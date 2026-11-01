@@ -15,7 +15,8 @@ import os
 import re
 import signal
 import subprocess
-from collections.abc import Mapping, Sequence
+import threading
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,8 @@ _DENIALS: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 UNKNOWN_DENIAL = "the guard refused the change"
 DEFAULT_TIMEOUT = 600.0
+# How much of a streamed output is read at a time.
+STREAM_CHUNK_BYTES = 64 * 1024
 
 _VERSION = re.compile(r"git version (\d+(?:\.\d+)*)")
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
@@ -187,3 +190,58 @@ class GitProcess:
                 child.communicate(timeout=10)
             return Outcome(255, "", f"git {args[0] if args else ''} timed out", unanswered=True)
         return Outcome(child.returncode, stdout, stderr)
+
+    def stream(
+        self,
+        args: Sequence[str],
+        *,
+        env: Mapping[str, str],
+        consume: Callable[[bytes], None],
+        cwd: Path | str = "/",
+        spawn: Mapping[str, Any] | None = None,
+        timeout: float = DEFAULT_TIMEOUT,
+    ) -> Outcome:
+        """Run git and hand its standard output to `consume` in chunks, keeping none of it (#764):
+        for output whose size the caller does not control and needs only part of. Standard error is
+        dropped; the caller decides from the exit status alone. A `consume` that raises ends git's
+        whole process group and the exception goes to the caller. A timeout is `unanswered`, as in
+        `run`."""
+        try:
+            child = subprocess.Popen(
+                [self.git, *args],
+                cwd=cwd,
+                env=dict(env),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                **(spawn or {}),
+            )
+        except OSError as error:
+            return Outcome(255, "", f"git cannot run: {error.strerror or 'error'}", unanswered=True)
+        timed_out = threading.Event()
+
+        def expire() -> None:
+            timed_out.set()
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(child.pid, signal.SIGKILL)
+
+        timer = threading.Timer(timeout, expire)
+        timer.start()
+        try:
+            assert child.stdout is not None  # stdout=PIPE
+            while chunk := child.stdout.read(STREAM_CHUNK_BYTES):
+                consume(chunk)
+        except BaseException:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(child.pid, signal.SIGKILL)
+            raise
+        finally:
+            timer.cancel()
+            if child.stdout is not None:
+                child.stdout.close()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                child.wait(timeout=10)
+        if timed_out.is_set():
+            return Outcome(255, "", f"git {args[0] if args else ''} timed out", unanswered=True)
+        return Outcome(child.returncode, "", "")

@@ -11,27 +11,31 @@ import os
 import secrets
 import subprocess
 import threading
+import tracemalloc
 from pathlib import Path
+from typing import Any
 
 import pytest
-from workspace_support import (
-    BRANCH,
-    IDENTITY,
-    Rig,
-    agent_git,
-)
 
 from code_reviewer_runner.implementer import git_workspace
+from code_reviewer_runner.implementer.git_process import Outcome
 from code_reviewer_runner.implementer.git_workspace import (
     GitWorkspace,
     PushLoop,
     PushOutcome,
+    PushTransient,
     PushUnverified,
     RepositoryUnusable,
 )
 from code_reviewer_runner.job import JobError
 from code_reviewer_runner.result import ErrorCode
 from git_support import TOKEN, HttpOrigin, raw, still_running
+from workspace_support import (
+    BRANCH,
+    IDENTITY,
+    Rig,
+    agent_git,
+)
 
 NO_HOOKS = ("-c", "core.hooksPath=/dev/null")
 
@@ -1212,3 +1216,385 @@ def test_no_background_gc_or_maintenance_is_started_in_the_mirror(rig: Rig) -> N
         workspace.push()
 
     assert not marker.exists(), "a push started git gc --auto in the mirror"
+
+
+# -- the back-off is measured from the end of the failed look (#764, review of #782) ---------
+
+
+# #764-F1
+def test_a_look_that_takes_long_and_fails_waits_from_its_end_not_from_its_start(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = rig.prepared()
+    clock = Clock()
+    loop = PushLoop(workspace, interval=0.0, clock=clock, retry_backoff=10.0, max_backoff=120.0)
+    commit(workspace, "a.txt")
+    calls: list[float] = []
+
+    def push() -> object:
+        calls.append(clock.now)
+        clock.now += 40.0  # a fetch that hangs for 40 s and then fails
+        raise PushUnverified("the agent's branch could not be fetched")
+
+    monkeypatch.setattr(workspace, "push", push)
+
+    assert loop.tick() is None
+    assert loop.tick() is None, "the failed look took 40 s, the wait of 10 s starts after it"
+    assert len(calls) == 1
+    clock.now += 9.0
+    assert loop.tick() is None
+    assert len(calls) == 1, "9 s after the end of the look is still inside the wait"
+    clock.now += 2.0
+    loop.tick()
+    assert len(calls) == 2, "the wait is over 11 s after the end of the look"
+
+
+# #764-F1
+def test_a_slow_good_push_spaces_the_next_one_from_its_end(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = rig.prepared()
+    clock = Clock()
+    loop = PushLoop(workspace, interval=120.0, clock=clock)
+    commit(workspace, "a.txt")
+    real_push = workspace.push
+
+    def push() -> object:
+        clock.now += 100.0
+        return real_push()
+
+    monkeypatch.setattr(workspace, "push", push)
+    assert loop.tick() is not None
+    commit(workspace, "b.txt")
+
+    clock.now += 60.0
+    assert loop.tick() is None, "the interval counts from the end of the push that took 100 s"
+
+
+# -- a commit message is not read as a whole (#764, review of #782) ---------------------------
+
+
+HUGE_MESSAGE_BYTES = 24 * 1024 * 1024
+
+
+# #764-F2
+def test_a_huge_commit_message_does_not_fill_the_memory_of_the_check(rig: Rig) -> None:
+    workspace = rig.prepared()
+    commit(workspace, "a.txt")
+    huge = raw_commit(
+        workspace,
+        [f"author {SYSTEM}", f"committer {SYSTEM}"],
+        message=("x" * 99 + "\n") * (HUGE_MESSAGE_BYTES // 100),
+    )
+    bypass(workspace, "update-ref", f"refs/heads/{BRANCH}", huge)
+
+    tracemalloc.start()
+    try:
+        result = workspace.push()
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert result.head == huge, "a long message is not a violation"
+    assert peak < HUGE_MESSAGE_BYTES // 4, f"the check held {peak} bytes of a message"
+
+
+# #764-F2
+def test_a_huge_message_does_not_hide_a_forged_committer_after_it(rig: Rig) -> None:
+    workspace = rig.prepared()
+    good = commit(workspace, "a.txt")
+    workspace.push()
+    bypass(
+        workspace,
+        "update-ref",
+        f"refs/heads/{BRANCH}",
+        raw_commit(
+            workspace,
+            [f"author {SYSTEM}", f"committer {SYSTEM}"],
+            message=("y" * 99 + "\n") * 20_000,
+        ),
+    )
+    forged = raw_commit(workspace, [f"author {SYSTEM}", f"committer {ALICE}"], message="fake\n")
+    bypass(workspace, "update-ref", f"refs/heads/{BRANCH}", forged)
+
+    with pytest.raises(JobError) as refused:
+        workspace.push()
+
+    assert refused.value.code is ErrorCode.BRANCH_VIOLATION
+    assert raw("rev-parse", f"refs/heads/{BRANCH}", cwd=workspace.mirror, git=rig.git) == good
+
+
+# #764-F2
+def test_a_header_block_that_is_absurdly_large_is_refused(rig: Rig) -> None:
+    workspace = rig.prepared()
+    good = commit(workspace, "a.txt")
+    workspace.push()
+    padding = [f"extra {'z' * 900}"] * 1_500  # about 1.3 MB of header lines
+    bloated = raw_commit(workspace, [f"author {SYSTEM}", f"committer {SYSTEM}", *padding])
+    bypass(workspace, "update-ref", f"refs/heads/{BRANCH}", bloated)
+
+    with pytest.raises(JobError) as refused:
+        workspace.push()
+
+    assert refused.value.code is ErrorCode.BRANCH_VIOLATION
+    assert raw("rev-parse", f"refs/heads/{BRANCH}", cwd=workspace.mirror, git=rig.git) == good
+
+
+# -- a push the provider cannot take for now is not a refusal (#764) ----------------------------
+
+TRANSIENT_TEXTS = {
+    "a 502": "fatal: unable to access 'https://x/r.git/': The requested URL returned error: 502",
+    "a 503": "fatal: unable to access 'https://x/r.git/': The requested URL returned error: 503",
+    "a 429": "fatal: unable to access 'https://x/r.git/': The requested URL returned error: 429",
+    "a reset": "fatal: unable to access 'https://x/r.git/': Recv failure: Connection reset by peer",
+    "no route": "fatal: unable to access 'https://x/r.git/': Could not resolve host: x",
+    "a hang up": "send-pack: unexpected disconnect while reading sideband packet",
+}
+
+
+def fail_pushes(
+    workspace: GitWorkspace,
+    monkeypatch: pytest.MonkeyPatch,
+    text: str,
+    times: int = 1,
+    *,
+    stdout: str = "",
+) -> list[int]:
+    """The next `times` pushes of the mirror to the provider fail with this report of git (`text`
+    on standard error, `stdout` the porcelain lines of the refs)."""
+    real = workspace._mirror  # pyright: ignore[reportPrivateUsage]
+    failed: list[int] = []
+
+    def mirror(args: list[str], **options: Any) -> Outcome:
+        if "push" in args and len(failed) < times:
+            failed.append(1)
+            return Outcome(1 if stdout else 128, stdout, text)
+        return real(args, **options)
+
+    monkeypatch.setattr(workspace, "_mirror", mirror)
+    return failed
+
+
+# #764-R4
+@pytest.mark.parametrize("name", sorted(TRANSIENT_TEXTS))
+def test_a_push_that_failed_without_a_refusal_is_tried_again_and_then_works(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    workspace = rig.prepared()
+    tip = commit(workspace, "a.txt")
+    fail_pushes(workspace, monkeypatch, TRANSIENT_TEXTS[name])
+
+    with pytest.raises(PushTransient) as failed:
+        workspace.push()
+
+    assert isinstance(failed.value, PushUnverified), "the loop backs off on it"
+    assert failed.value.code is ErrorCode.RUNNER_ERROR, "not a refusal, not charged as one"
+    assert rig.origin.tip(BRANCH) is None
+    assert workspace.push().head == tip
+    assert rig.origin.tip(BRANCH) == tip
+
+
+# #764-R4
+@pytest.mark.parametrize(
+    "text",
+    [
+        "fatal: unable to access 'https://x/r.git/': The requested URL returned error: 403",
+        "fatal: unable to access 'https://x/r.git/': The requested URL returned error: 401",
+        "remote: Repository not found.\nfatal: ... The requested URL returned error: 404",
+    ],
+)
+def test_a_client_error_of_the_provider_is_a_refusal(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    workspace = rig.prepared()
+    commit(workspace, "a.txt")
+    fail_pushes(workspace, monkeypatch, text)
+
+    with pytest.raises(JobError) as refused:
+        workspace.push()
+
+    assert refused.value.code is ErrorCode.PUSH_REJECTED
+    assert not isinstance(refused.value, PushUnverified)
+
+
+# #764-R4
+def test_the_loop_backs_off_on_a_transient_failure_and_pushes_when_it_is_over(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = rig.prepared()
+    clock = Clock()
+    loop = PushLoop(workspace, interval=0.0, clock=clock, retry_backoff=10.0)
+    tip = commit(workspace, "a.txt")
+    fail_pushes(workspace, monkeypatch, TRANSIENT_TEXTS["a 503"])
+
+    assert loop.tick() is None
+    assert rig.origin.tip(BRANCH) is None
+    clock.now += 5
+    assert loop.tick() is None, "inside the wait"
+    clock.now += 6
+    result = loop.tick()
+
+    assert result is not None and result.head == tip and rig.origin.tip(BRANCH) == tip
+
+
+# #764-R4
+def test_the_final_push_after_a_transient_failure_takes_what_the_loop_could_not(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = rig.prepared()
+    loop = PushLoop(workspace, interval=0.0, clock=Clock())
+    commit(workspace, "a.txt")
+    fail_pushes(workspace, monkeypatch, TRANSIENT_TEXTS["a 502"])
+    assert loop.tick() is None
+    second = commit(workspace, "b.txt")
+
+    result = loop.finish()
+
+    assert result.head == second and rig.origin.tip(BRANCH) == second
+
+
+# #764-R4
+def test_a_final_push_the_provider_never_takes_is_push_rejected_not_a_branch_violation(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = rig.prepared()
+    loop = PushLoop(workspace, interval=0.0, clock=Clock())
+    commit(workspace, "a.txt")
+    fail_pushes(workspace, monkeypatch, TRANSIENT_TEXTS["a 503"], times=5)
+
+    with pytest.raises(JobError) as ended:
+        loop.finish()
+
+    assert ended.value.code is ErrorCode.PUSH_REJECTED
+    assert not isinstance(ended.value, RepositoryUnusable)
+
+
+# -- the status of the tree is not read as a whole (#764) ---------------------------------------
+
+
+# #764-R9
+def test_dirty_stops_at_the_first_line_of_a_status_that_would_be_large(rig: Rig) -> None:
+    workspace = rig.prepared()
+    for number in range(20_000):
+        (workspace.repo / f"u{number}-{'x' * 150}").write_bytes(b"")
+
+    tracemalloc.start()
+    try:
+        answer = workspace.dirty()
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert answer is True
+    assert peak < 512 * 1024, f"dirty() held {peak} bytes of the status"
+
+
+# #764-R9
+def test_dirty_is_false_for_a_clean_tree_and_true_for_one_change(rig: Rig) -> None:
+    workspace = rig.prepared()
+    assert workspace.dirty() is False
+
+    (workspace.repo / "new.txt").write_text("x\n")
+
+    assert workspace.dirty() is True
+
+
+# #764-R13
+@pytest.mark.parametrize(
+    "text",
+    [
+        "error: cannot open '/work/mirror.git/FETCH_HEAD': Permission denied",
+        "fatal: could not create work tree dir '/work/x': Permission denied",
+    ],
+)
+def test_a_local_permission_error_is_not_a_refusal_of_the_provider(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    workspace = rig.prepared()
+    commit(workspace, "a.txt")
+    fail_pushes(workspace, monkeypatch, text)
+
+    with pytest.raises(PushTransient):
+        workspace.push()
+
+
+# #764-R13
+def test_what_the_remote_says_about_permissions_is_still_a_refusal(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = rig.prepared()
+    commit(workspace, "a.txt")
+    fail_pushes(
+        workspace,
+        monkeypatch,
+        "remote: Permission to acme/widgets.git denied to bot.\n"
+        "fatal: unable to access 'https://x/r.git/': The requested URL returned error: 403",
+    )
+
+    with pytest.raises(JobError) as refused:
+        workspace.push()
+
+    assert refused.value.code is ErrorCode.PUSH_REJECTED and not isinstance(
+        refused.value, PushUnverified
+    )
+
+
+REF = "refs/heads/implementer/a1b2c3"
+
+
+def rejected(reason: str, *, kind: str = "remote rejected") -> str:
+    return f"!\t{REF}:{REF}\t[{kind}] ({reason})\nDone\n"
+
+
+# #764-R13
+@pytest.mark.parametrize("reason", ["internal error", "failed to update ref", "Internal Error"])
+def test_a_remote_rejection_that_says_the_provider_failed_is_tried_again(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch, reason: str
+) -> None:
+    workspace = rig.prepared()
+    tip = commit(workspace, "a.txt")
+    fail_pushes(workspace, monkeypatch, "error: failed to push some refs", stdout=rejected(reason))
+
+    with pytest.raises(PushTransient):
+        workspace.push()
+
+    assert workspace.push().head == tip, "the next try goes through"
+
+
+# #764-R13
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "pre-receive hook declined",
+        "protected branch hook declined",
+        "refusing to allow a GitHub App to create or update workflow `.github/workflows/x.yml`",
+        "cannot lock ref",
+    ],
+)
+def test_a_remote_rejection_with_a_real_reason_is_a_refusal(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch, reason: str
+) -> None:
+    workspace = rig.prepared()
+    commit(workspace, "a.txt")
+    fail_pushes(workspace, monkeypatch, "error: failed to push some refs", stdout=rejected(reason))
+
+    with pytest.raises(JobError) as refused:
+        workspace.push()
+
+    assert refused.value.code is ErrorCode.PUSH_REJECTED
+    assert not isinstance(refused.value, PushUnverified)
+
+
+# #764-R13
+def test_one_hard_line_among_hiccups_makes_the_push_a_refusal(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = rig.prepared()
+    commit(workspace, "a.txt")
+    both = rejected("internal error") + rejected("pre-receive hook declined")
+    fail_pushes(workspace, monkeypatch, "error: failed to push some refs", stdout=both)
+
+    with pytest.raises(JobError) as refused:
+        workspace.push()
+
+    assert refused.value.code is ErrorCode.PUSH_REJECTED

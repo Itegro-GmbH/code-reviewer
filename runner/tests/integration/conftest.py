@@ -6,9 +6,9 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from workspace_support import Rig
 
 from git_support import Origin, guard_git
+from workspace_support import Rig
 
 
 @pytest.fixture

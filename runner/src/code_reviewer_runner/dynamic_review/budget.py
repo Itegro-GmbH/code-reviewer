@@ -1501,6 +1501,21 @@ class BudgetLedger:
             )
 
     @property
+    def model_used(self) -> bool:
+        """True when the model was really used: a call was billed (its usage was read), or may
+        have been (its usage was never seen, or its cost could not be read). `model_calls` is not
+        that: it counts every reservation, also the calls the provider turned away or that never
+        left (a failed connection, a 5xx), which cost nothing."""
+        with self._lock:
+            counters = self._counters
+            return (
+                counters.cost > 0
+                or counters.unknown_calls > 0
+                or counters.unpriced_calls > 0
+                or counters.prompt_tokens + counters.completion_tokens > 0
+            )
+
+    @property
     def unknown_calls(self) -> int:
         """How many calls were booked at their worst case because their usage was never seen."""
         with self._lock:

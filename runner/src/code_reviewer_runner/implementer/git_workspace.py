@@ -47,6 +47,7 @@ from urllib.parse import urlsplit
 
 from ..job import JobError
 from ..result import ErrorCode
+from .commit_headers import CommitHeaderReader, HeaderTooLarge
 from .git_process import (
     DEFAULT_TIMEOUT,
     MIN_GIT_VERSION,
@@ -66,8 +67,30 @@ from .guard_files import (
     system_gitconfig_text,
     write_file,
 )
+from .history import (
+    READ_COMMITS,
+    CappedBytes,
+    CappedLines,
+    CommitInfo,
+    FileChange,
+    StopReading,
+    parse_commits,
+    parse_name_status,
+)
 
 LEFTOVER_MESSAGE = "Implementer: uncommitted changes of the turn"
+# The files of a repository that the pinned engine loads from its working directory whatever the
+# flags say (#764): its v2 configuration service reads `.opencode/` (plugins, tools, commands,
+# agents, `opencode.json`) and `opencode.json(c)` at the root of the project unconditionally, and
+# `OPENCODE_DISABLE_PROJECT_CONFIG` only guards the older service. Nothing executable or
+# configurable may come from the repository (owner rule), so the agent's working tree is a sparse
+# checkout without them: they stay in every commit and are never on disk.
+ENGINE_INPUTS = (".opencode", "opencode.json", "opencode.jsonc")
+# Pathspecs that leave exactly those names out of a command of the leftover handling: git refuses to
+# add a path outside the sparse definition (exit 1), and a change of a tracked one is invisible to
+# it. They are not the agent's to change in this run, so they never count as a change and never
+# block the commit of the rest.
+_NOT_THE_AGENTS = tuple(f":(exclude,top){name}" for name in ENGINE_INPUTS)
 # The most often a batch of commits is pushed while the agent works (the final push is not held
 # back).
 PUSH_INTERVAL_SECONDS = 120.0
@@ -91,6 +114,17 @@ _LEFTOVER_COMMIT_OPTIONS = ("commit.gpgsign=false",)
 # this long before the next look, doubling to the ceiling.
 RETRY_BACKOFF_SECONDS = 10.0
 MAX_BACKOFF_SECONDS = PUSH_INTERVAL_SECONDS
+# An answer of the provider that is a no and not a hiccup: a client error other than "request
+# timeout" and "too many requests" (credentials, permission, a missing repository, a validation).
+_HTTP_ERROR = re.compile(r"returned error: (\d{3})")
+_RETRYABLE_CLIENT_ERRORS = frozenset({408, 425, 429})
+# git asks for credentials after a 401 and, with prompts off, reports that instead of the status.
+# Only the words of git about the remote's answer: a local "Permission denied" (a lock, the
+# mirror's own files) is not the provider refusing anything, and is not matched.
+_CREDENTIALS_REFUSED = re.compile(r"could not read (?:Username|Password)|Authentication failed")
+# A `! [remote rejected] (reason)` line of the porcelain whose reason says the provider itself
+# failed (GitHub's "internal error" and "failed to update ref"): a hiccup, not a no.
+_HICCUP = re.compile(r"\[remote rejected\]\s*\((?:internal error|failed to update ref)\)", re.I)
 _COMMIT_HEADER = re.compile(r"commit [0-9a-f]{40}")
 _COMMITTER = re.compile(r"committer (?P<name>[^<>\n]*) <(?P<email>[^<>\n]*)> \d+ [+-]\d{4}")
 
@@ -142,6 +176,13 @@ class PushUnverified(JobError):
         super().__init__(ErrorCode.RUNNER_ERROR, detail)
 
 
+class PushTransient(PushUnverified):
+    """The provider did not take the push and said nothing that is a refusal (a 5xx, a reset, a
+    timeout, no route). Nothing is known against the agent or the branch: the loop tries again
+    after its back-off, and the final push still runs once. Only the final push turns it into
+    `push_rejected` (`PushLoop.finish`)."""
+
+
 class RepositoryUnusable(JobError):
     """The agent ran, and its repository could then not be committed or verified: the leftover
     commit failed, the status cannot be read, or the last look at its branch failed. The model
@@ -174,6 +215,18 @@ class PushResult:
     outcome: PushOutcome
     # The tip the provider has after this call (None: nothing was ever pushed).
     head: str | None
+
+
+def _is_http_refusal(detail: str) -> bool:
+    """Whether git's report of a failed push to the provider names an HTTP client error that is not
+    worth retrying. The text is the provider's side of the push on the runner's own mirror."""
+    if _CREDENTIALS_REFUSED.search(detail):
+        return True
+    found = _HTTP_ERROR.search(detail)
+    if found is None:
+        return False
+    status = int(found.group(1))
+    return 400 <= status < 500 and status not in _RETRYABLE_CLIENT_ERRORS
 
 
 def _invalid(detail: str) -> JobError:
@@ -392,6 +445,7 @@ class GitWorkspace:
                 "--single-branch",
                 f"--branch={base}",
                 "--template=",
+                "--no-checkout",
                 f"file://{self.mirror}",
                 str(self.repo),
             ],
@@ -408,6 +462,8 @@ class GitWorkspace:
             ["config", "user.name", self.identity.name],
             ["config", "user.email", self.identity.email],
             ["config", "commit.gpgsign", "false"],
+            # What the engine would load from the working tree stays out (see `ENGINE_INPUTS`).
+            ["sparse-checkout", "set", "--no-cone", "/*", *(f"!/{name}" for name in ENGINE_INPUTS)],
             ["checkout", "-q", "-b", self.spec.branch],
         )
         environment = {**self.agent_environment(), "GIT_CONFIG_SYSTEM": "/dev/null"}
@@ -447,13 +503,33 @@ class GitWorkspace:
     # -- the leftover API (as the agent's user) ---------------------------------------------------
 
     def dirty(self) -> bool:
-        """Whether the working tree has changes, untracked files included. Runs as the agent."""
-        done = self._as_agent(
-            ["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all"]
+        """Whether the working tree has changes, untracked files included. Runs as the agent. Only
+        the first byte of what `git status` prints is looked at: the output is the agent's (a tree
+        with a million untracked files prints megabytes) and the answer is whether it has any."""
+        seen: list[bool] = []
+
+        def first(chunk: bytes) -> None:
+            if chunk:
+                seen.append(True)
+                raise StopReading
+
+        done = self._agent_stream(
+            [
+                "--no-optional-locks",
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                "--",
+                *_NOT_THE_AGENTS,
+            ],
+            first,
         )
+        if seen:
+            return True
         if done.returncode != 0:
             raise RepositoryUnusable("git status failed: " + self._agent_detail(done))
-        return bool(done.stdout)
+        return False
 
     def commit_all(self, message: str = LEFTOVER_MESSAGE) -> str | None:
         """Commit everything with the fixed message, as the agent's user, through the guard. Returns
@@ -469,7 +545,7 @@ class GitWorkspace:
             for setting in (f"core.hooksPath={self.layout.guard_dir}", *_LEFTOVER_COMMIT_OPTIONS)
             for arg in ("-c", setting)
         ]
-        added = self._as_agent([*options, "add", "-A"])
+        added = self._as_agent([*options, "add", "-A", "--", *_NOT_THE_AGENTS])
         if added.returncode != 0:
             raise RepositoryUnusable("git add failed: " + self._agent_detail(added))
         staged = self._as_agent([*options, "diff", "--cached", "--quiet"])
@@ -484,6 +560,54 @@ class GitWorkspace:
         if head.returncode != 0 or not head.stdout.strip():
             raise RepositoryUnusable("the new commit cannot be read: " + self._agent_detail(head))
         return head.stdout.strip()
+
+    def engine_inputs_present(self) -> list[str]:
+        """Which of the names the engine loads (`ENGINE_INPUTS`) exist in the agent's working tree:
+        the agent created or changed them, and none of it is kept. A look at the names with `lstat`
+        (nothing is followed or opened), which is safe in a directory the agent owns."""
+        return [name for name in ENGINE_INPUTS if os.path.lexists(self.repo / name)]
+
+    def commits_since_start(self) -> list[CommitInfo]:
+        """The commits of the agent's branch after the start commit, oldest first, bounded as the
+        result is (`history.parse_commits`). Read as the agent's user from its repository, as a
+        stream: a subject of any size costs no memory. Raises `RepositoryUnusable` when git
+        fails."""
+        reader = CappedLines()
+        done = self._agent_stream(
+            [
+                "log",
+                "--no-show-signature",
+                "-n",
+                str(READ_COMMITS),
+                "--format=%H %s",
+                f"{self.start_commit}..refs/heads/{self.spec.branch}",
+            ],
+            reader.feed,
+        )
+        if done.returncode != 0:
+            raise RepositoryUnusable("git log failed: " + self._agent_detail(done))
+        return parse_commits(bytes(reader.data))
+
+    def changed_files(self) -> list[FileChange]:
+        """The files that differ between the start commit and the agent's branch
+        (`git diff --name-status` as the agent's user), bounded as the result is."""
+        reader = CappedBytes()
+        done = self._agent_stream(
+            [
+                "diff",
+                "--name-status",
+                "-z",
+                "-M",
+                "--no-ext-diff",
+                "--no-textconv",
+                self.start_commit,
+                f"refs/heads/{self.spec.branch}",
+            ],
+            reader.feed,
+        )
+        if done.returncode != 0:
+            raise RepositoryUnusable("git diff failed: " + self._agent_detail(done))
+        return parse_name_status(bytes(reader.data))
 
     def agent_tip(self) -> str | None:
         """The tip of the agent's branch, read the safe way (`ls-remote` against a `git upload-pack`
@@ -651,23 +775,11 @@ class GitWorkspace:
         the committer is the system identity. The headers are read as they are stored
         (`--format=raw` prints the lines of the object): `%cn` and `%ce` read the last `committer`
         line while other parts of git read the first, so a commit with two of them is refused
-        outright."""
-        listed = self._mirror(
-            [
-                "log",
-                "-z",
-                "--no-show-signature",
-                "--format=raw",
-                f"{self.start_commit}..{tip}",
-            ]
-        )
-        if listed.returncode != 0:
-            raise PushUnverified("the commits of the branch could not be listed (git log)")
+        outright. Only the header block of each commit is read, as a stream: the message is the
+        agent's and can be arbitrarily large (#764)."""
         system = (self.identity.name, self.identity.email)
-        for entry in listed.stdout.split("\0"):
-            if not entry.strip():
-                continue
-            headers = entry.strip("\n").split("\n\n", 1)[0].split("\n")
+
+        def check(headers: list[str]) -> None:
             if not _COMMIT_HEADER.fullmatch(headers[0]):
                 self._violation("a commit of the branch cannot be read")
             sha = headers[0].removeprefix("commit ")
@@ -680,6 +792,25 @@ class GitWorkspace:
             found = _COMMITTER.fullmatch(committers[0])
             if found is None or (found["name"], found["email"]) != system:
                 self._violation(f"commit {sha[:12]} was not committed by the system identity")
+
+        reader = CommitHeaderReader(check)
+        try:
+            listed = self._mirror_stream(
+                [
+                    "log",
+                    "-z",
+                    "--no-show-signature",
+                    "--format=raw",
+                    f"{self.start_commit}..{tip}",
+                ],
+                reader.feed,
+            )
+            if listed.returncode == 0:
+                reader.finish()
+        except HeaderTooLarge:
+            self._violation("a commit of the branch has an absurdly large header")
+        if listed.returncode != 0:
+            raise PushUnverified("the commits of the branch could not be listed (git log)")
 
     def _advance(self, ref: str, tip: str, previous: str | None) -> None:
         """Move the mirror's branch to the verified tip, only if it still is where it was."""
@@ -696,6 +827,9 @@ class GitWorkspace:
         if pushed.returncode != 0:
             refused = [line for line in pushed.stdout.splitlines() if line.startswith("!")]
             detail = self._detail(pushed)
+            hiccups = bool(refused) and all(_HICCUP.search(line) for line in refused)
+            if hiccups or (not refused and not _is_http_refusal(detail)):
+                raise PushTransient("the provider did not take the push for now: " + detail)
             first = self._pushed is None
             if any("[rejected]" in line for line in refused) and first:
                 raise fail(
@@ -794,6 +928,15 @@ class GitWorkspace:
             timeout=timeout,
         )
 
+    def _mirror_stream(self, args: list[str], consume: Callable[[bytes], None]) -> Outcome:
+        """`_mirror` for output that is read as a stream and not kept (see `GitProcess.stream`)."""
+        return self._process.stream(
+            ["--git-dir", str(self.mirror), *_MIRROR_OPTIONS, *args],
+            env=self._process.base_environment("file"),
+            consume=consume,
+            timeout=self._timeout,
+        )
+
     def _as_agent(self, args: list[str], *, env: dict[str, str] | None = None) -> Outcome:
         return self._process.run(
             args,
@@ -802,6 +945,21 @@ class GitWorkspace:
             spawn=spawn_options(self.agent.uid, self.agent.gid),
             timeout=self._timeout,
         )
+
+    def _agent_stream(self, args: list[str], consume: Callable[[bytes], None]) -> Outcome:
+        """`_as_agent` for output that is read as a stream and only partly kept. A reader that has
+        what it keeps (`StopReading`) ends git, and the command counts as answered."""
+        try:
+            return self._process.stream(
+                args,
+                env=self.agent_environment(),
+                cwd=self.repo,
+                spawn=spawn_options(self.agent.uid, self.agent.gid),
+                consume=consume,
+                timeout=self._timeout,
+            )
+        except StopReading:
+            return Outcome(0, "", "")
 
     def _mirror_tip(self, ref: str) -> str | None:
         done = self._mirror(["rev-parse", "-q", "--verify", ref])
@@ -902,15 +1060,17 @@ class PushLoop:
         try:
             result = self._workspace.push()
         except PushUnverified:
-            # Nothing is known against the agent: look again, but not at the next tick.
+            # Nothing is known against the agent: look again, but not at the next tick. The wait
+            # counts from the end of the look: a fetch that hung for 30 s and failed must not be
+            # retried at once because the clock was read before it (#764).
             self._failures += 1
             wait = self._retry_backoff * 2 ** (self._failures - 1)
-            self._retry_at = now + min(self._max_backoff, wait)
+            self._retry_at = self._clock() + min(self._max_backoff, wait)
             return None
         self._failures = 0
         self._retry_at = None
         self._pending = False
-        self._last = now
+        self._last = self._clock()
         return result
 
     def finish(self) -> PushResult:
@@ -918,6 +1078,11 @@ class PushLoop:
         the turn: `RepositoryUnusable`, a charged class."""
         try:
             result = self._workspace.push()
+        except PushTransient as transient:
+            raise JobError(
+                ErrorCode.PUSH_REJECTED,
+                "the provider did not take the final push: " + transient.detail,
+            ) from None
         except PushUnverified as unverified:
             raise RepositoryUnusable(
                 "the agent's branch could not be verified: " + unverified.detail

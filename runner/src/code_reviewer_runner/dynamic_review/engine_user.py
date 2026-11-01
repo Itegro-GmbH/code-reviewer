@@ -186,10 +186,15 @@ class EngineLaunch:
         engine reads it but cannot rewrite or chmod it, and no other user of the container can
         read it either (#202: config readability).
         """
-        path = self.config_dir / "opencode.json"
+        return self.write_file("opencode.json", json.dumps(config))
+
+    def write_file(self, name: str, text: str) -> Path:
+        """Write another file of the runner's for the engine (the Implementer's instruction file,
+        #764) with the same ownership and mode as the config: the engine reads it, nobody else."""
+        path = self.config_dir / name
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(json.dumps(config))
+            stream.write(text)
             os.fchown(stream.fileno(), self.config_owner, self.gid)
             os.fchmod(stream.fileno(), 0o440)
         return path

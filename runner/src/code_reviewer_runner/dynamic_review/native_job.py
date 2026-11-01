@@ -24,6 +24,7 @@ rather than with the cost guard's refusal (#542, #552).
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 
 from code_reviewer_runner.dynamic_review import findings_schema
@@ -50,13 +51,14 @@ from code_reviewer_runner.dynamic_review.job_model_entry import (
 )
 from code_reviewer_runner.dynamic_review.passthrough.address import UpstreamRefused
 from code_reviewer_runner.dynamic_review.passthrough.admission import target_from_entry
+from code_reviewer_runner.dynamic_review.passthrough.cost_policy import CostPolicy
 from code_reviewer_runner.dynamic_review.passthrough.destination import key_destination
 from code_reviewer_runner.dynamic_review.passthrough.families import WireFamily, spec_of
 from code_reviewer_runner.dynamic_review.passthrough.native_run import NativeRun, build_native_run
 from code_reviewer_runner.dynamic_review.passthrough.server import PassthroughServer
 from code_reviewer_runner.dynamic_review.passthrough.upstream import HttpsUpstream, Upstream
 from code_reviewer_runner.dynamic_review.prompts import compose_system_prompt
-from code_reviewer_runner.job import Job
+from code_reviewer_runner.job import Job, LlmAccess
 from code_reviewer_runner.result import ErrorCode
 from code_reviewer_runner.supersede_timing import SUPERSEDED_DRAIN_SECONDS
 
@@ -125,12 +127,38 @@ def build_native_job(
     a policy the ledger cannot carry."""
     dynamic = job.dynamic
     assert dynamic is not None and dynamic.model_entry is not None and dynamic.cost is not None
-    entry = dynamic.model_entry
+    return build_native(
+        dynamic.model_entry,
+        dynamic.cost,
+        job.llm,
+        deadline=deadline,
+        environment=environment,
+        superseded=superseded,
+        upstream_for=upstream_for,
+        clock=clock,
+    )
+
+
+def build_native(
+    entry: JobModelEntry,
+    cost: CostPolicy,
+    llm: LlmAccess,
+    *,
+    deadline: float,
+    environment: Mapping[str, str],
+    superseded: Callable[[], bool] = lambda: False,
+    upstream_for: UpstreamFactory = HttpsUpstream,
+    clock: Callable[[], float] = time.monotonic,
+    limits: Callable[[Decimal, str], DynamicLimits] | None = None,
+) -> NativeJob:
+    """`build_native_job` for any job that carries a model entry, a cost policy and the model
+    access (#764: the Implementer's turn is one). `limits`, when given, makes the ledger's limits
+    from the cost limit and its stop reason; the default is the Dynamic envelope with `deadline`."""
     try:
         # The key goes only where `key_destination` says (`parse_job` checked it too): the
         # registry's address for a registry provider, the entry's plain public https address for
         # any other provider of the catalog (#555); nothing is prepared for any other address.
-        destination = key_destination(job.llm.provider, entry)
+        destination = key_destination(llm.provider, entry)
         target = target_from_entry(entry)
         upstream = upstream_for(destination)
     except (ValueError, UpstreamRefused):
@@ -140,20 +168,24 @@ def build_native_job(
         ) from None
     capability = new_proxy_capability()
     max_cost, stop_reason = effective_cost_limit(
-        operator_cost_limit(environment.get(_MAX_COST_VARIABLE), job.llm.operator_max_cost_usd),
-        job.llm.max_cost_usd,
+        operator_cost_limit(environment.get(_MAX_COST_VARIABLE), llm.operator_max_cost_usd),
+        llm.max_cost_usd,
     )
-    limits = DynamicLimits(
-        deadline_seconds=deadline, max_cost_usd=max_cost, cost_stop_reason=stop_reason
+    ledger_limits = (
+        DynamicLimits(
+            deadline_seconds=deadline, max_cost_usd=max_cost, cost_stop_reason=stop_reason
+        )
+        if limits is None
+        else limits(max_cost, stop_reason)
     )
     made = build_native_run(
-        dynamic.cost,
-        limits,
+        cost,
+        ledger_limits,
         window_tokens=_limit_of(entry, "context"),
         output_tokens=_limit_of(entry, "output"),
         target=target,
         upstream=upstream,
-        upstream_api_key=job.llm.api_key,
+        upstream_api_key=llm.api_key,
         capability=capability,
         reasoning=entry.model["reasoning"] is True,
         superseded=superseded,
