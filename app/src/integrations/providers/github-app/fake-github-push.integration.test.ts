@@ -585,4 +585,28 @@ describe("the push of the fake GitHub", () => {
     });
     expect(JSON.stringify(listed)).not.toContain(token);
   });
+
+  // #767
+  it("still lists the repositories of an installation after a journey removed the fixture of one of them", async () => {
+    const context = await setup();
+    const token = await context.mint([WIDGETS.id, OTHER.id], "read");
+    rmSync(join(context.directory, "widgets"), {
+      recursive: true,
+      force: true,
+    });
+
+    const listed = await fetch(
+      `${context.fake.baseUrl}/installation/repositories`,
+      {
+        headers: { authorization: `token ${token}` },
+      },
+    );
+
+    expect(listed.status).toBe(200);
+    expect(
+      (
+        (await listed.json()) as { repositories: Array<{ full_name: string }> }
+      ).repositories.map((repo) => repo.full_name),
+    ).toEqual([WIDGETS.fullName, OTHER.fullName]);
+  });
 });

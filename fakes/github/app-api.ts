@@ -448,7 +448,14 @@ export function createAppPart(
   function followingFixture(repo: FakeRepository): FakeRepository {
     const directory = gitRepositories.get(repo.fullName);
     if (directory === undefined) return repo;
-    const defaultBranch = readFixtureBranches(directory).defaultBranch;
+    // A journey that is over removes its fixture and leaves the registration: the repository then keeps its own default
+    // branch (the listing of an installation must not fail for the sake of another journey's repository, #767).
+    let defaultBranch: string | null = null;
+    try {
+      defaultBranch = readFixtureBranches(directory).defaultBranch;
+    } catch {
+      return repo;
+    }
     return defaultBranch === null ? repo : { ...repo, defaultBranch };
   }
 
