@@ -11,7 +11,14 @@
 //                            The network guard of the test must allow it (TEST_ALLOWED_HOSTS); the make target does.
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -246,6 +253,10 @@ describe("the Sandbox-Launcher in local mode with a real Docker daemon", () => {
   it("runs the Implementer's probe too, in the real image with the work volume, for a deployment that serves the kind", async () => {
     const { bin, log } = await loggingDocker();
     build(bin);
+    const volumes = join(workDirectory(), "volumes");
+    await mkdir(join(volumes, "code-reviewer-work-canary-privcanary"), {
+      recursive: true,
+    });
     const imageId = docker(
       "image",
       "inspect",
@@ -263,6 +274,10 @@ describe("the Sandbox-Launcher in local mode with a real Docker daemon", () => {
         logger,
         config: {},
         implementer: { config: {} },
+        // The local mode does not make the directory behind the work volume (its `mkdir` and `mount` steps are only
+        // recorded), and `docker volume create` is real here: the test makes the directory a VM would have made.
+        workVolumeRoot: volumes,
+        newSuffix: () => "privcanary",
       }),
       clock: systemClock,
       now: () => Date.now(),
@@ -295,5 +310,10 @@ describe("the Sandbox-Launcher in local mode with a real Docker daemon", () => {
         : "",
     ).toBe("");
     expect(service?.running()).toStrictEqual([]);
+    try {
+      docker("volume", "rm", "--force", "code-reviewer-work-canary-privcanary");
+    } catch {
+      // Nothing of it is left to remove.
+    }
   });
 });
