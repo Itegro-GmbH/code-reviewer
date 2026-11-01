@@ -227,14 +227,14 @@ describe("the probe verdict", () => {
       reasons: ["implementer_git_too_old"],
       passed: true,
     });
-    expect(IMPLEMENTER_REASONS).toHaveLength(8);
+    expect(IMPLEMENTER_REASONS).toHaveLength(9);
     expect(IMPLEMENTER_REASONS.every((r) => PROBE_REASONS.includes(r))).toBe(
       true,
     );
   });
 
-  // #765-T08
-  it("unites the verdicts of two containers: a failure of either leaves its engine out", () => {
+  // #765-D3, D4: opencode and its reasons come from the first output, implementer and its reasons from the second.
+  describe("the verdict of the two probes of a deployment that serves the Implementer", () => {
     const dynamic = line({
       version: 1,
       engines: ["pr-agent", "opencode"],
@@ -245,27 +245,141 @@ describe("the probe verdict", () => {
       engines: ["pr-agent", "opencode", "implementer"],
       reasons: [],
     });
-    const failing = line({
-      version: 1,
-      engines: ["pr-agent"],
-      reasons: ["engine_binary_missing"],
+    const merged = (first: string, second: string | undefined) => {
+      const { line: text, implementerProven } = mergeVerdictOutputs(
+        first,
+        second,
+      );
+      return { verdict: parseProbeOutput(text), implementerProven };
+    };
+
+    it("names the engine only when the first container passed and the second proved it", () => {
+      const { verdict, implementerProven } = merged(dynamic, proving);
+
+      expect(implementerProven).toBe(true);
+      expect(verdict).toStrictEqual({
+        engines: ["pr-agent", "opencode", "implementer"],
+        reasons: [],
+        passed: true,
+      });
     });
 
-    expect(
-      parseProbeOutput(mergeVerdictOutputs([dynamic, proving])),
-    ).toStrictEqual({
-      engines: ["pr-agent", "opencode", "implementer"],
-      reasons: [],
-      passed: true,
+    it("takes `implementer` from the second output only, whatever the first claims", () => {
+      const claims = line({
+        version: 1,
+        engines: ["pr-agent", "opencode", "implementer"],
+        reasons: [],
+      });
+      const { verdict } = merged(claims, dynamic);
+
+      // In the line itself, not only after a reader filtered it again.
+      expect(
+        (
+          JSON.parse(mergeVerdictOutputs(claims, dynamic).line) as {
+            engines: string[];
+          }
+        ).engines,
+      ).toStrictEqual(["pr-agent", "opencode"]);
+      expect(verdict?.engines).toStrictEqual(["pr-agent", "opencode"]);
+      expect(verdict?.reasons).toStrictEqual(["implementer_probe_failed"]);
     });
-    const hidden = parseProbeOutput(mergeVerdictOutputs([dynamic, failing]));
-    expect(hidden?.passed).toBe(false);
-    expect(hidden?.engines).toStrictEqual(["pr-agent"]);
-    expect(mergeVerdictOutputs([dynamic, "not a verdict"])).toBe(
-      "not a verdict",
-    );
-    expect(
-      parseProbeOutput(mergeVerdictOutputs(["not a verdict", dynamic])),
-    ).toBeUndefined();
+
+    it("keeps the Dynamic verdict when the second half did not run: `implementer` is missing with a reason, opencode stays", () => {
+      const { verdict, implementerProven } = merged(dynamic, undefined);
+
+      expect(implementerProven).toBe(false);
+      expect(verdict).toStrictEqual({
+        engines: ["pr-agent", "opencode"],
+        reasons: ["implementer_probe_failed"],
+        passed: true,
+      });
+    });
+
+    it("keeps the Dynamic verdict when the second answer is not a verdict", () => {
+      const { verdict } = merged(dynamic, "not a verdict");
+
+      expect(verdict?.engines).toStrictEqual(["pr-agent", "opencode"]);
+      expect(verdict?.reasons).toStrictEqual(["implementer_probe_failed"]);
+    });
+
+    it("does not let a failed check of the Dynamic self-check in the Implementer's container take opencode down", () => {
+      const failing = line({
+        version: 1,
+        engines: ["pr-agent"],
+        reasons: ["engine_binary_missing"],
+      });
+      const { verdict } = merged(dynamic, failing);
+
+      expect(verdict?.engines).toStrictEqual(["pr-agent", "opencode"]);
+      expect(verdict?.reasons).toStrictEqual(["implementer_probe_failed"]);
+      expect(verdict?.passed).toBe(true);
+    });
+
+    it("names the Implementer's own reason when the second container gave one", () => {
+      const own = line({
+        version: 1,
+        engines: ["pr-agent", "opencode"],
+        reasons: ["implementer_work_dir_not_exec"],
+      });
+      const { verdict } = merged(dynamic, own);
+
+      expect(verdict?.engines).toStrictEqual(["pr-agent", "opencode"]);
+      expect(verdict?.reasons).toStrictEqual(["implementer_work_dir_not_exec"]);
+    });
+
+    it("does not let a reason it does not know vanish: the proof is missing and says so", () => {
+      const strange = line({
+        version: 1,
+        engines: ["pr-agent", "opencode", "implementer"],
+        reasons: ["a_reason_of_a_newer_runner"],
+      });
+      const { verdict, implementerProven } = merged(dynamic, strange);
+
+      expect(implementerProven).toBe(false);
+      expect(verdict?.engines).not.toContain("implementer");
+      expect(verdict?.reasons).toStrictEqual(["implementer_probe_failed"]);
+    });
+
+    it("lets a failure of the Dynamic container stand, whatever the second says", () => {
+      const failing = line({
+        version: 1,
+        engines: ["pr-agent"],
+        reasons: ["engine_binary_missing"],
+      });
+      const { verdict } = merged(failing, proving);
+
+      expect(verdict?.passed).toBe(false);
+      expect(verdict?.engines).toStrictEqual(["pr-agent"]);
+    });
+
+    it("never names `implementer` when the Dynamic check failed, however clean the second output is", () => {
+      const failing = line({
+        version: 1,
+        engines: ["pr-agent"],
+        reasons: ["engine_binary_missing"],
+      });
+
+      const merged = mergeVerdictOutputs(failing, proving);
+
+      const written = JSON.parse(merged.line) as {
+        engines: string[];
+        reasons: string[];
+      };
+      expect(merged.implementerProven).toBe(false);
+      expect(written.engines).toStrictEqual(["pr-agent"]);
+      expect(written.reasons).toStrictEqual([
+        "engine_binary_missing",
+        "implementer_probe_failed",
+      ]);
+    });
+
+    it("returns a first output that is no verdict as it is", () => {
+      expect(mergeVerdictOutputs("not a verdict", proving).line).toBe(
+        "not a verdict",
+      );
+      expect(
+        parseProbeOutput(mergeVerdictOutputs("x", dynamic).line),
+      ).toBeUndefined();
+    });
   });
 });

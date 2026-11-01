@@ -67,19 +67,21 @@ from .git_workspace import (
     AgentUser,
     GitIdentity,
     GitWorkspace,
+    LeaseNotConfirmed,
     WorkspaceLayout,
     WorkspaceSpec,
 )
-from .report import escaped_size, fit_block, valid_block
+from .report import clip_texts, escaped_size, fit_block, valid_block
 from .session import ImplementerSession, SessionSeams
 from .startup import HOME_NAME, TMP_NAME, prepare_work_dir
 from .turn_result import TurnResult
 
 _log = logging.getLogger(__name__)
 
-# A SIGTERM gives the job host `terminate_grace` (5 s) before it kills the group; the process
-# leaves itself a second less, so that its own end comes first.
-SIGTERM_BACKSTOP_SECONDS = 4.0
+# A SIGTERM gives the process `IMPLEMENTER_TERMINATE_GRACE_SECONDS` (60 s, `job_loop/host.py`)
+# before the host kills the group; the process leaves itself five seconds less, so that its own
+# end comes first. The container's `stopTimeoutSeconds` (90) is above both.
+SIGTERM_BACKSTOP_SECONDS = 55.0
 MAX_LOG_TAIL_CHARS = 4096
 _ENGINE_DIRECTORY = "engine"
 
@@ -125,18 +127,20 @@ class JobSeams:
 
 def lease_gate(check: LeaseCheck) -> Callable[[], None]:
     """The gate before every push: it raises `lease_lost` unless the host says the job is still
-    ours. Anything but `held` is a no (an app that cannot be reached confirms nothing)."""
+    ours. Nothing is pushed unless the answer is `held`. A lost or superseded lease is a no that
+    ends the turn (`lease_lost`); an answer that could not be had (the app did not reply) is a
+    "not now": the push loop asks again after its back-off and the last push asks within its
+    window, and only when that stays unanswered does the turn end `lease_lost`."""
 
     def gate() -> None:
         state = check()
         if state is LeaseState.HELD:
             return
-        detail = (
-            "the lease could not be confirmed, so nothing is pushed"
-            if state is LeaseState.UNCONFIRMED
-            else "the job is no longer held by this runner, so nothing is pushed"
+        if state is LeaseState.UNCONFIRMED:
+            raise LeaseNotConfirmed
+        raise JobError(
+            ErrorCode.LEASE_LOST, "the job is no longer held by this runner, so nothing is pushed"
         )
-        raise JobError(ErrorCode.LEASE_LOST, detail)
 
     return gate
 
@@ -256,7 +260,7 @@ def _fitted(block: Mapping[str, object] | None, rest: JobResult | None) -> dict[
     if block is None:
         return None
     other = 0 if rest is None else escaped_size(rest.to_json())
-    fitted = fit_block(block, other)
+    fitted = fit_block(clip_texts(block), other)
     return fitted if valid_block(fitted) is not None else None
 
 
@@ -330,16 +334,31 @@ def run_implementer_job(
     shutdown: threading.Event,
     engines: tuple[str, ...] | None = None,
     usage_probe: UsageProbe | None = None,
+    process_timeout: float | None = None,
+    secrets_sink: list[str] | None = None,
     seams: JobSeams = JobSeams(),  # noqa: B008 - frozen, shared on purpose
 ) -> JobResult:
     """Run one turn and return its result. Never raises for a turn that failed; whatever an
-    unexpected error is, it is a result too (and a charged one when the model was used)."""
+    unexpected error is, it is a result too (and a charged one when the model was used).
+
+    `process_timeout` is the hard timeout of the process (`RUNNER_JOB_TIMEOUT_SECONDS`): the turn is
+    held to the smaller of it and its own time limit, so a lowered timeout still leaves the time for
+    the last push. `secrets_sink` receives the secrets the turn made up (the capability of its model
+    proxy), for the scrub of the line that is printed."""
     clock = seams.clock
     advertised = engines_from_environment(environment) if engines is None else engines
     if ENGINE_IMPLEMENTER not in advertised:
         return failure(
             ErrorCode.IMPLEMENTER_ENGINE_UNAVAILABLE,
             "this runner did not advertise the implementer engine",
+            duration_ms=_elapsed_ms(clock, started),
+        )
+    if job.llm.max_cost_usd is None and job.llm.operator_max_cost_usd is None:
+        # No limit in the job is no limit at all: the ledger would fall back to a default of the
+        # operator's environment that an Implementer container does not have (1.00 USD, silently).
+        return failure(
+            ErrorCode.IMPLEMENTER_CONFIG_INVALID,
+            "the job carries no cost limit, so the turn does not start",
             duration_ms=_elapsed_ms(clock, started),
         )
     # No answer is no lease: a process started without the channel never pushes.
@@ -350,7 +369,7 @@ def run_implementer_job(
         factory = seams.setup or production_setup
         setup = factory(job, environment, gate)
         setup.workspace.prepare()
-        session = _session(job, setup, started, environment, shutdown, seams)
+        session = _session(job, setup, started, environment, shutdown, seams, process_timeout)
         if usage_probe is not None:
             usage_probe.watch(lambda: _usage_of(session, job))
         turn = session.run()
@@ -363,6 +382,7 @@ def run_implementer_job(
             block=_early_block(setup.workspace if setup is not None else None),
         )
     except Exception:
+        _remember_secrets(session, secrets_sink)
         _log.exception("the turn failed unexpectedly")
         usage = _usage_of(session, job)
         used = usage is not None and usage.used_the_model
@@ -375,6 +395,7 @@ def run_implementer_job(
             block=_early_block(setup.workspace if setup is not None else None),
         )
     # The capability of the turn's model proxy is a secret of this turn too.
+    _remember_secrets(session, secrets_sink)
     return result_of(turn, duration_ms=_elapsed_ms(clock, started), secrets=session.secrets())
 
 
@@ -385,6 +406,7 @@ def _session(
     environment: Mapping[str, str],
     shutdown: threading.Event,
     seams: JobSeams,
+    process_timeout: float | None,
 ) -> TurnLike:
     options: dict[str, object] = {
         "workspace": setup.workspace,
@@ -396,10 +418,16 @@ def _session(
         "ripgrep": setup.ripgrep,
         "seams": seams.session_seams,
         "should_stop": shutdown.is_set,
+        "max_seconds": process_timeout,
     }
     if seams.session is not None:
         return seams.session(job, **options)
     return ImplementerSession(job, **options)  # type: ignore[arg-type]  # the keywords above
+
+
+def _remember_secrets(session: TurnLike | None, sink: list[str] | None) -> None:
+    if session is not None and sink is not None:
+        sink.extend(session.secrets())
 
 
 def _usage_of(session: TurnLike | None, job: ImplementerInput) -> Usage | None:

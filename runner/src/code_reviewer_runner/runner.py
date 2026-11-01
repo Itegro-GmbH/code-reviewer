@@ -1394,8 +1394,8 @@ def _main(
 
     saved_env = dict(os.environ)
     if isinstance(job, ImplementerInput):
-        result = _run_implementer(job, channel, started, saved_env)
-        return _exit_code(channel.write(result, job.secrets))
+        result, extra = _run_implementer(job, channel, started, saved_env)
+        return _exit_code(channel.write(result, [*job.secrets, *extra]))
     if job.review_kind is ReviewKind.DYNAMIC:
         # A Dynamic job is never run by PR-Agent (#195/#197). It gets the same process-level timeout
         # as a Diff job; on expiry the watchdog ends the engine's process group too (#197-T07).
@@ -1477,33 +1477,39 @@ def _main(
 
 def _run_implementer(
     job: ImplementerInput, channel: _ResultChannel, started: float, saved_env: Mapping[str, str]
-) -> JobResult:
+) -> tuple[JobResult, tuple[str, ...]]:
     """A turn of the Implementer: the root supervisor of the container, like a Dynamic job. The
     watchdog ends a process that does not stop; a SIGTERM is a stop (`_stop_on_sigterm`); the lease
-    is asked over the descriptor the job host handed over, before every push."""
+    is asked over the descriptor the job host handed over, before every push. Returns the result
+    and the secrets the turn made up (its proxy capability), which the scrub of the line needs."""
     timeout = _timeout_from(saved_env)
     probe = UsageProbe()
     watchdog = (
         _start_watchdog(timeout, channel, started, None, job.secrets, probe) if timeout else None
     )
     stop = threading.Event()
+    extra: list[str] = []
     try:
         with _stop_on_sigterm(stop):
-            return run_implementer_job(
+            result = run_implementer_job(
                 job,
                 started,
                 saved_env,
                 lease_check=lease_check_from_environment(saved_env, required=True),
                 shutdown=stop,
                 usage_probe=probe,
+                process_timeout=timeout,
+                secrets_sink=extra,
             )
+            return result, tuple(extra)
     except KeyboardInterrupt:
         raise
     except BaseException:
         usage = _probe_usage(probe)
         # The money is spent when the model was used: never the free code of a failed runner.
         code = ErrorCode.AGENT_GAVE_UP if usage is not None else ErrorCode.RUNNER_ERROR
-        return _failure(code, "unexpected runner error", started, None, usage=usage)
+        failed = _failure(code, "unexpected runner error", started, None, usage=usage)
+        return failed, tuple(extra)
     finally:
         if watchdog is not None:
             watchdog.cancel()

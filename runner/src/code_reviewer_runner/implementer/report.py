@@ -36,6 +36,11 @@ MAX_VERSION_CHARS = 64
 BODY_BUDGET_BYTES = 4_000_000
 
 _SHA = re.compile(r"[0-9a-f]{40}")
+# What the app takes out of the texts of the block before it judges them
+# (`withoutControlCharacters` in `runner-api/requests.ts`): C0 controls except tab, line feed and
+# carriage return, and DEL. A path is judged by what is left, so a file named `\x01` is no file
+# for the app.
+_APP_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _BLOCK_KEYS = frozenset(
     {"baseCommit", "headCommit", "pushed", "commits", "filesChanged", "summary", "opencode"}
 )
@@ -70,7 +75,9 @@ def _file_ok(value: object) -> bool:
         return False
     status = file["status"]
     return (
-        _is_string(file["path"], MAX_PATH_CHARS, minimum=1)
+        _is_string(file["path"], MAX_PATH_CHARS)
+        and isinstance(file["path"], str)
+        and len(_APP_CONTROLS.sub("", file["path"])) >= 1
         and isinstance(status, str)
         and status in _STATUSES
     )
@@ -119,6 +126,29 @@ def valid_block(value: object) -> dict[str, Any] | None:
     if not _is_string(block["summary"], MAX_SUMMARY_CHARS) or not _opencode_ok(block["opencode"]):
         return None
     return dict(block)
+
+
+def clip_texts(block: Mapping[str, Any]) -> dict[str, Any]:
+    """The block with every text cut to the contract's bound and the files the app would refuse
+    left out (a path that is nothing once its control characters are taken out). Redaction can make
+    a text longer, and a hostile agent can name a file anything: neither may cost the summary and
+    the rest of the list. A block that is not shaped like one is returned as it is (`valid_block`
+    refuses it)."""
+    try:
+        clipped: dict[str, Any] = dict(block)
+        clipped["summary"] = clipped["summary"][:MAX_SUMMARY_CHARS]
+        clipped["commits"] = [
+            {**commit, "subject": commit["subject"][:MAX_SUBJECT_CHARS]}
+            for commit in clipped["commits"]
+        ]
+        clipped["filesChanged"] = [
+            {**file, "path": file["path"][:MAX_PATH_CHARS]}
+            for file in clipped["filesChanged"]
+            if len(_APP_CONTROLS.sub("", file["path"][:MAX_PATH_CHARS])) >= 1
+        ]
+    except (KeyError, TypeError):
+        return dict(block)
+    return clipped
 
 
 def _kept_commits(commits: Sequence[Mapping[str, str]], room: int) -> list[Mapping[str, str]]:

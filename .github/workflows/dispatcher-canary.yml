@@ -24,7 +24,7 @@ on:
         description: "Base URL of the staged Dispatcher deployment (https://....vercel.app)"
         required: true
       engines:
-        description: "Engines the release needs: pr-agent,opencode, or pr-agent for a Diff-only deployment"
+        description: "Engines the release needs: pr-agent,opencode, or pr-agent for a Diff-only deployment (implementer is demanded as well when the deployment serves the kind: the Dispatcher requires it)"
         default: "pr-agent,opencode"
         required: false
       image_digest:
@@ -42,7 +42,7 @@ on:
         required: true
         type: string
       engines:
-        description: "Engines the release needs: pr-agent,opencode, or pr-agent"
+        description: "Engines the release needs: pr-agent,opencode, or pr-agent (implementer is demanded as well when the deployment serves the kind)"
         default: "pr-agent,opencode"
         required: false
         type: string

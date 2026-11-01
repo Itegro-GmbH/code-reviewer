@@ -67,7 +67,10 @@ from .config import build_engine_config, implementer_environment
 from .egress_config import EgressSettings, start_egress
 from .egress_proxy import EgressProxy
 from .git_workspace import (
+    CONFIRM_PAUSE_SECONDS,
+    CONFIRM_SECONDS,
     PUSH_INTERVAL_SECONDS,
+    RETRY_BACKOFF_SECONDS,
     GitWorkspace,
     PushLoop,
     PushResult,
@@ -107,11 +110,11 @@ COST_LIMIT_DETAIL = "the cost limit is used up"
 TOKEN_CAP_DETAIL = "the token cap is used up"
 
 
-def deadline_seconds(time_limit: int, elapsed: float) -> float:
+def deadline_seconds(time_limit: float, elapsed: float) -> float:
     """The seconds the agent may work, counted from now: the job's time limit less what is spent
     since the job began and less the grace kept for the leftover commit and the final push (three
     minutes; a third of a short limit)."""
-    return float(time_limit) - min(GRACE_SECONDS, time_limit / 3) - elapsed
+    return time_limit - min(GRACE_SECONDS, time_limit / 3) - elapsed
 
 
 def agent_limits(deadline: float, max_cost: Decimal, stop_reason: str) -> DynamicLimits:
@@ -139,12 +142,22 @@ class SessionSeams:
     # How often at most a batch of commits is pushed while the agent works (the last push is not
     # held back).
     push_interval: float = PUSH_INTERVAL_SECONDS
+    # How long, and how often, the last push asks a lease the host cannot confirm (a stop uses at
+    # most `STOP_CONFIRM_SECONDS` of it).
+    confirm_seconds: float = CONFIRM_SECONDS
+    confirm_pause: float = CONFIRM_PAUSE_SECONDS
+    # How long the push loop waits after a look that failed for a reason that is not the agent's.
+    retry_backoff: float = RETRY_BACKOFF_SECONDS
     startup_seconds: float | None = None
     scratch_dir: str | None = None
     clock: Callable[[], float] = time.monotonic
     # Starts the egress proxy of a registries container (default `egress_config.start_egress`).
     start_egress: Callable[[EgressSettings], EgressProxy | None] | None = None
 
+
+# How long the last push of a stop asks a lease the host cannot confirm: a stop has a minute in
+# all (`IMPLEMENTER_TERMINATE_GRACE_SECONDS`), and the engine and the push come out of it.
+STOP_CONFIRM_SECONDS = 20.0
 
 # What stops a turn when the push loop meets it: the provider or the branch refuses for good, or
 # the job is not ours any more (the lease gate before a push, #765). Anything else the loop raises
@@ -225,14 +238,17 @@ class PushTicker:
         if self._error is not None:
             raise self._error
 
-    def finish(self) -> PushResult:
+    def finish(self, *, confirm_seconds: float | None = None) -> PushResult:
         """Stop ticking and make the last push, whatever the back-off. Waits for a tick in
-        flight. A refusal the loop met is raised instead: the push would only be refused again."""
+        flight. A refusal the loop met is raised instead: the push would only be refused again.
+        `confirm_seconds`: how long a lease the host cannot confirm is asked again."""
         self._stop.set()
         with self._lock:
             if self._error is not None:
                 raise self._error
-            return self._loop.finish()
+            if confirm_seconds is None:
+                return self._loop.finish()
+            return self._loop.finish(confirm_seconds=confirm_seconds)
 
     def close(self) -> None:
         self._stop.set()
@@ -335,6 +351,7 @@ class ImplementerSession:
         ripgrep: Path | None = None,
         seams: SessionSeams = SessionSeams(),  # noqa: B008 - frozen, shared on purpose
         should_stop: Callable[[], bool] = lambda: False,
+        max_seconds: float | None = None,
     ) -> None:
         self.job = job
         self.workspace = workspace
@@ -348,6 +365,8 @@ class ImplementerSession:
         self._started = self._clock() if started is None else started
         # True once the runner was told to stop (SIGTERM): the watch ends the turn at once.
         self._should_stop = should_stop
+        # The hard timeout of the process: the turn is never given more (`_deadline_seconds`).
+        self._max_seconds = max_seconds
         self._notes: list[str] = []
         self._summary = ""
         self._error: tuple[ErrorCode, str] | None = None
@@ -365,9 +384,10 @@ class ImplementerSession:
     def _deadline_seconds(self) -> float:
         """The seconds the agent may work from now: the job's time limit less what is spent since
         the job began and less the grace kept for the end."""
-        return deadline_seconds(
-            self.job.implementer.limits.time_limit_seconds, self._clock() - self._started
-        )
+        limit = float(self.job.implementer.limits.time_limit_seconds)
+        if self._max_seconds is not None:
+            limit = min(limit, self._max_seconds)
+        return deadline_seconds(limit, self._clock() - self._started)
 
     # -- the turn -------------------------------------------------------------
 
@@ -384,9 +404,7 @@ class ImplementerSession:
             agent = self._agent(native, server.url)
             agent.start()
             self._session_id = agent.session_id
-            ticker = PushTicker(
-                PushLoop(self.workspace, interval=self.seams.push_interval), self.seams.tick_seconds
-            )
+            ticker = PushTicker(self._push_loop(), self.seams.tick_seconds)
             ticker.start()
             self._work(agent, ticker)
         except Exception as error:
@@ -405,6 +423,14 @@ class ImplementerSession:
             if egress is not None:
                 egress.stop()
         return self._result()
+
+    def _push_loop(self) -> PushLoop:
+        return PushLoop(
+            self.workspace,
+            interval=self.seams.push_interval,
+            confirm_pause=self.seams.confirm_pause,
+            retry_backoff=self.seams.retry_backoff,
+        )
 
     def _native_job(self) -> NativeJob:
         spec = self.job.implementer
@@ -551,10 +577,16 @@ class ImplementerSession:
         except Exception as error:
             self._stopped_by(error)
         try:
+            window = (
+                min(STOP_CONFIRM_SECONDS, self.seams.confirm_seconds)
+                if self._ends_quickly()
+                else self.seams.confirm_seconds
+            )
             if ticker is not None:
-                self._pushed = ticker.finish()
+                self._pushed = ticker.finish(confirm_seconds=window)
             else:
-                self._pushed = PushLoop(self.workspace).finish()
+                loop = self._push_loop()
+                self._pushed = loop.finish(confirm_seconds=window)
         except Exception as error:
             self._stopped_by(error)
 

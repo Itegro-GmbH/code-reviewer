@@ -69,7 +69,7 @@ removed separately and nothing outlives the job. A failed, hung or unverified st
 2 vCPU / 4 GB by default (`SANDBOX_KIND_DEFAULTS.implementer`); `DISPATCHER_WORKER_CONFIG.implementer` overrides the vCPUs and
 the container memory value by value, and a limit the VM cannot hold beside the OS is refused as `sandbox_config_invalid` at
 every launch of the kind. At start a deployment that serves the kind only logs `worker_config_invalid` for such a value and
-starts: the factory never blocks the release of code-review.com, and Diff and Dynamic do not read the entry. The operator's Dynamic variables (`RUNNER_DYNAMIC_*`) are not
+starts, and Diff and Dynamic do not read the entry. For a deployment that serves the kind the same value fails the canary (its VM is sized by it): see below. The operator's Dynamic variables (`RUNNER_DYNAMIC_*`) are not
 given to an implementer container. The platform gives a VM a 64 GB disk, which is the room of the work volume.
 
 "Runner" is retired as a concept: the former runner process conflated the Dispatcher

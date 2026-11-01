@@ -140,9 +140,15 @@ class FakeProcess:
     # What `notify_superseded` answers: False is a signal that could not be sent.
     notify_result: bool = True
 
+    # What the process printed before it went when it was terminated (a turn of the Implementer
+    # prints its result on SIGTERM, #765).
+    printed_on_terminate: bytes = b""
+
     async def terminate(self) -> None:
         self.terminated = True
-        self.finish(outcome(exit_code=-15, stdout=b"", stderr=b"terminated\n"))
+        self.finish(
+            outcome(exit_code=-15, stdout=self.printed_on_terminate, stderr=b"terminated\n")
+        )
 
     @property
     def running(self) -> bool:

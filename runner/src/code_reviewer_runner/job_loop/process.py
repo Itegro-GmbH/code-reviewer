@@ -87,6 +87,9 @@ class ProcessSpec:
     # How much of the end of its stdout is kept. The result line of an Implementer turn carries
     # its commits and files and can be megabytes; every other job prints a line of a few KB.
     stdout_keep_bytes: int = STDOUT_KEEP_BYTES
+    # How long a terminated process may take before SIGKILL; the launcher's own when None. A turn of
+    # the Implementer pushes its work inside it (#765).
+    terminate_grace: float | None = None
 
 
 @dataclass(frozen=True)
@@ -338,7 +341,7 @@ class SubprocessLauncher:
             spec.stdin,
             pipes,
             workdir,
-            self._terminate_grace,
+            self._terminate_grace if spec.terminate_grace is None else spec.terminate_grace,
             lease,
             stdout_keep_bytes=spec.stdout_keep_bytes,
         )

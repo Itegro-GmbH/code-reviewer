@@ -75,9 +75,14 @@ Rules (the CR-29 decisions, kept by the Worker host `job_loop/host.py`; tests in
   there as the engine user). Each failure is a stable reason (`implementer_git_too_old`, `implementer_work_dir_not_exec`, ...)
   in the log and in the verdict. A Worker that did not advertise it refuses an implementer job with
   `implementer_engine_unavailable`. The job process of a turn (`implementer/job_run.py`) asks the job host whether the lease
-  is still held before every push (only `held` allows it; a lost, superseded or unconfirmed lease ends the turn `lease_lost`
-  with nothing pushed), a SIGTERM ends the engine, pushes what is committed inside the host's grace and ends the turn
-  `runner_shutdown`, and the report (`implementer` in the result) is held to the contract and to 4 MB of escaped JSON, files
+  is still held before every push, and once more right before the `git push` itself (only `held` allows it; a lost or superseded
+  lease ends the turn `lease_lost` with nothing pushed; an answer that could not be had is a "not now": the push loop asks again
+  after its back-off and the last push asks again for up to 30 s, 20 s on a stop, before the turn ends `lease_lost`), a SIGTERM ends
+  the engine at once, pushes what is committed and ends the turn `runner_shutdown` with its report (the host keeps the report
+  and the usage in the result it gives the job back with; an Implementer job gets a grace of 60 s after SIGTERM, one lease
+  question is bounded to 25 s at a normal end and 10 s on a stop, the process ends itself after 55 s, all under the container's stop timeout of 90 s),
+  a turn is held to the smaller of its time limit and `RUNNER_JOB_TIMEOUT_SECONDS`, a job that carries neither `maxCostUsd` nor
+  `operatorMaxCostUsd` is refused with `implementer_config_invalid`, and the report (`implementer` in the result) is held to the contract and to 4 MB of escaped JSON, files
   first and then commits (`implementer/report.py`); a turn that never had a repository has no `implementer` key. The Worker
   reads from a Dynamic job the model descriptor (#279), `dynamic.cost` (the price book of the
   managed key, the token cap of an own key; `dynamic_review/passthrough/cost_policy.py`, #553) and, next to it,

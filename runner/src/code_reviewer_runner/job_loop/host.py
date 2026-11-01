@@ -89,6 +89,7 @@ from code_reviewer_runner.job_loop.reporting import (
     fit_request,
     minimal,
     result_from_outcome,
+    stopped_result,
 )
 from code_reviewer_runner.lease_check import LeaseState
 from code_reviewer_runner.pr_agent_config import PASSTHROUGH_VARIABLES
@@ -128,6 +129,17 @@ IMPLEMENTER_PASSTHROUGH_VARIABLES = (
 # The newest bytes of its stdout the host keeps of an Implementer job process: its result line
 # carries the commits and files of the turn, up to the 4 MB the body is held to (`report.py`).
 IMPLEMENTER_STDOUT_KEEP_BYTES = 6 * 1024 * 1024
+# A stopped turn of the Implementer has to end its engine, ask the lease and push: the process
+# gets this long after SIGTERM before it is killed (the container's own `stopTimeoutSeconds` is 90,
+# and the report of the stop comes after it). The process leaves itself less
+# (`job_run.SIGTERM_BACKSTOP_SECONDS`).
+IMPLEMENTER_TERMINATE_GRACE_SECONDS = 60.0
+# One lease question of an Implementer turn is bounded. At a normal end the last push must not
+# lose a good turn to a slow app: 25 s a question, and the window of the last push (30 s, asked
+# again) fits the grace of 180 s the end keeps. A stop has a minute in all and no time for an app
+# that does not answer: 10 s a question.
+IMPLEMENTER_LEASE_CHECK_BUDGET_SECONDS = 25.0
+IMPLEMENTER_STOP_LEASE_CHECK_BUDGET_SECONDS = 10.0
 # A shutdown report is tried for this long; the process is going away either way.
 SHUTDOWN_REPORT_WINDOW_SECONDS = 10.0
 _FIRST_RETRY_SECONDS = 1.0
@@ -441,9 +453,12 @@ class JobHost:
                 # #260: a Dynamic job writes its own comment, so it asks right before (a Diff job
                 # does not publish this way). An Implementer job asks before every push (#765).
                 lease_check=(
-                    (lambda: self._confirm_lease(claimed, state))
+                    (lambda: self._confirm_lease(claimed, state, self._lease_budget_of(kind)))
                     if _supervises_an_engine(kind)
                     else None
+                ),
+                terminate_grace=(
+                    IMPLEMENTER_TERMINATE_GRACE_SECONDS if kind is ReviewKind.IMPLEMENTER else None
                 ),
                 stdout_keep_bytes=(
                     IMPLEMENTER_STDOUT_KEEP_BYTES
@@ -609,12 +624,8 @@ class JobHost:
             self._log.warning(
                 "job %s: the runner is shutting down, the job is given back", claimed.id
             )
-            return failure_result(
-                RUNNER_SHUTDOWN,
-                "the runner was shut down before the job finished",
-                duration_ms=self._ms_since(started),
-                log_tail=tail,
-                redactor=redactor,
+            return stopped_result(
+                outcome, redactor, self._ms_since(started), implementer=implementer
             )
         return None
 
@@ -680,7 +691,21 @@ class JobHost:
                 detail = str(error) if isinstance(error, ApiError) else type(error).__name__
                 self._log.warning("job %s: heartbeat failed (%s)", claimed.id, detail)
 
-    async def _confirm_lease(self, claimed: ClaimedJob, state: _RunState) -> LeaseState:
+    def _lease_budget_of(self, kind: ReviewKind) -> float:
+        """How long one lease question may take: the Dynamic job's own, or an Implementer turn's,
+        which is shorter while the runner is being stopped."""
+        if kind is not ReviewKind.IMPLEMENTER:
+            return LEASE_CHECK_BUDGET_SECONDS
+        if self._hard_stop.is_set():
+            return IMPLEMENTER_STOP_LEASE_CHECK_BUDGET_SECONDS
+        return IMPLEMENTER_LEASE_CHECK_BUDGET_SECONDS
+
+    async def _confirm_lease(
+        self,
+        claimed: ClaimedJob,
+        state: _RunState,
+        budget: float = LEASE_CHECK_BUDGET_SECONDS,
+    ) -> LeaseState:
         """Beat the heart now. A lost lease and a cancelled job are both answered with 409.
 
         An answer that only says the app could not be reached (5xx, a reset, a timeout) is asked
@@ -690,7 +715,7 @@ class JobHost:
         if state.superseded.is_set():
             return LeaseState.SUPERSEDED
         try:
-            async with asyncio.timeout(LEASE_CHECK_BUDGET_SECONDS):
+            async with asyncio.timeout(budget):
                 return await self._ask_app(claimed, state)
         except TimeoutError:
             self._log.warning("job %s: the lease check ran out of time", claimed.id)
