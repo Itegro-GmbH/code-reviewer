@@ -1299,6 +1299,44 @@ the first App. The second project, its database, the Dispatcher's registry and t
 (the operator token stays). To restore an earlier deployment of the second App, run *Rollback production* with
 `factory_deployment` (section 7).
 
+#### Rollout of the Implementer (the order of the steps)
+
+The Implementer ([`implementer.md`](implementer.md)) is the first capability added to the second App after the lane exists.
+It is dormant in every release, and code-review.com is not touched at any step. The keys and values, in the order that
+works (the same steps with their checks, who does them and what undoes each are in [`factory-bring-up.md`](factory-bring-up.md),
+"Switching on the Implementer"):
+
+1. **Release the code to `main`.** The pipeline migrates the second database first, runs `health-factory` with the old set
+   (`dynamic-review,review`) and the canary on the rebuilt snapshot, and promotes. Nothing live changes.
+2. **`DISPATCHER_APPS`**, only after step 1 is live. Infisical `prod`, folder `/dispatcher`: in the factory entry set `kinds`
+   to `["diff","dynamic","implementer"]`. Optional: an `implementer` entry of `DISPATCHER_WORKER_CONFIG` (sizes and
+   `timeoutSeconds`; the defaults need none). Then run *Deploy production*, which stages and proves the Dispatcher with the
+   kind. Set earlier, an older Dispatcher refuses the unknown kind at start and the first App has an outage. **This deploy is
+   the first real proof of the engine:** the Launcher advertises `implementer` only when `DISPATCHER_APPS` names the kind, and
+   `POST /probe` then requires the report of the canary VM to name it (a second probe in the Implementer's container
+   profile, 110 seconds more, 260 seconds by default; with the kind keep `DISPATCHER_PROBE_TIMEOUT_SECONDS` at or below 190).
+   When the Implementer's half fails, the Dynamic verdict stands and the report says `implementer_probe_failed`; the canary
+   answers `503` and ends with `reasons=implementer_probe_failed missing=implementer, the release is blocked`. The promotions
+   of the App, the factory and the Dispatcher all wait for the canary, so nothing staged in that run goes live, the first
+   App's included (#797); there is no switch that waives the proof. The way back: set `kinds` back to `["diff","dynamic"]`,
+   wait for the Secret Sync and deploy again.
+3. **`PRODUCT_CAPABILITIES` and `FACTORY_EXPECTED_CAPABILITIES`, together.** Infisical `prod`, folder `/app-factory`, key
+   `PRODUCT_CAPABILITIES` = `review,dynamic-review,implementer`; repository variable `FACTORY_EXPECTED_CAPABILITIES` =
+   `dynamic-review,implementer,review`; then one *Deploy production*. One of the two alone ends in `PRODUCT_MISMATCH` at
+   `health-factory`: nothing is promoted and nothing live changes.
+4. **The maximum cost per review** in the factory's admin portal (General, Limits), raised from its default to the owner's
+   per-turn maximum (the value is in the bring-up checklist). It is the only brake of a turn, and it is the cap of every job
+   the factory claims, its own Diff and Dynamic reviews included.
+5. **The factory's GitHub App, by one click in the admin portal, after the deploy of step 3** (the manifest then asks for
+   Contents read and write; an App created earlier has it read-only and is updated by hand and approved by each
+   installation: [`github-app.md`](github-app.md)). With tenancy `multi` the App is public; an installation reaches a
+   workspace only when an Owner or Admin who owns the account has linked it. Also a model: a workspace key, or released
+   catalog entries that serve Dynamic Review.
+6. **The live smoke test** by the lead: [`implementer-smoke-test.md`](implementer-smoke-test.md).
+
+To go back, remove `implementer` from `PRODUCT_CAPABILITIES`, reset the repository variable, and deploy again. The Dispatcher
+entry and the permission may stay. What that does to running and queued tasks is in the bring-up checklist, step 3.
+
 ## 6. Sizing the Worker VMs
 
 A Sandbox VM has 1 vCPU or an even number up to 8, and **2 GiB of memory per vCPU**: the smallest is 1 vCPU / 2 GB.

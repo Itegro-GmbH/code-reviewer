@@ -336,6 +336,9 @@ export function createVercelSandboxService(
           // The platform refuses a name prefix with any other sort (HTTP 400): without it every run would fail.
           sortBy: "name",
           tags: { ...filter.tags },
+          // The platform keeps stopped VMs, so the listing grows (283 took 5.1 s); its default page is small. 50 is the
+          // largest page it allows (above it HTTP 400): fewer round trips, inside the claim's 4 s limit.
+          limit: 50,
           ...(signal === undefined ? {} : { signal }),
         }))
           vms.push({

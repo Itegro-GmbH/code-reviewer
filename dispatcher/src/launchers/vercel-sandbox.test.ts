@@ -125,6 +125,11 @@ function standIn(
               "Invalid request: `namePrefix` is only valid when `sortBy` is `name`",
             ),
           );
+        // The platform's page limit is 50; above it the call is HTTP 400.
+        if (typeof params.limit === "number" && params.limit > 50)
+          return Promise.reject(
+            apiError(400, undefined, "Invalid request: `limit` is at most 50"),
+          );
         const prefix = params.namePrefix;
         const items = (options.listed ?? []).filter(
           (item) =>
@@ -508,6 +513,7 @@ describe("the Vercel adapter of the Sandbox port", () => {
         // The platform refuses a name prefix with any other sort (HTTP 400).
         sortBy: "name",
         tags: { app: "code-reviewer" },
+        limit: 50,
       },
     ]);
     expect(vms).toStrictEqual(
@@ -526,6 +532,20 @@ describe("the Vercel adapter of the Sandbox port", () => {
   });
 
   // #364-T20
+  it("asks the platform for the largest page it allows (50), so a fleet of stopped VMs is not listed in many round trips", async () => {
+    const { sdk, calls } = standIn({ listed: [] });
+    await createVercelSandboxService(() => Promise.resolve(sdk), {
+      token: PLATFORM_TOKEN,
+      teamId: "team_dummy",
+      projectId: "prj_dummy",
+    }).list({ namePrefix: "cr-", tags: { app: "code-reviewer" } });
+
+    // The default page is small: 283 stopped VMs took 5.1 s to list and every claim ran into its 4 s limit.
+    expect(calls.list).toHaveLength(1);
+    const limit = (calls.list[0] as { limit?: unknown }).limit;
+    expect(limit).toBe(50);
+  });
+
   it("lists a VM without tags or a timeout with empty tags and no timeout", async () => {
     const { sdk } = standIn({
       listed: [{ name: "cr-x", createdAt: 5, status: "stopped" }],
