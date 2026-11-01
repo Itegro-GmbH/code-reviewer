@@ -397,6 +397,14 @@ describe("what the Implementer's journeys add to the lane (#767)", () => {
     expect(journey).toContain("E2E_WORKER_WRAPPER: WRAPPER");
     expect(journey).toContain("operatorToken: factoryEnv.operatorToken");
     expect(journey).not.toMatch(/\.skip|\.fixme|\.only|test\.slow|retries/);
+    // The journeys wait for what they need (a push, a run that ends), never for a fixed time of the agent's own, and the checks of
+    // the network and of the clean-up are exact: the proxy's own 403, a lookup that fails, a namespace nobody holds.
+    expect(journey).not.toMatch(/pause\(|sleep \d/);
+    expect(journey).toContain("CONNECT tunnel failed, response 403");
+    expect(journey).toContain("processesInNamespaces(namespaces)");
+    expect(journey).toContain(
+      "expect(await pushesSince(request, pushesBefore)).toEqual([])",
+    );
     expect(journey).not.toMatch(/mode: "serial"/);
     // One test per journey of the issue, named by its case.
     for (let number = 1; number <= 12; number += 1)
