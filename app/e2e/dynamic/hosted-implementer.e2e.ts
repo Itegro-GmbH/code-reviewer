@@ -372,9 +372,15 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     expect(pushes.length).toBeGreaterThanOrEqual(2);
     expectOnlyTheOwnBranch(pushes, branch);
     expectRunnerPushedOnlyForward(runnerGitCommands(), branch);
-    // No pull request was opened, read or asked for.
+    // No pull request was opened, read or asked for in this repository (the fake is shared with the earlier journey's repository).
     const asked = await getGithubRequests(request);
-    expect(asked.filter((entry) => /\/pulls?\b/.test(entry.path))).toEqual([]);
+    expect(
+      asked.filter(
+        (entry) =>
+          entry.path.includes(`/${GADGETS.fullName}`) &&
+          /\/pulls?(\/|$)/.test(entry.path),
+      ),
+    ).toEqual([]);
 
     // The Runs page: kind, repository, branch, commits, summary, model, duration.
     await page.goto(`/w/${WORKSPACE}/runs`);
