@@ -504,6 +504,8 @@ describe("the canary VM of a deployment that serves the Implementer (#765)", () 
     }
     expect(logger.text()).toContain("canary_implementer_probe_failed");
     expect(logger.text()).toContain("probe_exit_nonzero");
+    expect(logger.text()).toContain("canary_implementer_probe_exit");
+    expect(logger.text()).toContain('"exitCode":2');
     expect(logger.text()).toContain("work_volume_failed");
     expect(service.running()).toStrictEqual([]);
   });

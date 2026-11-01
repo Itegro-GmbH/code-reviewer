@@ -184,7 +184,13 @@ export function createSandboxCanary(
     } catch (error) {
       throw codeOf(error, signal, "probe_exec_failed");
     }
-    if (result.exitCode !== 0) throw new ProbeRunError("probe_exit_nonzero");
+    if (result.exitCode !== 0) {
+      // The number only (a docker failure is 125, a settings failure of the probe 2): the text of the container is never logged.
+      logger.warn("canary_implementer_probe_exit", {
+        exitCode: result.exitCode,
+      });
+      throw new ProbeRunError("probe_exit_nonzero");
+    }
     return result.stdout;
   }
 

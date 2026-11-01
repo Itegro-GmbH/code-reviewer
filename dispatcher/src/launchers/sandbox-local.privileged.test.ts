@@ -71,6 +71,20 @@ afterEach(async () => {
   if (work !== undefined) await rm(work, { recursive: true, force: true });
 });
 
+/** Runs a logged `docker run` line again and says how it ended, for the message of a test that failed (CI only). */
+function diagnose(line: string): string {
+  try {
+    const out = execFileSync("docker", line.split(" "), {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return `again: exit 0, stdout ${out.slice(0, 600)}`;
+  } catch (error) {
+    const failed = error as { status?: number; stderr?: string };
+    return `again: exit ${String(failed.status)}, stderr ${(failed.stderr ?? "").slice(0, 1200)}`;
+  }
+}
+
 /** A `docker` that logs its arguments and runs the real one, so the test can read the flags that were used. */
 async function loggingDocker(): Promise<{ bin: string; log: string }> {
   const bin = join(workDirectory(), "docker-logged.sh");
@@ -275,7 +289,11 @@ describe("the Sandbox-Launcher in local mode with a real Docker daemon", () => {
     expect(outcome.engines).toContain("pr-agent");
     if (outcome.engines.includes("implementer"))
       expect(outcome.engines).toContain("opencode");
-    expect(logger.text()).not.toContain("canary_implementer_probe_failed");
+    expect(
+      logger.text().includes("canary_implementer_probe_failed")
+        ? `the second probe failed: ${logger.text()}\n${diagnose(runs[1] ?? "")}`
+        : "",
+    ).toBe("");
     expect(service?.running()).toStrictEqual([]);
   });
 });
