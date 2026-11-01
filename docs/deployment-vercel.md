@@ -1313,10 +1313,13 @@ works (the same steps with their checks, who does them and what undoes each are 
    `timeoutSeconds`; the defaults need none). Then run *Deploy production*, which stages and proves the Dispatcher with the
    kind. Set earlier, an older Dispatcher refuses the unknown kind at start and the first App has an outage. **This deploy is
    the first real proof of the engine:** the Launcher advertises `implementer` only when `DISPATCHER_APPS` names the kind, and
-   `POST /probe` then requires the report of the canary VM to name it. When it cannot, the canary answers `503` and ends with
-   `missing=implementer, the release is blocked`; the promotions of the App, the factory and the Dispatcher all wait for the
-   canary, so nothing staged in that run goes live, the first App's included. The way back: set `kinds` back to
-   `["diff","dynamic"]`, wait for the Secret Sync and deploy again.
+   `POST /probe` then requires the report of the canary VM to name it (a second probe in the Implementer's container
+   profile, 110 seconds more, 260 seconds by default; with the kind keep `DISPATCHER_PROBE_TIMEOUT_SECONDS` at or below 190).
+   When the Implementer's half fails, the Dynamic verdict stands and the report says `implementer_probe_failed`; the canary
+   answers `503` and ends with `reasons=implementer_probe_failed missing=implementer, the release is blocked`. The promotions
+   of the App, the factory and the Dispatcher all wait for the canary, so nothing staged in that run goes live, the first
+   App's included (#797); there is no switch that waives the proof. The way back: set `kinds` back to `["diff","dynamic"]`,
+   wait for the Secret Sync and deploy again.
 3. **`PRODUCT_CAPABILITIES` and `FACTORY_EXPECTED_CAPABILITIES`, together.** Infisical `prod`, folder `/app-factory`, key
    `PRODUCT_CAPABILITIES` = `review,dynamic-review,implementer`; repository variable `FACTORY_EXPECTED_CAPABILITIES` =
    `dynamic-review,implementer,review`; then one *Deploy production*. One of the two alone ends in `PRODUCT_MISMATCH` at

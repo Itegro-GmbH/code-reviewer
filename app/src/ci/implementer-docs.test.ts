@@ -343,6 +343,101 @@ describe("the rollout of the Implementer", () => {
   });
 });
 
+describe("the documents match the merged runner job and canary (#765)", () => {
+  const text = flat(guide);
+
+  // #768-T01
+  it("has no temporary section and names the open points with their issues", () => {
+    for (const [file, doc] of [
+      ["docs/implementer.md", guide],
+      ["docs/implementer-smoke-test.md", smoke],
+      ["docs/factory-bring-up.md", bringUp],
+      ["docs/deployment-vercel.md", deployment],
+    ] as const)
+      expect(doc, file).not.toContain("State of the code");
+    const open = flat(section(guide, "## Open points"));
+    for (const issue of ["#767", "#797", "#799", "#784"])
+      expect(open, issue).toContain(issue);
+  });
+
+  // #768-T01
+  it.each(rollouts)(
+    "%s states the proof of the engine as the canary does it",
+    (_file, rollout) => {
+      const flatText = flat(rollout);
+      expect(flatText).toContain("implementer_probe_failed");
+      expect(flatText).toContain("missing=implementer");
+      expect(flatText).toContain("Dynamic verdict stands");
+      expect(flatText).toContain("`DISPATCHER_PROBE_TIMEOUT_SECONDS`");
+      expect(flatText).toContain("at or below 190");
+      expect(flatText).toContain("260 seconds");
+      expect(flatText).toContain("#797");
+    },
+  );
+
+  // #768-T02
+  it("states the numbers the canary code and the Dispatcher README have", () => {
+    const readme = flat(readText("dispatcher/README.md"));
+    expect(readme).toContain("is **260 s**");
+    expect(readme).toContain("at or below 190");
+    expect(readme).toContain("`IMPLEMENTER_PROBE_EXTRA_SECONDS`, 110 s");
+    const canary = readText("dispatcher/src/launchers/sandbox-canary.ts");
+    expect(canary).toContain("PROBE_RUN_TIMEOUT_MS = 60_000");
+    expect(readText("dispatcher/src/launchers/sandbox.ts")).toMatch(
+      /WORK_VOLUME_STEPS_SECONDS\s*=/,
+    );
+    expect(readText("dispatcher/src/probe/verdict.ts")).toContain(
+      'IMPLEMENTER_PROBE_FAILED: ProbeReason = "implementer_probe_failed"',
+    );
+    expect(readText("dispatcher/src/probe/canary.ts")).toContain(
+      "missing=${missing.join(",
+    );
+  });
+
+  // #768-T01
+  it("states the stop, the lease and the free codes as the runner has them", () => {
+    expect(text).toContain("a grace of 60 seconds");
+    expect(text).toContain("stop timeout is 90 seconds");
+    expect(text).toContain("`runner_shutdown`");
+    expect(text).toContain("never run twice");
+    expect(text).toContain("#799");
+    expect(readText("app/src/db/job-limits.ts")).toContain(
+      "IMPLEMENTER_MAX_ATTEMPTS = 1",
+    );
+    expect(readText("dispatcher/src/launchers/container-spec.ts")).toContain(
+      "stopTimeoutSeconds: 90",
+    );
+    const readme = flat(readText("runner/README.md"));
+    expect(readme).toContain("grace of 60 s after SIGTERM");
+    expect(readme).toContain("neither `maxCostUsd` nor `operatorMaxCostUsd`");
+  });
+
+  // #768-T01
+  it("describes the slow fleet listing, in the failure table and in the smoke test", () => {
+    for (const doc of [guide, smoke]) {
+      const flatDoc = flat(doc);
+      expect(flatDoc).toContain("`fleet_list_failed`");
+      expect(flatDoc).toContain("4 seconds");
+      expect(flatDoc).toContain("`no_capable_runner`");
+      expect(flatDoc).toContain("2026-11-01");
+    }
+    expect(flat(smoke)).toContain("What to look at");
+    const dispatcher = readText("dispatcher/src/core/dispatcher.ts");
+    expect(dispatcher).toContain("LIVE_VMS_TIMEOUT_MS = 4 * 1000");
+    expect(dispatcher).toContain('logger.error("fleet_list_failed")');
+    expect(dispatcher).toContain("LIVE_VMS_STALE_MS = 60 * 1000");
+  });
+
+  // #768-T01
+  it("does not say that the cost default is 5 USD: it is 1 USD until the owner sets 5", () => {
+    expect(text).not.toContain("5.00 USD by default");
+    expect(text).toContain("the default is 1.00 USD until then");
+    expect(flat(rollouts[0][1])).toContain(
+      "to 5.00 USD, the owner's per-turn maximum; the default is 1.00 USD until then",
+    );
+  });
+});
+
 describe("the operator guide states what the owner decided", () => {
   const text = flat(guide);
 

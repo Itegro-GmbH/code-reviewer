@@ -10,17 +10,6 @@ and `runner/README.md`.
 The Implementer exists in the factory deployment only (the capability `implementer`, [`app/src/capabilities/README.md`](../app/src/capabilities/README.md)).
 code-review.com has none of it: no page, no route, no job kind, and its Dispatcher entry never lists the kind.
 
-## State of the code when this guide was written
-
-Everything below describes the merged code. Three things were still open and decide when the first task can run; whoever
-merges the last of them removes this section.
-
-| Open | What is missing until it is merged |
-|---|---|
-| Runner job (#765) | The Worker does not yet take an `implementer` job from the queue to the end: no dispatch of the kind to the agent session, no advertisement of the engine after its self-check, no stop on SIGTERM that pushes first, no `implementer_engine_unavailable` from a Worker that did not advertise. The pieces it joins (clone and push, agent session, network, image) are merged |
-| The Launcher advertises the engine (#765) | In the merged code the Sandbox Launcher advertises `pr-agent` and `opencode` only, so the Dispatcher answers a wake-up call for the kind with `ignored` and `not_capable` and the app stops resending it. #765, being built, makes the Launcher advertise `implementer` only when `DISPATCHER_APPS` names the kind, and `POST /probe` then requires the canary report to name it (`docs/dispatcher.md`, "The kind `implementer`"). The first deploy after the kind is set is therefore the first real proof of the engine, and it can block the release (rollout, step 2) |
-| End to end journey (#767) | The whole path has not run in the privileged lane yet; the live smoke test is the first run of it on the platform |
-
 ## What it is
 
 A member of the workspace opens `/w/<slug>/implementer`, picks a repository, a base branch, a **new** branch name, writes
@@ -67,7 +56,9 @@ native path; the two registry providers (Anthropic, OpenRouter) are not offered.
    The task is the user message. When it ends its turn with uncommitted changes it gets one more message to commit them; what
    is still uncommitted afterwards is committed by the system ("Implementer: uncommitted changes of the turn").
 6. **Push.** While the agent works, the runner looks at its branch and pushes new commits from the mirror, at most every
-   120 seconds, and once more at the end (below, "The git rules").
+   120 seconds, and once more at the end (below, "The git rules"). Before every push, and once more right before `git push`
+   itself, it asks whether the lease is still held; only `held` allows the push. A lost lease ends the turn `lease_lost` with
+   nothing pushed after it.
 7. **Report.** The Worker reports the result once: base and head commit, whether the head was pushed, the commits (at most
    200), the changed files (at most 500), the agent's closing summary (at most 8,192 characters, with known secrets removed),
    the OpenCode ids and the usage. The session becomes idle and the Runs page shows branch, commits, files, summary and cost.
@@ -135,9 +126,10 @@ seconds. A tool that ignores the proxy variables has no network at all, which fa
 
 | Limit | Value | Where it is decided |
 |---|---|---|
-| Cost of a turn | The operator's maximum per turn, 5.00 USD by default, set in the factory's admin portal (General, Limits, "Maximum cost per review"; the product default of 1.00 USD is too low). A person may ask for a lower limit on the form (never above that maximum or 100 USD). Without one, the maximum applies | Claim, and the proxy of the Worker: it refuses the next model call once the calls so far cost that much, so a turn can end slightly above it by the last call |
+| Cost of a turn | The operator's maximum per turn: 5.00 USD once the owner has set it in the factory's admin portal (General, Limits, "Maximum cost per review"); the default is 1.00 USD until then, which is too low for a task. A person may ask for a lower limit on the form (never above that maximum or 100 USD). Without one, the maximum applies | Claim, and the proxy of the Worker: it refuses the next model call once the calls so far cost that much, so a turn can end slightly above it by the last call |
 | Steps of the agent | None. There is no step limit, no plan, no approach rule: the cost limit is the brake | |
-| Time of a turn | 3600 seconds. The runner keeps the last 180 seconds for the commit of what is left and the final push (a third of a short limit). The Dispatcher stops the Worker at 3600 seconds (`DISPATCHER_WORKER_CONFIG`, `implementer.timeoutSeconds`, 60 to 21600) and the App fails a turn still running after 70 minutes with `timeout`; the App cannot read the Dispatcher's setting, so change the constants with it (`docs/dispatcher.md`) | Dispatcher, runner, App |
+| Time of a turn | 3600 seconds. The runner keeps the last 180 seconds for the commit of what is left and the final push (a third of a short limit). The Dispatcher stops the Worker at 3600 seconds (`DISPATCHER_WORKER_CONFIG`, `implementer.timeoutSeconds`, 60 to 21600) and the App fails a turn still running after 70 minutes with `timeout`; the App cannot read the Dispatcher's setting, so change the constants with it (`docs/dispatcher.md`). The runner holds a turn to the smaller of its time limit and `RUNNER_JOB_TIMEOUT_SECONDS` | Dispatcher, runner, App |
+| Stop | On SIGTERM the engine is ended at once, what is committed is pushed (if the lease is still held) and the turn ends `runner_shutdown`. The job process gets a grace of 60 seconds, ends itself after 55, and the container's stop timeout is 90 seconds; one question about the lease is bounded to 25 seconds at a normal end and 10 on a stop | Runner, container spec |
 | Task text | 20,000 characters | Form and route |
 | Branch name | At most 200 characters, each part between slashes at most 240 bytes, git's rules, not the base branch | Form and route |
 | Base branches offered | 100 names, default first; a base beyond that can be typed | Route |
@@ -159,20 +151,22 @@ used):
 | `branch_exists` | Raised only at the first push, which is the first batch after the agent's first commit or the final push, when GitHub answers `[rejected]` because the branch exists with other history (someone made it after the submit check). The agent has worked by then, so the model was used, and the run is still not billed. Nothing was pushed and the agent's work is lost | free | Choose a new branch name and start again |
 | `base_branch_not_found` | The base branch was not on GitHub when the runner cloned | free | Check the name; it may have been deleted since the submit |
 | `clone_failed` | The repository could not be downloaded | free | Try again; look at the installation if it persists |
-| `setup_failed` | The runner could not prepare the workplace: git too old, a guard file missing, the guard's self-test failed, the mirror could not be made, a port of the slot was taken. The Runs-page sentence says "the repository's own set-up steps", which is not what happens: no repository script is ever run | free | Look at the Worker log of the job; it is the image or the VM |
-| `agent_gave_up` | The agent ended without a commit and nothing to commit, or its engine died after the model had been used | charged | Read its summary; try again with a clearer or smaller task |
-| `push_rejected` | GitHub did not take the push: the repository's rules refused it, a push of `.github/workflows/` (never allowed), or GitHub was unreachable. Work pushed earlier stays on the branch | charged | Check the branch, then start again |
+| `setup_failed` | The runner could not prepare the workplace before the turn started: git too old, a guard file missing, the guard's self-test failed, the mirror could not be made, a port of the slot was taken. It is the free code of a turn that never started: once the model was used, the same trouble shows as `branch_violation`, and an unexpected error as `agent_gave_up`. The Runs-page sentence says "the repository's own set-up steps", which is not what happens: no repository script is ever run | free | Look at the Worker log of the job; it is the image or the VM |
+| `agent_gave_up` | The agent ended without a commit and nothing to commit, or its engine died after the model had been used (what it had committed is pushed when possible). The summary also says when files the agent wrote could not be kept, such as `opencode.json` | charged | Read its summary; try again with a clearer or smaller task |
+| `push_rejected` | The repository did not accept the pushed work (a rule, a permission, a push of `.github/workflows/` which is never allowed), or the final push could not reach GitHub. Work pushed earlier stays on the branch | charged | Check the branch, then start again |
 | `branch_violation` | The branch was rewritten below what was pushed, a commit has a committer that is not the system, or the repository could not be committed or checked after the agent ran. Commits pushed before stay; nothing after was saved | charged | Look at the branch; the agent did something it was told not to |
-| `cost_limit_reached` | The calls so far cost the limit, so the next call was refused. Work pushed before stays | charged | Raise the limit within the maximum, or make the task smaller |
+| `cost_limit_reached` | The calls so far cost the limit, so the next call was refused. What was committed is pushed when possible: check the branch | charged | Raise the limit within the maximum, or make the task smaller |
 | `time_limit_reached` | The turn ran into its time limit. What was committed was pushed when possible | charged | Check the branch for what reached it |
 | `git_write_not_granted` | The installation has not accepted Contents write | free | Accept the new permission on GitHub ([`github-app.md`](github-app.md), "Update an existing App") |
-| `implementer_engine_unavailable` | No Worker that answered can run tasks, or the claim carried no cost limit | free | See "State of the code" above, and the rollout |
-| `implementer_config_invalid` | The turn's settings cannot be used: the model entry or the clone address | free | Look at the job log for the reason word |
-| `no_capable_runner` | Nobody that can run tasks claimed the turn within 30 minutes (3 hours while a Worker was busy with others of the kind). Here: the Dispatcher's entry for the factory does not list `implementer`, or the Launcher does not advertise it | free | Rollout step 2, and "State of the code" |
+| `implementer_engine_unavailable` | The Worker did not advertise the engine (its start-up checks failed, or the container is not the Implementer's profile), the claim carried no cost limit, or the capability is off in the App | free | The Worker log names the stable reason (`implementer_git_too_old`, `implementer_work_dir_not_exec` and others); see the rollout |
+| `implementer_config_invalid` | The turn's settings cannot be used: a model entry the proxy cannot serve, the clone address, a turn without its record, or a job that reached the runner with neither `maxCostUsd` nor `operatorMaxCostUsd` | free | Look at the job log for the reason word |
+| `no_capable_runner` | Nobody that can run tasks claimed the turn within 30 minutes (3 hours while a Worker was busy with others of the kind). Here: the Dispatcher's entry for the factory does not list `implementer`, so the Launcher does not advertise it; or, with two Apps, the Dispatcher could not list the platform's VMs in time (next row) | free | Rollout step 2, and the next row |
+| `fleet_list_failed` (a Dispatcher log line, not a code of the run) | With two or more Apps the Dispatcher lists the platform's VMs for every claim to count what each App occupies. A listing that gives no answer within 4 seconds counts as failed; the last good one is used for up to a minute, and after that the claim answers `unavailable` (retry in 60 s) and nothing is claimed. Waiting jobs then end `no_capable_runner`. Seen live on 2026-11-01, when the listing was too slow; a hotfix to `main` changes its page size | free | Look for `fleet_list_failed` in the Dispatcher log first. Not a fault of the task or of the agent: start it again once the listing answers |
 | `dispatch_unavailable` | Nothing claimed the turn within `RUNNER_DISPATCH_GIVE_UP_SECONDS` (60 minutes by default); the Dispatcher is down, protected or full ([`deployment-vercel.md`](deployment-vercel.md), 5.3) | free | Look at the App's sweep log and the Dispatcher's |
 | `timeout` | The turn was still running 70 minutes after it started, so the app failed it. The Worker normally ends it before at its 3600 seconds | free | Check the branch for what was pushed |
-| `lease_lost`, `lease_expired` | The Worker no longer held the turn when it was ready, or stopped reporting; the result was not saved. Work pushed before stays on the branch | free | Start again if the branch lacks the work |
-| `runner_error`, `runner_shutdown` | The runner failed unexpectedly, or was shut down while it worked | free | Read the Worker log; start again |
+| `lease_lost`, `lease_expired` | The Worker no longer held the turn when it was ready, or stopped reporting, or the lease could not be confirmed before a push; the result was not saved and nothing is pushed after the loss. Work pushed before stays on the branch | free | Start again if the branch lacks the work |
+| `runner_shutdown` | The Worker was told to stop (SIGTERM) while it worked: the engine was ended, what is committed was pushed if the lease was still held. A turn of the Implementer is never run twice, so the app gives it back and it ends here, as its last attempt. The usage of a stopped turn is not recorded yet (#799) | free | Check the branch for what was pushed; start again with a new branch name |
+| `runner_error` | The runner failed unexpectedly before any model call | free | Read the Worker log; start again |
 | `dynamic_accounting_failed` | The model usage could not be accounted for, so the turn ended and its cost is not known. The work may be done: check the branch | free | Check the branch |
 | `llm_auth`, `llm_quota`, `llm_rate_limit`, `llm_timeout`, `llm_unavailable` | The model provider refused the key, has no credit, limits requests, is slow or is down. On the operator's key these are the operator's to fix and are not billed to the workspace; on the workspace's own key they are the workspace's | free on the operator's key, charged on the workspace's own | The key or the provider, then start again |
 
@@ -220,3 +214,13 @@ These are decisions of the owner, not oversights.
 - **A turn that fails before it starts keeps its branch name** (#785).
 - **Follow-ups that do not block the first release:** the retry batch of write tokens and the wording for a provider pin
   (#794), the lint of the image's package managers and the OpenSSL wording (#786), remaining QA wording (#775).
+
+## Open points
+
+- **#767**, the end to end journey of the whole path in the privileged lane, is not merged. The live smoke test is the first
+  run of the whole path on the platform.
+- **#797**: a failed proof of the Implementer blocks code-review.com. The Dispatcher is shared, the deploy canary requires
+  `implementer` as soon as the factory's entry names the kind, and the promotions of everything staged in that run wait for the
+  canary. There is no switch that waives the proof; the way back is in the rollout, step 2.
+- **#799**: the usage of a turn that was stopped (`runner_shutdown`) is not recorded.
+- **#784**: read-only registry access, before external users (above).
