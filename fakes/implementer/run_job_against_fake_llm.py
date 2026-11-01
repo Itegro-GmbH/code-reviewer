@@ -91,6 +91,8 @@ class LoopbackUpstream:
         self._base_path = parts.path.rstrip("/")
 
     def send(self, request: UpstreamRequest, timeout: float) -> UpstreamResponse:
+        sys.stderr.write(f"fake upstream: POST {request.path} ({len(request.body)} bytes)\n")
+        sys.stderr.flush()
         connection = http.client.HTTPConnection(self._host, self._port, timeout=timeout)
         try:
             connection.request(
@@ -135,9 +137,10 @@ def record_git_commands(log_path: str) -> None:
 
 class EngineTraces:
     """Where the engine lives (its home and temporary directory) and the capability it was handed,
-    found when it is started."""
+    found when it is started. What the engine prints goes to a file next to the git log."""
 
-    def __init__(self) -> None:
+    def __init__(self, log_path: str = "") -> None:
+        self.log_path = log_path
         self.directories: set[str] = set()
         self.capabilities: set[str] = set()
 
@@ -154,6 +157,9 @@ class EngineTraces:
                     self.capabilities.add(key)
         except (KeyError, OSError, ValueError, AttributeError):
             pass
+        if self.log_path:
+            log = open(f"{self.log_path}.{os.getpid()}.engine.txt", "ab")  # noqa: SIM115
+            options.update(stdout=log, stderr=subprocess.STDOUT)
         return cast("subprocess.Popen[bytes]", subprocess.Popen(argv, **options))
 
     def scan(self, secrets: dict[str, str], report_path: str) -> None:
@@ -230,7 +236,7 @@ def main(argv: list[str]) -> int:
     faulthandler.dump_traceback_later(30, repeat=True, file=trace)
     record_git_commands(git_log)
     clone_over_http()
-    traces = EngineTraces()
+    traces = EngineTraces(git_log)
     seams = JobSeams(
         session_seams=SessionSeams(
             upstream_for=lambda _base_url: LoopbackUpstream(llm_base_url),

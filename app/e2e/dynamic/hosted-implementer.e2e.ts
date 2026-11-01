@@ -238,7 +238,27 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     required(llm, "The fake LLM").reset();
   });
 
-  test.afterEach(() => {
+  test.afterEach(async ({}, testInfo) => {
+    // A failed journey keeps what the model was asked and what the Dispatcher said, next to the screenshot.
+    if (testInfo.status !== testInfo.expectedStatus) {
+      await testInfo.attach("model-requests.json", {
+        body: JSON.stringify(
+          required(llm, "The fake LLM")
+            .requests()
+            .map((item) => ({
+              model: item.model,
+              tools: item.tools.length,
+              prompt: item.prompt.slice(-600),
+              toolResults: Object.values(item.toolResults).map((text) =>
+                text.slice(0, 300),
+              ),
+            })),
+          null,
+          2,
+        ),
+        contentType: "application/json",
+      });
+    }
     for (const item of required(llm, "The fake LLM").requests())
       shownToTheModel.push(
         `${item.prompt}\n${Object.values(item.toolResults).join("\n")}`,
