@@ -293,18 +293,21 @@ export const PROBE =
     .join("; ") + "; echo '== end of the probe'";
 
 /**
- * The same, while a push is going on: it commits, waits (at most twenty seconds, in steps of 50 ms) until a root process runs
- * `git push` (the runner's mirror push), tries to read that process's environment and its arguments, and then runs the probe.
+ * The same, while a push is going on: it commits, then looks (at most twelve seconds, every 20 ms) for a root process that runs
+ * `git push` (the runner's mirror push), reads its arguments and tries to read its environment, where the token is, and says
+ * what the system answered; then it runs the probe.
  */
 export const PROBE_DURING_PUSH =
-  "git add -A && git commit -q -m 'Add probe'; seen=no; " +
-  "for i in $(seq 1 400); do " +
-  "if pgrep -u 0 -f ' push --porcelain ' >/dev/null; then seen=yes; " +
+  "git add -A && git commit -q -m 'Add probe'; got=no; " +
+  "for i in $(seq 1 600); do " +
   "for p in $(pgrep -u 0 -f ' push --porcelain '); do " +
-  'echo "root push $p environ: $(cat /proc/$p/environ 2>&1 | head -c 160)"; ' +
-  "echo \"root push $p cmdline: $(tr '\\0' ' ' < /proc/$p/cmdline 2>&1 | head -c 400)\"; done; " +
-  "break; fi; sleep 0.05; done; " +
-  `echo "[push-seen] $seen"; ${PROBE}`;
+  "c=$(tr '\\0' ' ' < /proc/$p/cmdline 2>&1 | head -c 400); " +
+  "e=$(cat /proc/$p/environ 2>&1 | head -c 160); " +
+  'case "$e" in *"Permission denied"*) ' +
+  'echo "root push $p cmdline: $c"; echo "root push $p environ: $e"; got=yes;; esac; ' +
+  "done; " +
+  '[ "$got" = yes ] && break; sleep 0.02; done; ' +
+  `echo "[push-seen] $got"; ${PROBE}`;
 
 // -- what the runner did to Git ----------------------------------------------------------------------------------
 

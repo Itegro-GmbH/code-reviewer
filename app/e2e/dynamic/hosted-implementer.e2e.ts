@@ -745,8 +745,8 @@ test.describe("a task on its way from the form of the Implementer to a branch on
           "git -c core.hooksPath=/dev/null reset -q --hard HEAD~1 && echo bad > b.txt && git add -A && git -c core.hooksPath=/dev/null commit -q -m Bad; echo '[bypass]' $?",
         ),
       ],
-      // The agent waits before the bypass, until the good commit is on GitHub; after the bypass it waits again, for the run to end.
-      holdBefore: [2, 3],
+      // The agent waits before the bypass, until the good commit is on GitHub; after it the turn ends and the final push checks it.
+      holdBefore: [2],
       finalText: "Done.",
     });
     await signInAsAdmin(page);
