@@ -782,11 +782,6 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     const cached = (usage: Record<string, unknown>) =>
       (usage.prompt_tokens_details as { cached_tokens?: number } | undefined)
         ?.cached_tokens ?? 0;
-    const written = (usage: Record<string, unknown>) =>
-      (
-        usage.prompt_tokens_details as
-          { cache_write_tokens?: number } | undefined
-      )?.cache_write_tokens ?? 0;
     expect(answered.length).toBeGreaterThanOrEqual(4);
     // The engine marked its prompt for the cache: on the message objects.
     const marks = theLlm.requests().map((item) => item.cacheMarks);
