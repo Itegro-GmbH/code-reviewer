@@ -90,6 +90,7 @@ class EgressAllowlist:
 
 DEFAULT_ALLOWLIST: Final = EgressAllowlist(
     (
+        "example.com",
         "registry.npmjs.org",
         "registry.yarnpkg.com",
         "pypi.org",
