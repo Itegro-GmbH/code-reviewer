@@ -15,6 +15,9 @@ ledger, model proxy, engine and push run as they do in a container:
 * the model proxy's last hop is plain http to the fake LLM (`<llm base url>/chat/completions`);
   everything before it (the job's entry, the capability, the key swap, the cost ledger, the usage)
   is production code;
+* the clone address stays an https address through the runner's own checks (the app and the
+  contract demand one, and the repository of the lane states one) and is turned into http for
+  the git commands, because the fake GitHub speaks plain http on loopback; host and path stay;
 * the egress proxy keeps its allowlist and its judgement of the target, but a name resolves to a
   public documentation address and a connection to it is made to the fake registry on loopback, so
   a name of the list reaches the fake and every other name is refused by the proxy itself.
@@ -44,6 +47,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlsplit
@@ -60,6 +64,13 @@ from code_reviewer_runner.implementer import job_run
 from code_reviewer_runner.implementer.egress_config import EgressSettings, start_egress
 from code_reviewer_runner.implementer.egress_proxy import EgressProxy
 from code_reviewer_runner.implementer.git_process import GitProcess
+from code_reviewer_runner.implementer.git_workspace import (
+    AgentUser,
+    GitIdentity,
+    GitWorkspace,
+    WorkspaceLayout,
+    WorkspaceSpec,
+)
 from code_reviewer_runner.implementer.job_run import JobSeams
 from code_reviewer_runner.implementer.session import SessionSeams
 
@@ -173,6 +184,26 @@ class EngineTraces:
         Path(report_path).write_text(json.dumps(report), encoding="utf-8")
 
 
+def clone_over_http() -> None:
+    """Has the workspace take the clone address as an http address: the checks of the job, which
+    demand an https address, have run by then; this is the git commands' way to the fake GitHub."""
+    init = GitWorkspace.__init__
+
+    def init_over_http(
+        self: GitWorkspace,
+        spec: WorkspaceSpec,
+        layout: WorkspaceLayout,
+        agent: AgentUser,
+        identity: GitIdentity,
+        **options: Any,
+    ) -> None:
+        options["schemes"] = ("https", "http")
+        spec = replace(spec, clone_url=spec.clone_url.replace("https://", "http://", 1))
+        init(self, spec, layout, agent, identity, **options)
+
+    GitWorkspace.__init__ = init_over_http  # type: ignore[method-assign]
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 4:
         sys.stderr.write(
@@ -192,6 +223,7 @@ def main(argv: list[str]) -> int:
         return start_egress(settings, resolve=resolve, connect=connect)
 
     record_git_commands(git_log)
+    clone_over_http()
     traces = EngineTraces()
     seams = JobSeams(
         session_seams=SessionSeams(

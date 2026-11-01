@@ -195,7 +195,7 @@ export const GITHUB_APP_OWNER_ACCOUNT = {
 export async function addGithubInstallation(
   request: APIRequestContext,
   installation: GithubInstallation,
-  repositories: Array<{ id: number; fullName: string }>,
+  repositories: Array<{ id: number; fullName: string; htmlUrl?: string }>,
 ): Promise<void> {
   const response = await request.post(
     `${e2eEnv.githubUrl}/__fake/installations`,

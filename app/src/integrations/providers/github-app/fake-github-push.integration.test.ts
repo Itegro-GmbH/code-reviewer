@@ -609,4 +609,32 @@ describe("the push of the fake GitHub", () => {
       ).repositories.map((repo) => repo.full_name),
     ).toEqual([WIDGETS.fullName, OTHER.fullName]);
   });
+
+  // #767
+  it("states the html_url a test gives a repository, and the default address of the others", async () => {
+    const context = await setup();
+    context.fake.setRepositories(4242, [
+      { ...WIDGETS, htmlUrl: "https://127.0.0.1:1/acme/widgets" },
+      OTHER,
+    ]);
+    const token = await context.mint([WIDGETS.id, OTHER.id], "read");
+
+    const listed = await fetch(
+      `${context.fake.baseUrl}/installation/repositories`,
+      {
+        headers: { authorization: `token ${token}` },
+      },
+    );
+
+    expect(
+      (
+        (await listed.json()) as {
+          repositories: Array<{ full_name: string; html_url: string }>;
+        }
+      ).repositories.map((repo) => [repo.full_name, repo.html_url]),
+    ).toEqual([
+      ["acme/widgets", "https://127.0.0.1:1/acme/widgets"],
+      ["acme/other", `${context.fake.baseUrl}/acme/other`],
+    ]);
+  });
 });

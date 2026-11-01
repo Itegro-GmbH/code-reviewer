@@ -91,7 +91,13 @@ const VM_ROOT = "/run/hosted-vms";
 const PYTHON = resolve(process.cwd(), "../runner/.venv/bin/python");
 
 const INSTALLATION_ID = 9500767;
-const GADGETS = { id: 9600767, fullName: "hosted-implementer/gadgets" };
+// The app clones from the repository's own https address, and the lane's fake GitHub speaks plain http on loopback: the repository
+// states an https address on the fake's host and port, which the job wrapper turns into http for the one git command that talks to it.
+const GADGETS = {
+  id: 9600767,
+  fullName: "hosted-implementer/gadgets",
+  htmlUrl: `${e2eEnv.githubUrl.replace("http://", "https://")}/hosted-implementer/gadgets`,
+};
 const BASE = "trunk";
 const KEY = "sk-deepseek-e2e-implementer-key-0123456789abcdef0123";
 // One run of the agent takes a few seconds of the model's script and the pinned engine's start, a push and the end of the turn.

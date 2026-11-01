@@ -51,6 +51,12 @@ export type FakeRepository = {
   fullName: string;
   defaultBranch?: string;
   private?: boolean;
+  /**
+   * The `html_url` of the repository, when it is not `<web base>/<full name>`. The Implementer's journey (#767) gives its
+   * repository an https address: the app clones from the repository's own https address, and the lane's fake GitHub speaks
+   * plain http on loopback.
+   */
+  htmlUrl?: string;
 };
 
 export type FakePullRequest = {
@@ -326,7 +332,7 @@ function repositoryJson(repository: FakeRepository, webBase: string) {
     name: repository.fullName.split("/")[1],
     full_name: repository.fullName,
     private: repository.private ?? false,
-    html_url: `${webBase}/${repository.fullName}`,
+    html_url: repository.htmlUrl ?? `${webBase}/${repository.fullName}`,
     default_branch: repository.defaultBranch ?? "main",
     owner: { login: owner, id: ownerId },
   };
