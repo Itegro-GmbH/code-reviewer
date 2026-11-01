@@ -220,10 +220,8 @@ def test_the_token_cap_of_an_own_key_is_the_cost_limit() -> None:
         (LimitError(ErrorCode.DYNAMIC_CONFIG_INVALID, "no"), ErrorCode.IMPLEMENTER_CONFIG_INVALID),
         (JobError(ErrorCode.BRANCH_VIOLATION, "rewritten"), ErrorCode.BRANCH_VIOLATION),
         (JobError(ErrorCode.PUSH_REJECTED, "refused"), ErrorCode.PUSH_REJECTED),
-        (
-            IsolationError("the engine ports are not the ones the network rules allow"),
-            ErrorCode.SETUP_FAILED,
-        ),
+        (JobError(ErrorCode.LEASE_LOST, "not ours"), ErrorCode.LEASE_LOST),
+        (JobError(ErrorCode.RUNNER_SHUTDOWN, "stop"), ErrorCode.RUNNER_SHUTDOWN),
     ],
 )
 @pytest.mark.parametrize("used_model", [False, True])
@@ -231,6 +229,40 @@ def test_what_ends_a_turn_has_a_stable_code_whether_or_not_the_model_was_used(
     error: BaseException, code: ErrorCode, used_model: bool
 ) -> None:
     assert classify(error, used_model=used_model)[0] is code
+
+
+# #765: `setup_failed` is the free code of a turn that never started. After the model was used,
+# whatever is wrong with the repository or its set-up is the state the agent left: the charged
+# `branch_violation`, the code `RepositoryUnusable` also carries.
+@pytest.mark.parametrize(
+    "error",
+    [
+        IsolationError("the engine ports are not the ones the network rules allow"),
+        JobError(ErrorCode.SETUP_FAILED, "git status failed"),
+    ],
+)
+def test_setup_failed_is_free_before_the_model_and_branch_violation_after(
+    error: BaseException,
+) -> None:
+    assert classify(error, used_model=False)[0] is ErrorCode.SETUP_FAILED
+    assert classify(error, used_model=True)[0] is ErrorCode.BRANCH_VIOLATION
+
+
+# #765
+def test_an_unusable_repository_after_the_agent_ran_is_the_charged_code() -> None:
+    from code_reviewer_runner.implementer.git_workspace import RepositoryUnusable
+
+    for used in (False, True):
+        assert classify(RepositoryUnusable("git status failed"), used_model=used)[0] is (
+            ErrorCode.BRANCH_VIOLATION
+        )
+
+
+# #765
+def test_runner_error_never_ends_a_turn_that_used_the_model() -> None:
+    for error in (RuntimeError("anything"), JobError(ErrorCode.RUNNER_ERROR, "a bug")):
+        assert classify(error, used_model=False)[0] is ErrorCode.RUNNER_ERROR
+        assert classify(error, used_model=True)[0] is ErrorCode.AGENT_GAVE_UP
 
 
 # The engine's death and a bound of the audit are the runner's own failures. They are free before

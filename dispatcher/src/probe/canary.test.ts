@@ -1089,18 +1089,29 @@ describe("the arguments of the deploy canary", () => {
   });
 
   // #759-T11
-  it("still requires `pr-agent,opencode` by default and has no probe for the implementer engine", () => {
+  it("still requires `pr-agent,opencode` by default, and `--engines` may name the implementer (#765)", () => {
     const env = { RUNNER_TOKEN: "dummy-token-1234567890" };
 
     expect(
       parseCanaryArguments(["--url", "https://d.example"], env).requiredEngines,
     ).toStrictEqual(["pr-agent", "opencode"]);
+    expect(
+      parseCanaryArguments(
+        [
+          "--url",
+          "https://d.example",
+          "--engines",
+          "pr-agent,opencode,implementer",
+        ],
+        env,
+      ).requiredEngines,
+    ).toStrictEqual(["pr-agent", "opencode", "implementer"]);
     expect(() =>
       parseCanaryArguments(
-        ["--url", "https://d.example", "--engines", "implementer"],
+        ["--url", "https://d.example", "--engines", "nonsense"],
         env,
       ),
-    ).toThrow(/pr-agent and opencode/);
+    ).toThrow(/pr-agent, opencode and implementer/);
   });
 
   // #331-R01

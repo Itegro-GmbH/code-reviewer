@@ -67,10 +67,13 @@ from .config import build_engine_config, implementer_environment
 from .egress_config import EgressSettings, start_egress
 from .egress_proxy import EgressProxy
 from .git_workspace import (
+    CONFIRM_PAUSE_SECONDS,
+    CONFIRM_SECONDS,
+    PUSH_INTERVAL_SECONDS,
+    RETRY_BACKOFF_SECONDS,
     GitWorkspace,
     PushLoop,
     PushResult,
-    RepositoryUnusable,
 )
 from .history import CommitInfo, FileChange
 from .prompts import LEFTOVER_PROMPT, instructions_text
@@ -107,11 +110,11 @@ COST_LIMIT_DETAIL = "the cost limit is used up"
 TOKEN_CAP_DETAIL = "the token cap is used up"
 
 
-def deadline_seconds(time_limit: int, elapsed: float) -> float:
+def deadline_seconds(time_limit: float, elapsed: float) -> float:
     """The seconds the agent may work, counted from now: the job's time limit less what is spent
     since the job began and less the grace kept for the leftover commit and the final push (three
     minutes; a third of a short limit)."""
-    return float(time_limit) - min(GRACE_SECONDS, time_limit / 3) - elapsed
+    return time_limit - min(GRACE_SECONDS, time_limit / 3) - elapsed
 
 
 def agent_limits(deadline: float, max_cost: Decimal, stop_reason: str) -> DynamicLimits:
@@ -136,6 +139,15 @@ class SessionSeams:
     transport: Transport = _http_request
     port_source: Callable[[], int] | None = None
     tick_seconds: float = TICK_SECONDS
+    # How often at most a batch of commits is pushed while the agent works (the last push is not
+    # held back).
+    push_interval: float = PUSH_INTERVAL_SECONDS
+    # How long, and how often, the last push asks a lease the host cannot confirm (a stop uses at
+    # most `STOP_CONFIRM_SECONDS` of it).
+    confirm_seconds: float = CONFIRM_SECONDS
+    confirm_pause: float = CONFIRM_PAUSE_SECONDS
+    # How long the push loop waits after a look that failed for a reason that is not the agent's.
+    retry_backoff: float = RETRY_BACKOFF_SECONDS
     startup_seconds: float | None = None
     scratch_dir: str | None = None
     clock: Callable[[], float] = time.monotonic
@@ -143,13 +155,35 @@ class SessionSeams:
     start_egress: Callable[[EgressSettings], EgressProxy | None] | None = None
 
 
-# What stops a turn when the push loop meets it: the provider or the branch refuses for good.
-# Anything else the loop raises (a transient failure the loop did not take for one, a bug) is
-# logged,
-# waited out, and the final push still runs.
+# How long the last push of a stop asks a lease the host cannot confirm: a stop has a minute in
+# all (`IMPLEMENTER_TERMINATE_GRACE_SECONDS`), and the engine and the push come out of it.
+STOP_CONFIRM_SECONDS = 20.0
+
+# What stops a turn when the push loop meets it: the provider or the branch refuses for good, or
+# the job is not ours any more (the lease gate before a push, #765). Anything else the loop raises
+# (a transient failure the loop did not take for one, a bug) is logged, waited out, and the final
+# push still runs.
 _REFUSALS = frozenset(
-    {ErrorCode.BRANCH_VIOLATION, ErrorCode.PUSH_REJECTED, ErrorCode.BRANCH_EXISTS}
+    {
+        ErrorCode.BRANCH_VIOLATION,
+        ErrorCode.PUSH_REJECTED,
+        ErrorCode.BRANCH_EXISTS,
+        ErrorCode.LEASE_LOST,
+    }
 )
+# The ends after which nothing is committed any more and nothing may be pushed that was not already
+# committed: the job is not ours, or the runner is going away within seconds.
+_NO_LEFTOVER = frozenset({ErrorCode.LEASE_LOST, ErrorCode.RUNNER_SHUTDOWN})
+
+
+class ShutdownRequested(JobError):
+    """The runner was told to stop (SIGTERM, #765). What is committed is pushed first; the job
+    host gives the job back under this code."""
+
+    def __init__(self) -> None:
+        super().__init__(ErrorCode.RUNNER_SHUTDOWN, "the runner was told to stop")
+
+
 _UNEXPECTED_PAUSE_SECONDS = 30.0
 
 
@@ -204,14 +238,17 @@ class PushTicker:
         if self._error is not None:
             raise self._error
 
-    def finish(self) -> PushResult:
+    def finish(self, *, confirm_seconds: float | None = None) -> PushResult:
         """Stop ticking and make the last push, whatever the back-off. Waits for a tick in
-        flight. A refusal the loop met is raised instead: the push would only be refused again."""
+        flight. A refusal the loop met is raised instead: the push would only be refused again.
+        `confirm_seconds`: how long a lease the host cannot confirm is asked again."""
         self._stop.set()
         with self._lock:
             if self._error is not None:
                 raise self._error
-            return self._loop.finish()
+            if confirm_seconds is None:
+                return self._loop.finish()
+            return self._loop.finish(confirm_seconds=confirm_seconds)
 
     def close(self) -> None:
         self._stop.set()
@@ -243,6 +280,11 @@ def classify(
             return provider_error, "the model provider was not available for the turn"
         if used_model:
             return ErrorCode.AGENT_GAVE_UP, detail
+    if code is ErrorCode.SETUP_FAILED and used_model:
+        # Whatever is wrong with the repository or its set-up after the agent ran is the state it
+        # left, and the model budget is spent: the charged class (`RepositoryUnusable` is the
+        # same), never the free one a turn that never started has.
+        return ErrorCode.BRANCH_VIOLATION, detail
     return code, detail
 
 
@@ -308,6 +350,8 @@ class ImplementerSession:
         launch: EngineLaunch | None = None,
         ripgrep: Path | None = None,
         seams: SessionSeams = SessionSeams(),  # noqa: B008 - frozen, shared on purpose
+        should_stop: Callable[[], bool] = lambda: False,
+        max_seconds: float | None = None,
     ) -> None:
         self.job = job
         self.workspace = workspace
@@ -319,6 +363,10 @@ class ImplementerSession:
         self.seams = seams
         self._clock = seams.clock
         self._started = self._clock() if started is None else started
+        # True once the runner was told to stop (SIGTERM): the watch ends the turn at once.
+        self._should_stop = should_stop
+        # The hard timeout of the process: the turn is never given more (`_deadline_seconds`).
+        self._max_seconds = max_seconds
         self._notes: list[str] = []
         self._summary = ""
         self._error: tuple[ErrorCode, str] | None = None
@@ -336,9 +384,10 @@ class ImplementerSession:
     def _deadline_seconds(self) -> float:
         """The seconds the agent may work from now: the job's time limit less what is spent since
         the job began and less the grace kept for the end."""
-        return deadline_seconds(
-            self.job.implementer.limits.time_limit_seconds, self._clock() - self._started
-        )
+        limit = float(self.job.implementer.limits.time_limit_seconds)
+        if self._max_seconds is not None:
+            limit = min(limit, self._max_seconds)
+        return deadline_seconds(limit, self._clock() - self._started)
 
     # -- the turn -------------------------------------------------------------
 
@@ -355,13 +404,13 @@ class ImplementerSession:
             agent = self._agent(native, server.url)
             agent.start()
             self._session_id = agent.session_id
-            ticker = PushTicker(PushLoop(self.workspace), self.seams.tick_seconds)
+            ticker = PushTicker(self._push_loop(), self.seams.tick_seconds)
             ticker.start()
             self._work(agent, ticker)
         except Exception as error:
             self._stopped_by(error)
         finally:
-            ended = agent.stop() if agent is not None else True
+            ended = agent.stop(quick=self._ends_quickly()) if agent is not None else True
             if not ended:
                 self._note("the engine user's processes could not all be ended")
         try:
@@ -374,6 +423,14 @@ class ImplementerSession:
             if egress is not None:
                 egress.stop()
         return self._result()
+
+    def _push_loop(self) -> PushLoop:
+        return PushLoop(
+            self.workspace,
+            interval=self.seams.push_interval,
+            confirm_pause=self.seams.confirm_pause,
+            retry_backoff=self.seams.retry_backoff,
+        )
 
     def _native_job(self) -> NativeJob:
         spec = self.job.implementer
@@ -471,15 +528,29 @@ class ImplementerSession:
             **options,
         )
 
+    def _ends_quickly(self) -> bool:
+        """Whether this end has seconds to spare, not minutes: the runner was told to stop, or the
+        job is not ours any more."""
+        return self._error is not None and self._error[0] in _NO_LEFTOVER
+
+    def _watch(self, ticker: PushTicker) -> Callable[[], None]:
+        def check() -> None:
+            if self._should_stop():
+                raise ShutdownRequested
+            ticker.check()
+
+        return check
+
     def _work(self, agent: ImplementerAgent, ticker: PushTicker) -> None:
         """The instruction, and the one extra message when the tree is still dirty."""
-        ended = agent.turn(self.job.implementer.instruction, check=ticker.check)
+        check = self._watch(ticker)
+        ended = agent.turn(self.job.implementer.instruction, check=check)
         self._summary = ended.text
         self._note("the agent ended its turn")
         if not self.workspace.dirty() or not self._time_for_another_turn(agent):
             return
         self._note("the working tree is dirty: one extra message")
-        again: AgentTurn = agent.turn(LEFTOVER_PROMPT, check=ticker.check)
+        again: AgentTurn = agent.turn(LEFTOVER_PROMPT, check=check)
         self._summary = self._summary or again.text
 
     def _time_for_another_turn(self, agent: ImplementerAgent) -> bool:
@@ -500,19 +571,23 @@ class ImplementerSession:
         """The leftover commit and the final push, after the agent is gone. A failure here is the
         turn's error only when nothing ended the turn before."""
         try:
-            if self.workspace.dirty():
+            if not self._ends_quickly() and self.workspace.dirty():
                 self.workspace.commit_all()
                 self._note("uncommitted changes were committed by the system")
-        except RepositoryUnusable as error:
-            self._stopped_by(error)
-        except JobError as error:
+        except Exception as error:
             self._stopped_by(error)
         try:
+            window = (
+                min(STOP_CONFIRM_SECONDS, self.seams.confirm_seconds)
+                if self._ends_quickly()
+                else self.seams.confirm_seconds
+            )
             if ticker is not None:
-                self._pushed = ticker.finish()
+                self._pushed = ticker.finish(confirm_seconds=window)
             else:
-                self._pushed = PushLoop(self.workspace).finish()
-        except JobError as error:
+                loop = self._push_loop()
+                self._pushed = loop.finish(confirm_seconds=window)
+        except Exception as error:
             self._stopped_by(error)
 
     def _result(self) -> TurnResult:
@@ -522,8 +597,10 @@ class ImplementerSession:
         try:
             commits = workspace.commits_since_start()
             files = workspace.changed_files()
-        except JobError:
+        except JobError as error:
+            # The report would be a guess: the repository could not be read after the agent ran.
             self._note("the commits and files of the branch could not be read")
+            self._stopped_by(error)
         tip = workspace.agent_tip()
         head = tip if tip is not None and tip != workspace.start_commit else None
         pushed = head is not None and workspace.pushed_tip == head
@@ -535,7 +612,7 @@ class ImplementerSession:
             error = (ErrorCode.PUSH_REJECTED, "the work could not be pushed")
         usage = self._usage()
         touched = self._touched_engine_inputs()
-        summary = clip_summary(self._summary, self._secrets(), tail=_not_kept(touched))
+        summary = clip_summary(self._summary, self.secrets(), tail=_not_kept(touched))
         return TurnResult(
             error_code=None if error is None else error[0],
             error_detail=None if error is None else error[1],
@@ -564,7 +641,7 @@ class ImplementerSession:
             return Usage(None, 0, 0, 0, 0, False, None)
         return self._native.ledger.usage(self.job.llm.model)
 
-    def _secrets(self) -> tuple[str, ...]:
+    def secrets(self) -> tuple[str, ...]:
         capability = () if self._native is None else (self._native.capability,)
         return (*self.job.secrets, *capability)
 

@@ -46,7 +46,7 @@ export type ProbeStatus = "passed" | "denied" | "failed";
 /** What the probe found. Holds engines, stable reasons and a stable code and nothing else. */
 export type ProbeOutcome = {
   status: ProbeStatus;
-  /** What the container may advertise: `opencode` only for `passed`. */
+  /** What the container may advertise: `opencode` only for `passed`, `implementer` only on top of it. */
   engines: Engine[];
   /** Why the container left `opencode` out (`denied`). */
   reasons: ProbeReason[];
@@ -141,14 +141,17 @@ export function createCapabilityProbe(
         return {
           status: "passed",
           engines: verdict.engines,
-          reasons: [],
+          // Only the Implementer's reasons can be here: why `implementer` is missing from a deployment that serves it.
+          reasons: verdict.reasons,
           checkedAt: at,
         };
       }
       logger.warn("probe_denied", { reasons: verdict.reasons });
       return {
         status: "denied",
-        engines: verdict.engines.filter((engine) => engine !== "opencode"),
+        engines: verdict.engines.filter(
+          (engine) => engine !== "opencode" && engine !== "implementer",
+        ),
         reasons: verdict.reasons,
         checkedAt: at,
       };

@@ -693,7 +693,7 @@ describe("the Sandbox-Launcher", () => {
   });
 
   // #329 (additional): capabilities
-  it("advertises both engines unless told otherwise: the deploy canary is the proof, the deployment's engines decide (#479)", async () => {
+  it("advertises the two reviewer engines unless told otherwise: the deploy canary is the proof, the deployment's engines decide (#479)", async () => {
     const signal = new AbortController().signal;
 
     expect(await build().capabilities(signal)).toStrictEqual([
@@ -1102,11 +1102,14 @@ describe("the Sandbox-Launcher", () => {
     expect(service.starts).toHaveLength(0);
   });
 
-  // #760 (additional): P22 (#767) and the canary come later; the engine is advertised by the runner's self-check (P20)
-  it("does not advertise the implementer engine: the deploy canary cannot prove it yet, and an advertised engine is required of every production deploy", async () => {
+  // #765: advertised only by a deployment that serves the kind, because an advertised engine is required of every deploy
+  it("advertises the implementer engine only when the deployment serves the kind: an advertised engine is required of the deploy canary", async () => {
+    const signal = new AbortController().signal;
+
+    expect(await build().capabilities(signal)).not.toContain("implementer");
     expect(
-      await build().capabilities(new AbortController().signal),
-    ).not.toContain("implementer");
+      await build({ servesImplementer: true }).capabilities(signal),
+    ).toStrictEqual(["pr-agent", "opencode", "implementer"]);
   });
 
   // #329 (additional): the Launcher and the golden snapshot pipeline (#330) name the same things

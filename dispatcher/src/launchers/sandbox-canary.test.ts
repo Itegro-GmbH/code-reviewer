@@ -6,7 +6,12 @@ import {
   ProbeRunError,
   createCapabilityProbe,
 } from "../probe/capability-probe.ts";
+import { Hono } from "hono";
+import { runCanary as runDeployCanary } from "../probe/canary.ts";
 import { withProbeEndpoint } from "../probe/probe-endpoint.ts";
+import { mountProbeRoute } from "../probe/route.ts";
+import { parseProbeOutput } from "../probe/verdict.ts";
+import { DISPATCHER_TOKEN } from "../test-support/harness.ts";
 import {
   recordingLogger,
   type RecordedLogger,
@@ -408,5 +413,402 @@ describe("a Sandbox-Launcher with the probe endpoint over its canary VM (#479)",
     await Promise.all(calls);
 
     expect(service.creates).toHaveLength(1);
+  });
+});
+
+// #765: a deployment that serves the Implementer has the canary prove it, in a container of the Implementer's profile.
+describe("the canary VM of a deployment that serves the Implementer (#765)", () => {
+  const WITH_IMPLEMENTER = `${JSON.stringify({ version: 1, engines: ["pr-agent", "opencode", "implementer"], reasons: [] })}\n`;
+  const WITHOUT_IMPLEMENTER = `${JSON.stringify({ version: 1, engines: ["pr-agent", "opencode"], reasons: ["implementer_work_dir_not_exec"] })}\n`;
+  const implementerCall = () =>
+    service.execs.find((call) => call.label === "probe-implementer");
+
+  function serving(overrides: Partial<SandboxCanaryOptions> = {}) {
+    return canary({ implementer: { config: {} }, ...overrides });
+  }
+
+  it("runs a second probe in the same VM, after the work volume is made, in the Implementer's profile", async () => {
+    service.onExec("probe-implementer", { stdout: WITH_IMPLEMENTER });
+
+    await serving()(signal());
+
+    expect(service.creates).toHaveLength(1);
+    const labels = service.execs.map((call) => call.label);
+    expect(labels).toStrictEqual([
+      "vm-prepare",
+      "image-id",
+      "probe",
+      "work-volume-dir",
+      "work-volume-mount",
+      "work-volume-options",
+      "work-volume-check",
+      "work-volume-create",
+      "probe-implementer",
+    ]);
+    const args = implementerCall()?.args ?? [];
+    expect(args.join(" ")).toMatch(
+      /--mount type=volume,source=code-reviewer-work-canary-[a-z0-9]{8},target=\/work/,
+    );
+    expect(args).toContain("--read-only");
+    expect(valuesOf(args, "--env")).toEqual(
+      expect.arrayContaining([
+        "RUNNER_IMPLEMENTER_WORK_DIR=/work",
+        "RUNNER_IMPLEMENTER_NETWORK=registries",
+      ]),
+    );
+    expect(args.at(-1)).toBe("probe");
+    expect(args).toContain(IMAGE_ID);
+    expect(service.running()).toStrictEqual([]);
+    // The Dynamic probe stays what it was: no work volume in it.
+    expect(probeCall()?.args.join(" ")).not.toContain("type=volume");
+    expect(probeCall()?.args.join(" ")).not.toContain("RUNNER_IMPLEMENTER");
+  });
+
+  it("answers one verdict that holds `implementer` only when the Implementer's container proved it", async () => {
+    service.onExec("probe-implementer", { stdout: WITH_IMPLEMENTER });
+    const proven = parseProbeOutput(await serving()(signal()));
+    service.onExec("probe-implementer", { stdout: WITHOUT_IMPLEMENTER });
+    const refused = parseProbeOutput(await serving()(signal()));
+
+    expect(proven?.engines).toStrictEqual([
+      "pr-agent",
+      "opencode",
+      "implementer",
+    ]);
+    expect(refused?.engines).toStrictEqual(["pr-agent", "opencode"]);
+    expect(refused?.reasons).toStrictEqual(["implementer_work_dir_not_exec"]);
+  });
+
+  it("does not let a failure of the Dynamic container be hidden by the Implementer's", async () => {
+    service.onExec("probe", { stdout: DENYING });
+    service.onExec("probe-implementer", { stdout: WITH_IMPLEMENTER });
+
+    const verdict = parseProbeOutput(await serving()(signal()));
+
+    expect(verdict?.passed).toBe(false);
+    expect(verdict?.engines).not.toContain("opencode");
+    expect(verdict?.engines).not.toContain("implementer");
+  });
+
+  it("keeps the Dynamic verdict when the Implementer's half cannot be run: `implementer` is missing with its own reason, the VM is stopped and the half is logged", async () => {
+    service.onExec("probe-implementer", { exitCode: 2 });
+
+    const exited = parseProbeOutput(await serving()(signal()));
+    service.onExec("work-volume-create", { exitCode: 1 });
+    const volume = parseProbeOutput(await serving()(signal()));
+
+    for (const verdict of [exited, volume]) {
+      expect(verdict?.passed).toBe(true);
+      expect(verdict?.engines).toStrictEqual(["pr-agent", "opencode"]);
+      expect(verdict?.reasons).toStrictEqual(["implementer_probe_failed"]);
+    }
+    expect(logger.text()).toContain("canary_implementer_probe_failed");
+    expect(logger.text()).toContain("probe_exit_nonzero");
+    expect(logger.text()).toContain("canary_implementer_probe_exit");
+    expect(logger.text()).toContain('"exitCode":2');
+    expect(logger.text()).toContain("work_volume_failed");
+    expect(service.running()).toStrictEqual([]);
+  });
+
+  it("keeps the Dynamic verdict when the Implementer's configuration cannot be held by the VM, and says why", async () => {
+    const invalid = { container: { memory: { limit: "8g" } } };
+
+    const verdict = parseProbeOutput(
+      await serving({ implementer: { config: invalid } })(signal()),
+    );
+
+    expect(verdict).toStrictEqual({
+      engines: ["pr-agent", "opencode"],
+      reasons: ["implementer_probe_failed"],
+      passed: true,
+    });
+    expect(logger.text()).toContain("sandbox_config_invalid");
+    expect(
+      service.execs.some((call) => call.label === "probe-implementer"),
+    ).toBe(false);
+  });
+
+  it("still ends the whole probe when it is aborted during the Implementer's half", async () => {
+    const controller = new AbortController();
+    service.hangOn("probe-implementer");
+    const running = serving()(controller.signal);
+    await settle();
+    controller.abort();
+
+    expect((await failure(running)).code).toBe("probe_aborted");
+    expect(service.running()).toStrictEqual([]);
+  });
+
+  it("does nothing more for a deployment without the kind: one probe, no work volume", async () => {
+    await canary()(signal());
+
+    expect(implementerCall()).toBeUndefined();
+    expect(
+      service.execs.filter((call) => call.label.startsWith("work-volume")),
+    ).toStrictEqual([]);
+    expect(service.execs.filter((call) => call.label === "probe")).toHaveLength(
+      1,
+    );
+  });
+});
+
+/** The deploy canary (`pnpm probe:canary`) reading this answer of `POST /probe`, with its default `--engines`. */
+async function runCanary(
+  report: unknown,
+  status: number,
+  lines: string[],
+): Promise<number> {
+  const answer: typeof fetch = (input) =>
+    Promise.resolve(
+      String(input).endsWith("/health")
+        ? new Response("{}")
+        : new Response(JSON.stringify(report), { status }),
+    );
+  return runDeployCanary({
+    url: "https://dispatcher.example",
+    token: DISPATCHER_TOKEN,
+    fetch: answer,
+    clock: { sleep: () => Promise.resolve() },
+    write: (line) => lines.push(line),
+  });
+}
+
+// #765: the whole chain behind `POST /probe`: the Launcher, its canary, the endpoint and the route.
+describe("POST /probe of a Sandbox-Launcher that serves the Implementer (#765)", () => {
+  const WITH_IMPLEMENTER = `${JSON.stringify({ version: 1, engines: ["pr-agent", "opencode", "implementer"], reasons: [] })}\n`;
+  const LACKING = `${JSON.stringify({ version: 1, engines: ["pr-agent", "opencode"], reasons: [] })}\n`;
+
+  async function probeRoute(options: {
+    serves: boolean;
+    implementerStdout: string;
+    implementerExit?: number;
+  }) {
+    service.onExec(
+      "probe-implementer",
+      options.implementerExit === undefined
+        ? { stdout: options.implementerStdout }
+        : { exitCode: options.implementerExit },
+    );
+    const launcher = createSandboxLauncher({
+      service,
+      snapshotId: SNAPSHOT_ID,
+      imageDigest: IMAGE_ID,
+      logger,
+      clock,
+      ...(options.serves ? { servesImplementer: true } : {}),
+    });
+    const probe = createCapabilityProbe({
+      run: canary(options.serves ? { implementer: { config: {} } } : {}),
+      clock,
+      now: () => clock.now(),
+      logger,
+    });
+    const app = new Hono();
+    mountProbeRoute(app, {
+      token: "operator-token-for-the-tests-0000000001",
+      engines: options.serves
+        ? ["pr-agent", "opencode", "implementer"]
+        : ["pr-agent", "opencode"],
+      launcher: withProbeEndpoint({ launcher, probe }),
+      logger,
+    });
+    const response = await app.request("/probe", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer operator-token-for-the-tests-0000000001",
+      },
+    });
+    return {
+      status: response.status,
+      body: (await response.json()) as Record<string, unknown>,
+    };
+  }
+
+  it("answers 200 and names `implementer` when the canary proved it", async () => {
+    const { status, body } = await probeRoute({
+      serves: true,
+      implementerStdout: WITH_IMPLEMENTER,
+    });
+
+    expect(status).toBe(200);
+    expect(body).toMatchObject({
+      ok: true,
+      status: "passed",
+      engines: ["pr-agent", "opencode", "implementer"],
+      required: ["pr-agent", "opencode", "implementer"],
+    });
+  });
+
+  it("answers 503 when the report lacks `implementer`, and the deploy canary blocks with `missing`", async () => {
+    const { status, body } = await probeRoute({
+      serves: true,
+      implementerStdout: LACKING,
+    });
+
+    expect(status).toBe(503);
+    expect(body).toMatchObject({
+      ok: false,
+      required: ["pr-agent", "opencode", "implementer"],
+    });
+    expect(body.engines).not.toContain("implementer");
+    const lines: string[] = [];
+    const code = await runCanary(body, status, lines);
+    expect(code).toBe(1);
+    expect(lines.join("\n")).toContain("missing=implementer");
+  });
+
+  it("blocks with `missing=implementer` only, and the Dynamic verdict standing, when the Implementer's half failed to run", async () => {
+    const { status, body } = await probeRoute({
+      serves: true,
+      implementerStdout: "unused",
+      implementerExit: 2,
+    });
+
+    expect(status).toBe(503);
+    expect(body).toMatchObject({
+      ok: false,
+      status: "passed",
+      engines: ["pr-agent", "opencode"],
+      reasons: ["implementer_probe_failed"],
+      required: ["pr-agent", "opencode", "implementer"],
+    });
+    const lines: string[] = [];
+    expect(await runCanary(body, status, lines)).toBe(1);
+    const text = lines.join("\n");
+    expect(text).toContain("missing=implementer");
+    expect(text).not.toContain("missing=opencode");
+    expect(text).toContain("reasons=implementer_probe_failed");
+  });
+
+  it("is unchanged for a deployment without the kind: 200 with no `implementer` anywhere, one canary probe", async () => {
+    const { status, body } = await probeRoute({
+      serves: false,
+      implementerStdout: "not read",
+    });
+
+    expect(status).toBe(200);
+    expect(body).toMatchObject({
+      ok: true,
+      engines: ["pr-agent", "opencode"],
+      required: ["pr-agent", "opencode"],
+    });
+    expect(
+      service.execs.some((call) => call.label === "probe-implementer"),
+    ).toBe(false);
+  });
+
+  it("makes the deploy canary pass on a deployment with the kind and its default `--engines`", async () => {
+    const { status, body } = await probeRoute({
+      serves: true,
+      implementerStdout: WITH_IMPLEMENTER,
+    });
+    const lines: string[] = [];
+
+    expect(await runCanary(body, status, lines)).toBe(0);
+    expect(lines.join("\n")).toContain("engines=pr-agent,opencode,implementer");
+  });
+});
+
+// #765-D1: the second probe is the container of a real implementer job, run in its `probe` mode.
+describe("the flags of the Implementer's probe (#765)", () => {
+  const JOB_ID = "00000000-0000-4000-8000-000000000001";
+
+  /** The arguments without the four things that differ by design: the names, the job timeout and the entry mode. */
+  function comparable(args: readonly string[]): string[] {
+    const rest: string[] = [];
+    for (let index = 0; index < args.length; index += 1) {
+      const arg = args[index] ?? "";
+      const next = args[index + 1] ?? "";
+      if (arg === "--name") {
+        index += 1;
+      } else if (arg === "--mount") {
+        rest.push(arg, next.replace(/source=[^,]+/, "source=VOLUME"));
+        index += 1;
+      } else if (
+        arg === "--env" &&
+        next.startsWith("RUNNER_JOB_TIMEOUT_SECONDS=")
+      ) {
+        index += 1;
+      } else {
+        rest.push(arg);
+      }
+    }
+    // The entry mode is after the image id.
+    const image = rest.indexOf(IMAGE_ID);
+    return image < 0 ? rest : rest.slice(0, image + 1);
+  }
+
+  async function realJob(config = {}): Promise<readonly string[]> {
+    const launcher = createSandboxLauncher({
+      service,
+      snapshotId: SNAPSHOT_ID,
+      imageDigest: IMAGE_ID,
+      logger,
+      clock,
+    });
+    const ended = launcher.launch(
+      {
+        appId: "factory",
+        appUrl: "https://app.example.invalid",
+        jobId: JOB_ID,
+        credential: "crj_dummy-credential-0123456789-abcdefghijklmnopq",
+        kind: "implementer",
+        timeoutSeconds: 3600,
+        config,
+      },
+      signal(),
+    );
+    await settle();
+    await clock.advance(20_000);
+    await ended;
+    const run = service.starts.find((start) => start.label === "docker-run");
+    expect(run).toBeDefined();
+    return run?.args ?? [];
+  }
+
+  async function probeArgs(config = {}): Promise<readonly string[]> {
+    service.onExec("probe-implementer", { stdout: PASSING });
+    await canary({ implementer: { config } })(signal());
+    const probe = service.execs.find(
+      (call) => call.label === "probe-implementer",
+    );
+    expect(probe).toBeDefined();
+    return probe?.args ?? [];
+  }
+
+  it("has every flag, mount, limit and environment variable of the container a real implementer job gets", async () => {
+    const job = await realJob();
+    const probe = await probeArgs();
+
+    expect(comparable(probe)).toStrictEqual(comparable(job));
+    // The differences are only these, and each is the probe's own.
+    expect(probe.at(-1)).toBe("probe");
+    expect(job.at(-1)).not.toBe("probe");
+    expect(valuesOf(probe, "--memory")).toStrictEqual(["3g"]);
+    expect(valuesOf(probe, "--pids-limit")).toStrictEqual(["2048"]);
+    expect(valuesOf(probe, "--sysctl").length).toBeGreaterThan(0);
+  });
+
+  it("follows the Implementer's configured container memory, not the Dynamic one", async () => {
+    const config = { container: { memory: { limit: "3500m" } } };
+    const probe = await probeArgs(config);
+
+    expect(valuesOf(probe, "--memory")).toStrictEqual(["3500m"]);
+    expect(valuesOf(probe, "--memory-reservation")).toStrictEqual(["2560m"]);
+    expect(valuesOf(probeCall()?.args ?? [], "--memory")).toStrictEqual([
+      "1536m",
+    ]);
+  });
+
+  it("gives the second probe its own time limit and the VM the larger vCPU count of the two kinds", async () => {
+    service.onExec("probe-implementer", { stdout: PASSING });
+    await canary({ implementer: { config: {} } })(signal());
+
+    const timeouts = service.execs
+      .filter((call) => call.label.startsWith("probe"))
+      .map((call) => call.timeoutMs);
+    expect(timeouts).toStrictEqual([60_000, 60_000]);
+    // The Implementer's profile is 2 vCPU, the Dynamic 1: the VM holds the larger.
+    expect(service.creates[0]?.vcpus).toBe(2);
   });
 });

@@ -3,7 +3,8 @@
 """The verdict of the startup self-check: which engines a container may advertise, and why not.
 
 It is the one shape that the `probe` entry mode prints and that the engines file holds (#324). It
-carries engines and stable reasons (`SelfCheckReason` values) and nothing else: no path, no
+carries engines (`pr-agent`, `opencode` and, in an Implementer container whose own check passed too,
+`implementer`, #765) and stable reasons (`SelfCheckReason` values) and nothing else: no path, no
 environment, no value of the container. A launcher parses it; a version number lets the shape grow.
 """
 

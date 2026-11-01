@@ -46,13 +46,21 @@ from typing import Any, Protocol
 
 from code_reviewer_runner.capabilities import (
     ENGINE_DYNAMIC,
+    ENGINE_IMPLEMENTER,
     ENGINES_VARIABLE,
     OPENCODE_COMMAND_VARIABLE,
     RIPGREP_PATH_VARIABLE,
 )
 from code_reviewer_runner.dynamic_review.engine_user import sweep_user
 from code_reviewer_runner.dynamic_review.netguard import EGRESS_MODE_VARIABLE, EgressMode
-from code_reviewer_runner.job import Job, JobError, ReviewKind, parse_job
+from code_reviewer_runner.job import (
+    IMPLEMENTER_ENVIRONMENT_NAMES,
+    ImplementerInput,
+    Job,
+    JobError,
+    ReviewKind,
+    parse_runnable_job,
+)
 from code_reviewer_runner.job_loop.api import (
     ApiError,
     ApiRejected,
@@ -66,6 +74,7 @@ from code_reviewer_runner.job_loop.clock import Clock, RealClock
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 from code_reviewer_runner.job_loop.masking import SafeLog, SecretMasker
 from code_reviewer_runner.job_loop.process import (
+    STDOUT_KEEP_BYTES,
     ProcessLauncher,
     ProcessOutcome,
     ProcessSpec,
@@ -80,6 +89,7 @@ from code_reviewer_runner.job_loop.reporting import (
     fit_request,
     minimal,
     result_from_outcome,
+    stopped_result,
 )
 from code_reviewer_runner.lease_check import LeaseState
 from code_reviewer_runner.pr_agent_config import PASSTHROUGH_VARIABLES
@@ -106,6 +116,30 @@ DYNAMIC_PASSTHROUGH_VARIABLES = (
     "RUNNER_DYNAMIC_PROXY_PORT",
     "RUNNER_DYNAMIC_ENGINE_PORT",
 )
+# What an Implementer job process is told besides the engines and the engine command: the slot (the
+# engine user and its ports, as for Dynamic) and the names of its container profile (#746). The
+# Dynamic cost ceiling and model description are not among them: they are the Dynamic Review's.
+IMPLEMENTER_PASSTHROUGH_VARIABLES = (
+    "RUNNER_DYNAMIC_ENGINE_UID",
+    "RUNNER_DYNAMIC_ENGINE_GID",
+    "RUNNER_DYNAMIC_PROXY_PORT",
+    "RUNNER_DYNAMIC_ENGINE_PORT",
+    *IMPLEMENTER_ENVIRONMENT_NAMES,
+)
+# The newest bytes of its stdout the host keeps of an Implementer job process: its result line
+# carries the commits and files of the turn, up to the 4 MB the body is held to (`report.py`).
+IMPLEMENTER_STDOUT_KEEP_BYTES = 6 * 1024 * 1024
+# A stopped turn of the Implementer has to end its engine, ask the lease and push: the process
+# gets this long after SIGTERM before it is killed (the container's own `stopTimeoutSeconds` is 90,
+# and the report of the stop comes after it). The process leaves itself less
+# (`job_run.SIGTERM_BACKSTOP_SECONDS`).
+IMPLEMENTER_TERMINATE_GRACE_SECONDS = 60.0
+# One lease question of an Implementer turn is bounded. At a normal end the last push must not
+# lose a good turn to a slow app: 25 s a question, and the window of the last push (30 s, asked
+# again) fits the grace of 180 s the end keeps. A stop has a minute in all and no time for an app
+# that does not answer: 10 s a question.
+IMPLEMENTER_LEASE_CHECK_BUDGET_SECONDS = 25.0
+IMPLEMENTER_STOP_LEASE_CHECK_BUDGET_SECONDS = 10.0
 # A shutdown report is tried for this long; the process is going away either way.
 SHUTDOWN_REPORT_WINDOW_SECONDS = 10.0
 _FIRST_RETRY_SECONDS = 1.0
@@ -199,6 +233,21 @@ class _RunState:
         if not self.superseded.is_set():
             self.lease_expires_at = lease_expires_at
             self.superseded.set()
+
+
+def _kind_of(job: Job | ImplementerInput) -> ReviewKind:
+    return ReviewKind.IMPLEMENTER if isinstance(job, ImplementerInput) else job.review_kind
+
+
+def _label_of(job: Job | ImplementerInput) -> str:
+    return "implementer" if isinstance(job, ImplementerInput) else job.command.value
+
+
+def _supervises_an_engine(kind: ReviewKind) -> bool:
+    """A Dynamic job and an Implementer turn are root supervisors of an engine of another user:
+    they are the processes that ask the lease before they write, and whose engine user is swept
+    after them."""
+    return kind in (ReviewKind.DYNAMIC, ReviewKind.IMPLEMENTER)
 
 
 def _as_superseded(result: Result) -> Result:
@@ -299,7 +348,7 @@ class JobHost:
         finally:
             self._masker.discard(claimed.id)
 
-    def _child_environment(self, job: Job) -> dict[str, str]:
+    def _child_environment(self, job: Job | ImplementerInput) -> dict[str, str]:
         """Only the plain runtime variables; never the runner token or anything of another job."""
         env = {
             name: self._environment[name]
@@ -307,8 +356,29 @@ class JobHost:
             if name in self._environment
         }
         env[TIMEOUT_VARIABLE] = f"{self._settings.job_timeout:g}"
-        if job.review_kind is ReviewKind.DYNAMIC:
+        kind = _kind_of(job)
+        if kind is ReviewKind.DYNAMIC:
             env.update(self._dynamic_environment())
+        elif kind is ReviewKind.IMPLEMENTER:
+            env.update(self._implementer_environment())
+        return env
+
+    def _implementer_environment(self) -> dict[str, str]:
+        """What only an Implementer job process gets (#765): the engines the startup advertised,
+        the engine command and `rg` it verified, the egress mode, the slot and the names of the
+        container profile. All of it is the host's own finding or the Dispatcher's variable; none
+        comes from the job."""
+        env = {
+            name: self._environment[name]
+            for name in IMPLEMENTER_PASSTHROUGH_VARIABLES
+            if name in self._environment
+        }
+        env[ENGINES_VARIABLE] = ",".join(self._settings.engines)
+        env[EGRESS_MODE_VARIABLE] = self._settings.dynamic_egress_mode.value
+        if self._settings.dynamic_command:
+            env[OPENCODE_COMMAND_VARIABLE] = shlex.join(self._settings.dynamic_command)
+            if self._settings.dynamic_ripgrep:
+                env[RIPGREP_PATH_VARIABLE] = self._settings.dynamic_ripgrep
         return env
 
     def _dynamic_environment(self) -> dict[str, str]:
@@ -341,14 +411,26 @@ class JobHost:
         # Knows the runner token, the secrets of every running job and the lease tokens.
         redactor = self._masker
         try:
-            job = parse_job(json.dumps(claimed.input))
+            job = parse_runnable_job(json.dumps(claimed.input))
         except JobError as error:
             self._log.warning("job %s refused: %s", claimed.id, error.code.value)
             result = failure_result(
                 error.code.value, error.detail, duration_ms=self._ms_since(started)
             )
             return await self._refuse(claimed, result)
-        if self._refuse_unadvertised_engine and not self._engine_advertised(job):
+        kind = _kind_of(job)
+        if kind is ReviewKind.IMPLEMENTER and ENGINE_IMPLEMENTER not in self._settings.engines:
+            # Never run on a runner that did not prove its prerequisites, whoever started it (#765).
+            self._log.warning(
+                "job %s refused: the implementer engine is not advertised", claimed.id
+            )
+            result = failure_result(
+                ErrorCode.IMPLEMENTER_ENGINE_UNAVAILABLE.value,
+                "the implementer engine is not advertised by this worker",
+                duration_ms=self._ms_since(started),
+            )
+            return await self._refuse(claimed, result)
+        if self._refuse_unadvertised_engine and not self._engine_advertised(kind):
             self._log.warning("job %s refused: the Dynamic engine is not advertised", claimed.id)
             result = failure_result(
                 ErrorCode.DYNAMIC_ENGINE_UNAVAILABLE.value,
@@ -356,7 +438,7 @@ class JobHost:
                 duration_ms=self._ms_since(started),
             )
             return await self._refuse(claimed, result)
-        self._log.info("job %s claimed: %s", claimed.id, job.command.value)
+        self._log.info("job %s claimed: %s", claimed.id, _label_of(job))
         state = _RunState()
         try:
             # ASCII escapes: a lone surrogate in a text cannot break the encoding, and the job
@@ -367,15 +449,21 @@ class JobHost:
                 stdin=json.dumps(claimed.input).encode("ascii"),
                 # A Dynamic job is the root supervisor (it drops the engine to its own user); every
                 # other job drops to the unprivileged job user when the loop itself is root.
-                run_as=(
-                    None if job.review_kind is ReviewKind.DYNAMIC else self._settings.diff_job_user
-                ),
+                run_as=(None if _supervises_an_engine(kind) else self._settings.diff_job_user),
                 # #260: a Dynamic job writes its own comment, so it asks right before (a Diff job
-                # does not publish this way).
+                # does not publish this way). An Implementer job asks before every push (#765).
                 lease_check=(
-                    (lambda: self._confirm_lease(claimed, state))
-                    if job.review_kind is ReviewKind.DYNAMIC
+                    (lambda: self._confirm_lease(claimed, state, self._lease_budget_of(kind)))
+                    if _supervises_an_engine(kind)
                     else None
+                ),
+                terminate_grace=(
+                    IMPLEMENTER_TERMINATE_GRACE_SECONDS if kind is ReviewKind.IMPLEMENTER else None
+                ),
+                stdout_keep_bytes=(
+                    IMPLEMENTER_STDOUT_KEEP_BYTES
+                    if kind is ReviewKind.IMPLEMENTER
+                    else STDOUT_KEEP_BYTES
                 ),
             )
             process = await self._start_process(spec, job)
@@ -390,7 +478,14 @@ class JobHost:
             )
             return await self._refuse(claimed, result)
         try:
-            result = await self._supervise(claimed, process, redactor, started, state)
+            result = await self._supervise(
+                claimed,
+                process,
+                redactor,
+                started,
+                state,
+                implementer=_kind_of(job) is ReviewKind.IMPLEMENTER,
+            )
         finally:
             await self._after_process(job)
         if result is None:
@@ -413,16 +508,18 @@ class JobHost:
         delivery = await self._report(claimed, result, window=self._settings.complete_retry_window)
         return _end_of(result, delivery)
 
-    def _engine_advertised(self, job: Job) -> bool:
-        return job.review_kind is not ReviewKind.DYNAMIC or ENGINE_DYNAMIC in self._settings.engines
+    def _engine_advertised(self, kind: ReviewKind) -> bool:
+        return kind is not ReviewKind.DYNAMIC or ENGINE_DYNAMIC in self._settings.engines
 
-    def _engine_user(self, job: Job) -> tuple[int, int] | None:
+    def _engine_user(self, job: Job | ImplementerInput) -> tuple[int, int] | None:
         """The engine user whose leftovers follow this job's process, if it has one."""
-        if job.review_kind is not ReviewKind.DYNAMIC:
+        if not _supervises_an_engine(_kind_of(job)):
             return None
         return self._settings.dynamic_engine_user
 
-    async def _start_process(self, spec: ProcessSpec, job: Job) -> RunningProcess:
+    async def _start_process(
+        self, spec: ProcessSpec, job: Job | ImplementerInput
+    ) -> RunningProcess:
         if self._engine_user(job) is None:
             return await self._launcher.start(spec)
         # Under the lock that guards the sweep: a sweep that runs while this process is being
@@ -432,7 +529,7 @@ class JobHost:
             self._engine_jobs += 1
             return process
 
-    async def _after_process(self, job: Job) -> None:
+    async def _after_process(self, job: Job | ImplementerInput) -> None:
         """The job process is gone (however it ended): end what its engine user still runs.
 
         A job killed outright (SIGKILL, an OOM kill) cannot clean up after itself, and a helper
@@ -462,6 +559,8 @@ class JobHost:
         redactor: TextRedactor,
         started: float,
         state: _RunState,
+        *,
+        implementer: bool = False,
     ) -> Result | None:
         """Wait for the process, beat the heart, enforce the timeout. None: report nothing."""
         lost = asyncio.Event()
@@ -487,7 +586,9 @@ class JobHost:
             await asyncio.gather(*helpers, return_exceptions=True)
         if finished.done():
             outcome = finished.result()
-            result = result_from_outcome(outcome, redactor, self._ms_since(started))
+            result = result_from_outcome(
+                outcome, redactor, self._ms_since(started), implementer=implementer
+            )
             self._log_outcome(claimed, result, outcome)
             return result
         outcome = await self._end(process, finished)
@@ -523,12 +624,8 @@ class JobHost:
             self._log.warning(
                 "job %s: the runner is shutting down, the job is given back", claimed.id
             )
-            return failure_result(
-                RUNNER_SHUTDOWN,
-                "the runner was shut down before the job finished",
-                duration_ms=self._ms_since(started),
-                log_tail=tail,
-                redactor=redactor,
+            return stopped_result(
+                outcome, redactor, self._ms_since(started), implementer=implementer
             )
         return None
 
@@ -594,7 +691,21 @@ class JobHost:
                 detail = str(error) if isinstance(error, ApiError) else type(error).__name__
                 self._log.warning("job %s: heartbeat failed (%s)", claimed.id, detail)
 
-    async def _confirm_lease(self, claimed: ClaimedJob, state: _RunState) -> LeaseState:
+    def _lease_budget_of(self, kind: ReviewKind) -> float:
+        """How long one lease question may take: the Dynamic job's own, or an Implementer turn's,
+        which is shorter while the runner is being stopped."""
+        if kind is not ReviewKind.IMPLEMENTER:
+            return LEASE_CHECK_BUDGET_SECONDS
+        if self._hard_stop.is_set():
+            return IMPLEMENTER_STOP_LEASE_CHECK_BUDGET_SECONDS
+        return IMPLEMENTER_LEASE_CHECK_BUDGET_SECONDS
+
+    async def _confirm_lease(
+        self,
+        claimed: ClaimedJob,
+        state: _RunState,
+        budget: float = LEASE_CHECK_BUDGET_SECONDS,
+    ) -> LeaseState:
         """Beat the heart now. A lost lease and a cancelled job are both answered with 409.
 
         An answer that only says the app could not be reached (5xx, a reset, a timeout) is asked
@@ -604,7 +715,7 @@ class JobHost:
         if state.superseded.is_set():
             return LeaseState.SUPERSEDED
         try:
-            async with asyncio.timeout(LEASE_CHECK_BUDGET_SECONDS):
+            async with asyncio.timeout(budget):
                 return await self._ask_app(claimed, state)
         except TimeoutError:
             self._log.warning("job %s: the lease check ran out of time", claimed.id)
