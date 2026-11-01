@@ -231,7 +231,7 @@ def main(argv: list[str]) -> int:
     def egress(settings: EgressSettings) -> EgressProxy | None:
         return start_egress(settings, resolve=resolve, connect=connect)
 
-    # What the job says about itself (its log, the model proxy's) goes to a file next to the git log:
+    # What the job says about itself (its log, the model proxy) goes to a file next to the git log:
     # the Worker keeps no record of it, and a journey that fails has to be read from something.
     job_log = f"{git_log}.{os.getpid()}.job.txt"
     notes = open(job_log, "a", buffering=1, encoding="utf-8")  # noqa: SIM115
