@@ -16,7 +16,8 @@
 // log, the base URL and the failure injection; the sign in part (`oauth.ts`) sits next to it.
 import { createPublicKey, randomBytes, verify } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { basicToken, serveUploadPack } from "./git-http.ts";
+import { readFixtureBranches } from "./git-branches.ts";
+import { basicToken, serveReceivePack, serveUploadPack } from "./git-http.ts";
 import { readBody } from "./http.ts";
 import {
   DEFAULT_ACCOUNT_PERMISSIONS,
@@ -29,6 +30,7 @@ import {
   type FakePullRequestReview,
 } from "./checks-api.ts";
 import {
+  BASE_SHA,
   createReviewApi,
   type FakeChangedFile,
   type FakeComment,
@@ -49,6 +51,12 @@ export type FakeRepository = {
   fullName: string;
   defaultBranch?: string;
   private?: boolean;
+  /**
+   * The `html_url` of the repository, when it is not `<web base>/<full name>`. The Implementer's journey (#767) gives its
+   * repository an https address: the app clones from the repository's own https address, and the lane's fake GitHub speaks
+   * plain http on loopback.
+   */
+  htmlUrl?: string;
 };
 
 export type FakePullRequest = {
@@ -220,6 +228,15 @@ export type FakeGithubAppControls = {
   /** The permissions the app itself is granted; token requests may not exceed them (422). */
   setAppPermissions(permissions: FakePermissions): void;
   /**
+   * The permissions this installation has accepted (#749): what `GET /app/installations/:id` reports, and a ceiling
+   * for its tokens next to the app's own, so a permission the app was raised to but the installation has not approved
+   * yet is refused with 422, like GitHub. Without a call the installation holds whatever the app is granted.
+   */
+  setInstallationPermissions(
+    installationId: number,
+    permissions: FakePermissions,
+  ): void;
+  /**
    * The account and organization permissions (`emails`, `members`) the user tokens of the app
    * registered at start hold, and what `GET /app` reports for them. Default: both read-only. Without
    * `emails`, `GET /user/emails` answers 404 for a user token, like GitHub for an app that lacks it.
@@ -242,7 +259,15 @@ export type FakeGithubAppControls = {
   issuedInstallationTokens(): string[];
   /** Every installation token switched off with `DELETE /installation/token`, in order. */
   revokedInstallationTokens(): string[];
+  /**
+   * Every push received (`git-receive-pack`), in order: the repository and the names of the refs the client asked
+   * to update, whether or not Git accepted them (the branch endpoints tell what is there). No tokens, no objects.
+   */
+  pushes(): FakePush[];
 };
+
+/** One push as the fake saw it. */
+export type FakePush = { repository: string; refs: string[] };
 
 export type AppPart = {
   controls: FakeGithubAppControls;
@@ -257,6 +282,8 @@ export type AppPart = {
     url: URL;
     bearer: string | undefined;
     reply: (status: number, body: unknown) => Promise<void>;
+    /** Puts the names of the refs a push asked to update on the entry of this request in the request log. */
+    logRefs: (refs: string[]) => void;
   }): Promise<boolean>;
   /** Removes all state of the App API. */
   reset(): void;
@@ -305,7 +332,7 @@ function repositoryJson(repository: FakeRepository, webBase: string) {
     name: repository.fullName.split("/")[1],
     full_name: repository.fullName,
     private: repository.private ?? false,
-    html_url: `${webBase}/${repository.fullName}`,
+    html_url: repository.htmlUrl ?? `${webBase}/${repository.fullName}`,
     default_branch: repository.defaultBranch ?? "main",
     owner: { login: owner, id: ownerId },
   };
@@ -340,6 +367,8 @@ export function createAppPart(
   });
 
   const installations = new Map<number, FakeInstallation>();
+  // What an installation has accepted, when a test says (#749); the app's permissions otherwise.
+  const installationPermissions = new Map<number, FakePermissions>();
   const repositories = new Map<number, FakeRepository[]>();
   const pullRequests = new Map<string, FakePullRequest[]>();
   // Every head a pull request has had ("owner/name#7"): a review may name any of its commits (#405).
@@ -355,6 +384,20 @@ export function createAppPart(
   const revoked: string[] = [];
   const tokenRequests: FakeTokenRequest[] = [];
   let appPermissions: FakePermissions = { ...DEFAULT_FAKE_APP_PERMISSIONS };
+  const pushes: FakePush[] = [];
+
+  /** What an installation holds: the app's permissions, cut down to what the installation accepted. */
+  function permissionsOfInstallation(installationId: number): FakePermissions {
+    const accepted = installationPermissions.get(installationId);
+    if (accepted === undefined) return { ...appPermissions };
+    return Object.fromEntries(
+      Object.entries(appPermissions).flatMap(([name, level]) => {
+        const held = accepted[name];
+        if (held === undefined) return [];
+        return [[name, levelOf(held) < levelOf(level) ? held : level]];
+      }),
+    ) as FakePermissions;
+  }
   const omitted = new Map<number, number[]>();
   const rawInstallationRecords: Record<string, unknown>[] = [];
   let jwtsRejected = false;
@@ -407,11 +450,51 @@ export function createAppPart(
     return installations.has(issued.installationId) ? issued : undefined;
   }
 
+  /** The repository with the default branch of its Git fixture, when it has one (`git-branches.ts`). */
+  function followingFixture(repo: FakeRepository): FakeRepository {
+    const directory = gitRepositories.get(repo.fullName);
+    if (directory === undefined) return repo;
+    // A journey that is over removes its fixture and leaves the registration: the repository then keeps its own default
+    // branch (the listing of an installation must not fail for the sake of another journey's repository, #767).
+    let defaultBranch: string | null = null;
+    try {
+      defaultBranch = readFixtureBranches(directory).defaultBranch;
+    } catch {
+      return repo;
+    }
+    return defaultBranch === null ? repo : { ...repo, defaultBranch };
+  }
+
   function reposVisibleTo(token: IssuedToken): FakeRepository[] {
     const all = repositories.get(token.installationId) ?? [];
-    if (token.repositoryIds === null) return all;
+    if (token.repositoryIds === null) return all.map(followingFixture);
     const allowed = token.repositoryIds;
-    return all.filter((repo) => allowed.includes(repo.id));
+    return all
+      .filter((repo) => allowed.includes(repo.id))
+      .map(followingFixture);
+  }
+
+  /**
+   * The branches of a repository: those of its Git fixture, or, where the test registered none, the default
+   * branch and the branches the pull requests of the repository name (the head at the head commit of the pull
+   * request, every other at `BASE_SHA`).
+   */
+  function branchesOf(
+    repo: FakeRepository,
+    prs: FakePullRequest[],
+  ): { name: string; sha: string }[] {
+    const directory = gitRepositories.get(repo.fullName);
+    if (directory !== undefined) return readFixtureBranches(directory).branches;
+    const byName = new Map<string, string>([
+      [repo.defaultBranch ?? "main", BASE_SHA],
+    ]);
+    for (const pr of prs) {
+      if (!byName.has(pr.baseRef)) byName.set(pr.baseRef, BASE_SHA);
+      byName.set(pr.headRef, pr.headSha);
+    }
+    return [...byName]
+      .map(([name, sha]) => ({ name, sha }))
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   }
 
   /** Does the token hold at least this level of the permission? */
@@ -436,9 +519,10 @@ export function createAppPart(
 
   // Answers through `send`; a path that is not part of the GitHub App API is left unanswered.
   async function route(
-    { request, url, bearer, response }: Parameters<AppPart["handle"]>[0],
+    context: Parameters<AppPart["handle"]>[0],
     send: (status: number, body: unknown) => Promise<void>,
   ): Promise<void> {
+    const { request, url, bearer, response } = context;
     const path = url.pathname;
     const method = request.method ?? "GET";
 
@@ -457,6 +541,26 @@ export function createAppPart(
       if (!installations.has(body.installation.id))
         controls.addInstallation(body.installation);
       controls.setRepositories(body.installation.id, body.repositories);
+      return send(201, { ok: true });
+    }
+
+    // Control endpoint for a test that runs the fake as its own process (Playwright): what the registered App is
+    // granted (`setAppPermissions`), as `{ permissions: { contents: "write", ... } }`. The Implementer's journey (#767)
+    // raises Contents to write, as the App of a factory deployment asks for it.
+    if (path === "/__fake/app-permissions" && method === "POST") {
+      const body = JSON.parse(await readBody(request)) as {
+        permissions?: unknown;
+      };
+      const given = body.permissions;
+      if (
+        typeof given !== "object" ||
+        given === null ||
+        !Object.values(given).every(
+          (level) => level === "read" || level === "write" || level === "admin",
+        )
+      )
+        return send(400, { message: "Invalid body" });
+      controls.setAppPermissions(given as FakePermissions);
       return send(201, { ok: true });
     }
 
@@ -494,28 +598,71 @@ export function createAppPart(
       return send(201, { ok: true });
     }
 
-    // Git over HTTP, the way the runner's checkout reads a pull request: the token is the Basic password.
+    // Git over HTTP: the way the runner's checkout reads a pull request (`git-upload-pack`, needs Contents: read)
+    // and the way the Implementer's turn publishes its branch (`git-receive-pack`, needs Contents: write). The
+    // token is the Basic password.
     const gitMatch =
-      /^\/([^/]+)\/([^/]+)\.git\/(info\/refs|git-upload-pack)$/.exec(path);
+      /^\/([^/]+)\/([^/]+)\.git\/(info\/refs|git-upload-pack|git-receive-pack)$/.exec(
+        path,
+      );
     if (gitMatch) {
       const gitToken = basicToken(request.headers.authorization);
       const gitIssued =
         gitToken === undefined ? undefined : installationToken(gitToken);
-      if (gitIssued === undefined) return unauthorized();
+      if (gitIssued === undefined) {
+        // Like GitHub, the challenge names Basic: a client with URL credentials or a credential helper answers it and
+        // retries, and only `http.extraHeader` gets through without it.
+        response.writeHead(401, {
+          "content-type": "application/json",
+          "www-authenticate": 'Basic realm="GitHub"',
+        });
+        response.end(JSON.stringify({ message: "Bad credentials" }));
+        return;
+      }
       const gitName = `${gitMatch[1]}/${gitMatch[2]}`;
       const visible = reposVisibleTo(gitIssued).find(
         (repo) => repo.fullName === gitName,
       );
       const directory = gitRepositories.get(gitName);
       if (visible === undefined || directory === undefined) return notFound();
-      if (!mayDo(gitIssued, "contents", "read"))
-        return send(403, { message: "Resource not accessible by integration" });
       const advertise = gitMatch[3] === "info/refs";
-      if (advertise !== (method === "GET")) return notFound();
-      if (advertise && url.searchParams.get("service") !== "git-upload-pack")
+      const service = advertise ? url.searchParams.get("service") : gitMatch[3];
+      if (service !== "git-upload-pack" && service !== "git-receive-pack")
         return notFound();
-      await serveUploadPack(request, response, directory, advertise);
+      const pushing = service === "git-receive-pack";
+      if (!mayDo(gitIssued, "contents", pushing ? "write" : "read"))
+        return send(403, { message: "Resource not accessible by integration" });
+      if (advertise !== (method === "GET")) return notFound();
+      if (!pushing) {
+        await serveUploadPack(request, response, directory, advertise);
+        return;
+      }
+      const refs = await serveReceivePack(
+        request,
+        response,
+        directory,
+        advertise,
+      );
+      // Only a POST with a command is a push. The client's 4-byte probe of a request over 1 MB (it asks whether the
+      // server takes the body at all) names no ref and is neither recorded nor listed.
+      if (!advertise && refs.length > 0) {
+        pushes.push({ repository: gitName, refs });
+        context.logRefs(refs);
+      }
       return;
+    }
+
+    // Control endpoint for a test that runs the fake as its own process (Playwright): the pushes received, as
+    // `{ pushes }`, of one repository when `?repository=owner/name` is given (`pushes`).
+    if (path === "/__fake/pushes" && method === "GET") {
+      const repository = url.searchParams.get("repository");
+      return send(200, {
+        pushes: controls
+          .pushes()
+          .filter(
+            (push) => repository === null || push.repository === repository,
+          ),
+      });
     }
 
     // Control endpoint for a test that runs the fake as its own process (Playwright): the comments
@@ -581,6 +728,7 @@ export function createAppPart(
           account: accountJson(installation.account, webBase()),
           suspended_at: installation.suspended ? "2026-10-01T00:00:00Z" : null,
           app_id: Number(appForJwt(bearer)?.id),
+          permissions: permissionsOfInstallation(installation.id),
         }),
       );
       list.push(...rawInstallationRecords);
@@ -597,6 +745,7 @@ export function createAppPart(
         account: accountJson(installation.account, webBase()),
         suspended_at: installation.suspended ? "2026-10-01T00:00:00Z" : null,
         app_id: Number(appForJwt(bearer)?.id),
+        permissions: permissionsOfInstallation(installation.id),
       });
     }
 
@@ -662,11 +811,12 @@ export function createAppPart(
           message:
             "There is at least one repository that does not exist or is not accessible",
         });
+      const held = permissionsOfInstallation(installationId);
       if (
         requested !== null &&
         Object.entries(requested).some(
           ([key, level]) =>
-            levelOf(level) < 0 || levelOf(level) > levelOf(appPermissions[key]),
+            levelOf(level) < 0 || levelOf(level) > levelOf(held[key]),
         )
       )
         return send(422, {
@@ -684,9 +834,7 @@ export function createAppPart(
           )
           .map((repo) => repo.id);
       const granted: FakePermissions =
-        requested === null
-          ? { ...appPermissions }
-          : (requested as FakePermissions);
+        requested === null ? { ...held } : (requested as FakePermissions);
 
       const token = `ghs_fake${randomBytes(16).toString("hex")}`;
       const expiresAtMs = now() + TOKEN_LIFETIME_MS;
@@ -707,7 +855,9 @@ export function createAppPart(
           : {
               repositories: known
                 .filter((repo) => reach.includes(repo.id))
-                .map((repo) => repositoryJson(repo, webBase())),
+                .map((repo) =>
+                  repositoryJson(followingFixture(repo), webBase()),
+                ),
             }),
         ...tokenAnswerPatch,
       });
@@ -802,6 +952,7 @@ export function createAppPart(
         query: url.searchParams,
         repository,
         pullRequests: prs,
+        branches: () => branchesOf(repository, prs),
         body: () => readBody(request),
         mayDo: (names, level) =>
           names.some((name) => mayDo(issued, name, level)),
@@ -860,6 +1011,7 @@ export function createAppPart(
     },
     removeInstallation(id) {
       installations.delete(id);
+      installationPermissions.delete(id);
       repositories.delete(id);
     },
     suspendInstallation(id, suspended) {
@@ -932,6 +1084,9 @@ export function createAppPart(
     setAppPermissions(permissions) {
       appPermissions = { ...permissions };
     },
+    setInstallationPermissions(installationId, permissions) {
+      installationPermissions.set(installationId, { ...permissions });
+    },
     setAppAccountPermissions(permissions) {
       const start = options.appId && registry.byId(options.appId);
       if (start) start.accountPermissions = { ...permissions };
@@ -945,6 +1100,7 @@ export function createAppPart(
     tokenRequests: () => [...tokenRequests],
     issuedInstallationTokens: () => [...issuedTokens],
     revokedInstallationTokens: () => [...revoked],
+    pushes: () => pushes.map((push) => ({ ...push, refs: [...push.refs] })),
   };
 
   return {
@@ -965,9 +1121,11 @@ export function createAppPart(
       issuedTokens.length = 0;
       revoked.length = 0;
       tokenRequests.length = 0;
+      pushes.length = 0;
       jwtsRejected = false;
       tokenAnswerPatch = null;
       appPermissions = { ...DEFAULT_FAKE_APP_PERMISSIONS };
+      installationPermissions.clear();
       const start = options.appId && registry.byId(options.appId);
       if (start) {
         start.accountPermissions = { ...DEFAULT_ACCOUNT_PERMISSIONS };

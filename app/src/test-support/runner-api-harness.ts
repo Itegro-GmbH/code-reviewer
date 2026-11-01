@@ -10,6 +10,11 @@ import { operatorCostLimitCentsFrom } from "../review-settings/operator-cost-lim
 import { managedModelsOf } from "../runner-api/managed-models.ts";
 import { createUsageRecordsRepository } from "../db/repositories/usage-records-repository.ts";
 import { createJobsRepository } from "../db/repositories/jobs-repository.ts";
+import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
+import { createCapabilitySet } from "../capabilities/capability.ts";
+import { createJobQueue } from "../jobs/job-queue.ts";
+import type { EnqueueImplementerTurnInput } from "../jobs/job-types.ts";
+import { addUser } from "./workspace-deletion-fixture.ts";
 import { createJobVmRunsRepository } from "../db/repositories/job-vm-runs-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { createDefaultIntegrationRegistry } from "../integrations/registry.ts";
@@ -45,7 +50,13 @@ import {
   emptyJobOptionsSource,
   type JobOptionsSource,
 } from "../runner-api/job-options.ts";
-import { createClaimedKeys } from "../runner-api/claimed-keys.ts";
+import {
+  createClaimedKeys,
+  type ClaimedKeys,
+} from "../runner-api/claimed-keys.ts";
+import { createWriteTokens } from "../runner-api/write-token.ts";
+import { createJobClaimedKeysRepository } from "../db/repositories/job-claimed-keys-repository.ts";
+import { createPinnedAddressReader } from "../review-settings/pinned-addresses.ts";
 import { createProjectClaimGuard } from "../runner-api/project-claim-guard.ts";
 import { createKnownSecrets } from "../runner-api/known-secrets.ts";
 import { knownContextWindowFrom } from "../runner-api/known-context-window.ts";
@@ -164,6 +175,16 @@ export async function startRunnerApiHarness(
      */
     defaultEntry?: boolean;
     /**
+     * #753: the deployment is a factory with the Implementer: the registry's capabilities hold `implementer`, the fake App asks
+     * for contents write and the installation has accepted it (`h.enqueueTurn` makes a turn). Default: a code-review.com
+     * deployment, which can never make the write token.
+     */
+    implementer?: boolean;
+    /** #753: wraps what the API remembers about a job, for a test that makes one call fail (for example the write token ledger). */
+    wrapClaimedKeys?: (keys: ClaimedKeys) => ClaimedKeys;
+    /** #790: the addresses the workspace's projects pinned for a catalog provider. Default: read from the projects, as on the server. */
+    pinnedAddresses?: ClaimDeps["pinnedAddresses"];
+    /**
      * #281: wires the notice of a refused review like the running server does (`h.notices`). With
      * `deliver: "manual"` the refusals are only collected (`h.notices.refusals`) and the test hands them on.
      */
@@ -186,7 +207,12 @@ export async function startRunnerApiHarness(
   const refusals: NoticeRefusal[] = [];
   const noticeWork: Promise<void>[] = [];
   let noticeService: RefusalNoticeService | undefined;
+  // #790: what the running server does when the claim of a job ended, for a turn of the Implementer: its write tokens are switched off
+  // (after the response there; `h.writeTokensSettled()` waits for it here).
+  const endedWork: Promise<void>[] = [];
+  let onEnded: ((jobIds: readonly string[]) => void) | undefined;
   const fixture = await createJobQueueFixture({
+    onClaimsEnded: (jobIds) => onEnded?.(jobIds),
     ...(noticeOptions === undefined
       ? {}
       : {
@@ -253,7 +279,24 @@ export async function startRunnerApiHarness(
     ...options.env,
   };
 
+  if (options.implementer === true) {
+    const write = {
+      metadata: "read",
+      contents: "write",
+      pull_requests: "write",
+      issues: "write",
+      checks: "write",
+    } as const;
+    github.fake.setAppPermissions(write);
+    github.fake.setInstallationPermissions(4242, write);
+  }
   const registry = createDefaultIntegrationRegistry({
+    capabilities: () =>
+      createCapabilitySet(
+        options.implementer === true
+          ? ["review", "dynamic-review", "implementer"]
+          : ["review", "dynamic-review"],
+      ),
     loadConfig: () => loadGithubAppConfig(github.env),
     githubClient: {
       now: github.clock.now,
@@ -367,11 +410,36 @@ export async function startRunnerApiHarness(
       now: fixture.clock.now,
       providers,
     });
-    const claimedKeys = createClaimedKeys({
+    const plainClaimedKeys = createClaimedKeys({
       db: fixture.db,
       appSecret: () => TEST_APP_SECRET,
       now: fixture.clock.now,
     });
+    const claimedKeys =
+      options.wrapClaimedKeys?.(plainClaimedKeys) ?? plainClaimedKeys;
+    const writeTokens = createWriteTokens({
+      repositories: (workspaceId) =>
+        createRepositoriesRepository(
+          fixture.db,
+          workspaceId,
+          fixture.clock.now,
+        ),
+      integrations: (workspaceId) =>
+        createIntegrationsRepository(
+          fixture.db,
+          workspaceId,
+          fixture.clock.now,
+        ),
+      registry,
+      claimedKeys,
+      rows: createJobClaimedKeysRepository(fixture.db, fixture.clock.now),
+      logger,
+      // The tokens expire on the clock of GitHub's fake.
+      now: () => new Date(github.clock.now()),
+    });
+    onEnded = (jobIds) => {
+      endedWork.push(writeTokens.revokeEnded(jobIds));
+    };
     const apiDeps: WorkerApiDeps = {
       queue: options.wrapQueue?.(fixture.queue) ?? fixture.queue,
       repositories: (workspaceId) =>
@@ -451,6 +519,10 @@ export async function startRunnerApiHarness(
       }),
       entitlementsFor: (workspaceId) =>
         readEntitlements(fixture.db, workspaceId, fixture.clock.now),
+      implementerTurn: (job) =>
+        createImplementerRepository(fixture.db, job.workspaceId).getTurnByJob(
+          job.id,
+        ),
       claimedKeyMode: async (job) =>
         (
           await createUsageRecordsRepository(
@@ -469,6 +541,18 @@ export async function startRunnerApiHarness(
       providerPins:
         options.providerPins ?? createProviderPins(() => reviewSettings),
       claimedKeys,
+      revokeWriteTokens: writeTokens.revokeAllOf,
+      revokeUndelivered: writeTokens.revokeUndelivered,
+      pinnedAddresses:
+        options.pinnedAddresses ??
+        ((workspaceId, slug) =>
+          createPinnedAddressReader(
+            createProjectsRepository(
+              fixture.db,
+              workspaceId,
+              fixture.clock.now,
+            ),
+          )(slug)),
       ...(options.hooks ?? {}),
       now: fixture.clock.now,
       logger,
@@ -491,9 +575,9 @@ export async function startRunnerApiHarness(
     });
     // #320: the Worker API over the same collaborators (it has no dispatcher credential).
     const workerApi = createWorkerApi(apiDeps);
-    return { api, workerApi, llm, claimedKeys };
+    return { api, workerApi, llm, claimedKeys, writeTokens };
   }
-  const { api, workerApi, llm, claimedKeys } = buildApi();
+  const { api, workerApi, llm, claimedKeys, writeTokens } = buildApi();
   /** Saves (or, with null, removes) the LLM key of the workspace of the jobs, for a provider (default: the first one). */
   async function setLlmKey(
     key: string | null,
@@ -816,6 +900,42 @@ export async function startRunnerApiHarness(
     };
   }
 
+  /** #753: the queue of a factory deployment, for the turns of the Implementer (the harness queue refuses the kind). */
+  const turnQueue = createJobQueue(fixture.db, fixture.workspaceId, {
+    now: fixture.clock.now,
+    kindAllowed: (kind) =>
+      createCapabilitySet([
+        "review",
+        "dynamic-review",
+        "implementer",
+      ]).allowsReviewKind(kind),
+  });
+  let turnCounter = 0;
+  /** #753: a turn of the Implementer on the harness repository, as the submit will make it (a queued job of the kind). */
+  async function enqueueTurn(
+    overrides: Partial<EnqueueImplementerTurnInput> = {},
+  ) {
+    if (turnCounter === 0) await addUser(fixture.db, "turn-user");
+    turnCounter += 1;
+    fixture.clock.advance(1);
+    const result = await turnQueue.enqueueImplementerTurn({
+      repositoryId: fixture.repositoryId,
+      baseBranch: "main",
+      baseSha: sha("b"),
+      branch: `implementer/t${String(turnCounter)}`,
+      instruction: "Add a health endpoint.",
+      modelChoice: { entryId: "entry-1" },
+      costLimitCents: null,
+      createdBy: "turn-user",
+      actorLogin: "octocat",
+      clientRequestId: `request-${String(turnCounter)}`,
+      ...overrides,
+    });
+    if (result.status !== "created")
+      throw new Error(`expected a new turn, got ${result.status}`);
+    return result;
+  }
+
   /** Claims the next job and returns the parsed answer. */
   async function claimed(request?: RequestOptions) {
     const response = await claim(request);
@@ -899,6 +1019,13 @@ export async function startRunnerApiHarness(
       /** The comments on a pull request of the fake GitHub. */
       comments: (repoFullName: string, prNumber: number) =>
         github.fake.pullRequestComments(repoFullName, prNumber),
+    },
+    enqueueTurn,
+    /** #790: the write token service of the first app instance (the sweep's `retryPending`, the end of a turn). */
+    writeTokens,
+    /** #790: waits for the write tokens that the ends of claims (the reaper, a stop) switched off after their response. */
+    writeTokensSettled: async () => {
+      await Promise.all(endedWork.splice(0));
     },
     claim,
     claimed,

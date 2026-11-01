@@ -3,6 +3,7 @@
 // The copy for what the GitHub data routes answer: one sentence per stable code (src/github-config/errors.ts,
 // the issue codes of settings.ts and the outcomes of the manifest flow and of the linking). The codes are the
 // contract, these sentences are only what the page shows.
+import type { CapabilitySet } from "../../capabilities/capability.ts";
 import type { ProductIdentity } from "../../product-identity/identity.ts";
 import type { RequestIssue } from "../../ui/json-request.ts";
 import {
@@ -145,7 +146,10 @@ export function describeGithubOutcome(code: string): string | null {
   return Object.hasOwn(OUTCOMES, code) ? (OUTCOMES[code] ?? null) : null;
 }
 
-/** The permissions the manifest asks for, in the words of GitHub's settings page. */
+/**
+ * The permissions the manifest asks for, in the words of GitHub's settings page. A deployment with the Implementer asks
+ * for Contents as read and write (#749), see `permissionLabels`.
+ */
 export const PERMISSION_LABELS: Record<string, string> = {
   pull_requests: "Repository permissions > Pull requests: Read and write",
   issues: "Repository permissions > Issues: Read and write",
@@ -155,3 +159,15 @@ export const PERMISSION_LABELS: Record<string, string> = {
   emails: "Account permissions > Email addresses: Read-only",
   members: "Organization permissions > Members: Read-only",
 };
+
+/** The labels for a deployment: the same as `PERMISSION_LABELS`, with Contents as the Implementer needs it. */
+export function permissionLabels(
+  capabilities: CapabilitySet,
+): Record<string, string> {
+  return capabilities.has("implementer")
+    ? {
+        ...PERMISSION_LABELS,
+        contents: "Repository permissions > Contents: Read and write",
+      }
+    : PERMISSION_LABELS;
+}

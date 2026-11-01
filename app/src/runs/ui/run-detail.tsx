@@ -20,9 +20,13 @@ import {
 import { useLiveSnapshot } from "../../ui/use-live-snapshot.ts";
 import { workspacePath } from "../../workspaces/paths.ts";
 import { formatDuration } from "../run-duration.ts";
-import { KIND_NAMES } from "../../review-settings/kind-names.ts";
+import { JOB_KIND_NAMES } from "../../review-settings/kind-names.ts";
 import { isSettled } from "../run-status.ts";
-import type { CustomerRunDetailView, RunDetailSnapshot } from "../run-view.ts";
+import type {
+  CustomerRunDetailView,
+  ImplementerDetailView,
+  RunDetailSnapshot,
+} from "../run-view.ts";
 import { browserRunsApi, RUNS_POLL, type RunsApi } from "./api.ts";
 import {
   describePollFailure,
@@ -125,6 +129,154 @@ function findingsEmptyText(run: CustomerRunDetailView): string {
     : FINDINGS_NOT_POSTED_TEXT;
 }
 
+/** A link to GitHub made by the view, or the text alone when there is none. The text is from outside and stays text. */
+function MaybeLink({
+  href,
+  children,
+}: {
+  href: string | null;
+  children: ReactNode;
+}) {
+  return href === null ? (
+    <span className="break-words">{children}</span>
+  ) : (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="break-words"
+    >
+      {children}
+    </a>
+  );
+}
+
+/** The task of a run of the Implementer: its instruction. Text from the person who started it, rendered as text. */
+function TaskInstruction({ task }: { task: ImplementerDetailView }) {
+  return (
+    <Section title="Instruction">
+      <p
+        data-slot="run-instruction"
+        className="text-sm break-words whitespace-pre-wrap"
+      >
+        {task.instruction.preview}
+      </p>
+      {task.instruction.full === null ? null : (
+        <details className="text-sm">
+          <summary className="cursor-pointer text-muted-foreground">
+            Show the whole instruction
+          </summary>
+          <p className="mt-2 break-words whitespace-pre-wrap">
+            {task.instruction.full}
+          </p>
+        </details>
+      )}
+    </Section>
+  );
+}
+
+/** What the agent did: its own summary, the commits and the files. Every text here is from the agent or the repository. */
+function TaskResult({
+  task,
+  run,
+}: {
+  task: ImplementerDetailView;
+  run: CustomerRunDetailView;
+}) {
+  const settled = isSettled(run.status);
+  // A task that ended without the agent's report (a lost lease, a runner that died) may still have pushed work: an empty list
+  // would then say "none" where the truth is "not known". The branch is where to look.
+  if (settled && !task.reported)
+    return (
+      <Section title="Result not reported">
+        <p data-slot="run-not-reported" className="text-sm break-words">
+          The result of this task was not reported, so what the agent did is not
+          known here.
+          {task.branch === null ? null : (
+            <>
+              {" "}
+              Work it pushed is on the branch{" "}
+              <MaybeLink href={task.branchUrl}>{task.branch}</MaybeLink> on
+              GitHub.
+            </>
+          )}
+        </p>
+      </Section>
+    );
+  return (
+    <>
+      <Section title="Summary of the agent">
+        {task.summary !== null ? (
+          <p
+            data-slot="run-agent-summary"
+            className="text-sm break-words whitespace-pre-wrap"
+          >
+            {task.summary}
+          </p>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            {settled
+              ? "The agent left no summary."
+              : "The agent is still working."}
+          </p>
+        )}
+      </Section>
+      <Section title="Commits">
+        {task.commits.shown.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            {settled ? "No commits were made." : "No commits yet."}
+          </p>
+        ) : (
+          <ul className="flex flex-col gap-1 text-sm">
+            {task.commits.shown.map((commit) => (
+              <li
+                key={commit.shortSha + commit.subject}
+                className="break-words"
+              >
+                <code className="font-mono">
+                  <MaybeLink href={commit.url}>{commit.shortSha}</MaybeLink>
+                </code>{" "}
+                <span>{commit.subject}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+        {task.commits.more > 0 ? (
+          <p className="text-xs text-muted-foreground">
+            and {task.commits.more} more
+          </p>
+        ) : null}
+      </Section>
+      <Section title="Files changed">
+        {task.files.count === 0 ? (
+          <p className="text-sm text-muted-foreground">No files changed.</p>
+        ) : (
+          <>
+            <p className="text-sm text-muted-foreground">
+              {task.files.count} {task.files.count === 1 ? "file" : "files"}
+            </p>
+            <ul className="flex flex-col gap-1 text-sm">
+              {task.files.shown.map((file) => (
+                <li key={file.path + file.status} className="break-words">
+                  <code className="font-mono">{file.path}</code>{" "}
+                  <span className="text-xs text-muted-foreground">
+                    {file.status}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            {task.files.more > 0 ? (
+              <p className="text-xs text-muted-foreground">
+                and {task.files.more} more
+              </p>
+            ) : null}
+          </>
+        )}
+      </Section>
+    </>
+  );
+}
+
 /** How long after the end of a run its review text is still waited for: the app reads the comment right after the run ends. */
 const REVIEW_TEXT_WAIT_MS = 2 * 60 * 1000;
 
@@ -167,39 +319,85 @@ export function RunDetail({
   const run = data.run;
   const usage = usageItems(run);
 
+  const task = run.implementer;
+  const projectItem = {
+    term: "Project",
+    description: (
+      <Link
+        href={workspacePath(
+          workspaceSlug,
+          `/projects/${encodeURIComponent(run.repositoryId)}`,
+        )}
+      >
+        {run.project}
+      </Link>
+    ),
+  };
+  // A task is on a branch of a repository; a review is of a pull request with a command.
+  const whatItIs: { term: ReactNode; description: ReactNode }[] =
+    task === undefined
+      ? [
+          projectItem,
+          {
+            term: "Pull request",
+            description:
+              run.prUrl !== null ? (
+                <a href={run.prUrl} target="_blank" rel="noopener noreferrer">
+                  #{run.prNumber} on GitHub
+                </a>
+              ) : (
+                <span>#{run.prNumber}</span>
+              ),
+          },
+          {
+            term: "Command",
+            description: <code className="font-mono">/{run.command}</code>,
+          },
+          {
+            term: "Review kind",
+            description: JOB_KIND_NAMES[run.reviewKind],
+          },
+        ]
+      : [
+          projectItem,
+          { term: "Kind", description: JOB_KIND_NAMES[run.reviewKind] },
+          ...(task.baseBranch === null
+            ? []
+            : [
+                {
+                  term: "Base branch",
+                  description: (
+                    <span className="break-words">{task.baseBranch}</span>
+                  ),
+                },
+              ]),
+          ...(task.branch === null
+            ? []
+            : [
+                {
+                  term: "Branch",
+                  description: (
+                    <MaybeLink href={task.branchUrl}>{task.branch}</MaybeLink>
+                  ),
+                },
+              ]),
+          ...(task.head === null
+            ? []
+            : [
+                {
+                  term: "Pushed head",
+                  description: (
+                    <code className="font-mono">
+                      <MaybeLink href={task.head.url}>
+                        {task.head.shortSha}
+                      </MaybeLink>
+                    </code>
+                  ),
+                },
+              ]),
+        ];
   const summaryItems: { term: ReactNode; description: ReactNode }[] = [
-    {
-      term: "Project",
-      description: (
-        <Link
-          href={workspacePath(
-            workspaceSlug,
-            `/projects/${encodeURIComponent(run.repositoryId)}`,
-          )}
-        >
-          {run.project}
-        </Link>
-      ),
-    },
-    {
-      term: "Pull request",
-      description:
-        run.prUrl !== null ? (
-          <a href={run.prUrl} target="_blank" rel="noopener noreferrer">
-            #{run.prNumber} on GitHub
-          </a>
-        ) : (
-          <span>#{run.prNumber}</span>
-        ),
-    },
-    {
-      term: "Command",
-      description: <code className="font-mono">/{run.command}</code>,
-    },
-    {
-      term: "Review kind",
-      description: KIND_NAMES[run.reviewKind],
-    },
+    ...whatItIs,
     ...usage.model,
     ...costItem(run, usage),
     { term: "Duration", description: <DurationText run={run} /> },
@@ -216,15 +414,15 @@ export function RunDetail({
         </span>
       ),
     });
-  summaryItems.push(
-    { term: "Started by", description: run.trigger },
-    {
+  summaryItems.push({ term: "Started by", description: run.trigger });
+  // For a task the job's commit is the base branch tip; the pushed head above is the commit that matters.
+  if (task === undefined)
+    summaryItems.push({
       term: "Commit",
       description: (
         <code className="font-mono">{run.headSha.slice(0, 12)}</code>
       ),
-    },
-  );
+    });
 
   return (
     <div data-slot="run-detail" className="flex flex-col gap-6">
@@ -246,6 +444,11 @@ export function RunDetail({
             <span className="text-sm text-muted-foreground">{run.problem}</span>
           ) : null}
         </div>
+        {task?.pushedNote == null ? null : (
+          <p data-slot="run-pushed-note" className="text-sm break-words">
+            {task.pushedNote}
+          </p>
+        )}
         {run.errorCode !== null ? (
           <p className="text-xs text-muted-foreground">
             Error code: <code className="font-mono">{run.errorCode}</code>
@@ -275,7 +478,14 @@ export function RunDetail({
       <Section title="Summary">
         <DescriptionList items={summaryItems} />
       </Section>
-      <Findings run={run} />
+      {task === undefined ? (
+        <Findings run={run} />
+      ) : (
+        <>
+          <TaskInstruction task={task} />
+          <TaskResult task={task} run={run} />
+        </>
+      )}
     </div>
   );
 }

@@ -17,6 +17,7 @@ import { createDispatcherCore } from "./dispatcher.ts";
 import {
   LaunchError,
   type AppSettings,
+  type CoreSettings,
   type CreatedVm,
   type HandleResult,
   type LiveVmCounter,
@@ -494,6 +495,67 @@ describe("the core with several apps", () => {
     expect(logger.text()).not.toContain("crj_");
   });
 
+  // #746-T07
+  it("answers `not_capable` for a wake-up of the implementer kind and makes no claim and no call", async () => {
+    const jobId = "00000000-0000-4000-8000-0000000000e1";
+    const { core, launcher } = build();
+
+    const result = await core.handle({
+      appId: "factory",
+      jobId,
+      reviewKind: "implementer",
+    });
+
+    // No engine of this Dispatcher runs the kind (P14 adds it): it is never mapped onto another engine.
+    expect(result).toStrictEqual({ outcome: "not_capable" });
+    expect(factory.requests()).toHaveLength(0);
+    expect(reviewer.requests()).toHaveLength(0);
+    expect(launcher.launches).toHaveLength(0);
+  });
+
+  // #746-T07
+  it("releases a claimed job of the implementer kind unlaunched, whatever kinds the app has", async () => {
+    const jobId = "00000000-0000-4000-8000-0000000000e2";
+    factory.enqueue({ id: jobId });
+    factory.script("claim", [
+      {
+        status: 200,
+        body: {
+          version: 1,
+          job: {
+            id: jobId,
+            credential: `crj_${"A".repeat(43)}`,
+            reviewKind: "implementer",
+            leaseExpiresAt: "2026-10-10T12:02:00.000Z",
+            heartbeatIntervalSeconds: 30,
+          },
+        },
+      },
+    ]);
+    const { core, launcher, logger } = build();
+
+    const done = core.handle({ appId: "factory", jobId, reviewKind: "diff" });
+    const result = await (async () => {
+      let value: HandleResult | undefined;
+      void done.then((answer) => {
+        value = answer;
+      });
+      for (let step = 0; step < 100 && value === undefined; step += 1) {
+        await clock.advance(1000);
+        await settle();
+      }
+      return done;
+    })();
+
+    expect(result).toStrictEqual({ outcome: "not_capable" });
+    expect(launcher.launches).toHaveLength(0);
+    expect(seen(factory, "release").length).toBeGreaterThan(0);
+    expect(
+      logger.lines.some((line) => line.startsWith("error kind_not_allowed")),
+    ).toBe(true);
+    expect(logger.text()).not.toContain("crj_");
+  });
+
   // #730-T10
   it("gives back the slot of a job it refused", async () => {
     const jobId = "00000000-0000-4000-8000-0000000000d2";
@@ -913,13 +975,18 @@ describe("the cap of an app is counted by the Dispatcher too", () => {
     await clock.advance(1);
     const results = await Promise.all(calls);
 
-    expect(results).toStrictEqual([
-      { outcome: "unavailable", retryAfterSeconds: 60 },
-      { outcome: "unavailable", retryAfterSeconds: 60 },
-      { outcome: "unavailable", retryAfterSeconds: 60 },
+    // The listing failed, so the Dispatcher's own count decides (#802): one call takes the slot, the others find it taken.
+    expect(results.map((result) => result.outcome).sort()).toStrictEqual([
+      "busy",
+      "busy",
+      "started",
     ]);
-    expect(logger.text()).toContain("fleet_list_failed");
-    expect(factory.requests()).toHaveLength(0);
+    expect(logger.text()).toContain('fleet_list_failed {"ms":4000}');
+    expect(factory.requests().filter((r) => r.route === "claim")).toHaveLength(
+      1,
+    );
+    for (const result of results)
+      if (result.outcome === "started") await result.background;
   });
 
   // #730-T22
@@ -932,16 +999,21 @@ describe("the cap of an app is counted by the Dispatcher too", () => {
           ? new Promise<never>(() => undefined)
           : Promise.resolve(new Map<string, number>()),
     });
+    const firstJob = factory.enqueue();
     const first = core.handle({
       appId: "factory",
-      jobId: factory.enqueue(),
+      jobId: firstJob,
       reviewKind: "diff",
     });
     await settle();
     await clock.advance(4000);
-    expect((await first).outcome).toBe("unavailable");
+    expect((await handled(first)).outcome).toBe("started");
+    // The App holds the cap of one itself: the first job ends, as it would, before the next is offered.
+    factory.setJobStatus(firstJob, "succeeded");
 
     hang = false;
+    // The failed listing is not asked again for five seconds (below), so this call is served by the Dispatcher's own count.
+    await clock.advance(5000);
     const second = await handled(
       core.handle({
         appId: "factory",
@@ -1045,37 +1117,36 @@ describe("the cap of an app is counted by the Dispatcher too", () => {
     expect(second).toStrictEqual({ outcome: "busy", retryAfterSeconds: 30 });
   });
 
-  // #730-T22
-  it("answers `unavailable` and makes no claim when the platform cannot be listed and no listing is young enough", async () => {
+  // #802-T02
+  it("claims the job when the platform cannot be listed and no listing is young enough, and logs the failure without the platform's text", async () => {
     const jobId = factory.enqueue();
     const { core, logger } = build({
       liveVms: () => Promise.reject(new Error("the platform said something")),
     });
 
-    const result = await core.handle({
-      appId: "factory",
-      jobId,
-      reviewKind: "diff",
-    });
+    const result = await handled(
+      core.handle({ appId: "factory", jobId, reviewKind: "diff" }),
+    );
 
-    expect(result).toStrictEqual({
-      outcome: "unavailable",
-      retryAfterSeconds: 60,
-    });
-    expect(factory.requests()).toHaveLength(0);
+    expect(result.outcome).toBe("started");
+    expect(
+      factory.requests().filter((request) => request.route === "claim"),
+    ).toHaveLength(1);
     expect(logger.text()).toContain("fleet_list_failed");
     // The platform's own text is not ours to log.
     expect(logger.text()).not.toContain("the platform said something");
   });
 
-  // #730-T22
-  it("keeps working on the last listing for a minute when the platform cannot be listed, and not longer", async () => {
+  // #802-T02
+  it("falls back to the Dispatcher's own count after a minute without a listing: the stale platform count is not used", async () => {
     let failing = false;
     const { core } = build({
+      factory: { maxRunning: 1 },
+      // The cap is 1 and the tolerance 3: a platform count of 4 refuses the call.
       liveVms: () =>
         failing
           ? Promise.reject(new Error("down"))
-          : Promise.resolve(new Map<string, number>()),
+          : Promise.resolve(new Map([["factory", 4]])),
     });
     const handleOne = () =>
       handled(
@@ -1086,14 +1157,178 @@ describe("the cap of an app is counted by the Dispatcher too", () => {
         }),
       );
 
-    expect((await handleOne()).outcome).toBe("started");
+    expect((await handleOne()).outcome).toBe("busy");
     failing = true;
     await clock.advance(10_000);
-    expect((await handleOne()).outcome).toBe("started");
+    // Inside the minute the last good listing still counts.
+    expect((await handleOne()).outcome).toBe("busy");
     await clock.advance(61_000);
-    expect(await handleOne()).toStrictEqual({
-      outcome: "unavailable",
-      retryAfterSeconds: 60,
+    // After it only what the Dispatcher knows counts, and that is nothing: the claim goes on.
+    expect((await handleOne()).outcome).toBe("started");
+  });
+
+  // #802-T03
+  it("does not ask a platform that just failed again for five seconds, and logs the failure once for those calls", async () => {
+    const counter = vi.fn(() => Promise.reject(new Error("down")));
+    const { core, logger } = build({ liveVms: counter });
+    const handleOne = () =>
+      handled(
+        core.handle({
+          appId: "factory",
+          jobId: factory.enqueue(),
+          reviewKind: "diff",
+        }),
+      );
+
+    await handleOne();
+    await handleOne();
+    await handleOne();
+
+    expect(counter).toHaveBeenCalledTimes(1);
+    expect(logger.text().match(/fleet_list_failed/g)).toHaveLength(1);
+
+    await clock.advance(5000);
+    await handleOne();
+
+    expect(counter).toHaveBeenCalledTimes(2);
+    expect(logger.text().match(/fleet_list_failed/g)).toHaveLength(2);
+  });
+
+  describe("without a listing, the Dispatcher counts the VMs its own launches created", () => {
+    const vm = (name: string): CreatedVm => ({
+      name,
+      startedAt: new Date(0),
+      timeoutSeconds: 1500,
+    });
+    const failing: LiveVmCounter = () => Promise.reject(new Error("down"));
+
+    /** A Launcher whose launches end at once but leave a VM behind, as a Worker that runs on. */
+    function leaving() {
+      let created = 0;
+      return {
+        onLaunch: (spec: { onVmCreated?: (vm: CreatedVm) => void }) => {
+          created += 1;
+          spec.onVmCreated?.(vm(`cr-diff-created-${created}`));
+          return Promise.resolve();
+        },
+      };
+    }
+
+    /** One call for the app, whose job then ends at the App, so the App's own cap never gets in the way of the count. */
+    async function claim(core: ReturnType<typeof build>["core"], app: string) {
+      const queue = app === "factory" ? factory : reviewer;
+      const jobId = queue.enqueue();
+      const result = await core.handle({
+        appId: app,
+        jobId,
+        reviewKind: "diff",
+      });
+      if (result.outcome === "started") await result.background;
+      queue.setJobStatus(jobId, "succeeded");
+      return result;
+    }
+
+    // #802-T04
+    it("holds an app that is over its cap: the VMs it created count, plus the one this call would start", async () => {
+      const { core, logger } = build({
+        factory: { maxRunning: 1 },
+        liveVms: failing,
+        launcher: leaving(),
+      });
+      // The cap is 1 and the tolerance 3: four VMs in all are allowed, the fifth call is refused.
+      for (let call = 0; call < 4; call += 1) {
+        const result = await claim(core, "factory");
+        expect(result.outcome).toBe("started");
+      }
+
+      const refused = await claim(core, "factory");
+
+      expect(refused).toStrictEqual({ outcome: "busy", retryAfterSeconds: 30 });
+      expect(logger.text()).toContain(
+        'app_cap_reached {"app":"factory","occupied":4,"maxRunning":1,"tolerance":3}',
+      );
+      expect(
+        factory.requests().filter((request) => request.route === "claim"),
+      ).toHaveLength(4);
+    });
+
+    // #802-T04
+    it("keeps claiming for an app below its cap while another app is over its own", async () => {
+      const { core } = build({
+        factory: { maxRunning: 1 },
+        reviewer: { maxRunning: 5 },
+        liveVms: failing,
+        launcher: leaving(),
+      });
+      for (let call = 0; call < 4; call += 1) await claim(core, "factory");
+
+      const forFactory = await claim(core, "factory");
+      const forReviewer = await claim(core, "reviewer");
+
+      expect(forFactory.outcome).toBe("busy");
+      expect(forReviewer.outcome).toBe("started");
+    });
+
+    // #802-T07
+    it("counts the launches in progress that have no VM yet", async () => {
+      // Cap 3, tolerance 5: eight VMs and the one a call would start are allowed. Six VMs created lately and two launches
+      // that have no VM yet make eight: the next call would be the ninth and is refused. With the launches not counted
+      // it would see six and pass.
+      const hold = deferred();
+      let launches = 0;
+      const { core } = build({
+        factory: { maxRunning: 3 },
+        liveVms: failing,
+        launcher: {
+          onLaunch: (spec) => {
+            launches += 1;
+            if (launches <= 6) {
+              spec.onVmCreated?.(vm(`cr-diff-created-${launches}`));
+              return Promise.resolve();
+            }
+            // Launches without a VM: the Launcher is still making it.
+            return hold.promise;
+          },
+        },
+      });
+      for (let call = 0; call < 6; call += 1) await claim(core, "factory");
+      const waiting = [0, 1].map(() => {
+        const jobId = factory.enqueue();
+        return core.handle({ appId: "factory", jobId, reviewKind: "diff" });
+      });
+      await settle();
+
+      const ninth = factory.enqueue();
+      const results = await Promise.all(waiting);
+      expect(results.map((result) => result.outcome)).toStrictEqual([
+        "started",
+        "started",
+      ]);
+      const refused = await core.handle({
+        appId: "factory",
+        jobId: ninth,
+        reviewKind: "diff",
+      });
+      expect(refused.outcome).toBe("busy");
+
+      hold.resolve();
+      for (const result of results)
+        if (result.outcome === "started") await result.background;
+    });
+
+    // #802-T05
+    it("forgets a VM after ten minutes: a long outage must not turn the soft limit into a stop", async () => {
+      const { core } = build({
+        factory: { maxRunning: 1 },
+        liveVms: failing,
+        launcher: leaving(),
+      });
+      for (let call = 0; call < 4; call += 1) await claim(core, "factory");
+      expect((await claim(core, "factory")).outcome).toBe("busy");
+
+      await clock.advance(10 * 60 * 1000);
+
+      expect((await claim(core, "factory")).outcome).toBe("started");
     });
   });
 
@@ -1107,5 +1342,242 @@ describe("the cap of an app is counted by the Dispatcher too", () => {
     );
 
     expect(result.outcome).toBe("started");
+  });
+});
+
+// #759: the kind `implementer` is the factory's alone; the reviewer's entry cannot get it, whatever the engines say.
+describe("the core with the implementer kind", () => {
+  const ENGINES = ["pr-agent", "opencode", "implementer"] as const;
+
+  function buildImplementing(
+    options: {
+      factoryKinds?: AppSettings["kinds"];
+      core?: Partial<CoreSettings>;
+      launcherEngines?: Parameters<typeof createFakeLauncher>[0];
+    } = {},
+  ) {
+    const logger = recordingLogger();
+    const launcher = createFakeLauncher(
+      options.launcherEngines ?? { engines: ENGINES },
+    );
+    const recorded = recordingFetch();
+    const core = createDispatcherCore({
+      settings: settingsFor(reviewer.url, {
+        engines: ENGINES,
+        ...options.core,
+        more: [
+          factoryApp({
+            kinds: options.factoryKinds ?? ["diff", "dynamic", "implementer"],
+          }),
+        ],
+      }),
+      launcher,
+      clock,
+      logger,
+      fetch: recorded.fetch,
+      now: () => clock.now(),
+    });
+    return { core, launcher, logger, recorded };
+  }
+
+  const claimsOf = (recorded: ReturnType<typeof recordingFetch>) =>
+    recorded.calls.filter((call) => call.url.endsWith("/claim"));
+
+  // #759-T04
+  it("claims a job of the implementer kind at the factory, and at the factory only, and starts it with the kind", async () => {
+    const jobId = factory.enqueue({ reviewKind: "implementer" });
+    const { core, launcher, recorded } = buildImplementing();
+
+    const result = await handled(
+      core.handle({ appId: "factory", jobId, reviewKind: "implementer" }),
+    );
+
+    expect(result.outcome).toBe("started");
+    const claims = claimsOf(recorded);
+    expect(claims).toHaveLength(1);
+    expect(claims[0]?.url.startsWith(factory.url)).toBe(true);
+    expect(reviewer.requests()).toHaveLength(0);
+    expect(launcher.launches.map((spec) => [spec.appId, spec.kind])).toEqual([
+      ["factory", "implementer"],
+    ]);
+  });
+
+  // #759-T04
+  it("answers `not_capable` for the implementer kind named by the reviewer, with no claim and no launch, although the engine is served", async () => {
+    const jobId = reviewer.enqueue();
+    const { core, launcher, recorded, logger } = buildImplementing();
+
+    const result = await core.handle({
+      appId: "reviewer",
+      jobId,
+      reviewKind: "implementer",
+    });
+
+    expect(result).toStrictEqual({ outcome: "not_capable" });
+    expect(claimsOf(recorded)).toHaveLength(0);
+    expect(reviewer.requests()).toHaveLength(0);
+    expect(launcher.launches).toHaveLength(0);
+    expect(
+      logger.lines.some((line) => line.startsWith("warn kind_not_allowed")),
+    ).toBe(true);
+  });
+
+  // #759-T05
+  it("asks for the implementer engine in the factory's claim only because the factory's kinds name it", async () => {
+    const withKind = buildImplementing();
+    await handled(
+      withKind.core.handle({
+        appId: "factory",
+        jobId: factory.enqueue(),
+        reviewKind: "diff",
+      }),
+    );
+    const withoutKind = buildImplementing({
+      factoryKinds: ["diff", "dynamic"],
+    });
+    await handled(
+      withoutKind.core.handle({
+        appId: "factory",
+        jobId: factory.enqueue(),
+        reviewKind: "diff",
+      }),
+    );
+
+    expect(claimsOf(withKind.recorded)[0]?.body).toMatchObject({
+      engines: ["pr-agent", "opencode", "implementer"],
+    });
+    expect(claimsOf(withoutKind.recorded)[0]?.body).toMatchObject({
+      engines: ["pr-agent", "opencode"],
+    });
+  });
+
+  // #759-T05
+  it("keeps the reviewer's claim engines as they are, although the deployment serves the implementer engine", async () => {
+    const { core, recorded } = buildImplementing();
+
+    await handled(
+      core.handle({
+        appId: "reviewer",
+        jobId: reviewer.enqueue(),
+        reviewKind: "diff",
+      }),
+    );
+
+    expect(claimsOf(recorded)[0]?.body).toMatchObject({
+      engines: ["pr-agent", "opencode"],
+    });
+  });
+
+  // #759-T05
+  it("does not hand an implementer job to a claim that did not ask for the engine", async () => {
+    const jobId = factory.enqueue({ reviewKind: "implementer" });
+    const { core, launcher } = buildImplementing({
+      factoryKinds: ["diff", "dynamic"],
+    });
+
+    const result = await core.handle({
+      appId: "factory",
+      jobId,
+      reviewKind: "diff",
+    });
+
+    expect(result).toStrictEqual({ outcome: "ignored" });
+    expect(launcher.launches).toHaveLength(0);
+  });
+
+  // #759-T06
+  it("releases a claimed implementer job of the reviewer app unlaunched, logs `kind_not_allowed` at error level and makes no VM", async () => {
+    const jobId = "00000000-0000-4000-8000-0000000000f1";
+    reviewer.enqueue({ id: jobId });
+    reviewer.script("claim", [
+      {
+        status: 200,
+        body: {
+          version: 1,
+          job: {
+            id: jobId,
+            credential: `crj_${"A".repeat(43)}`,
+            reviewKind: "implementer",
+            leaseExpiresAt: "2026-10-10T12:02:00.000Z",
+            heartbeatIntervalSeconds: 30,
+          },
+        },
+      },
+    ]);
+    const { core, launcher, logger } = buildImplementing();
+
+    const done = core.handle({ appId: "reviewer", jobId, reviewKind: "diff" });
+    let result: HandleResult | undefined;
+    void done.then((answer) => {
+      result = answer;
+    });
+    for (let step = 0; step < 100 && result === undefined; step += 1) {
+      await clock.advance(1000);
+      await settle();
+    }
+
+    expect(await done).toStrictEqual({ outcome: "not_capable" });
+    expect(launcher.launches).toHaveLength(0);
+    expect(seen(reviewer, "release").length).toBeGreaterThan(0);
+    expect(
+      logger.lines.some((line) => line.startsWith("error kind_not_allowed")),
+    ).toBe(true);
+    expect(logger.text()).not.toContain("crj_");
+  });
+
+  // #759-T07
+  it.each([
+    ["3600 seconds by default", undefined, 3600],
+    ["the configured value when there is one", 7200, 7200],
+  ])(
+    "starts an implementer launch with %s, and Diff and Dynamic with the job timeout",
+    async (_name, configured, implementer) => {
+      const { core, launcher } = buildImplementing({
+        core:
+          configured === undefined
+            ? {}
+            : { implementerTimeoutSeconds: configured },
+      });
+      for (const [app, reviewKind] of [
+        ["factory", "implementer"],
+        ["factory", "dynamic"],
+        ["reviewer", "diff"],
+      ] as const)
+        await handled(
+          core.handle({
+            appId: app,
+            jobId: (app === "factory" ? factory : reviewer).enqueue({
+              reviewKind,
+            }),
+            reviewKind,
+          }),
+        );
+
+      expect(
+        launcher.launches.map((spec) => [spec.kind, spec.timeoutSeconds]),
+      ).toEqual([
+        ["implementer", implementer],
+        ["dynamic", 1200],
+        ["diff", 1200],
+      ]);
+    },
+  );
+
+  // #759-T08
+  it("passes the implementer's launch configuration to the launcher, and nothing of another kind's", async () => {
+    const config = { launcher: { vcpus: 2 } };
+    const { core, launcher } = buildImplementing({
+      core: { workerConfig: { diff: {}, dynamic: {}, implementer: config } },
+    });
+
+    await handled(
+      core.handle({
+        appId: "factory",
+        jobId: factory.enqueue({ reviewKind: "implementer" }),
+        reviewKind: "implementer",
+      }),
+    );
+
+    expect(launcher.launches[0]?.config).toStrictEqual(config);
   });
 });

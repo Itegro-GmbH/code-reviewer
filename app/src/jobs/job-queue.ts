@@ -15,8 +15,18 @@ import type { Database } from "../db/schema.ts";
 import type { WorkspaceId } from "../db/workspace-scope.ts";
 import { errorCode, FOREIGN_KEY_VIOLATION } from "../db/errors.ts";
 import { JobQueueError } from "./errors.ts";
-import { validateEnqueueInput } from "./job-input.ts";
-import type { EnqueueJobInput, EnqueueResult, Job } from "./job-types.ts";
+import {
+  CLIENT_REQUEST_ID,
+  validateEnqueueInput,
+  validateImplementerTurnInput,
+} from "./job-input.ts";
+import type {
+  EnqueueImplementerTurnInput,
+  EnqueueImplementerTurnResult,
+  EnqueueJobInput,
+  EnqueueResult,
+  Job,
+} from "./job-types.ts";
 
 export type JobQueue = {
   /**
@@ -40,6 +50,26 @@ export type JobQueue = {
    * (`JOB_REPOSITORY_UNKNOWN`), also when it belongs to another workspace.
    */
   enqueue(input: EnqueueJobInput): Promise<EnqueueResult>;
+  /**
+   * #752: accepts a task of the Implementer: the session, its first turn and the turn's job (a job of the kind `implementer`,
+   * `trigger_kind` manual, the pull request columns made by `db/implementer-job-shape.ts`) in one transaction. The job is queued for
+   * a runner with the engine `implementer`, never retried, and not touched by anything that acts on pull requests (README,
+   * "The implementer kind"). The same `clientRequestId` gives the turn it made back (`status: "existing"`) and writes nothing.
+   *
+   * Rejects with a `JobQueueError` and writes nothing when the input is not valid (`JOB_INPUT_INVALID`), the repository does
+   * not exist (`JOB_REPOSITORY_UNKNOWN`) or the deployment has no capability for the kind (`JOB_KIND_UNAVAILABLE`), and with an
+   * `ImplementerStoreError` when the branch has a session already (`IMPLEMENTER_BRANCH_TAKEN`). Does not consult the Dynamic gate.
+   */
+  enqueueImplementerTurn(
+    input: EnqueueImplementerTurnInput,
+  ): Promise<EnqueueImplementerTurnResult>;
+  /**
+   * The turn a client request id made earlier, or undefined; reads only (#791). A request id that is no valid id (not 1 to 200
+   * printable ASCII characters) has made no turn.
+   */
+  findImplementerTurn(
+    clientRequestId: string,
+  ): Promise<EnqueueImplementerTurnResult | undefined>;
   /** Cancels all waiting jobs of a repository (project deactivated); running jobs finish. */
   cancelWaitingForRepository(repositoryId: string): Promise<number>;
   /**
@@ -114,6 +144,33 @@ export function createJobQueue(
       }
       return result;
     },
+    async enqueueImplementerTurn(input) {
+      const checked = validateImplementerTurnInput(input);
+      if (!checked.ok)
+        throw new JobQueueError(
+          "JOB_INPUT_INVALID",
+          `The turn is not valid: ${checked.fieldErrors.map((error) => `${error.field} (${error.code})`).join(", ")}.`,
+          { fieldErrors: checked.fieldErrors },
+        );
+      const result = await jobs.enqueueImplementerTurn(checked.value);
+      // The same hook as for a review: the Dispatcher is woken and the check notifier told (it ignores a turn). A repeat did not
+      // change anything.
+      if (result.status === "created")
+        try {
+          options.onEnqueued?.({
+            status: "created",
+            job: result.job,
+            supersededJobIds: [],
+          });
+        } catch {
+          // The turn is queued; what a hook does after that is its own business.
+        }
+      return result;
+    },
+    findImplementerTurn: (clientRequestId) =>
+      CLIENT_REQUEST_ID.test(clientRequestId)
+        ? jobs.findImplementerTurn(clientRequestId)
+        : Promise.resolve(undefined),
     cancelWaitingForRepository: (repositoryId) =>
       jobs.cancelWaitingForRepository(repositoryId),
     cancelWaitingForReviewKindChange: (repositoryId) =>

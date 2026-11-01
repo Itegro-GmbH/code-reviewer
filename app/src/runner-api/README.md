@@ -47,10 +47,55 @@ are the same as for a single workspace.
 ## A managed Dynamic result without a cost (#553)
 
 `finishJob` (`report.ts`, shared by the runner API's `complete` and the Worker API's `result`) stores a Dynamic result of a job on
-the operator's key that claims a success and reports a usage with no cost (`usage.costUsd` null) as `dynamic_accounting_failed`
+the operator's key (and, since #754, of a turn of the Implementer) that claims a success and reports a usage with no cost (`usage.costUsd` null) as `dynamic_accounting_failed`
 (`managed-cost-guard.ts`): a managed run never settles with an unknown cost, and the code is free for the customer. A failure keeps
 the runner's code. On the workspace's own key a null cost is a success whose usage record settles with an unknown cost (minutes
 only in billing).
+
+## The result of a turn of the Implementer (#754)
+
+A turn is a job of the kind `implementer` and finishes through the same `finishJob` as every job. Its result carries the closed
+block `result.implementer` (`ImplementerResult` in the contract; `parseResult` in `requests.ts` reads it with the bounds of the
+schema and the compatibility test requires the same verdict as the contract file; the app is stricter in two ways it must be: the
+invariants the contract states in words, `pushed` never without a `headCommit` and `headCommit` the last of the commits when any are
+listed, and control characters, which are taken out of the text and ids because a NUL cannot be stored). A `null` block is refused,
+as the contract has no null for it. The block is held to the kind of the job
+(`implementer-report.ts`): a job of another kind that sends one is refused (`400 RUNNER_REQUEST_INVALID`, field
+`result.implementer`), and so is a **successful** turn without one. A failed turn may have none (the runner failed before it had a
+repository). A refused report completes nothing and changes nothing.
+
+What happens to a block that is accepted:
+
+- `redactResult` removes from the summary, the commit subjects and the file paths: the exact secrets the app knows (the LLM key of
+  the workspace and of the claim, the runner token, and the Worker credential on the Worker API; as they are and URL-encoded,
+  JSON-escaped and in base64) and everything shaped like a credential (GitHub tokens, `sk-` keys, `crj_` credentials, `Bearer`
+  lines). A secret split by zero-width or other format characters (U+200B and the like) is found too: the text is searched
+  without them, and rewritten only when something was found. What it does not catch is a secret in any other disguise (reversed,
+  spelled in pieces, look-alike letters, another encoding); the git token of a job is not known to the app, so it is caught by its
+  shape (`ghs_...`) only. On the operator's key the model ids and the provider are taken out of the summary and the
+  subjects too (`withoutManagedModel`); the paths are the repository's and stay.
+- The queue's `complete` (`runner-jobs-repository.ts`), in the transaction that ends the job, gives the session its result with
+  `recordTurnResult` (`db/implementer-turn-result.ts`): `head_commit` is the head the runner reports as pushed (`pushed: true`; the app takes the runner's word, it
+  does not read the remote), plus the summary and the saved OpenCode session, and the session is `idle`. A failed turn keeps its block, so a turn that stopped
+  at its cost limit after it pushed is a failed job with visible work. A failure without a block records nothing but the end (the
+  session still becomes `idle`, its fields unchanged).
+- A runner shut down by a redeploy reports `runner_shutdown`; the job is given back (a turn has one attempt, so it fails) and its
+  report is not stored, but the work it reports is recorded on the session in the same transaction (`release` with `result`), so a
+  push made before the SIGTERM keeps `head_commit`. A `launch_failed` ran no agent and records nothing.
+- A report of a turn may be larger than any other: `IMPLEMENTER_MAX_BODY_BYTES` (`contract.ts`, about 26 MB) covers every limit of
+  `ImplementerResult` with each character taken as the 12 bytes the runner's escaped JSON needs for a character outside the Basic
+  Multilingual Plane. The limit is read for the job of the report (runner API `complete`, Worker API `result`); Diff and Dynamic keep
+  64 KiB (`RUNNER_MAX_BODY_BYTES`), and so does any report for a job that is not there. A platform may limit a request body lower
+  before the app sees it.
+- Only the call that ended the job does this. A report with a lost lease (`409`) or one for a job that is settled already (late,
+  repeated, or with another result) changes nothing in the session. A job that ends without any report (lease expired, never
+  dispatched, no capable runner) sets the session `idle` through `idleSessionsOfEndedTurns` (#752).
+- Usage and cost are settled as for Dynamic (`settlementOfOutcome`; the call trace is stored the same way), and a managed native turn
+  that succeeds with an unknown cost, or with no usage at all, is stored as `dynamic_accounting_failed` (`managed-cost-guard.ts`; a
+  Dynamic result without usage keeps its old treatment). The members never read the
+  cost of a run on the operator's key: the Runs views take it out (`run-view.ts`), the stored usage keeps it for the settlement.
+- Billing classes of the Implementer's codes are in `billing/outcome.ts`: `agent_gave_up`, `push_rejected`, `branch_violation` and
+  `time_limit_reached` are charged (the agent ran), the codes that end a turn before it are free.
 
 ## Authentication
 
@@ -168,7 +213,7 @@ id (for which a refused job answers `204`, like any job that cannot be claimed).
    and the operator's maximum per review (#689, the admin portal, the instance setting `review_max_cost_cents`, read at
    each job through `ClaimDeps.operatorCostLimitCents`) go to a caller that names `operator_cost_limit` as two values; a caller
    that names `cost_limit` alone gets the smaller of the two in `llm.maxCostUsd`; a caller that names neither gets neither, and
-   the claim logs `carries no cost limit` (a Dynamic Review is then held only to the runner's `RUNNER_DYNAMIC_MAX_COST_USD`, a Diff Review to none); a caller that names `operator_cost_limit` alone gets the smaller of the two in `llm.operatorMaxCostUsd`. **On the operator's
+   the claim logs `carries no cost limit` (a Dynamic Review is then held only to the runner's `RUNNER_DYNAMIC_MAX_COST_USD`, a Diff Review to none; a turn of the Implementer is not given that: the runner has no limit of its own for it, so the job ends `implementer_engine_unavailable`); a caller that names `operator_cost_limit` alone gets the smaller of the two in `llm.operatorMaxCostUsd`. **On the operator's
    key** the model of the job is the entry's, never the workspace's; the capabilities of #279 are read for it, from the
    selection's provider. The entry's model is remembered with the key,
    so the result a runner reports is stripped of it (`usage.model` becomes `null`, the model ids of every entry of every
@@ -236,6 +281,54 @@ The claim only hands out a job whose review kind one of those engines can run (`
 `opencode` runs Dynamic), filtered in the atomic SQL claim. An unknown engine, a duplicate or an
 empty list is `400 RUNNER_REQUEST_INVALID`, and a body over 64 KiB is `413`, both before any job is
 claimed and any credential is created. The token check comes first.
+
+**#746, #753:** the contract names a third engine, `implementer`, and a third kind of job, `implementer` (the Implementer of the factory
+deployment, `contracts/README.md`, "The Implementer kind"). A claim that names the engine is handed a turn; a claim that does not never
+gets one (the atomic claim filters by engine), and a claimed turn for a caller without the engine is refused by `kind-guard.ts` with
+`implementer_engine_unavailable` before the guard, the key or a credential is looked at, so it is never built as a Diff job.
+
+## The claim of a turn (#753)
+
+A turn is a job of the kind `implementer` with a record in `implementer_turns` (the instruction, the model it was started with, its cost
+limit) and `implementer_sessions` (the branch, the base branch). The claim and the Worker's fetch take the road of every job (`checkJob`,
+then `buildJobInput`) with these differences:
+
+| Step          | A review job                                                  | A turn                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Options       | the review settings of the project                            | the turn's record: `{entryId}` (operator's key) or `{provider, model}` (own key), the cost limit of the turn. A choice that does not fit the key mode the claim decided ends the job (`managed_model_unavailable` / `llm_model_unavailable`); it is never moved to another model                                                                                                                                                                      |
+| Model         | `selectModel` for the kind                                    | `selectModel` for the Dynamic kind (`projectKindOf`): the entry must serve `dynamic`; the model must be native (entry and cost policy), else `implementer_config_invalid`. A catalog provider on the workspace's own key is held to the address the workspace's projects pinned for it (`ClaimDeps.pinnedAddresses`): one pin, exactly that address; several different pins, none (`provider_address_changed`); no pin, the catalog's trusted address |
+| Platform read | the pull request (`pr_not_found`, `pull_request_closed`)      | none: no pull request is read. The repository and its connection must be active (`git_connection_disabled`) and the installation must hold `contents: write` (`installationPermissions`, else `git_write_not_granted`, ended for good)                                                                                                                                                                                                                |
+| Token         | `jobAccess` (`contents: read`)                                | `implementerAccess` (`contents: write`, `metadata: read`, one repository). Behind the capability: a deployment without `implementer` gets `INTEGRATION_CAPABILITY_ABSENT`, mapped to `implementer_engine_unavailable`, before GitHub is asked                                                                                                                                                                                                         |
+| Input         | `prUrl`, `command`, `git`, `llm`, `env` (+ `dynamic`, `base`) | `reviewKind: implementer`, `implementer {repo {fullName, cloneUrl}, baseBranch, branch, instruction, limits {timeLimitSeconds: 3600}, cost, modelEntry}`, `git`, `llm` (`maxTokens`, the cost limit by `jobCostLimit` as for Dynamic), `env: {}`                                                                                                                                                                                                      |
+
+`cloneUrl` is the repository's own address with `.git`, and must satisfy the rule of the runner's workspace (https, a host, no credential,
+query or fragment); an address that does not ends the job `implementer_config_invalid` before any credential exists.
+
+A turn needs a runner that names `cost_limit` or `operator_cost_limit` (and `dynamic_cost_policy`): the cost limit is the brake of a turn and
+the runner has no limit of its own for this kind, so a caller that names neither ends the job `implementer_engine_unavailable`, as for an
+engine that cannot run the kind, before any credential exists.
+
+A failure that may pass (GitHub down while the installation is read or the token is made) gives the job back with `Retry-After`.
+A turn is never run twice (`maxAttempts` 1), so it is put back in the queue only while **no input was ever handed to a Worker**: the
+write tokens are remembered before an input leaves, so a turn whose ledger is empty has handed out none (`noInputHandedOut`, asked
+before the call builds anything), and its release carries `beforeStart`. After a first fetch delivered an input, a later failing fetch
+ends the turn like any lost attempt of it, because the Worker of the first fetch may be running.
+
+**The write token ends with the turn.** The token lives up to an hour and nothing may keep it alive after its job
+(`write-token.ts`). `implementerAccess`'s counterpart is `revokeImplementerAccess` (`DELETE /installation/token`, not behind the
+capability, never throws). It answers whether the token is off: `true` for a 2xx or a 401 (switched off before, or expired), `false` for
+a server error, a rate limit, a refusal, no answer in 3 s or no connection. Each token the claim hands out is remembered sealed with the
+time it expires next to the keys of the job (`job_claimed_keys`, `gitTokens`, rows changed under `FOR UPDATE`) before it leaves, and is
+forgotten **only after the platform said it is off, or once it has expired on its own**. A token that could not be switched off stays and is
+tried again. It is switched off:
+
+- when the fetch or claim fails after the token was made and before the input reached a Worker (`revokeUndelivered`: exactly that token,
+  with the value in hand, even if the ledger cannot be written; it is also what a failure after the mint inside `buildJobInput` does);
+- when the turn is over, however it ended: the stored result (success or failure, also a repeated report), a Worker or a Dispatcher giving
+  the job back, and every end of a claim of the queue (`onClaimsEnded`: the reaper, a stop, the hard timeout, a cancel), after the
+  response (`revokeAllOf`, `revokeEnded`);
+- by the retry: the maintenance between requests (`opportunistic.ts`) and the sweep (step `write_tokens`) look at the turns that ended
+  lately and still hold a token, until the token expires. Both exist only in a deployment with the capability `implementer`.
 
 The body may also name `features` (#279): `["dynamic_capabilities"]` says the runner reads
 `dynamic.capabilities`. Unknown names are ignored; a list that is not a list of plain names is

@@ -15,9 +15,18 @@
 import { createPublicKey, generateKeyPairSync } from "node:crypto";
 import { defineConfig, devices } from "@playwright/test";
 import { e2eEnv, llmEnv } from "./e2e/helpers/e2e-env";
-import { hostedDatabaseUrls, hostedEnv } from "./e2e/helpers/hosted-env";
+import {
+  factoryDatabaseUrls,
+  factoryEnv,
+  hostedDatabaseUrls,
+  hostedEnv,
+} from "./e2e/helpers/hosted-env";
 
-for (const port of [hostedEnv.appPort, hostedEnv.dispatcherPort])
+for (const port of [
+  hostedEnv.appPort,
+  hostedEnv.dispatcherPort,
+  factoryEnv.appPort,
+])
   if (port === 3000 || port === 3100)
     throw new Error(
       `The lane must not use port ${String(port)}: other work runs there. Set E2E_PORT to a private one.`,
@@ -42,6 +51,7 @@ const browser = {
   baseURL: hostedEnv.appUrl,
 };
 const database = hostedDatabaseUrls();
+const factoryDatabase = factoryDatabaseUrls();
 
 export default defineConfig({
   testDir: "e2e/dynamic",
@@ -86,6 +96,23 @@ export default defineConfig({
       use: browser,
       testMatch: /hosted-dynamic\.e2e\.ts$/,
       dependencies: ["prepare", "guard"],
+    },
+    // The second app, the factory's, is set up before its journey (#767).
+    {
+      name: "prepare-factory",
+      use: browser,
+      testMatch: /prepare-factory\.e2e\.ts$/,
+      dependencies: ["prepare"],
+    },
+    // The Implementer's journeys (#767): the factory app, the same Dispatcher process type serving both apps, the Worker
+    // with the Implementer's profile, git and the pinned OpenCode as the engine user. After the hosted journey, so that
+    // the two never run a Dispatcher next to each other (one port, one engine user), and after the guard's positive
+    // controls, whose counters it reads at its end.
+    {
+      name: "implementer",
+      use: { ...browser, baseURL: factoryEnv.appUrl },
+      testMatch: /hosted-implementer\.e2e\.ts$/,
+      dependencies: ["prepare-factory", "guard", "hosted"],
     },
   ],
   webServer: [
@@ -143,6 +170,46 @@ export default defineConfig({
         NEXT_TELEMETRY_DISABLED: "1",
       },
       url: hostedEnv.appUrl,
+      reuseExistingServer: false,
+      timeout: 60_000,
+    },
+    {
+      // The second app: the factory product with the Implementer, over a database of its own, from the same build (the
+      // product is read when the server starts, `src/capabilities/shared.ts`). A queued job wakes the Dispatcher with a
+      // signed call, as in the first app; the credentials differ from the first app's.
+      command:
+        `rm -rf ${factoryEnv.directory} && mkdir -p ${factoryEnv.directory} && ` +
+        "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON e2e/prepare-database.ts && " +
+        "node --conditions=react-server --disable-warning=MODULE_TYPELESS_PACKAGE_JSON src/db/migrate-cli.ts && " +
+        `./node_modules/.bin/next start --hostname 127.0.0.1 --keepAliveTimeout 120000 --port ${String(factoryEnv.appPort)} > ${factoryEnv.logFiles.app} 2>&1`,
+      env: {
+        APP_SECRET: e2eEnv.appSecret,
+        PRODUCT_ID: "factory",
+        PRODUCT_CAPABILITIES: "review,dynamic-review,implementer",
+        MODELS_DEV_FETCH: "off",
+        GITHUB_OAUTH_BASE_URL: e2eEnv.githubUrl,
+        GITHUB_API_BASE_URL: e2eEnv.githubUrl,
+        RUNNER_TOKEN: factoryEnv.dispatcherToken,
+        ALLOW_TEST_GITHUB_ENDPOINTS: "true",
+        E2E_ADMIN_DATABASE_URL: factoryDatabase.admin,
+        E2E_DATABASE_NAME: factoryDatabase.name,
+        DATABASE_URL: factoryDatabase.app,
+        DATABASE_URL_MIGRATE: factoryDatabase.app,
+        BETTER_AUTH_URL: factoryEnv.appUrl,
+        RUNNER_DISPATCH: "webhook",
+        RUNNER_WEBHOOK_URL: `${hostedEnv.dispatcherUrl}/dispatch`,
+        RUNNER_WEBHOOK_KEY_ID: factoryEnv.webhookKeyId,
+        RUNNER_WEBHOOK_SECRET: factoryEnv.webhookSecret,
+        // The pool of the factory is one Worker, here and in the Dispatcher's entry (`maxRunning`): both must be equal.
+        RUNNER_DISPATCH_MAX_RUNNING: "1",
+        CRON_SECRET: factoryEnv.cronSecret,
+        LLM_API_BASE_URL: e2eEnv.modelLlmFakeApiUrl,
+        ALLOW_TEST_LLM_ENDPOINTS: "true",
+        LLM_MODEL: llmEnv.model,
+        LLM_MAX_TOKENS: llmEnv.maxTokens,
+        NEXT_TELEMETRY_DISABLED: "1",
+      },
+      url: factoryEnv.appUrl,
       reuseExistingServer: false,
       timeout: 60_000,
     },

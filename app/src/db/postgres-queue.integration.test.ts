@@ -249,6 +249,27 @@ describe("the job queue on Postgres", () => {
     expect(dual?.job.id).toBe(dynamic.id);
   });
 
+  // #746-T07: the engine of the Implementer is in the contract before its jobs are in the queue; naming it alone claims
+  // nothing, and naming it next to the others changes nothing for them.
+  it("gives a runner that names only the implementer engine no job, and leaves the others as they were", async () => {
+    const postgres = await createTestDatabase();
+    const fixture = await createJobQueueFixture({ database: postgres.db });
+    const diff = await fixture.enqueueNew({
+      prNumber: 7,
+      headSha: sha("a"),
+      reviewKind: "diff",
+    });
+
+    const alone = await fixture.queue.claimNext("runner-a", ["implementer"]);
+    const withOthers = await fixture.queue.claimNext("runner-b", [
+      "pr-agent",
+      "implementer",
+    ]);
+
+    expect(alone).toBeNull();
+    expect(withOthers?.job.id).toBe(diff.id);
+  });
+
   // #195-T02, #195 finding 9
   it("never gives two capabilities a job of one pull request across kinds", async () => {
     const postgres = await createTestDatabase();

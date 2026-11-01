@@ -5,7 +5,7 @@
 // one tag) only narrows the listing and is never the check. Everything else in the project is not ours: the golden
 // snapshot's builder and check VMs (they carry the same `app` tag, a `role` tag and `code-reviewer-golden-` names),
 // another deployment's VMs, a person's. A VM that does not match is not touched, not asked about and not logged by name.
-import { LEGACY_APP_ID } from "../core/types.ts";
+import { KNOWN_KINDS, LEGACY_APP_ID } from "../core/types.ts";
 import type { ListedVm } from "../launchers/sandbox-service.ts";
 
 /** The tag every VM of ours carries, and the one the listing is narrowed by. */
@@ -18,8 +18,10 @@ export const TENANT_TAG = "tenant";
 /** The name prefix of every VM of ours (job VMs and canaries); the listing is narrowed by it. */
 export const NAME_PREFIX = "cr-";
 
-const JOB_NAME =
-  /^cr-(diff|dynamic)-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-[0-9a-f]{8}$/;
+// The kinds are the Dispatcher's own list, so a kind that is served can always be stopped and reaped (#759).
+const JOB_NAME = new RegExp(
+  `^cr-(${KNOWN_KINDS.join("|")})-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-[0-9a-f]{8}$`,
+);
 const CANARY_NAME = /^cr-canary-[0-9a-f]{8}$/;
 
 export type VmShape =

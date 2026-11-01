@@ -1,0 +1,71 @@
+{
+  "reviewKind": "implementer",
+  "implementer": {
+    "repo": {
+      "fullName": "acme/widgets",
+      "cloneUrl": "https://github.com/acme/widgets.git"
+    },
+    "baseBranch": "main",
+    "branch": "implementer/a1b2c3",
+    "instruction": "Add a retry with backoff to the webhook sender and cover it with a test.",
+    "limits": {
+      "timeLimitSeconds": 3600
+    },
+    "cost": {
+      "keyMode": "managed",
+      "priceBook": {
+        "input": "3000000",
+        "output": "15000000",
+        "cacheRead": "300000",
+        "cacheWrite5m": "3750000",
+        "cacheWrite1h": "6000000",
+        "reasoning": null,
+        "inputAudio": null,
+        "outputAudio": null,
+        "contextOver200k": null,
+        "tiers": []
+      },
+      "maxTotalTokens": null
+    },
+    "modelEntry": {
+      "version": 1,
+      "providerId": "openrouter",
+      "npm": "@openrouter/ai-sdk-provider",
+      "family": "openai-chat",
+      "authHeader": "Authorization",
+      "upstreamBaseUrl": "https://openrouter.ai/api/v1",
+      "modelId": "deepseek/deepseek-v4.1-flash",
+      "model": {
+        "name": "DeepSeek V4.1 Flash",
+        "status": "active",
+        "tool_call": true,
+        "reasoning": true,
+        "temperature": true,
+        "limit": {
+          "context": 1000000,
+          "output": 384000
+        },
+        "modalities": {
+          "input": ["text"],
+          "output": ["text"]
+        },
+        "interleaved": {
+          "field": "reasoning_content"
+        }
+      }
+    }
+  },
+  "git": {
+    "provider": "github",
+    "baseUrl": "https://api.github.com",
+    "token": "example-git-write-token",
+    "botLogin": "code-reviewer[bot]"
+  },
+  "llm": {
+    "provider": "openrouter",
+    "model": "deepseek/deepseek-v4.1-flash",
+    "apiKey": "example-llm-key",
+    "maxTokens": 100000
+  },
+  "env": {}
+}

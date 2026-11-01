@@ -119,3 +119,67 @@ describe("a managed Dynamic result without a known cost", () => {
     ).toBe(unknown);
   });
 });
+
+describe("a managed Implementer turn without a known cost (#754)", () => {
+  const MANAGED_IMPLEMENTER = {
+    managed: true,
+    native: true,
+    reviewKind: "implementer",
+  } as const;
+
+  // #754-T05
+  it("is not a success either: the turn ends as dynamic_accounting_failed, which is our fault and free", () => {
+    expect(
+      withoutUnaccountedManagedSuccess(resultOf(), MANAGED_IMPLEMENTER),
+    ).toMatchObject({ ok: false, errorCode: "dynamic_accounting_failed" });
+  });
+
+  // #754: a managed turn that reports no usage at all would settle with no cost while the operator pays the model.
+  it("is not a success when it reports no usage at all, which Dynamic's pinned behaviour still allows", () => {
+    const bare = resultOf({ usage: null });
+
+    expect(
+      withoutUnaccountedManagedSuccess(bare, MANAGED_IMPLEMENTER),
+    ).toMatchObject({ ok: false, errorCode: "dynamic_accounting_failed" });
+    expect(withoutUnaccountedManagedSuccess(bare, MANAGED_DYNAMIC)).toBe(bare);
+    expect(
+      withoutUnaccountedManagedSuccess(bare, {
+        ...MANAGED_IMPLEMENTER,
+        managed: false,
+      }),
+    ).toBe(bare);
+  });
+
+  // #754-T05
+  it("leaves a turn on the customer's own key, a failure and a known cost alone", () => {
+    const own = resultOf();
+    const failed = resultOf({ ok: false, errorCode: "agent_gave_up" });
+    const priced = resultOf({
+      usage: { ...resultOf().usage!, costUsd: 0.2 },
+    });
+
+    expect(
+      withoutUnaccountedManagedSuccess(own, {
+        ...MANAGED_IMPLEMENTER,
+        managed: false,
+      }),
+    ).toBe(own);
+    expect(withoutUnaccountedManagedSuccess(failed, MANAGED_IMPLEMENTER)).toBe(
+      failed,
+    );
+    expect(withoutUnaccountedManagedSuccess(priced, MANAGED_IMPLEMENTER)).toBe(
+      priced,
+    );
+  });
+
+  // #754-T08
+  it("does not reach a Diff Review, which was never held to the rule", () => {
+    const diff = resultOf();
+    expect(
+      withoutUnaccountedManagedSuccess(diff, {
+        ...MANAGED_IMPLEMENTER,
+        reviewKind: "diff",
+      }),
+    ).toBe(diff);
+  });
+});

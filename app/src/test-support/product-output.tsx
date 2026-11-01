@@ -4,6 +4,8 @@
 // and the brand, the check run and the verdict, the GitHub App manifest, the refusal notices and the message modules. The
 // golden test pins it for code-review.com; the brand-leak test renders it for every other product and looks for a foreign name.
 import { renderToStaticMarkup } from "react-dom/server";
+import { createCapabilitySet } from "../capabilities/capability.ts";
+import { PRODUCTS } from "../capabilities/products.ts";
 import { Brand, ProductName } from "../components/brand.tsx";
 import * as modelChoice from "../copy/model-choice.ts";
 import type { ProductIdentity } from "../product-identity/identity.ts";
@@ -97,6 +99,8 @@ function texts(product: ProductIdentity) {
     },
     manifest: {
       built: buildAppManifest({
+        // The words of the manifest do not depend on the product; its permissions do not depend on the words.
+        capabilities: createCapabilitySet(PRODUCTS["code-review-com"].default),
         product: product,
         publicUrl: url,
         tenancy: "multi",

@@ -16,6 +16,7 @@ import {
   renderDockerRunArguments,
 } from "./container.ts";
 import {
+  IMPLEMENTER_CONTAINER_SPEC,
   SANDBOX_LAUNCHER_ADDITIONS,
   WORKER_CONTAINER_SPEC,
 } from "./container-spec.ts";
@@ -136,6 +137,44 @@ describe("the Sandbox-Launcher in local mode", () => {
     expect(cwd?.trim()).toContain(
       service.directories.get(service.created[0] ?? "") ?? "?",
     );
+  });
+
+  // #760-T06
+  it("runs an implementer job with the profile: the work volume is made in the VM, then the container with the volume mounted", async () => {
+    const { launcher: sandbox, local: service } = launcher(2);
+
+    await sandbox.launch(
+      { ...spec(JOB_A, CREDENTIAL_A), kind: "implementer" },
+      new AbortController().signal,
+    );
+
+    const [args] = await recorded(".args");
+    expect(args?.trimEnd().split("\n")).toStrictEqual(
+      renderDockerRunArguments(IMPLEMENTER_CONTAINER_SPEC, {
+        image: IMAGE_ID,
+        name: `code-reviewer-worker-${JOB_A}`,
+        workVolume: `code-reviewer-work-${JOB_A}`,
+        environment: {
+          HOME: "/home/runner",
+          RUNNER_DIFF_JOB_USER: "10001:10001",
+          RUNNER_IMPLEMENTER_EGRESS_PORT: "10182",
+          RUNNER_IMPLEMENTER_NETWORK: "registries",
+          RUNNER_IMPLEMENTER_WORK_DIR: "/work",
+          RUNNER_JOB_TIMEOUT_SECONDS: "1200",
+        },
+        command: [ENTRY_MODE_WORKER_ONCE],
+        overrides: { memory: { limit: "3g", reservation: "2560m" } },
+        additions: SANDBOX_LAUNCHER_ADDITIONS,
+      }),
+    );
+    // The daemon's client was asked for the volume before the container ran.
+    expect(await readFile(join(records, "commands.log"), "utf8")).toContain(
+      `volume create --driver local --opt type=none --opt device=/var/lib/code-reviewer-work/code-reviewer-work-${JOB_A} --opt o=bind code-reviewer-work-${JOB_A}`,
+    );
+    // Local mode has no mounts of its own: the host steps succeed without a trace in the "VM" directory.
+    expect(
+      await readdir(service.directories.get(service.created[0] ?? "") ?? ""),
+    ).toStrictEqual([]);
   });
 
   // #329-T02
@@ -298,5 +337,23 @@ describe("the Sandbox-Launcher in local mode", () => {
     expect(
       await service.list({ namePrefix: "cr-diff-", tags: {} }),
     ).toStrictEqual([]);
+  });
+
+  // #802-T10
+  it("deletes a VM by name: it is stopped and no longer listed, and deleting it again is not an error", async () => {
+    const { launcher: sandbox, local: service } = launcher(2);
+    await sandbox.launch(
+      { ...spec(JOB_A, CREDENTIAL_A), kind: "dynamic" },
+      new AbortController().signal,
+    );
+    const name = service.created[0] ?? "";
+
+    await service.delete(name);
+    await service.delete(name);
+
+    expect(service.running()).toStrictEqual([]);
+    expect(await service.list({ namePrefix: "cr-", tags: {} })).toStrictEqual(
+      [],
+    );
   });
 });

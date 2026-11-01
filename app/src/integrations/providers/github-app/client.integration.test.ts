@@ -53,6 +53,14 @@ describe("listing installations", () => {
 
     const installations = await client.listInstallations();
 
+    // The permissions an installation holds (#749) are what the app is granted unless its owner accepted less.
+    const permissions = {
+      checks: "write",
+      contents: "read",
+      issues: "write",
+      metadata: "read",
+      pull_requests: "write",
+    };
     expect(installations).toEqual([
       {
         id: "4242",
@@ -60,6 +68,7 @@ describe("listing installations", () => {
         accountId: 5001,
         accountType: "Organization",
         suspended: false,
+        permissions,
       },
       {
         id: "4300",
@@ -67,6 +76,7 @@ describe("listing installations", () => {
         accountId: 583231,
         accountType: "User",
         suspended: true,
+        permissions,
       },
     ]);
   });
@@ -83,6 +93,21 @@ describe("listing installations", () => {
 
     expect(installations).toHaveLength(131);
     expect(new Set(installations.map((item) => item.id)).size).toBe(131);
+  });
+
+  // #749-T06
+  it("reads the permissions an installation accepted, which can be less than the app is granted", async () => {
+    const { fake, client } = await setup();
+    fake.setAppPermissions({ metadata: "read", contents: "write" });
+    fake.setInstallationPermissions(4242, {
+      metadata: "read",
+      contents: "read",
+    });
+
+    expect((await client.getInstallation("4242"))?.permissions).toEqual({
+      metadata: "read",
+      contents: "read",
+    });
   });
 
   it("returns null for an installation GitHub does not know", async () => {

@@ -440,9 +440,38 @@ jobs:
         env:
           DEPLOYMENT_URL: ${{ needs.stage-factory.outputs.url }}
           EXPECTED_PRODUCT: factory
-          EXPECTED_CAPABILITIES: dynamic-review,review
+          # The capability set of the factory's PRODUCT_CAPABILITIES. The repository variable changes together with
+          # that setting (docs/deployment-vercel.md, section 5.8); unset or empty it is the set of today.
+          EXPECTED_CAPABILITIES: ${{ vars.FACTORY_EXPECTED_CAPABILITIES || 'dynamic-review,review' }}
         run: |
           set -euo pipefail
+
+          # The value comes from a repository variable: check its shape before anything is requested, and never
+          # print it unchanged (a workflow command or a line break in it must not reach the log).
+          KNOWN_CAPABILITIES="billing dynamic-review implementer review"
+          capability_error() {
+            local shown
+            shown="$(printf '%s' "${EXPECTED_CAPABILITIES}" | tr -c 'a-z0-9,-' '?' | cut -c1-120)"
+            echo "::error::FACTORY_EXPECTED_CAPABILITIES is malformed: $1 (value: ${shown}). It must be the factory's capability names, comma separated, sorted alphabetically, without spaces, empty entries or duplicates. Nothing is promoted."
+            exit 1
+          }
+          if ! [[ "${EXPECTED_CAPABILITIES}" =~ ^[a-z-]+(,[a-z-]+)*$ ]]; then
+            capability_error "it has a character, a space or an empty entry that is not allowed"
+          fi
+          previous=""
+          IFS=',' read -r -a entries <<< "${EXPECTED_CAPABILITIES}"
+          for entry in "${entries[@]}"; do
+            if ! [[ " ${KNOWN_CAPABILITIES} " == *" ${entry} "* ]]; then
+              capability_error "an entry is not a known capability name"
+            fi
+            if [ "${entry}" = "${previous}" ]; then
+              capability_error "an entry is listed twice"
+            fi
+            if [ -n "${previous}" ] && [[ "${entry}" < "${previous}" ]]; then
+              capability_error "the entries are not sorted alphabetically"
+            fi
+            previous="${entry}"
+          done
 
           if ! [[ "${DEPLOYMENT_URL}" =~ ^https://[a-z0-9-]+\.vercel\.app$ ]]; then
             echo "::error::The staged factory App has no deployment address."

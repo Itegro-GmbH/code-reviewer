@@ -54,7 +54,7 @@ export function AppShell({
           {/* Only where a sidebar exists: a page outside a workspace has none, and the admin portal
               brings its own trigger next to the admin sidebar. */}
           <Suspense fallback={null}>
-            <WorkspaceSidebarTrigger />
+            <WorkspaceSidebarTrigger product={product} />
           </Suspense>
           <Link
             href="/"
@@ -73,7 +73,7 @@ export function AppShell({
       </header>
       <div className="mx-auto flex min-h-0 w-full max-w-page flex-1 gap-8 px-4 pt-12 pb-24 md:px-8">
         <Suspense fallback={null}>
-          <CurrentWorkspaceSidebar />
+          <CurrentWorkspaceSidebar product={product} />
         </Suspense>
         <SidebarInset
           id={mainId}

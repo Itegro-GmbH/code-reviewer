@@ -1,0 +1,18 @@
+{
+  "name": "git",
+  "repository": "https://github.com/git/git",
+  "version": "2.53.0",
+  "tag": "v2.53.0",
+  "commit": "67ad42147a7acc2af6074753ebd03d904476118f",
+  "license": "GPL-2.0-only",
+  "licenseUrl": "https://github.com/git/git/blob/v2.53.0/COPYING",
+  "notes": "Built from the unmodified upstream source tarball in a builder stage of runner/Dockerfile (Debian bookworm ships git 2.39; the Implementer's branch guard needs 2.53 or newer, which shows a branch switch to the reference-transaction hook). The archive digest equals the entry for git-2.53.0.tar.xz in the signed sha256sums.asc that kernel.org publishes next to the release. The commit is the one the annotated tag v2.53.0 points at. There is no pinned executable: it is a build result. Only linux-x64 is pinned; another platform needs its own digest here.",
+  "platforms": {
+    "linux-x64": {
+      "asset": "git-2.53.0.tar.xz",
+      "url": "https://mirrors.edge.kernel.org/pub/software/scm/git/git-2.53.0.tar.xz",
+      "archiveBytes": 7993096,
+      "archiveSha256": "5818bd7d80b061bbbdfec8a433d609dc8818a05991f731ffc4a561e2ca18c653"
+    }
+  }
+}

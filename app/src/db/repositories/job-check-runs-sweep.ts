@@ -31,6 +31,8 @@ export async function listJobsWithCheckWork(
     .selectFrom("job_check_runs")
     .innerJoin("jobs", "jobs.id", "job_check_runs.job_id")
     .select(["jobs.id as jobId", "jobs.workspace_id as workspaceId"])
+    // #752: a turn of the Implementer (no pull request) never has a check run, here or below.
+    .where("jobs.review_kind", "<>", "implementer")
     .where("job_check_runs.state", "=", "active")
     .where("job_check_runs.next_attempt_at", "<=", timestamp)
     .where((eb) =>
@@ -57,6 +59,7 @@ export async function listJobsWithCheckWork(
     .leftJoin("job_check_runs", "job_check_runs.job_id", "jobs.id")
     .select(["jobs.id as jobId", "jobs.workspace_id as workspaceId"])
     .where("job_check_runs.job_id", "is", null)
+    .where("jobs.review_kind", "<>", "implementer")
     .where("jobs.status", "in", ["queued", "running"])
     .orderBy("jobs.updated_at")
     .orderBy("jobs.id")

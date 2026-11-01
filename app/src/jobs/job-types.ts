@@ -7,8 +7,13 @@ import type {
   StoredReviewCommand,
 } from "../integrations/types.ts";
 import type { JsonValue } from "../integrations/types.ts";
-import type { ProjectReviewKind } from "../job-kind/job-kind.ts";
+import type { JobKind, ProjectReviewKind } from "../job-kind/job-kind.ts";
 import type { JobStatus } from "../db/job-status.ts";
+import type { ModelChoice } from "../db/implementer-model-choice.ts";
+import type {
+  StoredImplementerSession,
+  StoredImplementerTurn,
+} from "../db/repositories/implementer-repository.ts";
 
 /**
  * What started a job. `webhook` is automatic (a pull request was opened or updated); `comment` is a
@@ -33,7 +38,7 @@ export type Job = {
    * read-only agent. It is pinned when the job is enqueued from the project's settings, so a later
    * kind change cancels this waiting job instead of running it under the wrong engine.
    */
-  reviewKind: ProjectReviewKind;
+  reviewKind: JobKind;
   /** The command of the job. Historical rows may still carry a removed one (#203). */
   command: StoredReviewCommand;
   /** Text after the command; an empty string when there is none. Untrusted: it comes from a comment. */
@@ -94,6 +99,40 @@ export type EnqueueJobInput = {
   runAfter?: Date;
 };
 
+/**
+ * What is known when a task of the Implementer is accepted (#752). The pull request columns of the job are not input: they are
+ * made from the slot, the branch and `baseSha` by `db/implementer-job-shape.ts`, the one place that writes them.
+ */
+export type EnqueueImplementerTurnInput = {
+  repositoryId: string;
+  baseBranch: string;
+  /** The tip of the base branch read when the task was accepted: 40 hexadecimal characters. */
+  baseSha: string;
+  /** The new branch; one session per branch and repository. */
+  branch: string;
+  instruction: string;
+  modelChoice: ModelChoice;
+  /** The customer's cost limit for the turn in cents; null when none was asked for. */
+  costLimitCents: number | null;
+  /** The user who started the task. */
+  createdBy: string;
+  /** The login of that person on the provider, for the job's `actor_login`. */
+  actorLogin: string;
+  /**
+   * Chosen by the caller for one submit and repeated by every retry of it: the same id gives the same turn back (the job's
+   * delivery id is made from it) and writes nothing new. 1 to 200 printable ASCII characters.
+   */
+  clientRequestId: string;
+};
+
+export type EnqueueImplementerTurnResult = {
+  /** `existing`: the request was accepted before, and this is what it made; nothing was written now. */
+  status: "created" | "existing";
+  job: Job;
+  session: StoredImplementerSession;
+  turn: StoredImplementerTurn;
+};
+
 /** Why `enqueue` returned an existing job instead of creating one. */
 export const ENQUEUE_EXISTING_REASONS = [
   /** The same delivery was enqueued before (a redelivery or a second request). */
@@ -115,6 +154,22 @@ export type EnqueueResult =
       supersededJobIds: string[];
     }
   | { status: "existing"; job: Job; reason: EnqueueExistingReason };
+
+/**
+ * What else a release can say. `result` (#754): the checked and cleaned result a runner reported when it was shut down; if the
+ * job is a turn of the Implementer and this release ends it (its one attempt is used), the work it reports (the pushed head, the
+ * summary, the saved agent session) is recorded on its session in the same transaction. Without it nothing is recorded.
+ */
+export type ReleaseOptions = {
+  retryAt?: Date;
+  result?: unknown;
+  /**
+   * #753: the input of the job never reached a Worker (the claim could not build it): nothing ran and nothing was pushed, so a
+   * turn of the Implementer waits again like any job instead of failing on its first lost attempt. Only the claim says so, and
+   * only while no input was handed out (`claim.ts`, `giveBack`).
+   */
+  beforeStart?: boolean;
+};
 
 /** What a runner reports when it is done with a job. */
 export type JobOutcome =

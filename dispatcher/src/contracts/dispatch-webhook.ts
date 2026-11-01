@@ -19,9 +19,9 @@ export interface DispatchWebhook {
    */
   jobId: string;
   /**
-   * The review kind a job was queued for (#195), pinned at enqueue time. Absent on a legacy Diff payload means diff. A runner is only handed a job whose kind one of its engines can run, and a Dynamic job is never silently run by PR-Agent.
+   * The review kind a job was queued for (#195), pinned at enqueue time. Absent on a legacy Diff payload means diff. A runner is only handed a job whose kind one of its engines can run, and a Dynamic job is never silently run by PR-Agent. #746: `implementer` is a turn of the Implementer (the factory deployment only): its input has no pull request (`prUrl`, `command`, `base` and `dynamic` are absent) and carries the closed `implementer` object; only a runner that advertised the engine `implementer` is handed one, and a job of this kind is never run by another engine.
    */
-  reviewKind: "diff" | "dynamic";
+  reviewKind: "diff" | "dynamic" | "implementer";
   /**
    * The number of the attempt the job is on (1 for the first).
    */

@@ -14,13 +14,15 @@ import { builtInProjectDynamicSettings } from "../review-settings/settings.ts";
 import { managedModelsOf } from "./managed-models.ts";
 import { createUsageRecordsRepository } from "../db/repositories/usage-records-repository.ts";
 import { createJobsRepository } from "../db/repositories/jobs-repository.ts";
+import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
+import { createPinnedAddressReader } from "../review-settings/pinned-addresses.ts";
+import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
 import { createJobVmRunsRepository } from "../db/repositories/job-vm-runs-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { getDatabase } from "../db/startup.ts";
 import { integrationRegistry } from "../integrations/registry.ts";
 import { jobEnded, touched } from "../dispatch/maintenance-shared.ts";
 import { getRunnerQueue } from "../jobs/shared.ts";
-import { resolveAppSecret } from "../crypto/app-secret.ts";
 import { readEntitlements } from "../workspaces/effective-entitlements.ts";
 import { getWorkspaceLlm, modelCapabilities } from "../llm/shared.ts";
 import { getNativeCost } from "../native-cost/shared.ts";
@@ -36,27 +38,14 @@ import {
   type WorkerApi,
   type WorkerApiDeps,
 } from "./worker-api.ts";
-import { createClaimedKeys, type ClaimedKeys } from "./claimed-keys.ts";
 import { createProjectClaimGuard } from "./project-claim-guard.ts";
 import { HEARTBEAT_INTERVAL_SECONDS } from "./contract.ts";
 import { createReviewSettingsJobOptionsSource } from "./review-settings-job-options.ts";
 import { consoleRunnerApiLogger, describeError } from "./logger.ts";
 import { createKnownSecrets } from "./known-secrets.ts";
+import { getClaimedKeys, getWriteTokens } from "./claimed-keys-shared.ts";
 import { errorResponse } from "./responses.ts";
 import { configuredRunnerToken } from "./token-auth.ts";
-
-// The key each job was handed lives in the database (encrypted), so any app instance can mask a result.
-function getClaimedKeys(): ClaimedKeys {
-  return createClaimedKeys({
-    db: getDatabase(),
-    appSecret: () => {
-      const resolved = resolveAppSecret(process.env);
-      // The server does not start without it (src/auth/startup.ts); this is the second line.
-      if (!resolved.ok) throw new Error(resolved.problem);
-      return resolved.secret;
-    },
-  });
-}
 
 /**
  * The collaborators both APIs share: the runner API (claim, heartbeat, complete) and the Worker API
@@ -74,14 +63,18 @@ function sharedDeps(): WorkerApiDeps {
   });
   const llm = getWorkspaceLlm();
   const nativeCost = getNativeCost();
+  const claimedKeys = getClaimedKeys();
+  const writeTokens = getWriteTokens();
+  const repositories = (workspaceId: string) =>
+    createRepositoriesRepository(db, workspaceId);
+  const integrations = (workspaceId: string) =>
+    createIntegrationsRepository(db, workspaceId);
   return {
     // Runners serve the whole instance: the queue is not scoped, and everything the claim looks up
     // for a job is looked up in the job's own workspace.
     queue: getRunnerQueue(),
-    repositories: (workspaceId) =>
-      createRepositoriesRepository(db, workspaceId),
-    integrations: (workspaceId) =>
-      createIntegrationsRepository(db, workspaceId),
+    repositories,
+    integrations,
     // #199: the exact head of the last successful Dynamic review of the job's pull request; the
     // lookup is scoped to the job's own workspace.
     previousReviewedSha: (job) =>
@@ -114,6 +107,11 @@ function sharedDeps(): WorkerApiDeps {
     // The standing of the job's workspace, asked by the Worker's fetch before it hands out a key (#276), and its model access.
     entitlementsFor: (workspaceId) => readEntitlements(db, workspaceId),
     // Whose key the job runs on: what its claim decided, in its usage record (#496); scoped to the job's own workspace.
+    // #753: the turn an implementer job runs, from the job's own workspace.
+    implementerTurn: (job) =>
+      createImplementerRepository(getDatabase(), job.workspaceId).getTurnByJob(
+        job.id,
+      ),
     claimedKeyMode: async (job) =>
       (await createUsageRecordsRepository(db, job.workspaceId).get(job.id))
         ?.keyMode,
@@ -147,7 +145,15 @@ function sharedDeps(): WorkerApiDeps {
     nativeCost,
     // #588: a selection of a catalog provider made before pins existed is pinned by its first claim, in the job's own workspace.
     providerPins: createProviderPins(reviewSettingsServiceFor),
-    claimedKeys: getClaimedKeys(),
+    claimedKeys,
+    // #753: the write token of a turn of the Implementer ends with the turn (and with a fetch that failed after it was made).
+    revokeWriteTokens: writeTokens.revokeAllOf,
+    revokeUndelivered: writeTokens.revokeUndelivered,
+    // #790: the addresses the workspace's projects pinned, which a turn's catalog provider is held to.
+    pinnedAddresses: (workspaceId, slug) =>
+      createPinnedAddressReader(createProjectsRepository(db, workspaceId))(
+        slug,
+      ),
     // #395: what happens between two sweeps. Both run after the response and do nothing in poll mode.
     jobEnded,
     activity: () => touched(),

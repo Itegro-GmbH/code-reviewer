@@ -21,6 +21,7 @@ import {
   describeWarning,
 } from "./messages.ts";
 import { getProductIdentity } from "../../product-identity/current.ts";
+import { identityFor } from "../../product-identity/identities.ts";
 
 const PRODUCT = getProductIdentity();
 
@@ -274,5 +275,29 @@ describe("the copy for the check of the Dynamic model", () => {
 
   it("does not invent a sentence for a warning it does not know", () => {
     expect(describeWarning("dynamicModel", "SOMETHING_NEW")).toBeNull();
+  });
+});
+
+describe("the sentence for a repository that is gone", () => {
+  // #757-T01
+  it("sends code-review.com to the Projects page, as it always did", () => {
+    expect(
+      describeSaveFailure(
+        identityFor("code-review-com"),
+        "REVIEW_SETTINGS_PROJECT_NOT_FOUND",
+      ),
+    ).toBe(
+      "This repository was not found. Reload the Projects page and try again.",
+    );
+  });
+
+  // #757-T02
+  it("sends the factory to the QA page", () => {
+    expect(
+      describeSaveFailure(
+        identityFor("factory"),
+        "REVIEW_SETTINGS_PROJECT_NOT_FOUND",
+      ),
+    ).toBe("This repository was not found. Reload the QA page and try again.");
   });
 });

@@ -147,7 +147,7 @@ cause) and does not stop the others; the answer is then `500` with `failedSteps`
 1. **`expire`** (`expireStaleJobs()`, which claims did and now nobody does): a running job whose lease lapsed is
    queued again with the attempt counted (on the last allowed attempt it fails with `lease_expired`), a job that runs
    longer than 25 minutes fails with `timeout` whatever its heartbeats say, and a Dynamic job nobody can run is
-   cancelled (`no_capable_runner`). Its row in `job_dispatches` is due by then (the acknowledgement timeout is as long
+   cancelled (`no_capable_runner`, after 30 minutes without a working runner, after 3 hours at the latest: `jobs/README.md`). Its row in `job_dispatches` is due by then (the acknowledgement timeout is as long
    as the lease), so step 4 sends it again.
 2. **`give_up`**: a job that has been **queued for the give-up time without a claim** fails with the stable code
    `dispatch_unavailable` (copy on the Runs pages, `runs/error-copy.ts`) and no attempt is counted, so the pull
@@ -163,7 +163,7 @@ cause) and does not stop the others; the answer is then `500` with `failedSteps`
    kind) is made pending again at the first sweep that finds it stopped for `STOPPED_REVIVE_MS` (10 minutes) or longer, if its job is still queued, so a
    Dispatcher that was updated or got its engine back is asked again, at a slow pace and never in a hot loop (every
    2 hours, since the sweep runs that often). A Dynamic job that nobody can ever run still ends as `no_capable_runner`
-   after 30 minutes, when a claim or the sweep looks at it (step 1).
+   after 30 minutes (3 hours at the latest while a runner of the engine is busy, `jobs/README.md`), when a claim or the sweep looks at it (step 1).
 4. **`send`** (webhook mode, `getDispatchService()?.sendDue(limit)`): every queued job that is due and has no row, or
    whose row is due and not stopped, is sent: jobs queued by an instance that had no hook, a row that could not be
    written, a job given back with a retry time that has passed, a call that was never acknowledged, an acknowledged job that is still

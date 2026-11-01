@@ -161,6 +161,25 @@ def shutdown_engines() -> None:
             _log.warning(_SURVIVOR)
 
 
+def register_engine(pid: int, launch: EngineLaunch | None) -> None:
+    """Put an engine this process started (its group leader and, with a dedicated user, the user's
+    launch) on the registry `shutdown_engines` ends. The Implementer's engine (#764) joins the one
+    the entry point's watchdog already kills."""
+    with _ENGINES_LOCK:
+        _RUNNING_ENGINES.add(pid)
+        if launch is not None and launch not in _RUNNING_LAUNCHES:
+            _RUNNING_LAUNCHES.append(launch)
+
+
+def unregister_engine(pid: int | None, launch: EngineLaunch | None) -> None:
+    """Take an engine off the registry: the caller ends it itself (see `register_engine`)."""
+    with _ENGINES_LOCK:
+        if pid is not None:
+            _RUNNING_ENGINES.discard(pid)
+        if launch is not None and launch in _RUNNING_LAUNCHES:
+            _RUNNING_LAUNCHES.remove(launch)
+
+
 class EngineError(Exception):
     """The engine could not run or did not answer. `code` is stable; `detail` names no value."""
 
@@ -249,6 +268,8 @@ class EngineClient:
         *,
         transport: Transport = _http_request,
         provider_id: str = PROXY_PROVIDER_ID,
+        agent: str = REVIEW_AGENT,
+        session_title: str = SESSION_TITLE,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.directory = directory
@@ -256,6 +277,10 @@ class EngineClient:
         self._transport = transport
         # The provider the message names: the legacy proxy provider, or the one of a native job.
         self._provider_id = provider_id
+        # The agent the runner defined in the config and the title of the session: the Implementer
+        # (#764) has its own; Dynamic keeps the defaults.
+        self._agent = agent
+        self._session_title = session_title
 
     def _call(
         self,
@@ -314,7 +339,7 @@ class EngineClient:
 
     def create_session(self) -> str:
         status, body = self._call(
-            "POST", "/session", {"title": SESSION_TITLE}, timeout=SESSION_TIMEOUT_SECONDS
+            "POST", "/session", {"title": self._session_title}, timeout=SESSION_TIMEOUT_SECONDS
         )
         if status != 200:
             raise EngineError(ErrorCode.RUNNER_ERROR, "the engine refused a new session")
@@ -346,7 +371,7 @@ class EngineClient:
         gives it what is left of the whole job, plus a margin).
         """
         body: dict[str, Any] = {
-            "agent": REVIEW_AGENT,
+            "agent": self._agent,
             "model": {"providerID": self._provider_id, "modelID": model},
             "parts": parts,
         }
@@ -378,7 +403,7 @@ class EngineClient:
         it before its next step. Nothing else about the turn changes (#552, spike #547). True when
         the engine accepted it."""
         body = {
-            "agent": REVIEW_AGENT,
+            "agent": self._agent,
             "model": {"providerID": self._provider_id, "modelID": model},
             "parts": [{"type": "text", "text": text}],
         }

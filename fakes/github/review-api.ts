@@ -125,6 +125,8 @@ export type ReviewRequest = {
   repository: ReviewedRepository;
   /** Every pull request of the repository, oldest first. */
   pullRequests: ReviewedPullRequest[];
+  /** The branches of the repository, by name, each at its commit. */
+  branches: () => { name: string; sha: string }[];
   body: () => Promise<string>;
   /** Does the token hold at least this level of one of these permissions? */
   mayDo: (permissions: string[], level: "read" | "write") => boolean;
@@ -236,6 +238,14 @@ export function createReviewApi(options: ReviewApiOptions): ReviewApi {
     };
   }
 
+  function branchJson(branch: { name: string; sha: string }) {
+    return {
+      name: branch.name,
+      commit: { sha: branch.sha },
+      protected: false,
+    };
+  }
+
   const filesOf = (pr: ReviewedPullRequest) => pr.files ?? defaultFiles();
 
   function fileJson(file: FakeChangedFile) {
@@ -338,7 +348,8 @@ export function createReviewApi(options: ReviewApiOptions): ReviewApi {
   };
 
   async function handle(request: ReviewRequest): Promise<ReviewApiAnswer> {
-    const { method, rest, repository, pullRequests, mayDo } = request;
+    const { method, rest, query, repository, pullRequests, branches, mayDo } =
+      request;
 
     if (rest === "" && method === "GET") {
       if (!mayDo(["metadata"], "read")) return forbidden;
@@ -348,13 +359,34 @@ export function createReviewApi(options: ReviewApiOptions): ReviewApi {
       if (!mayDo(["metadata"], "read")) return forbidden;
       return { status: 200, body: { Python: 1000 } };
     }
-    const branchMatch = /^\/branches\/([^/]+)$/.exec(rest);
-    if (branchMatch && method === "GET") {
+    if (rest === "/branches" && method === "GET") {
       if (!mayDo(["contents"], "read")) return forbidden;
+      const perPage = Math.min(
+        Math.max(Number(query.get("per_page")) || 30, 1),
+        100,
+      );
+      const page = Math.max(Number(query.get("page")) || 1, 1);
       return {
         status: 200,
-        body: { name: branchMatch[1], commit: { sha: BASE_SHA } },
+        body: branches()
+          .slice((page - 1) * perPage, page * perPage)
+          .map((branch) => branchJson(branch)),
       };
+    }
+    // The name may come percent encoded (`feature%2Fx`) or with its slashes.
+    const branchMatch = /^\/branches\/(.+)$/.exec(rest);
+    if (branchMatch && method === "GET") {
+      if (!mayDo(["contents"], "read")) return forbidden;
+      let name: string;
+      try {
+        name = decodeURIComponent(branchMatch[1] ?? "");
+      } catch {
+        return notFound;
+      }
+      const branch = branches().find((item) => item.name === name);
+      return branch === undefined
+        ? { status: 404, body: { message: "Branch not found" } }
+        : { status: 200, body: branchJson(branch) };
     }
 
     // A comment is addressed by its id alone.

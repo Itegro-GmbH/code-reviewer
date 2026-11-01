@@ -10,7 +10,7 @@
 // makes that recoverable: a Postgres transaction that hit an error cannot run another statement until
 // it is rolled back to a savepoint.
 import { sql, type Kysely, type Selectable } from "kysely";
-import type { ProjectReviewKind } from "../../job-kind/job-kind.ts";
+import type { JobKind } from "../../job-kind/job-kind.ts";
 import { formatTimestamp } from "../codecs.ts";
 import { errorCode, UNIQUE_VIOLATION } from "../errors.ts";
 import type { Database, JobsTable } from "../schema.ts";
@@ -45,7 +45,7 @@ const MAX_CLAIM_ATTEMPTS = 100;
 export async function claimOldestDueJob(
   executor: Kysely<Database>,
   claim: JobClaim,
-  reviewKinds: readonly ProjectReviewKind[],
+  reviewKinds: readonly JobKind[],
   jobId?: string,
 ): Promise<Selectable<JobsTable> | undefined> {
   // One savepoint for the whole attempt loop: a rolled-back-to savepoint stays usable, and the outer
@@ -72,7 +72,7 @@ export async function claimOldestDueJob(
 function claimQuery(
   executor: Kysely<Database>,
   claim: JobClaim,
-  reviewKinds: readonly ProjectReviewKind[],
+  reviewKinds: readonly JobKind[],
   { jobId }: { jobId: string | undefined },
 ) {
   const now = formatTimestamp(claim.now);

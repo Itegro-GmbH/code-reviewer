@@ -116,20 +116,102 @@ describe("the capability set of a deployment", () => {
   });
 
   // #731-T08
-  it("refuses implementer on code-review.com by name, and no product allows it yet", () => {
+  // #747-T02
+  it("refuses implementer on code-review.com by name, whatever else the list holds", () => {
+    expect(
+      capabilityConfigProblems({
+        PRODUCT_CAPABILITIES: "review,dynamic-review,implementer",
+      }),
+    ).toEqual([
+      expect.stringMatching(/"implementer".*code-review-com does not allow/),
+    ]);
     expect(
       capabilityConfigProblems({ PRODUCT_CAPABILITIES: "review,implementer" }),
     ).toEqual([
       expect.stringMatching(/"implementer".*code-review-com does not allow/),
     ]);
-    for (const [id, product] of Object.entries(PRODUCTS))
-      expect(product.allowed, id).not.toContain("implementer");
+    expect(PRODUCTS["code-review-com"].allowed).not.toContain("implementer");
+    expect(PRODUCTS["code-review-com"].default).not.toContain("implementer");
+    const [problem] = capabilityConfigProblems({
+      PRODUCT_CAPABILITIES: "review,implementer,hunter2-secret",
+    });
+    expect(problem).toContain("PRODUCT_CAPABILITIES");
+    expect(
+      capabilityConfigProblems({
+        PRODUCT_CAPABILITIES: "review,implementer,hunter2-secret",
+      }).join(" "),
+    ).not.toContain("hunter2");
+  });
+
+  // #747-T01
+  it("lets the factory product have implementer, listed with the others alphabetically", () => {
+    expect(PRODUCTS.factory.allowed).toContain("implementer");
+    expect(
+      resolved({
+        PRODUCT_ID: "factory",
+        PRODUCT_CAPABILITIES: "review,dynamic-review,implementer",
+      }),
+    ).toEqual({
+      product: "factory",
+      list: ["dynamic-review", "implementer", "review"],
+    });
+    expect(
+      resolved({
+        PRODUCT_ID: "factory",
+        PRODUCT_CAPABILITIES: "implementer, dynamic-review, review",
+      }).list,
+    ).toEqual(["dynamic-review", "implementer", "review"]);
+  });
+
+  // #747-T03
+  it("never turns implementer on by default: the factory default and the code-review.com default are today's", () => {
+    expect(PRODUCTS.factory.default).toEqual(["review", "dynamic-review"]);
+    expect(PRODUCTS["code-review-com"].default).toEqual([
+      "review",
+      "dynamic-review",
+      "billing",
+    ]);
+    expect(resolved({ PRODUCT_ID: "factory" }).list).toEqual([
+      "dynamic-review",
+      "review",
+    ]);
+    expect(
+      resolved({ PRODUCT_ID: "factory", PRODUCT_CAPABILITIES: "  " }).list,
+    ).toEqual(["dynamic-review", "review"]);
+    expect(resolved({}).list).toEqual(["billing", "dynamic-review", "review"]);
+  });
+
+  // #747-T04
+  it("refuses implementer without dynamic-review, naming both, and without review", () => {
+    const withoutDynamic = capabilityConfigProblems({
+      PRODUCT_ID: "factory",
+      PRODUCT_CAPABILITIES: "review,implementer",
+    });
+    expect(withoutDynamic).toEqual([
+      expect.stringContaining('"implementer" but not "dynamic-review"'),
+    ]);
+    // Alone it lacks both: each is named, once.
+    const alone = capabilityConfigProblems({
+      PRODUCT_ID: "factory",
+      PRODUCT_CAPABILITIES: "implementer",
+    });
+    expect(alone).toHaveLength(2);
+    expect(alone.join(" ")).toContain('"implementer" but not "dynamic-review"');
+    expect(alone.join(" ")).toContain('does not name "review"');
+    // dynamic-review without review is the one problem it already was, with implementer on top.
+    const withoutReview = capabilityConfigProblems({
+      PRODUCT_ID: "factory",
+      PRODUCT_CAPABILITIES: "dynamic-review,implementer",
+    });
+    expect(withoutReview).toEqual([
+      expect.stringContaining('"dynamic-review" but not "review"'),
+    ]);
     expect(
       capabilityConfigProblems({
         PRODUCT_ID: "factory",
-        PRODUCT_CAPABILITIES: "implementer",
-      }),
-    ).not.toEqual([]);
+        PRODUCT_CAPABILITIES: "billing,implementer",
+      }).join(" "),
+    ).toContain('"dynamic-review"');
   });
 
   it("keeps every default inside the allowed list and closed under the requirements", () => {

@@ -39,7 +39,11 @@ export function RunDetailPageContent({
   api?: RunsApi;
 }) {
   const { run } = data.snapshot;
-  const title = `${run.project} #${String(run.prNumber)}`;
+  // A task has a branch, not a pull request number (the branch is a text from outside, rendered as text).
+  const title =
+    run.implementer === undefined
+      ? `${run.project} #${String(run.prNumber)}`
+      : `${run.project} ${run.implementer.branch ?? ""}`.trim();
   return (
     <>
       <PageHeader

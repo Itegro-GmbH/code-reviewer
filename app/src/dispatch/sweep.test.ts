@@ -84,6 +84,7 @@ function setup(
     checkJournal: vi.fn<() => Promise<{ checked: number }>>(async () => ({
       checked: 0,
     })),
+    retryWriteTokens: vi.fn<() => Promise<void>>(async () => undefined),
     info: vi.fn<(line: string) => void>(),
     error: vi.fn<(line: string) => void>(),
   };
@@ -104,6 +105,7 @@ function setup(
     billingHolds: { releaseStranded: mocks.releaseStranded },
     balanceMails: { deliverDue: mocks.deliverDue },
     journalCheck: { run: mocks.checkJournal },
+    writeTokens: { retryPending: mocks.retryWriteTokens },
     settings: options.settings ?? { giveUpMs: 3_600_000, maxRunning: null },
     ...(options.capabilities === undefined
       ? {}
@@ -628,5 +630,51 @@ describe("a run of the sweep of a deployment with a capability set (#731)", () =
       ])
         expect(ran).toHaveBeenCalled();
     }
+  });
+});
+
+describe("the write tokens of the Implementer in a run of the sweep (#790)", () => {
+  // #790
+  it("tries again for the tokens of ended turns that could not be switched off, in a deployment with the Implementer", async () => {
+    const t = setup({
+      capabilities: createCapabilitySet([
+        "review",
+        "dynamic-review",
+        "implementer",
+      ]),
+    });
+
+    const report = await t.sweep.run();
+
+    expect(t.retryWriteTokens).toHaveBeenCalledOnce();
+    expect(report.failedSteps).toEqual([]);
+  });
+
+  // #790
+  it("does not try in a deployment without the capability: code-review.com has no such token", async () => {
+    const t = setup({
+      capabilities: createCapabilitySet(["review", "dynamic-review"]),
+    });
+
+    await t.sweep.run();
+
+    expect(t.retryWriteTokens).not.toHaveBeenCalled();
+  });
+
+  // #790
+  it("goes on with the other steps, and says which step failed, when the retry fails", async () => {
+    const t = setup({
+      capabilities: createCapabilitySet([
+        "review",
+        "dynamic-review",
+        "implementer",
+      ]),
+    });
+    t.retryWriteTokens.mockRejectedValueOnce(new Error("down"));
+
+    const report = await t.sweep.run();
+
+    expect(report.failedSteps).toEqual(["write_tokens"]);
+    expect(t.cleanup).toHaveBeenCalledOnce();
   });
 });

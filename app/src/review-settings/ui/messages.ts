@@ -243,15 +243,16 @@ export function describeWholeRefusal(
   ].join(" ");
 }
 
-const SAVE_FAILURE_COPY: Record<ReviewSettingsErrorCode, string> = {
+const saveFailureCopy = (
+  product: ProductIdentity,
+): Record<ReviewSettingsErrorCode, string> => ({
   REVIEW_SETTINGS_INVALID:
     "Some settings are not valid. Fix the marked fields and save again.",
   REVIEW_SETTINGS_REQUEST_INVALID: REQUEST_NOT_UNDERSTOOD,
   REVIEW_SETTINGS_CROSS_SITE_REQUEST: CROSS_SITE_REQUEST_RELOAD_PAGE,
   REVIEW_SETTINGS_BODY_TOO_LARGE: "The settings are too large to save.",
   REVIEW_SETTINGS_CONTENT_TYPE_UNSUPPORTED: REQUEST_NOT_UNDERSTOOD,
-  REVIEW_SETTINGS_PROJECT_NOT_FOUND:
-    "This repository was not found. Reload the Projects page and try again.",
+  REVIEW_SETTINGS_PROJECT_NOT_FOUND: `This repository was not found. Reload the ${product.qaAreaName} page and try again.`,
   REVIEW_SETTINGS_STALE:
     "These defaults were changed meanwhile — reload the page and decide again.",
   // #588: the address of a catalog provider is confirmed, moved or dropped by an Owner or Admin only.
@@ -260,14 +261,14 @@ const SAVE_FAILURE_COPY: Record<ReviewSettingsErrorCode, string> = {
   // #614: a save that would pin an address another project of the workspace holds differently (also a model-only save of an older selection).
   PROVIDER_ADDRESS_OTHER_PROJECT_PIN:
     "Another project of this workspace uses this provider at a different address, so this project cannot take the current one. Ask an Owner or Admin of the workspace to save it.",
-};
+});
 
 /** The sentence for a save (or reset) that failed as a whole. */
 export function describeSaveFailure(
   product: ProductIdentity,
   code: string,
 ): string {
-  if (Object.hasOwn(SAVE_FAILURE_COPY, code))
-    return SAVE_FAILURE_COPY[code as ReviewSettingsErrorCode];
+  const copy = saveFailureCopy(product);
+  if (Object.hasOwn(copy, code)) return copy[code as ReviewSettingsErrorCode];
   return describeTransportFailure(product, code) ?? GENERIC_FAILURE;
 }

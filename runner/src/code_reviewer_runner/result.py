@@ -76,6 +76,22 @@ class ErrorCode(StrEnum):
     # A newer push replaced this run while it was running (#396). It stopped sending model requests,
     # published nothing and reports what it used. Not a failure of the job.
     SUPERSEDED = "superseded"
+    # The Implementer (#746). Stable codes a caller branches on; a turn that fails is never run
+    # again silently. `COST_LIMIT_REACHED` above is the cost limit of a turn as well.
+    BRANCH_EXISTS = "branch_exists"
+    BASE_BRANCH_NOT_FOUND = "base_branch_not_found"
+    CLONE_FAILED = "clone_failed"
+    SETUP_FAILED = "setup_failed"
+    AGENT_GAVE_UP = "agent_gave_up"
+    PUSH_REJECTED = "push_rejected"
+    BRANCH_VIOLATION = "branch_violation"
+    TIME_LIMIT_REACHED = "time_limit_reached"
+    GIT_WRITE_NOT_GRANTED = "git_write_not_granted"
+    IMPLEMENTER_ENGINE_UNAVAILABLE = "implementer_engine_unavailable"
+    IMPLEMENTER_CONFIG_INVALID = "implementer_config_invalid"
+    # The runner was told to stop (SIGTERM, #765): what is committed was pushed, and the job host
+    # gives the job back to the queue under this code.
+    RUNNER_SHUTDOWN = "runner_shutdown"
     UNKNOWN = "unknown"
 
 
@@ -163,6 +179,10 @@ class JobResult:
     # The findings left open by a successful review, for the verdict the app submits (#405). None
     # where the runner cannot say (and on every failure): the app then submits no verdict.
     findings: ReviewFindings | None = None
+    # What a turn of the Implementer did (`ImplementerResult`, built by `implementer/report.py`).
+    # None for every other job, and for a turn that never had a repository: the key is then left
+    # out, never sent as null (the app refuses null).
+    implementer: dict[str, Any] | None = None
 
     def to_json(self) -> dict[str, Any]:
         document: dict[str, Any] = {
@@ -178,6 +198,8 @@ class JobResult:
             document["errorReason"] = self.error_reason
         if self.findings is not None:
             document["findings"] = self.findings.to_json()
+        if self.implementer is not None:
+            document["implementer"] = self.implementer
         return document
 
     def to_line(self) -> str:

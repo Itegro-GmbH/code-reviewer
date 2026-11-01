@@ -9,9 +9,10 @@
 #   docker build -f runner/Dockerfile --target sandbox -t code-reviewer-runner-sandbox .
 # `sandbox` is the only target and the last stage, so a plain build gives it. It carries both engines:
 # PR-Agent (Diff) and the pinned stock OpenCode (about 186 MB, Dynamic), `nft`, a pinned `rg` and the
-# dedicated engine user 10101. Nothing enables anything by itself: the Sandbox-Launcher starts the
-# container with its capabilities, and the startup self-check advertises `opencode` only when all of it
-# is right.
+# dedicated engine user 10101, and the toolchain of the Implementer's agent (#761): git built from its pinned
+# source, Node.js and pnpm from pinned releases, uv, a compiler, jq and unzip, and the files of the branch
+# guard. Nothing enables anything by itself: the Sandbox-Launcher starts the container with its
+# capabilities, and the startup self-check advertises `opencode` only when all of it is right.
 #
 # The Python minor version must match .python-version (a test checks it). Update the digests with
 #   docker pull python:3.13-slim-bookworm && docker image inspect python:3.13-slim-bookworm --format '{{index .RepoDigests 0}}'
@@ -24,6 +25,10 @@ FROM ${UV_IMAGE} AS uv
 # ---- licenses: the license files of the repository, copied into the runtime stage below ----
 FROM scratch AS licenses
 COPY LICENSE NOTICE THIRD_PARTY_LICENSES.md /
+
+# ---- guard-files: the hook and the matrix of the Implementer's branch guard (#761), copied into the sandbox stage ----
+FROM scratch AS guard-files
+COPY runner/guard/reference-transaction runner/scripts/guard_matrix.sh /
 
 # ---- builder: create the virtual environment from uv.lock ----
 FROM ${PYTHON_IMAGE} AS builder
@@ -64,6 +69,42 @@ COPY runner/scripts/fetch_opencode.py runner/scripts/fetch_ripgrep.py /fetch/scr
 COPY runner/opencode-pin.json runner/ripgrep-pin.json /fetch/
 RUN python /fetch/scripts/fetch_opencode.py --dest /engine-tools \
     && python /fetch/scripts/fetch_ripgrep.py --dest /engine-tools
+
+# ---- toolchain-fetch: the pinned git source, Node.js and pnpm, verified (#761) ----
+# The Implementer's agent builds repositories in the Worker container. The same strict way as the engine
+# tools: runner/scripts/fetch_toolchain.py accepts a download only with the pinned size and SHA-256
+# (runner/git-pin.json, node-pin.json, pnpm-pin.json), unpacks it into a directory below /toolchain and
+# keeps an unverified tree from ever appearing there. Only linux-x64 is pinned. Node.js loses what an agent
+# does not run (C++ headers, man pages, docs); a native addon that has to be built would need the headers.
+FROM ${PYTHON_IMAGE} AS toolchain-fetch
+COPY runner/scripts/fetch_opencode.py runner/scripts/fetch_toolchain.py /fetch/scripts/
+COPY runner/git-pin.json runner/node-pin.json runner/pnpm-pin.json /fetch/
+RUN python /fetch/scripts/fetch_toolchain.py --component git --dest /toolchain/git
+RUN python /fetch/scripts/fetch_toolchain.py --component node --dest /toolchain/node \
+    && rm -rf /toolchain/node/include /toolchain/node/share
+RUN python /fetch/scripts/fetch_toolchain.py --component pnpm --dest /toolchain/pnpm \
+    && chmod 0755 /toolchain/pnpm/bin/pnpm.cjs /toolchain/pnpm/bin/pnpx.cjs
+
+# ---- git-build: git 2.53 or newer from the verified source (#761) ----
+# Debian bookworm ships git 2.39. The branch guard of the Implementer is a reference-transaction hook, and
+# only git 2.53 or newer shows it a switch of the branch (checkout, switch); on older git the guard is blind
+# to that, so the Worker's self-test refuses to run a turn on it. The release is built here, once, from the
+# pinned source: no Perl, Python, Tcl, gettext, expat or OpenSSL (nothing the agent needs; `git add -p` is the
+# one loss), against the GnuTLS flavour of libcurl, and with NO_OPENSSL: git is GPL-2.0-only and OpenSSL 3
+# (Apache-2.0) is not compatible with it, so no program of git may link it, neither its own `git-imap-send`
+# nor libcurl's TLS in `git-remote-https` (Debian's own git takes libcurl3-gnutls for the same reason); the system
+# config is in /etc (the Worker points GIT_CONFIG_SYSTEM at a file under /run per job, and the image bakes none in),
+# builtins as symlinks so the copy into the final image keeps one binary.
+FROM ${PYTHON_IMAGE} AS git-build
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends build-essential libcurl4-gnutls-dev zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=toolchain-fetch /toolchain/git /git-src
+WORKDIR /git-src
+RUN make -j2 prefix=/usr/local sysconfdir=/etc INSTALL_SYMLINKS=1 \
+        NO_GETTEXT=1 NO_PERL=1 NO_PYTHON=1 NO_TCLTK=1 NO_EXPAT=1 NO_LIBPCRE2=1 NO_OPENSSL=1 all strip \
+    && make prefix=/usr/local sysconfdir=/etc INSTALL_SYMLINKS=1 \
+        NO_GETTEXT=1 NO_PERL=1 NO_PYTHON=1 NO_TCLTK=1 NO_EXPAT=1 NO_LIBPCRE2=1 NO_OPENSSL=1 DESTDIR=/out install
 
 # ---- runtime-base: Python, the venv and nothing else (no uv, no compiler, no sources) ----
 FROM ${PYTHON_IMAGE} AS runtime-base
@@ -125,4 +166,28 @@ COPY --from=engine-tools --chown=0:0 --chmod=0755 /engine-tools/ /usr/local/bin/
 # The directory first: COPY would create it with the mode given to the files (0644, not enterable).
 RUN install -d -m 0755 -o 0 -g 0 /opt/code-reviewer/pins
 COPY --chown=0:0 --chmod=0644 runner/opencode-pin.json runner/ripgrep-pin.json /opt/code-reviewer/pins/
+# ---- the toolchain of the Implementer's agent (#761) ----
+# Compiler, make, jq, unzip and the GnuTLS flavour of libcurl that git needs for https (Debian's own git takes it for
+# the same reason: no OpenSSL in a GPL-2.0-only program), from Debian's signed packages, NOT
+# version-pinned (like nftables above); without build-essential's dpkg-dev and Perl, which saves about
+# 50 MB and which no build of the agent's needs. Debian's `git` package is not installed: the git below is
+# the only one, and the guard needs its version.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends gcc g++ make libc6-dev jq unzip libcurl3-gnutls \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=git-build --chown=0:0 /out/usr/local/ /usr/local/
+COPY --from=toolchain-fetch --chown=0:0 /toolchain/node /opt/node
+COPY --from=toolchain-fetch --chown=0:0 /toolchain/pnpm /opt/pnpm
+COPY --from=uv --chown=0:0 /uv /uvx /usr/local/bin/
+# The release licenses travel with the image: node's and pnpm's are in their trees, git's is copied.
+COPY --from=toolchain-fetch --chown=0:0 /toolchain/git/COPYING /usr/local/share/doc/git/COPYING
+RUN ln -s /opt/node/bin/node /usr/local/bin/node \
+    && ln -s /opt/node/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s /opt/node/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && ln -s /opt/pnpm/bin/pnpm.cjs /usr/local/bin/pnpm
+# The guard of the branch: the hook and the matrix that proves it, root-owned and read-only. The image bakes
+# in no core.hooksPath: the Worker sets it per job in a GIT_CONFIG_SYSTEM file under /run (the root file
+# system is read-only) and writes the guard configuration there.
+RUN install -d -m 0755 -o 0 -g 0 /opt/code-reviewer/guard
+COPY --from=guard-files --chown=0:0 --chmod=0755 / /opt/code-reviewer/guard/
 USER 10001:10001

@@ -14,6 +14,7 @@ import type { JobEndedEvent } from "../dispatch/job-ended.ts";
 import type { RunnerQueue } from "../jobs/runner-queue.ts";
 import { workerLeaseToken } from "../jobs/worker-credential.ts";
 import { RUNNER_API_VERSION, type ReleaseResponse } from "./contract.ts";
+import type { WriteTokenRevoker } from "./write-token.ts";
 import type { RunnerApiLogger } from "./logger.ts";
 import { parseReleaseRequest } from "./requests.ts";
 import {
@@ -28,6 +29,8 @@ export type ReleaseDeps = {
   now: () => Date;
   /** #395: the job went back to the queue (or failed on its last attempt); see `ReportDeps.jobEnded`. */
   jobEnded?: (event: JobEndedEvent) => void;
+  /** #753: switches off the write tokens of a turn of the Implementer that was given back (a Worker that ended without a result). */
+  revokeWriteTokens?: WriteTokenRevoker;
 };
 
 /** The reason a job fails with when a Dispatcher gives it back; a reason the app does not know becomes this one. */
@@ -89,6 +92,7 @@ export async function handleRelease(
     prNumber: released.job.prNumber,
     requeued: released.status === "requeued",
   });
+  await deps.revokeWriteTokens?.(released.job);
   return jsonResponse(200, {
     version: RUNNER_API_VERSION,
     job: {

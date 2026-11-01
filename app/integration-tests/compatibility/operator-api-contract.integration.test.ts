@@ -36,7 +36,7 @@ import {
   readContract,
   readExamples,
 } from "../../src/test-support/runner-contract.ts";
-import { PROJECT_REVIEW_KINDS } from "../../src/job-kind/job-kind.ts";
+import { JOB_KINDS } from "../../src/job-kind/job-kind.ts";
 import { KEY_MODES, LIMIT_NAMES } from "../../src/workspaces/entitlements.ts";
 import {
   CATALOG_ENTRY_ID_PATTERN,
@@ -200,9 +200,8 @@ describe("the usage part of the contract file", () => {
       TIER_NAME_PATTERN.source,
     );
     expect(defs.UsageItem.properties.keyMode.enum).toEqual([...KEY_MODES]);
-    expect(defs.UsageItem.properties.reviewKind.enum).toEqual([
-      ...PROJECT_REVIEW_KINDS,
-    ]);
+    // #752: a record is of the kind of its job, and a turn of the Implementer has its own.
+    expect(defs.UsageItem.properties.reviewKind.enum).toEqual([...JOB_KINDS]);
     expect(defs.UsagePage.description).toContain(
       `${USAGE_SAFETY_LAG_MS / 1000} seconds`,
     );

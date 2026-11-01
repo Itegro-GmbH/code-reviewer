@@ -9,7 +9,7 @@ import type {
   KnownClaimFeature,
   KnownReleaseReason,
 } from "../contracts/runner-api.ts";
-import type { ReviewKind } from "./types.ts";
+import { CONTRACT_REVIEW_KINDS, type WireReviewKind } from "./types.ts";
 
 /** The features of the App the split needs (`VersionResponse.features`). */
 export const REQUIRED_APP_FEATURES = [
@@ -34,7 +34,7 @@ const CLAIM_FEATURES: KnownClaimFeature[] = [
 export type ClaimedJob = {
   id: string;
   credential: string;
-  reviewKind: ReviewKind;
+  reviewKind: WireReviewKind;
   heartbeatIntervalSeconds: number;
 };
 
@@ -98,7 +98,7 @@ const splitClaim = z.object({
   job: z.object({
     id: z.string().regex(/^[0-9a-fA-F-]{36}$/),
     credential: z.string().regex(/^crj_[A-Za-z0-9_-]{43}$/),
-    reviewKind: z.enum(["diff", "dynamic"]),
+    reviewKind: z.enum(CONTRACT_REVIEW_KINDS),
     leaseExpiresAt: z.string(),
     heartbeatIntervalSeconds: z.number().int().min(1).max(3600),
   }),

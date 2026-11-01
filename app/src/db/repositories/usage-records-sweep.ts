@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// The sweep of usage records (src/usage/README.md) for the instance level code that ends jobs: the lease side of
+// The sweep of usage records (src/usage/README.md), and of the sessions of the Implementer whose turn ended, for the instance level code that ends jobs: the lease side of
 // the queue (runner-jobs-repository.ts) and the switch-off of Dynamic Review (instance-settings-repository.ts).
 // Instance level on purpose, like they are: it looks at the records of every workspace. The scoped twin for the
 // jobs of one workspace is `voidEndedJobs()` of usage-records-repository.ts.
@@ -10,6 +10,7 @@ import { SUPERSEDED_REPORT_GRACE_MS } from "../supersede-timing.ts";
 import { formatTimestamp } from "../codecs.ts";
 import type { Database } from "../schema.ts";
 import { settleEndedJobs } from "../../billing/settle-jobs.ts";
+import { idleSessionsOfEndedTurns } from "./implementer-sessions-sweep.ts";
 import {
   NO_RESULT_JOB_ERROR_CODES,
   type UnknownCostSettlement,
@@ -46,6 +47,9 @@ export async function closeRecordsOfEndedJobs(
   executor: Kysely<Database>,
   settledAt: string,
 ): Promise<UnknownCostSettlement[]> {
+  // #752: every place that ends a job without a report of its run calls this, so it is also where the session of a turn that
+  // ended that way gets idle again (it would stay `running` for good otherwise).
+  await idleSessionsOfEndedTurns(executor, settledAt);
   const settled = await executor
     .updateTable("usage_records")
     .set({

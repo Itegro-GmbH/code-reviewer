@@ -7,17 +7,19 @@ it with `GITHUB_OAUTH_BASE_URL` (GitHub's web pages: the authorization and the c
 well, because the client secret, the App JWT and the tokens are sent to that address. State is in
 memory. Dummy values only.
 
-| File            | Part                                                                                                               |
-| --------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `server.ts`     | The server (`startGithubFake`), the request log, failure injection, the control endpoints.                         |
-| `oauth.ts`      | Sign in: OAuth authorize and token endpoints, the user, e-mail and organization membership.                        |
-| `manifest.ts`   | The GitHub App manifest flow: the creation page, the one-time code, the conversion.                                |
-| `registry.ts`   | The Apps the fake knows (the one registered at start and the ones the manifest flow created), shared by the parts. |
-| `app-api.ts`    | The REST API as the GitHub App uses it: installations, tokens, repositories, pull requests.                        |
-| `review-api.ts` | What a reviewer reads and writes: diff, commits, file contents and comments of a pull request.                     |
-| `webhooks.ts`   | Signed webhook deliveries, `webhookFixture(name)` loads a payload from `../fixtures`.                              |
-| `http.ts`       | Small helpers for answering and reading HTTP messages.                                                             |
-| `main.ts`       | Starts the sign in part as its own process (Playwright).                                                           |
+| File                                | Part                                                                                                               |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `server.ts`                         | The server (`startGithubFake`), the request log, failure injection, the control endpoints.                         |
+| `oauth.ts`                          | Sign in: OAuth authorize and token endpoints, the user, e-mail and organization membership.                        |
+| `manifest.ts`                       | The GitHub App manifest flow: the creation page, the one-time code, the conversion.                                |
+| `registry.ts`                       | The Apps the fake knows (the one registered at start and the ones the manifest flow created), shared by the parts. |
+| `app-api.ts`                        | The REST API as the GitHub App uses it: installations, tokens, repositories, pull requests.                        |
+| `git-http.ts`                       | Git over smart HTTP: fetch (`git-upload-pack`) and push (`git-receive-pack`) of a registered repository.           |
+| `git-fixture.ts`, `git-branches.ts` | The Git repository a test registers, and its branches as the branch endpoints report them.                         |
+| `review-api.ts`                     | What a reviewer reads and writes: diff, commits, file contents and comments of a pull request.                     |
+| `webhooks.ts`                       | Signed webhook deliveries, `webhookFixture(name)` loads a payload from `../fixtures`.                              |
+| `http.ts`                           | Small helpers for answering and reading HTTP messages.                                                             |
+| `main.ts`                           | Starts the sign in part as its own process (Playwright).                                                           |
 
 A part is switched on by its options. `clientId` and `clientSecret` give the sign in; `appId` and
 `publicKeyPem` give the GitHub App API (give both options of a part or neither); `manifestFlow: true`
@@ -68,16 +70,16 @@ happened. Failures are injected like everywhere (`fail({ pathIncludes: "/app-man
 
 ## The GitHub App API
 
-| Endpoint                                                  | Behavior                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /app/installations`, `GET /app/installations/:id`    | Needs an App JWT: RS256 signature checked against the configured public key, `iss` is the app id, not expired. Paged (`per_page`, `page`).                                                                                                                                                                                                                                                                                       |
-| `POST /app/installations/:id/access_tokens`               | App JWT. Issues a random installation token (valid one hour of the fake's clock), optionally narrowed by `repository_ids` or `repositories` (names) and by `permissions`. 422 for a repository the installation does not have and for a permission above what the app holds (`setAppPermissions`, default: pull requests and issues write, contents and metadata read), 403 for a suspended installation, 404 for a removed one. |
-| `DELETE /installation/token`                              | Installation token. Switches that token off (204); later use of it gets 401. `revokedInstallationTokens()` lists them.                                                                                                                                                                                                                                                                                                           |
-| `GET /installation/repositories`                          | Installation token. `{ total_count, repositories }`, paged; only the repositories the token is narrowed to.                                                                                                                                                                                                                                                                                                                      |
-| `GET /repos/:owner/:repo/pulls`, `.../pulls/:n`           | Installation token with pull requests read. Open pull requests (`state` supported), one pull request or 404 (also for a repository the token is not narrowed to); 403 without the permission.                                                                                                                                                                                                                                    |
-| `GET /repos/:owner/:repo/collaborators/:login/permission` | Installation token with metadata read. `{ permission }`, `none` for a user without an entry.                                                                                                                                                                                                                                                                                                                                     |
-| `POST /__fake/pull-requests`                              | Control endpoint for the fake as its own process: body `{ repository: "owner/name", pullRequest }` (a `FakePullRequest`: `number`, `title`, `state`, `headSha`, `headRef`, `baseRef`, `author`) adds the pull request, replacing one with the same number. 400 for a body that is not one.                                                                                                                                       |
-| `POST /__fake/installations`                              | Control endpoint for the fake as its own process: body `{ installation, repositories }` installs the app for the account (or replaces the repositories of an installation that exists). Needs the GitHub App part (`GITHUB_FAKE_APP_ID`, `GITHUB_FAKE_APP_PUBLIC_KEY`).                                                                                                                                                          |
+| Endpoint                                                  | Behavior                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /app/installations`, `GET /app/installations/:id`    | Needs an App JWT: RS256 signature checked against the configured public key, `iss` is the app id, not expired. Each installation reports its `permissions` (#749): the app's, cut down to what `setInstallationPermissions(id, ...)` says the installation accepted. Paged (`per_page`, `page`).                                                                                                                                                                                                                                                                                          |
+| `POST /app/installations/:id/access_tokens`               | App JWT. Issues a random installation token (valid one hour of the fake's clock), optionally narrowed by `repository_ids` or `repositories` (names) and by `permissions`. 422 for a repository the installation does not have and for a permission above what the app holds (`setAppPermissions`, default: pull requests and issues write, contents and metadata read) or above what the installation accepted (`setInstallationPermissions`, #749: an App raised to contents write that the installation has not approved yet), 403 for a suspended installation, 404 for a removed one. |
+| `DELETE /installation/token`                              | Installation token. Switches that token off (204); later use of it gets 401. `revokedInstallationTokens()` lists them.                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `GET /installation/repositories`                          | Installation token. `{ total_count, repositories }`, paged; only the repositories the token is narrowed to.                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `GET /repos/:owner/:repo/pulls`, `.../pulls/:n`           | Installation token with pull requests read. Open pull requests (`state` supported), one pull request or 404 (also for a repository the token is not narrowed to); 403 without the permission.                                                                                                                                                                                                                                                                                                                                                                                             |
+| `GET /repos/:owner/:repo/collaborators/:login/permission` | Installation token with metadata read. `{ permission }`, `none` for a user without an entry.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `POST /__fake/pull-requests`                              | Control endpoint for the fake as its own process: body `{ repository: "owner/name", pullRequest }` (a `FakePullRequest`: `number`, `title`, `state`, `headSha`, `headRef`, `baseRef`, `author`) adds the pull request, replacing one with the same number. 400 for a body that is not one.                                                                                                                                                                                                                                                                                                |
+| `POST /__fake/installations`                              | Control endpoint for the fake as its own process: body `{ installation, repositories }` installs the app for the account (or replaces the repositories of an installation that exists). Needs the GitHub App part (`GITHUB_FAKE_APP_ID`, `GITHUB_FAKE_APP_PUBLIC_KEY`).                                                                                                                                                                                                                                                                                                                   |
 
 ## What a reviewer reads and writes
 
@@ -88,7 +90,8 @@ installation token with the permission GitHub asks for (`pull_requests`, `issues
 
 | Endpoint                                                                                  | Behavior                                                                                                                                                                                                      |
 | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /repos/:o/:r`, `.../languages`, `.../branches/:b`                                    | The repository, a language list, a branch.                                                                                                                                                                    |
+| `GET /repos/:o/:r`, `.../languages`                                                       | The repository (`default_branch` follows the Git fixture, see below), a language list.                                                                                                                        |
+| `GET .../branches?per_page=&page=`, `.../branches/:b`                                     | The branches (see below) and one branch with its commit; `:b` may be percent encoded (`feature%2Fx`). Both need `contents: read`.                                                                             |
 | `GET/PATCH /repos/:o/:r/pulls/:n`                                                         | The pull request (head, base, changed files); `PATCH` changes title and body.                                                                                                                                 |
 | `GET .../pulls/:n/files`, `.../pulls/:n/commits`, `.../commits/:sha`, `.../compare/:spec` | The diff (`patch`, `additions`, `deletions`) and the commit of the pull request. A `FakePullRequest` carries `files` (`filename`, `baseContent`, `headContent`, `patch`); a small Python change when omitted. |
 | `GET .../contents/:path?ref=`                                                             | The file at the head of the pull request (by sha or branch) or at the base (default branch); 404 for anything else, like `AGENTS.md`.                                                                         |
@@ -96,6 +99,40 @@ installation token with the permission GitHub asks for (`pull_requests`, `issues
 | `GET /rate_limit`, `POST /graphql`                                                        | An answer that lets PR-Agent go on (no review threads).                                                                                                                                                       |
 | `GET /__fake/comments?repository=owner/name&number=7`                                     | Control endpoint: the comments below a pull request (`id`, `body`, `login`, `htmlUrl`, `revision`).                                                                                                           |
 | `GET /__fake/installation-tokens`                                                         | Control endpoint: every installation token issued so far, to search outputs for them.                                                                                                                         |
+
+Branches (#750): where a test registered a Git repository (`addGitRepository`, `git-fixture.ts`), the branches are its
+`refs/heads/*`, read on every call (a branch a test creates afterwards is there at once; the sha is the commit it points
+to), and the default branch is the one `createGitRepository(dir, { defaultBranch })` made it with (`main` unless said
+otherwise; stored as `init.defaultBranch` in the repository), in the repository endpoints, in the installation
+repository listings and in the token answer alike. Where no Git repository is registered, a repository has its default
+branch (at `BASE_SHA`) and the branches its pull requests name (the head at the head commit, the base at `BASE_SHA`).
+Any other name is a 404 (`Branch not found`). The list is ordered by name and paged like GitHub (`per_page` up to 100,
+default 30, and `page`); the GitHub App client puts the default branch first.
+
+Git over HTTP (`git-http.ts`), for the repositories a test registered with `addGitRepository`: the real `git upload-pack`
+and `git receive-pack` behind the smart HTTP framing, with the installation token as the Basic password (user
+`x-access-token`). Without a valid token the answer is 401, for a repository the token does not reach or nobody
+registered 404.
+
+| Endpoint                                                                         | Behavior                                                                                                                                                                                                                             |
+| -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `GET /:o/:r.git/info/refs?service=git-upload-pack`, `POST .../git-upload-pack`   | Fetch and clone, as the runner's checkout does. The token needs `contents: read` (403 without).                                                                                                                                      |
+| `GET /:o/:r.git/info/refs?service=git-receive-pack`, `POST .../git-receive-pack` | Push (#766), as the Implementer's turn does. The token must have been minted with `contents: write` for the repository (403 for `contents: read`, so for a token minted without a permission list from an app that holds read only). |
+| `GET /__fake/pushes?repository=owner/name`                                       | Control endpoint: every push received, `{ pushes: [{ repository, refs }] }` (the `repository` filter is optional). The same list is `github.pushes()`.                                                                               |
+
+A push is judged by Git itself, **stricter than GitHub on purpose**: a new branch is accepted, and so is a push that moves
+a branch forward (a fast-forward); a history that is not a fast-forward of the branch (which stops `git push --force` as
+well) and the deletion of a branch are refused per ref (`[remote rejected]`, HTTP 200 like GitHub), although GitHub accepts
+both on a branch without protection. A test cannot learn from the fake that a client never forces a push: it asserts the
+client's own command. The fake accepts whatever else is pushed: a tag, `refs/notes/*` and a fast-forward of the default
+branch, so a test asserts that `pushes()` lists only the refs it expects. No hook runs. The repository is a fixture, so a
+push to its checked out branch is accepted too and leaves its working tree alone. The pushed branch is there at once for
+the branch endpoints above and for a fetch. `github.requests()` has the push as
+`{ method: "POST", path: ".../git-receive-pack", refs: ["refs/heads/..."] }`: the names of the refs the client asked
+to update (whether or not Git accepted them; the branch endpoints tell what is there), never a token or an object. Only a
+request that carries a command is a push: the 4-byte probe a client sends first for a request over 1 MB names no ref and
+is neither listed in `pushes()` nor given `refs`. The Git routes answer 401 with `WWW-Authenticate: Basic realm="GitHub"`
+like GitHub, so a client with URL credentials or a credential helper retries with them.
 
 Links (`html_url`) point to `https://github.test` unless the fake is started with `selfLinks`
 (`GITHUB_FAKE_SELF_LINKS=true` as its own process): then they point to the fake itself, which is what
@@ -145,6 +182,7 @@ github.setRepositories(4242, [{ id: 7001, fullName: "acme/widgets" }]);
 github.omitFromListings(4242, [7002]); // a page boundary that skipped a repository (total_count still counts it)
 github.rejectAppJwts(true); // every JWT answered with 401
 github.setAppPermissions({ metadata: "read", pull_requests: "read" }); // token requests above this get 422
+github.setInstallationPermissions(4242, { metadata: "read", contents: "read" }); // what installation 4242 accepted (#749)
 github.answerTokensWith({ repository_selection: "all" }); // a token answer that claims to be broader than asked
 github.pullRequestComments("acme/widgets", 7); // the comments below a pull request: id, body, login, htmlUrl, revision
 github.addPullRequestComment("acme/widgets", 7, "text"); // written as <slug>[bot] unless a login is given
@@ -165,7 +203,8 @@ github.fail({
 github.fail({ pathIncludes: "/pulls/", hang: true }); // never answers; stays open until the client gives up
 github.fail({ pathIncludes: "/pulls/", hangBody: true }); // sends the headers and the first byte of the answer, then stalls
 github.abortedRequests(); // requests the client closed before an answer was complete (an aborted request, not one merely no longer waited for)
-github.requests(); // method and path of every request, no credentials
+github.requests(); // method and path of every request (a push also its ref names), no credentials
+github.pushes(); // every push received: the repository and the ref names (#766)
 github.seenCredentials(); // every JWT or token received, to search outputs for leaks
 github.reset(); // all state, the request log and the injected failures (not failTokenEndpoint / failMembershipEndpoint)
 await github.close();

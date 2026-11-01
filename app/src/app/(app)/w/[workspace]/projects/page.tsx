@@ -17,7 +17,10 @@ import { PageHeader } from "@/components/page-header";
 import { requireWorkspace } from "@/workspaces/access-runtime";
 import { can } from "@/workspaces/permissions";
 
-export const metadata: Metadata = { title: "Projects" };
+// The area is named by the product of the deployment (#757): a function, not a constant of the module, like the root layout's title.
+export function generateMetadata(): Metadata {
+  return { title: getProductIdentity().qaAreaName };
+}
 
 // The repositories the GitHub App can read, each with a switch: a repository is reviewed only while
 // its project is on. The workspace is the one in the address, for a member only: the page asks for it
@@ -32,7 +35,7 @@ export default async function ProjectsPage({
   return (
     <>
       <PageHeader
-        title="Projects"
+        title={getProductIdentity().qaAreaName}
         description={`The repositories ${getProductIdentity().name} watches.`}
         actions={
           // The synchronization of the workspace: it reads the workspace's own connections, for an Owner or

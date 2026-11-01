@@ -14,6 +14,12 @@ import {
   parseSplitClaim,
 } from "./core/app-client.ts";
 import { readContract } from "./test-support/harness.ts";
+import {
+  CONTRACT_REVIEW_KINDS,
+  ENGINE_BY_KIND,
+  KNOWN_KINDS,
+  REVIEWER_KINDS,
+} from "./core/types.ts";
 
 const CONTRACTS = join(import.meta.dirname, "..", "..", "contracts");
 
@@ -173,6 +179,8 @@ describe("the contracts the Dispatcher speaks", () => {
       ["the example", good],
       ["a second attempt", { ...good, attempt: 2 }],
       ["a dynamic job", { ...good, reviewKind: "dynamic" }],
+      // #746-T05
+      ["an implementer job", { ...good, reviewKind: "implementer" }],
       ["an unknown field", { ...good, extra: 1 }],
       ["a credential field", { ...good, credential: "crj_x" }],
       ["a missing field", { ...good, sentAt: undefined }],
@@ -237,5 +245,79 @@ describe("the operator routes of the Dispatcher (#730)", () => {
       [...APP_FAILURES].sort(),
     );
     expect(codes).toContain(null);
+  });
+});
+
+describe("the implementer kind in the contracts the Dispatcher speaks (#746)", () => {
+  const runnerApi = readContract<{
+    $defs: Record<string, { enum?: string[] }>;
+  }>("runner-api.v1.json");
+
+  // #746-T03
+  it("lists the review kinds and the engines of the contract file", () => {
+    expect([...CONTRACT_REVIEW_KINDS].sort()).toStrictEqual(
+      [...(runnerApi.$defs.ReviewKind?.enum ?? [])].sort(),
+    );
+    expect(Object.keys(ENGINE_BY_KIND).sort()).toStrictEqual(
+      [...(runnerApi.$defs.ReviewKind?.enum ?? [])].sort(),
+    );
+    expect(runnerApi.$defs.Engine?.enum).toContain("implementer");
+    expect(new Set(Object.values(ENGINE_BY_KIND))).toStrictEqual(
+      new Set(runnerApi.$defs.Engine?.enum),
+    );
+  });
+
+  // #759-T01
+  it("serves every kind of the contract, each with the engine of the contract, and the reviewer's kinds are the two review kinds", () => {
+    expect([...KNOWN_KINDS].sort()).toStrictEqual(
+      [...(runnerApi.$defs.ReviewKind?.enum ?? [])].sort(),
+    );
+    expect([...KNOWN_KINDS]).toStrictEqual([...CONTRACT_REVIEW_KINDS]);
+    expect(Object.keys(ENGINE_BY_KIND).sort()).toStrictEqual(
+      [...KNOWN_KINDS].sort(),
+    );
+    expect(ENGINE_BY_KIND.implementer).toBe("implementer");
+    expect([...REVIEWER_KINDS]).toStrictEqual(["diff", "dynamic"]);
+  });
+
+  // #746-T01
+  it("reads the split claim answer of an implementer job as the schema does", () => {
+    const example = readContract<{ job: Record<string, unknown> }>(
+      "examples/implementer/SplitClaimResponse.json",
+    );
+    const check = validator("runner-api", "SplitClaimResponse");
+
+    expect(check(example), JSON.stringify(check.errors)).toBe(true);
+    expect(parseSplitClaim(example)).toMatchObject({
+      id: example.job.id,
+      reviewKind: "implementer",
+    });
+    expect(
+      parseSplitClaim({
+        ...example,
+        job: { ...example.job, reviewKind: "review" },
+      }),
+    ).toBeNull();
+  });
+
+  // #746-T01
+  it("has valid examples of the job input and the result", () => {
+    for (const [definition, example] of [
+      ["RunnerJobInput", "examples/implementer/RunnerJobInput.json"],
+      ["RunnerResult", "examples/implementer/RunnerResult.json"],
+    ] as const) {
+      const check = validator("runner-api", definition);
+      expect(
+        check(readContract(example)),
+        `${definition}: ${JSON.stringify(check.errors)}`,
+      ).toBe(true);
+    }
+    expect(
+      readdirSync(join(CONTRACTS, "examples", "implementer")).sort(),
+    ).toStrictEqual([
+      "RunnerJobInput.json",
+      "RunnerResult.json",
+      "SplitClaimResponse.json",
+    ]);
   });
 });

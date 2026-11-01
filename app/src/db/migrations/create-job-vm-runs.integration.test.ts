@@ -43,7 +43,9 @@ async function rowsOfEveryTable(
       table.name === "billing_profiles" ||
       table.name === "billing_start_credit_grants" ||
       table.name === "billing_workspace_settings" ||
-      table.name === "billing_notifications"
+      table.name === "billing_notifications" ||
+      table.name === "implementer_sessions" ||
+      table.name === "implementer_turns"
     )
       continue;
     const { rows } =

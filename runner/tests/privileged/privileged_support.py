@@ -244,18 +244,22 @@ def ipv6_switched_off() -> Generator[None]:
 
 @contextmanager
 def installed_rules(
-    proxy_port: int, engine_port: int, mode: EgressMode = EgressMode.FULL
+    proxy_port: int,
+    engine_port: int,
+    mode: EgressMode = EgressMode.FULL,
+    egress_port: int | None = None,
 ) -> Generator[None]:
     """The engine user's rules for these ports, installed like the startup does, removed after.
 
     Needs NET_ADMIN, so only the startup phase of the suite can use it. The job phase has the
     runner's own static rules and no way to touch them. The fallback rules do not see IPv6, so
-    that mode runs with IPv6 switched off, as the startup step leaves it.
+    that mode runs with IPv6 switched off, as the startup step leaves it. `egress_port` is the
+    Implementer container's third port (#763).
     """
     with contextlib.ExitStack() as stack:
         if mode is EgressMode.FALLBACK:
             stack.enter_context(ipv6_switched_off())
-        NetworkConfinement(ENGINE_UID, mode=mode).apply(proxy_port, engine_port)
+        NetworkConfinement(ENGINE_UID, mode=mode).apply(proxy_port, engine_port, egress_port)
         try:
             yield
         finally:

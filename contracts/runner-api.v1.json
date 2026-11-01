@@ -27,14 +27,14 @@
       "enum": ["review"]
     },
     "Engine": {
-      "description": "An engine a runner can run and may advertise in a claim (#195). pr-agent runs Diff Review, opencode runs Dynamic Review. An empty legacy claim means pr-agent only; a runner only advertises an engine its fail-closed startup self-check proved.",
+      "description": "An engine a runner can run and may advertise in a claim (#195). pr-agent runs Diff Review, opencode runs Dynamic Review. #746: implementer runs the Implementer (reviewKind implementer, a session that changes a branch of a repository); a runner advertises it only when its start-up self-check proved the Implementer prerequisites. An empty legacy claim means pr-agent only; a runner only advertises an engine its fail-closed startup self-check proved.",
       "type": "string",
-      "enum": ["pr-agent", "opencode"]
+      "enum": ["pr-agent", "opencode", "implementer"]
     },
     "ReviewKind": {
-      "description": "The review kind a job was queued for (#195), pinned at enqueue time. Absent on a legacy Diff payload means diff. A runner is only handed a job whose kind one of its engines can run, and a Dynamic job is never silently run by PR-Agent.",
+      "description": "The review kind a job was queued for (#195), pinned at enqueue time. Absent on a legacy Diff payload means diff. A runner is only handed a job whose kind one of its engines can run, and a Dynamic job is never silently run by PR-Agent. #746: `implementer` is a turn of the Implementer (the factory deployment only): its input has no pull request (`prUrl`, `command`, `base` and `dynamic` are absent) and carries the closed `implementer` object; only a runner that advertised the engine `implementer` is handed one, and a job of this kind is never run by another engine.",
       "type": "string",
-      "enum": ["diff", "dynamic"]
+      "enum": ["diff", "dynamic", "implementer"]
     },
     "LlmProviderId": {
       "description": "#424: the slug of an LLM provider, as in the registries of the app and of the runner. The form only: whether a slug is usable is decided by the registry of the side that reads it.",
@@ -54,7 +54,7 @@
           "type": "array",
           "items": { "$ref": "#/$defs/Engine" },
           "minItems": 1,
-          "maxItems": 2,
+          "maxItems": 3,
           "uniqueItems": true
         },
         "features": {
@@ -282,7 +282,7 @@
       ]
     },
     "KnownRunnerErrorCode": {
-      "description": "The error codes the runner reports in a result (ErrorCode in the runner, plus runner_shutdown from the job loop). A caller branches on the code, never on a message. The app accepts any code of the form below and stores an unknown one as 'unknown' (the original stays in the stored result), so a newer runner never loses a result.",
+      "description": "The error codes the runner reports in a result (ErrorCode in the runner, plus runner_shutdown from the job loop). #746 adds the codes of the Implementer: `branch_exists` (the branch to create is already on the remote), `base_branch_not_found`, `clone_failed`, `setup_failed` (the repository's own set-up did not run), `agent_gave_up` (the agent ended without a result it stands behind), `push_rejected` (the remote refused the push), `branch_violation` (the work left the branch it was given), `time_limit_reached` and the existing `cost_limit_reached` (the two limits of the turn), `git_write_not_granted` (the token cannot write contents of the repository), `implementer_engine_unavailable` (no engine of the runner runs the kind) and `implementer_config_invalid` (the turn's options cannot be used). A caller branches on the code, never on a message. The app accepts any code of the form below and stores an unknown one as 'unknown' (the original stays in the stored result), so a newer runner never loses a result.",
       "type": "string",
       "enum": [
         "invalid_job",
@@ -324,7 +324,18 @@
         "dynamic_model_features_unsupported",
         "cost_limit_reached",
         "lease_lost",
-        "superseded"
+        "superseded",
+        "branch_exists",
+        "base_branch_not_found",
+        "clone_failed",
+        "setup_failed",
+        "agent_gave_up",
+        "push_rejected",
+        "branch_violation",
+        "time_limit_reached",
+        "git_write_not_granted",
+        "implementer_engine_unavailable",
+        "implementer_config_invalid"
       ]
     },
     "JobEnv": {
@@ -337,16 +348,17 @@
       "maxProperties": 64
     },
     "RunnerJobInput": {
-      "description": "Exactly the job the runner reads on stdin (see runner/src/code_reviewer_runner/job.py). Closed: the runner refuses unknown fields. Contains secrets (git.token, llm.apiKey): only the claim response carries it.",
+      "description": "Exactly the job the runner reads on stdin (see runner/src/code_reviewer_runner/job.py). Closed: the runner refuses unknown fields. Contains secrets (git.token, llm.apiKey): only the claim response carries it. #746: for `reviewKind: implementer` the job carries the `implementer` object instead of `prUrl`, `command`, `base` and `dynamic`; `git.token` is then a token that may write the contents of exactly the repository named in `implementer.repo` and nothing else.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["prUrl", "command", "git", "llm", "env"],
+      "required": ["git", "llm", "env"],
       "properties": {
         "prUrl": { "type": "string", "minLength": 1, "maxLength": 2048 },
         "command": { "$ref": "#/$defs/Command" },
         "reviewKind": { "$ref": "#/$defs/ReviewKind" },
         "dynamic": { "$ref": "#/$defs/DynamicReview" },
         "base": { "$ref": "#/$defs/ClaimBase" },
+        "implementer": { "$ref": "#/$defs/ImplementerJob" },
         "args": {
           "description": "Legacy field of the removed /ask command. A previous release may send it; the runner accepts and ignores it and never hands it to PR-Agent. This app sends no args.",
           "type": "array",
@@ -406,6 +418,29 @@
       },
       "allOf": [
         {
+          "description": "#746: the fields a job has depend on its kind. A Diff or Dynamic job (reviewKind absent, 'diff' or 'dynamic') is about a pull request: `prUrl` and `command` are required and the `implementer` object is forbidden. An implementer job is about a branch of a repository: `implementer` is required and `prUrl`, `command`, `args`, `base` and `dynamic` are forbidden, so it can never be read as a review. `git`, `llm` and `env` are required for every kind.",
+          "if": {
+            "properties": { "reviewKind": { "const": "implementer" } },
+            "required": ["reviewKind"]
+          },
+          "then": {
+            "required": ["implementer"],
+            "not": {
+              "anyOf": [
+                { "required": ["prUrl"] },
+                { "required": ["command"] },
+                { "required": ["args"] },
+                { "required": ["base"] },
+                { "required": ["dynamic"] }
+              ]
+            }
+          },
+          "else": {
+            "required": ["prUrl", "command"],
+            "not": { "required": ["implementer"] }
+          }
+        },
+        {
           "if": {
             "properties": { "reviewKind": { "const": "dynamic" } },
             "required": ["reviewKind"]
@@ -427,6 +462,125 @@
           }
         }
       ]
+    },
+    "ImplementerBranchName": {
+      "description": "#746: the name of a branch as a job carries it: a non-empty text of at most 255 characters without whitespace and not starting with a dash (so it can never be read as an option). Whether it is a valid git ref name is decided by the app when the turn is submitted and again by the runner before it runs git; this is the floor both share.",
+      "type": "string",
+      "maxLength": 255,
+      "pattern": "^[^\\s-][^\\s]*$"
+    },
+    "ImplementerRepo": {
+      "description": "#746: the one repository a turn works on. `fullName` is `owner/name`; `cloneUrl` is the https address the runner clones from (the host of the git provider), with no credential in it: the token is in `git.token`.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fullName", "cloneUrl"],
+      "properties": {
+        "fullName": {
+          "type": "string",
+          "maxLength": 201,
+          "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
+        },
+        "cloneUrl": { "type": "string", "maxLength": 2048, "pattern": "^https://[^\\s@]+$" }
+      }
+    },
+    "ImplementerJob": {
+      "description": "#746: what an implementer job asks for (`reviewKind: implementer`; the factory deployment only). A closed object: there is no command, permission, executable, endpoint or upstream URL here, so a job can never widen what the agent may do. The agent works in a clone of `repo` that starts at the head of `baseBranch`, on the new branch `branch` (it must not exist yet) and only there, and pushes it. `instruction` is the user's task as literal data. `limits.timeLimitSeconds` is the wall clock the runner holds the turn to (the Dispatcher's own timeout for the kind is the backstop). `cost` and `modelEntry` are the `DynamicCostPolicy` and the `DynamicModelEntry` of the native Dynamic job, unchanged: the same passthrough proxy, price book and token cap, and a native job is the only way the Implementer runs a model. `capabilities` is optional, as for Dynamic.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repo", "baseBranch", "branch", "instruction", "limits", "cost", "modelEntry"],
+      "properties": {
+        "repo": { "$ref": "#/$defs/ImplementerRepo" },
+        "baseBranch": { "$ref": "#/$defs/ImplementerBranchName" },
+        "branch": { "$ref": "#/$defs/ImplementerBranchName" },
+        "instruction": { "type": "string", "minLength": 1, "maxLength": 20000 },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["timeLimitSeconds"],
+          "properties": {
+            "timeLimitSeconds": { "type": "integer", "minimum": 60, "maximum": 14400 }
+          }
+        },
+        "cost": { "$ref": "#/$defs/DynamicCostPolicy" },
+        "modelEntry": { "$ref": "#/$defs/DynamicModelEntry" },
+        "capabilities": { "$ref": "#/$defs/DynamicModelCapabilities" }
+      }
+    },
+    "ImplementerFileStatus": {
+      "description": "#746: what happened to a file between the base commit and the head commit.",
+      "type": "string",
+      "enum": ["added", "modified", "deleted", "renamed", "copied", "typechange"]
+    },
+    "ImplementerResult": {
+      "description": "#746: what a turn of the Implementer did, in `RunnerResult.implementer`. A closed object; later fields (checks, open questions, an export of the work) are additive in a later change. It is facts the runner measured in the repository, never text from the agent except `summary`, which is shown as plain text. `baseCommit` is the head of the base branch the work started from. `headCommit` is the last commit of the branch, or null when the turn made none. `pushed` says that the branch with `headCommit` is on the remote, and is never true without a `headCommit`. `commits` are the commits of the branch after the base commit, oldest first, at most 200 (more are cut off, the head commit is always the last); `filesChanged` are the files that differ between the base commit and the head commit, at most 500. `opencode` names the saved agent session a later turn continues, null when none was saved. A failed turn carries the block too, whenever the runner got as far as the repository.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseCommit", "headCommit", "pushed", "commits", "filesChanged", "summary", "opencode"],
+      "properties": {
+        "baseCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "headCommit": { "oneOf": [{ "type": "string", "pattern": "^[0-9a-f]{40}$" }, { "type": "null" }] },
+        "pushed": { "type": "boolean" },
+        "commits": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["sha", "subject"],
+            "properties": {
+              "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+              "subject": { "type": "string", "maxLength": 500 }
+            }
+          }
+        },
+        "filesChanged": {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "status"],
+            "properties": {
+              "path": { "type": "string", "minLength": 1, "maxLength": 4096 },
+              "status": { "$ref": "#/$defs/ImplementerFileStatus" }
+            }
+          }
+        },
+        "summary": { "type": "string", "maxLength": 8192 },
+        "opencode": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["sessionId", "version"],
+              "properties": {
+                "sessionId": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "version": { "type": "string", "minLength": 1, "maxLength": 64 }
+              }
+            },
+            { "type": "null" }
+          ]
+        }
+      },
+      "if": {
+        "properties": { "pushed": { "const": true } },
+        "required": ["pushed"]
+      },
+      "then": { "properties": { "headCommit": { "type": "string" } } }
+    },
+    "KnownImplementerEnvironmentName": {
+      "description": "#746: the names of the environment variables the Worker container of an implementer job gets, agreed here and used by later changes (the container profile and the runner). They hold no secret. `RUNNER_IMPLEMENTER_WORK_DIR`: the directory of the work volume, always `/work`. `RUNNER_IMPLEMENTER_EGRESS_PORT`: the loopback port of the registries proxy, a decimal port number; present when the network is `registries`. `RUNNER_IMPLEMENTER_NETWORK`: one of ImplementerNetworkMode. The Dispatcher sets them, never the app and never a job; the runner trusts these and nothing a job says about its own network.",
+      "type": "string",
+      "enum": [
+        "RUNNER_IMPLEMENTER_WORK_DIR",
+        "RUNNER_IMPLEMENTER_EGRESS_PORT",
+        "RUNNER_IMPLEMENTER_NETWORK"
+      ]
+    },
+    "ImplementerNetworkMode": {
+      "description": "#746: what the Worker of an implementer job can reach besides the model proxy and the git remote of its repository. `registries`: the package registries named by the deployment, through the loopback proxy of `RUNNER_IMPLEMENTER_EGRESS_PORT` (a default-deny proxy that allows only those hosts). `none`: nothing else.",
+      "type": "string",
+      "enum": ["registries", "none"]
     },
     "ClaimResponse": {
       "description": "200 from POST /api/runners/v1/claim. 204 without a body means there is nothing to do. Cache-Control is always no-store.",
@@ -685,6 +839,10 @@
         "findings": {
           "description": "#405: the findings left open on the pull request by a successful review, which the app turns into the review verdict it submits. Absent (or null) where the runner cannot say, and on every failure: the app then submits no verdict. Additive: a runner that does not send it, or an app that does not read it, keeps working.",
           "oneOf": [{ "$ref": "#/$defs/ReviewFindings" }, { "type": "null" }]
+        },
+        "implementer": {
+          "description": "#746: what a turn of the Implementer did (ImplementerResult). Only a result of an implementer job carries it; absent for every other kind. Optional and additive: an app of the release before ignores it.",
+          "$ref": "#/$defs/ImplementerResult"
         },
         "usage": {
           "description": "What the run used. A failed result carries it too, whenever the run made at least one model call before it failed (a timeout at the end, an answer the validator refuses, a publish error): the app counts such a run exactly like a successful one. A run that failed before its first model call reports null. The cost follows the same rule as for a successful run: exact, or null when any call is unpriced; the token counters are reported either way.",

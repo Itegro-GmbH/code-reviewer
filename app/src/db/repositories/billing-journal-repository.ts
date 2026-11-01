@@ -35,7 +35,7 @@ import {
   type ReserveRefusal,
 } from "../../billing/journal.ts";
 import { noteBalanceMovedSafely } from "../../billing/balance-notifications.ts";
-import type { ProjectReviewKind } from "../../job-kind/job-kind.ts";
+import { jobKindOf, type JobKind } from "../../job-kind/job-kind.ts";
 import { formatTimestamp } from "../codecs.ts";
 import { databaseDriver } from "../driver.ts";
 import type { BillingJournalEntriesTable, Database } from "../schema.ts";
@@ -52,7 +52,7 @@ export type JournalEntry = {
   amountMicroUsd: number;
   refKey: string;
   jobId: string | null;
-  reviewKind: ProjectReviewKind | null;
+  reviewKind: JobKind | null;
   minutes: number | null;
   aiMicroUsd: number | null;
   infraMicroUsd: number | null;
@@ -118,7 +118,7 @@ export type JobCharge = {
   aiMicroUsd: number;
   infraMicroUsd: number;
   minutes: number;
-  reviewKind: ProjectReviewKind;
+  reviewKind: JobKind;
 };
 
 export type SettleResult =
@@ -219,7 +219,7 @@ function toEntry(row: Selectable<BillingJournalEntriesTable>): JournalEntry {
     amountMicroUsd: Number(row.amount_micro_usd),
     refKey: row.ref_key,
     jobId: row.job_id,
-    reviewKind: row.review_kind as ProjectReviewKind | null,
+    reviewKind: row.review_kind === null ? null : jobKindOf(row.review_kind),
     minutes: row.minutes,
     aiMicroUsd: amount(row.ai_micro_usd),
     infraMicroUsd: amount(row.infra_micro_usd),

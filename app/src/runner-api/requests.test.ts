@@ -920,3 +920,268 @@ describe("the LLM providers a caller advertises (#424)", () => {
     expect(parseWorkerLlmProviders("Bad Name,,a")).toBeUndefined();
   });
 });
+
+// #754: the result block of a turn of the Implementer (`result.implementer`, contracts/runner-api.v1.json `ImplementerResult`).
+// The parser reads the block like the contract does; whether the job is a turn is decided with the job (`implementer-report.test.ts`).
+describe("the implementer block of a result (#754)", () => {
+  const SHA_A = "a".repeat(40);
+  const SHA_B = "b".repeat(40);
+  const block = () => ({
+    baseCommit: SHA_A,
+    headCommit: SHA_B,
+    pushed: true,
+    commits: [{ sha: SHA_B, subject: "Add a health endpoint" }],
+    filesChanged: [{ path: "src/health.ts", status: "added" }],
+    summary: "Added a health endpoint.",
+    opencode: { sessionId: "ses_1", version: "1.19.0" },
+  });
+  const bodyWith = (implementer: unknown) => ({
+    leaseToken: TOKEN,
+    result: { ...GOOD_RESULT, implementer },
+  });
+
+  // #754-T03
+  it("keeps a valid block as it was sent, in a complete and in a Worker result", () => {
+    const complete = parseCompleteRequest(bodyWith(block()));
+    const worker = parseWorkerResultRequest({
+      result: { ...GOOD_RESULT, implementer: block() },
+    });
+
+    expect(complete.ok && complete.value.result.implementer).toEqual(block());
+    expect(worker.ok && worker.value.result.implementer).toEqual(block());
+  });
+
+  // #754-T03
+  it("leaves the field out of a result that has none, and accepts a turn that made no commit", () => {
+    const none = parseCompleteRequest({
+      leaseToken: TOKEN,
+      result: GOOD_RESULT,
+    });
+    const empty = parseCompleteRequest(
+      bodyWith({
+        ...block(),
+        headCommit: null,
+        pushed: false,
+        commits: [],
+        filesChanged: [],
+        summary: "",
+        opencode: null,
+      }),
+    );
+
+    expect(none.ok && "implementer" in none.value.result).toBe(false);
+    expect(empty.ok).toBe(true);
+  });
+
+  // #754-T03
+  it.each<[string, (value: ReturnType<typeof block>) => unknown, string]>([
+    [
+      "a base commit that is not 40 hex digits",
+      (b) => ({ ...b, baseCommit: "abc" }),
+      "result.implementer.baseCommit",
+    ],
+    [
+      "an upper case sha",
+      (b) => ({ ...b, headCommit: "A".repeat(40) }),
+      "result.implementer.headCommit",
+    ],
+    [
+      "a head commit that is a number",
+      (b) => ({ ...b, headCommit: 5 }),
+      "result.implementer.headCommit",
+    ],
+    [
+      "a pushed flag that is not a boolean",
+      (b) => ({ ...b, pushed: "yes" }),
+      "result.implementer.pushed",
+    ],
+    [
+      "201 commits",
+      (b) => ({
+        ...b,
+        commits: Array.from({ length: 201 }, () => b.commits[0]),
+      }),
+      "result.implementer.commits",
+    ],
+    [
+      "a commit with a bad sha",
+      (b) => ({ ...b, commits: [{ sha: "x", subject: "s" }] }),
+      "result.implementer.commits[0].sha",
+    ],
+    [
+      "a subject over 500 characters",
+      (b) => ({ ...b, commits: [{ sha: SHA_B, subject: "s".repeat(501) }] }),
+      "result.implementer.commits[0].subject",
+    ],
+    [
+      "a commit with an unknown field",
+      (b) => ({ ...b, commits: [{ sha: SHA_B, subject: "s", author: "x" }] }),
+      "result.implementer.commits[0].author",
+    ],
+    [
+      "501 files",
+      (b) => ({
+        ...b,
+        filesChanged: Array.from({ length: 501 }, () => b.filesChanged[0]),
+      }),
+      "result.implementer.filesChanged",
+    ],
+    [
+      "an empty path",
+      (b) => ({ ...b, filesChanged: [{ path: "", status: "added" }] }),
+      "result.implementer.filesChanged[0].path",
+    ],
+    [
+      "a path over 4096 characters",
+      (b) => ({
+        ...b,
+        filesChanged: [{ path: "p".repeat(4097), status: "added" }],
+      }),
+      "result.implementer.filesChanged[0].path",
+    ],
+    [
+      "a file status the contract does not name",
+      (b) => ({ ...b, filesChanged: [{ path: "a", status: "moved" }] }),
+      "result.implementer.filesChanged[0].status",
+    ],
+    [
+      "a summary over 8192 characters",
+      (b) => ({ ...b, summary: "s".repeat(8193) }),
+      "result.implementer.summary",
+    ],
+    [
+      "a summary that is not text",
+      (b) => ({ ...b, summary: null }),
+      "result.implementer.summary",
+    ],
+    [
+      "an OpenCode session without a version",
+      (b) => ({ ...b, opencode: { sessionId: "ses_1" } }),
+      "result.implementer.opencode.version",
+    ],
+    [
+      "an OpenCode session id over 200 characters",
+      (b) => ({ ...b, opencode: { sessionId: "s".repeat(201), version: "1" } }),
+      "result.implementer.opencode.sessionId",
+    ],
+    [
+      "a field the block does not have",
+      (b) => ({ ...b, branch: "x" }),
+      "result.implementer.branch",
+    ],
+    [
+      "a missing summary",
+      (b) =>
+        Object.fromEntries(
+          Object.entries(b).filter(([key]) => key !== "summary"),
+        ),
+      "result.implementer.summary",
+    ],
+    ["a block that is not an object", () => "pushed", "result.implementer"],
+  ])(
+    "refuses %s, naming the field and not its value",
+    (_name, change, field) => {
+      const parsed = parseCompleteRequest(bodyWith(change(block())));
+
+      expect(fieldsOf(parsed).map((entry) => entry.field)).toContain(field);
+    },
+  );
+
+  // #754-T03
+  it("counts a text by characters, like the contract", () => {
+    const parsed = parseCompleteRequest(
+      bodyWith({ ...block(), summary: "😀".repeat(8192) }),
+    );
+
+    expect(parsed.ok).toBe(true);
+  });
+
+  // #754: a control character is no text: Postgres refuses a NUL in a text column, so the report would never be processed.
+  it("strips control characters from the text and the free-form ids, and keeps tabs and line breaks", () => {
+    const parsed = parseCompleteRequest(
+      bodyWith({
+        ...block(),
+        summary: "Added\u0000 a\u001b health\tendpoint.\nDone\u007f.",
+        commits: [{ sha: SHA_B, subject: "Add\u0000 it" }],
+        filesChanged: [{ path: "src/\u0000health.ts", status: "added" }],
+        opencode: { sessionId: "ses\u0000_1", version: "1.\u000019.0" },
+      }),
+    );
+
+    expect(parsed.ok && parsed.value.result.implementer).toMatchObject({
+      summary: "Added a health\tendpoint.\nDone.",
+      commits: [{ subject: "Add it" }],
+      filesChanged: [{ path: "src/health.ts" }],
+      opencode: { sessionId: "ses_1", version: "1.19.0" },
+    });
+  });
+
+  // #754: what is left of an id or a path after the strip has to be something.
+  it.each([
+    [
+      "an OpenCode session id of NUL only",
+      { opencode: { sessionId: "\u0000", version: "1" } },
+      "result.implementer.opencode.sessionId",
+    ],
+    [
+      "a version of NUL only",
+      { opencode: { sessionId: "s", version: "\u0000\u0000" } },
+      "result.implementer.opencode.version",
+    ],
+    [
+      "a path of NUL only",
+      { filesChanged: [{ path: "\u0000", status: "added" }] },
+      "result.implementer.filesChanged[0].path",
+    ],
+  ])("refuses %s", (_name, change, field) => {
+    expect(
+      fieldsOf(parseCompleteRequest(bodyWith({ ...block(), ...change }))).map(
+        (entry) => entry.field,
+      ),
+    ).toContain(field);
+  });
+
+  // #754: the invariants the contract states in words: `pushed` never without a head, and the head is the last commit.
+  it.each([
+    [
+      "pushed without a head commit",
+      { headCommit: null, pushed: true, commits: [], filesChanged: [] },
+      "result.implementer.pushed",
+    ],
+    [
+      "a head commit that is not the last commit listed",
+      { headCommit: SHA_A },
+      "result.implementer.headCommit",
+    ],
+    [
+      "commits listed and no head commit",
+      { headCommit: null, pushed: false },
+      "result.implementer.headCommit",
+    ],
+  ])("refuses %s", (_name, change, field) => {
+    expect(
+      fieldsOf(parseCompleteRequest(bodyWith({ ...block(), ...change }))).map(
+        (entry) => entry.field,
+      ),
+    ).toContain(field);
+  });
+
+  // #754
+  it("accepts a head commit with no commits listed, and a head that was committed and not pushed", () => {
+    expect(parseCompleteRequest(bodyWith({ ...block(), commits: [] })).ok).toBe(
+      true,
+    );
+    expect(
+      parseCompleteRequest(bodyWith({ ...block(), pushed: false })).ok,
+    ).toBe(true);
+  });
+
+  // #754: the contract has no null for the block (only absent); the parser follows it.
+  it("refuses a block that is null", () => {
+    expect(
+      fieldsOf(parseCompleteRequest(bodyWith(null))).map(
+        (entry) => entry.field,
+      ),
+    ).toContain("result.implementer");
+  });
+});

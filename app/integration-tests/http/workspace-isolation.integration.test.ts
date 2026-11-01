@@ -93,6 +93,11 @@ type Entry = {
    * Stripe (made-up credentials that are never used: no workspace here has a billing profile, so nothing is sent) first.
    */
   billing?: boolean;
+  /**
+   * The route exists only with the capability `implementer` (#755): the deployment of the request is the factory with it, as
+   * the proxy and the route file ask. Without it every request would be the 404 of a path that does not exist.
+   */
+  implementer?: boolean;
 };
 
 const ENTRIES: Entry[] = [
@@ -316,6 +321,59 @@ const ENTRIES: Entry[] = [
     params: () => ({ provider: "deepseek" }),
     file: "llm-catalog/[provider]/models/route.ts",
     takesNoIds: true,
+  },
+  {
+    // #755-T09: the four routes behind the Implementer form are for every member, like starting a review.
+    name: "GET implementer/repositories",
+    route: "/api/w/[workspace]/implementer/repositories",
+    method: "GET",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/implementer/repositories",
+    params: () => ({}),
+    file: "implementer/repositories/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    name: "GET implementer/repositories/[repositoryId]/branches",
+    route:
+      "/api/w/[workspace]/implementer/repositories/[repositoryId]/branches",
+    method: "GET",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) => `/implementer/repositories/${ids.repositoryId}/branches`,
+    params: (ids) => ({ repositoryId: ids.repositoryId }),
+    file: "implementer/repositories/[repositoryId]/branches/route.ts",
+    implementer: true,
+  },
+  {
+    name: "GET implementer/models",
+    route: "/api/w/[workspace]/implementer/models",
+    method: "GET",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/implementer/models",
+    params: () => ({}),
+    file: "implementer/models/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    name: "POST implementer/tasks",
+    route: "/api/w/[workspace]/implementer/tasks",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/implementer/tasks",
+    // The repository of the ids it is given: a repository of another workspace is not found, and nothing is written.
+    body: (ids) => ({
+      repositoryId: ids.repositoryId,
+      baseBranch: "main",
+      branch: "implementer/abc123",
+      instruction: "Add a health endpoint.",
+      model: { provider: "deepseek", model: "deepseek-chat" },
+      clientRequestId: "request-1",
+    }),
+    params: () => ({}),
+    file: "implementer/tasks/route.ts",
+    implementer: true,
   },
   {
     name: "POST plan-handoff",
@@ -762,6 +820,13 @@ async function start() {
       context: { params: Promise<Record<string, string>> },
     ) => Promise<Response>;
     if (entry.billing === true) await switchBillingOnWithStripe();
+    if (entry.implementer === true) {
+      vi.stubEnv("PRODUCT_ID", "factory");
+      vi.stubEnv(
+        "PRODUCT_CAPABILITIES",
+        "review,dynamic-review,billing,implementer",
+      );
+    }
     const body = entry.body?.(ids);
     return handler(
       new Request(`https://app.test/api/w/${slug}${entry.path(ids)}`, {

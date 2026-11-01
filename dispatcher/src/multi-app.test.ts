@@ -267,6 +267,54 @@ describe("POST /dispatch with two apps", () => {
     expect(logger.text()).toContain("kind_not_allowed");
   });
 
+  // #759-T04
+  it("answers `not_capable` to a wake-up for the implementer kind signed with the reviewer's key and claims nothing, and claims at the factory only when the factory signs it", async () => {
+    const jobId = factory.enqueue({ reviewKind: "implementer" });
+    const { app, launcher, background } = build({
+      env: environment({}, ["diff", "dynamic", "implementer"]),
+      launcher: { engines: ["pr-agent", "opencode", "implementer"] },
+    });
+
+    const forReviewer = await app.fetch(
+      signedRequest({
+        body: webhookBody({ jobId, reviewKind: "implementer" }),
+        nowSeconds: now(),
+      }),
+    );
+    await background.drain(1000);
+
+    expect(forReviewer.status).toBe(200);
+    expect(await forReviewer.json()).toStrictEqual({
+      version: 1,
+      status: "ignored",
+      reason: "not_capable",
+    });
+    expect(factory.requests()).toHaveLength(0);
+    expect(reviewer.requests()).toHaveLength(0);
+    expect(launcher.launches).toHaveLength(0);
+
+    const forFactory = await app.fetch(
+      signedRequest({
+        body: webhookBody({
+          jobId,
+          reviewKind: "implementer",
+          dispatchId: "6e4b9d1f-02c5-4a7b-b3d8-4f9c2e8a5b03",
+        }),
+        keyId: FACTORY_KEY,
+        secret: FACTORY_SECRET,
+        nowSeconds: now(),
+      }),
+    );
+    await background.drain(1000);
+
+    expect(forFactory.status).toBe(202);
+    expect(claimsAt(factory)).toHaveLength(1);
+    expect(reviewer.requests()).toHaveLength(0);
+    expect(
+      launcher.launches.map((spec) => [spec.appId, spec.appUrl, spec.kind]),
+    ).toEqual([["factory", factory.url, "implementer"]]);
+  });
+
   // #730-T18
   it("accepts every request of the unchanged contract vectors that is valid and refuses the rest, as an App of the current release sends them", async () => {
     const vectors = readContract<{
@@ -938,6 +986,53 @@ describe("the cap of each app against the platform's fleet", () => {
     expect(launcher.launches.map((spec) => spec.appId)).toStrictEqual([
       "reviewer",
     ]);
+  });
+
+  // #802-T31
+  it("logs the listing's time and size once for the claims that share it", async () => {
+    const { core, sandbox, logger } = build({
+      env: environment(),
+      withFleet: true,
+    });
+    seedLive(sandbox, "factory", 1, 100);
+    seedLive(sandbox, "reviewer", 1, 200);
+
+    for (const [app, queue] of [
+      ["factory", factory],
+      ["reviewer", reviewer],
+    ] as const) {
+      const result = await core.handle({
+        appId: app,
+        jobId: queue.enqueue(),
+        reviewKind: "diff",
+      });
+      if (result.outcome === "started") await result.background;
+    }
+
+    expect(
+      logger.text().match(/fleet_listed \{"ms":\d+,"count":2\}/g),
+    ).toHaveLength(1);
+  });
+
+  // #802-T02
+  it("claims the job of an app below its cap when the platform cannot be listed", async () => {
+    const { core, sandbox, launcher, logger } = build({
+      env: environment(),
+      withFleet: true,
+    });
+    sandbox.failNextList(new Error("platform down"));
+
+    const result = await core.handle({
+      appId: "factory",
+      jobId: factory.enqueue(),
+      reviewKind: "diff",
+    });
+    if (result.outcome === "started") await result.background;
+
+    expect(result.outcome).toBe("started");
+    expect(launcher.launches).toHaveLength(1);
+    expect(logger.text()).toContain("fleet_list_failed");
+    expect(logger.text()).not.toContain("fleet_listed");
   });
 
   // #730-T22

@@ -4,22 +4,23 @@
 // `make verify` fails while this file differs from what the schema generates.
 
 /**
- * Exactly the job the runner reads on stdin (see runner/src/code_reviewer_runner/job.py). Closed: the runner refuses unknown fields. Contains secrets (git.token, llm.apiKey): only the claim response carries it.
+ * Exactly the job the runner reads on stdin (see runner/src/code_reviewer_runner/job.py). Closed: the runner refuses unknown fields. Contains secrets (git.token, llm.apiKey): only the claim response carries it. #746: for `reviewKind: implementer` the job carries the `implementer` object instead of `prUrl`, `command`, `base` and `dynamic`; `git.token` is then a token that may write the contents of exactly the repository named in `implementer.repo` and nothing else.
  */
 export type RunnerJobInput = {
   [k: string]: unknown;
 } & {
-  prUrl: string;
+  prUrl?: string;
   /**
    * The commands the product executes. Since the removal of /ask, /improve and /describe only /review exists (a historical run keeps its original command in the database, never on the wire).
    */
-  command: "review";
+  command?: "review";
   /**
-   * The review kind a job was queued for (#195), pinned at enqueue time. Absent on a legacy Diff payload means diff. A runner is only handed a job whose kind one of its engines can run, and a Dynamic job is never silently run by PR-Agent.
+   * The review kind a job was queued for (#195), pinned at enqueue time. Absent on a legacy Diff payload means diff. A runner is only handed a job whose kind one of its engines can run, and a Dynamic job is never silently run by PR-Agent. #746: `implementer` is a turn of the Implementer (the factory deployment only): its input has no pull request (`prUrl`, `command`, `base` and `dynamic` are absent) and carries the closed `implementer` object; only a runner that advertised the engine `implementer` is handed one, and a job of this kind is never run by another engine.
    */
-  reviewKind?: "diff" | "dynamic";
+  reviewKind?: "diff" | "dynamic" | "implementer";
   dynamic?: DynamicReview;
   base?: ClaimBase;
+  implementer?: ImplementerJob;
   /**
    * Legacy field of the removed /ask command. A previous release may send it; the runner accepts and ignores it and never hands it to PR-Agent. This app sends no args.
    *
@@ -95,6 +96,7 @@ export type RunnerResult = {
    * #405: the findings left open on the pull request by a successful review, which the app turns into the review verdict it submits. Absent (or null) where the runner cannot say, and on every failure: the app then submits no verdict. Additive: a runner that does not send it, or an app that does not read it, keeps working.
    */
   findings?: ReviewFindings | null;
+  implementer?: ImplementerResult;
   /**
    * What the run used. A failed result carries it too, whenever the run made at least one model call before it failed (a timeout at the end, an answer the validator refuses, a publish error): the app counts such a run exactly like a successful one. A run that failed before its first model call reports null. The cost follows the same rule as for a successful run: exact, or null when any call is unpriced; the token counters are reported either way.
    */
@@ -458,6 +460,47 @@ export interface ClaimBase {
   comparison: "full" | "incremental";
 }
 /**
+ * #746: what an implementer job asks for (`reviewKind: implementer`; the factory deployment only). A closed object: there is no command, permission, executable, endpoint or upstream URL here, so a job can never widen what the agent may do. The agent works in a clone of `repo` that starts at the head of `baseBranch`, on the new branch `branch` (it must not exist yet) and only there, and pushes it. `instruction` is the user's task as literal data. `limits.timeLimitSeconds` is the wall clock the runner holds the turn to (the Dispatcher's own timeout for the kind is the backstop). `cost` and `modelEntry` are the `DynamicCostPolicy` and the `DynamicModelEntry` of the native Dynamic job, unchanged: the same passthrough proxy, price book and token cap, and a native job is the only way the Implementer runs a model. `capabilities` is optional, as for Dynamic.
+ */
+export interface ImplementerJob {
+  repo: ImplementerRepo;
+  /**
+   * #746: the name of a branch as a job carries it: a non-empty text of at most 255 characters without whitespace and not starting with a dash (so it can never be read as an option). Whether it is a valid git ref name is decided by the app when the turn is submitted and again by the runner before it runs git; this is the floor both share.
+   */
+  baseBranch: string;
+  /**
+   * #746: the name of a branch as a job carries it: a non-empty text of at most 255 characters without whitespace and not starting with a dash (so it can never be read as an option). Whether it is a valid git ref name is decided by the app when the turn is submitted and again by the runner before it runs git; this is the floor both share.
+   */
+  branch: string;
+  instruction: string;
+  limits: {
+    timeLimitSeconds: number;
+  };
+  /**
+   * #553: whose key pays for a native job (a job that runs through the passthrough proxy) and what bounds its cost. Optional, additive, and sent only to a caller that named the claim feature `dynamic_cost_policy`; a job without it is a job of today. A closed object. `managed` (the instance operator's key, which we pay): `priceBook` is the confirmed price of the model (the app's price confirmation, #549) and is the runner's **only** price source, never the engine's own cost and never models.dev; an unknown cost ends the run with `dynamic_accounting_failed`, which billing treats as our fault; there is no token cap. `own` (the workspace's key, the user pays the provider): `priceBook` is the catalog's price when it states one, else null; an unknown cost does not end the run, it is bound by `maxTotalTokens` (prompt, cache and completion tokens in all) and the clock, and the result reports `costUsd: null`, which billing charges as minutes only. A call that stated no usage at all still fails the run.
+   */
+  cost:
+    | {
+        keyMode: "managed";
+        priceBook: DynamicPriceBook;
+        maxTotalTokens: null;
+      }
+    | {
+        keyMode: "own";
+        priceBook: DynamicPriceBook | null;
+        maxTotalTokens: number;
+      };
+  modelEntry: DynamicModelEntry;
+  capabilities?: DynamicModelCapabilities;
+}
+/**
+ * #746: the one repository a turn works on. `fullName` is `owner/name`; `cloneUrl` is the https address the runner clones from (the host of the git provider), with no credential in it: the token is in `git.token`.
+ */
+export interface ImplementerRepo {
+  fullName: string;
+  cloneUrl: string;
+}
+/**
  * Extra options of the PR-Agent tools, as strings. The review tool's options (PR_REVIEWER__*) are used; a previous release's option families for the removed tools (PR_DESCRIPTION__*, PR_CODE_SUGGESTIONS__*, PR_QUESTIONS__*) are accepted for v1 compatibility and ignored. Nothing else is allowed here (credentials, endpoints and the model have their own fields).
  */
 export interface JobEnv {
@@ -516,6 +559,37 @@ export interface ReviewFindings {
     P1: number;
     P2: number;
     P3: number;
+  } | null;
+}
+/**
+ * #746: what a turn of the Implementer did (ImplementerResult). Only a result of an implementer job carries it; absent for every other kind. Optional and additive: an app of the release before ignores it.
+ */
+export interface ImplementerResult {
+  baseCommit: string;
+  headCommit: string | null;
+  pushed: boolean;
+  /**
+   * @maxItems 200
+   */
+  commits: {
+    sha: string;
+    subject: string;
+  }[];
+  /**
+   * @maxItems 500
+   */
+  filesChanged: {
+    path: string;
+    /**
+     * #746: what happened to a file between the base commit and the head commit.
+     */
+    status:
+      "added" | "modified" | "deleted" | "renamed" | "copied" | "typechange";
+  }[];
+  summary: string;
+  opencode: {
+    sessionId: string;
+    version: string;
   } | null;
 }
 export interface RunnerUsage {

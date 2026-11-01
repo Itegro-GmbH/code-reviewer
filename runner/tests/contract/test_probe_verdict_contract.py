@@ -15,6 +15,7 @@ import pytest
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 
+from code_reviewer_runner.capabilities import ALL_ENGINES, KNOWN_ENGINES
 from code_reviewer_runner.dynamic_review.self_check import SelfCheckReason
 from code_reviewer_runner.verdict import Verdict
 
@@ -61,7 +62,28 @@ def test_the_reasons_of_the_contract_are_the_self_check_reasons() -> None:
     # #331-T08
     listed = set(_PROBE["$defs"]["ProbeReason"]["enum"])
 
-    assert listed == {reason.value for reason in SelfCheckReason}
+    # The one reason the Dispatcher's canary writes (#765) is the contract's, not the runner's.
+    assert listed - {"implementer_probe_failed"} == {reason.value for reason in SelfCheckReason}
+    assert "implementer_probe_failed" not in {reason.value for reason in SelfCheckReason}
+
+
+@pytest.mark.contract
+def test_the_implementer_reasons_are_in_the_list_and_only_they() -> None:
+    # #765-T08
+    implementer = {
+        reason.value for reason in SelfCheckReason if reason.value.startswith("implementer_")
+    }
+
+    assert len(implementer) == 8
+    assert implementer <= set(_PROBE["$defs"]["ProbeReason"]["enum"])
+    assert "implementer_work_dir_not_exec" in implementer
+
+
+@pytest.mark.contract
+def test_the_engines_of_the_contract_are_the_engines_a_runner_can_advertise() -> None:
+    # #765-T08
+    assert _PROBE["$defs"]["ProbeEngine"]["enum"] == list(KNOWN_ENGINES)
+    assert KNOWN_ENGINES[:2] == ALL_ENGINES
 
 
 @pytest.mark.contract
@@ -69,8 +91,11 @@ def test_the_reasons_of_the_contract_are_the_self_check_reasons() -> None:
     "verdict",
     [
         Verdict(("pr-agent", "opencode")),
+        Verdict(("pr-agent", "opencode", "implementer")),
+        Verdict(("pr-agent", "opencode"), ("implementer_work_dir_not_exec",)),
         Verdict(("pr-agent",), (SelfCheckReason.ROOT_FILESYSTEM_WRITABLE.value,)),
         Verdict(("pr-agent",), tuple(reason.value for reason in SelfCheckReason)),
+        Verdict(("pr-agent", "opencode"), ("implementer_probe_failed",)),
     ],
 )
 def test_what_the_probe_prints_is_a_valid_verdict(verdict: Verdict) -> None:
@@ -79,9 +104,25 @@ def test_what_the_probe_prints_is_a_valid_verdict(verdict: Verdict) -> None:
 
 
 @pytest.mark.contract
+def test_the_probe_report_may_name_the_implementer_as_an_engine_and_as_required() -> None:
+    # #765-T08
+    report = _load(CONTRACTS / "examples" / "probe-verdict" / "ProbeReport.json")
+    report.update(
+        status="passed",
+        ok=True,
+        engines=["pr-agent", "opencode", "implementer"],
+        reasons=[],
+        required=["pr-agent", "opencode", "implementer"],
+    )
+
+    assert _accepts("ProbeReport", report)
+
+
+@pytest.mark.contract
 @pytest.mark.parametrize(
     "document",
     [
+        {"version": 1, "engines": ["pr-agent", "opencode", "implementer", "more"], "reasons": []},
         {
             "version": 1,
             "engines": ["pr-agent"],

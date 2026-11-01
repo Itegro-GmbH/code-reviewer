@@ -7,6 +7,7 @@ import { createBillingJournalRepository } from "../db/repositories/billing-journ
 import { createBillingNotificationsRepository } from "../db/repositories/billing-notifications-repository.ts";
 import { createBillingProfilesRepository } from "../db/repositories/billing-profiles-repository.ts";
 import { createBillingTopUpIntentsRepository } from "../db/repositories/billing-topup-intents-repository.ts";
+import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
 import { createInstallationLinkRequestsRepository } from "../db/repositories/installation-link-requests-repository.ts";
 import { createIntegrationsRepository } from "../db/repositories/integrations-repository.ts";
 import { createInvitationsRepository } from "../db/repositories/invitations-repository.ts";
@@ -97,7 +98,8 @@ export async function seedWorkspaceForDeletion(
     return enqueued.job;
   };
   const queued = await enqueue(7, `delivery-${tag}`);
-  const finished = await enqueue(8, `delivery-finished-${tag}`);
+  // The finished job is also the job of the Implementer turn below, so it carries the negative slot (-1: the first session).
+  const finished = await enqueue(-1, `delivery-finished-${tag}`);
   const usage = createUsageRecordsRepository(db, workspaceId);
   await usage.reserve(queued.id, "own");
   await db
@@ -116,6 +118,19 @@ export async function seedWorkspaceForDeletion(
       updated_at: "2026-10-10T23:51:01.000Z",
     })
     .execute();
+  // #751-T08: a session of the Implementer (slot 1) and its turn, whose job is one of the workspace's own.
+  await createImplementerRepository(db, workspaceId).createSessionWithTurn(
+    {
+      repositoryId: repository.id,
+      baseBranch: "main",
+      branch: `implementer/${tag}`,
+      instruction: `Instruction ${tag}`,
+      modelChoice: { entryId: `entry-${tag}` },
+      costLimitCents: null,
+      createdBy: `owner-${tag}`,
+    },
+    async () => finished.id,
+  );
   await db
     .insertInto("job_dispatches")
     .values({

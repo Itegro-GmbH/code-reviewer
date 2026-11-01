@@ -494,6 +494,7 @@ describe("what the app accepts from a runner", () => {
       { leaseToken: TOKEN, result: { ...result, extra: 1 } },
     ],
     ...callTraceCases(result, TOKEN),
+    ...implementerCases(result, TOKEN),
   ];
 
   it.each(HEARTBEATS)(
@@ -1089,5 +1090,79 @@ function callTraceCases(
       "a tool call with a flag that is not a boolean",
       body({ ...trace, toolCalls: [{ ...toolCall, isRepeat: "no" }] }),
     ],
+  ];
+}
+
+// #754: the implementer block of a result, judged by the app and the contract alike.
+function implementerCases(result: object, token: string): [string, unknown][] {
+  const sha = (letter: string) => letter.repeat(40);
+  const block = {
+    baseCommit: sha("a"),
+    headCommit: sha("b"),
+    pushed: true,
+    commits: [{ sha: sha("b"), subject: "Add a health endpoint" }],
+    filesChanged: [{ path: "src/health.ts", status: "added" }],
+    summary: "Added a health endpoint.",
+    opencode: { sessionId: "ses_1", version: "1.19.0" },
+  };
+  const body = (implementer: unknown) => ({
+    leaseToken: token,
+    result: { ...result, implementer },
+  });
+  const withoutSummary: Record<string, unknown> = { ...block };
+  delete withoutSummary.summary;
+  return [
+    ["an implementer block", body(block)],
+    [
+      "an implementer block of a turn that made no commit",
+      body({
+        ...block,
+        headCommit: null,
+        pushed: false,
+        commits: [],
+        filesChanged: [],
+        summary: "",
+        opencode: null,
+      }),
+    ],
+    [
+      "an implementer block with a short sha",
+      body({ ...block, baseCommit: "abc" }),
+    ],
+    [
+      "an implementer block with 201 commits",
+      body({
+        ...block,
+        commits: Array.from({ length: 201 }, () => block.commits[0]),
+      }),
+    ],
+    [
+      "an implementer block with 200 commits",
+      body({
+        ...block,
+        commits: Array.from({ length: 200 }, () => block.commits[0]),
+      }),
+    ],
+    [
+      "an implementer block with 501 files",
+      body({
+        ...block,
+        filesChanged: Array.from({ length: 501 }, () => block.filesChanged[0]),
+      }),
+    ],
+    [
+      "an implementer summary over its limit",
+      body({ ...block, summary: "s".repeat(8193) }),
+    ],
+    [
+      "an implementer block with a field it does not have",
+      body({ ...block, branch: "x" }),
+    ],
+    ["an implementer block without a summary", body(withoutSummary)],
+    [
+      "an implementer file with an unknown status",
+      body({ ...block, filesChanged: [{ path: "a", status: "moved" }] }),
+    ],
+    ["an implementer block that is a string", body("pushed")],
   ];
 }

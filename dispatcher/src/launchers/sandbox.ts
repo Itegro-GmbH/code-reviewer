@@ -7,7 +7,8 @@
 // Per job, in this order (the core has claimed the job and holds the credential):
 //   1. create a VM from the golden snapshot: `persistent: false`, region fra1, no failover region, a VM size per
 //      Worker kind, a timeout of the job's plus a margin as the backstop, a name nobody had before
-//   2. vm-prepare.sh as root (cgroup fix, dockerd), then the image in the VM must be the configured id
+//   2. vm-prepare.sh as root (cgroup fix, dockerd), then the image in the VM must be the configured id; for the
+//      Implementer's profile the job's work volume is made in the VM (#760)
 //   3. `docker run --interactive` with the rendered flags; the start document goes through stdin only
 //   4. resolve once the Worker has taken over (sandbox-host.ts); the core heartbeats until then
 // After the hand-over the Launcher holds nothing (#487): no wait for the container, no supervision in `waitUntil`, no
@@ -31,13 +32,21 @@ import type { WorkerContainerOverrides } from "../contracts/worker-container.ts"
 import {
   ContainerLauncher,
   ContainerSpecError,
+  WORK_VOLUME_PATH,
+  WORK_VOLUME_STEP_COUNT,
   applyOverrides,
+  workVolumeCommands,
+  workVolumeName,
 } from "./container.ts";
 import {
+  IMPLEMENTER_CONTAINER_SPEC,
   SANDBOX_LAUNCHER_ADDITIONS,
   WORKER_CONTAINER_SPEC,
 } from "./container-spec.ts";
-import { SandboxDockerHost } from "./sandbox-host.ts";
+import {
+  SandboxDockerHost,
+  WORK_VOLUME_STEP_TIMEOUT_MS,
+} from "./sandbox-host.ts";
 import {
   SandboxServiceError,
   type SandboxFailureKind,
@@ -64,6 +73,14 @@ export function minimumVmTimeoutMargin(handoverSeconds: number): number {
     handoverSeconds + LAUNCH_STEPS_SECONDS,
   );
 }
+/**
+ * What the steps of the Implementer's work volume may take at most: each has `WORK_VOLUME_STEP_TIMEOUT_MS`. They come on top
+ * of `LAUNCH_STEPS_SECONDS` for that kind alone, so that the launch of Diff and Dynamic, and the checks of a deployment that
+ * serves only them, stay as they were: the VM of an implementer job lives that much longer (`vmLifetimeSeconds`), and the
+ * launch deadline of the core has room for it (a test pins that).
+ */
+export const WORK_VOLUME_STEPS_SECONDS =
+  (WORK_VOLUME_STEP_COUNT * WORK_VOLUME_STEP_TIMEOUT_MS) / 1000;
 /** How long the container must run for the Worker to count as having taken over (sandbox-host.ts). */
 export const SANDBOX_HANDOVER_SECONDS = 20;
 /** The tag the golden snapshot pipeline (#330) gives the Worker image in the snapshot. */
@@ -76,8 +93,10 @@ const MEMORY_PER_VCPU_MB = 2048;
 const VM_HEADROOM_MB = 256;
 
 /**
- * The size of the VM and the memory of the container per Worker kind when the operator configures nothing:
- * the smallest VM and 1.5 GB for the container. Configuration (`DISPATCHER_WORKER_CONFIG`) wins value by value.
+ * The size of the VM and the memory of the container per Worker kind when the operator configures nothing: the smallest
+ * VM and 1.5 GB for the container for a review; 2 vCPU / 4 GB and 3 GB (reservation 2.5 GB) for the Implementer, whose
+ * agent installs a repository's dependencies and runs its tests (#760). Configuration (`DISPATCHER_WORKER_CONFIG`) wins
+ * value by value.
  */
 export const SANDBOX_KIND_DEFAULTS: Readonly<
   Record<
@@ -87,7 +106,30 @@ export const SANDBOX_KIND_DEFAULTS: Readonly<
 > = {
   diff: { vcpus: 1, memory: { limit: "1536m", reservation: "1280m" } },
   dynamic: { vcpus: 1, memory: { limit: "1536m", reservation: "1280m" } },
+  implementer: { vcpus: 2, memory: { limit: "3g", reservation: "2560m" } },
 };
+
+/** The directory of the VM below which the work volume of a job gets its own (a mount of its own, `workVolumeCommands`). */
+export const WORK_VOLUME_ROOT = "/var/lib/code-reviewer-work";
+
+/**
+ * What the Worker of an implementer job is told besides the names of every container (`ImplementerEnvironmentName` of
+ * runner-api.v1.json). The Dispatcher sets them, never the app and never a job: the work directory is the volume's, the
+ * network is the registries proxy, and the port is the runner's own default (`DEFAULT_EGRESS_PORT` of the Dynamic
+ * isolation), written down here so that the container does not depend on a default that could move.
+ */
+export const IMPLEMENTER_ENVIRONMENT = {
+  RUNNER_IMPLEMENTER_WORK_DIR: WORK_VOLUME_PATH,
+  RUNNER_IMPLEMENTER_EGRESS_PORT: "10182",
+  RUNNER_IMPLEMENTER_NETWORK: "registries",
+} as const;
+
+/** The container spec of a kind: the Implementer has its own profile, Diff and Dynamic the default one. */
+function profileOf(kind: ReviewKind) {
+  return kind === "implementer"
+    ? IMPLEMENTER_CONTAINER_SPEC
+    : WORKER_CONTAINER_SPEC;
+}
 
 /** What every container is given (names of the spec's allow-list). */
 export const CONTAINER_ENVIRONMENT = {
@@ -108,7 +150,14 @@ export type SandboxLauncherOptions = {
   /** Seconds added to the job's timeout for the VM's own; at least `minimumVmTimeoutMargin(handoverSeconds)`. */
   vmTimeoutMarginSeconds?: number;
   /**
-   * The engines this Launcher can run: both by default (#479). Which of them a deployment serves is its
+   * Whether this deployment serves the Implementer (an app of `DISPATCHER_APPS` names the kind, #765): then, and only then,
+   * the default `capabilities` hold `implementer`. A deployment without the kind advertises what it always did, so the
+   * canary of code-review.com does not depend on an engine it never serves.
+   */
+  servesImplementer?: boolean;
+  /**
+   * The engines this Launcher can run: both reviewer engines by default (#479), and `implementer` when the deployment
+   * serves it (`servesImplementer`). Which of them a deployment serves is its
    * `DISPATCHER_ENGINES`, which the core applies; the proof that the Dynamic-Worker's container is hardened is the
    * deploy canary (`POST /probe`), not a check per instance or per job.
    */
@@ -122,6 +171,8 @@ export type SandboxLauncherOptions = {
    * `RUNNER_DYNAMIC_CAPABILITIES` and `RUNNER_DYNAMIC_MAX_COST_USD`. Non-secret; names of the container spec's allow-list.
    */
   dynamicEnvironment?: Readonly<Record<string, string>>;
+  /** Where the VM keeps the work volumes of the Implementer (`WORK_VOLUME_ROOT`); another directory only for a test. */
+  workVolumeRoot?: string;
 };
 
 export type Plan = {
@@ -157,7 +208,7 @@ function planOf(spec: LaunchSpec): Plan {
     memory: { ...defaults.memory, ...config.container?.memory },
   };
   try {
-    const rendered = applyOverrides(WORKER_CONTAINER_SPEC, overrides);
+    const rendered = applyOverrides(profileOf(spec.kind), overrides);
     // A container that cannot fit in the VM beside the OS would be killed by the VM's own memory limit.
     if (
       megabytes(rendered.memory.limit) >
@@ -196,11 +247,35 @@ export function planForKind(kind: ReviewKind, config: LaunchConfig): Plan {
   });
 }
 
+/** The container's environment by kind: Dynamic gets the operator's Dynamic configuration, the Implementer the names of its profile. */
+function environmentOf(
+  kind: ReviewKind,
+  dynamicEnvironment: Readonly<Record<string, string>> | undefined,
+): Readonly<Record<string, string>> {
+  if (kind === "dynamic")
+    return { ...CONTAINER_ENVIRONMENT, ...dynamicEnvironment };
+  if (kind === "implementer")
+    return { ...CONTAINER_ENVIRONMENT, ...IMPLEMENTER_ENVIRONMENT };
+  return CONTAINER_ENVIRONMENT;
+}
+
 function slug(value: string, length: number): string {
   return value
     .toLowerCase()
     .replace(/[^a-z0-9-]/g, "-")
     .slice(0, length);
+}
+
+/**
+ * The name of a job VM: `cr-<kind>-<job id>-<suffix>`. The kind is whole, so that the stop route and the reaper
+ * (reaper/vm-shape.ts, stop/job-stopper.ts) recognise the VM of every kind by the same name.
+ */
+export function jobVmName(
+  kind: ReviewKind,
+  jobId: string,
+  suffix: string,
+): string {
+  return `cr-${slug(kind, 16)}-${slug(jobId, 36)}-${suffix}`;
 }
 
 function randomSuffix(): string {
@@ -268,6 +343,15 @@ export function createSandboxLauncher(
       `vmTimeoutMarginSeconds must be at least ${minimumVmTimeoutMargin(handoverSeconds)}`,
     );
 
+  /** How long the VM of a job may live if nobody stops it: the job, the margin, and for the Implementer the steps of its work volume. */
+  function vmLifetimeSeconds(spec: LaunchSpec): number {
+    return (
+      spec.timeoutSeconds +
+      vmTimeoutMarginSeconds +
+      (spec.kind === "implementer" ? WORK_VOLUME_STEPS_SECONDS : 0)
+    );
+  }
+
   async function stopQuietly(name: string, jobId: string): Promise<void> {
     try {
       await service.stop(name);
@@ -290,7 +374,7 @@ export function createSandboxLauncher(
           snapshotId: options.snapshotId,
           region: SANDBOX_REGION,
           vcpus: plan.vcpus,
-          timeoutMs: (spec.timeoutSeconds + vmTimeoutMarginSeconds) * 1000,
+          timeoutMs: vmLifetimeSeconds(spec) * 1000,
           // `tenant` names the app that claimed the job (#730): a stop or a reap for one app never touches a VM of another.
           tags: {
             app: "code-reviewer",
@@ -346,13 +430,21 @@ export function createSandboxLauncher(
     capabilities(signal) {
       return (
         options.capabilities?.(signal) ??
-        Promise.resolve(["pr-agent", "opencode"])
+        Promise.resolve<readonly Engine[]>(
+          options.servesImplementer === true
+            ? ["pr-agent", "opencode", "implementer"]
+            : ["pr-agent", "opencode"],
+        )
       );
     },
 
     async launch(spec, signal) {
       const plan = planOf(spec);
-      const requested = `cr-${slug(spec.kind, 8)}-${slug(spec.jobId, 36)}-${(options.newSuffix ?? randomSuffix)()}`;
+      const requested = jobVmName(
+        spec.kind,
+        spec.jobId,
+        (options.newSuffix ?? randomSuffix)(),
+      );
 
       const vm = await createVm(plan, spec, requested, signal);
       const createdAt = (options.now ?? (() => new Date()))();
@@ -366,7 +458,7 @@ export function createSandboxLauncher(
         spec.onVmCreated?.({
           name,
           startedAt: createdAt,
-          timeoutSeconds: spec.timeoutSeconds + vmTimeoutMarginSeconds,
+          timeoutSeconds: vmLifetimeSeconds(spec),
         });
       } catch {
         // Only that it failed.
@@ -382,6 +474,14 @@ export function createSandboxLauncher(
       });
       try {
         await host.prepare(signal);
+        if (spec.kind === "implementer")
+          await host.createWorkVolume(
+            workVolumeCommands(IMPLEMENTER_CONTAINER_SPEC, {
+              name: workVolumeName(spec.jobId),
+              root: options.workVolumeRoot ?? WORK_VOLUME_ROOT,
+            }),
+            signal,
+          );
       } catch (error) {
         throw await failLaunch(name, spec, signal, error, {
           code: "vm_prepare_failed",
@@ -391,13 +491,10 @@ export function createSandboxLauncher(
       try {
         const containers = new ContainerLauncher({
           host,
-          spec: WORKER_CONTAINER_SPEC,
+          spec: profileOf(spec.kind),
           // By id: exactly the image that was just verified, and a reference that cannot be pulled.
           image: options.imageDigest,
-          environment:
-            spec.kind === "dynamic"
-              ? { ...CONTAINER_ENVIRONMENT, ...options.dynamicEnvironment }
-              : CONTAINER_ENVIRONMENT,
+          environment: environmentOf(spec.kind, options.dynamicEnvironment),
           additions: SANDBOX_LAUNCHER_ADDITIONS,
         });
         const running = containers.launch(

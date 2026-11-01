@@ -3,7 +3,7 @@
 // The capability set of the deployment (#731-T10). The hosted lane runs its app as the clone: product `factory` with the
 // capabilities `review` and `dynamic-review` (playwright.hosted.config.ts), billing off. The other journeys of the lane prove
 // that this deployment reviews (webhook to review, Dynamic review, the pool cap) without any balance or credit; this one
-// proves what is not there: the health check says which product and capabilities run, every billing page and API answers as a
+// proves what is not there: the health check says which product and capabilities run, every billing page and API and every route of the Implementer form (#755, capability `implementer`) answers as a
 // path that does not exist (status, headers, body, for a page request, an RSC request, JSON and writes), and the navigation
 // has no entry for it.
 import { expect, test, type Page } from "@playwright/test";
@@ -67,7 +67,7 @@ test.describe("a deployment with the capabilities review and dynamic-review", ()
     expect(answer.body).toBe(expected.body);
   });
 
-  test("answers every billing page and API as a path that does not exist, to the admin, in every detail, and lists nothing of billing", async ({
+  test("answers every billing and Implementer page and API as a path that does not exist, to the admin, in every detail, and lists nothing of billing", async ({
     page,
   }) => {
     await signInAsAdmin(page);
@@ -84,6 +84,13 @@ test.describe("a deployment with the capabilities review and dynamic-review", ()
       "/admin/billing/reviews",
       "/api/admin/billing",
       "/api/admin/billing/workspaces",
+      // The routes behind the Implementer form (#755-T10): this deployment has no capability `implementer`.
+      `/api/w/${slug}/implementer/repositories`,
+      `/api/w/${slug}/implementer/repositories/x/branches`,
+      `/api/w/${slug}/implementer/models`,
+      `/api/w/${slug}/implementer/tasks`,
+      // The page of the form (#756-T09).
+      `/w/${slug}/implementer`,
     ];
     for (const [label, method, headers] of READS) {
       const expected = await observe(page, MISSING, { method, headers });

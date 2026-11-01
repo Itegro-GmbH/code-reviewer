@@ -194,6 +194,8 @@ describe("POST /stop", () => {
     expect(sandbox.lists).toStrictEqual([
       { namePrefix: `cr-diff-${JOB}-`, tags: { app: "code-reviewer" } },
       { namePrefix: `cr-dynamic-${JOB}-`, tags: { app: "code-reviewer" } },
+      // #759: the app `reviewer` never has the kind `implementer`, so its prefix is not listed (another app's is, see
+      // the stop lookup in reaper/vm-shape.test.ts).
     ]);
   });
 

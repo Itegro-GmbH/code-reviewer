@@ -9,6 +9,8 @@ import { GithubAppConfigError } from "./providers/github-app/errors.ts";
 import type { IntegrationProvider } from "./provider.ts";
 import type { GithubAppConfig } from "./providers/github-app/config.ts";
 import { createGithubAppProvider } from "./providers/github-app/provider.ts";
+import type { CapabilitySet } from "../capabilities/capability.ts";
+import { getCapabilities } from "../capabilities/shared.ts";
 import type { GithubAppClientOptions } from "./providers/github-app/client.ts";
 
 import {
@@ -90,6 +92,7 @@ export {
   buildAppManifest,
   GITHUB_APP_PATHS,
   MANIFEST_PERMISSIONS,
+  manifestPermissions,
   missingPermissions,
   suggestedAppName,
   type GithubAppManifest,
@@ -108,6 +111,11 @@ export type DefaultRegistryOptions = {
   loadConfig?: () => Promise<GithubAppConfig> | GithubAppConfig;
   /** For tests: a different fetch, clock or request timeout for the GitHub client. */
   githubClient?: Omit<GithubAppClientOptions, "config">;
+  /**
+   * The capabilities of the deployment the GitHub provider checks before it makes the token of the Implementer (#753).
+   * Default: those of the running server (`PRODUCT_ID`, `PRODUCT_CAPABILITIES`), read on every call.
+   */
+  capabilities?: () => CapabilitySet;
 };
 
 /**
@@ -134,6 +142,7 @@ export function createDefaultIntegrationRegistry(
   return createIntegrationRegistry({
     github_app: createGithubAppProvider({
       config,
+      capabilities: options.capabilities ?? (() => getCapabilities()),
       ...(options.githubClient === undefined
         ? {}
         : { clientOptions: options.githubClient }),

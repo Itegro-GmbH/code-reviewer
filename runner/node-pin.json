@@ -1,0 +1,21 @@
+{
+  "name": "node",
+  "repository": "https://github.com/nodejs/node",
+  "version": "24.22.2",
+  "tag": "v24.22.2",
+  "commit": "f7f273a9bb6445f6f7fb6349105e7532972045fb",
+  "license": "MIT",
+  "licenseUrl": "https://github.com/nodejs/node/blob/v24.22.2/LICENSE",
+  "notes": "Unmodified upstream release of the Node.js 24 line (the .nvmrc line), the glibc x64 tarball of nodejs.org. The archive digest equals the entry in the SHASUMS256.txt that nodejs.org publishes for v24.22.2. The release bundles V8, ICU, OpenSSL and more under their own licenses; the LICENSE file of the tarball lists them and travels with the image (/opt/node/LICENSE). The image drops include/ and share/ (headers, man pages, docs) and keeps bin/node, npm and corepack.",
+  "platforms": {
+    "linux-x64": {
+      "asset": "node-v24.22.2-linux-x64.tar.xz",
+      "url": "https://nodejs.org/dist/v24.22.2/node-v24.22.2-linux-x64.tar.xz",
+      "member": "node-v24.22.2-linux-x64/bin/node",
+      "archiveBytes": 32039312,
+      "archiveSha256": "48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75",
+      "executableBytes": 126881248,
+      "executableSha256": "904a6d3484241d466989f9df9ba3aab822b1496191bdb28230eb491a55c32a52"
+    }
+  }
+}

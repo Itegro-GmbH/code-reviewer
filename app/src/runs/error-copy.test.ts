@@ -14,6 +14,7 @@ import {
   CHECKOUT_REASON_COPY,
   describeCheckoutReason,
   describeErrorCode,
+  describeTurnErrorCode,
   errorCopy,
   HISTORIC_ERROR_CODES,
   unknownErrorCopy,
@@ -321,5 +322,213 @@ describe("the sentences for error codes", () => {
       describeCheckoutReason(PRODUCT, "<script>alert(1)</script>"),
     ).toBeNull();
     expect(describeCheckoutReason(PRODUCT, "")).toBeNull();
+  });
+});
+
+// The sentences of a run of the Implementer (#758): the table above is the table of code-review.com and does not change by a
+// line (its golden stays); a task has its own sentences where those do not fit it.
+describe("the sentences for the codes of a task", () => {
+  /** The codes a turn can end with: its own, the runner's general ones, the queue's and the claim's. */
+  const TURN_CODES = [
+    "branch_exists",
+    "base_branch_not_found",
+    "clone_failed",
+    "setup_failed",
+    "agent_gave_up",
+    "push_rejected",
+    "branch_violation",
+    "cost_limit_reached",
+    "time_limit_reached",
+    "git_write_not_granted",
+    "implementer_engine_unavailable",
+    "implementer_config_invalid",
+    "dynamic_accounting_failed",
+    "timeout",
+    "lease_expired",
+    "lease_lost",
+    "runner_shutdown",
+    "runner_error",
+    "invalid_job",
+    "no_capable_runner",
+    "dispatch_unavailable",
+    "launch_failed",
+    "worker_exited",
+    "claim_failed",
+    "git_connection_disabled",
+    "git_connection_gone",
+    "git_connection_suspended",
+    "git_access_failed",
+    "git_access_unavailable",
+    "llm_model_unavailable",
+    "llm_provider_unsupported",
+    "managed_model_unavailable",
+    "workspace_suspended",
+    "quota_exhausted",
+    "entitlements_invalid",
+    "balance_negative",
+    "insufficient_balance",
+    "billing_rates_incomplete",
+    "billing_hold_released",
+    "monthly_limit_reached",
+    "reviews_paused",
+    "billing_limits_unreadable",
+    "unknown",
+  ];
+
+  // #758-T10
+  it("has a full sentence for every code that can end a task, known and not the general one", () => {
+    for (const code of TURN_CODES) {
+      const { text, known } = describeTurnErrorCode(PRODUCT, code);
+      expect(known, code).toBe(true);
+      expect(text, code).toMatch(/^[A-Z].*\.$/);
+      expect(text, code).not.toContain(code);
+      expect(text, code).not.toBe(UNKNOWN_ERROR_COPY);
+    }
+    expect(TURN_CODES.filter((code) => !ALL_CODES.includes(code))).toEqual([]);
+  });
+
+  // #758-T10
+  it("promises no pull request, no review and no run on the next push", () => {
+    for (const code of TURN_CODES) {
+      const { text } = describeTurnErrorCode(PRODUCT, code);
+      // "Reviews" included: a task is not a review (review of #792).
+      expect(text.replaceAll(PRODUCT.name, ""), code).not.toMatch(
+        /pull request|next push|\breviews?\b/i,
+      );
+    }
+  });
+
+  // #758-T10
+  it("gives an unknown code the general sentence and shows the code, as for any run", () => {
+    expect(describeTurnErrorCode(PRODUCT, "flux_capacitor_overload")).toEqual({
+      code: "flux_capacitor_overload",
+      text: UNKNOWN_ERROR_COPY,
+      known: false,
+    });
+    expect(describeTurnErrorCode(PRODUCT, "<script>").code).toBeNull();
+  });
+
+  // #758-T10
+  it("hides the code that is never shown, also for a task", () => {
+    expect(describeTurnErrorCode(PRODUCT, "reviews_paused")).toMatchObject({
+      code: null,
+      known: true,
+    });
+  });
+
+  // #758-T03: from the review of #788, one assertion per sentence that did not fit a turn.
+  it("does not say 'nothing was pushed' for a branch violation, which also covers a repository that could not be committed or verified", () => {
+    const { text } = describeTurnErrorCode(PRODUCT, "branch_violation");
+
+    expect(text).not.toMatch(/nothing was pushed/i);
+    expect(text).toMatch(/branch/);
+    expect(text).toMatch(/pushed before/);
+  });
+
+  it("words the cost limit of a task as the limit of one task, posts no review and leaves pushed work standing", () => {
+    const { text } = describeTurnErrorCode(PRODUCT, "cost_limit_reached");
+
+    expect(text).toMatch(/cost limit/);
+    expect(text).toMatch(/task/);
+    expect(text).not.toMatch(/Limits in the project settings|this project/);
+    expect(text).not.toMatch(/posted no review/);
+    expect(text).toContain(PRODUCT.name);
+    expect(text).toMatch(/pushed/);
+    // The same sentence whichever limit bound: a turn has one limit per task.
+    expect(describeTurnErrorCode(PRODUCT, "cost_limit_reached").text).toBe(
+      text,
+    );
+  });
+
+  it("words an accounting failure of a task without the Dynamic Review and without saying the work is lost", () => {
+    const { text } = describeTurnErrorCode(
+      PRODUCT,
+      "dynamic_accounting_failed",
+    );
+
+    expect(text).not.toMatch(/Dynamic Review/);
+    expect(text).toMatch(/pushed/);
+    expect(text).toMatch(/accounted/);
+  });
+
+  it("says for the time limit of a task whether pushed work stays", () => {
+    const { text } = describeTurnErrorCode(PRODUCT, "time_limit_reached");
+
+    expect(text).toMatch(/time limit/);
+    expect(text).toMatch(/pushed/);
+  });
+
+  // #765: the copy of the issue comment, for the final push that could not reach the repository too.
+  it("says for a rejected push that the repository refused the work or could not be reached, and that earlier pushes stay", () => {
+    const { text } = describeTurnErrorCode(PRODUCT, "push_rejected");
+
+    expect(text).toBe(
+      "The repository did not accept the pushed work (it refused it, or could not be reached). Work already pushed stays on the branch.",
+    );
+    expect(text).not.toMatch(/new branch/);
+  });
+
+  // #765: the runner commits what is left and pushes it at the cost limit, as at the time limit.
+  it("says for the cost limit that committed work was pushed when possible, not that only earlier pushes stay", () => {
+    const { text } = describeTurnErrorCode(PRODUCT, "cost_limit_reached");
+
+    expect(text).toMatch(/committed before the stop was pushed/);
+    expect(text).not.toMatch(/pushed before the stop stays/);
+  });
+
+  // #758-T03 (review of #792, 3): the list row shows the sentence without the page's lists.
+  it("points at no list in the sentences of the pushed work: they are shown in the list row as well", () => {
+    for (const code of [
+      "branch_violation",
+      "time_limit_reached",
+      "dynamic_accounting_failed",
+      "cost_limit_reached",
+      "lease_lost",
+    ]) {
+      expect(describeTurnErrorCode(PRODUCT, code).text, code).not.toMatch(
+        /\b(below|above|listed)\b/i,
+      );
+    }
+  });
+
+  // #758-T10 (review of #792, 2)
+  it("words the pause and the used-up plan for a task", () => {
+    expect(describeTurnErrorCode(PRODUCT, "workspace_suspended").text).toMatch(
+      /^Tasks are paused for this workspace/,
+    );
+    const quota = describeTurnErrorCode(PRODUCT, "quota_exhausted").text;
+    expect(quota).toMatch(/Tasks start again when the period renews/);
+    expect(quota).not.toMatch(/Reviews/);
+  });
+
+  // #758-T10 (review of #792, 6)
+  it("says for agent_gave_up that the engine may have stopped, and that a summary may not exist", () => {
+    const { text } = describeTurnErrorCode(PRODUCT, "agent_gave_up");
+
+    expect(text).toMatch(/engine/);
+    expect(text).toMatch(/summary, if there is one|if there is a summary/);
+    // #765: files the agent wrote that were not kept are named in the summary; its commits were pushed.
+    expect(text).toMatch(/files the agent wrote could not be kept/);
+    expect(text).toMatch(/committed was pushed/);
+    expect(ERROR_COPY["agent_gave_up"]).toContain("Read its summary, then");
+  });
+
+  // #758-T09
+  it("changes no sentence of the table of the other kinds", () => {
+    for (const code of [
+      "branch_violation",
+      "cost_limit_reached",
+      "dynamic_accounting_failed",
+      "time_limit_reached",
+      "push_rejected",
+      "no_capable_runner",
+      "workspace_suspended",
+      "quota_exhausted",
+      "agent_gave_up",
+    ]) {
+      expect(describeErrorCode(PRODUCT, code).text).toBe(ERROR_COPY[code]);
+    }
+    expect(ERROR_COPY["cost_limit_reached"]).toContain("posted no review");
+    expect(ERROR_COPY["branch_violation"]).toContain("nothing was pushed");
   });
 });

@@ -150,18 +150,34 @@ export function createWorkspaceBillingService({
           .onRef("usage_records.job_id", "=", "jobs.id")
           .on("usage_records.workspace_id", "=", workspaceId),
       )
+      // #752: a turn of the Implementer has no pull request (its number is a negative placeholder); it is named by its branch.
+      .leftJoin("implementer_turns", (join) =>
+        join
+          .onRef("implementer_turns.job_id", "=", "jobs.id")
+          .on("implementer_turns.workspace_id", "=", workspaceId),
+      )
+      .leftJoin("implementer_sessions", (join) =>
+        join
+          .onRef("implementer_sessions.id", "=", "implementer_turns.session_id")
+          .on("implementer_sessions.workspace_id", "=", workspaceId),
+      )
       .select([
         "jobs.id as id",
         "jobs.pr_number as pr_number",
+        "jobs.review_kind as review_kind",
         "repositories.full_name as full_name",
         "usage_records.key_mode as key_mode",
+        "implementer_sessions.branch as branch",
       ])
       .where("jobs.workspace_id", "=", workspaceId)
       .where("jobs.id", "in", [...jobIds])
       .execute();
     for (const row of rows)
       facts.set(row.id, {
-        label: `${row.full_name} #${String(row.pr_number)}`,
+        label:
+          row.review_kind === "implementer"
+            ? `${row.full_name} ${row.branch ?? "(Implementer)"}`
+            : `${row.full_name} #${String(row.pr_number)}`,
         keyMode: row.key_mode,
       });
     return facts;

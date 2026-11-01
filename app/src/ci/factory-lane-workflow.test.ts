@@ -8,9 +8,11 @@
 // checks and promotes the second project, and no result of the lane (nor of its migration) can stop the release of the
 // first App or of the Dispatcher. The shell of the new steps runs against stand-ins.
 import { describe, expect, it } from "vitest";
+import { CAPABILITIES } from "../capabilities/capability.ts";
 import { runStep } from "./shell-support.ts";
 import { simulate, type Scenario } from "./workflow-conditions.ts";
 import {
+  allActionFiles,
   isInfisicalLoad,
   needsOf,
   readText,
@@ -187,7 +189,11 @@ describe("the lane while FACTORY_ENABLED is not true", () => {
   // #732-T01
   it("reads the variable once, in `factory-flag`, as the text `true`, and every factory job reads that job's output", () => {
     const uses = [...source.matchAll(/vars\.(\w+)/g)].map((m) => m[0]);
-    expect(uses).toEqual(["vars.FACTORY_ENABLED"]);
+    // The switch, and (#748) the expected capability set of the health check, which only `health-factory` reads.
+    expect(uses).toEqual([
+      "vars.FACTORY_ENABLED",
+      "vars.FACTORY_EXPECTED_CAPABILITIES",
+    ]);
     const flag = job(FLAG_JOB);
     expect(stepsOf(flag)).toHaveLength(1);
     expect(stepsOf(flag)[0]?.env).toEqual({
@@ -682,14 +688,171 @@ describe("the health check of the staged second App", () => {
   const curls = (calls: string[]) =>
     calls.filter((call) => call.startsWith("curl"));
 
-  it("pins the expected product and capability set in the job, not in the shell text", () => {
-    const step = stepsOf(job("health-factory")).find(
+  const checkStep = () =>
+    stepsOf(job("health-factory")).find(
       (candidate) => candidate.name === selector.step,
     );
+  const stagedWith = (capabilities: string[]) =>
+    curl("200", health("factory", capabilities));
+
+  it("pins the expected product and capability set in the job, not in the shell text", () => {
+    const step = checkStep();
     expect(step?.env?.EXPECTED_PRODUCT).toBe("factory");
-    expect(step?.env?.EXPECTED_CAPABILITIES).toBe("dynamic-review,review");
     expect(step?.run).not.toContain("${{");
   });
+
+  // #748-T01
+  it("takes the expected capability set from the repository variable and falls back to today's set when it is unset", () => {
+    const expression = String(checkStep()?.env?.EXPECTED_CAPABILITIES);
+    expect(expression).toBe(
+      "${{ vars.FACTORY_EXPECTED_CAPABILITIES || 'dynamic-review,review' }}",
+    );
+    // Unset (or empty) the `||` yields the literal of today; the literal is the only one in the job.
+    expect(expression.match(/'([^']*)'/)?.[1]).toBe("dynamic-review,review");
+    expect(
+      stepsOf(job("health-factory")).filter((step) =>
+        JSON.stringify(step).includes("dynamic-review,review"),
+      ),
+    ).toHaveLength(1);
+    // The graph and the conditions of the job are what they were.
+    expect(needsOf(job("health-factory")).sort()).toEqual([
+      "factory-flag",
+      "stage-factory",
+    ]);
+    expect(job("health-factory")["timeout-minutes"]).toBe(10);
+  });
+
+  // #748-T05
+  it("reads the variable in the health-factory job only, and no other job or file depends on a factory result through it", () => {
+    const name = "FACTORY_EXPECTED_CAPABILITIES";
+    const holders = Object.entries(workflow.jobs)
+      .filter(([, candidate]) => JSON.stringify(candidate).includes(name))
+      .map(([jobName]) => jobName);
+    expect(holders).toEqual(["health-factory"]);
+    // Within the job, one step reads it, in its environment.
+    expect(
+      stepsOf(job("health-factory")).filter((step) =>
+        String(step.env?.EXPECTED_CAPABILITIES).includes(`vars.${name}`),
+      ),
+    ).toHaveLength(1);
+    expect([
+      ...source.matchAll(/vars\.FACTORY_EXPECTED_CAPABILITIES/g),
+    ]).toHaveLength(1);
+    // Nowhere else in the repository: no other workflow, no composite action.
+    const files = allActionFiles()
+      .filter(([, text]) => text.includes(name))
+      .map(([path]) => path);
+    expect(files).toEqual([".github/workflows/deploy-production.yml"]);
+    expect(needsOf(job("promote-dispatcher"))).not.toContain("health-factory");
+  });
+
+  // #748-T03
+  it("knows exactly the capability names of the app, so a new name cannot be added in one place only", () => {
+    const listed = /^ *KNOWN_CAPABILITIES="([^"]*)"$/m.exec(
+      checkStep()?.run ?? "",
+    )?.[1];
+    expect(listed).toBeDefined();
+    expect((listed ?? "").split(" ").sort()).toEqual([...CAPABILITIES].sort());
+  });
+
+  // #748-T02
+  it("passes when the variable names the new set and the staged App reports it, in any order", () => {
+    const withVariable = {
+      ...env,
+      EXPECTED_CAPABILITIES: "dynamic-review,implementer,review",
+    };
+    for (const capabilities of [
+      ["dynamic-review", "implementer", "review"],
+      ["review", "implementer", "dynamic-review"],
+      ["implementer", "review", "dynamic-review"],
+    ]) {
+      const run = runStep(selector, {
+        env: withVariable,
+        stubs: stagedWith(capabilities),
+      });
+      expect(run.status, capabilities.join()).toBe(0);
+      expect(curls(run.calls)).toHaveLength(1);
+      // #768: the header file exists after a pass, so its absence after a failure (below) means something.
+      expect(run.read("bypass-header")).toContain("x-vercel-protection-bypass");
+    }
+  });
+
+  // #748-T03
+  it.each([
+    ["unsorted", "review,dynamic-review"],
+    ["unsorted with the new name", "dynamic-review,review,implementer"],
+    ["an unknown name", "dynamic-review,review,hunter2"],
+    ["an empty entry in the middle", "dynamic-review,,review"],
+    ["a trailing comma", "dynamic-review,review,"],
+    ["a leading comma", ",dynamic-review,review"],
+    ["a duplicate", "dynamic-review,review,review"],
+    ["a space after the comma", "dynamic-review, review"],
+    ["a space around the value", " dynamic-review,review "],
+    ["upper case", "Dynamic-Review,review"],
+    ["a separator other than a comma", "dynamic-review;review"],
+    ["only a comma", ","],
+    ["whitespace only", " "],
+    ["a newline inside", "dynamic-review\nreview"],
+  ])("fails before any request on a variable with %s", (_name, value) => {
+    const run = runStep(selector, {
+      env: { ...env, EXPECTED_CAPABILITIES: value },
+      stubs: stagedWith(["dynamic-review", "review"]),
+    });
+    expect(run.status).toBe(1);
+    expect(curls(run.calls)).toEqual([]);
+    expect(run.stdout).toContain("::error::");
+    expect(run.stdout).toContain("FACTORY_EXPECTED_CAPABILITIES");
+    expect(run.stdout).not.toContain("PRODUCT_MISMATCH");
+    // The bypass secret is not read before the check and never printed.
+    expect(run.stdout + run.stderr).not.toContain(
+      env.VERCEL_FACTORY_AUTOMATION_BYPASS_SECRET,
+    );
+    // #768: the header file that holds it is not even written after the failure (the order of the step is pinned here).
+    expect(() => run.read("bypass-header")).toThrow("no file bypass-header");
+  });
+
+  // #748-T03
+  it("does not pass a workflow command or a line break from the variable into the log", () => {
+    const hostile = "x\n::error::injected\n::add-mask::y";
+    const run = runStep(selector, {
+      env: { ...env, EXPECTED_CAPABILITIES: hostile },
+      stubs: stagedWith(["dynamic-review", "review"]),
+    });
+    expect(run.status).toBe(1);
+    expect(curls(run.calls)).toEqual([]);
+    const errors = run.stdout
+      .split("\n")
+      .filter((line) => line.startsWith("::"));
+    expect(errors).toHaveLength(1);
+    expect(run.stdout).not.toContain("::add-mask");
+    expect(() => run.read("bypass-header")).toThrow("no file bypass-header");
+  });
+
+  // #748-T04
+  it.each([
+    [
+      "the variable names the new set and the App reports the old one",
+      "dynamic-review,implementer,review",
+      ["dynamic-review", "review"],
+    ],
+    [
+      "the variable is unset (today's set) and the App reports the new one",
+      "dynamic-review,review",
+      ["dynamic-review", "implementer", "review"],
+    ],
+  ])(
+    "fails at once with PRODUCT_MISMATCH when %s",
+    (_name, expected, reported) => {
+      const run = runStep(selector, {
+        env: { ...env, EXPECTED_CAPABILITIES: expected },
+        stubs: stagedWith(reported),
+      });
+      expect(run.status).toBe(1);
+      expect(run.stdout).toContain("PRODUCT_MISMATCH");
+      expect(run.stdout).toContain(expected);
+      expect(curls(run.calls)).toHaveLength(1);
+    },
+  );
 
   // #732-T02
   it("passes on 200 with status ok, the product factory and exactly the capabilities of the second App, in any order", () => {

@@ -18,6 +18,11 @@ import {
 } from "../test-support/auth-harness.ts";
 import { startTestGithub } from "../test-support/github-fake.ts";
 import { createTestDatabase } from "../test-support/test-database.ts";
+import {
+  seedImplementerRepository,
+  startTask,
+  taskOf,
+} from "../test-support/implementer.ts";
 import { insertUser } from "../test-support/users.ts";
 import { defaultWorkspaceId } from "../test-support/workspaces.ts";
 import {
@@ -360,6 +365,34 @@ describe("merging the instance admin with an imported operator", () => {
         .select(["updated_by", "monthly_limit_micro_usd"])
         .execute(),
     ).toEqual([{ updated_by: "admin", monthly_limit_micro_usd: "50000000" }]);
+  });
+
+  // #751-T05
+  it("keeps who started an Implementer task: session and turn move to the admin when the operator is retired", async () => {
+    const ctx = await setup();
+    await adminAndImportedOperator(ctx);
+    const seed = await seedImplementerRepository(ctx.db, ctx.workspace.id, "w");
+    await startTask(
+      ctx.db,
+      ctx.workspace.id,
+      taskOf(seed, { createdBy: "operator" }),
+      seed.repoUrl,
+    );
+
+    expect(await ctx.link(ADMIN)).toEqual({ ok: true, outcome: "merged" });
+
+    expect(
+      await ctx.db
+        .selectFrom("implementer_sessions")
+        .select("created_by")
+        .execute(),
+    ).toEqual([{ created_by: "admin" }]);
+    expect(
+      await ctx.db
+        .selectFrom("implementer_turns")
+        .select("created_by")
+        .execute(),
+    ).toEqual([{ created_by: "admin" }]);
   });
 
   // #102-GH-25

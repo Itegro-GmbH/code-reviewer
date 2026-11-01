@@ -1,0 +1,104 @@
+{
+  "version": 1,
+  "user": "0:0",
+  "capDrop": ["ALL"],
+  "capAdd": [
+    {
+      "name": "SETUID",
+      "startupOnly": false
+    },
+    {
+      "name": "SETGID",
+      "startupOnly": false
+    },
+    {
+      "name": "KILL",
+      "startupOnly": false
+    },
+    {
+      "name": "CHOWN",
+      "startupOnly": false
+    },
+    {
+      "name": "DAC_OVERRIDE",
+      "startupOnly": false
+    },
+    {
+      "name": "FOWNER",
+      "startupOnly": false
+    },
+    {
+      "name": "NET_ADMIN",
+      "startupOnly": true
+    },
+    {
+      "name": "SETPCAP",
+      "startupOnly": true
+    }
+  ],
+  "securityOpt": ["no-new-privileges:true"],
+  "readOnly": true,
+  "tmpfs": [
+    {
+      "path": "/tmp",
+      "options": ["rw", "noexec", "nosuid", "nodev"],
+      "size": "512m",
+      "mode": "1777"
+    },
+    {
+      "path": "/run",
+      "options": ["rw", "noexec", "nosuid", "nodev"],
+      "size": "1m",
+      "mode": "0755"
+    },
+    {
+      "path": "/home/runner",
+      "options": ["rw", "noexec", "nosuid", "nodev"],
+      "size": "64m",
+      "uid": 10001,
+      "gid": 10001,
+      "mode": "0700"
+    }
+  ],
+  "workVolume": {
+    "path": "/work",
+    "options": ["rw", "nosuid", "nodev"],
+    "source": "named-volume"
+  },
+  "memory": {
+    "limit": "3g",
+    "reservation": "2560m",
+    "swap": "3g"
+  },
+  "pids": {
+    "limit": 2048
+  },
+  "stopTimeoutSeconds": 90,
+  "network": {
+    "mode": "bridge"
+  },
+  "allowedEnvironment": [
+    "HOME",
+    "RUNNER_DIFF_JOB_USER",
+    "RUNNER_JOB_TIMEOUT_SECONDS",
+    "RUNNER_DYNAMIC_CAPABILITIES",
+    "RUNNER_DYNAMIC_MAX_COST_USD",
+    "RUNNER_IMPLEMENTER_WORK_DIR",
+    "RUNNER_IMPLEMENTER_EGRESS_PORT",
+    "RUNNER_IMPLEMENTER_NETWORK"
+  ],
+  "forbiddenKeys": [
+    "privileged",
+    "binds",
+    "volumes",
+    "devices",
+    "networkMode",
+    "pid",
+    "ipc",
+    "uts",
+    "userns",
+    "cgroupns",
+    "dockerSocket"
+  ],
+  "overridable": ["memory.limit", "memory.reservation", "memory.swap"]
+}

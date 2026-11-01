@@ -791,6 +791,8 @@ export function createCheckRunService(
   async function syncRound(jobId: string, budget: Budget): Promise<boolean> {
     const job = await deps.jobs.get(jobId);
     if (job === undefined) return false;
+    // #752: a turn of the Implementer has no pull request, no head commit of one and no check run: nothing to make match.
+    if (job.reviewKind === "implementer") return false;
     const checks = deps.checks(job.workspaceId);
 
     // Nothing to do (in step, settled, dropped): no write, no call.

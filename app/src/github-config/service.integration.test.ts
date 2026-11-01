@@ -4,6 +4,7 @@
 // exchange of the code, the secrets at rest), the manual form (what is checked before anything is saved),
 // the private-app flag, the prompt of an imported App, the credentials as every instance reads them, and
 // that no secret is in any answer or log line.
+import { createCapabilitySet } from "../capabilities/capability.ts";
 import { createPrivateKey, generateKeyPairSync } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { webhookDelivery } from "../../../fakes/github/webhooks.ts";
@@ -838,5 +839,66 @@ describe("the credentials as the instances read them", () => {
         webhookDelivery({ event: "ping", payload: {}, secret: "any" }),
       ),
     ).rejects.toThrow();
+  });
+});
+
+describe("the permissions in a deployment with the Implementer", () => {
+  const implementer = createCapabilitySet([
+    "review",
+    "dynamic-review",
+    "implementer",
+  ]);
+  const permissionsOf = (started: { manifest: string }) =>
+    (JSON.parse(started.manifest) as { default_permissions: unknown })
+      .default_permissions;
+
+  // #749-T02
+  it("asks GitHub for contents write in the manifest, and for contents read in a deployment without the Implementer", async () => {
+    const withImplementer = await createGithubConfigHarness({
+      capabilities: implementer,
+    });
+    const without = await createGithubConfigHarness();
+
+    const asked = await withImplementer.service.startManifest(
+      withImplementer.admin,
+      {},
+    );
+    const plain = await without.service.startManifest(without.admin, {});
+
+    if (!asked.ok || !plain.ok) throw new Error("did not start");
+    expect(permissionsOf(asked)).toMatchObject({ contents: "write" });
+    expect(permissionsOf(plain)).toMatchObject({ contents: "read" });
+  });
+
+  // #749-T03
+  it("lists Contents for a hand-made App that holds it read-only, and not in a deployment without the Implementer", async () => {
+    const factory = await createGithubConfigHarness({
+      capabilities: implementer,
+    });
+    await factory.service.saveApp("admin-1", factory.validManualInput());
+    const reviewOnly = await createGithubConfigHarness();
+    await reviewOnly.service.saveApp("admin-1", reviewOnly.validManualInput());
+
+    expect(await factory.service.checkPermissions("admin-1")).toEqual({
+      ok: true,
+      missing: ["contents"],
+    });
+    expect(await reviewOnly.service.checkPermissions("admin-1")).toEqual({
+      ok: true,
+      missing: [],
+    });
+  });
+
+  // #749-T03
+  it("lists nothing for an App created from the manifest of the deployment", async () => {
+    const factory = await createGithubConfigHarness({
+      capabilities: implementer,
+    });
+    await factory.createAppThroughManifest();
+
+    expect(await factory.service.checkPermissions("admin-1")).toEqual({
+      ok: true,
+      missing: [],
+    });
   });
 });

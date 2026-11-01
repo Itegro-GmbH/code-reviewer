@@ -3,24 +3,35 @@
 // The places of the signed in app, grouped the way the sidebar shows them. One list feeds the
 // navigation, so the labels, the links and the active state cannot drift apart. The places belong to
 // a workspace: their addresses are below `/w/<slug>` (src/workspaces/paths.ts), and the navigation
-// shows them while the page is in a workspace. The groups are daily work (Projects, Runs), then a
+// shows them while the page is in a workspace. The groups are daily work (Projects, Implementer, Runs), then a
 // separator, then the workspace administration (Connections, Members, Settings); #168 says Members
-// stays a top-level item.
+// stays a top-level item. The first place is the QA area, which the product names (`qaAreaName`, #757): its address is
+// `/projects` in every product.
 import {
   createCapabilitySet,
   type Capability,
   type CapabilitySet,
 } from "../capabilities/capability.ts";
 import { PRODUCTS } from "../capabilities/products.ts";
+import type { ProductIdentity } from "../product-identity/identity.ts";
 import { workspacePath, workspaceSlugOfPath } from "../workspaces/paths.ts";
 
 // An item with a `capability` is shown only in a deployment that has it (src/capabilities/): no capability, no entry.
-const NAV_GROUPS: readonly {
-  items: readonly { path: string; label: string; capability?: Capability }[];
-}[] = [
+// A label is a text or, for a place the product names, a function of its identity.
+type NavPlace = {
+  path: string;
+  label: string | ((product: ProductIdentity) => string);
+  capability?: Capability;
+};
+const NAV_GROUPS: readonly { items: readonly NavPlace[] }[] = [
   {
     items: [
-      { path: "/projects", label: "Projects", capability: "review" },
+      {
+        path: "/projects",
+        label: (product) => product.qaAreaName,
+        capability: "review",
+      },
+      { path: "/implementer", label: "Implementer", capability: "implementer" },
       { path: "/runs", label: "Runs", capability: "review" },
     ],
   },
@@ -51,10 +62,11 @@ export const SIDEBAR_LINK_CLASS =
 
 /**
  * The groups of the workspace the page is in, or none for a page outside any workspace. A place whose capability the
- * deployment does not have is left out, and a group without places with it.
+ * deployment does not have is left out, and a group without places with it; the labels are the words of `product`.
  */
 export function navGroupsFor(
   pathname: string | null,
+  product: ProductIdentity,
   capabilities: CapabilitySet = WHOLE_PRODUCT,
 ): NavGroup[] {
   const slug = pathname === null ? undefined : workspaceSlugOfPath(pathname);
@@ -67,7 +79,8 @@ export function navGroupsFor(
       )
       .map((place) => ({
         href: workspacePath(slug, place.path),
-        label: place.label,
+        label:
+          typeof place.label === "string" ? place.label : place.label(product),
       })),
   })).filter((group) => group.items.length > 0);
 }
@@ -75,9 +88,12 @@ export function navGroupsFor(
 /** Every place in one list, in the order the sidebar shows them. */
 export function navItemsFor(
   pathname: string | null,
+  product: ProductIdentity,
   capabilities: CapabilitySet = WHOLE_PRODUCT,
 ): NavItem[] {
-  return navGroupsFor(pathname, capabilities).flatMap((group) => group.items);
+  return navGroupsFor(pathname, product, capabilities).flatMap(
+    (group) => group.items,
+  );
 }
 
 /**

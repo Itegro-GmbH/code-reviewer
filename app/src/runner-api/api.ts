@@ -21,7 +21,7 @@ import {
   workerLeaseToken,
 } from "../jobs/worker-credential.ts";
 import { DEFAULT_ENGINES } from "../jobs/runner-capabilities.ts";
-import { readJsonBody, readOptionalJsonBody } from "./body.ts";
+import { bodyLimitFor, readJsonBody, readOptionalJsonBody } from "./body.ts";
 import { handleClaim, type ClaimDeps } from "./claim.ts";
 import {
   APP_FEATURES,
@@ -163,7 +163,11 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
           return errorResponse(400, "RUNNER_REQUEST_INVALID", {
             fields: [{ field: "jobId", code: "invalid" }],
           });
-        const body = await readJsonBody(request);
+        // #754: a report of a turn of the Implementer may be larger (`IMPLEMENTER_MAX_BODY_BYTES`); the limit of every other kind,
+        // and of a job that is not there, is the usual one. The kind is read before the body, which is read in full only up to
+        // the limit of the kind.
+        const known = await deps.queue.get(jobId);
+        const body = await readJsonBody(request, bodyLimitFor(known));
         if (!body.ok) return body.response;
         return await handleComplete(deps, jobId, who.runnerId, body.value);
       } catch (error) {

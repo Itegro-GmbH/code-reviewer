@@ -12,7 +12,11 @@ import "server-only";
 import type { Kysely } from "kysely";
 import { createBillingJournalRepository } from "../db/repositories/billing-journal-repository.ts";
 import type { Database } from "../db/schema.ts";
-import type { ProjectReviewKind } from "../job-kind/job-kind.ts";
+import {
+  projectKindOf,
+  type JobKind,
+  type ProjectReviewKind,
+} from "../job-kind/job-kind.ts";
 import type { KeyMode } from "../workspaces/entitlements.ts";
 import {
   guardedBalanceNote,
@@ -90,7 +94,7 @@ export async function admitAtClaim(
   trx: Kysely<Database>,
   input: {
     rates: BillingRates;
-    job: { workspaceId: string; reviewKind: ProjectReviewKind };
+    job: { workspaceId: string; reviewKind: JobKind };
     keyMode: KeyMode;
     now: () => Date;
   },
@@ -104,7 +108,7 @@ export async function admitAtClaim(
   if (balanceMicroUsd > 0) return { ok: true };
   return canCostAnything({
     keyMode: input.keyMode,
-    reviewKind: input.job.reviewKind,
+    reviewKind: projectKindOf(input.job.reviewKind),
     rates: input.rates,
   })
     ? { ok: false, code: "insufficient_balance" }

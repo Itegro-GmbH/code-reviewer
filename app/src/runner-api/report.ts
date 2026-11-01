@@ -20,6 +20,7 @@ import type { ClaimedKeys } from "./claimed-keys.ts";
 import { maskModelInText } from "../llm/access.ts";
 import { maskProvidersInText } from "../llm/provider-mask.ts";
 import { withoutUnaccountedManagedSuccess } from "./managed-cost-guard.ts";
+import { implementerBlockProblems } from "./implementer-report.ts";
 import { redactResult } from "./redact.ts";
 import type { JobEndedEvent } from "../dispatch/job-ended.ts";
 import type { RunnerApiLogger } from "./logger.ts";
@@ -29,6 +30,7 @@ import {
   type Parsed,
 } from "./requests.ts";
 import { errorResponse, jsonResponse } from "./responses.ts";
+import type { WriteTokenRevoker } from "./write-token.ts";
 
 export type ReportDeps = {
   queue: Pick<RunnerQueue, "get" | "heartbeat" | "complete" | "release">;
@@ -57,6 +59,11 @@ export type ReportDeps = {
    * were waiting for the slot, after the response; it never throws and never delays the answer.
    */
   jobEnded?: (event: JobEndedEvent) => void;
+  /**
+   * #753: the turn is over, whether its result was stored or the job was given back: switches off the write tokens of a turn of the
+   * Implementer (the review of #776). Never rejects; does nothing for another kind. Left out, nothing is switched off here.
+   */
+  revokeWriteTokens?: WriteTokenRevoker;
   /** #395: an authenticated call touched the database (a heartbeat, a result): the running server may do repair work. */
   activity?: () => void;
 };
@@ -87,7 +94,9 @@ export function mapRunnerErrorCode(code: string): string {
  * the model, and the ids become `[model]` in the text fields at any length (the generic rule that follows ignores
  * secrets shorter than a credential could be). The link to the comment is left alone: the app builds it from GitHub
  * data, it never carries a model, and a short id that also occurs in a repository name would break the link. The
- * provider is taken out of the text the same way (`[provider]`). `hide` is whether the job ran on the operator's key.
+ * provider is taken out of the text the same way (`[provider]`). `hide` is whether the job ran on the operator's key. The text
+ * of an Implementer turn that an agent wrote (#754: the summary and the subjects of its commits) is cleaned the same way; its
+ * file paths are the repository's and are left as they are, like the link to the comment.
  */
 export function withoutManagedModel(
   result: RunnerResult,
@@ -104,6 +113,18 @@ export function withoutManagedModel(
     errorMessage:
       result.errorMessage === null ? null : mask(result.errorMessage),
     usage: result.usage === null ? null : { ...result.usage, model: null },
+    ...(result.implementer === undefined
+      ? {}
+      : {
+          implementer: {
+            ...result.implementer,
+            summary: mask(result.implementer.summary),
+            commits: result.implementer.commits.map((commit) => ({
+              ...commit,
+              subject: mask(commit.subject),
+            })),
+          },
+        }),
   };
 }
 
@@ -216,6 +237,15 @@ export async function finishJob(
   },
 ): Promise<Response> {
   const jobId = job.id;
+  // #754: the implementer block belongs to a turn and to no other job, and a turn that succeeded has to carry it. Refused like
+  // any invalid result: nothing is stored and the job is not completed by it.
+  const problems = implementerBlockProblems(job.reviewKind, reported);
+  if (problems.length > 0) {
+    deps.logger.info(
+      `[runner-api] complete ${who} job=${jobId} refused: ${problems.map((problem) => `${problem.field} ${problem.code}`).join(", ")}`,
+    );
+    return invalid({ ok: false, fields: problems });
+  }
   // What is stored: the checked result with everything that looks like a credential removed. The
   // same report always gives the same stored value, which is what makes a repetition recognisable.
   // The key of the claim and the current one: the key may have been rotated while the job ran, and the
@@ -259,10 +289,13 @@ export async function finishJob(
   // A runner that is shut down gives the job back: it waits again (one attempt counted, the same cap
   // as a lapsed lease) instead of failing for good with every redeploy. The result is not stored.
   if (stored.errorCode !== null && releaseCodes.includes(stored.errorCode)) {
+    // #754: a runner shut down by a redeploy may have pushed before it was; a turn of the Implementer keeps what it reports. A
+    // launch that failed ran no agent and records nothing, whatever the body says.
     const released = await deps.queue.release(
       jobId,
       leaseToken,
       stored.errorCode,
+      stored.errorCode === RUNNER_SHUTDOWN_CODE ? { result: stored } : {},
     );
     if (released.status === "not_holder") {
       deps.logger.info(
@@ -274,6 +307,7 @@ export async function finishJob(
       `[runner-api] complete ${who} job=${jobId} given back: ${stored.errorCode} (${released.status})`,
     );
     deps.jobEnded?.(endOf(released.job, released.status === "requeued"));
+    await deps.revokeWriteTokens?.(released.job);
     return jsonResponse(200, {
       version: RUNNER_API_VERSION,
       job: {
@@ -311,6 +345,8 @@ export async function finishJob(
       );
       if (result.status === "completed")
         deps.jobEnded?.(endOf(result.job, false));
+      // Also a repeated report: a token a first call could not switch off is tried again, and none is revoked twice.
+      await deps.revokeWriteTokens?.(result.job);
       deps.activity?.();
       return jsonResponse(200, {
         version: RUNNER_API_VERSION,

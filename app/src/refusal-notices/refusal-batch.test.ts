@@ -12,6 +12,7 @@ function refusal(overrides: Partial<NoticeRefusal> = {}): NoticeRefusal {
     repositoryId: "r1",
     prNumber: 7,
     triggerKind: "webhook",
+    reviewKind: "diff",
     errorCode: "quota_exhausted",
     periodStart: PERIOD,
     ...overrides,

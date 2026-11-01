@@ -2,7 +2,8 @@
 """The network setup of the Dynamic runner container, done once at start, and the end of NET_ADMIN.
 
 The engine's nft rules (`netguard.py`) depend on three values only: the engine user and two
-loopback ports. With one Dynamic slot those values are fixed for the life of the container, so the
+loopback ports (an Implementer container adds a third, the egress proxy's, #763). With one Dynamic
+slot those values are fixed for the life of the container, so the
 rules are installed once, when the container starts, and the capabilities that installing needed
 are then dropped for good (#244, ADR 0003):
 
@@ -32,7 +33,9 @@ import platform
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
+from typing import Concatenate
 
 from code_reviewer_runner.result import ErrorCode
 
@@ -42,10 +45,14 @@ from .netguard import EgressMode, IsolationError, NetworkConfinement, select_egr
 
 PROXY_PORT_VARIABLE = "RUNNER_DYNAMIC_PROXY_PORT"
 ENGINE_PORT_VARIABLE = "RUNNER_DYNAMIC_ENGINE_PORT"
+# The Implementer container's variables (#746; `job.py` keeps the same names and a test compares).
+EGRESS_PORT_VARIABLE = "RUNNER_IMPLEMENTER_EGRESS_PORT"
+NETWORK_VARIABLE = "RUNNER_IMPLEMENTER_NETWORK"
 # Below the kernel's default ephemeral range (32768 and up). The range can be lowered, so startup
 # reads the real one (`require_ports_outside_ephemeral_range`) before it installs anything.
 DEFAULT_PROXY_PORT = 10180
 DEFAULT_ENGINE_PORT = 10181
+DEFAULT_EGRESS_PORT = 10182
 _LOWEST_PORT = 1024
 _HIGHEST_PORT = 32767
 EPHEMERAL_RANGE_FILE = Path("/proc/sys/net/ipv4/ip_local_port_range")
@@ -68,10 +75,24 @@ _log = logging.getLogger("code_reviewer_runner.loop")
 
 @dataclass(frozen=True)
 class SlotPorts:
-    """The two loopback ports of the single Dynamic slot: this job's model proxy and the engine."""
+    """The loopback ports of the single slot: this job's model proxy and the engine, and in an
+    Implementer container the egress proxy (`egress`, #763; None when there is none)."""
 
     proxy: int
     engine: int
+    egress: int | None = None
+
+    @property
+    def extra(self) -> tuple[int, ...]:
+        """The ports beyond the model proxy and the engine that the rules allow."""
+        return () if self.egress is None else (self.egress,)
+
+
+class ImplementerNetwork(StrEnum):
+    """What the agent of an Implementer container may reach besides the model proxy (#746)."""
+
+    REGISTRIES = "registries"
+    NONE = "none"
 
 
 def _port(environment: Mapping[str, str], name: str, default: int) -> int:
@@ -83,14 +104,49 @@ def _port(environment: Mapping[str, str], name: str, default: int) -> int:
     return int(raw)
 
 
+def implementer_network(environment: Mapping[str, str]) -> ImplementerNetwork:
+    """The network of an Implementer container from trusted runner configuration.
+
+    Unset on both variables is no Implementer container and reaches nothing (`none`); a port alone
+    means `registries`. Anything but the two known values is an isolation failure.
+    """
+    raw = environment.get(NETWORK_VARIABLE, "").strip()
+    if not raw:
+        return (
+            ImplementerNetwork.REGISTRIES
+            if environment.get(EGRESS_PORT_VARIABLE, "").strip()
+            else ImplementerNetwork.NONE
+        )
+    try:
+        return ImplementerNetwork(raw)
+    except ValueError:
+        raise IsolationError(
+            f"{NETWORK_VARIABLE} must be one of "
+            + ", ".join(mode.value for mode in ImplementerNetwork)
+        ) from None
+
+
+def egress_port(environment: Mapping[str, str]) -> int | None:
+    """The egress proxy's loopback port, or None when the container's network is `none`."""
+    if implementer_network(environment) is ImplementerNetwork.NONE:
+        return None
+    return _port(environment, EGRESS_PORT_VARIABLE, DEFAULT_EGRESS_PORT)
+
+
 def slot_ports(environment: Mapping[str, str]) -> SlotPorts:
     """The ports of the slot from trusted runner configuration. Raises `IsolationError`."""
     ports = SlotPorts(
         _port(environment, PROXY_PORT_VARIABLE, DEFAULT_PROXY_PORT),
         _port(environment, ENGINE_PORT_VARIABLE, DEFAULT_ENGINE_PORT),
+        egress_port(environment),
     )
     if ports.proxy == ports.engine:
         raise IsolationError(f"{PROXY_PORT_VARIABLE} and {ENGINE_PORT_VARIABLE} must differ")
+    if ports.egress in (ports.proxy, ports.engine):
+        raise IsolationError(
+            f"{EGRESS_PORT_VARIABLE} must differ from {PROXY_PORT_VARIABLE} "
+            f"and {ENGINE_PORT_VARIABLE}"
+        )
     return ports
 
 
@@ -109,7 +165,7 @@ def require_ports_outside_ephemeral_range(
         raise IsolationError("the kernel's ephemeral port range cannot be read") from None
     if low > high:
         raise IsolationError("the kernel's ephemeral port range cannot be read")
-    if any(low <= port <= high for port in (ports.proxy, ports.engine)):
+    if any(low <= port <= high for port in (ports.proxy, ports.engine, *ports.extra)):
         raise IsolationError("a fixed slot port lies inside the kernel's ephemeral port range")
 
 
@@ -208,7 +264,8 @@ def drop_startup_capabilities(task_directory: Path = THREAD_DIRECTORY) -> None:
 
 # -- the startup step ---------------------------------------------------------
 
-Install = Callable[[int, int], None]
+# Takes the model proxy port, the engine port and, in an Implementer container, the egress port.
+Install = Callable[Concatenate[int, int, ...], None]
 Drop = Callable[[], None]
 Detect = Callable[[], EgressMode]
 
@@ -251,7 +308,9 @@ def secure_startup(
     try:
         require_ports_outside_ephemeral_range(ports, ephemeral_range)
         mode = (detect or select_egress_mode)()
-        (install or NetworkConfinement(uid, mode=mode).apply)(ports.proxy, ports.engine)
+        (install or NetworkConfinement(uid, mode=mode).apply)(
+            ports.proxy, ports.engine, *ports.extra
+        )
         # After the rules, not before: no engine runs at startup, and rules that could not be
         # installed must not leave the container, Diff jobs included, without IPv6 (review of #347).
         if mode is EgressMode.FALLBACK:

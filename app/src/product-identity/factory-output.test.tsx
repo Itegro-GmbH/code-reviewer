@@ -8,6 +8,7 @@
 //
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
+import { describeSaveFailure } from "../review-settings/ui/messages.ts";
 import { productOutput } from "../test-support/product-output.tsx";
 import { identityFor } from "./identities.ts";
 
@@ -20,7 +21,11 @@ const FOREIGN = /code-review\.com|code\s+reviewer/i;
 function exchanged(text: string): string {
   return text
     .replaceAll(CODE_REVIEW_COM.name, FACTORY.name)
-    .replaceAll(CODE_REVIEW_COM.checkName, FACTORY.checkName);
+    .replaceAll(CODE_REVIEW_COM.checkName, FACTORY.checkName)
+    .replaceAll(
+      `listed under ${CODE_REVIEW_COM.qaAreaName}`,
+      `listed under ${FACTORY.qaAreaName}`,
+    );
 }
 
 describe("the texts of the factory", () => {
@@ -66,5 +71,25 @@ describe("the texts of the factory", () => {
     );
     expect(checkRuns.verdictApproved).toContain("**Factory: approved.**");
     expect(checkRuns.withdrawMessage).toContain("verdict of Factory");
+  });
+
+  // #757-T02
+  it("call the area of the repositories QA wherever a sentence sends the person there", () => {
+    const { messages } = productOutput(FACTORY);
+
+    expect(messages.installation.RESULT_COPY.linked.text).toBe(
+      "GitHub is connected. The repositories of the installation are listed under QA.",
+    );
+    expect(
+      describeSaveFailure(FACTORY, "REVIEW_SETTINGS_PROJECT_NOT_FOUND"),
+    ).toBe("This repository was not found. Reload the QA page and try again.");
+  });
+
+  // #757-T05
+  it("find no foreign name in the area words either", () => {
+    const words = [FACTORY.qaAreaName, FACTORY.qaAreaNameInSentence];
+
+    for (const word of words) expect(word).not.toMatch(FOREIGN);
+    expect(words).not.toContain(CODE_REVIEW_COM.qaAreaName);
   });
 });

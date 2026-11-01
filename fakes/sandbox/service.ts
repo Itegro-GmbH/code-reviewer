@@ -11,6 +11,8 @@
 // `requestText()`, so a test can prove that a secret never left the process any other way than on that pipe.
 // The golden snapshot pipeline's double is `fakes/vercel-sandbox/`; the two do not share state. See README.md.
 
+import { mountinfoAfter } from "./mountinfo.ts";
+
 export type FakeCreateOptions = {
   name: string;
   snapshotId: string;
@@ -107,13 +109,21 @@ export class FakeSandboxService {
   readonly starts: FakeExecCall[] = [];
   /** Every name `stop` was called with, in order. */
   readonly stops: string[] = [];
+  /** Every name `delete` was called with, in order. */
+  readonly deletes: string[] = [];
   readonly vms = new Map<string, FakeVmRecord>();
   private readonly processes: FakeProcessRecord[] = [];
   private readonly rules: Rule[] = [];
+  private readonly holds: Array<string | RegExp> = [];
   private createError: Error | undefined;
   private createGate: Deferred<void> | undefined;
   private stopError: Error | undefined;
   private readonly stopErrors = new Map<string, Error>();
+  private deleteError: Error | undefined;
+  private readonly deleteErrors = new Map<string, Error>();
+  private readonly deleteKeeps = new Set<string>();
+  /** Runs at the start of every `delete`, before it answers: a test moves its clock here to make a delete take time. */
+  deleteHook: ((name: string) => void) | undefined;
   private ignoreFilter = false;
   private waitFailures: { remaining: number; error: Error } | undefined;
   private rename: ((name: string) => string) | undefined;
@@ -143,6 +153,11 @@ export class FakeSandboxService {
     });
   }
 
+  /** The commands with this label (or whose command line matches) never answer by themselves: they end only when their signal aborts, like a platform call that hangs. */
+  hangOn(match: string | RegExp): void {
+    this.holds.push(match);
+  }
+
   /** The next `create` throws this error (a `SandboxServiceError` of the Dispatcher, brought by the test). */
   failNextCreate(error: Error): void {
     this.createError = error;
@@ -152,6 +167,23 @@ export class FakeSandboxService {
   failStops(error: Error, name?: string): void {
     if (name === undefined) this.stopError = error;
     else this.stopErrors.set(name, error);
+  }
+
+  /** Every following `delete` throws this error; with a name, only the `delete` of that VM does. */
+  failDeletes(error: Error, name?: string): void {
+    if (name === undefined) this.deleteError = error;
+    else this.deleteErrors.set(name, error);
+  }
+
+  /** The next `delete` of this VM finds it no longer deletable (it started again meanwhile) and keeps it. */
+  keepOnDelete(name: string): void {
+    this.deleteKeeps.add(name);
+  }
+
+  /** The `delete` calls work again. */
+  healDeletes(): void {
+    this.deleteError = undefined;
+    this.deleteErrors.clear();
   }
 
   /** The `stop` calls work again (a failed stop is retried by the next run of the reaper). */
@@ -366,6 +398,33 @@ export class FakeSandboxService {
       if (process.vm === name && !process.ended) this.end(process, 137);
   }
 
+  /**
+   * Removes the VM from the platform: it is no longer listed. Deleting one that is gone is not an error. Like the adapter,
+   * it looks at the VM again first and keeps one that is up, ending or persistent.
+   */
+  async delete(name: string): Promise<"deleted" | "kept"> {
+    this.events.push(`delete:${name}`);
+    this.deletes.push(name);
+    this.deleteHook?.(name);
+    if (this.deleteError !== undefined) throw this.deleteError;
+    const named = this.deleteErrors.get(name);
+    if (named !== undefined) throw named;
+    const record = this.vms.get(name);
+    if (
+      this.deleteKeeps.delete(name) ||
+      (record !== undefined &&
+        (record.options.persistent ||
+          !["stopped", "failed", "aborted"].includes(
+            record.state === "running"
+              ? (record.statusWord ?? "running")
+              : (record.statusWord ?? "stopped"),
+          )))
+    )
+      return "kept";
+    this.vms.delete(name);
+    return "deleted";
+  }
+
   // ---- internals -------------------------------------------------------------------------------
 
   private end(process: FakeProcessRecord, exitCode: number): void {
@@ -389,7 +448,18 @@ export class FakeSandboxService {
           ? rule.handler(call)
           : rule.handler;
     if (rule !== undefined) rule.remaining -= 1;
-    return { exitCode: 0, stdout: "", stderr: "", ...given };
+    // The mounts of the VM as the commands made them (#760): what a read of its mountinfo would show, unless scripted.
+    const mounts =
+      rule === undefined &&
+      call.cmd === "cat" &&
+      call.args[0] === "/proc/self/mountinfo"
+        ? {
+            stdout: mountinfoAfter(
+              this.execs.filter((other) => other.vm === call.vm),
+            ),
+          }
+        : {};
+    return { exitCode: 0, stdout: "", stderr: "", ...mounts, ...given };
   }
 
   private requireRunning(record: FakeVmRecord): void {
@@ -406,6 +476,17 @@ export class FakeSandboxService {
         this.events.push(`exec:${request.label}`);
         const call: FakeExecCall = { ...request, vm: record.name };
         this.execs.push(structuredClone(call));
+        const line = `${call.cmd} ${call.args.join(" ")}`;
+        if (
+          this.holds.some((hold) =>
+            typeof hold === "string" ? hold === call.label : hold.test(line),
+          )
+        )
+          return new Promise<FakeExecResult>((_resolve, reject) => {
+            signal?.addEventListener("abort", () => reject(abortError()), {
+              once: true,
+            });
+          });
         return Promise.resolve(this.answer(call));
       },
       start: (request: FakeExecRequest) => {

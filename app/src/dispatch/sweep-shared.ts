@@ -12,6 +12,7 @@ import { getRunnerQueue } from "../jobs/shared.ts";
 import { deliverDueBalanceMailsNow } from "../billing/shared.ts";
 import { runJournalCheckWhileBillingOn } from "../billing/journal-check.ts";
 import { releaseStrandedHoldsWhileBillingOn } from "../billing/stranded-holds.ts";
+import { getWriteTokens } from "../runner-api/claimed-keys-shared.ts";
 import { cleanUpExpiredRows } from "../maintenance/cleanup.ts";
 import { getMailSender } from "../mail/shared.ts";
 import { getModelsDevService } from "../models-dev/shared.ts";
@@ -44,6 +45,10 @@ export function getDispatchSweep(
     notices: getRefusalNoticeService(),
     // #405: the check runs and review verdicts of the jobs the steps before ended or no request named.
     checks: getCheckRunService(),
+    // #790: the write tokens of ended turns of the Implementer that could not be switched off are tried again.
+    ...(capabilities.has("implementer")
+      ? { writeTokens: getWriteTokens() }
+      : {}),
     // #548: the daily fetch of the models.dev catalog, last.
     modelsDev: getModelsDevService(),
     // #591: the holds of jobs that ended while billing was off, while billing is on.

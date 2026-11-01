@@ -57,15 +57,17 @@ describe("the Sandbox image target", () => {
     ]);
   });
 
-  // #324-T09
-  it("carries no Dispatcher bundle and no Node.js", () => {
+  // #324-T09, #761-T02: Node.js is there for the Implementer's agent (the pinned toolchain), a Dispatcher is not.
+  it("carries no Dispatcher bundle; Node.js comes only from the pinned toolchain stage", () => {
     const image = lineage("sandbox")
       .flatMap((entry) => entry.lines)
       .join("\n");
 
     expect(image).not.toMatch(/dispatcher/i);
-    expect(image).not.toMatch(
-      /\bnode(js)?\b|\bnpm\b|\bpnpm\b|COPY[^\n]*dispatcher/i,
+    expect(image).not.toMatch(/COPY[^\n]*dispatcher/i);
+    expect(image).not.toMatch(/apt-get install[^\n]*\bnode(js)?\b/);
+    expect(image).toContain(
+      "COPY --from=toolchain-fetch --chown=0:0 /toolchain/node /opt/node",
     );
   });
 

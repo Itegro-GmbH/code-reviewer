@@ -1010,6 +1010,54 @@ export interface BillingWebhookEventsTable {
   resolution_entry_id: string | null;
 }
 
+/**
+ * A branch the Implementer works on (#751): the agent's task for one repository, the saved OpenCode session and its summary.
+ * Its turns are the instructions given on it (this slice: one). `slot` is the number of the session within its repository
+ * (1, 2, ...): the job of its turns holds `-slot` as the pull request number, so the queue's "one running job per pull request"
+ * means "one running turn per session". The repository and the workspace are linked by a composite key: the database refuses a
+ * session whose repository is another workspace's.
+ */
+export interface ImplementerSessionsTable {
+  id: string;
+  workspace_id: string;
+  repository_id: string;
+  slot: number;
+  /** The branch the new branch starts from. */
+  base_branch: string;
+  /** The new branch, unique within the repository. */
+  branch: string;
+  /** The last commit pushed to `branch`; null until a turn pushed one. */
+  head_commit: string | null;
+  /** `running` while a turn is queued or running, `idle` once a turn has ended. */
+  status: "running" | "idle";
+  opencode_session_id: string | null;
+  opencode_version: string | null;
+  summary: string | null;
+  created_by: string;
+  /** ISO 8601 UTC. */
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * One instruction given to a session (#751). Its status is the status of its job (`job_id`, unique): there is no second state
+ * machine. `model_choice` is JSON text of `{entryId}` or `{provider, model}` (src/db/implementer-model-choice.ts).
+ */
+export interface ImplementerTurnsTable {
+  id: string;
+  session_id: string;
+  workspace_id: string;
+  /** 1 for the first instruction of the session. */
+  number: number;
+  instruction: string;
+  model_choice: string;
+  /** The customer's cost limit for the turn in cents; null when none was asked for. */
+  cost_limit_cents: number | null;
+  job_id: string;
+  created_by: string;
+  created_at: string;
+}
+
 export interface Database {
   app_meta: AppMetaTable;
   users: UsersTable;
@@ -1038,6 +1086,8 @@ export interface Database {
   refusal_notices: RefusalNoticesTable;
   job_check_runs: JobCheckRunsTable;
   job_vm_runs: JobVmRunsTable;
+  implementer_sessions: ImplementerSessionsTable;
+  implementer_turns: ImplementerTurnsTable;
   plan_handoff_tokens: PlanHandoffTokensTable;
   model_catalog_entries: ModelCatalogEntriesTable;
   models_dev_providers: ModelsDevProvidersTable;

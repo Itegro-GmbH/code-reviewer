@@ -4,8 +4,9 @@
 // asks `can(role, "start_review")` and passes the answer on as `canStartReview`. Every real role may
 // start a review today, so the permission is stood in for with one that refuses it; the page itself
 // runs for real, with the data behind it replaced and the page content recording what it is given.
+// The page names itself as its product names the area (#757): Projects for code-review.com, QA for the factory.
 import { isValidElement, type ReactElement, type ReactNode } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const stub = vi.hoisted(() => ({
   allowStartReview: true,
@@ -53,7 +54,14 @@ vi.mock("@/projects/ui/projects-page", () => ({
   },
 }));
 
-import ProjectsPage from "../app/(app)/w/[workspace]/projects/page.tsx";
+import { PageHeader } from "@/components/page-header";
+import ProjectsPage, {
+  generateMetadata,
+} from "../app/(app)/w/[workspace]/projects/page.tsx";
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 /** The elements of a returned tree, depth first. */
 function elementsOf(node: ReactNode): ReactElement[] {
@@ -95,5 +103,42 @@ describe("the Projects page", () => {
   it("hides the play button from a role without the start_review permission", async () => {
     stub.allowStartReview = false;
     expect((await propsOfTheContent()).canStartReview).toBe(false);
+  });
+});
+
+describe("the name of the Projects page", () => {
+  async function headerTitle(): Promise<unknown> {
+    const tree = await ProjectsPage({
+      params: Promise.resolve({ workspace: "acme" }),
+    } as Parameters<typeof ProjectsPage>[0]);
+    const header = elementsOf(tree).find(
+      (element) => element.type === PageHeader,
+    );
+    if (header === undefined) throw new Error("the page renders no PageHeader");
+    return (header.props as { title: unknown }).title;
+  }
+
+  // #757-T01
+  it("is Projects for code-review.com, in the browser title and the heading", async () => {
+    vi.stubEnv("PRODUCT_ID", "code-review-com");
+
+    expect(generateMetadata()).toStrictEqual({ title: "Projects" });
+    expect(await headerTitle()).toBe("Projects");
+  });
+
+  // #757-T01
+  it("is Projects while PRODUCT_ID is not set", async () => {
+    vi.stubEnv("PRODUCT_ID", "");
+
+    expect(generateMetadata()).toStrictEqual({ title: "Projects" });
+    expect(await headerTitle()).toBe("Projects");
+  });
+
+  // #757-T02
+  it("is QA for the factory, in the browser title and the heading", async () => {
+    vi.stubEnv("PRODUCT_ID", "factory");
+
+    expect(generateMetadata()).toStrictEqual({ title: "QA" });
+    expect(await headerTitle()).toBe("QA");
   });
 });

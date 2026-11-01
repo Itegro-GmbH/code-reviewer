@@ -27,7 +27,7 @@ import {
   TableHeader,
   TableRow,
 } from "../../components/ui/table.tsx";
-import { KIND_NAMES } from "../../review-settings/kind-names.ts";
+import { JOB_KIND_NAMES } from "../../review-settings/kind-names.ts";
 import { formatDuration } from "../../runs/run-duration.ts";
 import { RUN_STATUS_PRESENTATION } from "../../runs/run-status.ts";
 import { CallTraceTables } from "../../runs/ui/call-trace.tsx";
@@ -89,7 +89,7 @@ export function AdminRunsListContent({ list }: { list: AdminRunsListView }) {
                     {run.project} #{run.prNumber}
                   </Link>
                 </TableCell>
-                <TableCell>{KIND_NAMES[run.reviewKind]}</TableCell>
+                <TableCell>{JOB_KIND_NAMES[run.reviewKind]}</TableCell>
                 <TableCell>
                   {RUN_STATUS_PRESENTATION[run.status].label}
                 </TableCell>
@@ -138,7 +138,7 @@ export function AdminRunDetailContent({
     },
     { term: "Project", description: run.project },
     { term: "Pull request", description: `#${run.prNumber}` },
-    { term: "Review kind", description: KIND_NAMES[run.reviewKind] },
+    { term: "Review kind", description: JOB_KIND_NAMES[run.reviewKind] },
     { term: "Status", description: RUN_STATUS_PRESENTATION[run.status].label },
     ...(run.errorCode === null
       ? []

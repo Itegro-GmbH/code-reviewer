@@ -32,6 +32,20 @@ describe("the identities of the products", () => {
     expect(factory).not.toMatch(/code-review\.com|code\s+reviewer/i);
   });
 
+  // #757-T03
+  it("name the QA area as each product calls it: Projects for code-review.com, QA for the factory", () => {
+    expect(identityFor("code-review-com").qaAreaName).toBe("Projects");
+    expect(identityFor("code-review-com").qaAreaNameInSentence).toBe(
+      "projects",
+    );
+    expect(identityFor("factory").qaAreaName).toBe("QA");
+    expect(identityFor("factory").qaAreaNameInSentence).toBe("QA");
+    for (const identity of Object.values(IDENTITIES)) {
+      expect(identity.qaAreaName.trim()).not.toBe("");
+      expect(identity.qaAreaNameInSentence.trim()).not.toBe("");
+    }
+  });
+
   // #740-T04
   it("keep the name of the GitHub App short enough for the host to follow it", () => {
     for (const identity of Object.values(IDENTITIES))

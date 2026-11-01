@@ -27,7 +27,7 @@ In order:
 | 9   | `scan_filesystem`                                             | No secret and no job data in what the pipeline added or changed in the restored snapshot (below).                                                                                                                                                                                                               | `scan_findings`, `scan_unreadable`                                |
 | 10  | `start_daemon_check`, `inspect_restored_image`                | `vm-prepare.sh` brings the daemon up; the image id must equal step 5.                                                                                                                                                                                                                                           | `host_prepare_failed`, `image_digest_mismatch`                    |
 | 11  | `probe`                                                       | The image runs in `probe` mode (#324) with the flags the shared renderer (#325) makes for the Sandbox variant (the hardened container spec plus the IPv6 sysctls); its verdict must advertise every engine in `requiredEngines` (`pr-agent`, `opencode`).                                                       | `probe_failed`, `probe_unreadable`, `engine_missing`              |
-| 12  | record, retention                                             | The record is returned and written; older builders are removed unless `--skip-retention` is given (the deployment removes them itself, below); the check VM is deleted.                                                                                                                                                                                                                | `record_invalid`; retention only warns                            |
+| 12  | record, retention                                             | The record is returned and written; older builders are removed unless `--skip-retention` is given (the deployment removes them itself, below); the check VM is deleted.                                                                                                                                         | `record_invalid`; retention only warns                            |
 
 **Fail closed.** If any step fails after the snapshot exists, the builder is deleted **with** its snapshots, so a bad
 snapshot is withdrawn and the run leaves no record. The record file named by `--out` is deleted when the run starts, so
@@ -38,6 +38,22 @@ never recorded.
 **What the pipeline never has.** It runs no job code, receives no job credential and no registry credential. The
 Vercel token is read from the environment, handed to the platform client and to nothing else (no VM command, file or
 environment, no argument, no log line: every log line is masked). The VMs hold no secret.
+
+## What the Worker image holds, and its size
+
+The snapshot carries the whole Worker image, which every kind of job uses: the runner with PR-Agent, the pinned OpenCode and `rg`, `nft`
+and, since #761, the toolchain of the Implementer's agent (git built from a pinned source, Node.js, pnpm, uv, `gcc`, `g++`, `make`, `jq`,
+`unzip`) and the branch guard files (`docs/dynamic-review.md`, "The Worker image"). The reviewer pays for that layer, so there is a budget:
+the image smoke test (`docker/smoke/runner.sh`) prints the size of the image as the sum of its layers and fails when it grew by more than
+600 MB over the image before the toolchain layer (999 MB). At the layer's introduction it grew by 490 MB locally and 471 MB in CI (1,489 MB locally), compressed content
+264 MB to 436 MB. If a later change breaks the budget, the answer is a per-kind image and snapshot, not a heavier shared image.
+
+What a changed image input does: every file the build reads is in `IMAGE_INPUT_PATHS` (`dispatcher/src/snapshot/pair.ts`, with the
+toolchain pins, `fetch_toolchain.py`, the guard files). A release that changes one of them has the deployment build a new golden snapshot
+(the image id changes), prove it with the canary and wire it in, as described above; nobody does anything by hand. The first release after
+the toolchain layer therefore rebuilds the snapshot once: the build step downloads the three pinned archives and compiles git (118 s with `make -j2` on a loaded
+2-vCPU-class host, the builder VM has 2 vCPU and 4 GB) on top of the roughly 70 seconds of the spike. A job VM is created from the snapshot, so a larger snapshot means a larger disk to restore;
+the container start of a Diff or Dynamic job does not read the new layers.
 
 ## The record
 
@@ -57,7 +73,7 @@ environment, no argument, no log line: every log line is masked). The VMs hold n
 from `snapshotId` in `fra1` and refuses to run when `docker image inspect` in the VM reports another id than
 `imageDigest`. The workflow keeps the record as the artifact `golden-snapshot-record` (90 days) and shows it in the run
 summary and as the outputs `snapshot-id`, `image-digest` and `commit` of the workflow. The build itself changes no
-deployment, removes no snapshot of an earlier run and writes nothing to Infisical: *Deploy production* wires the
+deployment, removes no snapshot of an earlier run and writes nothing to Infisical: _Deploy production_ wires the
 snapshot into a staged Dispatcher deployment, proves it with the canary, and only after the promotion writes it to
 Infisical (`SANDBOX_SNAPSHOT_ID`, `SANDBOX_IMAGE_DIGEST` and `SANDBOX_SNAPSHOT_COMMIT` of `/dispatcher`) and removes
 the snapshots nobody needs.
@@ -70,7 +86,7 @@ Vercel project, with the machine identity whose sign-in is stored as four secret
 The job loads them in one step, just before the build step and after the dependencies were installed, and hands the
 project id to the build as `VERCEL_PROJECT_ID`. (The environment `hosted-snapshot` is **retired**.)
 
-The workflow is called by *Deploy production* when the Worker image has to be rebuilt (a `workflow_call`, with the
+The workflow is called by _Deploy production_ when the Worker image has to be rebuilt (a `workflow_call`, with the
 same environment, branch and secret rules). Started by hand (_Actions > Golden snapshot > Run workflow_, input
 `target`, default `sandbox`) it is a **rehearsal**: it builds and checks a snapshot and leaves it, and wires nothing in
 and persists nothing, because a manual build that wrote the pair would let the pair drift away from what production runs
@@ -97,7 +113,7 @@ snapshot in use was built from (exactly the files the image build consumes: what
 files, the license files, `docker/sandbox/vm-prepare.sh` and the four files of the build tool that decide what is
 installed in the snapshot, `config.ts` with the pinned Docker and buildx versions and the default target among them: see
 `IMAGE_INPUT_PATHS` in `dispatcher/src/snapshot/pair.ts`), when that commit or the pair is missing (the first
-deployment), when the snapshot of the pair no longer exists, or when *Deploy production* is started with
+deployment), when the snapshot of the pair no longer exists, or when _Deploy production_ is started with
 `rebuild_snapshot`. That last one is for what the
 repository cannot show: the platform's base image changed (the install step then fails with `docker_version_mismatch`
 instead of snapshotting something nobody tested: update the pin in `dispatcher/src/snapshot/config.ts`, re-run the
@@ -118,7 +134,7 @@ older one than the previous may already be deleted.
 
 - **Snapshots do not expire** (`expiration: 0`). The platform's default of 30 days applies to automatic snapshots of
   persistent VMs, not to this one; if retention stops running, snapshots stay (and are billed as storage).
-- **The cleanup** (`pnpm snapshot:ops cleanup`, the `cleanup` job of *Deploy production*) runs only after the new
+- **The cleanup** (`pnpm snapshot:ops cleanup`, the `cleanup` job of _Deploy production_) runs only after the new
   pair is written to Infisical. It keeps the new snapshot, the previous one and the one the live Dispatcher deployment
   runs (read from the platform at that moment; if it cannot be read nothing is removed), and deletes every other
   builder **with** its snapshot (`deleteOrphanSnapshots`). It only touches builders whose name starts with
@@ -173,6 +189,12 @@ disk":
 | `private_key` | a `-----BEGIN ... PRIVATE KEY-----` header (the distribution's snake-oil key is allowed)                                                    |
 | `token`       | the shapes of GitHub, OpenRouter, Anthropic, AWS and Slack tokens, the per-job credential, `_authToken=`, `RUNNER_TOKEN=`-style assignments |
 | `job_data`    | any entry in Docker's `containers` or `volumes` directory, except the two artifacts `dockerd` creates in `volumes` at every start           |
+
+The work volume of the Implementer (#760) is not part of any snapshot: it is made in the job's VM, after the VM started from
+the snapshot, by the Sandbox launcher (a directory below `/var/lib/code-reviewer-work`, a mount on it and a Docker volume
+bound to it, see `docs/dispatcher.md`). The snapshot, `vm-prepare.sh` and the scan below are unchanged by it, and a builder VM
+never has such a volume, so the `volumes` rule keeps finding every entry there as `job_data`. The VM's disk is the platform's
+(64 GB); the work volume is the room of a checkout, its dependencies and a build, and goes away with the VM.
 
 The two Docker exemptions are narrow: `volumes/metadata.db` **as a regular file** and `volumes/backingFsBlockDev` **as a
 block device**. A file, a directory or a link of that name, or a `metadata.db` in `containers`, is job data.

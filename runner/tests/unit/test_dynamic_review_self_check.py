@@ -172,6 +172,18 @@ def test_a_runner_with_every_property_passes_and_probes_as_the_engine_user(world
     assert world.calls == ["capabilities", "probe:10101:10101:10180"]
 
 
+# #763-T06
+def test_an_implementer_runner_probes_the_egress_port_with_the_model_proxy_port(
+    world: World,
+) -> None:
+    def probe(uid: int, gid: int, *ports: int) -> None:
+        world.calls.append(f"probe:{uid}:{gid}:{'+'.join(str(port) for port in ports)}")
+
+    world.run(ports=SlotPorts(10180, 10181, 10182), probe=probe)
+
+    assert world.calls == ["capabilities", "probe:10101:10101:10180+10182"]
+
+
 # #345-T10
 @pytest.mark.parametrize("mode", list(EgressMode))
 def test_the_result_names_the_egress_mode_the_check_passed_with(

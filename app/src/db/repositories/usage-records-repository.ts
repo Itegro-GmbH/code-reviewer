@@ -11,7 +11,12 @@ import { sql, type Kysely, type Selectable } from "kysely";
 import { formatTimestamp } from "../codecs.ts";
 import type { Database, UsageRecordsTable } from "../schema.ts";
 import type { WorkspaceId } from "../workspace-scope.ts";
-import type { ProjectReviewKind } from "../../job-kind/job-kind.ts";
+import {
+  jobKindOf,
+  projectKindOf,
+  type JobKind,
+  type ProjectReviewKind,
+} from "../../job-kind/job-kind.ts";
 import type {
   SettledReason,
   UsageKeyMode,
@@ -24,7 +29,8 @@ export type UsageRecord = {
   id: string;
   workspaceId: string;
   jobId: string;
-  reviewKind: ProjectReviewKind;
+  /** The kind of the job the record is for; a turn of the Implementer has its own (#752). */
+  reviewKind: JobKind;
   keyMode: UsageKeyMode;
   /** The managed model tier of a run from before the catalog (#280, #434); null for every newer run and for an own run. Read only: nothing writes it. The name, never the model. */
   modelTier: string | null;
@@ -65,7 +71,7 @@ export type UsagePageOptions = {
 
 /** What one workspace ran in a period, for one kind of review and one key mode. */
 export type UsageSummaryGroup = {
-  reviewKind: ProjectReviewKind;
+  reviewKind: JobKind;
   keyMode: UsageKeyMode;
   /** Runs that count (`reserved` and `settled`; never `void`, never a run that was superseded). */
   recordCount: number;
@@ -173,7 +179,7 @@ export function toUsageRecord(row: Selectable<UsageRecordsTable>): UsageRecord {
     id: row.id,
     workspaceId: row.workspace_id,
     jobId: row.job_id,
-    reviewKind: row.review_kind as ProjectReviewKind,
+    reviewKind: jobKindOf(row.review_kind),
     keyMode: row.key_mode as UsageKeyMode,
     modelTier: row.model_tier,
     catalogEntryId: row.catalog_entry_id,
@@ -394,8 +400,9 @@ export function createUsageRecordsRepository(
         .groupBy("review_kind")
         .execute();
       const counts: Record<ProjectReviewKind, number> = { diff: 0, dynamic: 0 };
+      // #752: the runs of a turn of the Implementer count with the Dynamic runs of the plan (`projectKindOf`).
       for (const row of rows)
-        counts[row.review_kind as ProjectReviewKind] = Number(row.runs);
+        counts[projectKindOf(jobKindOf(row.review_kind))] += Number(row.runs);
       return counts;
     },
 
@@ -478,7 +485,7 @@ export function createUsageRecordsRepository(
         .orderBy("key_mode")
         .execute();
       return rows.map((row) => ({
-        reviewKind: row.review_kind as ProjectReviewKind,
+        reviewKind: jobKindOf(row.review_kind),
         keyMode: row.key_mode as UsageKeyMode,
         recordCount: Number(row.records),
         settledCount: Number(row.settled),

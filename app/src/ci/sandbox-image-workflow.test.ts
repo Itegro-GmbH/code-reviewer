@@ -109,6 +109,22 @@ describe("the smoke test of the entry modes", () => {
     expect(smoke).toContain("worker-reap");
   });
 
+  // #761 (review of #777): the canary only calls the probe; a Dynamic review runs in the image itself.
+  it("runs a real Dynamic review in the image with the production flags, against fakes that share the Worker's loopback", () => {
+    expect(smoke).toContain(
+      'python3 -B "$here/dynamic_job_fakes.py" "$image" "${dynamic_caps[@]}" "${dynamic_rootfs[@]}" "${dynamic_env[@]}"',
+    );
+    const driver = readFileSync(
+      `${repoRoot}docker/smoke/dynamic_job_fakes.py`,
+      "utf8",
+    );
+    // The runner takes plain http for loopback only: the fakes are in a container whose namespace the Worker joins.
+    expect(driver).toContain('"--network", f"container:{name}"');
+    expect(driver).toContain('"worker-once"');
+    expect(driver).toContain('"StructuredOutput" in r.get("tools", [])');
+    expect(driver).toContain("a credential of the job is in the output");
+  });
+
   // #324-T01
   it("asks for the verdict of a container made with the production flags and expects opencode", () => {
     expect(smoke).toContain(

@@ -650,6 +650,15 @@ def _populated(ok: bool) -> JobResult:
         )
         if ok
         else None,
+        implementer={
+            "baseCommit": "1" * 40,
+            "headCommit": "2" * 40,
+            "pushed": True,
+            "commits": [{"sha": "2" * 40, "subject": "Add it"}],
+            "filesChanged": [{"path": "a.ts", "status": "added"}],
+            "summary": "Done.",
+            "opencode": {"sessionId": "ses_1", "version": "1.19.0"},
+        },
     )
     # The fixture must set every field, or the parity would not cover a field added later. What a
     # success has no value for (an error code) and a failure has none for (a link, findings) is the
@@ -667,7 +676,10 @@ def _populated(ok: bool) -> JobResult:
 def test_every_field_a_successful_job_result_prints_reaches_the_reported_result() -> None:
     printed = _populated(ok=True).to_json()
 
-    result = reported(outcome(stdout=(json.dumps(printed) + "\n").encode()))
+    # The report of a turn passes only for a job that is a turn (#765).
+    result = result_from_outcome(
+        outcome(stdout=(json.dumps(printed) + "\n").encode()), REDACTOR, 777, implementer=True
+    )
 
     expected = {
         path: value for path, value in _paths(printed).items() if path not in INTENTIONAL_DROPS
@@ -680,7 +692,12 @@ def test_every_field_a_successful_job_result_prints_reaches_the_reported_result(
 def test_every_field_a_failed_job_result_prints_reaches_the_reported_result() -> None:
     printed = _populated(ok=False).to_json()
 
-    result = reported(outcome(exit_code=1, stdout=(json.dumps(printed) + "\n").encode()))
+    result = result_from_outcome(
+        outcome(exit_code=1, stdout=(json.dumps(printed) + "\n").encode()),
+        REDACTOR,
+        777,
+        implementer=True,
+    )
 
     assert {path: _paths(result).get(path, "MISSING") for path in _paths(printed)} == _paths(
         printed

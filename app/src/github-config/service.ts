@@ -15,6 +15,7 @@
 //
 // Every call that makes the server talk to GitHub is limited per admin and for the instance, in the shared
 // `rate_limits` table. Nothing here logs a secret, a code or a response body, and no answer contains one.
+import type { CapabilitySet } from "../capabilities/capability.ts";
 import type { ProductIdentity } from "../product-identity/identity.ts";
 import { secondsLeft } from "../auth/sign-in-limit.ts";
 import type { RateLimitsRepository } from "../db/repositories/rate-limits-repository.ts";
@@ -161,6 +162,8 @@ export type GithubConfigService = {
 export type GithubConfigServiceOptions = {
   /** Who the App is for: its suggested name and its description on GitHub. */
   product: ProductIdentity;
+  /** What the deployment offers: the permissions the manifest asks for, and the check of an App, follow it (#749). */
+  capabilities: CapabilitySet;
   credentials: GithubCredentialStore;
   signedStates: SignedStates;
   rateLimits: RateLimitsRepository;
@@ -196,6 +199,7 @@ function secretView(state: { state: string }): SecretView {
 
 export function createGithubConfigService({
   product,
+  capabilities,
   credentials,
   signedStates,
   rateLimits,
@@ -530,6 +534,7 @@ export function createGithubConfigService({
       const currentTenancy = await tenancy();
       const manifest = buildAppManifest({
         product,
+        capabilities,
         publicUrl,
         tenancy: currentTenancy,
         name,
@@ -631,7 +636,10 @@ export function createGithubConfigService({
               ? "github_unreachable"
               : "app_auth_failed",
         };
-      return { ok: true, missing: missingPermissions(verified.permissions) };
+      return {
+        ok: true,
+        missing: missingPermissions(verified.permissions, capabilities),
+      };
     },
   };
 }

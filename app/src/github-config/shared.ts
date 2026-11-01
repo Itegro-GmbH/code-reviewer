@@ -5,6 +5,7 @@
 // call reads the database, so a replaced credential counts from the next request on every instance.
 import "server-only";
 import { loadAuthConfig } from "../auth/config.ts";
+import { getCapabilities } from "../capabilities/shared.ts";
 import { resolveAppSecret } from "../crypto/app-secret.ts";
 import { createRateLimitsRepository } from "../db/repositories/rate-limits-repository.ts";
 import { createInstanceSettingsRepository } from "../db/repositories/instance-settings-repository.ts";
@@ -50,6 +51,7 @@ export function getGithubConfigService(): GithubConfigService {
   const config = loadAuthConfig(process.env);
   return createGithubConfigService({
     product: getProductIdentity(),
+    capabilities: getCapabilities(),
     credentials: getGithubCredentialStore(),
     signedStates: createSignedStates({ db, appSecret: appSecret() }),
     rateLimits: createRateLimitsRepository(db),

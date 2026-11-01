@@ -10,16 +10,21 @@ import { maskProvidersInText } from "../llm/provider-mask.ts";
 import type { JsonValue, StoredReviewCommand } from "../integrations/types.ts";
 import { checkCallTrace } from "../runner-api/call-trace.ts";
 import {
+  IMPLEMENTER_FILE_STATUSES,
+  IMPLEMENTER_RESULT_LIMITS,
   STOPPED_EARLY_REASONS,
+  type ImplementerFileStatus,
   type RunnerCallTrace,
   type StoppedEarly,
 } from "../runner-api/contract.ts";
 import type { JobStatus } from "../db/job-status.ts";
 import type { Job, JobTriggerKind } from "../jobs/job-types.ts";
-import type { ProjectReviewKind } from "../job-kind/job-kind.ts";
+import type { JobKind } from "../job-kind/job-kind.ts";
 import {
   describeCheckoutReason,
   describeErrorCode,
+  describeTurnErrorCode,
+  type ErrorDescription,
   type ReasonDescription,
 } from "./error-copy.ts";
 import type { ProductIdentity } from "../product-identity/identity.ts";
@@ -39,7 +44,7 @@ export type RunRowView = {
   prUrl: string | null;
   command: StoredReviewCommand;
   /** The review kind the run was queued for (#200): Diff Review or Dynamic Review. */
-  reviewKind: ProjectReviewKind;
+  reviewKind: JobKind;
   triggerKind: JobTriggerKind;
   /** "Automatic", "Comment by octocat" or "Started by octocat". */
   trigger: string;
@@ -57,6 +62,68 @@ export type RunRowView = {
    * review was billed; absent otherwise (billing off, a review still open, a review claimed with billing off).
    */
   price?: RunPriceView;
+  /**
+   * Present only for a run of the Implementer (#758), which is a repository and a branch, not a pull request: `prNumber` is a
+   * placeholder then and `prUrl` null. Absent for every other kind, so their views are what they were.
+   */
+  implementer?: ImplementerRowView;
+};
+
+/** What the list knows of a task: its branch (a text from the task, rendered as text) and a link to it when it can be made. */
+export type ImplementerRowView = {
+  /** The new branch of the task; null when the turn of the job cannot be read. */
+  branch: string | null;
+  /** `<repository url>/tree/<branch>` for the repository's own https url on github.com, otherwise null. */
+  branchUrl: string | null;
+};
+
+/** One commit of a task, as the run shows it. */
+export type ImplementerCommitView = {
+  shortSha: string;
+  /** The first line of the message, cleaned and cut. Untrusted text. */
+  subject: string;
+  /** The link to the commit on GitHub; null while it was not pushed. */
+  url: string | null;
+};
+
+export type ImplementerFileView = {
+  /** Cleaned and cut. Untrusted text. */
+  path: string;
+  status: ImplementerFileStatus;
+};
+
+/** What the detail page shows of a task besides the facts every run has. Built only from the fields listed here. */
+export type ImplementerDetailView = ImplementerRowView & {
+  /** The branch the new one started from; null when the turn of the job cannot be read. Untrusted text. */
+  baseBranch: string | null;
+  /** The task given to the agent: the first characters, and the whole text when there is more. Untrusted text. */
+  instruction: { preview: string; full: string | null };
+  /** The agent's own account of what it did; null while there is none. Untrusted text, rendered as text. */
+  summary: string | null;
+  commits: { shown: ImplementerCommitView[]; more: number };
+  files: { count: number; shown: ImplementerFileView[]; more: number };
+  /** The last commit on the branch after the turn, when the turn pushed. */
+  head: { shortSha: string; url: string | null } | null;
+  /** For a task that did not succeed but pushed work: "N commits were pushed to <branch>."; null otherwise. */
+  pushedNote: string | null;
+  /**
+   * The result carried the agent's report (commits, files, summary). False for a task that ended without one (a lost lease, a
+   * runner that died): then an empty list means "not known", not "none", and the page sends the reader to the branch.
+   */
+  reported: boolean;
+};
+
+/** What the repository knows of the turn of a job, for the row (`runs-repository.ts`). */
+export type ImplementerRowSource = {
+  branch: string;
+  /** The url of the repository as the repositories table holds it. */
+  repositoryUrl: string;
+};
+
+/** And for the detail. */
+export type ImplementerDetailSource = ImplementerRowSource & {
+  baseBranch: string;
+  instruction: string;
 };
 
 /**
@@ -107,6 +174,8 @@ export type RunDetailView = RunRowView & {
    * would give a price per token, which tells the model; the operator reads the cost through the operator API.
    */
   costHidden: boolean;
+  /** The task of a run of the Implementer (#758); absent for every other kind. */
+  implementer?: ImplementerDetailView;
 };
 
 /** What the list can be narrowed by: one repository, one status. */
@@ -176,6 +245,292 @@ export function cleanLog(raw: string): string {
     .replace(/\r\n?/g, "\n")
     .replace(ANSI_SEQUENCES, "")
     .replace(UNSAFE_CHARACTERS, "");
+}
+
+// Characters with no width or only a direction: zero-width space, joiners and marks (U+200B-U+200F), the Arabic letter mark,
+// word joiners and invisible operators (U+2060-U+2064), the Mongolian vowel separator and the byte order mark. `cleanLog` keeps
+// them (a review or a log may use them); the text of a task is shown beside names and links, where they would hide a difference.
+const INVISIBLE_CHARACTERS = /[\u200b-\u200f\u061c\u2060-\u2064\u180e\ufeff]/g;
+
+/** `cleanLog` and, for the text of a task, without the invisible characters. */
+function cleanTaskText(raw: string): string {
+  return cleanLog(raw).replace(INVISIBLE_CHARACTERS, "");
+}
+
+/** One line of the text of a task: `cleanTaskText`, then every run of white space as one space. */
+function cleanTaskLine(raw: string): string {
+  return cleanTaskText(raw).replace(/\s+/g, " ").trim();
+}
+
+/** The first `max` UTF-16 units of `text`: bounds the work of the cleaners on a text of any size. */
+function head(text: string, max: number): string {
+  return text.length > max ? text.slice(0, max) : text;
+}
+
+/**
+ * The address of a repository on GitHub without anything after it, from the url the repositories table holds; null for anything
+ * that is not `https://github.com/<owner>/<name>` (no other host, port, credentials, query or fragment). The links of a task
+ * are made from this and from nothing the task, the agent or the job row wrote.
+ */
+function githubRepositoryBase(url: string): string | null {
+  const safe = safeGithubUrl(url);
+  if (safe === null) return null;
+  const parsed = new URL(safe);
+  if (parsed.search !== "" || parsed.hash !== "") return null;
+  const match = /^\/([^/]+)\/([^/]+?)\/?$/.exec(parsed.pathname);
+  return match === null ? null : `https://github.com/${match[1]}/${match[2]}`;
+}
+
+/**
+ * The link to a branch of a repository: its own https url on github.com plus `/tree/` plus the name with every part encoded. A name
+ * with an empty part, a `.` or a `..` would leave the tree path once the browser resolves it, so it gets no link.
+ */
+export function githubBranchUrl(
+  repositoryUrl: string,
+  branch: string,
+): string | null {
+  const base = githubRepositoryBase(repositoryUrl);
+  if (base === null) return null;
+  const parts = branch.split("/");
+  if (parts.some((part) => part === "" || part === "." || part === ".."))
+    return null;
+  try {
+    return `${base}/tree/${parts.map(encodeURIComponent).join("/")}`;
+  } catch {
+    // A lone surrogate cannot be encoded.
+    return null;
+  }
+}
+
+/** The link to a commit of a repository; null for a sha that is not 40 hexadecimal characters. */
+export function githubCommitUrl(
+  repositoryUrl: string,
+  sha: string,
+): string | null {
+  const base = githubRepositoryBase(repositoryUrl);
+  return base === null || !COMMIT_SHA.test(sha)
+    ? null
+    : `${base}/commit/${sha}`;
+}
+
+const COMMIT_SHA = /^[0-9a-fA-F]{40}$/;
+const SHORT_SHA_CHARS = 7;
+
+/** How much of a task the detail page lists before it says "and N more" or shows an expander. */
+const MAX_LISTED_COMMITS = 20;
+const MAX_LISTED_FILES = 20;
+const INSTRUCTION_PREVIEW_CHARS = 500;
+/** The most characters of an instruction the page can hold (the submit's own limit). */
+const MAX_INSTRUCTION_CHARS = 20_000;
+const MAX_SUBJECT_CHARS = 500;
+const MAX_PATH_CHARS = 300;
+
+type StoredImplementerResult = {
+  /** The result carries an `implementer` block at all: a result without one says nothing of the work, and is not "no work". */
+  reported: boolean;
+  headCommit: string | null;
+  pushed: boolean;
+  commits: { sha: string; subject: string }[];
+  files: { path: string; status: ImplementerFileStatus }[];
+  summary: string | null;
+};
+
+const EMPTY_IMPLEMENTER_RESULT: StoredImplementerResult = {
+  reported: false,
+  headCommit: null,
+  pushed: false,
+  commits: [],
+  files: [],
+  summary: null,
+};
+
+function isRecord(value: unknown): value is Record<string, JsonValue> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The block of a turn in a stored result, or an empty one. The runner API checks it when it is stored; what is read here is
+ * checked again, field by field, because the row may be older than the check: an entry that is not what the contract says is
+ * left out. The OpenCode session and the base commit are not read: they stay on the server.
+ */
+function readStoredImplementer(
+  result: JsonValue | null,
+): StoredImplementerResult {
+  if (!isRecord(result) || !isRecord(result.implementer))
+    return EMPTY_IMPLEMENTER_RESULT;
+  const block = result.implementer;
+  const commits: StoredImplementerResult["commits"] = [];
+  if (Array.isArray(block.commits))
+    for (const entry of block.commits.slice(
+      0,
+      IMPLEMENTER_RESULT_LIMITS.commits,
+    )) {
+      if (
+        isRecord(entry) &&
+        typeof entry.sha === "string" &&
+        COMMIT_SHA.test(entry.sha) &&
+        typeof entry.subject === "string"
+      )
+        commits.push({ sha: entry.sha, subject: entry.subject });
+    }
+  const files: StoredImplementerResult["files"] = [];
+  if (Array.isArray(block.filesChanged))
+    for (const entry of block.filesChanged.slice(
+      0,
+      IMPLEMENTER_RESULT_LIMITS.filesChanged,
+    )) {
+      if (
+        isRecord(entry) &&
+        typeof entry.path === "string" &&
+        typeof entry.status === "string" &&
+        (IMPLEMENTER_FILE_STATUSES as readonly string[]).includes(entry.status)
+      )
+        files.push({
+          path: entry.path,
+          status: entry.status as ImplementerFileStatus,
+        });
+    }
+  return {
+    reported: true,
+    headCommit:
+      typeof block.headCommit === "string" && COMMIT_SHA.test(block.headCommit)
+        ? block.headCommit
+        : null,
+    pushed: block.pushed === true,
+    commits,
+    files,
+    summary: typeof block.summary === "string" ? block.summary : null,
+  };
+}
+
+/**
+ * The branch of a task. The name is a text from the person who started it: for display it is cleaned and given to `display`
+ * (redaction, and on the operator's key the provider mask); the link is made from the raw name, encoded.
+ */
+function implementerRowView(
+  source: ImplementerRowSource | null,
+  display: (text: string) => string,
+): ImplementerRowView {
+  if (source === null) return { branch: null, branchUrl: null };
+  return {
+    branch: display(cleanTaskLine(head(source.branch, 1000))),
+    branchUrl: githubBranchUrl(source.repositoryUrl, source.branch),
+  };
+}
+
+function plural(count: number, one: string, many: string): string {
+  return count === 1 ? one : many;
+}
+
+/**
+ * The task of a run for the detail page (#758). Everything that came from the task, the commits and the agent is cleaned like the
+ * log, stripped of known secrets, cut to the limits of the contract and rendered as text by the page; a link is made only by
+ * `githubBranchUrl` and `githubCommitUrl`.
+ */
+function implementerDetailView(
+  job: Job,
+  source: ImplementerDetailSource | null,
+  redact: (text: string) => string,
+  onManagedKey: boolean,
+): ImplementerDetailView {
+  const stored = readStoredImplementer(job.result);
+  // Text on the operator's key never names a provider (like the log and the review comment).
+  const display = (cleaned: string): string => {
+    const redacted = redact(cleaned);
+    return onManagedKey ? maskProvidersInText(redacted) : redacted;
+  };
+  const row = implementerRowView(source, display);
+  const repositoryUrl = source?.repositoryUrl ?? "";
+  const agentText = (text: string, max: number, line: boolean): string =>
+    cutCharacters(
+      display(line ? cleanTaskLine(text) : cleanTaskText(text)),
+      max,
+    );
+  const instruction =
+    source === null
+      ? ""
+      : cutCharacters(
+          redact(
+            cleanTaskText(head(source.instruction, MAX_INSTRUCTION_CHARS * 4)),
+          ),
+          MAX_INSTRUCTION_CHARS,
+        );
+  const commits = stored.commits.map((commit): ImplementerCommitView => ({
+    shortSha: commit.sha.slice(0, SHORT_SHA_CHARS),
+    subject: agentText(
+      head(commit.subject, MAX_SUBJECT_CHARS * 4),
+      MAX_SUBJECT_CHARS,
+      true,
+    ),
+    url: stored.pushed ? githubCommitUrl(repositoryUrl, commit.sha) : null,
+  }));
+  const files = stored.files.map((file): ImplementerFileView => ({
+    path: agentText(head(file.path, MAX_PATH_CHARS * 4), MAX_PATH_CHARS, true),
+    status: file.status,
+  }));
+  const summary =
+    stored.summary === null
+      ? ""
+      : agentText(
+          head(stored.summary, IMPLEMENTER_RESULT_LIMITS.summaryChars * 4),
+          IMPLEMENTER_RESULT_LIMITS.summaryChars,
+          false,
+        ).trim();
+  const pushedHead =
+    stored.pushed && stored.headCommit !== null ? stored.headCommit : null;
+  const failed = job.status === "failed" || job.status === "cancelled";
+  const pushedWork =
+    stored.pushed && (commits.length > 0 || pushedHead !== null);
+  return {
+    ...row,
+    reported: stored.reported,
+    baseBranch:
+      source === null
+        ? null
+        : display(cleanTaskLine(head(source.baseBranch, 1000))),
+    instruction: {
+      preview: cutCharacters(instruction, INSTRUCTION_PREVIEW_CHARS),
+      full:
+        Array.from(instruction).length > INSTRUCTION_PREVIEW_CHARS
+          ? instruction
+          : null,
+    },
+    summary: summary === "" ? null : summary,
+    commits: {
+      shown: commits.slice(0, MAX_LISTED_COMMITS),
+      more: Math.max(0, commits.length - MAX_LISTED_COMMITS),
+    },
+    files: {
+      count: files.length,
+      shown: files.slice(0, MAX_LISTED_FILES),
+      more: Math.max(0, files.length - MAX_LISTED_FILES),
+    },
+    head:
+      pushedHead === null
+        ? null
+        : {
+            shortSha: pushedHead.slice(0, SHORT_SHA_CHARS),
+            url: githubCommitUrl(repositoryUrl, pushedHead),
+          },
+    pushedNote:
+      failed && pushedWork && row.branch !== null
+        ? commits.length === 0
+          ? `Work was pushed to ${row.branch}.`
+          : `${String(commits.length)} ${plural(commits.length, "commit was", "commits were")} pushed to ${row.branch}.`
+        : null,
+  };
+}
+
+/** The sentence for the error code of a run: a task has sentences of its own where those of a review do not fit. */
+function describeRunError(
+  product: ProductIdentity,
+  kind: JobKind,
+  code: string,
+  stoppedEarly: StoppedEarly | null,
+): ErrorDescription {
+  return kind === "implementer"
+    ? describeTurnErrorCode(product, code)
+    : describeErrorCode(product, code, stoppedEarly);
 }
 
 type StoredResult = {
@@ -309,7 +664,7 @@ function problemOf(product: ProductIdentity, job: RunRowSource): string | null {
       ? job.status === "failed"
         ? "The run failed without saying why."
         : null
-      : describeErrorCode(product, job.errorCode).text;
+      : describeRunError(product, job.reviewKind, job.errorCode, null).text;
   }
   return null;
 }
@@ -319,6 +674,10 @@ export function toRunRowView(
   job: RunRowSource,
   project: string,
   now: Date,
+  /** What the repository knows of the turn of a run of the Implementer (#758); ignored for every other kind. */
+  implementer: ImplementerRowSource | null = null,
+  /** Takes known secrets out of the branch of a task before it is shown. */
+  redact: (text: string) => string = (text) => text,
 ): RunRowView {
   const startedAt = job.claimedAt;
   return {
@@ -326,7 +685,8 @@ export function toRunRowView(
     repositoryId: job.repositoryId,
     project,
     prNumber: job.prNumber,
-    prUrl: safeGithubUrl(job.prUrl),
+    // The address of a task's job is a placeholder (its branch): it is no pull request, whatever it looks like.
+    prUrl: job.reviewKind === "implementer" ? null : safeGithubUrl(job.prUrl),
     command: job.command,
     reviewKind: job.reviewKind,
     triggerKind: job.triggerKind,
@@ -340,6 +700,10 @@ export function toRunRowView(
       now,
     ),
     problem: problemOf(product, job),
+    // Only a task has the key: the rows of every other kind are what they were.
+    ...(job.reviewKind === "implementer"
+      ? { implementer: implementerRowView(implementer, redact) }
+      : {}),
   };
 }
 
@@ -352,6 +716,8 @@ export function toRunDetailView(
   redact: (text: string) => string = (text) => text,
   /** Whether the run was on the operator's key (its usage record says so): its cost is not shown. */
   onManagedKey = false,
+  /** What the repository knows of the turn of a run of the Implementer (#758); ignored for every other kind. */
+  implementer: ImplementerDetailSource | null = null,
 ): RunDetailView {
   const stored = readStoredResult(job.result);
   // A run on the operator's key never names its provider, also when it was stored before the result was masked on its way in.
@@ -366,11 +732,19 @@ export function toRunDetailView(
   const commentUrl = hasPostedReview ? safeGithubUrl(stored.commentUrl) : null;
   // #689: the limit that stopped a Diff Review words its failure; the usage of a failed run carries it.
   const stoppedEarly = readStoredUsage(job.result)?.stoppedEarly ?? null;
+  const isTask = job.reviewKind === "implementer";
   const error =
     job.errorCode === null
       ? null
-      : describeErrorCode(product, job.errorCode, stoppedEarly);
-  const row = toRunRowView(product, job, project, now);
+      : describeRunError(product, job.reviewKind, job.errorCode, stoppedEarly);
+  // The row's own `implementer` (the list's variant) is replaced below by the detail's, which holds all of it.
+  const row: Omit<RunRowView, "implementer"> = toRunRowView(
+    product,
+    job,
+    project,
+    now,
+    implementer,
+  );
   return {
     ...row,
     problem:
@@ -382,12 +756,15 @@ export function toRunDetailView(
     attempts: job.attempts,
     errorCode: error?.code ?? null,
     errorCodeKnown: error?.known ?? false,
+    // The reasons are those of a Dynamic Review checkout; a task has none.
     errorReason:
-      job.status === "failed" && stored.errorReason !== null
+      !isTask && job.status === "failed" && stored.errorReason !== null
         ? describeCheckoutReason(product, stored.errorReason)
         : null,
     commentUrl,
-    commentMissing: job.status === "succeeded" && commentUrl === null,
+    // A task posts no comment on a pull request, so none can be missing.
+    commentMissing:
+      !isTask && job.status === "succeeded" && commentUrl === null,
     log: {
       text: overlong ? cleaned.slice(cleaned.length - MAX_LOG_CHARS) : cleaned,
       truncated: stored.logTruncated || overlong,
@@ -396,6 +773,16 @@ export function toRunDetailView(
     usage: usageView(job, redact, onManagedKey),
     callTrace: traceView(job, onManagedKey),
     costHidden: onManagedKey,
+    ...(isTask
+      ? {
+          implementer: implementerDetailView(
+            job,
+            implementer,
+            redact,
+            onManagedKey,
+          ),
+        }
+      : {}),
   };
 }
 
@@ -411,6 +798,7 @@ export function toCustomerRunDetailView(
   redact: (text: string) => string = (text) => text,
   onManagedKey = false,
   reviewComment: string | null = null,
+  implementer: ImplementerDetailSource | null = null,
 ): CustomerRunDetailView {
   // Left out here, so neither is ever part of what a member's browser receives.
   const full = toRunDetailView(
@@ -420,6 +808,7 @@ export function toCustomerRunDetailView(
     now,
     redact,
     onManagedKey,
+    implementer,
   );
   const detail = Object.fromEntries(
     Object.entries(full).filter(

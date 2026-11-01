@@ -69,6 +69,7 @@ export type NoticeRefusal = Pick<
   | "repositoryId"
   | "prNumber"
   | "triggerKind"
+  | "reviewKind"
   | "errorCode"
   | "periodStart"
 >;
@@ -271,6 +272,8 @@ export function createRefusalNoticeService(
       return inOrder(async () => {
         const { workspaceId, errorCode, periodStart } = refusal;
         if (!isNoticeCode(errorCode) || periodStart === undefined) return;
+        // #752: a turn of the Implementer has no pull request to comment on (its number is a placeholder).
+        if (refusal.reviewKind === "implementer") return;
         await safely({
           workspaceId,
           repositoryId: refusal.repositoryId,

@@ -20,6 +20,11 @@
 // Nothing in here logs or keeps a credential: the revealed access exists only as a local value that
 // is built as late as possible and dropped with the response.
 //
+// #753: a turn of the Implementer (the kind `implementer`) takes the same road with two differences. Its facts are the turn's, not a
+// pull request's: nothing reads a pull request, the installation must hold the write permission (`git_write_not_granted`), and
+// step 4 creates a token that may write exactly this repository (`implementerAccess`) and builds the `implementer` block of the
+// input. The model must be a native one (entry and cost policy) that serves the Dynamic kind.
+//
 // #320: a claim that names the feature `worker_credential` (a Dispatcher) runs steps 1 to 3 only and
 // answers with a per-job credential and no input. Step 4 (`buildJobInput`: the job's input, with the git
 // credentials and the model key) runs when the Worker fetches the job (`worker-fetch.ts`), by the same
@@ -27,6 +32,10 @@
 import "server-only";
 import type { AttemptedShas } from "../db/repositories/jobs-repository.ts";
 import type { IntegrationsRepository } from "../db/repositories/integrations-repository.ts";
+import type {
+  StoredImplementerSession,
+  StoredImplementerTurn,
+} from "../db/repositories/implementer-repository.ts";
 import type { RepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { IntegrationError } from "../integrations/errors.ts";
 import { revealGitAccess } from "../integrations/normalized.ts";
@@ -70,17 +79,23 @@ import { jobCostLimit } from "./job-cost-limit.ts";
 import {
   RUNNER_API_VERSION,
   RUNNER_ENV_KEY_PATTERN,
+  type AnyJobInput,
   type ClaimBase,
   type ClaimFeature,
   type ClaimResponse,
   type DynamicModelCapabilities,
   type DynamicReviewOptions,
-  type RunnerJobInput,
   type SplitClaimResponse,
 } from "./contract.ts";
 import type { RunnerEngine } from "../jobs/runner-capabilities.ts";
 import type { JobOptions, JobOptionsSource } from "./job-options.ts";
 import { describeError, type RunnerApiLogger } from "./logger.ts";
+import { refusalForKind } from "./kind-guard.ts";
+import { DEFAULT_TOKEN_LIFETIME_MS } from "./write-token.ts";
+import type { UndeliveredTokenRevoker } from "./write-token.ts";
+import type { GitTokenEntry } from "./claimed-keys.ts";
+import { keyModeForJob } from "../llm/resolve.ts";
+import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import { callerLlmProviders } from "./requests.ts";
 import { errorResponse, jsonResponse, noContent } from "./responses.ts";
 import type { ClaimOptions } from "../db/repositories/runner-jobs-repository.ts";
@@ -106,6 +121,13 @@ export const CLAIM_FAILURE_CODES = [
   // Dynamic options are missing/unusable. The runner is never silently given the other engine.
   "dynamic_engine_unavailable",
   "dynamic_config_invalid",
+  // #746, #753: the claimed job is a turn of the Implementer and the caller cannot run one (it did not advertise the engine, or this
+  // deployment does not have the capability).
+  "implementer_engine_unavailable",
+  // #753: the turn's options cannot be used (its record is missing, or its model is not a native one with a cost policy).
+  "implementer_config_invalid",
+  // #753: the installation has not accepted the permission to write contents; the owner of the installation has to accept it.
+  "git_write_not_granted",
   // #279: the provider's metadata says the model lacks tool calling or a required tool choice.
   "dynamic_model_features_unsupported",
   // #432 (ADR 0005, 2.8): the job runs on the operator's key and the catalog entry it selects cannot be used (none
@@ -136,6 +158,12 @@ export const CLAIM_RELEASE_REASONS = [
   // #375: the Worker's container ended with an error before it reported a result (the Dispatcher's release call).
   "worker_exited",
 ] as const;
+
+/**
+ * #753: how long a turn of the Implementer may run, in seconds. A constant of the kind: the Dispatcher stops the Worker at its
+ * own per-kind job timeout of the same length, and the runner keeps the last minutes of it for the final commit and push.
+ */
+export const IMPLEMENTER_TIME_LIMIT_SECONDS = 3600;
 
 /** When the platform does not say how long to wait. */
 export const DEFAULT_RETRY_AFTER_SECONDS = 30;
@@ -197,6 +225,18 @@ export type ClaimDeps = {
    */
   claimedKeyMode: (job: Job) => Promise<UsageKeyMode | undefined>;
   /**
+   * #753: the turn (and its session) an implementer job runs: the instruction, the branch, the base branch, the model it was
+   * started with and its cost limit. Asked only for a job of that kind, in the job's own workspace; `undefined` for a job that
+   * is not a turn.
+   */
+  implementerTurn: (job: Job) => Promise<
+    | {
+        turn: StoredImplementerTurn;
+        session: StoredImplementerSession;
+      }
+    | undefined
+  >;
+  /**
    * Notes the provider and, for a job on the operator's key, the catalog entry (id and name as they are now) the job was
    * given in its usage record (#432): never the model. The claim reserved the record already; a failure gives the job back.
    */
@@ -213,8 +253,22 @@ export type ClaimDeps = {
    */
   claimedKeys: Pick<
     ClaimedKeys,
-    "remember" | "rememberModel" | "rememberNative"
+    | "remember"
+    | "rememberModel"
+    | "rememberNative"
+    | "rememberGitToken"
+    | "hasGitTokens"
   >;
+  /**
+   * #753: switches off a write token of a turn of the Implementer that was made and never handed to a Worker (the fetch failed
+   * after it). Only that token: the ones an earlier fetch handed over are in use. Never rejects; does nothing for another kind.
+   */
+  revokeUndelivered: UndeliveredTokenRevoker;
+  /**
+   * #790: the addresses the projects of a workspace pinned for a catalog provider (`createPinnedAddressReader`). A turn has no
+   * project of its own, so a workspace's key goes only to an address its projects pinned, as for a Dynamic review.
+   */
+  pinnedAddresses: (workspaceId: string, slug: string) => Promise<string[]>;
   /**
    * #279: where the metadata of a Dynamic job's model is read when its claim is built (the provider's
    * public endpoint metadata, cached for a short time). Left out, a claim reads none and a Dynamic job
@@ -255,6 +309,8 @@ type Prepared =
       response: ClaimResponse;
       entryModel: string | null;
       native: boolean;
+      /** #753: the write token of a turn, which the claim remembers before the input leaves and switches off if it cannot. */
+      writeToken: GitTokenEntry | null;
     }
   /** #320: the claim of a Dispatcher: the credential and no input. */
   | { kind: "split"; response: SplitClaimResponse }
@@ -280,17 +336,30 @@ export type Checked = {
   repo: RepoRef;
   prUrl: string;
   baseRef: string;
+  /** #753: what the turn of an implementer job asks for; null for every other job. */
+  implementer: {
+    instruction: string;
+    branch: string;
+    baseBranch: string;
+    /** The https address the runner clones from and pushes to, with no credential in it (`cloneUrlOf`). */
+    cloneUrl: string;
+  } | null;
 };
 
 /** What `buildJobInput` made: the input of the job and when its git token stops working. */
 export type Built = {
   kind: "built";
-  input: RunnerJobInput;
+  input: AnyJobInput;
   tokenExpiresAt: string | null;
   /** The model of the catalog entry the job runs on, or null for an own job; remembered for masking (#280, #432). */
   entryModel: string | null;
   /** #578: the input carries a native model entry (`dynamic.modelEntry`); remembered for the report. */
   native: boolean;
+  /**
+   * #753: the write token of a turn of the Implementer (the same value as `input.git.token`), or null. The caller remembers it
+   * before the input leaves and switches it off when the input does not (`revokeUndelivered`).
+   */
+  writeToken: GitTokenEntry | null;
 };
 
 function refuse(errorCode: string, detail?: string): Refusal {
@@ -318,6 +387,12 @@ function accessFailureCode(error: IntegrationError): string {
       return "git_scope_refused";
     case "INTEGRATION_ACCESS_APP_AUTH_FAILED":
       return "git_app_auth_failed";
+    // #753: the installation has not accepted contents write (a race with the check that ran just before the token).
+    case "INTEGRATION_ACCESS_PERMISSION_NOT_GRANTED":
+      return "git_write_not_granted";
+    // #753: this deployment does not offer the Implementer, whatever the App was set to by hand.
+    case "INTEGRATION_CAPABILITY_ABSENT":
+      return "implementer_engine_unavailable";
     default:
       return "git_access_failed";
   }
@@ -348,6 +423,58 @@ function llmOptionsOf(options: JobOptions): { maxCostCents?: number } | null {
     chosen.maxCostCents = maxCostCents;
   }
   return chosen;
+}
+
+/**
+ * #753: the options of a turn: what the settings of a project are for a review. The model is the one the task was started with
+ * (`{entryId}` on the operator's key, `{provider, model}` on the workspace's own), the cost limit the customer's limit for this
+ * turn. A turn takes nothing from the project: no PR-Agent environment, no skill, no layer of settings.
+ */
+function implementerOptionsOf(
+  choice: ModelChoice,
+  costLimitCents: number | null,
+): JobOptions {
+  return {
+    env: {},
+    selection:
+      "entryId" in choice
+        ? { layers: {}, entryId: choice.entryId }
+        : {
+            layers: {
+              project: { provider: choice.provider, model: choice.model },
+            },
+            entryId: null,
+          },
+    llm: { maxCostCents: costLimitCents },
+  };
+}
+
+/**
+ * The address the runner clones a repository from and pushes to (#753): the repository's own https address with `.git` after
+ * it. The runner's workspace takes an https address with a host and no credential, query or fragment, and the token goes in
+ * its environment, never in the address; an address that is not of that shape is refused here (null) instead of by the runner.
+ */
+export function cloneUrlOf(repositoryUrl: string): string | null {
+  if (/\s/.test(repositoryUrl)) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(repositoryUrl);
+  } catch {
+    return null;
+  }
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.hostname === "" ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.search !== "" ||
+    parsed.hash !== ""
+  )
+    return null;
+  const path = parsed.pathname.replace(/\/+$/, "");
+  if (path === "" || path.endsWith(".git")) return null;
+  const cloneUrl = `https://${parsed.host}${path}.git`;
+  return /^https:\/\/[^\s@]+$/.test(cloneUrl) ? cloneUrl : null;
 }
 
 /** `/review` takes no arguments; it is the only command a claim may hand out (#203). */
@@ -559,7 +686,11 @@ async function costOf(
   selection: Selection,
 ): Promise<CostDecision> {
   const native = deps.nativeCost;
-  if (native === undefined || job.reviewKind !== "dynamic")
+  // A turn of the Implementer runs on the Dynamic engine, so it is priced and bounded as a Dynamic job is (#753).
+  if (
+    native === undefined ||
+    (job.reviewKind !== "dynamic" && job.reviewKind !== "implementer")
+  )
     return { kind: "decided", policy: null };
   const ref = native.refOf(selection);
   if (ref === null) return { kind: "decided", policy: null };
@@ -579,10 +710,25 @@ async function costOf(
   // refused like an unavailable one: on the operator's key, which we pay, as `managed_model_unavailable` (free); on the
   // workspace's own key as a model Dynamic Review cannot use. No key exists yet in either case.
   const catalog = selection.keyMode === "own" && selection.catalog === true;
-  const entry = await native.entryFor(
-    ref,
-    catalog ? selection.pinnedAddress : undefined,
-  );
+  // A Dynamic job holds to the address its project pinned. A turn has no project of its own (#753, #790), so it holds to what the
+  // workspace's projects pinned for the provider: no pin, the catalog's trusted address; one pin, exactly that address (a catalog
+  // that moved since refuses the job below, `provider_address_changed`, and the key goes nowhere); several different pins, no
+  // address can be the one all of them selected, so the key is not sent anywhere either.
+  let pinned = catalog ? selection.pinnedAddress : undefined;
+  if (catalog && job.reviewKind === "implementer") {
+    const pins = await deps.pinnedAddresses(
+      job.workspaceId,
+      selection.provider,
+    );
+    if (pins.length > 1)
+      return {
+        kind: "refused",
+        errorCode: entryRefusalCode(selection, "provider_address_changed"),
+        detail: `${whose(selection)}kind=${selection.kind} reason=entry_provider_address_changed`,
+      };
+    pinned = pins[0];
+  }
+  const entry = await native.entryFor(ref, pinned);
   if (!entry.ok) {
     if (entry.code === "check_failed")
       return { kind: "retry", reason: "price_check_failed" };
@@ -594,7 +740,9 @@ async function costOf(
   }
   // #588: a selection made before pins existed is pinned now, to the address this claim is about to send the key to. If another
   // pin got there first, the job holds to that one, as every other claim does.
-  if (catalog && entry.unpinned === true) {
+  // A turn has no project that pinned the address: the model was chosen when the task was accepted, so the address the catalog
+  // trusts now is the one it is sent to (#753).
+  if (catalog && entry.unpinned === true && job.reviewKind !== "implementer") {
     let inForce: string | null;
     try {
       inForce = await deps.providerPins.adopt(
@@ -661,6 +809,36 @@ function whose(selection: Selection): string {
 }
 
 /**
+ * What a read of the platform that failed means for the job (the pull request of a review, the installation of a turn). At the
+ * claim every failure gives the job back to try later; at the Worker's fetch (`classifyReadFailures`) a permanent failure of the
+ * connection (removed, suspended, scope refused) ends the job with its stable code instead, like the same failure when the
+ * credentials are created. `what` is for the log; the text of the error never is.
+ */
+function unreadable(
+  deps: ClaimDeps,
+  job: Job,
+  error: unknown,
+  classifyReadFailures: boolean,
+  what: string,
+): Refusal {
+  deps.logger.error(
+    `[runner-api] job=${job.id} ${what}: ${describeError(error)}`,
+  );
+  if (
+    classifyReadFailures &&
+    error instanceof IntegrationError &&
+    !error.retryable &&
+    error.code.startsWith("INTEGRATION_ACCESS_")
+  )
+    return refuse(accessFailureCode(error));
+  return {
+    kind: "retry",
+    reason: "pull_request_unavailable",
+    retryAfterSeconds: retryAfterOf(error),
+  };
+}
+
+/**
  * Steps 1 to 3 of the module comment: the guard, the selection and the key it names, the options of the job and the
  * pull request. Nothing here creates or reveals a credential of the job.
  */
@@ -669,6 +847,10 @@ export async function checkJob(
   job: Job,
   { engines, classifyReadFailures, runnerProviders }: CheckOptions,
 ): Promise<Checked | Refusal> {
+  // #746, #753: first, before the guard, the entitlements or the key are looked at: a turn of the Implementer goes only to a caller
+  // that advertised the engine, and is never read as a Diff job (everything below branches on `dynamic` alone).
+  const unbuilt = refusalForKind(job.reviewKind, engines);
+  if (unbuilt !== null) return refuse(unbuilt);
   const decision = await deps.guard.check(job);
   if (!decision.allow)
     return decision.outcome === "cancel"
@@ -687,11 +869,36 @@ export async function checkJob(
 
   const command = commandOf(job);
   if (command === null) return refuse("job_args_invalid");
+  // #753: a turn takes its options from its own record. Without one (a job of this kind that is no turn) nothing can run.
+  const turn =
+    job.reviewKind === "implementer"
+      ? await deps.implementerTurn(job)
+      : undefined;
+  if (job.reviewKind === "implementer" && turn === undefined)
+    return refuse("implementer_config_invalid", "reason=turn_missing");
+  if (turn !== undefined) {
+    // The model of a turn is the one it was started with, for the key mode it was started in. If the workspace changed its key
+    // mode since, the choice no longer fits and the turn ends: it is never moved to another entry, provider or model.
+    const mode = keyModeForJob(entitlements);
+    if (mode === "managed" && !("entryId" in turn.turn.modelChoice))
+      return refuse(
+        MANAGED_MODEL_UNAVAILABLE,
+        "kind=dynamic reason=choice_not_an_entry",
+      );
+    if (mode === "own" && "entryId" in turn.turn.modelChoice)
+      return refuse(
+        "llm_model_unavailable",
+        "kind=dynamic reason=key_mode_changed",
+      );
+  }
   // The provider, the model and (on the operator's key) the catalog entry are chosen first, from the settings of the
   // project for the job's pinned kind; the operator chooses the model of a workspace on its key, never the tenant
   // (#276, #432). Any failure ends the job closed: no move to another entry, provider or the instance's model. The key
   // follows only a selection that succeeded.
-  const options = await deps.jobOptions.optionsFor(job);
+  const options =
+    turn === undefined
+      ? await deps.jobOptions.optionsFor(job)
+      : implementerOptionsOf(turn.turn.modelChoice, turn.turn.costLimitCents);
   // A catalog model needs the native path: its entry from the catalog and its cost policy (the token cap) come from `nativeCost`.
   const nativeModels = deps.nativeCost !== undefined;
   const selected = await selectModel({ ...deps, nativeModels }, job, {
@@ -714,6 +921,13 @@ export async function checkJob(
       reason: cost.reason,
       retryAfterSeconds: DEFAULT_RETRY_AFTER_SECONDS,
     };
+  // #753: the input of a turn has no field for a model without an entry and a cost policy, so a selection that is not native ends
+  // the job here, before any key or token exists (the native path is mandatory for the Implementer).
+  if (turn !== undefined && (cost.policy === null || cost.entry === undefined))
+    return refuse(
+      "implementer_config_invalid",
+      "kind=dynamic reason=native_required",
+    );
   // The log names the entry and the kind of a job on the operator's key, never a model or a provider; the log of
   // a job on the workspace's own key names no model either. A managed native job also names the confirmation that priced it
   // (its id and the version of its hash), so a price in dispute can be traced.
@@ -785,6 +999,47 @@ export async function checkJob(
     url: repository.url,
   };
 
+  // #753: a turn has no pull request to read. What it needs from the platform is the permission to write the contents of its
+  // repository, which the installation must have accepted; without it nothing is created and the job ends for good.
+  if (turn !== undefined) {
+    const cloneUrl = cloneUrlOf(repo.url);
+    if (cloneUrl === null)
+      return refuse("implementer_config_invalid", "reason=clone_url");
+    try {
+      const held = await provider.installationPermissions(integration);
+      if (!held.contentsWrite) return refuse("git_write_not_granted");
+    } catch (error) {
+      return unreadable(
+        deps,
+        job,
+        error,
+        classifyReadFailures,
+        "the installation could not be read",
+      );
+    }
+    return {
+      kind: "checked",
+      selection,
+      llm,
+      command,
+      options,
+      llmOptions,
+      dynamic,
+      cost: cost.policy,
+      modelEntry: cost.entry ?? null,
+      integration,
+      repo,
+      prUrl: job.prUrl,
+      baseRef: turn.session.baseBranch,
+      implementer: {
+        instruction: turn.turn.instruction,
+        branch: turn.session.branch,
+        baseBranch: turn.session.baseBranch,
+        cloneUrl,
+      },
+    };
+  }
+
   // The pull request must still be there and open; its URL and base branch come from the platform.
   let prUrl: string;
   let baseRef: string;
@@ -803,21 +1058,13 @@ export async function checkJob(
       error.code === "INTEGRATION_PULL_REQUEST_NOT_FOUND"
     )
       return refuse("pr_not_found");
-    deps.logger.error(
-      `[runner-api] job=${job.id} the pull request could not be read: ${describeError(error)}`,
+    return unreadable(
+      deps,
+      job,
+      error,
+      classifyReadFailures,
+      "the pull request could not be read",
     );
-    if (
-      classifyReadFailures &&
-      error instanceof IntegrationError &&
-      !error.retryable &&
-      error.code.startsWith("INTEGRATION_ACCESS_")
-    )
-      return refuse(accessFailureCode(error));
-    return {
-      kind: "retry",
-      reason: "pull_request_unavailable",
-      retryAfterSeconds: retryAfterOf(error),
-    };
   }
 
   return {
@@ -834,6 +1081,7 @@ export async function checkJob(
     repo,
     prUrl,
     baseRef,
+    implementer: null,
   };
 }
 
@@ -860,7 +1108,17 @@ export async function buildJobInput(
     modelEntry,
     integration,
     repo,
+    implementer,
   } = checked;
+  // #746, #753: a second wall for the kind, in case a caller reaches the build without the check: a turn is built from its own
+  // facts, its model entry and its cost policy, and from nothing else.
+  const unbuilt = refusalForKind(job.reviewKind, null);
+  if (unbuilt !== null) return refuse(unbuilt);
+  if (
+    job.reviewKind === "implementer" &&
+    (implementer === null || cost === null || modelEntry === null)
+  )
+    return refuse("implementer_engine_unavailable");
   // #553: a cost policy goes only to a caller that enforces one. A runner that did not read it would run without the bound
   // (the price book of the managed key, the token cap of an own key), so the job ends here, before any credential exists.
   if (cost !== null && !features.includes("dynamic_cost_policy"))
@@ -875,6 +1133,10 @@ export async function buildJobInput(
     operatorCents: await deps.operatorCostLimitCents(),
     features,
   });
+  // #790: the cost limit is the brake of a turn, and the runner has no limit of its own for this kind, so a caller that names
+  // neither feature cannot run one: it ends here, as for an engine that cannot run the kind, before any credential exists.
+  if (implementer !== null && costLimit.enforced === "none")
+    return refuse("implementer_engine_unavailable");
   if (costLimit.enforced === "none")
     deps.logger.info(
       `[runner-api] job=${job.id} carries no cost limit: the runner names neither claim feature cost_limit nor operator_cost_limit, so a Dynamic Review is held only to the runner's own RUNNER_DYNAMIC_MAX_COST_USD and a Diff Review to none`,
@@ -911,10 +1173,15 @@ export async function buildJobInput(
     if (decision.kind === "send") capabilities = decision.capabilities;
   }
 
-  // The one place that creates credentials for a job.
+  // The one place that creates credentials for a job. A turn gets a token that may write this one repository, a review job one that
+  // may not (#753).
   let git: GitAccess;
   try {
-    git = revealGitAccess(await provider.jobAccess(integration, repo));
+    git = revealGitAccess(
+      job.reviewKind === "implementer"
+        ? await provider.implementerAccess(integration, repo)
+        : await provider.jobAccess(integration, repo),
+    );
   } catch (error) {
     if (!(error instanceof IntegrationError)) throw error;
     deps.logger.error(
@@ -932,72 +1199,59 @@ export async function buildJobInput(
   if (git.provider !== "github" || git.botLogin === null)
     return refuse("git_access_failed");
 
-  // The instance's model and context window are the defaults; the review settings of the project
-  // replace them. The job never carries `fallbackModels`: the MVP has no fallback chain.
-  const llmAccess = revealLlmAccess(llm.access);
-  // #689: no setting names the token budget; the app decides it from the context window of the model: the window the provider's
-  // metadata states, else the one last read for it (the provider may be down); on the workspace's own key, which asks nobody, the
-  // smallest window the public catalog states for the model and its fallback model, else the instance's `LLM_MAX_TOKENS`, else
-  // the built-in value. Never sent unclamped. A native job (#578) states its window in its entry, but it
-  // runs no PR-Agent and never reads the field: it gets the built-in value like the others.
-  const maxTokens = reviewTokenBudget(
-    await reviewContextWindow(deps, {
-      selection,
-      metadata,
-      fallbackModels: options.llm?.fallbackModels ?? [],
-      managed,
-      instanceWindow: llmAccess.contextWindowTokens,
-    }),
-  );
-  // #199: the head of the last successful Dynamic review of this pull request, so the dynamic job
-  // can compare against it. A Diff job never carries a base, so it is not looked up.
-  const previousReviewedSha =
-    job.reviewKind === "dynamic" ? await deps.previousReviewedSha(job) : null;
-  const attempted: AttemptedShas =
-    job.reviewKind === "dynamic"
-      ? await deps.attemptedShas(job)
-      : { shas: [], truncated: false };
+  // Nothing below may fail without the write token of a turn being switched off: it is not yet in the input that would carry it (#753).
+  let llmAccess: ReturnType<typeof revealLlmAccess>;
+  let maxTokens: number;
+  let previousReviewedSha: string | null;
+  let attempted: AttemptedShas;
+  try {
+    // The instance's model and context window are the defaults; the review settings of the project
+    // replace them. The job never carries `fallbackModels`: the MVP has no fallback chain.
+    llmAccess = revealLlmAccess(llm.access);
+    // #689: no setting names the token budget; the app decides it from the context window of the model: the window the provider's
+    // metadata states, else the one last read for it (the provider may be down); on the workspace's own key, which asks nobody, the
+    // smallest window the public catalog states for the model and its fallback model, else the instance's `LLM_MAX_TOKENS`, else
+    // the built-in value. Never sent unclamped. A native job (#578) states its window in its entry, but it
+    // runs no PR-Agent and never reads the field: it gets the built-in value like the others.
+    maxTokens = reviewTokenBudget(
+      await reviewContextWindow(deps, {
+        selection,
+        metadata,
+        fallbackModels: options.llm?.fallbackModels ?? [],
+        managed,
+        instanceWindow: llmAccess.contextWindowTokens,
+      }),
+    );
+    // #199: the head of the last successful Dynamic review of this pull request, so the dynamic job
+    // can compare against it. A Diff job never carries a base, so it is not looked up.
+    previousReviewedSha =
+      job.reviewKind === "dynamic" ? await deps.previousReviewedSha(job) : null;
+    attempted =
+      job.reviewKind === "dynamic"
+        ? await deps.attemptedShas(job)
+        : { shas: [], truncated: false };
+  } catch (error) {
+    await deps.revokeUndelivered(job, writeTokenOf(git));
+    throw error;
+  }
+
   // The exact legacy Diff payload for every Diff job, whatever kind of runner asked: the keys are in
   // the order the previous release wrote them, byte for byte (prUrl, command, git, llm, env;
   // llm.provider, model, apiKey, maxTokens), so a golden serialization matches. A Dynamic job is only
   // ever handed to a runner that advertised `opencode`, so its tagged fields never reach an old runner.
-  const input: RunnerJobInput =
-    dynamic === null
+  const input: AnyJobInput =
+    implementer !== null && cost !== null && modelEntry !== null
       ? {
-          prUrl: checked.prUrl,
-          command,
-          git: {
-            provider: "github",
-            baseUrl: git.baseUrl,
-            token: git.token,
-            botLogin: git.botLogin,
+          reviewKind: "implementer",
+          implementer: {
+            repo: { fullName: repo.fullName, cloneUrl: implementer.cloneUrl },
+            baseBranch: implementer.baseBranch,
+            branch: implementer.branch,
+            instruction: implementer.instruction,
+            limits: { timeLimitSeconds: IMPLEMENTER_TIME_LIMIT_SECONDS },
+            cost,
+            modelEntry,
           },
-          llm: {
-            provider: selection.provider,
-            model: selection.model,
-            apiKey: llmAccess.apiKey,
-            maxTokens,
-            ...costLimit.fields,
-          },
-          env: options.env,
-        }
-      : {
-          prUrl: checked.prUrl,
-          command,
-          reviewKind: "dynamic",
-          dynamic: {
-            ...dynamic,
-            ...(capabilities === undefined ? {} : { capabilities }),
-            ...(cost === null ? {} : { cost }),
-            ...(modelEntry === null ? {} : { modelEntry }),
-          },
-          base: claimBaseOf(
-            repo.fullName,
-            checked.baseRef,
-            job.headSha,
-            previousReviewedSha,
-            attempted,
-          ),
           git: {
             provider: "github",
             baseUrl: git.baseUrl,
@@ -1012,13 +1266,65 @@ export async function buildJobInput(
             ...costLimit.fields,
           },
           env: {},
-        };
+        }
+      : dynamic === null
+        ? {
+            prUrl: checked.prUrl,
+            command,
+            git: {
+              provider: "github",
+              baseUrl: git.baseUrl,
+              token: git.token,
+              botLogin: git.botLogin,
+            },
+            llm: {
+              provider: selection.provider,
+              model: selection.model,
+              apiKey: llmAccess.apiKey,
+              maxTokens,
+              ...costLimit.fields,
+            },
+            env: options.env,
+          }
+        : {
+            prUrl: checked.prUrl,
+            command,
+            reviewKind: "dynamic",
+            dynamic: {
+              ...dynamic,
+              ...(capabilities === undefined ? {} : { capabilities }),
+              ...(cost === null ? {} : { cost }),
+              ...(modelEntry === null ? {} : { modelEntry }),
+            },
+            base: claimBaseOf(
+              repo.fullName,
+              checked.baseRef,
+              job.headSha,
+              previousReviewedSha,
+              attempted,
+            ),
+            git: {
+              provider: "github",
+              baseUrl: git.baseUrl,
+              token: git.token,
+              botLogin: git.botLogin,
+            },
+            llm: {
+              provider: selection.provider,
+              model: selection.model,
+              apiKey: llmAccess.apiKey,
+              maxTokens,
+              ...costLimit.fields,
+            },
+            env: {},
+          };
   return {
     kind: "built",
     input,
     tokenExpiresAt: git.expiresAt,
     entryModel: managed ? selection.model : null,
     native: modelEntry !== null,
+    writeToken: implementer === null ? null : writeTokenOf(git),
   };
 }
 
@@ -1071,6 +1377,7 @@ async function prepare(
     kind: "ready",
     entryModel: built.entryModel,
     native: built.native,
+    writeToken: built.writeToken,
     response: {
       version: RUNNER_API_VERSION,
       job: {
@@ -1146,19 +1453,56 @@ export async function cancelJob(
   return "cancelled";
 }
 
+/** The token of a turn with the time it expires; a platform that says none gets the lifetime GitHub gives. */
+function writeTokenOf(git: GitAccess, now: Date = new Date()): GitTokenEntry {
+  return {
+    token: git.token,
+    expiresAt:
+      git.expiresAt ??
+      new Date(now.getTime() + DEFAULT_TOKEN_LIFETIME_MS).toISOString(),
+  };
+}
+
+/**
+ * #753: whether no input of this turn was ever handed to a Worker. Every write token is remembered before an input leaves, so a
+ * job whose ledger is empty has handed out none; one that has a token has a Worker that may run and push. Only for a turn;
+ * a failed lookup says no (the safe answer: the job is not requeued).
+ */
+export async function noInputHandedOut(
+  deps: Pick<ClaimDeps, "claimedKeys">,
+  job: Pick<Job, "id" | "reviewKind">,
+): Promise<boolean> {
+  if (job.reviewKind !== "implementer") return false;
+  try {
+    return !(await deps.claimedKeys.hasGitTokens(job.id));
+  } catch {
+    return false;
+  }
+}
+
 /** Gives the job back after an unexpected failure, so it is not stuck under a lease nobody uses. */
 export async function giveBack(
   deps: ClaimDeps,
   claimed: NonNullable<ClaimResult>,
   reason: string,
   retryAt?: Date,
+  /**
+   * #753: no input of this job ever reached a Worker (`noInputHandedOut`, asked before the call was built), so a turn of the
+   * Implementer ran nothing and pushed nothing and waits again like any other job instead of failing on its first lost attempt.
+   * A turn whose Worker already has an input is never requeued: its Worker may be running.
+   */
+  beforeStart = false,
 ): Promise<void> {
+  const release = {
+    ...(retryAt === undefined ? {} : { retryAt }),
+    ...(beforeStart ? { beforeStart: true } : {}),
+  };
   try {
     await deps.queue.release(
       claimed.job.id,
       claimed.leaseToken,
       reason,
-      retryAt === undefined ? undefined : { retryAt },
+      Object.keys(release).length === 0 ? undefined : release,
     );
   } catch (error) {
     deps.logger.error(
@@ -1203,7 +1547,9 @@ export async function handleClaim(
     if (claimed === null) return noContent();
 
     // Whatever goes wrong from here on, the job is given back instead of staying under a lease that
-    // nobody uses (it would only run out after two minutes).
+    // nobody uses (it would only run out after two minutes). The write token of a turn that was made is switched off then (#753).
+    let writeToken: GitTokenEntry | null = null;
+    const beforeStart = await noInputHandedOut(deps, claimed.job);
     try {
       const prepared = await prepare(
         deps,
@@ -1213,6 +1559,7 @@ export async function handleClaim(
         split,
         target.llmProviders,
       );
+      if (prepared.kind === "ready") writeToken = prepared.writeToken;
 
       if (prepared.kind === "refused") {
         await endJob(
@@ -1236,6 +1583,7 @@ export async function handleClaim(
           claimed,
           prepared.reason,
           new Date(deps.now().getTime() + prepared.retryAfterSeconds * 1000),
+          beforeStart,
         );
         deps.logger.info(
           `[runner-api] ${origin.label} job=${claimed.job.id} given back: ${prepared.reason}`,
@@ -1265,6 +1613,13 @@ export async function handleClaim(
           prepared.entryModel,
         );
       await deps.claimedKeys.rememberNative(claimed.job.id, prepared.native);
+      // The token is remembered (sealed) before it leaves, so the end of the turn can switch it off (#753).
+      if (prepared.writeToken !== null)
+        await deps.claimedKeys.rememberGitToken(
+          claimed.job.id,
+          prepared.writeToken.token,
+          prepared.writeToken.expiresAt,
+        );
       deps.logger.info(
         `[runner-api] ${origin.label} job=${claimed.job.id} command=${claimed.job.command}`,
       );
@@ -1273,7 +1628,9 @@ export async function handleClaim(
       deps.logger.error(
         `[runner-api] ${origin.label} job=${claimed.job.id} failed: ${describeError(error)}`,
       );
-      await giveBack(deps, claimed, "claim_failed");
+      if (writeToken !== null)
+        await deps.revokeUndelivered(claimed.job, writeToken);
+      await giveBack(deps, claimed, "claim_failed", undefined, beforeStart);
       return errorResponse(500, "RUNNER_INTERNAL_ERROR");
     }
   }

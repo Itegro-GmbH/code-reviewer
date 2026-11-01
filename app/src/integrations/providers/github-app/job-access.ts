@@ -27,9 +27,25 @@ export const NOTICE_TOKEN_PERMISSIONS: InstallationPermissions = {
   metadata: "read",
 };
 
+/**
+ * What the token of the Implementer (#749) may do: write the contents of one repository (push a branch) and the
+ * metadata every token gets anyway. No pull requests, no issues, no checks, and no `workflows`: GitHub rejects a push
+ * that touches `.github/workflows/**` without that permission, and the App never asks for it.
+ */
+export const IMPLEMENTER_TOKEN_PERMISSIONS: InstallationPermissions = {
+  contents: "write",
+  metadata: "read",
+};
+
 /** What the token that reads a posted review comment (#657) may do: read the comments of one repository and the metadata. */
 export const COMMENT_READ_TOKEN_PERMISSIONS: InstallationPermissions = {
   issues: "read",
+  metadata: "read",
+};
+
+/** What the token of the branch reads (#750) may do: read the contents of one repository and the metadata. */
+export const BRANCH_READ_TOKEN_PERMISSIONS: InstallationPermissions = {
+  contents: "read",
   metadata: "read",
 };
 
@@ -76,6 +92,28 @@ export function toJobAccessError(error: unknown): IntegrationError {
     cause: error,
     retryAfterSeconds: error.retryAfterSeconds,
   });
+}
+
+/**
+ * `toJobAccessError` for the token of the Implementer (#749). A 422 that says the installation has not accepted a
+ * permission the App holds (the owner of the installation has not approved Contents: write yet) is
+ * `INTEGRATION_ACCESS_PERMISSION_NOT_GRANTED` (not retryable), told apart from a repository the installation does not
+ * have (`INTEGRATION_ACCESS_SCOPE_REFUSED`). Everything else is what a job token gets.
+ */
+export function toImplementerAccessError(error: unknown): IntegrationError {
+  if (
+    error instanceof GithubAppError &&
+    error.code === "GITHUB_APP_REQUEST_FAILED" &&
+    error.status === 422 &&
+    error.duringTokenRequest &&
+    error.refusal === "permission_missing"
+  )
+    return new IntegrationError(
+      "INTEGRATION_ACCESS_PERMISSION_NOT_GRANTED",
+      error.message,
+      { cause: error },
+    );
+  return toJobAccessError(error);
 }
 
 /**

@@ -316,6 +316,17 @@
         "dynamic_model_features_unsupported": "The configured model does not support the features Dynamic Review requires. Choose another model.",
         "lease_lost": "When the review was ready, the job was no longer held by its runner or this could not be confirmed, so nothing was written. The next push reviews again.",
         "superseded": "A newer push replaced this run while it was running, so it was stopped and published nothing.",
+        "branch_exists": "The branch for this task already exists on the repository, so nothing was changed. Choose another branch name.",
+        "base_branch_not_found": "The branch this task should start from could not be found on the repository, so nothing was changed.",
+        "clone_failed": "The repository could not be downloaded, so the task did not start.",
+        "setup_failed": "The repository's own set-up steps did not complete, so the task could not start.",
+        "agent_gave_up": "The agent stopped without a result it could stand behind. Read its summary, then try again with a clearer or smaller task.",
+        "push_rejected": "The repository refused the new branch, so the work was not saved there.",
+        "branch_violation": "The work left the branch it was given, so it was stopped and nothing was pushed.",
+        "time_limit_reached": "The task took longer than its time limit, so it was stopped.",
+        "git_write_not_granted": "The app is not allowed to write to this repository yet. Accept the new permission on GitHub, then start the task again.",
+        "implementer_engine_unavailable": "No worker that answered can run tasks yet, so this task did not start.",
+        "implementer_config_invalid": "The settings of this task could not be used, so it did not start.",
         "unknown": "The run failed for a reason this version does not know."
       },
       "CHECKOUT_REASON_COPY": {

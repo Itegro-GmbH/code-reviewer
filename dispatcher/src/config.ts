@@ -11,10 +11,10 @@
 // | DISPATCHER_SIGNING_KEY_ID / DISPATCHER_SIGNING_SECRET       | The key `reviewer` signs the wake-up call with       | required |
 // | DISPATCHER_SIGNING_KEY_ID_PREVIOUS / ..._SECRET_PREVIOUS    | The previous key, accepted while rotating            | none |
 // | DISPATCHER_POOL_ID                                          | Sent as X-Runner-Id; the App counts the pool by it   | dispatcher |
-// | DISPATCHER_ENGINES                                          | Engines to serve, `pr-agent,opencode`; the job kinds of `reviewer` follow | both |
-// | DISPATCHER_JOB_TIMEOUT_SECONDS                              | How long a Worker may live (60 to 21600)             | 1200 |
-// | DISPATCHER_WORKER_CONFIG                                    | JSON `{diff?, dynamic?}`: container memory, launcher options | none |
-// | DISPATCHER_APPS (#730)                                      | JSON array of further apps: `{id, url, kinds, keyId, maxRunning, poolId?}` | none: only `reviewer` |
+// | DISPATCHER_ENGINES                                          | Engines to serve, `pr-agent,opencode,implementer`; the job kinds of `reviewer` follow, and never include `implementer` (#759) | `pr-agent,opencode`, plus `implementer` when an app of `DISPATCHER_APPS` names the kind |
+// | DISPATCHER_JOB_TIMEOUT_SECONDS                              | How long a Worker of Diff or Dynamic may live (60 to 21600) | 1200 |
+// | DISPATCHER_WORKER_CONFIG                                    | JSON `{diff?, dynamic?, implementer?}`: container memory, launcher options; `implementer` also `timeoutSeconds` (60 to 21600, default 3600) | none |
+// | DISPATCHER_APPS (#730)                                      | JSON array of further apps: `{id, url, kinds, keyId, maxRunning, poolId?}`; `kinds` out of `diff`, `dynamic`, `implementer` | none: only `reviewer` |
 // | DISPATCHER_APP_<ID>_TOKEN                                   | Per further app (id upper-cased, `-` as `_`): its dispatcher credential | required per app |
 // | DISPATCHER_APP_<ID>_SIGNING_SECRET                          | Per further app: the secret its wake-up and stop calls are signed with | required per app |
 // | DISPATCHER_APP_<ID>_SIGNING_SECRET_PREVIOUS / ..._PREVIOUS_KEY_ID | Per further app: the previous key, accepted while rotating | none |
@@ -26,11 +26,11 @@ import {
   ENGINE_BY_KIND,
   KNOWN_KINDS,
   LEGACY_APP_ID,
+  REVIEWER_KINDS,
   type AppSettings,
   type CoreSettings,
   type Engine,
   type ReviewKind,
-  type LaunchConfig,
 } from "./core/types.ts";
 import type { AppSigningKey } from "./triggers/signature.ts";
 
@@ -87,9 +87,14 @@ export type Environment = Readonly<Record<string, string | undefined>>;
 const KEY_ID = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const POOL_ID = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}$/;
 const APP_ID = /^[a-z][a-z0-9-]{0,23}$/;
-const ENGINES: readonly Engine[] = ["pr-agent", "opencode"];
+/** What `DISPATCHER_ENGINES` may name. */
+const ENGINES: readonly Engine[] = ["pr-agent", "opencode", "implementer"];
+/** The engines served when nothing is configured (#759: `implementer` is added for the apps of the registry that name it). */
+const DEFAULT_ENGINES: readonly Engine[] = ["pr-agent", "opencode"];
 const MIN_SECRET_LENGTH = 32;
 const MAX_APPS = 16;
+const MIN_JOB_TIMEOUT_SECONDS = 60;
+const MAX_JOB_TIMEOUT_SECONDS = 21600;
 const CONTROL_OR_SPACE = /[\s\p{Cc}]/u;
 
 export function read(env: Environment, name: string): string | undefined {
@@ -385,9 +390,10 @@ function cronSecretOf(
   }
 }
 
-function engines(env: Environment): Engine[] {
+/** The engines the operator named, or undefined when `DISPATCHER_ENGINES` is not set. */
+function namedEngines(env: Environment): Engine[] | undefined {
   const raw = read(env, "DISPATCHER_ENGINES");
-  if (raw === undefined) return [...ENGINES];
+  if (raw === undefined) return undefined;
   const names = raw.split(",").map((name) => name.trim());
   const unique = [...new Set(names)];
   if (
@@ -397,6 +403,20 @@ function engines(env: Environment): Engine[] {
   )
     throw new ConfigError("DISPATCHER_ENGINES", "invalid");
   return unique;
+}
+
+/** The engines this deployment serves: the named ones, else the default and `implementer` when an app of the registry has the kind. */
+function enginesOf(
+  named: Engine[] | undefined,
+  registry: readonly RegistryApp[],
+): Engine[] {
+  if (named !== undefined) return named;
+  const implementing = registry.some((entry) =>
+    entry.app.kinds.includes("implementer"),
+  );
+  return implementing
+    ? [...DEFAULT_ENGINES, "implementer"]
+    : [...DEFAULT_ENGINES];
 }
 
 const memorySize = z.string().regex(/^[0-9]+[mg]$/);
@@ -419,11 +439,27 @@ const kindConfig = z.strictObject({
 const workerConfig = z.strictObject({
   diff: kindConfig.optional(),
   dynamic: kindConfig.optional(),
+  implementer: kindConfig
+    .extend({
+      timeoutSeconds: z
+        .number()
+        .int()
+        .min(MIN_JOB_TIMEOUT_SECONDS)
+        .max(MAX_JOB_TIMEOUT_SECONDS)
+        .optional(),
+    })
+    .optional(),
 });
 
-function workerConfigs(env: Environment): Record<ReviewKind, LaunchConfig> {
+type WorkerConfigs = {
+  workerConfig: CoreSettings["workerConfig"];
+  implementerTimeoutSeconds?: number;
+};
+
+/** The worker configuration per kind. The timeout of the Implementer is the core's, so it is not part of what a Launcher gets. */
+function workerConfigs(env: Environment): WorkerConfigs {
   const raw = read(env, "DISPATCHER_WORKER_CONFIG");
-  if (raw === undefined) return { diff: {}, dynamic: {} };
+  if (raw === undefined) return { workerConfig: { diff: {}, dynamic: {} } };
   let json: unknown;
   try {
     json = JSON.parse(raw);
@@ -433,7 +469,20 @@ function workerConfigs(env: Environment): Record<ReviewKind, LaunchConfig> {
   const parsed = workerConfig.safeParse(json);
   if (!parsed.success)
     throw new ConfigError("DISPATCHER_WORKER_CONFIG", "invalid");
-  return { diff: parsed.data.diff ?? {}, dynamic: parsed.data.dynamic ?? {} };
+  const { diff, dynamic, implementer } = parsed.data;
+  if (implementer === undefined)
+    return { workerConfig: { diff: diff ?? {}, dynamic: dynamic ?? {} } };
+  const { timeoutSeconds, ...launch } = implementer;
+  return {
+    workerConfig: {
+      diff: diff ?? {},
+      dynamic: dynamic ?? {},
+      implementer: launch,
+    },
+    ...(timeoutSeconds === undefined
+      ? {}
+      : { implementerTimeoutSeconds: timeoutSeconds }),
+  };
 }
 
 function poolId(env: Environment): string {
@@ -446,9 +495,10 @@ function poolId(env: Environment): string {
 export function loadSettings(env: Environment): Settings {
   const dispatcherToken = token(env);
   const legacy = legacySigningKeys(env);
-  const configuredEngines = engines(env);
+  const named = namedEngines(env);
   const url = appUrl(env);
   const extra = registryApps(env);
+  const configuredEngines = enginesOf(named, extra);
   const operator = operatorToken(env);
   // `POST /probe` starts canary VMs: with several apps no app's credential, the reviewer's included, may open it.
   if (extra.length > 0 && operator === undefined)
@@ -470,23 +520,32 @@ export function loadSettings(env: Environment): Settings {
     token: dispatcherToken,
     poolId: poolId(env),
     maxRunning: integer(env, "DISPATCHER_MAX_RUNNING", { min: 1, max: 1000 }),
-    // The kinds whose engine the deployment is configured to serve: with the default, both.
-    kinds: KNOWN_KINDS.filter((kind) =>
+    // The kinds whose engine the deployment is configured to serve: with the default, both. Never `implementer` (#759),
+    // whatever the engines say: only an app of the registry can be given that kind.
+    kinds: REVIEWER_KINDS.filter((kind) =>
       configuredEngines.includes(ENGINE_BY_KIND[kind]),
     ),
   };
+  if (reviewer.kinds.length === 0)
+    throw new ConfigError("DISPATCHER_ENGINES", "invalid");
   const keys = [...legacy.keys, ...extra.flatMap((entry) => entry.keys)];
+  // The literals are read by app/src/billing/hold.test.ts (the hold of the App follows this default).
+  const jobTimeoutSeconds = integer(env, "DISPATCHER_JOB_TIMEOUT_SECONDS", {
+    min: 60,
+    max: 21600,
+    fallback: 1200,
+  });
+  const configured = workerConfigs(env);
   return {
     core: {
       apps: [reviewer, ...extra.map((entry) => entry.app)],
       engines: configuredEngines,
-      jobTimeoutSeconds: integer(env, "DISPATCHER_JOB_TIMEOUT_SECONDS", {
-        min: 60,
-        max: 21600,
-        fallback: 1200,
-      }),
+      jobTimeoutSeconds,
+      ...(configured.implementerTimeoutSeconds === undefined
+        ? {}
+        : { implementerTimeoutSeconds: configured.implementerTimeoutSeconds }),
       launchDeadlineSeconds: 300,
-      workerConfig: workerConfigs(env),
+      workerConfig: configured.workerConfig,
     },
     ...cronSecretOf(env, [
       dispatcherToken,

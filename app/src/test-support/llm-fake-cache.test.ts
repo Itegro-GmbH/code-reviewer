@@ -456,6 +456,36 @@ describe("the fake LLM server with the prompt cache on", () => {
     });
   });
 
+  // #767
+  it("counts a mark on a chat message object only when the provider honours it, and then caches up to the end of that message", async () => {
+    fake = await startLlmFake();
+    const body = {
+      model: "claude-lane-coder",
+      messages: [
+        { role: "system", content: text("rules", 6000) },
+        { role: "user", content: text("task", 6000), cache_control: MARK },
+      ],
+    };
+
+    fake.enablePromptCache(true);
+    const ignored = [
+      await post("/chat/completions", body, {}),
+      await post("/chat/completions", body, {}),
+    ];
+    fake.enablePromptCache(true, { messageMarks: true });
+    const first = await post("/chat/completions", body, {});
+    const second = await post("/chat/completions", body, {});
+
+    const cachedOf = (answer: { json: Record<string, unknown> }) =>
+      (
+        (answer.json.usage as Record<string, unknown>).prompt_tokens_details as
+          { cached_tokens?: number } | undefined
+      )?.cached_tokens ?? 0;
+    expect(ignored.map(cachedOf)).toEqual([0, 0]);
+    expect(cachedOf(first)).toBe(0);
+    expect(cachedOf(second)).toBeGreaterThan(0);
+  });
+
   it("answers the chat usage with cached tokens and a discounted charge", async () => {
     fake = await startLlmFake();
     fake.enablePromptCache(true);

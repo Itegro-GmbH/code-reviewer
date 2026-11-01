@@ -6,7 +6,12 @@
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { JOB_TOKEN_PERMISSIONS } from "./job-access.ts";
+import { createCapabilitySet } from "../../../capabilities/capability.ts";
+import { PRODUCTS } from "../../../capabilities/products.ts";
+import {
+  IMPLEMENTER_TOKEN_PERMISSIONS,
+  JOB_TOKEN_PERMISSIONS,
+} from "./job-access.ts";
 import {
   ACCOUNT_PERMISSIONS,
   buildAppManifest,
@@ -107,6 +112,7 @@ describe("the GitHub App setup guide", () => {
       publicUrl: "https://reviews.example.test",
       tenancy: "single",
       name: "Code Reviewer",
+      capabilities: createCapabilitySet(PRODUCTS["code-review-com"].default),
     });
 
     expect(documented).toEqual(
@@ -154,5 +160,75 @@ describe("the GitHub App setup guide", () => {
 
     expect(existsSync(`${repoRoot}${route}`)).toBe(true);
     expect(guide).toContain("/api/webhooks/github-app");
+  });
+});
+
+describe("the setup guide for a deployment with the Implementer", () => {
+  const capabilities = (members: Parameters<typeof createCapabilitySet>[0]) =>
+    createCapabilitySet(members);
+  const manifestFor = (set: ReturnType<typeof capabilities>) =>
+    buildAppManifest({
+      product: PRODUCT,
+      publicUrl: "https://reviews.example.test",
+      tenancy: "single",
+      name: "Code Reviewer",
+      capabilities: set,
+    }).default_permissions;
+  const section_ = () => section("The Implementer");
+
+  // #749-T08
+  it("lists exactly the permission the manifest raises for the Implementer, at its level", () => {
+    const raised = Object.fromEntries(
+      Object.entries(
+        manifestFor(capabilities(["review", "dynamic-review", "implementer"])),
+      ).filter(
+        ([name, level]) =>
+          manifestFor(capabilities(["review", "dynamic-review"]))[name] !==
+          level,
+      ),
+    );
+
+    expect(permissionRows(section_())).toEqual(expectedRows(raised));
+    expect(raised).toEqual({ contents: "write" });
+  });
+
+  // #749-T08
+  it("is where Contents is write: the tables for every deployment keep it read-only", () => {
+    const permissions = section("Permissions");
+
+    expect(
+      permissionRows(subsection(permissions, "Repository permissions")),
+    ).toMatchObject({ contents: "Read-only" });
+  });
+
+  // #749-T08
+  it("names the token of the Implementer: Contents write and Metadata read on one repository, nothing else", () => {
+    const text = section_();
+
+    expect(IMPLEMENTER_TOKEN_PERMISSIONS).toEqual({
+      contents: "write",
+      metadata: "read",
+    });
+    expect(text).toContain("IMPLEMENTER_TOKEN_PERMISSIONS");
+    expect(text).toMatch(/one repository/i);
+  });
+
+  // #749-T08
+  it("says that GitHub rejects pushes to .github/workflows and that no Workflows permission is asked for", () => {
+    const text = section_();
+
+    expect(text).toContain(".github/workflows");
+    expect(text).toMatch(/reject/i);
+    expect(text).toMatch(/Workflows[^\n]*(not|never)/i);
+  });
+
+  // #749-T08
+  it("describes the update of an App that was created before: raise the permission, then every installation accepts it", () => {
+    const text = section_();
+
+    expect(text).toMatch(/Update an existing App/i);
+    expect(text).toMatch(/Read and write/);
+    expect(text).toMatch(/accept/i);
+    expect(text).toContain("INTEGRATION_ACCESS_PERMISSION_NOT_GRANTED");
   });
 });

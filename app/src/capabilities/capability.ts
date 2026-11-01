@@ -6,8 +6,9 @@
 // This module is pure (no environment, no imports), so the proxy, the pages, the jobs and the tests share it.
 
 /**
- * Every capability a deployment can have. `implementer` is reserved for the Software Factory: it is known so that a
- * product which does not allow it refuses it by name, but nothing is gated by it yet.
+ * Every capability a deployment can have. `implementer` belongs to the Software Factory (#747): only the product
+ * `factory` allows it, any other product refuses it by name. Routes, navigation and the job kind that it gates come
+ * with later changes of the Implementer (#745).
  */
 export const CAPABILITIES = [
   "review",
@@ -24,6 +25,8 @@ export function isCapability(value: string): value is Capability {
 /** The capability that a capability cannot exist without. */
 const REQUIRES: Partial<Record<Capability, Capability>> = {
   "dynamic-review": "review",
+  // The Implementer runs on the Dynamic engine, so a set without it cannot have the Implementer (and so not without review).
+  implementer: "dynamic-review",
 };
 
 export function requiredCapability(
@@ -32,10 +35,14 @@ export function requiredCapability(
   return REQUIRES[capability];
 }
 
-/** The review kinds of a job and the capability each needs (the job kind lives in src/job-kind/job-kind.ts). */
+/**
+ * The job kinds and the capability each needs (the job kind lives in src/job-kind/job-kind.ts). `implementer` is
+ * mapped here before the kind exists in that type (#752), so the set already answers for it.
+ */
 export const CAPABILITY_OF_REVIEW_KIND = {
   diff: "review",
   dynamic: "dynamic-review",
+  implementer: "implementer",
 } as const satisfies Record<string, Capability>;
 
 export type CapabilitySet = {

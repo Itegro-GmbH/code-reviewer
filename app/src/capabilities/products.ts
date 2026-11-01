@@ -2,8 +2,8 @@
 
 // The products this codebase is deployed as, and which capabilities each may have (#731). `PRODUCT_CAPABILITIES`
 // can only narrow `allowed`; unset, a product gets its `default`, so the deployment that exists today (code-review.com)
-// needs no new setting. The `allowed` list is the code wall: `implementer` is in none of them yet, so no setting can
-// make a deployment of these products start the Software Factory.
+// needs no new setting. The `allowed` list is the code wall: `implementer` is allowed by `factory` only and is in no
+// `default`, so an unset `PRODUCT_CAPABILITIES` never turns it on and no setting can make code-review.com start it (#747).
 import {
   CAPABILITIES,
   createCapabilitySet,
@@ -29,7 +29,7 @@ export const PRODUCTS: Readonly<Record<ProductId, ProductDefinition>> = {
     default: ["review", "dynamic-review", "billing"],
   },
   factory: {
-    allowed: ["review", "dynamic-review", "billing"],
+    allowed: ["review", "dynamic-review", "billing", "implementer"],
     default: ["review", "dynamic-review"],
   },
 };

@@ -3,9 +3,16 @@
 // The manifest the admin portal posts to GitHub: every address from the configured public URL, the
 // permissions and events of the App, public or private by tenancy, and the helper that names what an
 // imported App lacks.
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { createCapabilitySet } from "../../../capabilities/capability.ts";
+import { PRODUCTS } from "../../../capabilities/products.ts";
 import { identityFor } from "../../../product-identity/identities.ts";
 import { describe, expect, it } from "vitest";
-import { JOB_TOKEN_PERMISSIONS } from "./job-access.ts";
+import {
+  IMPLEMENTER_TOKEN_PERMISSIONS,
+  JOB_TOKEN_PERMISSIONS,
+} from "./job-access.ts";
 import {
   APP_NAME_MAX_LENGTH,
   buildAppManifest,
@@ -17,12 +24,24 @@ import { getProductIdentity } from "../../../product-identity/current.ts";
 
 const PRODUCT = getProductIdentity();
 
+/** The set of code-review.com, and of the factory with and without the Implementer. */
+const CODE_REVIEW_COM = createCapabilitySet(
+  PRODUCTS["code-review-com"].default,
+);
+const FACTORY = createCapabilitySet(PRODUCTS.factory.default);
+const FACTORY_IMPLEMENTER = createCapabilitySet([
+  "review",
+  "dynamic-review",
+  "implementer",
+]);
+
 const PUBLIC_URL = "https://reviews.example.com";
 
 describe("the GitHub App manifest", () => {
   // #102-GH-01
   it("derives the webhook, redirect, callback and setup addresses from the public URL of a multi-tenant instance", () => {
     const manifest = buildAppManifest({
+      capabilities: CODE_REVIEW_COM,
       product: PRODUCT,
       publicUrl: PUBLIC_URL,
       tenancy: "multi",
@@ -47,6 +66,7 @@ describe("the GitHub App manifest", () => {
   // #102-GH-01
   it("makes the App private on a single-tenant instance", () => {
     const manifest = buildAppManifest({
+      capabilities: CODE_REVIEW_COM,
       product: PRODUCT,
       publicUrl: PUBLIC_URL,
       tenancy: "single",
@@ -60,6 +80,7 @@ describe("the GitHub App manifest", () => {
   // #405-T13
   it("asks for the repository permissions of a review job plus Checks, Email addresses and Members", () => {
     const manifest = buildAppManifest({
+      capabilities: CODE_REVIEW_COM,
       product: PRODUCT,
       publicUrl: PUBLIC_URL,
       tenancy: "single",
@@ -83,6 +104,7 @@ describe("the GitHub App manifest", () => {
 
   it("does not ask GitHub to authorize a person during the installation", () => {
     const manifest = buildAppManifest({
+      capabilities: CODE_REVIEW_COM,
       product: PRODUCT,
       publicUrl: PUBLIC_URL,
       tenancy: "single",
@@ -94,6 +116,7 @@ describe("the GitHub App manifest", () => {
 
   it("ignores a trailing slash of the public URL", () => {
     const manifest = buildAppManifest({
+      capabilities: CODE_REVIEW_COM,
       product: PRODUCT,
       publicUrl: `${PUBLIC_URL}/`,
       tenancy: "single",
@@ -126,6 +149,7 @@ describe("the manifest of another product", () => {
   // #740-T04
   it("takes the name and the description from the identity and every address from the configured URL", () => {
     const manifest = buildAppManifest({
+      capabilities: CODE_REVIEW_COM,
       product: factory,
       publicUrl: PUBLIC_URL,
       tenancy: "single",
@@ -160,37 +184,172 @@ describe("the permissions an App lacks", () => {
   // #405-T13
   it("lists the Checks, account and organization permissions of an App that was made by hand without them", () => {
     expect(
-      missingPermissions({
-        pull_requests: "write",
-        issues: "write",
-        contents: "read",
-        metadata: "read",
-      }),
+      missingPermissions(
+        {
+          pull_requests: "write",
+          issues: "write",
+          contents: "read",
+          metadata: "read",
+        },
+        CODE_REVIEW_COM,
+      ),
     ).toEqual(["checks", "emails", "members"]);
   });
 
   it("lists a permission whose level is too low and nothing for a complete App", () => {
     expect(
-      missingPermissions({
-        pull_requests: "read",
-        issues: "write",
-        contents: "read",
-        metadata: "read",
-        checks: "write",
-        emails: "read",
-        members: "read",
-      }),
+      missingPermissions(
+        {
+          pull_requests: "read",
+          issues: "write",
+          contents: "read",
+          metadata: "read",
+          checks: "write",
+          emails: "read",
+          members: "read",
+        },
+        CODE_REVIEW_COM,
+      ),
     ).toEqual(["pull_requests"]);
     expect(
-      missingPermissions({
-        pull_requests: "write",
-        issues: "write",
-        contents: "write",
-        metadata: "read",
-        checks: "write",
-        emails: "read",
-        members: "write",
-      }),
+      missingPermissions(
+        {
+          pull_requests: "write",
+          issues: "write",
+          contents: "write",
+          metadata: "read",
+          checks: "write",
+          emails: "read",
+          members: "write",
+        },
+        CODE_REVIEW_COM,
+      ),
     ).toEqual([]);
+  });
+});
+
+// The same App code is deployed twice; only a deployment with the Implementer asks GitHub for more.
+const ALL_PERMISSIONS = {
+  pull_requests: "write",
+  issues: "write",
+  contents: "read",
+  metadata: "read",
+  checks: "write",
+  emails: "read",
+  members: "read",
+} as const;
+
+function manifestFor(
+  capabilities: Parameters<typeof buildAppManifest>[0]["capabilities"],
+  product = PRODUCT,
+) {
+  return buildAppManifest({
+    capabilities,
+    product,
+    publicUrl: "https://reviews.example.test",
+    tenancy: "multi",
+    name: suggestedAppName(product, "https://reviews.example.test"),
+  });
+}
+
+describe("the manifest of a deployment without the Implementer", () => {
+  const golden = JSON.parse(
+    readFileSync(
+      join(
+        import.meta.dirname,
+        "../../../product-identity/code-review-com-output.golden.json",
+      ),
+      "utf8",
+    ),
+  ) as { manifest: { built: unknown } };
+
+  // #749-T01
+  it("is byte for byte the one stored for code-review.com", () => {
+    expect(JSON.stringify(manifestFor(CODE_REVIEW_COM))).toBe(
+      JSON.stringify(golden.manifest.built),
+    );
+  });
+
+  // #749-T01
+  it("is the same for the factory while it has no Implementer", () => {
+    expect(JSON.stringify(manifestFor(FACTORY))).toBe(
+      JSON.stringify(golden.manifest.built),
+    );
+  });
+});
+
+describe("the manifest of a deployment with the Implementer", () => {
+  // #749-T02
+  it("raises Contents to write and leaves every other permission and event as it is", () => {
+    const manifest = manifestFor(FACTORY_IMPLEMENTER);
+
+    expect(manifest.default_permissions).toEqual({
+      ...ALL_PERMISSIONS,
+      contents: "write",
+    });
+    expect(manifest.default_events).toEqual(["pull_request", "issue_comment"]);
+    expect(manifest).toEqual({
+      ...manifestFor(CODE_REVIEW_COM),
+      default_permissions: { ...ALL_PERMISSIONS, contents: "write" },
+    });
+  });
+
+  // #749-T02
+  it("keeps the order of the permissions, so the only difference in the text is the one level", () => {
+    expect(JSON.stringify(manifestFor(FACTORY_IMPLEMENTER))).toBe(
+      JSON.stringify(manifestFor(CODE_REVIEW_COM)).replace(
+        '"contents":"read"',
+        '"contents":"write"',
+      ),
+    );
+  });
+
+  // #749-T02
+  it("asks for no permission that the token of the Implementer does not name beyond Contents and the review ones", () => {
+    expect(
+      Object.keys(manifestFor(FACTORY_IMPLEMENTER).default_permissions),
+    ).toEqual(Object.keys(ALL_PERMISSIONS));
+    expect(IMPLEMENTER_TOKEN_PERMISSIONS).not.toHaveProperty("workflows");
+    expect(
+      manifestFor(FACTORY_IMPLEMENTER).default_permissions,
+    ).not.toHaveProperty("workflows");
+  });
+});
+
+describe("the permissions an App lacks in a deployment with the Implementer", () => {
+  const readOnlyContents = { ...ALL_PERMISSIONS };
+
+  // #749-T03
+  it("names Contents for an App that holds it read-only", () => {
+    expect(missingPermissions(readOnlyContents, FACTORY_IMPLEMENTER)).toEqual([
+      "contents",
+    ]);
+  });
+
+  // #749-T03
+  it("names Contents for an App that does not hold it at all", () => {
+    const withoutContents = Object.fromEntries(
+      Object.entries(readOnlyContents).filter(([name]) => name !== "contents"),
+    );
+
+    expect(missingPermissions(withoutContents, FACTORY_IMPLEMENTER)).toEqual([
+      "contents",
+    ]);
+  });
+
+  // #749-T03
+  it("names nothing extra once Contents is write", () => {
+    expect(
+      missingPermissions(
+        { ...readOnlyContents, contents: "write" },
+        FACTORY_IMPLEMENTER,
+      ),
+    ).toEqual([]);
+  });
+
+  // #749-T03
+  it("names nothing extra for code-review.com or for the factory without the Implementer", () => {
+    for (const capabilities of [CODE_REVIEW_COM, FACTORY])
+      expect(missingPermissions(readOnlyContents, capabilities)).toEqual([]);
   });
 });

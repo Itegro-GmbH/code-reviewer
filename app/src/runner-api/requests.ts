@@ -16,6 +16,7 @@ import type {
   ReleaseRequest,
   VmStartRequest,
   FindingPriority,
+  ImplementerResult,
   ReviewFindings,
   RunnerResult,
   RunnerUsage,
@@ -26,6 +27,8 @@ import {
   CLAIM_FEATURES,
   DEFAULT_LLM_PROVIDERS,
   FINDING_PRIORITIES,
+  IMPLEMENTER_FILE_STATUSES,
+  IMPLEMENTER_RESULT_LIMITS,
   LLM_PROVIDER_ID_PATTERN,
   MAX_FINDING_COUNT,
   MAX_LLM_PROVIDERS,
@@ -90,6 +93,15 @@ function isRecord(value: unknown): value is Record_ {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// C0 controls other than tab, line feed and carriage return, and DEL. A NUL is refused by a Postgres text column, and none of
+// these is text a person reads in a summary, a commit subject, a path or an id.
+const CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+
+/** The text without its control characters (tab, line feed and carriage return stay). */
+export function withoutControlCharacters(text: string): string {
+  return text.replace(CONTROL_CHARACTERS, "");
+}
+
 /** Collects the refusals of one body while its fields are checked. */
 class Checker {
   readonly fields: FieldError[] = [];
@@ -101,19 +113,24 @@ class Checker {
     return undefined;
   }
 
+  /**
+   * `stripControls`: control characters are taken out of the text (see `withoutControlCharacters`). The maximum is judged on what
+   * was sent, like the contract does, the minimum on what is left.
+   */
   string(
     source: Record_,
     key: string,
     field: string,
-    options: { min?: number; max: number },
+    options: { min?: number; max: number; stripControls?: boolean },
   ): string | undefined {
     const value = source[key];
     if (value === undefined) return this.fail(field, "required");
     if (typeof value !== "string") return this.fail(field, "invalid");
-    const length = lengthOf(value);
-    if (length > options.max) return this.fail(field, "too_long");
-    if (length < (options.min ?? 0)) return this.fail(field, "invalid");
-    return value;
+    if (lengthOf(value) > options.max) return this.fail(field, "too_long");
+    const text =
+      options.stripControls === true ? withoutControlCharacters(value) : value;
+    if (lengthOf(text) < (options.min ?? 0)) return this.fail(field, "invalid");
+    return text;
   }
 
   /** A string that may be null or left out; `fallback` is what a missing value becomes. */
@@ -546,6 +563,230 @@ function parseFindings(
   return { open, bySeverity, ...(incomplete === true ? { incomplete } : {}) };
 }
 
+const COMMIT_SHA = /^[0-9a-f]{40}$/;
+const MAX_COMMIT_SUBJECT_CHARS = 500;
+const MAX_FILE_PATH_CHARS = 4096;
+const MAX_OPENCODE_SESSION_ID_CHARS = 200;
+const MAX_OPENCODE_VERSION_CHARS = 64;
+
+/** The keys of `source` that are not in `allowed`, refused under `prefix`: these objects are closed. */
+function refuseUnknownKeys(
+  check: Checker,
+  source: Record_,
+  allowed: readonly string[],
+  prefix: string,
+): void {
+  for (const key of Object.keys(source))
+    if (!allowed.includes(key)) check.fail(`${prefix}${key}`, "invalid");
+}
+
+function commitSha(
+  check: Checker,
+  source: Record_,
+  key: string,
+  field: string,
+): string | undefined {
+  const value = check.string(source, key, field, { max: 40 });
+  if (value !== undefined && !COMMIT_SHA.test(value))
+    return check.fail(field, "invalid");
+  return value;
+}
+
+/** The commits of an implementer block: closed objects, at most `IMPLEMENTER_RESULT_LIMITS.commits`. */
+function parseImplementerCommits(
+  check: Checker,
+  value: unknown,
+  field: string,
+): ImplementerResult["commits"] | undefined {
+  if (value === undefined) return check.fail(field, "required");
+  if (!Array.isArray(value)) return check.fail(field, "invalid");
+  if (value.length > IMPLEMENTER_RESULT_LIMITS.commits)
+    return check.fail(field, "too_long");
+  const before = check.fields.length;
+  const commits: ImplementerResult["commits"] = [];
+  value.forEach((entry: unknown, index) => {
+    const where = `${field}[${String(index)}]`;
+    if (!isRecord(entry)) {
+      check.fail(where, "invalid");
+      return;
+    }
+    refuseUnknownKeys(check, entry, ["sha", "subject"], `${where}.`);
+    const sha = commitSha(check, entry, "sha", `${where}.sha`);
+    const subject = check.string(entry, "subject", `${where}.subject`, {
+      max: MAX_COMMIT_SUBJECT_CHARS,
+      stripControls: true,
+    });
+    if (sha !== undefined && subject !== undefined)
+      commits.push({ sha, subject });
+  });
+  return check.fields.length > before ? undefined : commits;
+}
+
+/** The changed files of an implementer block: closed objects, at most `IMPLEMENTER_RESULT_LIMITS.filesChanged`. */
+function parseImplementerFiles(
+  check: Checker,
+  value: unknown,
+  field: string,
+): ImplementerResult["filesChanged"] | undefined {
+  if (value === undefined) return check.fail(field, "required");
+  if (!Array.isArray(value)) return check.fail(field, "invalid");
+  if (value.length > IMPLEMENTER_RESULT_LIMITS.filesChanged)
+    return check.fail(field, "too_long");
+  const before = check.fields.length;
+  const files: ImplementerResult["filesChanged"] = [];
+  value.forEach((entry: unknown, index) => {
+    const where = `${field}[${String(index)}]`;
+    if (!isRecord(entry)) {
+      check.fail(where, "invalid");
+      return;
+    }
+    refuseUnknownKeys(check, entry, ["path", "status"], `${where}.`);
+    const path = check.string(entry, "path", `${where}.path`, {
+      min: 1,
+      max: MAX_FILE_PATH_CHARS,
+      stripControls: true,
+    });
+    const status = entry.status;
+    const statusOk =
+      typeof status === "string" &&
+      (IMPLEMENTER_FILE_STATUSES as readonly string[]).includes(status);
+    if (!statusOk)
+      check.fail(
+        `${where}.status`,
+        status === undefined ? "required" : "invalid",
+      );
+    if (path !== undefined && statusOk)
+      files.push({
+        path,
+        status: status as ImplementerResult["filesChanged"][number]["status"],
+      });
+  });
+  return check.fields.length > before ? undefined : files;
+}
+
+/** The saved agent session of an implementer block: null, or a closed object with both fields. */
+function parseImplementerOpencode(
+  check: Checker,
+  value: unknown,
+  field: string,
+): ImplementerResult["opencode"] | undefined {
+  if (value === undefined) return check.fail(field, "required");
+  if (value === null) return null;
+  if (!isRecord(value)) return check.fail(field, "invalid");
+  const before = check.fields.length;
+  refuseUnknownKeys(check, value, ["sessionId", "version"], `${field}.`);
+  const sessionId = check.string(value, "sessionId", `${field}.sessionId`, {
+    min: 1,
+    max: MAX_OPENCODE_SESSION_ID_CHARS,
+    stripControls: true,
+  });
+  const version = check.string(value, "version", `${field}.version`, {
+    min: 1,
+    max: MAX_OPENCODE_VERSION_CHARS,
+    stripControls: true,
+  });
+  if (
+    check.fields.length > before ||
+    sessionId === undefined ||
+    version === undefined
+  )
+    return undefined;
+  return { sessionId, version };
+}
+
+/**
+ * The implementer block of a result (#754, `ImplementerResult` in the contract): closed, every field required, the bounds of the
+ * schema. Absent is "no block" (a failure before the runner had a repository, and every job that is not a turn); `null` is not
+ * a block and is refused, as the contract has no null for it. Whether the job may or must carry one is decided with the job
+ * (`implementer-report.ts`). The text fields lose their control characters (a NUL cannot be stored); the invariants the contract
+ * states in words are checked: `pushed` never without a head commit, and the head commit is the last commit when commits are listed.
+ */
+function parseImplementerResult(
+  check: Checker,
+  value: unknown,
+): ImplementerResult | null | undefined {
+  if (value === undefined) return null;
+  const field = "result.implementer";
+  if (!isRecord(value)) return check.fail(field, "invalid");
+  const before = check.fields.length;
+  const prefix = `${field}.`;
+  refuseUnknownKeys(
+    check,
+    value,
+    [
+      "baseCommit",
+      "headCommit",
+      "pushed",
+      "commits",
+      "filesChanged",
+      "summary",
+      "opencode",
+    ],
+    prefix,
+  );
+  const baseCommit = commitSha(
+    check,
+    value,
+    "baseCommit",
+    `${prefix}baseCommit`,
+  );
+  const headCommit =
+    value.headCommit === null
+      ? null
+      : commitSha(check, value, "headCommit", `${prefix}headCommit`);
+  const pushed = value.pushed;
+  if (typeof pushed !== "boolean")
+    check.fail(
+      `${prefix}pushed`,
+      pushed === undefined ? "required" : "invalid",
+    );
+  const commits = parseImplementerCommits(
+    check,
+    value.commits,
+    `${prefix}commits`,
+  );
+  const filesChanged = parseImplementerFiles(
+    check,
+    value.filesChanged,
+    `${prefix}filesChanged`,
+  );
+  const summary = check.string(value, "summary", `${prefix}summary`, {
+    max: IMPLEMENTER_RESULT_LIMITS.summaryChars,
+    stripControls: true,
+  });
+  const opencode = parseImplementerOpencode(
+    check,
+    value.opencode,
+    `${prefix}opencode`,
+  );
+  if (typeof pushed === "boolean" && headCommit !== undefined) {
+    if (pushed && headCommit === null) check.fail(`${prefix}pushed`, "invalid");
+    const last = commits?.at(-1);
+    if (last !== undefined && last.sha !== headCommit)
+      check.fail(`${prefix}headCommit`, "invalid");
+  }
+  if (
+    check.fields.length > before ||
+    baseCommit === undefined ||
+    headCommit === undefined ||
+    typeof pushed !== "boolean" ||
+    commits === undefined ||
+    filesChanged === undefined ||
+    summary === undefined ||
+    opencode === undefined
+  )
+    return undefined;
+  return {
+    baseCommit,
+    headCommit,
+    pushed,
+    commits,
+    filesChanged,
+    summary,
+    opencode,
+  };
+}
+
 function parseResult(check: Checker, value: unknown): RunnerResult | undefined {
   if (!isRecord(value)) return check.fail("result", "invalid");
   const before = check.fields.length;
@@ -604,6 +845,7 @@ function parseResult(check: Checker, value: unknown): RunnerResult | undefined {
     check.fail("result.logTruncated", "invalid");
   const usage = parseUsage(check, value.usage);
   const findings = parseFindings(check, value.findings);
+  const implementer = parseImplementerResult(check, value.implementer);
 
   if (
     check.fields.length > before ||
@@ -614,6 +856,7 @@ function parseResult(check: Checker, value: unknown): RunnerResult | undefined {
     commentUrl === undefined ||
     usage === undefined ||
     findings === undefined ||
+    implementer === undefined ||
     (errorCode !== null && typeof errorCode !== "string")
   )
     return undefined;
@@ -628,6 +871,7 @@ function parseResult(check: Checker, value: unknown): RunnerResult | undefined {
     logTruncated: logTruncated === true,
     usage,
     ...(findings === null ? {} : { findings }),
+    ...(implementer === null ? {} : { implementer }),
   };
 }
 

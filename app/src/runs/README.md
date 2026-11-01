@@ -52,6 +52,31 @@ level shows no cost and no cache count per call (and no such columns), like it s
 a provider reports cache writes says which provider it is. Its ending stays, as the protocol's normalised label. A run without a trace (an older runner, a Diff
 Review) shows no section. It is in the detail only, not in the list, and its copy is `ui/call-trace-messages.ts`.
 
+## Runs of the Implementer (#758)
+
+A turn of the Implementer is a job of the kind `implementer` (factory only; code-review.com has no such row). It has a
+repository, a base branch, a branch, an instruction and commits, not a pull request, so the views get an `implementer`
+variant. The key is **absent** on a Diff or Dynamic run, which keeps their JSON and pages exactly as they were.
+
+- **List row** (`ImplementerRowView`): the repository, the branch (a link to `<repository url>/tree/<branch>` when the
+  repository's own url is `https://github.com/<owner>/<name>`), an "Implementer" badge, status, start and duration. No
+  pull request number or link (the `prNumber` of the job is the placeholder `-slot`; `prUrl` is always null).
+- **Detail** (`ImplementerDetailView`): base branch, branch link, the pushed head, model, cost (hidden for a managed key as
+  today), duration, the instruction (first 500 characters; the whole text behind an expander), the agent's summary, the
+  commits (first 20, short sha linked to the commit once pushed, "and N more"), the files changed (count, first 20 paths) and
+  the usage as for Dynamic. A **failed** task that pushed work says "N commits were pushed to <branch>." next to the error sentence.
+- **Where it is read**: `runs-repository.ts` left-joins `implementer_turns` and `implementer_sessions` (branch for the list;
+  also base branch and instruction for one run); the list still never reads the stored result. The commits, files and summary
+  come from the `implementer` block of the stored result, checked again field by field (`readStoredImplementer`).
+- **Untrusted text**: instruction, branch names, subjects, paths and the summary are cleaned with `cleanLog` (control
+  characters, terminal escapes, bidi marks), stripped of known secrets, cut (instruction 20 000, summary 8 192, subject 500,
+  path 300) and rendered as plain text. A link is made only from the repository url and an encoded branch name or a 40-character
+  sha (`githubBranchUrl`, `githubCommitUrl`); a name with a `..` part gets none.
+- **Sentences**: `turnErrorCopy` in `error-copy.ts` words the codes where the table of code-review.com does not fit a task
+  (`branch_violation`, `cost_limit_reached`, `dynamic_accounting_failed`, `time_limit_reached`, `push_rejected`, and the
+  ones that promise a new run on the next push). Nothing in it promises a pull request; the table of code-review.com is not
+  changed (its golden stays).
+
 ## Polling
 
 The server renders the first snapshot; the browser then asks for newer ones (`useLiveSnapshot` in

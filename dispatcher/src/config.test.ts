@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 import { ConfigError, loadSettings } from "./config.ts";
+import { jobTimeoutFor, launchConfigFor } from "./core/types.ts";
 
 const SECRET = "a-signing-secret-of-at-least-32-characters";
 const TOKEN = "a-dispatcher-token-for-the-tests";
@@ -230,5 +231,97 @@ describe("the settings of the Dispatcher", () => {
         CRON_SECRET: "a-cron-secret-of-at-least-32-characters",
       }).cronSecretProblem,
     ).toBeUndefined();
+  });
+});
+
+// #759: the job timeout and the worker configuration per kind.
+describe("the timeout and the configuration of the implementer kind (#759)", () => {
+  const withConfig = (config: unknown) => ({
+    ...base,
+    DISPATCHER_WORKER_CONFIG: JSON.stringify(config),
+  });
+
+  // #759-T07
+  it("gives Diff and Dynamic the job timeout of the variable (1200 unless set) and the implementer 3600, whatever that variable says", () => {
+    for (const [variables, diffAndDynamic] of [
+      [base, 1200],
+      [{ ...base, DISPATCHER_JOB_TIMEOUT_SECONDS: "600" }, 600],
+    ] as const) {
+      const { core } = loadSettings(variables);
+      expect(jobTimeoutFor(core, "diff")).toBe(diffAndDynamic);
+      expect(jobTimeoutFor(core, "dynamic")).toBe(diffAndDynamic);
+      expect(jobTimeoutFor(core, "implementer")).toBe(3600);
+    }
+  });
+
+  // #759-T07
+  it("reads the timeout of the implementer from its worker configuration, between 60 and 21 600 seconds", () => {
+    const { core } = loadSettings(
+      withConfig({ implementer: { timeoutSeconds: 21600 } }),
+    );
+
+    expect(jobTimeoutFor(core, "implementer")).toBe(21600);
+    expect(jobTimeoutFor(core, "diff")).toBe(1200);
+    expect(
+      jobTimeoutFor(
+        loadSettings(withConfig({ implementer: { timeoutSeconds: 60 } })).core,
+        "implementer",
+      ),
+    ).toBe(60);
+  });
+
+  // #759-T08
+  it("reads the container memory and the launcher options of the implementer next to the other kinds, and keeps the timeout out of what the launcher gets", () => {
+    const { core } = loadSettings(
+      withConfig({
+        implementer: {
+          timeoutSeconds: 7200,
+          container: { memory: { limit: "3g", reservation: "2560m" } },
+          launcher: { vcpus: 2 },
+        },
+      }),
+    );
+
+    expect(launchConfigFor(core, "implementer")).toStrictEqual({
+      container: { memory: { limit: "3g", reservation: "2560m" } },
+      launcher: { vcpus: 2 },
+    });
+    expect(launchConfigFor(core, "diff")).toStrictEqual({});
+    expect(launchConfigFor(core, "dynamic")).toStrictEqual({});
+  });
+
+  // #759-T08
+  it("behaves as before without an `implementer` key: the same settings as without the variable's new key", () => {
+    const { core } = loadSettings(
+      withConfig({ dynamic: { launcher: { vcpus: 1 } } }),
+    );
+
+    expect(core.workerConfig).toStrictEqual({
+      diff: {},
+      dynamic: { launcher: { vcpus: 1 } },
+    });
+    expect(launchConfigFor(core, "implementer")).toStrictEqual({});
+    expect(jobTimeoutFor(core, "implementer")).toBe(3600);
+  });
+
+  // #759-T08
+  it.each([
+    ["a timeout above 21 600", { implementer: { timeoutSeconds: 21601 } }],
+    ["a timeout below 60", { implementer: { timeoutSeconds: 59 } }],
+    ["a fractional timeout", { implementer: { timeoutSeconds: 90.5 } }],
+    ["a timeout that is text", { implementer: { timeoutSeconds: "3600" } }],
+    ["an unknown key", { implementer: { privileged: true } }],
+    [
+      "a memory that is no size",
+      { implementer: { container: { memory: { limit: "lots" } } } },
+    ],
+    ["a timeout for Diff", { diff: { timeoutSeconds: 600 } }],
+    ["a timeout for Dynamic", { dynamic: { timeoutSeconds: 600 } }],
+    ["an unknown kind", { reviewer: {} }],
+  ])("refuses %s, naming the variable and no value", (_name, config) => {
+    const error = failure(withConfig(config));
+
+    expect(error.variable).toBe("DISPATCHER_WORKER_CONFIG");
+    expect(error.message).toBe("DISPATCHER_WORKER_CONFIG is invalid");
   });
 });

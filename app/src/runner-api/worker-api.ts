@@ -26,7 +26,7 @@ import {
   bearerWorkerCredential,
   workerLeaseToken,
 } from "../jobs/worker-credential.ts";
-import { discardBody, readJsonBody } from "./body.ts";
+import { bodyLimitFor, discardBody, readJsonBody } from "./body.ts";
 import type { ClaimDeps } from "./claim.ts";
 import { describeError } from "./logger.ts";
 import {
@@ -163,7 +163,7 @@ export function createWorkerApi(deps: WorkerApiDeps): WorkerApi {
       try {
         const who = await identify(request, jobId);
         if (!who.ok) return who.response;
-        const body = await readJsonBody(request);
+        const body = await readJsonBody(request, bodyLimitFor(who.job));
         if (!body.ok) return body.response;
         const parsed = parseWorkerResultRequest(body.value);
         if (!parsed.ok)

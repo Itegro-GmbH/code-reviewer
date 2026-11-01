@@ -53,6 +53,27 @@ require us to keep are in THIRD_PARTY_LICENSES.md, in particular:
   The Worker image carries the unmodified release 14.1.1 (source commit
   4649aa9700619f94cf9c66876e9549d83420e16c) as the search helper of the engine.
 
+  git (https://github.com/git/git)
+  Copyright (c) Linus Torvalds and the git contributors
+  Licensed under the GNU General Public License, version 2 (GPL-2.0-only).
+  The Worker image carries git 2.53.0 (source commit 67ad42147a7acc2af6074753ebd03d904476118f), built
+  unmodified from the upstream source release, as the version control of the Implementer's agent. The
+  license text is in /usr/local/share/doc/git/COPYING of the image; the source is the pinned release tarball.
+
+  Node.js (https://github.com/nodejs/node)
+  Copyright Node.js contributors. All rights reserved.
+  Licensed under the MIT License; the release bundles components under their own licenses, listed in the
+  LICENSE file of the release (/opt/node/LICENSE in the image).
+  The Worker image carries the unmodified release 24.22.2 (source commit
+  f7f273a9bb6445f6f7fb6349105e7532972045fb) for the Implementer's agent.
+
+  pnpm (https://github.com/pnpm/pnpm)
+  Copyright (c) 2015-2016 Rico Sta. Cruz and other contributors
+  Copyright (c) 2016-2025 Zoltan Kochan and other contributors
+  Licensed under the MIT License.
+  The Worker image carries the unmodified release 10.17.0 (source commit
+  1a1a272fa4f5be459430cad677ffce946c99cd86) for the Implementer's agent.
+
   caniuse-lite (https://github.com/browserslist/caniuse-lite)
   Credit: Alexis Deveria and the caniuse-lite contributors.
   Licensed under Creative Commons Attribution 4.0 International

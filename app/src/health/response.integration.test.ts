@@ -47,6 +47,33 @@ describe("GET /api/health", () => {
     });
   });
 
+  // #747-T06
+  it("reports implementer in the set of a factory deployment that enables it", async () => {
+    database.current = (await createTestDatabase()).db;
+    vi.stubEnv("PRODUCT_ID", "factory");
+    vi.stubEnv("PRODUCT_CAPABILITIES", "review,dynamic-review,implementer");
+
+    const response = await healthResponse();
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      status: "ok",
+      product: "factory",
+      capabilities: ["dynamic-review", "implementer", "review"],
+    });
+  });
+
+  // #747-T06
+  it("answers 503 for implementer on code-review.com and never reports it", async () => {
+    database.current = (await createTestDatabase()).db;
+    vi.stubEnv("PRODUCT_CAPABILITIES", "review,dynamic-review,implementer");
+
+    const response = await healthResponse();
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ status: "error" });
+  });
+
   it("answers 503 and names no product when the capability settings cannot be read", async () => {
     database.current = (await createTestDatabase()).db;
     vi.stubEnv("PRODUCT_CAPABILITIES", "nonsense");

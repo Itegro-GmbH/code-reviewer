@@ -38,6 +38,17 @@ const binary = z.strictObject({
    * them from the npm collector), relative to the repository root.
    */
   bundledLicenses: nonEmpty.optional(),
+  /**
+   * `source` when the image builds the binary from the pinned source release instead of unpacking a
+   * prebuilt one, so the pin holds the archive digest of the source and no executable digest.
+   */
+  build: z.literal("source").optional(),
+  /**
+   * The reviewed reason that a license outside the allow list is accepted for this binary (a copyleft
+   * program that is a separate, unmodified part of the image and is never linked into our code). Without
+   * it the license must be on the allow list. The pin must still carry the license named in `license`.
+   */
+  exception: nonEmpty.optional(),
   reason: nonEmpty,
 });
 

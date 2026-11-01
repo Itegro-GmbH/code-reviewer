@@ -11,7 +11,11 @@ import "server-only";
 import type { Kysely } from "kysely";
 import type { JobStatus } from "../job-status.ts";
 import type { Job } from "../../jobs/job-types.ts";
-import type { RunRowSource } from "../../runs/run-view.ts";
+import type {
+  ImplementerDetailSource,
+  ImplementerRowSource,
+  RunRowSource,
+} from "../../runs/run-view.ts";
 import type { Database } from "../schema.ts";
 import type { WorkspaceId } from "../workspace-scope.ts";
 import {
@@ -37,9 +41,18 @@ export type StoredRun = {
    * string when the comment could not be read. Untrusted text.
    */
   reviewComment: string | null;
+  /** What the turn and the session of a run of the Implementer say (#758); undefined for every other run. */
+  implementer?: ImplementerDetailSource;
 };
-/** A job as the list shows it: the listed fields only. */
-export type StoredRunRow = { job: RunRowSource; project: string };
+/**
+ * A job as the list shows it: the listed fields only. `implementer` is there for a run of the Implementer (#758) and holds the
+ * branch and the repository's url, never the instruction or the stored result.
+ */
+export type StoredRunRow = {
+  job: RunRowSource;
+  project: string;
+  implementer?: ImplementerRowSource;
+};
 
 export type RunListFilter = {
   repositoryId?: string;
@@ -81,6 +94,22 @@ export function createRunsRepository(
       let query = db
         .selectFrom("jobs")
         .innerJoin("repositories", "repositories.id", "jobs.repository_id")
+        // #758: the branch of a task. Only the jobs of the kind look for a turn; both tables are read through their unique keys.
+        .leftJoin("implementer_turns", (join) =>
+          join
+            .onRef("implementer_turns.job_id", "=", "jobs.id")
+            .on("implementer_turns.workspace_id", "=", workspaceId)
+            .on("jobs.review_kind", "=", "implementer"),
+        )
+        .leftJoin("implementer_sessions", (join) =>
+          join
+            .onRef(
+              "implementer_sessions.id",
+              "=",
+              "implementer_turns.session_id",
+            )
+            .on("implementer_sessions.workspace_id", "=", workspaceId),
+        )
         .select([
           "jobs.id",
           "jobs.repository_id",
@@ -96,6 +125,8 @@ export function createRunsRepository(
           "jobs.finished_at",
           "jobs.error_code",
           "repositories.full_name as project",
+          "repositories.url as repository_url",
+          "implementer_sessions.branch as session_branch",
         ])
         .where("jobs.workspace_id", "=", workspaceId);
       if (filter.repositoryId !== undefined)
@@ -114,6 +145,14 @@ export function createRunsRepository(
           const { status, command, triggerKind } = decodeJobVocabulary(row);
           return {
             project: row.project,
+            ...(row.session_branch === null
+              ? {}
+              : {
+                  implementer: {
+                    branch: row.session_branch,
+                    repositoryUrl: row.repository_url,
+                  },
+                }),
             job: {
               id: row.id,
               repositoryId: row.repository_id,
@@ -149,9 +188,28 @@ export function createRunsRepository(
             .onRef("job_check_runs.job_id", "=", "jobs.id")
             .on("job_check_runs.workspace_id", "=", workspaceId),
         )
+        .leftJoin("implementer_turns", (join) =>
+          join
+            .onRef("implementer_turns.job_id", "=", "jobs.id")
+            .on("implementer_turns.workspace_id", "=", workspaceId)
+            .on("jobs.review_kind", "=", "implementer"),
+        )
+        .leftJoin("implementer_sessions", (join) =>
+          join
+            .onRef(
+              "implementer_sessions.id",
+              "=",
+              "implementer_turns.session_id",
+            )
+            .on("implementer_sessions.workspace_id", "=", workspaceId),
+        )
         .selectAll("jobs")
         .select("repositories.full_name as project")
         .select([
+          "repositories.url as repository_url",
+          "implementer_sessions.branch as session_branch",
+          "implementer_sessions.base_branch as session_base_branch",
+          "implementer_turns.instruction as turn_instruction",
           "usage_records.key_mode as key_mode",
           "usage_records.catalog_entry_id as catalog_entry_id",
           "usage_records.model_tier as model_tier",
@@ -167,6 +225,10 @@ export function createRunsRepository(
         catalog_entry_id: entryId,
         model_tier: modelTier,
         review_comment: reviewComment,
+        repository_url: repositoryUrl,
+        session_branch: branch,
+        session_base_branch: baseBranch,
+        turn_instruction: instruction,
         ...job
       } = row;
       return {
@@ -175,6 +237,11 @@ export function createRunsRepository(
         onManagedKey:
           keyMode === "managed" || entryId !== null || modelTier !== null,
         reviewComment,
+        ...(branch === null || baseBranch === null || instruction === null
+          ? {}
+          : {
+              implementer: { branch, baseBranch, instruction, repositoryUrl },
+            }),
       };
     },
 

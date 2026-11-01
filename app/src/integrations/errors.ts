@@ -27,6 +27,18 @@ export const INTEGRATION_ERROR_CODES = [
    */
   "INTEGRATION_ACCESS_SCOPE_REFUSED",
   /**
+   * The platform refused the credentials of the Implementer because the connection has not accepted the permission to
+   * write contents (#749): the App asks for it, but the owner of the installation has not approved the change yet (or
+   * the App itself still asks for read only). Nobody retries it: the owner of the installation has to accept the
+   * permission on the platform first.
+   */
+  "INTEGRATION_ACCESS_PERMISSION_NOT_GRANTED",
+  /**
+   * The deployment does not have the capability the call needs (#753): the token of the Implementer is made in a
+   * deployment with `implementer` only. Nothing was asked of the platform. Nobody retries it.
+   */
+  "INTEGRATION_CAPABILITY_ABSENT",
+  /**
    * The platform understood the call and refused it for its content (GitHub: a 422 on the call itself, for
    * example a review of the app's own pull request). Trying the same call again does not help.
    */

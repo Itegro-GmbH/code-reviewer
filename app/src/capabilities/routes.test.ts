@@ -120,9 +120,41 @@ describe("the route classification", () => {
       "/projects/[[...rest]]": "review",
       "/api/health": "core",
       "/favicon.ico": "core",
+      // #755-T14: the routes behind the Implementer form belong to the capability, none of them is core.
+      "/api/w/[workspace]/implementer/repositories": "implementer",
+      "/api/w/[workspace]/implementer/repositories/[repositoryId]/branches":
+        "implementer",
+      "/api/w/[workspace]/implementer/models": "implementer",
+      "/api/w/[workspace]/implementer/tasks": "implementer",
+      // #756-T09: the page of the form belongs to the capability too.
+      "/w/[workspace]/implementer": "implementer",
     };
     for (const [route, expectedClass] of Object.entries(expected))
       expect(classOfRoute(route), route).toBe(expectedClass);
+  });
+});
+
+describe("the Implementer routes", () => {
+  // #755-T14
+  it("are all classified implementer, and every route below the implementer folder of the app is", () => {
+    const files = discoverRoutes().filter(
+      ({ route }) =>
+        route.startsWith("/api/w/[workspace]/implementer") ||
+        route.startsWith("/w/[workspace]/implementer"),
+    );
+    expect(files.map(({ route }) => route)).toEqual(
+      expect.arrayContaining([
+        "/api/w/[workspace]/implementer/models",
+        "/api/w/[workspace]/implementer/repositories",
+        "/api/w/[workspace]/implementer/repositories/[repositoryId]/branches",
+        "/api/w/[workspace]/implementer/tasks",
+        // #756-T09
+        "/w/[workspace]/implementer",
+      ]),
+    );
+    expect(
+      files.filter(({ route }) => classOfRoute(route) !== "implementer"),
+    ).toEqual([]);
   });
 });
 
@@ -165,6 +197,34 @@ describe("capabilityOfPath and isAbsentPath", () => {
     expect(capabilityOfPath("/api/billing-other")).toBeUndefined();
     // cannot be read: no page either
     expect(capabilityOfPath("/w/%E0%A4%A/projects")).toBeUndefined();
+  });
+
+  // #755-T10
+  it("find every Implementer path absent in a set without the capability (code-review.com's, today's factory's, none), however it is written, and present with it", () => {
+    const paths = [
+      "/api/w/acme/implementer/repositories",
+      "/api/w/acme/implementer/repositories/r1/branches",
+      "/api/w/acme/implementer/models",
+      "/api/w/acme/implementer/tasks",
+      "/api/w/acme/implementer/tasks/",
+      "/api/w/acme//implementer/./tasks",
+      "/api/w/acme/%69mplementer/tasks",
+      "/api/w/acme/implementer/x/../tasks",
+    ];
+    const withIt = createCapabilitySet([
+      "review",
+      "dynamic-review",
+      "implementer",
+    ]);
+    for (const path of paths) {
+      expect(capabilityOfPath(path), path).toBe("implementer");
+      expect(isAbsentPath(path, createCapabilitySet(["review"])), path).toBe(
+        true,
+      );
+      expect(isAbsentPath(path, factory), path).toBe(true);
+      expect(isAbsentPath(path, nothing), path).toBe(true);
+      expect(isAbsentPath(path, withIt), path).toBe(false);
+    }
   });
 
   // #731-T03

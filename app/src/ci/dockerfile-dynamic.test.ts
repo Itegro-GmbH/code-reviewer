@@ -7,6 +7,10 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import {
+  ALLOWED_PACKAGE_MANAGER_RUNS,
+  packageManagerRuns,
+} from "./dockerfile-package-managers";
 
 const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const dockerfile = readFileSync(`${repoRoot}runner/Dockerfile`, "utf8");
@@ -110,7 +114,11 @@ describe("the engine of the Worker image", () => {
     expect(fetching).toContain(
       "COPY runner/opencode-pin.json runner/ripgrep-pin.json /fetch/",
     );
-    expect(dockerfile).not.toMatch(/\b(curl|wget|npm|npx|bun|pnpm)\b/);
+    // The toolchain layer of the Implementer (#761) brings Node.js with npm and pnpm, so the Dockerfile
+    // names them in links; what stays forbidden is fetching with curl, wget or bun, and running a package
+    // manager at all (not a list of its subcommands: `npx pkg`, `npm update`, `pnpm up`, `pnpm fetch`).
+    expect(dockerfile).not.toMatch(/\b(curl|wget|bun)\b/);
+    expect(packageManagerRuns(dockerfile)).toEqual([]);
     expect(dockerfile).not.toMatch(/releases\/latest|@latest/);
     // ripgrep comes from the pinned release, never from the distribution's unpinned package.
     expect(image()).not.toMatch(/apt-get install[^\n]*ripgrep/);
@@ -153,6 +161,61 @@ describe("the engine of the Worker image", () => {
 
     expect(users.at(-1)).toBe("USER 10001:10001");
     expect(users[0]).toBe("USER 0:0");
+  });
+});
+
+// #202-T01 / #761-T02: the ban is on running a package manager, not on some of its subcommands.
+describe("the check that no RUN instruction runs a package manager", () => {
+  const flagged = (run: string) => packageManagerRuns(`FROM x\n${run}\n`);
+
+  it.each([
+    "RUN npx pkg",
+    "RUN npx --yes pkg@1",
+    "RUN npm update",
+    "RUN npm install --global something",
+    "RUN npm ci && npm run build",
+    "RUN pnpm up",
+    "RUN pnpm fetch",
+    "RUN pnpm dlx tool",
+    "RUN pnpm --version",
+    "RUN corepack enable",
+    "RUN corepack prepare pnpm@10 --activate",
+    "RUN yarn add left-pad",
+    "RUN pnpx tool",
+    "RUN cd /app && pnpm i",
+    "RUN apt-get update; npm i -g x",
+    "RUN true | npm run x",
+    "RUN CI=1 npm i",
+    "RUN env CI=1 npm i",
+    'RUN sh -c "make && npm i"',
+    "RUN find . -name package.json -exec npm i {} \\;",
+    "RUN /usr/local/bin/npm i",
+    "RUN /opt/pnpm/bin/pnpm.cjs add x",
+    "RUN node /opt/node/lib/node_modules/npm/bin/npm-cli.js i",
+    "RUN node /opt/pnpm/dist/pnpm.cjs fetch",
+    "RUN apt-get update \\\n && npm install",
+  ])("flags %s", (run) => {
+    expect(flagged(run)).toHaveLength(1);
+  });
+
+  it.each([
+    "RUN ln -s /opt/node/bin/node /usr/local/bin/node",
+    "RUN ln -s /opt/node/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && ln -s /opt/pnpm/bin/pnpm.cjs /usr/local/bin/pnpm",
+    "RUN rm -rf /toolchain/node/include /toolchain/node/share",
+    "RUN chmod 0755 /toolchain/pnpm/bin/pnpm.cjs /toolchain/pnpm/bin/pnpx.cjs",
+    "RUN python /fetch/scripts/fetch_toolchain.py --component pnpm --dest /toolchain/pnpm",
+    "COPY --from=toolchain-fetch --chown=0:0 /toolchain/pnpm /opt/pnpm",
+  ])("lets %s pass", (instruction) => {
+    expect(flagged(instruction)).toEqual([]);
+  });
+
+  it("allows nothing by exact form today, and only an exact RUN instruction could be allowed", () => {
+    expect(ALLOWED_PACKAGE_MANAGER_RUNS).toEqual([]);
+    expect(flagged("RUN node --version")).toEqual([]);
+  });
+
+  it("finds nothing in the Dockerfile of the Worker image", () => {
+    expect(packageManagerRuns(dockerfile)).toEqual([]);
   });
 });
 

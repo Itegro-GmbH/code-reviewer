@@ -143,3 +143,34 @@ describe("the repair work of the requests that touch the database", () => {
     );
   });
 });
+
+describe("the write tokens of the Implementer in the repair work (#790)", () => {
+  // #790
+  it("tries the tokens that could not be switched off again, after the leases are released", async () => {
+    const order: string[] = [];
+    const maintenance = createOpportunisticMaintenance({
+      withLock: async (work) => ({ acquired: true, value: await work() }),
+      queue: {
+        expireStaleJobs: vi.fn(async () => {
+          order.push("expire");
+          return {
+            requeued: 0,
+            leaseExpired: 0,
+            timedOut: 0,
+            noCapableRunner: 0,
+          };
+        }),
+      },
+      writeTokens: {
+        retryPending: vi.fn(async () => {
+          order.push("tokens");
+        }),
+      },
+      log: { error: vi.fn() },
+    });
+
+    expect(await maintenance.run()).toBe("ran");
+
+    expect(order).toEqual(["expire", "tokens"]);
+  });
+});

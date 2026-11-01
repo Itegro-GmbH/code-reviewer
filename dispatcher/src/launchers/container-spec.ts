@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 import type {
+  ImplementerContainerSpec,
   WorkerContainerLauncherAdditions,
   WorkerContainerSpec,
 } from "../contracts/worker-container.ts";
@@ -71,6 +72,30 @@ export const WORKER_CONTAINER_SPEC: WorkerContainerSpec = {
     "dockerSocket",
   ],
   overridable: ["memory.limit", "memory.reservation", "memory.swap"],
+};
+
+// The profile of the Implementer (#760, contracts/worker-container.v1.json, `ImplementerContainerSpec`): the spec above
+// with exactly four fields changed, so that the hardening floor cannot differ between the two. The agent builds and
+// tests a repository, which the floor alone cannot host (a read-only root, `noexec` tmpfs of 512 MB, 2 GB, 512
+// processes): one Docker named volume at /work, on the VM's disk and the only writable path that may run a program,
+// room for `pnpm install` and a test run (3 GB; the VM has 4 GB), and 2048 processes. The three names are what the
+// Dispatcher tells the Worker about its work directory and its network (runner-api.v1.json, `ImplementerEnvironmentName`).
+// The file of the contract equals this one; container-spec.test.ts fails when they differ.
+export const IMPLEMENTER_CONTAINER_SPEC: ImplementerContainerSpec = {
+  ...WORKER_CONTAINER_SPEC,
+  workVolume: {
+    path: "/work",
+    options: ["rw", "nosuid", "nodev"],
+    source: "named-volume",
+  },
+  memory: { limit: "3g", reservation: "2560m", swap: "3g" },
+  pids: { limit: 2048 },
+  allowedEnvironment: [
+    ...WORKER_CONTAINER_SPEC.allowedEnvironment,
+    "RUNNER_IMPLEMENTER_WORK_DIR",
+    "RUNNER_IMPLEMENTER_EGRESS_PORT",
+    "RUNNER_IMPLEMENTER_NETWORK",
+  ],
 };
 
 // What the Sandbox variant adds to the spec (`WorkerContainerLauncherAdditions`, #325, #345): IPv6 off in

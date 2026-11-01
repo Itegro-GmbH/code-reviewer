@@ -69,6 +69,7 @@ export const SWEEP_STEPS = [
   "send",
   "notices",
   "checks",
+  "write_tokens",
   "cleanup",
   "billing_holds",
   "balance_mails",
@@ -125,6 +126,8 @@ export type SweepDependencies = {
   checks?: {
     reconcileDue(options?: { budgetMs?: number }): Promise<{ synced: number }>;
   };
+  /** #790: tries again to switch off the write tokens of ended turns that could not be switched off. Left out, none is tried. */
+  writeTokens?: { retryPending(): Promise<void> };
   /** #591: releases the holds of ended jobs while billing is on (the step reads only the switch while it is off). Left out, none is. */
   billingHolds?: { releaseStranded(): Promise<{ released: number }> };
   /** #506: mails the balance crossings that are due (reads only the switch while billing is off). Left out, none is. */
@@ -216,6 +219,11 @@ export function createDispatchSweep(deps: SweepDependencies): DispatchSweep {
         report.checksSynced = (
           await checks.reconcileDue({ budgetMs: CHECKS_BUDGET_MS })
         ).synced;
+      });
+    const writeTokens = has("implementer") ? deps.writeTokens : undefined;
+    if (writeTokens !== undefined)
+      await step("write_tokens", async () => {
+        await writeTokens.retryPending();
       });
     await step("cleanup", async () => {
       const hour = Math.floor(now().getTime() / HOUR_MS);

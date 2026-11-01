@@ -3,8 +3,10 @@
 // What a job's result keeps of the model of a catalog entry when it ran on the operator's key (#432): the mechanics of
 // the masking, below the claim and the completion that feed it.
 import { describe, expect, it } from "vitest";
-import type { RunnerResult } from "./contract.ts";
-import { withoutManagedModel } from "./report.ts";
+import { IDENTITIES } from "../product-identity/identities.ts";
+import { errorCopy } from "../runs/error-copy.ts";
+import { RUNNER_ERROR_CODES, type RunnerResult } from "./contract.ts";
+import { mapRunnerErrorCode, withoutManagedModel } from "./report.ts";
 
 function resultOf(overrides: Partial<RunnerResult> = {}): RunnerResult {
   return {
@@ -124,5 +126,25 @@ describe("the result of a job on the operator's key", () => {
     expect(withoutManagedModel(result, ["vendor/entry-model"], false)).toBe(
       result,
     );
+  });
+});
+
+describe("the code a failed job is stored with (#754)", () => {
+  // #754-T07
+  it("keeps every code of the runner contract, the Implementer's included, and has a sentence for each", () => {
+    for (const product of Object.values(IDENTITIES)) {
+      const copy = errorCopy(product);
+      for (const code of RUNNER_ERROR_CODES) {
+        expect(mapRunnerErrorCode(code), code).toBe(code);
+        expect(Object.hasOwn(copy, code), `${product.name}: ${code}`).toBe(
+          true,
+        );
+      }
+    }
+  });
+
+  // #754-T07
+  it("stores a code the build does not know as unknown", () => {
+    expect(mapRunnerErrorCode("brand_new_failure")).toBe("unknown");
   });
 });

@@ -7,6 +7,8 @@
 import "server-only";
 import { getDatabase } from "../db/startup.ts";
 import { OPPORTUNISTIC_LOCK, tryWithLock } from "../db/try-lock.ts";
+import { getCapabilities } from "../capabilities/shared.ts";
+import { getWriteTokens } from "../runner-api/claimed-keys-shared.ts";
 import { getCheckRunService } from "../check-runs/shared.ts";
 import { getRunnerQueue } from "../jobs/shared.ts";
 import {
@@ -72,6 +74,9 @@ function getMaintenance(env: Env): OpportunisticMaintenance | undefined {
     queue: getRunnerQueue(),
     dispatch,
     checks: getCheckRunService(),
+    ...(getCapabilities().has("implementer")
+      ? { writeTokens: getWriteTokens() }
+      : {}),
   });
   return maintenance;
 }

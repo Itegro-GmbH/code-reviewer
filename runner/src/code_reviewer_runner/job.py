@@ -83,6 +83,43 @@ _TOP_LEVEL_FIELDS = {
     "llm",
     "env",
 }
+# The fields of an implementer job (#746): no pull request, so no `prUrl`, `command`, `args`, `base`
+# or `dynamic`, and the `implementer` object instead.
+_IMPLEMENTER_TOP_LEVEL_FIELDS = {"reviewKind", "implementer", "git", "llm", "env"}
+_IMPLEMENTER_FIELDS = {
+    "repo",
+    "baseBranch",
+    "branch",
+    "instruction",
+    "limits",
+    "cost",
+    "modelEntry",
+    "capabilities",
+}
+_IMPLEMENTER_REPO_FIELDS = {"fullName", "cloneUrl"}
+_IMPLEMENTER_LIMIT_FIELDS = {"timeLimitSeconds"}
+MAX_INSTRUCTION_CHARS = 20_000
+MIN_TIME_LIMIT_SECONDS = 60
+MAX_TIME_LIMIT_SECONDS = 14_400
+# A branch name as the contract bounds it: no whitespace, not starting with a dash.
+_BRANCH_NAME = re.compile(r"[^\s-][^\s]{0,254}")
+_REPO_FULL_NAME = re.compile(r"[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}")
+_CLONE_URL = re.compile(r"https://[^\s@]{1,2040}")
+
+# The names of the environment variables the Worker container of an implementer job gets (#746,
+# `KnownImplementerEnvironmentName` of the contract; a test compares them). The Dispatcher sets
+# them.
+IMPLEMENTER_WORK_DIR_VARIABLE = "RUNNER_IMPLEMENTER_WORK_DIR"
+IMPLEMENTER_EGRESS_PORT_VARIABLE = "RUNNER_IMPLEMENTER_EGRESS_PORT"
+IMPLEMENTER_NETWORK_VARIABLE = "RUNNER_IMPLEMENTER_NETWORK"
+IMPLEMENTER_ENVIRONMENT_NAMES: tuple[str, ...] = (
+    IMPLEMENTER_WORK_DIR_VARIABLE,
+    IMPLEMENTER_EGRESS_PORT_VARIABLE,
+    IMPLEMENTER_NETWORK_VARIABLE,
+)
+IMPLEMENTER_WORK_DIR = "/work"
+# What the Worker of an implementer job can reach besides the model proxy and its repository.
+IMPLEMENTER_NETWORK_MODES: tuple[str, ...] = ("registries", "none")
 _GIT_FIELDS = {"provider", "baseUrl", "token", "botLogin"}
 _LLM_FIELDS = {
     "provider",
@@ -176,6 +213,10 @@ class ReviewKind(StrEnum):
 
     DIFF = "diff"
     DYNAMIC = "dynamic"
+    # A turn of the Implementer (#746): about a branch of a repository, not a pull request.
+    # `parse_job` (the review path) refuses it and never returns a `Job` of this kind;
+    # `parse_runnable_job` returns its own type (#765).
+    IMPLEMENTER = "implementer"
 
 
 @dataclass(frozen=True)
@@ -237,6 +278,35 @@ class ClaimBase:
     attempted_shas_truncated: bool = False
 
 
+@dataclass(frozen=True)
+class ImplementerRepo:
+    full_name: str
+    clone_url: str
+
+
+@dataclass(frozen=True)
+class ImplementerLimits:
+    time_limit_seconds: int
+
+
+@dataclass(frozen=True)
+class ImplementerSpec:
+    """What an implementer job asks for (#746, `ImplementerJob` of the contract). Closed.
+
+    The cost policy and the model entry are those of the native Dynamic job and are required here:
+    a model runs only through the passthrough proxy, with a price or a token cap.
+    """
+
+    repo: ImplementerRepo
+    base_branch: str
+    branch: str
+    instruction: str
+    limits: ImplementerLimits
+    cost: CostPolicy
+    model_entry: JobModelEntry
+    capabilities: JobCapabilities | None = None
+
+
 class JobError(Exception):
     """The job was refused. `detail` is safe to log: it names fields and never contains values."""
 
@@ -293,6 +363,21 @@ class Job:
         """Every value that must never appear in an output."""
         # `env` is a closed list of tool options and holds no credentials, so its values are not
         # secrets: treating a value such as "true" as one would blank the result of a good run.
+        return (self.git.token, self.llm.api_key)
+
+
+@dataclass(frozen=True)
+class ImplementerInput:
+    """A parsed implementer job (#746). Not a `Job`: it has no pull request and no command."""
+
+    git: GitAccess
+    llm: LlmAccess
+    implementer: ImplementerSpec
+    env: dict[str, str] = field(default_factory=lambda: {})
+
+    @property
+    def secrets(self) -> tuple[str, ...]:
+        """Every value that must never appear in an output."""
         return (self.git.token, self.llm.api_key)
 
 
@@ -644,18 +729,23 @@ def _entry_matches(dynamic: DynamicReview, llm: LlmAccess) -> None:
     entry = dynamic.model_entry
     if entry is None:
         return
-    if entry.model_id != dynamic.model or entry.model_id != llm.model:
+    if entry.model_id != dynamic.model:
         raise _invalid("dynamic.modelEntry is not the model of the job")
+    _entry_is_of_llm(entry, llm, "dynamic.modelEntry")
+
+
+def _entry_is_of_llm(entry: JobModelEntry, llm: LlmAccess, name: str) -> None:
+    """The entry is of the model and provider of `llm`, and its address is one the key may go to."""
+    if entry.model_id != llm.model:
+        raise _invalid(f"{name} is not the model of the job")
     if entry.provider_id != llm.provider.replace("_", "-"):
-        raise _invalid("dynamic.modelEntry is not of the provider of llm.provider")
+        raise _invalid(f"{name} is not of the provider of llm.provider")
     # The key goes to the registry's address for a registry provider, and for any other provider to
     # the plain public https address of the entry and to no other (`key_destination`).
     try:
         key_destination(llm.provider, entry)
     except UpstreamRefused:
-        raise _invalid(
-            "dynamic.modelEntry.upstreamBaseUrl is not the address of the provider"
-        ) from None
+        raise _invalid(f"{name}.upstreamBaseUrl is not the address of the provider") from None
 
 
 def _capability_integer(document: dict[str, Any], key: str, upper: int) -> int:
@@ -762,15 +852,147 @@ def _attempted_shas_truncated(base: dict[str, Any]) -> bool:
     return raw
 
 
-def parse_job(raw: str) -> Job:
-    """Parse and validate the stdin text. Raises JobError; never returns a half valid job."""
+def _load_job(raw: str) -> dict[str, Any]:
+    """The JSON object of the stdin text, or `JobError`."""
     if len(raw) > MAX_JOB_BYTES:
         raise _invalid("the job is larger than 1 MiB")
     try:
         data: Any = json.loads(raw)
     except (ValueError, RecursionError):  # RecursionError: absurdly deep nesting
         raise _invalid("stdin is not valid JSON") from None
-    job = _object(data, "the job")
+    return _object(data, "the job")
+
+
+def _matching(value: object, pattern: re.Pattern[str], path: str, what: str) -> str:
+    if not isinstance(value, str) or pattern.fullmatch(value) is None:
+        raise _invalid(f"{path} must be {what}")
+    return value
+
+
+def _implementer_repo(spec: dict[str, Any], git: GitAccess) -> ImplementerRepo:
+    """The repository of a turn. The job carries a token that may write it and the runner sends that
+    token to `cloneUrl`: the address must be the provider's web host and exactly this repository,
+    never another host, another repository or a loopback address (#762)."""
+    repo = _section(spec, "repo")
+    _check_fields(repo, _IMPLEMENTER_REPO_FIELDS, "implementer.repo.")
+    full_name = _matching(
+        repo.get("fullName"), _REPO_FULL_NAME, "implementer.repo.fullName", "owner/name"
+    )
+    clone_url = _matching(
+        repo.get("cloneUrl"), _CLONE_URL, "implementer.repo.cloneUrl", "an https URL"
+    )
+    parts = _checked_url(clone_url, "implementer.repo.cloneUrl")
+    if parts.netloc != _web_host(git.base_url):
+        raise _invalid("implementer.repo.cloneUrl must point to the host of git.baseUrl")
+    if parts.path not in (f"/{full_name}", f"/{full_name}.git"):
+        raise _invalid(
+            "implementer.repo.cloneUrl must be https://<host>/<owner>/<name>[.git] of "
+            "implementer.repo.fullName"
+        )
+    return ImplementerRepo(full_name=full_name, clone_url=clone_url)
+
+
+def _implementer_limits(spec: dict[str, Any]) -> ImplementerLimits:
+    limits = _section(spec, "limits")
+    _check_fields(limits, _IMPLEMENTER_LIMIT_FIELDS, "implementer.limits.")
+    seconds = limits.get("timeLimitSeconds")
+    if (
+        isinstance(seconds, bool)
+        or not isinstance(seconds, int)
+        or not MIN_TIME_LIMIT_SECONDS <= seconds <= MAX_TIME_LIMIT_SECONDS
+    ):
+        raise _invalid(
+            "implementer.limits.timeLimitSeconds must be an integer between "
+            f"{MIN_TIME_LIMIT_SECONDS} and {MAX_TIME_LIMIT_SECONDS}"
+        )
+    return ImplementerLimits(time_limit_seconds=seconds)
+
+
+def _implementer_spec(data: dict[str, Any], git: GitAccess) -> ImplementerSpec:
+    """The `implementer` object (#746). Closed: an unknown field is refused. The instruction is
+    literal data and is never interpreted. The cost policy and the model entry are required."""
+    spec = _section(data, "implementer")
+    _check_fields(spec, _IMPLEMENTER_FIELDS, "implementer.")
+    instruction = spec.get("instruction")
+    if not isinstance(instruction, str) or not 1 <= len(instruction) <= MAX_INSTRUCTION_CHARS:
+        raise _invalid(
+            f"implementer.instruction must be a string of 1 to {MAX_INSTRUCTION_CHARS} characters"
+        )
+    for name in ("cost", "modelEntry"):
+        if name not in spec:
+            raise _invalid(f"implementer.{name} is required")
+    cost = _job_cost_policy(spec)
+    entry = _job_model_entry(spec)
+    assert cost is not None and entry is not None  # both keys are present, so both parse or raise
+    base_branch = _matching(
+        spec.get("baseBranch"), _BRANCH_NAME, "implementer.baseBranch", "a branch name"
+    )
+    branch = _matching(spec.get("branch"), _BRANCH_NAME, "implementer.branch", "a branch name")
+    if branch == base_branch:
+        raise _invalid("implementer.branch must differ from implementer.baseBranch")
+    return ImplementerSpec(
+        repo=_implementer_repo(spec, git),
+        base_branch=base_branch,
+        branch=branch,
+        instruction=instruction,
+        limits=_implementer_limits(spec),
+        cost=cost,
+        model_entry=entry,
+        capabilities=_job_capabilities(spec),
+    )
+
+
+def _implementer_input(job: dict[str, Any]) -> ImplementerInput:
+    _check_fields(job, _IMPLEMENTER_TOP_LEVEL_FIELDS, "")
+    git = _git_access(job)
+    spec = _implementer_spec(job, git)
+    # A native job only: its provider may be a provider of the catalog, and the key goes to the
+    # address of the entry and to no other.
+    llm = _llm_access(job, catalog=True)
+    _entry_is_of_llm(spec.model_entry, llm, "implementer.modelEntry")
+    return ImplementerInput(git=git, llm=llm, implementer=spec, env=_env(job))
+
+
+def parse_implementer_input(raw: str) -> ImplementerInput:
+    """Parse and validate an implementer job (#746). Raises JobError; never returns a half valid
+    job. `parse_job` refuses the kind; `parse_runnable_job` is the one the runner runs it from."""
+    job = _load_job(raw)
+    if job.get("reviewKind") != ReviewKind.IMPLEMENTER.value:
+        raise _invalid("reviewKind must be 'implementer'")
+    return _implementer_input(job)
+
+
+def _implementer_engine_unavailable() -> JobError:
+    return JobError(
+        ErrorCode.IMPLEMENTER_ENGINE_UNAVAILABLE,
+        "this runner has no engine for implementer jobs",
+    )
+
+
+def parse_job(raw: str) -> Job:
+    """Parse and validate the stdin text. Raises JobError; never returns a half valid job.
+
+    A job of the implementer kind (#746) is validated and then refused with
+    `implementer_engine_unavailable`: this function is the review path, and the kind is never read
+    as a Diff or Dynamic job. The one that runs it is `parse_runnable_job` (#765)."""
+    job = _load_job(raw)
+    if job.get("reviewKind") == ReviewKind.IMPLEMENTER.value:
+        _implementer_input(job)
+        raise _implementer_engine_unavailable()
+    return _review_job(job)
+
+
+def parse_runnable_job(raw: str) -> Job | ImplementerInput:
+    """`parse_job` for the code that can run every kind (the job host and the job process, #765):
+    an implementer job is validated into its own type, anything else is parsed as before. The
+    caller decides whether this runner may run the kind (`implementer` advertised)."""
+    job = _load_job(raw)
+    if job.get("reviewKind") == ReviewKind.IMPLEMENTER.value:
+        return _implementer_input(job)
+    return _review_job(job)
+
+
+def _review_job(job: dict[str, Any]) -> Job:
     command = _command(job)
     review_kind = _review_kind(job)
     # `args` (the legacy question of the removed `/ask`) is an allowed field so a previous release's
@@ -779,11 +1001,13 @@ def parse_job(raw: str) -> Job:
     if review_kind is ReviewKind.DYNAMIC:
         dynamic = _dynamic_review(job)
         base = _claim_base(job)
-    else:
+    elif review_kind is ReviewKind.DIFF:
         if "dynamic" in job or "base" in job:
             raise _invalid("a diff job must not carry dynamic options")
         dynamic = None
         base = None
+    else:
+        raise _implementer_engine_unavailable()
     git = _git_access(job)
     llm = _llm_access(job, catalog=dynamic is not None and dynamic.model_entry is not None)
     if dynamic is not None:

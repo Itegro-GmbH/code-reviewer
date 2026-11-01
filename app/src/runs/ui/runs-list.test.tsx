@@ -9,6 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RequestResult } from "../../ui/json-request.ts";
 import type { RunRowView, RunsSnapshot } from "../run-view.ts";
 import type { RunsApi } from "./api.ts";
+import { ProductIdentityProvider } from "../../product-identity/context.tsx";
+import { identityFor } from "../../product-identity/identities.ts";
 import { POLL_FAILED_TEXT } from "./poll-messages.ts";
 import { RunsList } from "./runs-list.tsx";
 
@@ -288,6 +290,25 @@ describe("the empty list", () => {
       screen.getByRole("link", { name: "Open projects" }).getAttribute("href"),
     ).toBe("/w/acme/projects");
     expect(screen.queryByRole("table")).toBeNull();
+  });
+
+  // #757-T02
+  it("offers the factory the QA area under its own name", () => {
+    render(
+      <ProductIdentityProvider product={identityFor("factory")}>
+        <RunsList
+          workspaceSlug="acme"
+          initial={snapshot([])}
+          filter={{}}
+          api={apiAnswering([])}
+        />
+      </ProductIdentityProvider>,
+    );
+
+    expect(
+      screen.getByRole("link", { name: "Open QA" }).getAttribute("href"),
+    ).toBe("/w/acme/projects");
+    expect(screen.queryByRole("link", { name: "Open projects" })).toBeNull();
   });
 
   // CR-35-T03

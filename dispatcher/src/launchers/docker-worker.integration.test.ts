@@ -22,6 +22,7 @@ import { LocalSandboxService } from "../../../fakes/sandbox/local.ts";
 import { waitFor } from "../test-support/harness.ts";
 import { renderDockerRunArguments } from "./container.ts";
 import {
+  IMPLEMENTER_CONTAINER_SPEC,
   SANDBOX_LAUNCHER_ADDITIONS,
   WORKER_CONTAINER_SPEC,
 } from "./container-spec.ts";
@@ -147,6 +148,121 @@ describe("the docker stand-in of the hosted lane", () => {
         "worker-once",
       ]),
     );
+  });
+
+  // #760-T06
+  it("understands the flags of the implementer profile and still refuses a mount or a volume it does not know", async () => {
+    await program('printf "%s" "$1" >"' + directory + '/mode"');
+    const vm = await vmWith();
+    const rendered = renderDockerRunArguments(IMPLEMENTER_CONTAINER_SPEC, {
+      image: IMAGE_ID,
+      name: NAME,
+      workVolume: "code-reviewer-work-job-1",
+      command: ["worker-once"],
+      additions: SANDBOX_LAUNCHER_ADDITIONS,
+    });
+
+    const accepted = await vm.exec({
+      label: "w",
+      cmd: "docker",
+      args: rendered,
+    });
+    const volume = await vm.exec({
+      label: "v",
+      cmd: "docker",
+      args: [
+        ...rendered.slice(0, -2),
+        "--volume",
+        "/:/host",
+        IMAGE_ID,
+        "worker-once",
+      ],
+    });
+    const bound = await vm.exec({
+      label: "b",
+      cmd: "docker",
+      args: [
+        ...rendered.slice(0, -2),
+        "-v",
+        "/:/host",
+        IMAGE_ID,
+        "worker-once",
+      ],
+    });
+
+    expect(accepted.exitCode).toBe(0);
+    expect(rendered).toContain("--mount");
+    expect(await readFile(join(directory, "mode"), "utf8")).toBe("worker-once");
+    expect(volume.exitCode).toBe(125);
+    expect(volume.stderr).toContain("unknown flag --volume");
+    expect(bound.exitCode).toBe(125);
+    expect(bound.stderr).toContain("unknown flag -v");
+    const bind = await vm.exec({
+      label: "m",
+      cmd: "docker",
+      args: [
+        ...rendered.slice(0, -2),
+        "--mount",
+        "type=bind,source=/,target=/host",
+        IMAGE_ID,
+        "worker-once",
+      ],
+    });
+    expect(bind.exitCode).toBe(125);
+    expect(bind.stderr).toContain("unknown mount type=bind");
+
+    // The stand-in matches the one mount the renderer makes, not a family of them: a comma or an equals sign in the
+    // name would add an option, and `*` of a glob would let it through.
+    const withoutMount = rendered
+      .slice(0, -2)
+      .filter(
+        (arg, index, all) => arg !== "--mount" && all[index - 1] !== "--mount",
+      );
+    const allowed = await vm.exec({
+      label: "m",
+      cmd: "docker",
+      args: [
+        ...withoutMount,
+        "--mount",
+        "type=volume,source=code-reviewer-work-a.b_c-1,target=/work",
+        IMAGE_ID,
+        "worker-once",
+      ],
+    });
+    expect(allowed.exitCode).toBe(0);
+    // One mount only: a second one, also a good one, is refused.
+    const twice = await vm.exec({
+      label: "m",
+      cmd: "docker",
+      args: [
+        ...rendered.slice(0, -2),
+        "--mount",
+        "type=volume,source=code-reviewer-work-a,target=/work",
+        IMAGE_ID,
+        "worker-once",
+      ],
+    });
+    expect(twice.exitCode).toBe(125);
+    for (const mount of [
+      "type=volume,source=code-reviewer-work-a,readonly=false,target=/work",
+      "type=volume,source=code-reviewer-work-a,bind-propagation=rshared,target=/work",
+      "type=volume,source=code-reviewer-work-a,volume-opt=o=suid,target=/work",
+      "type=volume,source=code-reviewer-work-a,target=/,target=/work",
+      "type=volume,source=code-reviewer-work-a=b,target=/work",
+      "type=volume,source=code-reviewer-work-,target=/work",
+      "type=volume,source=code-reviewer-work-a,target=/work,readonly",
+      "type=volume,source=other,target=/work",
+      "type=volume,source=code-reviewer-work-a b,target=/work",
+      "type=volume,source=code-reviewer-work-a,target=/work\n",
+    ]) {
+      const refused = await vm.exec({
+        label: "m",
+        cmd: "docker",
+        args: [...withoutMount, "--mount", mount, IMAGE_ID, "worker-once"],
+      });
+      expect(refused.exitCode, mount).toBe(125);
+      expect(refused.stderr, mount).toContain("unknown mount");
+    }
   });
 
   // #332-T09

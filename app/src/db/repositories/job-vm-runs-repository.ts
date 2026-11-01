@@ -14,7 +14,7 @@ import {
   type VmEndSource,
 } from "../billing-minutes.ts";
 import { maxVmMinutes } from "../../billing/hold.ts";
-import type { ProjectReviewKind } from "../../job-kind/job-kind.ts";
+import { JOB_KINDS, jobKindOf } from "../../job-kind/job-kind.ts";
 import { decodeBoolean, encodeBoolean, formatTimestamp } from "../codecs.ts";
 import type { Database, JobVmRunsTable } from "../schema.ts";
 import type { WorkspaceId } from "../workspace-scope.ts";
@@ -34,7 +34,7 @@ const WALL_CLOCK_SOURCES: readonly VmEndSource[] = [
   "claim_wall_clock",
 ];
 
-const REVIEW_KINDS: readonly ProjectReviewKind[] = ["diff", "dynamic"];
+const REVIEW_KINDS = JOB_KINDS;
 
 /** Whether a VM name is one of our own naming for this job (`cr-<kind>-<job id>-<random>`, launchers/sandbox.ts). */
 function isVmOfJob(name: string, jobId: string): boolean {
@@ -340,7 +340,7 @@ export function createJobVmRunsRepository(
           const start = new Date(job.claimed_at);
           const latest = new Date(
             start.getTime() +
-              maxVmMinutes(job.review_kind as ProjectReviewKind) * 60 * 1000,
+              maxVmMinutes(jobKindOf(job.review_kind)) * 60 * 1000,
           );
           for (const name of vmNames) {
             if (known.has(name) || !isVmOfJob(name, jobId)) continue;

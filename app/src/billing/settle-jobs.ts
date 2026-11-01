@@ -30,7 +30,7 @@ import { createJobVmRunsRepository } from "../db/repositories/job-vm-runs-reposi
 import { createUsageRecordsRepository } from "../db/repositories/usage-records-repository.ts";
 import { tryDecodeJson } from "../db/codecs.ts";
 import type { Database } from "../db/schema.ts";
-import type { ProjectReviewKind } from "../job-kind/job-kind.ts";
+import { jobKindOf, projectKindOf } from "../job-kind/job-kind.ts";
 import type { KeyMode } from "../workspaces/entitlements.ts";
 import { readClaimBilling, type ClaimBilling } from "./claim-billing.ts";
 import { classifyOutcome, type RunEnd } from "./outcome.ts";
@@ -190,7 +190,7 @@ async function chargeOf(
     return null;
   }
   const keyMode: KeyMode = record?.key_mode === "managed" ? "managed" : "own";
-  const reviewKind = job.review_kind as ProjectReviewKind;
+  const reviewKind = jobKindOf(job.review_kind);
   const outcomeClass = classifyOutcome({
     status: job.status as EndedStatus,
     // The error of the job, else what the Worker of a superseded run reported: our error is free there as anywhere.
@@ -210,7 +210,8 @@ async function chargeOf(
       outcomeClass,
       costMicroUsd: record?.cost_micro_usd ?? null,
       billableMinutes: minutes,
-      reviewKind,
+      // #752: a turn of the Implementer is priced at the rate of Dynamic Review, the engine it runs on; its entry keeps its kind.
+      reviewKind: projectKindOf(reviewKind),
       rates: billing.rates,
     });
     if (price.totalMicroUsd === 0) return null;

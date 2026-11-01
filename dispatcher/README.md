@@ -127,7 +127,7 @@ the whole identity of the sender**.
   answer the App already understands and does not resend on), logged as `kind_not_allowed`, and **no claim is made**. The claim
   asks for the engines of the app's kinds only. A claimed job of another kind, **or of a kind whose engine this Dispatcher does
   not serve** (a Dynamic job when `opencode` is not in `DISPATCHER_ENGINES` or not advertised), is released (`launch_failed`),
-  logged as the error `kind_not_allowed` (`reason` `kind` or `engine`), and no VM is created. The `reviewer`'s kinds are the ones whose engine is in `DISPATCHER_ENGINES`.
+  logged as the error `kind_not_allowed` (`reason` `kind` or `engine`), and no VM is created. The `reviewer`'s kinds are the ones of `diff` and `dynamic` whose engine is in `DISPATCHER_ENGINES`: **never `implementer` (#759)**, whatever `DISPATCHER_ENGINES` names (`REVIEWER_KINDS`), and a list that leaves the `reviewer` no kind is refused. `implementer` is a kind an entry of `DISPATCHER_APPS` can name (`"kinds":["diff","dynamic","implementer"]`); the default engines then include `implementer`, and the claim of that app asks for it. The Sandbox launcher advertises `implementer` **only when this deployment serves it** (`settings.core.engines` includes it: an entry of `DISPATCHER_APPS` names the kind, which adds it to the default engines, or `DISPATCHER_ENGINES` names it explicitly; #765); a deployment without the kind advertises exactly `pr-agent` and `opencode`, as before, and the reviewer's key never gets the kind. Where it is advertised a wake-up call for the kind is launched (a launch is refused before a VM is created only for an invalid `DISPATCHER_WORKER_CONFIG.implementer`: `sandbox_config_invalid`). **Set the kind in `DISPATCHER_APPS` only after this version is live: an older Dispatcher refuses the unknown kind at start.** **The deploy canary (`POST /probe`) requires `implementer` exactly when the Launcher advertises it:** the route requires the engines of `diff` and `dynamic` always and `implementer` when `launcher.capabilities` lists it, so a deployment without the kind keeps a canary that depends on nothing of the Implementer, a missing `pr-agent` or `opencode` still fails it, and a deployment with the kind cannot pass with a report that lacks `implementer`. The report can name it: `KNOWN_ENGINES` in `dispatcher/src/probe/verdict.ts`, the `ProbeEngine` enum and the `maxItems` of `ProbeVerdict` and `ProbeReport` in `contracts/probe-verdict.v1.json`, and `runner/src/code_reviewer_runner/verdict.py` all know it. **The canary VM proves it:** for a deployment that serves the kind it runs the `probe` mode a second time in the same VM, in the container profile of the Implementer (the work volume made as a job's is, its flags and environment), and unites the two verdicts (`mergeVerdictOutputs`); `implementer` is in the report only when the Dynamic container passed and the Implementer's container proved git, the guard files, the network rules and a prepared, exec-capable work volume (the `implementer_*` reasons of the verdict say which is missing). `pnpm probe:canary` needs no new option: its default `--engines` stay `pr-agent,opencode`, and the engines the route required are demanded as well, so the canary passes on a deployment with the kind exactly when the report names `implementer`. When it does block, the answer lists the engines the route required (`required`) and the canary prints the missing ones (`missing=`).
 - **VM isolation.** Every job VM carries the tag `tenant=<app id>` next to `{app, kind, job}`; the name format is unchanged.
   The stop route lists with the app of the verified key and returns only VMs whose tenant is that app (a VM without the tag was
   created before this release and belongs to `reviewer`): **a stop signed by one app can never end a VM of another**. Stop ids
@@ -150,9 +150,21 @@ the whole identity of the sender**.
   `reviewer` `DISPATCHER_MAX_RUNNING`, unchanged. _Cost:_ one listing of the project's `cr-` VMs (all pages, 50 per page, the platform's largest; it keeps stopped VMs, so the listing only grows: 283 VMs took 5.1 s at the default page size) per five seconds at most, shared by every claim in that time;
   claims that arrive together share one call. A claim therefore sees a VM that ended up to five seconds late (the safe side)
   and one that started in that time through the count of the Dispatcher's own launches. A listing that gives no answer in four
-  seconds counts as a failed one (claims never wait longer, and a waiting claim holds no launch slot). If the listing fails,
-  the last good one is used for up to a minute; after that the claim answers `unavailable` (retry in 60 s, `fleet_list_failed` in the log) and
-  nothing is claimed. Without a fleet (a local Launcher), **and with one app only (today's production, a Dispatcher with no
+  seconds counts as a failed one (claims never wait longer, and a waiting claim holds no launch slot; `fleet_list_failed` in
+  the log, with the `ms` it took). If the listing fails, the last good one is used for up to a minute; after that **the claim
+  goes on** (#802): the Dispatcher counts what it knows itself, the launches in progress that have no VM yet and the VMs its
+  own launches created in the last ten minutes, and holds the app to the same cap plus tolerance with that count. A failed
+  listing is not asked for again for five seconds, so a platform that is down neither delays every claim by four seconds nor
+  fills the log. The count then errs low (a VM older than ten minutes is not counted); the cap is a soft limit and the
+  platform's own concurrency limit stays the hard one. A refusal from it is `sandbox_rate_limited` or `sandbox_quota_exceeded`
+  (which of the two the platform sends for its concurrency limit is not confirmed); it ends the launch with `launch_failed`,
+  which burns an attempt of the job. That is the existing behaviour and accepted. During an outage of the listing the isolation
+  between apps is therefore not guaranteed: an app that ignores its cap is held only by the Dispatcher's own count of the last
+  ten minutes. Before
+  #802 this case answered `unavailable` (retry in 60 s) and claimed nothing: on 2026-11-01 a listing of 283 stopped VMs took
+  5.1 s and every claim of every app, the first app's reviews too, ended `no_capable_runner`. Every listing that answers logs
+  `fleet_listed` with `ms` (its time) and `count` (the VMs it returned, stopped ones included), at most once per listing, so
+  the margin to the four seconds is visible. Without a fleet (a local Launcher), **and with one app only (today's production, a Dispatcher with no
   `DISPATCHER_APPS`)**, the platform is not listed for the cap at all: the cap is the launches in progress and the App's own,
   exactly as before #730, so the cap adds no platform call and no new way to refuse. The count starts with the second app. The sum of the caps
   plus their tolerances should stay within the team's Sandbox concurrency (a platform limit not verified here); then no app
@@ -236,6 +248,9 @@ interface Launcher {
 
 `LaunchSpec.config` is the per-kind part of `DISPATCHER_WORKER_CONFIG`: `container` (what the container spec lets a
 Launcher change, the memory limit) and `launcher` (the Launcher's own options, which the core does not read).
+`LaunchSpec.timeoutSeconds` follows the kind (#759): `DISPATCHER_JOB_TIMEOUT_SECONDS` for Diff and Dynamic, 3600 for the
+Implementer unless `DISPATCHER_WORKER_CONFIG.implementer.timeoutSeconds` (60 to 21600) says otherwise; the VM's timeout is
+that plus the margin, and the reaper's fallback lifetime is the longest of the kinds some app has.
 
 ## The container spec renderer
 
@@ -258,6 +273,14 @@ could become a flag, with the stable codes of `CONTAINER_ERROR_CODES`.
   `SANDBOX_LAUNCHER_ADDITIONS` for every Worker kind, because the Sandbox kernel only supports the nft `ip` family
   and the Dynamic-Worker then needs IPv6 off from the container spec. The shared spec does not have them
   (a full-mode host behaves as before); the default is no additions.
+- **The Implementer's profile (#760).** `IMPLEMENTER_CONTAINER_SPEC` (`ImplementerContainerSpec` of the contract) is the
+  default spec with a `workVolume` (`/work`, `rw,nosuid,nodev`, a named volume), `3g`/`2560m` memory, 2048 pids and the three
+  `RUNNER_IMPLEMENTER_*` names. A spec with a `workVolume` key is checked as the profile (exact values, the floor shared),
+  every other as the default one; `RenderOptions.workVolume` names the volume (required by the profile, refused by the
+  default) and renders `--mount type=volume,source=<name>,target=/work`. `workVolumeCommands` returns the root steps that make
+  the volume in the VM (`mkdir`, a bind mount remounted with the volume's options, `docker volume create` over it), which
+  `SandboxDockerHost.createWorkVolume` runs; the Launcher picks the profile by the job kind. Diff and Dynamic render
+  byte-identical flags to before (the golden files).
 - The entry mode of the image (`worker-once`, `probe`) is a placeholder until the image has its entry modes (#324); the
   names are those #324 proposes, and nothing else changes when it fixes them.
 - `seccomp.ts` derives, from Docker's default profile, a profile that denies chosen socket families (AF_VSOCK);
@@ -329,6 +352,7 @@ then `released`, `release_job_ended`, `release_not_holder` or `release_failed`, 
 | `sandbox_snapshot_missing`, `sandbox_region_mismatch`, `sandbox_rejected` | no                           | the snapshot is gone or in another region; the platform refuses the request                                                                                                                                                                                                          |
 | `image_missing`, `image_mismatch`                                         | no                           | the VM has no such image, or not the configured one                                                                                                                                                                                                                                  |
 | `sandbox_config_invalid`                                                  | no                           | a VM size or memory limit the Launcher cannot run                                                                                                                                                                                                                                    |
+| `work_volume_failed`                                                      | yes                          | a step of the Implementer's work volume failed, took over 10 s, or the mount lacks `nosuid`/`nodev`/`rw` or has `noexec`                                                                                                                                                             |
 | `sandbox_create_failed`                                                   | no                           | an error it does not recognise                                                                                                                                                                                                                                                       |
 | `launch_aborted`                                                          | no                           | the deadline, a lost lease or a shutdown aborted the launch                                                                                                                                                                                                                          |
 
@@ -342,9 +366,14 @@ first real run). Only the code is logged, never the platform's text.
 configuration both kinds get 1 vCPU / 2 GB and a container limit of `1536m` (reservation `1280m`), which leaves room
 for `dockerd` and the OS; a limit that leaves the VM less than 256 MiB is refused. The spike suggests 2 vCPU / 4 GB for
 the Dynamic-Worker; its real peak is not measured yet, so that is a configuration change, not a code change. A wrong
-value fails the deployment at start (`DISPATCHER_WORKER_CONFIG`), not the first job.
+value of Diff or Dynamic fails the deployment at start (`DISPATCHER_WORKER_CONFIG`), not the first job. The Implementer (#760) defaults to
+2 vCPU / 4 GB and a container limit of `3g` (reservation `2560m`); `DISPATCHER_WORKER_CONFIG.implementer` overrides each value,
+and a wrong value of it never stops the Dispatcher from starting: a
+deployment that serves the kind logs `worker_config_invalid` at start, and every launch of the kind is refused with
+`sandbox_config_invalid` until the value is corrected (a deployment that does not serve the kind does not read the entry). **The same value also fails the canary of a deployment that serves the kind** (the canary cannot size the Implementer's VM: its half is `implementer_probe_failed` and `POST /probe` is `503`), so the release of that deployment, code-review.com's included when it serves the kind, is blocked until the value is corrected. Its container is the profile `IMPLEMENTER_CONTAINER_SPEC` (next section), and its launch makes the work
+volume in the VM between the image check and `docker run`.
 
-**Capabilities.** The Launcher advertises `pr-agent` and `opencode`; the engines the deployment serves are its
+**Capabilities.** The Launcher advertises `pr-agent` and `opencode`, and `implementer` when the deployment serves the kind (an app of `DISPATCHER_APPS` names it, #765); the engines the deployment serves are its
 `DISPATCHER_ENGINES` (#479). No probe stands between a Dynamic job and its claim: the hardening of the container is
 proven by the deploy canary before a deployment goes live (next section), and the Worker checks itself again when it
 starts.
@@ -376,7 +405,7 @@ whenever `DISPATCHER_ENGINES` contains `opencode` and a snapshot pair is set, on
 canary VM is started by a dispatch. (Earlier, a cold instance answered the first Dynamic wake-up `503` with
 `Retry-After: 20` while a probe ran, which the App did not wait for; `CapabilitiesPending` and `withCapabilityProbe` are
 gone.) The Vercel entry gives the Sandbox-Launcher its `probe` with `withProbeEndpoint` (`src/probe/probe-endpoint.ts`)
-when `DISPATCHER_ENGINES` includes `opencode`; a Diff-only deployment has no probe and no canary VM.
+when `DISPATCHER_ENGINES` includes `opencode` **or `implementer`**; a Diff-only deployment has no probe and no canary VM.
 
 **What is proven.** The image's `probe` mode (#324, `runner/README.md`) runs the container's own startup in a canary VM
 and prints one line, the verdict (`contracts/probe-verdict.v1.json`): the engines the container may advertise and, when
@@ -386,7 +415,7 @@ capabilities then `NET_ADMIN` and `SETPCAP` dropped, a read-only root), the egre
 fallback), IPv6 proven off where the fallback ruleset needs it, the pinned engine and `rg`, and the probe as the engine
 user. The canary runs with the **real flags** of a Dynamic-Worker: the one rendered container spec, the memory of the
 Dynamic kind, the two IPv6 switches of the Sandbox variant (`SANDBOX_LAUNCHER_ADDITIONS`) and the Dynamic environment of a
-job, so a launch flag that is wrong makes the probe fail instead of the job.
+job, so a launch flag that is wrong makes the probe fail instead of the job. A deployment that serves the Implementer gets a **second probe in the same VM** (#765): the container of the Implementer's profile (`IMPLEMENTER_CONTAINER_SPEC`, its memory, its three environment names and the work volume made as a job's is), also by the real flags, and `probe` as its command. The VM is as large as the larger of the two kinds. **The two halves do not take each other down:** `opencode` and its reasons are read from the Dynamic container's output only, `implementer` and its reasons from the Implementer's only (`mergeVerdictOutputs`). When the second half cannot be run, is no verdict or fails a check, the Dynamic verdict stands and the report says `implementer_probe_failed` (or the Implementer's own `implementer_*` reason), and the canary log names the half (`canary_implementer_probe_failed`, `canary_implementer_not_proven`).
 
 **The canary VM** (`src/launchers/sandbox-canary.ts`) is a job VM without a job: a VM from the golden snapshot
 (`persistent: false`, `fra1`, the size of a Dynamic job, tags `{app, kind: canary, job: canary}`, a timeout beyond the
@@ -408,7 +437,7 @@ memory only to serve a forced probe within `DISPATCHER_PROBE_REUSE_SECONDS` (bel
 **What a wake-up call sees.** The same for both kinds: the core applies `DISPATCHER_ENGINES`, the cap and the claim. A Dynamic
 job on a Dispatcher that is not configured for `opencode` is answered `200 ignored` with `not_capable` (the App stops
 sending it, revives the dispatch ten minutes later, and a Dynamic job that nobody can run ends `no_capable_runner` after 30
-minutes, `app/src/dispatch/README.md`). A `503`/`429` the App sees now comes from a busy or failing Dispatcher or platform,
+minutes without a working runner, 3 hours at the latest, `app/src/dispatch/README.md`). A `503`/`429` the App sees now comes from a busy or failing Dispatcher or platform,
 never from a probe; the App repeats it inside the request and wakes it again from the repair work
 (`app/src/dispatch/README.md`, "Between two sweeps").
 
@@ -419,7 +448,7 @@ the reasons of the self-check list, and for a probe that gave no verdict a code 
 `probe_exit_nonzero`, `probe_exec_failed`, `probe_aborted`, `probe_not_supported`, `probe_error`. Anything else, such as a code in
 a platform's error, is `probe_error`.
 
-**Cost.** One short canary VM (tens of seconds) per deploy canary, and no other. A Diff-only deployment
+**Cost.** One short canary VM (tens of seconds) per deploy canary, and no other; a deployment that serves the Implementer adds the steps of the work volume and a second probe to it (`IMPLEMENTER_PROBE_EXTRA_SECONDS`, 110 s: the probe's time, the VM's life and the reaper's `canaryLifetimeSeconds` grow by that, well inside the function limit of 1800 s). With the default `DISPATCHER_PROBE_TIMEOUT_SECONDS` of 150 the cap of the probe with the kind is **260 s**. **With the kind, keep `DISPATCHER_PROBE_TIMEOUT_SECONDS` at or below 190:** the deploy canary's request gives up at 300 s (`--timeout-seconds`), so a larger value makes the canary report `probe_unreachable` and block the release although the Dispatcher would still answer. A Diff-only deployment
 (`DISPATCHER_ENGINES=pr-agent`) has no probe.
 
 **Retired setting.** `DISPATCHER_PROBE_TTL_SECONDS` (how long an answer counted) is obsolete. A deployment that still sets
@@ -440,7 +469,7 @@ step is blocked; it changes nothing about what the running Dispatcher dispatches
 
 | Status | Body                                                                                          | Meaning                                                           |
 | ------ | --------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| `200`  | `{version, status, ok: true, engines, reasons, checkedAt}`                                    | every engine this deployment is configured to serve is advertised |
+| `200`  | `{version, status, ok: true, engines, reasons, required, checkedAt}`                          | every engine this deployment is configured to serve is advertised |
 | `503`  | the same with `ok: false`; `status` is `denied` (with `reasons`) or `failed` (with `failure`) | the canary did not pass, or could not run: block the release      |
 | `401`  | `RUNNER_UNAUTHORIZED`                                                                         | no, a wrong or a malformed credential                             |
 
@@ -477,7 +506,7 @@ one, and a rebuild that left the image id unchanged is told apart by its snapsho
 
 | Exit | Meaning                                                                                                                                                                                                     |
 | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `0`  | the deployment advertises every required engine (both by default) from a probe that ran just now                                                                                                            |
+| `0`  | the deployment advertises every required engine (both by default, and `implementer` when it serves the kind) from a probe that ran just now                                                                 |
 | `1`  | it does not, it could not be reached or refused the credential, or answered something that is not a report, or the Vercel API could not be asked (`canary_verification_unavailable`): **block the release** |
 | `2`  | wrong use (a bad URL or option), or a deployment that is not the Dispatcher project's (`canary_deployment_not_verified`); nothing was sent                                                                  |
 
@@ -542,7 +571,7 @@ the platform's cron calls
   anything else (another deployment's VM, a person's, a lookalike).
 - **Which are leftovers.** Younger than two minutes: never. Older than its lifetime (the timeout the platform reports
   for the VM, or the configured one: job timeout plus VM margin for a job VM, `DISPATCHER_PROBE_TIMEOUT_SECONDS` plus the
-  margin for a canary; plus two minutes of grace; a reported timeout above the longest possible one is not believed):
+  margin for a canary (with the Implementer served, 110 s more: `IMPLEMENTER_PROBE_EXTRA_SECONDS`, so 260 s plus the margin by default; keep `DISPATCHER_PROBE_TIMEOUT_SECONDS` at or below 190 then); plus two minutes of grace; a reported timeout above the longest possible one is not believed):
   stopped, whatever the App says. A canary has no job, so only that ends it. A job VM: stopped when the App says its job
   is not `running` (`GET /api/runners/v1/jobs/{id}` with the dispatcher credential, one call per job).
 - **A draining job (#397).** A superseded job whose claim is still valid (`draining: true` in the job state): its Worker is finishing the model requests in flight and reporting what they cost. The VM stays until the claim ends (the Worker's report, or the App's claim window of 240 seconds), then it is a leftover like any other. An App that does not send the field, or a Dispatcher that does not read it, treats a superseded job as ended.
@@ -552,7 +581,29 @@ the platform's cron calls
 - **Stopping and logs.** By the listed name; a VM that is already gone is not an error, a failed stop is counted and
   retried by the next run (runs may overlap, stopping twice is harmless). Stable events and codes only
   (`vm_reaped`, `vm_reap_failed`, `job_state_unreadable`, `reap_done`, `reap_list_failed`); the answer holds counts
-  (`listed`, `candidates`, `stopped`, `kept`, `unreadable`, `failed`). No credential, token or platform error text.
+  (`listed`, `candidates`, `stopped`, `kept`, `unreadable`, `failed`, `deleted`, `deleteFailed`, `deleteKept`, `deleteNotTried`). No credential, token or platform error text.
+- **Retention (#802).** The platform keeps an ended VM until somebody deletes it, and the listing every claim makes grows with
+  them (283 VMs: 5.1 s). After the stops, the run **deletes** the VMs the platform reports as `stopped`, `failed` or `aborted`
+  that were created one day ago or earlier (`RETENTION_MS`; a job VM lives seven hours at most, so by then it has been over for
+  hours). It is the same check as for stopping: only a non-persistent VM of exactly our shape with our tag, a job VM or a
+  canary, so never a running, pending, stopping or snapshotting VM, the golden builder or check VM, a persistent VM, a lookalike
+  or anything of another project. Nothing else reads an ended VM: the stop call, the live count and the reaper's stop pass look
+  at live VMs only. The platform is asked again before each delete (`Sandbox.get`, without resume): a VM that is no longer
+  deletable or is persistent is **kept** (`vm_delete_kept`, `deleteKept`). Only a 404 means a VM is gone; a 410 is the SDK's
+  "sandbox stopped" and counts as a failed delete, so a `vm_deleted` line is never a deletion that left the listing as long as
+  before. The delete keeps the snapshots a VM owns (`deleteOrphanSnapshots: false`, said in so many words): the golden snapshot
+  is the source of every job VM. Each deletion is logged as `vm_deleted` with the VM's name only.
+  The pass is bounded so it cannot hurt the launches that share the platform's API and the function: at most **50 per run**
+  (`MAX_DELETES_PER_RUN`), four at a time, picked **at random among the eligible VMs**, not the oldest (a VM whose delete fails
+  for good would take a place of the 50 in every run and starve the rest; a Vercel function remembers nothing between runs, so
+  no list of failures is kept and a random pick gives every VM its turn); each platform call (lookup, delete) has a limit of 15
+  seconds and answers `unavailable` past it; the pass stops at the first `rate_limited` or `unavailable` answer (`vm_delete_halted`)
+  and counts the rest as not tried (`deleteNotTried`); and no delete starts after 3 minutes of the pass
+  (`DELETE_BUDGET_MS`), under the five minutes between two runs. A failed delete counts against the 50, is logged as
+  `vm_delete_failed` by name and tried again by a later run, and never fails the run. A backlog drains at 50 per five minutes:
+  283 stopped VMs in six runs, half an hour; the cron's capacity is 14,000 a day, far above the number of job VMs.
+  _Known limits:_ the count without a listing forgets a VM after ten minutes (it errs low); a refusal of the platform's
+  concurrency limit burns an attempt of the job; with a random pick a backlog may take a few runs more than 50 per run.
 
 Not verified against the live platform: that `Sandbox.list` honours the name prefix together with a tag in one call and
 reports `status`, `createdAt`, `timeout` and `tags` as the SDK types say, and that the project's cron may run every five minutes
@@ -562,28 +613,28 @@ reports `status`, `createdAt`, `timeout` and `tags` as the SDK types say, and th
 
 Names only: a refusal names the variable, never the value.
 
-| Variable                                                                   | Meaning                                                                                                                                                                                       | Default      |
-| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
-| `RUNNER_API_URL`                                                           | Base URL of the App                                                                                                                                                                           | required     |
-| `RUNNER_TOKEN`                                                             | The dispatcher credential (the runner API token)                                                                                                                                              | required     |
-| `DISPATCHER_MAX_RUNNING`                                                   | The pool cap, 1 to 1000                                                                                                                                                                       | required     |
-| `DISPATCHER_SIGNING_KEY_ID`, `DISPATCHER_SIGNING_SECRET`                   | The key the App signs the wake-up call with; the secret has at least 32 characters and differs from every other secret                                                                        | required     |
-| `DISPATCHER_SIGNING_KEY_ID_PREVIOUS`, `DISPATCHER_SIGNING_SECRET_PREVIOUS` | The previous key, accepted while the keys rotate                                                                                                                                              | none         |
-| `DISPATCHER_POOL_ID`                                                       | Sent as `X-Runner-Id`; the App counts the running jobs of the pool by it                                                                                                                      | `dispatcher` |
-| `DISPATCHER_ENGINES`                                                       | `pr-agent`, `opencode` or both                                                                                                                                                                | both         |
-| `DISPATCHER_JOB_TIMEOUT_SECONDS`                                           | How long a Worker may live, 60 to 21600                                                                                                                                                       | `1200`       |
-| `DISPATCHER_WORKER_CONFIG`                                                 | JSON `{"diff": {...}, "dynamic": {...}}` with `container.memory` and `launcher`                                                                                                               | none         |
-| `SANDBOX_SNAPSHOT_ID`                                                      | Vercel entry: the golden snapshot (#330 record `snapshotId`). Unset: no launcher, nothing is claimed                                                                                          | none         |
-| `SANDBOX_IMAGE_DIGEST`                                                     | The Worker image id in that snapshot (#330 record `imageDigest`, `sha256:` and 64 hex). Required with the snapshot                                                                            | none         |
-| `SANDBOX_HANDOVER_SECONDS`                                                 | How long the container runs before the Worker counts as having taken over, 1 to 120; with create, `vm-prepare.sh` and the image check (150 s) it must fit in the core's 300 s launch deadline | `20`         |
-| `SANDBOX_VM_TIMEOUT_MARGIN_SECONDS`                                        | Seconds added to the job's timeout for the VM's own, 180 to 3600 and at least the hand-over time plus 150                                                                                     | `300`        |
-| `DISPATCHER_PROBE_TTL_SECONDS`                                             | **Retired (#479), ignored.** Accepted with any value and a `deprecated_setting` warning; removed in a later release                                                                           | none         |
-| `DISPATCHER_PROBE_REUSE_SECONDS`                                           | A forced probe (`POST /probe`) is served from an answer younger than this instead of a new canary VM, 0 to 600; 0 runs every one                                                              | `60`         |
-| `DISPATCHER_PROBE_TIMEOUT_SECONDS`                                         | How long a probe may take, the canary VM included, 30 to 600; the reaper (#364) takes a canary's lifetime from it plus the margin                                                             | `150`        |
-| `RUNNER_DYNAMIC_CAPABILITIES`, `RUNNER_DYNAMIC_MAX_COST_USD`               | The operator's Dynamic configuration for the container of a Dynamic job and for the canary: a JSON object (no line breaks, at most 4096 characters) and a plain positive decimal              | none         |
-| `CRON_SECRET`                                                              | Vercel entry: the secret of the platform's cron for the reaper route (#364), at least 32 characters, different from every other secret. Unset: the route refuses everyone                     | none         |
-| `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, `VERCEL_PROJECT_ID`                      | Platform access by token (all three). Without a token the OIDC token is used                                                                                                                  | OIDC         |
-| `DISPATCHER_SHUTDOWN_GRACE_SECONDS`                                        | Node test host only: how long launches may finish after SIGTERM, 0 to 600                                                                                                                     | `60`         |
+| Variable                                                                   | Meaning                                                                                                                                                                                       | Default                                                                                 |
+| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `RUNNER_API_URL`                                                           | Base URL of the App                                                                                                                                                                           | required                                                                                |
+| `RUNNER_TOKEN`                                                             | The dispatcher credential (the runner API token)                                                                                                                                              | required                                                                                |
+| `DISPATCHER_MAX_RUNNING`                                                   | The pool cap, 1 to 1000                                                                                                                                                                       | required                                                                                |
+| `DISPATCHER_SIGNING_KEY_ID`, `DISPATCHER_SIGNING_SECRET`                   | The key the App signs the wake-up call with; the secret has at least 32 characters and differs from every other secret                                                                        | required                                                                                |
+| `DISPATCHER_SIGNING_KEY_ID_PREVIOUS`, `DISPATCHER_SIGNING_SECRET_PREVIOUS` | The previous key, accepted while the keys rotate                                                                                                                                              | none                                                                                    |
+| `DISPATCHER_POOL_ID`                                                       | Sent as `X-Runner-Id`; the App counts the running jobs of the pool by it                                                                                                                      | `dispatcher`                                                                            |
+| `DISPATCHER_ENGINES`                                                       | `pr-agent`, `opencode`, `implementer` or a list; the `reviewer` never gets `implementer`                                                                                                      | `pr-agent,opencode`, plus `implementer` when an app of `DISPATCHER_APPS` names the kind |
+| `DISPATCHER_JOB_TIMEOUT_SECONDS`                                           | How long a Worker of Diff or Dynamic may live, 60 to 21600                                                                                                                                    | `1200`                                                                                  |
+| `DISPATCHER_WORKER_CONFIG`                                                 | JSON `{"diff": {...}, "dynamic": {...}, "implementer": {...}}` with `container.memory` and `launcher`; `implementer` also `timeoutSeconds` (60 to 21600)                                      | none (Implementer: 3600 s)                                                              |
+| `SANDBOX_SNAPSHOT_ID`                                                      | Vercel entry: the golden snapshot (#330 record `snapshotId`). Unset: no launcher, nothing is claimed                                                                                          | none                                                                                    |
+| `SANDBOX_IMAGE_DIGEST`                                                     | The Worker image id in that snapshot (#330 record `imageDigest`, `sha256:` and 64 hex). Required with the snapshot                                                                            | none                                                                                    |
+| `SANDBOX_HANDOVER_SECONDS`                                                 | How long the container runs before the Worker counts as having taken over, 1 to 120; with create, `vm-prepare.sh` and the image check (150 s) it must fit in the core's 300 s launch deadline | `20`                                                                                    |
+| `SANDBOX_VM_TIMEOUT_MARGIN_SECONDS`                                        | Seconds added to the job's timeout for the VM's own, 180 to 3600 and at least the hand-over time plus 150                                                                                     | `300`                                                                                   |
+| `DISPATCHER_PROBE_TTL_SECONDS`                                             | **Retired (#479), ignored.** Accepted with any value and a `deprecated_setting` warning; removed in a later release                                                                           | none                                                                                    |
+| `DISPATCHER_PROBE_REUSE_SECONDS`                                           | A forced probe (`POST /probe`) is served from an answer younger than this instead of a new canary VM, 0 to 600; 0 runs every one                                                              | `60`                                                                                    |
+| `DISPATCHER_PROBE_TIMEOUT_SECONDS`                                         | How long a probe may take, the canary VM included, 30 to 600; the reaper (#364) takes a canary's lifetime from it plus the margin                                                             | `150`                                                                                   |
+| `RUNNER_DYNAMIC_CAPABILITIES`, `RUNNER_DYNAMIC_MAX_COST_USD`               | The operator's Dynamic configuration for the container of a Dynamic job and for the canary: a JSON object (no line breaks, at most 4096 characters) and a plain positive decimal              | none                                                                                    |
+| `CRON_SECRET`                                                              | Vercel entry: the secret of the platform's cron for the reaper route (#364), at least 32 characters, different from every other secret. Unset: the route refuses everyone                     | none                                                                                    |
+| `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, `VERCEL_PROJECT_ID`                      | Platform access by token (all three). Without a token the OIDC token is used                                                                                                                  | OIDC                                                                                    |
+| `DISPATCHER_SHUTDOWN_GRACE_SECONDS`                                        | Node test host only: how long launches may finish after SIGTERM, 0 to 600                                                                                                                     | `60`                                                                                    |
 
 ## The golden snapshot pipeline
 

@@ -593,11 +593,12 @@
           "pattern": "^[A-Za-z0-9_-]+$"
         },
         "reviewKind": {
-          "description": "Which review the run was.",
+          "description": "Which review the run was. `implementer` is a turn of the Implementer (the factory deployment only, #752); a deployment without that capability never reports it.",
           "type": "string",
           "enum": [
             "diff",
-            "dynamic"
+            "dynamic",
+            "implementer"
           ]
         },
         "keyMode": {
@@ -708,7 +709,8 @@
           "type": "string",
           "enum": [
             "diff",
-            "dynamic"
+            "dynamic",
+            "implementer"
           ]
         },
         "keyMode": {

@@ -22,6 +22,7 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
+import type { ProductIdentity } from "@/product-identity/identity";
 import {
   isCurrentPage,
   navGroupsFor,
@@ -35,8 +36,14 @@ import {
 export const SIDEBAR_TOP_CLASS =
   "relative z-0 h-auto self-start group-data-[side=left]:border-r-0 group-data-[collapsible=offcanvas]:hidden";
 
-export function NavLinks({ pathname }: { pathname: string | null }) {
-  const groups = navGroupsFor(pathname, useCapabilities());
+export function NavLinks({
+  pathname,
+  product,
+}: {
+  pathname: string | null;
+  product: ProductIdentity;
+}) {
+  const groups = navGroupsFor(pathname, product, useCapabilities());
   if (groups.length === 0) return null;
   return (
     <SidebarContent>
@@ -89,7 +96,12 @@ function NavLink({
  * column. The `Sidebar` becomes the shadcn Sheet drawer on a narrow screen; a link or a page change
  * closes it.
  */
-export function CurrentWorkspaceSidebar() {
+export function CurrentWorkspaceSidebar({
+  product,
+}: {
+  /** The product whose words the links use. */
+  product: ProductIdentity;
+}) {
   const pathname = usePathname();
   const { setOpenMobile } = useSidebar();
   const capabilities = useCapabilities();
@@ -103,13 +115,13 @@ export function CurrentWorkspaceSidebar() {
     setOpenMobile(false);
   }, [pathname, setOpenMobile]);
 
-  if (navGroupsFor(pathname, capabilities).length === 0) return null;
+  if (navGroupsFor(pathname, product, capabilities).length === 0) return null;
   return (
     <>
       <SidebarShortcut />
       <Sidebar className={SIDEBAR_TOP_CLASS}>
         <nav aria-label="Main" className="flex min-h-0 flex-1 flex-col">
-          <NavLinks pathname={pathname} />
+          <NavLinks pathname={pathname} product={product} />
         </nav>
       </Sidebar>
     </>
@@ -121,10 +133,15 @@ export function CurrentWorkspaceSidebar() {
  * a page outside a workspace has no control that toggles nothing (the admin portal brings its own
  * trigger next to the admin sidebar).
  */
-export function WorkspaceSidebarTrigger() {
+export function WorkspaceSidebarTrigger({
+  product,
+}: {
+  /** The product whose places the sidebar lists. */
+  product: ProductIdentity;
+}) {
   const pathname = usePathname();
   const capabilities = useCapabilities();
-  if (navGroupsFor(pathname, capabilities).length === 0) return null;
+  if (navGroupsFor(pathname, product, capabilities).length === 0) return null;
   // A drawer on a narrow screen; a wide one shows the side column (Ctrl/Cmd+B still folds it away).
   return <SidebarTrigger className="size-11 md:hidden" />;
 }

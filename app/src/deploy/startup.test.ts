@@ -286,6 +286,47 @@ describe("checking the dispatch webhook settings when the server starts", () => 
     expect(exit).not.toHaveBeenCalled();
   });
 
+  // #747-T01
+  it("lets the factory start with implementer", async () => {
+    const { exit, log } = await run({
+      ...validEnv,
+      PRODUCT_ID: "factory",
+      PRODUCT_CAPABILITIES: "review,dynamic-review,implementer",
+    });
+
+    expect(exit).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  // #747-T02
+  it("stops the start for implementer with the full list on code-review.com, naming the variable and the capability", async () => {
+    const { exit, log } = await run({
+      ...validEnv,
+      PRODUCT_CAPABILITIES: "review,dynamic-review,billing,implementer",
+    });
+
+    expect(exit).toHaveBeenCalledWith(1);
+    const line = String(log.mock.calls[0]?.[0]);
+    expect(line).toContain("DEPLOY_CONFIG_INVALID");
+    expect(line).toContain("PRODUCT_CAPABILITIES");
+    expect(line).toContain('"implementer"');
+    expect(line).toContain("code-review-com does not allow");
+  });
+
+  // #747-T04
+  it("stops the start for implementer without dynamic-review on the factory", async () => {
+    const { exit, log } = await run({
+      ...validEnv,
+      PRODUCT_ID: "factory",
+      PRODUCT_CAPABILITIES: "review,implementer",
+    });
+
+    expect(exit).toHaveBeenCalledWith(1);
+    const line = String(log.mock.calls[0]?.[0]);
+    expect(line).toContain("PRODUCT_CAPABILITIES");
+    expect(line).toContain('"implementer" but not "dynamic-review"');
+  });
+
   // #740-T08
   it("warns when the product of the build and PRODUCT_ID of the running server disagree", async () => {
     const { exit, log, warn } = await run(

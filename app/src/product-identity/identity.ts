@@ -22,4 +22,12 @@ export type ProductIdentity = {
   readonly githubAppName: string;
   /** What the GitHub App says about itself in its settings on GitHub (#740). */
   readonly githubAppDescription: string;
+  /**
+   * What the area of the repositories is called (#757): the sidebar entry, the title and heading of its page, the root of the
+   * trail below it, and the sentences that send a person there. Code-review.com says "Projects", the factory "QA". The address
+   * of the area stays `/projects`; the word "project" inside the pages is not renamed.
+   */
+  readonly qaAreaName: string;
+  /** The same area inside a sentence, where code-review.com writes it in lowercase ("Open projects") and an acronym stays as it is. */
+  readonly qaAreaNameInSentence: string;
 };

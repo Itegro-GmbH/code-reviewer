@@ -5,6 +5,8 @@
 // gate and the access proxy in front, the real admin data routes behind them, and the real settings
 // service and secret store over a real Postgres database. Requests are real `Request` objects with cookies, the
 // way a browser sends them; nothing listens on a port.
+import { createCapabilitySet } from "../capabilities/capability.ts";
+import { PRODUCTS } from "../capabilities/products.ts";
 import { SECRET_NAMES } from "../admin/secret-names.ts";
 import { STRIPE_SECRET_NAMES } from "../secret-names/names.ts";
 import { WORKSPACE_LLM_KEY_NAMES } from "../llm/secret-names.ts";
@@ -204,6 +206,7 @@ export async function createAdminHarness(options: AdminHarnessOptions = {}) {
       const rateLimits = createRateLimitsRepository(db);
       const service = createGithubConfigService({
         product: getProductIdentity(),
+        capabilities: createCapabilitySet(PRODUCTS["code-review-com"].default),
         credentials,
         signedStates,
         rateLimits,

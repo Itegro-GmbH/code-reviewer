@@ -3,9 +3,10 @@
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { DispatcherAppFake } from "../../../fakes/dispatcher-app/server.ts";
+import { loadSettings } from "../config.ts";
 import { createApp } from "../dispatcher-app.ts";
 import { createBackgroundTracker } from "../test-support/background.ts";
-import type { ProbeResult } from "../core/types.ts";
+import type { Engine, ProbeResult } from "../core/types.ts";
 import { createFakeLauncher } from "../launchers/fake.ts";
 import {
   DISPATCHER_TOKEN,
@@ -146,6 +147,7 @@ describe("POST /probe", () => {
       ok: true,
       engines: ["pr-agent", "opencode"],
       reasons: [],
+      required: ["pr-agent", "opencode"],
       checkedAt: "2026-10-15T12:00:00.000Z",
     });
     expect(validReport()(report)).toBe(true);
@@ -236,6 +238,146 @@ describe("POST /probe", () => {
       failure: "probe_not_supported",
       ok: true,
     });
+  });
+});
+
+// #759: the engines a deployment serves come from `loadSettings`, so the tests start from the real configuration. A kind
+// this Launcher cannot launch yet is not a reason to refuse a deploy; one it advertises is proven like the others.
+describe("the engines of a Dispatcher that serves the implementer kind", () => {
+  const OPERATOR = "operator-token-for-the-tests-0000000001";
+  const FACTORY_TOKEN = "factory-dispatcher-token-for-tests-0001";
+  const FACTORY_SECRET = "factory-signing-secret-for-tests-000001";
+
+  function buildFromEnvironment(
+    extra: Record<string, string>,
+    launcherEngines: readonly Engine[] | undefined,
+    probe: ProbeResult,
+  ) {
+    const { core } = loadSettings({
+      RUNNER_API_URL: fake.url,
+      RUNNER_TOKEN: DISPATCHER_TOKEN,
+      DISPATCHER_MAX_RUNNING: "2",
+      DISPATCHER_SIGNING_KEY_ID: KEY_ID,
+      DISPATCHER_SIGNING_SECRET: SIGNING_SECRET,
+      DISPATCHER_APPS: JSON.stringify([
+        {
+          id: "factory",
+          url: "https://factory.example",
+          kinds: ["diff", "dynamic", "implementer"],
+          keyId: "factory-k1",
+          maxRunning: 2,
+        },
+      ]),
+      DISPATCHER_APP_FACTORY_TOKEN: FACTORY_TOKEN,
+      DISPATCHER_APP_FACTORY_SIGNING_SECRET: FACTORY_SECRET,
+      DISPATCHER_OPERATOR_TOKEN: OPERATOR,
+      ...extra,
+    });
+    const launcher = createFakeLauncher({
+      probe: () => Promise.resolve(probe),
+      ...(launcherEngines === undefined ? {} : { engines: launcherEngines }),
+    });
+    const app = createApp({
+      settings: core,
+      launcher,
+      logger: recordingLogger(),
+      background: createBackgroundTracker().run,
+      operatorToken: OPERATOR,
+      trigger: webhookTrigger({
+        keys: [{ kid: KEY_ID, secret: SIGNING_SECRET, appId: "reviewer" }],
+      }),
+    });
+    return { app, core };
+  }
+
+  const operator = { authorization: `Bearer ${OPERATOR}` };
+  const WITH_IMPLEMENTER: ProbeResult = {
+    ...PASSED,
+    engines: ["pr-agent", "opencode", "implementer"],
+  };
+
+  // #759-T20
+  it("answers 200 when the settings gained `implementer` from an app and the Launcher does not advertise it yet", async () => {
+    const { app, core } = buildFromEnvironment({}, undefined, PASSED);
+    expect(core.engines).toContain("implementer");
+
+    const response = await post(app, operator);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true });
+  });
+
+  // #759-T20
+  it("answers 200 when `implementer` is named in DISPATCHER_ENGINES and the Launcher does not advertise it yet", async () => {
+    const { app, core } = buildFromEnvironment(
+      { DISPATCHER_ENGINES: "pr-agent,opencode,implementer" },
+      undefined,
+      PASSED,
+    );
+    expect(core.engines).toContain("implementer");
+
+    const response = await post(app, operator);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true });
+  });
+
+  // #759-T20
+  it("still answers 503 when a reviewer engine is missing, with `implementer` in the settings", async () => {
+    const { app } = buildFromEnvironment({}, undefined, DENIED);
+
+    const response = await post(app, operator);
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ ok: false });
+  });
+
+  // #759-T20
+  it("requires `implementer` as soon as the Launcher advertises it, without a change of the route", async () => {
+    const advertised: Engine[] = ["pr-agent", "opencode", "implementer"];
+    const missing = buildFromEnvironment({}, advertised, PASSED);
+    const proven = buildFromEnvironment({}, advertised, WITH_IMPLEMENTER);
+
+    const refused = await post(missing.app, operator);
+    const accepted = await post(proven.app, operator);
+
+    expect(refused.status).toBe(503);
+    expect(await refused.json()).toMatchObject({
+      ok: false,
+      required: ["pr-agent", "opencode", "implementer"],
+    });
+    expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toMatchObject({ ok: true });
+  });
+
+  // #759-T20
+  it("requires the engines of the reviewer kinds even when the Launcher does not advertise them, with `implementer` in the settings", async () => {
+    // Only the engines of `diff` and `dynamic` are required unconditionally: what the Launcher advertises decides about the others.
+    const { app } = buildFromEnvironment({}, ["pr-agent"], {
+      ...PASSED,
+      engines: ["pr-agent"],
+    });
+
+    const response = await post(app, operator);
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      required: ["pr-agent", "opencode"],
+    });
+  });
+
+  // #759-T20
+  it("does not require `implementer` of a Diff-only deployment that names it nowhere", async () => {
+    const { app } = buildFromEnvironment(
+      { DISPATCHER_ENGINES: "pr-agent" },
+      undefined,
+      DENIED,
+    );
+
+    const response = await post(app, operator);
+
+    expect(response.status).toBe(200);
   });
 });
 

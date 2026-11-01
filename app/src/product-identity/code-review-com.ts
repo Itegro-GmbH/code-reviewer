@@ -17,4 +17,6 @@ export const CODE_REVIEW_COM: ProductIdentity = {
   checkName: "Code Reviewer",
   githubAppName: "Code Reviewer",
   githubAppDescription: `Automatic pull request reviews by ${NAME}.`,
+  qaAreaName: "Projects",
+  qaAreaNameInSentence: "projects",
 };

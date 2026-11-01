@@ -3,14 +3,16 @@
 "use client";
 // What an App that was imported or made by hand may lack: the repository permission "Checks" (the check run of
 // a review, #405), the account permission "Email addresses" (the verified primary email of a GitHub sign in) and
-// the organization permission "Members" (a person's role when an installation is bound to a workspace). The list is always shown; the button asks GitHub which of
+// the organization permission "Members" (a person's role when an installation is bound to a workspace), and, in a deployment
+// with the Implementer, Contents as read and write (#749). The list is always shown; the button asks GitHub which of
 // them this App really lacks. It sits behind the "Permissions GitHub granted" disclosure of the page.
 import { useState } from "react";
+import { useCapabilities } from "../../capabilities/context.tsx";
 import { Button } from "../../components/button.tsx";
 import { ProductName } from "../../components/brand.tsx";
 import { Alert, AlertDescription } from "../../components/ui/alert.tsx";
 import { browserGithubApi, type GithubApi } from "./api.ts";
-import { describeGithubFailure, PERMISSION_LABELS } from "./messages.ts";
+import { describeGithubFailure, permissionLabels } from "./messages.ts";
 import type { ProductIdentity } from "@/product-identity/identity.ts";
 
 type Outcome =
@@ -29,6 +31,15 @@ export function PermissionsCheck({
 }) {
   const [pending, setPending] = useState(false);
   const [outcome, setOutcome] = useState<Outcome>(null);
+  const capabilities = useCapabilities();
+  const labels = permissionLabels(capabilities);
+  // Only a deployment with the Implementer asks for Contents as write (#749): code-review.com lists nothing of it.
+  const listed = [
+    ...(capabilities.has("implementer") ? ["contents"] : []),
+    "checks",
+    "emails",
+    "members",
+  ];
 
   async function check() {
     setPending(true);
@@ -47,14 +58,18 @@ export function PermissionsCheck({
       <p className="text-sm text-muted-foreground">
         An App that was imported or made by hand may lack permissions that the
         one-click flow asks for. Without Checks, reviews run as before but the
-        pull request shows no check run. Add them in the App&apos;s settings on
-        GitHub (Permissions &amp; events), then accept the changed permissions
-        on each installation when GitHub asks:
+        pull request shows no check run
+        {capabilities.has("implementer")
+          ? ", and without write access to Contents the Implementer cannot push a branch"
+          : ""}
+        . Add them in the App&apos;s settings on GitHub (Permissions &amp;
+        events), then accept the changed permissions on each installation when
+        GitHub asks:
       </p>
       <ul className="list-disc pl-5 text-sm text-muted-foreground">
-        <li>{PERMISSION_LABELS.checks}</li>
-        <li>{PERMISSION_LABELS.emails}</li>
-        <li>{PERMISSION_LABELS.members}</li>
+        {listed.map((name) => (
+          <li key={name}>{labels[name]}</li>
+        ))}
       </ul>
       <div>
         <Button
@@ -80,7 +95,7 @@ export function PermissionsCheck({
               <p>The App lacks:</p>
               <ul className="list-disc pl-5">
                 {outcome.missing.map((name) => (
-                  <li key={name}>{PERMISSION_LABELS[name] ?? name}</li>
+                  <li key={name}>{labels[name] ?? name}</li>
                 ))}
               </ul>
             </AlertDescription>

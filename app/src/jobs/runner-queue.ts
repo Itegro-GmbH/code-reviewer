@@ -25,6 +25,7 @@ import type {
   Job,
   JobErrorCode,
   JobOutcome,
+  ReleaseOptions,
   ReleaseResult,
 } from "./job-types.ts";
 
@@ -75,7 +76,7 @@ export type RunnerQueue = {
     jobId: string,
     leaseToken: string,
     reason: string,
-    options?: { retryAt?: Date },
+    options?: ReleaseOptions,
   ): Promise<ReleaseResult>;
   /**
    * Cancels a claimed job (the project of its repository is off): running -> cancelled with

@@ -14,7 +14,9 @@ neither is a container image. The one container image of the project is the Work
 container per review job). It is built from the lockfile of the runner and carries both review
 engines: PR-Agent (Diff) and, for Dynamic Review, two prebuilt binaries, OpenCode and ripgrep; they
 are not copied into the repository but pinned by version, source commit and digest (see "OpenCode
-and ripgrep").
+and ripgrep"). For the Implementer it also carries the toolchain its agent builds repositories with:
+git, Node.js and pnpm pinned the same way, and uv, a compiler and a few Debian tools (see
+"Toolchain of the Worker image").
 
 The Worker image carries `LICENSE`, `NOTICE` and this file in `/licenses`; the image smoke test checks
 that they are there and identical to the files of the repository.
@@ -214,6 +216,87 @@ THE SOFTWARE.
 When a pinned version changes, check that the license text and the copyright line above still
 match the license shipped in the new release, and regenerate the OpenCode snapshot.
 
+## Toolchain of the Worker image (Implementer)
+
+The agent of the Implementer builds and tests repositories inside the Worker container, so the image
+carries a toolchain next to the engines. Three parts are named by an exact version, a source commit and
+SHA-256 digests in a pin file (`runner/git-pin.json`, `runner/node-pin.json`, `runner/pnpm-pin.json`);
+`runner/scripts/fetch_toolchain.py` accepts a download only when its size and digest equal the pin, before
+anything is unpacked. `make check-licenses` holds the pins to `license-policy.json` (the `binaries` list)
+exactly like OpenCode and ripgrep. The rest are Debian packages and one digest-pinned image. All of it is
+used unmodified and as separate programs that the agent starts as commands; none is linked into our code.
+
+### git
+
+- Package: git 2.53.0 (tag `v2.53.0`, pinned in `runner/git-pin.json`)
+- Source: https://github.com/git/git, source commit `67ad42147a7acc2af6074753ebd03d904476118f`. The image
+  builds the unmodified source tarball published on kernel.org (Debian bookworm ships git 2.39; the branch
+  guard of the Implementer needs 2.53 or newer, which shows a branch switch to its hook).
+- License: GPL-2.0-only. It is not on the allow list, so `license-policy.json` carries a documented
+  exception on the entry itself (`exception`): git is a separate program of the image that the agent runs
+  as a command, built unmodified and linked into none of our code, and the image is never handed to a third
+  party (code-review.com is a hosted service). The complete source is the pinned tarball, and the license
+  text travels with the image in `/usr/local/share/doc/git/COPYING`. It is built with `NO_OPENSSL=1` against the GnuTLS flavour of
+  libcurl (`libcurl3-gnutls`, LGPL-2.1-or-later, as Debian's own git does), so no program of git, not `git-imap-send`
+  and not the https helper, links OpenSSL 3 (Apache-2.0, incompatible with GPL-2.0-only), and the TLS of https is GnuTLS.
+  `libssh2`, which that libcurl loads for scp and sftp (as in Debian's own git), is a separate system library
+  that links OpenSSL itself; git does not use it. Parts of the source tree carry other open source
+  licenses (for example `xdiff` under LGPL-2.1-or-later); they belong to the same unmodified release and
+  are covered by the same review.
+
+### Node.js
+
+- Package: Node.js 24.22.2 (tag `v24.22.2`, pinned in `runner/node-pin.json`)
+- Source: https://github.com/nodejs/node, source commit `f7f273a9bb6445f6f7fb6349105e7532972045fb`
+- License: MIT. The glibc x64 release tarball of nodejs.org is used unmodified, minus `include/` and
+  `share/` (headers and documentation). The release bundles V8, ICU, OpenSSL and other components under
+  their own licenses; the `LICENSE` file of the release lists them all and travels with the image in
+  `/opt/node/LICENSE`. Its first lines read: "Node.js is licensed for use as follows" and "Copyright Node.js
+  contributors. All rights reserved."
+
+### pnpm
+
+- Package: pnpm 10.17.0 (tag `v10.17.0`, pinned in `runner/pnpm-pin.json`)
+- Source: https://github.com/pnpm/pnpm, source commit `1a1a272fa4f5be459430cad677ffce946c99cd86`. The npm
+  registry tarball is used unmodified; it is the version of the `packageManager` field of this repository.
+- License: MIT, which allows use in a proprietary product. The license file is in the image at
+  `/opt/pnpm/LICENSE`, and the notice and permission text are preserved below.
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2015-2016 Rico Sta. Cruz and other contributors
+Copyright (c) 2016-2025 Zoltan Kochan and other contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### uv and the Debian tools
+
+- uv 0.13.0 (Apache-2.0 OR MIT) comes from the digest-pinned image `ghcr.io/astral-sh/uv:0.13.0` that the
+  build stage already uses (`ARG UV_IMAGE` in `runner/Dockerfile`); the two executables `uv` and `uvx` are
+  copied unmodified. The MIT option is used.
+- `gcc`, `g++`, `make`, `libc6-dev` (GPL and LGPL, with the GCC runtime library exception), `jq` (MIT),
+  `unzip` (Info-ZIP) and `libcurl3-gnutls` (curl license, with GnuTLS under LGPL-2.1-or-later) are Debian's signed packages, installed with apt and,
+  like `tini` and `nftables`, not version-pinned. Their license texts are in `/usr/share/doc/<package>/copyright`
+  inside the image. They are separate programs; the image is never distributed.
+
 ## Adapted prompt text (Dynamic Review)
 
 The fixed core and the default review skill of Dynamic Review adapt text from other projects. The
@@ -375,6 +458,9 @@ packages inside OpenCode (`runner/opencode-bundled-licenses.json`, reviewed 2026
 | ---------- | ------- | ------- | ---------------------------------------- | -------------------------- |
 | `opencode` | 1.19.0  | MIT     | 733b2c627e5aec39cb33cc22373bdce33053ef2c | `runner/opencode-pin.json` |
 | `ripgrep`  | 14.1.1  | MIT     | 4649aa9700619f94cf9c66876e9549d83420e16c | `runner/ripgrep-pin.json`  |
+| `git`      | 2.53.0  | GPL-2.0-only | 67ad42147a7acc2af6074753ebd03d904476118f | `runner/git-pin.json` |
+| `node`     | 24.22.2 | MIT     | f7f273a9bb6445f6f7fb6349105e7532972045fb | `runner/node-pin.json`     |
+| `pnpm`     | 10.17.0 | MIT     | 1a1a272fa4f5be459430cad677ffce946c99cd86 | `runner/pnpm-pin.json`     |
 
 #### Exceptions
 

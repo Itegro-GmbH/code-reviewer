@@ -4,7 +4,11 @@
 // with 413 before it is parsed), then JSON. A refusal is the finished response; it never repeats the body.
 import "server-only";
 import { readLimitedBody } from "../webhooks/limited-body.ts";
-import { RUNNER_MAX_BODY_BYTES } from "./contract.ts";
+import type { Job } from "../jobs/job-types.ts";
+import {
+  IMPLEMENTER_MAX_BODY_BYTES,
+  RUNNER_MAX_BODY_BYTES,
+} from "./contract.ts";
 import { errorResponse } from "./responses.ts";
 
 export type Body =
@@ -19,8 +23,19 @@ function invalidBody(): Body {
   };
 }
 
-export async function readJsonBody(request: Request): Promise<Body> {
-  const body = await readLimitedBody(request, RUNNER_MAX_BODY_BYTES);
+/** `maxBytes`: the limit of this request; the one every kind has unless the caller knows the job is a turn of the Implementer (#754). */
+/** The limit of the report of `job` (#754): larger for a turn of the Implementer, the usual one for every other kind and for no job. */
+export function bodyLimitFor(job: Pick<Job, "reviewKind"> | undefined): number {
+  return job?.reviewKind === "implementer"
+    ? IMPLEMENTER_MAX_BODY_BYTES
+    : RUNNER_MAX_BODY_BYTES;
+}
+
+export async function readJsonBody(
+  request: Request,
+  maxBytes: number = RUNNER_MAX_BODY_BYTES,
+): Promise<Body> {
+  const body = await readLimitedBody(request, maxBytes);
   if (!body.ok)
     return { ok: false, response: errorResponse(413, "RUNNER_BODY_TOO_LARGE") };
   try {

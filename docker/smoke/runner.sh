@@ -11,7 +11,11 @@
 # formed failure result without a secret in it); that the engine is the pinned one, runs as its own user, and that
 # the startup self-check advertises `opencode` exactly when it should (#202). The entry modes are proven with the
 # flags of the hardened container spec (#324): `probe` prints a JSON verdict, `worker-once` runs one job against the
-# fake App (Node) and `worker-reap` is on the PATH; the image carries no Dispatcher bundle.
+# fake App (Node) and `worker-reap` is on the PATH; the image carries no Dispatcher bundle. The toolchain of the
+# Implementer's agent (#761) is proven here too: git 2.53 or newer, Node.js, pnpm, Python, uv, a compiler, jq and
+# unzip at the pinned versions, the guard hook root-owned with no hooksPath baked in, the guard matrix passing as
+# the engine user in the production layout, and the size of the image against the budget of the shared image. A real
+# Dynamic review runs in the image with the production flags against fakes of GitHub, the App and the model.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -525,6 +529,14 @@ step "worker-once with the production flags runs one job against the fake App"
 python3 -B "$here/worker_once_fake_app.py" "$image" "${dynamic_caps[@]}" "${dynamic_rootfs[@]}" "${dynamic_env[@]}" ||
   fail "worker-once with the production flags did not run the job as expected"
 
+# #761 (review of #777): the canary and the steps above call `POST /probe` or run a stand-in job process; this one runs a
+# real Dynamic review in the image with the production flags: the Worker claims it, prepares the pull request from a
+# real Git repository over smart HTTP, starts the pinned OpenCode as its engine user behind the network rules, and publishes the review. The
+# fakes share the Worker's loopback (the runner takes plain http for loopback only), see dynamic_job_fakes.py.
+step "worker-once with the production flags runs a real Dynamic review: engine, preparation and publication"
+python3 -B "$here/dynamic_job_fakes.py" "$image" "${dynamic_caps[@]}" "${dynamic_rootfs[@]}" "${dynamic_env[@]}" ||
+  fail "a Dynamic review did not run in the image"
+
 step "the startup of the Worker leaves the verdict in a root-only file on the /run tmpfs"
 start_worker smoke-worker-engines-file "${dynamic_caps[@]}" "${dynamic_rootfs[@]}" "${dynamic_env[@]}"
 wait_for_file smoke-worker-engines-file /run/code-reviewer-engines.json 90
@@ -540,11 +552,128 @@ step "worker-reap in the hardened container finds nothing of the engine user to 
 docker run --rm --network none "${dynamic_caps[@]}" "${dynamic_rootfs[@]}" "${dynamic_env[@]}" \
   --entrypoint worker-reap "$image" || fail "worker-reap failed in the hardened container"
 
-# #324-T09: the Worker image carries nothing of a Dispatcher.
-step "the image carries no Dispatcher bundle and no Node.js"
-scan_in_image "$image" "0" sh -c 'for path in /opt/code-reviewer/dispatcher /usr/local/bin/node /usr/bin/node /usr/bin/nodejs; do [ ! -e "$path" ] || echo "$path"; done'
-[ -z "$SCAN_OUTPUT" ] || fail "the image holds parts of a Dispatcher:
+# #324-T09: the Worker image carries nothing of a Dispatcher. Node.js is there since #761, as the pinned
+# toolchain of the agent (checked below); only a Dispatcher bundle and a Node.js from the distribution are not.
+step "the image carries no Dispatcher bundle and no Node.js other than the pinned one"
+scan_in_image "$image" "0" sh -c 'for path in /opt/code-reviewer/dispatcher /usr/bin/node /usr/bin/nodejs; do [ ! -e "$path" ] || echo "$path"; done'
+[ -z "$SCAN_OUTPUT" ] || fail "the image holds parts of a Dispatcher or a distribution Node.js:
 $SCAN_OUTPUT"
+
+# ---- #761: the toolchain of the Implementer's agent ----------------------------------------------------
+git_pin="$repo_root/runner/git-pin.json"
+node_pin="$repo_root/runner/node-pin.json"
+pnpm_pin="$repo_root/runner/pnpm-pin.json"
+
+# One command as the engine user, offline, with a writable HOME: <command> [args...]
+as_engine() {
+  docker run --rm --network none --user 10101:10101 --env HOME=/tmp --env NO_COLOR=1 --entrypoint "$1" "$image" "${@:2}"
+}
+
+# #761-T01
+step "git is the pinned release, 2.53 or newer, and the only git of the image"
+git_pinned=$(pin_value "$git_pin" version)
+git_reported=$(as_engine git --version) || fail "git --version failed as the engine user"
+[ "$git_reported" = "git version $git_pinned" ] || fail "git reports '$git_reported', the pin says '$git_pinned'"
+[ "$(printf '%s\n%s\n' 2.53.0 "$git_pinned" | sort -V | head -n 1)" = 2.53.0 ] || fail "the pinned git $git_pinned is older than 2.53.0"
+git_paths=$(in_image "$image" sh -c 'command -v git; ls /usr/bin/git 2>/dev/null; ls /usr/local/libexec/git-core/git-remote-https') || fail "git or its https helper is missing"
+[ "$git_paths" = "$(printf '/usr/local/bin/git\n/usr/local/libexec/git-core/git-remote-https')" ] ||
+  fail "unexpected git files (a distribution git, or no https helper):
+$git_paths"
+printf '    %s\n' "$git_reported"
+
+# #761-T07: git is GPL-2.0-only, so OpenSSL 3 (Apache-2.0) must not be linked into a program of it. NO_OPENSSL keeps it out
+# of `git-imap-send` itself, and the GnuTLS flavour of libcurl takes it out of the TLS of the https helper. What is left is
+# libssh2 (scp and sftp inside libcurl, which Debian's own git has too) with its own link to libcrypto: a separate
+# library of the system, not a link of git. So the direct dependencies of git's programs and the TLS of libcurl are judged.
+step "no program of git links OpenSSL directly, and https goes through the GnuTLS libcurl"
+needed=$(in_image "$image" sh -c 'for f in /usr/local/bin/git /usr/local/libexec/git-core/git-imap-send /usr/local/libexec/git-core/git-remote-https /lib/x86_64-linux-gnu/libcurl-gnutls.so.4; do readelf -d "$f"; done | grep NEEDED')
+if grep -Eq 'libssl|libcrypto' <<<"$needed"; then
+  fail "a program of git or its libcurl needs OpenSSL:
+$(grep -E 'libssl|libcrypto' <<<"$needed")"
+fi
+grep -q 'libgnutls\.so' <<<"$needed" || fail "the libcurl of git does not use GnuTLS"
+grep -q 'libcurl-gnutls\.so' <<<"$needed" || fail "git's https helper does not use the GnuTLS libcurl"
+
+# #761-T02
+step "node, pnpm, python3, uv, gcc, make, jq and unzip are there at the pinned versions"
+node_pinned=$(pin_value "$node_pin" version)
+[ "$(as_engine node --version)" = "v$node_pinned" ] || fail "node does not report v$node_pinned"
+[ "$(as_engine node -e 'process.stdout.write(String(1 + 1))')" = 2 ] || fail "node does not run a script"
+[ "$(as_engine pnpm --version)" = "$(pin_value "$pnpm_pin" version)" ] || fail "pnpm does not report the pinned version"
+as_engine npm --version >/dev/null || fail "npm does not run"
+[[ "$(as_engine python3 --version)" == "Python $(sed -n 's/^\([0-9]*\.[0-9]*\).*/\1/p' "$repo_root/runner/.python-version" | head -n 1)."* ]] ||
+  fail "python3 is not the Python of .python-version"
+uv_pinned=$(sed -n 's/^ARG UV_IMAGE=ghcr.io\/astral-sh\/uv:\([0-9.]*\)@.*/\1/p' "$repo_root/runner/Dockerfile")
+[ "$(as_engine uv --version | cut -d ' ' -f 1,2)" = "uv $uv_pinned" ] || fail "uv does not report $uv_pinned"
+for tool in gcc g++ make jq; do
+  as_engine "$tool" --version >/dev/null || fail "$tool does not run as the engine user"
+done
+as_engine unzip -v >/dev/null || fail "unzip does not run as the engine user"
+printf 'int main(void) { return 0; }\n' |
+  docker run --rm -i --network none --user 10101:10101 --env HOME=/tmp --entrypoint gcc "$image" -x c - -o /dev/null ||
+  fail "gcc cannot compile and link a program as the engine user"
+printf '    node v%s, pnpm %s, uv %s\n' "$node_pinned" "$(pin_value "$pnpm_pin" version)" "$uv_pinned"
+
+# #761-T02: the files the build verified against the pins are the files that are in the image, and nobody but
+# root can change them.
+step "the Node.js and pnpm files in the image are the pinned ones, owned by root and not writable by others"
+node_sha=$(in_image "$image" sha256sum /opt/node/bin/node | cut -d ' ' -f 1)
+[ "$node_sha" = "$(pin_value "$node_pin" platforms linux-x64 executableSha256)" ] || fail "/opt/node/bin/node is not the pinned executable"
+pnpm_sha=$(in_image "$image" sha256sum /opt/pnpm/dist/pnpm.cjs | cut -d ' ' -f 1)
+[ "$pnpm_sha" = "$(pin_value "$pnpm_pin" platforms linux-x64 executableSha256)" ] || fail "/opt/pnpm/dist/pnpm.cjs is not the pinned bundle"
+scan_in_image "$image" "0" find /opt/node /opt/pnpm /usr/local/libexec/git-core /usr/local/bin /opt/code-reviewer \
+  \( ! -user root -o -perm /022 \) ! -type l -print
+[ -z "$SCAN_OUTPUT" ] || fail "toolchain files that are not root-owned or are writable by others:
+$SCAN_OUTPUT"
+
+# #761-T03
+step "the guard hook is root-owned, mode 0755, not writable by the engine user, and no hooksPath is baked in"
+facts=$(in_image "$image" stat -c '%n %u:%g %a' /opt/code-reviewer/guard /opt/code-reviewer/guard/reference-transaction /opt/code-reviewer/guard/guard_matrix.sh)
+[ "$facts" = "$(printf '/opt/code-reviewer/guard 0:0 755\n/opt/code-reviewer/guard/reference-transaction 0:0 755\n/opt/code-reviewer/guard/guard_matrix.sh 0:0 755')" ] ||
+  fail "unexpected owner or mode of the guard files:
+$facts"
+as_engine sh -c 'test ! -w /opt/code-reviewer/guard && test ! -w /opt/code-reviewer/guard/reference-transaction && ! touch /opt/code-reviewer/guard/x 2>/dev/null' ||
+  fail "the engine user can write the guard directory or hook"
+for user in 0 10101; do
+  scope=$(docker run --rm --user "$user" --env HOME=/tmp --entrypoint git "$image" config --list --show-origin 2>/dev/null || true)
+  [[ "$scope" != *hooksPath* ]] || fail "core.hooksPath is configured in the image for user $user:
+$scope"
+done
+configs=$(in_image "$image" sh -c 'ls /etc/gitconfig /usr/local/etc/gitconfig /root/.gitconfig /root/.config/git/config /home/runner/.gitconfig 2>/dev/null || true')
+[ -z "$configs" ] || fail "the image bakes in a git configuration file:
+$configs"
+
+# #761-T04: the matrix as the engine user, in the production layout (read-only root, noexec tmpfs, no capability).
+step "the guard matrix passes as the engine user in the production layout"
+matrix_out=$(docker run --rm --network none --user 10101:10101 --cap-drop ALL --security-opt no-new-privileges:true \
+  "${dynamic_rootfs[@]}" --env HOME=/tmp --entrypoint /opt/code-reviewer/guard/guard_matrix.sh "$image") ||
+  fail "the guard matrix failed in the image:
+$matrix_out"
+matrix_line=$(printf '%s\n' "$matrix_out" | grep -E '^guard matrix: ') || fail "the guard matrix printed no verdict"
+[[ "$matrix_line" =~ ^guard\ matrix:\ ([0-9]+)\ passed,\ 0\ failed ]] || fail "the guard matrix has failures: $matrix_line"
+[ "${BASH_REMATCH[1]}" -ge 28 ] || fail "the guard matrix ran only ${BASH_REMATCH[1]} actions"
+printf '    %s\n' "$matrix_line"
+# A matrix that cannot find the hook says so and fails (exit status 2); it never passes quietly.
+status=0
+docker run --rm --network none --user 10101:10101 --env HOME=/tmp --env GUARD_DIR=/nonexistent \
+  --entrypoint /opt/code-reviewer/guard/guard_matrix.sh "$image" >/dev/null 2>&1 || status=$?
+[ "$status" -eq 2 ] || fail "the guard matrix without a hook ended with status $status, expected 2"
+
+# #761-T05: the image serves every kind of job, so the reviewer pays for what the Implementer needs. The growth is
+# the sum of the layers above the layer of the pin files (the toolchain layer and what follows it), in bytes as
+# `docker history` reports them (uncompressed). It is measured inside this one image, so it is the same under every
+# image store and needs no baseline from another build. Above the budget the PR must propose a per-kind image.
+GROWTH_BUDGET_BYTES=600000000
+step "the toolchain layer grew the image by less than the budget of the shared Worker image"
+history=$(docker history --human=false --no-trunc --format '{{.Size}} {{.CreatedBy}}' "$image")
+image_bytes=$(printf '%s\n' "$history" | awk '{ total += $1 } END { printf "%d", total }')
+growth=$(printf '%s\n' "$history" | awk '/ripgrep-pin.json \/opt\/code-reviewer\/pins/ { exit } { total += $1 } END { printf "%d", total }')
+printf '%s\n' "$history" | awk '$1 > 1000000 { printf "    %6d MB  %s\n", $1 / 1000000, substr($0, index($0, " ") + 1, 90) }'
+printf '    image %d MB (layers), the layers above the pins layer add %d MB, budget %d MB\n' \
+  $((image_bytes / 1000000)) $((growth / 1000000)) $((GROWTH_BUDGET_BYTES / 1000000))
+[ "$growth" -gt 100000000 ] || fail "the growth of $((growth / 1000000)) MB is implausibly small: is the pins layer still there?"
+[ "$growth" -le "$GROWTH_BUDGET_BYTES" ] ||
+  fail "the toolchain layer added $((growth / 1000000)) MB, above the budget of $((GROWTH_BUDGET_BYTES / 1000000)) MB: propose a per-kind image"
 
 step "the image is labelled as the Worker image"
 title=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.title"}}' "$image")

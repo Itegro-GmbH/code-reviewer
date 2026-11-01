@@ -7,6 +7,7 @@
 // later shows up too. Everything in a run that came from outside (the project name, the login) is
 // rendered as text and truncated instead of widening the page.
 import { useProductIdentity } from "../../product-identity/context.tsx";
+import type { ProductIdentity } from "../../product-identity/identity.ts";
 import Link from "next/link";
 import { useMemo } from "react";
 import { Button } from "../../components/button.tsx";
@@ -27,14 +28,21 @@ import {
   TableHeader,
   TableRow,
 } from "../../components/ui/table.tsx";
-import { KIND_NAMES } from "../../review-settings/kind-names.ts";
+import {
+  JOB_KIND_NAMES,
+  KIND_NAMES,
+} from "../../review-settings/kind-names.ts";
 import { formatUtc } from "../../ui/format-time.ts";
 import { useLiveSnapshot } from "../../ui/use-live-snapshot.ts";
 import { workspacePath } from "../../workspaces/paths.ts";
 import { RunPriceText } from "../../workspace-billing/ui/run-price.tsx";
 import { formatDuration } from "../run-duration.ts";
 import { isSettled } from "../run-status.ts";
-import type { RunRowView, RunsSnapshot } from "../run-view.ts";
+import type {
+  ImplementerRowView,
+  RunRowView,
+  RunsSnapshot,
+} from "../run-view.ts";
 import {
   browserRunsApi,
   RUNS_POLL,
@@ -74,6 +82,26 @@ function DurationLine({ run }: { run: RunRowView }) {
   );
 }
 
+/** The branch of a task under the repository: a link when there is one, always text from outside rendered as text. */
+function TaskBranch({ branch }: { branch: ImplementerRowView }) {
+  if (branch.branch === null) return null;
+  return branch.branchUrl === null ? (
+    <span className="block truncate text-xs text-muted-foreground">
+      {branch.branch}
+    </span>
+  ) : (
+    <a
+      href={branch.branchUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      title={branch.branch}
+      className="block truncate text-xs text-foreground"
+    >
+      {branch.branch}
+    </a>
+  );
+}
+
 function RunTableRow({
   run,
   workspaceSlug,
@@ -89,16 +117,28 @@ function RunTableRow({
       <TableCell className="min-w-0 align-top whitespace-normal">
         <Link
           href={runPath(workspaceSlug, run.id)}
-          // The project name alone repeats for every run of a repository; the PR number makes the
-          // link name of a row unique in a screen reader's link list.
-          aria-label={`${run.project} #${String(run.prNumber)}`}
+          // The project name alone repeats for every run of a repository; the PR number (the branch of a task)
+          // makes the link name of a row unique in a screen reader's link list.
+          aria-label={
+            run.implementer === undefined
+              ? `${run.project} #${String(run.prNumber)}`
+              : `${run.project} ${run.implementer.branch ?? ""}`.trim()
+          }
           className="block truncate font-semibold text-foreground no-underline"
         >
           {run.project}
         </Link>
+        {run.implementer === undefined ? null : (
+          <TaskBranch branch={run.implementer} />
+        )}
       </TableCell>
       <TableCell className="align-top whitespace-normal">
-        {run.prUrl !== null ? (
+        {run.implementer !== undefined ? (
+          // A task is on a branch, not on a pull request.
+          <span className="text-muted-foreground" aria-hidden="true">
+            —
+          </span>
+        ) : run.prUrl !== null ? (
           <a
             href={run.prUrl}
             target="_blank"
@@ -112,7 +152,11 @@ function RunTableRow({
         )}
       </TableCell>
       <TableCell className="align-top whitespace-normal">
-        <code className="font-mono text-xs">/{run.command}</code>
+        {run.implementer !== undefined ? (
+          <Badge variant="info">{JOB_KIND_NAMES.implementer}</Badge>
+        ) : (
+          <code className="font-mono text-xs">/{run.command}</code>
+        )}
         {run.reviewKind === "dynamic" ? (
           // Diff Review is the default and stays unmarked; the kind that is not is told by its name.
           <Badge variant="info" className="ml-2">
@@ -150,9 +194,11 @@ function RunTableRow({
 }
 
 export function RunsEmptyState({
+  product,
   filtered,
   workspaceSlug,
 }: {
+  product: ProductIdentity;
   filtered: boolean;
   workspaceSlug: string;
 }) {
@@ -190,7 +236,7 @@ export function RunsEmptyState({
       <EmptyContent>
         <Button asChild variant="primary">
           <Link href={workspacePath(workspaceSlug, "/projects")}>
-            Open projects
+            Open {product.qaAreaNameInSentence}
           </Link>
         </Button>
       </EmptyContent>
@@ -238,7 +284,11 @@ export function RunsList({
           : ""}
       </StatusRegion>
       {data.runs.length === 0 ? (
-        <RunsEmptyState filtered={filtered} workspaceSlug={workspaceSlug} />
+        <RunsEmptyState
+          product={product}
+          filtered={filtered}
+          workspaceSlug={workspaceSlug}
+        />
       ) : (
         <Table aria-label="Runs" className="table-fixed">
           <TableHeader>

@@ -22,7 +22,11 @@ import {
 import { databaseDriver } from "../driver.ts";
 import type { Database, JobsTable } from "../schema.ts";
 import { createUsageRecordsRepository } from "./usage-records-repository.ts";
-import type { ProjectReviewKind } from "../../job-kind/job-kind.ts";
+import {
+  jobKindOf,
+  projectKindOf,
+  type JobKind,
+} from "../../job-kind/job-kind.ts";
 import { readEffectiveEntitlements } from "../../workspaces/effective-entitlements.ts";
 import { keyModeAtClaim } from "../../billing/claim-key-mode.ts";
 import type { KeyMode } from "../../workspaces/entitlements.ts";
@@ -36,6 +40,8 @@ export type ClaimRefusal = {
   prNumber: number;
   /** What started the job (`webhook` is an automatic review), for the notice on a draft (#281). */
   triggerKind: string;
+  /** The kind of the job: a turn of the Implementer has no pull request, so no notice and no check run (#752). */
+  reviewKind: JobKind;
   errorCode: string;
   detail?: string;
   /**
@@ -87,7 +93,8 @@ export async function admitClaimedJob(
     };
   const ignoredCostLimit = ignoresCostLimit(entitlements);
 
-  const reviewKind = job.review_kind as ProjectReviewKind;
+  // #752: a turn counts against the plan, is priced and chooses its model as a Dynamic Review; its record keeps its own kind.
+  const reviewKind = projectKindOf(jobKindOf(job.review_kind));
   // A limit that applies to this job is the only reason to count and to lock; a suspension needs neither.
   if (
     readsUsage(entitlements, reviewKind, options) &&
@@ -103,7 +110,7 @@ export async function admitClaimedJob(
       const counted = (await records.countByKind(since))[kind];
       const ownCounts =
         own !== undefined &&
-        own.reviewKind === kind &&
+        projectKindOf(own.reviewKind) === kind &&
         own.state !== "void" &&
         own.reservedAt >= since;
       return ownCounts ? counted - 1 : counted;

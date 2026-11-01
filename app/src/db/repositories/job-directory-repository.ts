@@ -15,7 +15,7 @@ import {
   decodeReviewKind,
   toJob,
 } from "./jobs-repository.ts";
-import type { ProjectReviewKind } from "../../job-kind/job-kind.ts";
+import type { JobKind } from "../../job-kind/job-kind.ts";
 import type { JobStatus } from "../job-status.ts";
 import { NOT_DELETED } from "./workspaces-repository.ts";
 
@@ -26,7 +26,7 @@ export type DirectoryRunRow = {
   workspaceName: string;
   project: string;
   prNumber: number;
-  reviewKind: ProjectReviewKind;
+  reviewKind: JobKind;
   status: JobStatus;
   createdAt: string;
   claimedAt: string | null;

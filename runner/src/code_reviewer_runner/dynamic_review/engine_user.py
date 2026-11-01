@@ -164,6 +164,9 @@ class EngineLaunch:
     # The ports of the single Dynamic slot, which the static network rules allow (#244).
     proxy_port: int = DEFAULT_PROXY_PORT
     engine_port: int = DEFAULT_ENGINE_PORT
+    # The loopback port of the Implementer's egress proxy (#763), which the rules also allow; the
+    # probe proves it reachable. None for a Dynamic job.
+    egress_port: int | None = None
     # Which ruleset startup installed (#345); the fallback one does not see IPv6, so a job in that
     # mode proves IPv6 off again before its engine starts.
     egress_mode: EgressMode = EgressMode.FULL
@@ -183,10 +186,15 @@ class EngineLaunch:
         engine reads it but cannot rewrite or chmod it, and no other user of the container can
         read it either (#202: config readability).
         """
-        path = self.config_dir / "opencode.json"
+        return self.write_file("opencode.json", json.dumps(config))
+
+    def write_file(self, name: str, text: str) -> Path:
+        """Write another file of the runner's for the engine (the Implementer's instruction file,
+        #764) with the same ownership and mode as the config: the engine reads it, nobody else."""
+        path = self.config_dir / name
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(json.dumps(config))
+            stream.write(text)
             os.fchown(stream.fileno(), self.config_owner, self.gid)
             os.fchmod(stream.fileno(), 0o440)
         return path
@@ -199,7 +207,8 @@ class EngineLaunch:
         use are the ones the rules allow, that this process really holds neither `NET_ADMIN` nor
         `SETPCAP` and that the probe, run as the engine user, reaches the proxy and nothing else.
         With the fallback ruleset (#345) it also proves that IPv6, which that ruleset does not
-        see, is off.
+        see, is off. In an Implementer container (`egress_port` set) the egress proxy, which must
+        already listen, is probed as reachable too (#763).
 
         The first call also ends whatever the user still runs: a job process that was killed
         without a chance to clean up (SIGKILL, an OOM kill) leaves its engine behind, and the
@@ -211,7 +220,12 @@ class EngineLaunch:
             raise IsolationError("a process of the engine user from an earlier job cannot be ended")
         require_startup_capabilities_gone()
         if not self._verified:
-            verify_confinement(self.uid, self.gid, proxy_port)
+            verify_confinement(
+                self.uid,
+                self.gid,
+                proxy_port,
+                *(() if self.egress_port is None else (self.egress_port,)),
+            )
             if self.egress_mode is EgressMode.FALLBACK:
                 verify_ipv6_off(self.uid, self.gid)
             self._verified = True

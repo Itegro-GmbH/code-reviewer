@@ -2,19 +2,32 @@
 
 // POST /probe (#331): forces the capability probe and answers its report (`ProbeReport`,
 // contracts/probe-verdict.v1.json). For a deploy step that must block a release whose Dynamic canary fails: 200
-// when every engine this deployment is configured to serve is advertised, 503 with the same body when one is not.
+// when every engine this deployment is configured to serve is advertised, 503 with the same body when one is not. The
+// engines of the reviewer kinds are always required. `implementer` (#759) is required only once the Launcher advertises it
+// (`capabilities`): a Dispatcher that is configured to serve the kind but cannot launch it yet must not fail the canary of
+// the release that introduces it, and the day the Launcher advertises it the canary has to prove it, with no change here.
 // The caller needs the operator credential (`Authorization: Bearer <DISPATCHER_OPERATOR_TOKEN>`; while that is unset, the
 // token of the app `reviewer`, #730), checked before anything is started: a refused call creates no VM, and no other app's
 // credential opens it. Every refusal looks the same. The report holds engines, stable
 // reasons and a stable code; no text of the container, the platform or an error.
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { Context, Hono } from "hono";
-import type { Engine, Launcher, Logger, ProbeResult } from "../core/types.ts";
+import {
+  ENGINE_BY_KIND,
+  REVIEWER_KINDS,
+  type Engine,
+  type Launcher,
+  type Logger,
+  type ProbeResult,
+} from "../core/types.ts";
 
 export type ProbeRouteOptions = {
   /** The credential of the route: `DISPATCHER_OPERATOR_TOKEN`, else (rollout) the token of `reviewer`. Absent: nobody. */
   token: string | undefined;
-  /** The engines this deployment is configured to serve; the report is `ok` when the Launcher advertises all of them. */
+  /**
+   * The engines this deployment is configured to serve; the report is `ok` when the probe advertises all of them, except
+   * an engine of no reviewer kind (`implementer`) that the Launcher itself does not advertise yet.
+   */
   engines: readonly Engine[];
   launcher: Launcher;
   logger: Logger;
@@ -70,6 +83,19 @@ export function mountProbeRoute(app: Hono, options: ProbeRouteOptions): void {
     }
   }
 
+  /** The configured engines the probe has to prove: those of the reviewer kinds, and the others once the Launcher can launch them. */
+  async function required(): Promise<Engine[]> {
+    const reviewing = REVIEWER_KINDS.map((kind) => ENGINE_BY_KIND[kind]);
+    const later = options.engines.filter(
+      (engine) => !reviewing.includes(engine),
+    );
+    if (later.length === 0) return [...options.engines];
+    const launchable = await advertised();
+    return options.engines.filter(
+      (engine) => reviewing.includes(engine) || launchable.includes(engine),
+    );
+  }
+
   async function run(): Promise<ProbeResult> {
     const checkedAt = now().toISOString();
     if (launcher.probe === undefined)
@@ -101,9 +127,8 @@ export function mountProbeRoute(app: Hono, options: ProbeRouteOptions): void {
       return refuse(c);
     }
     const result = await run();
-    const ok = options.engines.every((engine) =>
-      result.engines.includes(engine),
-    );
+    const needed = await required();
+    const ok = needed.every((engine) => result.engines.includes(engine));
     logger.info("probe_requested", { status: result.status, ok });
     c.header("cache-control", "no-store");
     const imageDigest = IMAGE_ID.test(options.imageDigest ?? "")
@@ -113,7 +138,14 @@ export function mountProbeRoute(app: Hono, options: ProbeRouteOptions): void {
       ? { snapshotId: options.snapshotId }
       : {};
     return c.json(
-      { version: 1, ok, ...result, ...imageDigest, ...snapshotId },
+      {
+        version: 1,
+        ok,
+        ...result,
+        required: needed,
+        ...imageDigest,
+        ...snapshotId,
+      },
       ok ? 200 : 503,
     );
   });

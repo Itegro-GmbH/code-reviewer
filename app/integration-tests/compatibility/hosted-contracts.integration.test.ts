@@ -97,6 +97,7 @@ describe("the examples", () => {
       "DispatchWebhook",
     ]);
     expect(names("examples/worker-container")).toStrictEqual([
+      "ImplementerContainerSpec",
       "WorkerContainerLauncherAdditions",
       "WorkerContainerOverrides",
       "WorkerContainerSpec",
@@ -315,50 +316,141 @@ describe("a reader and an additive field", () => {
 });
 
 describe("the hardened container spec", () => {
-  function spec(): Record<string, unknown> {
-    return example("examples/worker-container", "WorkerContainerSpec");
+  function spec(definition = "WorkerContainerSpec"): Record<string, unknown> {
+    return example("examples/worker-container", definition);
   }
 
-  // #318-T05
+  // #318-T05, #760-T01: the same refusals for every profile
+  describe.each(["WorkerContainerSpec", "ImplementerContainerSpec"])(
+    "%s",
+    (definition) => {
+      it.each([
+        ["privileged", { privileged: true }],
+        [
+          "a bind of the Docker socket",
+          { binds: ["/var/run/docker.sock:/var/run/docker.sock"] },
+        ],
+        ["a volume", { volumes: ["/data:/data"] }],
+        ["a device", { devices: ["/dev/kvm"] }],
+        ["host network (key)", { networkMode: "host" }],
+        ["host network (value)", { network: { mode: "host" } }],
+        ["the host pid namespace", { pid: "host" }],
+        ["the host ipc namespace", { ipc: "host" }],
+        [
+          "an unconfined seccomp profile",
+          { securityOpt: ["no-new-privileges:true", "seccomp=unconfined"] },
+        ],
+        [
+          "an unconfined apparmor profile",
+          { securityOpt: ["no-new-privileges:true", "apparmor=unconfined"] },
+        ],
+        ["no no-new-privileges", { securityOpt: [] }],
+        ["a writable root", { readOnly: false }],
+        ["another user", { user: "10001:10001" }],
+        ["not dropping all capabilities", { capDrop: ["NET_RAW"] }],
+        [
+          "a capability outside the list",
+          { capAdd: [{ name: "SYS_ADMIN", startupOnly: false }] },
+        ],
+        [
+          "a secret in the environment names",
+          { allowedEnvironment: ["RUNNER_TOKEN"] },
+        ],
+        [
+          "a credential environment name",
+          { allowedEnvironment: ["WORKER_CREDENTIAL"] },
+        ],
+        ["an unknown key", { somethingNew: 1 }],
+      ])("is refused with %s", (_name, change) => {
+        expectInvalid(container, definition, {
+          ...spec(definition),
+          ...change,
+        });
+      });
+    },
+  );
+
+  // #760-T01
+  it("accepts the implementer profile, which differs from the default spec in the work volume, the memory, the pids limit and the environment names only", () => {
+    const base = spec();
+    const profile = spec("ImplementerContainerSpec");
+
+    expectValid(container, "ImplementerContainerSpec", profile);
+    // The default spec is not the profile and the profile is not the default spec.
+    expectInvalid(container, "WorkerContainerSpec", profile);
+    expectInvalid(container, "ImplementerContainerSpec", base);
+    const differing = Object.keys({ ...base, ...profile }).filter(
+      (key) => JSON.stringify(base[key]) !== JSON.stringify(profile[key]),
+    );
+    expect(differing.sort()).toStrictEqual([
+      "allowedEnvironment",
+      "memory",
+      "pids",
+      "workVolume",
+    ]);
+  });
+
+  // #760-T01
   it.each([
-    ["privileged", { privileged: true }],
-    [
-      "a bind of the Docker socket",
-      { binds: ["/var/run/docker.sock:/var/run/docker.sock"] },
-    ],
-    ["a volume", { volumes: ["/data:/data"] }],
-    ["a device", { devices: ["/dev/kvm"] }],
-    ["host network (key)", { networkMode: "host" }],
-    ["host network (value)", { network: { mode: "host" } }],
-    ["the host pid namespace", { pid: "host" }],
-    ["the host ipc namespace", { ipc: "host" }],
-    [
-      "an unconfined seccomp profile",
-      { securityOpt: ["no-new-privileges:true", "seccomp=unconfined"] },
-    ],
-    [
-      "an unconfined apparmor profile",
-      { securityOpt: ["no-new-privileges:true", "apparmor=unconfined"] },
-    ],
-    ["no no-new-privileges", { securityOpt: [] }],
-    ["a writable root", { readOnly: false }],
-    ["another user", { user: "10001:10001" }],
-    ["not dropping all capabilities", { capDrop: ["NET_RAW"] }],
-    [
-      "a capability outside the list",
-      { capAdd: [{ name: "SYS_ADMIN", startupOnly: false }] },
-    ],
-    [
-      "a secret in the environment names",
-      { allowedEnvironment: ["RUNNER_TOKEN"] },
-    ],
-    [
-      "a credential environment name",
-      { allowedEnvironment: ["WORKER_CREDENTIAL"] },
-    ],
-    ["an unknown key", { somethingNew: 1 }],
-  ])("is refused with %s", (_name, change) => {
-    expectInvalid(container, "WorkerContainerSpec", { ...spec(), ...change });
+    ["another path", { path: "/data" }],
+    ["another path below /work", { path: "/work/x" }],
+    ["no nosuid", { options: ["rw", "nodev"] }],
+    ["no nodev", { options: ["rw", "nosuid"] }],
+    ["a read-only volume", { options: ["ro", "nosuid", "nodev"] }],
+    ["a suid option", { options: ["rw", "suid", "nodev"] }],
+    ["a host path as the source", { source: "/var/lib/docker" }],
+    ["a bind as the source", { source: "bind" }],
+    ["an unknown key", { propagation: "shared" }],
+  ])("refuses a work volume with %s", (_name, change) => {
+    const profile = spec("ImplementerContainerSpec");
+    const volume = profile.workVolume as Record<string, unknown>;
+
+    expectInvalid(container, "ImplementerContainerSpec", {
+      ...profile,
+      workVolume: { ...volume, ...change },
+    });
+  });
+
+  // #760-T01
+  it.each([
+    ["no work volume", "workVolume"],
+    ["no pids limit", "pids"],
+  ])("refuses a profile with %s", (_name, key) => {
+    const profile = spec("ImplementerContainerSpec");
+    delete profile[key];
+
+    expectInvalid(container, "ImplementerContainerSpec", profile);
+  });
+
+  // #760-T01
+  it("refuses a profile whose pids limit or environment is not the profile's", () => {
+    const profile = spec("ImplementerContainerSpec");
+    const names = profile.allowedEnvironment as string[];
+
+    for (const limit of [512, 1024, 4096])
+      expectInvalid(container, "ImplementerContainerSpec", {
+        ...profile,
+        pids: { limit },
+      });
+    for (const missing of [
+      "RUNNER_IMPLEMENTER_WORK_DIR",
+      "RUNNER_IMPLEMENTER_EGRESS_PORT",
+      "RUNNER_IMPLEMENTER_NETWORK",
+    ])
+      expectInvalid(container, "ImplementerContainerSpec", {
+        ...profile,
+        allowedEnvironment: names.filter((name) => name !== missing),
+      });
+  });
+
+  // #760-T01
+  it("keeps the memory override per Worker kind to the memory keys for the profile too", () => {
+    expectValid(container, "WorkerContainerOverrides", {
+      memory: { limit: "3g", reservation: "2560m", swap: "3g" },
+    });
+    expectInvalid(container, "WorkerContainerOverrides", {
+      workVolume: { path: "/data", options: ["rw"], source: "x" },
+    });
   });
 
   // #318-T05

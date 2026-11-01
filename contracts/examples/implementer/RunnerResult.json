@@ -1,0 +1,42 @@
+{
+  "ok": true,
+  "durationMs": 912340,
+  "commentUrl": null,
+  "errorCode": null,
+  "errorMessage": null,
+  "logTail": "implementer: pushed 2 commits to implementer/a1b2c3",
+  "logTruncated": false,
+  "usage": {
+    "model": "deepseek/deepseek-v4.1-flash",
+    "promptTokens": 412000,
+    "completionTokens": 18400,
+    "totalTokens": 430400,
+    "aiCalls": 37,
+    "fallbackUsed": false,
+    "costUsd": 0.1534
+  },
+  "implementer": {
+    "baseCommit": "1f3a5c7e9b2d4f60a8c1e3b5d7f90a2c4e6b8d01",
+    "headCommit": "9d8c7b6a5f4e3d2c1b0a99887766554433221100",
+    "pushed": true,
+    "commits": [
+      {
+        "sha": "5a4b3c2d1e0f99887766554433221100aabbccdd",
+        "subject": "Add a retry with backoff to the webhook sender"
+      },
+      {
+        "sha": "9d8c7b6a5f4e3d2c1b0a99887766554433221100",
+        "subject": "Test the retry of the webhook sender"
+      }
+    ],
+    "filesChanged": [
+      { "path": "src/webhooks/sender.ts", "status": "modified" },
+      { "path": "src/webhooks/sender.test.ts", "status": "added" }
+    ],
+    "summary": "The webhook sender now retries a failed delivery up to three times with exponential backoff. The new test covers the retry and the give-up path.",
+    "opencode": {
+      "sessionId": "ses_01HZXEXAMPLE0123456789",
+      "version": "1.4.2"
+    }
+  }
+}

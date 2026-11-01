@@ -1,9 +1,16 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 import { describe, expect, it } from "vitest";
+import { FakeSandboxService } from "../../../fakes/sandbox/service.ts";
 import { ConfigError } from "../config.ts";
 import { noLauncher } from "./none.ts";
 import { sandboxFromEnvironment } from "./sandbox-env.ts";
+import { IMPLEMENTER_PROBE_EXTRA_SECONDS } from "./sandbox-canary.ts";
+import {
+  LAUNCH_STEPS_SECONDS,
+  SANDBOX_HANDOVER_SECONDS,
+  WORK_VOLUME_STEPS_SECONDS,
+} from "./sandbox.ts";
 import { recordingLogger } from "../test-support/harness.ts";
 import { GoldenRecordSchema } from "../snapshot/record.ts";
 import { loadSettings } from "../config.ts";
@@ -57,7 +64,7 @@ describe("the Sandbox-Launcher's configuration from the environment", () => {
   });
 
   // #329 (additional)
-  it("builds the Sandbox-Launcher, which advertises both engines, when the snapshot and the image are configured", async () => {
+  it("builds the Sandbox-Launcher, which advertises the two reviewer engines, when the snapshot and the image are configured", async () => {
     const sandbox = sandboxFromEnvironment(configured(), never);
 
     const launcher = sandbox.launcher({
@@ -284,6 +291,235 @@ describe("the Sandbox-Launcher's configuration from the environment", () => {
     ).not.toThrow();
   });
 
+  // #760-T04
+  describe("an implementer configuration in DISPATCHER_WORKER_CONFIG", () => {
+    const registry = {
+      DISPATCHER_APPS: JSON.stringify([
+        {
+          id: "factory",
+          url: "https://factory.example.test",
+          kinds: ["implementer"],
+          keyId: "factory-k1",
+          maxRunning: 1,
+        },
+      ]),
+      DISPATCHER_APP_FACTORY_TOKEN: "factory-dispatcher-token-for-tests-0001",
+      DISPATCHER_APP_FACTORY_SIGNING_SECRET:
+        "factory-signing-secret-for-tests-000001",
+      DISPATCHER_OPERATOR_TOKEN: "operator-token-for-the-tests-0000000001",
+    };
+    /** A platform that is never reached for good: it counts the loads, and a load that happens is a launch that got past its configuration. */
+    function counting() {
+      const loads = { count: 0 };
+      const load: () => Promise<SandboxSdk> = () => {
+        loads.count += 1;
+        return Promise.reject(new Error("not loaded"));
+      };
+      return { loads, load };
+    }
+    function launcherWith(
+      worker: Record<string, unknown>,
+      options: { served?: boolean; load?: () => Promise<SandboxSdk> } = {},
+    ) {
+      const logger = recordingLogger();
+      const launcher = sandboxFromEnvironment(
+        configured(),
+        options.load ?? never,
+      ).launcher({
+        settings: loadSettings({
+          ...BASE,
+          ...(options.served === false ? {} : registry),
+          DISPATCHER_WORKER_CONFIG: JSON.stringify(worker),
+        }),
+        logger,
+        background: () => undefined,
+      });
+      return { launcher, logger };
+    }
+    const launchSpec = (
+      kind: "diff" | "dynamic" | "implementer",
+      config: Record<string, unknown> = {},
+    ) => ({
+      appId: kind === "implementer" ? "factory" : "reviewer",
+      appUrl: "https://app.example.invalid",
+      jobId: "00000000-0000-4000-8000-000000000001",
+      credential: "crj_dummy-credential-0123456789-abcdefghijklmnopq",
+      kind,
+      timeoutSeconds: 1200,
+      config,
+    });
+
+    // A value only the Implementer reads cannot stop the Dispatcher from starting (it would fail the canary of every
+    // release it deploys): it is logged, each launch of the kind is refused, and the canary of a deployment that serves the
+    // kind reports `implementer_probe_failed` (see the canary tests).
+    it.each([
+      [
+        "a container memory the VM cannot give",
+        { container: { memory: { limit: "8g" } } },
+      ],
+      ["a VM size the platform does not have", { launcher: { vcpus: 3 } }],
+    ])(
+      "does not stop the Dispatcher from starting for %s: it logs an error",
+      (_what, implementer) => {
+        const { launcher, logger } = launcherWith({ implementer });
+
+        expect(launcher).toBeDefined();
+        expect(
+          logger.lines.filter((line) =>
+            line.startsWith("error worker_config_invalid "),
+          ),
+        ).toHaveLength(1);
+        expect(logger.text()).toContain('"kind":"implementer"');
+      },
+    );
+
+    it("leaves Diff and Dynamic working while an implementer launch is refused before it reaches the platform", async () => {
+      const implementer = { container: { memory: { limit: "8g" } } };
+      const signal = new AbortController().signal;
+      // The SDK is loaded once per launcher, by the first call that reaches the platform: one launcher per kind.
+      const reached = async (kind: "diff" | "dynamic" | "implementer") => {
+        const { loads, load } = counting();
+        const { launcher } = launcherWith({ implementer }, { load });
+        const error = await launcher
+          .launch(
+            launchSpec(kind, kind === "implementer" ? implementer : {}),
+            signal,
+          )
+          .catch((thrown: unknown) => thrown);
+        return { loads: loads.count, code: (error as { code?: string }).code };
+      };
+
+      expect(await reached("implementer")).toStrictEqual({
+        loads: 0,
+        code: "sandbox_config_invalid",
+      });
+      // Diff and Dynamic are not touched by the bad value: their launches get as far as the platform.
+      expect((await reached("diff")).loads).toBe(1);
+      expect((await reached("dynamic")).loads).toBe(1);
+    });
+
+    it("still refuses a bad Diff or Dynamic value at start, and accepts a sized implementer", () => {
+      expect(() =>
+        launcherWith({ dynamic: { launcher: { vcpus: 3 } }, implementer: {} }),
+      ).toThrowError(/DISPATCHER_WORKER_CONFIG/);
+      const sized = launcherWith({
+        implementer: {
+          launcher: { vcpus: 4 },
+          container: { memory: { limit: "6g", reservation: "5g" } },
+          timeoutSeconds: 7200,
+        },
+      });
+      expect(sized.logger.lines).toStrictEqual([]);
+      expect(launcherWith({ implementer: {} }).logger.lines).toStrictEqual([]);
+    });
+
+    it("does not read the entry of a deployment that serves no implementer job", () => {
+      const { logger } = launcherWith(
+        { implementer: { container: { memory: { limit: "8g" } } } },
+        { served: false },
+      );
+
+      expect(logger.lines).toStrictEqual([]);
+    });
+  });
+
+  // #760-T10
+  it("fits the steps of an implementer launch in the launch deadline of the core, with the Worker's hand-over", () => {
+    expect(
+      SANDBOX_HANDOVER_SECONDS +
+        LAUNCH_STEPS_SECONDS +
+        WORK_VOLUME_STEPS_SECONDS,
+    ).toBeLessThanOrEqual(loadSettings(BASE).core.launchDeadlineSeconds);
+  });
+
+  // #765-D1, D2: the probe that `POST /probe` runs is built from the environment of the deployment.
+  describe("the canary of the deployment", () => {
+    const FACTORY = {
+      DISPATCHER_APPS: JSON.stringify([
+        {
+          id: "factory",
+          url: "https://factory.example.test",
+          kinds: ["diff", "dynamic", "implementer"],
+          keyId: "factory-k1",
+          maxRunning: 1,
+        },
+      ]),
+      DISPATCHER_APP_FACTORY_TOKEN: "factory-dispatcher-token-for-tests-0001",
+      DISPATCHER_APP_FACTORY_SIGNING_SECRET:
+        "factory-signing-secret-for-tests-000001",
+      DISPATCHER_OPERATOR_TOKEN: "operator-token-for-the-tests-0000000001",
+    };
+    const PASSING = `${JSON.stringify({ version: 1, engines: ["pr-agent", "opencode"], reasons: [] })}\n`;
+    const WITH_IMPLEMENTER = `${JSON.stringify({ version: 1, engines: ["pr-agent", "opencode", "implementer"], reasons: [] })}\n`;
+
+    async function probed(extra: Record<string, string>) {
+      const service = new FakeSandboxService();
+      service.onExec("image-id", { stdout: `${IMAGE_DIGEST}\n` });
+      service.onExec("probe", { stdout: PASSING });
+      service.onExec("probe-implementer", { stdout: WITH_IMPLEMENTER });
+      const sandbox = sandboxFromEnvironment(configured(), never, service);
+      const settings = loadSettings({ ...BASE, ...extra });
+      const launcher = sandbox.launcher({
+        settings,
+        logger: recordingLogger(),
+        background: () => undefined,
+      });
+      const result = await launcher.probe?.(new AbortController().signal);
+      return { service, result, sandbox, settings };
+    }
+
+    it("runs the Implementer's probe, in a VM that holds its container, when the deployment serves the kind", async () => {
+      const { service, result } = await probed(FACTORY);
+
+      expect(service.execs.map((call) => call.label)).toContain(
+        "probe-implementer",
+      );
+      expect(service.creates).toHaveLength(1);
+      expect(service.creates[0]?.vcpus).toBe(2);
+      expect(result).toMatchObject({
+        status: "passed",
+        engines: ["pr-agent", "opencode", "implementer"],
+      });
+    });
+
+    it("runs exactly the probe it always did when the deployment does not serve the kind", async () => {
+      const { service, result } = await probed({});
+
+      expect(service.execs.map((call) => call.label)).not.toContain(
+        "probe-implementer",
+      );
+      expect(
+        service.execs.filter((call) => call.label.startsWith("work-volume")),
+      ).toStrictEqual([]);
+      expect(service.creates[0]?.vcpus).toBe(1);
+      expect(result).toMatchObject({
+        engines: ["pr-agent", "opencode"],
+      });
+    });
+
+    it("gives the probe of a deployment with the kind the volume steps and the second probe on top of its time, and the reaper the same", async () => {
+      const served = await probed(FACTORY);
+      const plain = await probed({});
+
+      const lifetime = (run: Awaited<ReturnType<typeof probed>>) =>
+        (run.service.creates[0]?.timeoutMs ?? 0) / 1000;
+      expect(lifetime(served) - lifetime(plain)).toBe(
+        IMPLEMENTER_PROBE_EXTRA_SECONDS,
+      );
+      expect(IMPLEMENTER_PROBE_EXTRA_SECONDS).toBe(
+        WORK_VOLUME_STEPS_SECONDS + 60,
+      );
+      // The reaper must not end a canary VM that is still within its life.
+      const reaper = (run: Awaited<ReturnType<typeof probed>>) =>
+        run.sandbox.reaper?.(run.settings)?.canaryLifetimeSeconds ?? 0;
+      expect(reaper(served) - reaper(plain)).toBe(
+        IMPLEMENTER_PROBE_EXTRA_SECONDS,
+      );
+      // Well inside what one function call may last.
+      expect(reaper(served)).toBeLessThan(1800);
+    });
+  });
+
   // #364-T18
   it("has no reaper when no snapshot is configured, so there is no route and no platform call", () => {
     expect(sandboxFromEnvironment({}, never).reaper).toBeUndefined();
@@ -320,6 +556,105 @@ describe("the Sandbox-Launcher's configuration from the environment", () => {
     expect(reaper).toMatchObject({
       jobLifetimeSeconds: 3600 + 600,
       canaryLifetimeSeconds: 300 + 600,
+    });
+  });
+
+  // #759 (additional)
+  it("lets the reaper wait for the longest job a served kind can have: the implementer's 3600 seconds only when an app has the kind", () => {
+    const sandbox = sandboxFromEnvironment(configured(), never);
+    const registry = {
+      DISPATCHER_APPS: JSON.stringify([
+        {
+          id: "factory",
+          url: "https://factory.example.test",
+          kinds: ["diff", "implementer"],
+          keyId: "factory-k1",
+          maxRunning: 1,
+        },
+      ]),
+      DISPATCHER_APP_FACTORY_TOKEN: "factory-dispatcher-token-for-tests-0001",
+      DISPATCHER_APP_FACTORY_SIGNING_SECRET:
+        "factory-signing-secret-for-tests-000001",
+      DISPATCHER_OPERATOR_TOKEN: "operator-token-for-the-tests-0000000001",
+    };
+
+    expect(
+      sandbox.reaper?.(loadSettings({ ...BASE, ...registry }))
+        ?.jobLifetimeSeconds,
+    ).toBe(3600 + 300);
+    expect(
+      sandbox.reaper?.(
+        loadSettings({
+          ...BASE,
+          ...registry,
+          DISPATCHER_WORKER_CONFIG: JSON.stringify({
+            implementer: { timeoutSeconds: 7200 },
+          }),
+        }),
+      )?.jobLifetimeSeconds,
+    ).toBe(7200 + 300);
+    // Nothing changes for a deployment that serves no implementer job, configured timeout or not.
+    expect(
+      sandbox.reaper?.(
+        loadSettings({
+          ...BASE,
+          DISPATCHER_WORKER_CONFIG: JSON.stringify({
+            implementer: { timeoutSeconds: 7200 },
+          }),
+        }),
+      )?.jobLifetimeSeconds,
+    ).toBe(1200 + 300);
+  });
+
+  // #765
+  describe("the engines the Launcher advertises", () => {
+    const FACTORY = {
+      DISPATCHER_APPS: JSON.stringify([
+        {
+          id: "factory",
+          url: "https://factory.example.test",
+          kinds: ["diff", "dynamic", "implementer"],
+          keyId: "factory-k1",
+          maxRunning: 1,
+        },
+      ]),
+      DISPATCHER_APP_FACTORY_TOKEN: "factory-dispatcher-token-for-tests-0001",
+      DISPATCHER_APP_FACTORY_SIGNING_SECRET:
+        "factory-signing-secret-for-tests-000001",
+      DISPATCHER_OPERATOR_TOKEN: "operator-token-for-the-tests-0000000001",
+    };
+    const advertised = async (extra: Record<string, string>) => {
+      const sandbox = sandboxFromEnvironment(configured(), never);
+      const launcher = sandbox.launcher({
+        settings: loadSettings({ ...BASE, ...extra }),
+        logger: recordingLogger(),
+        background: () => undefined,
+      });
+      return {
+        launcher,
+        engines: await launcher.capabilities(new AbortController().signal),
+      };
+    };
+
+    it("includes `implementer` when an app of this deployment names the kind, and has a probe that proves it", async () => {
+      const { launcher, engines } = await advertised(FACTORY);
+
+      expect(engines).toStrictEqual(["pr-agent", "opencode", "implementer"]);
+      expect(launcher.probe).toBeDefined();
+    });
+
+    it("advertises exactly what it always did when no app names the kind: the reviewer's key never gets it", async () => {
+      const { engines } = await advertised({});
+
+      expect(engines).toStrictEqual(["pr-agent", "opencode"]);
+    });
+
+    it("advertises exactly the two reviewer engines when DISPATCHER_ENGINES names only those, with no app that has the kind", async () => {
+      const { engines } = await advertised({
+        DISPATCHER_ENGINES: "pr-agent,opencode",
+      });
+
+      expect(engines).toStrictEqual(["pr-agent", "opencode"]);
     });
   });
 

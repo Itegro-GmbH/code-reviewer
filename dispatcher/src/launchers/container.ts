@@ -11,6 +11,10 @@
 // confinement. The per-job credential is not an input of the renderer at all: the launcher puts it
 // on stdin and checks that no argument holds it.
 //
+// Profiles (#760): the spec is the hardening floor, and the Implementer's profile adds to it one work volume and
+// room to build a repository (`ImplementerContainerSpec`); a spec with a `workVolume` key is checked as that profile,
+// every other as the default one. Both profiles share every check of the floor.
+//
 // Host preparation: `docker run` with a memory or pids limit fails inside a Sandbox VM until a root
 // script has made the cgroup v2 root a plain domain, before `dockerd` starts (docker/sandbox/vm-prepare.sh,
 // spike #317, finding F1). It is the host's job, not part of the flags; the golden snapshot (#330)
@@ -18,10 +22,14 @@
 
 import type { LaunchSpec } from "../core/types.ts";
 import type {
+  ImplementerContainerSpec,
   WorkerContainerLauncherAdditions,
   WorkerContainerOverrides,
   WorkerContainerSpec,
 } from "../contracts/worker-container.ts";
+
+/** A spec of the contract: the default one of Diff and Dynamic, or the profile of the Implementer (#760). */
+export type ContainerSpec = WorkerContainerSpec | ImplementerContainerSpec;
 
 export const CONTAINER_ERROR_CODES = [
   "spec_forbidden_key",
@@ -70,6 +78,7 @@ const FORBIDDEN_KEYS: ReadonlySet<string> = new Set([
   "cgroupns",
   "dockerSocket",
 ]);
+const WORK_VOLUME_KEY = "workVolume";
 const SPEC_KEYS: ReadonlySet<string> = new Set([
   "version",
   "user",
@@ -115,6 +124,17 @@ const OVERRIDABLE: ReadonlySet<string> = new Set([
 ]);
 const MEMORY_KEYS = ["limit", "reservation", "swap"] as const;
 
+/** Where the work volume of the Implementer's profile is mounted, and what the Worker is told (`RUNNER_IMPLEMENTER_WORK_DIR`). */
+export const WORK_VOLUME_PATH = "/work";
+const WORK_VOLUME_OPTIONS = ["rw", "nosuid", "nodev"] as const;
+const WORK_VOLUME_SOURCE = "named-volume";
+const IMPLEMENTER_PIDS_LIMIT = 2048;
+const IMPLEMENTER_ENVIRONMENT_NAMES = [
+  "RUNNER_IMPLEMENTER_WORK_DIR",
+  "RUNNER_IMPLEMENTER_EGRESS_PORT",
+  "RUNNER_IMPLEMENTER_NETWORK",
+] as const;
+
 const SIZE = /^[0-9]+[mg]$/;
 const MODE = /^[0-7]{4}$/;
 const NO_NEW_PRIVILEGES = "no-new-privileges:true";
@@ -126,6 +146,9 @@ const IMAGE = /^[a-z0-9][A-Za-z0-9._/:@-]*$/;
 const CONTAINER_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 const PROFILE_PATH = /^[A-Za-z0-9/][A-Za-z0-9_./-]*$/;
 const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+const VOLUME_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$/;
+// A directory of the VM, absolute and plain: no dot segment, no space, nothing a command could read as an option.
+const HOST_ROOT = /^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/;
 
 /** Whether `value` holds a control character: a line break, a NUL or the like. */
 function hasControlCharacter(value: string): boolean {
@@ -236,7 +259,10 @@ function assertMemory(memory: unknown, fail: (what: string) => never): void {
   if (r > l) return fail("the reservation is above the limit");
 }
 
-function assertEnvironmentNames(spec: Record<string, unknown>): void {
+function assertEnvironmentNames(
+  spec: Record<string, unknown>,
+  implementer: boolean,
+): void {
   const names: unknown = spec.allowedEnvironment;
   if (
     !Array.isArray(names) ||
@@ -244,6 +270,25 @@ function assertEnvironmentNames(spec: Record<string, unknown>): void {
     new Set(names).size !== names.length
   )
     notHardened("allowedEnvironment");
+  if (
+    implementer &&
+    !IMPLEMENTER_ENVIRONMENT_NAMES.every((name) =>
+      (names as string[]).includes(name),
+    )
+  )
+    notHardened("allowedEnvironment lacks a name of the Implementer");
+}
+
+/** The one volume of the Implementer's profile: exactly `/work`, `rw,nosuid,nodev`, a named volume. Nothing else. */
+function assertWorkVolume(volume: unknown): void {
+  if (!isRecord(volume)) return notHardened("the work volume");
+  const { path, options, source, ...rest } = volume;
+  if (Object.keys(rest).length > 0) return notHardened("a work volume key");
+  if (path !== WORK_VOLUME_PATH) return notHardened("the work volume path");
+  if (!Array.isArray(options) || !same(options, WORK_VOLUME_OPTIONS))
+    return notHardened("the work volume options");
+  if (source !== WORK_VOLUME_SOURCE)
+    return notHardened("the work volume source");
 }
 
 /**
@@ -252,16 +297,18 @@ function assertEnvironmentNames(spec: Record<string, unknown>): void {
  */
 export function assertHardenedSpec(
   spec: unknown,
-): asserts spec is WorkerContainerSpec {
+): asserts spec is ContainerSpec {
   if (!isRecord(spec)) return notHardened("not an object");
   for (const key of Object.keys(spec)) {
     if (FORBIDDEN_KEYS.has(key))
       refuse("spec_forbidden_key", `the spec has the forbidden key ${key}`);
   }
   for (const key of Object.keys(spec)) {
-    if (!SPEC_KEYS.has(key))
+    if (!SPEC_KEYS.has(key) && key !== WORK_VOLUME_KEY)
       refuse("spec_unknown_key", `the spec has the unknown key ${key}`);
   }
+  const implementer = WORK_VOLUME_KEY in spec;
+  if (implementer) assertWorkVolume(spec[WORK_VOLUME_KEY]);
   if (spec.version !== 1) notHardened("version");
   if (spec.user !== "0:0") notHardened("user");
   assertCapabilities(spec);
@@ -275,7 +322,8 @@ export function assertHardenedSpec(
     Object.keys(pids).length !== 1 ||
     !Number.isInteger(pids.limit) ||
     (pids.limit as number) < 1 ||
-    (pids.limit as number) > 4096
+    (pids.limit as number) > 4096 ||
+    (implementer && pids.limit !== IMPLEMENTER_PIDS_LIMIT)
   )
     notHardened("pids");
   const stop = spec.stopTimeoutSeconds;
@@ -288,7 +336,7 @@ export function assertHardenedSpec(
     network.mode !== "bridge"
   )
     notHardened("the network is not the default bridge");
-  assertEnvironmentNames(spec);
+  assertEnvironmentNames(spec, implementer);
   const forbidden: unknown = spec.forbiddenKeys;
   if (
     !Array.isArray(forbidden) ||
@@ -311,7 +359,7 @@ export function assertHardenedSpec(
 export function applyOverrides(
   spec: unknown,
   overrides: WorkerContainerOverrides,
-): WorkerContainerSpec {
+): ContainerSpec {
   assertHardenedSpec(spec);
   if (!isRecord(overrides))
     return refuse("override_not_allowed", "the overrides are not an object");
@@ -393,6 +441,11 @@ export interface RenderOptions {
   additions?: WorkerContainerLauncherAdditions;
   /** A seccomp profile derived from the default one (seccomp.ts), by path on the host. Off when absent. */
   seccompProfile?: string;
+  /**
+   * The name of the Docker volume mounted at /work: required by the Implementer's profile and refused by every other,
+   * because only that profile has a work volume (#760). The Launcher makes the volume first (`workVolumeCommands`).
+   */
+  workVolume?: string;
 }
 
 function checkOption(
@@ -404,7 +457,7 @@ function checkOption(
     refuse("option_invalid", `${what} is not valid`);
 }
 
-function tmpfsArgument(mount: WorkerContainerSpec["tmpfs"][number]): string {
+function tmpfsArgument(mount: ContainerSpec["tmpfs"][number]): string {
   const parts = [
     ...mount.options,
     `size=${mount.size}`,
@@ -431,6 +484,17 @@ export function renderDockerRunArguments(
 
   if (options.additions !== undefined)
     assertLauncherAdditions(options.additions);
+  const workVolume =
+    WORK_VOLUME_KEY in hardened ? hardened.workVolume : undefined;
+  if (workVolume === undefined) {
+    if (options.workVolume !== undefined)
+      refuse(
+        "option_invalid",
+        "only the Implementer's profile has a work volume",
+      );
+  } else {
+    checkOption(options.workVolume, VOLUME_NAME, "the work volume");
+  }
   checkOption(options.image, IMAGE, "the image");
   if (options.name !== undefined)
     checkOption(options.name, CONTAINER_NAME, "the container name");
@@ -474,6 +538,12 @@ export function renderDockerRunArguments(
     ...securityOptions.flatMap((option) => ["--security-opt", option]),
     "--read-only",
     ...hardened.tmpfs.flatMap((mount) => ["--tmpfs", tmpfsArgument(mount)]),
+    ...(workVolume === undefined
+      ? []
+      : [
+          "--mount",
+          `type=volume,source=${options.workVolume},target=${workVolume.path}`,
+        ]),
     "--memory",
     memory.limit,
     "--memory-reservation",
@@ -497,6 +567,117 @@ export function renderDockerRunArguments(
   ];
 }
 
+/** The name of the Docker volume of a job: one per job, so that no job ever finds another's. */
+export function workVolumeName(jobId: string): string {
+  checkOption(jobId, JOB_ID, "the job id");
+  return `code-reviewer-work-${jobId}`;
+}
+
+/** A command the Launcher runs as root in the VM before the container: an argument vector, never shell text. */
+export interface HostCommand {
+  /** A stable name of the step, for logs and for the doubles; never the command text. */
+  label: string;
+  cmd: string;
+  args: readonly string[];
+  sudo: true;
+  /**
+   * For a step that only looks: whether what it printed is what the Launcher needs. The step fails when this says no,
+   * as it does for a non-zero exit status.
+   */
+  check?: (stdout: string) => boolean;
+}
+
+/** How many steps `workVolumeCommands` has: the Launcher budgets time for each (`WORK_VOLUME_STEPS_SECONDS`). */
+export const WORK_VOLUME_STEP_COUNT = 5;
+
+/**
+ * Whether `mountinfo` (the text of `/proc/self/mountinfo`) shows a mount at `directory` that has all of `options` and no
+ * `noexec`. The options read are the mount's own (the sixth field of a line), never the filesystem's behind it (the
+ * last), and the last mount at the directory counts: it is the one that hides the others.
+ */
+export function mountHasOptions(
+  mountinfo: string,
+  directory: string,
+  options: readonly string[],
+): boolean {
+  let found: string[] | undefined;
+  for (const line of mountinfo.split("\n")) {
+    const fields = line.split(" ");
+    if (fields[4] === directory && fields[5] !== undefined)
+      found = fields[5].split(",");
+  }
+  return (
+    found !== undefined &&
+    options.every((option) => found.includes(option)) &&
+    !found.includes("noexec")
+  );
+}
+
+/**
+ * The steps that make the work volume of a job in its VM, in order (#760). Docker cannot give a named volume mount
+ * options, so the volume is a bind of a directory of the VM's disk that is a mount of its own with the profile's
+ * options (read-write, `nosuid`, `nodev`, and no `noexec`: the agent runs the repository's programs here). The options
+ * are read back from the kernel before the volume is made, because a platform that ignored them would run the agent on a
+ * mount that honours the setuid bit and nothing else would show it. A mount
+ * made in the VM lives and dies with the VM, and so does the volume: no step leaves anything behind. `root` is a
+ * plain absolute directory of the VM; the volume gets a directory below it named like itself.
+ */
+export function workVolumeCommands(
+  spec: unknown,
+  options: { name: string; root: string },
+): HostCommand[] {
+  assertHardenedSpec(spec);
+  if (!(WORK_VOLUME_KEY in spec))
+    return refuse(
+      "option_invalid",
+      "only the Implementer's profile has a work volume",
+    );
+  checkOption(options.name, VOLUME_NAME, "the work volume");
+  checkOption(options.root, HOST_ROOT, "the work volume root");
+  const directory = `${options.root}/${options.name}`;
+  const step = (
+    label: string,
+    cmd: string,
+    ...args: string[]
+  ): HostCommand => ({
+    label,
+    cmd,
+    args,
+    sudo: true,
+  });
+  return [
+    step("work-volume-dir", "mkdir", "-p", "--", directory),
+    step("work-volume-mount", "mount", "--bind", directory, directory),
+    step(
+      "work-volume-options",
+      "mount",
+      "-o",
+      `remount,bind,${spec.workVolume.options.join(",")}`,
+      directory,
+    ),
+    {
+      ...step("work-volume-check", "cat", "/proc/self/mountinfo"),
+      check: (mountinfo) =>
+        mountHasOptions(mountinfo, directory, spec.workVolume.options),
+    },
+    step(
+      "work-volume-create",
+      "docker",
+      "volume",
+      "create",
+      "--driver",
+      "local",
+      "--opt",
+      "type=none",
+      "--opt",
+      `device=${directory}`,
+      "--opt",
+      "o=bind",
+      options.name,
+    ),
+  ];
+}
+
 /** What a host runs: `docker` with these arguments, `stdin` written to the container. */
 export interface ContainerInvocation {
   args: string[];
@@ -517,6 +698,10 @@ export interface ContainerRunResult {
  */
 export interface ContainerHost {
   run(invocation: ContainerInvocation): Promise<ContainerRunResult>;
+}
+
+function hasWorkVolume(spec: unknown): boolean {
+  return isRecord(spec) && WORK_VOLUME_KEY in spec;
 }
 
 export interface ContainerLauncherConfig<H extends ContainerHost> {
@@ -568,6 +753,9 @@ export class ContainerLauncher<H extends ContainerHost = ContainerHost> {
     return renderDockerRunArguments(config.spec, {
       image: config.image,
       name: `code-reviewer-worker-${jobId}`,
+      ...(hasWorkVolume(config.spec)
+        ? { workVolume: workVolumeName(jobId) }
+        : {}),
       ...(environment === undefined ? {} : { environment }),
       command: [config.entryMode ?? ENTRY_MODE_WORKER_ONCE],
       ...(overrides === undefined ? {} : { overrides }),

@@ -202,6 +202,116 @@
         }
       }
     },
+    "WorkVolume": {
+      "description": "The one writable volume of the Implementer's container: a Docker named volume the Sandbox-Launcher creates for the job on the VM's disk, over a directory of the VM that it mounts with these options (Docker cannot set mount options on a named volume itself): read-write, no setuid bit honoured, no device node, and no `noexec`, because the agent builds and runs the repository's programs here. It lives and dies with the VM; nothing outlives the job. The path is /work (RUNNER_IMPLEMENTER_WORK_DIR).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "options", "source"],
+      "properties": {
+        "path": { "const": "/work" },
+        "options": { "const": ["rw", "nosuid", "nodev"] },
+        "source": {
+          "description": "A Docker named volume, created per job. Never a path of the host and never an existing volume.",
+          "const": "named-volume"
+        }
+      }
+    },
+    "ImplementerContainerSpec": {
+      "description": "The profile of the container for the Implementer (#760): the hardening floor of WorkerContainerSpec, value for value, plus one work volume and the room to build and test a repository. It differs from the default spec in exactly these fields: `workVolume` (new), `memory` (sized from the VM), `pids.limit` (2048) and `allowedEnvironment` (the three names of the Implementer added). The root filesystem stays read-only and every tmpfs stays noexec: the work volume is the only writable path where a program may run. A bind, a host path or an arbitrary volume has no key to live in. The Sandbox-Launcher chooses the profile by the job kind (implementer); Diff and Dynamic keep WorkerContainerSpec. examples/worker-container/ImplementerContainerSpec.json is the spec (the Dispatcher's copy and its test keep them equal).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "user",
+        "capDrop",
+        "capAdd",
+        "securityOpt",
+        "readOnly",
+        "tmpfs",
+        "workVolume",
+        "memory",
+        "pids",
+        "stopTimeoutSeconds",
+        "network",
+        "allowedEnvironment",
+        "forbiddenKeys",
+        "overridable"
+      ],
+      "properties": {
+        "version": { "const": 1 },
+        "user": {
+          "description": "The container starts as root: the job process of a Dynamic job is the supervisor that owns every credential and starts the engine as another user. Root holds exactly the capabilities of capAdd and no-new-privileges means nothing can regain more.",
+          "const": "0:0"
+        },
+        "capDrop": { "const": ["ALL"] },
+        "capAdd": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/CapabilityGrant" },
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true
+        },
+        "securityOpt": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/SecurityOption" },
+          "contains": { "const": "no-new-privileges:true" },
+          "maxItems": 2,
+          "uniqueItems": true
+        },
+        "readOnly": { "const": true },
+        "tmpfs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/TmpfsMount" },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "workVolume": { "$ref": "#/$defs/WorkVolume" },
+        "memory": { "$ref": "#/$defs/MemoryLimits" },
+        "pids": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["limit"],
+          "properties": { "limit": { "const": 2048 } }
+        },
+        "stopTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600
+        },
+        "network": {
+          "description": "The default bridge. Never the host's network and never none (the Worker must reach the app).",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": { "mode": { "const": "bridge" } }
+        },
+        "allowedEnvironment": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/EnvironmentName" },
+          "uniqueItems": true,
+          "allOf": [
+            { "contains": { "const": "RUNNER_IMPLEMENTER_WORK_DIR" } },
+            { "contains": { "const": "RUNNER_IMPLEMENTER_EGRESS_PORT" } },
+            { "contains": { "const": "RUNNER_IMPLEMENTER_NETWORK" } }
+          ]
+        },
+        "forbiddenKeys": {
+          "description": "Documentation that a tool can check: the keys that no spec has. The schema is closed, so none of them can be added.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/ForbiddenKey" },
+          "uniqueItems": true
+        },
+        "overridable": {
+          "description": "The only values a launcher may change per Worker kind (WorkerContainerOverrides).",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["memory.limit", "memory.reservation", "memory.swap"]
+          },
+          "uniqueItems": true
+        }
+      }
+    },
     "WorkerContainerOverrides": {
       "description": "What a launcher may change per Worker kind (ADR of the hosted deployment, #325): the memory limit, because the spec's default is not the size of a Sandbox VM. Nothing else.",
       "type": "object",

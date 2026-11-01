@@ -1239,6 +1239,34 @@ describe("the second App in the guide (#732)", () => {
     ).toContain("`FACTORY_ENABLED`");
   });
 
+  // #747-T08
+  it("documents the implementer capability: where it is allowed, that it is off by default, what it needs, and the health expectation", () => {
+    const row = section("### 3.1 The App project")
+      .split("\n")
+      .find((line) => line.startsWith("| `PRODUCT_CAPABILITIES` |"));
+    expect(row).toBeDefined();
+    const variable = flat(row as string);
+    expect(variable).toContain("`implementer` (needs `dynamic-review`;");
+    expect(variable).toContain("`factory` only");
+    expect(variable).toContain("stops the start");
+    expect(variable).toContain("`factory`: `review,dynamic-review`");
+
+    const capabilities = flat(second);
+    expect(capabilities).toContain("**The capability set of the factory.**");
+    expect(capabilities).toContain("`implementer`");
+    expect(capabilities).toContain("never turns it on");
+    expect(capabilities).toContain("`dynamic-review,implementer,review`");
+    expect(capabilities).toContain("`health-factory` compares the set exactly");
+    expect(capabilities).toContain("code-review.com refuses");
+
+    const checklist = flat(bringUp);
+    expect(checklist).toContain("`implementer` is allowed on this product");
+    expect(checklist).toContain(
+      "off until the rollout of the Implementer sets it",
+    );
+    expect(checklist).not.toContain("—");
+  });
+
   // #732-T09
   it("names every job of the lane, in the order the workflow has them", () => {
     const jobs = [
@@ -1360,6 +1388,41 @@ describe("the second App in the guide (#732)", () => {
     expect(off).toContain("The canary does not change");
     expect(off).not.toContain("operator_token");
     expect(deploy).not.toContain("operator_token");
+  });
+
+  // #748-T06
+  it("documents the variable that sets the expected capability set, the order of the rollout and what a lone change does", () => {
+    const text = flat(second);
+    const name = "FACTORY_EXPECTED_CAPABILITIES";
+    expect(text).toContain(`\`${name}\``);
+    expect(text).toContain("`dynamic-review,review` while it is unset");
+    expect(text).toContain("**sorted alphabetically**");
+    expect(text).toContain("`dynamic-review,implementer,review`");
+    // The order: the code first, then the setting and the variable together.
+    expect(text).toContain(
+      "Release the code that allows the capability to `main`",
+    );
+    expect(text).toContain("Only then, together:");
+    expect(text).toContain(
+      "`PRODUCT_CAPABILITIES` in Infisical `prod` `/app-factory`",
+    );
+    // The failure mode of a change of one of the two.
+    expect(text).toContain("**If only one of the two is changed**");
+    expect(text).toContain("`PRODUCT_MISMATCH`");
+    expect(text).toContain("nothing live changes");
+    expect(text).toContain("is not promoted");
+    expect(text).toContain(
+      "A variable with a malformed value fails the same job earlier",
+    );
+    // The variable is listed where the repository variables are, and in the owner's checklist.
+    expect(
+      section("### 2.1 Setup of the deployment pipeline (once)"),
+    ).toContain(name);
+    expect(flat(bringUp)).toContain(name);
+    expect(flat(bringUp)).toContain("`PRODUCT_MISMATCH`");
+    expect(flat(bringUp)).toContain("**together**");
+    // The workflow reads the very name the guide documents.
+    expect(deploy).toContain(`vars.${name}`);
   });
 
   // #732-T09

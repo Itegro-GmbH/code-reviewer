@@ -500,6 +500,11 @@ describe("the failures that incurred AI cost", () => {
   // #523-T13
   it("names the group, in one place", () => {
     expect([...AI_COST_FAILURE_CODES].sort()).toStrictEqual([
+      // #754: the Implementer's failures after the agent ran: it gave up, the repository refused its branch, the work left the
+      // branch or could not be committed or verified, the turn ran out of time. The model was used in each; the cost limit of a
+      // turn is `cost_limit_reached` below.
+      "agent_gave_up",
+      "branch_violation",
       "command_failed",
       // #666: a Diff Review stopped at the cost limit of its project.
       "cost_limit_reached",
@@ -507,7 +512,33 @@ describe("the failures that incurred AI cost", () => {
       "dynamic_policy_violation",
       "llm_bad_request",
       "llm_context_length_exceeded",
+      "push_rejected",
+      "time_limit_reached",
     ]);
+  });
+
+  // #754-T09
+  it("charges the failures of a turn after the agent ran, and nothing that ended before it", () => {
+    for (const code of [
+      "agent_gave_up",
+      "push_rejected",
+      "branch_violation",
+      "time_limit_reached",
+      "cost_limit_reached",
+    ] as const)
+      expect(AI_COST_FAILURE_CODES, code).toContain(code);
+    for (const code of [
+      "branch_exists",
+      "base_branch_not_found",
+      "clone_failed",
+      "setup_failed",
+      "git_write_not_granted",
+      "implementer_engine_unavailable",
+      "implementer_config_invalid",
+    ] as const) {
+      expect(AI_COST_FAILURE_CODES, code).not.toContain(code);
+      expect(ERROR_CODE_CLASSES[code], code).toBe("free");
+    }
   });
 
   // #523-T13

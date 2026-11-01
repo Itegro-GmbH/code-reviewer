@@ -25,6 +25,8 @@ export const WORKSPACE_ACTIONS = [
   "view",
   /** Start a review by hand. */
   "start_review",
+  /** Send a task to the Implementer (#755; factory only, the routes do not exist elsewhere). */
+  "start_implementer_task",
   /** Change the settings of one project. */
   "change_project_settings",
   /** Switch a project on or off: which repositories are reviewed (and paid for). */
@@ -60,6 +62,7 @@ const RANK: Record<WorkspaceRole, number> = { member: 1, admin: 2, owner: 3 };
 export const MINIMUM_ROLE: Record<WorkspaceAction, WorkspaceRole> = {
   view: "member",
   start_review: "member",
+  start_implementer_task: "member",
   change_project_settings: "member",
   manage_projects: "admin",
   manage_review_defaults: "admin",

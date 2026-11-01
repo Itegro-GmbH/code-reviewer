@@ -8,6 +8,10 @@ address of this job's model proxy (and to the engine's own server port). Everyth
 (another job's loopback service, any other address, IPv6, UDP, raw sends) is rejected at once.
 Only the answers of the engine's own server pass as replies (never "any tracked flow").
 
+An Implementer container (#763) allows one more loopback port: the egress allowlist proxy that
+the supervisor runs for the agent's package managers (`implementer/egress_proxy.py`). Nothing else
+changes, and the engine user still never resolves a name or reaches any address itself.
+
 Two rulesets exist (#345). The full one (`table inet`, `reject`) is what every host with a complete
 nf_tables gets. Some VM kernels support only the `ip` family and have no `reject`; there the
 fallback (`table ip`, `drop`) enforces the same policy, silently instead of at once, and IPv6 (which
@@ -55,6 +59,7 @@ _UDP_WAIT_SECONDS = 0.5
 _PROBE = r"""
 import json, socket, sys
 host, allowed, tcp_ports, other_host, other_port, udp_port = sys.argv[1:7]
+extra_ports = sys.argv[8].split(",") if len(sys.argv) > 8 else []
 def connect(address, port):
     try:
         with socket.create_connection((address, int(port)), timeout=float(sys.argv[7])):
@@ -66,6 +71,8 @@ reached = {
     "other_port": connect(host, tcp_ports),
     "other_host": connect(other_host, other_port),
 }
+if extra_ports:
+    reached["extra"] = all([connect(host, port) for port in extra_ports])
 try:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as datagram:
         datagram.sendto(b"x", (host, int(udp_port)))
@@ -116,8 +123,18 @@ def table_name(uid: int) -> str:
     return f"code_reviewer_engine_{uid}"
 
 
-def ruleset(uid: int, proxy_port: int, engine_port: int, mode: EgressMode = EgressMode.FULL) -> str:
+def ruleset(
+    uid: int,
+    proxy_port: int,
+    engine_port: int,
+    mode: EgressMode = EgressMode.FULL,
+    egress_port: int | None = None,
+) -> str:
     """The nft script that confines `uid` to loopback TCP to `proxy_port` and `engine_port`.
+
+    An Implementer container passes `egress_port` too (#763): the loopback port of the allowlist
+    proxy. It is one more accepted port, before the final refusal; without it the script is
+    byte for byte what it always was.
 
     `add table` + `flush table` makes it idempotent: installing again replaces the rules of this
     uid (a restarted container, a changed port).
@@ -130,13 +147,22 @@ def ruleset(uid: int, proxy_port: int, engine_port: int, mode: EgressMode = Egre
     The two modes differ in the family of the table and in the last rule only: `inet` + `reject`
     (refused at once) or `ip` + `drop` (silent, for kernels that have neither).
     """
-    ports = (proxy_port, engine_port)
-    if uid <= 0 or any(not 0 < port < 65536 for port in ports) or proxy_port == engine_port:
+    ports = (proxy_port, engine_port, *(() if egress_port is None else (egress_port,)))
+    if uid <= 0 or any(not 0 < port < 65536 for port in ports) or len(set(ports)) != len(ports):
         raise IsolationError("the network rules are given an unusable user or port")
     table = table_name(uid)
     family = table_family(mode)
     loopback = f'oifname "lo" ip daddr {PROXY_HOST}'
     last = "reject with icmpx type admin-prohibited" if mode is EgressMode.FULL else "drop"
+    egress = (
+        []
+        if egress_port is None
+        else [
+            # The supervisor's allowlist proxy: the only way the agent's tools leave the container.
+            f"add rule {family} {table} output meta skuid {uid} {loopback} "
+            f"tcp dport {egress_port} accept"
+        ]
+    )
     return "\n".join(
         [
             f"add table {family} {table}",
@@ -152,6 +178,7 @@ def ruleset(uid: int, proxy_port: int, engine_port: int, mode: EgressMode = Egre
             f"tcp dport {proxy_port} accept",
             f"add rule {family} {table} output meta skuid {uid} {loopback} "
             f"tcp dport {engine_port} accept",
+            *egress,
             # Every other packet of that user: refused at once (full) or dropped (fallback).
             f"add rule {family} {table} output meta skuid {uid} {last}",
             "",
@@ -233,8 +260,8 @@ class NetworkConfinement:
     run: NftRunner = _run_nft
     mode: EgressMode = EgressMode.FULL
 
-    def apply(self, proxy_port: int, engine_port: int) -> None:
-        self.run(ruleset(self.uid, proxy_port, engine_port, self.mode))
+    def apply(self, proxy_port: int, engine_port: int, egress_port: int | None = None) -> None:
+        self.run(ruleset(self.uid, proxy_port, engine_port, self.mode, egress_port))
 
 
 # Runs the probe as the engine user: argv, the user and group, returns the stdout text.
@@ -263,9 +290,16 @@ def run_probe_as_user(argv: list[str], uid: int, gid: int) -> str:
 
 
 def verify_confinement(
-    uid: int, gid: int, allowed_port: int, *, run_probe: ProbeRunner = run_probe_as_user
+    uid: int,
+    gid: int,
+    allowed_port: int,
+    *extra_ports: int,
+    run_probe: ProbeRunner = run_probe_as_user,
 ) -> None:
     """Prove, as the engine user, that only `allowed_port` is reachable. Raises `IsolationError`.
+
+    `extra_ports` (the egress proxy's, #763) must be reachable as well; a listener of the
+    supervisor has to accept on each of them.
 
     The sentinels are listeners this process owns: another "job's" port on the proxy address, a
     port on another loopback address and a UDP socket. Without the rules every one of them would
@@ -300,6 +334,7 @@ def verify_confinement(
             str(other_host.getsockname()[1]),
             str(datagram.getsockname()[1]),
             str(_CONNECT_TIMEOUT_SECONDS),
+            *([",".join(str(port) for port in extra_ports)] if extra_ports else []),
         ]
         output = run_probe(argv, uid, gid)
         try:
@@ -316,6 +351,8 @@ def verify_confinement(
         raise IsolationError("the network probe returned no result")
     if reached.get("allowed") is not True:
         raise IsolationError("the engine user cannot reach its model proxy")
+    if extra_ports and reached.get("extra") is not True:
+        raise IsolationError("the engine user cannot reach its egress proxy")
     if reached.get("other_port") is not False or reached.get("other_host") is not False:
         raise IsolationError("the engine user can reach a service other than its model proxy")
     if datagram_arrived:

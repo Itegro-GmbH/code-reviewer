@@ -10,6 +10,7 @@ import {
 import type { JobFieldError } from "./errors.ts";
 import {
   JOB_TRIGGER_KINDS,
+  type EnqueueImplementerTurnInput,
   type EnqueueJobInput,
   type JobTriggerKind,
 } from "./job-types.ts";
@@ -140,6 +141,64 @@ export function validateEnqueueInput(
       deliveryId: deliveryId as string | null,
       commentId: commentId as string | null,
       runAfter: runAfter as Date | null,
+    },
+  };
+}
+
+export type ImplementerTurnInputCheck =
+  | { ok: true; value: EnqueueImplementerTurnInput }
+  | { ok: false; fieldErrors: JobFieldError[] };
+
+/** A request id as a client sends it: printable ASCII without a space, so it is safe inside the job's delivery id and logs. */
+export const CLIENT_REQUEST_ID = /^[\x21-\x7e]{1,200}$/;
+/** A branch name: no control character and no space (git refuses both), and bounded. */
+export const BRANCH_NAME = /^[^\s\x00-\x1f\x7f]{1,255}$/;
+
+/**
+ * Checks what `enqueueImplementerTurn` is given before anything is written (#752). The model choice is checked where it is
+ * stored (`implementer-model-choice.ts`); the existence of the repository and the branch, by the transaction that writes them.
+ */
+export function validateImplementerTurnInput(
+  input: EnqueueImplementerTurnInput,
+): ImplementerTurnInputCheck {
+  const fields = input as Partial<
+    Record<keyof EnqueueImplementerTurnInput, unknown>
+  >;
+  const fieldErrors: JobFieldError[] = [];
+  const refuse = (field: string, code: JobFieldError["code"]) =>
+    void fieldErrors.push({ field, code });
+
+  if (!isNonEmptyString(fields.repositoryId))
+    refuse("repositoryId", "required");
+  for (const field of ["baseBranch", "branch"] as const) {
+    const value = fields[field];
+    if (!isNonEmptyString(value)) refuse(field, "required");
+    else if (!BRANCH_NAME.test(value)) refuse(field, "invalid");
+  }
+  const baseSha = fields.baseSha;
+  if (typeof baseSha !== "string" || !HEAD_SHA.test(baseSha))
+    refuse("baseSha", "invalid");
+  if (!isNonEmptyString(fields.instruction)) refuse("instruction", "required");
+  const cost = fields.costLimitCents;
+  if (
+    cost !== null &&
+    (typeof cost !== "number" || !Number.isSafeInteger(cost) || cost < 1)
+  )
+    refuse("costLimitCents", "invalid");
+  if (!isNonEmptyString(fields.createdBy)) refuse("createdBy", "required");
+  if (!isNonEmptyString(fields.actorLogin)) refuse("actorLogin", "required");
+  const requestId = fields.clientRequestId;
+  if (typeof requestId !== "string" || requestId === "")
+    refuse("clientRequestId", "required");
+  else if (!CLIENT_REQUEST_ID.test(requestId))
+    refuse("clientRequestId", requestId.length > 200 ? "too_long" : "invalid");
+
+  if (fieldErrors.length > 0) return { ok: false, fieldErrors };
+  return {
+    ok: true,
+    value: {
+      ...input,
+      baseSha: (baseSha as string).toLowerCase(),
     },
   };
 }

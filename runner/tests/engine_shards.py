@@ -17,6 +17,7 @@ SHARDS = ("pragent", "opencode")
 # The files of tests/engine that run the pinned OpenCode (directly, or through the native job).
 OPENCODE_FILES = frozenset(
     {
+        "test_engine_implementer.py",
         "test_engine_native_job.py",
         "test_engine_opencode.py",
         "test_engine_opencode_anthropic.py",

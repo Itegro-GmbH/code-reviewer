@@ -1143,6 +1143,8 @@ describe("the limits at claim", () => {
         repositoryId: job.repositoryId,
         prNumber: job.prNumber,
         triggerKind: job.triggerKind,
+        // #752: a turn of the Implementer has no pull request, so the notice is not made for it.
+        reviewKind: "diff",
         errorCode: "quota_exhausted",
         detail: "diff_runs",
         // #281: the period the refusal was decided under; the pull request notice is once per period.

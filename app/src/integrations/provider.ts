@@ -4,6 +4,7 @@
 // call these methods and see normalized types only. See README.md in this folder.
 import type { ConfigValidationResult } from "./config-schema.ts";
 import type {
+  ConnectionPermissions,
   DiscoveredConnection,
   GitAccess,
   Integration,
@@ -187,6 +188,40 @@ export interface IntegrationProvider {
   jobAccess(integration: Integration, repo: RepoRef): Promise<GitAccess>;
 
   /**
+   * Credentials for one Implementer turn on one repository (#749): like `jobAccess`, a fresh token limited to exactly
+   * this repository, but with the right to write its contents (push a branch) and nothing else. Never used by a review
+   * job. Rejects with an `IntegrationError` like `jobAccess`; `INTEGRATION_ACCESS_PERMISSION_NOT_GRANTED` says the
+   * connection has not accepted the write permission yet (not retryable). It is a capability of its own (#753): a
+   * deployment without `implementer` is refused with `INTEGRATION_CAPABILITY_ABSENT` before the platform is asked
+   * anything, whatever the App was set to by hand. A token lives up to an hour; `revokeImplementerAccess` ends it.
+   */
+  implementerAccess(
+    integration: Integration,
+    repo: RepoRef,
+  ): Promise<GitAccess>;
+
+  /**
+   * Switches off a token `implementerAccess` handed out (#753), so a write token does not outlive its job: called when the
+   * token never reached a Worker, and when the turn is over. Idempotent, never rejects, and not behind the capability, because
+   * a cleanup is never refused. Answers whether the token is off: `true` when the platform switched it off or says it is not
+   * valid any more; `false` when that is not known (an error, a rate limit, no answer in time), and the caller keeps the token and
+   * tries again until it expires. `token` is the value `implementerAccess` returned.
+   */
+  revokeImplementerAccess(
+    integration: Integration,
+    token: string,
+  ): Promise<boolean>;
+
+  /**
+   * What the connection has accepted on the platform (#749), so that a page can say "write access not granted" before a
+   * task is accepted. Reads the connection, mints no token. Rejects like `jobAccess` (a removed connection is
+   * `INTEGRATION_ACCESS_CONNECTION_GONE`).
+   */
+  installationPermissions(
+    integration: Integration,
+  ): Promise<ConnectionPermissions>;
+
+  /**
    * One pull request of a repository, for example to start a review by hand. When `signal` fires, the
    * request to the platform is aborted (not just no longer waited for) and the call rejects with
    * `INTEGRATION_ACCESS_UNAVAILABLE`.
@@ -197,6 +232,44 @@ export interface IntegrationProvider {
     prNumber: number,
     signal?: AbortSignal,
   ): Promise<PullRequestRef>;
+
+  /**
+   * The facts about a repository that the pickers need (#750): its default branch, which is always preselected.
+   * Reads with a token limited to this repository and to reading its contents (never the credentials of a job).
+   * Rejects like `getPullRequest` with an `IntegrationError`; a repository that is gone or refused is
+   * `INTEGRATION_ACCESS_*`. The message never holds a token.
+   */
+  getRepositoryFacts(
+    integration: Integration,
+    repo: RepoRef,
+    signal?: AbortSignal,
+  ): Promise<{ defaultBranch: string }>;
+
+  /**
+   * The branch names of a repository for the base branch picker (#750): at most the first 100, the default branch
+   * first, and whether there are more. Same token, errors and abort rules as `getRepositoryFacts`.
+   */
+  listBranches(
+    integration: Integration,
+    repo: RepoRef,
+    signal?: AbortSignal,
+  ): Promise<{ names: string[]; truncated: boolean }>;
+
+  /**
+   * One branch by name, `feature/x` included (#750): its head commit, or null when the repository has no such
+   * branch. This is the `branch_exists` check before anything is enqueued. Same token, errors and abort rules as
+   * `getRepositoryFacts`.
+   *
+   * Null can also mean that the repository path in `repo` is stale (the repository was renamed or moved, so
+   * GitHub answers 404 for the branch as well): a caller must call `getRepositoryFacts` first, which rejects when the
+   * repository path no longer resolves, and trust a null only after that.
+   */
+  getBranch(
+    integration: Integration,
+    repo: RepoRef,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<{ sha: string } | null>;
 
   /** The open pull requests of a repository (drafts included, marked as such). Aborts like `getPullRequest`. */
   listOpenPullRequests(

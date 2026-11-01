@@ -92,9 +92,16 @@ export function createRunsService(deps: {
       const prices = await deps.prices?.(runs.map(({ job }) => job.id));
       return {
         generatedAt: answeredAt.toISOString(),
-        runs: runs.map(({ job, project }) =>
+        runs: runs.map(({ job, project, implementer }) =>
           withPrice(
-            toRunRowView(deps.product, job, project, answeredAt),
+            toRunRowView(
+              deps.product,
+              job,
+              project,
+              answeredAt,
+              implementer ?? null,
+              deps.redact,
+            ),
             prices,
           ),
         ),
@@ -119,6 +126,7 @@ export function createRunsService(deps: {
             deps.redact,
             stored.onManagedKey,
             stored.reviewComment,
+            stored.implementer ?? null,
           ),
           prices,
         ),

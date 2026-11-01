@@ -30,7 +30,11 @@ export type GitRepository = {
   setRef(ref: string, sha: string): void;
 };
 
-export function createGitRepository(directory: string): GitRepository {
+export function createGitRepository(
+  directory: string,
+  options: { defaultBranch?: string } = {},
+): GitRepository {
+  const defaultBranch = options.defaultBranch ?? "main";
   mkdirSync(directory, { recursive: true });
   const environment: Record<string, string> = {
     PATH: process.env.PATH ?? "",
@@ -45,7 +49,10 @@ export function createGitRepository(directory: string): GitRepository {
       // Next's types make NODE_ENV a required variable; Git does not read it.
       env: environment as NodeJS.ProcessEnv,
     }).trim();
-  git("init", "--quiet", "--initial-branch=main");
+  git("init", "--quiet", `--initial-branch=${defaultBranch}`);
+  // The fake GitHub reads the default branch of the repository from here (`git-branches.ts`): the checked out
+  // branch moves with `branch` and `checkout`, this does not.
+  git("config", "init.defaultBranch", defaultBranch);
   git("config", "commit.gpgsign", "false");
   git("config", "core.hooksPath", "/dev/null");
   // What the runner's checkout asks the server for: a depth-one fetch of a commit with a blob size filter.

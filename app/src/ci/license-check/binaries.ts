@@ -105,13 +105,15 @@ function checkPin(
 
   const license = text(pin.license);
   if (license !== undefined) {
-    let permitted = false;
+    // An entry with a documented exception is accepted with the license it names; the pin must say the
+    // same license (checked above), so the exception cannot cover another one.
+    let permitted = entry.exception !== undefined && license === entry.license;
     try {
-      permitted = satisfies(parseExpression(license), (id) =>
+      permitted ||= satisfies(parseExpression(license), (id) =>
         allowed.has(id.toLowerCase()),
       );
     } catch {
-      permitted = false;
+      // not an SPDX expression: only an exception can permit it
     }
     if (!permitted) {
       violate(
@@ -131,7 +133,12 @@ function checkPin(
   }
   for (const platform of names) {
     const artifact = platforms[platform];
-    for (const field of ["archiveSha256", "executableSha256"]) {
+    // A release built from source has the digest of its archive only: the executable is a build result.
+    const digests =
+      entry.build === "source"
+        ? ["archiveSha256"]
+        : ["archiveSha256", "executableSha256"];
+    for (const field of digests) {
       const digest = isRecord(artifact) ? artifact[field] : undefined;
       if (typeof digest !== "string" || !SHA256.test(digest)) {
         violate(

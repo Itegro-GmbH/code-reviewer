@@ -1,0 +1,142 @@
+#!/bin/bash
+# SPDX-License-Identifier: LicenseRef-Proprietary
+#
+# Accident guard of the Implementer (#761): a git `reference-transaction` hook that keeps the agent on
+# its branch and tells the runner about every commit. The image installs it root-owned and read-only at
+# /opt/code-reviewer/guard/; the Worker points `core.hooksPath` at that directory per job through a
+# GIT_CONFIG_SYSTEM file under /run (the image bakes no hooksPath in).
+#
+# It is a guard against accidents (amend, reset, rebase, a branch switch, a new branch or tag), not a
+# security boundary: `git -c core.hooksPath=/dev/null` and a hand-written ref file get around it. The
+# guarantee is the runner's push check (fetch without force, ancestor check, push from a mirror), which
+# the spool below only hints at. Needs git 2.53 or newer: older git does not run the hook for a change
+# of HEAD, so a branch switch is invisible to it (the matrix, guard_matrix.sh, fails on older git).
+#
+# $1 is prepared|committed|aborted; stdin has "<old> <new> <ref>" per updated ref. git passes the zero id
+# as <old> in many updates, so the current tip is read from the repository (unchanged while `prepared`).
+#
+# Configuration (shell variables, a file only root can write; the Worker writes it per turn):
+#   BRANCH  the branch the agent works on        START  the commit it started from
+#   SPOOL   an append-only file the agent's user can write: one "<time> <sha>" line per tip update
+#   REPO    the agent's work repository, its work tree or its git directory (optional, added in #761 review;
+#           the Worker should always write it). core.hooksPath comes through the system config, so the hook
+#           runs for every repository of the job: a test fixture (`git init`), a clone, a git dependency of
+#           pnpm or uv, a submodule. With REPO set the hook acts only in the repository whose git directory
+#           is REPO's (a linked worktree of it counts) and lets every other one through. Without REPO the
+#           hook guards every repository, as before.
+# The file is read from $CODE_REVIEWER_GUARD_CONF, by default /run/code-reviewer/guard.conf. A missing or
+# incomplete file denies everything: a guard that silently allows is worse than none.
+conf=${CODE_REVIEWER_GUARD_CONF:-/run/code-reviewer/guard.conf}
+zero=0000000000000000000000000000000000000000
+state=$1
+lines=()
+while read -r line; do lines+=("$line"); done
+
+deny() {
+  echo "code-reviewer-guard: $*" >&2
+  exit 1
+}
+
+[ -r "$conf" ] || deny "the guard configuration is missing"
+# shellcheck disable=SC1090 # the file is written by the Worker at run time
+. "$conf"
+[ -n "${BRANCH:-}" ] && [ -n "${START:-}" ] && [ -n "${SPOOL:-}" ] || deny "the guard configuration is incomplete"
+
+# The common git directory of a repository (a linked worktree shares its main repository's), symlinks resolved.
+common_dir() { # <git arguments before rev-parse...>
+  local dir
+  dir=$("$@" rev-parse -q --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  (cd "$dir" 2>/dev/null && pwd -P)
+}
+if [ -n "${REPO:-}" ]; then
+  # Git passes GIT_DIR of the repository it works on (a clone does); the work repository is looked up without it.
+  work_git_dir=$(common_dir env -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE git -C "$REPO") || deny "the guard configuration names a repository that is not one"
+  # While git creates a repository (init, clone) there is no valid repository yet: GIT_DIR names it.
+  here_git_dir=$(common_dir git) || here_git_dir=$(cd "${GIT_DIR:-/nonexistent}" 2>/dev/null && pwd -P) || here_git_dir=""
+  # A repository of its own (or one that cannot be told) is none of the guard's business only when it is
+  # positively another one; when git cannot say where it is, the work repository's rules apply.
+  [ -n "$here_git_dir" ] && [ "$here_git_dir" != "$work_git_dir" ] && exit 0
+fi
+
+branch_ref="refs/heads/$BRANCH"
+current=$(git rev-parse -q --verify "$branch_ref")
+
+# The git command that runs this transaction: the first word of its command line that is not an option, the
+# parent of this hook. Used for what only some commands do to refs (see below); an accident guard can rely on it.
+command_of_git() {
+  local arg skip=0
+  while IFS= read -r -d "" arg; do
+    if [ "$skip" -eq 1 ]; then skip=0; continue; fi
+    case "$arg" in
+      -C | -c | --exec-path | --git-dir | --work-tree | --namespace | --config-env) skip=1 ;;
+      -* | git | */git) ;;
+      *) echo "$arg"; return 0 ;;
+    esac
+  done <"/proc/$PPID/cmdline" 2>/dev/null
+  return 1
+}
+command=$(command_of_git)
+
+# `git gc`, `git pack-refs` and `git maintenance` (also `gc --auto`, which git runs by itself after a few
+# commands) move loose refs into packed-refs: git reports the packing as a creation of every ref at the id it
+# already has, and then the pruning of the loose files as a deletion, although the ref stays. They are told
+# apart from a real change or deletion (`update-ref`, `branch -D`) by the command that runs the transaction and
+# by the ref: packing re-writes the id the ref has, pruning removes only a ref that packed-refs holds at its
+# id already, so the last copy of a ref never goes.
+packing_a_ref() { # <ref> <new>
+  [ "$command" = pack-refs ] && [ "$1" != HEAD ] || return 1
+  local id
+  id=$(git rev-parse -q --verify "$1") || return 1
+  if [ "$2" = "$zero" ]; then
+    grep -q "^$id $1\$" "$(git rev-parse -q --path-format=absolute --git-common-dir)/packed-refs" 2>/dev/null
+  else
+    [ "$2" = "$id" ]
+  fi
+}
+
+if [ "$state" = prepared ]; then
+  # What the branch becomes in this transaction: a HEAD update with an object id is allowed only
+  # together with an update of the branch to the same id.
+  branch_new=""
+  for line in "${lines[@]}"; do
+    # shellcheck disable=SC2086 # split into the three fields on purpose
+    set -- $line
+    [ "$3" = "$branch_ref" ] && branch_new=$2
+  done
+  for line in "${lines[@]}"; do
+    # shellcheck disable=SC2086
+    set -- $line
+    new=$2
+    ref=$3
+    # Packing and pruning refs (see above): the ref does not change.
+    packing_a_ref "$ref" "$new" && continue
+    case "$ref" in
+      "$branch_ref")
+        [ "$new" = "$zero" ] && deny "deleting $BRANCH is not allowed"
+        if [ -n "$current" ] && ! git merge-base --is-ancestor "$current" "$new"; then
+          deny "$BRANCH may only move forward"
+        fi
+        git merge-base --is-ancestor "$START" "$new" || deny "the tip must contain the start commit"
+        ;;
+      HEAD)
+        case "$new" in
+          ref:*) [ "$new" = "ref:$branch_ref" ] || deny "HEAD may only point at $BRANCH" ;;
+          *) [ -n "$branch_new" ] && [ "$new" = "$branch_new" ] || deny "HEAD may only follow $BRANCH" ;;
+        esac
+        ;;
+      refs/tags/*)
+        # `git fetch` follows the tags of what it fetches; a tag of the agent's own is not allowed.
+        case "$command" in fetch | pull) [ "$new" != "$zero" ] || deny "deleting $ref is not allowed" ;; *) deny "updating $ref is not allowed" ;; esac
+        ;;
+      refs/stash | refs/remotes/* | ORIG_HEAD | FETCH_HEAD | MERGE_HEAD | CHERRY_PICK_HEAD | REVERT_HEAD | AUTO_MERGE | REBASE_HEAD) : ;;
+      *) deny "updating $ref is not allowed" ;;
+    esac
+  done
+elif [ "$state" = committed ] && [ "$command" != pack-refs ]; then
+  for line in "${lines[@]}"; do
+    # shellcheck disable=SC2086
+    set -- $line
+    [ "$3" = "$branch_ref" ] && [ "$2" != "$zero" ] && echo "$(date +%s.%N) $2" >>"$SPOOL"
+  done
+fi
+exit 0

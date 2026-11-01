@@ -210,7 +210,7 @@ describe("the registry of apps", () => {
     ],
     [
       "names a kind that does not exist",
-      [{ ...factory, kinds: ["diff", "implementer"] }],
+      [{ ...factory, kinds: ["diff", "review"] }],
       factorySecrets,
       "DISPATCHER_APPS",
       "invalid",
@@ -401,7 +401,7 @@ describe("the registry of apps", () => {
 
   // #730-T02
   it("tells which app and which field a refusal of DISPATCHER_APPS is about", () => {
-    const error = failure(env([{ ...factory, kinds: ["implementer"] }]));
+    const error = failure(env([{ ...factory, kinds: ["review"] }]));
 
     expect(error.message).toBe("DISPATCHER_APPS is invalid (factory: kinds)");
   });
@@ -446,13 +446,12 @@ describe("the registry of apps", () => {
 
   // #730-T11
   it("allows no kind that is not on the list in code: not for an app of the registry, not through DISPATCHER_ENGINES, and `reviewer` cannot be redeclared", () => {
-    for (const kind of ["implementer", "review", "Diff"])
+    for (const kind of ["review", "Diff", "implementer "])
       expect(
         failure(env([{ ...factory, kinds: ["diff", kind] }])),
       ).toMatchObject({ variable: "DISPATCHER_APPS", reason: "invalid" });
     expect(
-      failure({ ...legacy, DISPATCHER_ENGINES: "pr-agent,implementer" })
-        .variable,
+      failure({ ...legacy, DISPATCHER_ENGINES: "pr-agent,review" }).variable,
     ).toBe("DISPATCHER_ENGINES");
     expect(
       failure(env([{ ...factory, id: "reviewer", kinds: ["diff"] }])),
@@ -464,5 +463,90 @@ describe("the registry of apps", () => {
         DISPATCHER_APP_REVIEWER_KINDS: "implementer",
       }).core.apps[0]?.kinds,
     ).toStrictEqual(["diff", "dynamic"]);
+  });
+});
+
+// #759: the kind `implementer` exists for the apps of the registry and never for `reviewer`.
+describe("the implementer kind in the configuration (#759)", () => {
+  const implementing = {
+    ...factory,
+    kinds: ["diff", "dynamic", "implementer"],
+  };
+
+  // #759-T02
+  it("never gives `reviewer` the kind: not with the default engines, not with DISPATCHER_ENGINES naming it", () => {
+    const variants: Array<[Record<string, string>, string[]]> = [
+      [legacy, ["diff", "dynamic"]],
+      [env([implementing]), ["diff", "dynamic"]],
+      [
+        { ...env([implementing]), DISPATCHER_ENGINES: "pr-agent,implementer" },
+        ["diff"],
+      ],
+      [
+        {
+          ...env([implementing]),
+          DISPATCHER_ENGINES: "pr-agent,opencode,implementer",
+        },
+        ["diff", "dynamic"],
+      ],
+      [{ ...legacy, DISPATCHER_ENGINES: "opencode,implementer" }, ["dynamic"]],
+    ];
+    for (const [variables, kinds] of variants)
+      expect(loadSettings(variables).core.apps[0]).toMatchObject({
+        id: "reviewer",
+        kinds,
+      });
+  });
+
+  // #759-T02
+  it("refuses an engine list that leaves `reviewer` no kind, naming DISPATCHER_ENGINES", () => {
+    expect(
+      failure({ ...env([implementing]), DISPATCHER_ENGINES: "implementer" }),
+    ).toMatchObject({ variable: "DISPATCHER_ENGINES", reason: "invalid" });
+  });
+
+  // #759-T02
+  it("adds the engine `implementer` to the default engines only when an app of DISPATCHER_APPS names the kind", () => {
+    expect(loadSettings(legacy).core.engines).toStrictEqual([
+      "pr-agent",
+      "opencode",
+    ]);
+    expect(loadSettings(env([factory])).core.engines).toStrictEqual([
+      "pr-agent",
+      "opencode",
+    ]);
+    expect(loadSettings(env([implementing])).core.engines).toStrictEqual([
+      "pr-agent",
+      "opencode",
+      "implementer",
+    ]);
+    // An operator who names the engines decides: the kind is not served unless the list has its engine.
+    expect(
+      loadSettings({ ...env([implementing]), DISPATCHER_ENGINES: "pr-agent" })
+        .core.engines,
+    ).toStrictEqual(["pr-agent"]);
+  });
+
+  // #759-T03
+  it("accepts a registry entry for `factory` with the kind and keeps it, and still refuses an unknown kind naming the entry", () => {
+    const { core } = loadSettings(env([implementing]));
+
+    expect(core.apps.map((app) => [app.id, app.kinds])).toStrictEqual([
+      ["reviewer", ["diff", "dynamic"]],
+      ["factory", ["diff", "dynamic", "implementer"]],
+    ]);
+    expect(
+      failure(env([{ ...implementing, kinds: ["diff", "implementor"] }]))
+        .message,
+    ).toBe("DISPATCHER_APPS is invalid (factory: kinds)");
+  });
+
+  // #759-T03
+  it("accepts the kind for an entry that names it alone", () => {
+    const { core } = loadSettings(
+      env([{ ...factory, kinds: ["implementer"] }]),
+    );
+
+    expect(core.apps[1]?.kinds).toStrictEqual(["implementer"]);
   });
 });

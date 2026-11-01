@@ -261,7 +261,7 @@ yours.
 
   Set them without typing a value into a command line, for example
   `read -rs -p 'value: ' V; printf '%s' "$V" | gh secret set INFISICAL_CLIENT_SECRET --env production; unset V`.
-- No repository variable is needed, except `FACTORY_ENABLED` when you run a second App (section 5.8; a *repository* variable, not a variable of the environment `production`). Unset, the pipeline is exactly the one described here.
+- No repository variable is needed, except `FACTORY_ENABLED` when you run a second App, and `FACTORY_EXPECTED_CAPABILITIES` when that App's capability set is not the default (section 5.8; both are *repository* variables, not variables of the environment `production`). Unset, the pipeline is exactly the one described here.
 - Retired: the environments `hosted-snapshot` and `hosted-canary`, the repository variables `DISPATCHER_CANARY_HOSTS`
   and `GOLDEN_SNAPSHOT_ENABLED`.
 
@@ -447,7 +447,7 @@ every secret: at least 32 characters, no white space or control characters.
 | `DATABASE_URL` | yes | **yes** | The **app role's** Postgres URL (`postgres://` or `postgresql://`). **A direct or session-mode connection, never a transaction pooler** (section 2). |
 | `DATABASE_POOL_MAX` | optional | no | Connections per function instance, 1 to 20, default 3. Every instance has its own pool: keep it small. |
 | `PRODUCT_ID` | optional | no | Which product this deployment is: `code-review-com` (default) or `factory`. Unknown values stop the start (`DEPLOY_CONFIG_INVALID`, naming the variable). `/api/health` reports it. It also decides the brand the app speaks under: its name in pages and mails, the title, the name of the check run and of the GitHub App (the codename `Factory` until the brand is chosen). It is read when the server renders or builds, so each Vercel project, with its own variables, has its own. |
-| `PRODUCT_CAPABILITIES` | optional | no | Comma list that narrows what the product has: `review`, `dynamic-review` (needs `review`), `billing`. Unset: the product's default (code-review.com: all three, so the live deployment sets nothing; `factory`: `review,dynamic-review`). A capability that is not in the set has no route, no navigation entry, no API and no background work: its paths answer as paths that do not exist. A value the product does not allow stops the start. Read at build and at start, so change it with a new deployment. `/api/health` answers `{"status":"ok","product":...,"capabilities":[...]}`. Details: `app/src/capabilities/README.md`. |
+| `PRODUCT_CAPABILITIES` | optional | no | Comma list that narrows what the product has: `review`, `dynamic-review` (needs `review`), `billing`, `implementer` (needs `dynamic-review`; `factory` only, see section 5.8). Unset: the product's default (code-review.com: `review`, `dynamic-review` and `billing`, so the live deployment sets nothing; `factory`: `review,dynamic-review`, so an unset value never turns `implementer` on). A capability that is not in the set has no route, no navigation entry, no API and no background work: its paths answer as paths that do not exist. A value the product does not allow stops the start (`implementer` on code-review.com included). Read at build and at start, so change it with a new deployment. `/api/health` answers `{"status":"ok","product":...,"capabilities":[...]}`. Details: `app/src/capabilities/README.md`. |
 | `RUNNER_TOKEN` | yes | **yes** | The **dispatcher credential**: what the Dispatcher claims jobs with. At least 32 characters. **Same value as the Dispatcher's `RUNNER_TOKEN`.** There is one token, no overlap while rotating (section 5.2). |
 | `CRON_SECRET` | yes | **yes** | Vercel sends it as `Authorization: Bearer ...` to both cron routes. At least 32 characters. Without it every cron call is refused (`401`): the safety net of section 5.7 does not run (stuck jobs, lapsed leases of a quiet system, `dispatch_unavailable`, notices that failed). Vercel adds the header by itself once the variable exists. |
 | `RUNNER_DISPATCH` | yes, **in step 5** | no | `webhook`. Leave it unset (`poll`) until step 5: in poll mode nothing wakes a Dispatcher. |
@@ -489,13 +489,13 @@ A refusal at start names the variable, never its value (`ConfigError`: `required
 | `DISPATCHER_SIGNING_KEY_ID` | yes | no | The key id the App signs with. **Same as the App's `RUNNER_WEBHOOK_KEY_ID`** (`k1` if that is unset). |
 | `DISPATCHER_SIGNING_SECRET` | yes | **yes** | **Same value as the App's `RUNNER_WEBHOOK_SECRET`.** At least 32 characters, different from `RUNNER_TOKEN`. |
 | `DISPATCHER_SIGNING_KEY_ID_PREVIOUS`, `DISPATCHER_SIGNING_SECRET_PREVIOUS` | optional | **yes** (secret) | The previous key, accepted while keys rotate. Both or neither. |
-| `DISPATCHER_APPS` | optional | no | More than one App (#730): further Apps this Dispatcher serves besides `reviewer`, the App of the variables above. A JSON array on one line, at most 16 entries, each `{"id", "url", "kinds", "keyId", "maxRunning", "poolId"?}`: `id` is `a-z`, `0-9` and `-` (at most 24 characters, not `reviewer`), `url` the App's address (as `RUNNER_API_URL`), `kinds` any of `diff` and `dynamic` (the job kinds that App may submit and be given: nothing else, whatever the App sends), `keyId` its signing key id, `maxRunning` the pool cap of that App (1 to 1000, **equal to that App's `RUNNER_DISPATCH_MAX_RUNNING`**), `poolId` what is sent as `X-Runner-Id` (default: the id). Per App the Dispatcher reads `DISPATCHER_APP_<ID>_TOKEN` and `DISPATCHER_APP_<ID>_SIGNING_SECRET` (required, secret, at least 32 characters) and optionally `DISPATCHER_APP_<ID>_SIGNING_SECRET_PREVIOUS` with `DISPATCHER_APP_<ID>_SIGNING_SECRET_PREVIOUS_KEY_ID`; `<ID>` is the id in upper case with `-` as `_`. Every secret is different from every other, a key id or an address is used once, and a refusal names `DISPATCHER_APPS` and the App. Unset: only `reviewer` exists, exactly as before. Details: `docs/dispatcher.md`, "More than one App". |
+| `DISPATCHER_APPS` | optional | no | More than one App (#730): further Apps this Dispatcher serves besides `reviewer`, the App of the variables above. A JSON array on one line, at most 16 entries, each `{"id", "url", "kinds", "keyId", "maxRunning", "poolId"?}`: `id` is `a-z`, `0-9` and `-` (at most 24 characters, not `reviewer`), `url` the App's address (as `RUNNER_API_URL`), `kinds` any of `diff`, `dynamic` and `implementer` (the job kinds that App may submit and be given: nothing else, whatever the App sends; `implementer`, #759, is for an App of this array only, `reviewer` never has it, and **an older Dispatcher refuses the value at start, so set it only after the Dispatcher with #759 is live**), `keyId` its signing key id, `maxRunning` the pool cap of that App (1 to 1000, **equal to that App's `RUNNER_DISPATCH_MAX_RUNNING`**), `poolId` what is sent as `X-Runner-Id` (default: the id). Per App the Dispatcher reads `DISPATCHER_APP_<ID>_TOKEN` and `DISPATCHER_APP_<ID>_SIGNING_SECRET` (required, secret, at least 32 characters) and optionally `DISPATCHER_APP_<ID>_SIGNING_SECRET_PREVIOUS` with `DISPATCHER_APP_<ID>_SIGNING_SECRET_PREVIOUS_KEY_ID`; `<ID>` is the id in upper case with `-` as `_`. Every secret is different from every other, a key id or an address is used once, and a refusal names `DISPATCHER_APPS` and the App. Unset: only `reviewer` exists, exactly as before. Details: `docs/dispatcher.md`, "More than one App". |
 | `DISPATCHER_OPERATOR_TOKEN` | optional | **yes** | The credential of `POST /probe` (the deploy canary) and `POST /apps/check`. At least 32 characters, different from every other secret. **Unset, `POST /probe` is still opened by `RUNNER_TOKEN`** (the rollout fallback, only while `reviewer` is the only App) and `POST /apps/check` refuses everyone. **Required with `DISPATCHER_APPS`**: the Dispatcher does not start without it. Set, no App's own credential opens either route: an App must not be able to start canary VMs, which cost money. Put it in `/ci` and `/dispatcher` together (`dispatcher/README.md`, "Rollout of the operator token"): the canary uses it when `/ci` has it. |
 | `SANDBOX_SNAPSHOT_ID` | yes | no | The golden snapshot: `snapshotId` of its record. **The deployment pipeline sets it** (section 5.1): the Dispatcher deployment of every run carries the pair it uses as its own run-time variables, and the pipeline writes the pair to Infisical after the promotion. **Unset, the Dispatcher has no Launcher and claims nothing** (every wake-up is answered `200 ignored` with `not_capable`). Set with `SANDBOX_IMAGE_DIGEST` or not at all. |
 | `SANDBOX_IMAGE_DIGEST` | with the snapshot | no | The Worker image id in that snapshot (`imageDigest` of the same record), `sha256:` and 64 hex characters. The Launcher refuses a VM whose image has another id. The pipeline sets the two together, and writes `SANDBOX_SNAPSHOT_COMMIT` (the commit the snapshot was built from; the Dispatcher does not read it) next to them. |
-| `DISPATCHER_ENGINES` | optional | no | `pr-agent`, `opencode` or both (default both). `pr-agent` for a Diff-only deployment: it has no `POST /probe` and no canary VM. A Dynamic job is accepted whenever `opencode` is in this list and the snapshot pair is set: the Dispatcher runs no capability probe on a dispatch (section 8). |
-| `DISPATCHER_JOB_TIMEOUT_SECONDS` | optional | no | How long a Worker may live, 60 to 21600, default **1200**. The function has to outlive only the launch (at most 300 s): the Dispatcher does not supervise the Worker after the hand-over (#487), so the function limit no longer bounds the job; the VM's own timeout (this plus `SANDBOX_VM_TIMEOUT_MARGIN_SECONDS`) and the reaper (section 5.5) do. |
-| `DISPATCHER_WORKER_CONFIG` | optional | no | JSON `{"diff": {...}, "dynamic": {...}}`: the VM size (`launcher.vcpus`) and the container memory (`container.memory.limit` / `reservation`) per Worker kind. Section 6. A wrong value fails when the function initialises (the variable is named in the log), not at the first job. |
+| `DISPATCHER_ENGINES` | optional | no | `pr-agent`, `opencode` or both (default both). `implementer` is added to the default when an App of `DISPATCHER_APPS` names the kind, and naming it here never gives it to `reviewer` (#759). The Launcher advertises `implementer` when it is in this list, and then `POST /probe` requires the canary report to name it (the canary VM runs a second probe in the Implementer's profile, #765); without it in the list nothing changes. `pr-agent` for a Diff-only deployment: it has no `POST /probe` and no canary VM. A Dynamic job is accepted whenever `opencode` is in this list and the snapshot pair is set: the Dispatcher runs no capability probe on a dispatch (section 8). |
+| `DISPATCHER_JOB_TIMEOUT_SECONDS` | optional | no | How long a Worker of Diff or Dynamic may live, 60 to 21600, default **1200**. The Implementer (#759) has its own timeout in `DISPATCHER_WORKER_CONFIG` (default 3600). The function has to outlive only the launch (at most 300 s): the Dispatcher does not supervise the Worker after the hand-over (#487), so the function limit no longer bounds the job; the VM's own timeout (this plus `SANDBOX_VM_TIMEOUT_MARGIN_SECONDS`) and the reaper (section 5.5) do. |
+| `DISPATCHER_WORKER_CONFIG` | optional | no | JSON `{"diff": {...}, "dynamic": {...}, "implementer": {...}}` (`implementer` also takes `timeoutSeconds`, 60 to 21600, default 3600): the VM size (`launcher.vcpus`) and the container memory (`container.memory.limit` / `reservation`) per Worker kind. Section 6. A wrong value fails when the function initialises (the variable is named in the log), not at the first job. |
 | `DISPATCHER_POOL_ID` | optional | no | Sent as `X-Runner-Id`; the App counts the running jobs of the pool by it. Default `dispatcher`. |
 | `SANDBOX_HANDOVER_SECONDS` | optional | no | How long the container must run before the Worker counts as having taken over, 1 to 120, default 20. |
 | `SANDBOX_VM_TIMEOUT_MARGIN_SECONDS` | optional | no | Seconds added to the job's timeout for the VM's own timeout, the backstop that ends a VM nobody stopped. At most 3600, at least 180 and 150 above the hand-over time, default 300. |
@@ -971,7 +971,7 @@ A run's error code is shown on the Runs pages with a fixed sentence. Four belong
 | Runs page | `worker_exited` | Runs from before #487 only. The Dispatcher used to give a job back with this code when it saw the Worker's container end with an error. It no longer watches the container after the hand-over: a Worker that dies is found by its lease and the run ends `lease_expired` after three lost attempts. |
 | Runs page | `dynamic_engine_unavailable` | A **Dynamic** job was dispatched and a Worker started, but the Worker refused it: its own startup self-check did not prove the container's isolation, so it serves Diff jobs only. No model was called and nothing was written to the pull request. The Worker's log says `Dynamic Review: opencode is not advertised, this runner serves Diff jobs only (<reason>)` and `job ... refused: the Dynamic engine is not advertised`. Since the Dispatcher runs no probe on a dispatch (section 8), this is the signal that the live deployment's container cannot be hardened: run the canary against it (section 4, step 3; Actions, *Dispatcher canary*), read the stable reason (`dynamic-review.md`, "The startup self-check"), fix it and redeploy through the pipeline so that a canary passes before it goes live. Diff jobs are not affected. |
 
-Others you will meet: `no_capable_runner` (a Dynamic job nobody could run for 30 minutes: `DISPATCHER_ENGINES` has no
+Others you will meet: `no_capable_runner` (a Dynamic job nobody could run for 30 minutes, or for 3 hours while a runner was busy with other Dynamic jobs: `DISPATCHER_ENGINES` has no
 `opencode`, or no Dispatcher is configured for it), `dynamic_review_disabled` (the gate is off), `lease_expired` (the Worker
 stopped reporting), `quota_exhausted`, `workspace_suspended` and `entitlements_invalid` (the workspace's limits, set
 through the operator API), `managed_model_unavailable` (the workspace is `managed` and its project selects no usable catalog entry for the kind
@@ -992,7 +992,7 @@ URL.
 - **No Launcher:** unset `SANDBOX_SNAPSHOT_ID` and `SANDBOX_IMAGE_DIGEST` and redeploy: the Dispatcher claims nothing. (A
   deployment of the pipeline carries its own pair and builds one when none is configured, so this is for a hand deployment.)
   Waiting jobs are not lost: Diff jobs fail with `dispatch_unavailable` after the give-up time, Dynamic ones with
-  `no_capable_runner` after 30 minutes.
+  `no_capable_runner` after 30 minutes (3 hours at the latest while a runner is busy with other Dynamic jobs).
 - **No more wake-ups:** `RUNNER_DISPATCH=poll` in the App. Jobs stay queued; nobody claims them.
 
 ### 5.5 Stopping VMs that outlived their job (the reaper)
@@ -1028,7 +1028,9 @@ deployment that outlived their purpose.
   App says. A job VM whose job the App reports as not `running` is stopped; if the App's answer cannot be read the VM
   is **kept** (only its lifetime ends it then). A canary VM is ended by its lifetime only.
 - The answer and the log hold counts and stable codes only: `listed`, `candidates`, `stopped`, `kept`, `unreadable`,
-  `failed`; events `vm_reaped`, `vm_reap_failed`, `job_state_unreadable`, `reap_done`, `reap_list_failed`. A `500` with
+  `failed`, `deleted`, `deleteFailed`, `deleteKept`, `deleteNotTried`; events `vm_reaped`, `vm_reap_failed`, `vm_deleted`, `vm_delete_failed`, `vm_delete_kept`, `vm_delete_halted`, `job_state_unreadable`, `reap_done`, `reap_list_failed`.
+  Besides stopping, each run deletes up to 50 ended (stopped, failed or aborted) VMs of ours that are a day old or older, so the platform's listing
+  stays small (`dispatcher/README.md`, "The reaper"). A `500` with
   `REAP_LIST_FAILED` means the platform's listing failed; nothing was stopped and the next run tries again.
 - **To check it:** Vercel's Cron Jobs settings of the Dispatcher project show the runs. During the smoke test, list the
   project's VMs after a job: none should be left running with a `cr-` name.
@@ -1157,7 +1159,7 @@ section 3.1, with its own values, and these are the ones that differ or are mand
 | Key in `/app-factory` | Value |
 |---|---|
 | `PRODUCT_ID` | `factory`. **Mandatory:** unset, the project starts as `code-review-com` (section 3.1) |
-| `PRODUCT_CAPABILITIES` | `review,dynamic-review` (billing off). This is the product's default; it is set explicitly so that the value `health-factory` checks is written down |
+| `PRODUCT_CAPABILITIES` | `review,dynamic-review` (billing off). This is the product's default; it is set explicitly so that the value `health-factory` checks is written down. Changing it means changing the repository variable `FACTORY_EXPECTED_CAPABILITIES` at the same time (below) |
 | `RUNNER_DISPATCH` | `webhook` |
 | `RUNNER_WEBHOOK_URL` | `https://<dispatcher production domain>/dispatch`, the same Dispatcher as the first App's |
 | `RUNNER_WEBHOOK_KEY_ID` | `factory-k1`: the `keyId` of the App's entry in `DISPATCHER_APPS` |
@@ -1165,12 +1167,22 @@ section 3.1, with its own values, and these are the ones that differ or are mand
 | `RUNNER_WEBHOOK_BYPASS_TOKEN` | Only if the Dispatcher is protected: `${prod.ci.VERCEL_DISPATCHER_AUTOMATION_BYPASS_SECRET}` |
 | `BETTER_AUTH_URL` | Its `vercel.app` address |
 
+**The capability set of the factory.** The product `factory` allows `implementer`, the capability of the Software Factory's
+Implementer; code-review.com refuses it and the start stops by name. It needs `dynamic-review` (and so `review`): a list with
+`implementer` and without `dynamic-review` stops the start too. The product's default stays `review,dynamic-review`, so
+an unset `PRODUCT_CAPABILITIES` never turns it on; the rollout of the Implementer sets the value explicitly, and the staged
+App then reports `dynamic-review,implementer,review` (sorted). `health-factory` compares the set exactly with
+the repository variable `FACTORY_EXPECTED_CAPABILITIES` (`dynamic-review,review` while it is unset), so a project whose
+`PRODUCT_CAPABILITIES` names `implementer` is not promoted until that variable is changed with it (below); nothing live
+changes in the meantime. The capability alone adds no page, no navigation entry
+and no job: they come with later changes of the Implementer.
+
 The keys of `/ci` for the lane are in the table of section 2.1. The Dispatcher learns about the App from `/dispatcher`,
 with references so that a value lives once:
 
 | Key in `/dispatcher` | Value |
 |---|---|
-| `DISPATCHER_APPS` | One JSON array on one line with the non-secret facts of the App: `[{"id":"factory","url":"https://<project>.vercel.app","kinds":["diff","dynamic"],"keyId":"factory-k1","maxRunning":2}]` (the format and every refusal are in section 3.2) |
+| `DISPATCHER_APPS` | One JSON array on one line with the non-secret facts of the App: `[{"id":"factory","url":"https://<project>.vercel.app","kinds":["diff","dynamic","implementer"],"keyId":"factory-k1","maxRunning":2}]` (the format and every refusal are in section 3.2; the `implementer` kind only once the Dispatcher with #759 is deployed, else it refuses the unknown kind at start and `reviewer` has an outage; **from that moment `POST /probe` requires the canary report to name `implementer` (#765), so a failed proof blocks the promotion of everything this Dispatcher deploys, code-review.com's release included; there is no switch that waives the proof, and the way back is `kinds` back to `["diff","dynamic"]` in this variable and a redeploy**) |
 | `DISPATCHER_APP_FACTORY_TOKEN` | `${prod.app-factory.RUNNER_TOKEN}` |
 | `DISPATCHER_APP_FACTORY_SIGNING_SECRET` | `${prod.app-factory.RUNNER_WEBHOOK_SECRET}` |
 | `DISPATCHER_OPERATOR_TOKEN` | `${prod.ci.DISPATCHER_OPERATOR_TOKEN}` |
@@ -1201,12 +1213,38 @@ to finish (below).
 | `factory-flag` | Reads `FACTORY_ENABLED` and outputs `enabled` (`true` only for the text `true`) | 2 min | The lane is skipped |
 | `migrate-factory` | `pnpm --dir app migrate` against `DATABASE_URL_MIGRATE_FACTORY` (the second App's migrate role). A job of its own: the first App's `migrate` does not run it and does not wait for it | 15 min | The second App is not staged. Nothing of the first App's path changes |
 | `stage-factory` | `vercel-stage.yml` for the second project, from the `app/` directory, after `migrate-factory`, in parallel with `stage-app` | 30 min | The second App is not promoted |
-| `health-factory` | `GET /api/health` of the staged second App must answer `200` with `{"status":"ok"}`, **and** report `product` `factory` and the capabilities `dynamic-review,review` (`PRODUCT_MISMATCH` stops at once). This is one-sided: the first App's `health-app` does not yet assert its own product (#738) | 10 min | The second App is not promoted |
+| `health-factory` | `GET /api/health` of the staged second App must answer `200` with `{"status":"ok"}`, **and** report `product` `factory` and exactly the capabilities of the repository variable `FACTORY_EXPECTED_CAPABILITIES`, `dynamic-review,review` while it is unset (`PRODUCT_MISMATCH` stops at once; a malformed variable stops the step before any request). This is one-sided: the first App's `health-app` does not yet assert its own product (#738) | 10 min | The second App is not promoted |
 | `apps-check` | `POST /apps/check` of the staged Dispatcher (operator credential): every App it serves must be reachable and accept its credential (`app_unreachable`, `app_rejected`); a missing feature is a warning, because the live Apps are still the previous release | 5 min | The second App is not promoted |
 | `promote-factory` | `vercel promote` of the second App, after `promote-app`, `health-factory`, `apps-check` and the canary | 10 min | The second App keeps its previous deployment |
 
 `canary` runs once, for the Dispatcher, as without the lane. The promotion order is the App, the second App, the
 Dispatcher (apps first, section 5.6). `record` also closes a `factory-production` deployment record.
+
+**The capability set the health check expects (`FACTORY_EXPECTED_CAPABILITIES`).** `health-factory` compares the set the
+staged App reports at `/api/health` with the **repository variable** `FACTORY_EXPECTED_CAPABILITIES` (a repository variable
+like `FACTORY_ENABLED`, read by this job only). Unset or empty, the expectation is `dynamic-review,review`, which is the
+check as it was before the variable existed, so nothing has to be set until the second App's capability set changes. The
+value is the App's `PRODUCT_CAPABILITIES` as the health check lists it: the capability names, comma separated,
+**sorted alphabetically**, with no space, no empty entry and no duplicate, for example `dynamic-review,implementer,review`.
+The step checks that shape (and that every name is a known capability) first and fails before it asks the App anything;
+the comparison itself stays exact, and `PRODUCT_MISMATCH` is final, not retried. Why a variable: the code that allows a new
+capability has to be live before the App's `PRODUCT_CAPABILITIES` names it, and the expectation has to change in the same
+moment as that setting; a literal in the workflow, changed by a pull request, cannot be both.
+
+The order, for a capability added to the second App (the Implementer's `implementer` is the first case):
+
+1. Release the code that allows the capability to `main` (the pipeline runs with the variable unset: the old set, green).
+2. Only then, together: set `PRODUCT_CAPABILITIES` in Infisical `prod` `/app-factory` to the new list and set
+   `FACTORY_EXPECTED_CAPABILITIES` to the new sorted list. Then run *Deploy production* once (the Secret Sync carries
+   the setting to the project; the staged App starts with it).
+3. To go back: reset both and deploy again. Removing the repository variable is the return to the default set.
+
+**If only one of the two is changed**, the lane stops at `health-factory` with `PRODUCT_MISMATCH` (the variable names a
+set the staged App does not report, or the other way round). The staged App is not promoted, `promote-factory` is skipped
+and nothing live changes: the live second App keeps its previous deployment and settings. The release of the first App and
+the Dispatcher is not affected (the lane never blocks it). A variable with a malformed value fails the same job earlier,
+with an error that names the variable and shows the value with every character outside letters, digits, `,` and `-`
+replaced by `?`. Fix the variable and run *Deploy production* again.
 
 **The first promotion needs one manual step.** `apps-check` asks the staged Dispatcher about the Apps as they are *live*:
 the address in `DISPATCHER_APPS` is the second App's production address. On the first run the second project has nothing
@@ -1262,6 +1300,44 @@ the first App. The second project, its database, the Dispatcher's registry and t
 `DISPATCHER_APPS` and the `DISPATCHER_APP_FACTORY_*` keys from `/dispatcher` if the Dispatcher should stop serving the App
 (the operator token stays). To restore an earlier deployment of the second App, run *Rollback production* with
 `factory_deployment` (section 7).
+
+#### Rollout of the Implementer (the order of the steps)
+
+The Implementer ([`implementer.md`](implementer.md)) is the first capability added to the second App after the lane exists.
+It is dormant in every release, and code-review.com is not touched at any step. The keys and values, in the order that
+works (the same steps with their checks, who does them and what undoes each are in [`factory-bring-up.md`](factory-bring-up.md),
+"Switching on the Implementer"):
+
+1. **Release the code to `main`.** The pipeline migrates the second database first, runs `health-factory` with the old set
+   (`dynamic-review,review`) and the canary on the rebuilt snapshot, and promotes. Nothing live changes.
+2. **`DISPATCHER_APPS`**, only after step 1 is live. Infisical `prod`, folder `/dispatcher`: in the factory entry set `kinds`
+   to `["diff","dynamic","implementer"]`. Optional: an `implementer` entry of `DISPATCHER_WORKER_CONFIG` (sizes and
+   `timeoutSeconds`; the defaults need none). Then run *Deploy production*, which stages and proves the Dispatcher with the
+   kind. Set earlier, an older Dispatcher refuses the unknown kind at start and the first App has an outage. **This deploy is
+   the first real proof of the engine:** the Launcher advertises `implementer` only when `DISPATCHER_APPS` names the kind, and
+   `POST /probe` then requires the report of the canary VM to name it (a second probe in the Implementer's container
+   profile, 110 seconds more, 260 seconds by default; with the kind keep `DISPATCHER_PROBE_TIMEOUT_SECONDS` at or below 190).
+   When the Implementer's half fails, the Dynamic verdict stands and the report says `implementer_probe_failed`; the canary
+   answers `503` and ends with `reasons=implementer_probe_failed missing=implementer, the release is blocked`. The promotions
+   of the App, the factory and the Dispatcher all wait for the canary, so nothing staged in that run goes live, the first
+   App's included (#797); there is no switch that waives the proof. The way back: set `kinds` back to `["diff","dynamic"]`,
+   wait for the Secret Sync and deploy again.
+3. **`PRODUCT_CAPABILITIES` and `FACTORY_EXPECTED_CAPABILITIES`, together.** Infisical `prod`, folder `/app-factory`, key
+   `PRODUCT_CAPABILITIES` = `review,dynamic-review,implementer`; repository variable `FACTORY_EXPECTED_CAPABILITIES` =
+   `dynamic-review,implementer,review`; then one *Deploy production*. One of the two alone ends in `PRODUCT_MISMATCH` at
+   `health-factory`: nothing is promoted and nothing live changes.
+4. **The maximum cost per review** in the factory's admin portal (General, Limits), raised from its default to the owner's
+   per-turn maximum (the value is in the bring-up checklist). It is the only brake of a turn, and it is the cap of every job
+   the factory claims, its own Diff and Dynamic reviews included.
+5. **The factory's GitHub App, by one click in the admin portal, after the deploy of step 3** (the manifest then asks for
+   Contents read and write; an App created earlier has it read-only and is updated by hand and approved by each
+   installation: [`github-app.md`](github-app.md)). With tenancy `multi` the App is public; an installation reaches a
+   workspace only when an Owner or Admin who owns the account has linked it. Also a model: a workspace key, or released
+   catalog entries that serve Dynamic Review.
+6. **The live smoke test** by the lead: [`implementer-smoke-test.md`](implementer-smoke-test.md).
+
+To go back, remove `implementer` from `PRODUCT_CAPABILITIES`, reset the repository variable, and deploy again. The Dispatcher
+entry and the permission may stay. What that does to running and queued tasks is in the bring-up checklist, step 3.
 
 ## 6. Sizing the Worker VMs
 

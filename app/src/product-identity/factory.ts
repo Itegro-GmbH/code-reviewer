@@ -14,4 +14,7 @@ export const FACTORY: ProductIdentity = {
   checkName: NAME,
   githubAppName: NAME,
   githubAppDescription: `Automatic pull request reviews by ${NAME}.`,
+  // "Qualitätssicherung": the area of the repositories is the quality assurance of the factory (#757).
+  qaAreaName: "QA",
+  qaAreaNameInSentence: "QA",
 };

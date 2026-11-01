@@ -89,13 +89,17 @@ export function addressesOf(
   // The billing routes of a workspace are for an Owner or an Admin (`manage_billing`, #499), and a missing path while billing is
   // off: whoever reads here is a Member of a workspace on the operator's key, so every address answers a 4xx, scanned like any other.
   // The billing page of a workspace (#505) is the same: it exists only while billing is on, and this workspace's app has it off. So
-  // is the key mode a workspace chooses (#496).
+  // is the key mode a workspace chooses (#496). The routes behind the Implementer form (#755) exist only in a deployment with the
+  // capability `implementer`, and so does its page (#756); the app of this journey has not, so they answer the 404 of a path that does
+  // not exist.
   let results: Array<{ path: string; refused: boolean }> = [
     {
       path: route.pattern,
       refused:
         route.pattern.startsWith("/api/w/:workspace/billing/") ||
         route.pattern === "/api/w/:workspace/llm-key-mode" ||
+        route.pattern.startsWith("/api/w/:workspace/implementer/") ||
+        route.pattern === "/w/:workspace/implementer" ||
         route.pattern === "/w/:workspace/settings/billing",
     },
   ];

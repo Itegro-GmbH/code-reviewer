@@ -18,6 +18,7 @@ import {
   type ContainerInvocation,
 } from "./container.ts";
 import {
+  IMPLEMENTER_CONTAINER_SPEC,
   SANDBOX_LAUNCHER_ADDITIONS,
   WORKER_CONTAINER_SPEC,
 } from "./container-spec.ts";
@@ -25,6 +26,16 @@ import {
 const IMAGE =
   "registry.invalid/code-reviewer-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000";
 const CREDENTIAL = "crj_dummy-credential-0123456789";
+
+// Both profiles of the contract: what a refusal must hold for, and the option the implementer's volume needs.
+const PROFILES = [
+  ["default", WORKER_CONTAINER_SPEC, {}],
+  [
+    "implementer",
+    IMPLEMENTER_CONTAINER_SPEC,
+    { workVolume: "code-reviewer-work-job-1" },
+  ],
+] as const;
 
 function spec(): Record<string, unknown> {
   return structuredClone(WORKER_CONTAINER_SPEC) as unknown as Record<
@@ -143,64 +154,72 @@ describe("rendering the hardened container spec", () => {
     expect(args.join(" ")).not.toContain("docker.sock");
   });
 
-  // #325-T03
-  it.each<[string, Record<string, unknown>, ContainerErrorCode]>([
-    ["privileged", { privileged: true }, "spec_forbidden_key"],
-    [
-      "a bind mount",
-      { binds: ["/var/run/docker.sock:/var/run/docker.sock"] },
-      "spec_forbidden_key",
-    ],
-    ["a volume", { volumes: ["/data:/data"] }, "spec_forbidden_key"],
-    ["a device", { devices: ["/dev/kvm"] }, "spec_forbidden_key"],
-    ["host network (key)", { networkMode: "host" }, "spec_forbidden_key"],
-    ["the host pid namespace", { pid: "host" }, "spec_forbidden_key"],
-    ["the host ipc namespace", { ipc: "host" }, "spec_forbidden_key"],
-    ["the docker socket", { dockerSocket: true }, "spec_forbidden_key"],
-    [
-      "host network (value)",
-      { network: { mode: "host" } },
-      "spec_not_hardened",
-    ],
-    ["no network", { network: { mode: "none" } }, "spec_not_hardened"],
-    [
-      "an unconfined seccomp profile",
-      { securityOpt: ["no-new-privileges:true", "seccomp=unconfined"] },
-      "spec_not_hardened",
-    ],
-    [
-      "an unconfined apparmor profile",
-      { securityOpt: ["no-new-privileges:true", "apparmor=unconfined"] },
-      "spec_not_hardened",
-    ],
-    ["no no-new-privileges", { securityOpt: [] }, "spec_not_hardened"],
-    ["a writable root", { readOnly: false }, "spec_not_hardened"],
-    ["another user", { user: "10001:10001" }, "spec_not_hardened"],
-    ["not dropping everything", { capDrop: ["NET_RAW"] }, "spec_not_hardened"],
-    [
-      "a capability outside the list",
-      { capAdd: [{ name: "SYS_ADMIN", startupOnly: false }] },
-      "spec_not_hardened",
-    ],
-    [
-      "NET_ADMIN not marked startup-only",
-      { capAdd: [{ name: "NET_ADMIN", startupOnly: false }] },
-      "spec_not_hardened",
-    ],
-    [
-      "a pids limit above the ceiling",
-      { pids: { limit: 100000 } },
-      "spec_not_hardened",
-    ],
-    ["an unknown key", { somethingNew: 1 }, "spec_unknown_key"],
-    ["a version it does not know", { version: 2 }, "spec_not_hardened"],
-    [
-      "a secret in the allowed environment",
-      { allowedEnvironment: ["RUNNER_TOKEN"] },
-      "spec_not_hardened",
-    ],
-  ])("refuses a spec that asks for %s", (_name, change, code) => {
-    expect(codeOf(() => render({}, { ...spec(), ...change }))).toBe(code);
+  // #325-T03, #760-T01: the same negative fixtures for every profile
+  describe.each(PROFILES)("the %s profile", (_profile, base, options) => {
+    it.each<[string, Record<string, unknown>, ContainerErrorCode]>([
+      ["privileged", { privileged: true }, "spec_forbidden_key"],
+      [
+        "a bind mount",
+        { binds: ["/var/run/docker.sock:/var/run/docker.sock"] },
+        "spec_forbidden_key",
+      ],
+      ["a volume", { volumes: ["/data:/data"] }, "spec_forbidden_key"],
+      ["a device", { devices: ["/dev/kvm"] }, "spec_forbidden_key"],
+      ["host network (key)", { networkMode: "host" }, "spec_forbidden_key"],
+      ["the host pid namespace", { pid: "host" }, "spec_forbidden_key"],
+      ["the host ipc namespace", { ipc: "host" }, "spec_forbidden_key"],
+      ["the docker socket", { dockerSocket: true }, "spec_forbidden_key"],
+      [
+        "host network (value)",
+        { network: { mode: "host" } },
+        "spec_not_hardened",
+      ],
+      ["no network", { network: { mode: "none" } }, "spec_not_hardened"],
+      [
+        "an unconfined seccomp profile",
+        { securityOpt: ["no-new-privileges:true", "seccomp=unconfined"] },
+        "spec_not_hardened",
+      ],
+      [
+        "an unconfined apparmor profile",
+        { securityOpt: ["no-new-privileges:true", "apparmor=unconfined"] },
+        "spec_not_hardened",
+      ],
+      ["no no-new-privileges", { securityOpt: [] }, "spec_not_hardened"],
+      ["a writable root", { readOnly: false }, "spec_not_hardened"],
+      ["another user", { user: "10001:10001" }, "spec_not_hardened"],
+      [
+        "not dropping everything",
+        { capDrop: ["NET_RAW"] },
+        "spec_not_hardened",
+      ],
+      [
+        "a capability outside the list",
+        { capAdd: [{ name: "SYS_ADMIN", startupOnly: false }] },
+        "spec_not_hardened",
+      ],
+      [
+        "NET_ADMIN not marked startup-only",
+        { capAdd: [{ name: "NET_ADMIN", startupOnly: false }] },
+        "spec_not_hardened",
+      ],
+      [
+        "a pids limit above the ceiling",
+        { pids: { limit: 100000 } },
+        "spec_not_hardened",
+      ],
+      ["an unknown key", { somethingNew: 1 }, "spec_unknown_key"],
+      ["a version it does not know", { version: 2 }, "spec_not_hardened"],
+      [
+        "a secret in the allowed environment",
+        { allowedEnvironment: ["RUNNER_TOKEN"] },
+        "spec_not_hardened",
+      ],
+    ])("refuses a spec that asks for %s", (_name, change, code) => {
+      expect(
+        codeOf(() => render(options, { ...structuredClone(base), ...change })),
+      ).toBe(code);
+    });
   });
 
   // #325-T03

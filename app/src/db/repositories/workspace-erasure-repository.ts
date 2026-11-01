@@ -178,7 +178,10 @@ export function createWorkspaceErasureRepository(
         .deleteFrom("job_comments")
         .where("job_id", "in", ownJobs())
         .execute();
+      // The Implementer's turns point at jobs and sessions, its sessions at repositories (#751): turns first.
       for (const table of [
+        "implementer_turns",
+        "implementer_sessions",
         "job_check_runs",
         "job_vm_runs",
         "usage_records",

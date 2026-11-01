@@ -135,6 +135,32 @@
       "commit": "4649aa9700619f94cf9c66876e9549d83420e16c",
       "license": "MIT",
       "reason": "The search helper of OpenCode, the unmodified upstream musl release, dual licensed Unlicense OR MIT (the MIT option is used)."
+    },
+    {
+      "name": "git",
+      "pin": "runner/git-pin.json",
+      "version": "2.53.0",
+      "commit": "67ad42147a7acc2af6074753ebd03d904476118f",
+      "license": "GPL-2.0-only",
+      "build": "source",
+      "exception": "GPL-2.0-only, accepted: git is a separate program of the Worker image that the agent runs as a command; it is built unmodified from the pinned upstream release, linked into none of our code, and the image is never handed to a third party (code-review.com is a hosted service). The complete source is the pinned tarball.",
+      "reason": "The version control of the Implementer's agent. Built from source because Debian's git is older than 2.53, which the branch guard needs."
+    },
+    {
+      "name": "node",
+      "pin": "runner/node-pin.json",
+      "version": "24.22.2",
+      "commit": "f7f273a9bb6445f6f7fb6349105e7532972045fb",
+      "license": "MIT",
+      "reason": "The JavaScript runtime the Implementer's agent builds and tests repositories with, the unmodified upstream release."
+    },
+    {
+      "name": "pnpm",
+      "pin": "runner/pnpm-pin.json",
+      "version": "10.17.0",
+      "commit": "1a1a272fa4f5be459430cad677ffce946c99cd86",
+      "license": "MIT",
+      "reason": "The package manager of the repositories the Implementer's agent works on, the unmodified upstream release at the version of this repository."
     }
   ],
   "notInstalled": [

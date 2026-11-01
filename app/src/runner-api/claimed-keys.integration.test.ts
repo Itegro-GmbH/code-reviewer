@@ -245,3 +245,131 @@ describe("the native marker remembered for a job (#578)", () => {
     expect(await keys.wasNative(other.id)).toBe(false);
   });
 });
+
+describe("the write tokens remembered for a job", () => {
+  const LATER = "2026-10-10T13:00:00.000Z";
+  const entry = (token: string, expiresAt = LATER) => ({ token, expiresAt });
+
+  // #753
+  it("remembers every token with the time it expires, and forgets only the ones it is told to", async () => {
+    const { job, keys } = await start();
+    await keys.rememberGitToken(job.id, "ghs_first_0001", LATER);
+    await keys.rememberGitToken(job.id, "ghs_second_0002", LATER);
+    await keys.rememberGitToken(job.id, "ghs_second_0002", LATER);
+
+    expect(await keys.gitTokensOf(job.id)).toEqual([
+      entry("ghs_first_0001"),
+      entry("ghs_second_0002"),
+    ]);
+
+    await keys.forgetGitTokens(job.id, ["ghs_first_0001", "ghs_unknown_0003"]);
+
+    expect(await keys.gitTokensOf(job.id)).toEqual([entry("ghs_second_0002")]);
+  });
+
+  // #753
+  it("says whether any token is remembered, expired or not", async () => {
+    const { job, keys } = await start();
+    expect(await keys.hasGitTokens(job.id)).toBe(false);
+
+    await keys.rememberGitToken(
+      job.id,
+      "ghs_first_0001",
+      "2020-01-01T00:00:00.000Z",
+    );
+
+    expect(await keys.hasGitTokens(job.id)).toBe(true);
+    await keys.forgetGitTokens(job.id, ["ghs_first_0001"]);
+    expect(await keys.hasGitTokens(job.id)).toBe(false);
+  });
+
+  // #753
+  it("keeps the keys, the models and the native flag next to them", async () => {
+    const { job, keys } = await start();
+    await keys.remember(job.id, "plain-key-one-0001");
+    await keys.rememberNative(job.id, true);
+
+    await keys.rememberGitToken(job.id, "ghs_first_0001", LATER);
+    await keys.forgetGitTokens(job.id, ["ghs_first_0001"]);
+
+    expect(await keys.keysOf(job.id)).toEqual(["plain-key-one-0001"]);
+    expect(await keys.wasNative(job.id)).toBe(true);
+  });
+
+  // #753
+  it("reads a row of the earlier format, and of a release that knew no tokens, as having none", async () => {
+    const { job, keys } = await start();
+    await keys.remember(job.id, "plain-key-one-0001");
+
+    expect(await keys.gitTokensOf(job.id)).toEqual([]);
+    expect(await keys.keysOf(job.id)).toEqual(["plain-key-one-0001"]);
+  });
+
+  // #753
+  it("holds the token only sealed", async () => {
+    const { job, keys, db } = await start();
+    await keys.rememberGitToken(job.id, "ghs_first_0001", LATER);
+
+    const rows = await db.selectFrom("job_claimed_keys").selectAll().execute();
+
+    expect(JSON.stringify(rows)).not.toContain("ghs_first_0001");
+  });
+
+  // #753 (review of #776, round 2, point 2): two instances remembering at once lost a token in 57 of 60 trials.
+  it("loses no token when several are remembered at the same time, on a job that has no row yet", async () => {
+    for (let trial = 0; trial < 20; trial += 1) {
+      const { job, keys } = await start();
+      const tokens = ["ghs_a_0001", "ghs_b_0002", "ghs_c_0003", "ghs_d_0004"];
+
+      await Promise.all(
+        tokens.map((token) => keys.rememberGitToken(job.id, token, LATER)),
+      );
+
+      expect(
+        (await keys.gitTokensOf(job.id)).map((known) => known.token).sort(),
+        `trial ${String(trial)}`,
+      ).toEqual(tokens);
+    }
+  });
+
+  // #753 (review of #776, round 2, point 2): a forget that overlapped a remember dropped the new token in 5 of 60 trials.
+  it("loses no token that is remembered while others are forgotten", async () => {
+    for (let trial = 0; trial < 20; trial += 1) {
+      const { job, keys } = await start();
+      await keys.rememberGitToken(job.id, "ghs_old_0001", LATER);
+
+      await Promise.all([
+        keys.forgetGitTokens(job.id, ["ghs_old_0001"]),
+        keys.rememberGitToken(job.id, "ghs_new_0002", LATER),
+      ]);
+
+      expect(
+        (await keys.gitTokensOf(job.id)).map((known) => known.token),
+        `trial ${String(trial)}`,
+      ).toEqual(["ghs_new_0002"]);
+    }
+  });
+
+  // #753 (review of #776, round 2, point 2): the same read-modify-write holds the keys, the models and the flag.
+  it("loses no key, model or token when they are remembered at the same time", async () => {
+    for (let trial = 0; trial < 10; trial += 1) {
+      const { job, keys } = await start();
+
+      await Promise.all([
+        keys.remember(job.id, "plain-key-one-0001"),
+        keys.rememberModel(job.id, "model-one"),
+        keys.rememberNative(job.id, true),
+        keys.rememberGitToken(job.id, "ghs_a_0001", LATER),
+      ]);
+
+      expect(await keys.keysOf(job.id), `trial ${String(trial)}`).toEqual([
+        "plain-key-one-0001",
+      ]);
+      expect(await keys.modelsOf(job.id)).toEqual(["model-one"]);
+      expect(await keys.wasNative(job.id)).toBe(true);
+      expect(
+        (await keys.gitTokensOf(job.id)).map((known) => known.token),
+      ).toEqual(["ghs_a_0001"]);
+    }
+  });
+});

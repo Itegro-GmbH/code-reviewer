@@ -21,7 +21,7 @@ export const resultCopy = (
 ): Record<BindingResultCode, { tone: ResultTone; text: string }> => ({
   linked: {
     tone: "success",
-    text: "GitHub is connected. The repositories of the installation are listed under Projects.",
+    text: `GitHub is connected. The repositories of the installation are listed under ${product.qaAreaName}.`,
   },
   picker_ready: {
     tone: "info",

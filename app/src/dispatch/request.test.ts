@@ -293,3 +293,24 @@ describe("the stop request", () => {
     );
   });
 });
+
+describe("the dispatch request of an implementer turn", () => {
+  // #752-T10
+  it("carries reviewKind implementer, and the kinds of Diff and Dynamic jobs stay as they were", () => {
+    const body = (reviewKind: DispatchWebhook["reviewKind"]) =>
+      JSON.parse(
+        buildDispatchRequest({
+          key: current,
+          jobId: example.jobId,
+          reviewKind,
+          attempt: 1,
+          dispatchId: example.dispatchId,
+          now: NOW,
+        }).body,
+      ) as DispatchWebhook;
+
+    expect(body("implementer").reviewKind).toBe("implementer");
+    expect(body("diff").reviewKind).toBe("diff");
+    expect(body("dynamic").reviewKind).toBe("dynamic");
+  });
+});

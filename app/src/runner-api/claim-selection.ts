@@ -22,7 +22,7 @@ import {
   type SelectableEntry,
 } from "../llm/selection.ts";
 import type { CatalogService } from "../model-catalog/service.ts";
-import type { ProjectReviewKind } from "../job-kind/job-kind.ts";
+import { projectKindOf, type ProjectReviewKind } from "../job-kind/job-kind.ts";
 import {
   noLimits,
   type ResolvedEntitlements,
@@ -133,7 +133,9 @@ export async function selectModel(
     runnerProviders: readonly string[];
   },
 ): Promise<SelectionOutcome> {
-  const kind = job.reviewKind;
+  // #752: a turn of the Implementer chooses its model as a Dynamic Review does, but the claim refuses the kind before it gets here
+  // (`kind-guard.ts`, until its own input is built).
+  const kind = projectKindOf(job.reviewKind);
   const keyMode = keyModeForJob(entitlements);
   let input: SelectionInput;
   if (keyMode === "unreadable") input = { keyMode };

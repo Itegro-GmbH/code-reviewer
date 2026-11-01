@@ -32,6 +32,8 @@ export type OpportunisticDependencies = {
   checks?: {
     reconcileDue(options?: { budgetMs?: number }): Promise<{ synced: number }>;
   };
+  /** #790: tries again to switch off the write tokens of ended turns that could not be switched off. Left out, none is tried. */
+  writeTokens?: { retryPending(): Promise<void> };
   now?: () => number;
   intervalMs?: number;
   log?: Pick<Console, "error">;
@@ -59,6 +61,8 @@ export function createOpportunisticMaintenance(
           await deps.dispatch?.sendDue(DEFAULT_SEND_LIMIT, {
             minAgeMs: OPPORTUNISTIC_MIN_JOB_AGE_MS,
           });
+          // A write token the end of its turn could not switch off is tried again until it expires (#790).
+          await deps.writeTokens?.retryPending();
           // The leases released above changed jobs no request named: their check runs follow.
           await deps.checks?.reconcileDue({ budgetMs: CHECKS_BUDGET_MS });
         });

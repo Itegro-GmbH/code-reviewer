@@ -13,6 +13,8 @@ import {
 } from "../test-support/check-runs-harness.ts";
 import { createJobCheckRunsRepository } from "../db/repositories/job-check-runs-repository.ts";
 import { sha } from "../test-support/jobs.ts";
+import { listJobsWithCheckWork } from "../db/repositories/job-check-runs-sweep.ts";
+import { addUser } from "../test-support/workspace-deletion-fixture.ts";
 import { verdictMarker } from "./verdict.ts";
 
 const BOT = "code-reviewer-test[bot]";
@@ -1901,5 +1903,60 @@ describe("keeping the review comment a run posted (#657)", () => {
     expect(t.checkRuns()[0]).toMatchObject({ status: "completed" });
     expect(t.lines.error.join("\n")).toContain("REVIEW_COMMENT_UNREADABLE");
     expect(t.lines.error.join("\n")).not.toContain("a review");
+  });
+});
+
+describe("a turn of the Implementer", () => {
+  async function withTurn() {
+    const t = await createCheckRunsHarness();
+    await addUser(t.fixture.db, "user-1");
+    const turn = await t.fixture.queue.enqueueImplementerTurn({
+      repositoryId: t.fixture.repositoryId,
+      baseBranch: "main",
+      baseSha: HEAD,
+      branch: "implementer/abc",
+      instruction: "Do it.",
+      modelChoice: { entryId: "entry-1" },
+      costLimitCents: null,
+      createdBy: "user-1",
+      actorLogin: "octocat",
+      clientRequestId: "req-1",
+    });
+    return { t, turn };
+  }
+
+  // #752-T09
+  it("gets no check run, however often it is synced, claimed or ended, and no row", async () => {
+    const { t, turn } = await withTurn();
+
+    await t.service.syncJob(turn.job.id);
+    await t.fixture.queue.claimNext("runner", ["implementer"]);
+    await t.service.syncJob(turn.job.id);
+    t.fixture.clock.advance(80 * MINUTE);
+    await t.fixture.queue.expireStaleJobs();
+    await t.service.syncJob(turn.job.id);
+    await t.service.reconcileDue();
+
+    expect(t.checkRuns()).toEqual([]);
+    expect(
+      await t.fixture.db.selectFrom("job_check_runs").selectAll().execute(),
+    ).toEqual([]);
+  });
+
+  // #752-T09
+  it("does not take the place of a review in the list of jobs that need check work", async () => {
+    const { t, turn } = await withTurn();
+    // The turn is older, so a list that did not skip it would put it first.
+    t.fixture.clock.advance(1000);
+    const review = await t.fixture.enqueueNew();
+
+    const due = await listJobsWithCheckWork(
+      t.fixture.db,
+      t.fixture.clock.now(),
+      { limit: 1 },
+    );
+
+    expect(due.map((item) => item.jobId)).toEqual([review.id]);
+    expect(turn.job.id).not.toBe(review.id);
   });
 });

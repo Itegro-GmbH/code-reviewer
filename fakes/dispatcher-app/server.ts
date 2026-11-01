@@ -83,7 +83,13 @@ export type Step = {
   retryAfterSeconds?: number;
 };
 
-export type ReviewKind = "diff" | "dynamic";
+export type ReviewKind = "diff" | "dynamic" | "implementer";
+/** The engine that runs a job of each kind: a claim only gets a job whose engine it advertised. */
+const ENGINE_OF_KIND: Record<ReviewKind, string> = {
+  diff: "pr-agent",
+  dynamic: "opencode",
+  implementer: "implementer",
+};
 const JOB_STATUSES = [
   "queued",
   "running",
@@ -250,6 +256,9 @@ export async function startDispatcherAppFake(
   const defaultInputs: Record<ReviewKind, Record<string, unknown>> = {
     diff: exampleJob.input as Record<string, unknown>,
     dynamic: readJson(join(FIXTURES, "dynamic-review-job.json")),
+    implementer: readJson(
+      join(CONTRACTS, "examples", "implementer", "RunnerJobInput.json"),
+    ),
   };
   const versionExample = readJson(
     join(CONTRACTS, "examples", "VersionResponse.json"),
@@ -304,7 +313,9 @@ export async function startDispatcherAppFake(
       engines !== undefined &&
       (!Array.isArray(engines) ||
         engines.length === 0 ||
-        engines.some((e) => e !== "pr-agent" && e !== "opencode"))
+        engines.some(
+          (e) => e !== "pr-agent" && e !== "opencode" && e !== "implementer",
+        ))
     )
       fields.push({ field: "engines", code: "invalid" });
     const features = body.features;
@@ -348,9 +359,7 @@ export async function startDispatcherAppFake(
       (candidate) =>
         candidate.status === "queued" &&
         (jobId === undefined || candidate.id === jobId) &&
-        advertised.has(
-          candidate.reviewKind === "dynamic" ? "opencode" : "pr-agent",
-        ),
+        advertised.has(ENGINE_OF_KIND[candidate.reviewKind]),
     );
     if (job === undefined) return { status: 204 };
 
@@ -728,7 +737,8 @@ export async function startDispatcherAppFake(
       const kind = body.reviewKind;
       const id = enqueue({
         id: typeof body.id === "string" ? body.id : undefined,
-        reviewKind: kind === "dynamic" ? "dynamic" : "diff",
+        reviewKind:
+          kind === "dynamic" || kind === "implementer" ? kind : "diff",
       });
       return { status: 200, body: { id } };
     }

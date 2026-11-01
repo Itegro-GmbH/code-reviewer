@@ -196,7 +196,7 @@ def _refused(reason: str) -> NativeConfigRefused:
     return NativeConfigRefused(reason)
 
 
-def _checked_native_provider(
+def checked_native_provider(
     provider: Mapping[str, Any],
     model_reference: str,
     family: WireFamily,
@@ -260,13 +260,13 @@ def build_native_engine_config(
     capability as `options.apiKey` and `models.<id>`) in place of the legacy proxy provider, and the
     rest the same.
 
-    The block is **asserted**, not trusted (`_checked_native_provider`): its one provider has the
+    The block is **asserted**, not trusted (`checked_native_provider`): its one provider has the
     SDK of the family, `options` are the proxy's address and the capability and nothing else (no
     `headers`), the model has the keys of the entry and no `provider`/`api` override, and the model
     id is a plain id (it goes into the Google path). The real key and the upstream address are not
     parameters: they are the supervisor's, and nothing here could write them into the file.
     """
-    _checked_native_provider(provider, model_reference, family, proxy_url, capability)
+    checked_native_provider(provider, model_reference, family, proxy_url, capability)
     return _engine_config(
         provider=dict(provider), model_reference=model_reference, system_prompt=system_prompt
     )

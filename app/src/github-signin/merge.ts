@@ -65,6 +65,8 @@ export const USER_REFERENCES: ReadonlyArray<{
     column: "updated_by",
     handling: "move",
   },
+  { table: "implementer_sessions", column: "created_by", handling: "move" },
+  { table: "implementer_turns", column: "created_by", handling: "move" },
   { table: "invitations", column: "invited_by", handling: "move" },
   { table: "invitations", column: "accepted_by", handling: "move" },
   {
@@ -234,6 +236,18 @@ export async function mergeImportedUser(
       .updateTable("billing_workspace_settings")
       .set({ updated_by: actingUserId })
       .where("updated_by", "=", source.id)
+      .execute();
+
+    // Who started an Implementer task (#751): the author stays with a person, not null.
+    await trx
+      .updateTable("implementer_sessions")
+      .set({ created_by: actingUserId })
+      .where("created_by", "=", source.id)
+      .execute();
+    await trx
+      .updateTable("implementer_turns")
+      .set({ created_by: actingUserId })
+      .where("created_by", "=", source.id)
       .execute();
 
     await trx

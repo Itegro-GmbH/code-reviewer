@@ -7,6 +7,7 @@
 // Every address in it is made from the configured public URL of the instance, never from a request
 // header: the manifest decides where GitHub delivers webhooks and sends the person back, so a forged
 // `Host` header must not be able to change it.
+import type { CapabilitySet } from "../../../capabilities/capability.ts";
 import type { ProductIdentity } from "../../../product-identity/identity.ts";
 import { JOB_TOKEN_PERMISSIONS } from "./job-access.ts";
 
@@ -35,6 +36,15 @@ export const REPOSITORY_PERMISSIONS: Readonly<
 > = { ...JOB_TOKEN_PERMISSIONS, ...CHECK_RUN_PERMISSIONS };
 
 /**
+ * What the Implementer changes in the repository permissions (#749): it pushes branches, so Contents is write instead of
+ * read. Only a deployment with the capability `implementer` (the factory) asks for it; the manifest of code-review.com is
+ * the one above, unchanged, and the App of the reviewer never holds write access to code.
+ */
+export const IMPLEMENTER_REPOSITORY_PERMISSIONS = {
+  contents: "write",
+} as const;
+
+/**
  * The account permission "Email addresses": it lets a sign in with GitHub read the verified primary email
  * (`GET /user/emails`), which applies the sign-up rule and replaces the placeholder address of an imported
  * user.
@@ -58,6 +68,19 @@ export const MANIFEST_PERMISSIONS: Readonly<Record<string, "read" | "write">> =
     ...ORGANIZATION_PERMISSIONS,
   };
 
+/**
+ * Every permission the manifest of a deployment asks for. `MANIFEST_PERMISSIONS` is the set without the Implementer;
+ * the Implementer raises Contents to write and nothing else (the keys keep their order, so the only difference in the
+ * text of the manifest is that level).
+ */
+export function manifestPermissions(
+  capabilities: CapabilitySet,
+): Readonly<Record<string, "read" | "write">> {
+  return capabilities.has("implementer")
+    ? { ...MANIFEST_PERMISSIONS, ...IMPLEMENTER_REPOSITORY_PERMISSIONS }
+    : MANIFEST_PERMISSIONS;
+}
+
 export type GithubAppManifest = {
   name: string;
   url: string;
@@ -79,6 +102,8 @@ export const APP_NAME_MAX_LENGTH = 34;
 export type ManifestInput = {
   /** Who the App is for: what it says about itself on GitHub (`githubAppDescription`). */
   product: ProductIdentity;
+  /** What the deployment offers: the permissions the App asks for follow it (#749). */
+  capabilities: CapabilitySet;
   /** The configured public address of the instance (`BETTER_AUTH_URL`), an origin without a path. */
   publicUrl: string;
   /** Multi-tenant instances create a public App (anybody may install it), single-tenant a private one. */
@@ -88,6 +113,7 @@ export type ManifestInput = {
 
 export function buildAppManifest({
   product,
+  capabilities,
   publicUrl,
   tenancy,
   name,
@@ -108,7 +134,7 @@ export function buildAppManifest({
     public: tenancy === "multi",
     request_oauth_on_install: false,
     default_events: [...SUBSCRIBED_EVENTS],
-    default_permissions: { ...MANIFEST_PERMISSIONS },
+    default_permissions: { ...manifestPermissions(capabilities) },
   };
 }
 
@@ -134,16 +160,17 @@ export function suggestedAppName(
 const LEVELS = ["read", "write", "admin"];
 
 /**
- * What an App lacks of what the manifest asks for, by API permission name, given the `permissions` object of
- * `GET /app`. An App that was imported or made by hand may lack the repository permission "Checks", the account
- * permission "Email addresses" or the organization permission "Members"; the portal lists what to add in the
- * App's settings. A level below
- * the wanted one counts as missing.
+ * What an App lacks of what the manifest of this deployment asks for, by API permission name, given the `permissions`
+ * object of `GET /app`. An App that was imported or made by hand may lack the repository permission "Checks", the account
+ * permission "Email addresses" or the organization permission "Members", and in a deployment with the Implementer it
+ * may hold Contents as read only (#749); the portal lists what to add in the App's settings. A level below the wanted
+ * one counts as missing.
  */
 export function missingPermissions(
   granted: Readonly<Record<string, unknown>>,
+  capabilities: CapabilitySet,
 ): string[] {
-  return Object.entries(MANIFEST_PERMISSIONS)
+  return Object.entries(manifestPermissions(capabilities))
     .filter(
       ([name, wanted]) =>
         LEVELS.indexOf(String(granted[name])) < LEVELS.indexOf(wanted),

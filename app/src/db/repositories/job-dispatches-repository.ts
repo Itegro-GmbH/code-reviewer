@@ -13,6 +13,7 @@ import {
   type DispatchState,
   type DispatchUpdate,
 } from "../../dispatch/outcome.ts";
+import { jobKindOf, type JobKind } from "../../job-kind/job-kind.ts";
 import { formatTimestamp } from "../codecs.ts";
 import type { Database } from "../schema.ts";
 
@@ -58,7 +59,7 @@ export type PullRequestRef = { repositoryId: string; prNumber: number };
 /** A queued job that is due and whose dispatch is missing or due: the work of one sweep. */
 export type DueDispatchJob = {
   jobId: string;
-  reviewKind: "diff" | "dynamic";
+  reviewKind: JobKind;
   /** The job's lost attempts so far; the call carries the number of the attempt it is on (this plus one). */
   jobAttempts: number;
 };
@@ -403,7 +404,8 @@ function toDueJob(row: {
 }): DueDispatchJob {
   return {
     jobId: row.job_id,
-    reviewKind: row.review_kind === "dynamic" ? "dynamic" : "diff",
+    // A kind this version does not know fails loudly: the old reading turned everything but Dynamic into Diff (#752).
+    reviewKind: jobKindOf(row.review_kind),
     jobAttempts: row.job_attempts,
   };
 }

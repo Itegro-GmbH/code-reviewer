@@ -165,11 +165,43 @@ def test_the_job_input_in_the_details_answer_stays_closed() -> None:
         {"allowedEnvironment": ["RUNNER_TOKEN"]},
     ],
 )
-def test_the_container_spec_refuses_weakening(change: Document) -> None:
-    # #318-T05
-    spec = {**_example("examples/worker-container", "WorkerContainerSpec"), **change}
+@pytest.mark.parametrize("definition", ["WorkerContainerSpec", "ImplementerContainerSpec"])
+def test_the_container_spec_refuses_weakening(definition: str, change: Document) -> None:
+    # #318-T05, #760-T01: the same refusals for every profile
+    spec = {**_example("examples/worker-container", definition), **change}
 
-    assert not _accepts("worker-container.v1.json", "WorkerContainerSpec", spec)
+    assert not _accepts("worker-container.v1.json", definition, spec)
+
+
+@pytest.mark.contract
+def test_the_implementer_profile_is_the_default_spec_plus_a_work_volume() -> None:
+    # #760-T01
+    standard = _example("examples/worker-container", "WorkerContainerSpec")
+    profile = _example("examples/worker-container", "ImplementerContainerSpec")
+
+    assert _accepts("worker-container.v1.json", "ImplementerContainerSpec", profile)
+    assert not _accepts("worker-container.v1.json", "ImplementerContainerSpec", standard)
+    assert not _accepts("worker-container.v1.json", "WorkerContainerSpec", profile)
+    differing = sorted(
+        key for key in {*standard, *profile} if standard.get(key) != profile.get(key)
+    )
+    assert differing == ["allowedEnvironment", "memory", "pids", "workVolume"]
+    volume = profile["workVolume"]
+    for change in (
+        {"path": "/data"},
+        {"options": ["rw", "nodev"]},
+        {"options": ["rw", "nosuid"]},
+        {"source": "/var/lib/docker"},
+        {"propagation": "shared"},
+    ):
+        assert not _accepts(
+            "worker-container.v1.json",
+            "ImplementerContainerSpec",
+            {**profile, "workVolume": {**volume, **change}},
+        )
+    assert not _accepts(
+        "worker-container.v1.json", "ImplementerContainerSpec", {**profile, "pids": {"limit": 512}}
+    )
 
 
 @pytest.mark.contract

@@ -5,7 +5,9 @@
 import { describe, expect, it } from "vitest";
 import {
   configuredNoCapableRunnerMs,
+  DEFAULT_JOB_QUEUE_LIMITS,
   DEFAULT_NO_CAPABLE_RUNNER_MS,
+  IMPLEMENTER_MAX_ATTEMPTS,
   NO_CAPABLE_RUNNER_VARIABLE,
 } from "./job-limits.ts";
 
@@ -24,4 +26,18 @@ describe("the no-capable-runner deadline", () => {
       ).toBe(DEFAULT_NO_CAPABLE_RUNNER_MS);
     },
   );
+});
+
+describe("the limits of the Implementer's turns", () => {
+  // #752-T07
+  it("never retries a turn: a second run would meet the branch the first one pushed", () => {
+    expect(IMPLEMENTER_MAX_ATTEMPTS).toBe(1);
+  });
+
+  // #752-T08
+  it("holds a turn for 70 minutes, the Dispatcher's 60 plus 10 of grace, and the other kinds for 25", () => {
+    expect(DEFAULT_JOB_QUEUE_LIMITS.implementerMaxRuntimeMs).toBe(70 * 60_000);
+    expect(DEFAULT_JOB_QUEUE_LIMITS.maxRuntimeMs).toBe(25 * 60_000);
+    expect(DEFAULT_JOB_QUEUE_LIMITS.maxAttempts).toBe(3);
+  });
 });

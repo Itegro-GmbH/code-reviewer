@@ -389,9 +389,10 @@ export function InstanceForm({
               gets a failed run with the code{" "}
               <code>dynamic_review_disabled</code>, never a Diff review. While
               it is on, those runs are queued and wait for a runner that can run
-              it; one that no runner claims within 30 minutes is cancelled with{" "}
-              <code>no_capable_runner</code>. Turning it off cancels the waiting
-              runs and leaves the running ones to finish. Deploy a
+              it; one is cancelled with <code>no_capable_runner</code> once 30
+              minutes pass without a runner running or finishing a Dynamic
+              review, and in any case after 3 hours. Turning it off cancels the
+              waiting runs and leaves the running ones to finish. Deploy a
               Dynamic-capable runner before turning it on; without one, those
               runs only wait and are then cancelled.
             </FieldDescription>

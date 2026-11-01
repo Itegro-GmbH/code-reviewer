@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
 import { webhookFixture } from "../../../fakes/github/webhooks.ts";
 import { createRepositoriesRepository } from "../../src/db/repositories/repositories-repository.ts";
 import { createIntegrationRegistry } from "../../src/integrations/registry.ts";
-import type { ProjectReviewKind } from "../../src/job-kind/job-kind.ts";
+import type { JobKind } from "../../src/job-kind/job-kind.ts";
 import { createJobQueue } from "../../src/jobs/job-queue.ts";
 import { startWebhookHarness } from "../../src/test-support/webhook-harness.ts";
 import { TEST_WEBHOOK_SECRET } from "../../src/test-support/github-app.ts";
@@ -36,7 +36,7 @@ function withHeadSha(fixture: string, sha: string): PullRequestPayload {
 async function startHarness(
   options: {
     projects?: WorkspaceCollaborators["projects"];
-    kindAllowed?: (kind: ProjectReviewKind) => boolean;
+    kindAllowed?: (kind: JobKind) => boolean;
   } = {},
 ) {
   const h = await startWebhookHarness();

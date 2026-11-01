@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "job": {
+    "id": "0b9f6f4e-3c1a-4d9e-8f43-2a7d5e1c9b10",
+    "credential": "crj_EXAMPLEexampleEXAMPLEexampleEXAMPLE-0123456",
+    "reviewKind": "implementer",
+    "leaseExpiresAt": "2026-10-10T12:02:00.000Z",
+    "heartbeatIntervalSeconds": 30
+  }
+}

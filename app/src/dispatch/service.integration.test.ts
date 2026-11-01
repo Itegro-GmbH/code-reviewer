@@ -17,6 +17,7 @@ import type { WebhookDispatchConfig } from "./config.ts";
 import { ACK_TIMEOUT_MS, REJECTED_BACKOFF_MS } from "./outcome.ts";
 import { createDispatchService } from "./service.ts";
 import { createTestDatabase } from "../test-support/test-database.ts";
+import { addUser } from "../test-support/workspace-deletion-fixture.ts";
 
 const CURRENT = {
   kid: "k2",
@@ -151,6 +152,38 @@ describe("the dispatch webhook", () => {
       expect(t.receiver.received.map((call) => call.body?.reviewKind)).toEqual([
         "dynamic",
       ]);
+    });
+
+    // #752-T10
+    it("names the review kind of an implementer turn, and a waiting turn is sent again with it", async () => {
+      const t = await setup();
+      await addUser(t.fixture.db, "user-1");
+
+      const result = await t.queue.enqueueImplementerTurn({
+        repositoryId: t.fixture.repositoryId,
+        baseBranch: "main",
+        baseSha: sha("b"),
+        branch: "implementer/abc",
+        instruction: "Do it.",
+        modelChoice: { entryId: "entry-1" },
+        costLimitCents: null,
+        createdBy: "user-1",
+        actorLogin: "octocat",
+        clientRequestId: "req-1",
+      });
+      await t.settled();
+
+      expect(result.status).toBe("created");
+      expect(t.receiver.received.map((call) => call.body?.reviewKind)).toEqual([
+        "implementer",
+      ]);
+      expect(
+        await t.dispatches.dueJob(result.job.id, t.fixture.clock.now()),
+      ).toEqual({
+        jobId: result.job.id,
+        reviewKind: "implementer",
+        jobAttempts: 0,
+      });
     });
 
     // #326-T06

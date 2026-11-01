@@ -26,6 +26,12 @@ const DEFAULT_PROBE_TIMEOUT_SECONDS = 300;
 const HOST_NAME = /^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/;
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const ENGINES: readonly Engine[] = ["pr-agent", "opencode"];
+/**
+ * Every engine the route can name in an answer. `implementer` is no default of the canary (the default stays the two
+ * reviewer engines, so a deployment without the kind is unchanged), but a deployment that serves it has the route require
+ * it (`report.required`), and the canary then blocks without it; `--engines` may also name it.
+ */
+const REPORTED_ENGINES: readonly Engine[] = [...ENGINES, "implementer"];
 const PLATFORM_API = "https://api.vercel.com";
 
 export type DeploymentCheck = {
@@ -101,6 +107,7 @@ const ReportSchema = z.object({
   engines: z.array(z.string()).max(16),
   reasons: z.array(z.string()).max(64),
   failure: z.string().max(100).optional(),
+  required: z.array(z.string()).max(16).optional(),
   imageDigest: z.string().max(100).optional(),
   snapshotId: z.string().max(130).optional(),
 });
@@ -114,7 +121,7 @@ export class CanaryUsageError extends Error {
 }
 
 const USAGE =
-  "usage: probe:canary --url <https://dispatcher> [--allowed-hosts <host,host>] [--verify-vercel [--expect-commit <sha>]] [--check-only] [--engines pr-agent,opencode] [--wait-seconds <n>] [--timeout-seconds <n>]; the credential is DISPATCHER_OPERATOR_TOKEN in the environment, else RUNNER_TOKEN (before the Dispatcher has an operator token), the allowed hosts may also be CANARY_ALLOWED_HOSTS; CANARY_EXPECT_IMAGE_DIGEST is the image id the deployment must report; --verify-vercel reads VERCEL_TOKEN, VERCEL_TEAM_ID and VERCEL_PROJECT_ID (the Dispatcher project) from the environment";
+  "usage: probe:canary --url <https://dispatcher> [--allowed-hosts <host,host>] [--verify-vercel [--expect-commit <sha>]] [--check-only] [--engines pr-agent,opencode[,implementer]] [--wait-seconds <n>] [--timeout-seconds <n>]; the credential is DISPATCHER_OPERATOR_TOKEN in the environment, else RUNNER_TOKEN (before the Dispatcher has an operator token), the allowed hosts may also be CANARY_ALLOWED_HOSTS; CANARY_EXPECT_IMAGE_DIGEST is the image id the deployment must report; --verify-vercel reads VERCEL_TOKEN, VERCEL_TEAM_ID and VERCEL_PROJECT_ID (the Dispatcher project) from the environment";
 
 function seconds(value: string | undefined, name: string, max: number): number {
   const number = Number(value);
@@ -192,9 +199,11 @@ export function parseCanaryArguments(
   const requiredEngines = (
     named === undefined ? [...ENGINES] : named.split(",")
   ).map((engine) => {
-    const known = ENGINES.find((candidate) => candidate === engine);
+    const known = REPORTED_ENGINES.find((candidate) => candidate === engine);
     if (known === undefined)
-      throw new CanaryUsageError("--engines takes pr-agent and opencode");
+      throw new CanaryUsageError(
+        "--engines takes pr-agent, opencode and implementer",
+      );
     return known;
   });
   const bypass = env.VERCEL_AUTOMATION_BYPASS_SECRET;
@@ -452,9 +461,9 @@ export async function runCanary(options: CanaryOptions): Promise<0 | 1 | 2> {
   }
 
   // Only what the contract lists is printed: a value shaped like a secret in the answer goes nowhere.
-  const engines = report.engines.filter((engine): engine is Engine =>
-    ENGINES.some((known) => known === engine),
-  );
+  const known = (engine: string): engine is Engine =>
+    REPORTED_ENGINES.some((candidate) => candidate === engine);
+  const engines = report.engines.filter(known);
   const reasons = report.reasons.filter((reason) =>
     PROBE_REASONS.some((known) => known === reason),
   );
@@ -465,7 +474,11 @@ export async function runCanary(options: CanaryOptions): Promise<0 | 1 | 2> {
       ? []
       : [`failure=${probeFailureCode(report.failure)}`]),
   ].join(" ");
-  const missing = required.filter((engine) => !engines.includes(engine));
+  // What the route required counts too: a canary that asks for less than the Dispatcher serves would otherwise block without a reason.
+  const demanded = [...required, ...(report.required ?? []).filter(known)];
+  const missing = [...new Set(demanded)].filter(
+    (engine) => !engines.includes(engine),
+  );
   if (answer.status === 200 && report.ok && missing.length === 0) {
     // The probe passed; was it the pair the pipeline built? No id is printed.
     if (

@@ -105,7 +105,7 @@ export type WebhookBody = {
   version: 1;
   type: "job.ready";
   jobId: string;
-  reviewKind: "diff" | "dynamic";
+  reviewKind: "diff" | "dynamic" | "implementer";
   attempt: number;
   dispatchId: string;
   sentAt: string;

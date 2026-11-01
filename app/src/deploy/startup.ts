@@ -63,7 +63,7 @@ export function findDeploymentConfigProblems(env: Env): string[] {
   // start: the app would queue jobs and never wake anyone. The problems name variables, never values.
   problems.push(...dispatchConfigProblems(env));
 
-  // The product and its capability set (#731); unset means today's code-review.com, so this adds no required variable.
+  // The product and its capability set (#731, `implementer` #747); unset means today's code-review.com, so this adds no required variable.
   problems.push(...capabilityConfigProblems(env));
 
   return problems;

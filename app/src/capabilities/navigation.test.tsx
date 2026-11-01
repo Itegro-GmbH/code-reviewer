@@ -17,10 +17,12 @@ import { adminNavGroupsFor } from "../admin/ui/nav-items.ts";
 import { AppShell } from "../shell/app-shell.tsx";
 import { navGroupsFor, navItemsFor } from "../shell/nav-items.ts";
 import { getProductIdentity } from "../product-identity/current.ts";
+import { identityFor } from "../product-identity/identities.ts";
 import { workspaceHome } from "../workspaces/paths.ts";
 import { SettingsNav } from "../workspaces/ui/settings-nav.tsx";
 import { CapabilitiesProvider } from "./context.tsx";
 import { createCapabilitySet, type Capability } from "./capability.ts";
+import { PRODUCTS } from "./products.ts";
 
 afterEach(() => {
   cleanup();
@@ -82,17 +84,149 @@ describe("the workspace sidebar", () => {
 
   it("has the pure lists agree, and starts a workspace on a page it has", () => {
     const none = createCapabilitySet([]);
-    expect(navItemsFor("/w/acme", none).map((item) => item.label)).toEqual([
-      "Connections",
-      "Members",
-      "Settings",
-    ]);
-    expect(navGroupsFor("/w/acme", none)).toHaveLength(1);
+    const product = getProductIdentity();
+    expect(
+      navItemsFor("/w/acme", product, none).map((item) => item.label),
+    ).toEqual(["Connections", "Members", "Settings"]);
+    expect(navGroupsFor("/w/acme", product, none)).toHaveLength(1);
     expect(workspaceHome("acme")).toBe("/w/acme/projects");
     expect(workspaceHome("acme", createCapabilitySet(FACTORY))).toBe(
       "/w/acme/projects",
     );
     expect(workspaceHome("acme", none)).toBe("/w/acme/connections");
+  });
+});
+
+describe("the name of the QA area in the sidebar", () => {
+  // #757-T01
+  it("is Projects for code-review.com, with the address it always had", () => {
+    const product = identityFor("code-review-com");
+
+    expect(
+      navItemsFor("/w/acme", product).map((item) => [item.label, item.href]),
+    ).toEqual([
+      ["Projects", "/w/acme/projects"],
+      ["Runs", "/w/acme/runs"],
+      ["Connections", "/w/acme/connections"],
+      ["Members", "/w/acme/members"],
+      ["Settings", "/w/acme/settings"],
+    ]);
+  });
+
+  // #757-T02
+  it("is QA for the factory, and the address stays /projects", () => {
+    const product = identityFor("factory");
+
+    expect(
+      navItemsFor("/w/acme", product).map((item) => [item.label, item.href]),
+    ).toEqual([
+      ["QA", "/w/acme/projects"],
+      ["Runs", "/w/acme/runs"],
+      ["Connections", "/w/acme/connections"],
+      ["Members", "/w/acme/members"],
+      ["Settings", "/w/acme/settings"],
+    ]);
+  });
+
+  // #757-T02
+  it("is what the rendered sidebar of the factory shows", () => {
+    render(
+      <CapabilitiesProvider capabilities={FACTORY}>
+        <AppShell product={identityFor("factory")} userMenu={<span>menu</span>}>
+          <h1>Page</h1>
+        </AppShell>
+      </CapabilitiesProvider>,
+    );
+
+    expect(labels()).toEqual(expect.arrayContaining(["QA", "Runs"]));
+    expect(labels()).not.toContain("Projects");
+  });
+});
+
+describe("the Implementer item in the sidebar", () => {
+  const WITH_IMPLEMENTER = createCapabilitySet([
+    "review",
+    "dynamic-review",
+    "implementer",
+  ]);
+
+  // #756-T01: the sidebar has no input for a role, so the item is the same for an Owner, an Admin, a Member and the instance
+  // admin: it depends on the capability set alone.
+  it("sits between the QA area and Runs where the deployment has the capability, and points to the page", () => {
+    const product = identityFor("factory");
+
+    expect(
+      navItemsFor("/w/acme", product, WITH_IMPLEMENTER).map((item) => [
+        item.label,
+        item.href,
+      ]),
+    ).toEqual([
+      ["QA", "/w/acme/projects"],
+      ["Implementer", "/w/acme/implementer"],
+      ["Runs", "/w/acme/runs"],
+      ["Connections", "/w/acme/connections"],
+      ["Members", "/w/acme/members"],
+      ["Settings", "/w/acme/settings"],
+    ]);
+  });
+
+  // #756-T01
+  it("is not in the list of code-review.com, nor of the factory without the capability", () => {
+    for (const product of [
+      identityFor("code-review-com"),
+      identityFor("factory"),
+    ]) {
+      expect(
+        navItemsFor("/w/acme", product).map((item) => item.label),
+      ).not.toContain("Implementer");
+      expect(
+        navItemsFor(
+          "/w/acme",
+          product,
+          createCapabilitySet(PRODUCTS["code-review-com"].default),
+        ).map((item) => item.label),
+      ).not.toContain("Implementer");
+      expect(
+        navItemsFor("/w/acme", product, createCapabilitySet(FACTORY)).map(
+          (item) => item.label,
+        ),
+      ).not.toContain("Implementer");
+    }
+  });
+
+  // #756-T01
+  it("is what the rendered sidebar shows with the capability, marked as the current page on its page, and is absent without it", () => {
+    navigation.pathname = "/w/acme/implementer";
+    const { rerender } = render(
+      <CapabilitiesProvider
+        capabilities={[...FACTORY, "implementer" satisfies Capability]}
+      >
+        <AppShell product={identityFor("factory")} userMenu={<span>menu</span>}>
+          <h1>Page</h1>
+        </AppShell>
+      </CapabilitiesProvider>,
+    );
+
+    expect(labels()).toEqual(
+      expect.arrayContaining(["QA", "Implementer", "Runs"]),
+    );
+    expect(
+      screen.getByRole("link", { name: "Implementer" }).getAttribute("href"),
+    ).toBe("/w/acme/implementer");
+    expect(
+      screen
+        .getByRole("link", { name: "Implementer" })
+        .getAttribute("aria-current"),
+    ).toBe("page");
+
+    rerender(
+      <CapabilitiesProvider capabilities={FACTORY}>
+        <AppShell product={identityFor("factory")} userMenu={<span>menu</span>}>
+          <h1>Page</h1>
+        </AppShell>
+      </CapabilitiesProvider>,
+    );
+    expect(labels()).not.toContain("Implementer");
   });
 });
 

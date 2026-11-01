@@ -162,3 +162,117 @@ describe("the credential of a Worker (#320)", () => {
     expect(cleaned).toContain("[redacted]");
   });
 });
+
+describe("the implementer block of a result (#754)", () => {
+  const LLM_KEY = "llm-key-for-the-turn-0123456789";
+  const CAPABILITY = `crj_${"Ab3-_".repeat(9)}Zz`;
+  const block = {
+    baseCommit: "a".repeat(40),
+    headCommit: "b".repeat(40),
+    pushed: true,
+    commits: [
+      { sha: "b".repeat(40), subject: `Use ${GHS} to push` },
+      { sha: "c".repeat(40), subject: "Plain subject" },
+    ],
+    filesChanged: [
+      { path: `config/${LLM_KEY}.json`, status: "added" as const },
+      { path: `src/${CAPABILITY}/index.ts`, status: "modified" as const },
+      { path: "src/plain.ts", status: "deleted" as const },
+    ],
+    summary: `I used ${GHS}, the key ${LLM_KEY} and Authorization: Bearer ${CAPABILITY}.`,
+    opencode: { sessionId: "ses_1", version: "1.19.0" },
+  };
+  const result: RunnerResult = {
+    ok: true,
+    durationMs: 1,
+    commentUrl: null,
+    errorCode: null,
+    errorMessage: null,
+    logTail: "",
+    logTruncated: false,
+    usage: null,
+    implementer: block,
+  };
+
+  // #754-T04
+  it("removes the git token, the LLM key and the capability from the summary, the subjects and the paths", () => {
+    const cleaned = redactResult(result, [LLM_KEY]);
+    const stored = JSON.stringify(cleaned.implementer);
+
+    for (const secret of [GHS, LLM_KEY, CAPABILITY, CAPABILITY.slice(4)])
+      expect(stored).not.toContain(secret);
+    expect(cleaned.implementer?.summary).toContain(REDACTED);
+    expect(cleaned.implementer?.commits[0]?.subject).toBe(
+      `Use ${REDACTED} to push`,
+    );
+    expect(cleaned.implementer?.filesChanged[0]?.path).toBe(
+      `config/${REDACTED}.json`,
+    );
+  });
+
+  // #754-T04
+  it("leaves the shas, the numbers, the statuses and the plain text as they were", () => {
+    const cleaned = redactResult(result, [LLM_KEY]).implementer;
+
+    expect(cleaned).toMatchObject({
+      baseCommit: block.baseCommit,
+      headCommit: block.headCommit,
+      pushed: true,
+      opencode: block.opencode,
+    });
+    expect(cleaned?.commits.map((commit) => commit.sha)).toEqual(
+      block.commits.map((commit) => commit.sha),
+    );
+    expect(cleaned?.commits[1]?.subject).toBe("Plain subject");
+    expect(cleaned?.filesChanged.map((file) => file.status)).toEqual([
+      "added",
+      "modified",
+      "deleted",
+    ]);
+    expect(cleaned?.filesChanged[2]?.path).toBe("src/plain.ts");
+  });
+
+  // #754-T04
+  it("leaves a result without the block without one", () => {
+    const bare: RunnerResult = { ...result };
+    delete bare.implementer;
+
+    expect("implementer" in redactResult(bare, [LLM_KEY])).toBe(false);
+  });
+
+  // #754: a zero-width character inside a secret keeps a plain match from finding it.
+  it("finds a secret that zero-width characters split, in every text of the block", () => {
+    const split = (text: string) =>
+      [...text].join("\u200b").replace(/\u200b$/, "");
+    const withSplit: RunnerResult = {
+      ...result,
+      implementer: {
+        ...block,
+        summary: `key ${split(LLM_KEY)} and token ${split(GHS)}`,
+        commits: [{ sha: "b".repeat(40), subject: `Use ${split(LLM_KEY)}` }],
+        filesChanged: [
+          { path: `src/${split(LLM_KEY)}.ts`, status: "added" as const },
+        ],
+      },
+    };
+
+    const stored = JSON.stringify(
+      redactResult(withSplit, [LLM_KEY]).implementer,
+    );
+
+    expect(stored).not.toContain(LLM_KEY.slice(4, 14));
+    expect(stored).not.toContain(GHS.slice(4, 14));
+    expect(stored).toContain(REDACTED);
+  });
+
+  // #754: only text that held a secret is rewritten; a ZWJ emoji or a soft hyphen elsewhere stays as it was.
+  it("leaves text without a secret exactly as it was, zero-width characters included", () => {
+    const plain = "family 👨\u200d👩\u200d👧 and co\u00adoperate";
+    const kept = redactResult(
+      { ...result, implementer: { ...block, summary: plain } },
+      [LLM_KEY],
+    );
+
+    expect(kept.implementer?.summary).toBe(plain);
+  });
+});

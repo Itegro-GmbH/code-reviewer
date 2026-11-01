@@ -262,6 +262,8 @@ describe("the scripts of the lane", () => {
   it("fetch the pinned OpenCode and ripgrep, make the one build, and keep to a private port pair", () => {
     expect(wrapper).toContain("scripts/fetch_opencode.py");
     expect(wrapper).toContain("scripts/fetch_ripgrep.py");
+    // The pinned git of the Implementer (#767): built from the verified source, never taken from the host.
+    expect(wrapper).toContain("scripts/build_lane_git.sh");
     expect(wrapper.match(/pnpm build/g)).toHaveLength(1);
     expect(wrapper).toContain("E2E_REUSE_BUILD");
     expect(wrapper).toMatch(/3000:\*/);
@@ -294,9 +296,28 @@ describe("the Playwright configuration of the lane", () => {
     expect(config).toContain(
       'globalSetup: "./e2e/dynamic/preflight.global-setup.ts"',
     );
-    expect(config.match(/command:/g)).toHaveLength(2);
+    // The fake GitHub, the hosted journey's app, and the factory's app of the Implementer's journeys (#767).
+    expect(config.match(/command:/g)).toHaveLength(3);
     expect(config).toContain("fakes/github/main.ts");
     expect(config).toContain("next start");
+  });
+
+  // #767
+  it("starts the factory app of the Implementer's journeys from the same build, with its own database, port and credentials", () => {
+    expect(config).toContain('PRODUCT_ID: "factory"');
+    expect(config).toContain(
+      'PRODUCT_CAPABILITIES: "review,dynamic-review,implementer"',
+    );
+    expect(config).toContain("factoryDatabase.app");
+    expect(config).toContain("factoryEnv.appPort");
+    expect(config).toContain("RUNNER_TOKEN: factoryEnv.dispatcherToken");
+    expect(config).toContain("RUNNER_WEBHOOK_SECRET: factoryEnv.webhookSecret");
+    // One build for both apps; the second never builds.
+    expect(config).not.toMatch(/pnpm build|next build/);
+    // The journeys run one after the other: the Implementer's after the hosted one, which has the Dispatcher's port.
+    expect(config).toMatch(
+      /name: "implementer"[\s\S]*dependencies: \["prepare-factory", "guard", "hosted"\]/,
+    );
   });
 
   // #253-N08
@@ -307,5 +328,86 @@ describe("the Playwright configuration of the lane", () => {
       "contracts/examples/worker-container/WorkerContainerSpec.json",
     );
     expect(shipped).not.toMatch(/dynamic_review|dynamicReview/);
+  });
+});
+
+describe("what the Implementer's journeys add to the lane (#767)", () => {
+  const container = read("runner/scripts/dynamic_e2e_worker_container.sh");
+  const journey = read("app/e2e/dynamic/hosted-implementer.e2e.ts");
+
+  // #767
+  it("builds the pinned git in the CI job and caches it, from headers installed by apt and nothing else of the host", () => {
+    const text = steps()
+      .map((step) => `${step.uses ?? ""} ${step.run ?? ""}`)
+      .join("\n");
+
+    expect(text).toMatch(/apt-get install .*libcurl4-openssl-dev/);
+    const cache = steps().find((step) =>
+      String(step.with?.path ?? "").includes("code-reviewer/lane-git"),
+    );
+    expect(String(cache?.with?.key)).toContain("runner/git-pin.json");
+    expect(String(cache?.with?.key)).toContain("build_lane_git.sh");
+    const script = read("runner/scripts/build_lane_git.sh");
+    // The same release and the same variables as the Worker image's git-build stage.
+    expect(script).toContain("fetch_toolchain.py --component git");
+    const dockerfile = read("runner/Dockerfile");
+    for (const variable of [
+      "INSTALL_SYMLINKS=1",
+      "NO_GETTEXT=1",
+      "NO_PERL=1",
+      "NO_PYTHON=1",
+      "NO_TCLTK=1",
+      "NO_EXPAT=1",
+      "NO_LIBPCRE2=1",
+      "NO_OPENSSL=1",
+    ]) {
+      expect(script, variable).toContain(variable);
+      expect(dockerfile, variable).toContain(variable);
+    }
+  });
+
+  // #767
+  it("installs git, the guard files and the mount point of the work volume in the namespace, root-owned", () => {
+    expect(namespace).toContain('"$LANE_GIT_TREE/usr/local/$directory/."');
+    expect(namespace).toMatch(/--no-preserve=ownership/);
+    expect(namespace).toMatch(
+      /install -m 0755 -o root -g root .*guard\/reference-transaction.*guard_matrix\.sh" \/opt\/code-reviewer\/guard\//,
+    );
+    expect(namespace).toContain("mkdir /work");
+    // The preflight names what is missing before any journey starts.
+    expect(read("app/e2e/helpers/dynamic-preflight.ts")).toContain(
+      "/opt/code-reviewer/guard",
+    );
+  });
+
+  // #767
+  it("gives each container a fresh work volume of its own, read-write, nosuid, nodev and executable, before the root goes read-only", () => {
+    expect(container).toMatch(
+      /mount -t tmpfs -o rw,nosuid,nodev,exec,size=3g,mode=0755 tmpfs "\$RUNNER_IMPLEMENTER_WORK_DIR"/,
+    );
+    expect(at(container, "make_work_volume ||")).toBeLessThan(
+      at(container, "make_root_read_only ||"),
+    );
+  });
+
+  // #767
+  it("runs the journeys on a Dispatcher whose registry names the kind implementer, with the Worker started as the container is, and without filter, skip or retry", () => {
+    expect(journey).toContain('kinds: ["diff", "dynamic", "implementer"]');
+    expect(journey).toContain("unsetForWorkerOnce: []");
+    expect(journey).toContain("E2E_WORKER_WRAPPER: WRAPPER");
+    expect(journey).toContain("operatorToken: factoryEnv.operatorToken");
+    expect(journey).not.toMatch(/\.skip|\.fixme|\.only|test\.slow|retries/);
+    // The journeys wait for what they need (a push, a run that ends), never for a fixed time of the agent's own, and the checks of
+    // the network and of the clean-up are exact: the proxy's own 403, a lookup that fails, a namespace nobody holds.
+    expect(journey).not.toMatch(/pause\(|sleep \d/);
+    expect(journey).toContain("CONNECT tunnel failed, response 403");
+    expect(journey).toContain("processesInNamespaces(namespaces)");
+    expect(journey).toContain(
+      "expect(await pushesSince(request, pushesBefore)).toEqual([])",
+    );
+    expect(journey).not.toMatch(/mode: "serial"/);
+    // One test per journey of the issue, named by its case.
+    for (let number = 1; number <= 12; number += 1)
+      expect(journey).toContain(`E${String(number).padStart(2, "0")} `);
   });
 });

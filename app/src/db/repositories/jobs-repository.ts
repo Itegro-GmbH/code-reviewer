@@ -21,12 +21,18 @@ import {
   STORED_REVIEW_COMMANDS,
   type JsonValue,
 } from "../../integrations/types.ts";
+import { JOB_KINDS, type JobKind } from "../../job-kind/job-kind.ts";
 import {
-  PROJECT_REVIEW_KINDS,
-  type ProjectReviewKind,
-} from "../../job-kind/job-kind.ts";
+  implementerDeliveryId,
+  implementerJobShape,
+} from "../implementer-job-shape.ts";
 import { JobQueueError } from "../../jobs/errors.ts";
 import type { ValidEnqueueInput } from "../../jobs/job-input.ts";
+import { ImplementerStoreError } from "../implementer-errors.ts";
+import {
+  createImplementerRepository,
+  type NewImplementerTask,
+} from "./implementer-repository.ts";
 import {
   createInstanceDynamicReviewGate,
   type DynamicReviewGate,
@@ -43,6 +49,8 @@ import {
 } from "../job-status.ts";
 import {
   JOB_TRIGGER_KINDS,
+  type EnqueueImplementerTurnInput,
+  type EnqueueImplementerTurnResult,
   type EnqueueResult,
   type Job,
   type JobErrorCode,
@@ -50,6 +58,7 @@ import {
 import { SUPERSEDED_DRAIN_MS } from "../supersede-timing.ts";
 import { databaseDriver } from "../driver.ts";
 import { decodeJson, formatTimestamp } from "../codecs.ts";
+import { errorCode, UNIQUE_VIOLATION } from "../errors.ts";
 import type { Database, JobsTable } from "../schema.ts";
 import type { WorkspaceId } from "../workspace-scope.ts";
 import { settleEndedJobs } from "../../billing/settle-jobs.ts";
@@ -81,7 +90,7 @@ export type AttemptedShas = { shas: string[]; truncated: boolean };
 export type PreviousReviewedShaInput = {
   repositoryId: string;
   prNumber: number;
-  reviewKind: ProjectReviewKind;
+  reviewKind: JobKind;
   /** The claimed job itself never counts as its own previous review. */
   excludeJobId: string;
 };
@@ -104,12 +113,31 @@ export type JobsRepositoryOptions = {
    * #731: whether this deployment has the capability a review kind needs (src/capabilities/). A job of a kind it does not
    * have is refused with `JOB_KIND_UNAVAILABLE` before anything is written. Left out, every kind is allowed.
    */
-  kindAllowed?: (kind: ProjectReviewKind) => boolean;
+  kindAllowed?: (kind: JobKind) => boolean;
 };
 
 export type JobsRepository = {
   /** Inserts a job unless the dedupe rules say one exists already; see the README of `src/jobs`. */
   enqueue(input: ValidEnqueueInput): Promise<EnqueueResult>;
+  /**
+   * #752: accepts a task of the Implementer: in one transaction the session, its first turn and the turn's job (a row of the
+   * kind `implementer`, placeholders from `db/implementer-job-shape.ts`). Refuses with `JOB_KIND_UNAVAILABLE`, writing nothing,
+   * when the deployment has no capability for the kind. Does not consult the Dynamic gate. A request id seen before gives the
+   * turn it made, whatever else the request says. Rejects with `JOB_REPOSITORY_UNKNOWN`, or an `ImplementerStoreError`
+   * (`IMPLEMENTER_BRANCH_TAKEN` and the others of the storage), writing nothing.
+   */
+  enqueueImplementerTurn(
+    input: EnqueueImplementerTurnInput,
+  ): Promise<EnqueueImplementerTurnResult>;
+  /**
+   * The turn a client request id made earlier (its job's delivery id is `implementer:<workspace id>:<client request id>`), or
+   * undefined. Writes nothing and asks nothing of the platform: the service looks here first, so a retry minutes after the
+   * agent pushed the branch gets the first task back and not "the branch exists". Not subject to `kindAllowed`: a deployment
+   * without the capability has no such turn.
+   */
+  findImplementerTurn(
+    clientRequestId: string,
+  ): Promise<EnqueueImplementerTurnResult | undefined>;
   /** Cancels every waiting job of a repository (its project was deactivated); returns how many. */
   cancelWaitingForRepository(repositoryId: string): Promise<number>;
   /**
@@ -173,12 +201,12 @@ export function decodeJobVocabulary(
   return { status: row.status, command, triggerKind };
 }
 
-/** The stored review kind of a job (#195); a value this version does not know fails loudly. */
+/** The stored kind of a job (#195, #752); a value this version does not know fails loudly. */
 export function decodeReviewKind(row: {
   id: string;
   review_kind: string;
-}): ProjectReviewKind {
-  const kind = PROJECT_REVIEW_KINDS.find((known) => known === row.review_kind);
+}): JobKind {
+  const kind = JOB_KINDS.find((known) => known === row.review_kind);
   if (kind === undefined)
     throw new Error(
       `Stored job ${row.id} has the unknown review kind "${row.review_kind}".`,
@@ -250,6 +278,34 @@ export function createJobsRepository(
   const dynamicReviewAllowed =
     options.dynamicReviewEnabled ?? createInstanceDynamicReviewGate();
 
+  // The turn a repeated request made, by the delivery id of its job. Looked up before `createSessionWithTurn`: a job handed back
+  // from its callback is refused there (`IMPLEMENTER_JOB_MISMATCH`) and rolled back, so a repeat must never get that far; and
+  // by the service before it asks the platform anything.
+  async function findImplementerTurn(
+    clientRequestId: string,
+  ): Promise<EnqueueImplementerTurnResult | undefined> {
+    const row = await db
+      .selectFrom("jobs")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .where(
+        "delivery_id",
+        "=",
+        implementerDeliveryId(workspaceId, clientRequestId),
+      )
+      .executeTakeFirst();
+    if (row === undefined) return undefined;
+    const found = await createImplementerRepository(
+      db,
+      workspaceId,
+      now,
+      newId,
+    ).getTurnByJob(row.id);
+    // A job with this delivery id that is no turn cannot be: the id has the prefix only turns write. Not an answer.
+    if (found === undefined) return undefined;
+    return { status: "existing", job: toJob(row), ...found };
+  }
+
   // A transaction cannot start another one; inside one, just use it.
   function inTransaction<T>(
     run: (executor: Kysely<Database>) => Promise<T>,
@@ -282,7 +338,10 @@ export function createJobsRepository(
         })
         .where("workspace_id", "=", workspaceId)
         .where("status", "in", statusesThatCanBecome("cancelled"))
-        .where("repository_id", "=", where.repositoryId);
+        .where("repository_id", "=", where.repositoryId)
+        // #752: nothing that acts on pull requests (a closed one, a draft, a deactivated project, a changed review kind) touches a
+        // turn of the Implementer, whatever its placeholder number is.
+        .where("review_kind", "<>", "implementer");
       if (where.prNumber !== undefined)
         query = query.where("pr_number", "=", where.prNumber);
       if (where.automaticOnly === true)
@@ -294,6 +353,7 @@ export function createJobsRepository(
           .select("id")
           .where("workspace_id", "=", workspaceId)
           .where("repository_id", "=", where.repositoryId)
+          .where("review_kind", "<>", "implementer")
           .where("status", "=", "queued"),
       );
       const result = await query.executeTakeFirst();
@@ -584,6 +644,118 @@ export function createJobsRepository(
       });
     },
 
+    findImplementerTurn: (clientRequestId) =>
+      findImplementerTurn(clientRequestId),
+
+    async enqueueImplementerTurn(input) {
+      // Before anything is read or written: a deployment without the capability never has a turn, not even an answer to a repeat.
+      if (options.kindAllowed?.("implementer") === false)
+        throw new JobQueueError(
+          "JOB_KIND_UNAVAILABLE",
+          "This deployment has no capability for review kind implementer.",
+        );
+      const repeated = await findImplementerTurn(input.clientRequestId);
+      if (repeated !== undefined) return repeated;
+
+      const task: NewImplementerTask = {
+        repositoryId: input.repositoryId,
+        baseBranch: input.baseBranch,
+        branch: input.branch,
+        instruction: input.instruction,
+        modelChoice: input.modelChoice,
+        costLimitCents: input.costLimitCents,
+        createdBy: input.createdBy,
+      };
+      try {
+        return await inTransaction<EnqueueImplementerTurnResult>(
+          async (trx) => {
+            const timestamp = formatTimestamp(now());
+            const created = await createImplementerRepository(
+              trx,
+              workspaceId,
+              now,
+              newId,
+            ).createSessionWithTurn(task, async (inner, { slot }) => {
+              const repository = await inner
+                .selectFrom("repositories")
+                .select("url")
+                .where("workspace_id", "=", workspaceId)
+                .where("id", "=", input.repositoryId)
+                .executeTakeFirstOrThrow();
+              const shape = implementerJobShape({
+                workspaceId,
+                repositoryUrl: repository.url,
+                branch: input.branch,
+                slot,
+                baseSha: input.baseSha,
+                clientRequestId: input.clientRequestId,
+              });
+              const id = newId();
+              await inner
+                .insertInto("jobs")
+                .values({
+                  id,
+                  workspace_id: workspaceId,
+                  repository_id: input.repositoryId,
+                  pr_number: shape.prNumber,
+                  pr_url: shape.prUrl,
+                  head_sha: shape.headSha,
+                  command: shape.command,
+                  review_kind: "implementer",
+                  args: shape.args,
+                  trigger_kind: "manual",
+                  actor_login: input.actorLogin,
+                  delivery_id: shape.deliveryId,
+                  status: "queued",
+                  run_after: timestamp,
+                  attempts: 0,
+                  runner_id: null,
+                  lease_token: null,
+                  claimed_at: null,
+                  heartbeat_at: null,
+                  lease_expires_at: null,
+                  result: null,
+                  error_code: null,
+                  superseded_by: null,
+                  created_at: timestamp,
+                  updated_at: timestamp,
+                  finished_at: null,
+                })
+                .execute();
+              return id;
+            });
+            const job = await trx
+              .selectFrom("jobs")
+              .selectAll()
+              .where("id", "=", created.turn.jobId)
+              .executeTakeFirstOrThrow();
+            return { status: "created", job: toJob(job), ...created };
+          },
+        );
+      } catch (error) {
+        if (
+          error instanceof ImplementerStoreError &&
+          error.code === "IMPLEMENTER_REPOSITORY_NOT_FOUND"
+        )
+          throw new JobQueueError(
+            "JOB_REPOSITORY_UNKNOWN",
+            `No repository row ${input.repositoryId}.`,
+            { cause: error },
+          );
+        // Two requests with one id raced past the lookup: the one that lost finds the turn the other made (its branch is taken, or
+        // the unique index of the delivery id refuses the job). Anything else, or no such turn, is the caller's.
+        if (
+          (error instanceof ImplementerStoreError &&
+            error.code === "IMPLEMENTER_BRANCH_TAKEN") ||
+          errorCode(error) === UNIQUE_VIOLATION
+        ) {
+          const raced = await findImplementerTurn(input.clientRequestId);
+          if (raced !== undefined) return raced;
+        }
+        throw error;
+      }
+    },
+
     cancelWaitingForRepository(repositoryId) {
       return cancelWaiting({ repositoryId }, "project_deactivated");
     },
@@ -645,10 +817,14 @@ export function createJobsRepository(
     },
 
     async previousReviewedSha(input) {
+      // #752: a turn has no reviewed head: its `head_sha` is the base branch tip read when the task was accepted.
+      if (input.reviewKind === "implementer") return null;
       return (await lastSucceeded(input))?.head_sha ?? null;
     },
 
     async attemptedShas(input) {
+      if (input.reviewKind === "implementer")
+        return { shas: [], truncated: false };
       const claimed = await scopeOf(input)
         .select("created_at")
         .where("id", "=", input.excludeJobId)

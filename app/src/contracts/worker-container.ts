@@ -157,6 +157,102 @@ export interface WorkerContainerSpec {
   overridable: ("memory.limit" | "memory.reservation" | "memory.swap")[];
 }
 /**
+ * The one writable volume of the Implementer's container: a Docker named volume the Sandbox-Launcher creates for the job on the VM's disk, over a directory of the VM that it mounts with these options (Docker cannot set mount options on a named volume itself): read-write, no setuid bit honoured, no device node, and no `noexec`, because the agent builds and runs the repository's programs here. It lives and dies with the VM; nothing outlives the job. The path is /work (RUNNER_IMPLEMENTER_WORK_DIR).
+ */
+export interface WorkVolume {
+  path: "/work";
+  options: ["rw", "nosuid", "nodev"];
+  /**
+   * A Docker named volume, created per job. Never a path of the host and never an existing volume.
+   */
+  source: "named-volume";
+}
+/**
+ * The profile of the container for the Implementer (#760): the hardening floor of WorkerContainerSpec, value for value, plus one work volume and the room to build and test a repository. It differs from the default spec in exactly these fields: `workVolume` (new), `memory` (sized from the VM), `pids.limit` (2048) and `allowedEnvironment` (the three names of the Implementer added). The root filesystem stays read-only and every tmpfs stays noexec: the work volume is the only writable path where a program may run. A bind, a host path or an arbitrary volume has no key to live in. The Sandbox-Launcher chooses the profile by the job kind (implementer); Diff and Dynamic keep WorkerContainerSpec. examples/worker-container/ImplementerContainerSpec.json is the spec (the Dispatcher's copy and its test keep them equal).
+ */
+export interface ImplementerContainerSpec {
+  version: 1;
+  /**
+   * The container starts as root: the job process of a Dynamic job is the supervisor that owns every credential and starts the engine as another user. Root holds exactly the capabilities of capAdd and no-new-privileges means nothing can regain more.
+   */
+  user: "0:0";
+  capDrop: ["ALL"];
+  /**
+   * @minItems 1
+   * @maxItems 8
+   */
+  capAdd:
+    | [CapabilityGrant]
+    | [CapabilityGrant, CapabilityGrant]
+    | [CapabilityGrant, CapabilityGrant, CapabilityGrant]
+    | [CapabilityGrant, CapabilityGrant, CapabilityGrant, CapabilityGrant]
+    | [
+        CapabilityGrant,
+        CapabilityGrant,
+        CapabilityGrant,
+        CapabilityGrant,
+        CapabilityGrant,
+      ]
+    | [
+        CapabilityGrant,
+        CapabilityGrant,
+        CapabilityGrant,
+        CapabilityGrant,
+        CapabilityGrant,
+        CapabilityGrant,
+      ]
+    | [
+        CapabilityGrant,
+        CapabilityGrant,
+        CapabilityGrant,
+        CapabilityGrant,
+        CapabilityGrant,
+        CapabilityGrant,
+        CapabilityGrant,
+      ]
+    | [
+        CapabilityGrant,
+        CapabilityGrant,
+        CapabilityGrant,
+        CapabilityGrant,
+        CapabilityGrant,
+        CapabilityGrant,
+        CapabilityGrant,
+        CapabilityGrant,
+      ];
+  /**
+   * @maxItems 2
+   */
+  securityOpt: [] | [SecurityOption] | [SecurityOption, SecurityOption];
+  readOnly: true;
+  /**
+   * @minItems 3
+   * @maxItems 3
+   */
+  tmpfs: [TmpfsMount, TmpfsMount, TmpfsMount];
+  workVolume: WorkVolume;
+  memory: MemoryLimits;
+  pids: {
+    limit: 2048;
+  };
+  stopTimeoutSeconds: number;
+  /**
+   * The default bridge. Never the host's network and never none (the Worker must reach the app).
+   */
+  network: {
+    mode: "bridge";
+  };
+  allowedEnvironment: EnvironmentName[];
+  /**
+   * Documentation that a tool can check: the keys that no spec has. The schema is closed, so none of them can be added.
+   */
+  forbiddenKeys: ForbiddenKey[];
+  /**
+   * The only values a launcher may change per Worker kind (WorkerContainerOverrides).
+   */
+  overridable: ("memory.limit" | "memory.reservation" | "memory.swap")[];
+}
+/**
  * What a launcher may change per Worker kind (ADR of the hosted deployment, #325): the memory limit, because the spec's default is not the size of a Sandbox VM. Nothing else.
  */
 export interface WorkerContainerOverrides {

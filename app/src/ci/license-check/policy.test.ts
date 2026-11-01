@@ -89,26 +89,42 @@ describe("license-policy.json", () => {
 
   // #202-T06
   describe("binaries", () => {
-    it("names the OpenCode and the ripgrep pin, each with its version, license and reason", () => {
+    it("names the pin of every prebuilt binary and tool of the Worker image, each with its version, license and reason", () => {
       expect(
         policy.binaries.map((entry) => [entry.name, entry.pin, entry.license]),
       ).toEqual([
         ["opencode", "runner/opencode-pin.json", "MIT"],
         ["ripgrep", "runner/ripgrep-pin.json", "MIT"],
+        // #761-T07
+        ["git", "runner/git-pin.json", "GPL-2.0-only"],
+        ["node", "runner/node-pin.json", "MIT"],
+        ["pnpm", "runner/pnpm-pin.json", "MIT"],
       ]);
       for (const entry of policy.binaries) {
         expect(entry.version, entry.name).toMatch(/^\d+\.\d+\.\d+$/);
         expect(entry.reason, entry.name).not.toBe("");
+        expect(entry.commit, entry.name).toMatch(/^[0-9a-f]{40}$/);
       }
-      expect(
-        policy.binaries.find((entry) => entry.name === "opencode")?.commit,
-      ).toMatch(/^[0-9a-f]{40}$/);
     });
 
+    // #202-T06, #761-T07: the pins of all five parts pass the audit.
     it("passes the audit of the real pins, documents and snapshot", () => {
       expect(binaries.violations.map(describeBinaryViolation)).toEqual([]);
-      expect(binaries.binaries).toBe(2);
+      expect(binaries.binaries).toBe(5);
       expect(binaries.installed.length).toBeGreaterThan(100);
+    });
+
+    // #761-T07: git is GPL-2.0, which is not on the allow list; it is a separate program of the image,
+    // built from the unmodified release, and the policy says so in the entry itself.
+    it("accepts git's GPL license only through a documented exception, and marks it as built from source", () => {
+      const git = policy.binaries.find((entry) => entry.name === "git");
+
+      expect(git?.build).toBe("source");
+      expect(git?.exception).toMatch(/separate program/i);
+      for (const entry of policy.binaries.filter((e) => e.name !== "git")) {
+        expect(entry.exception, entry.name).toBeUndefined();
+        expect(entry.build, entry.name).toBeUndefined();
+      }
     });
 
     it("allows the license of every package bundled in OpenCode, by the allow list or by name", () => {
@@ -136,6 +152,13 @@ describe("license-policy.json", () => {
           ...policy,
           binaries: [{ ...first, commit: "not-a-commit" }],
         }),
+      ).toThrow();
+      // #761-T07: `build` knows one value, and an exception needs a reason.
+      expect(() =>
+        parsePolicy({ ...policy, binaries: [{ ...first, build: "binary" }] }),
+      ).toThrow();
+      expect(() =>
+        parsePolicy({ ...policy, binaries: [{ ...first, exception: "" }] }),
       ).toThrow();
     });
   });

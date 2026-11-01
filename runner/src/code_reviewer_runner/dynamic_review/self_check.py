@@ -23,6 +23,7 @@ proven at startup is proven per job: the sealed read-only export, unreadable pri
 probe again before every engine (`supervisor.py`, `engine_user.py`).
 """
 
+import contextlib
 import hashlib
 import json
 import os
@@ -38,7 +39,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Concatenate
 
 from code_reviewer_runner.capabilities import IsolationSelfCheckError
 from code_reviewer_runner.job_loop.jsonvalues import as_object
@@ -55,7 +56,8 @@ _VERSION_TIMEOUT_SECONDS = 60.0
 
 
 class SelfCheckReason(StrEnum):
-    """Why `opencode` is not advertised. Stable: it is logged, and operators search for it."""
+    """Why `opencode` is not advertised, or (the `implementer_*` ones) why `implementer` is not on
+    top of it. Stable: it is logged, and operators search for it."""
 
     NOT_A_DYNAMIC_RUNNER = "not_a_dynamic_runner"
     NOT_ROOT_SUPERVISOR = "not_root_supervisor"
@@ -74,6 +76,16 @@ class SelfCheckReason(StrEnum):
     RIPGREP_UNTRUSTED = "ripgrep_untrusted"
     RIPGREP_CHECKSUM_MISMATCH = "ripgrep_checksum_mismatch"
     NETWORK_PROBE_FAILED = "network_probe_failed"
+    # Why `implementer` is not advertised on top of a passing Dynamic check (#765,
+    # `implementer/startup.py`). They are in the verdict next to the others.
+    IMPLEMENTER_GIT_MISSING = "implementer_git_missing"
+    IMPLEMENTER_GIT_TOO_OLD = "implementer_git_too_old"
+    IMPLEMENTER_SETPRIV_MISSING = "implementer_setpriv_missing"
+    IMPLEMENTER_GUARD_FILES_MISSING = "implementer_guard_files_missing"
+    IMPLEMENTER_EGRESS_RULES_MISSING = "implementer_egress_rules_missing"
+    IMPLEMENTER_WORK_DIR_MISSING = "implementer_work_dir_missing"
+    IMPLEMENTER_WORK_DIR_NOT_PREPARED = "implementer_work_dir_not_prepared"
+    IMPLEMENTER_WORK_DIR_NOT_EXEC = "implementer_work_dir_not_exec"
 
 
 class SelfCheckFailed(IsolationSelfCheckError):
@@ -109,7 +121,7 @@ DEFAULT_TOOLS = ToolPaths(
 )
 
 GroupOf = Callable[[int], int | None]
-Probe = Callable[[int, int, int], None]
+Probe = Callable[Concatenate[int, int, int, ...], None]
 Ipv6Proof = Callable[[int, int], None]
 VersionAsUser = Callable[[Path, int, int], str]
 
@@ -144,22 +156,30 @@ def root_filesystem_read_only(root: Path = Path("/")) -> bool:
         return False
 
 
-def startup_probe(uid: int, gid: int, proxy_port: int) -> None:
-    """Run the network probe as the engine user against a listener of ours on the proxy port.
+def startup_probe(uid: int, gid: int, proxy_port: int, *extra_ports: int) -> None:
+    """Run the network probe as the engine user against listeners of ours on the proxy port and,
+    in an Implementer container, on the egress proxy's port (#763).
 
-    No job exists at startup, so the supervisor itself plays the model proxy for the probe's
-    "allowed" connection. A port somebody else holds fails the probe: the slot is not clean.
+    No job exists at startup, so the supervisor itself plays the model proxy (and the egress
+    proxy) for the probe's "allowed" connections. A port somebody else holds fails the probe: the
+    slot is not clean.
     """
-    with socket.socket() as listener:
-        # A connection that only waits out its time on the port (the proxy of a job that just ended)
-        # does not make the port taken; a live listener of somebody else still fails the bind.
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            listener.bind((PROXY_HOST, proxy_port))
-            listener.listen(1)
-        except OSError:
-            raise IsolationError("the model proxy port of the slot is not free") from None
-        verify_confinement(uid, gid, proxy_port)
+    with contextlib.ExitStack() as stack:
+        for port, taken in (
+            (proxy_port, "the model proxy port of the slot is not free"),
+            *((port, "the egress proxy port of the slot is not free") for port in extra_ports),
+        ):
+            listener = stack.enter_context(socket.socket())
+            # A connection that only waits out its time on the port (the proxy of a job that just
+            # ended) does not make the port taken; a live listener of somebody else still fails
+            # the bind.
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                listener.bind((PROXY_HOST, port))
+                listener.listen(1)
+            except OSError:
+                raise IsolationError(taken) from None
+        verify_confinement(uid, gid, proxy_port, *extra_ports)
 
 
 def version_as_user(executable: Path, uid: int, gid: int) -> str:
@@ -422,7 +442,7 @@ def check_dynamic_runner(
             "the engine does not report the pinned version as the engine user",
         )
     try:
-        probe(uid, gid, ports.proxy)
+        probe(uid, gid, ports.proxy, *ports.extra)
     except IsolationError:
         raise SelfCheckFailed(
             SelfCheckReason.NETWORK_PROBE_FAILED,
