@@ -5,6 +5,7 @@
 // the fake registry behind the egress proxy, and the checks of what the runner did to Git and to GitHub.
 import { execFileSync } from "node:child_process";
 import {
+  appendFileSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -30,6 +31,21 @@ export const GIT_COMMANDS = `${RECORDS}/git-commands.jsonl`;
 export function keepRecords(directory: string): void {
   rmSync(directory, { recursive: true, force: true });
   cpSync(RECORDS, directory, { recursive: true });
+}
+
+/** The mount namespaces of the containers read while their Workers ran, kept in a file: a failed journey restarts the worker process. */
+const NAMESPACES = `${RECORDS}/container-namespaces.txt`;
+
+export function noteNamespace(namespace: string): void {
+  appendFileSync(NAMESPACES, `${namespace}\n`);
+}
+
+export function notedNamespaces(): string[] {
+  return existsSync(NAMESPACES)
+    ? readFileSync(NAMESPACES, "utf8")
+        .split("\n")
+        .filter((line) => line !== "")
+    : [];
 }
 
 export function prepareRecords(): void {

@@ -90,6 +90,8 @@ import {
   write,
   GIT_COMMANDS,
   keepRecords,
+  noteNamespace,
+  notedNamespaces,
   type ContainerMount,
   type FakeRegistry,
 } from "../helpers/implementer-journey";
@@ -127,9 +129,6 @@ test.describe("a task on its way from the form of the Implementer to a branch on
   let directory: string | undefined;
   let repository: GitRepository | undefined;
   let base = "";
-  const runs: string[] = [];
-  // The mount namespaces of the containers seen while their Workers ran (E10 looks for what still holds one).
-  const namespaces: string[] = [];
   // What the model was shown in every journey so far: the fake's log is cleared before each one.
   const shownToTheModel: string[] = [];
 
@@ -318,7 +317,7 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       throw new Error(
         "The container of the Worker has no namespace of its own.",
       );
-    namespaces.push(mount.namespace);
+    noteNamespace(mount.namespace);
     return mount;
   }
 
@@ -396,13 +395,13 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     });
     await signInAsAdmin(page);
     const pushesBefore = (await getPushes(request, GADGETS.fullName)).length;
+    const commandsBefore = runnerGitCommands().length;
 
     const runId = await startTask(page, {
       repository: GADGETS.fullName,
       branch,
       instruction,
     });
-    runs.push(runId);
 
     // During the turn: the first commit is on the branch at the fake GitHub while the agent waits and the run is running.
     await agentIsWaiting(theLlm, page, runId, RUN_TIMEOUT);
@@ -431,7 +430,10 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     const pushes = await pushesSince(request, pushesBefore);
     expect(pushes.length).toBeGreaterThanOrEqual(2);
     expectOnlyPushesOf(pushes, branch);
-    expectRunnerPushedOnlyForward(runnerGitCommands(), branch);
+    expectRunnerPushedOnlyForward(
+      runnerGitCommands().slice(commandsBefore),
+      branch,
+    );
     // No pull request was opened, read or asked for in this repository (the fake is shared with the earlier journey's repository).
     const asked = await getGithubRequests(request);
     expect(
@@ -539,7 +541,6 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       branch,
       instruction: "[E03-LEFTOVER] Write a notes.txt with one line.",
     });
-    runs.push(runId);
     const ended = await runEnded(page, runId, RUN_TIMEOUT);
 
     expect(ended.status).toBe("succeeded");
@@ -580,7 +581,6 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       branch,
       instruction: "[E04-IGNORED] Write a draft.txt with one line.",
     });
-    runs.push(runId);
     const ended = await runEnded(page, runId, RUN_TIMEOUT);
 
     expect(ended.status).toBe("succeeded");
@@ -626,7 +626,6 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       instruction: "[E05-COST] Add a.txt and then keep checking things.",
       costLimit: "0.01",
     });
-    runs.push(runId);
     await agentIsWaiting(theLlm, page, runId, RUN_TIMEOUT);
     await branchPushed(page, runId, gadgets().path, branch, RUN_TIMEOUT);
     observeContainer();
@@ -681,13 +680,13 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     });
     await signInAsAdmin(page);
     const pushesBefore = (await getPushes(request, GADGETS.fullName)).length;
+    const commandsBefore = runnerGitCommands().length;
 
     const runId = await startTask(page, {
       repository: GADGETS.fullName,
       branch,
       instruction: "[E06-GUARD] Add a.txt, then try to rewrite history.",
     });
-    runs.push(runId);
     await agentIsWaiting(theLlm, page, runId, RUN_TIMEOUT);
     await branchPushed(page, runId, gadgets().path, branch, RUN_TIMEOUT);
     observeContainer();
@@ -721,9 +720,7 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     // And nothing else reached GitHub: every push of the journey is the runner's, to the branch.
     expectOnlyPushesOf(await pushesSince(request, pushesBefore), branch);
     expectRunnerPushedOnlyForward(
-      runnerGitCommands().filter((command) =>
-        command.argv.join(" ").includes("e06"),
-      ),
+      runnerGitCommands().slice(commandsBefore),
       branch,
     );
     await expectQuiet();
@@ -751,13 +748,13 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     });
     await signInAsAdmin(page);
     const pushesBefore = (await getPushes(request, GADGETS.fullName)).length;
+    const commandsBefore = runnerGitCommands().length;
 
     const runId = await startTask(page, {
       repository: GADGETS.fullName,
       branch,
       instruction: "[E07-BYPASS] Add a.txt and then rewrite history.",
     });
-    runs.push(runId);
     await agentIsWaiting(theLlm, page, runId, RUN_TIMEOUT);
     await branchPushed(page, runId, gadgets().path, branch, RUN_TIMEOUT);
     observeContainer();
@@ -772,9 +769,7 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     expect(tipOf(gadgets().path, branch)).toBe(good);
     expectOnlyPushesOf(await pushesSince(request, pushesBefore), branch);
     expectRunnerPushedOnlyForward(
-      runnerGitCommands().filter((command) =>
-        command.argv.join(" ").includes("e07"),
-      ),
+      runnerGitCommands().slice(commandsBefore),
       branch,
     );
     await expectQuiet();
@@ -834,7 +829,6 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       branch,
       instruction: "[E08-NETWORK] Check which hosts you can reach.",
     });
-    runs.push(runId);
     const ended = await runEnded(page, runId, RUN_TIMEOUT);
 
     expect(ended.status).toBe("succeeded");
@@ -932,7 +926,6 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       branch,
       instruction: "[E12-TEXT] Change something.",
     });
-    runs.push(runId);
     const ended = await runEnded(page, runId, RUN_TIMEOUT);
 
     expect(ended.status).toBe("failed");
@@ -969,7 +962,6 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       branch,
       instruction: "[E09-PROBE] Look around the machine and add probe.txt.",
     });
-    runs.push(runId);
     const ended = await runEnded(page, runId, RUN_TIMEOUT);
     expect(ended.status).toBe("succeeded");
 
@@ -1014,8 +1006,11 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     // Everywhere else, every secret and the capability too.
     const list = await page.request.get(`/api/w/${WORKSPACE}/runs`);
     expect(list.status()).toBe(200);
+    const listed = (
+      JSON.parse(await list.text()) as { runs: Array<{ id: string }> }
+    ).runs;
     const details = await Promise.all(
-      runs.map(async (id) =>
+      listed.map(async ({ id }) =>
         JSON.stringify(
           await (
             await page.request.get(`/api/w/${WORKSPACE}/runs/${id}`)
@@ -1105,6 +1100,7 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     );
     // The containers of E01, E05, E06 and E07 were read while they ran (their volume had the options of the profile). A mount
     // of a container's own namespace lives as long as one process is in that namespace; none is.
+    const namespaces = notedNamespaces();
     expect(namespaces.length).toBeGreaterThanOrEqual(4);
     await eventually(
       "the containers' namespaces to be empty",
@@ -1123,7 +1119,7 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     const workers = theDispatcher
       .containers()
       .filter((container) => container.mode === "worker-once");
-    expect(workers.length).toBeGreaterThanOrEqual(runs.length);
+    expect(workers).toHaveLength(engineScans().length);
     assertGuardQuiet();
   });
 
@@ -1159,7 +1155,6 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       instruction: `${options.marker} Add c.txt.`,
       model: "Claude Lane Coder",
     });
-    runs.push(runId);
     const ended = await runEnded(page, runId, RUN_TIMEOUT);
     expect(ended.status).toBe("succeeded");
     // The engine marked its prompt for the cache: on the message objects.
