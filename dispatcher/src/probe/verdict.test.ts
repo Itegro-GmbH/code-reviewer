@@ -272,6 +272,14 @@ describe("the probe verdict", () => {
       });
       const { verdict } = merged(claims, dynamic);
 
+      // In the line itself, not only after a reader filtered it again.
+      expect(
+        (
+          JSON.parse(mergeVerdictOutputs(claims, dynamic).line) as {
+            engines: string[];
+          }
+        ).engines,
+      ).toStrictEqual(["pr-agent", "opencode"]);
       expect(verdict?.engines).toStrictEqual(["pr-agent", "opencode"]);
       expect(verdict?.reasons).toStrictEqual(["implementer_probe_failed"]);
     });
