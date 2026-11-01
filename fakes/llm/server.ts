@@ -295,6 +295,72 @@ function completion(model: string, content: string, usage?: ChatUsage) {
   };
 }
 
+type ChatCompletion = ReturnType<typeof completion>;
+
+/**
+ * A chat completion as the server-sent events a client that asked for `stream: true` reads (OpenAI's chunks): the role, the
+ * text or the tool calls (the arguments in two pieces, as a real stream cuts them), the finish, and with
+ * `stream_options.include_usage` a last chunk with the usage and no choice, then `[DONE]`. The native path of the runner
+ * (the Implementer's, #767) always streams, so a fake that only answers JSON leaves its engine without an answer.
+ */
+export function chatEvents(
+  document: ChatCompletion,
+  includeUsage: boolean,
+): string {
+  const [choice] = document.choices;
+  const message = (choice?.message ?? {}) as {
+    content?: string | null;
+    tool_calls?: Array<{
+      id: string;
+      type: string;
+      function: { name: string; arguments: string };
+    }>;
+  };
+  const chunk = (
+    delta: Record<string, unknown>,
+    finish: string | null = null,
+  ) => ({
+    id: document.id,
+    object: "chat.completion.chunk",
+    created: document.created,
+    model: document.model,
+    choices: [{ index: 0, delta, finish_reason: finish }],
+  });
+  const events: unknown[] = [chunk({ role: "assistant" })];
+  for (const [index, call] of (message.tool_calls ?? []).entries()) {
+    const half = Math.floor(call.function.arguments.length / 2);
+    events.push(
+      chunk({
+        tool_calls: [
+          {
+            index,
+            id: call.id,
+            type: call.type,
+            function: {
+              name: call.function.name,
+              arguments: call.function.arguments.slice(0, half),
+            },
+          },
+        ],
+      }),
+      chunk({
+        tool_calls: [
+          {
+            index,
+            function: { arguments: call.function.arguments.slice(half) },
+          },
+        ],
+      }),
+    );
+  }
+  if (typeof message.content === "string" && message.content !== "")
+    events.push(chunk({ content: message.content }));
+  events.push(chunk({}, choice?.finish_reason ?? "stop"));
+  if (includeUsage)
+    events.push({ ...chunk({}), choices: [], usage: document.usage });
+  return `${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`;
+}
+
 /**
  * A completion that asks for tool calls, with the fixed token counts a journey can check and the
  * `usage.cost` OpenRouter reports with every answer (a Dynamic run without it stops, #290).
@@ -746,6 +812,19 @@ export async function startLlmFake(
         provider: providerOf((body as { provider?: unknown }).provider),
       });
 
+      const streaming = (body as { stream?: unknown }).stream === true;
+      const includeUsage =
+        (body as { stream_options?: { include_usage?: unknown } })
+          .stream_options?.include_usage === true;
+      // An answer to a request that asked for a stream is the stream of the same answer.
+      const sendChat = (status: number, document: unknown) => {
+        if (!streaming || status !== 200) return send(status, document);
+        response.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+        });
+        response.end(chatEvents(document as ChatCompletion, includeUsage));
+      };
       const answer = () => {
         // The client hung up while the request was held: nobody to answer.
         if (response.destroyed) return;
@@ -791,15 +870,15 @@ export async function startLlmFake(
         }
         if (agent !== null) {
           if (toolNames((body as { tools?: unknown }).tools).length === 0)
-            return send(200, completion(model, "ok", chatUsage));
+            return sendChat(200, completion(model, "ok", chatUsage));
           const answer = nextAgentAnswer(lastUserText(messages));
           if (answer === null)
             return send(400, {
               error: { message: NO_SCRIPT_MATCHES, code: 400 },
             });
           if (answer.calls === null)
-            return send(200, completion(model, answer.text, chatUsage));
-          return send(
+            return sendChat(200, completion(model, answer.text, chatUsage));
+          return sendChat(
             200,
             toolCompletion(
               model,
@@ -809,7 +888,7 @@ export async function startLlmFake(
             ),
           );
         }
-        send(200, completion(model, replies[kind], chatUsage));
+        sendChat(200, completion(model, replies[kind], chatUsage));
       };
       if (holding) held.push(answer);
       else answer();

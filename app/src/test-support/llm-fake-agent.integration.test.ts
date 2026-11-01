@@ -22,6 +22,19 @@ const TOOLS = [
 ];
 
 type Message = Record<string, unknown>;
+type Chunk = {
+  choices: Array<{
+    delta?: {
+      content?: string;
+      tool_calls?: Array<{
+        function: { name?: string; arguments: string };
+        [key: string]: unknown;
+      }>;
+    };
+    finish_reason?: string | null;
+  }>;
+  usage?: Record<string, unknown>;
+};
 
 async function ask(
   baseUrl: string,
@@ -376,5 +389,83 @@ describe("the fake LLM playing a coding agent", () => {
       prompt_tokens: 100,
       completion_tokens: 50,
     });
+  });
+
+  // #767: found by the Implementer's journey in the privileged lane; the native path always streams, and the fake answered JSON.
+  it("answers a request that asks for a stream with the stream of the same answer: tool call in pieces, finish, usage, [DONE]", async () => {
+    const fake = await setup();
+    fake.scriptAgent({
+      steps: [[{ name: "read", arguments: { filePath: "a.txt" } }]],
+      finalText: "All done.",
+    });
+    const stream = async () => {
+      const response = await fetch(`${fake.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer the-key",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "vendor/agent-e2e",
+          stream: true,
+          stream_options: { include_usage: true },
+          messages: [{ role: "user", content: "go" }],
+          tools: TOOLS,
+        }),
+      });
+      const text = await response.text();
+      return {
+        type: response.headers.get("content-type"),
+        text,
+        events: text
+          .split("\n\n")
+          .filter((block) => block.startsWith("data: "))
+          .map((block) => block.slice(6)),
+      };
+    };
+
+    const first = await stream();
+    const second = await stream();
+
+    expect(first.type).toBe("text/event-stream");
+    expect(first.events.at(-1)).toBe("[DONE]");
+    const chunks = first.events
+      .slice(0, -1)
+      .map((event) => JSON.parse(event) as Chunk);
+    const calls = chunks.flatMap(
+      (chunk) => chunk.choices[0]?.delta?.tool_calls ?? [],
+    );
+    expect(calls[0]).toMatchObject({
+      index: 0,
+      type: "function",
+      function: { name: "read" },
+    });
+    expect(
+      calls
+        .map(
+          (call: { function: { arguments: string } }) =>
+            call.function.arguments,
+        )
+        .join(""),
+    ).toBe('{"filePath":"a.txt"}');
+    expect(
+      chunks.find((chunk) => chunk.choices[0]?.finish_reason)?.choices[0]
+        .finish_reason,
+    ).toBe("tool_calls");
+    expect(chunks.at(-1)).toMatchObject({
+      choices: [],
+      usage: { prompt_tokens: 100, completion_tokens: 20 },
+    });
+    // The closing text comes as content, with `stop`.
+    const closing = second.events
+      .slice(0, -1)
+      .map((event) => JSON.parse(event) as Chunk);
+    expect(
+      closing.map((chunk) => chunk.choices[0]?.delta?.content).join(""),
+    ).toBe("All done.");
+    expect(
+      closing.find((chunk) => chunk.choices[0]?.finish_reason)?.choices[0]
+        .finish_reason,
+    ).toBe("stop");
   });
 });
