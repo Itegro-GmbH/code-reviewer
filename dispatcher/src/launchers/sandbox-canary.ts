@@ -48,6 +48,7 @@ import {
   WORK_VOLUME_ROOT,
   SANDBOX_REGION,
   VM_TIMEOUT_MARGIN_SECONDS,
+  WORK_VOLUME_STEPS_SECONDS,
   planForKind,
 } from "./sandbox.ts";
 import {
@@ -58,6 +59,12 @@ import {
 
 /** How long the probe container may run: the self-check takes seconds. */
 const PROBE_RUN_TIMEOUT_MS = 60_000;
+/**
+ * What the Implementer's half adds to the time of the probe: the steps of the work volume and a second container, each at
+ * most its timeout (`vmLifetimeSeconds` adds the volume steps to the VM of a job in the same way).
+ */
+export const IMPLEMENTER_PROBE_EXTRA_SECONDS =
+  WORK_VOLUME_STEPS_SECONDS + PROBE_RUN_TIMEOUT_MS / 1000;
 
 export type SandboxCanaryOptions = {
   service: SandboxService;
@@ -183,10 +190,19 @@ export function createSandboxCanary(
 
   return async (signal) => {
     const plan = planForKind("dynamic", options.config);
-    const implementerPlan =
-      options.implementer === undefined
-        ? undefined
-        : planForKind("implementer", options.implementer.config);
+    // A configuration of the Implementer the VM cannot hold (`DISPATCHER_WORKER_CONFIG.implementer`) does not stop the probe of
+    // Dynamic: its half is missing, with a reason, and that blocks a deployment that serves the kind.
+    let implementerPlan: ReturnType<typeof planForKind> | "invalid" | undefined;
+    if (options.implementer !== undefined) {
+      try {
+        implementerPlan = planForKind(
+          "implementer",
+          options.implementer.config,
+        );
+      } catch {
+        implementerPlan = "invalid";
+      }
+    }
     const suffix = (
       options.newSuffix ??
       (() => crypto.randomUUID().replace(/-/g, "").slice(0, 8))
@@ -201,7 +217,10 @@ export function createSandboxCanary(
           snapshotId: options.snapshotId,
           region: SANDBOX_REGION,
           // The Implementer's probe runs in the same VM: it must hold the larger container.
-          vcpus: Math.max(plan.vcpus, implementerPlan?.vcpus ?? 0),
+          vcpus: Math.max(
+            plan.vcpus,
+            typeof implementerPlan === "object" ? implementerPlan.vcpus : 0,
+          ),
           timeoutMs: (timeoutSeconds + marginSeconds) * 1000,
           tags: { app: "code-reviewer", kind: "canary", job: "canary" },
           persistent: false,
@@ -265,14 +284,33 @@ export function createSandboxCanary(
       // The exit status says whether the probe ran (runner/README.md): 0 with a verdict, 2 without one.
       if (result.exitCode !== 0) throw new ProbeRunError("probe_exit_nonzero");
       if (implementerPlan === undefined) return result.stdout;
-      const second = await probeImplementer(
-        implementerPlan,
-        vm,
-        host,
-        suffix,
-        signal,
-      );
-      return mergeVerdictOutputs([result.stdout, second]);
+      // The Implementer's half never takes the Dynamic one down: when it cannot be run, the Dynamic verdict stands and
+      // `implementer` is missing with a reason (`implementer_probe_failed`), which blocks a deployment that serves the kind.
+      let second: string | undefined;
+      try {
+        if (implementerPlan === "invalid")
+          throw new ProbeRunError("sandbox_config_invalid");
+        second = await probeImplementer(
+          implementerPlan,
+          vm,
+          host,
+          suffix,
+          signal,
+        );
+      } catch (error) {
+        if (signal.aborted) throw error;
+        logger.warn("canary_implementer_probe_failed", {
+          sandbox: name,
+          why: error instanceof ProbeRunError ? error.code : "probe_error",
+        });
+      }
+      const merged = mergeVerdictOutputs(result.stdout, second);
+      if (second !== undefined && !merged.implementerProven)
+        logger.warn("canary_implementer_not_proven", {
+          sandbox: name,
+          half: "implementer",
+        });
+      return merged.line;
     } finally {
       await stopQuietly(name);
     }

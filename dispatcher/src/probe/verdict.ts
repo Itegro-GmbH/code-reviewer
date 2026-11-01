@@ -35,6 +35,8 @@ export const PROBE_REASONS = [
   "implementer_work_dir_missing",
   "implementer_work_dir_not_prepared",
   "implementer_work_dir_not_exec",
+  // Written by the Dispatcher's canary, never by the runner (see `IMPLEMENTER_PROBE_FAILED`).
+  "implementer_probe_failed",
 ] as const;
 export type ProbeReason = (typeof PROBE_REASONS)[number];
 
@@ -120,22 +122,51 @@ export function parseProbeOutput(stdout: string): ParsedVerdict | undefined {
 }
 
 /**
- * One verdict line from the outputs of several probe runs in the same canary VM (#765): the Dynamic container, and for a
- * deployment that serves the Implementer its container too. Engines and reasons are united, so a container that fails
- * any check leaves its engine out and its reason in; a run whose output is not a verdict makes the whole of it
- * unreadable (its text is returned as it is, and `parseProbeOutput` then reads nothing). Only engines and reasons the
- * reader knows are written.
+ * The reason the Dispatcher's canary writes itself when the Implementer's half of its probe did not prove the engine: it did not
+ * run, or its container failed a check, or its answer was not a verdict (#765). The runner never writes it. It is a reason of
+ * `IMPLEMENTER_REASONS`: it says why `implementer` is missing and nothing about `opencode`.
  */
-export function mergeVerdictOutputs(outputs: readonly string[]): string {
-  const verdicts: ParsedVerdict[] = [];
-  for (const output of outputs) {
-    const verdict = parseProbeOutput(output);
-    if (verdict === undefined) return output;
-    verdicts.push(verdict);
-  }
-  return JSON.stringify({
-    version: 1,
-    engines: [...new Set(verdicts.flatMap((verdict) => verdict.engines))],
-    reasons: [...new Set(verdicts.flatMap((verdict) => verdict.reasons))],
-  });
+export const IMPLEMENTER_PROBE_FAILED: ProbeReason = "implementer_probe_failed";
+
+/**
+ * One verdict line from the two probes the canary VM runs when the deployment serves the Implementer: the Dynamic container's
+ * (`first`) and the Implementer's (`second`, absent when it could not be run at all). **`opencode` and its reasons come from
+ * the first output only, `implementer` and its reasons from the second only**, so that a failure of one half never makes
+ * the other half's engine fall: a Dynamic container that passed stays passed whatever the Implementer's did. `implementer` is
+ * in the line only when the first container passed and the second proved it. When it is not, the line carries the reasons of
+ * the second output that are the Implementer's, and `implementer_probe_failed` when it has none (it did not run, it was not
+ * a verdict, a check of the Dynamic self-check failed in its container, or it held a reason this reader does not know), so a
+ * missing proof always has a reason and is never silent. A first output that is not a verdict is returned as it is.
+ */
+export function mergeVerdictOutputs(
+  first: string,
+  second: string | undefined,
+): { line: string; implementerProven: boolean } {
+  const dynamic = parseProbeOutput(first);
+  if (dynamic === undefined) return { line: first, implementerProven: false };
+  const implementer =
+    second === undefined ? undefined : parseProbeOutput(second);
+  const proven =
+    dynamic.passed && implementer?.engines.includes("implementer") === true;
+  const own = (implementer?.reasons ?? []).filter((reason) =>
+    IMPLEMENTER_REASONS.includes(reason),
+  );
+  const reasons = [
+    ...dynamic.reasons.filter(
+      (reason) => !IMPLEMENTER_REASONS.includes(reason),
+    ),
+    ...(proven ? [] : own.length > 0 ? own : [IMPLEMENTER_PROBE_FAILED]),
+  ];
+  const engines = [
+    ...dynamic.engines.filter((engine) => engine !== "implementer"),
+    ...(proven ? (["implementer"] as const) : []),
+  ];
+  return {
+    line: JSON.stringify({
+      version: 1,
+      engines: [...new Set(engines)],
+      reasons: [...new Set(reasons)],
+    }),
+    implementerProven: proven,
+  };
 }

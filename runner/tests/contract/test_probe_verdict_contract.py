@@ -62,7 +62,9 @@ def test_the_reasons_of_the_contract_are_the_self_check_reasons() -> None:
     # #331-T08
     listed = set(_PROBE["$defs"]["ProbeReason"]["enum"])
 
-    assert listed == {reason.value for reason in SelfCheckReason}
+    # The one reason the Dispatcher's canary writes itself (#765) is the contract's and not the runner's.
+    assert listed - {"implementer_probe_failed"} == {reason.value for reason in SelfCheckReason}
+    assert "implementer_probe_failed" not in {reason.value for reason in SelfCheckReason}
 
 
 @pytest.mark.contract
@@ -93,6 +95,7 @@ def test_the_engines_of_the_contract_are_the_engines_a_runner_can_advertise() ->
         Verdict(("pr-agent", "opencode"), ("implementer_work_dir_not_exec",)),
         Verdict(("pr-agent",), (SelfCheckReason.ROOT_FILESYSTEM_WRITABLE.value,)),
         Verdict(("pr-agent",), tuple(reason.value for reason in SelfCheckReason)),
+        Verdict(("pr-agent", "opencode"), ("implementer_probe_failed",)),
     ],
 )
 def test_what_the_probe_prints_is_a_valid_verdict(verdict: Verdict) -> None:

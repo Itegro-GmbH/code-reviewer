@@ -11,7 +11,7 @@
       "enum": ["pr-agent", "opencode", "implementer"]
     },
     "ProbeReason": {
-      "description": "Why an engine is not advertised: the `SelfCheckReason` values of the runner (runner/src/code_reviewer_runner/dynamic_review/self_check.py). The `implementer_*` ones say why `implementer` is missing from a container whose Dynamic self-check passed (#765); every other one says why `opencode` is. A closed set, so that the Dispatcher can keep a verdict to stable reasons and drop anything else. Both ends check their lists against this one.",
+      "description": "Why an engine is not advertised: the `SelfCheckReason` values of the runner (runner/src/code_reviewer_runner/dynamic_review/self_check.py). The `implementer_*` ones say why `implementer` is missing from a container whose Dynamic self-check passed (#765); every other one says why `opencode` is. `implementer_probe_failed` is written by the Dispatcher's canary, never by the runner: the Implementer's half of its probe did not run, was not a verdict, or failed a check of the Dynamic self-check in its container, so `implementer` is missing while the Dynamic verdict stands. A closed set, so that the Dispatcher can keep a verdict to stable reasons and drop anything else. Both ends check their lists against this one.",
       "type": "string",
       "enum": [
         "not_a_dynamic_runner",
@@ -38,7 +38,8 @@
         "implementer_egress_rules_missing",
         "implementer_work_dir_missing",
         "implementer_work_dir_not_prepared",
-        "implementer_work_dir_not_exec"
+        "implementer_work_dir_not_exec",
+        "implementer_probe_failed"
       ]
     },
     "ProbeVerdict": {
@@ -64,7 +65,7 @@
             "$ref": "#/$defs/ProbeReason"
           },
           "uniqueItems": true,
-          "maxItems": 25
+          "maxItems": 26
         }
       }
     },
@@ -137,7 +138,7 @@
             "$ref": "#/$defs/ProbeReason"
           },
           "uniqueItems": true,
-          "maxItems": 25
+          "maxItems": 26
         },
         "failure": {
           "$ref": "#/$defs/ProbeFailure"

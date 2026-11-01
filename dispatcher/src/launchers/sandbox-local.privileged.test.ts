@@ -227,4 +227,55 @@ describe("the Sandbox-Launcher in local mode with a real Docker daemon", () => {
     );
     expect(service?.running()).toStrictEqual([]);
   });
+
+  // #765-D1: the Implementer's half of the canary, on a real daemon and the real image.
+  it("runs the Implementer's probe too, in the real image with the work volume, for a deployment that serves the kind", async () => {
+    const { bin, log } = await loggingDocker();
+    build(bin);
+    const imageId = docker(
+      "image",
+      "inspect",
+      "--format",
+      "{{.Id}}",
+      IMAGE ?? "",
+    ).trim();
+    const logger = recordingLogger();
+    const probe = createCapabilityProbe({
+      run: createSandboxCanary({
+        service: service as LocalSandboxService,
+        snapshotId: "snap_local_mode",
+        imageDigest: imageId,
+        imageReference: IMAGE ?? "",
+        logger,
+        config: {},
+        implementer: { config: {} },
+      }),
+      clock: systemClock,
+      now: () => Date.now(),
+      logger,
+      timeoutMs: WORKER_RESULT_TIMEOUT_MS,
+    });
+
+    const outcome = await probe.refresh();
+
+    // Both containers ran with their own flags: the Dynamic one without a work volume, the Implementer's with it, and
+    // each printed a verdict the canary could read. Whether `opencode` and `implementer` pass depends on the host's
+    // kernel; what must hold is that the second probe ran, was read, and that `implementer` never stands without
+    // `opencode`.
+    const runs = (await readFile(log, "utf8"))
+      .split("\n")
+      .filter((line) => line.startsWith("run "));
+    expect(runs).toHaveLength(2);
+    expect(runs[0]).not.toContain("type=volume");
+    expect(runs[1]).toMatch(
+      /--mount type=volume,source=code-reviewer-work-canary-[a-z0-9]+,target=\/work/,
+    );
+    expect(runs[1]).toContain("RUNNER_IMPLEMENTER_WORK_DIR=/work");
+    expect(outcome.status).not.toBe("failed");
+    expect(outcome.engines).toContain("pr-agent");
+    if (outcome.engines.includes("implementer"))
+      expect(outcome.engines).toContain("opencode");
+    expect(logger.text()).not.toContain("canary_implementer_probe_failed");
+    expect(service?.running()).toStrictEqual([]);
+  });
 });
