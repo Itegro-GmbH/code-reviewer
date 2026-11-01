@@ -355,4 +355,26 @@ describe("the fake LLM playing a coding agent", () => {
     expect(call?.function.name).toBe("StructuredOutput");
     expect(JSON.parse(call?.function.arguments ?? "{}")).toEqual(FINAL);
   });
+
+  // #767
+  it("reports the chat usage a test sets, with the cost at one and four dollars per million tokens, until it is cleared", async () => {
+    const fake = await setup();
+    fake.scriptAgent({ steps: [], finalText: "Done." });
+
+    fake.setChatUsage({ promptTokens: 20_000, completionTokens: 100 });
+    const set = await ask(fake.baseUrl, [{ role: "user", content: "go" }]);
+    fake.setChatUsage(null);
+    const cleared = await ask(fake.baseUrl, [{ role: "user", content: "go" }]);
+
+    expect(set.json.usage).toMatchObject({
+      prompt_tokens: 20_000,
+      completion_tokens: 100,
+      total_tokens: 20_100,
+      cost: 0.0204,
+    });
+    expect(cleared.json.usage).toMatchObject({
+      prompt_tokens: 100,
+      completion_tokens: 50,
+    });
+  });
 });

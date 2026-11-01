@@ -159,6 +159,15 @@ export type FakeLlm = {
   /** The usage the next Messages answers report (default: 100 input tokens, 50 output tokens, no cache). */
   setMessagesUsage(usage: FakeMessagesUsage): void;
   /**
+   * The token counts the next chat answers report (default: 100 input tokens, 50 output tokens), with the `usage.cost`
+   * OpenRouter would state for them at one dollar per million input tokens and four per million output tokens; null is the
+   * default again. The prompt cache (`enablePromptCache`) still wins while it is on. For a journey that has to reach a cost
+   * limit within a few calls (#767).
+   */
+  setChatUsage(
+    usage: { promptTokens: number; completionTokens: number } | null,
+  ): void;
+  /**
    * While on, every answer reports the usage its request earns from a prompt cache that keeps the rules of the
    * Claude docs (`anthropic-cache.ts`, #539): cache tokens in the Messages shape, or `cached_tokens` and
    * `cache_write_tokens` with a discounted `usage.cost` in the chat shape, and a request the API would refuse (more
@@ -476,6 +485,7 @@ export async function startLlmFake(
   let messageLog: FakeMessagesRequest[] = [];
   let messagesUsage: FakeMessagesUsage = DEFAULT_MESSAGES_USAGE;
   let promptCache: PromptCache | null = null;
+  let chatUsageOverride: ChatUsage | null = null;
   // What the Claude API refuses with a 400, and the thinking blocks it issued (#533).
   let strictApi = new StrictMessagesApi();
   let queuedAnswers: Array<Record<string, unknown>> = [];
@@ -739,7 +749,7 @@ export async function startLlmFake(
       const answer = () => {
         // The client hung up while the request was held: nobody to answer.
         if (response.destroyed) return;
-        let chatUsage: ChatUsage | undefined;
+        let chatUsage: ChatUsage | undefined = chatUsageOverride ?? undefined;
         if (promptCache !== null && error === null) {
           try {
             const counted = promptCache.usage(
@@ -838,6 +848,19 @@ export async function startLlmFake(
     setMessagesUsage(usage) {
       messagesUsage = usage;
     },
+    setChatUsage(usage) {
+      chatUsageOverride =
+        usage === null
+          ? null
+          : {
+              prompt_tokens: usage.promptTokens,
+              completion_tokens: usage.completionTokens,
+              total_tokens: usage.promptTokens + usage.completionTokens,
+              cost:
+                (usage.promptTokens * 1 + usage.completionTokens * 4) /
+                1_000_000,
+            };
+    },
     queueMessagesAnswer(answer) {
       queuedAnswers.push(answer);
     },
@@ -857,6 +880,7 @@ export async function startLlmFake(
     reset() {
       holding = false;
       promptCache = null;
+      chatUsageOverride = null;
       release();
       agent = null;
       agentUsed = [];

@@ -70,7 +70,6 @@ export const factoryEnv = {
   /** The records of the journey's Dispatcher and its `docker` stand-in, kept apart from the first journey's. */
   dockerDirectory: `${factoryDirectory}/docker`,
   controlDirectory: `${factoryDirectory}/control`,
-  secretsDirectory: `${factoryDirectory}/secrets`,
   /** The id of the app in the Dispatcher's registry (`DISPATCHER_APPS`). */
   registryId: "factory",
   webhookKeyId: "e2f1",

@@ -14,3 +14,10 @@
   model, models with a `provider` override of their own (`opencode`), `interleaved` reasoning, `cost.tiers`, and a provider
   of each kind that is left out (`amazon-bedrock` cloud IAM, `venice` runtime install, `cohere` its own wire).
 - Dummy values only are added by the tests, never to this file.
+
+`implementer-lane.json` is **not** a copy of the public catalog: it is made up, in the same shape, for the Implementer's journeys in the
+privileged lane (#767). The app takes only the providers it supports, so it is the provider `deepseek` (its real address, an
+OpenAI-compatible chat API) with two models that do not exist, with prices the journeys know: `lane-coder`, and `claude-lane-coder`,
+whose id carries the word the engine marks a prompt for the cache by. The journeys fill the catalog of the factory app from it
+(`app/src/test-support/e2e-models-dev-child.ts fetch <db> <file>`), so that the models the fake LLM answers on the chat route are the
+ones the form offers.

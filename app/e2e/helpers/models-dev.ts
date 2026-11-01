@@ -12,13 +12,26 @@ const CHILD = resolve(
   "src/test-support/e2e-models-dev-child.ts",
 );
 
-/** Runs the fetch of the catalog once on the database file of the app. */
+/**
+ * Runs the fetch of the catalog once on the database of the app, with the committed copy of the public catalog or, when
+ * given, a fixture file of the journey's own.
+ */
 export async function fetchModelsDevCatalog(
   databaseUrl: string,
+  fixtureFile?: string,
 ): Promise<void> {
   await run(
     process.execPath,
-    ["--no-warnings", "--conditions=react-server", CHILD, "fetch", databaseUrl],
+    [
+      "--no-warnings",
+      "--conditions=react-server",
+      CHILD,
+      "fetch",
+      databaseUrl,
+      ...(fixtureFile === undefined
+        ? []
+        : [resolve(process.cwd(), fixtureFile)]),
+    ],
     { cwd: process.cwd() },
   );
 }

@@ -24,6 +24,12 @@ line each, in the file named by the third argument: the argument vector only (th
 the environment of those processes, never in it). The journeys assert on it that the runner never
 pushes with force.
 
+When the job has ended, and before the process does, it looks through the engine user's home and
+temporary directory (OpenCode's data, cache and sessions; they are in the work volume, which goes
+with the container) for the job's secrets: the installation token, the model key and the
+capability the engine was handed. It writes how many files it read and how many held each, never a
+value, next to the git log (`<git command log>.<pid>.scan.json`, one per job).
+
     python run_job_against_fake_llm.py <llm base url> <fake registry port> <git command log>
 
 Test stacks only; never set `PR_AGENT_COMMAND` on a real runner. Run it with the Python of the
@@ -32,11 +38,14 @@ runner's environment. The credentials stay on stdin: no argument is a secret."""
 import functools
 import http.client
 import json
+import os
 import socket
+import subprocess
 import sys
 import time
 from collections.abc import Sequence
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 from code_reviewer_runner import runner
@@ -112,6 +121,58 @@ def record_git_commands(log_path: str) -> None:
     GitProcess.stream = recording_stream  # type: ignore[method-assign,assignment]
 
 
+class EngineTraces:
+    """Where the engine lives (its home and temporary directory) and the capability it was handed,
+    found when it is started."""
+
+    def __init__(self) -> None:
+        self.directories: set[str] = set()
+        self.capabilities: set[str] = set()
+
+    def popen(self, argv: list[str], **options: Any) -> subprocess.Popen[bytes]:
+        environment: dict[str, str] = options["env"]
+        for name in ("HOME", "TMPDIR"):
+            if name in environment:
+                self.directories.add(environment[name])
+        try:
+            config = json.loads(Path(environment["OPENCODE_CONFIG"]).read_text(encoding="utf-8"))
+            for provider in config.get("provider", {}).values():
+                key = provider.get("options", {}).get("apiKey")
+                if isinstance(key, str) and key:
+                    self.capabilities.add(key)
+        except (KeyError, OSError, ValueError, AttributeError):
+            pass
+        return cast("subprocess.Popen[bytes]", subprocess.Popen(argv, **options))
+
+    def scan(self, secrets: dict[str, str], report_path: str) -> None:
+        """Counts, per secret, the files of the engine's directories that hold it."""
+        needles = {**secrets, **{f"capability-{n}": c for n, c in enumerate(self.capabilities)}}
+        found = dict.fromkeys(needles, 0)
+        files = 0
+        for directory in sorted(self.directories):
+            for root, _names, names in os.walk(directory, followlinks=False):
+                for name in names:
+                    path = Path(root, name)
+                    if path.is_symlink():
+                        continue
+                    try:
+                        data = path.read_bytes()
+                    except OSError:
+                        continue
+                    files += 1
+                    for label, value in needles.items():
+                        if value.encode() in data:
+                            found[label] += 1
+        # The capabilities go to a file of their own (mode 0600) that the journey reads to search
+        # every page and log for a value nobody else knows. No report or log is made from it.
+        with open(report_path + ".capabilities", "a", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            for capability in sorted(self.capabilities):
+                handle.write(capability + "\n")
+        report = {"files": files, "directories": sorted(self.directories), "found": found}
+        Path(report_path).write_text(json.dumps(report), encoding="utf-8")
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 4:
         sys.stderr.write(
@@ -131,14 +192,25 @@ def main(argv: list[str]) -> int:
         return start_egress(settings, resolve=resolve, connect=connect)
 
     record_git_commands(git_log)
+    traces = EngineTraces()
     seams = JobSeams(
         session_seams=SessionSeams(
             upstream_for=lambda _base_url: LoopbackUpstream(llm_base_url),
             start_egress=egress,
+            popen=traces.popen,
         )
     )
-    runner.run_implementer_job = functools.partial(job_run.run_implementer_job, seams=seams)
-    return runner.main()
+
+    def run_and_scan(job: Any, started: float, environment: Any, **options: Any) -> Any:
+        result = job_run.run_implementer_job(job, started, environment, seams=seams, **options)
+        traces.scan(
+            {"installation-token": job.git.token, "model-key": job.llm.api_key},
+            f"{git_log}.{os.getpid()}.scan.json",
+        )
+        return result
+
+    runner.run_implementer_job = run_and_scan
+    return runner.main([])
 
 
 if __name__ == "__main__":

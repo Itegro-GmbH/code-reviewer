@@ -1,0 +1,66 @@
+{
+  "deepseek": {
+    "id": "deepseek",
+    "env": ["DEEPSEEK_API_KEY"],
+    "npm": "@ai-sdk/openai-compatible",
+    "api": "https://api.deepseek.com",
+    "name": "DeepSeek",
+    "doc": "https://api-docs.deepseek.com/quick_start/pricing",
+    "models": {
+      "lane-coder": {
+        "id": "lane-coder",
+        "name": "Lane Coder",
+        "description": "Lane Coder of the Implementer's e2e lane",
+        "family": "acme-lane",
+        "attachment": false,
+        "reasoning": false,
+        "tool_call": true,
+        "structured_output": false,
+        "temperature": true,
+        "release_date": "2026-08-12",
+        "last_updated": "2026-08-22",
+        "modalities": {
+          "input": ["text"],
+          "output": ["text"]
+        },
+        "open_weights": false,
+        "limit": {
+          "context": 200000,
+          "output": 8192
+        },
+        "cost": {
+          "input": 0.5,
+          "output": 2.0
+        }
+      },
+      "claude-lane-coder": {
+        "id": "claude-lane-coder",
+        "name": "Claude Lane Coder",
+        "description": "Claude Lane Coder of the Implementer's e2e lane",
+        "family": "acme-lane",
+        "attachment": false,
+        "reasoning": false,
+        "tool_call": true,
+        "structured_output": false,
+        "temperature": true,
+        "release_date": "2026-08-12",
+        "last_updated": "2026-08-22",
+        "modalities": {
+          "input": ["text"],
+          "output": ["text"]
+        },
+        "open_weights": false,
+        "limit": {
+          "context": 200000,
+          "output": 8192
+        },
+        "cost": {
+          "input": 0.5,
+          "output": 2.0,
+          "cache_read": 0.05,
+          "cache_write": 0.625
+        }
+      }
+    }
+  }
+}

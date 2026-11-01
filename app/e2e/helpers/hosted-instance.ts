@@ -147,7 +147,14 @@ const run = promisify(execFile);
  */
 export async function runDeployCanary(
   timeoutSeconds: number,
+  options: { token?: string; engines?: string } = {},
 ): Promise<{ code: number; output: string }> {
+  // A Dispatcher that serves several apps opens `/probe` to its operator's credential only (`DISPATCHER_OPERATOR_TOKEN`); the
+  // one of the first app is the reviewer's own, and is the default.
+  const credential =
+    options.token === undefined
+      ? { RUNNER_TOKEN: hostedEnv.dispatcherToken }
+      : { DISPATCHER_OPERATOR_TOKEN: options.token };
   try {
     const { stdout, stderr } = await run(
       process.execPath,
@@ -158,6 +165,9 @@ export async function runDeployCanary(
         hostedEnv.dispatcherUrl,
         "--allowed-hosts",
         "127.0.0.1",
+        ...(options.engines === undefined
+          ? []
+          : ["--engines", options.engines]),
         "--wait-seconds",
         "30",
         "--timeout-seconds",
@@ -165,7 +175,7 @@ export async function runDeployCanary(
       ],
       {
         cwd: resolve(process.cwd(), "../dispatcher"),
-        env: { ...process.env, RUNNER_TOKEN: hostedEnv.dispatcherToken },
+        env: { ...process.env, ...credential },
       },
     );
     return { code: 0, output: `${stdout}${stderr}` };
