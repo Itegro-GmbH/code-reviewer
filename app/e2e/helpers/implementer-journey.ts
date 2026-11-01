@@ -197,6 +197,32 @@ export async function runEnded(
   return last;
 }
 
+/**
+ * Waits until the branch is on GitHub, and fails at once, with what the run says, when the run has ended without it (a task
+ * that was refused or failed would otherwise be waited for until the test times out).
+ */
+export async function branchPushed(
+  page: Page,
+  runId: string,
+  gitDirectory: string,
+  branch: string,
+  timeoutMs = 240_000,
+): Promise<void> {
+  await expect
+    .poll(
+      async () => {
+        if (tipOf(gitDirectory, branch) !== null) return "pushed";
+        const run = await runData(page, runId);
+        return UNSETTLED.has(run.status)
+          ? "waiting"
+          : `the run ended ${run.status} (${run.errorCode ?? "no code"}) without the branch`;
+      },
+      { timeout: timeoutMs, intervals: [500, 1000] },
+    )
+    .toMatch(/^(pushed|waiting)$/);
+  expect(tipOf(gitDirectory, branch)).not.toBeNull();
+}
+
 // -- the model's script ------------------------------------------------------------------------------------------
 
 /** Where the agent's repository is in the container (the same path every turn). */

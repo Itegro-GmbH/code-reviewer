@@ -57,6 +57,7 @@ import { required } from "../helpers/hosted-journey";
 import { allSecrets, containsSecret } from "../helpers/hosted-secrets";
 import {
   bash,
+  branchPushed,
   capabilities,
   commit,
   commitsAhead,
@@ -101,7 +102,7 @@ const GADGETS = {
 const BASE = "trunk";
 const KEY = "sk-deepseek-e2e-implementer-key-0123456789abcdef0123";
 // One run of the agent takes a few seconds of the model's script and the pinned engine's start, a push and the end of the turn.
-const RUN_TIMEOUT = 240_000;
+const RUN_TIMEOUT = 120_000;
 const FIXTURE = "../fakes/fixtures/models-dev/implementer-lane.json";
 const LEFTOVER_PHRASE = "commit your changes now";
 const SYSTEM_COMMIT = "Implementer: uncommitted changes of the turn";
@@ -229,7 +230,10 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     }
   });
 
-  test.beforeEach(() => {
+  // The lane has a limit of 25 minutes for twelve journeys: a journey that does not end in two minutes is a failure, not a wait
+  // (E01 also runs the deploy canary first).
+  test.beforeEach(({}, testInfo) => {
+    testInfo.setTimeout(testInfo.title.startsWith("E01") ? 240_000 : 150_000);
     required(llm, "The fake LLM").reset();
   });
 
@@ -324,12 +328,7 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     runs.push(runId);
 
     // During the turn: the first commit is on the branch at the fake GitHub while the run is still running.
-    await expect
-      .poll(() => tipOf(gadgets().path, branch), {
-        timeout: RUN_TIMEOUT,
-        intervals: [500],
-      })
-      .not.toBeNull();
+    await branchPushed(page, runId, gadgets().path, branch, RUN_TIMEOUT);
     expect(subjectsAhead(gadgets().path, BASE, branch)).toEqual(["Add hello"]);
     expect((await runData(page, runId)).status).toBe("running");
 
@@ -533,12 +532,7 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     });
     runs.push(runId);
     // The commit is on GitHub; from now on the model's calls are large, and the limit is reached within a few of them.
-    await expect
-      .poll(() => tipOf(gadgets().path, branch), {
-        timeout: RUN_TIMEOUT,
-        intervals: [500],
-      })
-      .not.toBeNull();
+    await branchPushed(page, runId, gadgets().path, branch, RUN_TIMEOUT);
     theLlm.setChatUsage({ promptTokens: 8000, completionTokens: 100 });
     const ended = await runEnded(page, runId, RUN_TIMEOUT);
 

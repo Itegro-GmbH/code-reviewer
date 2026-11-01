@@ -649,7 +649,7 @@ jobs:
           E2E_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
         run: scripts/run_dynamic_e2e.sh
       - name: Upload the Playwright report and the logs
-        if: ${{ failure() }}
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@v7
         with:
           name: e2e-dynamic-report-${{ github.run_id }}-${{ github.run_attempt }}
