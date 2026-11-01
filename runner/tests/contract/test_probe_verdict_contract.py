@@ -87,25 +87,6 @@ def test_the_engines_of_the_contract_are_the_engines_a_runner_can_advertise() ->
 
 
 @pytest.mark.contract
-def test_the_implementer_reasons_are_in_the_list_and_only_they() -> None:
-    # #765-T08
-    implementer = {
-        reason.value for reason in SelfCheckReason if reason.value.startswith("implementer_")
-    }
-
-    assert len(implementer) == 8
-    assert implementer <= set(_PROBE["$defs"]["ProbeReason"]["enum"])
-    assert "implementer_work_dir_not_exec" in implementer
-
-
-@pytest.mark.contract
-def test_the_engines_of_the_contract_are_the_engines_a_runner_can_advertise() -> None:
-    # #765-T08
-    assert _PROBE["$defs"]["ProbeEngine"]["enum"] == list(KNOWN_ENGINES)
-    assert KNOWN_ENGINES[:2] == ALL_ENGINES
-
-
-@pytest.mark.contract
 @pytest.mark.parametrize(
     "verdict",
     [
