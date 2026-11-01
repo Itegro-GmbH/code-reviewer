@@ -67,6 +67,7 @@ from .config import build_engine_config, implementer_environment
 from .egress_config import EgressSettings, start_egress
 from .egress_proxy import EgressProxy
 from .git_workspace import (
+    PUSH_INTERVAL_SECONDS,
     GitWorkspace,
     PushLoop,
     PushResult,
@@ -135,6 +136,9 @@ class SessionSeams:
     transport: Transport = _http_request
     port_source: Callable[[], int] | None = None
     tick_seconds: float = TICK_SECONDS
+    # How often at most a batch of commits is pushed while the agent works (the last push is not
+    # held back).
+    push_interval: float = PUSH_INTERVAL_SECONDS
     startup_seconds: float | None = None
     scratch_dir: str | None = None
     clock: Callable[[], float] = time.monotonic
@@ -380,7 +384,9 @@ class ImplementerSession:
             agent = self._agent(native, server.url)
             agent.start()
             self._session_id = agent.session_id
-            ticker = PushTicker(PushLoop(self.workspace), self.seams.tick_seconds)
+            ticker = PushTicker(
+                PushLoop(self.workspace, interval=self.seams.push_interval), self.seams.tick_seconds
+            )
             ticker.start()
             self._work(agent, ticker)
         except Exception as error:

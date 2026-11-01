@@ -6,6 +6,7 @@ not an Implementer container."""
 
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -55,15 +56,72 @@ CONTAINER = {
 }
 
 
+def which_everything(name: str, path: str) -> str | None:
+    return f"/usr/bin/{name}"
+
+
+def which_without(tool: str) -> Callable[[str, str], str | None]:
+    def which(name: str, path: str) -> str | None:
+        return None if name == tool else f"/usr/bin/{name}"
+
+    return which
+
+
+def version_is(*numbers: int) -> Callable[[str], tuple[int, ...] | None]:
+    def version(executable: str) -> tuple[int, ...] | None:
+        return numbers
+
+    return version
+
+
+def version_unreadable(executable: str) -> tuple[int, ...] | None:
+    return None
+
+
+def guard_files_usable(path: Path) -> bool:
+    return True
+
+
+def guard_files_all_but(name: str) -> Callable[[Path], bool]:
+    def usable(path: Path) -> bool:
+        return path.name != name
+
+    return usable
+
+
+def guard_files_none(path: Path) -> bool:
+    return False
+
+
+def prepared(directory: Path, uid: int, gid: int) -> None:
+    return None
+
+
+def runs_scripts(directory: Path, uid: int, gid: int) -> bool:
+    return True
+
+
+def refuses_scripts(directory: Path, uid: int, gid: int) -> bool:
+    return False
+
+
+def is_a_directory(path: Path) -> bool:
+    return True
+
+
+def is_no_directory(path: Path) -> bool:
+    return False
+
+
 def seams(**changes: Any) -> ImplementerSeams:
     """Every prerequisite holds, except what the test changes."""
     base: dict[str, Any] = {
-        "which": lambda name, path: f"/usr/bin/{name}",
-        "git_version": lambda executable: (2, 53, 0),
-        "guard_file_usable": lambda path: True,
-        "prepare_work_dir": lambda directory, uid, gid: None,
-        "runs_scripts_as": lambda directory, uid, gid: True,
-        "is_directory": lambda path: True,
+        "which": which_everything,
+        "git_version": version_is(2, 53, 0),
+        "guard_file_usable": guard_files_usable,
+        "prepare_work_dir": prepared,
+        "runs_scripts_as": runs_scripts,
+        "is_directory": is_a_directory,
     }
     return ImplementerSeams(**{**base, **changes})
 
@@ -96,18 +154,18 @@ def test_with_every_prerequisite_the_check_passes() -> None:
 @pytest.mark.parametrize(
     ("changes", "reason"),
     [
-        ({"which": lambda name, path: None if name == "git" else "/x"}, "git_missing"),
-        ({"git_version": lambda executable: None}, "git_missing"),
-        ({"git_version": lambda executable: (2, 52, 9)}, "git_too_old"),
-        ({"git_version": lambda executable: (2, 43)}, "git_too_old"),
-        ({"which": lambda name, path: None if name == "setpriv" else "/x"}, "setpriv_missing"),
-        ({"guard_file_usable": lambda path: False}, "guard_files_missing"),
-        ({"guard_file_usable": lambda path: path.name != GUARD_FILES[0]}, "guard_files_missing"),
-        ({"guard_file_usable": lambda path: path.name != GUARD_FILES[1]}, "guard_files_missing"),
+        ({"which": which_without("git")}, "git_missing"),
+        ({"git_version": version_unreadable}, "git_missing"),
+        ({"git_version": version_is(2, 52, 9)}, "git_too_old"),
+        ({"git_version": version_is(2, 43)}, "git_too_old"),
+        ({"which": which_without("setpriv")}, "setpriv_missing"),
+        ({"guard_file_usable": guard_files_none}, "guard_files_missing"),
+        ({"guard_file_usable": guard_files_all_but(GUARD_FILES[0])}, "guard_files_missing"),
+        ({"guard_file_usable": guard_files_all_but(GUARD_FILES[1])}, "guard_files_missing"),
         ({"ports": SlotPorts(10180, 10181)}, "egress_rules_missing"),
         ({"ports": None}, "egress_rules_missing"),
-        ({"is_directory": lambda path: False}, "work_dir_missing"),
-        ({"runs_scripts_as": lambda directory, uid, gid: False}, "work_dir_not_exec"),
+        ({"is_directory": is_no_directory}, "work_dir_missing"),
+        ({"runs_scripts_as": refuses_scripts}, "work_dir_not_exec"),
     ],
 )
 def test_each_missing_prerequisite_has_a_reason_of_its_own(
@@ -132,10 +190,15 @@ def test_without_an_engine_user_there_is_nothing_to_prepare() -> None:
 # #765-T02
 def test_the_work_directory_is_prepared_before_the_exec_check_and_for_the_engine_user() -> None:
     calls: list[tuple[str, int, int]] = []
-    check(
-        prepare_work_dir=lambda directory, uid, gid: calls.append(("prepare", uid, gid)),
-        runs_scripts_as=lambda directory, uid, gid: calls.append(("exec", uid, gid)) or True,
-    )
+
+    def prepare(directory: Path, uid: int, gid: int) -> None:
+        calls.append(("prepare", uid, gid))
+
+    def execute(directory: Path, uid: int, gid: int) -> bool:
+        calls.append(("exec", uid, gid))
+        return True
+
+    check(prepare_work_dir=prepare, runs_scripts_as=execute)
     assert calls == [("prepare", 10101, 10101), ("exec", 10101, 10101)]
 
 
@@ -227,9 +290,13 @@ def test_a_work_directory_that_is_not_an_absolute_directory_is_refused(value: st
 # #765-T02
 def test_a_default_diff_runner_and_a_dynamic_runner_never_advertise_it() -> None:
     calls: list[object] = []
+
+    def recording(**facts: Any) -> None:
+        calls.append(facts)
+
     for environment in ({}, {"RUNNER_DIFF_JOB_USER": "10001:10001"}):
         settings = advertised_dynamic(settings_of(environment))
-        decided, reason = decide_implementer(settings, check=lambda **facts: calls.append(facts))
+        decided, reason = decide_implementer(settings, check=recording)
         assert decided == settings
         assert reason is None
         assert ENGINE_IMPLEMENTER not in decided.engines
@@ -299,7 +366,10 @@ def test_without_the_dynamic_engine_the_implementer_is_not_even_asked() -> None:
     settings = replace(settings_of(CONTAINER), engines=(ENGINE_DIFF,))
     calls: list[object] = []
 
-    decided, named = decide_implementer(settings, check=lambda **facts: calls.append(facts))
+    def recording(**facts: Any) -> None:
+        calls.append(facts)
+
+    decided, named = decide_implementer(settings, check=recording)
 
     assert decided == settings
     assert named is None  # the Dynamic reason is the verdict's
@@ -344,11 +414,15 @@ def test_the_verdict_of_the_startup_names_the_engines_and_each_missing_reason(
 
 # #765-T02
 def test_a_passing_startup_writes_all_three_engines(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        service, "prepare_dynamic_runtime", lambda settings: EgressSetup(True, EgressMode.FULL)
-    )
-    monkeypatch.setattr(service, "check_dynamic_runner", lambda **facts: None)
-    monkeypatch.setattr(service, "check_implementer_runner", lambda **facts: None)
+    def prepare(settings: WorkerSettings) -> EgressSetup:
+        return EgressSetup(True, EgressMode.FULL)
+
+    def passing(**facts: Any) -> None:
+        return None
+
+    monkeypatch.setattr(service, "prepare_dynamic_runtime", prepare)
+    monkeypatch.setattr(service, "check_dynamic_runner", passing)
+    monkeypatch.setattr(service, "check_implementer_runner", passing)
 
     decided, verdict = service.run_startup(
         settings_of(CONTAINER),

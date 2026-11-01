@@ -301,7 +301,7 @@ def test_the_engines_of_the_runner_are_the_engines_of_the_file() -> None:
     # The reviewer engines are what the Dynamic self-check gates; `implementer` is advertised on top
     # of them by its own start-up check (#765), so it is not one of them.
     assert ENGINE_IMPLEMENTER not in ALL_ENGINES
-    assert KNOWN_ENGINES == (*ALL_ENGINES, ENGINE_IMPLEMENTER)
+    assert (*ALL_ENGINES, ENGINE_IMPLEMENTER) == KNOWN_ENGINES
     assert _accepts("ClaimRequest", {"engines": ["pr-agent", "opencode", "implementer"]})
 
 
