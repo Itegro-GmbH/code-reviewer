@@ -413,19 +413,31 @@ describe("the documents match the merged runner job and canary (#765)", () => {
   });
 
   // #768-T01
-  it("describes the slow fleet listing, in the failure table and in the smoke test", () => {
+  // #802
+  it("describes the slow fleet listing as a warning that no longer stops claims, in the failure table and in the smoke test", () => {
     for (const doc of [guide, smoke]) {
       const flatDoc = flat(doc);
       expect(flatDoc).toContain("`fleet_list_failed`");
       expect(flatDoc).toContain("4 seconds");
       expect(flatDoc).toContain("`no_capable_runner`");
       expect(flatDoc).toContain("2026-11-01");
+      expect(flatDoc).toContain("`fleet_listed`");
+      expect(flatDoc).toContain("the claim goes on");
+      expect(flatDoc).toContain("three days");
+      // The claim no longer answers `unavailable` for a failed listing: the docs must not say it does.
+      expect(flatDoc).not.toContain("the claim answers `unavailable`");
     }
     expect(flat(smoke)).toContain("What to look at");
     const dispatcher = readText("dispatcher/src/core/dispatcher.ts");
     expect(dispatcher).toContain("LIVE_VMS_TIMEOUT_MS = 4 * 1000");
-    expect(dispatcher).toContain('logger.error("fleet_list_failed")');
+    expect(dispatcher).toContain('logger.error("fleet_list_failed", {');
     expect(dispatcher).toContain("LIVE_VMS_STALE_MS = 60 * 1000");
+    expect(readText("dispatcher/src/reaper/reaper.ts")).toContain(
+      "RETENTION_MS = 3 * 24 * 3600 * 1000",
+    );
+    expect(readText("dispatcher/src/reaper/reaper.ts")).toContain(
+      "MAX_DELETES_PER_RUN = 50",
+    );
   });
 
   // #768-T01

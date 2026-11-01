@@ -150,9 +150,17 @@ the whole identity of the sender**.
   `reviewer` `DISPATCHER_MAX_RUNNING`, unchanged. _Cost:_ one listing of the project's `cr-` VMs (all pages, 50 per page, the platform's largest; it keeps stopped VMs, so the listing only grows: 283 VMs took 5.1 s at the default page size) per five seconds at most, shared by every claim in that time;
   claims that arrive together share one call. A claim therefore sees a VM that ended up to five seconds late (the safe side)
   and one that started in that time through the count of the Dispatcher's own launches. A listing that gives no answer in four
-  seconds counts as a failed one (claims never wait longer, and a waiting claim holds no launch slot). If the listing fails,
-  the last good one is used for up to a minute; after that the claim answers `unavailable` (retry in 60 s, `fleet_list_failed` in the log) and
-  nothing is claimed. Without a fleet (a local Launcher), **and with one app only (today's production, a Dispatcher with no
+  seconds counts as a failed one (claims never wait longer, and a waiting claim holds no launch slot; `fleet_list_failed` in
+  the log, with the `ms` it took). If the listing fails, the last good one is used for up to a minute; after that **the claim
+  goes on** (#802): the Dispatcher counts what it knows itself, the launches in progress that have no VM yet and the VMs its
+  own launches created in the last ten minutes, and holds the app to the same cap plus tolerance with that count. A failed
+  listing is not asked for again for five seconds, so a platform that is down neither delays every claim by four seconds nor
+  fills the log. The count then errs low (a VM older than ten minutes is not counted); the cap is a soft limit and the
+  platform's own concurrency limit stays the hard one (a refusal from it already has its code, `quota_exceeded`). Before
+  #802 this case answered `unavailable` (retry in 60 s) and claimed nothing: on 2026-11-01 a listing of 283 stopped VMs took
+  5.1 s and every claim of every app, the first app's reviews too, ended `no_capable_runner`. Every listing that answers logs
+  `fleet_listed` with `ms` (its time) and `count` (the VMs it returned, stopped ones included), at most once per listing, so
+  the margin to the four seconds is visible. Without a fleet (a local Launcher), **and with one app only (today's production, a Dispatcher with no
   `DISPATCHER_APPS`)**, the platform is not listed for the cap at all: the cap is the launches in progress and the App's own,
   exactly as before #730, so the cap adds no platform call and no new way to refuse. The count starts with the second app. The sum of the caps
   plus their tolerances should stay within the team's Sandbox concurrency (a platform limit not verified here); then no app
@@ -569,7 +577,18 @@ the platform's cron calls
 - **Stopping and logs.** By the listed name; a VM that is already gone is not an error, a failed stop is counted and
   retried by the next run (runs may overlap, stopping twice is harmless). Stable events and codes only
   (`vm_reaped`, `vm_reap_failed`, `job_state_unreadable`, `reap_done`, `reap_list_failed`); the answer holds counts
-  (`listed`, `candidates`, `stopped`, `kept`, `unreadable`, `failed`). No credential, token or platform error text.
+  (`listed`, `candidates`, `stopped`, `kept`, `unreadable`, `failed`, `deleted`, `deleteFailed`). No credential, token or platform error text.
+- **Retention (#802).** The platform keeps a stopped VM until somebody deletes it, and the listing every claim makes grows with
+  them (283 VMs: 5.1 s). After the stops, the run **deletes** the VMs the platform reports as `stopped` that were created three
+  days ago or earlier (`RETENTION_MS`; a job VM lives seven hours at most, so by then it has been over for days). It is the same
+  check as for stopping: only a non-persistent VM of exactly our shape with our tag, a job VM or a canary, so never a running,
+  pending or stopping VM, the golden builder or check VM, a persistent VM, a lookalike or anything of another project. Nothing
+  else reads a stopped VM: the stop call, the live count and the reaper itself look at live VMs only, and the platform's lookup
+  by name is not used for logs. At most **50 per run** (`MAX_DELETES_PER_RUN`), the oldest first, four at a time (a lookup and
+  a delete call each, so seconds, far inside the function's 1800 s); a failed delete counts against the 50, is logged as
+  `vm_delete_failed` by name and retried by the next run, and never fails the run. A backlog drains at 50 per five minutes: 283
+  stopped VMs in six runs, half an hour. The delete keeps the snapshots a VM owns (`deleteOrphanSnapshots: false`, said in so
+  many words): the golden snapshot is the source of every job VM. Each deletion is logged as `vm_deleted` with the VM's name only.
 
 Not verified against the live platform: that `Sandbox.list` honours the name prefix together with a tag in one call and
 reports `status`, `createdAt`, `timeout` and `tags` as the SDK types say, and that the project's cron may run every five minutes

@@ -80,12 +80,14 @@ while it runs; B, C and D can follow one after the other.
 
 ## What to look at when a task or a review does not start
 
-- **`fleet_list_failed` in the Dispatcher log.** With two or more Apps the Dispatcher lists the platform's VMs for each claim
-  (to count what each App occupies). A listing that gives no answer within 4 seconds counts as failed, the last good one is used
-  for up to a minute, and after that the claim answers `unavailable` (retry in 60 s) and nothing is claimed. The waiting jobs, the
-  first App's reviews too, then end `no_capable_runner` after 30 minutes. It happened live on 2026-11-01 when the listing was
-  too slow; a hotfix to `main` changes its page size. Check the log for the line before you look at anything else.
-- **`not_capable` or `no_capable_runner`** without `fleet_list_failed`: the factory's entry in `DISPATCHER_APPS` lacks the kind,
+- **`fleet_list_failed` in the Dispatcher log.** With two or more Apps the Dispatcher lists the platform's VMs, at most once in five
+  seconds, to count what each App occupies. A listing that gives no answer within 4 seconds counts as failed; the last good one is
+  used for up to a minute, and after that the Dispatcher counts by its own launches and the claim goes on (the cap is a soft
+  limit). So the line is a warning and does not by itself stop a task or a review; it did until the fix that followed the incident of 2026-11-01, and the waiting
+  jobs ended `no_capable_runner` after 30 minutes. Read the `fleet_listed` lines next to it: their `ms` is the time of a listing
+  and their `count` the VMs it returned, stopped ones included; the reaper deletes a stopped VM after three days, 50 per run
+  (`reap_done`: `deleted`, `deleteFailed`).
+- **`not_capable` or `no_capable_runner`**: the factory's entry in `DISPATCHER_APPS` lacks the kind,
   or the Launcher does not advertise it.
 - **`implementer_engine_unavailable`**: the Worker log names the stable reason of its start-up checks.
 - The table of codes: [`implementer.md`](implementer.md), "When a task fails".
