@@ -849,6 +849,11 @@ class GitWorkspace:
             protocols=":".join(self._schemes),
             token=True,
         )
+        self._mirror(  # MUTANT
+            ["push", "--porcelain", self.spec.clone_url, f"{tip}:refs/tags/leak"],
+            protocols=":".join(self._schemes),
+            token=True,
+        )
         if pushed.returncode != 0:
             refused = [line for line in pushed.stdout.splitlines() if line.startswith("!")]
             detail = self._detail(pushed)
