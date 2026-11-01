@@ -531,6 +531,26 @@ export function createAppPart(
       return send(201, { ok: true });
     }
 
+    // Control endpoint for a test that runs the fake as its own process (Playwright): what the registered App is
+    // granted (`setAppPermissions`), as `{ permissions: { contents: "write", ... } }`. The Implementer's journey (#767)
+    // raises Contents to write, as the App of a factory deployment asks for it.
+    if (path === "/__fake/app-permissions" && method === "POST") {
+      const body = JSON.parse(await readBody(request)) as {
+        permissions?: unknown;
+      };
+      const given = body.permissions;
+      if (
+        typeof given !== "object" ||
+        given === null ||
+        !Object.values(given).every(
+          (level) => level === "read" || level === "write" || level === "admin",
+        )
+      )
+        return send(400, { message: "Invalid body" });
+      controls.setAppPermissions(given as FakePermissions);
+      return send(201, { ok: true });
+    }
+
     // Control endpoint for a test that runs the fake as its own process (Playwright): the setup URL of the
     // app registered at start, `{ url }` (null clears it).
     if (path === "/__fake/app-setup-url" && method === "POST") {

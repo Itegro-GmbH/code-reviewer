@@ -435,18 +435,17 @@ describe("the push of the fake GitHub", () => {
     const withCredentials = new URL(context.remote);
     withCredentials.username = "x-access-token";
     withCredentials.password = token;
+    const environment: Record<string, string> = {
+      PATH: process.env.PATH ?? "",
+      HOME: context.directory,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_TERMINAL_PROMPT: "0",
+    };
     await run(
       "git",
       ["fetch", "--quiet", withCredentials.toString(), context.base],
-      {
-        cwd: clone,
-        env: {
-          PATH: process.env.PATH ?? "",
-          HOME: context.directory,
-          GIT_CONFIG_NOSYSTEM: "1",
-          GIT_TERMINAL_PROMPT: "0",
-        } as NodeJS.ProcessEnv,
-      },
+      // Next's types make NODE_ENV a required variable; Git does not read it.
+      { cwd: clone, env: environment as NodeJS.ProcessEnv },
     );
 
     expect(none.status).toBe(401);
@@ -527,5 +526,63 @@ describe("the push of the fake GitHub", () => {
       "refs/notes/commits",
       "refs/heads/main",
     ]);
+  });
+
+  // #767
+  it("lets a test running the fake as its own process raise the App to Contents: write", async () => {
+    const context = await setup();
+    // The App of the first test holds write already; narrow it, then raise it through the control endpoint.
+    context.fake.setAppPermissions({ metadata: "read", contents: "read" });
+    const readOnly = await context
+      .mint([WIDGETS.id], "write")
+      .catch(() => null);
+
+    const raised = await fetch(
+      `${context.fake.baseUrl}/__fake/app-permissions`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          permissions: { metadata: "read", contents: "write" },
+        }),
+      },
+    );
+    const refused = await fetch(
+      `${context.fake.baseUrl}/__fake/app-permissions`,
+      {
+        method: "POST",
+        body: JSON.stringify({ permissions: { contents: "everything" } }),
+      },
+    );
+    const token = await context.mint([WIDGETS.id], "write");
+    const advertise = await fetch(
+      `${context.remote}/info/refs?service=git-receive-pack`,
+      { headers: { authorization: basic(token) } },
+    );
+
+    expect(readOnly).toBeNull();
+    expect(raised.status).toBe(201);
+    expect(refused.status).toBe(400);
+    expect(advertise.status).toBe(200);
+  });
+
+  // #767
+  it("lists the request log through a control endpoint, a push with its refs and without a token", async () => {
+    const context = await setup();
+    const token = await context.mint([WIDGETS.id], "write");
+    const clone = await workingCopy(context, token, "clone", "implementer/x");
+    await push(clone, token, context.remote, "HEAD:refs/heads/implementer/x");
+
+    const listed = (await (
+      await fetch(`${context.fake.baseUrl}/__fake/requests`)
+    ).json()) as {
+      requests: Array<{ method: string; path: string; refs?: string[] }>;
+    };
+
+    expect(listed.requests).toContainEqual({
+      method: "POST",
+      path: "/acme/widgets.git/git-receive-pack",
+      refs: ["refs/heads/implementer/x"],
+    });
+    expect(JSON.stringify(listed)).not.toContain(token);
   });
 });

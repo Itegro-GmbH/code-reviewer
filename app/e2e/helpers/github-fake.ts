@@ -309,6 +309,47 @@ export async function addGithubGitRepository(
   expect(response.status()).toBe(201);
 }
 
+/** Sets what the App registered at the fake is granted (a factory deployment's App holds Contents: write, #749). */
+export async function setGithubAppPermissions(
+  request: APIRequestContext,
+  permissions: Record<string, "read" | "write" | "admin">,
+): Promise<void> {
+  const response = await request.post(
+    `${e2eEnv.githubUrl}/__fake/app-permissions`,
+    { data: { permissions } },
+  );
+  expect(response.status(), await response.text()).toBe(201);
+}
+
+/** Every push the fake GitHub received for a repository, oldest first: the repository and the ref names of each. */
+export async function getPushes(
+  request: APIRequestContext,
+  repositoryFullName: string,
+): Promise<Array<{ repository: string; refs: string[] }>> {
+  const response = await request.get(
+    `${e2eEnv.githubUrl}/__fake/pushes?repository=${encodeURIComponent(repositoryFullName)}`,
+  );
+  expect(response.status()).toBe(200);
+  return (
+    (await response.json()) as {
+      pushes: Array<{ repository: string; refs: string[] }>;
+    }
+  ).pushes;
+}
+
+/** Method and path of every request the fake GitHub received (a push also names its refs); no credential is in it. */
+export async function getGithubRequests(
+  request: APIRequestContext,
+): Promise<Array<{ method: string; path: string; refs?: string[] }>> {
+  const response = await request.get(`${e2eEnv.githubUrl}/__fake/requests`);
+  expect(response.status()).toBe(200);
+  return (
+    (await response.json()) as {
+      requests: Array<{ method: string; path: string; refs?: string[] }>;
+    }
+  ).requests;
+}
+
 export type GithubComment = {
   id: number;
   body: string;

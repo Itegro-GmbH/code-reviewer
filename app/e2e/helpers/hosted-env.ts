@@ -33,6 +33,55 @@ export function hostedDatabaseUrls(): {
 
 const directory = "test-results/e2e-hosted";
 
+// The second app of the privileged lane, the factory's (#767): the product `factory` with the capability `implementer`, in
+// the same mode as the first (serverless, a signed call wakes the Dispatcher), over a database of its own. The Dispatcher
+// of its journey serves both apps (the first as the legacy `reviewer`, this one as an entry of `DISPATCHER_APPS`), so every
+// credential of it differs from every credential of the first, as the Dispatcher demands.
+const factoryPort = appPort + 2;
+for (const port of [factoryPort])
+  if (port === 3000 || port === 3100)
+    throw new Error(
+      `The factory app of the lane must not use port ${String(port)}: other work runs there. Set E2E_HOSTED_PORT to a private one.`,
+    );
+
+/** The server URL with the database of the factory app (`cr_e2e_factory_<port>`, dropped and made again at start). */
+export function factoryDatabaseUrls(): {
+  admin: string;
+  app: string;
+  name: string;
+} {
+  const admin = adminDatabaseUrl();
+  const name = `cr_e2e_factory_${String(factoryPort)}`;
+  const app = new URL(admin);
+  app.pathname = `/${name}`;
+  return { admin: admin.toString(), app: app.toString(), name };
+}
+
+const factoryDirectory = "test-results/e2e-factory";
+
+export const factoryEnv = {
+  appPort: factoryPort,
+  appUrl: `http://127.0.0.1:${String(factoryPort)}`,
+  directory: factoryDirectory,
+  logFiles: {
+    app: `${factoryDirectory}/app.log`,
+    dispatcher: `${factoryDirectory}/dispatcher.log`,
+  },
+  /** The records of the journey's Dispatcher and its `docker` stand-in, kept apart from the first journey's. */
+  dockerDirectory: `${factoryDirectory}/docker`,
+  controlDirectory: `${factoryDirectory}/control`,
+  secretsDirectory: `${factoryDirectory}/secrets`,
+  /** The id of the app in the Dispatcher's registry (`DISPATCHER_APPS`). */
+  registryId: "factory",
+  webhookKeyId: "e2f1",
+  webhookSecret: "e2f-dispatch-webhook-secret-0123456789-abcdef",
+  /** What the factory app and the Dispatcher's entry for it share: the claim's credential. */
+  dispatcherToken: "e2f-dispatcher-token-0123456789-0123456789-abcdef",
+  /** The Dispatcher's operator credential (`/probe`, required with `DISPATCHER_APPS`). */
+  operatorToken: "e2f-operator-token-0123456789-0123456789-abcdef",
+  cronSecret: "e2f-cron-secret-0123456789-0123456789-abcdef",
+};
+
 export const hostedEnv = {
   appPort,
   appUrl: `http://127.0.0.1:${String(appPort)}`,
@@ -77,5 +126,15 @@ export function hostedSecrets(): string[] {
     hostedEnv.cronSecret,
     hostedEnv.appSecret,
     hostedEnv.dispatcherToken,
+  ];
+}
+
+/** Every credential of the factory app and the Dispatcher's entry for it, to search outputs for. */
+export function factorySecrets(): string[] {
+  return [
+    factoryEnv.webhookSecret,
+    factoryEnv.dispatcherToken,
+    factoryEnv.operatorToken,
+    factoryEnv.cronSecret,
   ];
 }
