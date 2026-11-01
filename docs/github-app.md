@@ -215,6 +215,11 @@ more, or rather one level more:
 The manifest of the one-click way asks for it, and the form of the way by hand needs it (change Contents from Read-only to
 **Read and write**). A test (`setup-doc.test.ts`) keeps this table and the manifest together.
 
+**Order.** The manifest is built from the capability set of the running deployment, so the one click asks for Contents Read and
+write only after the deploy that puts `implementer` into `PRODUCT_CAPABILITIES` is live. Click before it and the App is created
+with Contents Read-only and has to be updated by hand, below. After the click, check on GitHub (the App's settings,
+*Permissions*) that Contents reads Read and write, and that **Check the permissions** in the portal lists nothing missing.
+
 The token of an Implementer turn is made for one repository and holds exactly `contents: write` and `metadata: read`
 (`IMPLEMENTER_TOKEN_PERMISSIONS` in `app/src/integrations/providers/github-app/job-access.ts`): no pull requests, no issues, no
 checks. A review job keeps its token (`JOB_TOKEN_PERMISSIONS`, Contents read-only).

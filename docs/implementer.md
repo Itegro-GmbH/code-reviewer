@@ -18,7 +18,7 @@ merges the last of them removes this section.
 | Open | What is missing until it is merged |
 |---|---|
 | Runner job (#765) | The Worker does not yet take an `implementer` job from the queue to the end: no dispatch of the kind to the agent session, no advertisement of the engine after its self-check, no stop on SIGTERM that pushes first, no `implementer_engine_unavailable` from a Worker that did not advertise. The pieces it joins (clone and push, agent session, network, image) are merged |
-| The Launcher advertises the engine | The Sandbox Launcher advertises `pr-agent` and `opencode` only, so the Dispatcher answers a wake-up call for the kind with `ignored` and `not_capable` and the app stops resending it. Advertising it needs the probe and the verdict contract to name `implementer` (`docs/dispatcher.md`, "The kind `implementer`") |
+| The Launcher advertises the engine (#765) | In the merged code the Sandbox Launcher advertises `pr-agent` and `opencode` only, so the Dispatcher answers a wake-up call for the kind with `ignored` and `not_capable` and the app stops resending it. #765, being built, makes the Launcher advertise `implementer` only when `DISPATCHER_APPS` names the kind, and `POST /probe` then requires the canary report to name it (`docs/dispatcher.md`, "The kind `implementer`"). The first deploy after the kind is set is therefore the first real proof of the engine, and it can block the release (rollout, step 2) |
 | End to end journey (#767) | The whole path has not run in the privileged lane yet; the live smoke test is the first run of it on the platform |
 
 ## What it is
@@ -39,7 +39,8 @@ native path; the two registry providers (Anthropic, OpenRouter) are not offered.
 ## Session and Turn
 
 - A **Session** is one branch of one repository, the saved OpenCode session id and version, the last pushed commit and a
-  summary. A branch name is used once per repository.
+  summary. Per repository one session holds a branch name (a unique index), and it holds it even if the branch never reached GitHub:
+  a turn that failed before it started keeps its name. A name that exists on GitHub already is refused at submit.
 - A **Turn** is one instruction. In this slice a session has exactly one turn; more turns per session come later. A turn is a
   row of `jobs` too, so its status is the status of its job: there is no second state machine.
 - Two turns of one session never run at once; sessions of one repository run in parallel (the factory's
@@ -89,7 +90,9 @@ The hook also writes every tip update to a spool that tells the runner to look. 
 **The push check.** The runner never runs git inside a directory the agent controls. To push, it fetches the agent's branch
 into a scratch ref of the mirror (a failed or refused fetch is not guessed at), and checks, from exit statuses and objects
 and never from what git printed: the tip contains the start commit; it descends from the tip verified before; every commit
-since the start has exactly one author and one committer line, and **the committer is the system identity**. Only then is the
+since the start has exactly one author and one committer line, and **the committer is the system identity**. This last check
+catches accidents (a changed `user.name`, a commit made by a tool with another identity); it is not a proof of who made a
+commit, because the agent is handed that identity in its environment. Only then is the
 mirror's branch moved (compare and swap) and pushed to GitHub without force. A branch that was rewritten below what is pushed
 ends the turn `branch_violation`; GitHub keeps the last good tip.
 
@@ -98,13 +101,14 @@ ends the turn `branch_violation`; GitHub keeps the last good tip.
 | It can | It cannot |
 |---|---|
 | Bypass the hook (`git -c core.hooksPath=/dev/null`, a hand-written ref file, `git config` in its clone) and rewrite its own branch | Get a rewrite onto GitHub: the push check refuses it and the turn ends `branch_violation` |
-| Write commits with a forged author | Write a commit with a forged committer: the committer is always the environment's, so a forged author shows next to the system committer. Only the committer is checked on purpose, because `cherry-pick`, `am` and a merge keep the author of a legitimate commit |
+| Write commits with any author and, since it knows the system identity, with that identity as committer too, so the committer check passes. Only the committer is checked on purpose, because `cherry-pick`, `am` and a merge keep the author of a legitimate commit | Make the check mean more than "no accident": it cannot tell the agent's honest commit from a forged one |
 | Fill the disk, burn CPU and run for the whole time limit | Keep working after the time limit or after the cost limit is used up: the runner ends the engine and the proxy refuses the next model call |
 | Read everything it can reach in the VM, including the repository and the files it installed | Read a credential: the git token is in the environment of one git process of the runner and in no file, argument or URL; the model key stays in the App, the agent has a loopback proxy and a job capability |
 | Reach the registries on the allowlist | Become root (no sudo), switch the rules of the network off, or reach any other host |
 
-The agent's commits are made by one identity (the product's name and "Implementer"), so on GitHub every commit of a task has
-the same committer, whoever started it.
+The commits that pass carry one committer, the system identity (the product's name and "Implementer"). Who started the task
+is not in the commits: it is in the run (the session's `created_by`, shown on the Runs page). On GitHub the committer therefore
+says "an Implementer task", not who asked for it, and not that the system made the commit.
 
 ## Network in the agent phase
 
@@ -152,7 +156,7 @@ used):
 
 | Code | What happened | Billed | What to do |
 |---|---|---|---|
-| `branch_exists` | The new branch exists on GitHub (made by someone while the task waited, or by an earlier task of the same name). Nothing was changed | free | Choose a new branch name |
+| `branch_exists` | Raised only at the first push, which is the first batch after the agent's first commit or the final push, when GitHub answers `[rejected]` because the branch exists with other history (someone made it after the submit check). The agent has worked by then, so the model was used, and the run is still not billed. Nothing was pushed and the agent's work is lost | free | Choose a new branch name and start again |
 | `base_branch_not_found` | The base branch was not on GitHub when the runner cloned | free | Check the name; it may have been deleted since the submit |
 | `clone_failed` | The repository could not be downloaded | free | Try again; look at the installation if it persists |
 | `setup_failed` | The runner could not prepare the workplace: git too old, a guard file missing, the guard's self-test failed, the mirror could not be made, a port of the slot was taken. The Runs-page sentence says "the repository's own set-up steps", which is not what happens: no repository script is ever run | free | Look at the Worker log of the job; it is the image or the VM |
@@ -164,6 +168,16 @@ used):
 | `git_write_not_granted` | The installation has not accepted Contents write | free | Accept the new permission on GitHub ([`github-app.md`](github-app.md), "Update an existing App") |
 | `implementer_engine_unavailable` | No Worker that answered can run tasks, or the claim carried no cost limit | free | See "State of the code" above, and the rollout |
 | `implementer_config_invalid` | The turn's settings cannot be used: the model entry or the clone address | free | Look at the job log for the reason word |
+| `no_capable_runner` | Nobody that can run tasks claimed the turn within 30 minutes (3 hours while a Worker was busy with others of the kind). Here: the Dispatcher's entry for the factory does not list `implementer`, or the Launcher does not advertise it | free | Rollout step 2, and "State of the code" |
+| `dispatch_unavailable` | Nothing claimed the turn within `RUNNER_DISPATCH_GIVE_UP_SECONDS` (60 minutes by default); the Dispatcher is down, protected or full ([`deployment-vercel.md`](deployment-vercel.md), 5.3) | free | Look at the App's sweep log and the Dispatcher's |
+| `timeout` | The turn was still running 70 minutes after it started, so the app failed it. The Worker normally ends it before at its 3600 seconds | free | Check the branch for what was pushed |
+| `lease_lost`, `lease_expired` | The Worker no longer held the turn when it was ready, or stopped reporting; the result was not saved. Work pushed before stays on the branch | free | Start again if the branch lacks the work |
+| `runner_error`, `runner_shutdown` | The runner failed unexpectedly, or was shut down while it worked | free | Read the Worker log; start again |
+| `dynamic_accounting_failed` | The model usage could not be accounted for, so the turn ended and its cost is not known. The work may be done: check the branch | free | Check the branch |
+| `llm_auth`, `llm_quota`, `llm_rate_limit`, `llm_timeout`, `llm_unavailable` | The model provider refused the key, has no credit, limits requests, is slow or is down. On the operator's key these are the operator's to fix and are not billed to the workspace; on the workspace's own key they are the workspace's | free on the operator's key, charged on the workspace's own | The key or the provider, then start again |
+
+Every other code is a sentence of the Runs page with a billing class in `app/src/billing/outcome.ts`, which decides who pays
+and fails its test when a code has no class. The table above is what a task is likely to meet.
 
 Before the job exists the form refuses with its own codes (`IMPLEMENTER_BRANCH_EXISTS`, `IMPLEMENTER_WRITE_NOT_GRANTED`,
 `IMPLEMENTER_MODEL_NOT_ALLOWED`, `EXCEEDS_OPERATOR_MAXIMUM` and the others of `app/src/implementer/errors.ts`), each with a
@@ -187,8 +201,13 @@ that were pushed first. A Worker that is stopped while it works (`runner_shutdow
 
 These are decisions of the owner, not oversights.
 
-- **Hooks are an accident guard.** A hostile agent can rewrite its own clone; it cannot rewrite GitHub (table above). A
-  forged author is possible and visible; only the committer is checked.
+- **Hooks are an accident guard.** A hostile agent can rewrite its own clone; it cannot rewrite GitHub (table above).
+- **The committer check is an accident check.** The agent knows the system identity, so a hostile agent can write any author
+  and the system committer. Nothing on GitHub proves that the system made a commit.
+- **A branch created meanwhile.** If someone creates the branch after the submit check and before the first push, and it
+  points at the base tip or at an ancestor of the agent's tip, GitHub fast-forwards it: the task lands on a branch it did not
+  create, with that person's earlier history under it. Any other history ends the turn `branch_exists`. The window is the
+  time between the submit check and the first push, which can be most of a turn.
 - **Exfiltration through a registry.** The egress rule looks at the name of the tunnel and nothing inside it. `registry.npmjs.org`
   accepts uploads, so an agent that holds an npm token (from the repository, or from prompt-injection text) can `npm publish`
   any file it can read, and the registry names sit on CDN addresses that other tenants share, so another endpoint behind the

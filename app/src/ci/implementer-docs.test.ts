@@ -101,22 +101,59 @@ describe("the Implementer documents exist and are linked", () => {
 });
 
 describe("every name the Implementer documents give exists in the code", () => {
+  // The code the documents describe, not the tests: a test that spells a name proves nothing about the product, and this file
+  // spells all of them.
   const files = listTrackedFiles(repoRoot).filter(
-    (path) => !path.startsWith("docs/") && !path.endsWith(".md"),
+    (path) =>
+      !path.startsWith("docs/") &&
+      !path.endsWith(".md") &&
+      !/\.test\.|\.integration\.|\.e2e\.|(^|\/)(tests?|integration-tests|e2e)\//.test(
+        path,
+      ),
   );
   const code = files.map((path) => readText(path)).join("\n");
   const folders = readText("tools/factory-bootstrap/factory-bootstrap.sh");
 
-  /** Environment variables, Infisical keys and stable codes written in capitals: `NAME_WITH_UNDERSCORE`. */
+  /**
+   * What a document names that something must read or write: environment variables and Infisical keys (`UPPER_SNAKE`), stable
+   * codes and log events (`lower_snake`, or a lower case word that the text calls a log "line", like the `launched` line).
+   */
   function names(text: string): string[] {
-    return [
-      ...new Set(
-        [...text.matchAll(/`([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)`/g)].map(
-          (match) => match[1] as string,
-        ),
-      ),
-    ];
+    const found = new Set<string>();
+    for (const pattern of [
+      /`([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)`/g,
+      /`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`/g,
+      /`([a-z]+)` (?:log )?line\b/g,
+    ])
+      for (const match of text.matchAll(pattern)) found.add(match[1] as string);
+    return [...found];
   }
+
+  /** The names of `text` that do not appear, as a whole word, in the code. */
+  function unknownNames(text: string, corpus: string): string[] {
+    return names(text).filter(
+      (name) =>
+        !new RegExp(`(?<![A-Za-z0-9_])${name}(?![A-Za-z0-9_])`).test(corpus),
+    );
+  }
+
+  // #768-T02
+  it("finds a name that no code has, in capitals, in lower case and as a log line", () => {
+    expect(
+      unknownNames(
+        "`NOT_A_REAL_NAME` `not_a_real_code` the `nolaunch` line",
+        code,
+      ),
+    ).toEqual(["NOT_A_REAL_NAME", "not_a_real_code", "nolaunch"]);
+    // A whole word: a prefix of a real code is not the code.
+    expect(unknownNames("`branch_exist`", code)).toEqual(["branch_exist"]);
+    expect(
+      unknownNames(
+        "`branch_exists` `PRODUCT_MISMATCH` the `launched` line",
+        code,
+      ),
+    ).toEqual([]);
+  });
 
   // #768-T02
   it.each([
@@ -125,10 +162,9 @@ describe("every name the Implementer documents give exists in the code", () => {
     ["the rollout of docs/factory-bring-up.md", rollouts[0][1]],
     ["the rollout of docs/deployment-vercel.md", rollouts[1][1]],
   ])(
-    "%s names only variables, keys and codes that something reads",
+    "%s names only variables, keys, codes and log events that something reads",
     (_, text) => {
-      const unknown = names(text).filter((name) => !code.includes(name));
-      expect(unknown).toEqual([]);
+      expect(unknownNames(text, code)).toEqual([]);
       expect(names(text).length).toBeGreaterThan(0);
     },
   );
@@ -210,20 +246,100 @@ describe("the rollout of the Implementer", () => {
   });
 
   // #768-T01
-  it("says that the Launcher must advertise the engine, and what happens until it does", () => {
+  it("says that the first deploy with the kind is the proof of the engine, how it fails and what that holds back", () => {
     for (const [file, text] of rollouts) {
       const flatText = flat(text);
-      expect(flatText, file).toContain("`not_capable`");
-      expect(flatText, file).toContain("advertise");
+      expect(flatText, file).toContain(
+        "advertises `implementer` only when `DISPATCHER_APPS` names the kind",
+      );
+      expect(flatText, file).toContain("`POST /probe`");
+      expect(flatText, file).toContain("`503`");
+      expect(flatText, file).toContain("missing=implementer");
+      expect(flatText, file).toContain("nothing staged in that run");
+      expect(flatText, file).toContain("`kinds`");
     }
+    // The canary does print what the docs quote, and the promotions do wait for it.
+    expect(readText("dispatcher/src/probe/canary.ts")).toContain("missing=");
+    const deploy = readText(".github/workflows/deploy-production.yml");
+    for (const job of ["promote-app", "promote-factory", "promote-dispatcher"])
+      expect(deploy.slice(deploy.indexOf(`\n  ${job}:`))).toMatch(
+        /needs: \[[^\]]*canary/,
+      );
+    // No step is called safe without the exception.
+    expect(flat(rollouts[0][1])).not.toContain("are safe");
+  });
+
+  // #768-T01
+  it("makes the one-click App the main path, after the deploy of step 3, with the update by hand as the fallback", () => {
+    const flatText = flat(rollouts[0][1]);
+    expect(flatText).toContain(
+      "Main path: one click in the admin portal, after step 3 is deployed",
+    );
+    expect(flatText).toContain("Never click before the deploy of step 3");
+    expect(flatText).toContain("Fallback only");
+    expect(flatText).toContain("Contents **Read and write**");
+    expect(flatText).toContain("*Check the permissions* lists nothing missing");
+    expect(flatText).toContain("Tenancy:** the factory is `multi`");
+    expect(flatText).toContain("**public** App");
+    expect(flatText).toContain("access to those repositories only");
+    expect(flatText).toContain(
+      "until an Owner or Admin who owns the GitHub account",
+    );
+    // What the code does: public for multi, the capability set read at the click.
+    expect(
+      readText("app/src/integrations/providers/github-app/manifest.ts"),
+    ).toContain('public: tenancy === "multi"');
+    expect(readText("app/src/github-config/shared.ts")).toContain(
+      "capabilities: getCapabilities()",
+    );
+    const githubApp = flat(readText("docs/github-app.md"));
+    expect(githubApp).toContain(
+      "only after the deploy that puts `implementer` into `PRODUCT_CAPABILITIES` is live",
+    );
+    // The table of optional items says the same.
+    expect(flat(bringUp)).toContain(
+      "click only after the deploy that puts `implementer` into `PRODUCT_CAPABILITIES`",
+    );
   });
 
   // #768-T01
   it("separates what is the owner's action from what is the lead's", () => {
     const flatText = flat(rollouts[0][1]);
-    expect(flatText).toContain("accept the new permissions");
-    expect(flatText).toContain("existing App");
+    expect(flatText).toContain("accepts the new permissions");
+    expect(flatText).toContain("existing");
     expect(flatText).toContain("approve the new GitHub permission");
+  });
+
+  // #768-T01
+  it("states what removing the capability does to running and queued tasks, as the code does it", () => {
+    const flatText = flat(rollouts[0][1]);
+    expect(flatText).toContain(
+      "A turn that is **running** keeps its lease and finishes",
+    );
+    expect(flatText).toContain("no longer switches off its write token");
+    expect(flatText).toContain(
+      "A turn that is **queued** is still sent to the Dispatcher",
+    );
+    expect(flatText).toContain("`no_capable_runner`");
+    // The code the sentences rest on: the revoke and the retry ask for the capability, the sweep still sends.
+    expect(readText("app/src/jobs/shared.ts")).toMatch(
+      /allowed: \(\) => getCapabilities\(\)\.has\("implementer"\)/,
+    );
+    expect(readText("app/src/dispatch/sweep.ts")).toContain(
+      'has("implementer") ? deps.writeTokens',
+    );
+    expect(readText("app/src/runner-api/claim.ts")).toContain(
+      '"INTEGRATION_CAPABILITY_ABSENT"',
+    );
+  });
+
+  // #768-T01
+  it("says the cost maximum loosens the factory's own reviews, and how large the cap must be for two reviews and two tasks", () => {
+    const flatText = flat(rollouts[0][1]);
+    expect(flatText).toContain("cap of every job the factory claims");
+    expect(flatText).toContain("the factory's own Dynamic and Diff reviews");
+    expect(flatText).toContain("**at least 4**");
+    expect(flat(rollouts[1][1])).toContain("every job the factory claims");
   });
 });
 
@@ -291,8 +407,54 @@ describe("the operator guide states what the owner decided", () => {
       "git_write_not_granted",
       "implementer_engine_unavailable",
       "implementer_config_invalid",
+      "no_capable_runner",
+      "dispatch_unavailable",
+      "timeout",
     ])
       expect(guide, code).toContain(`| \`${code}\` |`);
+    for (const code of [
+      "lease_lost",
+      "runner_error",
+      "dynamic_accounting_failed",
+      "llm_unavailable",
+    ])
+      expect(guide, code).toContain(`\`${code}\``);
+    expect(flat(guide)).toContain("`app/src/billing/outcome.ts`");
+  });
+
+  // #768-T01
+  it("says what the committer check is: an accident check that a hostile agent can satisfy", () => {
+    expect(text).not.toContain("Write a commit with a forged committer");
+    expect(text).not.toContain("whoever started it");
+    expect(text).toContain("it is not a proof of who made a commit");
+    expect(text).toContain("The committer check is an accident check");
+    // The code gives the agent the identity it is then checked against.
+    const workspace = readText(
+      "runner/src/code_reviewer_runner/implementer/git_workspace.py",
+    );
+    expect(workspace).toContain('"GIT_COMMITTER_NAME": self.identity.name');
+    expect(workspace).toContain(
+      "system = (self.identity.name, self.identity.email)",
+    );
+  });
+
+  // #768-T01
+  it("says when branch_exists arises, that the model was used and the run is not billed, and what a branch made meanwhile does", () => {
+    expect(text).toContain("Raised only at the first push");
+    expect(text).toContain(
+      "the model was used, and the run is still not billed",
+    );
+    expect(text).toContain("fast-forwards it");
+    expect(text).not.toContain("Nothing was changed");
+    expect(text).not.toContain("A branch name is used once per repository");
+    const workspace = readText(
+      "runner/src/code_reviewer_runner/implementer/git_workspace.py",
+    );
+    expect(workspace).toContain('"[rejected]" in line for line in refused');
+    expect(workspace).toContain("first = self._pushed is None");
+    expect(readText("app/src/billing/outcome.ts")).toContain(
+      'branch_exists: "free"',
+    );
   });
 
   // #768-T01
@@ -344,6 +506,69 @@ describe("the live smoke test", () => {
       "T03",
     ])
       expect(text, phrase).toContain(phrase);
+  });
+
+  // #768-T03
+  it("gives the agent only commands the Worker image has, and names the error text each closed door must show", () => {
+    const dockerfile = readText("runner/Dockerfile");
+    // The image installs no program that the task would need to fetch a page, and no sudo.
+    for (const program of ["curl", "wget", "sudo"])
+      expect(dockerfile, program).not.toMatch(
+        new RegExp(
+          `install[^\\n]*(?<![A-Za-z0-9_-])${program}(?![A-Za-z0-9_-])`,
+        ),
+      );
+    // What it does have, on the agent's PATH (the runner's trusted path); python3 is the base image's.
+    expect(dockerfile).toContain("FROM ${PYTHON_IMAGE}");
+    expect(dockerfile).toContain(
+      "ln -s /opt/node/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm",
+    );
+    expect(
+      readText("runner/src/code_reviewer_runner/implementer/git_process.py"),
+    ).toContain('TRUSTED_PATH = "/usr/local/bin:/usr/bin:/bin"');
+    const start = smoke.indexOf("```text");
+    const block = smoke.slice(start, smoke.indexOf("\n  ```", start));
+    const commands = block
+      .split("\n")
+      .filter((line) => /^ {2}\d+\. /.test(line))
+      .map((line) => line.replace(/^ {2}\d+\. /, ""));
+    expect(commands).toHaveLength(13);
+    const available = new Set([
+      "id",
+      "git",
+      "grep",
+      "env",
+      "python3",
+      "npm",
+      "cut",
+    ]);
+    for (const command of commands)
+      for (const part of command
+        .replace(/"[^"]*"|'[^']*'/g, "")
+        .split(/;|\|/)) {
+        const program = part
+          .trim()
+          .replace(/^env(?: -u \S+)+ /, "")
+          .split(/\s+/)[0] as string;
+        expect(available.has(program), command).toBe(true);
+      }
+    for (const error of [
+      "Temporary failure in name resolution",
+      "No route to host",
+      "timed out",
+      "Tunnel connection failed: 403 Forbidden",
+      "CONNECT tunnel failed, response 403",
+      "PONG",
+      "code-reviewer-guard:",
+    ])
+      expect(text, error).toContain(error);
+    // The hook message and the proxy's refusal are the code's.
+    expect(readText("runner/guard/reference-transaction")).toContain(
+      "code-reviewer-guard:",
+    );
+    expect(
+      readText("runner/src/code_reviewer_runner/implementer/egress_proxy.py"),
+    ).toContain("403");
   });
 
   // #768-T03
@@ -425,15 +650,15 @@ describe("the corrections the reviews asked for", () => {
   });
 
   // #771 review
-  it("says in both places that the locks on users, repositories and workspaces are held while the index waits for jobs", () => {
+  it("says in both places that the locks on users, repositories and workspaces are held until the batch commits, and that lock_timeout is per statement", () => {
     for (const path of [
       "app/src/db/README.md",
       "app/src/db/migrations/20261030140000_create_implementer_sessions_and_turns.ts",
     ]) {
       const text = flat(readText(path).replace(/^\/\/ ?/gm, ""));
-      expect(text, path).toMatch(
-        /(reverse|the other way round)[^.]*(`users`, `repositories` and `workspaces`)|(`users`, `repositories` and `workspaces`)[^.]*(held|wait)/,
-      );
+      expect(text, path).toContain("`users`, `repositories` and `workspaces`");
+      expect(text, path).toContain("as the rest of the migration runs");
+      expect(text, path).toContain("per statement");
       expect(text, path).toContain(
         path.endsWith(".md") ? "5 s" : "LOCK_TIMEOUT",
       );

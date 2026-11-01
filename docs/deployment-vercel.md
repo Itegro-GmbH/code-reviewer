@@ -1310,23 +1310,29 @@ works (the same steps with their checks, who does them and what undoes each are 
    (`dynamic-review,review`) and the canary on the rebuilt snapshot, and promotes. Nothing live changes.
 2. **`DISPATCHER_APPS`**, only after step 1 is live. Infisical `prod`, folder `/dispatcher`: in the factory entry set `kinds`
    to `["diff","dynamic","implementer"]`. Optional: an `implementer` entry of `DISPATCHER_WORKER_CONFIG` (sizes and
-   `timeoutSeconds`; the defaults need none). Then run *Deploy production*, which redeploys the Dispatcher. Set earlier, an
-   older Dispatcher refuses the unknown kind at start and the first App has an outage. The Sandbox Launcher must also
-   advertise the engine before a task can run: until it does, a wake-up call for the kind is `ignored` with `not_capable`
-   (section "The kind `implementer`" of [`dispatcher.md`](dispatcher.md)).
+   `timeoutSeconds`; the defaults need none). Then run *Deploy production*, which stages and proves the Dispatcher with the
+   kind. Set earlier, an older Dispatcher refuses the unknown kind at start and the first App has an outage. **This deploy is
+   the first real proof of the engine:** the Launcher advertises `implementer` only when `DISPATCHER_APPS` names the kind, and
+   `POST /probe` then requires the report of the canary VM to name it. When it cannot, the canary answers `503` and ends with
+   `missing=implementer, the release is blocked`; the promotions of the App, the factory and the Dispatcher all wait for the
+   canary, so nothing staged in that run goes live, the first App's included. The way back: set `kinds` back to
+   `["diff","dynamic"]`, wait for the Secret Sync and deploy again.
 3. **`PRODUCT_CAPABILITIES` and `FACTORY_EXPECTED_CAPABILITIES`, together.** Infisical `prod`, folder `/app-factory`, key
    `PRODUCT_CAPABILITIES` = `review,dynamic-review,implementer`; repository variable `FACTORY_EXPECTED_CAPABILITIES` =
    `dynamic-review,implementer,review`; then one *Deploy production*. One of the two alone ends in `PRODUCT_MISMATCH` at
    `health-factory`: nothing is promoted and nothing live changes.
 4. **The maximum cost per review** in the factory's admin portal (General, Limits), raised from its default to the owner's
-   per-turn maximum (the value is in the bring-up checklist). It is the only brake of a turn.
-5. **Contents read and write for the factory's GitHub App.** An existing App needs the permission changed on GitHub and
-   then the approval of each installation; an App created after step 3 has it from the start ([`github-app.md`](github-app.md)).
-   Also a model: a workspace key, or released catalog entries that serve Dynamic Review.
+   per-turn maximum (the value is in the bring-up checklist). It is the only brake of a turn, and it is the cap of every job
+   the factory claims, its own Diff and Dynamic reviews included.
+5. **The factory's GitHub App, by one click in the admin portal, after the deploy of step 3** (the manifest then asks for
+   Contents read and write; an App created earlier has it read-only and is updated by hand and approved by each
+   installation: [`github-app.md`](github-app.md)). With tenancy `multi` the App is public; an installation reaches a
+   workspace only when an Owner or Admin who owns the account has linked it. Also a model: a workspace key, or released
+   catalog entries that serve Dynamic Review.
 6. **The live smoke test** by the lead: [`implementer-smoke-test.md`](implementer-smoke-test.md).
 
 To go back, remove `implementer` from `PRODUCT_CAPABILITIES`, reset the repository variable, and deploy again. The Dispatcher
-entry and the permission may stay.
+entry and the permission may stay. What that does to running and queued tasks is in the bring-up checklist, step 3.
 
 ## 6. Sizing the Worker VMs
 
