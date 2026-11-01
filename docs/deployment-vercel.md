@@ -1028,7 +1028,9 @@ deployment that outlived their purpose.
   App says. A job VM whose job the App reports as not `running` is stopped; if the App's answer cannot be read the VM
   is **kept** (only its lifetime ends it then). A canary VM is ended by its lifetime only.
 - The answer and the log hold counts and stable codes only: `listed`, `candidates`, `stopped`, `kept`, `unreadable`,
-  `failed`; events `vm_reaped`, `vm_reap_failed`, `job_state_unreadable`, `reap_done`, `reap_list_failed`. A `500` with
+  `failed`, `deleted`, `deleteFailed`, `deleteKept`, `deleteNotTried`; events `vm_reaped`, `vm_reap_failed`, `vm_deleted`, `vm_delete_failed`, `vm_delete_kept`, `vm_delete_halted`, `job_state_unreadable`, `reap_done`, `reap_list_failed`.
+  Besides stopping, each run deletes up to 50 ended (stopped, failed or aborted) VMs of ours that are a day old or older, so the platform's listing
+  stays small (`dispatcher/README.md`, "The reaper"). A `500` with
   `REAP_LIST_FAILED` means the platform's listing failed; nothing was stopped and the next run tries again.
 - **To check it:** Vercel's Cron Jobs settings of the Dispatcher project show the runs. During the smoke test, list the
   project's VMs after a job: none should be left running with a `cr-` name.

@@ -14,6 +14,10 @@ const REPORT: ReapReport = {
   kept: 1,
   unreadable: 0,
   failed: 0,
+  deleted: 0,
+  deleteFailed: 0,
+  deleteKept: 0,
+  deleteNotTried: 0,
 };
 
 function setup(

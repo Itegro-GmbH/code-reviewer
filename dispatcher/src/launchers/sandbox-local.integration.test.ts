@@ -338,4 +338,22 @@ describe("the Sandbox-Launcher in local mode", () => {
       await service.list({ namePrefix: "cr-diff-", tags: {} }),
     ).toStrictEqual([]);
   });
+
+  // #802-T10
+  it("deletes a VM by name: it is stopped and no longer listed, and deleting it again is not an error", async () => {
+    const { launcher: sandbox, local: service } = launcher(2);
+    await sandbox.launch(
+      { ...spec(JOB_A, CREDENTIAL_A), kind: "dynamic" },
+      new AbortController().signal,
+    );
+    const name = service.created[0] ?? "";
+
+    await service.delete(name);
+    await service.delete(name);
+
+    expect(service.running()).toStrictEqual([]);
+    expect(await service.list({ namePrefix: "cr-", tags: {} })).toStrictEqual(
+      [],
+    );
+  });
 });
