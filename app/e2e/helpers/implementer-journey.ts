@@ -557,7 +557,7 @@ function processArguments(pid: number): string {
 
 /** What a Worker and its job leave when they end badly: the runner, the job wrapper, the engine, the git of the mirror, the user switch. */
 const WORKER_PROCESSES =
-  /code_reviewer_runner|code-reviewer-runner|run_job_against_fake_llm|opencode|setpriv|unshare|docker-worker|\/work\//;
+  /code_reviewer_runner|code-reviewer-runner|run_job_against_fake_llm|opencode|setpriv|unshare|docker-worker|[ =]\/work\/(repo|mirror\.git|home|tmp)\b/;
 
 /** Processes of the lane that belong to a Worker (root or the engine user) and have not ended. */
 export function leftoverWorkerProcesses(): string[] {
