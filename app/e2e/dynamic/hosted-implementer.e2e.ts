@@ -78,6 +78,7 @@ import {
   WORKSPACE,
   write,
   GIT_COMMANDS,
+  keepRecords,
   type FakeRegistry,
 } from "../helpers/implementer-journey";
 import { fetchModelsDevCatalog } from "../helpers/models-dev";
@@ -245,6 +246,8 @@ test.describe("a task on its way from the form of the Implementer to a branch on
   });
 
   test.afterAll(async () => {
+    // Whatever the journeys left of the job wrapper's records goes with the report (the lane's /run does not outlive it).
+    keepRecords(`${factoryEnv.directory}/records`);
     try {
       await dispatcher?.stop();
     } finally {

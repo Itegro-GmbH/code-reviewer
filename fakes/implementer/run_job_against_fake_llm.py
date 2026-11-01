@@ -38,6 +38,7 @@ value, next to the git log (`<git command log>.<pid>.scan.json`, one per job).
 Test stacks only; never set `PR_AGENT_COMMAND` on a real runner. Run it with the Python of the
 runner's environment. The credentials stay on stdin: no argument is a secret."""
 
+import faulthandler
 import functools
 import http.client
 import json
@@ -222,6 +223,11 @@ def main(argv: list[str]) -> int:
     def egress(settings: EgressSettings) -> EgressProxy | None:
         return start_egress(settings, resolve=resolve, connect=connect)
 
+    # A job that does not end says where it is: the stacks of every thread, every thirty seconds,
+    # in a file next to the log (open for as long as the process lives).
+    stacks = f"{git_log}.{os.getpid()}.stacks.txt"
+    trace = open(stacks, "w", encoding="utf-8")  # noqa: SIM115
+    faulthandler.dump_traceback_later(30, repeat=True, file=trace)
     record_git_commands(git_log)
     clone_over_http()
     traces = EngineTraces()

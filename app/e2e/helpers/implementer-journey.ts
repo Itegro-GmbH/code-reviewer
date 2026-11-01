@@ -5,6 +5,7 @@
 // the fake registry behind the egress proxy, and the checks of what the runner did to Git and to GitHub.
 import { execFileSync } from "node:child_process";
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -24,8 +25,14 @@ export const WORKSPACE = "default";
 export const RECORDS = "/run/lane-implementer";
 export const GIT_COMMANDS = `${RECORDS}/git-commands.jsonl`;
 
+/** Keeps what the job wrapper wrote (the stacks of a job that hung, the git commands) with the report of the lane. */
+export function keepRecords(directory: string): void {
+  rmSync(directory, { recursive: true, force: true });
+  cpSync(RECORDS, directory, { recursive: true });
+}
+
 export function prepareRecords(): void {
-  rmSync(RECORDS, { recursive: true, force: true });
+  // Not emptied: Playwright starts a new worker after a failed journey and runs the setup again; the lane's /run is new for every run.
   mkdirSync(RECORDS, { recursive: true, mode: 0o755 });
 }
 
@@ -208,19 +215,20 @@ export async function branchPushed(
   branch: string,
   timeoutMs = 240_000,
 ): Promise<void> {
-  await expect
-    .poll(
-      async () => {
-        if (tipOf(gitDirectory, branch) !== null) return "pushed";
-        const run = await runData(page, runId);
-        return UNSETTLED.has(run.status)
-          ? "waiting"
-          : `the run ended ${run.status} (${run.errorCode ?? "no code"}) without the branch`;
-      },
-      { timeout: timeoutMs, intervals: [500, 1000] },
-    )
-    .toMatch(/^(pushed|waiting)$/);
-  expect(tipOf(gitDirectory, branch)).not.toBeNull();
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (tipOf(gitDirectory, branch) !== null) return;
+    const run = await runData(page, runId);
+    if (!UNSETTLED.has(run.status))
+      throw new Error(
+        `The run ended ${run.status} (${run.errorCode ?? "no code"}) without the branch ${branch} on GitHub.`,
+      );
+    if (Date.now() > deadline)
+      throw new Error(
+        `The branch ${branch} was not on GitHub after ${String(timeoutMs)} ms; the run is ${run.status}.`,
+      );
+    await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+  }
 }
 
 // -- the model's script ------------------------------------------------------------------------------------------
