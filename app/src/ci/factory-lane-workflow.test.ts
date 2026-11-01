@@ -772,6 +772,8 @@ describe("the health check of the staged second App", () => {
       });
       expect(run.status, capabilities.join()).toBe(0);
       expect(curls(run.calls)).toHaveLength(1);
+      // #768: the header file exists after a pass, so its absence after a failure (below) means something.
+      expect(run.read("bypass-header")).toContain("x-vercel-protection-bypass");
     }
   });
 
@@ -805,6 +807,8 @@ describe("the health check of the staged second App", () => {
     expect(run.stdout + run.stderr).not.toContain(
       env.VERCEL_FACTORY_AUTOMATION_BYPASS_SECRET,
     );
+    // #768: the header file that holds it is not even written after the failure (the order of the step is pinned here).
+    expect(() => run.read("bypass-header")).toThrow("no file bypass-header");
   });
 
   // #748-T03
@@ -821,6 +825,7 @@ describe("the health check of the staged second App", () => {
       .filter((line) => line.startsWith("::"));
     expect(errors).toHaveLength(1);
     expect(run.stdout).not.toContain("::add-mask");
+    expect(() => run.read("bypass-header")).toThrow("no file bypass-header");
   });
 
   // #748-T04
