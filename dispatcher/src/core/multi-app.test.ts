@@ -1269,6 +1269,53 @@ describe("the cap of an app is counted by the Dispatcher too", () => {
       expect(forReviewer.outcome).toBe("started");
     });
 
+    // #802-T07
+    it("counts the launches in progress that have no VM yet", async () => {
+      // Cap 3, tolerance 5: eight VMs and the one a call would start are allowed. Six VMs created lately and two launches
+      // that have no VM yet make eight: the next call would be the ninth and is refused. With the launches not counted
+      // it would see six and pass.
+      const hold = deferred();
+      let launches = 0;
+      const { core } = build({
+        factory: { maxRunning: 3 },
+        liveVms: failing,
+        launcher: {
+          onLaunch: (spec) => {
+            launches += 1;
+            if (launches <= 6) {
+              spec.onVmCreated?.(vm(`cr-diff-created-${launches}`));
+              return Promise.resolve();
+            }
+            // Launches without a VM: the Launcher is still making it.
+            return hold.promise;
+          },
+        },
+      });
+      for (let call = 0; call < 6; call += 1) await claim(core, "factory");
+      const waiting = [0, 1].map(() => {
+        const jobId = factory.enqueue();
+        return core.handle({ appId: "factory", jobId, reviewKind: "diff" });
+      });
+      await settle();
+
+      const ninth = factory.enqueue();
+      const results = await Promise.all(waiting);
+      expect(results.map((result) => result.outcome)).toStrictEqual([
+        "started",
+        "started",
+      ]);
+      const refused = await core.handle({
+        appId: "factory",
+        jobId: ninth,
+        reviewKind: "diff",
+      });
+      expect(refused.outcome).toBe("busy");
+
+      hold.resolve();
+      for (const result of results)
+        if (result.outcome === "started") await result.background;
+    });
+
     // #802-T05
     it("forgets a VM after ten minutes: a long outage must not turn the soft limit into a stop", async () => {
       const { core } = build({

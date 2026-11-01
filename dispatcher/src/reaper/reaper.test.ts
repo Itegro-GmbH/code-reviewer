@@ -558,6 +558,8 @@ describe("the reaper: failures and what it reports", () => {
     expect(Object.keys(report).sort()).toStrictEqual([
       "candidates",
       "deleteFailed",
+      "deleteKept",
+      "deleteNotTried",
       "deleted",
       "failed",
       "kept",

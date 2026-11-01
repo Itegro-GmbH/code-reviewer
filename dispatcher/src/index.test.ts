@@ -353,6 +353,8 @@ describe("the Vercel entry", () => {
       failed: 0,
       deleted: 0,
       deleteFailed: 0,
+      deleteKept: 0,
+      deleteNotTried: 0,
     });
     expect(sdk.list).toHaveBeenCalledTimes(1);
     expect(sdk.list.mock.calls[0]?.[0]).toMatchObject({

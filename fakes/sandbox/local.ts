@@ -132,9 +132,10 @@ export class LocalSandboxService {
   }
 
   /** Stops the VM and forgets it, as the platform's delete does: it is no longer listed (#802). */
-  async delete(name: string): Promise<void> {
+  async delete(name: string): Promise<"deleted"> {
     await this.stop(name);
     this.vms.delete(name);
+    return "deleted";
   }
 
   /**

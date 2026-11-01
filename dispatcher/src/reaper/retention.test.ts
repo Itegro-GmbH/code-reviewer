@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // The reaper's retention (#802): the platform keeps a stopped VM until somebody deletes it, and the listing every claim
-// makes grows with them (283 stopped VMs took 5.1 s). The reaper deletes the stopped VMs of ours that are older than a few
-// days, a bounded number per run, and nothing else.
+// makes grows with them (283 stopped VMs took 5.1 s). The reaper deletes the ended VMs of ours that are older than a day,
+// a bounded number per run, and nothing else.
 import { describe, expect, it } from "vitest";
 import { FakeSandboxService } from "../../../fakes/sandbox/service.ts";
-import { SandboxServiceError } from "../launchers/sandbox-service.ts";
+import {
+  SandboxServiceError,
+  type SandboxFailureKind,
+} from "../launchers/sandbox-service.ts";
 import { recordingLogger } from "../test-support/harness.ts";
 import {
+  DELETE_BUDGET_MS,
   MAX_DELETES_PER_RUN,
   RETENTION_MS,
   createReaper,
@@ -17,6 +21,17 @@ import {
 const T0 = 1_800_000_000_000;
 const DAY = 24 * 3600 * 1000;
 const JOB = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+/** A small seeded generator, so a test that depends on the reaper's random pick is repeatable. */
+function seeded(seed: number): () => number {
+  let state = seed;
+  return () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
 function setup() {
   const clock = { now: T0 };
@@ -33,6 +48,7 @@ function setup() {
     },
     logger,
     now: () => clock.now,
+    random: seeded(7),
     jobLifetimeSeconds: 1500,
     canaryLifetimeSeconds: 450,
   });
@@ -64,25 +80,30 @@ function setup() {
   return { clock, fake, logger, reaper, jobVm, asked: () => asked };
 }
 
-describe("the reaper's retention of stopped VMs", () => {
+describe("the reaper's retention of ended VMs", () => {
   // #802-T20
-  it("deletes a stopped VM of ours that is older than three days, by its name, and counts it", async () => {
+  it("deletes a stopped VM of ours that is a day old, by its name, and counts it", async () => {
     const t = setup();
-    const old = t.jobVm(3 * DAY);
+    const old = t.jobVm(DAY);
 
     const report = await t.reaper.run();
 
-    expect(RETENTION_MS).toBe(3 * DAY);
+    expect(RETENTION_MS).toBe(DAY);
     expect(t.fake.deletes).toStrictEqual([old]);
     expect(t.fake.vms.has(old)).toBe(false);
-    expect(report).toMatchObject({ deleted: 1, deleteFailed: 0 });
+    expect(report).toMatchObject({
+      deleted: 1,
+      deleteFailed: 0,
+      deleteKept: 0,
+      deleteNotTried: 0,
+    });
     expect(t.logger.text()).toContain(`vm_deleted {"sandbox":"${old}"}`);
   });
 
   // #802-T20
-  it("keeps a stopped VM that is a second short of three days", async () => {
+  it("keeps a stopped VM that is a second short of a day", async () => {
     const t = setup();
-    t.jobVm(3 * DAY - 1000);
+    t.jobVm(DAY - 1000);
 
     const report = await t.reaper.run();
 
@@ -91,7 +112,20 @@ describe("the reaper's retention of stopped VMs", () => {
   });
 
   // #802-T21
-  it.each(["running", "pending", "stopping", "snapshotting", "failed"])(
+  it.each(["stopped", "failed", "aborted"])(
+    "deletes a VM the platform reports as %s, which has ended for good",
+    async (status) => {
+      const t = setup();
+      const name = t.jobVm(2 * DAY, { status });
+
+      await t.reaper.run();
+
+      expect(t.fake.deletes).toStrictEqual([name]);
+    },
+  );
+
+  // #802-T21
+  it.each(["running", "pending", "stopping", "snapshotting"])(
     "never deletes a VM the platform reports as %s, however old",
     async (status) => {
       const t = setup();
@@ -169,20 +203,15 @@ describe("the reaper's retention of stopped VMs", () => {
   });
 
   // #802-T24
-  it("deletes at most a fixed number per run, the oldest first, and drains a backlog over several runs", async () => {
+  it("deletes at most a fixed number per run and drains a backlog over several runs", async () => {
     const t = setup();
     const total = MAX_DELETES_PER_RUN * 2 + 20;
-    const names: string[] = [];
-    // Created from the youngest to the oldest, so the order of the listing is not the order of age.
     for (let index = 0; index < total; index += 1)
-      names.push(t.jobVm(4 * DAY + index * 1000));
-    const oldestFirst = [...names].reverse();
+      t.jobVm(2 * DAY + index * 1000);
 
     const first = await t.reaper.run();
     expect(first).toMatchObject({ deleted: MAX_DELETES_PER_RUN });
-    expect(new Set(t.fake.deletes)).toStrictEqual(
-      new Set(oldestFirst.slice(0, MAX_DELETES_PER_RUN)),
-    );
+    expect(t.fake.deletes).toHaveLength(MAX_DELETES_PER_RUN);
 
     const second = await t.reaper.run();
     const third = await t.reaper.run();
@@ -195,13 +224,41 @@ describe("the reaper's retention of stopped VMs", () => {
     expect(new Set(t.fake.deletes).size).toBe(total);
   });
 
+  // #802-T28
+  it("does not let VMs whose delete fails for good starve the others: it picks among the eligible ones, not the oldest", async () => {
+    const t = setup();
+    // Seventy VMs the platform refuses to delete, all older than the 20 that can be.
+    const poison = Array.from({ length: 70 }, (_, index) =>
+      t.jobVm(10 * DAY + index * 1000),
+    );
+    const good = Array.from({ length: 20 }, (_, index) =>
+      t.jobVm(2 * DAY + index * 1000),
+    );
+    for (const name of poison)
+      t.fake.failDeletes(new SandboxServiceError("rejected"), name);
+
+    let runs = 0;
+    while (good.some((name) => t.fake.vms.has(name)) && runs < 30) {
+      const report = await t.reaper.run();
+      expect(report.deleted + report.deleteFailed).toBeLessThanOrEqual(
+        MAX_DELETES_PER_RUN,
+      );
+      runs += 1;
+    }
+
+    expect(good.some((name) => t.fake.vms.has(name))).toBe(false);
+    expect(poison.every((name) => t.fake.vms.has(name))).toBe(true);
+    // Not a certainty for every seed, but with this one it stays well under the thirty runs it is allowed.
+    expect(runs).toBeLessThan(15);
+  });
+
   // #802-T25
   it("goes on after a failed delete, counts it, never fails the run, and deletes that VM in the next run", async () => {
     const t = setup();
     const first = t.jobVm(5 * DAY);
     const second = t.jobVm(5 * DAY);
     t.fake.failDeletes(
-      Object.assign(new SandboxServiceError("unavailable"), {
+      Object.assign(new SandboxServiceError("rejected"), {
         message: "dummy-platform-text-secret",
       }),
       first,
@@ -229,7 +286,7 @@ describe("the reaper's retention of stopped VMs", () => {
     const t = setup();
     for (let index = 0; index < MAX_DELETES_PER_RUN + 5; index += 1)
       t.jobVm(5 * DAY);
-    t.fake.failDeletes(new SandboxServiceError("unavailable"));
+    t.fake.failDeletes(new SandboxServiceError("rejected"));
 
     const report = await t.reaper.run();
 
@@ -237,6 +294,85 @@ describe("the reaper's retention of stopped VMs", () => {
     expect(report).toMatchObject({
       deleted: 0,
       deleteFailed: MAX_DELETES_PER_RUN,
+    });
+  });
+
+  // #802-T29
+  it("counts a VM that is no longer deletable when the platform is asked again as kept, not as deleted", async () => {
+    const t = setup();
+    const back = t.jobVm(5 * DAY);
+    const other = t.jobVm(5 * DAY);
+    t.fake.keepOnDelete(back);
+
+    const report = await t.reaper.run();
+
+    expect(report).toMatchObject({
+      deleted: 1,
+      deleteKept: 1,
+      deleteFailed: 0,
+    });
+    expect(t.fake.vms.has(back)).toBe(true);
+    expect(t.fake.vms.has(other)).toBe(false);
+    expect(t.logger.text()).not.toContain(`vm_deleted {"sandbox":"${back}"}`);
+    expect(t.logger.text()).toContain(`vm_delete_kept {"sandbox":"${back}"}`);
+  });
+
+  // #802-T30
+  it.each<SandboxFailureKind>(["rate_limited", "unavailable"])(
+    "stops its deletions at the first %s answer and counts the rest as not tried, so job launches are not hurt",
+    async (kind) => {
+      const t = setup();
+      for (let index = 0; index < MAX_DELETES_PER_RUN + 10; index += 1)
+        t.jobVm(5 * DAY);
+      t.fake.failDeletes(new SandboxServiceError(kind));
+
+      const report = await t.reaper.run();
+
+      // The first answers are those of the calls already in flight (four at a time); nothing starts after the first.
+      expect(t.fake.deletes.length).toBeLessThanOrEqual(4);
+      expect(report.deleteFailed).toBe(t.fake.deletes.length);
+      expect(report.deleteNotTried).toBe(
+        MAX_DELETES_PER_RUN - t.fake.deletes.length,
+      );
+      expect(report.deleted).toBe(0);
+      expect(t.logger.text()).toContain(`vm_delete_halted {"kind":"${kind}"}`);
+
+      // The next run tries again.
+      t.fake.healDeletes();
+      const next = await t.reaper.run();
+      expect(next).toMatchObject({ deleted: MAX_DELETES_PER_RUN });
+    },
+  );
+
+  // #802-T30
+  it("does not stop for another kind of failure: the other VMs are still tried", async () => {
+    const t = setup();
+    for (let index = 0; index < 10; index += 1) t.jobVm(5 * DAY);
+    t.fake.failDeletes(new SandboxServiceError("rejected"));
+
+    const report = await t.reaper.run();
+
+    expect(t.fake.deletes).toHaveLength(10);
+    expect(report).toMatchObject({ deleteFailed: 10, deleteNotTried: 0 });
+  });
+
+  // #802-T31
+  it("stops starting deletions once the pass has used its time budget, and counts the rest as not tried", async () => {
+    const t = setup();
+    for (let index = 0; index < MAX_DELETES_PER_RUN; index += 1)
+      t.jobVm(5 * DAY);
+    // Each delete takes more than half the budget, and the calls start one after the other: only two start inside it.
+    t.fake.deleteHook = () => {
+      t.clock.now += DELETE_BUDGET_MS / 2 + 1;
+    };
+
+    const report = await t.reaper.run();
+
+    expect(DELETE_BUDGET_MS).toBeLessThan(5 * 60 * 1000);
+    expect(t.fake.deletes).toHaveLength(2);
+    expect(report).toMatchObject({
+      deleted: 2,
+      deleteNotTried: MAX_DELETES_PER_RUN - 2,
     });
   });
 

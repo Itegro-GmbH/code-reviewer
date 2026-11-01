@@ -503,7 +503,15 @@ export function createDispatcherCore(deps: CoreDependencies): DispatcherCore {
       if (!vmCounted) {
         vmCounted = true;
         state.vmsCreated += 1;
-        state.recentVms.push(now());
+        // Only where the platform is listed for the cap (several apps): a deployment with one app needs no memory of its VMs.
+        // Pruned here as well as where it is read, so it stays short when the listing works and nothing reads it.
+        if (deps.liveVms !== undefined) {
+          const since = now() - OWN_VM_MEMORY_MS;
+          state.recentVms = state.recentVms.filter(
+            (createdAt) => createdAt > since,
+          );
+          state.recentVms.push(now());
+        }
         // A VM reported after the launch phase ended is created, but no launch is left to hold it in flight.
         if (!phaseEnded) {
           inFlight = true;

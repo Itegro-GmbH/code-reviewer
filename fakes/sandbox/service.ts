@@ -121,6 +121,9 @@ export class FakeSandboxService {
   private readonly stopErrors = new Map<string, Error>();
   private deleteError: Error | undefined;
   private readonly deleteErrors = new Map<string, Error>();
+  private readonly deleteKeeps = new Set<string>();
+  /** Runs at the start of every `delete`, before it answers: a test moves its clock here to make a delete take time. */
+  deleteHook: ((name: string) => void) | undefined;
   private ignoreFilter = false;
   private waitFailures: { remaining: number; error: Error } | undefined;
   private rename: ((name: string) => string) | undefined;
@@ -170,6 +173,11 @@ export class FakeSandboxService {
   failDeletes(error: Error, name?: string): void {
     if (name === undefined) this.deleteError = error;
     else this.deleteErrors.set(name, error);
+  }
+
+  /** The next `delete` of this VM finds it no longer deletable (it started again meanwhile) and keeps it. */
+  keepOnDelete(name: string): void {
+    this.deleteKeeps.add(name);
   }
 
   /** The `delete` calls work again. */
@@ -390,14 +398,31 @@ export class FakeSandboxService {
       if (process.vm === name && !process.ended) this.end(process, 137);
   }
 
-  /** Removes the VM from the platform: it is no longer listed. Deleting one that is gone is not an error. */
-  async delete(name: string): Promise<void> {
+  /**
+   * Removes the VM from the platform: it is no longer listed. Deleting one that is gone is not an error. Like the adapter,
+   * it looks at the VM again first and keeps one that is up, ending or persistent.
+   */
+  async delete(name: string): Promise<"deleted" | "kept"> {
     this.events.push(`delete:${name}`);
     this.deletes.push(name);
+    this.deleteHook?.(name);
     if (this.deleteError !== undefined) throw this.deleteError;
     const named = this.deleteErrors.get(name);
     if (named !== undefined) throw named;
+    const record = this.vms.get(name);
+    if (
+      this.deleteKeeps.delete(name) ||
+      (record !== undefined &&
+        (record.options.persistent ||
+          !["stopped", "failed", "aborted"].includes(
+            record.state === "running"
+              ? (record.statusWord ?? "running")
+              : (record.statusWord ?? "stopped"),
+          )))
+    )
+      return "kept";
     this.vms.delete(name);
+    return "deleted";
   }
 
   // ---- internals -------------------------------------------------------------------------------
