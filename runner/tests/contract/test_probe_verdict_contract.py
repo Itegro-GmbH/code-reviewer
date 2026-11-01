@@ -62,7 +62,7 @@ def test_the_reasons_of_the_contract_are_the_self_check_reasons() -> None:
     # #331-T08
     listed = set(_PROBE["$defs"]["ProbeReason"]["enum"])
 
-    # The one reason the Dispatcher's canary writes itself (#765) is the contract's, not the runner's.
+    # The one reason the Dispatcher's canary writes (#765) is the contract's, not the runner's.
     assert listed - {"implementer_probe_failed"} == {reason.value for reason in SelfCheckReason}
     assert "implementer_probe_failed" not in {reason.value for reason in SelfCheckReason}
 
