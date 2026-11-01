@@ -515,11 +515,9 @@ describe("the Sandbox-Launcher's configuration from the environment", () => {
     ).toBe(1200 + 300);
   });
 
-  // #759 (additional)
-  it("does not advertise the implementer engine yet although it can launch the kind (#760): no real probe reports it, so a dispatch for the kind is `not_capable`", async () => {
-    const sandbox = sandboxFromEnvironment(configured(), never);
-    const settings = loadSettings({
-      ...BASE,
+  // #765
+  describe("the engines the Launcher advertises", () => {
+    const FACTORY = {
       DISPATCHER_APPS: JSON.stringify([
         {
           id: "factory",
@@ -533,17 +531,40 @@ describe("the Sandbox-Launcher's configuration from the environment", () => {
       DISPATCHER_APP_FACTORY_SIGNING_SECRET:
         "factory-signing-secret-for-tests-000001",
       DISPATCHER_OPERATOR_TOKEN: "operator-token-for-the-tests-0000000001",
+    };
+    const advertised = async (extra: Record<string, string>) => {
+      const sandbox = sandboxFromEnvironment(configured(), never);
+      const launcher = sandbox.launcher({
+        settings: loadSettings({ ...BASE, ...extra }),
+        logger: recordingLogger(),
+        background: () => undefined,
+      });
+      return {
+        launcher,
+        engines: await launcher.capabilities(new AbortController().signal),
+      };
+    };
+
+    it("includes `implementer` when an app of this deployment names the kind, and has a probe that proves it", async () => {
+      const { launcher, engines } = await advertised(FACTORY);
+
+      expect(engines).toStrictEqual(["pr-agent", "opencode", "implementer"]);
+      expect(launcher.probe).toBeDefined();
     });
 
-    const launcher = sandbox.launcher({
-      settings,
-      logger: recordingLogger(),
-      background: () => undefined,
+    it("advertises exactly what it always did when no app names the kind: the reviewer's key never gets it", async () => {
+      const { engines } = await advertised({});
+
+      expect(engines).toStrictEqual(["pr-agent", "opencode"]);
     });
 
-    expect(
-      await launcher.capabilities(new AbortController().signal),
-    ).toStrictEqual(["pr-agent", "opencode"]);
+    it("does not advertise it for a deployment that only names it in DISPATCHER_ENGINES without an app that can have it", async () => {
+      const { engines } = await advertised({
+        DISPATCHER_ENGINES: "pr-agent,opencode",
+      });
+
+      expect(engines).toStrictEqual(["pr-agent", "opencode"]);
+    });
   });
 
   // #364-T18

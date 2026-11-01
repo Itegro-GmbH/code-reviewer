@@ -3,7 +3,12 @@
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
 import { readContract } from "../test-support/harness.ts";
-import { PROBE_REASONS, parseProbeOutput } from "./verdict.ts";
+import {
+  IMPLEMENTER_REASONS,
+  PROBE_REASONS,
+  mergeVerdictOutputs,
+  parseProbeOutput,
+} from "./verdict.ts";
 
 const line = (document: unknown) => `${JSON.stringify(document)}\n`;
 
@@ -176,5 +181,91 @@ describe("the probe verdict", () => {
         reasons: verdict?.reasons,
       }),
     ).toBe(true);
+  });
+
+  // #765-T08
+  it("knows `implementer` as an engine and proves it only on top of a passing Dynamic check", () => {
+    const three = ["pr-agent", "opencode", "implementer"];
+
+    expect(
+      parseProbeOutput(line({ version: 1, engines: three, reasons: [] })),
+    ).toStrictEqual({ engines: three, reasons: [], passed: true });
+    // Never without opencode, whatever the line claims.
+    expect(
+      parseProbeOutput(
+        line({
+          version: 1,
+          engines: ["pr-agent", "implementer"],
+          reasons: ["pin_unreadable"],
+        }),
+      )?.engines,
+    ).toStrictEqual(["pr-agent"]);
+    // Not with a reason of its own in the same line.
+    expect(
+      parseProbeOutput(
+        line({
+          version: 1,
+          engines: three,
+          reasons: ["implementer_work_dir_not_exec"],
+        }),
+      )?.engines,
+    ).toStrictEqual(["pr-agent", "opencode"]);
+  });
+
+  // #765-T08
+  it("keeps the Implementer's reasons apart from the reasons against opencode", () => {
+    const verdict = parseProbeOutput(
+      line({
+        version: 1,
+        engines: ["pr-agent", "opencode"],
+        reasons: ["implementer_git_too_old"],
+      }),
+    );
+
+    expect(verdict).toStrictEqual({
+      engines: ["pr-agent", "opencode"],
+      reasons: ["implementer_git_too_old"],
+      passed: true,
+    });
+    expect(IMPLEMENTER_REASONS).toHaveLength(8);
+    expect(IMPLEMENTER_REASONS.every((r) => PROBE_REASONS.includes(r))).toBe(
+      true,
+    );
+  });
+
+  // #765-T08
+  it("unites the verdicts of two containers: a failure of either leaves its engine out", () => {
+    const dynamic = line({
+      version: 1,
+      engines: ["pr-agent", "opencode"],
+      reasons: [],
+    });
+    const proving = line({
+      version: 1,
+      engines: ["pr-agent", "opencode", "implementer"],
+      reasons: [],
+    });
+    const failing = line({
+      version: 1,
+      engines: ["pr-agent"],
+      reasons: ["engine_binary_missing"],
+    });
+
+    expect(
+      parseProbeOutput(mergeVerdictOutputs([dynamic, proving])),
+    ).toStrictEqual({
+      engines: ["pr-agent", "opencode", "implementer"],
+      reasons: [],
+      passed: true,
+    });
+    const hidden = parseProbeOutput(mergeVerdictOutputs([dynamic, failing]));
+    expect(hidden?.passed).toBe(false);
+    expect(hidden?.engines).toStrictEqual(["pr-agent"]);
+    expect(mergeVerdictOutputs([dynamic, "not a verdict"])).toBe(
+      "not a verdict",
+    );
+    expect(
+      parseProbeOutput(mergeVerdictOutputs(["not a verdict", dynamic])),
+    ).toBeUndefined();
   });
 });

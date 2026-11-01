@@ -6,7 +6,12 @@ import {
   ProbeRunError,
   createCapabilityProbe,
 } from "../probe/capability-probe.ts";
+import { Hono } from "hono";
+import { runCanary as runDeployCanary } from "../probe/canary.ts";
 import { withProbeEndpoint } from "../probe/probe-endpoint.ts";
+import { mountProbeRoute } from "../probe/route.ts";
+import { parseProbeOutput } from "../probe/verdict.ts";
+import { DISPATCHER_TOKEN } from "../test-support/harness.ts";
 import {
   recordingLogger,
   type RecordedLogger,
@@ -408,5 +413,233 @@ describe("a Sandbox-Launcher with the probe endpoint over its canary VM (#479)",
     await Promise.all(calls);
 
     expect(service.creates).toHaveLength(1);
+  });
+});
+
+// #765: a deployment that serves the Implementer has the canary prove it, in a container of the Implementer's profile.
+describe("the canary VM of a deployment that serves the Implementer (#765)", () => {
+  const WITH_IMPLEMENTER = `${JSON.stringify({ version: 1, engines: ["pr-agent", "opencode", "implementer"], reasons: [] })}\n`;
+  const WITHOUT_IMPLEMENTER = `${JSON.stringify({ version: 1, engines: ["pr-agent", "opencode"], reasons: ["implementer_work_dir_not_exec"] })}\n`;
+  const implementerCall = () =>
+    service.execs.find((call) => call.label === "probe-implementer");
+
+  function serving(overrides: Partial<SandboxCanaryOptions> = {}) {
+    return canary({ implementer: { config: {} }, ...overrides });
+  }
+
+  it("runs a second probe in the same VM, after the work volume is made, in the Implementer's profile", async () => {
+    service.onExec("probe-implementer", { stdout: WITH_IMPLEMENTER });
+
+    await serving()(signal());
+
+    expect(service.creates).toHaveLength(1);
+    const labels = service.execs.map((call) => call.label);
+    expect(labels).toStrictEqual([
+      "vm-prepare",
+      "image-id",
+      "probe",
+      "work-volume-dir",
+      "work-volume-mount",
+      "work-volume-options",
+      "work-volume-check",
+      "work-volume-create",
+      "probe-implementer",
+    ]);
+    const args = implementerCall()?.args ?? [];
+    expect(args.join(" ")).toMatch(
+      /--mount type=volume,source=code-reviewer-work-canary-[a-z0-9]{8},target=\/work/,
+    );
+    expect(args).toContain("--read-only");
+    expect(valuesOf(args, "--env")).toEqual(
+      expect.arrayContaining([
+        "RUNNER_IMPLEMENTER_WORK_DIR=/work",
+        "RUNNER_IMPLEMENTER_NETWORK=registries",
+      ]),
+    );
+    expect(args.at(-1)).toBe("probe");
+    expect(args).toContain(IMAGE_ID);
+    expect(service.running()).toStrictEqual([]);
+    // The Dynamic probe stays what it was: no work volume in it.
+    expect(probeCall()?.args.join(" ")).not.toContain("type=volume");
+    expect(probeCall()?.args.join(" ")).not.toContain("RUNNER_IMPLEMENTER");
+  });
+
+  it("answers one verdict that holds `implementer` only when the Implementer's container proved it", async () => {
+    service.onExec("probe-implementer", { stdout: WITH_IMPLEMENTER });
+    const proven = parseProbeOutput(await serving()(signal()));
+    service.onExec("probe-implementer", { stdout: WITHOUT_IMPLEMENTER });
+    const refused = parseProbeOutput(await serving()(signal()));
+
+    expect(proven?.engines).toStrictEqual([
+      "pr-agent",
+      "opencode",
+      "implementer",
+    ]);
+    expect(refused?.engines).toStrictEqual(["pr-agent", "opencode"]);
+    expect(refused?.reasons).toStrictEqual(["implementer_work_dir_not_exec"]);
+  });
+
+  it("does not let a failure of the Dynamic container be hidden by the Implementer's", async () => {
+    service.onExec("probe", { stdout: DENYING });
+    service.onExec("probe-implementer", { stdout: WITH_IMPLEMENTER });
+
+    const verdict = parseProbeOutput(await serving()(signal()));
+
+    expect(verdict?.passed).toBe(false);
+    expect(verdict?.engines).not.toContain("opencode");
+    expect(verdict?.engines).not.toContain("implementer");
+  });
+
+  it("reports an Implementer container that does not answer as a probe failure, and stops the VM", async () => {
+    service.onExec("probe-implementer", { exitCode: 2 });
+
+    expect((await failure(serving()(signal()))).code).toBe(
+      "probe_exit_nonzero",
+    );
+    service.onExec("work-volume-create", { exitCode: 1 });
+    expect((await failure(serving()(signal()))).code).toBe(
+      "work_volume_failed",
+    );
+    expect(service.running()).toStrictEqual([]);
+  });
+
+  it("does nothing more for a deployment without the kind: one probe, no work volume", async () => {
+    await canary()(signal());
+
+    expect(implementerCall()).toBeUndefined();
+    expect(
+      service.execs.filter((call) => call.label.startsWith("work-volume")),
+    ).toStrictEqual([]);
+    expect(service.execs.filter((call) => call.label === "probe")).toHaveLength(
+      1,
+    );
+  });
+});
+
+/** The deploy canary (`pnpm probe:canary`) reading this answer of `POST /probe`, with its default `--engines`. */
+async function runCanary(
+  report: unknown,
+  status: number,
+  lines: string[],
+): Promise<number> {
+  const answer: typeof fetch = (input) =>
+    Promise.resolve(
+      String(input).endsWith("/health")
+        ? new Response("{}")
+        : new Response(JSON.stringify(report), { status }),
+    );
+  return runDeployCanary({
+    url: "https://dispatcher.example",
+    token: DISPATCHER_TOKEN,
+    fetch: answer,
+    clock: { sleep: () => Promise.resolve() },
+    write: (line) => lines.push(line),
+  });
+}
+
+// #765: the whole chain behind `POST /probe`: the Launcher, its canary, the endpoint and the route.
+describe("POST /probe of a Sandbox-Launcher that serves the Implementer (#765)", () => {
+  const WITH_IMPLEMENTER = `${JSON.stringify({ version: 1, engines: ["pr-agent", "opencode", "implementer"], reasons: [] })}\n`;
+  const LACKING = `${JSON.stringify({ version: 1, engines: ["pr-agent", "opencode"], reasons: [] })}\n`;
+
+  async function probeRoute(options: {
+    serves: boolean;
+    implementerStdout: string;
+  }) {
+    service.onExec("probe-implementer", { stdout: options.implementerStdout });
+    const launcher = createSandboxLauncher({
+      service,
+      snapshotId: SNAPSHOT_ID,
+      imageDigest: IMAGE_ID,
+      logger,
+      clock,
+      ...(options.serves ? { servesImplementer: true } : {}),
+    });
+    const probe = createCapabilityProbe({
+      run: canary(options.serves ? { implementer: { config: {} } } : {}),
+      clock,
+      now: () => clock.now(),
+      logger,
+    });
+    const app = new Hono();
+    mountProbeRoute(app, {
+      token: "operator-token-for-the-tests-0000000001",
+      engines: options.serves
+        ? ["pr-agent", "opencode", "implementer"]
+        : ["pr-agent", "opencode"],
+      launcher: withProbeEndpoint({ launcher, probe }),
+      logger,
+    });
+    const response = await app.request("/probe", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer operator-token-for-the-tests-0000000001",
+      },
+    });
+    return {
+      status: response.status,
+      body: (await response.json()) as Record<string, unknown>,
+    };
+  }
+
+  it("answers 200 and names `implementer` when the canary proved it", async () => {
+    const { status, body } = await probeRoute({
+      serves: true,
+      implementerStdout: WITH_IMPLEMENTER,
+    });
+
+    expect(status).toBe(200);
+    expect(body).toMatchObject({
+      ok: true,
+      status: "passed",
+      engines: ["pr-agent", "opencode", "implementer"],
+      required: ["pr-agent", "opencode", "implementer"],
+    });
+  });
+
+  it("answers 503 when the report lacks `implementer`, and the deploy canary blocks with `missing`", async () => {
+    const { status, body } = await probeRoute({
+      serves: true,
+      implementerStdout: LACKING,
+    });
+
+    expect(status).toBe(503);
+    expect(body).toMatchObject({
+      ok: false,
+      required: ["pr-agent", "opencode", "implementer"],
+    });
+    expect(body.engines).not.toContain("implementer");
+    const lines: string[] = [];
+    const code = await runCanary(body, status, lines);
+    expect(code).toBe(1);
+    expect(lines.join("\n")).toContain("missing=implementer");
+  });
+
+  it("is unchanged for a deployment without the kind: 200 with no `implementer` anywhere, one canary probe", async () => {
+    const { status, body } = await probeRoute({
+      serves: false,
+      implementerStdout: "not read",
+    });
+
+    expect(status).toBe(200);
+    expect(body).toMatchObject({
+      ok: true,
+      engines: ["pr-agent", "opencode"],
+      required: ["pr-agent", "opencode"],
+    });
+    expect(
+      service.execs.some((call) => call.label === "probe-implementer"),
+    ).toBe(false);
+  });
+
+  it("makes the deploy canary pass on a deployment with the kind and its default `--engines`", async () => {
+    const { status, body } = await probeRoute({
+      serves: true,
+      implementerStdout: WITH_IMPLEMENTER,
+    });
+    const lines: string[] = [];
+
+    expect(await runCanary(body, status, lines)).toBe(0);
+    expect(lines.join("\n")).toContain("engines=pr-agent,opencode,implementer");
   });
 });

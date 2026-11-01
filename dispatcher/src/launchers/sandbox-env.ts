@@ -230,6 +230,9 @@ export function sandboxFromEnvironment(
       // Only a deployment that serves Dynamic jobs reads (and refuses) the Dynamic configuration: a typo in a variable
       // it does not use must not take its Diff jobs down.
       const serversDynamic = settings.core.engines.includes("opencode");
+      // The Launcher advertises `implementer` only for a deployment that serves it (#765), and then the canary has to
+      // prove it (`POST /probe` requires every engine the Launcher advertises that the deployment serves).
+      const servesImplementer = settings.core.engines.includes("implementer");
       const dynamic = serversDynamic ? dynamicEnvironment(env) : {};
       const launcher = createSandboxLauncher({
         service,
@@ -239,9 +242,11 @@ export function sandboxFromEnvironment(
         vmTimeoutMarginSeconds,
         logger,
         dynamicEnvironment: dynamic,
+        servesImplementer,
       });
-      // A deployment that serves no Dynamic job has nothing to prove: no canary VM is ever made for it.
-      if (!serversDynamic) return launcher;
+      // A deployment that serves neither a Dynamic job nor the Implementer has nothing to prove: no canary VM is ever
+      // made for it.
+      if (!serversDynamic && !servesImplementer) return launcher;
       // `opencode` is advertised by the Launcher like any engine (#479): a Dynamic job is accepted whenever
       // `DISPATCHER_ENGINES` has it and the snapshot pair is set, and no canary VM is started by a dispatch. The proof is the
       // deploy canary, which must pass before a deployment goes live; the snapshot pair and the settings cannot change
@@ -254,6 +259,13 @@ export function sandboxFromEnvironment(
           logger,
           config: settings.core.workerConfig.dynamic,
           environment: dynamic,
+          ...(servesImplementer
+            ? {
+                implementer: {
+                  config: settings.core.workerConfig.implementer ?? {},
+                },
+              }
+            : {}),
           timeoutSeconds: probeTimeoutSeconds,
           vmTimeoutMarginSeconds,
         }),

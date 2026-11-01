@@ -26,7 +26,11 @@ const DEFAULT_PROBE_TIMEOUT_SECONDS = 300;
 const HOST_NAME = /^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/;
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const ENGINES: readonly Engine[] = ["pr-agent", "opencode"];
-/** Every engine the route can name in an answer: `implementer` is no default of the canary, but a Dispatcher may require it. */
+/**
+ * Every engine the route can name in an answer. `implementer` is no default of the canary (the default stays the two
+ * reviewer engines, so a deployment without the kind is unchanged), but a deployment that serves it has the route require
+ * it (`report.required`), and the canary then blocks without it; `--engines` may also name it.
+ */
 const REPORTED_ENGINES: readonly Engine[] = [...ENGINES, "implementer"];
 const PLATFORM_API = "https://api.vercel.com";
 
@@ -117,7 +121,7 @@ export class CanaryUsageError extends Error {
 }
 
 const USAGE =
-  "usage: probe:canary --url <https://dispatcher> [--allowed-hosts <host,host>] [--verify-vercel [--expect-commit <sha>]] [--check-only] [--engines pr-agent,opencode] [--wait-seconds <n>] [--timeout-seconds <n>]; the credential is DISPATCHER_OPERATOR_TOKEN in the environment, else RUNNER_TOKEN (before the Dispatcher has an operator token), the allowed hosts may also be CANARY_ALLOWED_HOSTS; CANARY_EXPECT_IMAGE_DIGEST is the image id the deployment must report; --verify-vercel reads VERCEL_TOKEN, VERCEL_TEAM_ID and VERCEL_PROJECT_ID (the Dispatcher project) from the environment";
+  "usage: probe:canary --url <https://dispatcher> [--allowed-hosts <host,host>] [--verify-vercel [--expect-commit <sha>]] [--check-only] [--engines pr-agent,opencode[,implementer]] [--wait-seconds <n>] [--timeout-seconds <n>]; the credential is DISPATCHER_OPERATOR_TOKEN in the environment, else RUNNER_TOKEN (before the Dispatcher has an operator token), the allowed hosts may also be CANARY_ALLOWED_HOSTS; CANARY_EXPECT_IMAGE_DIGEST is the image id the deployment must report; --verify-vercel reads VERCEL_TOKEN, VERCEL_TEAM_ID and VERCEL_PROJECT_ID (the Dispatcher project) from the environment";
 
 function seconds(value: string | undefined, name: string, max: number): number {
   const number = Number(value);
@@ -195,9 +199,11 @@ export function parseCanaryArguments(
   const requiredEngines = (
     named === undefined ? [...ENGINES] : named.split(",")
   ).map((engine) => {
-    const known = ENGINES.find((candidate) => candidate === engine);
+    const known = REPORTED_ENGINES.find((candidate) => candidate === engine);
     if (known === undefined)
-      throw new CanaryUsageError("--engines takes pr-agent and opencode");
+      throw new CanaryUsageError(
+        "--engines takes pr-agent, opencode and implementer",
+      );
     return known;
   });
   const bypass = env.VERCEL_AUTOMATION_BYPASS_SECRET;

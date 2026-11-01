@@ -27,6 +27,7 @@ export const PROBE_FAILURE_CODES = [
   "sandbox_config_invalid",
   "docker_not_ready",
   "vm_prepare_failed",
+  "work_volume_failed",
   "image_missing",
   "image_mismatch",
 ] as const;

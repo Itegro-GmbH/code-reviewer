@@ -10,6 +10,10 @@
 //      container spec, the memory of the Dynamic kind, the two IPv6 switches of the Sandbox variant, the Dynamic
 //      environment of a job) and the entry mode `probe`: no stdin, no App URL, no token, no credential
 //   4. the stdout is the verdict, handed on unread (`probe/verdict.ts` reads it)
+//   4b. a deployment that serves the Implementer (`implementer` option, #765) runs the probe a second time in the same
+//       VM, in the Implementer's profile: its work volume made the way a job's is, its flags and environment, the
+//       `probe` mode. Only that container can prove `implementer`; the two verdicts are united into one
+//       (`mergeVerdictOutputs`), so a failure of either leaves its engine out.
 //   5. the VM is stopped by name, whatever happened
 //
 // It returns the output or rejects with a `ProbeRunError` whose code is stable: the launch error codes of a job VM
@@ -22,9 +26,16 @@ import {
   type Logger,
 } from "../core/types.ts";
 import { ProbeRunError, type ProbeRunner } from "../probe/capability-probe.ts";
+import { mergeVerdictOutputs } from "../probe/verdict.ts";
 import { systemClock } from "../core/clock.ts";
-import { ContainerSpecError, renderDockerRunArguments } from "./container.ts";
 import {
+  ContainerSpecError,
+  renderDockerRunArguments,
+  workVolumeCommands,
+  workVolumeName,
+} from "./container.ts";
+import {
+  IMPLEMENTER_CONTAINER_SPEC,
   SANDBOX_LAUNCHER_ADDITIONS,
   WORKER_CONTAINER_SPEC,
 } from "./container-spec.ts";
@@ -32,7 +43,9 @@ import { SandboxDockerHost } from "./sandbox-host.ts";
 import {
   CONTAINER_ENVIRONMENT,
   CREATE_FAILURES,
+  IMPLEMENTER_ENVIRONMENT,
   SANDBOX_IMAGE_REFERENCE,
+  WORK_VOLUME_ROOT,
   SANDBOX_REGION,
   VM_TIMEOUT_MARGIN_SECONDS,
   planForKind,
@@ -59,6 +72,14 @@ export type SandboxCanaryOptions = {
   config: LaunchConfig;
   /** What a Dynamic job's container is given besides the base: `RUNNER_DYNAMIC_CAPABILITIES`, `RUNNER_DYNAMIC_MAX_COST_USD`. */
   environment?: Readonly<Record<string, string>>;
+  /**
+   * Present for a deployment that serves the Implementer (#765): the part of `DISPATCHER_WORKER_CONFIG` for that kind
+   * (the VM of the canary is as large as the larger of the two kinds, the container memory is the kind's own). The
+   * canary then also runs the probe in the Implementer's profile.
+   */
+  implementer?: { config: LaunchConfig };
+  /** Where the work volume of the Implementer's probe is made; the Launcher's own root unless a test brings one. */
+  workVolumeRoot?: string;
   /** The time the probe is given (the VM timeout is this plus the margin). */
   timeoutSeconds?: number;
   vmTimeoutMarginSeconds?: number;
@@ -108,8 +129,64 @@ export function createSandboxCanary(
     return new ProbeRunError(fallback);
   }
 
+  /** The probe in the Implementer's profile: the work volume, then the container (#765). */
+  async function probeImplementer(
+    plan: ReturnType<typeof planForKind>,
+    vm: SandboxVm,
+    host: SandboxDockerHost,
+    suffix: string,
+    signal: AbortSignal,
+  ): Promise<string> {
+    const volume = workVolumeName(`canary-${suffix}`);
+    try {
+      await host.createWorkVolume(
+        workVolumeCommands(IMPLEMENTER_CONTAINER_SPEC, {
+          name: volume,
+          root: options.workVolumeRoot ?? WORK_VOLUME_ROOT,
+        }),
+        signal,
+      );
+    } catch (error) {
+      throw codeOf(error, signal, "work_volume_failed");
+    }
+    let args: string[];
+    try {
+      args = renderDockerRunArguments(IMPLEMENTER_CONTAINER_SPEC, {
+        image: options.imageDigest,
+        environment: { ...CONTAINER_ENVIRONMENT, ...IMPLEMENTER_ENVIRONMENT },
+        command: ["probe"],
+        overrides: plan.overrides,
+        additions: SANDBOX_LAUNCHER_ADDITIONS,
+        workVolume: volume,
+      });
+    } catch (error) {
+      throw codeOf(error, signal, "sandbox_config_invalid");
+    }
+    let result;
+    try {
+      result = await vm.exec(
+        {
+          label: "probe-implementer",
+          cmd: "docker",
+          args,
+          sudo: true,
+          timeoutMs: PROBE_RUN_TIMEOUT_MS,
+        },
+        signal,
+      );
+    } catch (error) {
+      throw codeOf(error, signal, "probe_exec_failed");
+    }
+    if (result.exitCode !== 0) throw new ProbeRunError("probe_exit_nonzero");
+    return result.stdout;
+  }
+
   return async (signal) => {
     const plan = planForKind("dynamic", options.config);
+    const implementerPlan =
+      options.implementer === undefined
+        ? undefined
+        : planForKind("implementer", options.implementer.config);
     const suffix = (
       options.newSuffix ??
       (() => crypto.randomUUID().replace(/-/g, "").slice(0, 8))
@@ -123,7 +200,8 @@ export function createSandboxCanary(
           name: requested,
           snapshotId: options.snapshotId,
           region: SANDBOX_REGION,
-          vcpus: plan.vcpus,
+          // The Implementer's probe runs in the same VM: it must hold the larger container.
+          vcpus: Math.max(plan.vcpus, implementerPlan?.vcpus ?? 0),
           timeoutMs: (timeoutSeconds + marginSeconds) * 1000,
           tags: { app: "code-reviewer", kind: "canary", job: "canary" },
           persistent: false,
@@ -186,7 +264,15 @@ export function createSandboxCanary(
       }
       // The exit status says whether the probe ran (runner/README.md): 0 with a verdict, 2 without one.
       if (result.exitCode !== 0) throw new ProbeRunError("probe_exit_nonzero");
-      return result.stdout;
+      if (implementerPlan === undefined) return result.stdout;
+      const second = await probeImplementer(
+        implementerPlan,
+        vm,
+        host,
+        suffix,
+        signal,
+      );
+      return mergeVerdictOutputs([result.stdout, second]);
     } finally {
       await stopQuietly(name);
     }
