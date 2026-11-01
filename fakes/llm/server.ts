@@ -55,6 +55,8 @@ export type FakeLlmRequest = {
   toolResults: Record<string, string>;
   /** The `provider` object of the body (OpenRouter's routing options, #270); null when absent. */
   provider: Record<string, unknown> | null;
+  /** Where the request put `cache_control`: on message objects, on content parts, on tools, and at the top level. */
+  cacheMarks: { messages: number; parts: number; tools: number; top: boolean };
   /** The `usage` the chat answer stated (cache tokens included), once it was sent; absent for a request that got an error. */
   usage?: Record<string, unknown>;
 };
@@ -405,6 +407,28 @@ function toolCompletion(
   };
 }
 
+function cacheMarksOf(
+  body: Record<string, unknown>,
+): FakeLlmRequest["cacheMarks"] {
+  const marked = (value: unknown) =>
+    typeof value === "object" && value !== null && "cache_control" in value;
+  const messages = Array.isArray(body.messages)
+    ? (body.messages as Array<Record<string, unknown>>)
+    : [];
+  return {
+    messages: messages.filter(marked).length,
+    parts: messages
+      .flatMap((message) =>
+        Array.isArray(message.content) ? (message.content as unknown[]) : [],
+      )
+      .filter(marked).length,
+    tools: (Array.isArray(body.tools) ? (body.tools as unknown[]) : []).filter(
+      marked,
+    ).length,
+    top: "cache_control" in body,
+  };
+}
+
 /** A chat request as the cache sees it: the same blocks, a mark on a part or at the top level kept, one on a message object left out. */
 function chatAsMessages(
   body: Record<string, unknown>,
@@ -730,6 +754,7 @@ export async function startLlmFake(
             tools,
             toolResults: {},
             provider: null,
+            cacheMarks: { messages: 0, parts: 0, tools: 0, top: false },
           });
           return accept(messagesText(model, replies.review, usage));
         };
@@ -812,6 +837,7 @@ export async function startLlmFake(
         tools: toolNames((body as { tools?: unknown }).tools),
         toolResults: toolResultsOf(messages),
         provider: providerOf((body as { provider?: unknown }).provider),
+        cacheMarks: cacheMarksOf(body as Record<string, unknown>),
       };
       log.push(entry);
 

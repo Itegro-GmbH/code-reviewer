@@ -786,6 +786,12 @@ test.describe("a task on its way from the form of the Implementer to a branch on
           { cache_write_tokens?: number } | undefined
       )?.cache_write_tokens ?? 0;
     expect(answered.length).toBeGreaterThanOrEqual(4);
+    // Where the engine put its marks decides whether a provider can cache; the fake counts a mark on a part or at the top.
+    const marks = theLlm.requests().map((item) => item.cacheMarks);
+    expect(
+      marks.some((mark) => mark.parts > 0 || mark.top),
+      `the engine marked no part of its prompt for the cache: ${JSON.stringify(marks.slice(-3))}`,
+    ).toBe(true);
     expect(
       answered.slice(1).some((usage) => cached(usage) > 0),
       "a later call read from the cache",
