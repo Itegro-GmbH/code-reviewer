@@ -281,7 +281,6 @@ def main(argv: list[str]) -> int:
             {"installation-token": job.git.token, "model-key": job.llm.api_key},
             f"{git_log}.{os.getpid()}.scan.json",
         )
-        subprocess.Popen(["sleep", "600"], start_new_session=True)  # MUTANT
         return result
 
     runner.run_implementer_job = run_and_scan
