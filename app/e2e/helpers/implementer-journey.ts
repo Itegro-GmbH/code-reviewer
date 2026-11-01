@@ -273,20 +273,24 @@ export function expectRunnerPushedOnlyForward(
   commands: GitCommand[],
   branch: string,
 ): void {
-  const pushes = commands.filter((command) => command.argv[0] === "push");
+  // `--git-dir /work/mirror.git -c gc.auto=0 ... push --porcelain <remote> <refspec>`: what follows `push` is the command.
+  const pushes = commands.flatMap(({ argv }) => {
+    const at = argv.indexOf("push");
+    return at < 0 ? [] : [argv.slice(at)];
+  });
   expect(pushes.length).toBeGreaterThan(0);
   const refspec = `refs/heads/${branch}:refs/heads/${branch}`;
-  for (const { argv } of pushes) {
-    expect(argv, "a push names the branch it pushes").toContain(refspec);
-    // `push --porcelain <remote> <refspec>`: nothing else, in particular no force in any spelling and no deletion.
-    expect(argv.slice(0, 2)).toEqual(["push", "--porcelain"]);
-    expect(argv).toHaveLength(4);
-    for (const argument of argv) {
+  for (const rest of pushes) {
+    // `push --porcelain <remote> <refspec>`: nothing else, in particular no force in any spelling and no deletion, and
+    // the one refspec is the agent's branch to the same name, without a `+`.
+    expect(rest.slice(0, 2)).toEqual(["push", "--porcelain"]);
+    expect(rest, "a push is made of four words").toHaveLength(4);
+    expect(rest[3]).toBe(refspec);
+    expect(rest[2]).toMatch(/^https?:\/\/[^@\s]+$/);
+    for (const argument of rest)
       expect(argument).not.toMatch(
         /^(-f|--force.*|--mirror|--delete|--prune|--tags|--all|--follow-tags|\+.*|:.*)$/,
       );
-    }
-    expect(argv[3]).toBe(refspec);
   }
 }
 
