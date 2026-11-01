@@ -176,8 +176,10 @@ export type FakeLlm = {
    * Claude docs (`anthropic-cache.ts`, #539): cache tokens in the Messages shape, or `cached_tokens` and
    * `cache_write_tokens` with a discounted `usage.cost` in the chat shape, and a request the API would refuse (more
    * than four breakpoints, a mark on a message object) answered with its 400. Off by default and by `reset()`.
+   * `messageMarks`: a mark on a message object of a chat request counts, as a gateway that honours it caches up to the end of
+   * that message (it is where the engine puts the mark for an OpenAI-compatible provider, #767); by default it is left out.
    */
-  enablePromptCache(on: boolean): void;
+  enablePromptCache(on: boolean, options?: { messageMarks?: boolean }): void;
   /**
    * The next `POST /messages` that is accepted answers with this message verbatim (thinking blocks and all), in
    * the order queued, once each; the request is checked as always (#533).
@@ -429,9 +431,10 @@ function cacheMarksOf(
   };
 }
 
-/** A chat request as the cache sees it: the same blocks, a mark on a part or at the top level kept, one on a message object left out. */
+/** A chat request as the cache sees it: the same blocks, a mark on a part or at the top level kept, one on a message object left out (unless the provider honours it). */
 function chatAsMessages(
   body: Record<string, unknown>,
+  honourMessageMarks = false,
 ): Record<string, unknown> {
   const messages = (Array.isArray(body.messages) ? body.messages : []).map(
     (raw: Record<string, unknown>) => {
@@ -442,14 +445,17 @@ function chatAsMessages(
           : Array.isArray(content)
             ? [...(content as unknown[])]
             : [];
-      const {
-        role,
-        content: _content,
-        cache_control: _control,
-        ...extra
-      } = raw;
+      const { role, content: _content, cache_control: control, ...extra } = raw;
       if (Object.keys(extra).length > 0)
         parts.push({ type: "text", text: JSON.stringify(extra) });
+      // A gateway that honours the mark on the message object (the engine puts it there for an OpenAI-compatible provider)
+      // caches up to the end of that message: the mark moves to its last part.
+      const last = parts.at(-1);
+      if (honourMessageMarks && control !== undefined && last !== undefined)
+        parts[parts.length - 1] = {
+          ...(last as Record<string, unknown>),
+          cache_control: control,
+        };
       return { role: typeof role === "string" ? role : "user", content: parts };
     },
   );
@@ -577,6 +583,7 @@ export async function startLlmFake(
   let messageLog: FakeMessagesRequest[] = [];
   let messagesUsage: FakeMessagesUsage = DEFAULT_MESSAGES_USAGE;
   let promptCache: PromptCache | null = null;
+  let messageMarks = false;
   let chatUsageOverride: ChatUsage | null = null;
   // What the Claude API refuses with a 400, and the thinking blocks it issued (#533).
   let strictApi = new StrictMessagesApi();
@@ -863,7 +870,7 @@ export async function startLlmFake(
         if (promptCache !== null && error === null) {
           try {
             const counted = promptCache.usage(
-              chatAsMessages(body as Record<string, unknown>),
+              chatAsMessages(body as Record<string, unknown>, messageMarks),
               50,
               { minimum: 1024 },
             );
@@ -984,8 +991,9 @@ export async function startLlmFake(
       holding = on;
       if (!on) release();
     },
-    enablePromptCache(on) {
+    enablePromptCache(on, options) {
       promptCache = on ? new PromptCache() : null;
+      messageMarks = on && options?.messageMarks === true;
     },
     reset() {
       holding = false;

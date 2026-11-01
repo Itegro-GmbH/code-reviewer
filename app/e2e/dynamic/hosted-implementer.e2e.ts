@@ -748,7 +748,9 @@ test.describe("a task on its way from the form of the Implementer to a branch on
   }) => {
     const theLlm = required(llm, "The fake LLM");
     const branch = "implementer/e11";
-    theLlm.enablePromptCache(true);
+    // The engine marks two message objects of its prompt (the mark it puts there for an OpenAI-compatible provider); the provider
+    // of this journey honours it.
+    theLlm.enablePromptCache(true, { messageMarks: true });
     theLlm.scriptAgent({
       when: { lastUserContains: "[E11-CACHE]" },
       steps: [
@@ -786,11 +788,11 @@ test.describe("a task on its way from the form of the Implementer to a branch on
           { cache_write_tokens?: number } | undefined
       )?.cache_write_tokens ?? 0;
     expect(answered.length).toBeGreaterThanOrEqual(4);
-    // Where the engine put its marks decides whether a provider can cache; the fake counts a mark on a part or at the top.
+    // The engine marked its prompt for the cache: on the message objects.
     const marks = theLlm.requests().map((item) => item.cacheMarks);
     expect(
-      marks.some((mark) => mark.parts > 0 || mark.top),
-      `the engine marked no part of its prompt for the cache: ${JSON.stringify(marks.slice(-3))}`,
+      marks.some((mark) => mark.messages > 0),
+      `the engine marked nothing: ${JSON.stringify(marks.slice(-3))}`,
     ).toBe(true);
     expect(
       answered.slice(1).some((usage) => cached(usage) > 0),
