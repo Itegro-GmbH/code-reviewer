@@ -109,6 +109,8 @@ export class FakeSandboxService {
   readonly starts: FakeExecCall[] = [];
   /** Every name `stop` was called with, in order. */
   readonly stops: string[] = [];
+  /** Every name `delete` was called with, in order. */
+  readonly deletes: string[] = [];
   readonly vms = new Map<string, FakeVmRecord>();
   private readonly processes: FakeProcessRecord[] = [];
   private readonly rules: Rule[] = [];
@@ -117,6 +119,8 @@ export class FakeSandboxService {
   private createGate: Deferred<void> | undefined;
   private stopError: Error | undefined;
   private readonly stopErrors = new Map<string, Error>();
+  private deleteError: Error | undefined;
+  private readonly deleteErrors = new Map<string, Error>();
   private ignoreFilter = false;
   private waitFailures: { remaining: number; error: Error } | undefined;
   private rename: ((name: string) => string) | undefined;
@@ -160,6 +164,18 @@ export class FakeSandboxService {
   failStops(error: Error, name?: string): void {
     if (name === undefined) this.stopError = error;
     else this.stopErrors.set(name, error);
+  }
+
+  /** Every following `delete` throws this error; with a name, only the `delete` of that VM does. */
+  failDeletes(error: Error, name?: string): void {
+    if (name === undefined) this.deleteError = error;
+    else this.deleteErrors.set(name, error);
+  }
+
+  /** The `delete` calls work again. */
+  healDeletes(): void {
+    this.deleteError = undefined;
+    this.deleteErrors.clear();
   }
 
   /** The `stop` calls work again (a failed stop is retried by the next run of the reaper). */
@@ -372,6 +388,16 @@ export class FakeSandboxService {
     delete record.statusWord;
     for (const process of this.processes)
       if (process.vm === name && !process.ended) this.end(process, 137);
+  }
+
+  /** Removes the VM from the platform: it is no longer listed. Deleting one that is gone is not an error. */
+  async delete(name: string): Promise<void> {
+    this.events.push(`delete:${name}`);
+    this.deletes.push(name);
+    if (this.deleteError !== undefined) throw this.deleteError;
+    const named = this.deleteErrors.get(name);
+    if (named !== undefined) throw named;
+    this.vms.delete(name);
   }
 
   // ---- internals -------------------------------------------------------------------------------

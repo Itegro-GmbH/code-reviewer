@@ -117,7 +117,7 @@ export type ListFilter = {
 
 /**
  * What the reaper (#364) needs of the platform, next to the Launcher's `SandboxService`: list the VMs of the
- * project by a filter, and stop one by name. The platform's filter is a narrowing, never the check: the reaper
+ * project by a filter, and stop or delete one by name. The platform's filter is a narrowing, never the check: the reaper
  * decides itself which VMs are ours.
  */
 export interface SandboxFleet {
@@ -125,4 +125,9 @@ export interface SandboxFleet {
   list(filter: ListFilter, signal?: AbortSignal): Promise<readonly ListedVm[]>;
   /** The same call as `SandboxService.stop`: by name, a VM that is gone is not an error. */
   stop(name: string): Promise<void>;
+  /**
+   * Deletes a VM by name, so the platform no longer lists it (#802): it keeps a stopped VM until somebody does. The
+   * snapshots the VM owns are kept (the golden snapshot is the source of every job VM). A VM that is gone is not an error.
+   */
+  delete(name: string): Promise<void>;
 }

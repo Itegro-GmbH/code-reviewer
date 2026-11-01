@@ -988,6 +988,53 @@ describe("the cap of each app against the platform's fleet", () => {
     ]);
   });
 
+  // #802-T31
+  it("logs the listing's time and size once for the claims that share it", async () => {
+    const { core, sandbox, logger } = build({
+      env: environment(),
+      withFleet: true,
+    });
+    seedLive(sandbox, "factory", 1, 100);
+    seedLive(sandbox, "reviewer", 1, 200);
+
+    for (const [app, queue] of [
+      ["factory", factory],
+      ["reviewer", reviewer],
+    ] as const) {
+      const result = await core.handle({
+        appId: app,
+        jobId: queue.enqueue(),
+        reviewKind: "diff",
+      });
+      if (result.outcome === "started") await result.background;
+    }
+
+    expect(
+      logger.text().match(/fleet_listed \{"ms":\d+,"count":2\}/g),
+    ).toHaveLength(1);
+  });
+
+  // #802-T02
+  it("claims the job of an app below its cap when the platform cannot be listed", async () => {
+    const { core, sandbox, launcher, logger } = build({
+      env: environment(),
+      withFleet: true,
+    });
+    sandbox.failNextList(new Error("platform down"));
+
+    const result = await core.handle({
+      appId: "factory",
+      jobId: factory.enqueue(),
+      reviewKind: "diff",
+    });
+    if (result.outcome === "started") await result.background;
+
+    expect(result.outcome).toBe("started");
+    expect(launcher.launches).toHaveLength(1);
+    expect(logger.text()).toContain("fleet_list_failed");
+    expect(logger.text()).not.toContain("fleet_listed");
+  });
+
   // #730-T22
   it("does not list the platform for the cap in the single-app environment, the production of today", async () => {
     const legacy = environment();

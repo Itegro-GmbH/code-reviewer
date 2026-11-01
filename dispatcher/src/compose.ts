@@ -70,7 +70,7 @@ export function composeDispatcher(
   // nothing the App's own cap does not already do.
   const liveVms =
     setup !== undefined && settings.core.apps.length > 1
-      ? liveJobVmsByApp(setup.fleet)
+      ? liveJobVmsByApp(setup.fleet, { logger })
       : undefined;
   const dispatcher = createDispatcher({
     settings: settings.core,

@@ -131,6 +131,12 @@ export class LocalSandboxService {
     await rm(state.dir, { recursive: true, force: true });
   }
 
+  /** Stops the VM and forgets it, as the platform's delete does: it is no longer listed (#802). */
+  async delete(name: string): Promise<void> {
+    await this.stop(name);
+    this.vms.delete(name);
+  }
+
   /**
    * The VMs whose name starts with the prefix and that carry every tag of the filter, like the platform's listing; a
    * VM that was stopped is still listed, as `stopped`.

@@ -18,6 +18,9 @@
 // Launcher the registry's URL of the app that claimed, never anything a request said. Where the platform can be listed and
 // there is more than one app (`liveVms`), the cap of an app is also the Dispatcher's own count of that app's live VMs plus
 // its launches in flight, so an app that ignores its cap (a bug, a compromise) cannot take the concurrency of another.
+// That count is a soft limit and never a reason to stop a whole product's reviews (#802): when the platform cannot be
+// listed and no listing is young enough, the Dispatcher counts what it knows itself (the launches in progress and the VMs
+// its launches created lately) and the claim goes on. The platform's own concurrency limit stays the hard one.
 import {
   createAppClient,
   type AppClient,
@@ -59,8 +62,18 @@ const MIN_HEARTBEAT_SECONDS = 5;
 const LIVE_VMS_TTL_MS = 5 * 1000;
 /** A listing that has not answered by then is a failed one: a hang must not hold up the claims that wait for it. */
 const LIVE_VMS_TIMEOUT_MS = 4 * 1000;
-/** A listing that failed is replaced by the last good one only while it is this young; then the claim waits. */
+/**
+ * A listing that failed is replaced by the last good one only while it is this young; after that the Dispatcher counts by
+ * its own launches (#802). A listing that failed is not asked for again for `LIVE_VMS_TTL_MS`, so a platform that is down
+ * does not make every claim wait for it.
+ */
 const LIVE_VMS_STALE_MS = 60 * 1000;
+/**
+ * Without a listing, a VM this Dispatcher's launches created counts for this long (#802). It is the guess of how long a job VM
+ * is up: much longer would count VMs that ended long ago and, through a long outage, turn the soft cap into a stop; shorter
+ * only lets an app a little further above its cap, which the platform's own concurrency limit still bounds.
+ */
+const OWN_VM_MEMORY_MS = 10 * 60 * 1000;
 /**
  * How far above its cap an app may be by the Dispatcher's count before a call is refused: twice the cap plus two VMs in all.
  * The App enforces the exact cap at the claim; this is a backstop against an app that ignores it (a runaway, not a fair
@@ -117,6 +130,8 @@ type AppState = {
   vmsCreated: number;
   /** Of the launches in progress, those whose VM exists already (they are in `launching` too). */
   vmsInFlight: number;
+  /** When this app's launches created their VMs, the last `OWN_VM_MEMORY_MS` of them: the count without a listing (#802). */
+  recentVms: number[];
 };
 
 type LiveSnapshot = {
@@ -146,6 +161,7 @@ export function createDispatcherCore(deps: CoreDependencies): DispatcherCore {
       takesVmReports: false,
       vmsCreated: 0,
       vmsInFlight: 0,
+      recentVms: [],
     });
   const shutdown = new AbortController();
 
@@ -180,11 +196,14 @@ export function createDispatcherCore(deps: CoreDependencies): DispatcherCore {
   }
 
   let live: LiveSnapshot | undefined;
+  /** When the last listing failed; none is asked for until `LIVE_VMS_TTL_MS` later. */
+  let failedAt: number | undefined;
   let listing: Promise<LiveSnapshot | undefined> | undefined;
 
   /**
    * One listing at a time, reused for a few seconds. A failed one (a rejection or no answer in `LIVE_VMS_TIMEOUT_MS`, even
-   * from a platform that ignores the signal) is replaced by the last good one while that is young.
+   * from a platform that ignores the signal) is replaced by the last good one while that is young, and by nothing after
+   * that: the caller counts by the Dispatcher's own launches then.
    */
   async function refreshLive(
     counter: LiveVmCounter,
@@ -211,12 +230,18 @@ export function createDispatcherCore(deps: CoreDependencies): DispatcherCore {
         counts: await Promise.race([counter(signal), gaveUp]),
         created,
       };
+      failedAt = undefined;
     } catch {
       // The platform's own text is not ours to log.
-      logger.error("fleet_list_failed");
+      failedAt = now();
+      logger.error("fleet_list_failed", { ms: failedAt - at });
     } finally {
       answered.abort();
     }
+    return youngLive();
+  }
+
+  function youngLive(): LiveSnapshot | undefined {
     return live !== undefined && now() - live.at < LIVE_VMS_STALE_MS
       ? live
       : undefined;
@@ -226,6 +251,8 @@ export function createDispatcherCore(deps: CoreDependencies): DispatcherCore {
     counter: LiveVmCounter,
   ): Promise<LiveSnapshot | undefined> {
     if (live !== undefined && now() - live.at < LIVE_VMS_TTL_MS) return live;
+    if (failedAt !== undefined && now() - failedAt < LIVE_VMS_TTL_MS)
+      return youngLive();
     listing ??= refreshLive(counter).finally(() => {
       listing = undefined;
     });
@@ -244,6 +271,17 @@ export function createDispatcherCore(deps: CoreDependencies): DispatcherCore {
       (state.vmsCreated - (snapshot.created.get(id) ?? 0)) +
       (state.launching - state.vmsInFlight)
     );
+  }
+
+  /**
+   * What the app occupies when there is no listing young enough (#802): what the Dispatcher knows itself, the launches in
+   * progress that have no VM yet and the VMs its launches created lately. It errs low (a VM created before the memory ended
+   * is not counted), which the platform's concurrency limit makes safe. The launch asked about is not among them.
+   */
+  function knownOccupied(state: AppState): number {
+    const since = now() - OWN_VM_MEMORY_MS;
+    state.recentVms = state.recentVms.filter((createdAt) => createdAt > since);
+    return state.recentVms.length + (state.launching - state.vmsInFlight);
   }
 
   async function appSupportsTheSplit(
@@ -313,15 +351,13 @@ export function createDispatcherCore(deps: CoreDependencies): DispatcherCore {
     // cannot fill the cap with calls that launch nothing.
     if (deps.liveVms !== undefined) {
       const snapshot = await liveSnapshot(deps.liveVms);
-      if (snapshot === undefined)
-        return {
-          outcome: "unavailable",
-          retryAfterSeconds: DEFAULT_RETRY_UNAVAILABLE_SECONDS,
-        };
       // Calls that waited for the same listing, and launches that began meanwhile, are counted now.
       if (state.launching >= state.settings.maxRunning) return busy(state);
       // This launch is one more than the Dispatcher's count.
-      const used = occupied(state, snapshot) + 1;
+      const used =
+        (snapshot === undefined
+          ? knownOccupied(state)
+          : occupied(state, snapshot)) + 1;
       const tolerance = capTolerance(state.settings.maxRunning);
       if (used > state.settings.maxRunning + tolerance) {
         logger.warn("app_cap_reached", {
@@ -467,6 +503,7 @@ export function createDispatcherCore(deps: CoreDependencies): DispatcherCore {
       if (!vmCounted) {
         vmCounted = true;
         state.vmsCreated += 1;
+        state.recentVms.push(now());
         // A VM reported after the launch phase ended is created, but no launch is left to hold it in flight.
         if (!phaseEnded) {
           inFlight = true;

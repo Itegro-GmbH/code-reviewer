@@ -31,6 +31,8 @@ type Calls = {
   list: Record<string, unknown>[];
   run: Record<string, unknown>[];
   stop: number;
+  /** The options of every `delete` call (the argument list, so a call without options is `[]`). */
+  delete: unknown[][];
   command: { stdin: string[]; closed: number; waits: number };
 };
 
@@ -41,6 +43,7 @@ function standIn(
     createError?: unknown;
     getError?: unknown;
     stopError?: unknown;
+    deleteError?: unknown;
     /** What `Sandbox.list` yields, one page of two at a time; the real paginator is an async iterable of sandboxes. */
     listed?: unknown[];
     listError?: unknown;
@@ -52,6 +55,7 @@ function standIn(
     list: [],
     run: [],
     stop: 0,
+    delete: [],
     command: { stdin: [], closed: 0, waits: 0 },
   };
   const command: SdkCommand = {
@@ -86,6 +90,12 @@ function standIn(
       return options.stopError === undefined
         ? Promise.resolve({})
         : Promise.reject(options.stopError);
+    },
+    delete(...args: unknown[]) {
+      calls.delete.push(args);
+      return options.deleteError === undefined
+        ? Promise.resolve()
+        : Promise.reject(options.deleteError);
     },
   } as unknown as SdkSandbox;
   const sdk: SandboxSdk = {
@@ -289,6 +299,72 @@ describe("the Vercel adapter of the Sandbox port", () => {
       },
     ]);
     expect(calls.stop).toBe(1);
+  });
+
+  // #802-T10
+  it("deletes a VM by looking it up by name, without resuming it and without deleting the snapshots it owns", async () => {
+    const { sdk, calls } = standIn();
+    const service = createVercelSandboxService(() => Promise.resolve(sdk), {
+      token: PLATFORM_TOKEN,
+      teamId: "team_dummy",
+      projectId: "prj_dummy",
+    });
+
+    await service.delete(CREATE.name);
+
+    expect(calls.get).toStrictEqual([
+      {
+        token: PLATFORM_TOKEN,
+        teamId: "team_dummy",
+        projectId: "prj_dummy",
+        name: CREATE.name,
+      },
+    ]);
+    expect(calls.get[0]).not.toHaveProperty("resume");
+    expect(calls.stop).toBe(0);
+    // The golden snapshot must stay: the options say it in so many words, whatever the SDK's default is.
+    expect(calls.delete).toStrictEqual([[{ deleteOrphanSnapshots: false }]]);
+  });
+
+  // #802-T10
+  it.each([404, 410])(
+    "treats a delete of a VM the platform no longer has (%s) as done",
+    async (status) => {
+      const { sdk, calls } = standIn({ getError: apiError(status) });
+
+      await expect(
+        createVercelSandboxService(() => Promise.resolve(sdk)).delete(
+          CREATE.name,
+        ),
+      ).resolves.toBeUndefined();
+      expect(calls.delete).toStrictEqual([]);
+    },
+  );
+
+  // #802-T10
+  it("treats a VM that is deleted between the lookup and the delete as done", async () => {
+    const { sdk } = standIn({ deleteError: apiError(404) });
+
+    await expect(
+      createVercelSandboxService(() => Promise.resolve(sdk)).delete(
+        CREATE.name,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  // #802-T10
+  it("maps a failed delete that is not a missing VM, without the platform's text", async () => {
+    const { sdk } = standIn({
+      deleteError: apiError(500, undefined, "secret platform text"),
+    });
+
+    const error = await createVercelSandboxService(() => Promise.resolve(sdk))
+      .delete(CREATE.name)
+      .catch((thrown: unknown) => thrown);
+
+    expect(error).toBeInstanceOf(SandboxServiceError);
+    expect((error as SandboxServiceError).kind).toBe("unavailable");
+    expect((error as Error).message).not.toContain("secret");
   });
 
   // #329-T08

@@ -18,6 +18,14 @@
 //
 // Stopping is by the listed name; a failed stop is counted and retried by the next run. Nothing here logs a credential
 // or the platform's own error text.
+//
+// Retention (#802): the platform keeps a stopped VM until somebody deletes it, and the listing every claim and every run
+// makes grows with them (283 stopped VMs took 5.1 s). So, after the stops, the reaper deletes the VMs of ours (the same
+// rule, `shapeOf`) that the platform reports `stopped` and that were created three days ago or earlier: a job VM lives for
+// seven hours at most, so by then it has been over for days. At most `MAX_DELETES_PER_RUN` per run, the oldest first, so a
+// run stays well inside its time limit and a backlog drains over several runs; a failed delete is counted, costs a place in
+// the bound and is retried by the next run. Nothing running, pending or stopping is deleted, and neither is anything that
+// is not exactly ours (a persistent VM, the golden builder, a lookalike): the check is the one that decides what to stop.
 import type { JobStateResult } from "../core/app-client.ts";
 import type { Logger } from "../core/types.ts";
 import type { ListedVm, SandboxFleet } from "../launchers/sandbox-service.ts";
@@ -37,6 +45,13 @@ export const LIFETIME_GRACE_MS = 120_000;
 export const MAX_JOB_VM_LIFETIME_MS = (21_600 + 3600) * 1000;
 /** The same for a canary: the longest probe (10 min) plus the largest margin. */
 export const MAX_CANARY_LIFETIME_MS = (600 + 3600) * 1000;
+/** A stopped VM is deleted once it was created this long ago (#802). */
+export const RETENTION_MS = 3 * 24 * 3600 * 1000;
+/**
+ * The most VMs one run deletes (#802). Each takes a lookup and a delete call; with four at a time that is seconds, far inside
+ * the function's limit, and the cron runs every five minutes: 50 per run drains 283 VMs in six runs, half an hour.
+ */
+export const MAX_DELETES_PER_RUN = 50;
 const CONCURRENCY = 4;
 
 export const REAP_ERROR_CODES = ["REAP_LIST_FAILED"] as const;
@@ -65,6 +80,10 @@ export type ReapReport = {
   unreadable: number;
   /** Stops that failed; the next run retries them. */
   failed: number;
+  /** Stopped VMs deleted by the retention (#802). */
+  deleted: number;
+  /** Deletes that failed; the next run retries them. */
+  deleteFailed: number;
 };
 
 export type ReaperOptions = {
@@ -247,6 +266,30 @@ export function createReaper(options: ReaperOptions): Reaper {
       );
 
       const stopped = outcomes.filter(Boolean).length;
+
+      // The retention: the oldest stopped VMs of ours, up to the bound.
+      const expired = listed
+        .filter(
+          (vm) =>
+            vm.status === "stopped" &&
+            at - vm.createdAtMs >= RETENTION_MS &&
+            shapeOf(vm) !== null,
+        )
+        .sort((a, b) => a.createdAtMs - b.createdAtMs)
+        .slice(0, MAX_DELETES_PER_RUN);
+      const deletions = await mapLimit(expired, CONCURRENCY, async (vm) => {
+        try {
+          await fleet.delete(vm.name);
+        } catch {
+          // The platform's own text is not ours to log.
+          logger.warn("vm_delete_failed", { sandbox: vm.name });
+          return false;
+        }
+        logger.info("vm_deleted", { sandbox: vm.name });
+        return true;
+      });
+      const deleted = deletions.filter(Boolean).length;
+
       const report: ReapReport = {
         listed: listed.length,
         candidates: candidates.length,
@@ -254,6 +297,8 @@ export function createReaper(options: ReaperOptions): Reaper {
         kept: candidates.length - toStop.length,
         unreadable,
         failed: outcomes.length - stopped,
+        deleted,
+        deleteFailed: deletions.length - deleted,
       };
       logger.info("reap_done", report);
       return report;

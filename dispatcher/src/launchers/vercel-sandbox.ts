@@ -60,6 +60,7 @@ export interface SdkSandbox {
     signal?: AbortSignal;
   }): Promise<{ exitCode: number }>;
   stop(opts?: { signal?: AbortSignal }): Promise<unknown>;
+  delete(opts?: { deleteOrphanSnapshots?: boolean }): Promise<unknown>;
 }
 
 /** What the adapter reads of one VM of `Sandbox.list` (the SDK yields more). */
@@ -306,6 +307,19 @@ export function createVercelSandboxService(
       try {
         const sandbox = await Sandbox.get({ ...auth, name });
         await sandbox.stop();
+      } catch (error) {
+        if (isGone(error)) return;
+        throw mapped(error);
+      }
+    },
+
+    async delete(name) {
+      const { Sandbox } = await loaded();
+      try {
+        // No `resume`: a stopped VM is deleted as it is, not started first.
+        const sandbox = await Sandbox.get({ ...auth, name });
+        // Said in so many words: the snapshots a VM owns are not ours to delete here, the golden snapshot included.
+        await sandbox.delete({ deleteOrphanSnapshots: false });
       } catch (error) {
         if (isGone(error)) return;
         throw mapped(error);
