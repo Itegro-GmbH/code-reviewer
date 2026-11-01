@@ -80,7 +80,7 @@ Rules (the CR-29 decisions, kept by the Worker host `job_loop/host.py`; tests in
   after its back-off and the last push asks again for up to 30 s, 20 s on a stop, before the turn ends `lease_lost`), a SIGTERM ends
   the engine at once, pushes what is committed and ends the turn `runner_shutdown` with its report (the host keeps the report
   and the usage in the result it gives the job back with; an Implementer job gets a grace of 60 s after SIGTERM, one lease
-  question is bounded to 10 s, the process ends itself after 55 s, all under the container's stop timeout of 90 s),
+  question is bounded to 25 s at a normal end and 10 s on a stop, the process ends itself after 55 s, all under the container's stop timeout of 90 s),
   a turn is held to the smaller of its time limit and `RUNNER_JOB_TIMEOUT_SECONDS`, a job that carries neither `maxCostUsd` nor
   `operatorMaxCostUsd` is refused with `implementer_config_invalid`, and the report (`implementer` in the result) is held to the contract and to 4 MB of escaped JSON, files
   first and then commits (`implementer/report.py`); a turn that never had a repository has no `implementer` key. The Worker

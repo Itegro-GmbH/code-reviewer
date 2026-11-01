@@ -23,9 +23,8 @@ from code_reviewer_runner.capabilities import (
 )
 from code_reviewer_runner.job import ImplementerInput, JobError, parse_job, parse_runnable_job
 from code_reviewer_runner.job_loop import host as host_module
-from code_reviewer_runner.job_loop.api import ClaimedJob, LeaseLost
+from code_reviewer_runner.job_loop.api import ClaimedJob, HeartbeatReply, LeaseLost
 from code_reviewer_runner.job_loop.host import (
-    IMPLEMENTER_LEASE_CHECK_BUDGET_SECONDS,
     IMPLEMENTER_STDOUT_KEEP_BYTES,
     IMPLEMENTER_TERMINATE_GRACE_SECONDS,
     JobEnd,
@@ -424,23 +423,52 @@ def test_the_stop_of_another_kind_stays_bare() -> None:
     run(scenario)
 
 
-# #765-R5b: one question of an Implementer turn is bounded inside its stop (the budget is the
-# loop's own clock, so the test shortens it).
-def test_a_lease_question_of_a_turn_is_bounded_by_the_implementers_budget(
+# #765-R5b: how long one lease question of an Implementer turn may take. The budget is the loop's
+# own clock, so the tests shorten the constants; the real ones are checked against each other below.
+def _slow_app(harness: Harness, seconds: float) -> None:
+    async def answers_late(job_id: str, token: str) -> Any:
+        await asyncio.sleep(seconds)
+        return HeartbeatReply(superseded=False, lease_expires_at=None)
+
+    harness.api.heartbeat = answers_late  # type: ignore[method-assign]
+
+
+# #765: at a normal end an app that answers slowly (15 s in real life) lets the last push through.
+def test_a_slow_app_does_not_cost_a_good_turn_its_last_push_at_a_normal_end(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
-        monkeypatch.setattr(host_module, "IMPLEMENTER_LEASE_CHECK_BUDGET_SECONDS", 0.2)
+        monkeypatch.setattr(host_module, "IMPLEMENTER_LEASE_CHECK_BUDGET_SECONDS", 1.5)
+        monkeypatch.setattr(host_module, "IMPLEMENTER_STOP_LEASE_CHECK_BUDGET_SECONDS", 0.2)
         harness = advertising_harness()
         harness.api.claims = [implementer_claim()]
         await harness.start()
         spec = harness.launcher.processes[0].spec
         assert spec.lease_check is not None
+        _slow_app(harness, 0.6)  # slower than a stop allows, inside the normal budget
 
-        async def never_answers(job_id: str, token: str) -> Any:
-            await asyncio.Event().wait()
+        answer = await asyncio.wait_for(spec.lease_check(), 5)
 
-        harness.api.heartbeat = never_answers  # type: ignore[method-assign]
+        assert answer is LeaseState.HELD
+        await harness.stop()
+
+    run(scenario)
+
+
+# #765: while the runner is stopped the question keeps its short bound.
+def test_the_same_slow_app_is_not_waited_for_while_the_runner_is_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr(host_module, "IMPLEMENTER_LEASE_CHECK_BUDGET_SECONDS", 1.5)
+        monkeypatch.setattr(host_module, "IMPLEMENTER_STOP_LEASE_CHECK_BUDGET_SECONDS", 0.2)
+        harness = advertising_harness()
+        harness.api.claims = [implementer_claim()]
+        await harness.start()
+        spec = harness.launcher.processes[0].spec
+        assert spec.lease_check is not None
+        _slow_app(harness, 0.6)
+        harness.host.request_hard_stop()
 
         answer = await asyncio.wait_for(spec.lease_check(), 5)
 
@@ -448,8 +476,20 @@ def test_a_lease_question_of_a_turn_is_bounded_by_the_implementers_budget(
         await harness.stop()
 
     run(scenario)
-    assert host_module.LEASE_CHECK_BUDGET_SECONDS > 10.0  # Dynamic keeps its own
-    assert IMPLEMENTER_LEASE_CHECK_BUDGET_SECONDS < IMPLEMENTER_TERMINATE_GRACE_SECONDS / 2
+
+
+# #765: the real numbers. The last push of a normal end fits the grace it keeps, a stop its minute.
+def test_the_lease_budgets_fit_the_grace_of_the_end_and_of_the_stop() -> None:
+    from code_reviewer_runner.implementer.git_workspace import CONFIRM_SECONDS
+    from code_reviewer_runner.implementer.session import GRACE_SECONDS, STOP_CONFIRM_SECONDS
+
+    normal = host_module.IMPLEMENTER_LEASE_CHECK_BUDGET_SECONDS
+    stop = host_module.IMPLEMENTER_STOP_LEASE_CHECK_BUDGET_SECONDS
+    assert normal == 25.0 and stop == 10.0 and host_module.LEASE_CHECK_BUDGET_SECONDS > 10.0
+    # Asked again inside the window, the last push of a normal end takes one question past it.
+    assert CONFIRM_SECONDS + normal < GRACE_SECONDS
+    # A stop: the question and its window inside half the minute; the rest: engine, push.
+    assert STOP_CONFIRM_SECONDS + stop <= host_module.IMPLEMENTER_TERMINATE_GRACE_SECONDS / 2
 
 
 # -- T01: the parse ---------------------------------------------------------------------------

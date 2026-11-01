@@ -134,9 +134,12 @@ IMPLEMENTER_STDOUT_KEEP_BYTES = 6 * 1024 * 1024
 # and the report of the stop comes after it). The process leaves itself less
 # (`job_run.SIGTERM_BACKSTOP_SECONDS`).
 IMPLEMENTER_TERMINATE_GRACE_SECONDS = 60.0
-# One lease question of an Implementer turn is bounded well inside that: the question is asked again
-# by the push loop, and a stop has no time for 40 seconds of an app that does not answer.
-IMPLEMENTER_LEASE_CHECK_BUDGET_SECONDS = 10.0
+# One lease question of an Implementer turn is bounded. At a normal end the last push must not
+# lose a good turn to a slow app: 25 s a question, and the window of the last push (30 s, asked
+# again) fits the grace of 180 s the end keeps. A stop has a minute in all and no time for an app
+# that does not answer: 10 s a question.
+IMPLEMENTER_LEASE_CHECK_BUDGET_SECONDS = 25.0
+IMPLEMENTER_STOP_LEASE_CHECK_BUDGET_SECONDS = 10.0
 # A shutdown report is tried for this long; the process is going away either way.
 SHUTDOWN_REPORT_WINDOW_SECONDS = 10.0
 _FIRST_RETRY_SECONDS = 1.0
@@ -238,14 +241,6 @@ def _kind_of(job: Job | ImplementerInput) -> ReviewKind:
 
 def _label_of(job: Job | ImplementerInput) -> str:
     return "implementer" if isinstance(job, ImplementerInput) else job.command.value
-
-
-def _lease_budget_of(kind: ReviewKind) -> float:
-    return (
-        IMPLEMENTER_LEASE_CHECK_BUDGET_SECONDS
-        if kind is ReviewKind.IMPLEMENTER
-        else LEASE_CHECK_BUDGET_SECONDS
-    )
 
 
 def _supervises_an_engine(kind: ReviewKind) -> bool:
@@ -458,7 +453,7 @@ class JobHost:
                 # #260: a Dynamic job writes its own comment, so it asks right before (a Diff job
                 # does not publish this way). An Implementer job asks before every push (#765).
                 lease_check=(
-                    (lambda: self._confirm_lease(claimed, state, _lease_budget_of(kind)))
+                    (lambda: self._confirm_lease(claimed, state, self._lease_budget_of(kind)))
                     if _supervises_an_engine(kind)
                     else None
                 ),
@@ -695,6 +690,15 @@ class JobHost:
                 # the class of an unexpected error is logged, its text may hold part of the input.
                 detail = str(error) if isinstance(error, ApiError) else type(error).__name__
                 self._log.warning("job %s: heartbeat failed (%s)", claimed.id, detail)
+
+    def _lease_budget_of(self, kind: ReviewKind) -> float:
+        """How long one lease question may take: the Dynamic job's own, or an Implementer turn's,
+        which is shorter while the runner is being stopped."""
+        if kind is not ReviewKind.IMPLEMENTER:
+            return LEASE_CHECK_BUDGET_SECONDS
+        if self._hard_stop.is_set():
+            return IMPLEMENTER_STOP_LEASE_CHECK_BUDGET_SECONDS
+        return IMPLEMENTER_LEASE_CHECK_BUDGET_SECONDS
 
     async def _confirm_lease(
         self,

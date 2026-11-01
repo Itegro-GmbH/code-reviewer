@@ -436,7 +436,7 @@ the reasons of the self-check list, and for a probe that gave no verdict a code 
 `probe_exit_nonzero`, `probe_exec_failed`, `probe_aborted`, `probe_not_supported`, `probe_error`. Anything else, such as a code in
 a platform's error, is `probe_error`.
 
-**Cost.** One short canary VM (tens of seconds) per deploy canary, and no other; a deployment that serves the Implementer adds the steps of the work volume and a second probe to it (`IMPLEMENTER_PROBE_EXTRA_SECONDS`: the probe's time, the VM's life and the reaper's `canaryLifetimeSeconds` grow by that, well inside the function limit of 1800 s; the deploy canary's own request timeout of 300 s holds with the defaults). A Diff-only deployment
+**Cost.** One short canary VM (tens of seconds) per deploy canary, and no other; a deployment that serves the Implementer adds the steps of the work volume and a second probe to it (`IMPLEMENTER_PROBE_EXTRA_SECONDS`, 110 s: the probe's time, the VM's life and the reaper's `canaryLifetimeSeconds` grow by that, well inside the function limit of 1800 s). With the default `DISPATCHER_PROBE_TIMEOUT_SECONDS` of 150 the cap of the probe with the kind is **260 s**. **With the kind, keep `DISPATCHER_PROBE_TIMEOUT_SECONDS` at or below 190:** the deploy canary's request gives up at 300 s (`--timeout-seconds`), so a larger value makes the canary report `probe_unreachable` and block the release although the Dispatcher would still answer. A Diff-only deployment
 (`DISPATCHER_ENGINES=pr-agent`) has no probe.
 
 **Retired setting.** `DISPATCHER_PROBE_TTL_SECONDS` (how long an answer counted) is obsolete. A deployment that still sets
@@ -559,7 +559,7 @@ the platform's cron calls
   anything else (another deployment's VM, a person's, a lookalike).
 - **Which are leftovers.** Younger than two minutes: never. Older than its lifetime (the timeout the platform reports
   for the VM, or the configured one: job timeout plus VM margin for a job VM, `DISPATCHER_PROBE_TIMEOUT_SECONDS` plus the
-  margin for a canary; plus two minutes of grace; a reported timeout above the longest possible one is not believed):
+  margin for a canary (with the Implementer served, 110 s more: `IMPLEMENTER_PROBE_EXTRA_SECONDS`, so 260 s plus the margin by default; keep `DISPATCHER_PROBE_TIMEOUT_SECONDS` at or below 190 then); plus two minutes of grace; a reported timeout above the longest possible one is not believed):
   stopped, whatever the App says. A canary has no job, so only that ends it. A job VM: stopped when the App says its job
   is not `running` (`GET /api/runners/v1/jobs/{id}` with the dispatcher credential, one call per job).
 - **A draining job (#397).** A superseded job whose claim is still valid (`draining: true` in the job state): its Worker is finishing the model requests in flight and reporting what they cost. The VM stays until the claim ends (the Worker's report, or the App's claim window of 240 seconds), then it is a leftover like any other. An App that does not send the field, or a Dispatcher that does not read it, treats a superseded job as ended.

@@ -352,6 +352,27 @@ describe("the probe verdict", () => {
       expect(verdict?.engines).toStrictEqual(["pr-agent"]);
     });
 
+    it("never names `implementer` when the Dynamic check failed, however clean the second output is", () => {
+      const failing = line({
+        version: 1,
+        engines: ["pr-agent"],
+        reasons: ["engine_binary_missing"],
+      });
+
+      const merged = mergeVerdictOutputs(failing, proving);
+
+      const written = JSON.parse(merged.line) as {
+        engines: string[];
+        reasons: string[];
+      };
+      expect(merged.implementerProven).toBe(false);
+      expect(written.engines).toStrictEqual(["pr-agent"]);
+      expect(written.reasons).toStrictEqual([
+        "engine_binary_missing",
+        "implementer_probe_failed",
+      ]);
+    });
+
     it("returns a first output that is no verdict as it is", () => {
       expect(mergeVerdictOutputs("not a verdict", proving).line).toBe(
         "not a verdict",
