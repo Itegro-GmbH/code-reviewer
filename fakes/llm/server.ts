@@ -81,6 +81,12 @@ export type AgentScript = {
    */
   when?: { lastUserContains: string };
   /**
+   * Indexes of `steps` before which the answer waits: the request that would get step `i` is held until the test calls
+   * `release()` (`heldCount()` says one is waiting). A journey that has to see something happen while the agent waits (a push
+   * of what it committed) waits on that, not on a pause of its own (#767). The chat route only.
+   */
+  holdBefore?: number[];
+  /**
    * The Messages API only (#533): every answer that asks for tools opens with a signed `thinking` block, as a model
    * that always thinks does, and the next request has to give it back (the fake answers a 400 when it does not).
    */
@@ -195,6 +201,15 @@ export type FakeLlm = {
    * review that is in progress, so it can end the process that runs it.
    */
   hold(on: boolean): void;
+  /** How many requests wait for `release()`: those held by `hold(true)` and those held by a script's `holdBefore`. */
+  heldCount(): number;
+  /** Answers every request that is held; a `holdBefore` that was released does not hold again. */
+  release(): void;
+  /**
+   * Whether the chat answers state their charge in `usage.cost`, as OpenRouter does (default). A provider that does not
+   * (DeepSeek, OpenAI) leaves the price of the run to the book of the catalog (#767).
+   */
+  statesCharge(on: boolean): void;
   /** Normal replies, no error, no recorded requests, no hold. */
   reset(): void;
   close(): Promise<void>;
@@ -297,7 +312,7 @@ function completion(model: string, content: string, usage?: ChatUsage) {
         finish_reason: "stop",
       },
     ],
-    usage: usage ?? FIXED_CHAT_USAGE,
+    usage: usage ?? { ...FIXED_CHAT_USAGE },
   };
 }
 
@@ -590,11 +605,36 @@ export async function startLlmFake(
   let queuedAnswers: Array<Record<string, unknown>> = [];
   let holding = false;
   let held: Array<() => void> = [];
+  // The answers a script's `holdBefore` keeps back, and the holds that were released (a step is held once).
+  let scriptHeld: Array<{ key: string; run: () => void }> = [];
+  let passedHolds = new Set<string>();
+  let statesCharge = true;
   const release = () => {
     const waiting = held;
     held = [];
     for (const answer of waiting) answer();
+    const kept = scriptHeld;
+    scriptHeld = [];
+    for (const { key, run } of kept) {
+      passedHolds.add(key);
+      run();
+    }
   };
+  /** The key of the hold the next answer of the script that the last user message selects runs into, or null. */
+  function holdAhead(lastUser: string): string | null {
+    const position = (agent ?? []).findIndex(
+      (script) =>
+        script.when === undefined ||
+        lastUser.includes(script.when.lastUserContains),
+    );
+    const script = agent?.[position];
+    if (script?.holdBefore === undefined) return null;
+    const next = agentUsed[position] ?? 0;
+    const key = `${String(position)}:${String(next)}`;
+    return script.holdBefore.includes(next) && !passedHolds.has(key)
+      ? key
+      : null;
+  }
 
   /**
    * The next scripted answer to a request that offers tools: the next step of the script the last user message
@@ -854,8 +894,15 @@ export async function startLlmFake(
           .stream_options?.include_usage === true;
       // An answer to a request that asked for a stream is the stream of the same answer.
       const sendChat = (status: number, document: unknown) => {
-        if (status === 200)
-          entry.usage = (document as { usage?: Record<string, unknown> }).usage;
+        if (status === 200) {
+          const body = document as { usage?: Record<string, unknown> };
+          // A provider that states no charge leaves it out of the usage of every answer.
+          if (!statesCharge && body.usage !== undefined) {
+            const { cost: _charge, ...rest } = body.usage;
+            body.usage = rest;
+          }
+          entry.usage = body.usage;
+        }
         if (!streaming || status !== 200) return send(status, document);
         response.writeHead(200, {
           "content-type": "text/event-stream",
@@ -863,7 +910,7 @@ export async function startLlmFake(
         });
         response.end(chatEvents(document as ChatCompletion, includeUsage));
       };
-      const answer = () => {
+      const respond = () => {
         // The client hung up while the request was held: nobody to answer.
         if (response.destroyed) return;
         let chatUsage: ChatUsage | undefined = chatUsageOverride ?? undefined;
@@ -909,6 +956,11 @@ export async function startLlmFake(
         if (agent !== null) {
           if (toolNames((body as { tools?: unknown }).tools).length === 0)
             return sendChat(200, completion(model, "ok", chatUsage));
+          const holdKey = holdAhead(lastUserText(messages));
+          if (holdKey !== null) {
+            scriptHeld.push({ key: holdKey, run: respond });
+            return;
+          }
           const answer = nextAgentAnswer(lastUserText(messages));
           if (answer === null)
             return send(400, {
@@ -928,8 +980,8 @@ export async function startLlmFake(
         }
         sendChat(200, completion(model, replies[kind], chatUsage));
       };
-      if (holding) held.push(answer);
-      else answer();
+      if (holding) held.push(respond);
+      else respond();
     });
   });
 
@@ -991,6 +1043,11 @@ export async function startLlmFake(
       holding = on;
       if (!on) release();
     },
+    heldCount: () => held.length + scriptHeld.length,
+    release,
+    statesCharge(on) {
+      statesCharge = on;
+    },
     enablePromptCache(on, options) {
       promptCache = on ? new PromptCache() : null;
       messageMarks = on && options?.messageMarks === true;
@@ -1000,6 +1057,9 @@ export async function startLlmFake(
       promptCache = null;
       chatUsageOverride = null;
       release();
+      scriptHeld = [];
+      passedHolds = new Set();
+      statesCharge = true;
       agent = null;
       agentUsed = [];
       agentRequests = 0;

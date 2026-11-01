@@ -14,9 +14,15 @@
 // LLM. The texts of the scripts do not overlap: a script answers the first request whose last user message holds its marker,
 // so every instruction carries a marker of its own and none of them holds a phrase another script waits for.
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { request as httpsRequest } from "node:https";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { expect, test } from "@playwright/test";
+import {
+  expect,
+  test,
+  type APIRequestContext,
+  type Page,
+} from "@playwright/test";
 import { Client } from "pg";
 import {
   createGitRepository,
@@ -56,17 +62,21 @@ import {
 import { required } from "../helpers/hosted-journey";
 import { allSecrets, containsSecret } from "../helpers/hosted-secrets";
 import {
+  agentIsWaiting,
   bash,
   branchPushed,
   capabilities,
   commit,
   commitsAhead,
+  containerMountOf,
   engineScans,
-  expectOnlyTheOwnBranch,
   expectRunnerPushedOnlyForward,
   JOB_WRAPPER,
-  pause,
+  leftoverWorkerProcesses,
+  PROBE,
+  PROBE_DURING_PUSH,
   prepareRecords,
+  processesInNamespaces,
   runData,
   runEnded,
   runnerGitCommands,
@@ -76,9 +86,11 @@ import {
   tipOf,
   vmDirectories,
   WORKSPACE,
+  wrapperOutputs,
   write,
   GIT_COMMANDS,
   keepRecords,
+  type ContainerMount,
   type FakeRegistry,
 } from "../helpers/implementer-journey";
 import { fetchModelsDevCatalog } from "../helpers/models-dev";
@@ -116,6 +128,8 @@ test.describe("a task on its way from the form of the Implementer to a branch on
   let repository: GitRepository | undefined;
   let base = "";
   const runs: string[] = [];
+  // The mount namespaces of the containers seen while their Workers ran (E10 looks for what still holds one).
+  const namespaces: string[] = [];
   // What the model was shown in every journey so far: the fake's log is cleared before each one.
   const shownToTheModel: string[] = [];
 
@@ -287,6 +301,45 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     assertGuardQuiet();
   }
 
+  /**
+   * The container of the Worker that runs now, as the lane sees it: its own mount namespace, and the volume at /work in it. Read
+   * while the agent waits, because a process of the lane cannot see the mounts of a container that has ended.
+   */
+  function observeContainer(): ContainerMount {
+    const worker = required(
+      required(dispatcher, "The Dispatcher")
+        .containers()
+        .filter((container) => container.mode === "worker-once")
+        .at(-1),
+      "The Worker",
+    );
+    const mount = containerMountOf(worker.pid);
+    if (mount === null)
+      throw new Error(
+        "The container of the Worker has no namespace of its own.",
+      );
+    namespaces.push(mount.namespace);
+    return mount;
+  }
+
+  /** Every push the fake GitHub received for the repository since `before` pushes were counted: any ref, not only the branch. */
+  async function pushesSince(
+    request: APIRequestContext,
+    before: number,
+  ): Promise<Array<{ repository: string; refs: string[] }>> {
+    return (await getPushes(request, GADGETS.fullName)).slice(before);
+  }
+
+  /** The pushes of a journey are the agent's branch and nothing else: no tag, no note, no other branch, whatever the fake accepts. */
+  function expectOnlyPushesOf(
+    pushes: Array<{ refs: string[] }>,
+    branch: string,
+  ): void {
+    expect(pushes.length).toBeGreaterThan(0);
+    for (const push of pushes)
+      expect(push.refs).toEqual([`refs/heads/${branch}`]);
+  }
+
   function gadgets(): GitRepository {
     return required(repository, "The repository");
   }
@@ -334,14 +387,15 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       steps: [
         write("hello.txt", "Hello\n"),
         commit("Add hello"),
-        // The push loop looks every two seconds: the first commit is on GitHub while the turn goes on.
-        pause(8),
         write("farewell.txt", "Goodbye\n"),
         commit("Add farewell"),
       ],
+      // The agent waits before its third step, until the first commit is on GitHub (the test releases it).
+      holdBefore: [2],
       finalText: "Added hello.txt and farewell.txt, one commit each.",
     });
     await signInAsAdmin(page);
+    const pushesBefore = (await getPushes(request, GADGETS.fullName)).length;
 
     const runId = await startTask(page, {
       repository: GADGETS.fullName,
@@ -350,10 +404,19 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     });
     runs.push(runId);
 
-    // During the turn: the first commit is on the branch at the fake GitHub while the run is still running.
+    // During the turn: the first commit is on the branch at the fake GitHub while the agent waits and the run is running.
+    await agentIsWaiting(theLlm, page, runId, RUN_TIMEOUT);
     await branchPushed(page, runId, gadgets().path, branch, RUN_TIMEOUT);
     expect(subjectsAhead(gadgets().path, BASE, branch)).toEqual(["Add hello"]);
     expect((await runData(page, runId)).status).toBe("running");
+    // The volume of the container, from the lane: a fresh tmpfs at /work that the engine's programs may run from.
+    const mount = observeContainer();
+    expect(mount.work?.fstype).toBe("tmpfs");
+    expect(mount.work?.options).toEqual(
+      expect.arrayContaining(["rw", "nosuid", "nodev"]),
+    );
+    expect(mount.work?.options).not.toContain("noexec");
+    theLlm.release();
 
     const ended = await runEnded(page, runId, RUN_TIMEOUT);
     expect(ended.status).toBe("succeeded");
@@ -365,9 +428,9 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     ]);
     expect(tipOf(gadgets().path, BASE)).toBe(base);
     expect(commitsAhead(gadgets().path, BASE, branch)).toHaveLength(2);
-    const pushes = await getPushes(request, GADGETS.fullName);
+    const pushes = await pushesSince(request, pushesBefore);
     expect(pushes.length).toBeGreaterThanOrEqual(2);
-    expectOnlyTheOwnBranch(pushes, branch);
+    expectOnlyPushesOf(pushes, branch);
     expectRunnerPushedOnlyForward(runnerGitCommands(), branch);
     // No pull request was opened, read or asked for in this repository (the fake is shared with the earlier journey's repository).
     const asked = await getGithubRequests(request);
@@ -536,13 +599,13 @@ test.describe("a task on its way from the form of the Implementer to a branch on
   // #767-E05
   test("E05 the cost limit stops the turn: Failed with cost_limit_reached, and the pushed commit is shown", async ({
     page,
+    request,
   }) => {
     const theLlm = required(llm, "The fake LLM");
     const branch = "implementer/e05";
     const steps = [
       write("a.txt", "a\n"),
       commit("Add a"),
-      pause(8),
       ...Array.from({ length: 20 }, (_, index) =>
         bash(`echo step ${String(index)}`),
       ),
@@ -550,9 +613,12 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     theLlm.scriptAgent({
       when: { lastUserContains: "[E05-COST]" },
       steps,
+      // The agent waits before its third step, until the commit is on GitHub.
+      holdBefore: [2],
       finalText: "Done.",
     });
     await signInAsAdmin(page);
+    const pushesBefore = (await getPushes(request, GADGETS.fullName)).length;
 
     const runId = await startTask(page, {
       repository: GADGETS.fullName,
@@ -561,9 +627,12 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       costLimit: "0.01",
     });
     runs.push(runId);
-    // The commit is on GitHub; from now on the model's calls are large, and the limit is reached within a few of them.
+    await agentIsWaiting(theLlm, page, runId, RUN_TIMEOUT);
     await branchPushed(page, runId, gadgets().path, branch, RUN_TIMEOUT);
+    observeContainer();
+    // The commit is on GitHub; from now on the model's calls are large, and the limit is reached within a few of them.
     theLlm.setChatUsage({ promptTokens: 8000, completionTokens: 100 });
+    theLlm.release();
     const ended = await runEnded(page, runId, RUN_TIMEOUT);
 
     expect(ended.status).toBe("failed");
@@ -573,6 +642,7 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       "Add a",
     ]);
     expect(ended.implementer?.pushedNote).toContain("pushed");
+    expectOnlyPushesOf(await pushesSince(request, pushesBefore), branch);
     await page.goto(`/w/${WORKSPACE}/runs/${runId}`);
     await expect(
       page.locator('[data-slot="run-detail"]').filter({ visible: true }),
@@ -587,22 +657,30 @@ test.describe("a task on its way from the form of the Implementer to a branch on
   }) => {
     const theLlm = required(llm, "The fake LLM");
     const branch = "implementer/e06";
+    // The address the runner itself pushes to: the agent's repository has no remote, so a push to it by name tells nothing about
+    // the credential. By address it is the runner's remote itself: the engine user's network rules and the missing credential stop it.
+    const remote = `${e2eEnv.githubUrl}/${GADGETS.fullName}.git`;
     theLlm.scriptAgent({
       when: { lastUserContains: "[E06-GUARD]" },
       steps: [
         write("a.txt", "a\n"),
         commit("First"),
-        pause(8),
         bash("git commit --amend -q -m Amended; echo '[amend]' $?"),
         bash(`git checkout ${BASE}; echo '[checkout]' $?`),
         bash("git reset --hard HEAD~1; echo '[reset]' $?"),
         bash("git push origin HEAD; echo '[push]' $?"),
+        bash(
+          `GIT_TERMINAL_PROMPT=0 git push ${remote} HEAD:refs/heads/e06-direct 2>&1; echo '[push-direct]' $?`,
+        ),
         write("b.txt", "b\n"),
         commit("Second"),
       ],
+      // The agent waits before the attempts, until its first commit is on GitHub.
+      holdBefore: [2],
       finalText: "Tried a few things, then added b.txt.",
     });
     await signInAsAdmin(page);
+    const pushesBefore = (await getPushes(request, GADGETS.fullName)).length;
 
     const runId = await startTask(page, {
       repository: GADGETS.fullName,
@@ -610,6 +688,10 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       instruction: "[E06-GUARD] Add a.txt, then try to rewrite history.",
     });
     runs.push(runId);
+    await agentIsWaiting(theLlm, page, runId, RUN_TIMEOUT);
+    await branchPushed(page, runId, gadgets().path, branch, RUN_TIMEOUT);
+    observeContainer();
+    theLlm.release();
     const ended = await runEnded(page, runId, RUN_TIMEOUT);
 
     expect(ended.status).toBe("succeeded");
@@ -619,7 +701,10 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       "Second",
     ]);
     expect(tipOf(gadgets().path, BASE)).toBe(base);
-    // What the agent was told by each attempt: the hook said no to the rewrites, and there is no remote to push to.
+    expect(tipOf(gadgets().path, "e06-direct")).toBeNull();
+    // What the agent was told by each attempt: the hook said no to the rewrites, and a push by name fails because the repository has no
+    // remote; a push to the runner's own address fails at the network (the engine user reaches loopback ports of its proxies only),
+    // before any credential is asked for.
     const shown = Object.values(
       required(theLlm.requests().at(-1), "The last request").toolResults,
     ).join("\n");
@@ -628,11 +713,13 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     expect(shown.match(/code-reviewer-guard: /g)?.length ?? 0).toBeGreaterThan(
       1,
     );
-    const pushes = await getPushes(request, GADGETS.fullName);
-    expectOnlyTheOwnBranch(
-      pushes.filter((entry) => entry.refs.some((ref) => ref.endsWith("e06"))),
-      branch,
+    expect(shown).toMatch(/'origin' does not appear to be a git repository/);
+    expect(shown).toMatch(
+      /(Failed to connect|Connection refused|Couldn't connect)[\s\S]*\[push-direct\]\s+128/,
     );
+    expect(shown).not.toMatch(/Authentication failed|could not read Username/);
+    // And nothing else reached GitHub: every push of the journey is the runner's, to the branch.
+    expectOnlyPushesOf(await pushesSince(request, pushesBefore), branch);
     expectRunnerPushedOnlyForward(
       runnerGitCommands().filter((command) =>
         command.argv.join(" ").includes("e06"),
@@ -654,15 +741,16 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       steps: [
         write("a.txt", "a\n"),
         commit("Good"),
-        pause(8),
         bash(
           "git -c core.hooksPath=/dev/null reset -q --hard HEAD~1 && echo bad > b.txt && git add -A && git -c core.hooksPath=/dev/null commit -q -m Bad; echo '[bypass]' $?",
         ),
-        pause(10),
       ],
+      // The agent waits before the bypass, until the good commit is on GitHub; after the bypass it waits again, for the run to end.
+      holdBefore: [2, 3],
       finalText: "Done.",
     });
     await signInAsAdmin(page);
+    const pushesBefore = (await getPushes(request, GADGETS.fullName)).length;
 
     const runId = await startTask(page, {
       repository: GADGETS.fullName,
@@ -670,17 +758,19 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       instruction: "[E07-BYPASS] Add a.txt and then rewrite history.",
     });
     runs.push(runId);
+    await agentIsWaiting(theLlm, page, runId, RUN_TIMEOUT);
+    await branchPushed(page, runId, gadgets().path, branch, RUN_TIMEOUT);
+    observeContainer();
+    const good = tipOf(gadgets().path, branch);
+    theLlm.release();
     const ended = await runEnded(page, runId, RUN_TIMEOUT);
 
     expect(ended.status).toBe("failed");
     expect(ended.errorCode).toBe("branch_violation");
     // The branch on GitHub is the good commit, and the rewrite never got there.
     expect(subjectsAhead(gadgets().path, BASE, branch)).toEqual(["Good"]);
-    const pushes = await getPushes(request, GADGETS.fullName);
-    expectOnlyTheOwnBranch(
-      pushes.filter((entry) => entry.refs.some((ref) => ref.endsWith("e07"))),
-      branch,
-    );
+    expect(tipOf(gadgets().path, branch)).toBe(good);
+    expectOnlyPushesOf(await pushesSince(request, pushesBefore), branch);
     expectRunnerPushedOnlyForward(
       runnerGitCommands().filter((command) =>
         command.argv.join(" ").includes("e07"),
@@ -691,12 +781,31 @@ test.describe("a task on its way from the form of the Implementer to a branch on
   });
 
   // #767-E08
-  test("E08 network: curl to a host off the list and a direct lookup fail, a registry of the list is reached through the proxy, nothing leaves loopback", async ({
+  test("E08 network: a host off the list is refused by the proxy (403), a direct lookup fails, a direct connect to a loopback port is refused, and a registry of the list is reached through the proxy", async ({
     page,
   }) => {
     const theLlm = required(llm, "The fake LLM");
     const theRegistry = required(registry, "The fake registry");
     const branch = "implementer/e08";
+    // The control: the registry answers whoever may reach it. The lane itself reaches it; the agent must not.
+    await new Promise<void>((resolveControl, reject) => {
+      const control = httpsRequest(
+        {
+          host: "127.0.0.1",
+          port: theRegistry.port,
+          path: "/control",
+          rejectUnauthorized: false,
+        },
+        (answer) => {
+          answer.resume();
+          answer.on("end", () => resolveControl());
+        },
+      );
+      control.once("error", reject);
+      control.end();
+    });
+    expect(theRegistry.requests().at(-1)).toMatch(/GET \/control$/);
+    const seenByControl = theRegistry.requests().length;
     theLlm.scriptAgent({
       when: { lastUserContains: "[E08-NETWORK]" },
       steps: [
@@ -707,6 +816,9 @@ test.describe("a task on its way from the form of the Implementer to a branch on
           "curl -sS -m 10 --noproxy '*' https://example.com 2>&1; echo '[direct]' $?",
         ),
         bash("getent hosts example.com; echo '[lookup]' $?"),
+        bash(
+          `curl -sSk -m 10 --noproxy '*' https://127.0.0.1:${String(theRegistry.port)}/direct 2>&1; echo '[loopback]' $?`,
+        ),
         bash(
           "curl -sSk -m 20 https://registry.npmjs.org/left-pad 2>&1; echo '[registry]' $?",
         ),
@@ -729,82 +841,74 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     const shown = Object.values(
       required(theLlm.requests().at(-1), "The last request").toolResults,
     ).join("\n");
-    expect(shown).not.toMatch(/\[proxy-refuses\]\s+0/);
-    expect(shown).toMatch(/\[proxy-refuses\]\s+[1-9]/);
-    expect(shown).toMatch(/\[direct\]\s+[1-9]/);
-    expect(shown).toMatch(/\[lookup\]\s+[1-9]/);
-    // The registry of the list answered through the proxy, and only it.
+    // Through the proxy, a host off the list: the proxy's own refusal, not a failed handshake with whatever answered.
+    expect(shown).toMatch(
+      /CONNECT tunnel failed, response 403\s+\[proxy-refuses\]\s+56\b/,
+    );
+    // Straight, the name does not resolve (no lookup leaves the engine user), and the tool says so.
+    expect(shown).toMatch(
+      /Could not resolve host: example\.com\s+\[direct\]\s+6\b/,
+    );
+    expect(shown).toMatch(/\[lookup\]\s+2\b/);
+    expect(shown).not.toMatch(/^\s*\d+\.\d+\.\d+\.\d+\s+example\.com/m);
+    // A direct connect to a loopback port the engine user has no rule for is refused, though the lane itself reaches it (control).
+    expect(shown).toMatch(
+      /Failed to connect to 127\.0\.0\.1 port \d+[^\n]*\n\[loopback\]\s+7\b/,
+    );
+    // The registry of the list, through the proxy.
     expect(shown).toContain('"fake":"registry"');
-    expect(shown).toMatch(/\[registry\]\s+0/);
-    expect(theRegistry.requests()).toEqual([
-      "registry.npmjs.org GET /left-pad",
-    ]);
+    expect(shown).toMatch(/\[registry\]\s+0\b/);
+    // And the registry saw exactly that one request since the control: nothing for example.com, nothing direct.
+    const seen = theRegistry.requests().slice(seenByControl);
+    expect(seen).toEqual(["registry.npmjs.org GET /left-pad"]);
+    expect(seen.join("\n")).not.toContain("example.com");
+    expect(seen.join("\n")).not.toContain("/direct");
     await expectQuiet();
   });
 
   // #767-E11
-  test("E11 prompt cache: the later calls read from the cache, and the cost of the run is the sum of its calls including the cache", async ({
+  test("E11 prompt cache, the provider states its charge (OpenRouter): later calls read from the cache, and the run costs what its calls cost, the dearer of the stated charge and the book's price", async ({
     page,
   }) => {
-    const theLlm = required(llm, "The fake LLM");
-    const branch = "implementer/e11";
-    // The engine marks two message objects of its prompt (the mark it puts there for an OpenAI-compatible provider); the provider
-    // of this journey honours it.
-    theLlm.enablePromptCache(true, { messageMarks: true });
-    theLlm.scriptAgent({
-      when: { lastUserContains: "[E11-CACHE]" },
-      steps: [
-        write("c.txt", "c\n"),
-        commit("Add c"),
-        bash("echo one"),
-        bash("echo two"),
-        bash("echo three"),
-      ],
-      finalText: "Added c.txt.",
+    const { ended, answered } = await cachedRun(page, {
+      branch: "implementer/e11",
+      marker: "[E11-CACHE]",
+      stated: true,
     });
-    await signInAsAdmin(page);
-
-    const runId = await startTask(page, {
-      repository: GADGETS.fullName,
-      branch,
-      instruction: "[E11-CACHE] Add c.txt.",
-      model: "Claude Lane Coder",
-    });
-    runs.push(runId);
-    const ended = await runEnded(page, runId, RUN_TIMEOUT);
-
-    expect(ended.status).toBe("succeeded");
-    // What the fake said every answer used (the title request too: the model proxy counts it): fresh input, what was read
-    // from the cache, what was written to it, and the output, priced as the catalog prices the model (per million tokens).
-    const answered = theLlm
-      .requests()
-      .flatMap((item) => (item.usage === undefined ? [] : [item.usage]));
-    const cached = (usage: Record<string, unknown>) =>
-      (usage.prompt_tokens_details as { cached_tokens?: number } | undefined)
-        ?.cached_tokens ?? 0;
-    expect(answered.length).toBeGreaterThanOrEqual(4);
-    // The engine marked its prompt for the cache: on the message objects.
-    const marks = theLlm.requests().map((item) => item.cacheMarks);
-    expect(
-      marks.some((mark) => mark.messages > 0),
-      `the engine marked nothing: ${JSON.stringify(marks.slice(-3))}`,
-    ).toBe(true);
-    expect(
-      answered.slice(1).some((usage) => cached(usage) > 0),
-      "a later call read from the cache",
-    ).toBe(true);
-    // The cost of the run is the sum of what the calls cost, the cache included: each answer states its charge (`usage.cost`, as
-    // OpenRouter does: cache reads are cheaper, cache writes dearer), and the run states the sum of them.
-    const statedCost = answered.reduce(
-      (sum, usage) => sum + Number(usage.cost),
+    // The runner prices every call at the dearer of what the provider states and what the catalog's price comes to.
+    const expected = answered.reduce(
+      (sum, usage) => sum + Math.max(Number(usage.cost), bookCost(usage)),
       0,
     );
-    expect(statedCost).toBeGreaterThan(0);
-    expect(ended.usage?.aiCalls).toBe(answered.length);
-    expect(
-      ended.usage?.costUsd,
-      `the calls stated ${String(statedCost)} in all`,
-    ).toBeCloseTo(statedCost, 8);
+    expect(expected).toBeGreaterThan(0);
+    expect(ended.usage?.costUsd).toBeCloseTo(expected, 8);
+    await expectQuiet();
+  });
+
+  // #767-E11
+  test("E11 prompt cache, the provider states no charge (DeepSeek, OpenAI): the run costs the book's price of its calls, the cache read at the cache's price", async ({
+    page,
+  }) => {
+    const { ended, answered } = await cachedRun(page, {
+      branch: "implementer/e11b",
+      marker: "[E11-NO-CHARGE]",
+      stated: false,
+    });
+    // Nothing is stated, so nothing but the catalog's price can have priced the run.
+    for (const usage of answered) expect(usage).not.toHaveProperty("cost");
+    const expected = answered.reduce((sum, usage) => sum + bookCost(usage), 0);
+    expect(expected).toBeGreaterThan(0);
+    expect(ended.usage?.costUsd).toBeCloseTo(expected, 8);
+    // The cache's price is what made the difference: without it the calls would cost more than the run did.
+    const withoutCache = answered.reduce(
+      (sum, usage) =>
+        sum +
+        (Number(usage.prompt_tokens) * BOOK.input +
+          Number(usage.completion_tokens) * BOOK.output) /
+          1_000_000,
+      0,
+    );
+    expect(ended.usage?.costUsd).toBeLessThan(withoutCache);
     await expectQuiet();
   });
 
@@ -821,6 +925,7 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       finalText: "I looked at it and there is nothing to change.",
     });
     await signInAsAdmin(page);
+    const pushesBefore = (await getPushes(request, GADGETS.fullName)).length;
 
     const runId = await startTask(page, {
       repository: GADGETS.fullName,
@@ -833,31 +938,80 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     expect(ended.status).toBe("failed");
     expect(ended.errorCode).toBe("agent_gave_up");
     expect(tipOf(gadgets().path, branch)).toBeNull();
-    const pushes = await getPushes(request, GADGETS.fullName);
-    expect(
-      pushes.filter((entry) => entry.refs.some((ref) => ref.endsWith("e12"))),
-    ).toEqual([]);
+    // Nothing was pushed at all during the journey: no branch, no tag, no note.
+    expect(await pushesSince(request, pushesBefore)).toEqual([]);
     await expectQuiet();
   });
 
   // #767-E09
-  test("E09 no secret anywhere: not the installation token, the model key, the capability or the credential of a job", async ({
+  test("E09 no secret anywhere, and an agent that looks for one finds none: not the installation token, the model key or the credential of a job", async ({
     page,
     request,
   }) => {
+    const theLlm = required(llm, "The fake LLM");
     const theDispatcher = required(dispatcher, "The Dispatcher");
+    const branch = "implementer/e09";
+    theLlm.scriptAgent({
+      when: { lastUserContains: "[E09-PROBE]" },
+      steps: [
+        // At the start: its own environment and everything of the container it can read.
+        bash(`${PROBE}; echo '[probe-start-done]'`),
+        write("probe.txt", "probe\n"),
+        // While the runner pushes: the same, and an attempt to read the environment of the root process that pushes.
+        bash(PROBE_DURING_PUSH),
+      ],
+      finalText: "Looked around, then committed probe.txt.",
+    });
     await signInAsAdmin(page);
+
+    const runId = await startTask(page, {
+      repository: GADGETS.fullName,
+      branch,
+      instruction: "[E09-PROBE] Look around the machine and add probe.txt.",
+    });
+    runs.push(runId);
+    const ended = await runEnded(page, runId, RUN_TIMEOUT);
+    expect(ended.status).toBe("succeeded");
+
     const tokens = await getIssuedInstallationTokens(request);
     expect(tokens.length).toBeGreaterThan(0);
-    const secrets = [
-      KEY,
-      ...tokens,
-      ...capabilities(),
-      ...factorySecrets(),
-      ...allSecrets(),
-    ];
-    expect(capabilities().length).toBeGreaterThan(0);
+    const secrets = [KEY, ...tokens, ...factorySecrets(), ...allSecrets()];
+    // The capability of the engine's proxy is the engine's own credential for the loopback proxy of its job, worthless anywhere
+    // else: the agent may read it (its configuration is its own), and it must be nowhere outside the container.
+    const theCapabilities = capabilities();
+    expect(theCapabilities.length).toBeGreaterThan(0);
 
+    // What the agent saw, as the model received it.
+    const probed = Object.values(
+      required(theLlm.requests().at(-1), "The last request").toolResults,
+    ).join("\n");
+    // It could read: its own environment and that of every process of its user,
+    expect(probed).toContain("[probe-start-done]");
+    expect(probed).toMatch(/HTTPS_PROXY=http:\/\/127\.0\.0\.1:\d+/);
+    expect(probed).toContain("OPENCODE_CONFIG=");
+    expect(probed).toMatch(/== ps -eo user,pid,args\n[\s\S]*root\s+\d+/);
+    // and found the repository without a remote and without a credential in its configuration,
+    expect(probed).toMatch(
+      /== cat \/work\/repo\/\.git\/config\n[\s\S]*repositoryformatversion/,
+    );
+    expect(probed).not.toMatch(
+      /\[remote |remote\.[^\s=]+\.url|\burl\s*=|extraheader/i,
+    );
+    expect(probed).toMatch(/== git remote -v\n== ps/);
+    // while the runner pushed it looked for the root process, and could neither read its environment (where the token is) nor
+    // find the token in its arguments.
+    expect(probed).toContain("[push-seen] yes");
+    expect(probed).toMatch(/root push \d+ environ: [^\n]*Permission denied/);
+    expect(probed).toMatch(
+      /root push \d+ cmdline: [^\n]*refs\/heads\/implementer\/e09/,
+    );
+    for (const secret of secrets)
+      expect(
+        containsSecret(probed, secret),
+        "the agent found a credential",
+      ).toBe(false);
+
+    // Everywhere else, every secret and the capability too.
     const list = await page.request.get(`/api/w/${WORKSPACE}/runs`);
     expect(list.status()).toBe(200);
     const details = await Promise.all(
@@ -870,7 +1024,7 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       ),
     );
     await page.goto(`/w/${WORKSPACE}/runs`);
-    const texts: Record<string, string> = {
+    const elsewhere: Record<string, string> = {
       "the Runs page": await page.content(),
       "the runs API": await list.text(),
       "the run details": details.join("\n"),
@@ -894,36 +1048,74 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       "the runner's git commands": runnerGitCommands()
         .map((command) => command.argv.join(" "))
         .join("\n"),
-      "what the model was shown": shownToTheModel.join("\n"),
+      ...Object.fromEntries(
+        Object.entries(wrapperOutputs()).map(([name, text]) => [
+          `the job wrapper's ${name}`,
+          text,
+        ]),
+      ),
     };
-    for (const [name, text] of Object.entries(texts))
-      for (const secret of secrets)
+    for (const [name, text] of Object.entries(elsewhere))
+      for (const secret of [...secrets, ...theCapabilities])
         expect(containsSecret(text, secret), `a credential is in ${name}`).toBe(
           false,
         );
-
-    // The engine's own directories (OpenCode's data, cache and sessions), read at the end of every job.
-    const scans = engineScans();
-    expect(scans.length).toBeGreaterThan(0);
-    for (const scan of scans) {
-      expect(scan.files).toBeGreaterThan(0);
+    // What the model was shown in all journeys: the secrets, never. (The capability may be in what an agent read from its own
+    // configuration; the probes above do not read that file.)
+    const shownEverywhere = shownToTheModel.join("\n") + "\n" + probed;
+    for (const secret of secrets)
       expect(
-        Object.entries(scan.found).filter(([, count]) => count > 0),
-        "a secret is in the engine's directories",
-      ).toEqual([]);
-    }
+        containsSecret(shownEverywhere, secret),
+        "the model was shown a credential",
+      ).toBe(false);
+
+    // The places of every job, looked through at its end (the wrapper writes one scan per job): the engine's own directories,
+    // the agent's repository, the root's mirror and /run; each holds files, and none holds a secret (the capability is left out of
+    // /run, where the engine's configuration is by design).
+    const workers = theDispatcher
+      .containers()
+      .filter((container) => container.mode === "worker-once");
+    const scans = engineScans();
+    expect(scans).toHaveLength(workers.length);
+    for (const scan of scans)
+      for (const place of [
+        "engine-directories",
+        "repository",
+        "mirror",
+        "run",
+      ]) {
+        const root = scan.roots[place];
+        expect(root?.files, `the scan of ${place} read files`).toBeGreaterThan(
+          0,
+        );
+        expect(
+          Object.entries(root?.found ?? {}).filter(([, count]) => count > 0),
+          `a secret is in ${place}`,
+        ).toEqual([]);
+      }
   });
 
   // #767-E10
-  test("E10 after the Workers end, no process of the engine user and no work volume is left, and the VMs are stopped", async () => {
+  test("E10 after the Workers end, nothing of them is left: no process in a container's namespace (and so no /work mount), no process of the runner or the engine, no VM", async () => {
     const theDispatcher = required(dispatcher, "The Dispatcher");
     await eventually(
       "the VMs of the jobs to be stopped",
       async () => vmDirectories(VM_ROOT).length === 0,
       60_000,
     );
+    // The containers of E01, E05, E06 and E07 were read while they ran (their volume had the options of the profile). A mount
+    // of a container's own namespace lives as long as one process is in that namespace; none is.
+    expect(namespaces.length).toBeGreaterThanOrEqual(4);
+    await eventually(
+      "the containers' namespaces to be empty",
+      async () => processesInNamespaces(namespaces).length === 0,
+      30_000,
+    );
+    expect(processesInNamespaces(namespaces)).toEqual([]);
+    // No process of a Worker, its job, its mirror or its engine, whoever runs it.
+    expect(leftoverWorkerProcesses()).toEqual([]);
     expect(engineProcesses()).toEqual([]);
-    // The work volume is a mount of the container's own namespace: none of the lane's processes has one at /work.
+    // The container's mounts stayed in its own namespace: E01 saw it differ from the lane's, and nothing leaked into the lane's.
     expect(readFileSync("/proc/self/mountinfo", "utf8")).not.toMatch(
       /\s\/work\s/,
     );
@@ -934,4 +1126,102 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     expect(workers.length).toBeGreaterThanOrEqual(runs.length);
     assertGuardQuiet();
   });
+
+  /**
+   * A task on a model whose id the engine marks for the cache, with the provider that does or does not state its charge. Returns
+   * the run and what every answer said it used.
+   */
+  async function cachedRun(
+    page: Page,
+    options: { branch: string; marker: string; stated: boolean },
+  ) {
+    const theLlm = required(llm, "The fake LLM");
+    // The engine marks two message objects of its prompt (the mark it puts there for an OpenAI-compatible provider); the provider
+    // of this journey honours it.
+    theLlm.enablePromptCache(true, { messageMarks: true });
+    theLlm.statesCharge(options.stated);
+    theLlm.scriptAgent({
+      when: { lastUserContains: options.marker },
+      steps: [
+        write("c.txt", "c\n"),
+        commit("Add c"),
+        bash("echo one"),
+        bash("echo two"),
+        bash("echo three"),
+      ],
+      finalText: "Added c.txt.",
+    });
+    await signInAsAdmin(page);
+
+    const runId = await startTask(page, {
+      repository: GADGETS.fullName,
+      branch: options.branch,
+      instruction: `${options.marker} Add c.txt.`,
+      model: "Claude Lane Coder",
+    });
+    runs.push(runId);
+    const ended = await runEnded(page, runId, RUN_TIMEOUT);
+    expect(ended.status).toBe("succeeded");
+    // The engine marked its prompt for the cache: on the message objects.
+    const marks = theLlm.requests().map((item) => item.cacheMarks);
+    expect(
+      marks.some((mark) => mark.messages > 0),
+      `the engine marked nothing: ${JSON.stringify(marks.slice(-3))}`,
+    ).toBe(true);
+    // What the fake said every answer used (the title request too: the model proxy counts it).
+    const answered = theLlm
+      .requests()
+      .flatMap((item) => (item.usage === undefined ? [] : [item.usage]));
+    expect(answered.length).toBeGreaterThanOrEqual(4);
+    expect(
+      answered.slice(1).some((usage) => cachedTokens(usage) > 0),
+      "a later call read from the cache",
+    ).toBe(true);
+    expect(ended.usage?.aiCalls).toBe(answered.length);
+    return { ended, answered };
+  }
 });
+
+// The catalog's price of the model of the cache journeys, in US dollars per million tokens (the fixture the app's catalog was filled from).
+const BOOK = (
+  JSON.parse(readFileSync(resolve(process.cwd(), FIXTURE), "utf8")) as {
+    deepseek: {
+      models: Record<
+        string,
+        {
+          cost: {
+            input: number;
+            output: number;
+            cache_read: number;
+            cache_write: number;
+          };
+        }
+      >;
+    };
+  }
+).deepseek.models["claude-lane-coder"]?.cost ?? {
+  input: Number.NaN,
+  output: Number.NaN,
+  cache_read: Number.NaN,
+  cache_write: Number.NaN,
+};
+
+const cachedTokens = (usage: Record<string, unknown>): number =>
+  (usage.prompt_tokens_details as { cached_tokens?: number } | undefined)
+    ?.cached_tokens ?? 0;
+
+/** What the catalog's price comes to for one answer's usage: fresh input, cache reads, cache writes and output. */
+function bookCost(usage: Record<string, unknown>): number {
+  const prompt = Number(usage.prompt_tokens);
+  const read = cachedTokens(usage);
+  const written =
+    (usage.prompt_tokens_details as { cache_write_tokens?: number } | undefined)
+      ?.cache_write_tokens ?? 0;
+  return (
+    ((prompt - read - written) * BOOK.input +
+      read * BOOK.cache_read +
+      written * BOOK.cache_write +
+      Number(usage.completion_tokens) * BOOK.output) /
+    1_000_000
+  );
+}

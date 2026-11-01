@@ -60,9 +60,11 @@ describe("the project claim guard", () => {
       await guard.check({ ...job, reviewKind: "implementer" } as Job),
     ).toStrictEqual({ allow: true });
     expect(asked).toBe(0);
-    // A review of the same repository is still cancelled.
-    expect(
-      await guard.check({ ...job, reviewKind: "diff" } as Job),
-    ).toMatchObject({ allow: false, errorCode: "project_deactivated" });
+    // A review of the same repository, of either kind, is still cancelled.
+    for (const reviewKind of ["diff", "dynamic"] as const)
+      expect(
+        await guard.check({ ...job, reviewKind } as Job),
+        reviewKind,
+      ).toMatchObject({ allow: false, errorCode: "project_deactivated" });
   });
 });

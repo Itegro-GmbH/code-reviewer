@@ -482,4 +482,58 @@ describe("the fake LLM playing a coding agent", () => {
       completion_tokens: 30,
     });
   });
+
+  // #767: the journeys wait on a condition (a push) while the agent waits, not on a sleep of the agent's own.
+  it("holds the request that would get a step named in holdBefore until the test releases it, once", async () => {
+    const fake = await setup();
+    fake.scriptAgent({
+      steps: [
+        [{ name: "read", arguments: { filePath: "a" } }],
+        [{ name: "read", arguments: { filePath: "b" } }],
+      ],
+      holdBefore: [1],
+      finalText: "Done.",
+    });
+    const user = [{ role: "user", content: "go" }];
+
+    const first = await ask(fake.baseUrl, user);
+    const waiting = ask(fake.baseUrl, user);
+    await expect.poll(() => fake.heldCount()).toBe(1);
+    const requestsWhileHeld = fake.requests().length;
+    fake.release();
+    const second = await waiting;
+    const third = await ask(fake.baseUrl, user);
+
+    expect(
+      first.json.choices[0]?.message.tool_calls?.[0]?.function.arguments,
+    ).toBe('{"filePath":"a"}');
+    expect(
+      second.json.choices[0]?.message.tool_calls?.[0]?.function.arguments,
+    ).toBe('{"filePath":"b"}');
+    expect(third.json.choices[0]?.message.content).toBe("Done.");
+    expect(requestsWhileHeld).toBe(2);
+    expect(fake.heldCount()).toBe(0);
+  });
+
+  // #767: the path of a provider that states no charge (DeepSeek, OpenAI).
+  it("leaves usage.cost out of every chat answer when the provider states no charge, and puts it back", async () => {
+    const fake = await setup();
+    fake.scriptAgent({
+      steps: [[{ name: "read", arguments: { filePath: "a" } }]],
+      finalText: "Done.",
+    });
+    const user = [{ role: "user", content: "go" }];
+
+    fake.statesCharge(false);
+    const tool = await ask(fake.baseUrl, user);
+    const text = await ask(fake.baseUrl, user);
+    fake.statesCharge(true);
+    const again = await ask(fake.baseUrl, user);
+
+    expect("cost" in tool.json.usage).toBe(false);
+    expect("cost" in text.json.usage).toBe(false);
+    expect(text.json.usage.prompt_tokens).toBe(100);
+    expect("cost" in again.json.usage).toBe(true);
+    expect(fake.requests()[0]?.usage).not.toHaveProperty("cost");
+  });
 });

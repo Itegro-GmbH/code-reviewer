@@ -10,6 +10,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   rmSync,
 } from "node:fs";
 import { createServer, type Server } from "node:https";
@@ -231,6 +232,31 @@ export async function branchPushed(
   }
 }
 
+/**
+ * Waits until the fake LLM holds a request (a script's `holdBefore`: the agent waits for the test), and fails at once when the
+ * run ends first. What the journey has to see happen while the agent waits (a push) is waited for after this, and `release()`
+ * lets the agent go on.
+ */
+export async function agentIsWaiting(
+  llm: { heldCount(): number },
+  page: Page,
+  runId: string,
+  timeoutMs = 80_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (llm.heldCount() > 0) return;
+    const run = await runData(page, runId);
+    if (!UNSETTLED.has(run.status))
+      throw new Error(
+        `The run ended ${run.status} (${run.errorCode ?? "no code"}) before the agent waited.`,
+      );
+    if (Date.now() > deadline)
+      throw new Error("The agent did not come to the point it was to wait at.");
+    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+  }
+}
+
 // -- the model's script ------------------------------------------------------------------------------------------
 
 /** Where the agent's repository is in the container (the same path every turn). */
@@ -247,9 +273,38 @@ export const bash = (command: string): AgentToolCall[] => [
 ];
 export const commit = (message: string): AgentToolCall[] =>
   bash(`git add -A && git commit -q -m '${message}'`);
-/** A pause that lets the push loop (it looks every two seconds) publish what is committed while the turn goes on. */
-export const pause = (seconds: number): AgentToolCall[] =>
-  bash(`sleep ${String(seconds)}`);
+
+/**
+ * What an agent that looks for a secret runs, in the order of the issue: its environment and that of every process it can read,
+ * the repository's configuration, git's configuration and remotes, the processes with their arguments, and the directories of
+ * the container. Each command is announced, so that an empty answer is a result and not a gap.
+ */
+export const PROBE =
+  [
+    "env",
+    "cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n'",
+    "cat /work/repo/.git/config",
+    "git config -l",
+    "git remote -v",
+    "ps -eo user,pid,args",
+    "ls -la /run /work",
+  ]
+    .map((command) => `echo "== ${command.replaceAll('"', "'")}"; ${command}`)
+    .join("; ") + "; echo '== end of the probe'";
+
+/**
+ * The same, while a push is going on: it commits, waits (at most twenty seconds, in steps of 50 ms) until a root process runs
+ * `git push` (the runner's mirror push), tries to read that process's environment and its arguments, and then runs the probe.
+ */
+export const PROBE_DURING_PUSH =
+  "git add -A && git commit -q -m 'Add probe'; seen=no; " +
+  "for i in $(seq 1 400); do " +
+  "if pgrep -u 0 -f ' push --porcelain ' >/dev/null; then seen=yes; " +
+  "for p in $(pgrep -u 0 -f ' push --porcelain '); do " +
+  'echo "root push $p environ: $(cat /proc/$p/environ 2>&1 | head -c 160)"; ' +
+  "echo \"root push $p cmdline: $(tr '\\0' ' ' < /proc/$p/cmdline 2>&1 | head -c 400)\"; done; " +
+  "break; fi; sleep 0.05; done; " +
+  `echo "[push-seen] $seen"; ${PROBE}`;
 
 // -- what the runner did to Git ----------------------------------------------------------------------------------
 
@@ -371,12 +426,11 @@ export function capabilities(): string[] {
 }
 
 export type EngineScan = {
-  files: number;
-  directories: string[];
-  found: Record<string, number>;
+  /** Per place the job wrapper looked through at the end of a job: how many files, and how many held each secret. */
+  roots: Record<string, { files: number; found: Record<string, number> }>;
 };
 
-/** What the job wrapper found when it looked through the engine's directories at the end of each job, one scan per job. */
+/** What the job wrapper found when it looked through the places of a job at its end, one scan per job. */
 export function engineScans(): EngineScan[] {
   const prefix = "git-commands.jsonl.";
   return readdirSync(RECORDS)
@@ -385,6 +439,132 @@ export function engineScans(): EngineScan[] {
       (name) =>
         JSON.parse(readFileSync(`${RECORDS}/${name}`, "utf8")) as EngineScan,
     );
+}
+
+/** The files the job wrapper wrote next to its records: its log, the engine's output, the stacks of a hung job. */
+export function wrapperOutputs(): Record<string, string> {
+  return Object.fromEntries(
+    readdirSync(RECORDS)
+      .filter((name) => /\.(job|engine|stacks)\.txt$/.test(name))
+      .map((name) => [name, readFileSync(`${RECORDS}/${name}`, "utf8")]),
+  );
+}
+
+// -- the container, from the lane ----------------------------------------------------------------------------------
+
+/** The processes below `pid` (its children, their children, ...), as `/proc` says; the process itself is not in the list. */
+export function descendantsOf(pid: number): number[] {
+  const parents = new Map<number, number>();
+  for (const entry of readdirSync("/proc")) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const stat = readFileSync(`/proc/${entry}/stat`, "utf8");
+      // `pid (comm) state ppid ...`: the name may hold spaces and brackets, so count from its closing bracket.
+      const rest = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+      parents.set(Number(entry), Number(rest[1]));
+    } catch {
+      // The process ended while this looked.
+    }
+  }
+  const found: number[] = [];
+  const queue = [pid];
+  while (queue.length > 0) {
+    const current = queue.shift() as number;
+    for (const [child, parent] of parents)
+      if (parent === current && !found.includes(child)) {
+        found.push(child);
+        queue.push(child);
+      }
+  }
+  return found;
+}
+
+const mountNamespaceOf = (pid: number): string | null => {
+  try {
+    return readlinkSync(`/proc/${String(pid)}/ns/mnt`);
+  } catch {
+    return null;
+  }
+};
+
+export type ContainerMount = {
+  /** The id of the container's mount namespace (`mnt:[...]`), which the lane's own processes do not share. */
+  namespace: string;
+  /** The mount at /work as the container's own mountinfo has it. */
+  work: { fstype: string; options: string[] } | null;
+};
+
+/**
+ * What the container of a running Worker looks like from the lane: the mount namespace the stand-in's wrapper made (`unshare
+ * --mount`) and the volume at /work in it, read from the mountinfo of a process of the Worker. A process of the lane itself
+ * cannot see these mounts, which is why a check of "no /work mount left" reads this namespace while the Worker runs and then
+ * looks for any process that still holds it.
+ */
+export function containerMountOf(workerPid: number): ContainerMount | null {
+  const own = mountNamespaceOf(process.pid);
+  // The wrapper `exec`s into `unshare --mount`, which `exec`s on: the stand-in's own process may be the one in the namespace.
+  for (const pid of [workerPid, ...descendantsOf(workerPid)]) {
+    const namespace = mountNamespaceOf(pid);
+    if (namespace === null || namespace === own) continue;
+    let work: ContainerMount["work"] = null;
+    try {
+      for (const line of readFileSync(
+        `/proc/${String(pid)}/mountinfo`,
+        "utf8",
+      ).split("\n")) {
+        // `id parent maj:min root mount-point options [optional...] - fstype source super-options`
+        const fields = line.split(" ");
+        if (fields[4] !== "/work") continue;
+        const dash = fields.indexOf("-");
+        work = {
+          fstype: fields[dash + 1] ?? "",
+          options: (fields[5] ?? "").split(","),
+        };
+      }
+    } catch {
+      continue;
+    }
+    return { namespace, work };
+  }
+  return null;
+}
+
+/** `pid args` of every process that is in one of the mount namespaces (a Worker's container ends with its last process). */
+export function processesInNamespaces(namespaces: string[]): string[] {
+  const found: string[] = [];
+  for (const entry of readdirSync("/proc")) {
+    if (!/^\d+$/.test(entry)) continue;
+    const namespace = mountNamespaceOf(Number(entry));
+    if (namespace === null || !namespaces.includes(namespace)) continue;
+    found.push(`${entry} ${processArguments(Number(entry))}`);
+  }
+  return found;
+}
+
+function processArguments(pid: number): string {
+  try {
+    return readFileSync(`/proc/${String(pid)}/cmdline`, "utf8")
+      .split("\0")
+      .join(" ")
+      .trim();
+  } catch {
+    return "";
+  }
+}
+
+/** What a Worker and its job leave when they end badly: the runner, the job wrapper, the engine, the git of the mirror, the user switch. */
+const WORKER_PROCESSES =
+  /code_reviewer_runner|code-reviewer-runner|run_job_against_fake_llm|opencode|setpriv|unshare|docker-worker|\/work\//;
+
+/** Processes of the lane that belong to a Worker (root or the engine user) and have not ended. */
+export function leftoverWorkerProcesses(): string[] {
+  const found: string[] = [];
+  for (const entry of readdirSync("/proc")) {
+    if (!/^\d+$/.test(entry) || Number(entry) === process.pid) continue;
+    const args = processArguments(Number(entry));
+    if (WORKER_PROCESSES.test(args)) found.push(`${entry} ${args}`);
+  }
+  return found;
 }
 
 /** The path of this file's `fakes/implementer/run_job_against_fake_llm.py`. */

@@ -28,10 +28,11 @@ the environment of those processes, never in it). The journeys assert on it that
 pushes with force.
 
 When the job has ended, and before the process does, it looks through the engine user's home and
-temporary directory (OpenCode's data, cache and sessions; they are in the work volume, which goes
-with the container) for the job's secrets: the installation token, the model key and the
-capability the engine was handed. It writes how many files it read and how many held each, never a
-value, next to the git log (`<git command log>.<pid>.scan.json`, one per job).
+temporary directory (OpenCode's data, cache and sessions), the agent's repository, the mirror and
+`/run` for the job's secrets: the installation token, the model key and the capability the engine
+was handed (in `/run` the capability is the engine's configuration, by design, and is only left
+out). It writes how many files it read and how many held each, never a value, next to the git log
+(`<git command log>.<pid>.scan.json`, one per job).
 
     python run_job_against_fake_llm.py <llm base url> <fake registry port> <git command log>
 
@@ -137,6 +138,10 @@ def record_git_commands(log_path: str) -> None:
     GitProcess.stream = recording_stream  # type: ignore[method-assign,assignment]
 
 
+# A larger file is a cache or an object store, not a place for a token: the scan leaves it.
+MAX_SCANNED_BYTES = 8 * 1024 * 1024
+
+
 class EngineTraces:
     """Where the engine lives (its home and temporary directory) and the capability it was handed,
     found when it is started. What the engine prints goes to a file next to the git log."""
@@ -165,32 +170,49 @@ class EngineTraces:
         return cast("subprocess.Popen[bytes]", subprocess.Popen(argv, **options))
 
     def scan(self, secrets: dict[str, str], report_path: str) -> None:
-        """Counts, per secret, the files of the engine's directories that hold it."""
-        needles = {**secrets, **{f"capability-{n}": c for n, c in enumerate(self.capabilities)}}
-        found = dict.fromkeys(needles, 0)
-        files = 0
-        for directory in sorted(self.directories):
-            for root, _names, names in os.walk(directory, followlinks=False):
-                for name in names:
-                    path = Path(root, name)
-                    if path.is_symlink():
-                        continue
-                    try:
-                        data = path.read_bytes()
-                    except OSError:
-                        continue
-                    files += 1
-                    for label, value in needles.items():
-                        if value.encode() in data:
-                            found[label] += 1
+        """Counts, per place and per secret, the files that hold it: the engine's home and temporary
+        directory, the agent's repository, the root's mirror, and `/run` (the guard's files, the
+        engine's configuration, the Worker's files) without the lane's records. The capability is
+        the engine's credential for the proxy of this job: it is in the engine's configuration
+        under `/run` by design, so there it is left out."""
+        capabilities = {f"capability-{n}": c for n, c in enumerate(self.capabilities)}
+        everything = {**secrets, **capabilities}
+        records = os.path.dirname(report_path)
+        places: dict[str, tuple[list[str], dict[str, str], list[str]]] = {
+            "engine-directories": (sorted(self.directories), everything, []),
+            "repository": (["/work/repo"], everything, []),
+            "mirror": (["/work/mirror.git"], everything, []),
+            "run": (["/run"], secrets, [records]),
+        }
+        roots: dict[str, dict[str, Any]] = {}
+        for label, (directories, needles, skipped) in places.items():
+            found = dict.fromkeys(needles, 0)
+            files = 0
+            for directory in directories:
+                for root, names, filenames in os.walk(directory, followlinks=False):
+                    names[:] = [n for n in names if os.path.join(root, n) not in skipped]
+                    for name in filenames:
+                        path = Path(root, name)
+                        if path.is_symlink():
+                            continue
+                        try:
+                            if path.stat().st_size > MAX_SCANNED_BYTES:
+                                continue
+                            data = path.read_bytes()
+                        except OSError:
+                            continue
+                        files += 1
+                        for needle, value in needles.items():
+                            if value.encode() in data:
+                                found[needle] += 1
+            roots[label] = {"files": files, "found": found}
         # The capabilities go to a file of their own (mode 0600) that the journey reads to search
         # every page and log for a value nobody else knows. No report or log is made from it.
         with open(report_path + ".capabilities", "a", encoding="utf-8") as handle:
             os.fchmod(handle.fileno(), 0o600)
             for capability in sorted(self.capabilities):
                 handle.write(capability + "\n")
-        report = {"files": files, "directories": sorted(self.directories), "found": found}
-        Path(report_path).write_text(json.dumps(report), encoding="utf-8")
+        Path(report_path).write_text(json.dumps({"roots": roots}), encoding="utf-8")
 
 
 def clone_over_http() -> None:
