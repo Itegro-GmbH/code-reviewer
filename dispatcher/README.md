@@ -147,7 +147,7 @@ the whole identity of the sender**.
   nothing wakes it again before the sweep (the hosted E2E of a crash loop at cap 1 showed it). Even with the tolerance, an app
   in a crash loop whose dead Workers leave more than twice the cap plus two VMs can have a job **delayed, not lost**: the
   wake-up call is answered `busy` and the App offers the job again, until the reaper has stopped the leftovers. The cap is that of the app: for
-  `reviewer` `DISPATCHER_MAX_RUNNING`, unchanged. _Cost:_ one listing of the project's `cr-` VMs (all pages) per five seconds at most, shared by every claim in that time;
+  `reviewer` `DISPATCHER_MAX_RUNNING`, unchanged. _Cost:_ one listing of the project's `cr-` VMs (all pages, 50 per page, the platform's largest; it keeps stopped VMs, so the listing only grows: 283 VMs took 5.1 s at the default page size) per five seconds at most, shared by every claim in that time;
   claims that arrive together share one call. A claim therefore sees a VM that ended up to five seconds late (the safe side)
   and one that started in that time through the count of the Dispatcher's own launches. A listing that gives no answer in four
   seconds counts as a failed one (claims never wait longer, and a waiting claim holds no launch slot). If the listing fails,
