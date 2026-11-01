@@ -7,6 +7,7 @@
 | `RUNNER_JOB_TIMEOUT_SECONDS` | Hard timeout of one job                         | 1200 |
 | `RUNNER_DIFF_JOB_USER`       | `uid:gid` of the Diff job process (root Worker) | none |
 | `RUNNER_DYNAMIC_*`           | Engine user and ports of the Dynamic slot       | supervisor.py |
+| `RUNNER_IMPLEMENTER_*`       | Work dir, network, egress port (Implementer)    | none |
 | `PR_AGENT_COMMAND`           | Command that runs one job (test stacks only)    | run-job |
 
 The app address and the per-job credential are not settings: they come on stdin (`worker.py`). A
@@ -17,15 +18,22 @@ import shlex
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
 
 from code_reviewer_runner.capabilities import ENGINE_DIFF
 from code_reviewer_runner.dynamic_review.netguard import EgressMode, IsolationError
-from code_reviewer_runner.dynamic_review.static_isolation import SlotPorts, slot_ports
+from code_reviewer_runner.dynamic_review.static_isolation import (
+    ImplementerNetwork,
+    SlotPorts,
+    implementer_network,
+    slot_ports,
+)
 from code_reviewer_runner.dynamic_review.supervisor import (
     DEFAULT_ENGINE_ID,
     ENGINE_GID_VARIABLE,
     ENGINE_UID_VARIABLE,
 )
+from code_reviewer_runner.job import IMPLEMENTER_WORK_DIR_VARIABLE
 
 DEFAULT_JOB_TIMEOUT_SECONDS = 20 * 60.0
 MAX_JOB_TIMEOUT_SECONDS = 6 * 60 * 60.0
@@ -65,6 +73,10 @@ class WorkerSettings:
     # the startup after it, never read from the environment; the Worker hands it to the Dynamic job
     # process, which proves the matching properties again.
     dynamic_egress_mode: EgressMode = EgressMode.FULL
+    # The work volume of an Implementer container (`RUNNER_IMPLEMENTER_WORK_DIR`, #765); None in
+    # every other container, which never advertises `implementer`.
+    implementer_work_dir: Path | None = None
+    implementer_network: ImplementerNetwork = ImplementerNetwork.NONE
 
 
 def _number(
@@ -136,6 +148,24 @@ def _dynamic_ports(
         raise SettingsError(error.detail) from None
 
 
+def _implementer_work_dir(environment: Mapping[str, str]) -> Path | None:
+    """The work volume of an Implementer container: an absolute path without `..`, not `/`."""
+    raw = environment.get(IMPLEMENTER_WORK_DIR_VARIABLE, "").strip()
+    if not raw:
+        return None
+    path = PurePosixPath(raw)
+    if not path.is_absolute() or ".." in path.parts or path == PurePosixPath("/"):
+        raise SettingsError(f"{IMPLEMENTER_WORK_DIR_VARIABLE} must be an absolute directory")
+    return Path(path)
+
+
+def _implementer_network(environment: Mapping[str, str]) -> ImplementerNetwork:
+    try:
+        return implementer_network(environment)
+    except IsolationError as error:
+        raise SettingsError(error.detail) from None
+
+
 def _identifier(environment: Mapping[str, str], name: str) -> int:
     raw = environment.get(name, "").strip()
     if not raw:
@@ -154,6 +184,8 @@ def worker_settings_from_environment(environment: Mapping[str, str]) -> WorkerSe
         diff_job_user=diff_job_user,
         dynamic_engine_user=_dynamic_engine_user(environment, diff_job_user),
         dynamic_ports=_dynamic_ports(environment, diff_job_user),
+        implementer_work_dir=_implementer_work_dir(environment),
+        implementer_network=_implementer_network(environment),
         job_timeout=_number(
             environment,
             "RUNNER_JOB_TIMEOUT_SECONDS",

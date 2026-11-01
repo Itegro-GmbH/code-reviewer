@@ -150,7 +150,14 @@ export type SandboxLauncherOptions = {
   /** Seconds added to the job's timeout for the VM's own; at least `minimumVmTimeoutMargin(handoverSeconds)`. */
   vmTimeoutMarginSeconds?: number;
   /**
-   * The engines this Launcher can run: both by default (#479). Which of them a deployment serves is its
+   * Whether this deployment serves the Implementer (an app of `DISPATCHER_APPS` names the kind, #765): then, and only then,
+   * the default `capabilities` hold `implementer`. A deployment without the kind advertises what it always did, so the
+   * canary of code-review.com does not depend on an engine it never serves.
+   */
+  servesImplementer?: boolean;
+  /**
+   * The engines this Launcher can run: both reviewer engines by default (#479), and `implementer` when the deployment
+   * serves it (`servesImplementer`). Which of them a deployment serves is its
    * `DISPATCHER_ENGINES`, which the core applies; the proof that the Dynamic-Worker's container is hardened is the
    * deploy canary (`POST /probe`), not a check per instance or per job.
    */
@@ -423,7 +430,11 @@ export function createSandboxLauncher(
     capabilities(signal) {
       return (
         options.capabilities?.(signal) ??
-        Promise.resolve(["pr-agent", "opencode"])
+        Promise.resolve<readonly Engine[]>(
+          options.servesImplementer === true
+            ? ["pr-agent", "opencode", "implementer"]
+            : ["pr-agent", "opencode"],
+        )
       );
     },
 

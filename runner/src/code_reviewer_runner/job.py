@@ -213,8 +213,9 @@ class ReviewKind(StrEnum):
 
     DIFF = "diff"
     DYNAMIC = "dynamic"
-    # A turn of the Implementer (#746): about a branch of a repository, not a pull request. This
-    # release has no engine for it; `parse_job` refuses it and never returns a `Job` of this kind.
+    # A turn of the Implementer (#746): about a branch of a repository, not a pull request.
+    # `parse_job` (the review path) refuses it and never returns a `Job` of this kind;
+    # `parse_runnable_job` returns its own type (#765).
     IMPLEMENTER = "implementer"
 
 
@@ -954,7 +955,7 @@ def _implementer_input(job: dict[str, Any]) -> ImplementerInput:
 
 def parse_implementer_input(raw: str) -> ImplementerInput:
     """Parse and validate an implementer job (#746). Raises JobError; never returns a half valid
-    job. Nothing runs it in this release: `parse_job` refuses the kind."""
+    job. `parse_job` refuses the kind; `parse_runnable_job` is the one the runner runs it from."""
     job = _load_job(raw)
     if job.get("reviewKind") != ReviewKind.IMPLEMENTER.value:
         raise _invalid("reviewKind must be 'implementer'")
@@ -972,12 +973,26 @@ def parse_job(raw: str) -> Job:
     """Parse and validate the stdin text. Raises JobError; never returns a half valid job.
 
     A job of the implementer kind (#746) is validated and then refused with
-    `implementer_engine_unavailable`: this release has no engine for it, and it is never read as a
-    Diff or Dynamic job."""
+    `implementer_engine_unavailable`: this function is the review path, and the kind is never read
+    as a Diff or Dynamic job. The one that runs it is `parse_runnable_job` (#765)."""
     job = _load_job(raw)
     if job.get("reviewKind") == ReviewKind.IMPLEMENTER.value:
         _implementer_input(job)
         raise _implementer_engine_unavailable()
+    return _review_job(job)
+
+
+def parse_runnable_job(raw: str) -> Job | ImplementerInput:
+    """`parse_job` for the code that can run every kind (the job host and the job process, #765):
+    an implementer job is validated into its own type, anything else is parsed as before. The
+    caller decides whether this runner may run the kind (`implementer` advertised)."""
+    job = _load_job(raw)
+    if job.get("reviewKind") == ReviewKind.IMPLEMENTER.value:
+        return _implementer_input(job)
+    return _review_job(job)
+
+
+def _review_job(job: dict[str, Any]) -> Job:
     command = _command(job)
     review_kind = _review_kind(job)
     # `args` (the legacy question of the removed `/ask`) is an allowed field so a previous release's

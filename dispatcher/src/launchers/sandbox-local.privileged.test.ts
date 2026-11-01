@@ -11,7 +11,14 @@
 //                            The network guard of the test must allow it (TEST_ALLOWED_HOSTS); the make target does.
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -70,6 +77,20 @@ afterEach(async () => {
   await app?.close();
   if (work !== undefined) await rm(work, { recursive: true, force: true });
 });
+
+/** Runs a logged `docker run` line again and says how it ended, for the message of a test that failed (CI only). */
+function diagnose(line: string): string {
+  try {
+    const out = execFileSync("docker", line.split(" "), {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return `again: exit 0, stdout ${out.slice(0, 600)}`;
+  } catch (error) {
+    const failed = error as { status?: number; stderr?: string };
+    return `again: exit ${String(failed.status)}, stderr ${(failed.stderr ?? "").slice(0, 1200)}`;
+  }
+}
 
 /** A `docker` that logs its arguments and runs the real one, so the test can read the flags that were used. */
 async function loggingDocker(): Promise<{ bin: string; log: string }> {
@@ -226,5 +247,73 @@ describe("the Sandbox-Launcher in local mode with a real Docker daemon", () => {
       outcome.engines.includes("opencode"),
     );
     expect(service?.running()).toStrictEqual([]);
+  });
+
+  // #765-D1: the Implementer's half of the canary, on a real daemon and the real image.
+  it("runs the Implementer's probe too, in the real image with the work volume, for a deployment that serves the kind", async () => {
+    const { bin, log } = await loggingDocker();
+    build(bin);
+    const volumes = join(workDirectory(), "volumes");
+    await mkdir(join(volumes, "code-reviewer-work-canary-privcanary"), {
+      recursive: true,
+    });
+    const imageId = docker(
+      "image",
+      "inspect",
+      "--format",
+      "{{.Id}}",
+      IMAGE ?? "",
+    ).trim();
+    const logger = recordingLogger();
+    const probe = createCapabilityProbe({
+      run: createSandboxCanary({
+        service: service as LocalSandboxService,
+        snapshotId: "snap_local_mode",
+        imageDigest: imageId,
+        imageReference: IMAGE ?? "",
+        logger,
+        config: {},
+        implementer: { config: {} },
+        // The local mode does not make the directory behind the work volume (its `mkdir` and `mount` steps are only
+        // recorded), and `docker volume create` is real here: the test makes the directory a VM would have made.
+        workVolumeRoot: volumes,
+        newSuffix: () => "privcanary",
+      }),
+      clock: systemClock,
+      now: () => Date.now(),
+      logger,
+      timeoutMs: WORKER_RESULT_TIMEOUT_MS,
+    });
+
+    const outcome = await probe.refresh();
+
+    // Both containers ran with their own flags: the Dynamic one without a work volume, the Implementer's with it, and
+    // each printed a verdict the canary could read. Whether `opencode` and `implementer` pass depends on the host's
+    // kernel; what must hold is that the second probe ran, was read, and that `implementer` never stands without
+    // `opencode`.
+    const runs = (await readFile(log, "utf8"))
+      .split("\n")
+      .filter((line) => line.startsWith("run "));
+    expect(runs).toHaveLength(2);
+    expect(runs[0]).not.toContain("type=volume");
+    expect(runs[1]).toMatch(
+      /--mount type=volume,source=code-reviewer-work-canary-[a-z0-9]+,target=\/work/,
+    );
+    expect(runs[1]).toContain("RUNNER_IMPLEMENTER_WORK_DIR=/work");
+    expect(outcome.status).not.toBe("failed");
+    expect(outcome.engines).toContain("pr-agent");
+    if (outcome.engines.includes("implementer"))
+      expect(outcome.engines).toContain("opencode");
+    expect(
+      logger.text().includes("canary_implementer_probe_failed")
+        ? `the second probe failed: ${logger.text()}\n${diagnose(runs[1] ?? "")}`
+        : "",
+    ).toBe("");
+    expect(service?.running()).toStrictEqual([]);
+    try {
+      docker("volume", "rm", "--force", "code-reviewer-work-canary-privcanary");
+    } catch {
+      // Nothing of it is left to remove.
+    }
   });
 });

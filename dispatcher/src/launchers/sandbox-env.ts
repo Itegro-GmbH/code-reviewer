@@ -32,9 +32,12 @@ import {
 import { systemClock } from "../core/clock.ts";
 import { createCapabilityProbe } from "../probe/capability-probe.ts";
 import { withProbeEndpoint } from "../probe/probe-endpoint.ts";
-import type { SandboxFleet } from "./sandbox-service.ts";
+import type { SandboxFleet, SandboxService } from "./sandbox-service.ts";
 import { noLauncher } from "./none.ts";
-import { createSandboxCanary } from "./sandbox-canary.ts";
+import {
+  IMPLEMENTER_PROBE_EXTRA_SECONDS,
+  createSandboxCanary,
+} from "./sandbox-canary.ts";
 import {
   LAUNCH_STEPS_SECONDS,
   createSandboxLauncher,
@@ -134,6 +137,8 @@ function dynamicEnvironment(env: Environment): Record<string, string> {
 export function sandboxFromEnvironment(
   env: Environment,
   loadSdk: () => Promise<SandboxSdk>,
+  /** The platform service; the Vercel one unless a test brings its own. */
+  service?: SandboxService & SandboxFleet,
 ): SandboxFromEnvironment {
   const snapshotId = read(env, "SANDBOX_SNAPSHOT_ID");
   const imageDigest = read(env, "SANDBOX_IMAGE_DIGEST");
@@ -173,20 +178,27 @@ export function sandboxFromEnvironment(
     max: 600,
     fallback: 60,
   });
+  /** The time of the probe: the configured one, and for a deployment that serves the Implementer the work volume and its probe. */
+  const probeSecondsFor = (servesImplementer: boolean) =>
+    probeTimeoutSeconds +
+    (servesImplementer ? IMPLEMENTER_PROBE_EXTRA_SECONDS : 0);
   const access = credentials(env);
   const secrets = [access?.token, read(env, "VERCEL_OIDC_TOKEN")].filter(
     (secret): secret is string => secret !== undefined,
   );
   // One service for the launcher and the reaper: the platform's access is configured once.
-  const service = createVercelSandboxService(loadSdk, access);
+  const platform = service ?? createVercelSandboxService(loadSdk, access);
 
   return {
     secrets,
     reaper: (settings) => ({
-      fleet: service,
+      fleet: platform,
       jobLifetimeSeconds:
         longestJobTimeoutSeconds(settings.core) + vmTimeoutMarginSeconds,
-      canaryLifetimeSeconds: probeTimeoutSeconds + vmTimeoutMarginSeconds,
+      // A deployment that serves the Implementer has the canary run a second probe, so its VM lives that much longer.
+      canaryLifetimeSeconds:
+        probeSecondsFor(settings.core.engines.includes("implementer")) +
+        vmTimeoutMarginSeconds,
     }),
     launcher({ settings, logger }) {
       if (probeTtlSet)
@@ -209,10 +221,11 @@ export function sandboxFromEnvironment(
         }
       }
       // The Implementer's configuration is read only by a deployment that serves the kind (#760), and a wrong value in it
-      // is logged, never thrown: the factory never blocks the release of code-review.com (deploy-production.yml), and a
-      // Dispatcher that does not start fails the canary of the reviewer's release. Each launch of the kind is refused
-      // with `sandbox_config_invalid` by the same check (`planOf`) until the value is corrected; Diff and Dynamic are
-      // untouched by it.
+      // is logged, never thrown: a Dispatcher that does not start fails the canary of every release it deploys. Each launch
+      // of the kind is refused with `sandbox_config_invalid` by the same check (`planOf`) until the value is corrected;
+      // Diff and Dynamic are untouched by it. **It does block the release of a deployment that serves the kind** (#765):
+      // the canary cannot size the Implementer's VM and its half is `implementer_probe_failed`, so `POST /probe` is 503 until
+      // the value is corrected or the kind is taken out of `kinds` and the Dispatcher is deployed again.
       if (settings.core.engines.includes("implementer")) {
         try {
           validateKindConfig(
@@ -230,37 +243,49 @@ export function sandboxFromEnvironment(
       // Only a deployment that serves Dynamic jobs reads (and refuses) the Dynamic configuration: a typo in a variable
       // it does not use must not take its Diff jobs down.
       const serversDynamic = settings.core.engines.includes("opencode");
+      // The Launcher advertises `implementer` only for a deployment that serves it (#765), and then the canary has to
+      // prove it (`POST /probe` requires every engine the Launcher advertises that the deployment serves).
+      const servesImplementer = settings.core.engines.includes("implementer");
       const dynamic = serversDynamic ? dynamicEnvironment(env) : {};
       const launcher = createSandboxLauncher({
-        service,
+        service: platform,
         snapshotId,
         imageDigest,
         handoverSeconds,
         vmTimeoutMarginSeconds,
         logger,
         dynamicEnvironment: dynamic,
+        servesImplementer,
       });
-      // A deployment that serves no Dynamic job has nothing to prove: no canary VM is ever made for it.
-      if (!serversDynamic) return launcher;
+      // A deployment that serves neither a Dynamic job nor the Implementer has nothing to prove: no canary VM is ever
+      // made for it.
+      if (!serversDynamic && !servesImplementer) return launcher;
       // `opencode` is advertised by the Launcher like any engine (#479): a Dynamic job is accepted whenever
       // `DISPATCHER_ENGINES` has it and the snapshot pair is set, and no canary VM is started by a dispatch. The proof is the
       // deploy canary, which must pass before a deployment goes live; the snapshot pair and the settings cannot change
       // during its lifetime. The canary reaches the probe through `POST /probe` only.
       const probe = createCapabilityProbe({
         run: createSandboxCanary({
-          service,
+          service: platform,
           snapshotId,
           imageDigest,
           logger,
           config: settings.core.workerConfig.dynamic,
           environment: dynamic,
-          timeoutSeconds: probeTimeoutSeconds,
+          ...(servesImplementer
+            ? {
+                implementer: {
+                  config: settings.core.workerConfig.implementer ?? {},
+                },
+              }
+            : {}),
+          timeoutSeconds: probeSecondsFor(servesImplementer),
           vmTimeoutMarginSeconds,
         }),
         clock: systemClock,
         now: () => Date.now(),
         logger,
-        timeoutMs: probeTimeoutSeconds * 1000,
+        timeoutMs: probeSecondsFor(servesImplementer) * 1000,
         forceReuseMs: probeReuseSeconds * 1000,
       });
       return withProbeEndpoint({ launcher, probe });

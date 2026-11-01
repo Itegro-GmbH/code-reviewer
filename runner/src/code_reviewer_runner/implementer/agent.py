@@ -266,15 +266,16 @@ class ImplementerAgent:
         # Looking must not reap the engine: while its group is alive its id has to stay ours.
         return self._process is not None and not has_exited(self._process)
 
-    def stop(self) -> bool:
+    def stop(self, *, quick: bool = False) -> bool:
         """End the audit, the whole process group and everything the engine user still runs. True
         when nothing of that user is left (always True without a dedicated user). Safe to call
         twice. The commit of leftovers and the push come after this: no process of the agent can
-        change the working tree from here on."""
+        change the working tree from here on. `quick`: no wait for the engine to leave by itself
+        (a stop of the runner has seconds, not minutes)."""
         if self._events is not None:
             self._events.stop()
             self._events = None
-        self._end_process()
+        self._end_process(quick=quick)
         clean = True
         if self.launch is not None:
             unregister_engine(None, self.launch)
@@ -285,13 +286,13 @@ class ImplementerAgent:
             shutil.rmtree(self._scratch, ignore_errors=True)
         return clean
 
-    def _end_process(self) -> None:
+    def _end_process(self, *, quick: bool = False) -> None:
         process = self._process
         if process is not None:
             # The engine leads its own session, so its pid is its process group id. Off the
             # registry first, then the group is ended and the leader reaped last.
             unregister_engine(process.pid, None)
-            end_group(process)
+            end_group(process, 0.0 if quick else 5.0)
             if self.launch is not None:
                 self.launch.sweep()  # a helper that left the group is still the user's process
         self._process = None
@@ -351,7 +352,9 @@ class ImplementerAgent:
                 raise failure
         finally:
             self.turn_seconds.append(self.ledger.elapsed_seconds() - started)
-            worker.join(timeout=5.0)
+            # A call that is still open when the turn ends early (a limit, a stop) only ends with
+            # the engine, which is ended right after: there is nothing to wait for.
+            worker.join(timeout=5.0 if finished.is_set() else 0.2)
         return self._ended(client.last_message)
 
     def _watch(self, check: Callable[[], None]) -> None:

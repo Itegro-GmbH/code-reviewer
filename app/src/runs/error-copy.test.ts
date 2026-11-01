@@ -458,11 +458,22 @@ describe("the sentences for the codes of a task", () => {
     expect(text).toMatch(/pushed/);
   });
 
-  it("does not blame the repository alone for a rejected push: GitHub may have been out of reach", () => {
+  // #765: the copy of the issue comment, for the final push that could not reach the repository too.
+  it("says for a rejected push that the repository refused the work or could not be reached, and that earlier pushes stay", () => {
     const { text } = describeTurnErrorCode(PRODUCT, "push_rejected");
 
-    expect(text).toMatch(/refused|rejected/);
-    expect(text).toMatch(/could not be reached|unavailable|outage/);
+    expect(text).toBe(
+      "The repository did not accept the pushed work (it refused it, or could not be reached). Work already pushed stays on the branch.",
+    );
+    expect(text).not.toMatch(/new branch/);
+  });
+
+  // #765: the runner commits what is left and pushes it at the cost limit, as at the time limit.
+  it("says for the cost limit that committed work was pushed when possible, not that only earlier pushes stay", () => {
+    const { text } = describeTurnErrorCode(PRODUCT, "cost_limit_reached");
+
+    expect(text).toMatch(/committed before the stop was pushed/);
+    expect(text).not.toMatch(/pushed before the stop stays/);
   });
 
   // #758-T03 (review of #792, 3): the list row shows the sentence without the page's lists.
@@ -496,6 +507,9 @@ describe("the sentences for the codes of a task", () => {
 
     expect(text).toMatch(/engine/);
     expect(text).toMatch(/summary, if there is one|if there is a summary/);
+    // #765: files the agent wrote that were not kept are named in the summary; its commits were pushed.
+    expect(text).toMatch(/files the agent wrote could not be kept/);
+    expect(text).toMatch(/committed was pushed/);
     expect(ERROR_COPY["agent_gave_up"]).toContain("Read its summary, then");
   });
 

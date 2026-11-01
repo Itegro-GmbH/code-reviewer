@@ -68,7 +68,23 @@ Rules (the CR-29 decisions, kept by the Worker host `job_loop/host.py`; tests in
   `job_loop/service.py` after the network setup and before the job is fetched). A failure logs a stable reason and
   leaves `pr-agent` only; a Worker without an engine user never passes. The Worker gives the job process of a Dynamic
   job the advertised engines, the verified engine command and `RUNNER_DYNAMIC_CAPABILITIES`; a Diff job process gets
-  none of them. The Worker reads from a Dynamic job the model descriptor (#279), `dynamic.cost` (the price book of the
+  none of them. **`implementer` (#765)** is advertised on top of that, only in a container of the Implementer's profile
+  (`RUNNER_IMPLEMENTER_WORK_DIR` set) and only after `implementer/startup.py` passed as well: `git >= 2.53`, `setpriv`, the
+  guard files of the image, the egress port in the network rules, and the work volume present, prepared for the engine
+  user (its home and temporary directory in it: the `chown` the profile expects) and exec-capable (a script is really run
+  there as the engine user). Each failure is a stable reason (`implementer_git_too_old`, `implementer_work_dir_not_exec`, ...)
+  in the log and in the verdict. A Worker that did not advertise it refuses an implementer job with
+  `implementer_engine_unavailable`. The job process of a turn (`implementer/job_run.py`) asks the job host whether the lease
+  is still held before every push, and once more right before the `git push` itself (only `held` allows it; a lost or superseded
+  lease ends the turn `lease_lost` with nothing pushed; an answer that could not be had is a "not now": the push loop asks again
+  after its back-off and the last push asks again for up to 30 s, 20 s on a stop, before the turn ends `lease_lost`), a SIGTERM ends
+  the engine at once, pushes what is committed and ends the turn `runner_shutdown` with its report (the host keeps the report
+  and the usage in the result it gives the job back with; an Implementer job gets a grace of 60 s after SIGTERM, one lease
+  question is bounded to 25 s at a normal end and 10 s on a stop, the process ends itself after 55 s, all under the container's stop timeout of 90 s),
+  a turn is held to the smaller of its time limit and `RUNNER_JOB_TIMEOUT_SECONDS`, a job that carries neither `maxCostUsd` nor
+  `operatorMaxCostUsd` is refused with `implementer_config_invalid`, and the report (`implementer` in the result) is held to the contract and to 4 MB of escaped JSON, files
+  first and then commits (`implementer/report.py`); a turn that never had a repository has no `implementer` key. The Worker
+  reads from a Dynamic job the model descriptor (#279), `dynamic.cost` (the price book of the
   managed key, the token cap of an own key; `dynamic_review/passthrough/cost_policy.py`, #553) and, next to it,
   `dynamic.modelEntry` (#578): a job with both is native and runs through the passthrough proxy and the plain-final
   engine path (`dynamic_review/native_job.py`, `docs/dynamic-review.md`, "The native path of a job"); a job that carries
@@ -167,7 +183,8 @@ that cannot drop `NET_ADMIN` (no `SETPCAP`) does not start in `worker-once` (exi
 {"version":1,"engines":["pr-agent","opencode"],"reasons":[]}
 ```
 
-`engines` are the engines the container may advertise; when `opencode` is missing `reasons` holds the stable reason
+`engines` are the engines the container may advertise (`implementer` too, in an Implementer container whose own check
+passed; when it did not, `reasons` holds the `implementer_*` reason and `opencode` stays); when `opencode` is missing `reasons` holds the stable reason
 from the list of `docs/dynamic-review.md` ("Startup self-check"), for example `network_rules_not_installed` (no
 `NET_ADMIN` or `nft`), `capabilities_not_dropped`, `root_filesystem_writable` or `not_a_dynamic_runner`. It holds no
 other text and no value of the environment. The exit status says whether the probe ran, not whether the container
@@ -605,7 +622,7 @@ and the enum agree. Callers branch on the code, never on the text.
 | `cost_limit_reached` | A Diff Review sent no further model request because what its calls cost had reached the cost limit of its project (#666, `llm.maxCostUsd`); usage and cost are reported as usual |
 | `dynamic_accounting_failed` | The Dynamic Review's model usage could not be established or accounted for (an answer without usage, or a call the provider's price list cannot price, #511) |
 | `dynamic_model_features_unsupported` | The configured model does not support the tool calling or structured output Dynamic Review requires (a forced tool choice, #511), or OpenRouter found no provider that supports every parameter of a request (404, #270); there is no fallback model or provider |
-| `lease_lost` | A Dynamic job was no longer held by this runner (lease lost, job cancelled) or could not be confirmed as held right before it would have written its summary; nothing was written (#260) |
+| `lease_lost` | A Dynamic job was no longer held by this runner (lease lost, job cancelled) or could not be confirmed as held right before it would have written its summary; nothing was written (#260). A turn of the Implementer ends with it when the lease is not confirmed `held` before a push; nothing is pushed after that (#765) |
 | `superseded` | A newer push replaced this run while it was running (#396): it finished the model requests in flight, sent no more, published nothing and reports what it used. Not a failure of the job ("A superseded run", below) |
 | `branch_exists` | An implementer job (#746): the branch the turn should create is already on the remote; nothing was changed |
 | `base_branch_not_found` | An implementer job (#746): the base branch the turn should start from does not exist on the remote |
@@ -618,6 +635,7 @@ and the enum agree. Callers branch on the code, never on the text.
 | `git_write_not_granted` | An implementer job (#746): the token cannot write the contents of the repository |
 | `implementer_engine_unavailable` | An implementer job (#746) arrived at a runner with no engine for it (this release has none); it is never run as a Diff or Dynamic job |
 | `implementer_config_invalid` | An implementer job (#746): the options of the turn cannot be used |
+| `runner_shutdown` | A turn of the Implementer was told to stop (SIGTERM, #765): its engine was ended and what is committed was pushed, if the lease was still held; the job host gives the job back to the queue under this code |
 | `timeout` | The command did not finish within `RUNNER_JOB_TIMEOUT_SECONDS` (also reported by the Worker for a process it had to end) |
 | `unknown` | Something failed that no rule recognises |
 
@@ -1226,7 +1244,7 @@ those parts (`native_job.build_native`, `adapter.EngineClient`, `ToolPartAudit`)
 | End | Whatever ended the turn, the engine and every process of its user are ended first (sweep), then the leftover commit, then the final push (`PushLoop.finish`), then the result. The egress proxy and the model proxy are stopped last. |
 | Egress | In `registries` mode the session starts the allowlist proxy (`start_egress`) before the engine's network is proven, sets `EngineLaunch.egress_port` so the probe reaches it, and stops it with the turn; `none` starts nothing. An engine test sends a request from a tool through the real proxy. |
 | Limits | The cost limit is the ledger's: the proxy refuses the next call and the turn ends `cost_limit_reached` (an own key's token cap is the same code). The clock is the job's `timeLimitSeconds` less 3 minutes (a third for a short limit; `deadline_seconds`): `time_limit_reached`. In both cases the committed and the leftover work is pushed first and the result reports it. There is no step limit and **no bound on a single tool result** (a `grep` answers 200 KB); the cumulative 256 MiB of results and the 32 MiB request are sanity bounds. |
-| Codes | `agent_gave_up` (no commit and a clean tree; the closing text is the summary; **also** an engine that died or a bound that ended the turn once the model was really used, that is a call was billed or may have been (`BudgetLedger.model_used`; reservations the provider turned away do not count), because that turn has cost money), `llm_unavailable` / `llm_timeout` when the engine gave up while the last call to the provider had failed (an outage, named from `proxy.last_upstream_error` as for Dynamic, and free when nothing was billed), `cost_limit_reached`, `time_limit_reached`, the codes of the git layer (`branch_violation`, `push_rejected`, `branch_exists`, `setup_failed`), `implementer_config_invalid` for a model entry the proxy cannot serve, and `runner_error`, free, for the same failures **before** any model call (the wire has no `internal_error`). |
+| Codes | `agent_gave_up` (no commit and a clean tree; the closing text is the summary; **also** an engine that died or a bound that ended the turn once the model was really used, that is a call was billed or may have been (`BudgetLedger.model_used`; reservations the provider turned away do not count), because that turn has cost money), `llm_unavailable` / `llm_timeout` when the engine gave up while the last call to the provider had failed (an outage, named from `proxy.last_upstream_error` as for Dynamic, and free when nothing was billed), `cost_limit_reached`, `time_limit_reached`, the codes of the git layer (`branch_violation`, `push_rejected`, `branch_exists`, `setup_failed`; **`setup_failed` is the free code of a turn that never started: once the model was used it is `branch_violation`, the code `RepositoryUnusable` carries, and an unexpected error is `agent_gave_up`, never `runner_error`**), `lease_lost` and `runner_shutdown` (#765), `implementer_config_invalid` for a model entry the proxy cannot serve, and `runner_error`, free, for the same failures **before** any model call (the wire has no `internal_error`). |
 | Push errors | A push that failed with no refusal (a 5xx, a reset, a timeout, no route, a 429, a local error such as a permission problem on the mirror, or GitHub's `! [remote rejected] (internal error)` / `(failed to update ref)`) is `PushTransient`, a `PushUnverified`: the loop backs off and tries again, and the final push runs once more. Only a refusal ends the turn: a `!` line of the porcelain, or an HTTP client error other than 408/425/429 (or git reporting that credentials were refused; only the remote's own words count, a local "Permission denied" does not). A final push that the provider never took is `push_rejected`. |
 | Result | `TurnResult.implementer_block()` is the contract's `ImplementerResult`: the commits and changed files (read as the engine user, bounded by `history.py`), the closing text as the summary (secrets redacted, 8 192 characters), the OpenCode session id and the pinned version. The usage is the ledger's, with the call trace as for Dynamic (numbers and the names `read`, `grep`, `glob`; the contract has no name yet for `write` and `bash`, which count as `other`). |
 | Prompt caching | Whatever the stock engine and the passthrough proxy do for Dynamic; nothing here sets, removes or rewrites a cache marker. `test_engine_implementer.py` checks for **each** wire family (Anthropic messages, OpenAI chat, OpenAI responses, Google) that every request extends the one before it (the prefix a provider caches, automatically or by mark), that the engine's marks reach the provider where the model takes them, that the Anthropic requests replayed through the cache rules of the fakes read their own prefix from the second call on, and that the ledger counts and prices what the provider states. |
