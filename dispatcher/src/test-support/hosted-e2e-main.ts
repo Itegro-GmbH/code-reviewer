@@ -103,6 +103,7 @@ const service: SandboxService & SandboxFleet = {
     return local.create(options, signal);
   },
   stop: (name) => local.stop(name),
+  delete: (name) => local.delete(name),
   list: (filter) => local.list(filter),
 };
 

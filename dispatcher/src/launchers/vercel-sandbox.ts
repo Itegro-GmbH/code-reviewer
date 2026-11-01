@@ -12,6 +12,7 @@
 // persistent sandbox. The per-job credential reaches the VM through `SandboxProcess.writeStdin` and nothing else.
 import { Writable } from "node:stream";
 import {
+  DELETABLE_STATUSES,
   SandboxServiceError,
   type ExecRequest,
   type ExecResult,
@@ -59,7 +60,14 @@ export interface SdkSandbox {
     stderr: Writable;
     signal?: AbortSignal;
   }): Promise<{ exitCode: number }>;
+  /** The status of the VM's session, as of the lookup. */
+  readonly status: string;
+  readonly persistent: boolean;
   stop(opts?: { signal?: AbortSignal }): Promise<unknown>;
+  delete(opts?: {
+    deleteOrphanSnapshots?: boolean;
+    signal?: AbortSignal;
+  }): Promise<unknown>;
 }
 
 /** What the adapter reads of one VM of `Sandbox.list` (the SDK yields more). */
@@ -90,7 +98,9 @@ export interface SandboxSdk {
         signal?: AbortSignal;
       },
     ): Promise<SdkSandbox>;
-    get(params: SdkAuth & { name: string }): Promise<SdkSandbox>;
+    get(
+      params: SdkAuth & { name: string; signal?: AbortSignal },
+    ): Promise<SdkSandbox>;
     /** The result is async-iterable over every page. The parameters are loose: the SDK's own are unions. */
     list(
       params: Record<string, unknown>,
@@ -204,6 +214,31 @@ export function classifySandboxError(error: unknown): SandboxFailureKind {
   return "rejected";
 }
 
+/** How long one platform call of the delete path may take: a lookup or a delete (#802). */
+export const DELETE_CALL_LIMIT_MS = 15_000;
+
+/**
+ * Runs one platform call with a time limit: the signal is aborted at the limit, and the wait itself ends there too, for a
+ * platform that ignores the signal. The failure is `unavailable`, like any other answer of a platform that is not there.
+ */
+async function limited<T>(
+  run: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new SandboxServiceError("unavailable"));
+    }, DELETE_CALL_LIMIT_MS);
+  });
+  try {
+    return await Promise.race([run(controller.signal), expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function mapped(error: unknown): unknown {
   return isAbort(error)
     ? error
@@ -312,6 +347,30 @@ export function createVercelSandboxService(
       }
     },
 
+    async delete(name) {
+      const { Sandbox } = await loaded();
+      try {
+        // No `resume`: an ended VM is deleted as it is, not started first.
+        const sandbox = await limited((signal) =>
+          Sandbox.get({ ...auth, name, signal }),
+        );
+        // The listing may be old: a VM that is up again, ending, being snapshotted or persistent is not ours to delete.
+        if (sandbox.persistent || !DELETABLE_STATUSES.includes(sandbox.status))
+          return "kept";
+        await limited((signal) =>
+          // Said in so many words: the snapshots a VM owns are not ours to delete here, the golden snapshot included.
+          sandbox.delete({ deleteOrphanSnapshots: false, signal }),
+        );
+        return "deleted";
+      } catch (error) {
+        // Only 404 means it is gone. A 410 is the SDK's "sandbox stopped": the VM is still listed, so it is a failed
+        // delete and the reaper counts it, rather than reporting a deletion that left the listing as long as before.
+        if (statusOf(error) === 404) return "deleted";
+        if (error instanceof SandboxServiceError) throw error;
+        throw mapped(error);
+      }
+    },
+
     async list(filter: ListFilter, signal): Promise<ListedVm[]> {
       const { Sandbox } = await loaded();
       const vms: ListedVm[] = [];
@@ -322,6 +381,9 @@ export function createVercelSandboxService(
           // The platform refuses a name prefix with any other sort (HTTP 400): without it every run would fail.
           sortBy: "name",
           tags: { ...filter.tags },
+          // The platform keeps stopped VMs, so the listing grows (283 took 5.1 s); its default page is small. 50 is the
+          // largest page it allows (above it HTTP 400): fewer round trips, inside the claim's 4 s limit.
+          limit: 50,
           ...(signal === undefined ? {} : { signal }),
         }))
           vms.push({

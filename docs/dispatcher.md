@@ -21,7 +21,7 @@ Dispatcher's code, configuration and Launchers are in [`dispatcher/README.md`](.
 **More than one App (#730).** One Dispatcher can serve several Apps. The key that signs a call names the app (a key belongs to
 exactly one app), the core claims, heartbeats, releases and reports at that app only, each app may submit only the job kinds
 the registry lists for it, and every job VM is tagged with its app (`tenant`), so one app can never claim, stop or read
-another's jobs or VMs, and the Dispatcher counts each app's live VMs against its cap itself, so one app cannot take the Sandbox concurrency of another. The legacy variables define the app `reviewer`; `DISPATCHER_APPS` adds the others
+another's jobs or VMs, and the Dispatcher counts each app's live VMs against its cap itself, so one app cannot take the Sandbox concurrency of another. That holds only while the platform's listing works: when it fails and no listing younger than a minute exists, the claim goes on (#802) and the cap is a soft limit, counted by the Dispatcher's own launches of the last ten minutes; the platform's own concurrency limit is then the only hard one. The legacy variables define the app `reviewer`; `DISPATCHER_APPS` adds the others
 ([`dispatcher/README.md`](../dispatcher/README.md), "More than one App"; variables in
 [`deployment-vercel.md`](deployment-vercel.md), 3.2).
 

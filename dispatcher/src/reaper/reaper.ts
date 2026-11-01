@@ -18,9 +18,31 @@
 //
 // Stopping is by the listed name; a failed stop is counted and retried by the next run. Nothing here logs a credential
 // or the platform's own error text.
+//
+// Retention (#802): the platform keeps an ended VM until somebody deletes it, and the listing every claim and every run
+// makes grows with them (283 stopped VMs took 5.1 s). So, after the stops, the reaper deletes the VMs of ours (the same
+// rule, `shapeOf`) that the platform reports `stopped`, `failed` or `aborted` and that were created a day ago or earlier: a
+// job VM lives seven hours at most, so by then it has been over for hours. Nothing running, pending, stopping or
+// snapshotting is deleted, and neither is anything that is not exactly ours (a persistent VM, the golden builder, a
+// lookalike). The platform is asked again before each delete (the adapter), so a VM that came back after the listing is
+// kept. The pass is bounded three ways, so it cannot hurt the launches that share the platform's API and the function:
+//
+//   - at most `MAX_DELETES_PER_RUN` VMs, picked at random among the eligible ones and not the oldest: a VM whose delete
+//     fails for good would otherwise take a place of the 50 in every run for ever and starve the rest (a Vercel function
+//     remembers nothing between runs, so no list of failures is kept; a random pick gives every VM its turn)
+//   - it stops at the first `rate_limited` or `unavailable` answer (the rest is counted as not tried; the next run
+//     tries again), and a call that does not answer is `unavailable` (the adapter)
+//   - it starts no delete after `DELETE_BUDGET_MS` of the pass, under the five minutes between two runs
+//
+// A failed delete is counted, costs a place in the bound and never fails the run.
 import type { JobStateResult } from "../core/app-client.ts";
 import type { Logger } from "../core/types.ts";
-import type { ListedVm, SandboxFleet } from "../launchers/sandbox-service.ts";
+import {
+  DELETABLE_STATUSES,
+  SandboxServiceError,
+  type ListedVm,
+  type SandboxFleet,
+} from "../launchers/sandbox-service.ts";
 import {
   APP_TAG,
   NAME_PREFIX,
@@ -37,6 +59,15 @@ export const LIFETIME_GRACE_MS = 120_000;
 export const MAX_JOB_VM_LIFETIME_MS = (21_600 + 3600) * 1000;
 /** The same for a canary: the longest probe (10 min) plus the largest margin. */
 export const MAX_CANARY_LIFETIME_MS = (600 + 3600) * 1000;
+/** An ended VM is deleted once it was created this long ago (#802). */
+export const RETENTION_MS = 24 * 3600 * 1000;
+/**
+ * The most VMs one run deletes (#802). Each takes a lookup and a delete call; with four at a time that is seconds, and the
+ * cron runs every five minutes: 50 per run drains 283 VMs in six runs, half an hour, and leaves room for 14,000 a day.
+ */
+export const MAX_DELETES_PER_RUN = 50;
+/** No delete starts after the pass has run this long: under the five minutes between two runs, with a call in flight to spare. */
+export const DELETE_BUDGET_MS = 3 * 60 * 1000;
 const CONCURRENCY = 4;
 
 export const REAP_ERROR_CODES = ["REAP_LIST_FAILED"] as const;
@@ -65,6 +96,14 @@ export type ReapReport = {
   unreadable: number;
   /** Stops that failed; the next run retries them. */
   failed: number;
+  /** Ended VMs deleted by the retention (#802). */
+  deleted: number;
+  /** Deletes that failed; the next run retries them. */
+  deleteFailed: number;
+  /** VMs the platform showed as deletable no longer when asked again: kept. */
+  deleteKept: number;
+  /** VMs picked for deletion that were not tried: the pass stopped at a refusal or ran out of its budget. */
+  deleteNotTried: number;
 };
 
 export type ReaperOptions = {
@@ -76,6 +115,8 @@ export type ReaperOptions = {
   jobs: { jobState(jobId: string, appId: string): Promise<JobStateResult> };
   logger: Logger;
   now?: () => number;
+  /** Which of the eligible VMs to delete first when there are more than a run's bound (0 to 1); `Math.random` by default. */
+  random?: () => number;
   /** A job VM's lifetime when the platform reports none: the job timeout plus the VM margin. */
   jobLifetimeSeconds: number;
   /** A canary's: the probe timeout plus the VM margin. */
@@ -114,6 +155,7 @@ async function mapLimit<T, R>(
 export function createReaper(options: ReaperOptions): Reaper {
   const { fleet, jobs, logger } = options;
   const now = options.now ?? (() => Date.now());
+  const random = options.random ?? Math.random;
 
   /**
    * The VM's own timeout when the platform reports a believable one, the configured lifetime otherwise, plus the grace.
@@ -247,6 +289,61 @@ export function createReaper(options: ReaperOptions): Reaper {
       );
 
       const stopped = outcomes.filter(Boolean).length;
+
+      // The retention: a random pick of the VMs of ours that have ended, up to the bound.
+      const eligible = listed.filter(
+        (vm) =>
+          DELETABLE_STATUSES.includes(vm.status) &&
+          at - vm.createdAtMs >= RETENTION_MS &&
+          shapeOf(vm) !== null,
+      );
+      // A partial Fisher-Yates shuffle: the first `MAX_DELETES_PER_RUN` places only.
+      for (
+        let index = 0;
+        index < Math.min(MAX_DELETES_PER_RUN, eligible.length);
+        index += 1
+      ) {
+        const pick = index + Math.floor(random() * (eligible.length - index));
+        [eligible[index], eligible[pick]] = [
+          eligible[pick] as ListedVm,
+          eligible[index] as ListedVm,
+        ];
+      }
+      const picked = eligible.slice(0, MAX_DELETES_PER_RUN);
+      const passStartedAt = now();
+      let halted = false;
+      const deletions = await mapLimit(
+        picked,
+        CONCURRENCY,
+        async (vm): Promise<"deleted" | "kept" | "failed" | "not_tried"> => {
+          if (halted || now() - passStartedAt >= DELETE_BUDGET_MS)
+            return "not_tried";
+          try {
+            const result = await fleet.delete(vm.name);
+            if (result === "kept") {
+              logger.info("vm_delete_kept", { sandbox: vm.name });
+              return "kept";
+            }
+          } catch (error) {
+            // The platform's own text is not ours to log.
+            logger.warn("vm_delete_failed", { sandbox: vm.name });
+            if (
+              error instanceof SandboxServiceError &&
+              (error.kind === "rate_limited" || error.kind === "unavailable") &&
+              !halted
+            ) {
+              halted = true;
+              logger.warn("vm_delete_halted", { kind: error.kind });
+            }
+            return "failed";
+          }
+          logger.info("vm_deleted", { sandbox: vm.name });
+          return "deleted";
+        },
+      );
+      const count = (outcome: (typeof deletions)[number]) =>
+        deletions.filter((result) => result === outcome).length;
+
       const report: ReapReport = {
         listed: listed.length,
         candidates: candidates.length,
@@ -254,6 +351,10 @@ export function createReaper(options: ReaperOptions): Reaper {
         kept: candidates.length - toStop.length,
         unreadable,
         failed: outcomes.length - stopped,
+        deleted: count("deleted"),
+        deleteFailed: count("failed"),
+        deleteKept: count("kept"),
+        deleteNotTried: count("not_tried"),
       };
       logger.info("reap_done", report);
       return report;

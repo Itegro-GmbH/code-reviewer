@@ -40,7 +40,7 @@ esac
 # only the owner has. The table is the single list: docs/factory-bring-up.md, step 3, points here.
 entries=(
   "/app-factory|PRODUCT_ID|fixed: factory|Mandatory: which product this deployment is. Without it the clone starts as code-review-com"
-  "/app-factory|PRODUCT_CAPABILITIES|fixed: review,dynamic-review|Billing off. The staged App must report exactly this set (health-factory checks it)"
+  "/app-factory|PRODUCT_CAPABILITIES|fixed: review,dynamic-review|Billing off. This is the start value; the Implementer rollout changes it together with the repository variable FACTORY_EXPECTED_CAPABILITIES, which health-factory compares exactly with the set the staged App reports (docs/factory-bring-up.md)"
   "/app-factory|APP_SECRET|generated (base64)|The master key. Keep a copy of this one in a password manager: it cannot be rotated"
   "/app-factory|RUNNER_TOKEN|generated (hex)|The factory App's dispatcher credential"
   "/app-factory|CRON_SECRET|generated (hex)|Opens the factory App's cron routes. Its own value"
@@ -59,7 +59,7 @@ entries=(
   "/dispatcher|DISPATCHER_APP_FACTORY_TOKEN|reference|\${prod.app-factory.RUNNER_TOKEN}"
   "/dispatcher|DISPATCHER_APP_FACTORY_SIGNING_SECRET|reference|\${prod.app-factory.RUNNER_WEBHOOK_SECRET}"
   "/dispatcher|DISPATCHER_OPERATOR_TOKEN|reference|\${prod.ci.DISPATCHER_OPERATOR_TOKEN}"
-  "/dispatcher|DISPATCHER_APPS|yours|One line, the factory entry: {\"id\":\"factory\",\"url\":\"<BETTER_AUTH_URL>\",\"kinds\":[\"diff\",\"dynamic\"],\"keyId\":\"factory-k1\",\"maxRunning\":2} in a JSON array"
+  "/dispatcher|DISPATCHER_APPS|yours|One line, the factory entry: {\"id\":\"factory\",\"url\":\"<BETTER_AUTH_URL>\",\"kinds\":[\"diff\",\"dynamic\"],\"keyId\":\"factory-k1\",\"maxRunning\":2} in a JSON array (the Implementer rollout adds \"implementer\" to kinds, docs/factory-bring-up.md)"
 )
 
 echo "Infisical entries of the factory lane (environment prod):"

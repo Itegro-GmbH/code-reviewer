@@ -1028,7 +1028,9 @@ deployment that outlived their purpose.
   App says. A job VM whose job the App reports as not `running` is stopped; if the App's answer cannot be read the VM
   is **kept** (only its lifetime ends it then). A canary VM is ended by its lifetime only.
 - The answer and the log hold counts and stable codes only: `listed`, `candidates`, `stopped`, `kept`, `unreadable`,
-  `failed`; events `vm_reaped`, `vm_reap_failed`, `job_state_unreadable`, `reap_done`, `reap_list_failed`. A `500` with
+  `failed`, `deleted`, `deleteFailed`, `deleteKept`, `deleteNotTried`; events `vm_reaped`, `vm_reap_failed`, `vm_deleted`, `vm_delete_failed`, `vm_delete_kept`, `vm_delete_halted`, `job_state_unreadable`, `reap_done`, `reap_list_failed`.
+  Besides stopping, each run deletes up to 50 ended (stopped, failed or aborted) VMs of ours that are a day old or older, so the platform's listing
+  stays small (`dispatcher/README.md`, "The reaper"). A `500` with
   `REAP_LIST_FAILED` means the platform's listing failed; nothing was stopped and the next run tries again.
 - **To check it:** Vercel's Cron Jobs settings of the Dispatcher project show the runs. During the smoke test, list the
   project's VMs after a job: none should be left running with a `cr-` name.
@@ -1298,6 +1300,44 @@ the first App. The second project, its database, the Dispatcher's registry and t
 `DISPATCHER_APPS` and the `DISPATCHER_APP_FACTORY_*` keys from `/dispatcher` if the Dispatcher should stop serving the App
 (the operator token stays). To restore an earlier deployment of the second App, run *Rollback production* with
 `factory_deployment` (section 7).
+
+#### Rollout of the Implementer (the order of the steps)
+
+The Implementer ([`implementer.md`](implementer.md)) is the first capability added to the second App after the lane exists.
+It is dormant in every release, and code-review.com is not touched at any step. The keys and values, in the order that
+works (the same steps with their checks, who does them and what undoes each are in [`factory-bring-up.md`](factory-bring-up.md),
+"Switching on the Implementer"):
+
+1. **Release the code to `main`.** The pipeline migrates the second database first, runs `health-factory` with the old set
+   (`dynamic-review,review`) and the canary on the rebuilt snapshot, and promotes. Nothing live changes.
+2. **`DISPATCHER_APPS`**, only after step 1 is live. Infisical `prod`, folder `/dispatcher`: in the factory entry set `kinds`
+   to `["diff","dynamic","implementer"]`. Optional: an `implementer` entry of `DISPATCHER_WORKER_CONFIG` (sizes and
+   `timeoutSeconds`; the defaults need none). Then run *Deploy production*, which stages and proves the Dispatcher with the
+   kind. Set earlier, an older Dispatcher refuses the unknown kind at start and the first App has an outage. **This deploy is
+   the first real proof of the engine:** the Launcher advertises `implementer` only when `DISPATCHER_APPS` names the kind, and
+   `POST /probe` then requires the report of the canary VM to name it (a second probe in the Implementer's container
+   profile, 110 seconds more, 260 seconds by default; with the kind keep `DISPATCHER_PROBE_TIMEOUT_SECONDS` at or below 190).
+   When the Implementer's half fails, the Dynamic verdict stands and the report says `implementer_probe_failed`; the canary
+   answers `503` and ends with `reasons=implementer_probe_failed missing=implementer, the release is blocked`. The promotions
+   of the App, the factory and the Dispatcher all wait for the canary, so nothing staged in that run goes live, the first
+   App's included (#797); there is no switch that waives the proof. The way back: set `kinds` back to `["diff","dynamic"]`,
+   wait for the Secret Sync and deploy again.
+3. **`PRODUCT_CAPABILITIES` and `FACTORY_EXPECTED_CAPABILITIES`, together.** Infisical `prod`, folder `/app-factory`, key
+   `PRODUCT_CAPABILITIES` = `review,dynamic-review,implementer`; repository variable `FACTORY_EXPECTED_CAPABILITIES` =
+   `dynamic-review,implementer,review`; then one *Deploy production*. One of the two alone ends in `PRODUCT_MISMATCH` at
+   `health-factory`: nothing is promoted and nothing live changes.
+4. **The maximum cost per review** in the factory's admin portal (General, Limits), raised from its default to the owner's
+   per-turn maximum (the value is in the bring-up checklist). It is the only brake of a turn, and it is the cap of every job
+   the factory claims, its own Diff and Dynamic reviews included.
+5. **The factory's GitHub App, by one click in the admin portal, after the deploy of step 3** (the manifest then asks for
+   Contents read and write; an App created earlier has it read-only and is updated by hand and approved by each
+   installation: [`github-app.md`](github-app.md)). With tenancy `multi` the App is public; an installation reaches a
+   workspace only when an Owner or Admin who owns the account has linked it. Also a model: a workspace key, or released
+   catalog entries that serve Dynamic Review.
+6. **The live smoke test** by the lead: [`implementer-smoke-test.md`](implementer-smoke-test.md).
+
+To go back, remove `implementer` from `PRODUCT_CAPABILITIES`, reset the repository variable, and deploy again. The Dispatcher
+entry and the permission may stay. What that does to running and queued tasks is in the bring-up checklist, step 3.
 
 ## 6. Sizing the Worker VMs
 

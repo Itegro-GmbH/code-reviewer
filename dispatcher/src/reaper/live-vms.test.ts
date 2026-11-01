@@ -4,6 +4,7 @@
 // its tenant tag names, and an untagged one for `reviewer`.
 import { describe, expect, it } from "vitest";
 import type { ListedVm } from "../launchers/sandbox-service.ts";
+import { recordingLogger } from "../test-support/harness.ts";
 import { liveJobVmsByApp } from "./live-vms.ts";
 
 const JOB = "0b9f6f4e-3c1a-4d9e-8f43-2a7d5e1c9b10";
@@ -113,5 +114,43 @@ describe("the live job VMs per app", () => {
         signal: controller.signal,
       },
     ]);
+  });
+
+  // #802-T30
+  it("logs how long the listing took and how many VMs it returned, stopped ones included, once", async () => {
+    const logger = recordingLogger();
+    let clock = 1000;
+    const counter = liveJobVmsByApp(
+      {
+        list: () => {
+          clock += 5100;
+          return Promise.resolve([
+            vm({ name: `cr-diff-${JOB}-00000001` }),
+            vm({ name: `cr-diff-${JOB}-00000002`, status: "stopped" }),
+            vm({ name: "cr-canary-0a1b2c3d", status: "stopped" }),
+          ]);
+        },
+      },
+      { logger, now: () => clock },
+    );
+
+    await counter(new AbortController().signal);
+
+    expect(logger.lines).toStrictEqual([
+      'info fleet_listed {"ms":5100,"count":3}',
+    ]);
+  });
+
+  // #802-T30
+  it("logs no `fleet_listed` for a listing that failed, and passes the failure on", async () => {
+    const logger = recordingLogger();
+    const counter = liveJobVmsByApp(
+      { list: () => Promise.reject(new Error("down")) },
+      { logger },
+    );
+
+    await expect(counter(new AbortController().signal)).rejects.toThrow("down");
+
+    expect(logger.lines).toStrictEqual([]);
   });
 });

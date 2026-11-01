@@ -105,7 +105,7 @@ Set these five and nothing else.
 |---|---|---|
 | Pull requests (`pull_requests`) | Read and write | Read the pull request (head commit, state, draft); post the review and inline comments |
 | Issues (`issues`) | Read and write | Pull request conversation comments are issue comments: the persistent review comment; labels and reactions on comments |
-| Contents (`contents`) | Read-only | Read the changed files and the other repository files a review needs, such as `AGENTS.md` (the app never pushes) |
+| Contents (`contents`) | Read-only | Read the changed files and the other repository files a review needs, such as `AGENTS.md`. The app never pushes, except in a deployment with the Implementer, where Contents is Read and write ("The Implementer" below) |
 | Metadata (`metadata`) | Read-only | Mandatory for every app: list the installation's repositories and ask whether a commenter has write access |
 | Checks (`checks`) | Read and write | The **check run** "Code Reviewer" in the checks area of the pull request (waiting, reviewing, finished). Only the App itself writes it, with a token of its own; a review job never gets this permission |
 
@@ -215,6 +215,11 @@ more, or rather one level more:
 The manifest of the one-click way asks for it, and the form of the way by hand needs it (change Contents from Read-only to
 **Read and write**). A test (`setup-doc.test.ts`) keeps this table and the manifest together.
 
+**Order.** The manifest is built from the capability set of the running deployment, so the one click asks for Contents Read and
+write only after the deploy that puts `implementer` into `PRODUCT_CAPABILITIES` is live. Click before it and the App is created
+with Contents Read-only and has to be updated by hand, below. After the click, check on GitHub (the App's settings,
+*Permissions*) that Contents reads Read and write, and that **Check the permissions** in the portal lists nothing missing.
+
 The token of an Implementer turn is made for one repository and holds exactly `contents: write` and `metadata: read`
 (`IMPLEMENTER_TOKEN_PERMISSIONS` in `app/src/integrations/providers/github-app/job-access.ts`): no pull requests, no issues, no
 checks. A review job keeps its token (`JOB_TOKEN_PERMISSIONS`, Contents read-only).
@@ -226,7 +231,8 @@ push is rejected by GitHub and the task reports it; change workflow files by han
 ### Update an existing App
 
 An App that was created from the earlier manifest holds Contents as read-only, and **nothing changes by itself**. Until it is
-updated the Implementer refuses the repository ("write access not granted"):
+updated the Implementer refuses the repository: the form lists it as disabled with the note "approve the new GitHub permission", and a task for it is
+answered `IMPLEMENTER_WRITE_NOT_GRANTED` (a job that gets that far ends `git_write_not_granted`):
 
 1. In the App's settings on GitHub (*Permissions & events > Repository permissions*), set **Contents** to **Read and write**
    and save. **Check the permissions** on the Integrations page then no longer lists *Contents*.
@@ -366,8 +372,9 @@ it reads the workspace's own connections) if the repository is missing, and swit
 
 - [ ] The App exists (one click, or by hand with the addresses and settings above), webhook active, SSL
       verification enabled
-- [ ] Permissions: Pull requests Read and write, Issues Read and write, Contents Read-only, Metadata Read-only,
-      Checks Read and write, Email addresses Read-only, Members Read-only, and nothing else
+- [ ] Permissions: Pull requests Read and write, Issues Read and write, Contents Read-only (Contents Read and write for a
+      deployment with the Implementer, see "The Implementer"), Metadata Read-only, Checks Read and write, Email addresses
+      Read-only, Members Read-only, and nothing else
 - [ ] Events: Pull request and Issue comment ticked
 - [ ] The tile on Integrations shows **Configured**, and **Sign in with GitHub** is enabled
 - [ ] Only for the way by hand: the `.pem` file is in the password manager and deleted from the laptop
