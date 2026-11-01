@@ -89,6 +89,9 @@ class ErrorCode(StrEnum):
     GIT_WRITE_NOT_GRANTED = "git_write_not_granted"
     IMPLEMENTER_ENGINE_UNAVAILABLE = "implementer_engine_unavailable"
     IMPLEMENTER_CONFIG_INVALID = "implementer_config_invalid"
+    # The runner was told to stop (SIGTERM, #765): what is committed was pushed, and the job host
+    # gives the job back to the queue under this code.
+    RUNNER_SHUTDOWN = "runner_shutdown"
     UNKNOWN = "unknown"
 
 

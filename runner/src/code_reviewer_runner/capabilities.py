@@ -19,11 +19,12 @@ from code_reviewer_runner.result import ErrorCode
 
 ENGINE_DIFF = "pr-agent"
 ENGINE_DYNAMIC = "opencode"
-# The Implementer's engine (#746) is named by the contract, but this release has no engine behind it
-# and its start-up self-check does not exist yet: a runner never advertises it, so it is not in
-# `ALL_ENGINES`.
+# The Implementer's engine (#746, #765). `ALL_ENGINES` are the reviewer engines the Dynamic
+# self-check gates; `implementer` is advertised on top of them only when its own start-up check
+# (`implementer/startup.py`) holds too, and only in a container that has a work directory.
 ENGINE_IMPLEMENTER = "implementer"
 ALL_ENGINES: tuple[str, ...] = (ENGINE_DIFF, ENGINE_DYNAMIC)
+KNOWN_ENGINES: tuple[str, ...] = (*ALL_ENGINES, ENGINE_IMPLEMENTER)
 
 
 class IsolationSelfCheckError(Exception):
@@ -115,4 +116,4 @@ RIPGREP_PATH_VARIABLE = "RUNNER_DYNAMIC_RIPGREP"
 def engines_from_environment(environment: Mapping[str, str]) -> tuple[str, ...]:
     """The known engines named in `ENGINES_VARIABLE`; nothing when it is unset."""
     named = environment.get(ENGINES_VARIABLE, "").split(",")
-    return tuple(engine for engine in ALL_ENGINES if engine in named)
+    return tuple(engine for engine in KNOWN_ENGINES if engine in named)

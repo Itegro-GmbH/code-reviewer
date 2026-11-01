@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
-from code_reviewer_runner.capabilities import self_check_outcome
+from code_reviewer_runner.capabilities import ENGINE_DYNAMIC, ENGINE_IMPLEMENTER, self_check_outcome
 from code_reviewer_runner.dynamic_review.netguard import EgressMode
 from code_reviewer_runner.dynamic_review.self_check import (
     DEFAULT_TOOLS,
@@ -23,6 +23,7 @@ from code_reviewer_runner.dynamic_review.static_isolation import (
     secure_startup,
 )
 from code_reviewer_runner.engines_file import remove_engines_file, write_engines_file
+from code_reviewer_runner.implementer.startup import check_implementer_runner
 from code_reviewer_runner.job_loop.settings import WorkerSettings
 from code_reviewer_runner.verdict import Verdict
 
@@ -139,6 +140,44 @@ def decide_engines(
     )
 
 
+def decide_implementer(
+    settings: WorkerSettings,
+    *,
+    check: Callable[..., object] | None = None,
+) -> tuple[WorkerSettings, str | None]:
+    """`implementer` on top of the engines `decide_engines` decided, and the stable reason it is
+    missing (#765).
+
+    Only a container with a work directory (the Implementer's profile) is asked at all; every other
+    container advertises what it did, with no reason. The Dynamic self-check has to have passed
+    (the engine user, the rules, the pins and the probe are the Implementer's too): when it did
+    not, its reason is already the verdict's. Then `check_implementer_runner` decides, and a
+    failure of it, or any unexpected error inside it, leaves `implementer` out.
+    """
+    log = logging.getLogger(LOGGER_NAME)
+    work_dir = settings.implementer_work_dir
+    if work_dir is None:
+        return settings, None
+    if ENGINE_DYNAMIC not in settings.engines:
+        log.warning("Implementer: not advertised, the Dynamic self-check did not pass")
+        return settings, None
+    run_check = check or check_implementer_runner
+    try:
+        run_check(
+            work_dir=work_dir,
+            user=settings.dynamic_engine_user,
+            ports=settings.dynamic_ports,
+            network=settings.implementer_network,
+        )
+    except Exception as error:
+        reason: Any = getattr(error, "reason", None)
+        named = reason.value if isinstance(reason, SelfCheckReason) else "self_check_error"
+        log.warning("Implementer: not advertised, the start-up self-check failed (%s)", named)
+        return settings, named
+    log.info("Implementer: implementer is advertised, the start-up self-check passed")
+    return replace(settings, engines=(*settings.engines, ENGINE_IMPLEMENTER)), None
+
+
 def advertise_engines(
     settings: WorkerSettings,
     rules_installed: bool,
@@ -180,6 +219,9 @@ def run_startup(
         egress_mode=setup.mode,
         require_read_only_root=require_read_only_root,
     )
-    verdict = Verdict(decided.engines, (reason,) if reason else ())
+    decided, implementer_reason = decide_implementer(decided)
+    verdict = Verdict(
+        decided.engines, tuple(named for named in (reason, implementer_reason) if named)
+    )
     (write_verdict or write_engines_file)(verdict)
     return decided, verdict
