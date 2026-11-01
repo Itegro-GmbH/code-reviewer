@@ -9,10 +9,12 @@
 // authorization of the token is the GitHub App part's (`app-api.ts`).
 //
 // The push (#766) is the real `git receive-pack` the same way, for the Implementer's branch. A new branch and a
-// branch that moves forward are accepted; what GitHub refuses with its default settings is refused too (a history
-// that is not a fast-forward of the branch, which also stops `--force`, and the deletion of a branch). The
-// repository is a fixture the test made, so a push to its checked out branch is accepted as well and leaves its
-// working tree alone. No hook runs. No other service.
+// branch that moves forward are accepted. The fake is stricter than GitHub on purpose: it refuses a history that is
+// not a fast-forward of the branch (which also stops `--force`) and the deletion of a branch, while GitHub accepts
+// both on a branch without protection. A test therefore cannot learn from the fake that a client never forces: it
+// asserts the client's command. Nothing else is refused: tags, `refs/notes/*` and a fast-forward of the default
+// branch are accepted (a test asserts which refs were pushed). The repository is a fixture the test made, so a push
+// to its checked out branch is accepted as well and leaves its working tree alone. No hook runs. No other service.
 import { spawn } from "node:child_process";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { gunzipSync } from "node:zlib";
@@ -107,6 +109,8 @@ function receivePack(
   return serve(
     [
       "core.hooksPath=/dev/null",
+      // Stricter than GitHub on purpose (see the top of the file): GitHub accepts a forced push and a deletion on a
+      // branch without protection.
       "receive.denyNonFastForwards=true",
       "receive.denyDeletes=true",
       "receive.denyCurrentBranch=ignore",

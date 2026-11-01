@@ -7,6 +7,7 @@
 // refuses them; the pushed branch is at once visible through the branch endpoints; the request log names the pushed
 // refs and never a token. The Implementer journey (#767) relies on this, so a wrong fake fails here first.
 import { execFile, execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -416,5 +417,115 @@ describe("the push of the fake GitHub", () => {
     });
     expect(JSON.stringify(context.fake.requests())).not.toContain(token);
     expect(JSON.stringify(context.fake.pushes())).not.toContain(token);
+  });
+
+  // #767 (review of #779, item 4)
+  it("challenges a request without credentials with WWW-Authenticate: Basic, so that URL credentials work", async () => {
+    const context = await setup();
+    const token = await context.mint([WIDGETS.id], "write");
+    const advertise = `${context.remote}/info/refs?service=git-receive-pack`;
+
+    const none = await fetch(advertise);
+    const bad = await fetch(advertise, {
+      headers: { authorization: basic("not-a-token") },
+    });
+    // A client that only knows the credentials from the URL sends them after the challenge.
+    const clone = join(context.directory, "by-url");
+    execFileSync("git", ["init", "--quiet", clone]);
+    const withCredentials = new URL(context.remote);
+    withCredentials.username = "x-access-token";
+    withCredentials.password = token;
+    await run(
+      "git",
+      ["fetch", "--quiet", withCredentials.toString(), context.base],
+      {
+        cwd: clone,
+        env: {
+          PATH: process.env.PATH ?? "",
+          HOME: context.directory,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_TERMINAL_PROMPT: "0",
+        } as NodeJS.ProcessEnv,
+      },
+    );
+
+    expect(none.status).toBe(401);
+    expect(none.headers.get("www-authenticate")).toMatch(/^Basic /);
+    expect(bad.status).toBe(401);
+    expect(bad.headers.get("www-authenticate")).toMatch(/^Basic /);
+    expect(
+      execFileSync("git", ["-C", clone, "cat-file", "-t", context.base], {
+        encoding: "utf8",
+      }).trim(),
+    ).toBe("commit");
+  });
+
+  // #767 (review of #779, item 3)
+  it("records a push over 1 MB once: the client's 4-byte probe names no ref and is not a push", async () => {
+    const context = await setup();
+    const token = await context.mint([WIDGETS.id], "write");
+    const clone = await workingCopy(context, token, "clone", "implementer/big");
+    // Incompressible, and above http.postBuffer (1 MiB): the client probes the server before it sends the body.
+    writeFileSync(join(clone, "big.bin"), randomBytes(2_500_000));
+    execFileSync("git", ["-C", clone, "add", "--all"]);
+    await git(clone, token, "commit", "--quiet", "--message", "Add big.bin");
+
+    const pushed = await push(
+      clone,
+      token,
+      context.remote,
+      "HEAD:refs/heads/implementer/big",
+    );
+
+    const posts = context.fake
+      .requests()
+      .filter(
+        (request) =>
+          request.method === "POST" &&
+          request.path.endsWith("/git-receive-pack"),
+      );
+    expect(pushed.ok).toBe(true);
+    // The probe really happened (two POSTs), and only the one with the command is a push.
+    expect(posts.length).toBeGreaterThanOrEqual(2);
+    expect(posts.filter((post) => post.refs !== undefined)).toHaveLength(1);
+    expect(context.fake.pushes()).toEqual([
+      { repository: "acme/widgets", refs: ["refs/heads/implementer/big"] },
+    ]);
+  });
+
+  // #767 (review of #779, item 2)
+  it("accepts a tag, a note and a fast-forward of the default branch, which is why a journey asserts the refs it expects", async () => {
+    const context = await setup();
+    const token = await context.mint([WIDGETS.id], "write");
+    const clone = await workingCopy(context, token, "clone", "implementer/x");
+    execFileSync("git", ["-C", clone, "tag", "v1"]);
+    execFileSync("git", [
+      "-C",
+      clone,
+      "update-ref",
+      "refs/notes/commits",
+      "HEAD",
+    ]);
+
+    const tag = await push(clone, token, context.remote, "refs/tags/v1");
+    const note = await push(
+      clone,
+      token,
+      context.remote,
+      "refs/notes/commits:refs/notes/commits",
+    );
+    const main = await push(
+      clone,
+      token,
+      context.remote,
+      "HEAD:refs/heads/main",
+    );
+
+    expect([tag.ok, note.ok, main.ok]).toEqual([true, true, true]);
+    expect(context.fake.pushes().flatMap((entry) => entry.refs)).toEqual([
+      "refs/tags/v1",
+      "refs/notes/commits",
+      "refs/heads/main",
+    ]);
   });
 });

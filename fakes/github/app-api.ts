@@ -576,7 +576,16 @@ export function createAppPart(
       const gitToken = basicToken(request.headers.authorization);
       const gitIssued =
         gitToken === undefined ? undefined : installationToken(gitToken);
-      if (gitIssued === undefined) return unauthorized();
+      if (gitIssued === undefined) {
+        // Like GitHub, the challenge names Basic: a client with URL credentials or a credential helper answers it and
+        // retries, and only `http.extraHeader` gets through without it.
+        response.writeHead(401, {
+          "content-type": "application/json",
+          "www-authenticate": 'Basic realm="GitHub"',
+        });
+        response.end(JSON.stringify({ message: "Bad credentials" }));
+        return;
+      }
       const gitName = `${gitMatch[1]}/${gitMatch[2]}`;
       const visible = reposVisibleTo(gitIssued).find(
         (repo) => repo.fullName === gitName,
@@ -601,7 +610,9 @@ export function createAppPart(
         directory,
         advertise,
       );
-      if (!advertise) {
+      // Only a POST with a command is a push. The client's 4-byte probe of a request over 1 MB (it asks whether the
+      // server takes the body at all) names no ref and is neither recorded nor listed.
+      if (!advertise && refs.length > 0) {
         pushes.push({ repository: gitName, refs });
         context.logRefs(refs);
       }
