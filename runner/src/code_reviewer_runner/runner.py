@@ -102,13 +102,18 @@ from code_reviewer_runner.identity_patch import (
     apply_identity_patch,
     check_pr_agent_version,
 )
+from code_reviewer_runner.implementer.job_run import (
+    SIGTERM_BACKSTOP_SECONDS as IMPLEMENTER_SIGTERM_BACKSTOP_SECONDS,
+)
+from code_reviewer_runner.implementer.job_run import run_implementer_job
 from code_reviewer_runner.job import (
     MAX_JOB_BYTES,
     Command,
+    ImplementerInput,
     Job,
     JobError,
     ReviewKind,
-    parse_job,
+    parse_runnable_job,
 )
 from code_reviewer_runner.lease_check import (
     LeaseCheck,
@@ -1120,12 +1125,35 @@ def _truncation(
     return None
 
 
-def _ensure_clean(result: JobResult, secrets: Sequence[str]) -> JobResult:
-    """Last line of defence: no secret of the job may be in the line that is printed."""
+def _leaks(result: JobResult, secrets: Sequence[str]) -> bool:
     line = result.to_line()
-    if not any(secret and secret in line for secret in secrets):
+    return any(secret and secret in line for secret in secrets)
+
+
+def _ensure_clean(result: JobResult, secrets: Sequence[str]) -> JobResult:
+    """Last line of defence: no secret of the job may be in the line that is printed.
+
+    The report of an Implementer turn holds text an agent wrote (the summary, commit subjects,
+    paths); when a secret is still in it after the log is blanked, every text of it is replaced
+    (its shape stays one the app reads, so the facts of the turn still reach it)."""
+    if not _leaks(result, secrets):
         return result
-    return replace(result, log_tail=REDACTED, log_truncated=True, comment_url=None)
+    cleaned = replace(result, log_tail=REDACTED, log_truncated=True, comment_url=None)
+    block = cleaned.implementer
+    if block is None or not _leaks(cleaned, secrets):
+        return cleaned
+    return replace(
+        cleaned,
+        implementer={
+            **block,
+            "summary": REDACTED,
+            "commits": [{"sha": c["sha"], "subject": REDACTED} for c in block["commits"]],
+            "filesChanged": [
+                {"path": f"[redacted {number}]", "status": f["status"]}
+                for number, f in enumerate(block["filesChanged"], 1)
+            ],
+        },
+    )
 
 
 class _ResultChannel:
@@ -1198,6 +1226,35 @@ def _unwind_on_sigterm() -> Generator[None]:
         backstop.daemon = True
         backstop.start()
         raise KeyboardInterrupt
+
+    try:
+        previous = signal.signal(signal.SIGTERM, on_term)
+    except ValueError:  # not the main thread: nothing to install
+        yield
+        return
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+@contextmanager
+def _stop_on_sigterm(stop: threading.Event) -> Generator[None]:
+    """A turn of the Implementer that gets SIGTERM stops, pushes what is committed and reports
+    `runner_shutdown` (#765).
+
+    The job host sends the signal when the Worker is stopped (and when the lease is lost, when the
+    lease gate then refuses the push). The handler only sets `stop`: the turn's watch sees it within
+    a second, ends the engine and makes the last push. It also arms a backstop shorter than the
+    host's grace, so that a turn stuck somewhere else (a clone, a git that hangs) is ended by
+    this process before the host kills it.
+    """
+
+    def on_term(signum: int, frame: object) -> None:
+        stop.set()
+        backstop = threading.Timer(IMPLEMENTER_SIGTERM_BACKSTOP_SECONDS, _stop_hard)
+        backstop.daemon = True
+        backstop.start()
 
     try:
         previous = signal.signal(signal.SIGTERM, on_term)
@@ -1323,7 +1380,7 @@ def _main(
     logger.remove()
 
     try:
-        job = parse_job(_read_stdin(stdin or sys.stdin))
+        job = parse_runnable_job(_read_stdin(stdin or sys.stdin))
     except JobError as error:
         return _exit_code(channel.write(_failure(error.code, error.detail, started, None)))
     except UnicodeDecodeError:
@@ -1336,6 +1393,9 @@ def _main(
         )
 
     saved_env = dict(os.environ)
+    if isinstance(job, ImplementerInput):
+        result = _run_implementer(job, channel, started, saved_env)
+        return _exit_code(channel.write(result, job.secrets))
     if job.review_kind is ReviewKind.DYNAMIC:
         # A Dynamic job is never run by PR-Agent (#195/#197). It gets the same process-level timeout
         # as a Diff job; on expiry the watchdog ends the engine's process group too (#197-T07).
@@ -1413,6 +1473,40 @@ def _main(
         os.environ.clear()
         os.environ.update(saved_env)
     return _exit_code(channel.write(result, job.secrets))
+
+
+def _run_implementer(
+    job: ImplementerInput, channel: _ResultChannel, started: float, saved_env: Mapping[str, str]
+) -> JobResult:
+    """A turn of the Implementer: the root supervisor of the container, like a Dynamic job. The
+    watchdog ends a process that does not stop; a SIGTERM is a stop (`_stop_on_sigterm`); the lease
+    is asked over the descriptor the job host handed over, before every push."""
+    timeout = _timeout_from(saved_env)
+    probe = UsageProbe()
+    watchdog = (
+        _start_watchdog(timeout, channel, started, None, job.secrets, probe) if timeout else None
+    )
+    stop = threading.Event()
+    try:
+        with _stop_on_sigterm(stop):
+            return run_implementer_job(
+                job,
+                started,
+                saved_env,
+                lease_check=lease_check_from_environment(saved_env, required=True),
+                shutdown=stop,
+                usage_probe=probe,
+            )
+    except KeyboardInterrupt:
+        raise
+    except BaseException:
+        usage = _probe_usage(probe)
+        # The money is spent when the model was used: never the free code of a failed runner.
+        code = ErrorCode.AGENT_GAVE_UP if usage is not None else ErrorCode.RUNNER_ERROR
+        return _failure(code, "unexpected runner error", started, None, usage=usage)
+    finally:
+        if watchdog is not None:
+            watchdog.cancel()
 
 
 def _exit_code(written: int | None) -> int:

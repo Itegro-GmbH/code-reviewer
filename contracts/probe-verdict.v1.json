@@ -6,12 +6,12 @@
   "version": 1,
   "$defs": {
     "ProbeEngine": {
-      "description": "An engine a container may advertise: `pr-agent` runs Diff jobs, `opencode` runs Dynamic jobs.",
+      "description": "An engine a container may advertise: `pr-agent` runs Diff jobs, `opencode` runs Dynamic jobs, `implementer` runs the Implementer's turns (#765; only a container of the Implementer's profile, with its work volume, advertises it, and only after the Dynamic self-check and its own passed).",
       "type": "string",
-      "enum": ["pr-agent", "opencode"]
+      "enum": ["pr-agent", "opencode", "implementer"]
     },
     "ProbeReason": {
-      "description": "Why `opencode` is not advertised: the `SelfCheckReason` values of the runner (runner/src/code_reviewer_runner/dynamic_review/self_check.py). A closed set, so that the Dispatcher can keep a verdict to stable reasons and drop anything else. Both ends check their lists against this one.",
+      "description": "Why an engine is not advertised: the `SelfCheckReason` values of the runner (runner/src/code_reviewer_runner/dynamic_review/self_check.py). The `implementer_*` ones say why `implementer` is missing from a container whose Dynamic self-check passed (#765); every other one says why `opencode` is. A closed set, so that the Dispatcher can keep a verdict to stable reasons and drop anything else. Both ends check their lists against this one.",
       "type": "string",
       "enum": [
         "not_a_dynamic_runner",
@@ -30,11 +30,19 @@
         "ripgrep_missing",
         "ripgrep_untrusted",
         "ripgrep_checksum_mismatch",
-        "network_probe_failed"
+        "network_probe_failed",
+        "implementer_git_missing",
+        "implementer_git_too_old",
+        "implementer_setpriv_missing",
+        "implementer_guard_files_missing",
+        "implementer_egress_rules_missing",
+        "implementer_work_dir_missing",
+        "implementer_work_dir_not_prepared",
+        "implementer_work_dir_not_exec"
       ]
     },
     "ProbeVerdict": {
-      "description": "The line the `probe` mode prints. `engines` always holds `pr-agent`; `opencode` is in it only when the whole self-check passed (the hardening of the container, the egress mode, IPv6 off where the fallback ruleset needs it, the pins), and then `reasons` is empty.",
+      "description": "The line the `probe` mode prints. `engines` always holds `pr-agent`; `opencode` is in it only when the whole self-check passed (the hardening of the container, the egress mode, IPv6 off where the fallback ruleset needs it, the pins), and then `reasons` holds no reason against it. `implementer` (#765) is in it only in a container of the Implementer's profile, on top of `opencode`, when its own start-up check passed as well (git, the guard files, the work volume prepared and exec-capable, the network rules); a container whose own check failed has `opencode` and the `implementer_*` reasons. A container that is no Implementer container has no such reason.",
       "type": "object",
       "additionalProperties": false,
       "required": ["version", "engines", "reasons"],
@@ -48,7 +56,7 @@
             "$ref": "#/$defs/ProbeEngine"
           },
           "uniqueItems": true,
-          "maxItems": 2
+          "maxItems": 3
         },
         "reasons": {
           "type": "array",
@@ -56,7 +64,7 @@
             "$ref": "#/$defs/ProbeReason"
           },
           "uniqueItems": true,
-          "maxItems": 17
+          "maxItems": 25
         }
       }
     },
@@ -120,7 +128,7 @@
             "$ref": "#/$defs/ProbeEngine"
           },
           "uniqueItems": true,
-          "maxItems": 2
+          "maxItems": 3
         },
         "reasons": {
           "type": "array",
@@ -128,13 +136,13 @@
             "$ref": "#/$defs/ProbeReason"
           },
           "uniqueItems": true,
-          "maxItems": 17
+          "maxItems": 25
         },
         "failure": {
           "$ref": "#/$defs/ProbeFailure"
         },
         "required": {
-          "description": "The engines this Dispatcher required for `ok`: those of the reviewer kinds, and `implementer` only once the Launcher advertises it. A deploy step names the ones `engines` lacks when it blocks. Unlike `engines`, it may hold `implementer`, which a container verdict cannot yet (ProbeVerdict still lists two engines).",
+          "description": "The engines this Dispatcher required for `ok`: those of the reviewer kinds, and `implementer` only once the Launcher advertises it. A deploy step names the ones `engines` lacks when it blocks. It may hold `implementer`, which `engines` holds only when the canary proved the Implementer's container too.",
           "type": "array",
           "items": {
             "enum": ["pr-agent", "opencode", "implementer"]

@@ -70,7 +70,6 @@ from .git_workspace import (
     GitWorkspace,
     PushLoop,
     PushResult,
-    RepositoryUnusable,
 )
 from .history import CommitInfo, FileChange
 from .prompts import LEFTOVER_PROMPT, instructions_text
@@ -143,13 +142,31 @@ class SessionSeams:
     start_egress: Callable[[EgressSettings], EgressProxy | None] | None = None
 
 
-# What stops a turn when the push loop meets it: the provider or the branch refuses for good.
-# Anything else the loop raises (a transient failure the loop did not take for one, a bug) is
-# logged,
-# waited out, and the final push still runs.
+# What stops a turn when the push loop meets it: the provider or the branch refuses for good, or
+# the job is not ours any more (the lease gate before a push, #765). Anything else the loop raises
+# (a transient failure the loop did not take for one, a bug) is logged, waited out, and the final
+# push still runs.
 _REFUSALS = frozenset(
-    {ErrorCode.BRANCH_VIOLATION, ErrorCode.PUSH_REJECTED, ErrorCode.BRANCH_EXISTS}
+    {
+        ErrorCode.BRANCH_VIOLATION,
+        ErrorCode.PUSH_REJECTED,
+        ErrorCode.BRANCH_EXISTS,
+        ErrorCode.LEASE_LOST,
+    }
 )
+# The ends after which nothing is committed any more and nothing may be pushed that was not already
+# committed: the job is not ours, or the runner is going away within seconds.
+_NO_LEFTOVER = frozenset({ErrorCode.LEASE_LOST, ErrorCode.RUNNER_SHUTDOWN})
+
+
+class ShutdownRequested(JobError):
+    """The runner was told to stop (SIGTERM, #765). What is committed is pushed first; the job
+    host gives the job back under this code."""
+
+    def __init__(self) -> None:
+        super().__init__(ErrorCode.RUNNER_SHUTDOWN, "the runner was told to stop")
+
+
 _UNEXPECTED_PAUSE_SECONDS = 30.0
 
 
@@ -243,6 +260,11 @@ def classify(
             return provider_error, "the model provider was not available for the turn"
         if used_model:
             return ErrorCode.AGENT_GAVE_UP, detail
+    if code is ErrorCode.SETUP_FAILED and used_model:
+        # Whatever is wrong with the repository or its set-up after the agent ran is the state it
+        # left, and the model budget is spent: the charged class (`RepositoryUnusable` is the
+        # same), never the free one a turn that never started has.
+        return ErrorCode.BRANCH_VIOLATION, detail
     return code, detail
 
 
@@ -308,6 +330,7 @@ class ImplementerSession:
         launch: EngineLaunch | None = None,
         ripgrep: Path | None = None,
         seams: SessionSeams = SessionSeams(),  # noqa: B008 - frozen, shared on purpose
+        should_stop: Callable[[], bool] = lambda: False,
     ) -> None:
         self.job = job
         self.workspace = workspace
@@ -319,6 +342,8 @@ class ImplementerSession:
         self.seams = seams
         self._clock = seams.clock
         self._started = self._clock() if started is None else started
+        # True once the runner was told to stop (SIGTERM): the watch ends the turn at once.
+        self._should_stop = should_stop
         self._notes: list[str] = []
         self._summary = ""
         self._error: tuple[ErrorCode, str] | None = None
@@ -361,7 +386,7 @@ class ImplementerSession:
         except Exception as error:
             self._stopped_by(error)
         finally:
-            ended = agent.stop() if agent is not None else True
+            ended = agent.stop(quick=self._ends_quickly()) if agent is not None else True
             if not ended:
                 self._note("the engine user's processes could not all be ended")
         try:
@@ -471,15 +496,29 @@ class ImplementerSession:
             **options,
         )
 
+    def _ends_quickly(self) -> bool:
+        """Whether this end has seconds to spare, not minutes: the runner was told to stop, or the
+        job is not ours any more."""
+        return self._error is not None and self._error[0] in _NO_LEFTOVER
+
+    def _watch(self, ticker: PushTicker) -> Callable[[], None]:
+        def check() -> None:
+            if self._should_stop():
+                raise ShutdownRequested
+            ticker.check()
+
+        return check
+
     def _work(self, agent: ImplementerAgent, ticker: PushTicker) -> None:
         """The instruction, and the one extra message when the tree is still dirty."""
-        ended = agent.turn(self.job.implementer.instruction, check=ticker.check)
+        check = self._watch(ticker)
+        ended = agent.turn(self.job.implementer.instruction, check=check)
         self._summary = ended.text
         self._note("the agent ended its turn")
         if not self.workspace.dirty() or not self._time_for_another_turn(agent):
             return
         self._note("the working tree is dirty: one extra message")
-        again: AgentTurn = agent.turn(LEFTOVER_PROMPT, check=ticker.check)
+        again: AgentTurn = agent.turn(LEFTOVER_PROMPT, check=check)
         self._summary = self._summary or again.text
 
     def _time_for_another_turn(self, agent: ImplementerAgent) -> bool:
@@ -500,19 +539,17 @@ class ImplementerSession:
         """The leftover commit and the final push, after the agent is gone. A failure here is the
         turn's error only when nothing ended the turn before."""
         try:
-            if self.workspace.dirty():
+            if not self._ends_quickly() and self.workspace.dirty():
                 self.workspace.commit_all()
                 self._note("uncommitted changes were committed by the system")
-        except RepositoryUnusable as error:
-            self._stopped_by(error)
-        except JobError as error:
+        except Exception as error:
             self._stopped_by(error)
         try:
             if ticker is not None:
                 self._pushed = ticker.finish()
             else:
                 self._pushed = PushLoop(self.workspace).finish()
-        except JobError as error:
+        except Exception as error:
             self._stopped_by(error)
 
     def _result(self) -> TurnResult:
@@ -522,8 +559,10 @@ class ImplementerSession:
         try:
             commits = workspace.commits_since_start()
             files = workspace.changed_files()
-        except JobError:
+        except JobError as error:
+            # The report would be a guess: the repository could not be read after the agent ran.
             self._note("the commits and files of the branch could not be read")
+            self._stopped_by(error)
         tip = workspace.agent_tip()
         head = tip if tip is not None and tip != workspace.start_commit else None
         pushed = head is not None and workspace.pushed_tip == head
@@ -535,7 +574,7 @@ class ImplementerSession:
             error = (ErrorCode.PUSH_REJECTED, "the work could not be pushed")
         usage = self._usage()
         touched = self._touched_engine_inputs()
-        summary = clip_summary(self._summary, self._secrets(), tail=_not_kept(touched))
+        summary = clip_summary(self._summary, self.secrets(), tail=_not_kept(touched))
         return TurnResult(
             error_code=None if error is None else error[0],
             error_detail=None if error is None else error[1],
@@ -564,7 +603,7 @@ class ImplementerSession:
             return Usage(None, 0, 0, 0, 0, False, None)
         return self._native.ledger.usage(self.job.llm.model)
 
-    def _secrets(self) -> tuple[str, ...]:
+    def secrets(self) -> tuple[str, ...]:
         capability = () if self._native is None else (self._native.capability,)
         return (*self.job.secrets, *capability)
 

@@ -156,7 +156,7 @@ def test_the_review_path_still_refuses_the_kind_and_the_runnable_path_reads_it()
     assert parse_runnable_job(raw).implementer.branch == "implementer/a1b2c3"  # type: ignore[union-attr]
 
 
-# -- the process of an advertised engine ------------------------------------------------------------
+# -- the process of an advertised engine ----------------------------------------------------------
 
 
 # #765-T04
@@ -220,7 +220,7 @@ def test_the_other_kinds_keep_the_small_stdout_and_their_users() -> None:
     run(scenario)
 
 
-# -- the report -------------------------------------------------------------------------------------
+# -- the report -----------------------------------------------------------------------------------
 
 
 # #765-T04
@@ -282,7 +282,7 @@ def test_a_report_that_is_too_big_is_delivered_under_4_mb() -> None:
     run(scenario)
 
 
-# -- the lease and a stop ----------------------------------------------------------------------------
+# -- the lease and a stop -------------------------------------------------------------------------
 
 
 # #765-T05

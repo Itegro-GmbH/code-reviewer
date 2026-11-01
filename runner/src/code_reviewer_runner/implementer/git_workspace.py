@@ -259,6 +259,7 @@ class GitWorkspace:
         path: str = TRUSTED_PATH,
         schemes: Collection[str] = ("https",),
         timeout: float = DEFAULT_TIMEOUT,
+        before_push: Callable[[], None] | None = None,
     ) -> None:
         if agent.uid == 0 or agent.gid == 0:
             raise _invalid("the agent must not run as root")
@@ -267,6 +268,9 @@ class GitWorkspace:
         if executable is None:
             raise fail(ErrorCode.SETUP_FAILED, "git is not installed")
         self.spec = spec
+        # Called before every push, the periodic ones and the last: it raises to refuse the push.
+        # The job asks the lease here, so that nothing is pushed for a job that is not ours (#765).
+        self._before_push = before_push
         self.layout = layout
         self.agent = agent
         self.identity = identity
@@ -654,7 +658,12 @@ class GitWorkspace:
         a commit by another committer, a branch without the start commit, a branch that is gone)
         ends the turn for good; a look that failed for another reason raises `PushUnverified` and
         the next call tries again. Which of the two it is, is decided from exit statuses and the
-        objects in the mirror, never from the text git printed."""
+        objects in the mirror, never from the text git printed.
+
+        `before_push`, when given, is asked first and may refuse with any `JobError`: nothing is
+        fetched or pushed then."""
+        if self._before_push is not None:
+            self._before_push()
         with self._lock:
             return self._push()
 

@@ -197,7 +197,7 @@ def test_a_result_with_a_report_carries_it_whole() -> None:
     assert json.loads(result.to_line())["implementer"] == report
 
 
-# -- what the host lets through --------------------------------------------------------------------
+# -- what the host lets through -------------------------------------------------------------------
 
 
 def line_of(report: object, **changes: Any) -> bytes:
@@ -253,9 +253,7 @@ def test_a_report_the_app_would_refuse_is_not_passed_on(broken: object) -> None:
 
 
 # #765-T04
-def test_a_turn_that_says_it_succeeded_without_a_usable_report_becomes_a_failure_that_keeps_its_usage() -> (
-    None
-):
+def test_a_success_without_a_usable_report_becomes_a_failure_that_keeps_its_usage() -> None:
     result = reported(line_of({**block(), "baseCommit": "main"}))
 
     assert result["ok"] is False

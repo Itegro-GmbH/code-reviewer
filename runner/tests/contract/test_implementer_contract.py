@@ -20,7 +20,7 @@ from jsonschema import Draft202012Validator
 
 from code_reviewer_runner import job as runner_job
 from code_reviewer_runner import runner
-from code_reviewer_runner.capabilities import ALL_ENGINES, ENGINE_IMPLEMENTER
+from code_reviewer_runner.capabilities import ALL_ENGINES, ENGINE_IMPLEMENTER, KNOWN_ENGINES
 from code_reviewer_runner.result import ErrorCode
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -298,8 +298,10 @@ def test_the_engines_of_the_runner_are_the_engines_of_the_file() -> None:
 
     assert ENGINE_IMPLEMENTER == "implementer"
     assert sorted({*ALL_ENGINES, ENGINE_IMPLEMENTER}) == sorted(listed)
-    # This release has no implementer engine: a self-checked runner does not advertise it yet.
+    # The reviewer engines are what the Dynamic self-check gates; `implementer` is advertised on top
+    # of them by its own start-up check (#765), so it is not one of them.
     assert ENGINE_IMPLEMENTER not in ALL_ENGINES
+    assert KNOWN_ENGINES == (*ALL_ENGINES, ENGINE_IMPLEMENTER)
     assert _accepts("ClaimRequest", {"engines": ["pr-agent", "opencode", "implementer"]})
 
 
