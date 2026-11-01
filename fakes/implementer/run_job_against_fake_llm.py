@@ -42,6 +42,7 @@ import faulthandler
 import functools
 import http.client
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -91,8 +92,9 @@ class LoopbackUpstream:
         self._base_path = parts.path.rstrip("/")
 
     def send(self, request: UpstreamRequest, timeout: float) -> UpstreamResponse:
-        sys.stderr.write(f"fake upstream: POST {request.path} ({len(request.body)} bytes)\n")
-        sys.stderr.flush()
+        logging.getLogger("fake-upstream").info(
+            "POST %s (%d bytes)", request.path, len(request.body)
+        )
         connection = http.client.HTTPConnection(self._host, self._port, timeout=timeout)
         try:
             connection.request(
@@ -229,6 +231,12 @@ def main(argv: list[str]) -> int:
     def egress(settings: EgressSettings) -> EgressProxy | None:
         return start_egress(settings, resolve=resolve, connect=connect)
 
+    # What the job says about itself (its log, the model proxy's) goes to a file next to the git log:
+    # the Worker keeps no record of it, and a journey that fails has to be read from something.
+    job_log = f"{git_log}.{os.getpid()}.job.txt"
+    notes = open(job_log, "a", buffering=1, encoding="utf-8")  # noqa: SIM115
+    os.dup2(notes.fileno(), 2)
+    logging.basicConfig(stream=notes, level=logging.DEBUG, force=True)
     # A job that does not end says where it is: the stacks of every thread, every thirty seconds,
     # in a file next to the log (open for as long as the process lives).
     stacks = f"{git_log}.{os.getpid()}.stacks.txt"

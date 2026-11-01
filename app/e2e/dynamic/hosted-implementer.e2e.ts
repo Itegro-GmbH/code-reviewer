@@ -108,6 +108,9 @@ const FIXTURE = "../fakes/fixtures/models-dev/implementer-lane.json";
 const LEFTOVER_PHRASE = "commit your changes now";
 const SYSTEM_COMMIT = "Implementer: uncommitted changes of the turn";
 
+// TEMPORARY (#767 debugging): the first failure ends the run of the journeys.
+test.describe.configure({ mode: "serial" });
+
 test.describe("a task on its way from the form of the Implementer to a branch on GitHub", () => {
   let llm: FakeLlm | undefined;
   let dispatcher: HostedDispatcher | undefined;
