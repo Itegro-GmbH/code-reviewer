@@ -396,7 +396,8 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     await expect(detail).toContainText("Implementer");
     await expect(detail).toContainText("Base branch");
     await expect(detail).toContainText(BASE);
-    await expect(detail.getByRole("link", { name: branch })).toBeVisible();
+    // The branch is a link to GitHub only where the repository's address is GitHub's; the lane's is the fake's.
+    await expect(detail).toContainText(branch);
     await expect(detail).toContainText("Add hello");
     await expect(detail).toContainText("Add farewell");
     await expect(detail).toContainText(
@@ -771,15 +772,40 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     const ended = await runEnded(page, runId, RUN_TIMEOUT);
 
     expect(ended.status).toBe("succeeded");
-    const calls = ended.callTrace?.modelCalls ?? [];
-    expect(calls.length).toBeGreaterThanOrEqual(4);
+    // What the fake said every answer used (the title request too: the model proxy counts it): fresh input, what was read
+    // from the cache, what was written to it, and the output, priced as the catalog prices the model (per million tokens).
+    const answered = theLlm
+      .requests()
+      .flatMap((item) => (item.usage === undefined ? [] : [item.usage]));
+    const cached = (usage: Record<string, unknown>) =>
+      (usage.prompt_tokens_details as { cached_tokens?: number } | undefined)
+        ?.cached_tokens ?? 0;
+    const written = (usage: Record<string, unknown>) =>
+      (
+        usage.prompt_tokens_details as
+          { cache_write_tokens?: number } | undefined
+      )?.cache_write_tokens ?? 0;
+    expect(answered.length).toBeGreaterThanOrEqual(4);
     expect(
-      calls.slice(1).some((call) => (call.cacheRead ?? 0) > 0),
+      answered.slice(1).some((usage) => cached(usage) > 0),
       "a later call read from the cache",
     ).toBe(true);
-    const summed = calls.reduce((sum, call) => sum + (call.costUsd ?? 0), 0);
-    expect(ended.usage?.costUsd).toBeCloseTo(summed, 8);
-    expect(summed).toBeGreaterThan(0);
+    const expectedCost = answered.reduce((sum, usage) => {
+      const prompt = Number(usage.prompt_tokens);
+      const read = cached(usage);
+      const wrote = written(usage);
+      return (
+        sum +
+        ((prompt - read - wrote) * 0.5 +
+          read * 0.05 +
+          wrote * 0.625 +
+          Number(usage.completion_tokens) * 2) /
+          1_000_000
+      );
+    }, 0);
+    expect(expectedCost).toBeGreaterThan(0);
+    expect(ended.usage?.aiCalls).toBe(answered.length);
+    expect(ended.usage?.costUsd).toBeCloseTo(expectedCost, 8);
     await expectQuiet();
   });
 

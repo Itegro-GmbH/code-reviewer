@@ -55,6 +55,8 @@ export type FakeLlmRequest = {
   toolResults: Record<string, string>;
   /** The `provider` object of the body (OpenRouter's routing options, #270); null when absent. */
   provider: Record<string, unknown> | null;
+  /** The `usage` the chat answer stated (cache tokens included), once it was sent; absent for a request that got an error. */
+  usage?: Record<string, unknown>;
 };
 
 /** One request's tool calls of the agent script. */
@@ -801,7 +803,7 @@ export async function startLlmFake(
       const authorization = request.headers.authorization ?? "";
       const system = textOf(messages, "system");
       const kind = classify(system);
-      log.push({
+      const entry: FakeLlmRequest = {
         path: request.url ?? "",
         authorization,
         model,
@@ -810,7 +812,8 @@ export async function startLlmFake(
         tools: toolNames((body as { tools?: unknown }).tools),
         toolResults: toolResultsOf(messages),
         provider: providerOf((body as { provider?: unknown }).provider),
-      });
+      };
+      log.push(entry);
 
       const streaming = (body as { stream?: unknown }).stream === true;
       const includeUsage =
@@ -818,6 +821,8 @@ export async function startLlmFake(
           .stream_options?.include_usage === true;
       // An answer to a request that asked for a stream is the stream of the same answer.
       const sendChat = (status: number, document: unknown) => {
+        if (status === 200)
+          entry.usage = (document as { usage?: Record<string, unknown> }).usage;
         if (!streaming || status !== 200) return send(status, document);
         response.writeHead(200, {
           "content-type": "text/event-stream",

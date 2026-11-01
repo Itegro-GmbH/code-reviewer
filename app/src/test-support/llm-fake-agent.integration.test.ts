@@ -468,4 +468,18 @@ describe("the fake LLM playing a coding agent", () => {
         .finish_reason,
     ).toBe("stop");
   });
+
+  // #767
+  it("keeps the usage it stated with the request in its log", async () => {
+    const fake = await setup();
+    fake.scriptAgent({ steps: [], finalText: "Done." });
+    fake.setChatUsage({ promptTokens: 700, completionTokens: 30 });
+
+    await ask(fake.baseUrl, [{ role: "user", content: "go" }]);
+
+    expect(fake.requests()[0]?.usage).toMatchObject({
+      prompt_tokens: 700,
+      completion_tokens: 30,
+    });
+  });
 });
