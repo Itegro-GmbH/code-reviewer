@@ -798,22 +798,18 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       answered.slice(1).some((usage) => cached(usage) > 0),
       "a later call read from the cache",
     ).toBe(true);
-    const expectedCost = answered.reduce((sum, usage) => {
-      const prompt = Number(usage.prompt_tokens);
-      const read = cached(usage);
-      const wrote = written(usage);
-      return (
-        sum +
-        ((prompt - read - wrote) * 0.5 +
-          read * 0.05 +
-          wrote * 0.625 +
-          Number(usage.completion_tokens) * 2) /
-          1_000_000
-      );
-    }, 0);
-    expect(expectedCost).toBeGreaterThan(0);
+    // The cost of the run is the sum of what the calls cost, the cache included: each answer states its charge (`usage.cost`, as
+    // OpenRouter does: cache reads are cheaper, cache writes dearer), and the run states the sum of them.
+    const statedCost = answered.reduce(
+      (sum, usage) => sum + Number(usage.cost),
+      0,
+    );
+    expect(statedCost).toBeGreaterThan(0);
     expect(ended.usage?.aiCalls).toBe(answered.length);
-    expect(ended.usage?.costUsd).toBeCloseTo(expectedCost, 8);
+    expect(
+      ended.usage?.costUsd,
+      `the calls stated ${String(statedCost)} in all`,
+    ).toBeCloseTo(statedCost, 8);
     await expectQuiet();
   });
 
