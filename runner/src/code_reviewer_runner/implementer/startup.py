@@ -28,7 +28,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from code_reviewer_runner.dynamic_review.self_check import SelfCheckFailed, SelfCheckReason
 from code_reviewer_runner.dynamic_review.static_isolation import ImplementerNetwork, SlotPorts
@@ -112,15 +112,18 @@ def runs_scripts_as(work_dir: Path, uid: int, gid: int) -> bool:
         switch: dict[str, Any] = (
             {"user": uid, "group": gid, "extra_groups": ()} if uid != os.geteuid() else {}
         )
-        done = subprocess.run(
-            [str(script)],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=_EXEC_PROBE_SECONDS,
-            check=False,
-            cwd=work_dir / HOME_NAME,
-            env={"PATH": TRUSTED_PATH},
-            **switch,
+        done = cast(
+            "subprocess.CompletedProcess[bytes]",
+            subprocess.run(
+                [str(script)],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=_EXEC_PROBE_SECONDS,
+                check=False,
+                cwd=work_dir / HOME_NAME,
+                env={"PATH": TRUSTED_PATH},
+                **switch,
+            ),
         )
     except (OSError, subprocess.SubprocessError):
         return False

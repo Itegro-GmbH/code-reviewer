@@ -84,6 +84,9 @@ class ProcessSpec:
     # #260: the loop's answer to "is this job still ours?". When set, the process is handed one
     # descriptor (`RUNNER_LEASE_CHECK_FD`) it can ask over; it holds no lease token itself.
     lease_check: Callable[[], Awaitable[LeaseState]] | None = None
+    # How much of the end of its stdout is kept. The result line of an Implementer turn carries
+    # its commits and files and can be megabytes; every other job prints a line of a few KB.
+    stdout_keep_bytes: int = STDOUT_KEEP_BYTES
 
 
 @dataclass(frozen=True)
@@ -179,6 +182,7 @@ class _SubprocessJob:
         workdir: Path,
         terminate_grace: float,
         lease: _LeaseChannel | None = None,
+        stdout_keep_bytes: int = STDOUT_KEEP_BYTES,
     ) -> None:
         self._process = process
         self._pipes = pipes
@@ -187,7 +191,7 @@ class _SubprocessJob:
         self._terminate_grace = terminate_grace
         # Whoever ends the group holds it, so one cannot signal after the other has reaped.
         self._group_lock = threading.Lock()
-        self._stdout = StreamTail(STDOUT_KEEP_BYTES)
+        self._stdout = StreamTail(stdout_keep_bytes)
         self._stderr = StreamTail(STDERR_KEEP_BYTES)
         self._readers = [
             asyncio.create_task(self._write_stdin(stdin)),
@@ -329,7 +333,15 @@ class SubprocessLauncher:
                 for end in ends or ():
                     end.close()
             raise
-        return _SubprocessJob(process, spec.stdin, pipes, workdir, self._terminate_grace, lease)
+        return _SubprocessJob(
+            process,
+            spec.stdin,
+            pipes,
+            workdir,
+            self._terminate_grace,
+            lease,
+            stdout_keep_bytes=spec.stdout_keep_bytes,
+        )
 
 
 async def _connect_pipes(process: subprocess.Popen[bytes]) -> _Pipes:

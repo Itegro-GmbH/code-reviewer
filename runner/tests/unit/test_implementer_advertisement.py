@@ -191,7 +191,7 @@ def test_a_link_in_the_place_of_a_directory_is_refused(tmp_path: Path) -> None:
     (tmp_path / "elsewhere").mkdir()
     (tmp_path / "home").symlink_to(tmp_path / "elsewhere")
 
-    with pytest.raises(OSError):  # noqa: PT011 - O_NOFOLLOW answers ELOOP, the type is what counts
+    with pytest.raises(OSError):
         prepare_work_dir(tmp_path, os.geteuid(), os.getegid())
 
 

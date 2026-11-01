@@ -19,6 +19,12 @@ from enum import StrEnum
 from typing import Any, Protocol
 
 from code_reviewer_runner.dynamic_review.call_trace import valid_call_trace
+from code_reviewer_runner.implementer.report import (
+    MAX_SUMMARY_CHARS,
+    escaped_size,
+    fit_block,
+    valid_block,
+)
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 from code_reviewer_runner.job_loop.process import ProcessOutcome
 from code_reviewer_runner.redaction import Redactor
@@ -62,6 +68,7 @@ class DroppedValue(StrEnum):
     FINDINGS_INVALID = "RESULT_FINDINGS_INVALID"
     STOPPED_EARLY_INVALID = "RESULT_STOPPED_EARLY_INVALID"
     CALL_TRACE_INVALID = "RESULT_CALL_TRACE_INVALID"
+    IMPLEMENTER_INVALID = "RESULT_IMPLEMENTER_INVALID"
 
 
 def _log_dropped(code: DroppedValue) -> None:
@@ -240,7 +247,31 @@ def _findings(value: object) -> dict[str, Any] | None:
     return document
 
 
-def _sanitize(line: Mapping[str, Any], redactor: TextRedactor, measured_ms: int) -> Result:
+def _redacted_block(block: Mapping[str, Any], redactor: TextRedactor) -> Result:
+    """The block with the secrets of the job gone from every text in it. The agent wrote the
+    summary, the subjects and (by naming files) the paths; the runner redacted them once, and this
+    is the second look of the host."""
+    return {
+        **block,
+        "summary": redactor.redact(block["summary"])[:MAX_SUMMARY_CHARS],
+        "commits": [
+            {"sha": commit["sha"], "subject": redactor.redact(commit["subject"])}
+            for commit in block["commits"]
+        ],
+        "filesChanged": [
+            {"path": redactor.redact(file["path"]), "status": file["status"]}
+            for file in block["filesChanged"]
+        ],
+    }
+
+
+def _sanitize(
+    line: Mapping[str, Any],
+    redactor: TextRedactor,
+    measured_ms: int,
+    *,
+    implementer: bool = False,
+) -> Result:
     ok = line["ok"] is True
     code: Any = line.get("errorCode")
     error_code: str | None = None
@@ -276,17 +307,50 @@ def _sanitize(line: Mapping[str, Any], redactor: TextRedactor, measured_ms: int)
     elif not ok and result["usage"] is None and line.get("usage") is not None:
         # A usage was sent but cannot be read: the run did reach the model (#273).
         result["errorReason"] = UNREADABLE_USAGE_REASON
+    if implementer:
+        return _with_implementer_block(result, line, redactor, measured_ms)
+    return result
+
+
+def _with_implementer_block(
+    result: Result, line: Mapping[str, Any], redactor: TextRedactor, measured_ms: int
+) -> Result:
+    """The block of a turn: checked against the contract, or left out. A failed turn may have none
+    (no repository existed yet). A turn that says it succeeded without a usable block did not do its
+    job: the app would refuse the result, so it becomes a failure that keeps its usage."""
+    sent = line.get("implementer")
+    block = None if sent is None else valid_block(sent)
+    if sent is not None and block is None:
+        _log_dropped(DroppedValue.IMPLEMENTER_INVALID)
+    if block is not None:
+        result["implementer"] = _redacted_block(block, redactor)
+        return result
+    if result["ok"]:
+        failed = failure_result(
+            ErrorCode.RUNNER_ERROR.value,
+            "the job process reported a turn without a usable report",
+            duration_ms=measured_ms,
+            redactor=redactor,
+            reason=NO_RESULT_REASON,
+        )
+        failed["usage"] = result["usage"]
+        return failed
     return result
 
 
 def result_from_outcome(
-    outcome: ProcessOutcome, redactor: TextRedactor, measured_ms: int
+    outcome: ProcessOutcome,
+    redactor: TextRedactor,
+    measured_ms: int,
+    *,
+    implementer: bool = False,
 ) -> Result:
-    """The result of a process that ended by itself."""
+    """The result of a process that ended by itself. `implementer`: the job was a turn of the
+    Implementer, whose result carries the block (and no other kind's may)."""
     line = _parse_line(outcome.stdout)
     stderr_tail = outcome.stderr.decode("utf-8", errors="replace")
     if line is not None and outcome.exit_code in (0, 1) and (outcome.exit_code == 0) == line["ok"]:
-        return _sanitize(line, redactor, measured_ms)
+        return _sanitize(line, redactor, measured_ms, implementer=implementer)
     # No usable line, or a line and an exit code that disagree: the process did not do its job.
     if outcome.exit_code < 0:
         message = f"the job process was ended by signal {-outcome.exit_code}"
@@ -321,7 +385,16 @@ def fit_request(result: Result) -> Result:
 
     The per-call trace (#541) goes first, whole: it is observability, and the usage and the log are
     what the app needs. Only when the body is still too large does the log tail lose its older half.
+
+    The report of a turn of the Implementer (#765) is the exception to the 48 KiB: the rest of the
+    result is shrunk to them as above, and the report gets what is left of 4 MB, the most a
+    platform lets through (files are given up first, then commits: `implementer/report.py`).
     """
+    block = result.get("implementer")
+    if block is not None:
+        rest = {name: value for name, value in result.items() if name != "implementer"}
+        shrunk = fit_request(rest)
+        return {**shrunk, "implementer": fit_block(block, escaped_size(shrunk))}
     current = dict(result)
     if len(json.dumps(current)) > MAX_REQUEST_BYTES:
         current = dict(_without_trace(current))
@@ -334,6 +407,17 @@ def fit_request(result: Result) -> Result:
         current["logTail"] = tail[(len(tail) + 1) // 2 :]
         current["logTruncated"] = True
     return current
+
+
+def _short_block(block: Mapping[str, Any]) -> Result:
+    """The report of a turn when even the whole result was refused: where it ended and the head
+    commit, no file list and no summary."""
+    return {
+        **block,
+        "commits": list(block["commits"])[-1:],
+        "filesChanged": [],
+        "summary": "",
+    }
 
 
 def minimal(result: Mapping[str, Any], *, keep_usage: bool = True) -> Result:
@@ -355,6 +439,9 @@ def minimal(result: Mapping[str, Any], *, keep_usage: bool = True) -> Result:
         "logTruncated": True,
         "usage": None,
     }
+    if "implementer" in result:
+        # A turn's verdict is its short report: the app refuses a success without one.
+        verdict["implementer"] = _short_block(result["implementer"])
     if result["ok"]:
         # What the app decides the review verdict from is part of the verdict of a success (#517).
         if "findings" in result:
