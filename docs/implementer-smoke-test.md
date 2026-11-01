@@ -85,8 +85,8 @@ while it runs; B, C and D can follow one after the other.
   used for up to a minute, and after that the Dispatcher counts by its own launches and the claim goes on (the cap is a soft
   limit). So the line is a warning and does not by itself stop a task or a review; it did until the fix that followed the incident of 2026-11-01, and the waiting
   jobs ended `no_capable_runner` after 30 minutes. Read the `fleet_listed` lines next to it: their `ms` is the time of a listing
-  and their `count` the VMs it returned, stopped ones included; the reaper deletes a stopped VM after three days, 50 per run
-  (`reap_done`: `deleted`, `deleteFailed`).
+  and their `count` the VMs it returned, stopped ones included; the reaper deletes an ended VM after one day, 50 per run
+  (`reap_done`: `deleted`, `deleteFailed`, `deleteKept`, `deleteNotTried`).
 - **`not_capable` or `no_capable_runner`**: the factory's entry in `DISPATCHER_APPS` lacks the kind,
   or the Launcher does not advertise it.
 - **`implementer_engine_unavailable`**: the Worker log names the stable reason of its start-up checks.

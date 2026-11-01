@@ -423,7 +423,7 @@ describe("the documents match the merged runner job and canary (#765)", () => {
       expect(flatDoc).toContain("2026-11-01");
       expect(flatDoc).toContain("`fleet_listed`");
       expect(flatDoc).toContain("the claim goes on");
-      expect(flatDoc).toContain("three days");
+      expect(flatDoc).toContain("one day");
       // The claim no longer answers `unavailable` for a failed listing: the docs must not say it does.
       expect(flatDoc).not.toContain("the claim answers `unavailable`");
     }
@@ -433,7 +433,7 @@ describe("the documents match the merged runner job and canary (#765)", () => {
     expect(dispatcher).toContain('logger.error("fleet_list_failed", {');
     expect(dispatcher).toContain("LIVE_VMS_STALE_MS = 60 * 1000");
     expect(readText("dispatcher/src/reaper/reaper.ts")).toContain(
-      "RETENTION_MS = 3 * 24 * 3600 * 1000",
+      "RETENTION_MS = 24 * 3600 * 1000",
     );
     expect(readText("dispatcher/src/reaper/reaper.ts")).toContain(
       "MAX_DELETES_PER_RUN = 50",

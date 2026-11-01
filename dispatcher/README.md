@@ -156,7 +156,11 @@ the whole identity of the sender**.
   own launches created in the last ten minutes, and holds the app to the same cap plus tolerance with that count. A failed
   listing is not asked for again for five seconds, so a platform that is down neither delays every claim by four seconds nor
   fills the log. The count then errs low (a VM older than ten minutes is not counted); the cap is a soft limit and the
-  platform's own concurrency limit stays the hard one (a refusal from it already has its code, `quota_exceeded`). Before
+  platform's own concurrency limit stays the hard one. A refusal from it is `sandbox_rate_limited` or `sandbox_quota_exceeded`
+  (which of the two the platform sends for its concurrency limit is not confirmed); it ends the launch with `launch_failed`,
+  which burns an attempt of the job. That is the existing behaviour and accepted. During an outage of the listing the isolation
+  between apps is therefore not guaranteed: an app that ignores its cap is held only by the Dispatcher's own count of the last
+  ten minutes. Before
   #802 this case answered `unavailable` (retry in 60 s) and claimed nothing: on 2026-11-01 a listing of 283 stopped VMs took
   5.1 s and every claim of every app, the first app's reviews too, ended `no_capable_runner`. Every listing that answers logs
   `fleet_listed` with `ms` (its time) and `count` (the VMs it returned, stopped ones included), at most once per listing, so
@@ -577,18 +581,29 @@ the platform's cron calls
 - **Stopping and logs.** By the listed name; a VM that is already gone is not an error, a failed stop is counted and
   retried by the next run (runs may overlap, stopping twice is harmless). Stable events and codes only
   (`vm_reaped`, `vm_reap_failed`, `job_state_unreadable`, `reap_done`, `reap_list_failed`); the answer holds counts
-  (`listed`, `candidates`, `stopped`, `kept`, `unreadable`, `failed`, `deleted`, `deleteFailed`). No credential, token or platform error text.
-- **Retention (#802).** The platform keeps a stopped VM until somebody deletes it, and the listing every claim makes grows with
-  them (283 VMs: 5.1 s). After the stops, the run **deletes** the VMs the platform reports as `stopped` that were created three
-  days ago or earlier (`RETENTION_MS`; a job VM lives seven hours at most, so by then it has been over for days). It is the same
-  check as for stopping: only a non-persistent VM of exactly our shape with our tag, a job VM or a canary, so never a running,
-  pending or stopping VM, the golden builder or check VM, a persistent VM, a lookalike or anything of another project. Nothing
-  else reads a stopped VM: the stop call, the live count and the reaper itself look at live VMs only, and the platform's lookup
-  by name is not used for logs. At most **50 per run** (`MAX_DELETES_PER_RUN`), the oldest first, four at a time (a lookup and
-  a delete call each, so seconds, far inside the function's 1800 s); a failed delete counts against the 50, is logged as
-  `vm_delete_failed` by name and retried by the next run, and never fails the run. A backlog drains at 50 per five minutes: 283
-  stopped VMs in six runs, half an hour. The delete keeps the snapshots a VM owns (`deleteOrphanSnapshots: false`, said in so
-  many words): the golden snapshot is the source of every job VM. Each deletion is logged as `vm_deleted` with the VM's name only.
+  (`listed`, `candidates`, `stopped`, `kept`, `unreadable`, `failed`, `deleted`, `deleteFailed`, `deleteKept`, `deleteNotTried`). No credential, token or platform error text.
+- **Retention (#802).** The platform keeps an ended VM until somebody deletes it, and the listing every claim makes grows with
+  them (283 VMs: 5.1 s). After the stops, the run **deletes** the VMs the platform reports as `stopped`, `failed` or `aborted`
+  that were created one day ago or earlier (`RETENTION_MS`; a job VM lives seven hours at most, so by then it has been over for
+  hours). It is the same check as for stopping: only a non-persistent VM of exactly our shape with our tag, a job VM or a
+  canary, so never a running, pending, stopping or snapshotting VM, the golden builder or check VM, a persistent VM, a lookalike
+  or anything of another project. Nothing else reads an ended VM: the stop call, the live count and the reaper's stop pass look
+  at live VMs only. The platform is asked again before each delete (`Sandbox.get`, without resume): a VM that is no longer
+  deletable or is persistent is **kept** (`vm_delete_kept`, `deleteKept`). Only a 404 means a VM is gone; a 410 is the SDK's
+  "sandbox stopped" and counts as a failed delete, so a `vm_deleted` line is never a deletion that left the listing as long as
+  before. The delete keeps the snapshots a VM owns (`deleteOrphanSnapshots: false`, said in so many words): the golden snapshot
+  is the source of every job VM. Each deletion is logged as `vm_deleted` with the VM's name only.
+  The pass is bounded so it cannot hurt the launches that share the platform's API and the function: at most **50 per run**
+  (`MAX_DELETES_PER_RUN`), four at a time, picked **at random among the eligible VMs**, not the oldest (a VM whose delete fails
+  for good would take a place of the 50 in every run and starve the rest; a Vercel function remembers nothing between runs, so
+  no list of failures is kept and a random pick gives every VM its turn); each platform call (lookup, delete) has a limit of 15
+  seconds and answers `unavailable` past it; the pass stops at the first `rate_limited` or `unavailable` answer (`vm_delete_halted`)
+  and counts the rest as not tried (`deleteNotTried`); and no delete starts after 3 minutes of the pass
+  (`DELETE_BUDGET_MS`), under the five minutes between two runs. A failed delete counts against the 50, is logged as
+  `vm_delete_failed` by name and tried again by a later run, and never fails the run. A backlog drains at 50 per five minutes:
+  283 stopped VMs in six runs, half an hour; the cron's capacity is 14,000 a day, far above the number of job VMs.
+  _Known limits:_ the count without a listing forgets a VM after ten minutes (it errs low); a refusal of the platform's
+  concurrency limit burns an attempt of the job; with a random pick a backlog may take a few runs more than 50 per run.
 
 Not verified against the live platform: that `Sandbox.list` honours the name prefix together with a tag in one call and
 reports `status`, `createdAt`, `timeout` and `tags` as the SDK types say, and that the project's cron may run every five minutes
