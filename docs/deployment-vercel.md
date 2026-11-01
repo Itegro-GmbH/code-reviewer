@@ -1299,6 +1299,35 @@ the first App. The second project, its database, the Dispatcher's registry and t
 (the operator token stays). To restore an earlier deployment of the second App, run *Rollback production* with
 `factory_deployment` (section 7).
 
+#### Rollout of the Implementer (the order of the steps)
+
+The Implementer ([`implementer.md`](implementer.md)) is the first capability added to the second App after the lane exists.
+It is dormant in every release, and code-review.com is not touched at any step. The keys and values, in the order that
+works (the same steps with their checks, who does them and what undoes each are in [`factory-bring-up.md`](factory-bring-up.md),
+"Switching on the Implementer"):
+
+1. **Release the code to `main`.** The pipeline migrates the second database first, runs `health-factory` with the old set
+   (`dynamic-review,review`) and the canary on the rebuilt snapshot, and promotes. Nothing live changes.
+2. **`DISPATCHER_APPS`**, only after step 1 is live. Infisical `prod`, folder `/dispatcher`: in the factory entry set `kinds`
+   to `["diff","dynamic","implementer"]`. Optional: an `implementer` entry of `DISPATCHER_WORKER_CONFIG` (sizes and
+   `timeoutSeconds`; the defaults need none). Then run *Deploy production*, which redeploys the Dispatcher. Set earlier, an
+   older Dispatcher refuses the unknown kind at start and the first App has an outage. The Sandbox Launcher must also
+   advertise the engine before a task can run: until it does, a wake-up call for the kind is `ignored` with `not_capable`
+   (section "The kind `implementer`" of [`dispatcher.md`](dispatcher.md)).
+3. **`PRODUCT_CAPABILITIES` and `FACTORY_EXPECTED_CAPABILITIES`, together.** Infisical `prod`, folder `/app-factory`, key
+   `PRODUCT_CAPABILITIES` = `review,dynamic-review,implementer`; repository variable `FACTORY_EXPECTED_CAPABILITIES` =
+   `dynamic-review,implementer,review`; then one *Deploy production*. One of the two alone ends in `PRODUCT_MISMATCH` at
+   `health-factory`: nothing is promoted and nothing live changes.
+4. **The maximum cost per review** in the factory's admin portal (General, Limits), raised from its default to the owner's
+   per-turn maximum (the value is in the bring-up checklist). It is the only brake of a turn.
+5. **Contents read and write for the factory's GitHub App.** An existing App needs the permission changed on GitHub and
+   then the approval of each installation; an App created after step 3 has it from the start ([`github-app.md`](github-app.md)).
+   Also a model: a workspace key, or released catalog entries that serve Dynamic Review.
+6. **The live smoke test** by the lead: [`implementer-smoke-test.md`](implementer-smoke-test.md).
+
+To go back, remove `implementer` from `PRODUCT_CAPABILITIES`, reset the repository variable, and deploy again. The Dispatcher
+entry and the permission may stay.
+
 ## 6. Sizing the Worker VMs
 
 A Sandbox VM has 1 vCPU or an even number up to 8, and **2 GiB of memory per vCPU**: the smallest is 1 vCPU / 2 GB.

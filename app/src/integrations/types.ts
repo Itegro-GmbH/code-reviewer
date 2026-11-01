@@ -242,13 +242,13 @@ export type PullRequestRef = {
   author: TriggerActor;
 };
 
+/** What a connection has accepted on the platform (#749): whether the app may write the contents of its repositories. */
+export type ConnectionPermissions = { contentsWrite: boolean };
+
 /**
  * A connection the platform itself can enumerate (GitHub App: an installation). Used to create and
  * update `integrations` rows without a user adding them by hand.
  */
-/** What a connection has accepted on the platform (#749): whether the app may write the contents of its repositories. */
-export type ConnectionPermissions = { contentsWrite: boolean };
-
 export type DiscoveredConnection = {
   /** The platform's id for the connection (GitHub App: the installation id). */
   externalId: string;

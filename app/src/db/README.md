@@ -556,7 +556,9 @@ workspace_id)`, a turn its session and its job by `(session_id, workspace_id)` a
 - **Live database.** The migration is expand only. The unique index on `jobs` is a plain `create unique index` (the migrator's transaction cannot take
   `CONCURRENTLY`) and blocks writes to `jobs` while it builds and while it waits for a writer that has not ended. So the migration sets `lock_timeout` to 5 s for its
   own statements and puts the earlier value back. Both tables are created before anything touches `jobs` (the index, then the turns' link to `jobs` as an `alter table`),
-  because a lock lives until the batch commits: waiting for a writer on `users`, `repositories` or `workspaces` must not hold `jobs` (the queue) meanwhile. If a long writer holds `jobs`, the migration gives up with `MIGRATION_FAILED`, the whole batch is rolled back and the
+  because a lock lives until the batch commits: waiting for a writer on `users`, `repositories` or `workspaces` must not hold `jobs` (the queue) meanwhile. The reverse holds
+  too: by the time the index waits for a writer on `jobs`, the foreign keys of the two new tables already hold their short locks on `users`, `repositories` and `workspaces`
+  until the batch commits, so writes to those three wait as long as the index does, at most 5 s (`lock_timeout`). If a long writer holds `jobs`, the migration gives up with `MIGRATION_FAILED`, the whole batch is rolled back and the
   deployment can be run again (`create-implementer-tables.integration.test.ts` holds a writer open and checks exactly that).
 
 `20261030190000_widen_review_kind_checks_for_implementer` (#752) takes the kind `implementer` into the checks on `usage_records.review_kind` and

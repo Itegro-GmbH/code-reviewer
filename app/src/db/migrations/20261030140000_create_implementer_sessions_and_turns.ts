@@ -23,6 +23,8 @@
 //    key waits for a writer on the tables it names (up to LOCK_TIMEOUT each). The statements that touch `jobs` therefore come
 //    LAST: both tables are created first (the turns without their link to `jobs`), then the index, then the link. While the
 //    migration waits for `workspaces`, `users` or `repositories` it holds nothing on `jobs`, so jobs writes (the queue) go on.
+//    The reverse holds: while the index waits for a writer on `jobs` (at most LOCK_TIMEOUT) the locks the foreign keys took on
+//    `users`, `repositories` and `workspaces` are still held, so writes to those three wait for the same time.
 import { sql } from "kysely";
 import type { Migration } from "kysely/migration";
 

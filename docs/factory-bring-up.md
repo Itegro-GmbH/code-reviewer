@@ -22,7 +22,7 @@ credential, which is why step 3 ends with a run that has the switch still off.
    Put the database URLs, the project id, the bypass secret and the App's address into their keys too. The App's own keys
    are not only the secrets: `PRODUCT_ID` (`factory`, **mandatory**; without it the project starts as code-review.com; the build copies it into
    `NEXT_PUBLIC_PRODUCT_ID` for the crash page, so that one is not set by hand, and a mismatch is logged at start),
-   `PRODUCT_CAPABILITIES` (`review,dynamic-review`, billing off; `implementer` is allowed on this product but stays off until the rollout of the Implementer sets it, and then needs `dynamic-review`), `RUNNER_DISPATCH` (`webhook`), `RUNNER_WEBHOOK_URL` (the
+   `PRODUCT_CAPABILITIES` (`review,dynamic-review`, billing off; `implementer` is allowed on this product but stays off until the rollout of the Implementer sets it, and then needs `dynamic-review`; the rollout is the section "Switching on the Implementer" below), `RUNNER_DISPATCH` (`webhook`), `RUNNER_WEBHOOK_URL` (the
    Dispatcher's `/dispatch` address), `RUNNER_WEBHOOK_KEY_ID` (`factory-k1`), `RUNNER_DISPATCH_MAX_RUNNING` (`2`) and, if the
    Dispatcher is protected, `RUNNER_WEBHOOK_BYPASS_TOKEN`. In `/dispatcher` put `DISPATCHER_APPS` (its `keyId` and
    `maxRunning` are the key id and the cap above) and the references to the App's token, its signing secret and the operator
@@ -55,7 +55,7 @@ The pipeline's `health-factory` compares the staged second App's capabilities wi
 spaces). When a new capability is added to the second App, release the code that allows it first, then change
 `PRODUCT_CAPABILITIES` (Infisical `prod` `/app-factory`) and the repository variable **together** and run *Deploy
 production* once (`docs/deployment-vercel.md`, section 5.8). If only one of the two is changed, `health-factory` fails with
-`PRODUCT_MISMATCH`, the staged App is not promoted and nothing live changes; set the other one and run it again.
+`PRODUCT_MISMATCH`, the staged App is not promoted and nothing live changes; set the other one and run it again. The Implementer is the first case; its steps, with the order they need, are in "Switching on the Implementer" at the end of this page.
 
 ## After step 4
 
@@ -63,3 +63,30 @@ Run `pnpm --dir app setup-code` against the new database (with its migrate URL) 
 browser: single tenant, sign-up closed. To go back: set `FACTORY_ENABLED` to anything but `true`; it is a repository
 variable, not a variable of the environment `production`. To restore an earlier deployment of the second App: *Rollback
 production* with `factory_deployment`.
+
+## Switching on the Implementer (the rollout)
+
+The Implementer ([`implementer.md`](implementer.md)) is dormant in every release: the code is on `main`, the factory's
+capability set does not name it, the Dispatcher does not serve its kind, and no page, route or job exists. Nothing on
+code-review.com is touched at any step: no Infisical key, no Vercel setting, no variable. Names and values only below, never
+a secret. The order matters; each step has a check and a way back.
+
+**Before you start.** Read "State of the code when this guide was written" in [`implementer.md`](implementer.md). While the
+runner job is not merged, or while the Sandbox Launcher advertises `pr-agent` and `opencode` only, steps 1 to 7 are safe but
+no task runs: the Dispatcher answers a wake-up call for the kind with `ignored` and `not_capable` and the app stops resending
+it. Run the smoke test only after both are in the release.
+
+| # | Step | Who | Check | Rollback |
+|---|---|---|---|---|
+| 1 | Release the code to `main` (the pull request from `development`). The pipeline migrates the factory database first (two empty tables), stages, runs `health-factory` with the old set (`dynamic-review,review`), the canary (the Worker image changed, so the snapshot is rebuilt and Diff and Dynamic must pass) and promotes the App, the factory and the Dispatcher | lead | *Deploy production* is green; `apps-check` and `health-factory` are green; the factory answers `GET /api/health` with `dynamic-review,review`; the Implementer page is `404` | None needed, the release is dormant. A bad release: *Rollback production* ([`deployment-vercel.md`](deployment-vercel.md), section 7) |
+| 2 | Only after step 1 is live: Infisical `prod`, folder `/dispatcher`, key `DISPATCHER_APPS`: in the factory entry set `kinds` to `["diff","dynamic","implementer"]`, everything else as it is. Optional: an `implementer` entry of `DISPATCHER_WORKER_CONFIG` (sizes, `timeoutSeconds`; the defaults need none). Wait for the Secret Sync, then run *Deploy production* once, which redeploys the Dispatcher. Earlier, the old Dispatcher refuses the unknown kind at start and the reviewer has an outage | lead | The Dispatcher starts (the canary of that run is green, `apps-check` passes); no `worker_config_invalid` in its log | Set `kinds` back to `["diff","dynamic"]`, remove the `DISPATCHER_WORKER_CONFIG` entry, deploy again |
+| 3 | Together: Infisical `prod`, folder `/app-factory`, key `PRODUCT_CAPABILITIES` = `review,dynamic-review,implementer`, and the repository variable `FACTORY_EXPECTED_CAPABILITIES` = `dynamic-review,implementer,review` (sorted, no spaces). Then run *Deploy production* once. One of the two alone makes `health-factory` fail with `PRODUCT_MISMATCH`: nothing is promoted, nothing live changes (safe and loud) | lead | `health-factory` is green; `GET /api/health` of the factory lists `dynamic-review`, `implementer`, `review`; the Implementer item is in the factory's sidebar between QA and Runs | Remove `implementer` from `PRODUCT_CAPABILITIES` and reset (or delete) the repository variable, deploy again. The Dispatcher entry and the GitHub permission may stay |
+| 4 | Raise the maximum cost per review in the factory's admin portal (General, Limits, "Maximum cost per review") from the default of 1.00 USD to 5.00 USD, the owner's per-turn maximum. It is the only brake of a turn: there is no step limit | owner or lead | The task form's cost field names 5.00 USD as its upper bound | Set it back to the earlier value; a running turn keeps the limit it was claimed with |
+| 5 | GitHub: the factory's App needs Contents **Read and write**. An **existing App** created from the earlier manifest: change the permission in the App's settings on GitHub, and then the owner of every installation (the person or an owner of the organization) opens the installation and clicks to accept the new permissions. Until then the form lists the repository as disabled, with the note "approve the new GitHub permission". An App created after step 3 (one click in the admin portal) asks for it from the start. [`github-app.md`](github-app.md), "The Implementer" | owner | *Check the permissions* on the Integrations page no longer lists Contents; the repository is selectable in the Implementer form | Set Contents back to Read-only on GitHub; the Implementer refuses the repository again, nothing else changes |
+| 6 | A model: a workspace key in Settings, LLM access (a provider of the models catalog), or released catalog entries that serve Dynamic Review in the admin portal | owner | The model picker of the form lists at least one model | Remove the key or release |
+| 7 | Optional: if reviews wait behind tasks, raise `RUNNER_DISPATCH_MAX_RUNNING` (`/app-factory`) and `maxRunning` of the factory entry of `DISPATCHER_APPS` to the same number; their sum over all Apps must fit the team's Sandbox concurrency | lead | Two reviews and two tasks run at the same time | Both back to 2 |
+| 8 | The live smoke test, a throwaway repository and a trivial task: [`implementer-smoke-test.md`](implementer-smoke-test.md) | lead | Every row of the test passes and the result is written into issue #768 | Step 3's rollback, then fix and run it again |
+
+Three things to know. The permission update is an action of the owner, not a decision: a task can be started only after it.
+The cost limit applies to every turn, and a person can ask for a lower one. And the Worker image changes in the release of step
+1: the first run rebuilds the golden snapshot (section 5.1 of the deployment guide), which the smoke test measures.
