@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 from loop_support import Harness, make_claim, outcome, run, settle
 from support import API_KEY, TOKEN
 
@@ -19,7 +20,7 @@ from code_reviewer_runner.capabilities import (
     OPENCODE_COMMAND_VARIABLE,
     RIPGREP_PATH_VARIABLE,
 )
-from code_reviewer_runner.job import JobError, parse_job, parse_runnable_job
+from code_reviewer_runner.job import ImplementerInput, JobError, parse_job, parse_runnable_job
 from code_reviewer_runner.job_loop.api import ClaimedJob, LeaseLost
 from code_reviewer_runner.job_loop.host import (
     IMPLEMENTER_STDOUT_KEEP_BYTES,
@@ -336,3 +337,47 @@ def test_a_stop_ends_the_process_and_reports_runner_shutdown() -> None:
         assert "implementer" not in result
 
     run(scenario)
+
+
+# -- T01: the parse ---------------------------------------------------------------------------
+
+
+def _edit(path: tuple[str, ...], value: Any) -> dict[str, Any]:
+    document = implementer_input()
+    target: Any = document
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    return document
+
+
+# #765-T01
+def test_a_valid_implementer_job_is_parsed_into_its_own_type() -> None:
+    parsed = parse_runnable_job(json.dumps(implementer_input()))
+
+    assert isinstance(parsed, ImplementerInput)
+    assert parsed.implementer.repo.full_name == "acme/widgets"
+    assert parsed.git.token == TOKEN
+
+
+# #765-T01: unknown fields, missing fields and values of the wrong type are refused with the name
+# of the field, and the refusal names no value (the strings below must not come back).
+def test_a_refusal_names_the_field_and_echoes_no_value() -> None:
+    cases: list[tuple[dict[str, Any], str]] = [
+        (_edit(("implementer", "surprise-value-1"), "echo-me-1"), "implementer"),
+        (_edit(("implementer", "branch"), 42), "implementer.branch"),
+        (_edit(("implementer", "limits", "timeLimitSeconds"), "echo-me-2"), "timeLimitSeconds"),
+        (_edit(("surprise-top-2",), "echo-me-3"), "surprise-top-2"),
+    ]
+    missing = implementer_input()
+    del missing["implementer"]["instruction"]
+    cases.append((missing, "implementer.instruction"))
+
+    for document, field in cases:
+        with pytest.raises(JobError) as refused:
+            parse_runnable_job(json.dumps(document))
+        text = f"{refused.value} {refused.value.detail}"
+        assert refused.value.code is ErrorCode.INVALID_JOB
+        assert field in text, text
+        assert "echo-me" not in text
+        assert TOKEN not in text and API_KEY not in text
