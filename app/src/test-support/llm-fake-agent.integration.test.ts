@@ -22,6 +22,19 @@ const TOOLS = [
 ];
 
 type Message = Record<string, unknown>;
+type Chunk = {
+  choices: Array<{
+    delta?: {
+      content?: string;
+      tool_calls?: Array<{
+        function: { name?: string; arguments: string };
+        [key: string]: unknown;
+      }>;
+    };
+    finish_reason?: string | null;
+  }>;
+  usage?: Record<string, unknown>;
+};
 
 async function ask(
   baseUrl: string,
@@ -354,5 +367,173 @@ describe("the fake LLM playing a coding agent", () => {
     const call = answer.json.choices[0]?.message.tool_calls?.[0];
     expect(call?.function.name).toBe("StructuredOutput");
     expect(JSON.parse(call?.function.arguments ?? "{}")).toEqual(FINAL);
+  });
+
+  // #767
+  it("reports the chat usage a test sets, with the cost at one and four dollars per million tokens, until it is cleared", async () => {
+    const fake = await setup();
+    fake.scriptAgent({ steps: [], finalText: "Done." });
+
+    fake.setChatUsage({ promptTokens: 20_000, completionTokens: 100 });
+    const set = await ask(fake.baseUrl, [{ role: "user", content: "go" }]);
+    fake.setChatUsage(null);
+    const cleared = await ask(fake.baseUrl, [{ role: "user", content: "go" }]);
+
+    expect(set.json.usage).toMatchObject({
+      prompt_tokens: 20_000,
+      completion_tokens: 100,
+      total_tokens: 20_100,
+      cost: 0.0204,
+    });
+    expect(cleared.json.usage).toMatchObject({
+      prompt_tokens: 100,
+      completion_tokens: 50,
+    });
+  });
+
+  // #767: found by the Implementer's journey in the privileged lane; the native path always streams, and the fake answered JSON.
+  it("answers a request that asks for a stream with the stream of the same answer: tool call in pieces, finish, usage, [DONE]", async () => {
+    const fake = await setup();
+    fake.scriptAgent({
+      steps: [[{ name: "read", arguments: { filePath: "a.txt" } }]],
+      finalText: "All done.",
+    });
+    const stream = async () => {
+      const response = await fetch(`${fake.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer the-key",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "vendor/agent-e2e",
+          stream: true,
+          stream_options: { include_usage: true },
+          messages: [{ role: "user", content: "go" }],
+          tools: TOOLS,
+        }),
+      });
+      const text = await response.text();
+      return {
+        type: response.headers.get("content-type"),
+        text,
+        events: text
+          .split("\n\n")
+          .filter((block) => block.startsWith("data: "))
+          .map((block) => block.slice(6)),
+      };
+    };
+
+    const first = await stream();
+    const second = await stream();
+
+    expect(first.type).toBe("text/event-stream");
+    expect(first.events.at(-1)).toBe("[DONE]");
+    const chunks = first.events
+      .slice(0, -1)
+      .map((event) => JSON.parse(event) as Chunk);
+    const calls = chunks.flatMap(
+      (chunk) => chunk.choices[0]?.delta?.tool_calls ?? [],
+    );
+    expect(calls[0]).toMatchObject({
+      index: 0,
+      type: "function",
+      function: { name: "read" },
+    });
+    expect(
+      calls
+        .map(
+          (call: { function: { arguments: string } }) =>
+            call.function.arguments,
+        )
+        .join(""),
+    ).toBe('{"filePath":"a.txt"}');
+    expect(
+      chunks.find((chunk) => chunk.choices[0]?.finish_reason)?.choices[0]
+        .finish_reason,
+    ).toBe("tool_calls");
+    expect(chunks.at(-1)).toMatchObject({
+      choices: [],
+      usage: { prompt_tokens: 100, completion_tokens: 20 },
+    });
+    // The closing text comes as content, with `stop`.
+    const closing = second.events
+      .slice(0, -1)
+      .map((event) => JSON.parse(event) as Chunk);
+    expect(
+      closing.map((chunk) => chunk.choices[0]?.delta?.content).join(""),
+    ).toBe("All done.");
+    expect(
+      closing.find((chunk) => chunk.choices[0]?.finish_reason)?.choices[0]
+        .finish_reason,
+    ).toBe("stop");
+  });
+
+  // #767
+  it("keeps the usage it stated with the request in its log", async () => {
+    const fake = await setup();
+    fake.scriptAgent({ steps: [], finalText: "Done." });
+    fake.setChatUsage({ promptTokens: 700, completionTokens: 30 });
+
+    await ask(fake.baseUrl, [{ role: "user", content: "go" }]);
+
+    expect(fake.requests()[0]?.usage).toMatchObject({
+      prompt_tokens: 700,
+      completion_tokens: 30,
+    });
+  });
+
+  // #767: the journeys wait on a condition (a push) while the agent waits, not on a sleep of the agent's own.
+  it("holds the request that would get a step named in holdBefore until the test releases it, once", async () => {
+    const fake = await setup();
+    fake.scriptAgent({
+      steps: [
+        [{ name: "read", arguments: { filePath: "a" } }],
+        [{ name: "read", arguments: { filePath: "b" } }],
+      ],
+      holdBefore: [1],
+      finalText: "Done.",
+    });
+    const user = [{ role: "user", content: "go" }];
+
+    const first = await ask(fake.baseUrl, user);
+    const waiting = ask(fake.baseUrl, user);
+    await expect.poll(() => fake.heldCount()).toBe(1);
+    const requestsWhileHeld = fake.requests().length;
+    fake.release();
+    const second = await waiting;
+    const third = await ask(fake.baseUrl, user);
+
+    expect(
+      first.json.choices[0]?.message.tool_calls?.[0]?.function.arguments,
+    ).toBe('{"filePath":"a"}');
+    expect(
+      second.json.choices[0]?.message.tool_calls?.[0]?.function.arguments,
+    ).toBe('{"filePath":"b"}');
+    expect(third.json.choices[0]?.message.content).toBe("Done.");
+    expect(requestsWhileHeld).toBe(2);
+    expect(fake.heldCount()).toBe(0);
+  });
+
+  // #767: the path of a provider that states no charge (DeepSeek, OpenAI).
+  it("leaves usage.cost out of every chat answer when the provider states no charge, and puts it back", async () => {
+    const fake = await setup();
+    fake.scriptAgent({
+      steps: [[{ name: "read", arguments: { filePath: "a" } }]],
+      finalText: "Done.",
+    });
+    const user = [{ role: "user", content: "go" }];
+
+    fake.statesCharge(false);
+    const tool = await ask(fake.baseUrl, user);
+    const text = await ask(fake.baseUrl, user);
+    fake.statesCharge(true);
+    const again = await ask(fake.baseUrl, user);
+
+    expect("cost" in tool.json.usage).toBe(false);
+    expect("cost" in text.json.usage).toBe(false);
+    expect(text.json.usage.prompt_tokens).toBe(100);
+    expect("cost" in again.json.usage).toBe(true);
+    expect(fake.requests()[0]?.usage).not.toHaveProperty("cost");
   });
 });

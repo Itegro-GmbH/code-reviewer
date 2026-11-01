@@ -51,6 +51,12 @@ export type FakeRepository = {
   fullName: string;
   defaultBranch?: string;
   private?: boolean;
+  /**
+   * The `html_url` of the repository, when it is not `<web base>/<full name>`. The Implementer's journey (#767) gives its
+   * repository an https address: the app clones from the repository's own https address, and the lane's fake GitHub speaks
+   * plain http on loopback.
+   */
+  htmlUrl?: string;
 };
 
 export type FakePullRequest = {
@@ -326,7 +332,7 @@ function repositoryJson(repository: FakeRepository, webBase: string) {
     name: repository.fullName.split("/")[1],
     full_name: repository.fullName,
     private: repository.private ?? false,
-    html_url: `${webBase}/${repository.fullName}`,
+    html_url: repository.htmlUrl ?? `${webBase}/${repository.fullName}`,
     default_branch: repository.defaultBranch ?? "main",
     owner: { login: owner, id: ownerId },
   };
@@ -448,7 +454,14 @@ export function createAppPart(
   function followingFixture(repo: FakeRepository): FakeRepository {
     const directory = gitRepositories.get(repo.fullName);
     if (directory === undefined) return repo;
-    const defaultBranch = readFixtureBranches(directory).defaultBranch;
+    // A journey that is over removes its fixture and leaves the registration: the repository then keeps its own default
+    // branch (the listing of an installation must not fail for the sake of another journey's repository, #767).
+    let defaultBranch: string | null = null;
+    try {
+      defaultBranch = readFixtureBranches(directory).defaultBranch;
+    } catch {
+      return repo;
+    }
     return defaultBranch === null ? repo : { ...repo, defaultBranch };
   }
 
@@ -531,6 +544,26 @@ export function createAppPart(
       return send(201, { ok: true });
     }
 
+    // Control endpoint for a test that runs the fake as its own process (Playwright): what the registered App is
+    // granted (`setAppPermissions`), as `{ permissions: { contents: "write", ... } }`. The Implementer's journey (#767)
+    // raises Contents to write, as the App of a factory deployment asks for it.
+    if (path === "/__fake/app-permissions" && method === "POST") {
+      const body = JSON.parse(await readBody(request)) as {
+        permissions?: unknown;
+      };
+      const given = body.permissions;
+      if (
+        typeof given !== "object" ||
+        given === null ||
+        !Object.values(given).every(
+          (level) => level === "read" || level === "write" || level === "admin",
+        )
+      )
+        return send(400, { message: "Invalid body" });
+      controls.setAppPermissions(given as FakePermissions);
+      return send(201, { ok: true });
+    }
+
     // Control endpoint for a test that runs the fake as its own process (Playwright): the setup URL of the
     // app registered at start, `{ url }` (null clears it).
     if (path === "/__fake/app-setup-url" && method === "POST") {
@@ -576,7 +609,16 @@ export function createAppPart(
       const gitToken = basicToken(request.headers.authorization);
       const gitIssued =
         gitToken === undefined ? undefined : installationToken(gitToken);
-      if (gitIssued === undefined) return unauthorized();
+      if (gitIssued === undefined) {
+        // Like GitHub, the challenge names Basic: a client with URL credentials or a credential helper answers it and
+        // retries, and only `http.extraHeader` gets through without it.
+        response.writeHead(401, {
+          "content-type": "application/json",
+          "www-authenticate": 'Basic realm="GitHub"',
+        });
+        response.end(JSON.stringify({ message: "Bad credentials" }));
+        return;
+      }
       const gitName = `${gitMatch[1]}/${gitMatch[2]}`;
       const visible = reposVisibleTo(gitIssued).find(
         (repo) => repo.fullName === gitName,
@@ -601,7 +643,9 @@ export function createAppPart(
         directory,
         advertise,
       );
-      if (!advertise) {
+      // Only a POST with a command is a push. The client's 4-byte probe of a request over 1 MB (it asks whether the
+      // server takes the body at all) names no ref and is neither recorded nor listed.
+      if (!advertise && refs.length > 0) {
         pushes.push({ repository: gitName, refs });
         context.logRefs(refs);
       }

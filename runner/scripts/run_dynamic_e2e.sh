@@ -11,7 +11,8 @@
 #
 # Two steps:
 #   1. as you, with the internet: the pinned OpenCode and ripgrep (fetch_opencode.py and fetch_ripgrep.py
-#      accept only the pinned bytes) and the one production build of the app (`next build`; set
+#      accept only the pinned bytes), the pinned git for the Implementer (build_lane_git.sh: the release of git-pin.json
+#      built from its verified source, cached) and the one production build of the app (`next build`; set
 #      E2E_REUSE_BUILD=1 to use the build that is there);
 #   2. as root, in `unshare --net --mount --pid --fork --mount-proc`: scripts/dynamic_e2e_namespace.sh. The
 #      namespaces hold the lane: loopback is the only network (and a network guard counts and rejects every
@@ -67,6 +68,7 @@ LANE_DATABASE_URL="$(head -n 1 "$STAGING/pg-url")"
 # Step 1: the pinned tools and the one build.
 OPENCODE_BIN="$(uv run python scripts/fetch_opencode.py)"
 RIPGREP_BIN="$(uv run python scripts/fetch_ripgrep.py --dest "$STAGING/ripgrep")"
+GIT_TREE="$(scripts/build_lane_git.sh)"
 if [ "${E2E_REUSE_BUILD:-}" != "1" ]; then
   (cd "$APP_DIR" && NEXT_TELEMETRY_DISABLED=1 pnpm build)
 fi
@@ -81,7 +83,7 @@ esac
 # Step 2: root, in the lane's namespaces. `env PATH=...` because sudo replaces PATH.
 set +e
 sudo --preserve-env env "PATH=$PATH:/usr/sbin:/sbin" "HOME=$HOME" \
-  "LANE_OPENCODE_BIN=$OPENCODE_BIN" "LANE_RIPGREP_BIN=$RIPGREP_BIN" \
+  "LANE_OPENCODE_BIN=$OPENCODE_BIN" "LANE_RIPGREP_BIN=$RIPGREP_BIN" "LANE_GIT_TREE=$GIT_TREE" \
   "LANE_APP_DIR=$APP_DIR" "LANE_RUNNER_DIR=$RUNNER_DIR" "LANE_STAGE=$STAGING/lane" "E2E_PORT=$E2E_PORT" "E2E_DATABASE_URL=$LANE_DATABASE_URL" \
   unshare --net --mount --pid --fork --mount-proc -- \
   bash "$RUNNER_DIR/scripts/dynamic_e2e_namespace.sh" "$@"

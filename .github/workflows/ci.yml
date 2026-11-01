@@ -625,6 +625,16 @@ jobs:
       # here: the lane uses the pinned one (the runner's self-check compares it with runner/ripgrep-pin.json).
       - name: Install nftables
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends nftables
+      # The Implementer's git (#767): the Worker's start-up self-check wants git 2.53 or newer, which a package of the runner image
+      # does not promise, so the lane builds the pinned release (runner/git-pin.json) from its verified source, the way the Worker
+      # image does (runner/scripts/build_lane_git.sh). These are the headers that build needs; the result is cached.
+      - name: Install what builds git
+        run: sudo apt-get install --yes --no-install-recommends libcurl4-openssl-dev zlib1g-dev
+      - name: Restore the pinned git
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/code-reviewer/lane-git
+          key: lane-git-${{ hashFiles('runner/git-pin.json', 'runner/scripts/build_lane_git.sh') }}
       # The pinned OpenCode (runner/opencode-pin.json); the cache just saves the download.
       - name: Restore the pinned OpenCode
         uses: actions/cache@v4
@@ -639,7 +649,7 @@ jobs:
           E2E_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
         run: scripts/run_dynamic_e2e.sh
       - name: Upload the Playwright report and the logs
-        if: ${{ failure() }}
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@v7
         with:
           name: e2e-dynamic-report-${{ github.run_id }}-${{ github.run_attempt }}

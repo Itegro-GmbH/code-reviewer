@@ -42,4 +42,29 @@ describe("the project claim guard", () => {
       outcome: "cancel",
     });
   });
+
+  // #767: found by the Implementer's journey in the privileged lane; the form offers a repository without a project (#755), and
+  // every task on one was cancelled at the claim.
+  it("lets a task of the Implementer run in a repository that has no project, and asks nothing of the projects", async () => {
+    let asked = 0;
+    const guard = createProjectClaimGuard({
+      projects: () => ({
+        getActiveProjectForRepository: async () => {
+          asked += 1;
+          return undefined;
+        },
+      }),
+    });
+
+    expect(
+      await guard.check({ ...job, reviewKind: "implementer" } as Job),
+    ).toStrictEqual({ allow: true });
+    expect(asked).toBe(0);
+    // A review of the same repository, of either kind, is still cancelled.
+    for (const reviewKind of ["diff", "dynamic"] as const)
+      expect(
+        await guard.check({ ...job, reviewKind } as Job),
+        reviewKind,
+      ).toMatchObject({ allow: false, errorCode: "project_deactivated" });
+  });
 });

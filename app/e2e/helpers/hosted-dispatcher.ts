@@ -108,6 +108,28 @@ export async function startHostedDispatcher(options: {
   tiktoken?: boolean;
   /** More variables for the process, for a lane that needs them (the privileged lane's wrapper). */
   environment?: Record<string, string>;
+  /**
+   * Further apps of the Dispatcher's registry (`DISPATCHER_APPS`, #730), next to the `reviewer` it always has (the first
+   * app of the lane). With one, the Dispatcher also needs its operator credential. A kind named `implementer` makes it
+   * serve that engine, and the Launcher advertise it.
+   */
+  apps?: Array<{
+    id: string;
+    url: string;
+    kinds: string[];
+    keyId: string;
+    maxRunning: number;
+    token: string;
+    signingSecret: string;
+  }>;
+  operatorToken?: string;
+  /** The files of this Dispatcher and its stand-in; by default the first journey's (`hostedEnv`). */
+  records?: {
+    dockerDirectory: string;
+    controlDirectory: string;
+    secretsDirectory: string;
+    logFile: string;
+  };
 }): Promise<HostedDispatcher> {
   const python = join(RUNNER_DIRECTORY, ".venv/bin/python");
   const program = join(RUNNER_DIRECTORY, ".venv/bin/code-reviewer-runner");
@@ -123,11 +145,17 @@ export async function startHostedDispatcher(options: {
   );
   const connectionLog = absolute(hostedEnv.connectionLog);
   if (tiktoken) assertTiktokenCache();
-  mkdirSync(absolute(hostedEnv.dockerDirectory), { recursive: true });
-  mkdirSync(absolute(hostedEnv.controlDirectory), { recursive: true });
-  const gate = absolute(`${hostedEnv.controlDirectory}/hold-workers`);
+  const records = options.records ?? {
+    dockerDirectory: hostedEnv.dockerDirectory,
+    controlDirectory: hostedEnv.controlDirectory,
+    secretsDirectory: hostedEnv.secretsDirectory,
+    logFile: hostedEnv.logFiles.dispatcher,
+  };
+  mkdirSync(absolute(records.dockerDirectory), { recursive: true });
+  mkdirSync(absolute(records.controlDirectory), { recursive: true });
+  const gate = absolute(`${records.controlDirectory}/hold-workers`);
   rmSync(gate, { force: true });
-  const exitFile = absolute(`${hostedEnv.controlDirectory}/exit-workers`);
+  const exitFile = absolute(`${records.controlDirectory}/exit-workers`);
   rmSync(exitFile, { force: true });
 
   const environment: Record<string, string> = {
@@ -144,6 +172,29 @@ export async function startHostedDispatcher(options: {
     DISPATCHER_SIGNING_KEY_ID: hostedEnv.webhookKeyId,
     DISPATCHER_SIGNING_SECRET: hostedEnv.webhookSecret,
     DISPATCHER_SHUTDOWN_GRACE_SECONDS: "5",
+    ...(options.apps === undefined
+      ? {}
+      : {
+          DISPATCHER_APPS: JSON.stringify(
+            options.apps.map(({ id, url, kinds, keyId, maxRunning }) => ({
+              id,
+              url,
+              kinds,
+              keyId,
+              maxRunning,
+            })),
+          ),
+          DISPATCHER_OPERATOR_TOKEN: options.operatorToken ?? "",
+          ...Object.fromEntries(
+            options.apps.flatMap((app) => {
+              const name = app.id.toUpperCase().replaceAll("-", "_");
+              return [
+                [`DISPATCHER_APP_${name}_TOKEN`, app.token],
+                [`DISPATCHER_APP_${name}_SIGNING_SECRET`, app.signingSecret],
+              ];
+            }),
+          ),
+        }),
     ...(options.dynamic === undefined
       ? {}
       : {
@@ -153,8 +204,8 @@ export async function startHostedDispatcher(options: {
     // The test host and the `docker` stand-in (hosted-e2e-main.ts, docker-worker.sh).
     E2E_PORT: String(hostedEnv.dispatcherPort),
     E2E_IMAGE_ID: hostedEnv.imageId,
-    E2E_CONTROL_DIR: absolute(hostedEnv.controlDirectory),
-    E2E_DOCKER_DIR: absolute(hostedEnv.dockerDirectory),
+    E2E_CONTROL_DIR: absolute(records.controlDirectory),
+    E2E_DOCKER_DIR: absolute(records.dockerDirectory),
     E2E_WORKER_COMMAND: program,
     E2E_WORKER_GATE: gate,
     E2E_WORKER_EXIT_FILE: exitFile,
@@ -164,7 +215,7 @@ export async function startHostedDispatcher(options: {
     // What the image carries itself and the container is not given: the job command that adds the address of the fake
     // LLM to the job, and the tiktoken encoding PR-Agent counts tokens with.
     // The copy of every start document: what the logs are searched for (the per-job credential is in it).
-    E2E_STDIN_COPY_DIR: absolute(hostedEnv.secretsDirectory),
+    E2E_STDIN_COPY_DIR: absolute(records.secretsDirectory),
     E2E_WORKER_PASS_PR_AGENT_COMMAND: [
       python,
       WRAPPER,
@@ -200,7 +251,7 @@ export async function startHostedDispatcher(options: {
     },
   );
   let output = "";
-  const logFile = absolute(hostedEnv.logFiles.dispatcher);
+  const logFile = absolute(records.logFile);
   const collect = (chunk: Buffer) => {
     output += chunk.toString("utf8");
     // Every Dispatcher of the run appends to one file, for the journey that reads every log at the end.
@@ -243,9 +294,9 @@ export async function startHostedDispatcher(options: {
 
   return {
     output: () => output,
-    containers: () => readContainers(absolute(hostedEnv.dockerDirectory)),
+    containers: () => readContainers(absolute(records.dockerDirectory)),
     workersOf: (jobId) =>
-      readContainers(absolute(hostedEnv.dockerDirectory)).filter(
+      readContainers(absolute(records.dockerDirectory)).filter(
         (container) =>
           container.mode === "worker-once" &&
           container.name === `code-reviewer-worker-${jobId}`,
@@ -260,7 +311,7 @@ export async function startHostedDispatcher(options: {
     },
     failNextCreations(count) {
       writeFileSync(
-        absolute(`${hostedEnv.controlDirectory}/fail-create`),
+        absolute(`${records.controlDirectory}/fail-create`),
         String(count),
       );
     },

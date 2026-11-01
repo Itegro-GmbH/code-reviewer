@@ -55,6 +55,10 @@ export type FakeLlmRequest = {
   toolResults: Record<string, string>;
   /** The `provider` object of the body (OpenRouter's routing options, #270); null when absent. */
   provider: Record<string, unknown> | null;
+  /** Where the request put `cache_control`: on message objects, on content parts, on tools, and at the top level. */
+  cacheMarks: { messages: number; parts: number; tools: number; top: boolean };
+  /** The `usage` the chat answer stated (cache tokens included), once it was sent; absent for a request that got an error. */
+  usage?: Record<string, unknown>;
 };
 
 /** One request's tool calls of the agent script. */
@@ -76,6 +80,12 @@ export type AgentScript = {
    * one). A script without `when` answers any request. Each script counts its own steps.
    */
   when?: { lastUserContains: string };
+  /**
+   * Indexes of `steps` before which the answer waits: the request that would get step `i` is held until the test calls
+   * `release()` (`heldCount()` says one is waiting). A journey that has to see something happen while the agent waits (a push
+   * of what it committed) waits on that, not on a pause of its own (#767). The chat route only.
+   */
+  holdBefore?: number[];
   /**
    * The Messages API only (#533): every answer that asks for tools opens with a signed `thinking` block, as a model
    * that always thinks does, and the next request has to give it back (the fake answers a 400 when it does not).
@@ -159,12 +169,23 @@ export type FakeLlm = {
   /** The usage the next Messages answers report (default: 100 input tokens, 50 output tokens, no cache). */
   setMessagesUsage(usage: FakeMessagesUsage): void;
   /**
+   * The token counts the next chat answers report (default: 100 input tokens, 50 output tokens), with the `usage.cost`
+   * OpenRouter would state for them at one dollar per million input tokens and four per million output tokens; null is the
+   * default again. The prompt cache (`enablePromptCache`) still wins while it is on. For a journey that has to reach a cost
+   * limit within a few calls (#767).
+   */
+  setChatUsage(
+    usage: { promptTokens: number; completionTokens: number } | null,
+  ): void;
+  /**
    * While on, every answer reports the usage its request earns from a prompt cache that keeps the rules of the
    * Claude docs (`anthropic-cache.ts`, #539): cache tokens in the Messages shape, or `cached_tokens` and
    * `cache_write_tokens` with a discounted `usage.cost` in the chat shape, and a request the API would refuse (more
    * than four breakpoints, a mark on a message object) answered with its 400. Off by default and by `reset()`.
+   * `messageMarks`: a mark on a message object of a chat request counts, as a gateway that honours it caches up to the end of
+   * that message (it is where the engine puts the mark for an OpenAI-compatible provider, #767); by default it is left out.
    */
-  enablePromptCache(on: boolean): void;
+  enablePromptCache(on: boolean, options?: { messageMarks?: boolean }): void;
   /**
    * The next `POST /messages` that is accepted answers with this message verbatim (thinking blocks and all), in
    * the order queued, once each; the request is checked as always (#533).
@@ -180,6 +201,15 @@ export type FakeLlm = {
    * review that is in progress, so it can end the process that runs it.
    */
   hold(on: boolean): void;
+  /** How many requests wait for `release()`: those held by `hold(true)` and those held by a script's `holdBefore`. */
+  heldCount(): number;
+  /** Answers every request that is held; a `holdBefore` that was released does not hold again. */
+  release(): void;
+  /**
+   * Whether the chat answers state their charge in `usage.cost`, as OpenRouter does (default). A provider that does not
+   * (DeepSeek, OpenAI) leaves the price of the run to the book of the catalog (#767).
+   */
+  statesCharge(on: boolean): void;
   /** Normal replies, no error, no recorded requests, no hold. */
   reset(): void;
   close(): Promise<void>;
@@ -282,8 +312,74 @@ function completion(model: string, content: string, usage?: ChatUsage) {
         finish_reason: "stop",
       },
     ],
-    usage: usage ?? FIXED_CHAT_USAGE,
+    usage: usage ?? { ...FIXED_CHAT_USAGE },
   };
+}
+
+type ChatCompletion = ReturnType<typeof completion>;
+
+/**
+ * A chat completion as the server-sent events a client that asked for `stream: true` reads (OpenAI's chunks): the role, the
+ * text or the tool calls (the arguments in two pieces, as a real stream cuts them), the finish, and with
+ * `stream_options.include_usage` a last chunk with the usage and no choice, then `[DONE]`. The native path of the runner
+ * (the Implementer's, #767) always streams, so a fake that only answers JSON leaves its engine without an answer.
+ */
+export function chatEvents(
+  document: ChatCompletion,
+  includeUsage: boolean,
+): string {
+  const [choice] = document.choices;
+  const message = (choice?.message ?? {}) as {
+    content?: string | null;
+    tool_calls?: Array<{
+      id: string;
+      type: string;
+      function: { name: string; arguments: string };
+    }>;
+  };
+  const chunk = (
+    delta: Record<string, unknown>,
+    finish: string | null = null,
+  ) => ({
+    id: document.id,
+    object: "chat.completion.chunk",
+    created: document.created,
+    model: document.model,
+    choices: [{ index: 0, delta, finish_reason: finish }],
+  });
+  const events: unknown[] = [chunk({ role: "assistant" })];
+  for (const [index, call] of (message.tool_calls ?? []).entries()) {
+    const half = Math.floor(call.function.arguments.length / 2);
+    events.push(
+      chunk({
+        tool_calls: [
+          {
+            index,
+            id: call.id,
+            type: call.type,
+            function: {
+              name: call.function.name,
+              arguments: call.function.arguments.slice(0, half),
+            },
+          },
+        ],
+      }),
+      chunk({
+        tool_calls: [
+          {
+            index,
+            function: { arguments: call.function.arguments.slice(half) },
+          },
+        ],
+      }),
+    );
+  }
+  if (typeof message.content === "string" && message.content !== "")
+    events.push(chunk({ content: message.content }));
+  events.push(chunk({}, choice?.finish_reason ?? "stop"));
+  if (includeUsage)
+    events.push({ ...chunk({}), choices: [], usage: document.usage });
+  return `${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`;
 }
 
 /**
@@ -328,9 +424,32 @@ function toolCompletion(
   };
 }
 
-/** A chat request as the cache sees it: the same blocks, a mark on a part or at the top level kept, one on a message object left out. */
+function cacheMarksOf(
+  body: Record<string, unknown>,
+): FakeLlmRequest["cacheMarks"] {
+  const marked = (value: unknown) =>
+    typeof value === "object" && value !== null && "cache_control" in value;
+  const messages = Array.isArray(body.messages)
+    ? (body.messages as Array<Record<string, unknown>>)
+    : [];
+  return {
+    messages: messages.filter(marked).length,
+    parts: messages
+      .flatMap((message) =>
+        Array.isArray(message.content) ? (message.content as unknown[]) : [],
+      )
+      .filter(marked).length,
+    tools: (Array.isArray(body.tools) ? (body.tools as unknown[]) : []).filter(
+      marked,
+    ).length,
+    top: "cache_control" in body,
+  };
+}
+
+/** A chat request as the cache sees it: the same blocks, a mark on a part or at the top level kept, one on a message object left out (unless the provider honours it). */
 function chatAsMessages(
   body: Record<string, unknown>,
+  honourMessageMarks = false,
 ): Record<string, unknown> {
   const messages = (Array.isArray(body.messages) ? body.messages : []).map(
     (raw: Record<string, unknown>) => {
@@ -341,14 +460,17 @@ function chatAsMessages(
           : Array.isArray(content)
             ? [...(content as unknown[])]
             : [];
-      const {
-        role,
-        content: _content,
-        cache_control: _control,
-        ...extra
-      } = raw;
+      const { role, content: _content, cache_control: control, ...extra } = raw;
       if (Object.keys(extra).length > 0)
         parts.push({ type: "text", text: JSON.stringify(extra) });
+      // A gateway that honours the mark on the message object (the engine puts it there for an OpenAI-compatible provider)
+      // caches up to the end of that message: the mark moves to its last part.
+      const last = parts.at(-1);
+      if (honourMessageMarks && control !== undefined && last !== undefined)
+        parts[parts.length - 1] = {
+          ...(last as Record<string, unknown>),
+          cache_control: control,
+        };
       return { role: typeof role === "string" ? role : "user", content: parts };
     },
   );
@@ -476,16 +598,43 @@ export async function startLlmFake(
   let messageLog: FakeMessagesRequest[] = [];
   let messagesUsage: FakeMessagesUsage = DEFAULT_MESSAGES_USAGE;
   let promptCache: PromptCache | null = null;
+  let messageMarks = false;
+  let chatUsageOverride: ChatUsage | null = null;
   // What the Claude API refuses with a 400, and the thinking blocks it issued (#533).
   let strictApi = new StrictMessagesApi();
   let queuedAnswers: Array<Record<string, unknown>> = [];
   let holding = false;
   let held: Array<() => void> = [];
+  // The answers a script's `holdBefore` keeps back, and the holds that were released (a step is held once).
+  let scriptHeld: Array<{ key: string; run: () => void }> = [];
+  let passedHolds = new Set<string>();
+  let statesCharge = true;
   const release = () => {
     const waiting = held;
     held = [];
     for (const answer of waiting) answer();
+    const kept = scriptHeld;
+    scriptHeld = [];
+    for (const { key, run } of kept) {
+      passedHolds.add(key);
+      run();
+    }
   };
+  /** The key of the hold the next answer of the script that the last user message selects runs into, or null. */
+  function holdAhead(lastUser: string): string | null {
+    const position = (agent ?? []).findIndex(
+      (script) =>
+        script.when === undefined ||
+        lastUser.includes(script.when.lastUserContains),
+    );
+    const script = agent?.[position];
+    if (script?.holdBefore === undefined) return null;
+    const next = agentUsed[position] ?? 0;
+    const key = `${String(position)}:${String(next)}`;
+    return script.holdBefore.includes(next) && !passedHolds.has(key)
+      ? key
+      : null;
+  }
 
   /**
    * The next scripted answer to a request that offers tools: the next step of the script the last user message
@@ -652,6 +801,7 @@ export async function startLlmFake(
             tools,
             toolResults: {},
             provider: null,
+            cacheMarks: { messages: 0, parts: 0, tools: 0, top: false },
           });
           return accept(messagesText(model, replies.review, usage));
         };
@@ -725,7 +875,7 @@ export async function startLlmFake(
       const authorization = request.headers.authorization ?? "";
       const system = textOf(messages, "system");
       const kind = classify(system);
-      log.push({
+      const entry: FakeLlmRequest = {
         path: request.url ?? "",
         authorization,
         model,
@@ -734,16 +884,40 @@ export async function startLlmFake(
         tools: toolNames((body as { tools?: unknown }).tools),
         toolResults: toolResultsOf(messages),
         provider: providerOf((body as { provider?: unknown }).provider),
-      });
+        cacheMarks: cacheMarksOf(body as Record<string, unknown>),
+      };
+      log.push(entry);
 
-      const answer = () => {
+      const streaming = (body as { stream?: unknown }).stream === true;
+      const includeUsage =
+        (body as { stream_options?: { include_usage?: unknown } })
+          .stream_options?.include_usage === true;
+      // An answer to a request that asked for a stream is the stream of the same answer.
+      const sendChat = (status: number, document: unknown) => {
+        if (status === 200) {
+          const body = document as { usage?: Record<string, unknown> };
+          // A provider that states no charge leaves it out of the usage of every answer.
+          if (!statesCharge && body.usage !== undefined) {
+            const { cost: _charge, ...rest } = body.usage;
+            body.usage = rest;
+          }
+          entry.usage = body.usage;
+        }
+        if (!streaming || status !== 200) return send(status, document);
+        response.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+        });
+        response.end(chatEvents(document as ChatCompletion, includeUsage));
+      };
+      const respond = () => {
         // The client hung up while the request was held: nobody to answer.
         if (response.destroyed) return;
-        let chatUsage: ChatUsage | undefined;
+        let chatUsage: ChatUsage | undefined = chatUsageOverride ?? undefined;
         if (promptCache !== null && error === null) {
           try {
             const counted = promptCache.usage(
-              chatAsMessages(body as Record<string, unknown>),
+              chatAsMessages(body as Record<string, unknown>, messageMarks),
               50,
               { minimum: 1024 },
             );
@@ -781,15 +955,20 @@ export async function startLlmFake(
         }
         if (agent !== null) {
           if (toolNames((body as { tools?: unknown }).tools).length === 0)
-            return send(200, completion(model, "ok", chatUsage));
+            return sendChat(200, completion(model, "ok", chatUsage));
+          const holdKey = holdAhead(lastUserText(messages));
+          if (holdKey !== null) {
+            scriptHeld.push({ key: holdKey, run: respond });
+            return;
+          }
           const answer = nextAgentAnswer(lastUserText(messages));
           if (answer === null)
             return send(400, {
               error: { message: NO_SCRIPT_MATCHES, code: 400 },
             });
           if (answer.calls === null)
-            return send(200, completion(model, answer.text, chatUsage));
-          return send(
+            return sendChat(200, completion(model, answer.text, chatUsage));
+          return sendChat(
             200,
             toolCompletion(
               model,
@@ -799,10 +978,10 @@ export async function startLlmFake(
             ),
           );
         }
-        send(200, completion(model, replies[kind], chatUsage));
+        sendChat(200, completion(model, replies[kind], chatUsage));
       };
-      if (holding) held.push(answer);
-      else answer();
+      if (holding) held.push(respond);
+      else respond();
     });
   });
 
@@ -838,6 +1017,19 @@ export async function startLlmFake(
     setMessagesUsage(usage) {
       messagesUsage = usage;
     },
+    setChatUsage(usage) {
+      chatUsageOverride =
+        usage === null
+          ? null
+          : {
+              prompt_tokens: usage.promptTokens,
+              completion_tokens: usage.completionTokens,
+              total_tokens: usage.promptTokens + usage.completionTokens,
+              cost:
+                (usage.promptTokens * 1 + usage.completionTokens * 4) /
+                1_000_000,
+            };
+    },
     queueMessagesAnswer(answer) {
       queuedAnswers.push(answer);
     },
@@ -851,13 +1043,23 @@ export async function startLlmFake(
       holding = on;
       if (!on) release();
     },
-    enablePromptCache(on) {
+    heldCount: () => held.length + scriptHeld.length,
+    release,
+    statesCharge(on) {
+      statesCharge = on;
+    },
+    enablePromptCache(on, options) {
       promptCache = on ? new PromptCache() : null;
+      messageMarks = on && options?.messageMarks === true;
     },
     reset() {
       holding = false;
       promptCache = null;
+      chatUsageOverride = null;
       release();
+      scriptHeld = [];
+      passedHolds = new Set();
+      statesCharge = true;
       agent = null;
       agentUsed = [];
       agentRequests = 0;

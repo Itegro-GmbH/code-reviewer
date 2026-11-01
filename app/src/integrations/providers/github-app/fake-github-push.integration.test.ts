@@ -7,6 +7,7 @@
 // refuses them; the pushed branch is at once visible through the branch endpoints; the request log names the pushed
 // refs and never a token. The Implementer journey (#767) relies on this, so a wrong fake fails here first.
 import { execFile, execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -416,5 +417,224 @@ describe("the push of the fake GitHub", () => {
     });
     expect(JSON.stringify(context.fake.requests())).not.toContain(token);
     expect(JSON.stringify(context.fake.pushes())).not.toContain(token);
+  });
+
+  // #767 (review of #779, item 4)
+  it("challenges a request without credentials with WWW-Authenticate: Basic, so that URL credentials work", async () => {
+    const context = await setup();
+    const token = await context.mint([WIDGETS.id], "write");
+    const advertise = `${context.remote}/info/refs?service=git-receive-pack`;
+
+    const none = await fetch(advertise);
+    const bad = await fetch(advertise, {
+      headers: { authorization: basic("not-a-token") },
+    });
+    // A client that only knows the credentials from the URL sends them after the challenge.
+    const clone = join(context.directory, "by-url");
+    execFileSync("git", ["init", "--quiet", clone]);
+    const withCredentials = new URL(context.remote);
+    withCredentials.username = "x-access-token";
+    withCredentials.password = token;
+    const environment: Record<string, string> = {
+      PATH: process.env.PATH ?? "",
+      HOME: context.directory,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_TERMINAL_PROMPT: "0",
+    };
+    await run(
+      "git",
+      ["fetch", "--quiet", withCredentials.toString(), context.base],
+      // Next's types make NODE_ENV a required variable; Git does not read it.
+      { cwd: clone, env: environment as NodeJS.ProcessEnv },
+    );
+
+    expect(none.status).toBe(401);
+    expect(none.headers.get("www-authenticate")).toMatch(/^Basic /);
+    expect(bad.status).toBe(401);
+    expect(bad.headers.get("www-authenticate")).toMatch(/^Basic /);
+    expect(
+      execFileSync("git", ["-C", clone, "cat-file", "-t", context.base], {
+        encoding: "utf8",
+      }).trim(),
+    ).toBe("commit");
+  });
+
+  // #767 (review of #779, item 3)
+  it("records a push over 1 MB once: the client's 4-byte probe names no ref and is not a push", async () => {
+    const context = await setup();
+    const token = await context.mint([WIDGETS.id], "write");
+    const clone = await workingCopy(context, token, "clone", "implementer/big");
+    // Incompressible, and above http.postBuffer (1 MiB): the client probes the server before it sends the body.
+    writeFileSync(join(clone, "big.bin"), randomBytes(2_500_000));
+    execFileSync("git", ["-C", clone, "add", "--all"]);
+    await git(clone, token, "commit", "--quiet", "--message", "Add big.bin");
+
+    const pushed = await push(
+      clone,
+      token,
+      context.remote,
+      "HEAD:refs/heads/implementer/big",
+    );
+
+    const posts = context.fake
+      .requests()
+      .filter(
+        (request) =>
+          request.method === "POST" &&
+          request.path.endsWith("/git-receive-pack"),
+      );
+    expect(pushed.ok).toBe(true);
+    // The probe really happened (two POSTs), and only the one with the command is a push.
+    expect(posts.length).toBeGreaterThanOrEqual(2);
+    expect(posts.filter((post) => post.refs !== undefined)).toHaveLength(1);
+    expect(context.fake.pushes()).toEqual([
+      { repository: "acme/widgets", refs: ["refs/heads/implementer/big"] },
+    ]);
+  });
+
+  // #767 (review of #779, item 2)
+  it("accepts a tag, a note and a fast-forward of the default branch, which is why a journey asserts the refs it expects", async () => {
+    const context = await setup();
+    const token = await context.mint([WIDGETS.id], "write");
+    const clone = await workingCopy(context, token, "clone", "implementer/x");
+    execFileSync("git", ["-C", clone, "tag", "v1"]);
+    execFileSync("git", [
+      "-C",
+      clone,
+      "update-ref",
+      "refs/notes/commits",
+      "HEAD",
+    ]);
+
+    const tag = await push(clone, token, context.remote, "refs/tags/v1");
+    const note = await push(
+      clone,
+      token,
+      context.remote,
+      "refs/notes/commits:refs/notes/commits",
+    );
+    const main = await push(
+      clone,
+      token,
+      context.remote,
+      "HEAD:refs/heads/main",
+    );
+
+    expect([tag.ok, note.ok, main.ok]).toEqual([true, true, true]);
+    expect(context.fake.pushes().flatMap((entry) => entry.refs)).toEqual([
+      "refs/tags/v1",
+      "refs/notes/commits",
+      "refs/heads/main",
+    ]);
+  });
+
+  // #767
+  it("lets a test running the fake as its own process raise the App to Contents: write", async () => {
+    const context = await setup();
+    // The App of the first test holds write already; narrow it, then raise it through the control endpoint.
+    context.fake.setAppPermissions({ metadata: "read", contents: "read" });
+    const readOnly = await context
+      .mint([WIDGETS.id], "write")
+      .catch(() => null);
+
+    const raised = await fetch(
+      `${context.fake.baseUrl}/__fake/app-permissions`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          permissions: { metadata: "read", contents: "write" },
+        }),
+      },
+    );
+    const refused = await fetch(
+      `${context.fake.baseUrl}/__fake/app-permissions`,
+      {
+        method: "POST",
+        body: JSON.stringify({ permissions: { contents: "everything" } }),
+      },
+    );
+    const token = await context.mint([WIDGETS.id], "write");
+    const advertise = await fetch(
+      `${context.remote}/info/refs?service=git-receive-pack`,
+      { headers: { authorization: basic(token) } },
+    );
+
+    expect(readOnly).toBeNull();
+    expect(raised.status).toBe(201);
+    expect(refused.status).toBe(400);
+    expect(advertise.status).toBe(200);
+  });
+
+  // #767
+  it("lists the request log through a control endpoint, a push with its refs and without a token", async () => {
+    const context = await setup();
+    const token = await context.mint([WIDGETS.id], "write");
+    const clone = await workingCopy(context, token, "clone", "implementer/x");
+    await push(clone, token, context.remote, "HEAD:refs/heads/implementer/x");
+
+    const listed = (await (
+      await fetch(`${context.fake.baseUrl}/__fake/requests`)
+    ).json()) as {
+      requests: Array<{ method: string; path: string; refs?: string[] }>;
+    };
+
+    expect(listed.requests).toContainEqual({
+      method: "POST",
+      path: "/acme/widgets.git/git-receive-pack",
+      refs: ["refs/heads/implementer/x"],
+    });
+    expect(JSON.stringify(listed)).not.toContain(token);
+  });
+
+  // #767
+  it("still lists the repositories of an installation after a journey removed the fixture of one of them", async () => {
+    const context = await setup();
+    const token = await context.mint([WIDGETS.id, OTHER.id], "read");
+    rmSync(join(context.directory, "widgets"), {
+      recursive: true,
+      force: true,
+    });
+
+    const listed = await fetch(
+      `${context.fake.baseUrl}/installation/repositories`,
+      {
+        headers: { authorization: `token ${token}` },
+      },
+    );
+
+    expect(listed.status).toBe(200);
+    expect(
+      (
+        (await listed.json()) as { repositories: Array<{ full_name: string }> }
+      ).repositories.map((repo) => repo.full_name),
+    ).toEqual([WIDGETS.fullName, OTHER.fullName]);
+  });
+
+  // #767
+  it("states the html_url a test gives a repository, and the default address of the others", async () => {
+    const context = await setup();
+    context.fake.setRepositories(4242, [
+      { ...WIDGETS, htmlUrl: "https://127.0.0.1:1/acme/widgets" },
+      OTHER,
+    ]);
+    const token = await context.mint([WIDGETS.id, OTHER.id], "read");
+
+    const listed = await fetch(
+      `${context.fake.baseUrl}/installation/repositories`,
+      {
+        headers: { authorization: `token ${token}` },
+      },
+    );
+
+    expect(
+      (
+        (await listed.json()) as {
+          repositories: Array<{ full_name: string; html_url: string }>;
+        }
+      ).repositories.map((repo) => [repo.full_name, repo.html_url]),
+    ).toEqual([
+      ["acme/widgets", "https://127.0.0.1:1/acme/widgets"],
+      ["acme/other", `${context.fake.baseUrl}/acme/other`],
+    ]);
   });
 });

@@ -120,13 +120,19 @@ registered 404.
 | `GET /:o/:r.git/info/refs?service=git-receive-pack`, `POST .../git-receive-pack` | Push (#766), as the Implementer's turn does. The token must have been minted with `contents: write` for the repository (403 for `contents: read`, so for a token minted without a permission list from an app that holds read only). |
 | `GET /__fake/pushes?repository=owner/name`                                       | Control endpoint: every push received, `{ pushes: [{ repository, refs }] }` (the `repository` filter is optional). The same list is `github.pushes()`.                                                                               |
 
-A push is judged by Git itself with GitHub's default settings: a new branch is accepted, and so is a push that moves a
-branch forward (a fast-forward); a history that is not a fast-forward of the branch (which stops `git push --force` as
-well) and the deletion of a branch are refused per ref (`[remote rejected]`, HTTP 200 like GitHub); no hook runs. The
-repository is a fixture, so a push to its checked out branch is accepted too and leaves its working tree alone. The
-pushed branch is there at once for the branch endpoints above and for a fetch. `github.requests()` has the push as
+A push is judged by Git itself, **stricter than GitHub on purpose**: a new branch is accepted, and so is a push that moves
+a branch forward (a fast-forward); a history that is not a fast-forward of the branch (which stops `git push --force` as
+well) and the deletion of a branch are refused per ref (`[remote rejected]`, HTTP 200 like GitHub), although GitHub accepts
+both on a branch without protection. A test cannot learn from the fake that a client never forces a push: it asserts the
+client's own command. The fake accepts whatever else is pushed: a tag, `refs/notes/*` and a fast-forward of the default
+branch, so a test asserts that `pushes()` lists only the refs it expects. No hook runs. The repository is a fixture, so a
+push to its checked out branch is accepted too and leaves its working tree alone. The pushed branch is there at once for
+the branch endpoints above and for a fetch. `github.requests()` has the push as
 `{ method: "POST", path: ".../git-receive-pack", refs: ["refs/heads/..."] }`: the names of the refs the client asked
-to update (whether or not Git accepted them; the branch endpoints tell what is there), never a token or an object.
+to update (whether or not Git accepted them; the branch endpoints tell what is there), never a token or an object. Only a
+request that carries a command is a push: the 4-byte probe a client sends first for a request over 1 MB names no ref and
+is neither listed in `pushes()` nor given `refs`. The Git routes answer 401 with `WWW-Authenticate: Basic realm="GitHub"`
+like GitHub, so a client with URL credentials or a credential helper retries with them.
 
 Links (`html_url`) point to `https://github.test` unless the fake is started with `selfLinks`
 (`GITHUB_FAKE_SELF_LINKS=true` as its own process): then they point to the fake itself, which is what

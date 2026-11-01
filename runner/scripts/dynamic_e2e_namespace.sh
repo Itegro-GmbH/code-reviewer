@@ -9,7 +9,9 @@
 #      connection to something that is not loopback reaches the guard, which counts and rejects it;
 #   2. what the Dynamic image has, in this mount namespace only: the engine user 10101 and the Diff job user
 #      10001 (bind-mounted copies of passwd and group), a fresh /run, the pinned OpenCode and ripgrep at
-#      /usr/local/bin, and their pin files in /opt/code-reviewer/pins (overlays, so the host is untouched);
+#      /usr/local/bin, and their pin files in /opt/code-reviewer/pins (overlays, so the host is untouched); and what the
+#      Implementer's image adds (#761, #767): git 2.53 or newer under /usr/local (the pinned release, built by
+#      build_lane_git.sh), the guard files in /opt/code-reviewer/guard, and the mount point /work of its work volume;
 #   3. the preflight, which names whatever is missing and stops;
 #   3b. the `probe` entry mode of the Worker image (#324, #331) on this layout: with a read-only root it must advertise
 #      `opencode`, with a writable one it must not (the capability probe of the hosted deployment is this verdict);
@@ -19,7 +21,7 @@
 #      engine user, only names of e2e/dynamic/dns-allowlist.txt by anyone), and a check that no process of the lane is left.
 set -euo pipefail
 
-: "${LANE_OPENCODE_BIN:?}" "${LANE_RIPGREP_BIN:?}" "${LANE_APP_DIR:?}" "${LANE_RUNNER_DIR:?}" "${LANE_STAGE:?}"
+: "${LANE_OPENCODE_BIN:?}" "${LANE_RIPGREP_BIN:?}" "${LANE_GIT_TREE:?}" "${LANE_APP_DIR:?}" "${LANE_RUNNER_DIR:?}" "${LANE_STAGE:?}"
 export NEXT_TELEMETRY_DISABLED=1
 NODE=(node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON)
 
@@ -64,6 +66,31 @@ mount -t overlay overlay -o "lowerdir=/usr/local/bin,upperdir=$STAGE/bin-upper,w
   || fail "the tools cannot be installed (overlayfs on /usr/local/bin)"
 mount -t overlay overlay -o "lowerdir=/opt,upperdir=$STAGE/opt-upper,workdir=$STAGE/opt-work" /opt \
   || fail "the pin files cannot be installed (overlayfs on /opt)"
+# The Implementer's git (#761): the pinned release, laid out as /usr/local, over the three directories git lives in. Owned by root
+# whatever the build's owner is. The image has no other git on the runner's trusted path, so none of the host's can be used by
+# accident: the Worker's start-up self-check judges the version it finds first.
+for directory in /usr/local/libexec /usr/local/share; do
+  mkdir -p "$directory"
+  name="$(basename "$directory")"
+  mkdir -p "$STAGE/$name-upper" "$STAGE/$name-work"
+  mount -t overlay overlay -o "lowerdir=$directory,upperdir=$STAGE/$name-upper,workdir=$STAGE/$name-work" "$directory" \
+    || fail "git cannot be installed (overlayfs on $directory)"
+done
+for directory in bin libexec share; do
+  cp -a --no-preserve=ownership "$LANE_GIT_TREE/usr/local/$directory/." "/usr/local/$directory/" \
+    || fail "git cannot be installed (copy of $directory)"
+done
+# The guard files of the Implementer's branch guard (#761): the hook and the matrix, root-owned and read-only, where the Worker's
+# self-check and the guard's configuration look for them.
+install -d -m 0755 -o root -g root /opt/code-reviewer/guard
+install -m 0755 -o root -g root "$LANE_RUNNER_DIR/guard/reference-transaction" "$LANE_RUNNER_DIR/scripts/guard_matrix.sh" /opt/code-reviewer/guard/
+# The mount point of the Implementer's work volume. The container's wrapper puts a fresh tmpfs there for each container
+# (dynamic_e2e_worker_container.sh); the directory is removed when the lane ends if this made it.
+if [ ! -e /work ]; then
+  mkdir /work || fail "the mount point /work cannot be made"
+  WORK_MADE=1
+fi
+
 # The fetch scripts leave the tools in a directory of the invoking user. Root installs from a copy on the
 # lane's own tmpfs (root owned, 0700), so nothing can swap a file between the copy and the install. The
 # copy is not the integrity check: the pin files (size and SHA-256) are, in the fetch scripts, in the
@@ -156,6 +183,8 @@ status=0
 
 # 5. The guard has the last word, and nothing may be left running.
 kill "$DNS_PID" 2>/dev/null && wait "$DNS_PID" 2>/dev/null && :
+# The mount point of the work volume, if this made it (the containers' own mounts ended with them).
+if [ "${WORK_MADE:-}" = 1 ]; then rmdir /work 2>/dev/null || echo "The mount point /work is not empty and stays." >&2; fi
 echo "Names the lane asked for (its resolver answers none; the guard compares them with e2e/dynamic/dns-allowlist.txt): $(sort "$DNS_LOG" | uniq -c | tr '\n' ';')"
 if ! "${NODE[@]}" "$LANE_APP_DIR/e2e/helpers/dynamic-lane-guard-command.ts" "$DNS_LOG"; then
   status=1

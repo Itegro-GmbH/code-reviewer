@@ -326,6 +326,11 @@ export async function startGithubFake(
 
       if (method === "GET" && path === "/__fake/health")
         return sendJson(response, 200, { ok: true });
+      // For a test that runs the fake as its own process (Playwright): the request log (`requests()`), method and path of
+      // every request, a push also with its ref names; no credential is in it. The Implementer's journey (#767) reads it to
+      // show what the app did not ask GitHub for (no pull request).
+      if (method === "GET" && path === "/__fake/requests")
+        return sendJson(response, 200, { requests: log });
       if (method === "POST" && path === "/__fake/reset") {
         resetAll();
         return sendJson(response, 200, { ok: true });

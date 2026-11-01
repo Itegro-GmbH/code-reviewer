@@ -75,4 +75,11 @@ A request that offers tools and that no script matches is refused with a 400 (`T
 last user message`), so a mistaken script shows at once instead of answering something else. `scriptAgent(null)` and
 `reset()` switch the agent mode off.
 
+### Usage
+
+A chat answer reports 100 input and 50 output tokens. `setChatUsage({ promptTokens, completionTokens })` makes the next ones
+report other counts (with the `usage.cost` for them at one and four dollars per million tokens; `null` is the default again).
+The Implementer's journey for the cost limit (#767) switches it once the first commit is pushed, so that the limit is reached
+within a few calls.
+
 Tests: `app/src/test-support/llm-fake-agent.integration.test.ts`.

@@ -116,6 +116,9 @@ for (const name of [
   if (value !== undefined) dynamicEnvironment[name] = value;
 }
 
+// The same rule as the deployment (`launchers/sandbox-env.ts`, #765): the Launcher advertises `implementer` only for a
+// deployment that serves the kind, and then the canary proves it in the Implementer's profile.
+const servesImplementer = settings.core.engines.includes("implementer");
 const sandbox = createSandboxLauncher({
   service,
   snapshotId: SNAPSHOT_ID,
@@ -123,27 +126,36 @@ const sandbox = createSandboxLauncher({
   handoverSeconds,
   logger,
   dynamicEnvironment,
+  servesImplementer,
 });
 // The same rule as the deployment (#479): a Dispatcher that serves Dynamic jobs runs no probe on a dispatch; the canary
 // is reached through `POST /probe` only.
-const launcher = settings.core.engines.includes("opencode")
-  ? withProbeEndpoint({
-      launcher: sandbox,
-      probe: createCapabilityProbe({
-        run: createSandboxCanary({
-          service,
-          snapshotId: SNAPSHOT_ID,
-          imageDigest,
+const launcher =
+  settings.core.engines.includes("opencode") || servesImplementer
+    ? withProbeEndpoint({
+        launcher: sandbox,
+        probe: createCapabilityProbe({
+          run: createSandboxCanary({
+            service,
+            snapshotId: SNAPSHOT_ID,
+            imageDigest,
+            logger,
+            config: settings.core.workerConfig.dynamic,
+            environment: dynamicEnvironment,
+            ...(servesImplementer
+              ? {
+                  implementer: {
+                    config: settings.core.workerConfig.implementer ?? {},
+                  },
+                }
+              : {}),
+          }),
+          clock: systemClock,
+          now: () => Date.now(),
           logger,
-          config: settings.core.workerConfig.dynamic,
-          environment: dynamicEnvironment,
         }),
-        clock: systemClock,
-        now: () => Date.now(),
-        logger,
-      }),
-    })
-  : sandbox;
+      })
+    : sandbox;
 
 const server = await startNodeServer({
   env,
