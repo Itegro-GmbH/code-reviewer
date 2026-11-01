@@ -4,6 +4,7 @@
 advertise the engine, starts the process with what only it needs, asks the lease before a push and
 delivers the report within 4 MB; a stop is reported `runner_shutdown`."""
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -21,9 +22,12 @@ from code_reviewer_runner.capabilities import (
     RIPGREP_PATH_VARIABLE,
 )
 from code_reviewer_runner.job import ImplementerInput, JobError, parse_job, parse_runnable_job
+from code_reviewer_runner.job_loop import host as host_module
 from code_reviewer_runner.job_loop.api import ClaimedJob, LeaseLost
 from code_reviewer_runner.job_loop.host import (
+    IMPLEMENTER_LEASE_CHECK_BUDGET_SECONDS,
     IMPLEMENTER_STDOUT_KEEP_BYTES,
+    IMPLEMENTER_TERMINATE_GRACE_SECONDS,
     JobEnd,
 )
 from code_reviewer_runner.job_loop.process import STDOUT_KEEP_BYTES
@@ -172,6 +176,8 @@ def test_a_turn_starts_as_the_root_supervisor_with_what_only_it_needs() -> None:
         assert spec.run_as is None  # root: it drops the engine to its own user
         assert spec.lease_check is not None
         assert spec.stdout_keep_bytes == IMPLEMENTER_STDOUT_KEEP_BYTES > 4_500_000
+        # A stopped turn has the time to end its engine and push (#765-R5b).
+        assert spec.terminate_grace == IMPLEMENTER_TERMINATE_GRACE_SECONDS == 60.0
         assert spec.env[ENGINES_VARIABLE] == ",".join(ALL_THREE)
         assert spec.env[OPENCODE_COMMAND_VARIABLE] == "/usr/local/bin/opencode"
         assert spec.env[RIPGREP_PATH_VARIABLE] == "/usr/local/bin/rg"
@@ -213,6 +219,7 @@ def test_the_other_kinds_keep_the_small_stdout_and_their_users() -> None:
 
         spec = harness.launcher.processes[0].spec
         assert spec.stdout_keep_bytes == STDOUT_KEEP_BYTES
+        assert spec.terminate_grace is None  # the launcher's own
         assert spec.run_as == (10001, 10001)
         assert spec.lease_check is None
         assert ENGINES_VARIABLE not in spec.env
@@ -334,9 +341,115 @@ def test_a_stop_ends_the_process_and_reports_runner_shutdown() -> None:
         assert harness.end is JobEnd.GIVEN_BACK
         result = harness.api.completions[0][2]
         assert result["errorCode"] == "runner_shutdown"
-        assert "implementer" not in result
+        # The process printed nothing before it went: the result is the bare one.
+        assert "implementer" not in result and result["usage"] is None
 
     run(scenario)
+
+
+USAGE = {
+    "model": "m",
+    "promptTokens": 100,
+    "completionTokens": 10,
+    "totalTokens": 110,
+    "aiCalls": 3,
+    "fallbackUsed": False,
+    "costUsd": 0.0123,
+}
+
+
+# #765-R1: the job pushed and printed its result when it was stopped; the host gives it on.
+def test_a_stopped_turn_reports_what_it_pushed_and_what_it_cost() -> None:
+    async def scenario() -> None:
+        harness = advertising_harness()
+        harness.api.claims = [implementer_claim()]
+        await harness.start()
+        # Printed by the job process on SIGTERM: runner_shutdown, the block, the usage. It even says
+        # something else about the code than the host will: the host decides what a stop is.
+        printed = line(ok=False, errorCode="lease_lost", usage=USAGE, implementer=report())
+        harness.launcher.processes[0].printed_on_terminate = printed
+
+        harness.loop.request_force()
+        await settle()
+
+        result = harness.api.completions[0][2]
+        assert harness.end is JobEnd.GIVEN_BACK
+        assert result["ok"] is False and result["errorCode"] == "runner_shutdown"
+        assert result["implementer"] == report()
+        assert result["usage"]["aiCalls"] == 3 and result["usage"]["costUsd"] == 0.0123
+
+    run(scenario)
+
+
+# #765-R1
+def test_a_stop_keeps_no_report_that_is_not_one_and_no_secret() -> None:
+    async def scenario() -> None:
+        harness = advertising_harness()
+        harness.api.claims = [implementer_claim()]
+        await harness.start()
+        broken = report(baseCommit="main", summary=f"key {API_KEY}")
+        harness.launcher.processes[0].printed_on_terminate = line(
+            ok=False, errorCode="runner_shutdown", usage=USAGE, implementer=broken
+        )
+
+        harness.loop.request_force()
+        await settle()
+
+        result = harness.api.completions[0][2]
+        assert result["errorCode"] == "runner_shutdown"
+        assert "implementer" not in result
+        assert result["usage"]["aiCalls"] == 3
+        assert API_KEY not in json.dumps(result)
+
+    run(scenario)
+
+
+# #765-R1: only a turn of the Implementer may carry the report; a Diff job's stop stays bare.
+def test_the_stop_of_another_kind_stays_bare() -> None:
+    async def scenario() -> None:
+        harness = Harness(**USERS, engines=ALL_ENGINES, environment=PROFILE)
+        harness.api.claims = [make_claim(1)]
+        await harness.start()
+        harness.launcher.processes[0].printed_on_terminate = line(
+            ok=False, errorCode="runner_shutdown", usage=USAGE
+        )
+
+        harness.loop.request_force()
+        await settle()
+
+        result = harness.api.completions[0][2]
+        assert result["errorCode"] == "runner_shutdown"
+        assert "implementer" not in result and result["usage"] is None
+
+    run(scenario)
+
+
+# #765-R5b: one question of an Implementer turn is bounded inside its stop (the budget is the
+# loop's own clock, so the test shortens it).
+def test_a_lease_question_of_a_turn_is_bounded_by_the_implementers_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr(host_module, "IMPLEMENTER_LEASE_CHECK_BUDGET_SECONDS", 0.2)
+        harness = advertising_harness()
+        harness.api.claims = [implementer_claim()]
+        await harness.start()
+        spec = harness.launcher.processes[0].spec
+        assert spec.lease_check is not None
+
+        async def never_answers(job_id: str, token: str) -> Any:
+            await asyncio.Event().wait()
+
+        harness.api.heartbeat = never_answers  # type: ignore[method-assign]
+
+        answer = await asyncio.wait_for(spec.lease_check(), 5)
+
+        assert answer is LeaseState.UNCONFIRMED
+        await harness.stop()
+
+    run(scenario)
+    assert host_module.LEASE_CHECK_BUDGET_SECONDS > 10.0  # Dynamic keeps its own
+    assert IMPLEMENTER_LEASE_CHECK_BUDGET_SECONDS < IMPLEMENTER_TERMINATE_GRACE_SECONDS / 2
 
 
 # -- T01: the parse ---------------------------------------------------------------------------

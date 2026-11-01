@@ -59,6 +59,7 @@ from code_reviewer_runner.implementer.job_run import (
 )
 from code_reviewer_runner.implementer.session import SessionSeams, agent_limits
 from code_reviewer_runner.job import JobError
+from code_reviewer_runner.job_loop.host import IMPLEMENTER_TERMINATE_GRACE_SECONDS
 from code_reviewer_runner.job_loop.settings import WorkerSettings
 from code_reviewer_runner.lease_check import LEASE_CHECK_FD_VARIABLE
 from code_reviewer_runner.result import ErrorCode
@@ -73,10 +74,13 @@ TIP = "2" * 40
 SECOND = "3" * 40
 
 
-def job_text() -> str:
+def job_text(*, cost_limit: bool = True) -> str:
     document: dict[str, Any] = json.loads(EXAMPLE.read_text(encoding="utf-8"))
     document["git"]["token"] = TOKEN
     document["llm"]["apiKey"] = KEY
+    if cost_limit:
+        # The app sends the limits with the claim features (`cost_limit`, `operator_cost_limit`).
+        document["llm"]["maxCostUsd"] = 2.5
     return json.dumps(document)
 
 
@@ -305,6 +309,8 @@ def play(
         dirty: bool = False,
         configure: Callable[[FakeGit], None] | None = None,
         session_error: Exception | None = None,
+        cost_limit: bool = True,
+        confirm_seconds: float = 0.3,
     ) -> Turn:
         events: list[str] = []
         made: list[FakeGit] = []
@@ -345,6 +351,9 @@ def play(
                 upstream_for=lambda _url: cast("Any", object()),
                 tick_seconds=0.05,
                 push_interval=0.05,
+                confirm_seconds=confirm_seconds,
+                confirm_pause=0.05,
+                retry_backoff=0.05,
             ),
         )
         if session_error is not None:
@@ -359,7 +368,7 @@ def play(
         )
         monkeypatch.setattr(runner, "_stop_hard", lambda: hard_stops.append(1))
         output = io.StringIO()
-        code = runner.main([], stdin=io.StringIO(job_text()), stdout=output)
+        code = runner.main([], stdin=io.StringIO(job_text(cost_limit=cost_limit)), stdout=output)
         git = made[0] if made else FakeGit(tmp_path, None)
         return Turn(
             git, agents[0] if agents else None, lease, code, output.getvalue(), events, hard_stops
@@ -605,6 +614,18 @@ def test_a_bug_after_the_model_was_used_is_never_the_free_runner_error(
     assert valid_result(result)
 
 
+# #765-R7
+def test_a_job_without_any_cost_limit_does_not_start(play: Any) -> None:
+    turn = play(commits_then_ends(), cost_limit=False)
+
+    result = turn.result
+    assert turn.exit_code == 1
+    assert result["errorCode"] == "implementer_config_invalid"
+    assert "implementer" not in result and result["usage"] is None
+    assert turn.agent is None and turn.git.prepared is False
+    assert valid_result(result)
+
+
 # -- T05: the lease -------------------------------------------------------------------------------
 
 
@@ -675,6 +696,46 @@ def test_a_lease_that_cannot_be_confirmed_is_no_lease(play: Any) -> None:
 
     assert turn.result["errorCode"] == "lease_lost"
     assert turn.git.pushes == []
+
+
+# #765-R2: one unanswered question is a "not now", not the end of the turn.
+def test_an_app_that_is_silent_once_does_not_end_the_turn(play: Any) -> None:
+    def silent_first(number: int) -> str:
+        return "unconfirmed" if number <= 2 else "held"
+
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        agent.use_the_model()
+        git = agent.git
+        make_commit(agent, TIP)
+        assert wait_for(lambda: git.pushes == [TIP]), "the push after the silence was not made"
+        return "done"
+
+    turn = play(script, answers=silent_first, confirm_seconds=5.0)
+
+    assert turn.result["ok"] is True
+    assert turn.result["implementer"]["pushed"] is True
+    assert turn.git.pushes == [TIP]
+    assert turn.lease is not None and turn.lease.asked >= 3
+
+
+# #765-R2: the last push asks again within its window and pushes when the app answers in time.
+def test_the_last_push_asks_again_and_pushes_when_the_app_answers_in_time(play: Any) -> None:
+    def silent_then_held(number: int) -> str:
+        return "unconfirmed" if number == 1 else "held"
+
+    turn = play(commits_then_ends(), answers=silent_then_held, confirm_seconds=5.0)
+
+    assert turn.result["ok"] is True
+    assert turn.git.pushes == [TIP]
+
+
+# #765-R2: a lost lease is final, however long the window.
+def test_a_lost_lease_is_not_asked_again(play: Any) -> None:
+    turn = play(commits_and_waits_for(never_done), answers=lost, confirm_seconds=5.0)
+
+    assert turn.result["errorCode"] == "lease_lost"
+    assert turn.git.pushes == []
+    assert turn.lease is not None and turn.lease.asked <= 3
 
 
 # #765-T05
@@ -764,11 +825,45 @@ def test_the_handler_arms_a_backstop_that_ends_a_turn_stuck_where_the_watch_cann
 
 # #765-T06
 def test_the_process_leaves_itself_less_time_than_the_host_gives_it() -> None:
-    assert WorkerSettings().terminate_grace > SIGTERM_BACKSTOP_SECONDS
+    spec = json.loads(
+        (
+            ROOT / "contracts" / "examples" / "worker-container" / "ImplementerContainerSpec.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    # The process ends itself first, the host kills it after, the container's stop is above both.
+    assert (
+        SIGTERM_BACKSTOP_SECONDS < IMPLEMENTER_TERMINATE_GRACE_SECONDS < spec["stopTimeoutSeconds"]
+    )
     assert SIGTERM_BACKSTOP_SECONDS == runner.IMPLEMENTER_SIGTERM_BACKSTOP_SECONDS
+    # A default Diff or Dynamic job keeps the grace it had.
+    assert WorkerSettings().terminate_grace == 5.0
 
 
 # -- T07: the secrets -----------------------------------------------------------------------------
+
+
+# #765-T07
+def test_the_capability_is_in_no_text_of_the_report_subjects_and_paths_included(
+    play: Any,
+) -> None:
+    capabilities: list[str] = []
+
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        agent.use_the_model()
+        capability = agent.capability()
+        capabilities.append(capability)
+        agent.git.commit(TIP, f"uses {capability}")
+        agent.git.files = [FileChange(f"src/{capability}.ts", ChangeKind.ADDED)]
+        return "done"
+
+    turn = play(script)
+
+    line = turn.lines[0]
+    assert capabilities[0] not in line
+    assert turn.result["ok"] is True
+    assert turn.result["implementer"]["headCommit"] == TIP
+    assert valid_result(turn.result)
 
 
 # #765-T07

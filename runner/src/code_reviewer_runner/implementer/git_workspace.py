@@ -94,6 +94,9 @@ _NOT_THE_AGENTS = tuple(f":(exclude,top){name}" for name in ENGINE_INPUTS)
 # The most often a batch of commits is pushed while the agent works (the final push is not held
 # back).
 PUSH_INTERVAL_SECONDS = 120.0
+# The final push asks the lease again every this often, for up to `confirm_seconds` (#765).
+CONFIRM_PAUSE_SECONDS = 2.0
+CONFIRM_SECONDS = 30.0
 SELF_TEST_TIMEOUT = 180.0
 # Reading the agent's tip happens every tick: a repository the agent made unreadable (a FIFO as
 # `.git/HEAD`) must cost seconds, not the 600 s of a push.
@@ -174,6 +177,15 @@ class PushUnverified(JobError):
 
     def __init__(self, detail: str) -> None:
         super().__init__(ErrorCode.RUNNER_ERROR, detail)
+
+
+class LeaseNotConfirmed(PushUnverified):
+    """The job host could not say whether the job is still ours (the app did not answer, #765). Not
+    a no: the loop asks again after its back-off, and the final push asks again within its window
+    before it gives up (`lease_lost`). Nothing is pushed while the answer is missing."""
+
+    def __init__(self) -> None:
+        super().__init__("the lease could not be confirmed, so nothing is pushed")
 
 
 class PushTransient(PushUnverified):
@@ -828,6 +840,10 @@ class GitWorkspace:
             raise PushUnverified("the mirror's branch could not be moved (git update-ref)")
 
     def _push_from_mirror(self, ref: str, tip: str) -> PushResult:
+        # The fetch and the checks above can take a long while: the lease is asked once more right
+        # before the one command that writes to the provider (#765).
+        if self._before_push is not None:
+            self._before_push()
         pushed = self._mirror(
             ["push", "--porcelain", self.spec.clone_url, f"{ref}:{ref}"],
             protocols=":".join(self._schemes),
@@ -1040,7 +1056,11 @@ class PushLoop:
         clock: Callable[[], float] = time.monotonic,
         retry_backoff: float = RETRY_BACKOFF_SECONDS,
         max_backoff: float = MAX_BACKOFF_SECONDS,
+        sleep: Callable[[float], None] = time.sleep,
+        confirm_pause: float = CONFIRM_PAUSE_SECONDS,
     ) -> None:
+        self._sleep = sleep
+        self._confirm_pause = confirm_pause
         self._workspace = workspace
         self._interval = interval
         self._clock = clock
@@ -1082,9 +1102,29 @@ class PushLoop:
         self._last = self._clock()
         return result
 
-    def finish(self) -> PushResult:
+    def finish(self, *, confirm_seconds: float = CONFIRM_SECONDS) -> PushResult:
         """The last push of the turn, at once and whatever the back-off. A look that fails now ends
-        the turn: `RepositoryUnusable`, a charged class."""
+        the turn: `RepositoryUnusable`, a charged class. A lease the host could not confirm is asked
+        again every `CONFIRM_PAUSE_SECONDS` for up to `confirm_seconds` (a stop has seconds, a
+        normal end more); then the turn ends `lease_lost` with nothing pushed."""
+        end = self._clock() + confirm_seconds
+        while True:
+            try:
+                result = self._push_once()
+                break
+            except LeaseNotConfirmed:
+                # The window is counted on the clock: a question can itself take seconds.
+                if self._clock() + self._confirm_pause > end:
+                    raise JobError(
+                        ErrorCode.LEASE_LOST,
+                        "the lease could not be confirmed, so nothing is pushed",
+                    ) from None
+                self._sleep(self._confirm_pause)
+        self._pending = False
+        self._last = self._clock()
+        return result
+
+    def _push_once(self) -> PushResult:
         try:
             result = self._workspace.push()
         except PushTransient as transient:
@@ -1093,9 +1133,9 @@ class PushLoop:
                 "the provider did not take the final push: " + transient.detail,
             ) from None
         except PushUnverified as unverified:
+            if isinstance(unverified, LeaseNotConfirmed):
+                raise
             raise RepositoryUnusable(
                 "the agent's branch could not be verified: " + unverified.detail
             ) from None
-        self._pending = False
-        self._last = self._clock()
         return result

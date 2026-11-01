@@ -20,7 +20,7 @@ from typing import Any, Protocol
 
 from code_reviewer_runner.dynamic_review.call_trace import valid_call_trace
 from code_reviewer_runner.implementer.report import (
-    MAX_SUMMARY_CHARS,
+    clip_texts,
     escaped_size,
     fit_block,
     valid_block,
@@ -251,9 +251,9 @@ def _redacted_block(block: Mapping[str, Any], redactor: TextRedactor) -> Result:
     """The block with the secrets of the job gone from every text in it. The agent wrote the
     summary, the subjects and (by naming files) the paths; the runner redacted them once, and this
     is the second look of the host."""
-    return {
+    redacted = {
         **block,
-        "summary": redactor.redact(block["summary"])[:MAX_SUMMARY_CHARS],
+        "summary": redactor.redact(block["summary"]),
         "commits": [
             {"sha": commit["sha"], "subject": redactor.redact(commit["subject"])}
             for commit in block["commits"]
@@ -263,6 +263,8 @@ def _redacted_block(block: Mapping[str, Any], redactor: TextRedactor) -> Result:
             for file in block["filesChanged"]
         ],
     }
+    # Redaction can make a text longer: a text the bound now refuses would cost the whole result.
+    return clip_texts(redacted)
 
 
 def _sanitize(
@@ -312,6 +314,11 @@ def _sanitize(
     return result
 
 
+def _cleaned(sent: object) -> object:
+    block = as_object(sent)
+    return sent if block is None else clip_texts(block)
+
+
 def _with_implementer_block(
     result: Result, line: Mapping[str, Any], redactor: TextRedactor, measured_ms: int
 ) -> Result:
@@ -319,11 +326,13 @@ def _with_implementer_block(
     (no repository existed yet). A turn that says it succeeded without a usable block did not do its
     job: the app would refuse the result, so it becomes a failure that keeps its usage."""
     sent = line.get("implementer")
-    block = None if sent is None else valid_block(sent)
-    if sent is not None and block is None:
+    # The files the app would refuse are left out first: one odd path must not cost the report.
+    block = None if sent is None else valid_block(_cleaned(sent))
+    redacted = None if block is None else valid_block(_redacted_block(block, redactor))
+    if sent is not None and redacted is None:
         _log_dropped(DroppedValue.IMPLEMENTER_INVALID)
-    if block is not None:
-        result["implementer"] = _redacted_block(block, redactor)
+    if redacted is not None:
+        result["implementer"] = redacted
         return result
     if result["ok"]:
         failed = failure_result(
@@ -367,6 +376,42 @@ def result_from_outcome(
         redactor=redactor,
         reason=NO_RESULT_REASON,
     )
+
+
+def stopped_result(
+    outcome: ProcessOutcome | None,
+    redactor: TextRedactor,
+    measured_ms: int,
+    *,
+    implementer: bool,
+) -> Result:
+    """The result of a job the host ended because the runner was stopped: always `runner_shutdown`.
+
+    A turn of the Implementer that was stopped has pushed what was committed and printed its result
+    before it went (`runner_shutdown`, the block with the head and the summary, and what the model
+    cost): those are kept, because the app records them on the session of the turn when it gives
+    the job back and the person finds the branch there. Whatever else the process printed (a
+    different code, a success) is not: the host stopped it. Without a usable line, or for any other
+    kind, the result is the bare one.
+    """
+    stderr = "" if outcome is None else outcome.stderr.decode("utf-8", errors="replace")
+    result = failure_result(
+        RUNNER_SHUTDOWN,
+        "the runner was shut down before the job finished",
+        duration_ms=measured_ms,
+        log_tail=stderr,
+        redactor=redactor,
+    )
+    line = _parse_line(outcome.stdout) if outcome is not None and implementer else None
+    if line is None:
+        return result
+    kept = _sanitize(
+        {**line, "ok": False, "errorCode": RUNNER_SHUTDOWN}, redactor, measured_ms, implementer=True
+    )
+    for name in ("usage", "implementer"):
+        if kept.get(name) is not None:
+            result[name] = kept[name]
+    return result
 
 
 def _without_trace(result: Mapping[str, Any]) -> Result:
