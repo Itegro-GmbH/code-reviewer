@@ -46,6 +46,7 @@ def build_native_run(
     superseded: Callable[[], bool] = lambda: False,
     call_timeout: float = CALL_TIMEOUT_SECONDS,
     clock: Callable[[], float] = time.monotonic,
+    ledger_type: type[BudgetLedger] = BudgetLedger,
 ) -> NativeRun:
     """The ledger of the policy and the proxy that settles into it. Raises `LimitError`
     (`dynamic_config_invalid`) for a policy the ledger cannot carry."""
@@ -56,6 +57,7 @@ def build_native_run(
         output_tokens=output_tokens,
         reasoning=reasoning,
         clock=clock,
+        ledger_type=ledger_type,
     )
     proxy = PassthroughProxy(
         ledger=ledger,

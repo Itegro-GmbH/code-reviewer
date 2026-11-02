@@ -202,6 +202,7 @@ def checked_native_provider(
     family: WireFamily,
     proxy_url: str,
     capability: str,
+    door_host: str | None = None,
 ) -> None:
     """Assert that `provider` is the block the entry makes for this job and nothing else.
 
@@ -221,7 +222,8 @@ def checked_native_provider(
     if block["npm"] not in NPM_OF_FAMILY[family]:
         raise _refused("the SDK of the provider is not one that speaks the family")
     host = urlsplit(proxy_url)
-    if host.scheme != "http" or host.hostname not in _LOOPBACK or host.path not in ("", "/"):
+    hosts = (*_LOOPBACK, *(() if door_host is None else (door_host,)))
+    if host.scheme != "http" or host.hostname not in hosts or host.path not in ("", "/"):
         raise _refused("the engine is not pointed at a loopback proxy")
     if len(capability) < _MIN_CAPABILITY_CHARS:
         raise _refused("the capability is too weak")

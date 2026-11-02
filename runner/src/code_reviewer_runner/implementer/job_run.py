@@ -224,6 +224,7 @@ def production_setup(
         proxy_port=ports.proxy,
         engine_port=ports.engine,
         egress_port=ports.egress,
+        door=ports.door,
         egress_mode=mode,
     )
     return TurnSetup(workspace, launch, tuple(command), Path(ripgrep), egress)

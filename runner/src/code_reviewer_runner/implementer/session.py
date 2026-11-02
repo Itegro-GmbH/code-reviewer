@@ -28,8 +28,7 @@ only brakes.
 import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
-from decimal import Decimal
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -40,15 +39,20 @@ from code_reviewer_runner.dynamic_review.adapter import (
     _http_request,  # pyright: ignore[reportPrivateUsage]
 )
 from code_reviewer_runner.dynamic_review.budget import (
-    MAX_REQUEST_BYTES,
     BudgetLedger,
-    DynamicLimits,
     LimitError,
 )
+from code_reviewer_runner.dynamic_review.config import new_proxy_capability
 from code_reviewer_runner.dynamic_review.engine_user import EngineLaunch
 from code_reviewer_runner.dynamic_review.job_model_entry import (
+    JobModelEntry,
     native_model_reference,
     native_provider_config,
+)
+from code_reviewer_runner.dynamic_review.model_door_route import (
+    MODEL_DOOR_ADDRESS,
+    MODEL_DOOR_MODE,
+    MODEL_DOOR_VARIABLE,
 )
 from code_reviewer_runner.dynamic_review.native_job import (
     NativeJob,
@@ -65,6 +69,8 @@ from code_reviewer_runner.result import ErrorCode, Usage
 
 from .agent import AgentTurn, ImplementerAgent
 from .config import build_engine_config, implementer_environment
+from .door_launcher import DoorSeams, RunningDoor, start_door
+from .door_model import build_door_ledger
 from .egress_config import EgressSettings, start_egress
 from .egress_proxy import EgressProxy
 from .git_workspace import (
@@ -75,6 +81,12 @@ from .git_workspace import (
     PushReport,
 )
 from .history import CommitInfo, FileChange
+
+# The bounds are named here too: the tests and the model door read them from this module.
+from .limits import MAX_AGENT_REQUEST_BYTES as MAX_AGENT_REQUEST_BYTES
+from .limits import MAX_RETURNED_BYTES as MAX_RETURNED_BYTES
+from .limits import MAX_TOOL_RESULT_BYTES as MAX_TOOL_RESULT_BYTES
+from .limits import agent_limits
 from .prompts import LEFTOVER_PROMPT, instructions_text
 from .turn_result import TurnResult, clip_summary
 
@@ -100,17 +112,6 @@ STOP_PUSH_SECONDS = 30.0
 LEASE_POLL_SECONDS = 30.0
 # The extra message for a dirty tree is only worth sending when this much of the clock is left.
 MIN_EXTRA_TURN_SECONDS = 20.0
-# What the ledger holds the results of tools to. There is no bound on a single result: the owner's
-# rule is that the cost limit is the only brake, and a normal `grep` or `bash` result is larger than
-# the 64 KiB a review is held to (a grep over 300 files answers 200 KB; the engine's own cut does
-# not apply to it). The cumulative bound is a sanity bound above what any turn the cost limit allows
-# can read; a single result cannot pass it either.
-MAX_RETURNED_BYTES = 256 * 1024 * 1024
-MAX_TOOL_RESULT_BYTES = MAX_RETURNED_BYTES
-# A conversation of a coding agent is larger than a review's: the model's window bounds a request
-# (`BudgetLedger.reserve_call`), this byte bound is only a backstop above it.
-MAX_AGENT_REQUEST_BYTES = 8 * MAX_REQUEST_BYTES
-
 # The name of the instruction file the runner writes for the engine.
 INSTRUCTIONS_FILE = "implementer-instructions.md"
 
@@ -126,19 +127,6 @@ def deadline_seconds(time_limit: float, elapsed: float) -> float:
     since the job began and less the grace kept for the leftover commit and the final push (three
     minutes; a third of a short limit)."""
     return time_limit - min(GRACE_SECONDS, time_limit / 3) - elapsed
-
-
-def agent_limits(deadline: float, max_cost: Decimal, stop_reason: str) -> DynamicLimits:
-    """The envelope of the ledger of one turn: the Dynamic one with the clock and cost limit of the
-    turn and the bounds a coding agent needs (see the constants above)."""
-    return DynamicLimits(
-        deadline_seconds=deadline,
-        max_cost_usd=max_cost,
-        cost_stop_reason=stop_reason,
-        max_tool_result_bytes=MAX_TOOL_RESULT_BYTES,
-        max_returned_bytes=MAX_RETURNED_BYTES,
-        max_request_bytes=MAX_AGENT_REQUEST_BYTES,
-    )
 
 
 @dataclass(frozen=True)
@@ -163,6 +151,9 @@ class SessionSeams:
     clock: Callable[[], float] = time.monotonic
     # Starts the egress proxy of a registries container (default `egress_config.start_egress`).
     start_egress: Callable[[EgressSettings], EgressProxy | None] | None = None
+    # How the model door is started and what it talks to (#745, step 3); the defaults are the VM's
+    # Docker. A test brings a daemon of its own.
+    door: DoorSeams = field(default_factory=DoorSeams)
 
 
 # How long the last push of a stop asks a lease the host cannot confirm: a stop has a minute in
@@ -172,6 +163,34 @@ STOP_CONFIRM_SECONDS = 20.0
 # The ends after which nothing is committed any more and nothing may be pushed that was not already
 # committed: the job is not ours, or the runner is going away within seconds.
 _NO_LEFTOVER = frozenset({ErrorCode.LEASE_LOST, ErrorCode.RUNNER_SHUTDOWN})
+
+
+@dataclass
+class TurnModel:
+    """What a turn reaches the model through: the model entry, the ledger of the turn, the bearer
+    the agent presents and where it presents it. The proxy is in this process (`door` is None, the
+    Worker's own, as before step 3) or in a container of its own (the model door, #745)."""
+
+    entry: JobModelEntry
+    ledger: BudgetLedger
+    capability: str
+    url: str
+    door: RunningDoor | None = None
+    native: NativeJob | None = None
+    server: PassthroughServer | None = None
+
+    def upstream_error(self) -> ErrorCode | None:
+        """The code of the provider's last failed call, as the proxy that made the call kept it."""
+        if self.door is not None:
+            return self.door.state.upstream_error
+        return None if self.native is None else self.native.run.proxy.last_upstream_error
+
+    def stop(self) -> None:
+        if self.door is not None:
+            self.door.stop()
+        if self.server is not None:
+            self.server.stop(drain_seconds=0.0)
+            self.server = None
 
 
 class ShutdownRequested(JobError):
@@ -318,7 +337,7 @@ class ImplementerSession:
         self._summary = ""
         self._error: tuple[ErrorCode, str] | None = None
         self._session_id: str | None = None
-        self._native: NativeJob | None = None
+        self._model: TurnModel | None = None
         self._leftover_lost = False
         # False when the sweep after the engine could not end every process of the engine user: then
         # nothing is run as that user for the leftover (a survivor could be racing the tree).
@@ -330,7 +349,7 @@ class ImplementerSession:
     @property
     def ledger(self) -> BudgetLedger | None:
         """The ledger of the turn (None before it was made): its limits are a fact tests pin."""
-        return None if self._native is None else self._native.ledger
+        return None if self._model is None else self._model.ledger
 
     # -- the limits -----------------------------------------------------------
 
@@ -346,14 +365,12 @@ class ImplementerSession:
 
     def run(self) -> TurnResult:
         agent: ImplementerAgent | None = None
-        server: PassthroughServer | None = None
+        model: TurnModel | None = None
         egress: EgressProxy | None = None
         try:
-            native = self._native_job()
-            self._native = native
+            model = self._start_model()
             egress = self._start_egress()
-            server = self._serve(native)
-            agent = self._agent(native, server.url)
+            agent = self._agent(model)
             agent.start()
             self._session_id = agent.session_id
             self._work(agent)
@@ -364,19 +381,29 @@ class ImplementerSession:
             self._engine_ended = ended
             if not ended:
                 self._note("the engine user's processes could not all be ended")
+            if model is not None and model.door is not None:
+                # No call can come any more: the door says its last word, the cost is final.
+                model.stop()
         try:
             self._finish()
         finally:
-            if server is not None:
-                server.stop(drain_seconds=0.0)
+            if model is not None:
+                model.stop()
             if egress is not None:
                 egress.stop()
         return self._result()
 
-    def _native_job(self) -> NativeJob:
+    def _door_wanted(self) -> bool:
+        """The container may start a model door (the Dispatcher says so with the VM's Docker socket
+        and `RUNNER_IMPLEMENTER_MODEL_DOOR`); otherwise the proxy runs in this process."""
+        return self.environment.get(MODEL_DOOR_VARIABLE, "").strip() == MODEL_DOOR_MODE
+
+    def _start_model(self) -> TurnModel:
         spec = self.job.implementer
         deadline = self._deadline_seconds()
-        return build_native(
+        if self._door_wanted():
+            return self._start_door(deadline)
+        native = build_native(
             spec.model_entry,
             spec.cost,
             self.job.llm,
@@ -386,6 +413,47 @@ class ImplementerSession:
             clock=self._clock,
             limits=lambda max_cost, reason: agent_limits(deadline, max_cost, reason),
         )
+        model = TurnModel(spec.model_entry, native.ledger, native.capability, "", native=native)
+        self._model = model
+        model.url, model.server = self._serve(native)
+        return model
+
+    def _start_door(self, deadline: float) -> TurnModel:
+        """The model door (#745, step 3): the key, the model pin and the cost limit go to a
+        container of its own, and this process keeps a ledger that reads what the door counts."""
+        spec = self.job.implementer
+        access = self.job.model_access
+        if access is None:
+            raise JobError(
+                ErrorCode.IMPLEMENTER_CONFIG_INVALID, "the job has no model access to hand over"
+            )
+        ledger = build_door_ledger(
+            spec.model_entry,
+            spec.cost,
+            self.job.llm,
+            deadline=deadline,
+            environment=self.environment,
+            clock=self._clock,
+        )
+        capability = new_proxy_capability()
+        model = TurnModel(spec.model_entry, ledger, capability, "")
+        self._model = model
+        port = self.launch.proxy_port if self.launch is not None else 10180
+        running = start_door(
+            model_access=access,
+            capability=capability,
+            deadline_seconds=self._deadline_seconds(),
+            port=port,
+            environment={
+                name: value
+                for name, value in self.environment.items()
+                if name == "RUNNER_DYNAMIC_MAX_COST_USD"
+            },
+            seams=self.seams.door,
+        )
+        ledger.attach(running.state)
+        model.door, model.url = running, running.url
+        return model
 
     def _start_egress(self) -> EgressProxy | None:
         """The allowlist proxy of a registries container (#763), listening before the engine's
@@ -403,22 +471,25 @@ class ImplementerSession:
                 ErrorCode.SETUP_FAILED, "the egress proxy port of the slot is not free"
             ) from None
 
-    def _serve(self, native: NativeJob) -> PassthroughServer:
+    def _serve(self, native: NativeJob) -> tuple[str, PassthroughServer]:
         port = self.launch.proxy_port if self.launch is not None else 0
         try:
-            return PassthroughServer(native.run.proxy, "127.0.0.1", port).start()
+            server = PassthroughServer(native.run.proxy, "127.0.0.1", port).start()
+            return server.url, server
         except OSError:
             raise JobError(
                 ErrorCode.SETUP_FAILED, "the model proxy port of the slot is not free"
             ) from None
 
-    def _agent(self, native: NativeJob, proxy_url: str) -> ImplementerAgent:
-        entry = native.entry
+    def _agent(self, model: TurnModel) -> ImplementerAgent:
+        entry, proxy_url = model.entry, model.url
+        door_host = MODEL_DOOR_ADDRESS if model.door is not None else None
         family = WireFamily(entry.family)
         provider = native_provider_config(
             entry,
             base_url=spec_of(family).proxy_base_url(proxy_url),
-            api_key=native.capability,
+            api_key=model.capability,
+            door_host=door_host,
         )
 
         def make_config(instructions_path: str) -> dict[str, Any]:
@@ -427,8 +498,9 @@ class ImplementerSession:
                 model_reference=native_model_reference(entry),
                 family=family,
                 proxy_url=proxy_url,
-                capability=native.capability,
+                capability=model.capability,
                 instructions_path=instructions_path,
+                door_host=door_host,
             )
 
         home = str(self.workspace.layout.agent_home)
@@ -453,7 +525,7 @@ class ImplementerSession:
             egress=self.egress,
         )
         return ImplementerAgent(
-            ledger=native.ledger,
+            ledger=model.ledger,
             command=self.command,
             directory=str(self.workspace.repo),
             make_config=make_config,
@@ -504,9 +576,9 @@ class ImplementerSession:
         return agent.ledger.remaining_seconds() >= MIN_EXTRA_TURN_SECONDS
 
     def _stopped_by(self, error: BaseException) -> None:
-        native = self._native
-        used = native is not None and native.ledger.model_used
-        failed = None if native is None else native.run.proxy.last_upstream_error
+        model = self._model
+        used = model is not None and model.ledger.model_used
+        failed = None if model is None else model.upstream_error()
         code, detail = classify(error, used_model=used, provider_error=failed)
         if self._error is None:
             self._error = (code, detail)
@@ -638,12 +710,12 @@ class ImplementerSession:
         return present
 
     def _usage(self) -> Usage:
-        if self._native is None:
+        if self._model is None:
             return Usage(None, 0, 0, 0, 0, False, None)
-        return self._native.ledger.usage(self.job.llm.model)
+        return self._model.ledger.usage(self.job.llm.model)
 
     def secrets(self) -> tuple[str, ...]:
-        capability = () if self._native is None else (self._native.capability,)
+        capability = () if self._model is None else (self._model.capability,)
         return (*self.job.secrets, *capability)
 
     def _note(self, text: str) -> None:

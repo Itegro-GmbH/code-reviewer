@@ -84,6 +84,8 @@ class SelfCheckReason(StrEnum):
     IMPLEMENTER_WORK_DIR_MISSING = "implementer_work_dir_missing"
     IMPLEMENTER_WORK_DIR_NOT_PREPARED = "implementer_work_dir_not_prepared"
     IMPLEMENTER_WORK_DIR_NOT_EXEC = "implementer_work_dir_not_exec"
+    # The container may start a model door (#745, step 3) and the VM's Docker does not answer.
+    IMPLEMENTER_DOCKER_UNAVAILABLE = "implementer_docker_unavailable"
 
 
 class SelfCheckFailed(IsolationSelfCheckError):

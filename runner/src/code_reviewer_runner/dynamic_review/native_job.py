@@ -150,10 +150,13 @@ def build_native(
     upstream_for: UpstreamFactory = HttpsUpstream,
     clock: Callable[[], float] = time.monotonic,
     limits: Callable[[Decimal, str], DynamicLimits] | None = None,
+    capability: str | None = None,
 ) -> NativeJob:
     """`build_native_job` for any job that carries a model entry, a cost policy and the model
     access (#764: the Implementer's turn is one). `limits`, when given, makes the ledger's limits
-    from the cost limit and its stop reason; the default is the Dynamic envelope with `deadline`."""
+    from the cost limit and its stop reason; the default is the Dynamic envelope with `deadline`.
+    `capability` is the bearer the proxy answers to when the caller made it (the Implementer's
+    Control container makes it and hands it to the model door); a fresh one by default."""
     try:
         # The key goes only where `key_destination` says (`parse_job` checked it too): the
         # registry's address for a registry provider, the entry's plain public https address for
@@ -166,7 +169,7 @@ def build_native(
         raise LimitError(
             ErrorCode.DYNAMIC_CONFIG_INVALID, "the model provider of the job cannot be used"
         ) from None
-    capability = new_proxy_capability()
+    capability = capability or new_proxy_capability()
     max_cost, stop_reason = effective_cost_limit(
         operator_cost_limit(environment.get(_MAX_COST_VARIABLE), llm.operator_max_cost_usd),
         llm.max_cost_usd,

@@ -167,6 +167,9 @@ class EngineLaunch:
     # The loopback port of the Implementer's egress proxy (#763), which the rules also allow; the
     # probe proves it reachable. None for a Dynamic job.
     egress_port: int | None = None
+    # Where the model proxy is when it is a container of its own (#745, step 3); the probe proves
+    # the engine user reaches it there. None: loopback.
+    door: tuple[str, int] | None = None
     # Which ruleset startup installed (#345); the fallback one does not see IPv6, so a job in that
     # mode proves IPv6 off again before its engine starts.
     egress_mode: EgressMode = EgressMode.FULL
@@ -220,12 +223,13 @@ class EngineLaunch:
             raise IsolationError("a process of the engine user from an earlier job cannot be ended")
         require_startup_capabilities_gone()
         if not self._verified:
-            verify_confinement(
-                self.uid,
-                self.gid,
-                proxy_port,
-                *(() if self.egress_port is None else (self.egress_port,)),
-            )
+            extra = () if self.egress_port is None else (self.egress_port,)
+            if self.door is None:
+                verify_confinement(self.uid, self.gid, proxy_port, *extra)
+            else:
+                verify_confinement(
+                    self.uid, self.gid, proxy_port, *extra, allowed_host=self.door[0]
+                )
             if self.egress_mode is EgressMode.FALLBACK:
                 verify_ipv6_off(self.uid, self.gid)
             self._verified = True

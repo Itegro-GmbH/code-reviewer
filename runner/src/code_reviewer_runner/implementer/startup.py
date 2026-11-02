@@ -9,6 +9,8 @@ slot ports, network rules, pinned OpenCode and `rg`, the probe as the engine use
 * git is installed and `setpriv` is (the final push reads the agent's repository through
   `setpriv ... git upload-pack`);
 * a container whose network is `registries` has the egress port in its rules;
+* a container that starts the model door (`RUNNER_IMPLEMENTER_MODEL_DOOR`, #745) reaches the VM's
+  Docker: its socket answers a ping;
 * the work directory is the volume of the container profile: present, prepared for the engine user
   (its home and its temporary directory in it, the CHOWN the profile expects of the Worker) and
   exec-capable (the agent runs the repository's own scripts there, and a `noexec` mount would fail
@@ -30,6 +32,7 @@ from typing import Any, cast
 from code_reviewer_runner.dynamic_review.self_check import SelfCheckFailed, SelfCheckReason
 from code_reviewer_runner.dynamic_review.static_isolation import ImplementerNetwork, SlotPorts
 
+from .docker_api import DockerApi
 from .git_process import TRUSTED_PATH
 
 # The engine user's home and temporary directory live in the work volume: the agent installs a
@@ -103,6 +106,7 @@ class ImplementerSeams:
     prepare_work_dir: Callable[[Path, int, int], None] = prepare_work_dir
     runs_scripts_as: Callable[[Path, int, int], bool] = runs_scripts_as
     is_directory: Callable[[Path], bool] = lambda path: path.is_dir() and not path.is_symlink()
+    docker_answers: Callable[[], bool] = lambda: DockerApi().ping()
 
 
 def check_implementer_runner(
@@ -124,6 +128,11 @@ def check_implementer_runner(
         raise _failed(
             SelfCheckReason.IMPLEMENTER_EGRESS_RULES_MISSING,
             "the egress proxy port is not in the network rules",
+        )
+    if ports is not None and ports.door is not None and not seams.docker_answers():
+        raise _failed(
+            SelfCheckReason.IMPLEMENTER_DOCKER_UNAVAILABLE,
+            "the container may start the model door and the VM's Docker does not answer",
         )
     if user is None:
         raise _failed(SelfCheckReason.NOT_A_DYNAMIC_RUNNER, "no engine user is configured")

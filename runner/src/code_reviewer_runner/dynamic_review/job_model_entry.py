@@ -214,22 +214,28 @@ def parse_job_model_entry(document: Any) -> JobModelEntry:
     )
 
 
-def _is_loopback_proxy(base_url: str) -> bool:
+def _is_loopback_proxy(base_url: str, door_host: str | None = None) -> bool:
     try:
         parts = urlsplit(base_url)
     except ValueError:
         return False
-    return parts.scheme == "http" and parts.hostname in ("127.0.0.1", "::1", "localhost")
+    hosts = ("127.0.0.1", "::1", "localhost", *(() if door_host is None else (door_host,)))
+    return parts.scheme == "http" and parts.hostname in hosts
 
 
-def native_provider_config(entry: JobModelEntry, *, base_url: str, api_key: str) -> dict[str, Any]:
+def native_provider_config(
+    entry: JobModelEntry, *, base_url: str, api_key: str, door_host: str | None = None
+) -> dict[str, Any]:
     """The `provider` object of the engine's configuration for this job: one provider, one model.
 
     `base_url` is the loopback address of the per-job proxy (anything else is refused: the engine
     must never be handed the upstream address) and `api_key` the job's dummy capability for it. The
     model entry is copied, so changing the configuration later never changes the entry.
+
+    `door_host` is the one other address the proxy may be at: the Implementer's model door, a
+    container of its own at a fixed address (#745, step 3).
     """
-    if not _is_loopback_proxy(base_url):
+    if not _is_loopback_proxy(base_url, door_host):
         raise JobModelEntryError("job_model_proxy_not_loopback")
     return {
         entry.provider_id: {

@@ -64,6 +64,7 @@ def build_engine_config(
     proxy_url: str,
     capability: str,
     instructions_path: str,
+    door_host: str | None = None,
 ) -> dict[str, Any]:
     """The whole engine configuration of one turn, as data the runner writes itself.
 
@@ -74,7 +75,9 @@ def build_engine_config(
     `headers`, would be the one way around it. The real key and the upstream address are not
     parameters of this function.
     """
-    checked_native_provider(provider, model_reference, family, proxy_url, capability)
+    checked_native_provider(
+        provider, model_reference, family, proxy_url, capability, door_host=door_host
+    )
     if not instructions_path.startswith("/"):
         raise ValueError("the instruction file must be an absolute path the runner wrote")
     return {

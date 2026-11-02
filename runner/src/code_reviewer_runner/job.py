@@ -112,10 +112,14 @@ _CLONE_URL = re.compile(r"https://[^\s@]{1,2040}")
 IMPLEMENTER_WORK_DIR_VARIABLE = "RUNNER_IMPLEMENTER_WORK_DIR"
 IMPLEMENTER_EGRESS_PORT_VARIABLE = "RUNNER_IMPLEMENTER_EGRESS_PORT"
 IMPLEMENTER_NETWORK_VARIABLE = "RUNNER_IMPLEMENTER_NETWORK"
+# #745, step 3: `docker` when the container carries the VM's Docker socket and starts the model
+# door.
+IMPLEMENTER_MODEL_DOOR_VARIABLE = "RUNNER_IMPLEMENTER_MODEL_DOOR"
 IMPLEMENTER_ENVIRONMENT_NAMES: tuple[str, ...] = (
     IMPLEMENTER_WORK_DIR_VARIABLE,
     IMPLEMENTER_EGRESS_PORT_VARIABLE,
     IMPLEMENTER_NETWORK_VARIABLE,
+    IMPLEMENTER_MODEL_DOOR_VARIABLE,
 )
 IMPLEMENTER_WORK_DIR = "/work"
 # What the Worker of an implementer job can reach besides the model proxy and its repository.
@@ -374,6 +378,10 @@ class ImplementerInput:
     llm: LlmAccess
     implementer: ImplementerSpec
     env: dict[str, str] = field(default_factory=lambda: {})
+    # The parts of the job text that the model door is built from (`llm`, `modelEntry`, `cost`), as
+    # they came (#745, step 3). The door parses them again with `parse_model_access`, so that it
+    # judges them by the very rules the job was judged by. Holds the key: never printed.
+    model_access: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
     @property
     def secrets(self) -> tuple[str, ...]:
@@ -955,7 +963,35 @@ def _implementer_input(job: dict[str, Any]) -> ImplementerInput:
     # address of the entry and to no other.
     llm = _llm_access(job, catalog=True, catalog_model_id=True)
     _entry_is_of_llm(spec.model_entry, llm, "implementer.modelEntry")
-    return ImplementerInput(git=git, llm=llm, implementer=spec, env=_env(job))
+    raw_spec = _section(job, "implementer")
+    return ImplementerInput(
+        git=git,
+        llm=llm,
+        implementer=spec,
+        env=_env(job),
+        model_access={
+            "llm": job["llm"],
+            "modelEntry": raw_spec["modelEntry"],
+            "cost": raw_spec["cost"],
+        },
+    )
+
+
+def parse_model_access(document: object) -> tuple[LlmAccess, JobModelEntry, CostPolicy]:
+    """The model access of an Implementer turn from `ImplementerInput.model_access`, judged by the
+    rules of the job itself (#745, step 3): the `llm` section of a task, the model entry and the
+    cost policy, and the entry must be of the provider the key belongs to. Raises `JobError`."""
+    data = _object(document, "the model access")
+    _check_fields(data, {"llm", "modelEntry", "cost"}, "")
+    for name in ("llm", "modelEntry", "cost"):
+        if name not in data:
+            raise _invalid(f"{name} is required")
+    llm = _llm_access(data, catalog=True, catalog_model_id=True)
+    cost = _job_cost_policy(data)
+    entry = _job_model_entry(data)
+    assert cost is not None and entry is not None  # both keys are present
+    _entry_is_of_llm(entry, llm, "modelEntry")
+    return llm, entry, cost
 
 
 def parse_implementer_input(raw: str) -> ImplementerInput:

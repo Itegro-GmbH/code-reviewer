@@ -149,17 +149,19 @@ def build_native_ledger(
     output_tokens: int,
     reasoning: bool = False,
     clock: Callable[[], float] = time.monotonic,
+    ledger_type: type[BudgetLedger] = BudgetLedger,
 ) -> BudgetLedger:
-    """The ledger of a native job. `output_tokens` is the cap the engine really sends
-    (`min(limit.output, NATIVE_OUTPUT_CAP)`), `reasoning` the catalog's flag for the model: a model
-    that thinks spends output tokens nobody can predict, so every call reserves at least
-    `REASONING_OUTPUT_FLOOR_TOKENS` (#548, the reasoning flag changes the request and so the
-    reservation)."""
+    """The ledger of a native job (`ledger_type`: the Implementer's Control container reads the
+    cost from its model door and so counts with a subclass, #745). `output_tokens` is the cap the
+    engine really sends (`min(limit.output, NATIVE_OUTPUT_CAP)`), `reasoning` the catalog's flag
+    for the model: a model that thinks spends output tokens nobody can predict, so every call
+    reserves at least `REASONING_OUTPUT_FLOOR_TOKENS` (#548, the reasoning flag changes the
+    request and so the reservation)."""
     if policy.key_mode is KeyMode.MANAGED and policy.book is None:
         raise LimitError(ErrorCode.DYNAMIC_CONFIG_INVALID, "a managed key has no price book")
     if policy.key_mode is KeyMode.OWN and policy.max_total_tokens is None:
         raise LimitError(ErrorCode.DYNAMIC_CONFIG_INVALID, "an own key has no token cap")
-    return BudgetLedger(
+    return ledger_type(
         limits,
         window_tokens=window_tokens,
         output_tokens=min(output_tokens, NATIVE_OUTPUT_CAP),
