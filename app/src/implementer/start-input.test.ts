@@ -25,6 +25,7 @@ const parsed: StartInput = {
   instruction: "Add a health endpoint.",
   model: { entryId: "entry-1" },
   costLimitCents: null,
+  environmentId: null,
   clientRequestId: "req-1",
 };
 
@@ -220,5 +221,31 @@ describe("the body that starts a task", () => {
         costLimitCents: 0,
       }).map((issue) => issue.field),
     ).toEqual(["repositoryId", "branch", "instruction", "costLimitCents"]);
+  });
+
+  // #818-T23
+  it("takes an environment id as given and a missing or null one as none", () => {
+    expect(validateStartInput({ ...VALID, environmentId: "env-1" })).toEqual({
+      ok: true,
+      value: { ...parsed, environmentId: "env-1" },
+    });
+    expect(validateStartInput({ ...VALID, environmentId: null })).toEqual({
+      ok: true,
+      value: parsed,
+    });
+  });
+
+  // #818-T23
+  it.each([
+    [5, "invalid"],
+    [{}, "invalid"],
+    ["", "required"],
+    ["a\nb", "invalid"],
+    ["a\u0000b", "invalid"],
+    ["x".repeat(129), "invalid"],
+  ])("refuses the environment id %j", (environmentId, code) => {
+    expect(issuesOf({ ...VALID, environmentId })).toEqual([
+      { field: "environmentId", code },
+    ]);
   });
 });

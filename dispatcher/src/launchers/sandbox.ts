@@ -159,6 +159,26 @@ export const SANDBOX_KIND_DEFAULTS: Readonly<
   implementer: { vcpus: 2, memory: { limit: "768m", reservation: "512m" } },
 };
 
+function isSandboxVcpus(
+  value: unknown,
+): value is (typeof SANDBOX_VCPUS)[number] {
+  return (SANDBOX_VCPUS as readonly unknown[]).includes(value);
+}
+
+/**
+ * The container memory of an Implementer job that chose a size (#818): the VM's memory (2 GB per vCPU) minus 1 GB for the OS,
+ * dockerd and the work volume's page cache, as the default 2 vCPU / 3 GB already is; for 1 vCPU the 1.5 GB a review runs in (the
+ * VM keeps 512 MB). The reservation is 512 MB below the limit (256 MB for 1 vCPU, as for a review).
+ */
+export function implementerMemoryFor(vcpus: number): {
+  limit: string;
+  reservation: string;
+} {
+  if (vcpus <= 1) return { limit: "1536m", reservation: "1280m" };
+  const limit = vcpus * SANDBOX_MEMORY_PER_VCPU_MB - 1024;
+  return { limit: `${limit}m`, reservation: `${limit - 512}m` };
+}
+
 /** The directory of the VM below which the work volume of a job gets its own (a mount of its own, `workVolumeCommands`). */
 export const WORK_VOLUME_ROOT = "/var/lib/code-reviewer-work";
 
@@ -257,15 +277,21 @@ function planOf(spec: LaunchSpec): Plan {
   const options = config.launcher ?? {};
   for (const key of Object.keys(options))
     if (key !== "vcpus") throw configInvalid();
-  const vcpus = options.vcpus ?? defaults.vcpus;
-  if (
-    typeof vcpus !== "number" ||
-    !(SANDBOX_VCPUS as readonly number[]).includes(vcpus)
-  )
-    throw configInvalid();
+  // #818: the size an Implementer job asks for. Precedence: the job's size, then the kind's configuration
+  // (`DISPATCHER_WORKER_CONFIG`), then the kind's default. A reviewer job never names a size, whatever the spec says. Only the
+  // sizes of the platform are launched; any other is refused with its own code, before a VM is created.
+  const jobSize = spec.kind === "implementer" ? spec.vcpus : undefined;
+  if (jobSize !== undefined && !isSandboxVcpus(jobSize))
+    throw new LaunchError("sandbox_size_unsupported");
+  const vcpus = jobSize ?? options.vcpus ?? defaults.vcpus;
+  if (!isSandboxVcpus(vcpus)) throw configInvalid();
 
   const overrides: WorkerContainerOverrides = {
-    memory: { ...defaults.memory, ...config.container?.memory },
+    // The memory of a chosen size follows the size; the operator's memory for the kind applies to the jobs that name none.
+    memory:
+      jobSize !== undefined
+        ? implementerMemoryFor(jobSize)
+        : { ...defaults.memory, ...config.container?.memory },
   };
   try {
     const rendered = applyOverrides(profileOf(spec.kind), overrides);

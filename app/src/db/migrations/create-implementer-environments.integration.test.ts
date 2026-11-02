@@ -28,6 +28,17 @@ const beforeThisMigration: MigrationProvider = {
   },
 };
 
+/** The migrations up to and including this one: a later migration adds columns to tables this one leaves alone. */
+const throughThisMigration: MigrationProvider = {
+  async getMigrations() {
+    return Object.fromEntries(
+      Object.entries(await migrationProvider.getMigrations()).filter(
+        ([name]) => name <= THIS,
+      ),
+    );
+  },
+};
+
 async function rowsOfEveryOldTable(
   db: Kysely<Database>,
 ): Promise<Record<string, unknown[]>> {
@@ -73,7 +84,7 @@ describe("the implementer environments migration", () => {
     const before = await rowsOfEveryOldTable(db);
     const columnsBefore = await columnsOfEveryOldTable(db);
 
-    const { executed } = await migrateToLatest(db, migrationProvider);
+    const { executed } = await migrateToLatest(db, throughThisMigration);
 
     expect(executed).toContain(THIS);
     expect(await rowsOfEveryOldTable(db)).toEqual(before);

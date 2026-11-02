@@ -13,6 +13,7 @@ import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import type {
   StoredImplementerSession,
   StoredImplementerTurn,
+  TurnEnvironment,
 } from "../db/repositories/implementer-repository.ts";
 
 /**
@@ -114,6 +115,8 @@ export type EnqueueImplementerTurnInput = {
   modelChoice: ModelChoice;
   /** The customer's cost limit for the turn in cents; null when none was asked for. */
   costLimitCents: number | null;
+  /** A copy of the environment the person chose (#818), made by the service from the workspace's own; null for none. */
+  environment?: TurnEnvironment | null;
   /** The user who started the task. */
   createdBy: string;
   /** The login of that person on the provider, for the job's `actor_login`. */
