@@ -239,6 +239,43 @@ def test_the_probe_as_the_engine_user_sees_a_socket_that_refuses_it(listening_so
     assert engine_user_can_open(os.getuid(), os.getgid(), listening_socket) is False
 
 
+# #823-F3
+def test_a_socket_nobody_listens_on_is_not_a_refusal(tmp_path: Path) -> None:
+    import os
+
+    # A stale file answers the connect with "connection refused": that says nothing of the user's
+    # rights, and only a permission or a missing path is a refusal.
+    stale = tmp_path / "stale.sock"
+    stale.write_text("not a socket")
+
+    assert engine_user_can_open(os.getuid(), os.getgid(), stale) is True
+
+
+# #823-F3
+def test_a_probe_that_times_out_is_not_a_refusal(tmp_path: Path) -> None:
+    import contextlib
+    import os
+    import socket
+
+    # A listener whose backlog is full leaves the next connect waiting: a timeout, or any other
+    # error that is not "permission denied", must not count as a refusal.
+    path = tmp_path / "busy.sock"
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(path))
+    server.listen(0)
+    fillers = [socket.socket(socket.AF_UNIX) for _ in range(3)]
+    try:
+        for filler in fillers:
+            filler.setblocking(False)
+            with contextlib.suppress(OSError):
+                filler.connect(str(path))
+        assert engine_user_can_open(os.getuid(), os.getgid(), path, probe_seconds=0.3) is True
+    finally:
+        for filler in fillers:
+            filler.close()
+        server.close()
+
+
 # #745-T11
 def test_a_probe_that_cannot_run_is_not_a_refusal(tmp_path: Path) -> None:
     # Nothing proves the user cannot open it: the answer is "can", and the check fails closed.

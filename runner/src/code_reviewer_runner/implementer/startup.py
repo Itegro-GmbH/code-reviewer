@@ -99,25 +99,39 @@ def runs_scripts_as(work_dir: Path, uid: int, gid: int) -> bool:
     return done.returncode == 0
 
 
-# Runs as the engine user: one `connect()` to the Docker socket. Fixed text, no input but the path.
+# Runs as the engine user: one `connect()` to the Docker socket. Fixed text, no input but the path
+# and the seconds. Only two answers are a refusal: the kernel said "permission denied" or the path
+# is not there. Anything else (a timeout, too many open files, a socket nobody listens on) proves
+# nothing about the user's rights and is printed as `unknown:`, read by the caller as "can open".
 _DOCKER_PROBE = r"""
 import socket, sys
 try:
     with socket.socket(socket.AF_UNIX) as probe:
-        probe.settimeout(5)
+        probe.settimeout(float(sys.argv[2]))
         probe.connect(sys.argv[1])
     print("connected")
-except OSError as error:
+except (PermissionError, FileNotFoundError) as error:
     print("refused:" + type(error).__name__)
+except BaseException as error:
+    print("unknown:" + type(error).__name__)
 """
+_DOCKER_PROBE_REFUSALS = ("refused:PermissionError", "refused:FileNotFoundError")
+_DOCKER_PROBE_CONNECT_SECONDS = 5.0
 _DOCKER_PROBE_SECONDS = 20.0
 
 
-def engine_user_can_open(uid: int, gid: int, socket_path: Path = Path(DOCKER_SOCKET)) -> bool:
+def engine_user_can_open(
+    uid: int,
+    gid: int,
+    socket_path: Path = Path(DOCKER_SOCKET),
+    *,
+    probe_seconds: float = _DOCKER_PROBE_CONNECT_SECONDS,
+) -> bool:
     """Whether the engine user can `connect()` to the Docker socket. Asked by running a probe as
     that user, as root can open anything and would say nothing. Only a probe that ran and was
-    refused says no: one that could not run (no interpreter, the user cannot be switched to) says
-    yes."""
+    refused for its permission (or found no socket at the path) says no: one that could not run
+    (no interpreter, the user cannot be switched to), timed out or failed in any other way says
+    yes, so the check fails closed."""
     python = shutil.which("python3", path=TRUSTED_PATH)
     if python is None:
         return True
@@ -128,7 +142,7 @@ def engine_user_can_open(uid: int, gid: int, socket_path: Path = Path(DOCKER_SOC
     )
     try:
         done: subprocess.CompletedProcess[str] = subprocess.run(
-            [python, "-I", "-c", _DOCKER_PROBE, str(socket_path)],
+            [python, "-I", "-c", _DOCKER_PROBE, str(socket_path), str(probe_seconds)],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -139,7 +153,7 @@ def engine_user_can_open(uid: int, gid: int, socket_path: Path = Path(DOCKER_SOC
         )
     except (OSError, subprocess.SubprocessError):
         return True
-    return done.returncode != 0 or not done.stdout.startswith("refused:")
+    return done.returncode != 0 or done.stdout.strip() not in _DOCKER_PROBE_REFUSALS
 
 
 @dataclass(frozen=True)

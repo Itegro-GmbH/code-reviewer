@@ -61,6 +61,7 @@ from code_reviewer_runner.implementer.door_launcher import (
     start_door,
 )
 from code_reviewer_runner.implementer.session import classify
+from code_reviewer_runner.implementer.startup import engine_user_can_open
 from code_reviewer_runner.job import JobError
 
 ENGINE_UID = ENGINE_GID = 10101
@@ -207,6 +208,15 @@ for root in roots:
             if needle in data:
                 found.append(path)
 print(json.dumps({"found": found, "processes_read": processes, "files_read": files}))
+"""
+
+# Runs in a helper container that shares the door's network namespace: whether IPv6 is switched off
+# there, read from the kernel (the sysctl of the door's definition is only what was asked for).
+NO_IPV6 = r"""
+import sys
+for name in ("all", "default"):
+    if open(f"/proc/sys/net/ipv6/conf/{name}/disable_ipv6").read().strip() != "1":
+        sys.exit(5)
 """
 
 # Runs in a helper container: one connection. The exit code says what happened to it.
@@ -368,6 +378,52 @@ def connect_from(api: DockerApi, image: str, network: str, address: str, port: i
         api.remove_container(helper)
 
 
+def helper_exit(api: DockerApi, image: str, network: str, code: str, *arguments: str) -> int:
+    """Run `code` in a one-shot container that shares `network` and return its exit code."""
+    helper = api.create_container(
+        {
+            "Image": image,
+            "Entrypoint": [VENV_PYTHON, "-I", "-c", code, *arguments],
+            "Cmd": [],
+            "User": "10001:10001",
+            "Env": [],
+            "HostConfig": {
+                "NetworkMode": network,
+                "Privileged": False,
+                "ReadonlyRootfs": True,
+                "CapDrop": ["ALL"],
+                "SecurityOpt": ["no-new-privileges:true"],
+                "Memory": 64 * 1024 * 1024,
+                "MemorySwap": 64 * 1024 * 1024,
+                "PidsLimit": 16,
+                "RestartPolicy": {"Name": "no"},
+            },
+        },
+        HELPER_NAME,
+    )
+    try:
+        api.start_container(helper)
+        return api.wait_container(helper, timeout=60.0)
+    finally:
+        api.remove_container(helper)
+
+
+def the_door_has_no_ipv6(checks: Checks, api: DockerApi) -> None:
+    """The door's rules are an `ip` table, which does not see IPv6: a door with an IPv6 address
+    or a switch left on would have a way round them."""
+    document = api.inspect_container(DOOR_CONTAINER_NAME)
+    networks = document["NetworkSettings"]["Networks"].values()
+    addressed = [network.get("GlobalIPv6Address") for network in networks]
+    image = str(api.inspect_container(socket.gethostname()).get("Image", ""))
+    in_the_kernel = helper_exit(api, image, f"container:{DOOR_CONTAINER_NAME}", NO_IPV6)
+    checks.say(
+        "door_has_no_ipv6",
+        not any(addressed) and in_the_kernel == 0,
+        addresses=addressed,
+        sysctl_in_the_door_namespace=in_the_kernel,
+    )
+
+
 def the_door_opens_nothing_into_the_model_network(checks: Checks, api: DockerApi) -> None:
     image = str(api.inspect_container(socket.gethostname()).get("Image", ""))
     for label, port in (("a_port", 0), ("dns_port", 53)):
@@ -400,13 +456,11 @@ def main() -> int:
 
     path = docker_api.DOCKER_SOCKET
     checks.say("docker_socket", DockerApi().ping(), path=path, mode=oct(os.stat(path).st_mode))
-    tried = as_engine_user(
-        "import socket,sys\ns=socket.socket(socket.AF_UNIX)\n"
-        "try:\n    s.connect(sys.argv[1]); print('connected')\n"
-        "except OSError as e:\n    print('refused:'+type(e).__name__)\n",
-        path,
-    ).stdout.strip()
-    checks.say("engine_user_cannot_open_the_docker_socket", tried.startswith("refused"), got=tried)
+    # The production function of the start-up check, not a copy of its probe.
+    checks.say(
+        "engine_user_cannot_open_the_docker_socket",
+        not engine_user_can_open(ENGINE_UID, ENGINE_GID),
+    )
 
     began = time.monotonic()
     door, capability = start(2.5, ports.proxy)
@@ -419,6 +473,7 @@ def main() -> int:
     )
     api = DockerApi()
     the_container(checks, api, capability)
+    the_door_has_no_ipv6(checks, api)
     the_engine_user(checks, door, capability, ports.proxy)
     the_door_opens_nothing_into_the_model_network(checks, api)
 
