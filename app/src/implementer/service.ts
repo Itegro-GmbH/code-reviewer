@@ -9,6 +9,8 @@
 // the new branch does not exist and is no folder or file of a listed one, the model is one the claim would run, the cost limit is within the operator's maximum. Then one
 // transaction writes the session, the turn and the job (`queue.enqueueImplementerTurn`), and the queue wakes the Dispatcher.
 // Nothing is written before the last step, and a platform that cannot be asked ends the submit with 503.
+import type { ImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
+import type { TurnEnvironment } from "../db/repositories/implementer-repository.ts";
 import type { IntegrationsRepository } from "../db/repositories/integrations-repository.ts";
 import type { RepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { ImplementerStoreError } from "../db/implementer-errors.ts";
@@ -72,6 +74,8 @@ export type ImplementerServiceDependencies = {
   integrations: Pick<IntegrationsRepository, "get" | "list">;
   registry: Pick<IntegrationRegistry, "resolve">;
   models: ImplementerModels;
+  /** The workspace's environments (#818): a task may start with one, copied into the turn. */
+  environments: Pick<ImplementerEnvironmentsRepository, "get">;
   queue: Pick<JobQueue, "enqueueImplementerTurn" | "findImplementerTurn">;
   /** The operator's maximum cost per turn in whole US cents, read for each call. */
   operatorCostLimitCents(): Promise<number>;
@@ -161,6 +165,7 @@ function repeatOf(
     session.branch === task.branch &&
     turn.instruction === task.instruction &&
     turn.costLimitCents === task.costLimitCents &&
+    (turn.environment?.id ?? null) === task.environmentId &&
     sameModel(turn.modelChoice, task.model);
   if (!same)
     throw new ImplementerError(
@@ -341,6 +346,24 @@ export function createImplementerService(
           { reason },
         );
 
+      // The environment is read now and copied into the turn: what it says at this moment is what the task runs with, whatever
+      // is done to it afterwards. An id of another workspace, or of one that is gone, is the same refusal.
+      let environment: TurnEnvironment | null = null;
+      if (task.environmentId !== null) {
+        const found = await deps.environments.get(task.environmentId);
+        if (found === undefined)
+          throw new ImplementerError(
+            "IMPLEMENTER_ENVIRONMENT_NOT_FOUND",
+            "There is no such environment in this workspace.",
+          );
+        environment = {
+          id: found.id,
+          name: found.name,
+          vcpus: found.vcpus,
+          setupScript: found.setupScript,
+        };
+      }
+
       if (task.costLimitCents !== null) {
         const maximumCents = await deps.operatorCostLimitCents();
         if (task.costLimitCents > maximumCents)
@@ -361,6 +384,7 @@ export function createImplementerService(
           instruction: task.instruction,
           modelChoice: task.model,
           costLimitCents: task.costLimitCents,
+          environment,
           createdBy: user.id,
           actorLogin: user.githubLogin,
           clientRequestId: task.clientRequestId,

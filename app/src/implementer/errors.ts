@@ -33,9 +33,11 @@ export const IMPLEMENTER_ERROR_CODES = [
   "IMPLEMENTER_BRANCH_CONFLICT",
   /**
    * The client request id made a task before, and this body is not that task's (another instruction, branch, base branch,
-   * repository, model or cost limit). Nothing is written; the answer carries the `runId` of the task the id made. 409.
+   * repository, model, environment or cost limit). Nothing is written; the answer carries the `runId` of the task the id made. 409.
    */
   "IMPLEMENTER_REQUEST_REUSED",
+  /** The environment named by the body is not one of this workspace (another workspace's looks the same), or it was deleted. 404. */
+  "IMPLEMENTER_ENVIRONMENT_NOT_FOUND",
   /** The model is not one the claim would run (`reason` says why). 422. */
   "IMPLEMENTER_MODEL_NOT_ALLOWED",
   /** The cost limit is above the operator's maximum per turn; the answer carries `maximumCents`. 422. */
@@ -61,6 +63,7 @@ export const IMPLEMENTER_ERROR_STATUS: Record<
   IMPLEMENTER_BRANCH_EXISTS: 409,
   IMPLEMENTER_BRANCH_CONFLICT: 409,
   IMPLEMENTER_REQUEST_REUSED: 409,
+  IMPLEMENTER_ENVIRONMENT_NOT_FOUND: 404,
   IMPLEMENTER_MODEL_NOT_ALLOWED: 422,
   EXCEEDS_OPERATOR_MAXIMUM: 422,
   IMPLEMENTER_GITHUB_UNAVAILABLE: 503,
@@ -75,6 +78,7 @@ export type ImplementerIssue = {
     | "instruction"
     | "model"
     | "costLimitCents"
+    | "environmentId"
     | "clientRequestId";
   code: "required" | "invalid" | "too_long" | BranchNameIssue;
 };

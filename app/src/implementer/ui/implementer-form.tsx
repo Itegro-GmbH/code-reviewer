@@ -56,7 +56,13 @@ import {
 import { useRequest } from "./use-request.ts";
 
 type FieldKey =
-  "repository" | "baseBranch" | "branch" | "instruction" | "model" | "cost";
+  | "repository"
+  | "baseBranch"
+  | "branch"
+  | "instruction"
+  | "model"
+  | "environment"
+  | "cost";
 type Errors = Partial<Record<FieldKey, string>>;
 /** A sentence on the form that is no field's; for a request id that made another task it brings the link to that task. */
 type Problem = { sentence: string; runId?: string };
@@ -68,6 +74,7 @@ const FIELD_OF_ISSUE: Record<ImplementerIssue["field"], FieldKey | null> = {
   instruction: "instruction",
   model: "model",
   costLimitCents: "cost",
+  environmentId: "environment",
   clientRequestId: null,
 };
 
@@ -77,12 +84,17 @@ const FIELD_OF_FAILURE: Record<string, FieldKey> = {
   IMPLEMENTER_BRANCH_CONFLICT: "branch",
   IMPLEMENTER_BASE_BRANCH_NOT_FOUND: "baseBranch",
   IMPLEMENTER_MODEL_NOT_ALLOWED: "model",
+  IMPLEMENTER_ENVIRONMENT_NOT_FOUND: "environment",
   EXCEEDS_OPERATOR_MAXIMUM: "cost",
 };
 
 // Stable functions for `useRequest`.
 const loadRepositories = (api: ImplementerApi) => api.repositories();
 const loadModels = (api: ImplementerApi) => api.models();
+const loadEnvironments = (api: ImplementerApi) => api.environments();
+
+/** What the picker's "no environment" option is called; an environment's id can never be this (they are UUIDs). */
+const STANDARD = "__standard";
 const loadBranches = (api: ImplementerApi, repositoryId: string) =>
   api.branches(repositoryId);
 
@@ -140,6 +152,7 @@ export function ImplementerForm({
     provider: "",
     model: "",
   });
+  const [environmentPick, setEnvironmentPick] = useState(STANDARD);
   const [cost, setCost] = useState("");
   const [errors, setErrors] = useState<Errors>({});
   const [problem, setProblem] = useState<Problem | null>(null);
@@ -160,6 +173,11 @@ export function ImplementerForm({
     loadRepositories,
   );
   const [models, reloadModels] = useRequest(api, "all", loadModels);
+  const [environments, reloadEnvironments] = useRequest(
+    api,
+    "all",
+    loadEnvironments,
+  );
   const [branches, reloadBranches] = useRequest(
     api,
     repositoryId === "" ? null : repositoryId,
@@ -202,6 +220,12 @@ export function ImplementerForm({
   const baseBranch = typedBase !== "" ? typedBase : pickedBase;
   const modelOptions = models.state === "ready" ? models.data : undefined;
   const choice = modelChoiceOf(modelOptions, modelPick);
+  const environmentList =
+    environments.state === "ready" ? environments.data.environments : [];
+  // A pick that is no longer in the list (it was deleted since) falls back to the standard.
+  const environment = environmentList.find(
+    (candidate) => candidate.id === environmentPick,
+  );
 
   function clear(...keys: FieldKey[]) {
     setErrors((current) => {
@@ -238,6 +262,7 @@ export function ImplementerForm({
       branch,
       instruction,
       model: choice,
+      ...(environment === undefined ? {} : { environmentId: environment.id }),
       ...(costLimit.ok && costLimit.cents !== null
         ? { costLimitCents: costLimit.cents }
         : {}),
@@ -338,6 +363,8 @@ export function ImplementerForm({
       setProblem(rest ? { sentence } : null);
     } else if (field !== undefined) {
       setErrors({ [field]: sentence });
+      // The list the person chose from is out of date.
+      if (field === "environment") reloadEnvironments();
     } else {
       setProblem({ sentence });
     }
@@ -411,6 +438,14 @@ export function ImplementerForm({
         : {}),
     }),
   );
+
+  const environmentOptions: ModelOption[] = [
+    { id: STANDARD, label: FORM_COPY.environmentStandard },
+    ...environmentList.map((candidate) => ({
+      id: candidate.id,
+      label: `${candidate.name} (${candidate.vcpus} vCPU, ${candidate.memoryGb} GB${candidate.setupScript === "" ? "" : ", setup script"})`,
+    })),
+  ];
 
   return (
     <form
@@ -565,6 +600,41 @@ export function ImplementerForm({
               status: models.failure.status,
             })}
             onRetry={reloadModels}
+          />
+        ) : null}
+        <ModelSelect
+          name="environment"
+          label={FORM_COPY.environment}
+          value={environment?.id ?? STANDARD}
+          options={environmentOptions}
+          onChange={(id) => {
+            setEnvironmentPick(id);
+            clear("environment");
+          }}
+          error={errors.environment}
+          disabled={environments.state === "loading"}
+          placeholder={FORM_COPY.environmentPlaceholder}
+        />
+        {environment !== undefined && environment.setupScript !== "" ? (
+          <p className="-mt-3 text-sm text-muted-foreground">
+            {FORM_COPY.environmentScriptNote}
+          </p>
+        ) : (
+          <p className="-mt-3 text-sm text-muted-foreground">
+            {FORM_COPY.environmentHint}{" "}
+            <Link
+              href={workspacePath(workspaceSlug, "/environments")}
+              className="font-semibold underline underline-offset-4"
+            >
+              {FORM_COPY.environmentLink}
+            </Link>
+            .
+          </p>
+        )}
+        {environments.state === "failed" ? (
+          <LoadFailure
+            sentence={FORM_COPY.environmentLoadFailed}
+            onRetry={reloadEnvironments}
           />
         ) : null}
         <FormField

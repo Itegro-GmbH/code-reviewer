@@ -125,7 +125,7 @@ const MANAGED: ModelOptions = {
   ],
 };
 
-/** The four calls as mocks, so a test reads what was sent. */
+/** The calls as mocks, so a test reads what was sent. */
 type FakeApi = { [K in keyof ImplementerApi]: Mock<ImplementerApi[K]> };
 
 function fakeApi(overrides: Partial<FakeApi> = {}): FakeApi {
@@ -142,6 +142,9 @@ function fakeApi(overrides: Partial<FakeApi> = {}): FakeApi {
       );
     }),
     models: vi.fn<ImplementerApi["models"]>(() => Promise.resolve(ok(OWN))),
+    environments: vi.fn<ImplementerApi["environments"]>(() =>
+      Promise.resolve(ok({ environments: [], maximum: 50 })),
+    ),
     startTask: vi.fn<ImplementerApi["startTask"]>(() =>
       Promise.resolve(ok({ runId: "run-1", sessionId: "session-1" })),
     ),
@@ -1508,6 +1511,7 @@ describe("labels and order", () => {
       "Task",
       "Provider",
       "Model",
+      "Environment",
       /^Cost limit/,
     ].map((label) => control(label));
     const form = order[0]?.closest("form") as HTMLFormElement;
@@ -1519,6 +1523,160 @@ describe("labels and order", () => {
     );
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
-    expect(within(form).getAllByRole("combobox").length).toBe(4);
+    expect(within(form).getAllByRole("combobox").length).toBe(5);
+  });
+});
+
+const NODE_ENV = {
+  id: "env-node",
+  name: "Node 22",
+  vcpus: 6,
+  memoryGb: 12,
+  setupScript: "pnpm install\n",
+  createdAt: "2026-11-02T08:00:00.000Z",
+  updatedAt: "2026-11-02T08:00:00.000Z",
+};
+const BARE_ENV = {
+  ...NODE_ENV,
+  id: "env-bare",
+  name: "Bare",
+  vcpus: 1,
+  memoryGb: 2,
+  setupScript: "",
+};
+const withEnvironments = () =>
+  fakeApi({
+    environments: vi.fn<ImplementerApi["environments"]>(() =>
+      Promise.resolve(ok({ environments: [BARE_ENV, NODE_ENV], maximum: 50 })),
+    ),
+  });
+
+describe("the environment picker (#818)", () => {
+  // #818-T22
+  it("offers the standard first, then each environment of the workspace with its size", async () => {
+    const user = userEvent.setup();
+    renderForm(withEnvironments());
+    await waitFor(() =>
+      expect(control("Environment")).not.toHaveProperty("disabled", true),
+    );
+
+    await user.click(control("Environment"));
+    const options = await screen.findAllByRole("option");
+
+    expect(options.map((option) => option.textContent)).toEqual([
+      "Standard (2 vCPU, 4 GB, no setup script)",
+      "Bare (1 vCPU, 2 GB)",
+      "Node 22 (6 vCPU, 12 GB, setup script)",
+    ]);
+    expect(control("Environment").textContent).toContain("Standard");
+  });
+
+  // #818-T22
+  it("sends no environment when the standard stays chosen, exactly the body of before", async () => {
+    const user = userEvent.setup();
+    const api = withEnvironments();
+    renderForm(api);
+    await fillIn(user);
+
+    await user.click(startButton());
+
+    await waitFor(() => expect(api.startTask).toHaveBeenCalledTimes(1));
+    expect(api.startTask.mock.calls[0]?.[0]).not.toHaveProperty(
+      "environmentId",
+    );
+  });
+
+  // #818-T22
+  it("sends the id of the chosen environment", async () => {
+    const user = userEvent.setup();
+    const api = withEnvironments();
+    renderForm(api);
+    await fillIn(user);
+
+    await chooseOption(user, control("Environment"), /^Node 22/);
+    await user.click(startButton());
+
+    await waitFor(() => expect(api.startTask).toHaveBeenCalledTimes(1));
+    expect(api.startTask.mock.calls[0]?.[0]).toMatchObject({
+      environmentId: "env-node",
+    });
+  });
+
+  // #818-T22
+  it("makes a task with another environment another task: the request id changes with the body", async () => {
+    const user = userEvent.setup();
+    const api = withEnvironments();
+    api.startTask.mockResolvedValueOnce(
+      refused(503, "IMPLEMENTER_GITHUB_UNAVAILABLE"),
+    );
+    renderForm(api);
+    await fillIn(user);
+    await user.click(startButton());
+    await waitFor(() => expect(api.startTask).toHaveBeenCalledTimes(1));
+    await screen.findByText(/GitHub could not be reached/);
+
+    await chooseOption(user, control("Environment"), /^Bare/);
+    await user.click(startButton());
+    await waitFor(() => expect(api.startTask).toHaveBeenCalledTimes(2));
+
+    const [first, second] = api.startTask.mock.calls.map((call) => call[0]);
+    expect(first?.clientRequestId).not.toBe(second?.clientRequestId);
+  });
+
+  // #818-T22
+  it("says what the chosen environment does before the agent starts", async () => {
+    const user = userEvent.setup();
+    renderForm(withEnvironments());
+    await waitFor(() =>
+      expect(control("Environment")).not.toHaveProperty("disabled", true),
+    );
+
+    await chooseOption(user, control("Environment"), /^Node 22/);
+
+    expect(
+      screen.getByText(/runs its setup script once before the agent starts/i),
+    ).toBeTruthy();
+  });
+
+  // #818-T22
+  it("does not stop a task without an environment when the environments cannot be loaded, and says so", async () => {
+    const user = userEvent.setup();
+    const api = fakeApi({
+      environments: vi.fn<ImplementerApi["environments"]>(() =>
+        Promise.resolve(refused(500, "UNEXPECTED_RESPONSE")),
+      ),
+    });
+    renderForm(api);
+    await fillIn(user);
+
+    expect(
+      await screen.findByText(/environments could not be loaded/i),
+    ).toBeTruthy();
+    await user.click(startButton());
+
+    await waitFor(() => expect(api.startTask).toHaveBeenCalledTimes(1));
+    expect(api.startTask.mock.calls[0]?.[0]).not.toHaveProperty(
+      "environmentId",
+    );
+  });
+
+  // #818-T22
+  it("marks the environment field and loads the list again when the environment is gone", async () => {
+    const user = userEvent.setup();
+    const api = withEnvironments();
+    api.startTask.mockResolvedValueOnce(
+      refused(404, "IMPLEMENTER_ENVIRONMENT_NOT_FOUND"),
+    );
+    renderForm(api);
+    await fillIn(user);
+    await chooseOption(user, control("Environment"), /^Node 22/);
+
+    await user.click(startButton());
+
+    expect(
+      await screen.findByText(/environment does not exist any more/i),
+    ).toBeTruthy();
+    expect(control("Environment").getAttribute("aria-invalid")).toBe("true");
+    await waitFor(() => expect(api.environments).toHaveBeenCalledTimes(2));
   });
 });

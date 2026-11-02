@@ -77,6 +77,7 @@ import { migration as addJobCheckRunsReviewComment } from "./20261023120000_add_
 import { migration as addWorkspaceDeletedAt } from "./20261023150000_add_workspace_deleted_at.ts";
 import { migration as addJobsSupersededByIndex } from "./20261023160000_add_jobs_superseded_by_index.ts";
 import { migration as addUsersPosthogIdentity } from "./20261025140000_add_users_posthog_identity.ts";
+import { migration as addImplementerTurnEnvironment } from "./20261102150000_add_implementer_turn_environment.ts";
 import { migration as createImplementerEnvironments } from "./20261102140000_create_implementer_environments.ts";
 import { migration as createImplementerSessionsAndTurns } from "./20261030140000_create_implementer_sessions_and_turns.ts";
 import { migration as widenReviewKindChecksForImplementer } from "./20261030190000_widen_review_kind_checks_for_implementer.ts";
@@ -175,6 +176,8 @@ const migrations: Record<string, Migration> = {
     widenReviewKindChecksForImplementer,
   "20261102140000_create_implementer_environments":
     createImplementerEnvironments,
+  "20261102150000_add_implementer_turn_environment":
+    addImplementerTurnEnvironment,
 };
 
 export const migrationProvider: MigrationProvider = {

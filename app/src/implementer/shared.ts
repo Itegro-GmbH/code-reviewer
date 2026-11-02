@@ -5,6 +5,7 @@
 import "server-only";
 import { notFound } from "next/navigation";
 import { getCapabilities } from "../capabilities/shared.ts";
+import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import { createIntegrationsRepository } from "../db/repositories/integrations-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { getDatabase } from "../db/startup.ts";
@@ -58,6 +59,7 @@ export function implementerServiceFor(workspaceId: string): ImplementerService {
     repositories: createRepositoriesRepository(db, workspaceId),
     integrations: createIntegrationsRepository(db, workspaceId),
     registry: integrationRegistry,
+    environments: createImplementerEnvironmentsRepository(db, workspaceId),
     models: createImplementerModels({
       keyMode: async () => keyModeForJob(await readEntitlements()),
       configuredProviders: () => configuredKeyProviders(keys),

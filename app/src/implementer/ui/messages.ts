@@ -45,6 +45,16 @@ export const FORM_COPY = {
   providerPlaceholder: "Choose a provider",
   model: "Model",
   modelPlaceholder: "Choose a model",
+  environment: "Environment",
+  environmentPlaceholder: "Choose an environment",
+  environmentHint:
+    "A size and a setup script for this task. Without a choice the standard applies. Environments are managed under",
+  environmentLink: "Environments",
+  environmentScriptNote:
+    "This environment runs its setup script once before the agent starts. It counts into the task's time limit, and a failing script ends the task without a model call.",
+  environmentLoadFailed:
+    "The environments could not be loaded. A task can still be sent with the standard.",
+  environmentStandard: "Standard (2 vCPU, 4 GB, no setup script)",
   costLimit: "Cost limit (USD, optional)",
   costLimitHint:
     "The task stops when it reaches this amount. Leave empty for the maximum.",
@@ -179,6 +189,13 @@ const FIELD_COPY: Record<
     invalid: "This model choice cannot be used. Choose the model again.",
     too_long: "This model choice cannot be used. Choose the model again.",
   },
+  environmentId: {
+    required: "Choose an environment, or the standard.",
+    invalid:
+      "This environment cannot be used. Reload the page and choose another.",
+    too_long:
+      "This environment cannot be used. Reload the page and choose another.",
+  },
   costLimitCents: {
     required: "Enter an amount, for example 2.50, or leave the field empty.",
     invalid: "Enter an amount in dollars, for example 2.50.",
@@ -261,6 +278,8 @@ const failureCopy = (
     "This name clashes with a branch of the repository: a branch name cannot be a folder of another (foo and foo/bar). A new branch name is needed.",
   IMPLEMENTER_REQUEST_REUSED:
     "A task with this form was already started, and what you sent now is not that task. Open the task that was started, or reload the page to send a new one.",
+  IMPLEMENTER_ENVIRONMENT_NOT_FOUND:
+    "This environment does not exist any more. Choose another, or the standard.",
   IMPLEMENTER_MODEL_NOT_ALLOWED: hasReason(failure.reason)
     ? MODEL_REFUSAL_COPY[failure.reason]
     : MODEL_REFUSED_GENERIC,

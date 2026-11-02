@@ -44,6 +44,14 @@ export type StoredImplementerSession = {
   updatedAt: string;
 };
 
+/** The environment a turn started with, copied when the turn was written (#818). The id is kept to say which one; nothing points at it. */
+export type TurnEnvironment = {
+  id: string;
+  name: string;
+  vcpus: number;
+  setupScript: string;
+};
+
 export type StoredImplementerTurn = {
   id: string;
   sessionId: string;
@@ -58,6 +66,8 @@ export type StoredImplementerTurn = {
   jobId: string;
   createdBy: string;
   createdAt: string;
+  /** The environment the person chose; null for a task without one (the standard). */
+  environment: TurnEnvironment | null;
 };
 
 /** What is known when a task is accepted. */
@@ -70,6 +80,8 @@ export type NewImplementerTask = {
   modelChoice: ModelChoice;
   costLimitCents: number | null;
   createdBy: string;
+  /** A copy of the environment chosen at submit (#818); left out or null for none. */
+  environment?: TurnEnvironment | null;
 };
 
 /**
@@ -166,6 +178,18 @@ function turnFrom(
     jobId: row.job_id,
     createdBy: row.created_by,
     createdAt: row.created_at,
+    environment:
+      row.environment_id === null ||
+      row.environment_name === null ||
+      row.environment_vcpus === null ||
+      row.environment_setup_script === null
+        ? null
+        : {
+            id: row.environment_id,
+            name: row.environment_name,
+            vcpus: row.environment_vcpus,
+            setupScript: row.environment_setup_script,
+          },
   };
 }
 
@@ -281,6 +305,10 @@ export function createImplementerRepository(
             job_id: jobId,
             created_by: task.createdBy,
             created_at: timestamp,
+            environment_id: task.environment?.id ?? null,
+            environment_name: task.environment?.name ?? null,
+            environment_vcpus: task.environment?.vcpus ?? null,
+            environment_setup_script: task.environment?.setupScript ?? null,
           })
           .returningAll()
           .executeTakeFirstOrThrow();

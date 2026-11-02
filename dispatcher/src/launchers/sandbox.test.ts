@@ -1338,3 +1338,100 @@ describe("the Sandbox-Launcher in the Dispatcher core", () => {
     }
   });
 });
+
+describe("the size of a job (#818)", () => {
+  const implementer = (overrides: Partial<LaunchSpec> = {}) =>
+    spec({
+      kind: "implementer",
+      timeoutSeconds: 3600,
+      ...overrides,
+    });
+
+  // #818-T30
+  it.each([
+    [1, "1536m", "1280m"],
+    [2, "3072m", "2560m"],
+    [4, "7168m", "6656m"],
+    [6, "11264m", "10752m"],
+    [8, "15360m", "14848m"],
+  ])(
+    "creates the VM with the size of an Implementer job, %i vCPU, and the container memory follows it",
+    async (vcpus, limit, reservation) => {
+      const result = await launch(build(), implementer({ vcpus }));
+
+      expect(result).toStrictEqual({ ok: true });
+      expect(service.creates[0]?.vcpus).toBe(vcpus);
+      const args = dockerRun()?.args ?? [];
+      expect(valuesOf(args, "--memory")).toStrictEqual([limit]);
+      expect(valuesOf(args, "--memory-swap")).toStrictEqual([limit]);
+      expect(valuesOf(args, "--memory-reservation")).toStrictEqual([
+        reservation,
+      ]);
+      // What the container may have fits in the VM beside the OS and Docker: at most VM memory minus 256 MB.
+      expect(Number.parseInt(limit)).toBeLessThanOrEqual(vcpus * 2048 - 256);
+    },
+  );
+
+  // #818-T30
+  it("keeps the standard when the job names no size: 2 vCPU and 3 GB, as before", async () => {
+    await launch(build(), implementer());
+
+    expect(service.creates[0]?.vcpus).toBe(2);
+    expect(valuesOf(dockerRun()?.args ?? [], "--memory")).toStrictEqual(["3g"]);
+  });
+
+  // #818-T31
+  it("the size of the job wins over the operator's configuration of the kind, which wins over the default; memory follows the job's size", async () => {
+    const configured = {
+      launcher: { vcpus: 4 },
+      container: { memory: { limit: "6g", reservation: "5g" } },
+    };
+
+    await launch(build(), implementer({ config: configured }));
+    await launch(build(), implementer({ config: configured, vcpus: 1 }));
+
+    expect(service.creates.map((created) => created.vcpus)).toStrictEqual([
+      4, 1,
+    ]);
+    const [withoutSize, withSize] = service.starts.filter(
+      (start) => start.label === "docker-run",
+    );
+    expect(valuesOf(withoutSize?.args ?? [], "--memory")).toStrictEqual(["6g"]);
+    expect(valuesOf(withSize?.args ?? [], "--memory")).toStrictEqual(["1536m"]);
+  });
+
+  // #818-T32
+  it.each<[string, unknown]>([
+    ["a size the platform does not have", 3],
+    ["more than the plan has", 16],
+    ["zero", 0],
+    ["a negative size", -2],
+    ["a fraction", 2.5],
+    ["not a number", "4"],
+    ["not a finite number", Number.NaN],
+  ])(
+    "refuses %s with its own code before it creates anything",
+    async (_what, vcpus) => {
+      const error = failure(
+        await launch(build(), implementer({ vcpus: vcpus as number })),
+      );
+
+      expect(error.code).toBe("sandbox_size_unsupported");
+      expect(error.retryable).toBe(false);
+      expect(service.creates).toStrictEqual([]);
+    },
+  );
+
+  // #818-T33
+  it.each(["diff", "dynamic"] as const)(
+    "never lets a %s job name a size: it is launched with the kind's own, whatever the spec says",
+    async (kind) => {
+      await launch(build(), spec({ kind, vcpus: 8 }));
+
+      expect(service.creates[0]?.vcpus).toBe(1);
+      expect(valuesOf(dockerRun()?.args ?? [], "--memory")).toStrictEqual([
+        "1536m",
+      ]);
+    },
+  );
+});
