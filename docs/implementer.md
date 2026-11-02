@@ -135,7 +135,8 @@ capability `implementer`, anywhere else the path is a 404 like an unknown one).
   keeps the standard, 2 vCPU and no script.
 - **The script** is text of at most 64 KB (UTF-8), literal data, stored exactly as written: no trimming, no changed line ends, no
   checking of what it says. Only what cannot be stored as text (a NUL byte, half of a character) is refused. It has no secrets
-  field and the page says so.
+  field and the page says so. **Setup scripts do not run yet** (the runner part of #818 is not built): the text is saved and nothing is
+  done with it when a task starts, and the page says so.
 - **Names** are unique within a workspace, whatever the case.
 - **The form** has an optional picker "Environment". It lists the standard first and then the environments with their size. A task
   that names none is the task of before.
@@ -144,7 +145,7 @@ capability `implementer`, anywhere else the path is a 404 like an unknown one).
   was deleted still gives the first task back. The Runs page shows which environment and size a task used.
 
 Routes (all `Cache-Control: no-store`, errors `{ "error": <code> }` with the codes of `app/src/implementer/environments/errors.ts`):
-`GET /api/w/<slug>/environments` (every member), `POST` the same path, `PUT` and `DELETE /api/w/<slug>/environments/<id>` (Owner or
+`GET /api/w/<slug>/environments` (every member; `?view=picker` is the list for the task form's picker, without the scripts), `POST` the same path, `PUT` and `DELETE /api/w/<slug>/environments/<id>` (Owner or
 Admin).
 
 ### How the size reaches the VM

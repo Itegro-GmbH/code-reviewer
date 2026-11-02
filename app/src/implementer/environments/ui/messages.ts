@@ -22,7 +22,6 @@ import {
 import {
   ENVIRONMENT_NAME_MAX_LENGTH,
   SETUP_SCRIPT_MAX_BYTES,
-  SETUP_SCRIPT_TIMEOUT_SECONDS,
 } from "../limits.ts";
 
 /** The words of the labels, hints and states of the page. */
@@ -47,7 +46,10 @@ export const PAGE_COPY = {
   size: "Size",
   sizeHint: "The size of the VM the task runs in. 2 GB of memory per vCPU.",
   script: "Setup script",
-  scriptHint: `Runs once in the repository's folder after the clone and before the model is called, with the same network as the agent (the package registries). It counts into the task's time limit, ${SETUP_SCRIPT_TIMEOUT_SECONDS / 60} minutes at most; a failing script ends the task without a model call. It is stored as written and shown to every member. Keep secrets out of it: it has no secrets field, and neither the git token nor the model key is reachable from it.`,
+  scriptHint:
+    "Setup scripts do not run yet: the text is saved, and a task does nothing with it for now. Once they run, the script will run as root with full internet access, in its own container with no secrets, and the agent will start afterwards with its own restricted network. The text is stored as written and shown to every member. Keep secrets out of it: there is no secrets field.",
+  scriptsNotRunning:
+    "Setup scripts do not run yet. They are saved with the environment, and nothing is done with them when a task starts.",
   scriptLabelShown: "Setup script",
   noScript: "No setup script",
   saved: "The environment was saved.",

@@ -69,8 +69,8 @@ async function startRoutes(
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-  const list = (workspace = "default") =>
-    listRoute.GET(new Request(base(workspace)), {
+  const list = (workspace = "default", query = "") =>
+    listRoute.GET(new Request(`${base(workspace)}${query}`), {
       params: Promise.resolve({ workspace }),
     } as Parameters<typeof listRoute.GET>[1]);
   const create = (body: unknown, workspace = "default") =>
@@ -174,6 +174,32 @@ describe("the environment route files", () => {
       expect(await response.json()).toEqual({ error: "forbidden" });
     }
     expect(await rows()).toMatchObject([{ id, name: "Node 22" }]);
+  });
+
+  // #818-T46
+  it("give the picker's list without a single script, to a Member as well", async () => {
+    const { db, workspaceId, list } = await startRoutes({ role: "member" });
+    const { createImplementerEnvironmentsRepository } =
+      await import("../../src/db/repositories/implementer-environments-repository.ts");
+    await createImplementerEnvironmentsRepository(db, workspaceId).create(
+      { ...BODY, setupScript: "SECRET-MARKER-SCRIPT\n", createdBy: "u1" },
+      50,
+    );
+
+    const picker = await list("default", "?view=picker");
+    const full = await list();
+
+    expect(picker.status).toBe(200);
+    const text = await picker.text();
+    expect(text).not.toContain("SECRET-MARKER-SCRIPT");
+    expect(JSON.parse(text)).toMatchObject({
+      environments: [
+        { name: "Node 22", vcpus: 4, memoryGb: 8, hasScript: true },
+      ],
+    });
+    // The page's own list still has the script.
+    expect(await full.text()).toContain("SECRET-MARKER-SCRIPT");
+    expect((await list("default", "?view=nope")).status).toBe(400);
   });
 
   // #818-T14

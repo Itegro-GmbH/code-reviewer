@@ -349,3 +349,185 @@ describe("changing and deleting", () => {
     expect(await screen.findByText(/does not exist any more/)).toBeTruthy();
   });
 });
+
+describe("what the page says about the script (#819 review)", () => {
+  // #818-T40
+  it("says plainly that setup scripts do not run yet, for a person who manages and for one who does not", async () => {
+    for (const canManage of [true, false]) {
+      show(fakeApi().api, canManage);
+      expect(
+        await screen.findByText(/setup scripts do not run yet/i),
+      ).toBeTruthy();
+      cleanup();
+    }
+  });
+
+  // #818-T40
+  it("describes the script as running as root with full internet access in its own container without secrets, the agent starting afterwards with its own restricted network — as a plan, not a fact", async () => {
+    show(fakeApi([]).api, true);
+    await screen.findByText(/standard/);
+    await userEvent.click(
+      screen.getByRole("button", { name: /new environment/i }),
+    );
+
+    const hint = (
+      screen
+        .getByLabelText("Setup script")
+        .closest("[data-field]") as HTMLElement
+    ).textContent;
+    expect(hint).toMatch(/do not run yet/i);
+    expect(hint).toMatch(/as root/);
+    expect(hint).toMatch(/full internet access/);
+    expect(hint).toMatch(/own container with no secrets/);
+    expect(hint).toMatch(/restricted network/);
+    // The old wording gave the script the agent's network.
+    expect(hint).not.toMatch(/same network as the agent/);
+    expect(hint).not.toMatch(/registries/);
+  });
+});
+
+describe("deleting while editing, a delete that finds nothing, and a delete in flight (#819 review)", () => {
+  // #818-T41
+  it("gives back 'New environment' and closes the form when the environment being edited is deleted", async () => {
+    const { api } = fakeApi();
+    show(api, true);
+    const node = (await screen.findByText("Node 22")).closest(
+      "li",
+    ) as HTMLElement;
+    await userEvent.click(within(node).getByRole("button", { name: /edit/i }));
+    expect(screen.getByLabelText("Name")).toBeTruthy();
+
+    await userEvent.click(
+      within(node).getByRole("button", { name: /delete/i }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Yes, delete it" }),
+    );
+
+    await waitFor(() => expect(screen.queryByText("Node 22")).toBeNull());
+    expect(screen.queryByLabelText("Name")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /new environment/i }),
+    ).toBeTruthy();
+  });
+
+  // #818-T41
+  it("keeps the form of another environment open when one that is not being edited is deleted", async () => {
+    const { api } = fakeApi();
+    show(api, true);
+    const node = (await screen.findByText("Node 22")).closest(
+      "li",
+    ) as HTMLElement;
+    const bare = screen.getByText("Bare").closest("li") as HTMLElement;
+    await userEvent.click(within(node).getByRole("button", { name: /edit/i }));
+
+    await userEvent.click(
+      within(bare).getByRole("button", { name: /delete/i }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Yes, delete it" }),
+    );
+
+    await waitFor(() => expect(screen.queryByText("Bare")).toBeNull());
+    expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe(
+      "Node 22",
+    );
+  });
+
+  // #818-T42
+  it("takes the row off the screen when the delete finds the environment gone, and says so", async () => {
+    const remove = vi.fn(async () => refused(404, "ENVIRONMENT_NOT_FOUND"));
+    show(fakeApi(undefined, { remove }).api, true);
+    const bare = (await screen.findByText("Bare")).closest("li") as HTMLElement;
+
+    await userEvent.click(
+      within(bare).getByRole("button", { name: /delete/i }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Yes, delete it" }),
+    );
+
+    expect(await screen.findByText(/does not exist any more/)).toBeTruthy();
+    expect(screen.queryByText("Bare")).toBeNull();
+    expect(screen.getByText("Node 22")).toBeTruthy();
+  });
+
+  // #818-T42
+  it("keeps the row for any other failure of the delete", async () => {
+    const remove = vi.fn(async () => refused(500, "UNEXPECTED_RESPONSE"));
+    show(fakeApi(undefined, { remove }).api, true);
+    const bare = (await screen.findByText("Bare")).closest("li") as HTMLElement;
+
+    await userEvent.click(
+      within(bare).getByRole("button", { name: /delete/i }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Yes, delete it" }),
+    );
+
+    expect(await screen.findByText(/server answered/i)).toBeTruthy();
+    expect(screen.getByText("Bare")).toBeTruthy();
+  });
+
+  // #818-T43
+  it("disables every Delete button while a delete is in flight, and enables them again when it ends", async () => {
+    let finish: (value: RequestResult<{ removed: true }>) => void = () =>
+      undefined;
+    const remove = vi.fn(
+      () =>
+        new Promise<RequestResult<{ removed: true }>>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    show(fakeApi(undefined, { remove }).api, true);
+    const bare = (await screen.findByText("Bare")).closest("li") as HTMLElement;
+
+    await userEvent.click(
+      within(bare).getByRole("button", { name: /delete/i }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Yes, delete it" }),
+    );
+
+    await waitFor(() => expect(remove).toHaveBeenCalledTimes(1));
+    for (const button of screen.getAllByRole("button", { name: /^delete/i }))
+      expect(button).toHaveProperty("disabled", true);
+    finish(ok({ removed: true as const }));
+    await waitFor(() => expect(screen.queryByText("Bare")).toBeNull());
+    for (const button of screen.getAllByRole("button", { name: /^delete/i }))
+      expect(button).toHaveProperty("disabled", false);
+  });
+});
+
+describe("the size group (#819 review)", () => {
+  // #818-T44
+  it("is described by its hint, and by the refusal instead of the hint when the server refuses the size", async () => {
+    const create = vi.fn(async () =>
+      refused(400, "ENVIRONMENT_REQUEST_INVALID", {
+        issues: [{ field: "vcpus", code: "invalid" }],
+      }),
+    );
+    show(fakeApi([], { create }).api, true);
+    await screen.findByText(/standard/);
+    await userEvent.click(
+      screen.getByRole("button", { name: /new environment/i }),
+    );
+    const group = screen.getByRole("radiogroup");
+    const describedBy = () =>
+      (group.getAttribute("aria-describedby") ?? "")
+        .split(" ")
+        .map((id) => document.getElementById(id)?.textContent ?? "");
+
+    expect(describedBy()).toEqual([
+      expect.stringContaining("2 GB of memory per vCPU"),
+    ]);
+    expect(group.getAttribute("aria-invalid")).not.toBe("true");
+
+    await userEvent.type(screen.getByLabelText("Name"), "x");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await screen.findByText(describeFieldIssue("vcpus", "invalid"));
+    expect(describedBy()).toEqual([describeFieldIssue("vcpus", "invalid")]);
+    expect(group.getAttribute("aria-invalid")).toBe("true");
+  });
+});

@@ -35,6 +35,21 @@ function setup(overrides: Partial<EnvironmentService> = {}) {
       calls.push("list"),
       { environments: [VIEW], maximum: 50 }
     ),
+    listForPicker: async () => (
+      calls.push("picker"),
+      {
+        environments: [
+          {
+            id: "env-1",
+            name: "Node 22",
+            vcpus: 4,
+            memoryGb: 8,
+            hasScript: true,
+          },
+        ],
+        maximum: 50,
+      }
+    ),
     get: async () => (calls.push("get"), VIEW),
     create: async (_user, body) => (
       calls.push(`create ${JSON.stringify(body)}`),
@@ -76,6 +91,42 @@ describe("the environment handlers", () => {
       environments: [VIEW],
       maximum: 50,
     });
+  });
+
+  // #818-T46
+  it("answers the picker's list, without the scripts, for ?view=picker", async () => {
+    const { handlers, url, calls } = setup();
+
+    const response = await handlers.list(new Request(`${url}?view=picker`));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(calls).toEqual(["picker"]);
+    expect(await response.json()).toEqual({
+      environments: [
+        {
+          id: "env-1",
+          name: "Node 22",
+          vcpus: 4,
+          memoryGb: 8,
+          hasScript: true,
+        },
+      ],
+      maximum: 50,
+    });
+  });
+
+  // #818-T46
+  it("refuses a view it does not know and asks the service for nothing", async () => {
+    const { handlers, url, calls } = setup();
+
+    const response = await handlers.list(new Request(`${url}?view=everything`));
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: "ENVIRONMENT_REQUEST_INVALID",
+    });
+    expect(calls).toEqual([]);
   });
 
   // #818-T08

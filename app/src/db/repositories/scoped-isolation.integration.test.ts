@@ -1732,6 +1732,19 @@ const CASES: Case[] = [
     expectAnswer: (answer, a) => expect(answer).toEqual([a.environment]),
   },
   {
+    name: "environments.listSummaries",
+    run: (a) => a.environments.listSummaries(),
+    expectAnswer: (answer, a) =>
+      expect(answer).toEqual([
+        {
+          id: a.environment.id,
+          name: a.environment.name,
+          vcpus: a.environment.vcpus,
+          hasScript: true,
+        },
+      ]),
+  },
+  {
     name: "environments.get",
     run: (a, b) => a.environments.get(b.environment.id),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),

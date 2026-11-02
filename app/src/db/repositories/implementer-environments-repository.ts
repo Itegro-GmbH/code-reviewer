@@ -6,7 +6,7 @@
 // count, checked under a lock on the workspace row so that two creators cannot both take the last place. Everything about the
 // shape of the input (the size list, the script bound) is the service's.
 import "server-only";
-import type { Kysely, Selectable } from "kysely";
+import { sql, type Kysely, type Selectable } from "kysely";
 import { formatTimestamp } from "../codecs.ts";
 import { UNIQUE_VIOLATION, errorCode } from "../errors.ts";
 import type { Database, ImplementerEnvironmentsTable } from "../schema.ts";
@@ -21,6 +21,14 @@ export type StoredEnvironment = {
   createdBy: string;
   createdAt: string;
   updatedAt: string;
+};
+
+/** An environment without its script: what a picker needs. `hasScript` is whether the script is not empty. */
+export type EnvironmentSummary = {
+  id: string;
+  name: string;
+  vcpus: number;
+  hasScript: boolean;
 };
 
 export type EnvironmentFields = {
@@ -42,6 +50,11 @@ export type UpdateOutcome =
 export type ImplementerEnvironmentsRepository = {
   /** All environments of the workspace by name (case ignored). */
   list(): Promise<StoredEnvironment[]>;
+  /**
+   * The same environments, by name, without reading their scripts (up to 64 KB each): only whether one is there. For a picker, which
+   * has no use for the text.
+   */
+  listSummaries(): Promise<EnvironmentSummary[]>;
   get(id: string): Promise<StoredEnvironment | undefined>;
   /** `maximum` is how many the workspace may hold, counted with the new one. */
   create(environment: NewEnvironment, maximum: number): Promise<CreateOutcome>;
@@ -83,6 +96,27 @@ export function createImplementerEnvironmentsRepository(
         .orderBy("id")
         .execute();
       return rows.map(environmentFrom);
+    },
+
+    async listSummaries() {
+      const rows = await db
+        .selectFrom("implementer_environments")
+        .select([
+          "id",
+          "name",
+          "vcpus",
+          sql<boolean>`octet_length(setup_script) > 0`.as("has_script"),
+        ])
+        .where("workspace_id", "=", workspaceId)
+        .orderBy((eb) => eb.fn("lower", ["name"]))
+        .orderBy("id")
+        .execute();
+      return rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        vcpus: row.vcpus,
+        hasScript: row.has_script,
+      }));
     },
 
     async get(id) {

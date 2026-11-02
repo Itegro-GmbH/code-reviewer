@@ -29,8 +29,24 @@ export type EnvironmentList = {
   maximum: number;
 };
 
+/** An environment as the form's picker needs it: no script, only whether there is one. */
+export type EnvironmentPickerView = {
+  id: string;
+  name: string;
+  vcpus: number;
+  memoryGb: number;
+  hasScript: boolean;
+};
+
+export type EnvironmentPickerList = {
+  environments: EnvironmentPickerView[];
+  maximum: number;
+};
+
 export type EnvironmentService = {
   list(): Promise<EnvironmentList>;
+  /** The list for the picker of the task form: the scripts (up to 64 KB each, 50 of them) are not read, not sent. */
+  listForPicker(): Promise<EnvironmentPickerList>;
   get(id: string): Promise<EnvironmentView>;
   create(user: { id: string }, body: unknown): Promise<EnvironmentView>;
   update(id: string, body: unknown): Promise<EnvironmentView>;
@@ -90,6 +106,16 @@ export function createEnvironmentService({
     async list() {
       return {
         environments: (await environments.list()).map(viewOf),
+        maximum: ENVIRONMENTS_PER_WORKSPACE_MAX,
+      };
+    },
+
+    async listForPicker() {
+      return {
+        environments: (await environments.listSummaries()).map((summary) => ({
+          ...summary,
+          memoryGb: memoryGbOf(summary.vcpus),
+        })),
         maximum: ENVIRONMENTS_PER_WORKSPACE_MAX,
       };
     },
