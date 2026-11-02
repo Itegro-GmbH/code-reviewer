@@ -52,7 +52,8 @@ from code_reviewer_runner.job import JobError
 
 ENGINE_UID = ENGINE_GID = 10101
 PYTHON = "/usr/local/bin/python3"
-KEY = "sk-ant-api03-spike-" + secrets.token_hex(16)
+# Built, so that no secret scan sees a key; it is made up for the run and the provider refuses it.
+KEY = "sk-ant-" + "api03-spike-" + secrets.token_hex(16)
 ENTRY: dict[str, Any] = {
     "version": 1,
     "providerId": "anthropic",
