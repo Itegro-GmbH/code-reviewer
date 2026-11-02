@@ -30,7 +30,9 @@ export function happyFake(): FakeSandboxService {
   fake.onExec(STEPS.checkNoContainers, { stdout: "" });
   fake.onExec(STEPS.scanFilesystem, { stdout: "SCAN_DONE\n" });
   fake.onExec(STEPS.inspectRestoredImage, { stdout: `${IMAGE_ID}\n` });
-  fake.onExec(STEPS.inspectRestoredAgentImage, { stdout: `${AGENT_IMAGE_ID}\n` });
+  fake.onExec(STEPS.inspectRestoredAgentImage, {
+    stdout: `${AGENT_IMAGE_ID}\n`,
+  });
   fake.onExec(STEPS.probe, { stdout: PROBE_OK });
   fake.onExec(STEPS.sysboxProbe, { stdout: SYSBOX_PROBE_OK });
   return fake;

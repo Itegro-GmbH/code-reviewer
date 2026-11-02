@@ -44,12 +44,14 @@ import {
   CONTAINER_ENVIRONMENT,
   CREATE_FAILURES,
   IMPLEMENTER_ENVIRONMENT,
+  implementerEnvironment,
   SANDBOX_IMAGE_REFERENCE,
   WORK_VOLUME_ROOT,
   SANDBOX_REGION,
   VM_TIMEOUT_MARGIN_SECONDS,
   WORK_VOLUME_STEPS_SECONDS,
   planForKind,
+  type SysboxProof,
 } from "./sandbox.ts";
 import {
   SandboxServiceError,
@@ -85,6 +87,8 @@ export type SandboxCanaryOptions = {
    * canary then also runs the probe in the Implementer's profile.
    */
   implementer?: { config: LaunchConfig };
+  /** The snapshot's Sysbox verdict, given to the Implementer's probe as a job's container gets it (the probe does not read it). */
+  sysboxProof?: SysboxProof;
   /** Where the work volume of the Implementer's probe is made; the Launcher's own root unless a test brings one. */
   workVolumeRoot?: string;
   /** The time the probe is given (the VM timeout is this plus the margin). */
@@ -160,7 +164,11 @@ export function createSandboxCanary(
     try {
       args = renderDockerRunArguments(IMPLEMENTER_CONTAINER_SPEC, {
         image: options.imageDigest,
-        environment: { ...CONTAINER_ENVIRONMENT, ...IMPLEMENTER_ENVIRONMENT },
+        environment: {
+          ...CONTAINER_ENVIRONMENT,
+          ...IMPLEMENTER_ENVIRONMENT,
+          ...implementerEnvironment(plan, options.sysboxProof ?? "unproven"),
+        },
         command: ["probe"],
         overrides: plan.overrides,
         additions: SANDBOX_LAUNCHER_ADDITIONS,

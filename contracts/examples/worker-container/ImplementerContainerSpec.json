@@ -70,9 +70,9 @@
     "target": "/run/docker.sock"
   },
   "memory": {
-    "limit": "3g",
-    "reservation": "2560m",
-    "swap": "3g"
+    "limit": "768m",
+    "reservation": "512m",
+    "swap": "768m"
   },
   "pids": {
     "limit": 2048

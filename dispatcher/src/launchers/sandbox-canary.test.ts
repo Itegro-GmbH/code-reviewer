@@ -458,8 +458,8 @@ describe("the canary VM of a deployment that serves the Implementer (#765)", () 
     expect(valuesOf(args, "--env")).toEqual(
       expect.arrayContaining([
         "RUNNER_IMPLEMENTER_WORK_DIR=/work",
-        "RUNNER_IMPLEMENTER_NETWORK=registries",
         "RUNNER_IMPLEMENTER_MODEL_DOOR=docker",
+        "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB=2560",
       ]),
     );
     expect(args.at(-1)).toBe("probe");
@@ -790,17 +790,17 @@ describe("the flags of the Implementer's probe (#765)", () => {
     // The differences are only these, and each is the probe's own.
     expect(probe.at(-1)).toBe("probe");
     expect(job.at(-1)).not.toBe("probe");
-    expect(valuesOf(probe, "--memory")).toStrictEqual(["3g"]);
+    expect(valuesOf(probe, "--memory")).toStrictEqual(["768m"]);
     expect(valuesOf(probe, "--pids-limit")).toStrictEqual(["2048"]);
     expect(valuesOf(probe, "--sysctl").length).toBeGreaterThan(0);
   });
 
   it("follows the Implementer's configured container memory, not the Dynamic one", async () => {
-    const config = { container: { memory: { limit: "3500m" } } };
+    const config = { container: { memory: { limit: "3200m" } } };
     const probe = await probeArgs(config);
 
-    expect(valuesOf(probe, "--memory")).toStrictEqual(["3500m"]);
-    expect(valuesOf(probe, "--memory-reservation")).toStrictEqual(["2560m"]);
+    expect(valuesOf(probe, "--memory")).toStrictEqual(["3200m"]);
+    expect(valuesOf(probe, "--memory-reservation")).toStrictEqual(["512m"]);
     expect(valuesOf(probeCall()?.args ?? [], "--memory")).toStrictEqual([
       "1536m",
     ]);

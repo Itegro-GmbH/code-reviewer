@@ -80,6 +80,26 @@ describe("the Sandbox-Launcher's configuration from the environment", () => {
     ).toStrictEqual(["pr-agent", "opencode"]);
   });
 
+  // #745 step 4: the verdict of the snapshot's record is optional and read only by the Implementer
+  it.each(["proven", "unproven", undefined])(
+    "accepts the snapshot's Sysbox verdict %s",
+    (verdict) => {
+      const sandbox = sandboxFromEnvironment(
+        configured(
+          verdict === undefined ? {} : { SANDBOX_SYSBOX_PROOF: verdict },
+        ),
+        never,
+      );
+      expect(
+        sandbox.launcher({
+          settings: loadSettings(BASE),
+          logger: recordingLogger(),
+          background: () => undefined,
+        }),
+      ).not.toBe(noLauncher);
+    },
+  );
+
   // #329 (additional): the record of the golden snapshot pipeline (#330) is what these variables hold
   it("accepts the snapshot id and the image id of a golden snapshot record as they are", () => {
     const record = GoldenRecordSchema.parse({
@@ -134,6 +154,11 @@ describe("the Sandbox-Launcher's configuration from the environment", () => {
       "an image id of the wrong length",
       configured({ SANDBOX_IMAGE_DIGEST: "sha256:abc" }),
       "SANDBOX_IMAGE_DIGEST",
+    ],
+    [
+      "a Sysbox verdict that is neither proven nor unproven",
+      configured({ SANDBOX_SYSBOX_PROOF: "probably" }),
+      "SANDBOX_SYSBOX_PROOF",
     ],
     [
       "a hand-over time of zero",

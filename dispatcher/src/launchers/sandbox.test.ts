@@ -26,6 +26,8 @@ import {
   SYSBOX_PREPARE_SECONDS,
   WORK_VOLUME_STEPS_SECONDS,
   minimumVmTimeoutMargin,
+  agentMemoryMb,
+  implementerEnvironment,
   planForKind,
   validateKindConfig,
   VM_TIMEOUT_MARGIN_SECONDS,
@@ -665,7 +667,8 @@ describe("the Sandbox-Launcher", () => {
 
   // #745-T15: the model door is a second container of an implementer turn, and the VM holds it beside the Worker.
   it("keeps room for the model door beside the Worker of an implementer turn, and for no door beside a review's", async () => {
-    // 2 vCPU are 4096 MB: 256 for the OS and dockerd, 256 for the door. 3600m fits a review but not a turn.
+    // 2 vCPU are 4096 MB: a review keeps 256 for the OS and dockerd; a turn keeps 512 for them and the Sysbox daemons and
+    // 256 for the door. 3600m fits a review but not a turn.
     const config = {
       launcher: { vcpus: 2 },
       container: { memory: { limit: "3600m", reservation: "3g" } },
@@ -678,7 +681,7 @@ describe("the Sandbox-Launcher", () => {
     expect(() =>
       validateKindConfig("implementer", {
         launcher: { vcpus: 2 },
-        container: { memory: { limit: "3584m", reservation: "3g" } },
+        container: { memory: { limit: "3328m", reservation: "3g" } },
       }),
     ).not.toThrow();
   });
@@ -770,14 +773,14 @@ describe("the Sandbox-Launcher", () => {
   });
 
   // #760-T02
-  it("starts an implementer job in the implementer profile: 2 vCPU, a 3 GB container, 2048 processes, the work volume, the Docker socket and the four names", async () => {
+  it("starts an implementer job in the implementer profile: 2 vCPU, a 768 MB container, 2048 processes, the work volume, the Docker socket and the names", async () => {
     await launch(build(), spec({ kind: "implementer" }));
 
     const args = dockerRun()?.args ?? [];
     expect(service.creates[0]?.vcpus).toBe(2);
-    expect(valuesOf(args, "--memory")).toStrictEqual(["3g"]);
-    expect(valuesOf(args, "--memory-reservation")).toStrictEqual(["2560m"]);
-    expect(valuesOf(args, "--memory-swap")).toStrictEqual(["3g"]);
+    expect(valuesOf(args, "--memory")).toStrictEqual(["768m"]);
+    expect(valuesOf(args, "--memory-reservation")).toStrictEqual(["512m"]);
+    expect(valuesOf(args, "--memory-swap")).toStrictEqual(["768m"]);
     expect(valuesOf(args, "--pids-limit")).toStrictEqual(["2048"]);
     expect(valuesOf(args, "--mount")).toStrictEqual([
       `type=volume,source=code-reviewer-work-${JOB_ID},target=/work`,
@@ -789,9 +792,9 @@ describe("the Sandbox-Launcher", () => {
     expect(valuesOf(args, "--env")).toStrictEqual([
       "HOME=/home/runner",
       "RUNNER_DIFF_JOB_USER=10001:10001",
-      "RUNNER_IMPLEMENTER_EGRESS_PORT=10182",
+      "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB=2560",
       "RUNNER_IMPLEMENTER_MODEL_DOOR=docker",
-      "RUNNER_IMPLEMENTER_NETWORK=registries",
+      "RUNNER_IMPLEMENTER_SANDBOX_PROOF=unproven",
       "RUNNER_IMPLEMENTER_WORK_DIR=/work",
       "RUNNER_JOB_TIMEOUT_SECONDS=1200",
     ]);
@@ -857,7 +860,7 @@ describe("the Sandbox-Launcher", () => {
       spec({
         kind: "implementer",
         jobId: "00000000-0000-4000-8000-000000000002",
-        config: { container: { memory: { limit: "3500m" } } },
+        config: { container: { memory: { limit: "3200m" } } },
       }),
     );
 
@@ -869,14 +872,14 @@ describe("the Sandbox-Launcher", () => {
     ]);
     // The limit alone: the default reservation stays, and the swap follows the limit.
     expect(valuesOf(service.starts[1]?.args ?? [], "--memory")).toStrictEqual([
-      "3500m",
+      "3200m",
     ]);
     expect(
       valuesOf(service.starts[1]?.args ?? [], "--memory-swap"),
-    ).toStrictEqual(["3500m"]);
+    ).toStrictEqual(["3200m"]);
     expect(
       valuesOf(service.starts[1]?.args ?? [], "--memory-reservation"),
-    ).toStrictEqual(["2560m"]);
+    ).toStrictEqual(["512m"]);
   });
 
   // #760-T04
@@ -916,11 +919,49 @@ describe("the Sandbox-Launcher", () => {
     expect(() => validateKindConfig("implementer", {})).not.toThrow();
     expect(planForKind("implementer", {})).toMatchObject({
       vcpus: 2,
-      overrides: { memory: { limit: "3g", reservation: "2560m" } },
+      overrides: { memory: { limit: "768m", reservation: "512m" } },
+      agentMemoryMb: 2560,
     });
     expect(SANDBOX_KIND_DEFAULTS.implementer).toStrictEqual({
       vcpus: 2,
-      memory: { limit: "3g", reservation: "2560m" },
+      memory: { limit: "768m", reservation: "512m" },
+    });
+  });
+
+  // #745 step 4: what is left of the VM for the agent's container, at each size the platform has.
+  it.each<[number, number]>([
+    [1, 512],
+    [2, 2560],
+    [4, 6656],
+    [6, 10752],
+    [8, 14848],
+  ])(
+    "leaves the agent's container %i vCPU: %i MB after the OS, Control and the door",
+    (vcpus, megabytes) => {
+      expect(
+        planForKind("implementer", { launcher: { vcpus } }).agentMemoryMb,
+      ).toBe(megabytes);
+      expect(agentMemoryMb(vcpus, 768)).toBe(megabytes);
+    },
+  );
+
+  // #745 step 4: reviews are never given the names of the sandbox.
+  it("hands the snapshot's Sysbox verdict to an implementer job and to no other kind", async () => {
+    await launch(
+      build({ sysboxProof: "proven" }),
+      spec({ kind: "implementer" }),
+    );
+    expect(valuesOf(dockerRun()?.args ?? [], "--env")).toContain(
+      "RUNNER_IMPLEMENTER_SANDBOX_PROOF=proven",
+    );
+  });
+
+  it("calls a verdict that is not given unproven", () => {
+    expect(
+      implementerEnvironment(planForKind("implementer", {}), "unproven"),
+    ).toStrictEqual({
+      RUNNER_IMPLEMENTER_SANDBOX_PROOF: "unproven",
+      RUNNER_IMPLEMENTER_AGENT_MEMORY_MB: "2560",
     });
   });
 

@@ -26,9 +26,9 @@ const VOLUME = "code-reviewer-work-job-1";
 const ROOT = "/var/lib/code-reviewer-work";
 const IMPLEMENTER_ENVIRONMENT = {
   RUNNER_IMPLEMENTER_WORK_DIR: "/work",
-  RUNNER_IMPLEMENTER_EGRESS_PORT: "10182",
-  RUNNER_IMPLEMENTER_NETWORK: "registries",
   RUNNER_IMPLEMENTER_MODEL_DOOR: "docker",
+  RUNNER_IMPLEMENTER_SANDBOX_PROOF: "proven",
+  RUNNER_IMPLEMENTER_AGENT_MEMORY_MB: "2560",
 };
 const DOCKER_SOCKET_MOUNT =
   "type=bind,source=/var/run/docker.sock,target=/run/docker.sock,readonly";
@@ -87,14 +87,14 @@ describe("rendering the implementer profile", () => {
       DOCKER_SOCKET_MOUNT,
     ]);
     expect(WORK_VOLUME_PATH).toBe("/work");
-    expect(valuesOf(args, "--memory")).toStrictEqual(["3g"]);
-    expect(valuesOf(args, "--memory-reservation")).toStrictEqual(["2560m"]);
-    expect(valuesOf(args, "--memory-swap")).toStrictEqual(["3g"]);
+    expect(valuesOf(args, "--memory")).toStrictEqual(["768m"]);
+    expect(valuesOf(args, "--memory-reservation")).toStrictEqual(["512m"]);
+    expect(valuesOf(args, "--memory-swap")).toStrictEqual(["768m"]);
     expect(valuesOf(args, "--pids-limit")).toStrictEqual(["2048"]);
     expect(valuesOf(args, "--env")).toStrictEqual([
-      "RUNNER_IMPLEMENTER_EGRESS_PORT=10182",
+      "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB=2560",
       "RUNNER_IMPLEMENTER_MODEL_DOOR=docker",
-      "RUNNER_IMPLEMENTER_NETWORK=registries",
+      "RUNNER_IMPLEMENTER_SANDBOX_PROOF=proven",
       "RUNNER_IMPLEMENTER_WORK_DIR=/work",
     ]);
   });
