@@ -1270,6 +1270,102 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     expect(ended.usage?.aiCalls).toBe(answered.length);
     return { ended, answered };
   }
+
+  /** The `vcpus` the Dispatcher reported for the VM of a run (the app keeps it with the VM's minutes), or null while none is. */
+  async function reportedVcpus(runId: string): Promise<number | null> {
+    const client = new Client({ connectionString: factoryDatabaseUrls().app });
+    await client.connect();
+    try {
+      const { rows } = await client.query<{ vcpus: number | null }>(
+        "select vcpus from job_vm_runs where job_id = $1",
+        [runId],
+      );
+      return rows[0]?.vcpus ?? null;
+    } finally {
+      await client.end();
+    }
+  }
+
+  /** The values of a flag in the `docker run` the Dispatcher rendered for the last Worker. */
+  function workerFlag(flag: string): string[] {
+    const worker = required(
+      required(dispatcher, "The Dispatcher")
+        .containers()
+        .filter((container) => container.mode === "worker-once")
+        .at(-1),
+      "The Worker",
+    );
+    return worker.args.flatMap((arg, index) =>
+      arg === flag ? [worker.args[index + 1] ?? ""] : [],
+    );
+  }
+
+  // #818-F01
+  test("F01 a task with an environment of 6 vCPU: the form offers it, the Dispatcher creates the VM of that size and the container gets the memory that follows the size; the run says which environment it used, and the size is recorded", async ({
+    page,
+  }) => {
+    const theLlm = required(llm, "The fake LLM");
+    theLlm.scriptAgent({
+      when: { lastUserContains: "[F01-TEXT]" },
+      steps: [],
+      finalText: "Nothing to change.",
+    });
+    await signInAsAdmin(page);
+    const created = await page.request.post(
+      `/api/w/${WORKSPACE}/environments`,
+      { data: { name: "Six cores", vcpus: 6, setupScript: "" } },
+    );
+    expect(created.status(), await created.text()).toBe(201);
+
+    const runId = await startTask(page, {
+      repository: GADGETS.fullName,
+      branch: "implementer/f01",
+      instruction: "[F01-TEXT] Change something.",
+      environment: "Six cores",
+    });
+    await runEnded(page, runId, RUN_TIMEOUT);
+
+    // 6 vCPU are 12 GB; the container gets 11264 MB of them (1 GB stays with the OS and Docker), a reservation 512 MB below.
+    expect(workerFlag("--memory")).toEqual(["11264m"]);
+    expect(workerFlag("--memory-reservation")).toEqual(["10752m"]);
+    await eventually(
+      "the size of the VM to be recorded",
+      async () => (await reportedVcpus(runId)) === 6,
+    );
+    // The run says which environment it used.
+    await page.goto(`/w/${WORKSPACE}/runs/${runId}`);
+    await expect(page.getByText("Six cores (6 vCPU, 12 GB)")).toBeVisible();
+    await expectQuiet();
+  });
+
+  // #818-F02
+  test("F02 a task without an environment is the task of before: the standard of 2 vCPU and 3 GB for the container, nothing about an environment on the run", async ({
+    page,
+  }) => {
+    const theLlm = required(llm, "The fake LLM");
+    theLlm.scriptAgent({
+      when: { lastUserContains: "[F02-TEXT]" },
+      steps: [],
+      finalText: "Nothing to change.",
+    });
+    await signInAsAdmin(page);
+
+    const runId = await startTask(page, {
+      repository: GADGETS.fullName,
+      branch: "implementer/f02",
+      instruction: "[F02-TEXT] Change something.",
+    });
+    await runEnded(page, runId, RUN_TIMEOUT);
+
+    expect(workerFlag("--memory")).toEqual(["3g"]);
+    await eventually(
+      "the size of the VM to be recorded",
+      async () => (await reportedVcpus(runId)) === 2,
+    );
+    await page.goto(`/w/${WORKSPACE}/runs/${runId}`);
+    await expect(page.getByText("Environment", { exact: true })).toHaveCount(0);
+    await expectQuiet();
+  });
 });
 
 // The catalog's price of the model of the cache journeys, in US dollars per million tokens (the fixture the app's catalog was filled from).

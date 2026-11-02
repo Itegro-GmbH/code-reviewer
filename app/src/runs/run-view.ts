@@ -29,7 +29,6 @@ import {
   type ReasonDescription,
 } from "./error-copy.ts";
 import type { ProductIdentity } from "../product-identity/identity.ts";
-import { memoryGbOf } from "../implementer/environments/limits.ts";
 import { runDurationMs } from "./run-duration.ts";
 import type { RunPriceView } from "../workspace-billing/view.ts";
 
@@ -444,6 +443,8 @@ function implementerRowView(
 }
 
 const MAX_ENVIRONMENT_NAME_CHARS = 200;
+/** The platform's memory per vCPU (`contracts/environment-sizes.v1.json`); not imported from the Implementer: this module is below it. */
+const MEMORY_GB_PER_VCPU = 2;
 
 /** The setup block of a stored result, or null: read field by field like the rest, an entry that is not what the contract says is left out. */
 function readStoredSetup(result: JsonValue | null): {
@@ -509,7 +510,7 @@ function environmentView(
       cleanTaskLine(head(environment.name, MAX_ENVIRONMENT_NAME_CHARS * 4)),
     ),
     vcpus: environment.vcpus,
-    memoryGb: memoryGbOf(environment.vcpus),
+    memoryGb: environment.vcpus * MEMORY_GB_PER_VCPU,
     setup,
   };
 }

@@ -126,6 +126,8 @@ export type Task = {
   model?: string;
   /** Dollars as a person types them. */
   costLimit?: string;
+  /** An environment of the workspace by the start of its name (#818); left out, the standard stays chosen. */
+  environment?: string;
 };
 
 /** Fills in the form of the Implementer page as a person does, sends it, and returns the id of the run it leads to. */
@@ -153,6 +155,12 @@ export async function startTask(page: Page, task: Task): Promise<string> {
       `^${(task.model ?? "Lane Coder").replace(/[^A-Za-z0-9 ]/g, "\\$&")}`,
     ),
   );
+  if (task.environment !== undefined)
+    await chooseOption(
+      page,
+      "Environment",
+      new RegExp(`^${task.environment.replace(/[^A-Za-z0-9 ]/g, "\\$&")}`),
+    );
   if (task.costLimit !== undefined)
     await page
       .getByRole("textbox", { name: "Cost limit (USD, optional)", exact: true })

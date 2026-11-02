@@ -137,12 +137,29 @@ capability `implementer`, anywhere else the path is a 404 like an unknown one).
   checking of what it says. Only what cannot be stored as text (a NUL byte, half of a character) is refused. It has no secrets
   field and the page says so.
 - **Names** are unique within a workspace, whatever the case.
-- **Nothing points at an environment.** A task copies size and script when it starts (the next part of #818), so changing or
-  deleting an environment never touches a running or a past task.
+- **The form** has an optional picker "Environment". It lists the standard first and then the environments with their size. A task
+  that names none is the task of before.
+- **The task keeps its own copy.** When the task is sent, its turn copies the environment's name, size and script (`implementer_turns.environment_*`, no foreign key).
+  Changing or deleting the environment later touches no running or past task, and sending the same request again after the environment
+  was deleted still gives the first task back. The Runs page shows which environment and size a task used.
 
 Routes (all `Cache-Control: no-store`, errors `{ "error": <code> }` with the codes of `app/src/implementer/environments/errors.ts`):
 `GET /api/w/<slug>/environments` (every member), `POST` the same path, `PUT` and `DELETE /api/w/<slug>/environments/<id>` (Owner or
 Admin).
+
+### How the size reaches the VM
+
+The Dispatcher creates the VM when it claims the job, before any Worker exists, so the size comes from the App's answer to the claim and from nothing else:
+
+1. The claim answer (`SplitClaimResponse`, authenticated with the Dispatcher's credential) carries `job.vcpus` for a turn that has an environment, and for nothing else. Neither the name nor the script is in it.
+2. The core of the Dispatcher believes the number for the kind `implementer` only. A review job's answer may say anything: the field is dropped, so a review can never name a size.
+3. The Launcher accepts only the sizes of `SANDBOX_VCPUS` (1, 2, 4, 6, 8). Any other number fails the launch with the code `sandbox_size_unsupported` (not retryable, nothing created); a size the platform itself refuses at the create reaches the usual codes (`sandbox_rejected`, `sandbox_quota_exceeded`).
+4. **Precedence** of the size of an Implementer VM: the turn's environment, then `DISPATCHER_WORKER_CONFIG.implementer.launcher.vcpus`, then the default of the kind (2). The container's memory follows the size when the job names one (the operator's `container.memory` for the kind applies to the jobs that name none): 1 vCPU gets 1536 MB (the 1.5 GB a review runs in), n >= 2 vCPU get `2048 n - 1024` MB (3, 7, 11 and 15 GB), the reservation 512 MB below (256 MB for 1 vCPU), no swap.
+5. The Dispatcher reports the VM's size with the VM (`vcpus` in `VmStartRequest`) for an Implementer job only (an App of the release before refuses a field it does not know, and a refused report only costs the measuring of the minutes), and the App keeps it in `job_vm_runs.vcpus`, so that minutes can be priced per size later. Billing is off in the factory; nothing is charged by size today.
+
+What does not depend on the size: the work volume is a directory of the VM's disk (64 GB on the Pro plan, whatever the vCPUs), `pids` stays 2048, the steps of the volume and `IMPLEMENTER_PROBE_EXTRA_SECONDS` are per command, the canary runs at the configured default size and proves the image, Docker and the hardening, not a size, and a VM lives `timeoutSeconds` plus the margin (at most 6 hours, under the platform's 24 hours per session) whatever its size, so the reaper and the stop route recognise it by its name. In the privileged lane `/work` is a tmpfs of 3 GB.
+
+The setup script itself is not run by this part of #818: the claim path carries it (`implementer.environment`, only to a Worker that names the claim feature `implementer_environment`, otherwise the task ends `implementer_engine_unavailable`, free), and the runner part follows. `environment_setup_failed` (the code of a script that fails or runs out of time before the model is called, free) and the `setup` block of a result (the end of its scrubbed output, shown in Runs) are in the contract and in the Runs page already.
 
 ## Limits
 
@@ -156,7 +173,7 @@ Admin).
 | Branch name | At most 200 characters, each part between slashes at most 240 bytes, git's rules, not the base branch | Form and route |
 | Base branches offered | 100 names, default first; a base beyond that can be typed | Route |
 | Result | 200 commits, 500 files, 8,192 characters of summary, the whole report under 4 MB (Vercel cuts a body at 4.5 MB) | Contract and runner |
-| VM and container | 2 vCPU and 4 GB for the VM, 3 GB for the container without swap, 2048 processes, `/work` mounted `nosuid,nodev`, exec allowed | Dispatcher (`DISPATCHER_WORKER_CONFIG` can override the sizes) |
+| VM and container | By default 2 vCPU and 4 GB for the VM, 3 GB for the container without swap, 2048 processes, `/work` mounted `nosuid,nodev`, exec allowed. A task whose environment names a size gets that VM (1 to 8 vCPU, 2 GB each) and a container memory that follows it ("How the size reaches the VM") | Dispatcher (`DISPATCHER_WORKER_CONFIG` can override the default sizes) |
 | Parallel work | `RUNNER_DISPATCH_MAX_RUNNING` (2) for all kinds together, and one running turn per session | App and Dispatcher |
 
 **Billing.** Turns are billed at the Dynamic rate for now: the billing code treats the kind as `dynamic` (`projectKindOf`),
@@ -173,6 +190,7 @@ used):
 | `branch_exists` | Raised only at the first push, which is the first batch after the agent's first commit or the final push, when GitHub answers `[rejected]` because the branch exists with other history (someone made it after the submit check). The agent has worked by then, so the model was used, and the run is still not billed. Nothing was pushed and the agent's work is lost | free | Choose a new branch name and start again |
 | `base_branch_not_found` | The base branch was not on GitHub when the runner cloned | free | Check the name; it may have been deleted since the submit |
 | `clone_failed` | The repository could not be downloaded | free | Try again; look at the installation if it persists |
+| `environment_setup_failed` | The setup script of the task's environment failed (a non-zero exit) or ran out of its time limit, before the model was called, so nothing was used. The code and the page that shows it exist; the runner that reports it is the next part of #818, so no task ends with it yet. The Runs page shows the exit status, the time and the end of the output (scrubbed of known secrets) | free | Fix the script in Environments and send the task again |
 | `setup_failed` | The runner could not prepare the workplace before the turn started: git too old, a guard file missing, the guard's self-test failed, the mirror could not be made, a port of the slot was taken. It is the free code of a turn that never started: once the model was used, the same trouble shows as `branch_violation`, and an unexpected error as `agent_gave_up`. The Runs-page sentence says "the repository's own set-up steps", which is not what happens: no repository script is ever run | free | Look at the Worker log of the job; it is the image or the VM |
 | `agent_gave_up` | The agent ended without a commit and nothing to commit, or its engine died after the model had been used (what it had committed is pushed when possible). The summary also says when files the agent wrote could not be kept, such as `opencode.json` | charged | Read its summary; try again with a clearer or smaller task |
 | `push_rejected` | The repository did not accept the pushed work (a rule, a permission, a push of `.github/workflows/` which is never allowed), or the final push could not reach GitHub. Work pushed earlier stays on the branch | charged | Check the branch, then start again |
@@ -203,8 +221,8 @@ that were pushed first. A Worker that is stopped while it works (`runner_shutdow
 
 ## Out of scope
 
-- **Setup scripts.** The repository's own install and set-up steps are not run for the agent; it installs what it needs
-  through the registries and may run what it finds.
+- **The repository's own setup scripts.** The repository's own install and set-up steps are not run for the agent; it installs what it needs
+  through the registries and may run what it finds. A setup script is the workspace's choice, in an environment (above).
 - **Docker.** There is no Docker, no sudo and no system package installs. A repository whose tests need containers cannot be
   tested here.
 - **Secrets for tests.** No credential of any kind reaches the agent: tests that need an API key or a database URL cannot run.
