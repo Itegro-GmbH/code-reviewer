@@ -218,16 +218,16 @@ describe("the probe verdict", () => {
       line({
         version: 1,
         engines: ["pr-agent", "opencode"],
-        reasons: ["implementer_git_too_old"],
+        reasons: ["implementer_setpriv_missing"],
       }),
     );
 
     expect(verdict).toStrictEqual({
       engines: ["pr-agent", "opencode"],
-      reasons: ["implementer_git_too_old"],
+      reasons: ["implementer_setpriv_missing"],
       passed: true,
     });
-    expect(IMPLEMENTER_REASONS).toHaveLength(9);
+    expect(IMPLEMENTER_REASONS).toHaveLength(7);
     expect(IMPLEMENTER_REASONS.every((r) => PROBE_REASONS.includes(r))).toBe(
       true,
     );

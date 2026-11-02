@@ -11,19 +11,20 @@ This module joins the pieces that already exist and are tested apart:
    volume (the `chown` the container profile expects), the engine launch with its network proven,
    the git workspace with the lease gate in front of every push;
 3. the turn (`ImplementerSession`, #764), in which a SIGTERM is a stop: the engine is ended at once,
-   what is committed is pushed (if the lease is still held) and the turn ends `runner_shutdown`;
+   what is committed on all local branches is pushed (if the lease is still held) and the turn ends
+   `runner_shutdown`;
 4. the result: the facts of the turn in a `JobResult`, the report held to the contract and to 4 MB
    (`report.py`), and no `implementer` key at all when no repository existed.
 
 **The lease.** The job host owns the lease token and beats the heart; this process asks it over the
-descriptor it was handed, before every push (`lease_gate`). Only `held` allows a push: a lost,
-superseded or unconfirmed lease ends the turn `lease_lost` and nothing is pushed after it. That is
-the `lease_check` rule of Dynamic, applied to the one write this kind makes.
+descriptor it was handed, before the final push lists anything and before every `git push`
+(`lease_gate`). Only `held` allows a push: a lost, superseded or unconfirmed lease ends the turn
+`lease_lost` and nothing is pushed after it. That is the `lease_check` rule of Dynamic, applied to
+the one write this kind makes.
 
 **A turn that cost money never ends free.** An unexpected error after the agent ran is
 `agent_gave_up`, not `runner_error`; the session classes `setup_failed` after the model was used as
-`branch_violation` (a repository that cannot be committed or verified is `RepositoryUnusable`, the
-same code).
+`agent_gave_up` too.
 """
 
 import logging
@@ -80,7 +81,8 @@ _log = logging.getLogger(__name__)
 
 # A SIGTERM gives the process `IMPLEMENTER_TERMINATE_GRACE_SECONDS` (60 s, `job_loop/host.py`)
 # before the host kills the group; the process leaves itself five seconds less, so that its own
-# end comes first. The container's `stopTimeoutSeconds` (90) is above both.
+# end comes first. The container's `stopTimeoutSeconds` (90) is above both. The engine comes out of
+# these 55 seconds, and so does the one final push (`session.STOP_PUSH_SECONDS`).
 SIGTERM_BACKSTOP_SECONDS = 55.0
 MAX_LOG_TAIL_CHARS = 4096
 _ENGINE_DIRECTORY = "engine"
@@ -315,6 +317,7 @@ def _early_block(workspace: GitWorkspace | None) -> dict[str, object] | None:
         "baseCommit": start,
         "headCommit": None,
         "pushed": False,
+        "branches": [],
         "commits": [],
         "filesChanged": [],
         "summary": "",

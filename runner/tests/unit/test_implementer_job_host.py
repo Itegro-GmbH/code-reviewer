@@ -88,6 +88,7 @@ def report(**changes: Any) -> dict[str, Any]:
         "baseCommit": "1" * 40,
         "headCommit": HEAD,
         "pushed": True,
+        "branches": [{"name": "work/b", "head": HEAD, "result": "pushed", "reason": None}],
         "commits": [{"sha": HEAD, "subject": "Add it"}],
         "filesChanged": [{"path": "a.ts", "status": "added"}],
         "summary": "Done.",

@@ -74,7 +74,7 @@ def test_the_implementer_reasons_are_in_the_list_and_only_they() -> None:
         reason.value for reason in SelfCheckReason if reason.value.startswith("implementer_")
     }
 
-    assert len(implementer) == 8
+    assert len(implementer) == 6
     assert implementer <= set(_PROBE["$defs"]["ProbeReason"]["enum"])
     assert "implementer_work_dir_not_exec" in implementer
 

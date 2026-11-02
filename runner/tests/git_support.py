@@ -2,9 +2,6 @@
 
 """Helpers of the Implementer's git workspace tests (#762); not a test file.
 
-* `guard_directory` builds the directory the image has at /opt/code-reviewer/guard from the hook and
-  the matrix of the repository (#761). A repository without them fails the test with the reason: the
-  guard tests never skip.
 * `Origin` is a bare repository standing in for GitHub, on the file system.
 * `HttpOrigin` serves such a repository over HTTP on loopback with `git http-backend`, and answers
   only a request that carries the `Authorization` header a token makes: the way the clone and the
@@ -15,7 +12,6 @@ import base64
 import gzip
 import http.server
 import os
-import re
 import shutil
 import subprocess
 import threading
@@ -23,50 +19,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-import pytest
-
-ROOT = Path(__file__).resolve().parents[2]
-HOOK = ROOT / "runner" / "guard" / "reference-transaction"
-MATRIX = ROOT / "runner" / "scripts" / "guard_matrix.sh"
-MIN_GIT = (2, 53)
 TOKEN = "ghs_dummy-installation-token-0123456789"
 
 
-def git_version(executable: str) -> tuple[int, ...]:
-    out = subprocess.run([executable, "--version"], capture_output=True, text=True, check=True)
-    found = re.search(r"git version (\d+(?:\.\d+)*)", out.stdout)
-    assert found is not None, out.stdout
-    return tuple(int(part) for part in found.group(1).split("."))
-
-
-def guard_git() -> str:
-    """The git the guard tests run: 2.53 or newer, or the test fails (older git is blind to a
-    branch switch, so a guard test on it would prove nothing)."""
+def system_git() -> str:
+    """The git the tests run (the first on PATH): any version, the Implementer no longer needs a
+    minimum."""
     executable = shutil.which("git")
     assert executable is not None, "git is not installed"
-    version = git_version(executable)
-    if version < MIN_GIT:
-        pytest.fail(
-            f"git {'.'.join(map(str, version))} at {executable} is older than 2.53: the branch "
-            "guard cannot be proven on it. Put a git 2.53 or newer first on PATH."
-        )
     return executable
-
-
-def guard_directory(target: Path) -> Path:
-    """The guard files as the image has them: the hook and the matrix side by side, root-style."""
-    for source in (HOOK, MATRIX):
-        if not source.is_file():
-            pytest.fail(
-                f"{source.relative_to(ROOT)} is missing: the guard files arrive with the worker "
-                "image change (#761)"
-            )
-    target.mkdir(parents=True, exist_ok=True)
-    for source in (HOOK, MATRIX):
-        destination = target / source.name
-        shutil.copyfile(source, destination)
-        destination.chmod(0o755)
-    return target
 
 
 def raw(*args: str, cwd: Path | None = None, git: str = "git", **env: str) -> str:
@@ -144,6 +105,31 @@ class Origin:
         sha = raw("rev-parse", "HEAD", cwd=self.seed, git=self.git)
         raw("checkout", "-q", "main", cwd=self.seed, git=self.git)
         return sha
+
+    def branches(self) -> list[str]:
+        """The names of the branches the origin has."""
+        done = subprocess.run(
+            [self.git, "--git-dir", str(self.path), "for-each-ref", "--format=%(refname)", "refs/"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return sorted(line for line in done.stdout.splitlines() if line)
+
+    def reject_ref_with_hook(self, ref: str, text: str) -> None:
+        """A pre-receive hook that refuses an update of this one ref with this message (GitHub's own
+        refusals, for one branch among several)."""
+        hook = self.path / "hooks" / "pre-receive"
+        hook.parent.mkdir(exist_ok=True)
+        hook.write_text(
+            "#!/bin/sh\n"
+            "status=0\n"
+            "while read old new ref; do\n"
+            f'  if [ "$ref" = "{ref}" ]; then echo \'{text}\' >&2; status=1; fi\n'
+            "done\n"
+            "exit $status\n"
+        )
+        hook.chmod(0o755)
 
     def reject_with_hook(self, text: str) -> None:
         """A pre-receive hook that refuses every push with this message (GitHub's own refusals)."""

@@ -79,9 +79,7 @@ class SelfCheckReason(StrEnum):
     # Why `implementer` is not advertised on top of a passing Dynamic check (#765,
     # `implementer/startup.py`). They are in the verdict next to the others.
     IMPLEMENTER_GIT_MISSING = "implementer_git_missing"
-    IMPLEMENTER_GIT_TOO_OLD = "implementer_git_too_old"
     IMPLEMENTER_SETPRIV_MISSING = "implementer_setpriv_missing"
-    IMPLEMENTER_GUARD_FILES_MISSING = "implementer_guard_files_missing"
     IMPLEMENTER_EGRESS_RULES_MISSING = "implementer_egress_rules_missing"
     IMPLEMENTER_WORK_DIR_MISSING = "implementer_work_dir_missing"
     IMPLEMENTER_WORK_DIR_NOT_PREPARED = "implementer_work_dir_not_prepared"

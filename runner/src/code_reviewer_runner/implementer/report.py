@@ -42,8 +42,21 @@ _SHA = re.compile(r"[0-9a-f]{40}")
 # for the app.
 _APP_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _BLOCK_KEYS = frozenset(
-    {"baseCommit", "headCommit", "pushed", "commits", "filesChanged", "summary", "opencode"}
+    {
+        "baseCommit",
+        "headCommit",
+        "pushed",
+        "branches",
+        "commits",
+        "filesChanged",
+        "summary",
+        "opencode",
+    }
 )
+MAX_BRANCHES = 50
+MAX_BRANCH_NAME_CHARS = 255
+MAX_REASON_CHARS = 40
+_REASON = re.compile(r"[a-z][a-z_]*")
 _STATUSES = frozenset(kind.value for kind in ChangeKind)
 
 
@@ -94,6 +107,25 @@ def _opencode_ok(value: object) -> bool:
     )
 
 
+def _branch_ok(value: object) -> bool:
+    branch = as_object(value)
+    if branch is None or set(branch) != {"name", "head", "result", "reason"}:
+        return False
+    head, result, reason = branch["head"], branch["result"], branch["reason"]
+    if not _is_string(branch["name"], MAX_BRANCH_NAME_CHARS, minimum=1):
+        return False
+    if not _sha_or_none(head, allow_none=True):
+        return False
+    if result == "pushed":
+        return head is not None and reason is None
+    return (
+        result == "rejected"
+        and isinstance(reason, str)
+        and len(reason) <= MAX_REASON_CHARS
+        and _REASON.fullmatch(reason) is not None
+    )
+
+
 def _sha_or_none(value: object, *, allow_none: bool) -> bool:
     if value is None:
         return allow_none
@@ -107,12 +139,17 @@ def valid_block(value: object) -> dict[str, Any] | None:
     if block is None or set(block) != set(_BLOCK_KEYS):
         return None
     base, head, pushed = block["baseCommit"], block["headCommit"], block["pushed"]
-    commits, files = block["commits"], block["filesChanged"]
+    commits, files, branches = block["commits"], block["filesChanged"], block["branches"]
     if not _sha_or_none(base, allow_none=False) or not _sha_or_none(head, allow_none=True):
         return None
     if not isinstance(pushed, bool) or (pushed and head is None):
         return None
     if not isinstance(commits, list) or not isinstance(files, list):
+        return None
+    if not isinstance(branches, list):
+        return None
+    branch_list = cast("list[object]", branches)
+    if len(branch_list) > MAX_BRANCHES or not all(_branch_ok(branch) for branch in branch_list):
         return None
     commit_list, file_list = cast("list[object]", commits), cast("list[object]", files)
     if len(commit_list) > MAX_COMMITS or len(file_list) > MAX_FILES:

@@ -15,7 +15,7 @@ from code_reviewer_runner.implementer.git_workspace import (
     WorkspaceLayout,
     WorkspaceSpec,
 )
-from git_support import TOKEN, Origin, guard_directory, raw
+from git_support import TOKEN, Origin, raw
 
 IDENTITY = GitIdentity(name="Code Review Implementer", email="implementer@example.invalid")
 BRANCH = "implementer/a1b2c3"
@@ -35,7 +35,6 @@ class Rig:
         self.layout = WorkspaceLayout(
             work_dir=base / "work",
             run_dir=base / "run",
-            guard_dir=guard_directory(base / "guard"),
             agent_home=base / "home",
         )
         self.layout.agent_home.mkdir()
@@ -65,12 +64,12 @@ class Rig:
 
     def prepared(self, base_branch: str = "main", branch: str = BRANCH) -> GitWorkspace:
         workspace = self.workspace(base_branch=base_branch, branch=branch)
-        workspace.prepare(self_test=False)
+        workspace.prepare()
         return workspace
 
 
 def agent_git(workspace: GitWorkspace, *args: str) -> subprocess.CompletedProcess[str]:
-    """What the agent runs: git in its repository with the guard active."""
+    """What the agent runs: git in its repository, in the environment the runner gives it."""
     return subprocess.run(
         [workspace.git, *args],
         cwd=workspace.repo,
@@ -81,35 +80,14 @@ def agent_git(workspace: GitWorkspace, *args: str) -> subprocess.CompletedProces
     )
 
 
-def reset_to(workspace: GitWorkspace, sha: str) -> None:
-    """Back to a known state between actions, without the guard (a test's own set-up)."""
-    raw(
-        "checkout",
-        "-qf",
-        BRANCH,
-        cwd=workspace.repo,
-        git=workspace.git,
-        GIT_CONFIG_SYSTEM="/dev/null",
-    )
-    raw(
-        "update-ref",
-        f"refs/heads/{BRANCH}",
-        sha,
-        cwd=workspace.repo,
-        git=workspace.git,
-        GIT_CONFIG_SYSTEM="/dev/null",
-    )
-    raw(
-        "reset",
-        "-q",
-        "--hard",
-        sha,
-        cwd=workspace.repo,
-        git=workspace.git,
-        GIT_CONFIG_SYSTEM="/dev/null",
-    )
-    raw("clean", "-qfd", cwd=workspace.repo, git=workspace.git, GIT_CONFIG_SYSTEM="/dev/null")
+def commit(workspace: GitWorkspace, name: str, content: str = "x\n") -> str:
+    """A commit on the branch that is checked out in the agent's repository."""
+    (workspace.repo / name).write_text(content)
+    assert agent_git(workspace, "add", "-A").returncode == 0
+    done = agent_git(workspace, "commit", "-qm", f"add {name}")
+    assert done.returncode == 0, done.stderr
+    return head_of(workspace)
 
 
-def spool_lines(workspace: GitWorkspace) -> list[str]:
-    return workspace.spool_path.read_text().splitlines()
+def head_of(workspace: GitWorkspace, ref: str = "HEAD") -> str:
+    return raw("rev-parse", ref, cwd=workspace.repo, git=workspace.git)

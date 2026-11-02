@@ -13,7 +13,7 @@ and every other, present or future, by the wildcard.
 Nothing executable or configurable comes from the repository (owner rule): no plugin, no MCP server,
 no LSP, no formatter, no setup script, and no repository skill or instruction file (the discovery
 flags of the engine are on, `skills.paths` is empty). The flags are not a proof of isolation on
-their own (spike #85); the engine user, the read-only guard files and the closed network are.
+their own (spike #85); the engine user and the closed network are.
 """
 
 from collections.abc import Mapping
@@ -109,13 +109,12 @@ def build_engine_config(
 
 
 _COMPACTION_FLAGS = ("OPENCODE_DISABLE_AUTOCOMPACT", "OPENCODE_DISABLE_PRUNE")
-# What the engine takes from the workspace's environment: git's guard, the identity and the config
-# that points git at the guard. PATH and HOME are composed here, and nothing else passes.
+# What the engine takes from the workspace's environment: git's config switches and the identity.
+# PATH and HOME are composed here, and nothing else passes.
 _WORKSPACE_NAMES = (
-    "GIT_CONFIG_SYSTEM",
+    "GIT_CONFIG_NOSYSTEM",
     "GIT_CONFIG_GLOBAL",
     "GIT_TERMINAL_PROMPT",
-    "CODE_REVIEWER_GUARD_CONF",
     "GIT_AUTHOR_NAME",
     "GIT_AUTHOR_EMAIL",
     "GIT_COMMITTER_NAME",
@@ -133,7 +132,7 @@ def implementer_environment(
 ) -> dict[str, str]:
     """The environment of the engine, which its tools inherit (#764): the flags of the Dynamic
     engine, the private home, a minimal `PATH` (the verified tools first, then the workspace's,
-    which holds the git of the guard), the git identity and guard variables of the workspace
+    which holds the pinned git), the git identity and config variables of the workspace
     (`GitWorkspace.agent_environment`) and the egress proxy variables (#763). Built from names,
     never by inheriting: no credential of any kind, no `NO_PROXY`.
 

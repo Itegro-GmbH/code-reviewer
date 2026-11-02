@@ -10,8 +10,8 @@
 #   2. what the Dynamic image has, in this mount namespace only: the engine user 10101 and the Diff job user
 #      10001 (bind-mounted copies of passwd and group), a fresh /run, the pinned OpenCode and ripgrep at
 #      /usr/local/bin, and their pin files in /opt/code-reviewer/pins (overlays, so the host is untouched); and what the
-#      Implementer's image adds (#761, #767): git 2.53 or newer under /usr/local (the pinned release, built by
-#      build_lane_git.sh), the guard files in /opt/code-reviewer/guard, and the mount point /work of its work volume;
+#      Implementer's image adds (#761, #767): the pinned git under /usr/local (built by
+#      build_lane_git.sh), and the mount point /work of its work volume;
 #   3. the preflight, which names whatever is missing and stops;
 #   3b. the `probe` entry mode of the Worker image (#324, #331) on this layout: with a read-only root it must advertise
 #      `opencode`, with a writable one it must not (the capability probe of the hosted deployment is this verdict);
@@ -80,10 +80,6 @@ for directory in bin libexec share; do
   cp -a --no-preserve=ownership "$LANE_GIT_TREE/usr/local/$directory/." "/usr/local/$directory/" \
     || fail "git cannot be installed (copy of $directory)"
 done
-# The guard files of the Implementer's branch guard (#761): the hook and the matrix, root-owned and read-only, where the Worker's
-# self-check and the guard's configuration look for them.
-install -d -m 0755 -o root -g root /opt/code-reviewer/guard
-install -m 0755 -o root -g root "$LANE_RUNNER_DIR/guard/reference-transaction" "$LANE_RUNNER_DIR/scripts/guard_matrix.sh" /opt/code-reviewer/guard/
 # The mount point of the Implementer's work volume. The container's wrapper puts a fresh tmpfs there for each container
 # (dynamic_e2e_worker_container.sh); the directory is removed when the lane ends if this made it.
 if [ ! -e /work ]; then

@@ -30,7 +30,6 @@ from code_reviewer_runner.dynamic_review.static_isolation import (
 )
 from code_reviewer_runner.implementer import startup
 from code_reviewer_runner.implementer.startup import (
-    GUARD_FILES,
     ImplementerSeams,
     check_implementer_runner,
     prepare_work_dir,
@@ -67,32 +66,6 @@ def which_without(tool: str) -> Callable[[str, str], str | None]:
     return which
 
 
-def version_is(*numbers: int) -> Callable[[str], tuple[int, ...] | None]:
-    def version(executable: str) -> tuple[int, ...] | None:
-        return numbers
-
-    return version
-
-
-def version_unreadable(executable: str) -> tuple[int, ...] | None:
-    return None
-
-
-def guard_files_usable(path: Path) -> bool:
-    return True
-
-
-def guard_files_all_but(name: str) -> Callable[[Path], bool]:
-    def usable(path: Path) -> bool:
-        return path.name != name
-
-    return usable
-
-
-def guard_files_none(path: Path) -> bool:
-    return False
-
-
 def prepared(directory: Path, uid: int, gid: int) -> None:
     return None
 
@@ -117,8 +90,6 @@ def seams(**changes: Any) -> ImplementerSeams:
     """Every prerequisite holds, except what the test changes."""
     base: dict[str, Any] = {
         "which": which_everything,
-        "git_version": version_is(2, 53, 0),
-        "guard_file_usable": guard_files_usable,
         "prepare_work_dir": prepared,
         "runs_scripts_as": runs_scripts,
         "is_directory": is_a_directory,
@@ -155,13 +126,7 @@ def test_with_every_prerequisite_the_check_passes() -> None:
     ("changes", "reason"),
     [
         ({"which": which_without("git")}, "git_missing"),
-        ({"git_version": version_unreadable}, "git_missing"),
-        ({"git_version": version_is(2, 52, 9)}, "git_too_old"),
-        ({"git_version": version_is(2, 43)}, "git_too_old"),
         ({"which": which_without("setpriv")}, "setpriv_missing"),
-        ({"guard_file_usable": guard_files_none}, "guard_files_missing"),
-        ({"guard_file_usable": guard_files_all_but(GUARD_FILES[0])}, "guard_files_missing"),
-        ({"guard_file_usable": guard_files_all_but(GUARD_FILES[1])}, "guard_files_missing"),
         ({"ports": SlotPorts(10180, 10181)}, "egress_rules_missing"),
         ({"ports": None}, "egress_rules_missing"),
         ({"is_directory": is_no_directory}, "work_dir_missing"),
@@ -444,3 +409,12 @@ def test_the_engines_the_loop_names_to_the_job_process_include_the_implementer()
         ENGINE_IMPLEMENTER,
     )
     assert engines_from_environment({}) == ()
+
+
+# The owner's git model: nothing in the repository is guarded, so no prerequisite exists only for a guard.
+def test_the_reasons_that_only_the_guard_needed_are_gone() -> None:
+    values = {reason.value for reason in SelfCheckReason}
+
+    assert "implementer_git_too_old" not in values
+    assert "implementer_guard_files_missing" not in values
+    assert startup.__dict__.get("GUARD_FILES") is None
