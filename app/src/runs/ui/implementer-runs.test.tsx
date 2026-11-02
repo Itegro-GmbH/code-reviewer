@@ -18,6 +18,7 @@ import { RunsList } from "./runs-list.tsx";
 afterEach(cleanup);
 
 const api = { list: vi.fn(), detail: vi.fn() } as unknown as RunsApi;
+const NONE_DROPPED = { invalid: 0, overflow: 0 };
 const SHA = "b".repeat(40);
 
 function row(overrides: Partial<RunRowView> = {}): RunRowView {
@@ -81,6 +82,7 @@ function task(
         },
       ],
       more: 0,
+      dropped: NONE_DROPPED,
     },
     head: {
       shortSha: SHA.slice(0, 7),
@@ -284,6 +286,7 @@ describe("the detail page of an implementer run", () => {
               },
             ],
             more: 0,
+            dropped: NONE_DROPPED,
           },
         }),
       }),
@@ -305,12 +308,53 @@ describe("the detail page of an implementer run", () => {
   it("shows no list of branches for a task that pushed none", () => {
     const { container } = renderDetail(
       detail({
-        implementer: task({ branches: { shown: [], more: 0 }, head: null }),
+        implementer: task({
+          branches: { shown: [], more: 0, dropped: NONE_DROPPED },
+          head: null,
+        }),
       }),
     );
 
     expect(container.querySelector('[data-slot="run-branches"]')).toBeNull();
     expect(screen.queryByText("Branches")).toBeNull();
+  });
+
+  it("says how many branches were left out, because of their name and because of the limit, even when none was pushed", () => {
+    const { container } = renderDetail(
+      detail({
+        implementer: task({
+          branches: {
+            shown: [],
+            more: 0,
+            dropped: { invalid: 2, overflow: 1 },
+          },
+          head: null,
+        }),
+      }),
+    );
+
+    expect(screen.getByText("Branches")).toBeTruthy();
+    expect(
+      container.querySelector('[data-slot="run-branches-invalid"]')
+        ?.textContent,
+    ).toBe("2 branches were not pushed because their names cannot be pushed.");
+    expect(
+      container.querySelector('[data-slot="run-branches-overflow"]')
+        ?.textContent,
+    ).toBe(
+      "1 further branch was not pushed because only 50 branches are pushed.",
+    );
+  });
+
+  it("says nothing about left-out branches when there are none", () => {
+    const { container } = renderDetail(detail({ implementer: task({}) }));
+
+    expect(
+      container.querySelector('[data-slot="run-branches-invalid"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-slot="run-branches-overflow"]'),
+    ).toBeNull();
   });
 
   it("renders a hostile branch name as text", () => {
@@ -330,6 +374,7 @@ describe("the detail page of an implementer run", () => {
               },
             ],
             more: 0,
+            dropped: NONE_DROPPED,
           },
         }),
       }),

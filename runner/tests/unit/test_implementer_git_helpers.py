@@ -4,7 +4,7 @@
 with, how the runner's git is started for the final push, and what travels in an error."""
 
 import shlex
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -108,10 +108,6 @@ def _listing_git(
     ) -> Outcome:
         words = list(args)
         calls.append(words)
-        if "ls-remote" in words:
-            return Outcome(
-                0, "".join(f"{tip}\trefs/heads/{name}\n" for name, tip in branches.items()), ""
-            )
         if "fetch" in words:
             refspec = words[-1]
             source, _, destination = refspec.removeprefix("+").partition(":")
@@ -123,7 +119,26 @@ def _listing_git(
             return Outcome(0, scratch.get(ref, "f" * 40) + "\n", "")
         return Outcome(0, "", "")
 
+    def stream(
+        self: GitProcess,
+        args: Sequence[str],
+        *,
+        env: Mapping[str, str],
+        consume: Callable[[bytes], None],
+        cwd: Path | str = "/",
+        spawn: Mapping[str, Any] | None = None,
+        timeout: float = 0.0,
+    ) -> Outcome:
+        words = list(args)
+        calls.append(words)
+        if "for-each-ref" in words:
+            consume(
+                "".join(f"{tip} refs/heads/{name}\n" for name, tip in branches.items()).encode()
+            )
+        return Outcome(0, "", "")
+
     monkeypatch.setattr(GitProcess, "run", run)
+    monkeypatch.setattr(GitProcess, "stream", stream)
     return calls
 
 
@@ -137,8 +152,9 @@ def _ready(tmp_path: Path) -> GitWorkspace:
     return workspace
 
 
-# The agent's repository is read by an upload-pack that runs as the agent's user, with no new
-# privileges, named on the command line; root never has the repository as its directory.
+# The agent's branches are listed by git running as the agent's user and fetched through an
+# upload-pack that runs as the agent's user, with no new privileges, named on the command line;
+# root never has the repository as its directory.
 def test_the_agents_branches_are_listed_and_fetched_by_an_upload_pack_that_runs_as_the_agents_user(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -147,12 +163,9 @@ def test_the_agents_branches_are_listed_and_fetched_by_an_upload_pack_that_runs_
 
     report = workspace.push_all(seconds=60.0)
 
-    reads = [call for call in calls if "ls-remote" in call or "fetch" in call]
-    assert [call[0] if call[0] == "ls-remote" else "fetch" for call in reads] == [
-        "ls-remote",
-        "fetch",
-        "fetch",
-    ]
+    assert [call[0] for call in calls if "for-each-ref" in call] == ["for-each-ref"]
+    reads = [call for call in calls if "fetch" in call]
+    assert len(reads) == 2
     for call in reads:
         (option,) = [argument for argument in call if argument.startswith("--upload-pack=")]
         command = shlex.split(option.removeprefix("--upload-pack="))
@@ -161,6 +174,42 @@ def test_the_agents_branches_are_listed_and_fetched_by_an_upload_pack_that_runs_
         assert "--clear-groups" in command and "--no-new-privs" in command
         assert command[-1] == "upload-pack" and command[-2].endswith("git")
     assert [entry.name for entry in report.branches] == ["implementer/a1", "second"]
+
+
+def test_the_fetch_asks_for_protocol_2_so_the_advertisement_is_for_one_ref_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _listing_git(monkeypatch, {"one": "a" * 40})
+    workspace = _ready(tmp_path)
+
+    workspace.push_all(seconds=60.0)
+
+    (fetch,) = [call for call in calls if "fetch" in call]
+    pairs = [(fetch[i], fetch[i + 1]) for i in range(len(fetch) - 1)]
+    assert ("-c", "protocol.version=2") in pairs
+
+
+def test_the_listing_is_read_as_the_agents_user_in_its_repository_never_by_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[tuple[list[str], str]] = []
+    real = GitProcess.stream
+
+    def stream(self: GitProcess, args: Sequence[str], **options: Any) -> Outcome:
+        seen.append((list(args), str(options.get("cwd"))))
+        return real(self, args, **options)
+
+    calls = _listing_git(monkeypatch, {"one": "a" * 40})
+    monkeypatch.setattr(GitProcess, "stream", stream)
+    workspace = _ready(tmp_path)
+
+    workspace.push_all(seconds=5.0)
+
+    # No fake of the stream ran, so the real git was started in the (missing) repository as the
+    # agent's user: the listing is the one call that has the repository as its directory.
+    listing = [entry for entry in seen if "for-each-ref" in entry[0]]
+    assert listing and listing[0][1] == str(workspace.repo)
+    assert not any("ls-remote" in call for call in calls)
 
 
 def test_the_fetch_of_a_branch_checks_its_objects_takes_no_tags_and_names_a_numbered_scratch_ref(

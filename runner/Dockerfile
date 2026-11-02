@@ -81,13 +81,12 @@ RUN python /fetch/scripts/fetch_toolchain.py --component pnpm --dest /toolchain/
     && chmod 0755 /toolchain/pnpm/bin/pnpm.cjs /toolchain/pnpm/bin/pnpx.cjs
 
 # ---- git-build: git 2.53 from the verified source (#761) ----
-# Debian bookworm ships git 2.39. The release is built here, once, from the pinned source (the Implementer
-# no longer needs a git of a minimum version; the build stays for the license and TLS reasons below): no Perl, Python, Tcl, gettext, expat or OpenSSL (nothing the agent needs; `git add -p` is the
-# one loss), against the GnuTLS flavour of libcurl, and with NO_OPENSSL: git is GPL-2.0-only and OpenSSL 3
-# (Apache-2.0) is not compatible with it, so no program of git may link it, neither its own `git-imap-send`
-# nor libcurl's TLS in `git-remote-https` (Debian's own git takes libcurl3-gnutls for the same reason); the system
-# config is in /etc (the image bakes none in),
-# builtins as symlinks so the copy into the final image keeps one binary.
+# The release is built here, once, from the pinned source. Nothing in the Implementer needs this version of git; the build
+# stays for the image's sake: no Perl (Debian's git package depends on it), Python, Tcl, gettext, expat or OpenSSL (nothing
+# the agent needs; `git add -p` is the one loss), against the GnuTLS flavour of libcurl, and with NO_OPENSSL: git is GPL-2.0-only and OpenSSL 3 (Apache-2.0) is not compatible with
+# it, so no program of git may link it, neither its own `git-imap-send` nor libcurl's TLS in `git-remote-https`
+# (Debian's own git takes libcurl3-gnutls for the same reason). The system config is in /etc (the image bakes none in),
+# builtins are symlinks so the copy into the final image keeps one binary.
 FROM ${PYTHON_IMAGE} AS git-build
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends build-essential libcurl4-gnutls-dev zlib1g-dev \

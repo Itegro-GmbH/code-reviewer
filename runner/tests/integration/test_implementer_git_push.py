@@ -11,6 +11,7 @@ import os
 import secrets
 import subprocess
 import threading
+import tracemalloc
 from pathlib import Path
 from typing import Any
 
@@ -22,9 +23,11 @@ from code_reviewer_runner.implementer.git_workspace import (
     REASON_NOT_A_COMMIT,
     REASON_NOT_FAST_FORWARD,
     REASON_OUT_OF_TIME,
+    REASON_PROVIDER_ERROR,
     REASON_PROVIDER_REFUSED,
     REASON_PROVIDER_UNAVAILABLE,
     REASON_REMOTE_REJECTED,
+    REASON_TIMED_OUT,
     REASON_UNREADABLE,
     REASON_WORKFLOWS,
     GitWorkspace,
@@ -609,6 +612,7 @@ def fail_pushes(
     times: int = 1,
     *,
     stdout: str = "",
+    unanswered: bool = False,
 ) -> list[int]:
     """The next `times` pushes of the mirror to the provider fail with this report of git (`text`
     on standard error, `stdout` the porcelain lines of the refs)."""
@@ -618,7 +622,7 @@ def fail_pushes(
     def mirror(args: list[str], **options: Any) -> Outcome:
         if "push" in args and len(failed) < times:
             failed.append(1)
-            return Outcome(1 if stdout else 128, stdout, text)
+            return Outcome(255 if unanswered else 1 if stdout else 128, stdout, text, unanswered)
         return real(args, **options)
 
     monkeypatch.setattr(workspace, "_mirror", mirror)
@@ -941,7 +945,7 @@ def test_a_fetch_killed_at_the_timeout_rejects_that_branch_and_leaves_no_lock_or
 
     assert (branch(report, BRANCH).pushed, branch(report, BRANCH).reason) == (
         False,
-        REASON_UNREADABLE,
+        REASON_TIMED_OUT,
     )
     lock = mirror / "refs" / "runner" / "in" / "0.lock"
     assert lock.exists(), "the killed fetch left its lock (the test's premise)"
@@ -1018,3 +1022,223 @@ def test_no_background_gc_or_maintenance_is_started_in_the_mirror(rig: Rig) -> N
     assert still_running("gc --auto", "maintenance run --auto") == []
     for path in ("gc.pid", "gc.log"):
         assert not (workspace.mirror / path).exists()
+
+
+# -- the work on a detached HEAD is not lost -----------------------------------------------------
+
+
+def test_committed_work_on_a_detached_head_is_saved_on_a_branch_and_pushed(rig: Rig) -> None:
+    workspace = rig.prepared()
+    commit(workspace, "a.txt")
+    assert agent_git(workspace, "checkout", "-q", "--detach").returncode == 0
+    detached = commit(workspace, "only-here.txt")
+
+    saved = workspace.rescue_detached_head()
+
+    assert saved is not None and saved.startswith(f"{BRANCH}-leftover-")
+    assert head_of(workspace, f"refs/heads/{saved}") == detached
+    report = push(workspace)
+    assert rig.origin.tip(saved) == detached and branch(report, saved).pushed
+
+
+def test_a_detached_head_that_a_branch_contains_needs_no_rescue(rig: Rig) -> None:
+    workspace = rig.prepared()
+    commit(workspace, "a.txt")
+    assert agent_git(workspace, "checkout", "-q", "--detach").returncode == 0
+
+    assert workspace.rescue_detached_head() is None
+    assert agent_git(workspace, "branch", "--list", "*leftover*").stdout.strip() == ""
+
+
+def test_a_head_on_a_branch_needs_no_rescue(rig: Rig) -> None:
+    workspace = rig.prepared()
+    commit(workspace, "a.txt")
+
+    assert workspace.rescue_detached_head() is None
+
+
+# -- the agent's list of branches is read as the agent's user and with a bound ----------------
+
+
+def test_a_list_of_branches_over_the_cap_is_not_read_and_says_why(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(git_workspace, "LIST_MAX_BYTES", 20_000)
+    workspace = rig.prepared()
+    commit(workspace, "a.txt")
+    tip = head_of(workspace)
+    lines = "".join(f"{tip} refs/heads/pad/{number:06d}\n" for number in range(2_000))
+    (workspace.repo / ".git" / "packed-refs").write_text(
+        "# pack-refs with: peeled fully-peeled sorted \n" + lines
+    )
+
+    report = push(workspace)
+
+    assert report.listed is False and report.list_problem == git_workspace.LIST_TOO_LARGE
+    assert report.branches == () and rig.origin.tip(BRANCH) is None
+
+
+def test_a_huge_list_of_branches_costs_the_runner_no_memory_beyond_the_cap(rig: Rig) -> None:
+    workspace = rig.prepared()
+    commit(workspace, "a.txt")
+    tip = head_of(workspace)
+    with (workspace.repo / ".git" / "packed-refs").open("w") as handle:
+        handle.write("# pack-refs with: peeled fully-peeled sorted \n")
+        for number in range(1_200_000):  # about 70 MB
+            handle.write(f"{tip} refs/heads/pad/{number:08d}\n")
+
+    tracemalloc.start()
+    try:
+        report = workspace.push_all(seconds=SECONDS)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert report.list_problem == git_workspace.LIST_TOO_LARGE
+    assert peak < 16 * 1024 * 1024, f"the runner held {peak} bytes of the list"
+    assert still_running("for-each-ref", str(workspace.repo)) == []
+
+
+def test_the_cap_does_not_touch_a_normal_list(rig: Rig) -> None:
+    workspace = rig.prepared()
+    commit(workspace, "a.txt")
+    for number in range(30):
+        make_branch(workspace, f"extra/{number}", f"e{number}.txt", start=workspace.start_commit)
+
+    report = push(workspace)
+
+    assert report.listed and report.list_problem is None and len(report.branches) == 31
+
+
+# -- the reason words say what happened ---------------------------------------------------------
+
+
+def rejected_line(name: str, reason: str) -> str:
+    return f"!\trefs/runner/in/0:refs/heads/{name}\t[remote rejected] ({reason})\nDone\n"
+
+
+def test_a_branch_called_workflow_that_is_refused_for_another_reason_is_remote_rejected(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    name = "my-workflow-notes"
+    workspace = rig.prepared()
+    make_branch(workspace, name, "n.txt", start=workspace.start_commit)
+    status = rejected_line(name, "protected branch hook declined")
+    fail_pushes(
+        workspace,
+        monkeypatch,
+        "remote: error: GH013 for refs/heads/" + name,
+        stdout=status,
+        times=3,
+    )
+
+    report = push(workspace)
+
+    assert branch(report, name).reason == REASON_REMOTE_REJECTED
+
+
+def test_githubs_words_for_a_workflow_file_are_found_in_the_reason_of_the_status_line(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = rig.prepared()
+    commit(workspace, "a.txt")
+    status = rejected_line(
+        BRANCH,
+        "refusing to allow a GitHub App to create or update workflow "
+        "`.github/workflows/x.yml` without `workflows` permission",
+    )
+    fail_pushes(workspace, monkeypatch, "error: failed to push", stdout=status, times=3)
+
+    assert branch(push(workspace), BRANCH).reason == REASON_WORKFLOWS
+
+
+def test_a_server_that_says_it_on_a_remote_line_is_believed_only_at_the_start_of_the_line(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = rig.prepared()
+    commit(workspace, "a.txt")
+    status = rejected_line(BRANCH, "pre-receive hook declined")
+    words = "refusing to allow a GitHub App to create or update workflow `x`"
+    fail_pushes(workspace, monkeypatch, f"remote: {words}\n", stdout=status, times=3)
+    assert branch(push(workspace), BRANCH).reason == REASON_WORKFLOWS
+
+
+def test_a_workflow_sentence_inside_a_longer_remote_line_is_no_reason(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = rig.prepared()
+    commit(workspace, "a.txt")
+    status = rejected_line(BRANCH, "pre-receive hook declined")
+    text = "remote: error: GH013: x refusing to allow a GitHub App to create or update workflow \n"
+    fail_pushes(workspace, monkeypatch, text, stdout=status, times=3)
+
+    assert branch(push(workspace), BRANCH).reason == REASON_REMOTE_REJECTED
+
+
+def test_a_push_killed_at_its_time_limit_is_timed_out_not_unavailable(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = rig.prepared()
+    commit(workspace, "a.txt")
+    failed = fail_pushes(workspace, monkeypatch, "git push timed out", times=5, unanswered=True)
+
+    report = push(workspace)
+
+    assert failed == [1], "a push that was killed is not tried again"
+    assert branch(report, BRANCH).reason == REASON_TIMED_OUT
+
+
+def test_an_error_of_the_provider_that_is_no_refusal_of_the_access_is_provider_error(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = rig.prepared()
+    commit(workspace, "a.txt")
+    text = "fatal: unable to access 'https://x/r.git/': The requested URL returned error: 413"
+    failed = fail_pushes(workspace, monkeypatch, text, times=5)
+
+    report = push(workspace)
+
+    assert failed == [1]
+    assert branch(report, BRANCH).reason == REASON_PROVIDER_ERROR
+
+
+# -- nothing of the agent's user runs when the token goes out -------------------------------------
+
+
+def test_the_agents_user_is_swept_right_before_each_push_and_a_failed_sweep_is_counted(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    workspace = rig.prepared()
+    commit(workspace, "a.txt")
+    make_branch(workspace, "two", "b.txt", start=workspace.start_commit)
+    real = workspace._mirror  # pyright: ignore[reportPrivateUsage]
+
+    def mirror(args: list[str], **options: Any) -> Outcome:
+        if "push" in args:
+            events.append("push")
+        return real(args, **options)
+
+    def sweep() -> bool:
+        events.append("sweep")
+        return len(events) > 2  # the first sweep fails
+
+    monkeypatch.setattr(workspace, "_mirror", mirror)
+    workspace._sweep = sweep  # pyright: ignore[reportPrivateUsage]
+
+    report = push(workspace)
+
+    assert events == ["sweep", "push", "sweep", "push"]
+    assert report.sweeps_failed == 1 and report.pushed_any
+
+
+def test_the_report_says_whether_the_task_branch_is_among_the_local_branches(rig: Rig) -> None:
+    workspace = rig.prepared()
+    make_branch(workspace, "elsewhere", "e.txt", start=workspace.start_commit)
+    assert push(workspace).form_listed is True
+
+    assert agent_git(workspace, "checkout", "-q", "elsewhere").returncode == 0
+    assert agent_git(workspace, "branch", "-D", BRANCH).returncode == 0
+    report = push(workspace)
+
+    assert report.form_listed is False and names(report) == ["elsewhere"]

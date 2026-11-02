@@ -347,6 +347,24 @@ def test_a_report_with_pushed_and_rejected_branches_is_valid() -> None:
     assert valid_block(report) == report
 
 
+def test_the_counts_of_the_branches_that_were_left_out_are_optional_and_checked() -> None:
+    counted = block(branchesDropped={"invalid": 3, "overflow": 7})
+
+    assert valid_block(counted) == counted
+    assert valid_block(block()) is not None  # an older shape, without the counts
+    for bad in (
+        None,
+        3,
+        {"invalid": 0},
+        {"invalid": 0, "overflow": 0, "extra": 1},
+        {"invalid": -1, "overflow": 0},
+        {"invalid": 1.5, "overflow": 0},
+        {"invalid": True, "overflow": 0},
+        {"invalid": 0, "overflow": 10**10},
+    ):
+        assert valid_block(block(branchesDropped=bad)) is None, bad
+
+
 def test_a_report_with_no_branch_at_all_is_valid_for_a_turn_that_pushed_nothing() -> None:
     assert valid_block(block(commits=[], branches=[], filesChanged=[])) is not None
 

@@ -144,7 +144,7 @@
       "license": "GPL-2.0-only",
       "build": "source",
       "exception": "GPL-2.0-only, accepted: git is a separate program of the Worker image that the agent runs as a command; it is built unmodified from the pinned upstream release, linked into none of our code, and the image is never handed to a third party (code-review.com is a hosted service). The complete source is the pinned tarball.",
-      "reason": "The version control of the Implementer's agent. Built from source because Debian's git is older than 2.53, which the branch guard needs."
+      "reason": "The version control of the Implementer's agent. Built from source so that the image carries no Perl (Debian's git package depends on it) and links the GnuTLS flavour of libcurl. Nothing in the Implementer needs a git of a minimum version."
     },
     {
       "name": "node",

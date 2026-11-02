@@ -23,6 +23,12 @@ REQUIRED = [
     "The repository has no remote and you have no credential, so do not try to push",
     "the system pushes everything that is on the local branches of this repository to GitHub",
     "what you want to keep has to be committed on a branch",
+    # the limit and the name rules, and what is dropped
+    "Only 50 branches are pushed, the task's branch first and then the others in alphabetical "
+    "order",
+    "a branch whose name has a space, a control character or one of ~ ^ : ? * [ \\",
+    "is longer than 255 bytes is not pushed either",
+    "Work committed on a detached HEAD is saved on a new branch",
     # nobody can answer
     "Nobody can answer a question here",
     "decide on the most reasonable reading of the task and go on",

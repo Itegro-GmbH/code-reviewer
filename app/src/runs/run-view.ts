@@ -121,7 +121,12 @@ export type ImplementerDetailView = ImplementerRowView & {
   commits: { shown: ImplementerCommitView[]; more: number };
   files: { count: number; shown: ImplementerFileView[]; more: number };
   /** Every branch the runner pushed or tried to push when the turn ended, the task's branch first. Empty when none. */
-  branches: { shown: ImplementerBranchView[]; more: number };
+  branches: {
+    shown: ImplementerBranchView[];
+    more: number;
+    /** Local branches that are in no entry: their name cannot be pushed, or they are beyond the limit of 50. */
+    dropped: { invalid: number; overflow: number };
+  };
   /** The last commit on the branch after the turn, when the turn pushed. */
   head: { shortSha: string; url: string | null } | null;
   /** For a task that did not succeed but pushed work: "N commits were pushed to <branch>."; null otherwise. */
@@ -361,6 +366,10 @@ const BRANCH_REASONS: Readonly<Record<string, string>> = {
     "GitHub did not accept the access for this push, so the branch was not saved.",
   provider_unavailable:
     "GitHub could not be reached or did not take the push, so the branch was not saved.",
+  provider_error:
+    "GitHub answered the push with an error that is not a refusal of the access, for example because the push was too large, so the branch was not saved.",
+  timed_out:
+    "The push or the reading of this branch took too long and was stopped. Whether GitHub received anything is not known: check the branch on GitHub.",
   unreadable: "The branch could not be read from the workspace.",
   not_a_commit: "The branch does not point at a commit.",
   out_of_time: "There was no time left to push this branch.",
@@ -384,6 +393,8 @@ type StoredImplementerResult = {
     pushed: boolean;
     reason: string | null;
   }[];
+  /** Local branches that are in no entry of `branches` (a result of an older runner has none). */
+  branchesDropped: { invalid: number; overflow: number };
   commits: { sha: string; subject: string }[];
   files: { path: string; status: ImplementerFileStatus }[];
   summary: string | null;
@@ -394,6 +405,7 @@ const EMPTY_IMPLEMENTER_RESULT: StoredImplementerResult = {
   headCommit: null,
   pushed: false,
   branches: [],
+  branchesDropped: { invalid: 0, overflow: 0 },
   commits: [],
   files: [],
   summary: null,
@@ -401,6 +413,23 @@ const EMPTY_IMPLEMENTER_RESULT: StoredImplementerResult = {
 
 function isRecord(value: unknown): value is Record<string, JsonValue> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** A count of `branchesDropped` as stored: a whole number from 0 up, else 0 (the row may be older than the check). */
+function droppedCount(value: JsonValue | undefined): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : 0;
+}
+
+function readBranchesDropped(
+  value: JsonValue | undefined,
+): StoredImplementerResult["branchesDropped"] {
+  if (!isRecord(value)) return { invalid: 0, overflow: 0 };
+  return {
+    invalid: droppedCount(value.invalid),
+    overflow: droppedCount(value.overflow),
+  };
 }
 
 /**
@@ -474,6 +503,7 @@ function readStoredImplementer(
         : null,
     pushed: block.pushed === true,
     branches,
+    branchesDropped: readBranchesDropped(block.branchesDropped),
     commits,
     files,
     summary: typeof block.summary === "string" ? block.summary : null,
@@ -604,6 +634,7 @@ function implementerDetailView(
     branches: {
       shown: branches.slice(0, MAX_LISTED_BRANCHES),
       more: Math.max(0, branches.length - MAX_LISTED_BRANCHES),
+      dropped: stored.branchesDropped,
     },
     head:
       pushedHead === null

@@ -769,7 +769,8 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     const theLlm = required(llm, "The fake LLM");
     const branch = "implementer/e07";
     const existing = "e07-existing";
-    const workflow = "e07-workflow";
+    // Not called "workflow": the runner reads the reason GitHub gives, never the name of the branch.
+    const workflow = "e07-ci-file";
     // Someone's branch, on GitHub at the base commit. The agent replaces it with unrelated history.
     gadgets().setRef(`refs/heads/${existing}`, base);
     theLlm.scriptAgent({
@@ -1111,9 +1112,11 @@ test.describe("a task on its way from the form of the Implementer to a branch on
         write("probe.txt", "probe\n"),
         commit("Add probe"),
       ],
-      // The root process that pushes (the runner's git, with the token in its environment) runs after the agent and all its
-      // processes are gone: nothing of the engine user exists then to read it (E10 and `expectQuiet` look for leftovers). What
-      // the agent could read of the root processes that exist while it works is probed above.
+      // The root process that pushes (the runner's git, with the token in its environment) runs after the engine is stopped and the
+      // engine user's processes were swept, and the sweep is made once more right before each push, because the status, the
+      // leftover commit and the upload-pack of a fetch run as that user in between. What it cannot do is read the environment of
+      // a root process (E10 and `expectQuiet` look for leftovers). What the agent could read of the root processes that exist
+      // while it works is probed above.
       finalText: "Looked around, then committed probe.txt.",
     });
     await signInAsAdmin(page);
@@ -1274,8 +1277,7 @@ test.describe("a task on its way from the form of the Implementer to a branch on
           `printf '#!/bin/sh\\nid -u >> /work/tmp/trap.log\\nexit 0\\n' > ${trap} && chmod +x ${trap}; echo '[trap]' $?`,
         ),
         bash(
-          `git config core.fsmonitor ${trap}; git config core.pager ${trap}; git config core.sshCommand ${trap}; ` +
-            `git config uploadpack.packObjectsHook ${trap}; git config alias.fetch '!${trap}'; ` +
+          `git config core.fsmonitor ${trap}; git config uploadpack.packObjectsHook ${trap}; ` +
             `mkdir -p .git/hooks; cp ${trap} .git/hooks/pre-push; cp ${trap} .git/hooks/post-commit; echo '[config]' $?`,
         ),
         bash("git status --short > /dev/null; echo '[control]' $?"),

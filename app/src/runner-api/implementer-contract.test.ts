@@ -376,6 +376,25 @@ describe("the implementer result", () => {
     }
   });
 
+  it("takes the counts of the branches that were left out: optional, closed, two whole numbers from 0", () => {
+    const counted = example("RunnerResult");
+    counted.implementer.branchesDropped = { invalid: 3, overflow: 7 };
+    expect(accepts("RunnerResult", counted)).toBe(true);
+
+    for (const dropped of [
+      { invalid: 0 },
+      { invalid: 0, overflow: 0, extra: 1 },
+      { invalid: -1, overflow: 0 },
+      { invalid: 0, overflow: 1.5 },
+      { invalid: "1", overflow: 0 },
+      null,
+    ]) {
+      const result = example("RunnerResult");
+      result.implementer.branchesDropped = dropped;
+      expect(accepts("RunnerResult", result)).toBe(false);
+    }
+  });
+
   // #746-T02
   it("allows a failed turn with no head commit, a null session and nothing pushed", () => {
     const failed = example("RunnerResult");

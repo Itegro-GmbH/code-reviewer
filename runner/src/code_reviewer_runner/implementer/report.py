@@ -47,6 +47,7 @@ _BLOCK_KEYS = frozenset(
         "headCommit",
         "pushed",
         "branches",
+        "branchesDropped",
         "commits",
         "filesChanged",
         "summary",
@@ -57,6 +58,9 @@ MAX_BRANCHES = 50
 MAX_BRANCH_NAME_CHARS = 255
 MAX_REASON_CHARS = 40
 _REASON = re.compile(r"[a-z][a-z_]*")
+# Not required: a block without the count (an older shape) is still one the app reads.
+_OPTIONAL_KEYS = frozenset({"branchesDropped"})
+MAX_DROPPED = 1_000_000_000
 _STATUSES = frozenset(kind.value for kind in ChangeKind)
 
 
@@ -107,6 +111,16 @@ def _opencode_ok(value: object) -> bool:
     )
 
 
+def _dropped_ok(value: object) -> bool:
+    dropped = as_object(value)
+    if dropped is None or set(dropped) != {"invalid", "overflow"}:
+        return False
+    return all(
+        isinstance(count, int) and not isinstance(count, bool) and 0 <= count <= MAX_DROPPED
+        for count in dropped.values()
+    )
+
+
 def _branch_ok(value: object) -> bool:
     branch = as_object(value)
     if branch is None or set(branch) != {"name", "head", "result", "reason"}:
@@ -136,7 +150,9 @@ def valid_block(value: object) -> dict[str, Any] | None:
     """The block when it is what the app reads (the bounds of the contract, its invariants), else
     None. A copy: the caller's object is not kept."""
     block = as_object(value)
-    if block is None or set(block) != set(_BLOCK_KEYS):
+    if block is None or not _BLOCK_KEYS - _OPTIONAL_KEYS <= set(block) <= _BLOCK_KEYS:
+        return None
+    if "branchesDropped" in block and not _dropped_ok(block["branchesDropped"]):
         return None
     base, head, pushed = block["baseCommit"], block["headCommit"], block["pushed"]
     commits, files, branches = block["commits"], block["filesChanged"], block["branches"]

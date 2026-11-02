@@ -230,8 +230,9 @@ used unmodified and as separate programs that the agent starts as commands; none
 
 - Package: git 2.53.0 (tag `v2.53.0`, pinned in `runner/git-pin.json`)
 - Source: https://github.com/git/git, source commit `67ad42147a7acc2af6074753ebd03d904476118f`. The image
-  builds the unmodified source tarball published on kernel.org (Debian bookworm ships git 2.39; the branch
-  guard of the Implementer needs 2.53 or newer, which shows a branch switch to its hook).
+  builds the unmodified source tarball published on kernel.org, so that the image carries no Perl (Debian's
+  git package depends on it) and links the GnuTLS flavour of libcurl. Nothing in the Implementer needs a
+  minimum version of git.
 - License: GPL-2.0-only. It is not on the allow list, so `license-policy.json` carries a documented
   exception on the entry itself (`exception`): git is a separate program of the image that the agent runs
   as a command, built unmodified and linked into none of our code, and the image is never handed to a third

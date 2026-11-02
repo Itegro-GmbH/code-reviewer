@@ -703,6 +703,11 @@ export type ImplementerResult = {
   pushed: boolean;
   /** Every branch the runner dealt with at the end of the turn; absent in the result of an older runner (none). */
   branches?: ImplementerBranchResult[];
+  /**
+   * The local branches that are in no entry of `branches`: `invalid` those whose name cannot be pushed, `overflow` the valid ones beyond
+   * the limit. Absent in the result of an older runner (none).
+   */
+  branchesDropped?: { invalid: number; overflow: number };
   commits: { sha: string; subject: string }[];
   filesChanged: { path: string; status: ImplementerFileStatus }[];
   summary: string;

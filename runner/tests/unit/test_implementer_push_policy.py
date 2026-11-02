@@ -157,3 +157,25 @@ def test_the_form_branch_survives_the_limit() -> None:
 
     assert chosen.names[0] == FORM
     assert chosen.overflow == 4
+
+
+def test_excluded_branches_count_toward_the_limit_so_the_report_never_has_more_than_the_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    names = [f"b{number:04d}" for number in range(MAX_PUSHED_BRANCHES + 10)]
+    monkeypatch.setattr(push_policy, "PUSH_EXCLUDED_BRANCHES", frozenset(names[:20]))
+
+    chosen = select_branches(names, form_branch=FORM)
+
+    assert len(chosen.names) + len(chosen.excluded) == MAX_PUSHED_BRANCHES
+    assert chosen.overflow == 10
+    assert [name for name, _ in chosen.excluded] == names[:20]
+
+
+def test_what_is_dropped_is_the_end_of_the_order_task_branch_then_alphabetical() -> None:
+    names = [f"b{number:04d}" for number in range(MAX_PUSHED_BRANCHES + 2)] + [FORM, "a-first"]
+
+    chosen = select_branches(names, form_branch=FORM)
+
+    assert chosen.names[:2] == [FORM, "a-first"]
+    assert chosen.overflow == 4 and "b0051" not in chosen.names and "b0000" in chosen.names

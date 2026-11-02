@@ -48,6 +48,9 @@ class TurnResult:
     pushed: bool
     # Every local branch of the agent's repository the final push dealt with, pushed or rejected.
     branches: tuple[BranchPush, ...]
+    # How many local branches were left out: (names that cannot be pushed, valid names beyond
+    # the limit).
+    branches_dropped: tuple[int, int]
     commits: tuple[CommitInfo, ...]
     files_changed: tuple[FileChange, ...]
     summary: str
@@ -81,6 +84,10 @@ class TurnResult:
                 }
                 for branch in self.branches
             ],
+            "branchesDropped": {
+                "invalid": self.branches_dropped[0],
+                "overflow": self.branches_dropped[1],
+            },
             "commits": [{"sha": c.sha, "subject": c.subject} for c in self.commits],
             "filesChanged": [{"path": f.path, "status": f.kind.value} for f in self.files_changed],
             "summary": self.summary,

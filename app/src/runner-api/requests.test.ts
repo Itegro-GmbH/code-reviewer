@@ -1070,6 +1070,60 @@ describe("the implementer block of a result (#754)", () => {
     });
   });
 
+  describe("the counts of the branches that were left out", () => {
+    const parsed = (branchesDropped: unknown) =>
+      parseCompleteRequest(bodyWith({ ...block(), branchesDropped }));
+
+    it("keeps the counts as sent, and leaves the field out when the runner sent none", () => {
+      const done = parsed({ invalid: 3, overflow: 7 });
+      const none = parseCompleteRequest(bodyWith(block()));
+
+      expect(done.ok && done.value.result.implementer?.branchesDropped).toEqual(
+        { invalid: 3, overflow: 7 },
+      );
+      expect(
+        none.ok && "branchesDropped" in (none.value.result.implementer ?? {}),
+      ).toBe(false);
+    });
+
+    it.each<[string, unknown, string]>([
+      ["not an object", 3, "result.implementer.branchesDropped"],
+      ["null", null, "result.implementer.branchesDropped"],
+      [
+        "an unknown field",
+        { invalid: 0, overflow: 0, extra: 1 },
+        "result.implementer.branchesDropped.extra",
+      ],
+      [
+        "a missing count",
+        { invalid: 0 },
+        "result.implementer.branchesDropped.overflow",
+      ],
+      [
+        "a negative count",
+        { invalid: -1, overflow: 0 },
+        "result.implementer.branchesDropped.invalid",
+      ],
+      [
+        "a count that is not a whole number",
+        { invalid: 0, overflow: 1.5 },
+        "result.implementer.branchesDropped.overflow",
+      ],
+      [
+        "a count that is not a number",
+        { invalid: "3", overflow: 0 },
+        "result.implementer.branchesDropped.invalid",
+      ],
+    ])("refuses %s", (_, counts, field) => {
+      const done = parsed(counts);
+
+      expect(done.ok).toBe(false);
+      expect(!done.ok && done.fields.map((entry) => entry.field)).toContain(
+        field,
+      );
+    });
+  });
+
   // #754-T03
   it("leaves the field out of a result that has none, and accepts a turn that made no commit", () => {
     const none = parseCompleteRequest({

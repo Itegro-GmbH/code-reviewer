@@ -70,6 +70,7 @@ from .egress_proxy import EgressProxy
 from .git_workspace import (
     CONFIRM_PAUSE_SECONDS,
     CONFIRM_SECONDS,
+    LIST_TOO_LARGE,
     GitWorkspace,
     PushReport,
 )
@@ -82,15 +83,17 @@ _log = logging.getLogger(__name__)
 # What is kept back from the job's time limit for the end of the turn: the commit of what is left
 # and the final push (the plan: the last three minutes). A short limit keeps a third of it.
 GRACE_SECONDS = 180.0
-# How the grace is spent at a normal end: the look at the tree (`DIRTY_TIMEOUT`), the leftover
-# commit of the system, the final push and the two reads of the report (`REPORT_READ_TIMEOUT` each),
-# with `ENGINE_STOP_SECONDS` for the end of the engine before them; the sum stays below
-# `GRACE_SECONDS` (a test holds it).
+# How the grace is spent at a normal end: the rescue of a detached HEAD (three git commands of
+# `RESCUE_STEP_TIMEOUT`), the look at the tree (`DIRTY_TIMEOUT`), the leftover commit of the system,
+# the final push and the two reads of the report (`REPORT_READ_TIMEOUT` each), with
+# `ENGINE_STOP_SECONDS` for the end of the engine before them; the sum stays below `GRACE_SECONDS`
+# (a test holds it).
 LEFTOVER_SECONDS = 40.0
 FINAL_PUSH_SECONDS = 100.0
 ENGINE_STOP_SECONDS = 5.0
 # A stop (SIGTERM) leaves the process `SIGTERM_BACKSTOP_SECONDS` in all (`job_run.py`): the engine
-# comes out of it, then the final push (no leftover is committed) and the two reads of the report.
+# comes out of it, then the rescue of a detached HEAD, the final push (no leftover is committed) and
+# the two reads of the report.
 STOP_PUSH_SECONDS = 30.0
 # How often the watch asks the job host whether the job is still ours while the agent works (a
 # lost lease ends the turn at once; nothing is pushed in the meantime).
@@ -246,7 +249,9 @@ def _implementer_code(code: ErrorCode) -> ErrorCode:
     return code
 
 
-def _not_kept(names: list[str], leftover_lost: bool) -> str:
+def _not_kept(
+    names: list[str], leftover_lost: bool, rescued: str | None = None, unchecked: bool = False
+) -> str:
     """The sentences at the end of the summary about what of the agent's work was not kept: the
     names the engine loads that it touched, and changes in the working tree that could not be
     committed."""
@@ -256,6 +261,17 @@ def _not_kept(names: list[str], leftover_lost: bool) -> str:
             f"[Not made: the agent created or changed {', '.join(names)}. These files are not "
             "available to the Implementer and cannot be changed in a run, so nothing of that "
             "change was kept.]"
+        )
+    if rescued is not None:
+        parts.append(
+            "[Saved: work that was committed on no branch (a detached HEAD) is on the branch "
+            f"{rescued}.]"
+        )
+    if unchecked:
+        parts.append(
+            "[Not checked: a process of the agent could not be ended, so changes in the working "
+            "tree "
+            "that were not committed were not looked for.]"
         )
     if leftover_lost:
         parts.append(
@@ -304,6 +320,12 @@ class ImplementerSession:
         self._session_id: str | None = None
         self._native: NativeJob | None = None
         self._leftover_lost = False
+        # False when the sweep after the engine could not end every process of the engine user: then
+        # nothing is run as that user for the leftover (a survivor could be racing the tree).
+        self._engine_ended = True
+        # The branch made for work committed on a detached HEAD, if there was such work.
+        self._rescued: str | None = None
+        self._unchecked = False
 
     @property
     def ledger(self) -> BudgetLedger | None:
@@ -339,6 +361,7 @@ class ImplementerSession:
             self._stopped_by(error)
         finally:
             ended = agent.stop(quick=self._ends_quickly()) if agent is not None else True
+            self._engine_ended = ended
             if not ended:
                 self._note("the engine user's processes could not all be ended")
         try:
@@ -497,13 +520,23 @@ class ImplementerSession:
         leftover that cannot be committed is a note (the branches that are committed are pushed
         all the same)."""
         quick = self._ends_quickly()
-        try:
-            if not quick and self.workspace.dirty():
-                self.workspace.commit_all(seconds=self.seams.leftover_seconds)
-                self._note("uncommitted changes were committed by the system")
-        except Exception:
-            self._leftover_lost = True
-            self._note("uncommitted changes could not be committed")
+        if not self._engine_ended:
+            self._unchecked = True
+            self._note("nothing was committed or rescued: a process of the engine user is left")
+        else:
+            try:
+                self._rescued = self.workspace.rescue_detached_head()
+                if self._rescued is not None:
+                    self._note(f"work on a detached HEAD was saved on the branch {self._rescued}")
+            except Exception:
+                self._note("work on a detached HEAD could not be saved on a branch")
+            try:
+                if not quick and self.workspace.dirty():
+                    self.workspace.commit_all(seconds=self.seams.leftover_seconds)
+                    self._note("uncommitted changes were committed by the system")
+            except Exception:
+                self._leftover_lost = True
+                self._note("uncommitted changes could not be committed")
         try:
             seconds = self.seams.stop_push_seconds if quick else self.seams.final_push_seconds
             window = (
@@ -523,7 +556,17 @@ class ImplementerSession:
             outcome = "pushed" if branch.pushed else f"rejected ({branch.reason})"
             self._note(f"branch {branch.name}: {outcome}")
         if not report.listed:
-            self._note("the local branches of the agent's repository could not be read")
+            if report.list_problem == LIST_TOO_LARGE:
+                self._note(
+                    "the list of local branches of the agent's repository is too long to read"
+                )
+            else:
+                self._note("the local branches of the agent's repository could not be read")
+        if report.sweeps_failed:
+            self._note(
+                f"{report.sweeps_failed} pushes were made while a process of the engine user "
+                "was left"
+            )
         if report.invalid:
             self._note(f"{report.invalid} local branches have names that are not pushed")
         if report.overflow:
@@ -541,17 +584,33 @@ class ImplementerSession:
         if error is None and not report.listed:
             error = (
                 ErrorCode.PUSH_REJECTED,
-                "the repository of the agent could not be read, so nothing was pushed",
+                "the repository of the agent could not be read"
+                + (
+                    ": its list of branches is too long"
+                    if report.list_problem == LIST_TOO_LARGE
+                    else ""
+                )
+                + ", so nothing was pushed",
             )
         elif error is None and not report.branches:
             # No commit and nothing to commit, on no branch: the agent did not do the task.
             error = (ErrorCode.AGENT_GAVE_UP, "the agent ended without a commit")
-        elif error is None and (not report.pushed_any or (head is not None and not pushed)):
+        elif error is None and (
+            not report.pushed_any
+            or (form is not None and not form.pushed)
+            or (form is None and not report.form_listed)
+        ):
+            # The task's branch has an entry only when it has work or could not be looked at (one
+            # that is verifiably empty, at the base commit, has none): an entry that was not pushed
+            # is work that did not arrive, and a branch that is gone is not verifiably empty. Not a
+            # success, whatever else was pushed.
             error = (ErrorCode.PUSH_REJECTED, "the work could not be pushed")
         usage = self._usage()
         touched = self._touched_engine_inputs()
         summary = clip_summary(
-            self._summary, self.secrets(), tail=_not_kept(touched, self._leftover_lost)
+            self._summary,
+            self.secrets(),
+            tail=_not_kept(touched, self._leftover_lost, self._rescued, self._unchecked),
         )
         return TurnResult(
             error_code=None if error is None else error[0],
@@ -560,6 +619,7 @@ class ImplementerSession:
             head_commit=head,
             pushed=pushed,
             branches=report.branches,
+            branches_dropped=(report.invalid, report.overflow),
             commits=tuple(commits),
             files_changed=tuple(files),
             summary=summary,

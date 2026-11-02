@@ -20,8 +20,9 @@ from dataclasses import dataclass, field
 # anything, belongs here. A name in this set is reported as rejected with `REASON_EXCLUDED`.
 PUSH_EXCLUDED_BRANCHES: frozenset[str] = frozenset()
 
-# The most branches one turn pushes. More than a hundred branches is not work, it is noise; the
-# report and the time of the end of the turn are bounded by it.
+# The most branches one turn reports (pushed, rejected or excluded). More than that is not work, it
+# is noise; the report and the time of the end of the turn are bounded by it. What is beyond is
+# counted (`Selection.overflow`), and the person is told the count.
 MAX_PUSHED_BRANCHES = 50
 # Git's own limit for a ref name is the file system's (255 bytes for a component); the form allows
 # 200 characters.
@@ -73,6 +74,7 @@ def select_branches(local_branches: list[str], *, form_branch: str) -> Selection
     **The one place for a rule about which branches are pushed.** Today only the name checks and
     `PUSH_EXCLUDED_BRANCHES` decide."""
     unique = sorted(set(local_branches))
+    # The task's branch first, then alphabetical: what the limit drops is the end of this order.
     ordered = sorted(unique, key=lambda name: (name != form_branch, name))
     names: list[str] = []
     excluded: list[tuple[str, str]] = []
@@ -81,10 +83,11 @@ def select_branches(local_branches: list[str], *, form_branch: str) -> Selection
     for name in ordered:
         if branch_name_problem(name) is not None:
             invalid += 1
+        elif len(names) + len(excluded) >= MAX_PUSHED_BRANCHES:
+            # Excluded names are entries of the report too, so they count toward its limit.
+            overflow += 1
         elif name in PUSH_EXCLUDED_BRANCHES:
             excluded.append((name, REASON_EXCLUDED))
-        elif len(names) >= MAX_PUSHED_BRANCHES:
-            overflow += 1
         else:
             names.append(name)
     return Selection(names, excluded, invalid, overflow)

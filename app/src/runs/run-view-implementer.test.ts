@@ -347,11 +347,67 @@ describe("the detail of an implementer run", () => {
       source(),
     ).implementer;
 
-    expect(old?.branches).toEqual({ shown: [], more: 0 });
+    expect(old?.branches).toEqual({
+      shown: [],
+      more: 0,
+      dropped: { invalid: 0, overflow: 0 },
+    });
     const name = hostile?.branches.shown[0]?.name ?? "";
     expect(name).not.toContain("\u202e");
     expect(name).not.toContain(GIT_TOKEN);
     expect(hostile?.branches.shown[0]?.url).toBeNull();
+  });
+
+  it("carries the counts of the branches that were left out, and reads a count that is not a whole number from 0 as none", () => {
+    const counted = view(
+      turn({
+        result: resultWith({ branchesDropped: { invalid: 3, overflow: 7 } }),
+      }),
+      source(),
+    ).implementer;
+    const odd = view(
+      turn({
+        result: resultWith({ branchesDropped: { invalid: -2, overflow: "x" } }),
+      }),
+      source(),
+    ).implementer;
+
+    expect(counted?.branches.dropped).toEqual({ invalid: 3, overflow: 7 });
+    expect(odd?.branches.dropped).toEqual({ invalid: 0, overflow: 0 });
+  });
+
+  it("has a sentence for a push that was killed at its time limit and for an answer of GitHub that is no refusal of the access", () => {
+    const run = view(
+      turn({
+        result: resultWith({
+          branches: [
+            { name: "a", head: SHA_B, result: "rejected", reason: "timed_out" },
+            {
+              name: "b",
+              head: SHA_B,
+              result: "rejected",
+              reason: "provider_error",
+            },
+            {
+              name: "c",
+              head: SHA_B,
+              result: "rejected",
+              reason: "provider_refused",
+            },
+          ],
+        }),
+      }),
+      source(),
+    ).implementer;
+    const byName = Object.fromEntries(
+      (run?.branches.shown ?? []).map((branch) => [branch.name, branch.reason]),
+    );
+
+    expect(byName.a).toContain("took too long");
+    expect(byName.a).toContain("not known");
+    expect(byName.b).toContain("not a refusal of the access");
+    expect(byName.c).toContain("did not accept the access");
+    expect(new Set(Object.values(byName)).size).toBe(3);
   });
 
   // #758-T02

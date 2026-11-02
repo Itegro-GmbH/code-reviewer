@@ -740,6 +740,38 @@ function parseImplementerBranches(
   return check.fields.length > before ? undefined : branches;
 }
 
+/** The most of either count of `branchesDropped` (a repository holds far fewer refs than this). */
+const MAX_BRANCHES_DROPPED = 1_000_000_000;
+
+/** `branchesDropped` of an implementer block (optional): a closed object of two counts. */
+function parseImplementerBranchesDropped(
+  check: Checker,
+  value: unknown,
+  field: string,
+): ImplementerResult["branchesDropped"] | null | undefined {
+  if (value === undefined) return null;
+  if (!isRecord(value)) return check.fail(field, "invalid");
+  const before = check.fields.length;
+  refuseUnknownKeys(check, value, ["invalid", "overflow"], `${field}.`);
+  const counts: Record<"invalid" | "overflow", number> = {
+    invalid: 0,
+    overflow: 0,
+  };
+  for (const key of ["invalid", "overflow"] as const) {
+    const count = value[key];
+    if (count === undefined) check.fail(`${field}.${key}`, "required");
+    else if (
+      typeof count !== "number" ||
+      !Number.isInteger(count) ||
+      count < 0 ||
+      count > MAX_BRANCHES_DROPPED
+    )
+      check.fail(`${field}.${key}`, "invalid");
+    else counts[key] = count;
+  }
+  return check.fields.length > before ? undefined : counts;
+}
+
 /** The saved agent session of an implementer block: null, or a closed object with both fields. */
 function parseImplementerOpencode(
   check: Checker,
@@ -794,6 +826,7 @@ function parseImplementerResult(
       "headCommit",
       "pushed",
       "branches",
+      "branchesDropped",
       "commits",
       "filesChanged",
       "summary",
@@ -821,6 +854,11 @@ function parseImplementerResult(
     check,
     value.branches,
     `${prefix}branches`,
+  );
+  const branchesDropped = parseImplementerBranchesDropped(
+    check,
+    value.branchesDropped,
+    `${prefix}branchesDropped`,
   );
   const commits = parseImplementerCommits(
     check,
@@ -853,6 +891,7 @@ function parseImplementerResult(
     headCommit === undefined ||
     typeof pushed !== "boolean" ||
     branches === undefined ||
+    branchesDropped === undefined ||
     commits === undefined ||
     filesChanged === undefined ||
     summary === undefined ||
@@ -865,6 +904,7 @@ function parseImplementerResult(
     pushed,
     // Kept only when the runner sent them: a result of an older runner stays as it was.
     ...(value.branches === undefined ? {} : { branches }),
+    ...(branchesDropped === null ? {} : { branchesDropped }),
     commits,
     filesChanged,
     summary,

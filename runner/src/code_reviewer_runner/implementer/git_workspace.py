@@ -21,14 +21,20 @@ What the system does, and what the agent can and cannot:
 * **How the runner (root) stays safe from the agent's repository.** Root never runs git with the
   agent's repository as working directory or git directory, so the hooks, `core.fsmonitor`,
   filters, aliases and `safe.directory` that repository holds are never read by a root process. The
-  mirror reads the agent's branches through `git upload-pack`, named on the command line
-  (`--upload-pack`) and run by `setpriv` as the agent's user with `no_new_privs`: the config of the
-  agent's repository is read by that process with the agent's own rights and by nothing else. What
-  comes back is an object stream that the mirror's git checks (`fsckObjects`) and stores; the mirror
-  is bare (nothing is checked out, no filter or hook runs) and its config is the runner's. The
-  names of the branches are the only thing taken from the listing, and each is validated
-  (`push_policy`) before it is put in a refspec; the tip of a branch is read from the mirror, never
-  from what the listing printed. `git status` and the leftover commit run as the agent's user.
+  list of branches is made by `git for-each-ref` run as the agent's user in its repository, read
+  as a stream and capped (`LIST_MAX_BYTES`), and the mirror reads the branches through `git
+  upload-pack`, named on the command line (`--upload-pack`) and run by `setpriv` as the agent's user
+  with `no_new_privs`: the config of the agent's repository is read by those processes with the
+  agent's own rights and by nothing else. What comes back is an object stream that the mirror's git
+  checks (`fsckObjects`) and stores; the mirror is bare (nothing is checked out, no filter or hook
+  runs) and its config is the runner's. The names of the branches are the only thing taken from the
+  listing, and each is validated (`push_policy`) before it is put in a refspec; the tip of a branch
+  is read from the mirror, never from what the listing printed. `git status`, the rescue of a
+  detached HEAD and the leftover commit run as the agent's user. Those commands and the upload-pack
+  of a fetch can leave a process of that user behind (the repository's config can start one), so
+  the runner ends every process of that user once more right before each `git push` (`sweep`); a
+  sweep that fails is counted and noted, and the push goes on, because that user cannot read the
+  environment of a root process.
 """
 
 import os
@@ -89,6 +95,11 @@ LIST_TIMEOUT = 20.0
 # the files of the form's branch from the mirror for the report.
 DIRTY_TIMEOUT = 10.0
 REPORT_READ_TIMEOUT = 5.0
+# Each of the three git commands of the rescue of a detached HEAD (`rescue_detached_head`).
+RESCUE_STEP_TIMEOUT = 3.0
+# The most bytes of the agent's list of local branches the runner reads. A repository can hold any
+# number of refs; this holds about 40,000 branches and the rest is not read.
+LIST_MAX_BYTES = 4 * 1024 * 1024
 FETCH_TIMEOUT = 60.0
 PUSH_TIMEOUT = 120.0
 # The wait before the one new try of a push the provider could not take.
@@ -114,6 +125,13 @@ REASON_PROVIDER_UNAVAILABLE = "provider_unavailable"
 REASON_UNREADABLE = "unreadable"
 REASON_NOT_A_COMMIT = "not_a_commit"
 REASON_OUT_OF_TIME = "out_of_time"
+# A git command of ours was killed at its time limit: nothing is known of what it did.
+REASON_TIMED_OUT = "timed_out"
+# GitHub answered the push with an error that is neither a refusal of the access nor a hiccup.
+REASON_PROVIDER_ERROR = "provider_error"
+# Why the list of branches could not be had (`PushReport.list_problem`).
+LIST_UNREADABLE = "unreadable"
+LIST_TOO_LARGE = "too_large"
 
 # An answer of the provider that is a no and not a hiccup: a client error other than "request
 # timeout" and "too many requests" (credentials, permission, a missing repository, a validation).
@@ -126,7 +144,14 @@ _CREDENTIALS_REFUSED = re.compile(r"could not read (?:Username|Password)|Authent
 # A `! ... [remote rejected] (reason)` line of the porcelain whose reason says the provider itself
 # failed (GitHub's "internal error" and "failed to update ref"): a hiccup, not a no.
 _HICCUP = re.compile(r"\[remote rejected\]\s*\((?:internal error|failed to update ref)\)", re.I)
-_WORKFLOW = re.compile(r"workflow", re.I)
+# The words GitHub gives for a change of a workflow file by an App without the `workflows`
+# permission. Matched only as the reason in the parentheses of the status line, or at the start of a
+# `remote:` line: a branch name is never in either place, so a name that holds "workflow" is no
+# reason.
+_WORKFLOW_REASON = "refusing to allow a GitHub App to create or update workflow "
+_REMOTE_REJECTED = re.compile(r"\[remote rejected\]\s*\((?P<reason>.*)\)\s*$")
+# A client error of the provider that means "no access" (the token, the permission, the repository).
+_ACCESS_STATUSES = frozenset({401, 403, 404})
 _SHA = re.compile(r"[0-9a-f]{40}")
 
 
@@ -198,24 +223,39 @@ class PushReport:
     branches: tuple[BranchPush, ...] = ()
     form_head: str | None = None
     listed: bool = True
+    list_problem: str | None = None
     invalid: int = 0
     overflow: int = 0
+    sweeps_failed: int = 0
+    # Whether the task's branch is among the local branches. A branch that is gone is not a branch
+    # that is verifiably empty.
+    form_listed: bool = True
 
     @property
     def pushed_any(self) -> bool:
         return any(branch.pushed for branch in self.branches)
 
 
-def _is_http_refusal(detail: str) -> bool:
-    """Whether git's report of a failed push to the provider names an HTTP client error that is not
-    worth retrying. The text is the provider's side of the push on the runner's own mirror."""
-    if _CREDENTIALS_REFUSED.search(detail):
-        return True
+def _http_status(detail: str) -> int | None:
     found = _HTTP_ERROR.search(detail)
-    if found is None:
-        return False
-    status = int(found.group(1))
-    return 400 <= status < 500 and status not in _RETRYABLE_CLIENT_ERRORS
+    return None if found is None else int(found.group(1))
+
+
+def _is_access_refusal(detail: str) -> bool:
+    """Whether git's report names a refusal of the access: credentials asked for again, or a 401,
+    403 or 404. The text is the provider's side of the push on the runner's own mirror."""
+    return bool(_CREDENTIALS_REFUSED.search(detail)) or _http_status(detail) in _ACCESS_STATUSES
+
+
+def _is_client_error(detail: str) -> bool:
+    """A client error of the provider that is no hiccup and not worth retrying (a 413, a 422, ...;
+    408, 425 and 429 are hiccups)."""
+    status = _http_status(detail)
+    return status is not None and 400 <= status < 500 and status not in _RETRYABLE_CLIENT_ERRORS
+
+
+class _ListingTooLarge(Exception):
+    """The agent's list of branches is longer than `LIST_MAX_BYTES`."""
 
 
 def _invalid(detail: str) -> JobError:
@@ -241,8 +281,11 @@ class _Progress:
     branches: list[BranchPush] = field(default_factory=lambda: [])
     form_head: str | None = None
     listed: bool = True
+    list_problem: str | None = None
     invalid: int = 0
     overflow: int = 0
+    sweeps_failed: int = 0
+    form_listed: bool = True
     # The scratch ref the form's branch was taken over into (None: it was not).
     form_ref: str | None = None
 
@@ -262,6 +305,7 @@ class GitWorkspace:
         schemes: Collection[str] = ("https",),
         timeout: float = DEFAULT_TIMEOUT,
         before_push: Callable[[], None] | None = None,
+        sweep: Callable[[], bool] | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -276,6 +320,11 @@ class GitWorkspace:
         # raises to refuse. The job asks the lease here, so that nothing is pushed for a job that is
         # not ours (#765).
         self._before_push = before_push
+        # Ends every process of the agent's user and says whether none is left. The git commands
+        # that run as that user (the status, the leftover commit, the upload-pack of a fetch) can
+        # start a daemon through the repository's config, so it is asked again right before each
+        # `git push`.
+        self._sweep = sweep
         self.layout = layout
         self.agent = agent
         self.identity = identity
@@ -516,6 +565,7 @@ class GitWorkspace:
         if listed is None:
             self._progress.listed = False
             return self.push_report()
+        self._progress.form_listed = any(name == self.spec.branch for name, _ in listed)
         # A branch still at the start commit has nothing on it: it is neither fetched nor reported.
         names = [name for name, tip in listed if tip != self.start_commit]
         selection = select_branches(names, form_branch=self.spec.branch)
@@ -537,8 +587,11 @@ class GitWorkspace:
             branches=tuple(progress.branches),
             form_head=progress.form_head,
             listed=progress.listed,
+            list_problem=progress.list_problem,
             invalid=progress.invalid,
             overflow=progress.overflow,
+            sweeps_failed=progress.sweeps_failed,
+            form_listed=progress.form_listed,
         )
 
     def commits_since_start(self) -> list[CommitInfo]:
@@ -615,25 +668,76 @@ class GitWorkspace:
 
     def _local_branches(self) -> list[tuple[str, str]] | None:
         """The local branches of the agent's repository as (name, tip as listed), or None when it
-        cannot be read. `ls-remote` against a `git upload-pack` run as the agent's user (see the
-        module text). The names are judged by `push_policy`. The listed tip is only a hint that
-        saves a fetch (a branch still at the start commit has nothing to push); what is pushed is
-        read from the mirror."""
-        listed = self._root(
-            ["ls-remote", "--heads", f"--upload-pack={self._upload_pack()}", str(self.repo)],
-            protocols="file",
-            timeout=min(self._timeout, LIST_TIMEOUT),
-        )
-        if listed.returncode != 0:
+        cannot be read (`list_problem` says why). `git for-each-ref` run **as the agent's user** in
+        its repository, so that its config is read with the agent's rights and by nothing else, and
+        **streamed and capped** at `LIST_MAX_BYTES`: the runner holds no more than that of a list
+        the agent controls, and git is ended when the cap is passed. The names are judged by
+        `push_policy`. The listed tip is only a hint that saves a fetch (a branch still at the
+        start commit has nothing to push); what is pushed is read from the mirror."""
+        data = bytearray()
+
+        def consume(chunk: bytes) -> None:
+            data.extend(chunk)
+            if len(data) > LIST_MAX_BYTES:
+                raise _ListingTooLarge
+
+        try:
+            done = self._agent_stream(
+                ["for-each-ref", "--format=%(objectname) %(refname)", "refs/heads/"],
+                consume,
+                timeout=min(self._timeout, LIST_TIMEOUT),
+            )
+        except _ListingTooLarge:
+            self._progress.list_problem = LIST_TOO_LARGE
+            return None
+        if done.returncode != 0:
+            self._progress.list_problem = LIST_UNREADABLE
             return None
         branches: list[tuple[str, str]] = []
         # Split on the line feed only: a name that holds another separator stays one name, which
         # `push_policy` then refuses.
-        for line in listed.stdout.split("\n"):
-            tip, _, ref = line.partition("\t")
+        for line in data.decode("utf-8", errors="surrogateescape").split("\n"):
+            tip, _, ref = line.partition(" ")
             if ref.startswith("refs/heads/"):
                 branches.append((ref.removeprefix("refs/heads/"), tip))
         return branches
+
+    def sweep_engine_user(self) -> bool:
+        """End every process of the agent's user; True when none is left (always True where there is
+        no dedicated user)."""
+        return True if self._sweep is None else self._sweep()
+
+    def rescue_detached_head(self) -> str | None:
+        """Work committed on a detached HEAD is on no branch, so the final push would not see it.
+        When HEAD is detached and no local branch contains it, a branch
+        `<task branch>-leftover-<id>` is made at HEAD and checked out, and its name is returned;
+        otherwise None. Runs as the agent's user; a failure is raised (`setup_failed`) for the
+        caller to note."""
+        attached = self._as_agent(["symbolic-ref", "-q", "HEAD"], timeout=RESCUE_STEP_TIMEOUT)
+        if attached.returncode != 1:
+            return None
+        containing = self._as_agent(
+            [
+                "for-each-ref",
+                "--count=1",
+                "--contains",
+                "HEAD",
+                "--format=%(refname)",
+                "refs/heads/",
+            ],
+            timeout=RESCUE_STEP_TIMEOUT,
+        )
+        if containing.returncode != 0:
+            raise fail(
+                ErrorCode.SETUP_FAILED, "git for-each-ref failed: " + self._agent_detail(containing)
+            )
+        if containing.stdout.strip():
+            return None
+        name = f"{self.spec.branch}-leftover-{uuid.uuid4().hex[:8]}"
+        moved = self._as_agent(["switch", "-q", "-c", name], timeout=RESCUE_STEP_TIMEOUT)
+        if moved.returncode != 0:
+            raise fail(ErrorCode.SETUP_FAILED, "git switch failed: " + self._agent_detail(moved))
+        return name
 
     def _push_one(
         self, index: int, name: str, deadline: float, confirm_seconds: float, confirm_pause: float
@@ -651,6 +755,12 @@ class GitWorkspace:
             self._progress.form_head = tip
             self._progress.form_ref = scratch
         self._ask_lease(deadline, confirm_seconds, confirm_pause)
+        # Nothing of the agent's user runs when the token goes out. The fetch above ran an
+        # upload-pack as that user, and a repository's config can make it leave a daemon behind. A
+        # sweep that fails does not hold the push back (that user cannot read a root process's
+        # environment, which the privileged tests prove) but is counted and noted.
+        if not self.sweep_engine_user():
+            self._progress.sweeps_failed += 1
         reason = self._push(scratch, name, deadline)
         self._record(name, tip, reason)
 
@@ -667,6 +777,10 @@ class GitWorkspace:
                 "fetch.fsckObjects=true",
                 "-c",
                 "transfer.fsckObjects=true",
+                # Protocol 2 asks the agent's upload-pack for the one ref only (`ref-prefix`): the
+                # advertisement the runner reads does not grow with the refs the agent made.
+                "-c",
+                "protocol.version=2",
                 "fetch",
                 *_PLAIN_FETCH,
                 f"--upload-pack={self._upload_pack()}",
@@ -676,7 +790,7 @@ class GitWorkspace:
             timeout=self._left(FETCH_TIMEOUT, deadline),
         )
         if fetched.returncode != 0:
-            return None, REASON_UNREADABLE
+            return None, REASON_TIMED_OUT if fetched.unanswered else REASON_UNREADABLE
         raw_id = self._mirror(["rev-parse", "-q", "--verify", scratch])
         commit = self._mirror(["rev-parse", "-q", "--verify", f"{scratch}^{{commit}}"])
         found = raw_id.stdout.strip()
@@ -707,19 +821,30 @@ class GitWorkspace:
         )
         if pushed.returncode == 0:
             return None
+        if pushed.unanswered:
+            return REASON_TIMED_OUT
         refused = [line for line in pushed.stdout.splitlines() if line.startswith("!")]
         detail = self._detail(pushed)
         if refused:
             if all(_HICCUP.search(line) for line in refused):
                 return REASON_PROVIDER_UNAVAILABLE
-            if any("[remote rejected]" in line for line in refused):
-                # GitHub names the reason on the status line; a hook says it on a `remote:` line.
-                if _WORKFLOW.search("\n".join(refused)) or _WORKFLOW.search(detail):
+            remote = [_REMOTE_REJECTED.search(line) for line in refused]
+            if any(found is not None for found in remote):
+                if any(found and found["reason"].startswith(_WORKFLOW_REASON) for found in remote):
+                    return REASON_WORKFLOWS
+                # A server that shows its reason on `remote:` lines (a hook) says it at the start of
+                # the line; a line that only mentions the branch does not count.
+                if any(
+                    line.startswith("remote: " + _WORKFLOW_REASON)
+                    for line in pushed.stderr.splitlines()
+                ):
                     return REASON_WORKFLOWS
                 return REASON_REMOTE_REJECTED
             return REASON_NOT_FAST_FORWARD
-        if _is_http_refusal(detail):
+        if _is_access_refusal(detail):
             return REASON_PROVIDER_REFUSED
+        if _is_client_error(detail):
+            return REASON_PROVIDER_ERROR
         return REASON_PROVIDER_UNAVAILABLE
 
     def _left(self, cap: float, deadline: float) -> float:

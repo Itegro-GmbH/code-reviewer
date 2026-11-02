@@ -34,7 +34,10 @@ do not leave finished work uncommitted. Git is yours to use as you like inside t
 amend, rebase, reset, create and switch branches. The repository has no remote and you have no \
 credential, so do not try to push. When your turn ends, the system pushes everything that is on \
 the local branches of this repository to GitHub, as it is: what you want to keep has to be \
-committed on a branch.
+committed on a branch. Only 50 branches are pushed, the task's branch first and then the others \
+in alphabetical order, and a branch whose name has a space, a control character or one of \
+~ ^ : ? * [ \\, has "..", starts with - or +, or is longer than 255 bytes is not pushed either. \
+Work committed on a detached HEAD is saved on a new branch named after the task's branch.
 
 When the repository has tests, run them before you finish.
 

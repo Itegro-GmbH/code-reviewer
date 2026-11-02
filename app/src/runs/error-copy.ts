@@ -296,11 +296,12 @@ export const turnErrorCopy = (
     "The task used more than its allowed budget and was stopped. Work committed before the stop was pushed to the branch when possible, so check the branch for what reached it.",
   llm_context_length_exceeded:
     "The conversation of the task grew larger than the model's context window, so the AI provider refused the request. Work committed before the stop was pushed to the branch when possible. Start a smaller task, or choose a model with a larger window.",
-  // The runner reports this code when the task's branch did not arrive on GitHub, or when no branch did: the repository refused it
-  // (the branch already exists with other history, a rule, a permission, a workflow file) or could not be reached. The page
-  // lists every branch with the reason; a branch that was pushed stays.
+  // The runner reports this code when the task's branch did not arrive on GitHub, or when no branch did: GitHub refused it (the
+  // branch already exists with other history, a rule, a permission, a workflow file, an answer that was an error) or could not be
+  // reached, the push took too long, or the runner could not read the agent's repository (or its list of branches) and so pushed
+  // nothing. The page lists every branch with the reason; a branch that was pushed stays.
   push_rejected:
-    "GitHub did not take the work of this task: the branch was refused, or GitHub could not be reached. The branches below say which were pushed and why the others were not. A branch that was pushed stays on GitHub.",
+    "The work of this task did not arrive on GitHub. Either GitHub refused the branch, did not answer or answered with an error, the push took too long, or the workspace of the agent could not be read, in which case nothing was pushed. The branches below, if there are any, say which were pushed and why the others were not. A branch that was pushed stays on GitHub.",
   // The table above says "Reviews" for a workspace that is paused or has used up its plan; a task is not a review.
   workspace_suspended:
     "Tasks are paused for this workspace, so this task did not start and no AI model was used. Ask whoever manages this workspace's plan.",

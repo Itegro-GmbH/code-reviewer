@@ -568,6 +568,10 @@ export interface ImplementerResult {
   baseCommit: string;
   headCommit: string | null;
   pushed: boolean;
+  branchesDropped?: {
+    invalid: number;
+    overflow: number;
+  };
   /**
    * @maxItems 50
    */

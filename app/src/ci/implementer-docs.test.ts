@@ -7,6 +7,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { describeBranchReason } from "../runs/run-view.ts";
 import { listTrackedFiles } from "./tracked-files.ts";
 import { readText, repoRoot } from "./workflow-support.ts";
 
@@ -553,6 +554,10 @@ describe("the operator guide states what the owner decided", () => {
       "Root never runs git with the agent's repository",
       "`--upload-pack`",
       "`no_new_privs`",
+      "`branchesDropped`",
+      "once more right before each `git push`",
+      "capped at 4 MiB",
+      "`<the task's branch>-leftover-<id>`",
     ])
       expect(rules, phrase).toContain(phrase);
     // What the guide says is what the code does.
@@ -581,13 +586,28 @@ describe("the operator guide states what the owner decided", () => {
       "remote_rejected",
       "workflows_not_allowed",
       "provider_refused",
+      "provider_error",
       "provider_unavailable",
+      "timed_out",
       "unreadable",
       "not_a_commit",
       "out_of_time",
       "excluded",
     ])
       expect(rules, reason).toContain(`\`${reason}\``);
+    // Every word the runner can give for a branch is in the guide and has a sentence of its own on the Runs page.
+    const words = [
+      ...(workspace + policy).matchAll(/^REASON_[A-Z_]+ = "([a-z_]+)"$/gm),
+    ]
+      .map((found) => found[1] ?? "")
+      .filter((word) => word !== "");
+    expect(words.length).toBeGreaterThanOrEqual(11);
+    for (const word of words) {
+      expect(rules, word).toContain(`\`${word}\``);
+      expect(describeBranchReason(word), word).not.toBe(
+        "The branch was not pushed.",
+      );
+    }
   });
 
   // The guide says which branches the codes of the old model are gone for.

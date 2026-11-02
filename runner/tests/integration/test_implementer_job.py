@@ -119,6 +119,12 @@ class FakeGit(GitWorkspace):
         self.prepared = False
         self.other_branches: dict[str, str] = {}
         self.rejected: dict[str, str] = {}
+        # The task's branch was looked at and not taken over: (reason, head or None).
+        self.form_rejected: tuple[str, str | None] | None = None
+        self.rescue_name: str | None = None
+        self.dropped: tuple[int, int] = (0, 0)
+        self.form_gone = False
+        self.sweeps = 0
         self._prepare_error: JobError | None = None
 
     def fail_prepare(self, error: JobError) -> None:
@@ -154,6 +160,15 @@ class FakeGit(GitWorkspace):
     def changed_files(self) -> list[FileChange]:
         return list(self.files) if self._progress.form_ref is not None else []
 
+    def rescue_detached_head(self) -> str | None:
+        self.events.append("rescue")
+        return self.rescue_name
+
+    def sweep_engine_user(self) -> bool:
+        self.events.append("sweep")
+        self.sweeps += 1
+        return True
+
     def engine_inputs_present(self) -> list[str]:
         return []
 
@@ -167,10 +182,17 @@ class FakeGit(GitWorkspace):
         deadline = self._clock() + seconds
         self._ask_lease(deadline, confirm_seconds, confirm_pause)
         mine = self._progress
-        if self.tip is not None and self.tip != self._start:
+        mine.invalid, mine.overflow = self.dropped
+        mine.form_listed = not self.form_gone
+        if self.form_rejected is not None:
+            reason, head = self.form_rejected
+            mine.branches.append(BranchPush(self.spec.branch, head, False, reason))
+            mine.form_head = head
+        elif self.tip is not None and self.tip != self._start:
             mine.form_head = self.tip
             mine.form_ref = "refs/runner/in/0"
             self._ask_lease(deadline, confirm_seconds, confirm_pause)
+            self.sweep_engine_user()
             self.events.append("push")
             self.pushes.append(self.tip)
             mine.branches.append(BranchPush(self.spec.branch, self.tip, True, None))
@@ -195,6 +217,7 @@ class FakeAgent:
     session_id: str | None = None
     stopped: list[bool] = field(default_factory=lambda: [])
     texts: list[str] = field(default_factory=lambda: [])
+    ends_clean: bool = True
 
     @property
     def ledger(self) -> Any:
@@ -223,7 +246,7 @@ class FakeAgent:
     def stop(self, *, quick: bool = False) -> bool:
         self.events.append("stop(quick)" if quick else "stop")
         self.stopped.append(quick)
-        return True
+        return self.ends_clean
 
 
 class LeaseChannel:
@@ -322,6 +345,7 @@ def play(
         session_error: Exception | None = None,
         cost_limit: bool = True,
         confirm_seconds: float = 0.3,
+        ends_clean: bool = True,
     ) -> Turn:
         events: list[str] = []
         made: list[FakeGit] = []
@@ -351,7 +375,7 @@ def play(
             )
 
         def agent_factory(**options: Any) -> FakeAgent:
-            agent = FakeAgent(script, events, made[0], options)
+            agent = FakeAgent(script, events, made[0], options, ends_clean=ends_clean)
             agents.append(agent)
             return agent
 
@@ -429,7 +453,7 @@ def test_a_job_in_and_a_valid_result_out_with_the_commit_pushed_once(play: Any) 
     assert result["implementer"]["opencode"]["sessionId"] == "ses_fake"
     assert result["usage"]["aiCalls"] >= 1
     assert turn.git.pushes == [TIP]
-    assert turn.events == ["agent.start", "turn", "stop", "push"]
+    assert turn.events == ["agent.start", "turn", "stop", "rescue", "sweep", "push"]
     assert turn.git.prepared
 
 
@@ -529,6 +553,7 @@ def test_a_setup_that_fails_after_the_clone_reports_the_base_commit_and_nothing_
         "headCommit": None,
         "pushed": False,
         "branches": [],
+        "branchesDropped": {"invalid": 0, "overflow": 0},
         "commits": [],
         "filesChanged": [],
         "summary": "",
@@ -902,7 +927,7 @@ def test_sigterm_ends_the_engine_pushes_what_is_committed_and_reports_runner_shu
     assert turn.git.pushes == [TIP]
     # The engine first (quickly: seconds, not minutes), then the push, nothing in between: the
     # leftover is not committed on a stop.
-    assert turn.events == ["agent.start", "turn", "stop(quick)", "push"]
+    assert turn.events == ["agent.start", "turn", "stop(quick)", "rescue", "sweep", "push"]
     assert result["implementer"]["pushed"] is True
     assert result["implementer"]["headCommit"] == TIP
     assert valid_result(result)
@@ -1000,3 +1025,109 @@ def test_the_token_the_key_and_the_capability_are_in_no_output_of_the_turn(
         assert secret not in everything, "a secret reached an output"
     assert turn.result["ok"] is True
     assert "leaked" in turn.result["implementer"]["summary"]
+
+
+# -- review of #815: what the turn says about the task's branch and the work it saved --------------
+
+
+@pytest.mark.parametrize("reason", ["unreadable", "not_a_commit", "timed_out"])
+def test_a_task_branch_that_was_not_taken_over_is_not_a_success_whatever_else_was_pushed(
+    play: Any, reason: str
+) -> None:
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        agent.use_the_model()
+        return "worked"
+
+    def configure(git: FakeGit) -> None:
+        git.form_rejected = (reason, None)
+        git.other_branches = {"second": SECOND}
+
+    turn = play(script, configure=configure)
+
+    block = turn.result["implementer"]
+    assert turn.result["errorCode"] == "push_rejected", turn.output
+    assert valid_result(turn.result)
+    assert [(b["name"], b["result"], b["reason"]) for b in block["branches"]] == [
+        ("implementer/a1b2c3", "rejected", reason),
+        ("second", "pushed", None),
+    ]
+
+
+def test_a_task_branch_that_is_verifiably_empty_does_not_stop_another_branch_from_succeeding(
+    play: Any,
+) -> None:
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        agent.use_the_model()
+        return "worked elsewhere"
+
+    def configure(git: FakeGit) -> None:
+        git.other_branches = {"elsewhere": SECOND}
+
+    assert play(script, configure=configure).result["ok"] is True
+
+
+def test_a_task_branch_that_is_gone_is_not_verifiably_empty_so_another_branch_is_no_success(
+    play: Any,
+) -> None:
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        agent.use_the_model()
+        return "worked elsewhere"
+
+    def configure(git: FakeGit) -> None:
+        git.form_gone = True
+        git.other_branches = {"elsewhere": SECOND}
+
+    turn = play(script, configure=configure)
+
+    assert turn.result["errorCode"] == "push_rejected", turn.output
+    assert [b["name"] for b in turn.result["implementer"]["branches"]] == ["elsewhere"]
+
+
+def test_the_counts_of_the_branches_that_were_left_out_are_in_the_report(play: Any) -> None:
+    def configure(git: FakeGit) -> None:
+        git.dropped = (3, 7)
+
+    turn = play(commits_then_ends(), configure=configure)
+
+    assert turn.result["implementer"]["branchesDropped"] == {"invalid": 3, "overflow": 7}
+    assert valid_result(turn.result)
+
+
+def test_work_saved_from_a_detached_head_is_in_the_summary_and_the_notes(play: Any) -> None:
+    def configure(git: FakeGit) -> None:
+        git.rescue_name = "implementer/a1b2c3-leftover-1234abcd"
+
+    turn = play(commits_then_ends(), configure=configure)
+
+    assert "implementer/a1b2c3-leftover-1234abcd" in turn.result["implementer"]["summary"]
+    assert turn.events[:4] == ["agent.start", "turn", "stop", "rescue"]
+
+
+def test_the_agents_user_is_swept_again_after_the_leftover_and_before_the_push(play: Any) -> None:
+    turn = play(commits_then_ends(), dirty=True)
+
+    assert turn.events == [
+        "agent.start",
+        "turn",
+        "turn",
+        "stop",
+        "rescue",
+        "commit_all",
+        "sweep",
+        "push",
+    ]
+
+
+def test_when_the_agents_processes_could_not_all_be_ended_nothing_is_committed_as_that_user(
+    play: Any,
+) -> None:
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        agent.use_the_model()
+        make_commit(agent, TIP)
+        return "done"
+
+    turn = play(script, dirty=True, ends_clean=False)
+
+    assert "commit_all" not in turn.events and "rescue" not in turn.events
+    assert turn.git.pushes == [TIP], "what was committed is still pushed"
+    assert "were not looked for" in turn.result["implementer"]["summary"]

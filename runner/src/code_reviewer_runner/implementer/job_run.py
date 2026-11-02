@@ -213,6 +213,7 @@ def production_setup(
         AgentUser(identity.uid, identity.gid),
         identity_for(job),
         before_push=gate,
+        sweep=lambda: sweep_user(identity.uid, identity.gid),
     )
     launch = EngineLaunch(
         uid=identity.uid,
@@ -318,6 +319,7 @@ def _early_block(workspace: GitWorkspace | None) -> dict[str, object] | None:
         "headCommit": None,
         "pushed": False,
         "branches": [],
+        "branchesDropped": {"invalid": 0, "overflow": 0},
         "commits": [],
         "filesChanged": [],
         "summary": "",

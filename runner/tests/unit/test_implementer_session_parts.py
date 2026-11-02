@@ -22,7 +22,11 @@ from code_reviewer_runner.dynamic_review.netguard import IsolationError
 from code_reviewer_runner.dynamic_review.static_isolation import ImplementerNetwork
 from code_reviewer_runner.dynamic_review.tool_part_audit import ToolPartAudit
 from code_reviewer_runner.implementer.egress_config import EgressSettings
-from code_reviewer_runner.implementer.git_workspace import DIRTY_TIMEOUT, REPORT_READ_TIMEOUT
+from code_reviewer_runner.implementer.git_workspace import (
+    DIRTY_TIMEOUT,
+    REPORT_READ_TIMEOUT,
+    RESCUE_STEP_TIMEOUT,
+)
 from code_reviewer_runner.implementer.job_run import SIGTERM_BACKSTOP_SECONDS
 from code_reviewer_runner.implementer.session import (
     COST_LIMIT_DETAIL,
@@ -429,8 +433,11 @@ def test_the_session_names_the_outage_the_proxy_kept(failure: ErrorCode) -> None
 # The one final push has to fit the end of the turn, at a normal end and at a stop.
 def test_the_end_of_a_turn_fits_the_grace_and_a_stop_fits_the_sigterm_backstop() -> None:
     reads = 2 * REPORT_READ_TIMEOUT
-    normal = ENGINE_STOP_SECONDS + DIRTY_TIMEOUT + LEFTOVER_SECONDS + FINAL_PUSH_SECONDS + reads
-    stop = ENGINE_STOP_SECONDS + STOP_PUSH_SECONDS + reads
+    rescue = 3 * RESCUE_STEP_TIMEOUT  # symbolic-ref, for-each-ref, switch; at a stop too
+    normal = (
+        ENGINE_STOP_SECONDS + rescue + DIRTY_TIMEOUT + LEFTOVER_SECONDS + FINAL_PUSH_SECONDS + reads
+    )
+    stop = ENGINE_STOP_SECONDS + rescue + STOP_PUSH_SECONDS + reads
 
     assert normal <= GRACE_SECONDS
     assert stop <= SIGTERM_BACKSTOP_SECONDS
