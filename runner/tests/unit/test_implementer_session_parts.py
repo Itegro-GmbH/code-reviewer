@@ -18,16 +18,14 @@ from code_reviewer_runner.dynamic_review.budget import (
     Reservation,
     UnitCosts,
 )
-from code_reviewer_runner.dynamic_review.netguard import IsolationError
-from code_reviewer_runner.dynamic_review.static_isolation import ImplementerNetwork
 from code_reviewer_runner.dynamic_review.tool_part_audit import ToolPartAudit
-from code_reviewer_runner.implementer.egress_config import EgressSettings
 from code_reviewer_runner.implementer.git_workspace import (
     DIRTY_TIMEOUT,
     REPORT_READ_TIMEOUT,
     RESCUE_STEP_TIMEOUT,
 )
 from code_reviewer_runner.implementer.job_run import SIGTERM_BACKSTOP_SECONDS
+from code_reviewer_runner.implementer.limits import agent_limits
 from code_reviewer_runner.implementer.session import (
     COST_LIMIT_DETAIL,
     DEADLINE_DETAIL,
@@ -39,7 +37,6 @@ from code_reviewer_runner.implementer.session import (
     STOP_PUSH_SECONDS,
     TOKEN_CAP_DETAIL,
     ImplementerSession,
-    agent_limits,
     classify,
     deadline_seconds,
 )
@@ -243,7 +240,7 @@ def test_what_ends_a_turn_has_a_stable_code_whether_or_not_the_model_was_used(
 @pytest.mark.parametrize(
     "error",
     [
-        IsolationError("the engine ports are not the ones the network rules allow"),
+        JobError(ErrorCode.SETUP_FAILED, "agent_container_unavailable: the daemon refused a step"),
         JobError(ErrorCode.SETUP_FAILED, "git status failed"),
     ],
 )
@@ -385,7 +382,7 @@ def session_that_ended(ledger: BudgetLedger, failed: ErrorCode | None) -> Implem
         job,
         workspace=None,  # type: ignore[arg-type]  # not read by _stopped_by
         command=["opencode"],
-        egress=EgressSettings(ImplementerNetwork.NONE, None),
+        place=lambda: None,  # type: ignore[arg-type,return-value]
         environment={},
     )
     # The turn's model as `_stopped_by` reads it: the ledger and what the proxy kept of the outage.

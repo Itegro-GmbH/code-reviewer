@@ -148,7 +148,7 @@ def session_with(max_seconds: float | None) -> ImplementerSession:
         job(),
         workspace=None,  # type: ignore[arg-type]  # the deadline reads none of it
         command=("opencode",),
-        egress=None,  # type: ignore[arg-type]
+        place=lambda: None,  # type: ignore[arg-type,return-value]
         environment={},
         started=0.0,
         seams=SessionSeams(clock=lambda: 100.0),

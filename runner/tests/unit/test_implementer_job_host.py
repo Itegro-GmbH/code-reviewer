@@ -50,8 +50,9 @@ PROFILE = {
     "RUNNER_DYNAMIC_MAX_COST_USD": "0.50",
     "RUNNER_DYNAMIC_CAPABILITIES": '{"tool_choice_required": true}',
     "RUNNER_IMPLEMENTER_WORK_DIR": "/work",
-    "RUNNER_IMPLEMENTER_NETWORK": "registries",
-    "RUNNER_IMPLEMENTER_EGRESS_PORT": "10182",
+    "RUNNER_IMPLEMENTER_MODEL_DOOR": "docker",
+    "RUNNER_IMPLEMENTER_SANDBOX_PROOF": "proven",
+    "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB": "2560",
 }
 HEAD = "9" * 40
 
@@ -182,7 +183,9 @@ def test_a_turn_starts_as_the_root_supervisor_with_what_only_it_needs() -> None:
         assert spec.env[OPENCODE_COMMAND_VARIABLE] == "/usr/local/bin/opencode"
         assert spec.env[RIPGREP_PATH_VARIABLE] == "/usr/local/bin/rg"
         assert spec.env["RUNNER_IMPLEMENTER_WORK_DIR"] == "/work"
-        assert spec.env["RUNNER_IMPLEMENTER_EGRESS_PORT"] == "10182"
+        assert spec.env["RUNNER_IMPLEMENTER_MODEL_DOOR"] == "docker"
+        assert spec.env["RUNNER_IMPLEMENTER_SANDBOX_PROOF"] == "proven"
+        assert spec.env["RUNNER_IMPLEMENTER_AGENT_MEMORY_MB"] == "2560"
         assert spec.env["RUNNER_DYNAMIC_ENGINE_UID"] == "10101"
         # The Dynamic Review's own settings and the operator's other variables stay out.
         assert "RUNNER_DYNAMIC_MAX_COST_USD" not in spec.env
