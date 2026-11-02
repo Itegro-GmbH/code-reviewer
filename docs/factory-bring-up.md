@@ -93,7 +93,7 @@ a secret. The order matters; each step has a check and a way back.
   `health-factory` when its two settings disagree, which holds back only the factory's promotion.
 - Take the baseline of [`implementer-smoke-test.md`](implementer-smoke-test.md) (one Diff and one Dynamic review on the first
   App) before step 2.
-- Open points, none of them a blocker for the rollout: the end to end journey of the privileged lane (#767) is not merged, the
+- Open points, none of them a blocker for the rollout: the
   usage of a stopped turn is not recorded (#799), and the registry exfiltration of #784 must be closed before external users.
 
 | # | Step | Who | Check | Rollback |

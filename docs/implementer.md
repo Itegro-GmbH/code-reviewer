@@ -217,8 +217,6 @@ These are decisions of the owner, not oversights.
 
 ## Open points
 
-- **#767**, the end to end journey of the whole path in the privileged lane, is not merged. The live smoke test is the first
-  run of the whole path on the platform.
 - **#797**: a failed proof of the Implementer blocks code-review.com. The Dispatcher is shared, the deploy canary requires
   `implementer` as soon as the factory's entry names the kind, and the promotions of everything staged in that run wait for the
   canary. There is no switch that waives the proof; the way back is in the rollout, step 2.

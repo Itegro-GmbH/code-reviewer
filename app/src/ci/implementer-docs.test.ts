@@ -356,7 +356,7 @@ describe("the documents match the merged runner job and canary (#765)", () => {
     ] as const)
       expect(doc, file).not.toContain("State of the code");
     const open = flat(section(guide, "## Open points"));
-    for (const issue of ["#767", "#797", "#799", "#784"])
+    for (const issue of ["#797", "#799", "#784"])
       expect(open, issue).toContain(issue);
   });
 
