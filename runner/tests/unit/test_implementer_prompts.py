@@ -17,9 +17,18 @@ REQUIRED = [
     'including "only commit when explicitly requested"',
     "commit your work at normal intervals, with meaningful commit messages (git add, git commit)",
     "do not leave finished work uncommitted",
-    # the branch and what rewrites it
-    "Never push, never switch, create or delete branches, never amend, rebase or reset commits",
-    "never change the git configuration",
+    # git is free, there is no remote, and everything on the local branches is pushed at the end
+    "Git is yours to use as you like inside this workspace",
+    "amend, rebase, reset, create and switch branches",
+    "The repository has no remote and you have no credential, so do not try to push",
+    "the system pushes everything that is on the local branches of this repository to GitHub",
+    "what you want to keep has to be committed on a branch",
+    # the limit and the name rules, and what is dropped
+    "Only 50 branches are pushed, the task's branch first and then the others in alphabetical "
+    "order",
+    "a branch whose name has a space, a control character or one of ~ ^ : ? * [ \\",
+    "is longer than 255 bytes is not pushed either",
+    "Work committed on a detached HEAD is saved on a new branch",
     # nobody can answer
     "Nobody can answer a question here",
     "decide on the most reasonable reading of the task and go on",
@@ -87,3 +96,18 @@ def test_the_text_gives_no_rule_about_the_approach_beyond_the_ones_above(
 # #764-T05
 def test_the_extra_message_asks_to_commit_the_changes() -> None:
     assert "commit your changes" in LEFTOVER_PROMPT
+
+
+# The owner's git model: nothing in the text forbids what the workspace allows.
+@pytest.mark.parametrize("network", BOTH)
+def test_the_text_does_not_forbid_what_git_allows(network: ImplementerNetwork) -> None:
+    text = instructions_text(network)
+
+    for forbidden in (
+        "Never push",
+        "never switch",
+        "never amend",
+        "never change the git configuration",
+        "rewrites history is refused",
+    ):
+        assert forbidden.lower() not in text.lower()

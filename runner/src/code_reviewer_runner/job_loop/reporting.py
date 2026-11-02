@@ -254,6 +254,9 @@ def _redacted_block(block: Mapping[str, Any], redactor: TextRedactor) -> Result:
     redacted = {
         **block,
         "summary": redactor.redact(block["summary"]),
+        "branches": [
+            {**branch, "name": redactor.redact(branch["name"])} for branch in block["branches"]
+        ],
         "commits": [
             {"sha": commit["sha"], "subject": redactor.redact(commit["subject"])}
             for commit in block["commits"]

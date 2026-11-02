@@ -78,6 +78,9 @@ class ErrorCode(StrEnum):
     SUPERSEDED = "superseded"
     # The Implementer (#746). Stable codes a caller branches on; a turn that fails is never run
     # again silently. `COST_LIMIT_REACHED` above is the cost limit of a turn as well.
+    # `BRANCH_EXISTS` and `BRANCH_VIOLATION` are no longer produced since git is free in the
+    # workspace and the final push reports each branch by itself; they stay for the runs that carry
+    # them and for older runners (contracts/runner-api.v1.json).
     BRANCH_EXISTS = "branch_exists"
     BASE_BRANCH_NOT_FOUND = "base_branch_not_found"
     CLONE_FAILED = "clone_failed"

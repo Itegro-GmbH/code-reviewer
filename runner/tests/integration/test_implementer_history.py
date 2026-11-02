@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
 """What the Implementer's result says about the branch (#764): the commits since the start commit
-and the files that differ, read as the agent's user from its repository, bounded and sanitised."""
+and the files that differ, read from the mirror after the final push has taken the form's branch
+over, bounded and sanitised."""
 
 from code_reviewer_runner.implementer.git_workspace import GitWorkspace
 from code_reviewer_runner.implementer.history import ChangeKind, CommitInfo, FileChange
@@ -25,6 +26,7 @@ def test_the_commits_since_the_start_are_listed_oldest_first_with_their_subjects
     first = commit_file(workspace, "a.txt", "1\n", "Add a\n\nlong body that is not a subject")
     second = commit_file(workspace, "b.txt", "2\n", "Add b")
 
+    workspace.push_all(seconds=120.0)
     assert workspace.commits_since_start() == [
         CommitInfo(first, "Add a"),
         CommitInfo(second, "Add b"),
@@ -35,6 +37,7 @@ def test_the_commits_since_the_start_are_listed_oldest_first_with_their_subjects
 def test_a_branch_without_commits_lists_none(rig: Rig) -> None:
     workspace = rig.prepared()
 
+    workspace.push_all(seconds=120.0)
     assert workspace.commits_since_start() == []
     assert workspace.changed_files() == []
 
@@ -52,6 +55,7 @@ def test_an_added_and_a_modified_file_have_their_statuses(rig: Rig) -> None:
     (workspace.repo / "new.txt").write_text("fresh\n")
     commit_all(workspace)
 
+    workspace.push_all(seconds=120.0)
     assert sorted(workspace.changed_files(), key=lambda change: change.path) == [
         FileChange("new.txt", ChangeKind.ADDED),
         FileChange("src/app.py", ChangeKind.MODIFIED),
@@ -64,6 +68,7 @@ def test_a_deleted_file_is_deleted(rig: Rig) -> None:
     (workspace.repo / "README.md").unlink()
     commit_all(workspace)
 
+    workspace.push_all(seconds=120.0)
     assert workspace.changed_files() == [FileChange("README.md", ChangeKind.DELETED)]
 
 
@@ -74,6 +79,7 @@ def test_a_renamed_file_is_listed_under_its_new_path(rig: Rig) -> None:
     (workspace.repo / "README.md").rename(workspace.repo / "docs" / "README.md")
     commit_all(workspace)
 
+    workspace.push_all(seconds=120.0)
     assert workspace.changed_files() == [FileChange("docs/README.md", ChangeKind.RENAMED)]
 
 
@@ -84,6 +90,7 @@ def test_a_file_that_became_a_link_is_a_change_of_type(rig: Rig) -> None:
     (workspace.repo / "README.md").symlink_to("src/app.py")
     commit_all(workspace)
 
+    workspace.push_all(seconds=120.0)
     assert workspace.changed_files() == [FileChange("README.md", ChangeKind.TYPECHANGE)]
 
 
@@ -92,6 +99,7 @@ def test_a_path_with_odd_characters_is_returned_as_it_is(rig: Rig) -> None:
     workspace = rig.prepared()
     commit_file(workspace, "dir with space/ünï cödé\ttab.txt", "x\n", "odd")
 
+    workspace.push_all(seconds=120.0)
     assert workspace.changed_files() == [
         FileChange("dir with space/ünï cödé\ttab.txt", ChangeKind.ADDED)
     ]
@@ -106,6 +114,7 @@ def test_a_huge_subject_and_a_flood_of_files_are_bounded(rig: Rig) -> None:
         (workspace.repo / f"f{number}.txt").write_text("x\n")
     commit_all(workspace, "files\u0007with\u001b[31mcontrol")
 
+    workspace.push_all(seconds=120.0)
     commits = workspace.commits_since_start()
     files = workspace.changed_files()
 

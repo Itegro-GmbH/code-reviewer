@@ -189,6 +189,16 @@ export type RunData = {
     files: { count: number; shown: Array<{ path: string; status: string }> };
     head: { shortSha: string } | null;
     pushedNote: string | null;
+    /** Every branch the runner pushed or tried to push at the end of the turn, the task's own first. */
+    branches?: {
+      shown: Array<{
+        name: string;
+        pushed: boolean;
+        reason: string | null;
+        shortSha: string | null;
+      }>;
+      more: number;
+    };
   };
 };
 
@@ -303,27 +313,12 @@ export const PROBE =
     "git config -l",
     "git remote -v",
     "ps -eo user,pid,args",
+    // The root processes of the container (the runner holds the token): their environment cannot be read.
+    'for p in $(ps -u 0 -o pid=); do echo "root $p environ: $(cat /proc/$p/environ 2>&1 | head -c 120)"; done',
     "ls -la /run /work",
   ]
     .map((command) => `echo "== ${command.replaceAll('"', "'")}"; ${command}`)
     .join("; ") + "; echo '== end of the probe'";
-
-/**
- * The same, while a push is going on: it commits, then looks (at most twelve seconds, every 20 ms) for a root process that runs
- * `git push` (the runner's mirror push), reads its arguments and tries to read its environment, where the token is, and says
- * what the system answered; then it runs the probe.
- */
-export const PROBE_DURING_PUSH =
-  "git add -A && git commit -q -m 'Add probe'; got=no; " +
-  "for i in $(seq 1 600); do " +
-  "for p in $(pgrep -u 0 -f ' push --porcelain '); do " +
-  "c=$(tr '\\0' ' ' < /proc/$p/cmdline 2>&1 | head -c 400); " +
-  "e=$(cat /proc/$p/environ 2>&1 | head -c 160); " +
-  'case "$e" in *"Permission denied"*) ' +
-  'echo "root push $p cmdline: $c"; echo "root push $p environ: $e"; got=yes;; esac; ' +
-  "done; " +
-  '[ "$got" = yes ] && break; sleep 0.02; done; ' +
-  `echo "[push-seen] $got"; ${PROBE}`;
 
 // -- what the runner did to Git ----------------------------------------------------------------------------------
 
@@ -339,43 +334,49 @@ export function runnerGitCommands(): GitCommand[] {
 }
 
 /**
- * The runner pushes the agent's branch and nothing else, and never with force. The fake GitHub refuses a forced update on
- * purpose (stricter than GitHub, which accepts it on a branch without protection), so what it accepts says nothing about the
- * runner: the command it ran does.
+ * The runner pushes branches of the agent's repository, each with a command of its own, and never with force. The fake GitHub
+ * refuses a forced update on purpose (stricter than GitHub, which accepts it on a branch without protection), so what it accepts
+ * says nothing about the runner: the command it ran does. Every push is `push --porcelain <remote> refs/runner/in/<n>:refs/heads/<name>`
+ * for a name in `branches`, and nothing else: no `+`, no force in any spelling, no deletion, no tags, no mirror.
  */
 export function expectRunnerPushedOnlyForward(
   commands: GitCommand[],
-  branch: string,
+  branches: string | string[],
 ): void {
+  const allowed = Array.isArray(branches) ? branches : [branches];
   // `--git-dir /work/mirror.git -c gc.auto=0 ... push --porcelain <remote> <refspec>`: what follows `push` is the command.
   const pushes = commands.flatMap(({ argv }) => {
     const at = argv.indexOf("push");
     return at < 0 ? [] : [argv.slice(at)];
   });
   expect(pushes.length).toBeGreaterThan(0);
-  const refspec = `refs/heads/${branch}:refs/heads/${branch}`;
+  const seen: string[] = [];
   for (const rest of pushes) {
-    // `push --porcelain <remote> <refspec>`: nothing else, in particular no force in any spelling and no deletion, and
-    // the one refspec is the agent's branch to the same name, without a `+`.
     expect(rest.slice(0, 2)).toEqual(["push", "--porcelain"]);
     expect(rest, "a push is made of four words").toHaveLength(4);
-    expect(rest[3]).toBe(refspec);
+    const match = /^refs\/runner\/in\/\d+:refs\/heads\/([\s\S]+)$/.exec(
+      rest[3] ?? "",
+    );
+    expect(match, `the refspec ${String(rest[3])}`).not.toBeNull();
+    seen.push(match?.[1] ?? "");
     expect(rest[2]).toMatch(/^https?:\/\/[^@\s]+$/);
-    for (const argument of rest)
+    for (const argument of rest.slice(0, 3))
       expect(argument).not.toMatch(
         /^(-f|--force.*|--mirror|--delete|--prune|--tags|--all|--follow-tags|\+.*|:.*)$/,
       );
   }
+  // One command per branch, and only branches the journey expects.
+  expect([...seen].sort()).toEqual([...allowed].sort());
 }
 
-/** Only the agent's own branch was pushed (the fake accepts a tag, a note or a fast-forward of the default branch). */
-export function expectOnlyTheOwnBranch(
+/** Only these branches were pushed (the fake accepts a tag, a note or a fast-forward of the default branch). */
+export function expectOnlyTheseBranches(
   pushes: Array<{ refs: string[] }>,
-  branch: string,
+  branches: string[],
 ): void {
   expect(pushes.length).toBeGreaterThan(0);
-  for (const push of pushes)
-    expect(push.refs).toEqual([`refs/heads/${branch}`]);
+  const refs = pushes.flatMap((push) => push.refs).sort();
+  expect(refs).toEqual(branches.map((name) => `refs/heads/${name}`).sort());
 }
 
 // -- the registry behind the egress proxy ------------------------------------------------------------------------
@@ -447,6 +448,11 @@ export function capabilities(): string[] {
 export type EngineScan = {
   /** Per place the job wrapper looked through at the end of a job: how many files, and how many held each secret. */
   roots: Record<string, { files: number; found: Record<string, number> }>;
+  /**
+   * What the traps of journey E15 left behind: the user ids a program run by the agent's git configuration wrote into the
+   * engine's temporary directory, and the files a shell reading a hostile branch name would have made.
+   */
+  traps?: { uids: string[]; pwned: string[] };
 };
 
 /** What the job wrapper found when it looked through the places of a job at its end, one scan per job. */

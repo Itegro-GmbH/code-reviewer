@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// Pins down the toolchain layer of the Worker image (#761): git 2.53 or newer, Node.js with pnpm, Python
-// with uv, a compiler, jq and unzip, and the files of the Implementer's accident guard. The agent builds
-// repositories inside the Worker container with these. Everything downloaded is pinned and verified
-// (runner/<name>-pin.json, runner/scripts/fetch_toolchain.py); git is built from its pinned source because
-// Debian's is older than the 2.53 the guard needs. Whether the built image behaves (versions, owners, the
-// guard matrix, the size budget) is judged by docker/smoke/runner.sh, which CI runs; here the Dockerfile
-// that makes it is.
+// Pins down the toolchain layer of the Worker image (#761): git, Node.js with pnpm, Python with uv, a
+// compiler, jq and unzip. The agent builds repositories inside the Worker container with these (git is
+// free there; the image holds no guard of it). Everything downloaded is pinned and verified
+// (runner/<name>-pin.json, runner/scripts/fetch_toolchain.py); git is built from its pinned source, linked
+// to the GnuTLS flavour of libcurl. Whether the built image behaves (versions, owners, the size budget) is
+// judged by docker/smoke/runner.sh, which CI runs; here the Dockerfile that makes it is.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -114,7 +113,7 @@ describe("git of the Worker image", () => {
     expect(sandbox().join("\n")).not.toMatch(/\blibcurl4\b/);
   });
 
-  // #761-T01: Debian's git (2.39) would be found first on a path and is too old for the guard.
+  // #761-T01: Debian's git would be found first on a path; the built one is the only git.
   it("is the only git: the distribution's package is never installed", () => {
     const installs = stages(dockerfile)
       .flatMap((entry) => entry.lines)
@@ -195,23 +194,14 @@ describe("the rest of the toolchain in the Worker image", () => {
   });
 });
 
-describe("the accident guard files in the Worker image", () => {
-  // #761-T03
-  it("puts the hook and the matrix in a root-owned directory the engine user cannot write", () => {
-    expect(sandbox()).toContain(
-      "RUN install -d -m 0755 -o 0 -g 0 /opt/code-reviewer/guard",
-    );
-    // Through a scratch stage, like the license files: the final stage copies nothing but pins from the context.
-    expect(stage("guard-files").base).toBe("scratch");
-    expect(stage("guard-files").lines).toEqual([
-      "COPY runner/guard/reference-transaction runner/scripts/guard_matrix.sh /",
-    ]);
-    expect(sandbox()).toContain(
-      "COPY --from=guard-files --chown=0:0 --chmod=0755 / /opt/code-reviewer/guard/",
-    );
+describe("git in the Worker image", () => {
+  // The owner's git model: git is free in the workspace, so the image holds no guard of it.
+  it("has no hook, no guard directory and no stage for them", () => {
+    expect(dockerfile).not.toMatch(/guard-files|\/opt\/code-reviewer\/guard/);
+    expect(dockerfile).not.toMatch(/reference-transaction|guard_matrix/);
   });
 
-  // #761-T03: the Worker sets core.hooksPath per job through GIT_CONFIG_SYSTEM; the root file system is read-only.
+  // #761-T03
   it("bakes no git configuration into the image: no hooksPath, no system or global config, no GIT_CONFIG", () => {
     const executable = stages(dockerfile)
       .flatMap((entry) => entry.lines)

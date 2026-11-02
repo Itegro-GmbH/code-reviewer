@@ -1147,6 +1147,10 @@ def _ensure_clean(result: JobResult, secrets: Sequence[str]) -> JobResult:
         implementer={
             **block,
             "summary": REDACTED,
+            "branches": [
+                {**b, "name": f"[redacted {number}]"}
+                for number, b in enumerate(block["branches"], 1)
+            ],
             "commits": [{"sha": c["sha"], "subject": REDACTED} for c in block["commits"]],
             "filesChanged": [
                 {"path": f"[redacted {number}]", "status": f["status"]}

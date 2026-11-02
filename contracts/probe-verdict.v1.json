@@ -32,9 +32,7 @@
         "ripgrep_checksum_mismatch",
         "network_probe_failed",
         "implementer_git_missing",
-        "implementer_git_too_old",
         "implementer_setpriv_missing",
-        "implementer_guard_files_missing",
         "implementer_egress_rules_missing",
         "implementer_work_dir_missing",
         "implementer_work_dir_not_prepared",
@@ -43,7 +41,7 @@
       ]
     },
     "ProbeVerdict": {
-      "description": "The line the `probe` mode prints. `engines` always holds `pr-agent`; `opencode` is in it only when the whole self-check passed (the hardening of the container, the egress mode, IPv6 off where the fallback ruleset needs it, the pins), and then `reasons` holds no reason against it. `implementer` (#765) is in it only in a container of the Implementer's profile, on top of `opencode`, when its own start-up check passed as well (git, the guard files, the work volume prepared and exec-capable, the network rules); a container whose own check failed has `opencode` and the `implementer_*` reasons. A container that is no Implementer container has no such reason.",
+      "description": "The line the `probe` mode prints. `engines` always holds `pr-agent`; `opencode` is in it only when the whole self-check passed (the hardening of the container, the egress mode, IPv6 off where the fallback ruleset needs it, the pins), and then `reasons` holds no reason against it. `implementer` (#765) is in it only in a container of the Implementer's profile, on top of `opencode`, when its own start-up check passed as well (git and setpriv, the work volume prepared and exec-capable, the network rules); a container whose own check failed has `opencode` and the `implementer_*` reasons. A container that is no Implementer container has no such reason.",
       "type": "object",
       "additionalProperties": false,
       "required": ["version", "engines", "reasons"],

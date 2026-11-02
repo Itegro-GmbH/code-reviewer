@@ -329,6 +329,72 @@ describe("the implementer result", () => {
     }
   });
 
+  // The git model: the runner reports every branch it pushed at the end of the turn.
+  it("takes the branches of the turn: optional, closed, at most 50, a reason word for a rejection", () => {
+    const branch = {
+      name: "experiment/two",
+      head: "c".repeat(40),
+      result: "rejected",
+      reason: "non_fast_forward",
+    };
+    const accepted = example("RunnerResult");
+    accepted.implementer.branches = [
+      ...accepted.implementer.branches,
+      branch,
+      { name: "unread", head: null, result: "rejected", reason: "unreadable" },
+    ];
+    expect(accepts("RunnerResult", accepted)).toBe(true);
+    const older = example("RunnerResult");
+    delete older.implementer.branches;
+    expect(accepts("RunnerResult", older)).toBe(true);
+    const full = example("RunnerResult");
+    full.implementer.branches = Array.from({ length: 50 }, (_, number) => ({
+      ...branch,
+      name: `b${String(number)}`,
+    }));
+    expect(accepts("RunnerResult", full)).toBe(true);
+
+    for (const edit of [
+      (result: Document) =>
+        (result.implementer.branches = Array.from(
+          { length: 51 },
+          () => branch,
+        )),
+      (result: Document) => (result.implementer.branches[0].extra = 1),
+      (result: Document) => (result.implementer.branches[0].name = ""),
+      (result: Document) =>
+        (result.implementer.branches[0].name = "n".repeat(256)),
+      (result: Document) => (result.implementer.branches[0].head = "abc"),
+      (result: Document) => (result.implementer.branches[0].result = "maybe"),
+      (result: Document) =>
+        (result.implementer.branches[0].reason = "Not Fast"),
+      (result: Document) => delete result.implementer.branches[0].reason,
+    ]) {
+      const result = example("RunnerResult");
+      edit(result);
+      expect(accepts("RunnerResult", result)).toBe(false);
+    }
+  });
+
+  it("takes the counts of the branches that were left out: optional, closed, two whole numbers from 0", () => {
+    const counted = example("RunnerResult");
+    counted.implementer.branchesDropped = { invalid: 3, overflow: 7 };
+    expect(accepts("RunnerResult", counted)).toBe(true);
+
+    for (const dropped of [
+      { invalid: 0 },
+      { invalid: 0, overflow: 0, extra: 1 },
+      { invalid: -1, overflow: 0 },
+      { invalid: 0, overflow: 1.5 },
+      { invalid: "1", overflow: 0 },
+      null,
+    ]) {
+      const result = example("RunnerResult");
+      result.implementer.branchesDropped = dropped;
+      expect(accepts("RunnerResult", result)).toBe(false);
+    }
+  });
+
   // #746-T02
   it("allows a failed turn with no head commit, a null session and nothing pushed", () => {
     const failed = example("RunnerResult");

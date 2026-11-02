@@ -3,8 +3,9 @@
 """The Implementer's agent session against the real, pinned OpenCode (#764).
 
 A scripted model plays one tool call or one text per request; everything else is production: the
-engine configuration and environment, the model proxy and ledger, the git workspace with its guard,
-the push loop and the leftover handling. The user separation is proven by the privileged lane.
+engine configuration and environment, the model proxy and ledger, the git workspace (git is free in
+it), the final push of all local branches and the leftover handling. The user separation is proven
+by the privileged lane.
 """
 
 import contextlib
@@ -12,6 +13,7 @@ import itertools
 import json
 import socket
 import threading
+import time
 from collections.abc import Callable
 from fractions import Fraction
 from pathlib import Path
@@ -268,7 +270,7 @@ def test_the_environment_of_the_spawned_engine_holds_no_secret_and_only_the_name
         assert capability not in text, "the capability is in the config file and nowhere else"
         assert not {name for name in environment if "KEY" in name or "TOKEN" in name}
         assert environment["OPENCODE_CONFIG"].endswith("opencode.json")
-        assert environment["GIT_CONFIG_SYSTEM"] == str(turned.workspace.system_config_path)
+        assert environment["GIT_CONFIG_NOSYSTEM"] == "1" and "GIT_CONFIG_SYSTEM" not in environment
         assert environment["GIT_AUTHOR_NAME"] == turned.workspace.identity.name
         ripgrep = ripgrep_binary()
         assert ripgrep is not None
@@ -409,7 +411,7 @@ def test_usage_and_call_trace_are_recorded_for_the_kind_and_valid_against_the_co
 
 
 # #764-T03
-def test_the_branch_is_pushed_while_the_agent_still_works_and_a_later_commit_follows(
+def test_nothing_reaches_the_remote_while_the_agent_works_and_everything_does_at_the_end(
     tmp_path: Path,
 ) -> None:
     seen: list[str | None] = []
@@ -418,7 +420,7 @@ def test_the_branch_is_pushed_while_the_agent_still_works_and_a_later_commit_fol
         return [
             write_file(repo, "one.txt"),
             commit("Add one"),
-            bash("true"),  # the model is asked again after the commit: the push has happened
+            bash("true"),  # the model is asked again after the commit: no push happens meanwhile
             write_file(repo, "two.txt"),
             commit("Add two"),
             says("done"),
@@ -426,32 +428,55 @@ def test_the_branch_is_pushed_while_the_agent_still_works_and_a_later_commit_fol
 
     def react(turned: Turned, scene: Scene, body: dict[str, Any]) -> None:
         if scene.calls == 3:
-            scene.wait_until(lambda: turned.origin_tip() is not None)
+            time.sleep(2.0)  # what a periodic push would have done by now
             seen.append(turned.origin_tip())
 
     with implementer_turn(tmp_path, script, react=react) as turned:
         result = turned.result
 
         assert result.ok, (result.error_code, result.error_detail, result.notes)
-        assert len(seen) == 1 and seen[0] is not None, (
-            "the first commit reached the remote mid-turn"
-        )
-        assert seen[0] != result.head_commit
+        assert seen == [None], "a commit does not reach the remote while the agent works"
         assert [c.subject for c in result.commits] == ["Add one", "Add two"]
         assert turned.origin_tip() == result.head_commit
 
 
-# #764-T07
-def test_a_branch_that_appeared_on_the_remote_meanwhile_ends_the_turn_as_branch_exists(
-    tmp_path: Path,
-) -> None:
+# The owner's git model: the agent may do anything with git in its workspace, and everything on
+# its local branches arrives.
+def test_amend_reset_a_new_branch_and_a_bypassed_hook_all_arrive(tmp_path: Path) -> None:
     def script(repo: Path) -> list[Turn]:
         return [
             write_file(repo, "one.txt"),
             commit("Add one"),
-            *[bash("sleep 1") for _ in range(30)],
+            bash("git commit --amend -qm 'Add one, amended'"),
+            write_file(repo, "two.txt"),
+            commit("Add two"),
+            bash("git reset -q --hard HEAD~1"),
+            write_file(repo, "three.txt"),
+            bash("git -c core.hooksPath=/dev/null add -A"),
+            bash("git -c core.hooksPath=/dev/null commit -qm 'Add three'"),
+            bash("git checkout -q -b side && echo s > side.txt && git add -A"),
+            bash("git commit -qm 'On side'"),
+            bash("git checkout -q " + BRANCH),
             says("done"),
         ]
+
+    with implementer_turn(tmp_path, script) as turned:
+        result = turned.result
+
+        assert result.ok, (result.error_code, result.error_detail, result.notes)
+        assert [c.subject for c in result.commits] == ["Add one, amended", "Add three"]
+        assert turned.origin_tip() == result.head_commit
+        names = {entry.name: entry for entry in result.branches}
+        assert set(names) == {BRANCH, "side"} and all(entry.pushed for entry in names.values())
+        assert raw("rev-parse", "refs/heads/side", cwd=turned.rig.origin.path, git=turned.rig.git)
+
+
+# #764-T07
+def test_a_branch_that_appeared_on_the_remote_meanwhile_is_a_rejected_branch_at_the_end(
+    tmp_path: Path,
+) -> None:
+    def script(repo: Path) -> list[Turn]:
+        return [write_file(repo, "one.txt"), commit("Add one"), says("done")]
 
     def react(turned: Turned, scene: Scene, body: dict[str, Any]) -> None:
         if scene.calls == 1:
@@ -460,10 +485,12 @@ def test_a_branch_that_appeared_on_the_remote_meanwhile_ends_the_turn_as_branch_
     with implementer_turn(tmp_path, script, react=react) as turned:
         result = turned.result
 
-        assert result.error_code is ErrorCode.BRANCH_EXISTS, (result.error_detail, result.notes)
+        assert result.error_code is ErrorCode.PUSH_REJECTED, (result.error_detail, result.notes)
         assert not result.pushed
+        assert [(b.name, b.pushed, b.reason) for b in result.branches] == [
+            (BRANCH, False, "non_fast_forward")
+        ]
         assert [c.subject for c in result.commits] == ["Add one"], "what the agent did is reported"
-        assert len(turned.requests) < 30, "the turn ended as soon as the push was refused"
 
 
 # #764-R3
@@ -926,20 +953,13 @@ def test_prompt_caching_holds_for_every_family_the_requests_extend_each_other_an
 
 
 # #764-R4
-def test_a_push_the_provider_cannot_take_for_now_does_not_cost_the_commits_after_it(
+def test_a_push_the_provider_cannot_take_for_now_is_tried_once_more_at_the_end(
     tmp_path: Path,
 ) -> None:
     refused: list[int] = []
 
     def script(repo: Path) -> list[Turn]:
-        return [
-            write_file(repo, "one.txt"),
-            commit("Add one"),
-            bash("sleep 2"),  # the loop looks at the branch meanwhile, and the provider says 503
-            write_file(repo, "two.txt"),
-            commit("Add two"),
-            says("done"),
-        ]
+        return [write_file(repo, "one.txt"), commit("Add one"), says("done")]
 
     def react(turned: Turned, scene: Scene, body: dict[str, Any]) -> None:
         if scene.calls != 1:
@@ -961,7 +981,7 @@ def test_a_push_the_provider_cannot_take_for_now_does_not_cost_the_commits_after
 
         assert refused, "the provider refused once, for now"
         assert result.ok, (result.error_code, result.error_detail, result.notes)
-        assert [c.subject for c in result.commits] == ["Add one", "Add two"]
+        assert [c.subject for c in result.commits] == ["Add one"]
         assert result.pushed and turned.origin_tip() == result.head_commit
 
 

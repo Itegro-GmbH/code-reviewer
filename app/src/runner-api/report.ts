@@ -119,6 +119,14 @@ export function withoutManagedModel(
           implementer: {
             ...result.implementer,
             summary: mask(result.implementer.summary),
+            ...(result.implementer.branches === undefined
+              ? {}
+              : {
+                  branches: result.implementer.branches.map((branch) => ({
+                    ...branch,
+                    name: mask(branch.name),
+                  })),
+                }),
             commits: result.implementer.commits.map((commit) => ({
               ...commit,
               subject: mask(commit.subject),

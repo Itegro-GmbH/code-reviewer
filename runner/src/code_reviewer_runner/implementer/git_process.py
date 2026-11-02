@@ -26,41 +26,13 @@ from ..redaction import Redactor
 from ..result import ErrorCode
 
 TRUSTED_PATH = "/usr/local/bin:/usr/bin:/bin"
-# The guard hook is blind to a change of branch on older git (spike section 2.2): the self-test
-# refuses to run a turn on it.
-MIN_GIT_VERSION: tuple[int, ...] = (2, 53)
 # Characters of git's own output that may travel in an error detail.
 DETAIL_CHARS = 600
-GUARD_DENIAL = "code-reviewer-guard: "
-# What the hook (`runner/guard/reference-transaction`) says when it denies a change, mapped to a
-# text of ours. The hook's own words carry the agent's choices (`updating <ref> is not allowed`),
-# and a line that starts like a denial can be printed by anything the agent configured, so nothing
-# of the line travels: only one of these fixed texts.
-_DENIALS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"the guard configuration .+"), "the guard configuration is not usable"),
-    (re.compile(r"deleting .+ is not allowed"), "deleting a ref is not allowed"),
-    (re.compile(r".+ may only move forward"), "the branch may only move forward"),
-    (re.compile(r"the tip must contain the start commit"), "the tip must contain the start commit"),
-    (
-        re.compile(r"HEAD may only (?:point at|follow) .+"),
-        "HEAD may only follow the agent's branch",
-    ),
-    (re.compile(r"updating .+ is not allowed"), "only the agent's branch may be updated"),
-)
-UNKNOWN_DENIAL = "the guard refused the change"
 DEFAULT_TIMEOUT = 600.0
 # How much of a streamed output is read at a time.
 STREAM_CHUNK_BYTES = 64 * 1024
 
-_VERSION = re.compile(r"git version (\d+(?:\.\d+)*)")
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
-
-
-def parse_git_version(text: str) -> tuple[int, ...] | None:
-    found = _VERSION.search(text)
-    if found is None:
-        return None
-    return tuple(int(part) for part in found.group(1).split("."))
 
 
 def basic_authorization(token: str) -> str:
@@ -133,25 +105,6 @@ class GitProcess:
         cleaned = _CONTROL.sub("?", self._redactor.redact(text)).strip()
         lines = [line for line in cleaned.splitlines() if line.strip()]
         return " | ".join(lines)[-DETAIL_CHARS:]
-
-    def agent_detail(self, text: str) -> str:
-        """The output of a git command that worked on what the agent controls (its repository, its
-        refs, its config): none of it travels, because the agent decides what git prints
-        (`fatal: unexpected line in ./packed-refs: <that line>`), and it can print a line that
-        looks like the guard's. A denial of the guard hook becomes one of a few fixed texts of ours
-        (`_DENIALS`); a line that claims to be one and is none says `UNKNOWN_DENIAL`. An empty
-        string says that nothing was a denial."""
-        kept: list[str] = []
-        for line in text.splitlines():
-            if not line.startswith(GUARD_DENIAL):
-                continue
-            said = line[len(GUARD_DENIAL) :].strip()
-            fixed = next(
-                (to for pattern, to in _DENIALS if pattern.fullmatch(said)), UNKNOWN_DENIAL
-            )
-            if fixed not in kept:
-                kept.append(fixed)
-        return " | ".join(kept)
 
     def run(
         self,

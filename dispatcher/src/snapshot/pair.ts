@@ -50,8 +50,6 @@ export const IMAGE_INPUT_PATHS = [
   "runner/scripts/fetch_opencode.py",
   "runner/scripts/fetch_ripgrep.py",
   "runner/scripts/fetch_toolchain.py",
-  "runner/scripts/guard_matrix.sh",
-  "runner/guard/reference-transaction",
   "runner/opencode-pin.json",
   "runner/ripgrep-pin.json",
   "runner/git-pin.json",

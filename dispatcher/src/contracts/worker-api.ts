@@ -568,6 +568,19 @@ export interface ImplementerResult {
   baseCommit: string;
   headCommit: string | null;
   pushed: boolean;
+  branchesDropped?: {
+    invalid: number;
+    overflow: number;
+  };
+  /**
+   * @maxItems 50
+   */
+  branches?: {
+    name: string;
+    head: string | null;
+    result: "pushed" | "rejected";
+    reason: string | null;
+  }[];
   /**
    * @maxItems 200
    */

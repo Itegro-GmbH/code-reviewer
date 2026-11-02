@@ -46,13 +46,13 @@ environment, no argument, no log line: every log line is masked). The VMs hold n
 
 The snapshot carries the whole Worker image, which every kind of job uses: the runner with PR-Agent, the pinned OpenCode and `rg`, `nft`
 and, since #761, the toolchain of the Implementer's agent (git built from a pinned source, Node.js, pnpm, uv, `gcc`, `g++`, `make`, `jq`,
-`unzip`) and the branch guard files (`docs/dynamic-review.md`, "The Worker image"). The reviewer pays for that layer, so there is a budget:
+`unzip`; `docs/dynamic-review.md`, "The Worker image"). The reviewer pays for that layer, so there is a budget:
 the image smoke test (`docker/smoke/runner.sh`) prints the size of the image as the sum of its layers and fails when it grew by more than
 600 MB over the image before the toolchain layer (999 MB). At the layer's introduction it grew by 490 MB locally and 471 MB in CI (1,489 MB locally), compressed content
 264 MB to 436 MB. If a later change breaks the budget, the answer is a per-kind image and snapshot, not a heavier shared image.
 
 What a changed image input does: every file the build reads is in `IMAGE_INPUT_PATHS` (`dispatcher/src/snapshot/pair.ts`, with the
-toolchain pins, `fetch_toolchain.py`, the guard files). A release that changes one of them has the deployment build a new golden snapshot
+toolchain pins, `fetch_toolchain.py`). A release that changes one of them has the deployment build a new golden snapshot
 (the image id changes), prove it with the canary and wire it in, as described above; nobody does anything by hand. The first release after
 the toolchain layer therefore rebuilds the snapshot once: the build step downloads the three pinned archives and compiles git (118 s with `make -j2` on a loaded
 2-vCPU-class host, the builder VM has 2 vCPU and 4 GB) on top of the roughly 70 seconds of the spike. A job VM is created from the snapshot, so a larger snapshot means a larger disk to restore;

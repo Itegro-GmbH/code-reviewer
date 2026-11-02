@@ -19,14 +19,8 @@ export const OPENCODE_PATH = "/usr/local/bin/opencode";
 export const RIPGREP_PATH = "/usr/local/bin/rg";
 /** The dedicated engine user of the image: uid and gid 10101. */
 export const ENGINE_UID = 10101;
-/** What the Implementer's image adds (#761): git 2.53 or newer first on the runner's trusted path, and the guard files. */
+/** What the Implementer's image adds (#761): its git, first on the runner's trusted path. */
 export const GIT_PATH = "/usr/local/bin/git";
-export const MIN_GIT_VERSION = [2, 53] as const;
-export const GUARD_DIR = "/opt/code-reviewer/guard";
-export const GUARD_FILES = [
-  "reference-transaction",
-  "guard_matrix.sh",
-] as const;
 
 /** The stable names of the things the lane needs; a failure names them. */
 export const LANE_ITEMS = [
@@ -36,7 +30,6 @@ export const LANE_ITEMS = [
   "engine_user",
   "root",
   "git",
-  "guard_files",
 ] as const;
 export type LaneItem = (typeof LANE_ITEMS)[number];
 
@@ -52,8 +45,6 @@ export type LaneFacts = {
   engineUser: { uid: number; gid: number } | null;
   /** The output of `git --version` at `path`, or null when it cannot be run. */
   git: { path: string; version: string | null };
-  /** The guard files of the Implementer's image that are not executable files. */
-  guard: { dir: string; missing: string[] };
 };
 
 export type Missing = { item: LaneItem; message: string };
@@ -84,16 +75,10 @@ export function checkLane(facts: LaneFacts): Missing[] {
           ? `The engine user ${String(facts.engineUid)} does not exist. The Dynamic image has it with its own group ${String(facts.engineUid)}; the lane adds it to the passwd and group files of its mount namespace.`
           : `The engine user ${String(user.uid)} has the group ${String(user.gid)}, not a group of its own: the runner's self-check refuses it.`,
     });
-  const gitVersion = parseGitVersion(facts.git.version);
-  if (gitVersion === null || !atLeast(gitVersion, MIN_GIT_VERSION))
+  if (facts.git.version === null)
     missing.push({
       item: "git",
-      message: `git ${MIN_GIT_VERSION.join(".")} or newer is not at ${facts.git.path} (${facts.git.version ?? "it cannot be run"}). The Implementer's branch guard is blind to a switch of branch on older git, so the Worker refuses to advertise the kind. The lane builds the pinned release ("scripts/build_lane_git.sh" in runner/) and installs it there.`,
-    });
-  if (facts.guard.missing.length > 0)
-    missing.push({
-      item: "guard_files",
-      message: `The guard files of the Implementer (${facts.guard.missing.join(", ")}) are not executable files in ${facts.guard.dir}. The lane installs runner/guard/reference-transaction and runner/scripts/guard_matrix.sh there, root-owned, as the image does.`,
+      message: `git cannot be run at ${facts.git.path}. The Implementer's runner pushes the agent's branches with it, so the Worker refuses to advertise the kind. The lane builds the pinned release ("scripts/build_lane_git.sh" in runner/) and installs it there.`,
     });
   if (facts.uid !== 0)
     missing.push({
@@ -110,19 +95,6 @@ export function describeMissing(missing: readonly Missing[]): string {
     `The Dynamic e2e lane cannot run: ${String(missing.length)} thing${missing.length === 1 ? " is" : "s are"} missing.`,
     ...lines,
   ].join("\n");
-}
-
-function parseGitVersion(text: string | null): number[] | null {
-  const found = /git version (\d+(?:\.\d+)*)/.exec(text ?? "");
-  return found?.[1] === undefined ? null : found[1].split(".").map(Number);
-}
-
-function atLeast(version: number[], minimum: readonly number[]): boolean {
-  for (const [index, wanted] of minimum.entries()) {
-    const got = version[index] ?? 0;
-    if (got !== wanted) return got > wanted;
-  }
-  return true;
 }
 
 export type LaneProbes = {
@@ -161,7 +133,6 @@ export type LaneEnvironment = {
   LANE_RIPGREP_PATH?: string | undefined;
   LANE_ENGINE_UID?: string | undefined;
   LANE_GIT_PATH?: string | undefined;
-  LANE_GUARD_DIR?: string | undefined;
 };
 
 export function collectFacts(
@@ -183,15 +154,8 @@ export function collectFacts(
       : null;
   const git = environment.LANE_GIT_PATH || GIT_PATH;
   const gitRun = probes.run(git, ["--version"]);
-  const guardDir = environment.LANE_GUARD_DIR || GUARD_DIR;
   return {
     git: { path: git, version: gitRun.ok ? gitRun.output : null },
-    guard: {
-      dir: guardDir,
-      missing: GUARD_FILES.filter(
-        (name) => !probes.isExecutable(`${guardDir}/${name}`),
-      ),
-    },
     uid: probes.uid(),
     opencode: { path: opencode, executable: probes.isExecutable(opencode) },
     ripgrep: { path: ripgrep, executable: probes.isExecutable(ripgrep) },
