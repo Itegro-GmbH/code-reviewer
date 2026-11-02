@@ -257,9 +257,7 @@ def test_the_rules_container_holds_net_admin_and_nothing_else_and_shares_nothing
 
 
 # #745-T19
-def test_the_rules_let_the_agent_side_dns_and_https_through_and_drop_the_vm_and_everything_else() -> (
-    None
-):
+def test_the_rules_let_dns_and_https_through_and_drop_the_vm_and_everything_else() -> None:
     rules = EGRESS_RULES.split("; ")
 
     assert rules[-1].endswith("output drop"), "the last word is no"
