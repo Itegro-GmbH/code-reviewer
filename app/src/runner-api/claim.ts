@@ -285,7 +285,10 @@ export type ClaimDeps = {
    * #553: the cost policy of a native job (a job whose selection names a catalog model, src/native-cost/). Left out, no job
    * is native: the claim is exactly the claim of today. The running server wires it (`getNativeCost()`).
    */
-  nativeCost?: Pick<NativeCostService, "refOf" | "policyFor" | "entryFor">;
+  nativeCost?: Pick<
+    NativeCostService,
+    "refOf" | "implementerRefOf" | "policyFor" | "entryFor"
+  >;
   /**
    * #588: where the address a selection of a catalog provider was pinned to is adopted for a selection made before pins existed:
    * the claim pins the address it is about to send the key to, once. Answers the pin in force, or null when the project no
@@ -692,7 +695,11 @@ async function costOf(
     (job.reviewKind !== "dynamic" && job.reviewKind !== "implementer")
   )
     return { kind: "decided", policy: null };
-  const ref = native.refOf(selection);
+  // A turn of the Implementer has no legacy wire, so Anthropic and OpenRouter are catalog models for it; a review keeps its rule.
+  const ref =
+    job.reviewKind === "implementer"
+      ? native.implementerRefOf(selection)
+      : native.refOf(selection);
   if (ref === null) return { kind: "decided", policy: null };
   const outcome = await native.policyFor(selection.keyMode, ref);
   if (!outcome.ok) {

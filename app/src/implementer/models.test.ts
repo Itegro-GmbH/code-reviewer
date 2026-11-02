@@ -2,8 +2,9 @@
 
 // The models a person can send an Implementer task to (#755): the picker's options and the check at submit are one rule, the one
 // the claim applies (#753): a Dynamic model on the native path. On the workspace's own key that is a model of the models.dev
-// catalog whose provider has a saved key; on the operator's key a released catalog entry that serves Dynamic Review, that the
-// plan allows and whose model has a confirmed price. The registry's two providers are not on the native path.
+// catalog whose provider has a saved key (Anthropic and OpenRouter among them: the agent is OpenCode, which has no legacy wire);
+// on the operator's key a released catalog entry that serves Dynamic Review, that the plan allows and whose model has a
+// confirmed price.
 import { describe, expect, it, vi } from "vitest";
 import type { CatalogSelectionSource } from "../review-settings/catalog-selection.ts";
 import type { MemberCatalogEntry } from "../model-catalog/member.ts";
@@ -104,15 +105,58 @@ describe("the options of the picker on the workspace's own key", () => {
   });
 
   // #755-T07
-  it("lists nothing for a workspace without a saved key, and never a provider of the registry", async () => {
+  it("lists nothing for a workspace without a saved key", async () => {
     expect(
       await createImplementerModels(deps({ configured: [] })).options(),
     ).toEqual({ keyMode: "own", providers: [] });
     expect(
       await createImplementerModels(
-        deps({ configured: ["anthropic", "openrouter"], listed: {} }),
+        deps({
+          configured: [],
+          listed: {
+            anthropic: ["claude-sonnet-5-5"],
+            openrouter: ["vendor/m"],
+          },
+        }),
       ).options(),
     ).toEqual({ keyMode: "own", providers: [] });
+  });
+
+  // The owner saved an Anthropic key and the form said "No model is available yet".
+  it("lists Anthropic and OpenRouter with a saved key, with the models the catalog lists, and not without", async () => {
+    const listed = {
+      anthropic: ["claude-sonnet-5-5", "claude-haiku-5-5"],
+      openrouter: ["mistralai/mistral-saba"],
+    };
+
+    expect(
+      await createImplementerModels(
+        deps({ configured: ["anthropic"], listed }),
+      ).options(),
+    ).toEqual({
+      keyMode: "own",
+      providers: [
+        {
+          id: "anthropic",
+          label: "ANTHROPIC",
+          models: listed.anthropic.map(model),
+        },
+      ],
+    });
+    expect(
+      await createImplementerModels(
+        deps({ configured: ["openrouter"], listed }),
+      ).options(),
+    ).toEqual({
+      keyMode: "own",
+      providers: [
+        {
+          id: "openrouter",
+          label: "OPENROUTER",
+          models: listed.openrouter.map(model),
+        },
+      ],
+    });
   });
 });
 
@@ -169,6 +213,33 @@ describe("the check of a choice at submit", () => {
     ).toBeNull();
   });
 
+  it("passes a model of Anthropic and of OpenRouter with a saved key, and refuses one the catalog does not list", async () => {
+    const registry = createImplementerModels(
+      deps({
+        configured: ["anthropic", "openrouter"],
+        listed: {
+          anthropic: ["claude-sonnet-5-5"],
+          openrouter: ["mistralai/mistral-saba"],
+        },
+      }),
+    );
+    expect(
+      await registry.check({
+        provider: "anthropic",
+        model: "claude-sonnet-5-5",
+      }),
+    ).toBeNull();
+    expect(
+      await registry.check({
+        provider: "openrouter",
+        model: "mistralai/mistral-saba",
+      }),
+    ).toBeNull();
+    expect(
+      await registry.check({ provider: "anthropic", model: "claude-gone" }),
+    ).toBe("model_not_in_catalog");
+  });
+
   // #755-T07
   it.each([
     ["a provider without a key", { provider: "mistral", model: "m" }, "no_key"],
@@ -178,9 +249,14 @@ describe("the check of a choice at submit", () => {
       "model_not_in_catalog",
     ],
     [
-      "a provider of the registry",
-      { provider: "anthropic", model: "claude-sonnet-5-5" },
+      "a provider the native path cannot serve",
+      { provider: "aihubmix", model: "m" },
       "provider_unsupported",
+    ],
+    [
+      "Anthropic without a saved key",
+      { provider: "anthropic", model: "claude-sonnet-5-5" },
+      "no_key",
     ],
     [
       "an entry id on the workspace's own key",

@@ -17,3 +17,14 @@ export function getNativeCatalog(): NativeCatalogReader {
     legacyProviders: llmProviderDescriptors.ids,
   });
 }
+
+/**
+ * The catalog of the Implementer's picker and check: the same catalog, but no provider is legacy, because its agent is OpenCode and
+ * has no legacy wire. Anthropic and OpenRouter are offered with the models.dev models and the address the registry pins for them.
+ */
+export function getImplementerCatalog(): NativeCatalogReader {
+  return createNativeCatalogReader({
+    models: createModelsDevRepository(getDatabase()),
+    legacyProviders: [],
+  });
+}

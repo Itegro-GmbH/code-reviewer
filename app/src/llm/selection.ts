@@ -26,6 +26,7 @@
 // has not looked.
 import type { CatalogEntry } from "../model-catalog/entries.ts";
 import {
+  implementerProviderIdOf,
   isCatalogModelId,
   nativeProviderIdOf,
 } from "../native-cost/catalog-ref.ts";
@@ -112,6 +113,11 @@ export type SelectionInput =
        * `llm_provider_unsupported`, the answer for a provider the caller did not list. A Diff job never takes it (#558).
        */
       nativeModels?: boolean;
+      /**
+       * The job is a task of the Implementer: its agent is OpenCode, which has no legacy wire, so a provider of the registry
+       * (Anthropic, OpenRouter) is a catalog provider for it too, with the same workspace key. A review never sets this.
+       */
+      implementer?: true;
       /** The model of the kind for the default provider when no layer sets one (`LLM_MODEL`, or the Dynamic default). */
       builtInModel: string;
       /**
@@ -305,7 +311,10 @@ function resolveOwn(
   let model = setModel;
 
   const descriptor = providers.find(provider);
-  if (descriptor === undefined && nativeAllowed(input, provider))
+  if (
+    (descriptor === undefined && nativeAllowed(input, provider)) ||
+    implementerNative(input, provider)
+  )
     return resolveOwnNative(
       kind,
       provider,
@@ -350,6 +359,19 @@ function resolveOwn(
       keySource: "workspace",
     },
   };
+}
+
+/** Whether the provider is a catalog provider for a task of the Implementer, whether or not the registry has it (`implementerProviderIdOf`). */
+function implementerNative(
+  input: Extract<SelectionInput, { keyMode: "own" }>,
+  provider: string,
+): boolean {
+  return (
+    input.implementer === true &&
+    input.kind === "dynamic" &&
+    input.nativeModels === true &&
+    implementerProviderIdOf(provider) !== null
+  );
 }
 
 /** Whether a provider outside the registry is a catalog provider this job may run (#555): Dynamic, a capable caller, supported. */
