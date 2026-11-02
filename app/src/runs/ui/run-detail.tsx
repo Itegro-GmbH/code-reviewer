@@ -175,6 +175,44 @@ function TaskInstruction({ task }: { task: ImplementerDetailView }) {
   );
 }
 
+/**
+ * What the setup script of the task's environment did (#818): how it ended and the end of its output. The output is a text from a
+ * program that ran repository code, cleaned and stripped of known secrets by the view, and rendered as text.
+ */
+function TaskSetup({ task }: { task: ImplementerDetailView }) {
+  const setup = task.environment?.setup;
+  if (setup === null || setup === undefined) return null;
+  const how =
+    setup.outcome === "ok"
+      ? "The script finished successfully"
+      : setup.outcome === "timed_out"
+        ? "The script ran out of time"
+        : setup.exitCode === null
+          ? "The script was stopped"
+          : `The script failed with exit status ${String(setup.exitCode)}`;
+  return (
+    <Section title="Setup script">
+      <p data-slot="run-setup-outcome" className="text-sm">
+        {how} after {setup.durationSeconds} s.
+      </p>
+      {setup.output === "" ? (
+        <p className="text-sm text-muted-foreground">
+          The script wrote no output.
+        </p>
+      ) : (
+        <pre
+          data-slot="run-setup-output"
+          tabIndex={0}
+          aria-label="End of the output of the setup script"
+          className="max-h-96 overflow-auto rounded-lg border border-border bg-background p-3 font-mono text-sm break-words whitespace-pre-wrap"
+        >
+          {setup.output}
+        </pre>
+      )}
+    </Section>
+  );
+}
+
 /** What the agent did: its own summary, the commits and the files. Every text here is from the agent or the repository. */
 function TaskResult({
   task,
@@ -361,6 +399,19 @@ export function RunDetail({
       : [
           projectItem,
           { term: "Kind", description: JOB_KIND_NAMES[run.reviewKind] },
+          ...(task.environment === null
+            ? []
+            : [
+                {
+                  term: "Environment",
+                  description: (
+                    <span className="break-words">
+                      {task.environment.name} ({task.environment.vcpus} vCPU,{" "}
+                      {task.environment.memoryGb} GB)
+                    </span>
+                  ),
+                },
+              ]),
           ...(task.baseBranch === null
             ? []
             : [
@@ -483,6 +534,7 @@ export function RunDetail({
       ) : (
         <>
           <TaskInstruction task={task} />
+          <TaskSetup task={task} />
           <TaskResult task={task} run={run} />
         </>
       )}

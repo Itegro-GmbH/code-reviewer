@@ -327,6 +327,7 @@
         "git_write_not_granted": "The app is not allowed to write to this repository yet. Accept the new permission on GitHub, then start the task again.",
         "implementer_engine_unavailable": "No worker that answered can run tasks yet, so this task did not start.",
         "implementer_config_invalid": "The settings of this task could not be used, so it did not start.",
+        "environment_setup_failed": "The setup script of this task's environment did not finish successfully, so the task was stopped before the AI model was called and nothing was charged. The end of the script's output is shown below. Fix the script in Environments, then start the task again.",
         "unknown": "The run failed for a reason this version does not know."
       },
       "CHECKOUT_REASON_COPY": {

@@ -54,6 +54,8 @@ export type StoredVmRun = {
   startedAt: string;
   reportedAt: string;
   vmTimeoutSeconds: number | null;
+  /** The VM's size in vCPUs where the Dispatcher reported it (an Implementer job, #818); null otherwise. */
+  vcpus: number | null;
   endedAt: string | null;
   endSource: VmEndSource | null;
   /** True for the run that counts for the job's bill (the final claim's). */
@@ -78,6 +80,8 @@ export type RecordStartInput = {
   /** The start as the Dispatcher says it; kept between the claim and the report. */
   startedAt: Date;
   vmTimeoutSeconds: number;
+  /** #818: the VM's size, for an Implementer job. */
+  vcpus?: number;
 };
 
 export type JobVmRunsRepository = {
@@ -131,6 +135,7 @@ function toStored(row: Selectable<JobVmRunsTable>): StoredVmRun {
     startedAt: row.started_at,
     reportedAt: row.reported_at,
     vmTimeoutSeconds: row.vm_timeout_seconds,
+    vcpus: row.vcpus,
     endedAt: row.ended_at,
     endSource: row.end_source as VmEndSource | null,
     billable: decodeBoolean(row.billable),
@@ -247,6 +252,7 @@ export function createJobVmRunsRepository(
       claimedAt: string;
       startedAt: Date;
       vmTimeoutSeconds: number | null;
+      vcpus?: number;
       end?: { at: Date; source: VmEndSource };
     },
   ): Promise<"recorded" | "replayed"> {
@@ -282,6 +288,7 @@ export function createJobVmRunsRepository(
         started_at: formatTimestamp(values.startedAt),
         reported_at: stamp,
         vm_timeout_seconds: values.vmTimeoutSeconds,
+        vcpus: values.vcpus ?? null,
         ended_at:
           values.end === undefined ? null : formatTimestamp(values.end.at),
         end_source: values.end?.source ?? null,
@@ -324,6 +331,7 @@ export function createJobVmRunsRepository(
           claimedAt: input.claimedAt,
           startedAt,
           vmTimeoutSeconds: input.vmTimeoutSeconds,
+          ...(input.vcpus === undefined ? {} : { vcpus: input.vcpus }),
         });
       });
     },

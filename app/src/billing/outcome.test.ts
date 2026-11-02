@@ -541,6 +541,16 @@ describe("the failures that incurred AI cost", () => {
     }
   });
 
+  // #818-T28
+  it("does not charge a task whose setup script failed: it ended before the model was called, on either key", () => {
+    expect(AI_COST_FAILURE_CODES).not.toContain("environment_setup_failed");
+    expect(ERROR_CODE_CLASSES.environment_setup_failed).toBe("free");
+    for (const keyMode of ["managed", "own"] as const)
+      expect(
+        classifyOutcome(failed("environment_setup_failed", { keyMode })),
+      ).toBe("free");
+  });
+
   // #523-T13
   it("gives every member the class of the group, on both keys", () => {
     for (const code of AI_COST_FAILURE_CODES) {

@@ -492,6 +492,7 @@ export interface ImplementerJob {
       };
   modelEntry: DynamicModelEntry;
   capabilities?: DynamicModelCapabilities;
+  environment?: ImplementerEnvironment;
 }
 /**
  * #746: the one repository a turn works on. `fullName` is `owner/name`; `cloneUrl` is the https address the runner clones from (the host of the git provider), with no credential in it: the token is in `git.token`.
@@ -499,6 +500,13 @@ export interface ImplementerJob {
 export interface ImplementerRepo {
   fullName: string;
   cloneUrl: string;
+}
+/**
+ * #818: the environment a turn was started with, as the turn copied it when it started: the setup script the runner runs once in the repository's folder after the clone and before the model is called. Present only when the environment has a script and the caller named the claim feature `implementer_environment`; a turn without a script carries nothing (the size of the VM is the Dispatcher's business, it reaches the Worker as the VM it runs in). `setupScript` is literal text of at most 64 KB of UTF-8, written by a member of the workspace: it is data to run, never a command of the app, and it holds no secret by design (there is no field for one). `name` is for the run's log line only.
+ */
+export interface ImplementerEnvironment {
+  name: string;
+  setupScript: string;
 }
 /**
  * Extra options of the PR-Agent tools, as strings. The review tool's options (PR_REVIEWER__*) are used; a previous release's option families for the removed tools (PR_DESCRIPTION__*, PR_CODE_SUGGESTIONS__*, PR_QUESTIONS__*) are accepted for v1 compatibility and ignored. Nothing else is allowed here (credentials, endpoints and the model have their own fields).
@@ -591,6 +599,17 @@ export interface ImplementerResult {
     sessionId: string;
     version: string;
   } | null;
+  setup?: ImplementerSetupResult;
+}
+/**
+ * #818: what the setup script of a turn did, in `ImplementerResult.setup`; present when a script ran, absent otherwise. `ok` is whether it ended with exit status 0 within its time limit. `exitCode` is its exit status, null when it did not end by itself (the time limit, `timedOut`, or a signal). `output` is the end of what it wrote to stdout and stderr together, at most 8192 characters, with every secret known to the runner removed like every log line. A failed script ends the turn with the error code `environment_setup_failed` before the model is called.
+ */
+export interface ImplementerSetupResult {
+  ok: boolean;
+  exitCode: number | null;
+  timedOut: boolean;
+  durationSeconds: number;
+  output: string;
 }
 export interface RunnerUsage {
   model: string | null;

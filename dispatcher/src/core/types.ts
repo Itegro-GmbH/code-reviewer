@@ -75,6 +75,8 @@ export type CreatedVm = {
   name: string;
   startedAt: Date;
   timeoutSeconds: number;
+  /** #818: the VM's size in vCPUs; the core reports it for a job of the Implementer only. */
+  vcpus?: number;
 };
 
 /** Everything a Launcher needs to start the Worker of one job. The credential is a secret: never log it. */

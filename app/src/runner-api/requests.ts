@@ -17,6 +17,7 @@ import type {
   VmStartRequest,
   FindingPriority,
   ImplementerResult,
+  ImplementerSetupResult,
   ReviewFindings,
   RunnerResult,
   RunnerUsage,
@@ -29,6 +30,7 @@ import {
   FINDING_PRIORITIES,
   IMPLEMENTER_FILE_STATUSES,
   IMPLEMENTER_RESULT_LIMITS,
+  IMPLEMENTER_SETUP_OUTPUT_CHARS,
   LLM_PROVIDER_ID_PATTERN,
   MAX_FINDING_COUNT,
   MAX_LLM_PROVIDERS,
@@ -38,6 +40,7 @@ import {
   VM_NAME_PATTERN,
   VM_STARTED_AT_PATTERN,
   VM_TIMEOUT_SECONDS_RANGE,
+  VM_VCPUS_RANGE,
 } from "./contract.ts";
 import { WORKER_CREDENTIAL_PATTERN } from "../jobs/worker-credential.ts";
 import { checkCallTrace } from "./call-trace.ts";
@@ -366,6 +369,7 @@ const VM_START_FIELDS = [
   "vmName",
   "startedAt",
   "timeoutSeconds",
+  "vcpus",
 ] as const;
 
 /**
@@ -408,6 +412,15 @@ export function parseVmStartRequest(body: unknown): Parsed<VmStartRequest> {
     timeout > VM_TIMEOUT_SECONDS_RANGE.max
   )
     check.fail("timeoutSeconds", "invalid");
+  const vcpus = body.vcpus;
+  if (
+    vcpus !== undefined &&
+    (typeof vcpus !== "number" ||
+      !Number.isInteger(vcpus) ||
+      vcpus < VM_VCPUS_RANGE.min ||
+      vcpus > VM_VCPUS_RANGE.max)
+  )
+    check.fail("vcpus", "invalid");
   if (check.fields.length > 0) return { ok: false, fields: check.fields };
   return {
     ok: true,
@@ -416,6 +429,7 @@ export function parseVmStartRequest(body: unknown): Parsed<VmStartRequest> {
       vmName: vmName as string,
       startedAt: startedAt as string,
       timeoutSeconds: timeout as number,
+      ...(vcpus === undefined ? {} : { vcpus: vcpus as number }),
     },
   };
 }
@@ -694,6 +708,60 @@ function parseImplementerOpencode(
   return { sessionId, version };
 }
 
+/** The setup block of an implementer block (#818, `ImplementerSetupResult`): closed, every field required, the output bounded. */
+function parseImplementerSetup(
+  check: Checker,
+  value: unknown,
+  field: string,
+): ImplementerSetupResult | undefined {
+  if (!isRecord(value)) return check.fail(field, "invalid");
+  const before = check.fields.length;
+  refuseUnknownKeys(
+    check,
+    value,
+    ["ok", "exitCode", "timedOut", "durationSeconds", "output"],
+    `${field}.`,
+  );
+  const { ok, exitCode, timedOut, durationSeconds } = value;
+  if (typeof ok !== "boolean")
+    check.fail(`${field}.ok`, ok === undefined ? "required" : "invalid");
+  if (exitCode === undefined) check.fail(`${field}.exitCode`, "required");
+  else if (
+    exitCode !== null &&
+    (typeof exitCode !== "number" ||
+      !Number.isInteger(exitCode) ||
+      exitCode < -255 ||
+      exitCode > 255)
+  )
+    check.fail(`${field}.exitCode`, "invalid");
+  if (typeof timedOut !== "boolean")
+    check.fail(
+      `${field}.timedOut`,
+      timedOut === undefined ? "required" : "invalid",
+    );
+  if (durationSeconds === undefined)
+    check.fail(`${field}.durationSeconds`, "required");
+  else if (
+    typeof durationSeconds !== "number" ||
+    !Number.isInteger(durationSeconds) ||
+    durationSeconds < 0 ||
+    durationSeconds > 86_400
+  )
+    check.fail(`${field}.durationSeconds`, "invalid");
+  const output = check.string(value, "output", `${field}.output`, {
+    max: IMPLEMENTER_SETUP_OUTPUT_CHARS,
+    stripControls: true,
+  });
+  if (check.fields.length > before || output === undefined) return undefined;
+  return {
+    ok: ok as boolean,
+    exitCode: exitCode as number | null,
+    timedOut: timedOut as boolean,
+    durationSeconds: durationSeconds as number,
+    output,
+  };
+}
+
 /**
  * The implementer block of a result (#754, `ImplementerResult` in the contract): closed, every field required, the bounds of the
  * schema. Absent is "no block" (a failure before the runner had a repository, and every job that is not a turn); `null` is not
@@ -721,6 +789,7 @@ function parseImplementerResult(
       "filesChanged",
       "summary",
       "opencode",
+      "setup",
     ],
     prefix,
   );
@@ -759,6 +828,10 @@ function parseImplementerResult(
     value.opencode,
     `${prefix}opencode`,
   );
+  const setup =
+    value.setup === undefined
+      ? undefined
+      : parseImplementerSetup(check, value.setup, `${prefix}setup`);
   if (typeof pushed === "boolean" && headCommit !== undefined) {
     if (pushed && headCommit === null) check.fail(`${prefix}pushed`, "invalid");
     const last = commits?.at(-1);
@@ -773,7 +846,8 @@ function parseImplementerResult(
     commits === undefined ||
     filesChanged === undefined ||
     summary === undefined ||
-    opencode === undefined
+    opencode === undefined ||
+    (value.setup !== undefined && setup === undefined)
   )
     return undefined;
   return {
@@ -784,6 +858,7 @@ function parseImplementerResult(
     filesChanged,
     summary,
     opencode,
+    ...(setup === undefined ? {} : { setup }),
   };
 }
 

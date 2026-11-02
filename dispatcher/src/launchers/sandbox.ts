@@ -485,6 +485,7 @@ export function createSandboxLauncher(
           name,
           startedAt: createdAt,
           timeoutSeconds: vmLifetimeSeconds(spec),
+          vcpus: plan.vcpus,
         });
       } catch {
         // Only that it failed.

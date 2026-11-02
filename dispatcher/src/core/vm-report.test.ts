@@ -52,7 +52,10 @@ function recordingFetch() {
 }
 
 /** A core whose launcher creates a VM and tells the core, like the Sandbox-Launcher does right after the create. */
-function build(launcherOptions: Parameters<typeof createFakeLauncher>[0] = {}) {
+function build(
+  launcherOptions: Parameters<typeof createFakeLauncher>[0] = {},
+  overrides: Parameters<typeof settingsFor>[1] = {},
+) {
   const logger = recordingLogger();
   const launcher = createFakeLauncher({
     onLaunch: (spec) => {
@@ -63,7 +66,7 @@ function build(launcherOptions: Parameters<typeof createFakeLauncher>[0] = {}) {
   });
   const recorded = recordingFetch();
   const core = createDispatcherCore({
-    settings: settingsFor(app.url),
+    settings: settingsFor(app.url, overrides),
     launcher,
     clock,
     logger,
@@ -244,5 +247,55 @@ describe("the report of the VM", () => {
 
     expect(vmRequests()).toHaveLength(1);
     expect(app.requests().filter((r) => r.route === "release")).toHaveLength(1);
+  });
+});
+
+describe("the size of the VM (#818)", () => {
+  const SIZED: CreatedVm = { ...VM, vcpus: 6 };
+
+  // #818-T35
+  it("is reported for a job of the Implementer, as the Launcher says it", async () => {
+    const jobId = app.enqueue({ reviewKind: "implementer" });
+    const { core, recorded } = build(
+      {
+        engines: ["pr-agent", "opencode", "implementer"],
+        onLaunch: (spec) => {
+          spec.onVmCreated?.(SIZED);
+          return Promise.resolve();
+        },
+      },
+      {
+        engines: ["pr-agent", "opencode", "implementer"],
+        kinds: ["diff", "dynamic", "implementer"],
+      },
+    );
+
+    await handled(
+      core.handle({ appId: "reviewer", jobId, reviewKind: "implementer" }),
+    );
+
+    expect(vmCalls(recorded.calls)[0]?.body).toMatchObject({ vcpus: 6 });
+  });
+
+  // #818-T35
+  it("is left out of the report of a review: an App of the release before refuses a field it does not know", async () => {
+    const jobId = app.enqueue();
+    const { core, recorded } = build({
+      onLaunch: (spec) => {
+        spec.onVmCreated?.(SIZED);
+        return Promise.resolve();
+      },
+    });
+
+    await handled(
+      core.handle({ appId: "reviewer", jobId, reviewKind: "diff" }),
+    );
+
+    expect(vmCalls(recorded.calls)[0]?.body).toStrictEqual({
+      credential: expect.any(String),
+      vmName: VM.name,
+      startedAt: "2026-10-19T10:00:00.250Z",
+      timeoutSeconds: 1500,
+    });
   });
 });
