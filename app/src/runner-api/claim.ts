@@ -695,9 +695,10 @@ async function costOf(
     (job.reviewKind !== "dynamic" && job.reviewKind !== "implementer")
   )
     return { kind: "decided", policy: null };
-  // A turn of the Implementer has no legacy wire, so the registry's two providers are catalog models for it; a review keeps its rule.
+  // A turn of the Implementer on the workspace's own key has no legacy wire, so the registry's two providers are catalog models for
+  // it. On the operator's key (managed) nothing changes: the rule of the reviews applies, as it always did. A review keeps its rule.
   const ref =
-    job.reviewKind === "implementer"
+    job.reviewKind === "implementer" && selection.keyMode === "own"
       ? native.implementerRefOf(selection)
       : native.refOf(selection);
   if (ref === null) return { kind: "decided", policy: null };

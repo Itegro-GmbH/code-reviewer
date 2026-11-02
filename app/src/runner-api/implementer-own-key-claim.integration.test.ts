@@ -16,6 +16,9 @@ import {
   createNativeCostService,
   type NativeCostService,
 } from "../native-cost/service.ts";
+import { anthropicDescriptor } from "../llm/providers/anthropic/descriptor.ts";
+import { openrouterDescriptor } from "../llm/providers/openrouter/descriptor.ts";
+import { createWorkspaceEntitlementsRepository } from "../db/repositories/workspace-entitlements-repository.ts";
 import { startRunnerApiHarness } from "../test-support/runner-api-harness.ts";
 import type { ClaimResponse } from "./contract.ts";
 
@@ -80,9 +83,13 @@ function nativeCostService(): NativeCostService {
   const rows = catalogRows();
   return createNativeCostService({
     prices: {
-      availability: async () => {
-        throw new Error("the own key asks no availability");
-      },
+      // A confirmed price: a managed turn that reached the policy would be built, so only the claim's own rule can refuse it.
+      availability: async () => ({
+        selectable: true,
+        book: PRICE_BOOK,
+        confirmationId: 3,
+        hashVersion: 2,
+      }),
       // The catalog's price of the fixture's Anthropic model in micro-USD per million tokens (the price service is the admin portal's).
       catalogPrice: async (providerId, modelId) =>
         providerId === "anthropic" && modelId === SONNET ? PRICE_BOOK : null,
@@ -188,6 +195,64 @@ describe("the claim of a turn of the Implementer on the workspace's own Anthropi
   });
 });
 
+describe("a turn of the Implementer on the operator's key", () => {
+  // Managed mode is not part of this change: a stored entry on a provider of the registry still ends the turn before any key or token
+  // exists, as it did, and is never built as a native job on the operator's key.
+  it("ends a turn whose entry is a provider of the registry with implementer_config_invalid, before a token exists", async () => {
+    const h = await start({ key: null });
+    const saved = await h.llm
+      .operatorKey()
+      .save(
+        { provider: "anthropic", apiKey: "dummy-operator-anthropic-key" },
+        null,
+      );
+    expect(saved.ok).toBe(true);
+    await createWorkspaceEntitlementsRepository(
+      h.db,
+      h.workspaceId,
+      h.clock.now,
+    ).put(
+      {
+        planLabel: "plan",
+        keyMode: "managed",
+        limits: {
+          diffRunsPerPeriod: null,
+          dynamicRunsPerPeriod: null,
+          managedCostLimitMicroUsd: null,
+          ownKeyCostLimitMicroUsd: null,
+        },
+        periodStart: "2026-10-01T00:00:00.000Z",
+        suspended: false,
+        suspensionCode: null,
+      },
+      null,
+    );
+    const entry = await h.catalogEntryFor("anthropic", {
+      name: "Thorough",
+      modelId: SONNET,
+      kinds: ["diff", "dynamic"],
+      status: "released",
+    });
+    const turn = await h.enqueueTurn({ modelChoice: { entryId: entry.id } });
+
+    // A runner that advertises the provider, as a real one does: only the claim's own rule can end the turn.
+    expect(
+      (
+        await h.claim({
+          ...claimOptions(),
+          llmProviders: ["openrouter", "anthropic"],
+        })
+      ).status,
+    ).toBe(204);
+
+    expect(await h.queue.get(turn.job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "implementer_config_invalid",
+    });
+    expect(h.issuedJobTokens()).toEqual([]);
+  });
+});
+
 describe("a review on the same provider and key", () => {
   // The new rule must not leak: with the wiring of the running server these two keep the claim they had (no entry, no policy).
   it.each(["diff", "dynamic"] as const)(
@@ -227,6 +292,65 @@ describe("a review on the same provider and key", () => {
       expect(input.reviewKind).not.toBe("implementer");
       expect(JSON.stringify(input)).not.toContain("modelEntry");
       expect(JSON.stringify(input)).not.toContain('"cost"');
+    },
+  );
+});
+
+describe("a review on a registry provider with no model set", () => {
+  // The gate of the selection: only a turn of the Implementer names the registry's providers as catalog models. A review with no model
+  // gets the registry's default model of the kind and never a catalog selection (which would need a model and refuse the job).
+  const DEFAULTS = {
+    anthropic: anthropicDescriptor.defaultModels,
+    openrouter: openrouterDescriptor.defaultModels,
+  } as const;
+  it.each([
+    ["anthropic", "dynamic"],
+    ["openrouter", "dynamic"],
+    ["anthropic", "diff"],
+  ] as const)(
+    "gives a %s %s review the registry's default model, with no model entry",
+    async (provider, reviewKind) => {
+      const h = await startRunnerApiHarness({
+        nativeCost: nativeCostService(),
+        llmKey: null,
+        jobOptions: {
+          optionsFor: async () => ({
+            env: {},
+            selection: {
+              layers: { project: { provider } },
+              entryId: null,
+            },
+            ...(reviewKind === "dynamic"
+              ? {
+                  dynamic: {
+                    model: DEFAULTS[provider].dynamic,
+                    skill: "review",
+                    maxFindings: 5,
+                  },
+                }
+              : {}),
+          }),
+        },
+      });
+      await h.setLlmKey(KEY, provider);
+      await h.enqueueNew({ reviewKind });
+
+      const response = await h.claim({
+        engines: ["pr-agent", "opencode"],
+        features: FEATURES,
+        llmProviders: ["openrouter", "anthropic"],
+      });
+
+      expect(response.status).toBe(200);
+      const { job } = (await response.json()) as ClaimResponse;
+      expect(job.input).toMatchObject({
+        llm: {
+          provider,
+          model: DEFAULTS[provider][reviewKind],
+          apiKey: KEY,
+        },
+      });
+      expect(JSON.stringify(job.input)).not.toContain("modelEntry");
     },
   );
 });
