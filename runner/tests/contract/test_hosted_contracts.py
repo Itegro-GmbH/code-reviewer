@@ -185,7 +185,35 @@ def test_the_implementer_profile_is_the_default_spec_plus_a_work_volume() -> Non
     differing = sorted(
         key for key in {*standard, *profile} if standard.get(key) != profile.get(key)
     )
-    assert differing == ["allowedEnvironment", "memory", "pids", "workVolume"]
+    # #745: the VM's Docker socket for the model door, and a list of forbidden keys without it.
+    assert differing == [
+        "allowedEnvironment",
+        "dockerSocket",
+        "forbiddenKeys",
+        "memory",
+        "pids",
+        "workVolume",
+    ]
+    assert profile["dockerSocket"] == {
+        "source": "/var/run/docker.sock",
+        "target": "/run/docker.sock",
+    }
+    assert "dockerSocket" not in profile["forbiddenKeys"]
+    for change in (
+        {"source": "/"},
+        {"target": "/work/docker.sock"},
+        {"readonly": False},
+    ):
+        assert not _accepts(
+            "worker-container.v1.json",
+            "ImplementerContainerSpec",
+            {**profile, "dockerSocket": {**profile["dockerSocket"], **change}},
+        )
+    assert not _accepts(
+        "worker-container.v1.json",
+        "ImplementerContainerSpec",
+        {**profile, "forbiddenKeys": standard["forbiddenKeys"]},
+    )
     volume = profile["workVolume"]
     for change in (
         {"path": "/data"},

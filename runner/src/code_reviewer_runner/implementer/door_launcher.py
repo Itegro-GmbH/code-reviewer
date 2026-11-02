@@ -321,15 +321,16 @@ def start_door(
         )  # fmt: skip
         running.begin()
         api.start_container(container)
-        streams.write(
-            start_document(
-                model_access=model_access,
-                capability=capability,
-                deadline_seconds=deadline_seconds,
-                port=port,
-                environment=environment,
-            )
+        document = start_document(
+            model_access=model_access,
+            capability=capability,
+            deadline_seconds=deadline_seconds,
+            port=port,
+            environment=environment,
         )
+        # A door that is already gone cannot be written to: the reader says how it ended.
+        with contextlib.suppress(OSError):
+            streams.write(document)
     except DockerError as error:
         _cleanup(api, container, network, own, streams)
         raise _unavailable(f"the daemon refused a step ({error.status})") from None
