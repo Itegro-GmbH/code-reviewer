@@ -275,4 +275,86 @@ describe("the fake LLM as the Anthropic Messages API", () => {
       output_tokens_details: { thinking_tokens: 60 },
     });
   });
+
+  // #755: found by the Implementer's journey in the privileged lane; its engine always streams, and the fake answered JSON.
+  it("answers a request that asks for a stream with the stream of the same answer: message, blocks, stop reason with the output tokens", async () => {
+    const fake = await setup();
+    fake.scriptAgent({
+      when: { lastUserContains: "the diff" },
+      steps: [[{ name: "bash", arguments: { command: "echo one" } }]],
+      finalText: "Done.",
+    });
+    fake.setMessagesUsage({
+      input_tokens: 10,
+      output_tokens: 90,
+      cache_read_input_tokens: 400,
+      cache_creation_input_tokens: 200,
+    });
+    const ask = async () => {
+      const response = await fetch(`${fake.baseUrl}/messages`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "anthropic-version": "2023-06-01",
+          "x-api-key": "dummy-key",
+        },
+        body: JSON.stringify({
+          ...REQUEST,
+          stream: true,
+          tools: [{ name: "bash", input_schema: { type: "object" } }],
+        }),
+      });
+      const text = await response.text();
+      return {
+        type: response.headers.get("content-type"),
+        events: text
+          .split("\n\n")
+          .filter((chunk) => chunk !== "")
+          .map((chunk) => ({
+            name: /^event: (.*)$/m.exec(chunk)?.[1],
+            data: JSON.parse(
+              /^data: (.*)$/m.exec(chunk)?.[1] ?? "null",
+            ) as Record<string, unknown>,
+          })),
+      };
+    };
+
+    const tool = await ask();
+    const text = await ask();
+
+    expect(tool.type).toBe("text/event-stream");
+    expect(tool.events.map((event) => event.name)).toEqual([
+      "message_start",
+      "content_block_start",
+      "content_block_delta",
+      "content_block_delta",
+      "content_block_stop",
+      "message_delta",
+      "message_stop",
+    ]);
+    expect(tool.events[0]?.data).toMatchObject({
+      message: {
+        usage: {
+          input_tokens: 10,
+          cache_read_input_tokens: 400,
+          cache_creation_input_tokens: 200,
+        },
+      },
+    });
+    const arguments_ = tool.events
+      .filter((event) => event.name === "content_block_delta")
+      .map(
+        (event) => (event.data.delta as { partial_json: string }).partial_json,
+      )
+      .join("");
+    expect(JSON.parse(arguments_)).toEqual({ command: "echo one" });
+    expect(tool.events.at(-2)?.data).toMatchObject({
+      delta: { stop_reason: "tool_use" },
+      usage: { output_tokens: 90 },
+    });
+    expect(text.events.map((event) => event.name)).toContain("message_stop");
+    expect(
+      text.events.find((event) => event.name === "content_block_delta")?.data,
+    ).toMatchObject({ delta: { type: "text_delta", text: "Done." } });
+  });
 });

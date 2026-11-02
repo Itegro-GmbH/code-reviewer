@@ -11,10 +11,6 @@ import type { StoredModel, StoredProvider } from "../models-dev/catalog.ts";
 import { parseModelsDev } from "../models-dev/parse.ts";
 import { planCatalog } from "../models-dev/plan.ts";
 import { supportedProvider } from "../models-dev/opencode-providers.ts";
-import {
-  priceBookFromCatalog,
-  priceBookToJson,
-} from "../model-prices/price-book.ts";
 import { nativeCostRegistryFor } from "../native-cost/registry-addresses.ts";
 import {
   createNativeCostService,
@@ -26,6 +22,18 @@ import type { ClaimResponse } from "./contract.ts";
 const NOW = new Date("2026-11-02T10:00:00.000Z");
 const KEY = "dummy-anthropic-key-0123456789-implementer";
 const SONNET = "claude-sonnet-5-5";
+const PRICE_BOOK = {
+  input: "3000000",
+  output: "15000000",
+  cacheRead: "300000",
+  cacheWrite5m: "3750000",
+  cacheWrite1h: null,
+  reasoning: null,
+  inputAudio: null,
+  outputAudio: null,
+  contextOver200k: null,
+  tiers: [],
+};
 const FEATURES = ["cost_limit", "operator_cost_limit", "dynamic_cost_policy"];
 
 const body = JSON.parse(
@@ -75,16 +83,9 @@ function nativeCostService(): NativeCostService {
       availability: async () => {
         throw new Error("the own key asks no availability");
       },
-      catalogPrice: async (providerId, modelId) => {
-        const model = rows.models.find(
-          (row) => row.providerId === providerId && row.id === modelId,
-        );
-        const book =
-          model === undefined
-            ? null
-            : priceBookFromCatalog(model.cost, undefined);
-        return book === null ? null : priceBookToJson(book);
-      },
+      // The catalog's price of the fixture's Anthropic model in micro-USD per million tokens (the price service is the admin portal's).
+      catalogPrice: async (providerId, modelId) =>
+        providerId === "anthropic" && modelId === SONNET ? PRICE_BOOK : null,
     },
     settings: { get: async () => undefined },
     catalog: {
@@ -143,7 +144,7 @@ describe("the claim of a turn of the Implementer on the workspace's own Anthropi
         },
         cost: {
           keyMode: "own",
-          priceBook: { cacheRead: "100000", cacheWrite5m: "2500000" },
+          priceBook: { cacheRead: "300000", cacheWrite5m: "3750000" },
         },
       },
     });

@@ -140,6 +140,12 @@ type Started = RunnerApiHarness & {
   keyLoads: { count: number };
 };
 
+/** The harness's second provider is the native one: the real map names no provider outside the legacy registry. */
+const nativeRefOf = (selection: { provider: string; model: string }) =>
+  selection.provider === FAKE_PROVIDER_ID
+    ? { providerId: "deepseek", modelId: selection.model }
+    : null;
+
 async function start(
   options: {
     keyMode?: "own" | "managed";
@@ -222,10 +228,9 @@ async function start(
         options.nativeEntry === false
           ? { ok: false, code: "model_not_in_catalog" }
           : { ok: true, entry: ENTRY },
-      refOf: (selection) =>
-        selection.provider === FAKE_PROVIDER_ID
-          ? { providerId: "deepseek", modelId: selection.model }
-          : null,
+      refOf: nativeRefOf,
+      // The turn asks the Implementer's own rule (no provider is legacy); the harness's second provider is the native one.
+      implementerRefOf: nativeRefOf,
     },
   });
   settingsDb = createInstanceSettingsRepository(h.db);
