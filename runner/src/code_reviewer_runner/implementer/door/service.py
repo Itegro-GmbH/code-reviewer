@@ -104,7 +104,7 @@ def parse_start(text: str) -> DoorStart:
     if (
         access is None
         or not isinstance(capability, str)
-        or len(capability) < 16
+        or len(capability) < 32
         or isinstance(deadline, bool)
         or not isinstance(deadline, int | float)
         or not 0 < deadline <= _MAX_DEADLINE_SECONDS
