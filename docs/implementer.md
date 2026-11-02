@@ -247,7 +247,7 @@ not touched by either: the container keeps `opencode` and the review engines, on
 **Its only way out is the provider.** The door sits on the VM's default bridge, which routes to the internet and to the VM itself (its
 Docker gateway, its control port). So Control, before it tells the door anything, starts a one-shot container that shares the door's
 network namespace, holds `NET_ADMIN` (the door holds no capability) and installs an `ip` table (`EGRESS_RULES` in `door_launcher.py`):
-the model network, loopback, replies and DNS (port 53) are open, every private, link-local, shared and special range is dropped (the VM,
+loopback, replies and DNS (port 53) are open, a new connection into the model network is dropped (the door answers the agent and opens none towards it, Control's address included), every private, link-local, shared and special range is dropped (the VM,
 its neighbours, other containers, the platform's services), the rest of the internet is open on port 443 only, and everything else is
 dropped. A door whose rules did not go in is taken away and the key is never written to it (`setup_failed`, free). Measured on a VM:
 from the door, port 443 of the provider answers, port 80 and the VM's services (`172.17.0.1:23456`, `169.254.0.1`) do not. Port 443

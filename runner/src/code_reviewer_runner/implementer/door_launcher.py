@@ -93,10 +93,14 @@ BRIDGE_NETWORK: Final = "bridge"
 # container that shares the door's network namespace and holds `NET_ADMIN` (the door itself holds
 # no capability) installs these rules before the door is told the key:
 #
-# * the model network (the agent's side) and loopback (the embedded DNS) are open;
-# * replies are open, and DNS (port 53, the resolver of the VM is on a private address);
+# * loopback (the embedded DNS) is open;
+# * replies are open: the door answers the agent's connections to the model port, and that is all
+#   it does on the model network. A new connection into it, Control's address included, is
+#   dropped before anything else can accept it (DNS and 443 below);
+# * DNS (port 53, the resolver of the VM is on a private address) is open to every other
+#   address, as it was; narrowing it belongs to the network door (step 7);
 # * every private, link-local, shared and special range is dropped: the VM, its neighbours, the
-#   other containers, the platform's services;
+#   other containers, the model network, the platform's services;
 # * what is left of the internet, port 443 only: the provider (`HttpsUpstream` dials port 443 of
 #   public addresses only, this says it again where the door cannot get round it);
 # * everything else is dropped.
@@ -122,8 +126,8 @@ EGRESS_RULES: Final = "; ".join(
         f"add chain ip {EGRESS_TABLE} output "
         "{ type filter hook output priority 0 ; policy accept ; }",
         f'add rule ip {EGRESS_TABLE} output oifname "lo" accept',
-        f"add rule ip {EGRESS_TABLE} output ip daddr {MODEL_NETWORK_SUBNET} accept",
         f"add rule ip {EGRESS_TABLE} output ct state established,related accept",
+        f"add rule ip {EGRESS_TABLE} output ip daddr {MODEL_NETWORK_SUBNET} drop",
         f"add rule ip {EGRESS_TABLE} output meta l4proto {{ tcp, udp }} th dport 53 accept",
         f"add rule ip {EGRESS_TABLE} output ip daddr {{ {', '.join(PRIVATE_RANGES)} }} drop",
         f"add rule ip {EGRESS_TABLE} output tcp dport 443 accept",

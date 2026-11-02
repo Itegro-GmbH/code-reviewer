@@ -20,7 +20,16 @@ without a cost), and the key is searched for in the places the agent could look.
    the user can read (environment and command line of every process it can see, every file it can
    read), the Docker socket is not its to open;
 4. a call over the cost limit is refused at the door and Control reads why;
-5. the door is killed: the turn's end is named and the cost class is the one the model use decides.
+5. the door is killed: the turn's end is named and the cost class is the one the model use decides;
+6. the door answers the model network and opens nothing into it: a process in the door's network
+   namespace cannot open a connection to Control's address (DNS port included), and one on the
+   model network outside the door's rules can, so that the refusal is the rules and not a missing
+   route.
+
+`--offline` (the CI lane with a real Docker daemon, no provider and no internet): the same run with
+the checks that need a real provider left out (a call that reaches it, the ledger read back after
+its refusal). Everything the door does before the provider is asked is still proven: the container
+as the daemon starts it, the rules, the way in for the agent, the cost refusal, the kill.
 
 It pauses once (`PAUSE`) until `/work/resume` exists, so that the host can look at the door's
 container from outside (`docker top`, `docker exec`, `docker stats`) while it runs.
@@ -37,7 +46,11 @@ from pathlib import Path
 from typing import Any
 
 from code_reviewer_runner.dynamic_review.config import new_proxy_capability
-from code_reviewer_runner.dynamic_review.model_door_route import MODEL_DOOR_ADDRESS
+from code_reviewer_runner.dynamic_review.model_door_route import (
+    MODEL_CONTROL_ADDRESS,
+    MODEL_DOOR_ADDRESS,
+    MODEL_NETWORK_NAME,
+)
 from code_reviewer_runner.dynamic_review.netguard import verify_confinement
 from code_reviewer_runner.dynamic_review.static_isolation import secure_startup, slot_ports
 from code_reviewer_runner.implementer import docker_api
@@ -52,6 +65,8 @@ from code_reviewer_runner.job import JobError
 
 ENGINE_UID = ENGINE_GID = 10101
 PYTHON = "/usr/local/bin/python3"
+VENV_PYTHON = "/opt/venv/bin/python"
+OFFLINE = "--offline" in sys.argv[1:]
 # Built, so that no secret scan sees a key; it is made up for the run and the provider refuses it.
 KEY = "sk-ant-" + "api03-spike-" + secrets.token_hex(16)
 ENTRY: dict[str, Any] = {
@@ -194,6 +209,24 @@ for root in roots:
 print(json.dumps({"found": found, "processes_read": processes, "files_read": files}))
 """
 
+# Runs in a helper container: one connection. The exit code says what happened to it.
+CONNECT = r"""
+import socket, sys
+probe = socket.socket()
+probe.settimeout(4)
+try:
+    probe.connect((sys.argv[1], int(sys.argv[2])))
+except TimeoutError:
+    sys.exit(7)  # nothing came back: dropped
+except ConnectionRefusedError:
+    sys.exit(8)  # answered with a refusal: not dropped, nobody listens
+except OSError:
+    sys.exit(9)
+sys.exit(0)
+"""
+CONNECTED, DROPPED, REFUSED = 0, 7, 8
+HELPER_NAME = "code-reviewer-door-check-helper"
+
 STEPS: list[tuple[str, float]] = []
 _request = DockerApi.request
 
@@ -276,21 +309,22 @@ def the_engine_user(checks: Checks, door: RunningDoor, capability: str, port: in
     for label, address, where in elsewhere:
         got = as_engine_user(REACH, address, str(where)).stdout.strip()
         checks.say(f"engine_user_refused_{label}", got.startswith("refused"), got=got)
-    outcome = call(capability, port)
-    # The provider answers the made-up key with a refusal: the way out and back works at no cost.
-    checks.say(
-        "call_through_the_door_reaches_the_provider",
-        outcome.get("status") in REFUSED_STATUSES,
-        **outcome,
-    )
-    time.sleep(0.5)
-    seen = door.state.status
-    checks.say(
-        "ledger_read_back_after_a_refused_call",
-        seen is not None and not seen.model_used and seen.upstream_error is not None,
-        upstream_error=None if seen is None else seen.upstream_error,
-        calls=None if seen is None else seen.usage["aiCalls"],
-    )
+    if not OFFLINE:
+        outcome = call(capability, port)
+        # The provider answers the made-up key with a refusal: out and back works, at no cost.
+        checks.say(
+            "call_through_the_door_reaches_the_provider",
+            outcome.get("status") in REFUSED_STATUSES,
+            **outcome,
+        )
+        time.sleep(0.5)
+        seen = door.state.status
+        checks.say(
+            "ledger_read_back_after_a_refused_call",
+            seen is not None and not seen.model_used and seen.upstream_error is not None,
+            upstream_error=None if seen is None else seen.upstream_error,
+            calls=None if seen is None else seen.usage["aiCalls"],
+        )
     wrong = call("not-the-capability-" + "x" * 30, port)
     checks.say(
         "call_without_the_capability_is_refused", wrong.get("status") in REFUSED_STATUSES, **wrong
@@ -301,6 +335,60 @@ def the_engine_user(checks: Checks, door: RunningDoor, capability: str, port: in
         looked.get("found") == [],
         **looked,
     )
+
+
+def connect_from(api: DockerApi, image: str, network: str, address: str, port: int) -> int:
+    """Open one connection to `address:port` from a one-shot container that shares `network`
+    (`container:<name>` is the door's namespace, with the door's rules) and return its exit code."""
+    helper = api.create_container(
+        {
+            "Image": image,
+            "Entrypoint": [VENV_PYTHON, "-I", "-c", CONNECT, address, str(port)],
+            "Cmd": [],
+            "User": "10001:10001",
+            "Env": [],
+            "HostConfig": {
+                "NetworkMode": network,
+                "Privileged": False,
+                "ReadonlyRootfs": True,
+                "CapDrop": ["ALL"],
+                "SecurityOpt": ["no-new-privileges:true"],
+                "Memory": 64 * 1024 * 1024,
+                "MemorySwap": 64 * 1024 * 1024,
+                "PidsLimit": 16,
+                "RestartPolicy": {"Name": "no"},
+            },
+        },
+        HELPER_NAME,
+    )
+    try:
+        api.start_container(helper)
+        return api.wait_container(helper, timeout=60.0)
+    finally:
+        api.remove_container(helper)
+
+
+def the_door_opens_nothing_into_the_model_network(checks: Checks, api: DockerApi) -> None:
+    image = str(api.inspect_container(socket.gethostname()).get("Image", ""))
+    for label, port in (("a_port", 0), ("dns_port", 53)):
+        with socket.socket() as listener:
+            listener.bind((MODEL_CONTROL_ADDRESS, port))
+            listener.listen(8)
+            where = int(listener.getsockname()[1])
+            reaches = connect_from(api, image, MODEL_NETWORK_NAME, MODEL_CONTROL_ADDRESS, where)
+            from_door = connect_from(
+                api, image, f"container:{DOOR_CONTAINER_NAME}", MODEL_CONTROL_ADDRESS, where
+            )
+        checks.say(
+            f"door_namespace_cannot_open_a_connection_to_control_{label}",
+            reaches == CONNECTED and from_door == DROPPED,
+            outside_the_rules=reaches,
+            in_the_door=from_door,
+        )
+    # Not a model network: the VM's gateway has no listener on this port, so a refusal would
+    # mean the packet got there, and a drop means the rules stopped it.
+    vm = connect_from(api, image, f"container:{DOOR_CONTAINER_NAME}", "172.17.0.1", 23456)
+    checks.say("door_namespace_cannot_reach_the_vm", vm == DROPPED, in_the_door=vm)
 
 
 def main() -> int:
@@ -332,12 +420,14 @@ def main() -> int:
     api = DockerApi()
     the_container(checks, api, capability)
     the_engine_user(checks, door, capability, ports.proxy)
+    the_door_opens_nothing_into_the_model_network(checks, api)
 
-    # The host looks at the door from outside while it runs (`docker top`, `docker exec`, ...).
-    print("PAUSE", flush=True)
-    end = time.monotonic() + 600
-    while not Path("/work/resume").exists() and time.monotonic() < end:
-        time.sleep(0.5)
+    if not OFFLINE:
+        # The host looks at the door from outside while it runs (`docker top`, `docker exec`, ...).
+        print("PAUSE", flush=True)
+        end = time.monotonic() + 600
+        while not Path("/work/resume").exists() and time.monotonic() < end:
+            time.sleep(0.5)
     door.stop()
     checks.say("door_stop", door.state.end is not None and not door.state.end.unexpected)
 

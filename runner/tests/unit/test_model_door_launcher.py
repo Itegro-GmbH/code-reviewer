@@ -262,10 +262,18 @@ def test_the_rules_let_dns_and_https_through_and_drop_the_vm_and_everything_else
     rules = EGRESS_RULES.split("; ")
 
     assert rules[-1].endswith("output drop"), "the last word is no"
-    accept_model = next(i for i, r in enumerate(rules) if MODEL_NETWORK_SUBNET in r)
+    replies = next(i for i, r in enumerate(rules) if "ct state established,related accept" in r)
+    shut_model = next(
+        i for i, r in enumerate(rules) if MODEL_NETWORK_SUBNET in r and r.endswith("drop")
+    )
+    accept_dns = next(i for i, r in enumerate(rules) if "th dport 53 accept" in r)
     drop_private = next(i for i, r in enumerate(rules) if r.endswith("} drop"))
     accept_https = next(i for i, r in enumerate(rules) if "dport 443 accept" in r)
-    assert accept_model < drop_private < accept_https, "the model network is inside 10.0.0.0/8"
+    # The door answers the agent's connections (replies) and opens none into the model network,
+    # not even to a port another rule would accept (DNS, 443).
+    assert replies < shut_model < accept_dns < drop_private < accept_https
+    assert not any(MODEL_NETWORK_SUBNET in r and "accept" in r for r in rules)
+    assert "10.0.0.0/8" in rules[drop_private]
     assert any("th dport 53 accept" in r for r in rules), (
         "the resolver of the VM is a private address"
     )
