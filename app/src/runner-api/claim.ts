@@ -695,7 +695,7 @@ async function costOf(
     (job.reviewKind !== "dynamic" && job.reviewKind !== "implementer")
   )
     return { kind: "decided", policy: null };
-  // A turn of the Implementer has no legacy wire, so Anthropic and OpenRouter are catalog models for it; a review keeps its rule.
+  // A turn of the Implementer has no legacy wire, so the registry's two providers are catalog models for it; a review keeps its rule.
   const ref =
     job.reviewKind === "implementer"
       ? native.implementerRefOf(selection)

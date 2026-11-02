@@ -115,7 +115,7 @@ export type SelectionInput =
       nativeModels?: boolean;
       /**
        * The job is a task of the Implementer: its agent is OpenCode, which has no legacy wire, so a provider of the registry
-       * (Anthropic, OpenRouter) is a catalog provider for it too, with the same workspace key. A review never sets this.
+       * is a catalog provider for it too, with the same workspace key. A review never sets this.
        */
       implementer?: true;
       /** The model of the kind for the default provider when no layer sets one (`LLM_MODEL`, or the Dynamic default). */

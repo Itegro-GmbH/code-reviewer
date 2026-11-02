@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // The providers a workspace holds a readable key for, as the Implementer's picker and check need them: the registry's two providers
-// (Anthropic, OpenRouter) keep their key in a slot of their own, the catalog providers in a slot per slug (`native-providers/lookup.ts`).
+// keep their key in a slot of their own, the catalog providers in a slot per slug (`native-providers/lookup.ts`).
 // The task is native for all of them (its agent is OpenCode), so the claim loads the key of the same provider by the same slot.
 import type { WorkspaceLlmKeyService } from "../llm/workspace-key.ts";
 

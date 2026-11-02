@@ -15,7 +15,7 @@
 // a native slug in a selection yet: that, and the key per native provider, belong to the wiring and #555 (README.md).
 //
 // One kind has no legacy wire: a task of the Implementer (the agent is OpenCode). For it `implementerProviderIdOf` and
-// `implementerCatalogRefOf` below treat no provider as legacy, so the key of Anthropic or OpenRouter reaches the agent through the
+// `implementerCatalogRefOf` below treat no provider as legacy, so the key of the registry's two providers reaches the agent through the
 // passthrough proxy like any catalog provider's. The reviews never call them.
 import { supportedProvider } from "../models-dev/opencode-providers.ts";
 

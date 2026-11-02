@@ -4,7 +4,7 @@
 // it is the claim's (#753): the model must run on the native path (the passthrough proxy, an entry from the catalog and a cost
 // policy), because the agent is OpenCode. So:
 //  - on the workspace's own key a model is a provider and a model of the models.dev catalog (`src/native-providers/`), and the
-//    workspace has saved a key for the provider. Anthropic and OpenRouter are catalog providers here too: the agent is OpenCode
+//    workspace has saved a key for the provider. The registry's two providers are catalog providers here too: the agent is OpenCode
 //    and has no legacy wire, so their keys go through the passthrough proxy like any catalog provider's (the reviews keep the
 //    legacy wire of the two; `native-cost/catalog-ref.ts`, `implementerProviderIdOf`);
 //  - on the operator's key a model is a released catalog entry that serves Dynamic Review, that the plan allows, and whose model

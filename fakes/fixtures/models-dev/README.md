@@ -18,6 +18,7 @@
 `implementer-lane.json` is **not** a copy of the public catalog: it is made up, in the same shape, for the Implementer's journeys in the
 privileged lane (#767). The app takes only the providers it supports, so it is the provider `deepseek` (its real address, an
 OpenAI-compatible chat API) with two models that do not exist, with prices the journeys know: `lane-coder`, and `claude-lane-coder`,
-whose id carries the word the engine marks a prompt for the cache by. The journeys fill the catalog of the factory app from it
+whose id carries the word the engine marks a prompt for the cache by; and the provider `anthropic` (the address the committed file
+records for it, the Messages wire) with one model, `claude-sonnet-5-5`, for the journey of a workspace on its own Anthropic key. The journeys fill the catalog of the factory app from it
 (`app/src/test-support/e2e-models-dev-child.ts fetch <db> <file>`), so that the models the fake LLM answers on the chat route are the
 ones the form offers.
