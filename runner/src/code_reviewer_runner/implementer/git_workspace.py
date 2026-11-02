@@ -585,6 +585,17 @@ class GitWorkspace:
         )
         return parse_name_status(bytes(reader.data)) if done.returncode == 0 else []
 
+    def check_lease(self) -> None:
+        """One question to the job host while the agent works: raises `lease_lost` (or whatever the
+        gate raises) when the job is no longer ours, so that the turn ends and the model is not paid
+        for nothing. An answer that cannot be had is not a no; the next question comes later."""
+        if self._before_push is None:
+            return
+        try:
+            self._before_push()
+        except LeaseNotConfirmed:
+            return
+
     def _ask_lease(self, deadline: float, confirm_seconds: float, confirm_pause: float) -> None:
         if self._before_push is None:
             return

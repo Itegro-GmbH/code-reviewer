@@ -94,6 +94,9 @@ ENGINE_STOP_SECONDS = 5.0
 # A stop (SIGTERM) leaves the process `SIGTERM_BACKSTOP_SECONDS` in all (`job_run.py`): the engine
 # comes out of it, then the final push (no leftover is committed) and the two reads of the report.
 STOP_PUSH_SECONDS = 30.0
+# How often the watch asks the job host whether the job is still ours while the agent works (a
+# lost lease ends the turn at once; nothing is pushed in the meantime).
+LEASE_POLL_SECONDS = 30.0
 # The extra message for a dirty tree is only worth sending when this much of the clock is left.
 MIN_EXTRA_TURN_SECONDS = 20.0
 # What the ledger holds the results of tools to. There is no bound on a single result: the owner's
@@ -153,6 +156,7 @@ class SessionSeams:
     final_push_seconds: float = FINAL_PUSH_SECONDS
     stop_push_seconds: float = STOP_PUSH_SECONDS
     leftover_seconds: float = LEFTOVER_SECONDS
+    lease_poll_seconds: float = LEASE_POLL_SECONDS
     startup_seconds: float | None = None
     scratch_dir: str | None = None
     clock: Callable[[], float] = time.monotonic
@@ -450,9 +454,16 @@ class ImplementerSession:
         return self._error is not None and self._error[0] in _NO_LEFTOVER
 
     def _watch(self) -> Callable[[], None]:
+        last = time.monotonic()
+
         def check() -> None:
+            nonlocal last
             if self._should_stop():
                 raise ShutdownRequested
+            now = time.monotonic()
+            if now - last >= self.seams.lease_poll_seconds:
+                last = now
+                self.workspace.check_lease()
 
         return check
 

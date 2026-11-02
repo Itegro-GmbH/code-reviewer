@@ -41,12 +41,12 @@ from code_reviewer_runner.implementer import session as session_module
 from code_reviewer_runner.implementer.agent import AgentTurn
 from code_reviewer_runner.implementer.egress_config import EgressSettings
 from code_reviewer_runner.implementer.git_workspace import (
+    _Progress,  # pyright: ignore[reportPrivateUsage]
     AgentUser,
     GitIdentity,
+    BranchPush,
     GitWorkspace,
-    PushOutcome,
-    PushResult,
-    RepositoryUnusable,
+    PushReport,
     WorkspaceLayout,
     WorkspaceSpec,
 )
@@ -93,9 +93,9 @@ def valid_result(line: dict[str, Any]) -> bool:
 
 
 class FakeGit(GitWorkspace):
-    """The real `GitWorkspace` (its `push()` with the lease gate, its paths, its identity) with the
-    commands behind it replaced by a script the test controls. `pushes` are the tips `_push` was
-    asked to push; `events` is the order of everything that matters."""
+    """The real `GitWorkspace` (its lease questions, its paths, its identity) with the commands
+    behind it replaced by a script the test controls. `pushes` are the tips `push_all` pushed;
+    `events` is the order of everything that matters."""
 
     def __init__(self, base: Path, before_push: Callable[[], None] | None) -> None:
         super().__init__(
@@ -117,6 +117,8 @@ class FakeGit(GitWorkspace):
         self.push_calls = 0
         self.events: list[str] = []
         self.prepared = False
+        self.other_branches: dict[str, str] = {}
+        self.rejected: dict[str, str] = {}
         self._prepare_error: JobError | None = None
 
     def fail_prepare(self, error: JobError) -> None:
@@ -125,7 +127,7 @@ class FakeGit(GitWorkspace):
         cloned = error.code not in (ErrorCode.CLONE_FAILED, ErrorCode.BASE_BRANCH_NOT_FOUND)
         self._start = START if cloned else None
 
-    def prepare(self, *, self_test: bool = True) -> None:
+    def prepare(self) -> None:
         if self._prepare_error is not None:
             raise self._prepare_error
         self.prepared = True
@@ -135,42 +137,51 @@ class FakeGit(GitWorkspace):
         self.commits = [*self.commits, CommitInfo(sha, subject)]
         self.files = [FileChange("src/a.ts", ChangeKind.ADDED)]
 
-    def agent_tip(self) -> str | None:
-        return self.tip
-
-    def spool_signalled(self) -> bool:
-        return False
-
     def dirty(self) -> bool:
         if self.dirty_error is not None:
             raise self.dirty_error
         return self.is_dirty
 
-    def commit_all(self, message: str = "") -> str | None:
+    def commit_all(self, message: str = "", *, seconds: float = 0.0) -> str | None:
         self.events.append("commit_all")
         self.commit(SECOND, "Implementer: uncommitted changes of the turn")
         self.is_dirty = False
         return SECOND
 
     def commits_since_start(self) -> list[CommitInfo]:
-        return list(self.commits)
+        return list(self.commits) if self._progress.form_ref is not None else []
 
     def changed_files(self) -> list[FileChange]:
-        return list(self.files)
+        return list(self.files) if self._progress.form_ref is not None else []
 
     def engine_inputs_present(self) -> list[str]:
         return []
 
-    def _push(self) -> PushResult:
+    def push_all(
+        self, *, seconds: float, confirm_seconds: float = 0.0, confirm_pause: float = 0.0
+    ) -> Any:
+        """What the real one does around git: the lease is asked before the listing and before
+        every push, the form's branch comes first, one branch refused does not stop the others."""
         self.push_calls += 1
-        if self.tip is None or (self.tip == self._start and self._pushed is None):
-            return PushResult(PushOutcome.NOTHING_TO_PUSH, None)
-        if self.tip == self._pushed:
-            return PushResult(PushOutcome.UP_TO_DATE, self._pushed)
-        self.events.append("push")
-        self.pushes.append(self.tip)
-        self._pushed = self.tip
-        return PushResult(PushOutcome.PUSHED, self.tip)
+        self._progress = _Progress()
+        deadline = self._clock() + seconds
+        self._ask_lease(deadline, confirm_seconds, confirm_pause)
+        mine = self._progress
+        if self.tip is not None and self.tip != self._start:
+            mine.form_head = self.tip
+            mine.form_ref = "refs/runner/in/0"
+            self._ask_lease(deadline, confirm_seconds, confirm_pause)
+            self.events.append("push")
+            self.pushes.append(self.tip)
+            mine.branches.append(BranchPush(self.spec.branch, self.tip, True, None))
+        for name, sha in sorted(self.other_branches.items()):
+            self._ask_lease(deadline, confirm_seconds, confirm_pause)
+            if name in self.rejected:
+                mine.branches.append(BranchPush(name, sha, False, self.rejected[name]))
+                continue
+            self.pushes.append(sha)
+            mine.branches.append(BranchPush(name, sha, True, None))
+        return self.push_report()
 
 
 @dataclass
@@ -349,11 +360,9 @@ def play(
             setup=setup,
             session_seams=SessionSeams(
                 upstream_for=lambda _url: cast("Any", object()),
-                tick_seconds=0.05,
-                push_interval=0.05,
                 confirm_seconds=confirm_seconds,
                 confirm_pause=0.05,
-                retry_backoff=0.05,
+                lease_poll_seconds=0.05,
             ),
         )
         if session_error is not None:
@@ -519,6 +528,7 @@ def test_a_setup_that_fails_after_the_clone_reports_the_base_commit_and_nothing_
         "baseCommit": START,
         "headCommit": None,
         "pushed": False,
+        "branches": [],
         "commits": [],
         "filesChanged": [],
         "summary": "",
@@ -530,11 +540,17 @@ def test_a_setup_that_fails_after_the_clone_reports_the_base_commit_and_nothing_
 
 
 # #765
-def test_an_unusable_repository_after_the_agent_ran_is_the_charged_code(play: Any) -> None:
-    turn = play(commits_then_ends(), dirty_error=RepositoryUnusable("git status failed"))
+def test_a_repository_that_cannot_be_read_after_the_agent_ran_is_a_charged_push_rejected(
+    play: Any,
+) -> None:
+    def unreadable(git: FakeGit) -> None:
+        git.push_all = lambda **_: PushReport(listed=False)  # type: ignore[method-assign]
+        git.push_report = lambda: PushReport(listed=False)  # type: ignore[method-assign]
+
+    turn = play(commits_then_ends(), configure=unreadable)
 
     result = turn.result
-    assert result["errorCode"] == "branch_violation"
+    assert result["errorCode"] == "push_rejected"
     assert result["errorCode"] not in ("setup_failed", "runner_error")
     assert result["usage"]["aiCalls"] >= 1
     assert valid_result(result)
@@ -655,11 +671,11 @@ def test_a_lease_lost_during_the_turn_aborts_the_engine_and_pushes_nothing(play:
     assert turn.exit_code == 1
     assert result["errorCode"] == "lease_lost"
     assert valid_result(result)
-    assert turn.git.pushes == [] and turn.git.push_calls == 0
+    assert turn.git.pushes == []
     assert turn.agent is not None and turn.agent.stopped  # the engine was ended
     assert turn.events[-1] != "push" and "push" not in turn.events
     assert result["implementer"]["pushed"] is False
-    assert result["implementer"]["headCommit"] == TIP
+    assert result["implementer"]["branches"] == []
     assert "commit_all" not in turn.git.events
 
 
@@ -672,10 +688,7 @@ def test_nothing_is_pushed_after_the_lease_was_lost_even_if_the_agent_commits_ag
 
     def script(agent: FakeAgent, check: Callable[[], None]) -> str:
         agent.use_the_model()
-        git = agent.git
         make_commit(agent, TIP)
-        assert wait_for(lambda: git.pushes == [TIP]), "the first push was not made"
-        make_commit(agent, SECOND)
         end = time.monotonic() + 10
         while time.monotonic() < end:
             check()
@@ -685,8 +698,7 @@ def test_nothing_is_pushed_after_the_lease_was_lost_even_if_the_agent_commits_ag
     turn = play(script, answers=first_held_then_lost)
 
     assert turn.result["errorCode"] == "lease_lost"
-    assert turn.git.pushes == [TIP]  # the second commit never reached the provider
-    assert turn.result["implementer"]["headCommit"] == SECOND
+    assert turn.git.pushes == []  # no commit reached the provider
     assert turn.result["implementer"]["pushed"] is False
 
 
@@ -698,24 +710,29 @@ def test_a_lease_that_cannot_be_confirmed_is_no_lease(play: Any) -> None:
     assert turn.git.pushes == []
 
 
-# #765-R2: one unanswered question is a "not now", not the end of the turn.
+# #765-R2: one unanswered question while the agent works is a "not now", not the end of the turn.
 def test_an_app_that_is_silent_once_does_not_end_the_turn(play: Any) -> None:
+    asked: list[int] = []
+
     def silent_first(number: int) -> str:
+        asked.append(number)
         return "unconfirmed" if number <= 2 else "held"
 
     def script(agent: FakeAgent, check: Callable[[], None]) -> str:
         agent.use_the_model()
-        git = agent.git
         make_commit(agent, TIP)
-        assert wait_for(lambda: git.pushes == [TIP]), "the push after the silence was not made"
+        end = time.monotonic() + 5
+        while time.monotonic() < end and len(asked) < 3:
+            check()  # the watch asks the host every few hundredths of a second in this test
+            time.sleep(0.02)
         return "done"
 
     turn = play(script, answers=silent_first, confirm_seconds=5.0)
 
+    assert len(asked) >= 3, "the watch asked while the agent worked"
     assert turn.result["ok"] is True
     assert turn.result["implementer"]["pushed"] is True
     assert turn.git.pushes == [TIP]
-    assert turn.lease is not None and turn.lease.asked >= 3
 
 
 # #765-R2: the last push asks again within its window and pushes when the app answers in time.
@@ -747,19 +764,114 @@ def test_a_process_started_without_the_lease_channel_never_pushes(play: Any) -> 
 
 
 # #765-T05
-def test_the_lease_is_asked_before_every_push_not_once(play: Any) -> None:
-    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
-        agent.use_the_model()
-        git = agent.git
-        make_commit(agent, TIP)
-        assert wait_for(lambda: git.pushes == [TIP])
-        return "done"
+def test_the_lease_is_asked_before_the_listing_and_before_every_push_not_once(play: Any) -> None:
+    def configure(git: FakeGit) -> None:
+        git.other_branches = {"second": SECOND}
 
-    turn = play(script)
+    turn = play(commits_then_ends(), configure=configure)
 
     assert turn.result["ok"] is True
-    assert turn.git.pushes == [TIP]  # the ticker's push is the one; the final one finds it pushed
-    assert turn.lease is not None and turn.lease.asked >= 2  # asked before each of two pushes
+    assert turn.git.pushes == [TIP, SECOND]
+    assert (
+        turn.lease is not None and turn.lease.asked >= 3
+    )  # the listing, the form's push, one more
+
+
+# -- the report names every branch ------------------------------------------------------------------
+
+
+# #git-free
+def test_every_pushed_branch_is_in_the_report_and_the_form_branch_has_the_commits(
+    play: Any,
+) -> None:
+    def configure(git: FakeGit) -> None:
+        git.other_branches = {"experiment/two": SECOND}
+
+    turn = play(commits_then_ends(), configure=configure)
+
+    block = turn.result["implementer"]
+    assert turn.result["ok"] is True and valid_result(turn.result)
+    assert block["branches"] == [
+        {"name": "implementer/a1b2c3", "head": TIP, "result": "pushed", "reason": None},
+        {"name": "experiment/two", "head": SECOND, "result": "pushed", "reason": None},
+    ]
+    assert block["headCommit"] == TIP and block["pushed"] is True
+    assert block["commits"] == [{"sha": TIP, "subject": "Add it"}]
+
+
+# #git-free
+def test_a_rejected_branch_is_reported_with_its_reason_and_the_turn_still_succeeds(
+    play: Any,
+) -> None:
+    def configure(git: FakeGit) -> None:
+        git.other_branches = {"main": SECOND}
+        git.rejected = {"main": "non_fast_forward"}
+
+    turn = play(commits_then_ends(), configure=configure)
+
+    block = turn.result["implementer"]
+    assert turn.result["ok"] is True, turn.output
+    assert {"name": "main", "head": SECOND, "result": "rejected", "reason": "non_fast_forward"} in (
+        block["branches"]
+    )
+    assert block["pushed"] is True
+
+
+# #git-free
+def test_a_form_branch_that_is_rejected_ends_the_turn_push_rejected_and_keeps_the_others(
+    play: Any,
+) -> None:
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        agent.use_the_model()
+        return "worked on another branch only"
+
+    def configure(git: FakeGit) -> None:
+        git.tip = TIP
+        git.commits = [CommitInfo(TIP, "Add it")]
+        git.other_branches = {"second": SECOND}
+        git.rejected = {"implementer/a1b2c3": "non_fast_forward"}
+
+    # The fake rejects only the other branches by name; the form's branch is rejected by making
+    # its push fail through the same list.
+    original = FakeGit.push_all
+
+    def push_all(self: FakeGit, **options: Any) -> Any:
+        report = original(self, **options)
+        rejected = BranchPush(self.spec.branch, TIP, False, "non_fast_forward")
+        self._progress.branches[:] = [
+            rejected if entry.name == self.spec.branch else entry for entry in report.branches
+        ]
+        return self.push_report()
+
+    FakeGit.push_all = push_all  # type: ignore[method-assign]
+    try:
+        turn = play(script, configure=configure)
+    finally:
+        FakeGit.push_all = original  # type: ignore[method-assign]
+
+    block = turn.result["implementer"]
+    assert turn.result["errorCode"] == "push_rejected"
+    assert block["pushed"] is False and block["headCommit"] == TIP
+    assert [b["name"] for b in block["branches"] if b["result"] == "pushed"] == ["second"]
+
+
+# #git-free
+def test_work_only_on_another_branch_is_a_success_with_no_form_head(play: Any) -> None:
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        agent.use_the_model()
+        return "worked elsewhere"
+
+    def configure(git: FakeGit) -> None:
+        git.other_branches = {"elsewhere": SECOND}
+
+    turn = play(script, configure=configure)
+
+    block = turn.result["implementer"]
+    assert turn.result["ok"] is True
+    assert block["headCommit"] is None and block["pushed"] is False
+    assert block["branches"] == [
+        {"name": "elsewhere", "head": SECOND, "result": "pushed", "reason": None}
+    ]
 
 
 # -- T06: SIGTERM ---------------------------------------------------------------------------------
