@@ -168,6 +168,7 @@ describe("the inputs of the Worker image", () => {
       "runner/Dockerfile",
       "runner/Dockerfile.dockerignore",
       "docker/sandbox/vm-prepare.sh",
+      "docker/sandbox/sysbox-prepare.sh",
       "dispatcher/src/snapshot/config.ts",
       "dispatcher/src/snapshot/pipeline.ts",
       "dispatcher/src/snapshot/probe-flags.ts",

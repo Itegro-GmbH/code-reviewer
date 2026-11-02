@@ -117,6 +117,7 @@ jobs:
           args=(
             --context "$RUNNER_TEMP/context.tgz"
             --vm-prepare ../docker/sandbox/vm-prepare.sh
+            --sysbox-prepare ../docker/sandbox/sysbox-prepare.sh
             --out "$RUNNER_TEMP/golden-snapshot.json"
             --commit "$GITHUB_SHA"
             --skip-retention
@@ -138,6 +139,10 @@ jobs:
           } >> "$GITHUB_OUTPUT"
       - name: Show the record
         run: |
+          # Sysbox is for the Implementer only and never holds back a snapshot: an unproven one is shown, not failed (docs/golden-snapshot.md).
+          if [ "$(jq -r '.sysbox // "unproven"' "$RUNNER_TEMP/golden-snapshot.json")" != "proven" ]; then
+            echo "::warning title=Sysbox unproven::The golden snapshot was recorded without a passing Sysbox proof. Reviews are not affected; the Implementer's VM will not start a Sysbox container. The log of the build step names the reason."
+          fi
           {
             echo "### Golden snapshot"
             echo

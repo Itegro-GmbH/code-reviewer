@@ -19,6 +19,13 @@ describe("the pipeline configuration", () => {
     expect(config.dockerVersion).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
+  it("pins Sysbox to a release and its checksum, and the proof's image to a digest", () => {
+    const config = resolveConfig();
+    expect(config.sysboxVersion).toBe("0.7.1");
+    expect(config.sysboxSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(config.sysboxProbeImage).toMatch(/@sha256:[0-9a-f]{64}$/);
+  });
+
   it.each([
     ["dockerVersion", "29.1.3; rm -rf /"],
     ["dockerVersion", "$(id)"],
@@ -30,6 +37,11 @@ describe("the pipeline configuration", () => {
     ["imageTag", "tag with space"],
     ["probeMemory", "1g;reboot"],
     ["probeMemory", "1g"], // below the reservation of the container spec: the renderer refuses it
+    ["sysboxVersion", "0.7.1; reboot"],
+    ["sysboxSha256", "9d6d5484"],
+    ["sysboxSha256", "G".repeat(64)],
+    ["sysboxProbeImage", "docker.io/library/docker:dind"], // a tag is not content: only a digest is accepted
+    ["sysboxProbeImage", "docker@sha256:abc"],
     ["keep", 0],
     ["keep", 11],
     ["keep", 1.5],

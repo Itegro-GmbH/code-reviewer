@@ -13,6 +13,7 @@ export { probeRunArguments };
 export const STEPS = {
   recordBaseManifest: "record_base_manifest",
   installDocker: "install_docker",
+  installSysbox: "install_sysbox",
   writeDaemonConfig: "write_daemon_config",
   installHostScripts: "install_host_scripts",
   startDaemon: "start_daemon",
@@ -25,6 +26,7 @@ export const STEPS = {
   startDaemonCheck: "start_daemon_check",
   inspectRestoredImage: "inspect_restored_image",
   probe: "probe",
+  sysboxProbe: "sysbox_probe",
 } as const;
 
 /** Where files go in the VMs. The staged ones share a prefix so one `rm` removes them. */
@@ -34,7 +36,10 @@ export const PATHS = {
   context: "/tmp/golden-context.tgz",
   contextDir: "/tmp/golden-ctx",
   buildLog: "/tmp/golden-build.log",
+  sysboxPrepare: "/tmp/golden-sysbox-prepare.sh",
+  sysboxDeb: "/tmp/golden-sysbox.deb",
   vmPrepareInstalled: "/usr/local/sbin/vm-prepare.sh",
+  sysboxPrepareInstalled: "/usr/local/sbin/sysbox-prepare.sh",
   // Outside every scan root and outside /tmp (which the clean step empties): it travels in the snapshot to the check VM.
   baseManifest: "/var/lib/code-reviewer-golden/base-manifest",
 } as const;
@@ -53,7 +58,13 @@ export const EXIT_TOOL_FAILED = 47;
 export const EXIT_MANIFEST_MODIFIED = 48;
 /** Exit status of the install step when the installed docker.io is not the pinned version. */
 export const EXIT_VERSION_MISMATCH = 42;
+/** Exit status of the Sysbox install when the downloaded package is not the pinned one. */
+export const EXIT_SYSBOX_CHECKSUM = 41;
+/** Exit status of the Sysbox install when the installed package or its runtime is not the pinned version. */
+export const EXIT_SYSBOX_VERSION = 44;
 export const SCAN_DONE = "SCAN_DONE";
+/** What the Sysbox proof prints: one `SYSBOX_PROBE ok <check>` or `SYSBOX_PROBE fail <reason>` per check, and the marker last. */
+export const SYSBOX_PROBE_DONE = "SYSBOX_PROBE_DONE";
 
 const STRICT = "set -euo pipefail";
 
@@ -77,7 +88,9 @@ esac
 }
 
 /**
- * The daemon configuration. IPv6 is off (the Worker container turns it off too, and the reduced egress ruleset
+ * The daemon configuration. The `sysbox-runc` runtime is registered here and used by no container that does not name it: the
+ * default stays `runc`, and a daemon with a runtime whose binary is missing starts all the same (measured), so a snapshot
+ * whose Sysbox install was skipped still starts its daemon exactly as before. IPv6 is off (the Worker container turns it off too, and the reduced egress ruleset
  * of kernels with only the `ip` nf_tables family does not cover it) and the platform kernel has no IPv6 tables
  * to program. Nothing opens the daemon to the network: no `hosts`, no TLS, no registry exception.
  */
@@ -87,6 +100,7 @@ export function daemonConfigJson(): string {
       ipv6: false,
       ip6tables: false,
       "live-restore": false,
+      runtimes: { "sysbox-runc": { path: "/usr/bin/sysbox-runc" } },
       "log-opts": { "max-size": "10m", "max-file": "2" },
     },
     null,
@@ -100,10 +114,51 @@ install -D -m 0644 -o root -g root ${PATHS.daemonJson} /etc/docker/daemon.json
 `;
 }
 
-/** vm-prepare.sh (docker/sandbox, #325) goes into the snapshot: the Launcher runs it on every VM start. */
+/**
+ * vm-prepare.sh (docker/sandbox, #325) goes into the snapshot: the Launcher runs it on every VM start. sysbox-prepare.sh goes
+ * with it and is run on the Implementer's VM only (and by the snapshot's own Sysbox proof).
+ */
 export function installHostScriptsScript(): string {
   return `${STRICT}
 install -D -m 0755 -o root -g root ${PATHS.vmPrepare} ${PATHS.vmPrepareInstalled}
+install -D -m 0755 -o root -g root ${PATHS.sysboxPrepare} ${PATHS.sysboxPrepareInstalled}
+`;
+}
+
+/**
+ * Installs the pinned Sysbox package. Downloaded from the project's release and refused unless it has the pinned checksum;
+ * `kmod` is what the package's runtime needs and the base image lacks. The package's maintainer scripts call `systemctl` when
+ * a running Docker needs a restart; the VM has no systemd, so a stub that does nothing is first on the PATH of this one command
+ * and is not left in the snapshot. A failed install purges what it unpacked, so that the snapshot is without Sysbox and not
+ * with a half-configured one. The package edits /etc/docker/daemon.json; the next step writes the pipeline's file over it.
+ */
+export function installSysboxScript(config: PipelineConfig): string {
+  const { sysboxVersion, sysboxSha256 } = config;
+  const url = `https://github.com/nestybox/sysbox/releases/download/v${sysboxVersion}/sysbox-ce_${sysboxVersion}.linux_amd64.deb`;
+  return `${STRICT}
+export DEBIAN_FRONTEND=noninteractive
+deb=${PATHS.sysboxDeb}
+stub=$(mktemp -d)
+cleanup() {
+  local status=$?
+  rm -rf "$stub" "$deb"
+  if [ "$status" -ne 0 ]; then dpkg --purge --force-all sysbox-ce > /dev/null 2>&1 || true; fi
+}
+trap cleanup EXIT
+curl --fail --silent --show-error --location --retry 3 --max-time 180 --output "$deb" ${shellQuote(url)}
+if ! printf '%s  %s\\n' ${shellQuote(sysboxSha256)} "$deb" | sha256sum --check --status -; then
+  echo "the Sysbox package is not the pinned one" >&2
+  exit ${EXIT_SYSBOX_CHECKSUM}
+fi
+printf '#!/bin/sh\\nexit 0\\n' > "$stub/systemctl"
+chmod 0755 "$stub/systemctl"
+PATH="$stub:$PATH" apt-get install -y -qq "$deb" kmod
+installed=$(dpkg-query -W -f='\${Version}' sysbox-ce)
+case "$installed" in
+  ${sysboxVersion}*) ;;
+  *) echo "sysbox-ce is not the pinned version" >&2; exit ${EXIT_SYSBOX_VERSION} ;;
+esac
+sysbox-runc --version > /dev/null
 `;
 }
 
@@ -391,5 +446,115 @@ echo ${SCAN_DONE}
 export function probeScript(config: PipelineConfig): string {
   return `${STRICT}
 timeout 180 docker ${probeRunArguments(config).map(shellQuote).join(" ")}
+`;
+}
+
+/** The port of the listener the Sysbox proof opens on the VM, and what it is reached from. */
+const SYSBOX_PROBE_PORT = 38417;
+
+/**
+ * The proof that Sysbox works on this kernel, run in the check VM, as root, with the daemon up (`vm-prepare.sh`): the same
+ * `sysbox-prepare.sh` a job VM runs, then a container with `--runtime=sysbox-runc` that starts its own `dockerd` and runs a
+ * container of its own, on the network the Implementer's agent will have (`--internal` and `gateway_mode_ipv4=isolated`). From
+ * inside it, the VM's addresses, the other network's bridge, an outside address and an outside name must all be unreachable.
+ * A plain `--internal` network is the control: the VM's listener must be reachable from it, or a "blocked" would prove nothing
+ * (`sysbox_network_check_inconclusive`). It is a connectivity check, not an attack test.
+ *
+ * It prints one `SYSBOX_PROBE ok <check>` or `SYSBOX_PROBE fail <reason>` per check and `SYSBOX_PROBE_DONE` last, and ends 0
+ * whatever it found: the pipeline reads the lines. Reasons: the names of `sysbox-prepare.sh`, `sysbox_probe_image_unavailable`
+ * (the pull failed: the proof did not run), `sysbox_container_failed`, `sysbox_inner_docker_failed`,
+ * `sysbox_inner_container_failed`, `sysbox_network_check_inconclusive`, `sysbox_network_not_isolated`.
+ */
+export function sysboxProbeScript(config: PipelineConfig): string {
+  const image = shellQuote(config.sysboxProbeImage);
+  return `set -uo pipefail
+image=${image}
+port=${SYSBOX_PROBE_PORT}
+box=sbxp-box
+iso=sbxp-isolated
+ctl=sbxp-control
+listener=
+report() { printf 'SYSBOX_PROBE %s\\n' "$*"; }
+cleanup() {
+  docker rm -f "$box" > /dev/null 2>&1
+  docker network rm "$iso" "$ctl" > /dev/null 2>&1
+  if [ -n "$listener" ]; then kill "$listener" > /dev/null 2>&1; fi
+}
+finish() { cleanup; echo ${SYSBOX_PROBE_DONE}; exit 0; }
+trap cleanup EXIT
+
+if ! boot_error=$(${PATHS.sysboxPrepareInstalled} 2>&1 > /dev/null); then
+  name=$(printf '%s' "$boot_error" | grep -o 'sysbox_[a-z_]*' | head -n 1)
+  report "fail \${name:-sysbox_boot_failed}"
+  finish
+fi
+report ok boot
+
+if ! timeout 120 docker pull --quiet "$image" > /dev/null 2>&1; then
+  report fail sysbox_probe_image_unavailable
+  finish
+fi
+
+if ! docker network create --internal -o com.docker.network.bridge.gateway_mode_ipv4=isolated "$iso" > /dev/null 2>&1 ||
+   ! docker network create --internal "$ctl" > /dev/null 2>&1; then
+  report fail sysbox_network_create_failed
+  finish
+fi
+
+if ! docker run --detach --runtime=sysbox-runc --network "$iso" --name "$box" --entrypoint sh "$image" \
+     -c 'exec dockerd --host=unix:///var/run/docker.sock --tls=false --ipv6=false --ip6tables=false' > /dev/null 2>&1; then
+  report fail sysbox_container_failed
+  finish
+fi
+ready=
+for _ in $(seq 1 300); do
+  if docker exec "$box" docker info > /dev/null 2>&1; then ready=1; break; fi
+  sleep 0.2
+done
+if [ -z "$ready" ]; then
+  report fail sysbox_inner_docker_failed
+  finish
+fi
+report ok inner_docker
+
+# The inner container's image is made from two files of the container itself: nothing is pulled a second time.
+inner=$(docker exec "$box" sh -c 'tar -C / -cf - bin/busybox lib/ld-musl-x86_64.so.1 | docker import - sbxp-inner > /dev/null && docker run --rm sbxp-inner /bin/busybox echo sysbox-inner-ok' 2> /dev/null)
+if [ "$inner" != "sysbox-inner-ok" ]; then
+  report fail sysbox_inner_container_failed
+else
+  report ok inner_container
+fi
+
+# The control: a listener on the VM, reached from a plain --internal network through its bridge address.
+python3 -c 'import socket, time
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("0.0.0.0", '$port'))
+s.listen(16)
+time.sleep(120)' > /dev/null 2>&1 &
+listener=$!
+sleep 0.5
+control_gateway=$(docker network inspect "$ctl" --format '{{(index .IPAM.Config 0).Gateway}}' 2> /dev/null)
+if [ -n "$control_gateway" ] && docker run --rm --network "$ctl" --entrypoint sh "$image" -c "nc -w 3 -z $control_gateway $port" > /dev/null 2>&1; then
+  report ok network_control
+else
+  report fail sysbox_network_check_inconclusive
+  finish
+fi
+
+# The isolated network: every address the VM has, the control network's bridge, an outside address and an outside name.
+targets="$control_gateway $(ip -4 -o addr show | awk '{print $4}' | cut -d/ -f1 | tr '\\n' ' ')"
+leaks=0
+for target in $targets; do
+  if docker exec "$box" sh -c "nc -w 3 -z $target $port" > /dev/null 2>&1; then leaks=$((leaks + 1)); fi
+done
+if docker exec "$box" sh -c 'nc -w 3 -z 1.1.1.1 443' > /dev/null 2>&1; then leaks=$((leaks + 1)); fi
+if docker exec "$box" sh -c 'ping -c 1 -W 3 example.com' > /dev/null 2>&1; then leaks=$((leaks + 1)); fi
+if [ "$leaks" -ne 0 ]; then
+  report fail sysbox_network_not_isolated
+else
+  report ok network_isolated
+fi
+finish
 `;
 }

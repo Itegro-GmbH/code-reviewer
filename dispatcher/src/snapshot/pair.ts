@@ -32,7 +32,8 @@ export const PAIR_META = {
  *  - the files `runner/Dockerfile` copies out of the build context (a test parses its `COPY` lines and fails when one is
  *    missing here, and when this list names something the build does not copy), and the files that decide what the
  *    build context holds (`runner/Dockerfile.dockerignore`, the Dockerfile itself);
- *  - the script the snapshot's VM runs on every start (`docker/sandbox/vm-prepare.sh`);
+ *  - the scripts the snapshot's VM runs at its start (`docker/sandbox/vm-prepare.sh` on every VM, `docker/sandbox/sysbox-prepare.sh`
+ *    on the Implementer's);
  *  - the files of the build tool that decide what is installed and checked in the snapshot (the pinned Docker
  *    versions and the default build target live in `config.ts`; a test follows the imports of `pipeline.ts`).
  */
@@ -57,6 +58,7 @@ export const IMAGE_INPUT_PATHS = [
   "runner/node-pin.json",
   "runner/pnpm-pin.json",
   "docker/sandbox/vm-prepare.sh",
+  "docker/sandbox/sysbox-prepare.sh",
   "dispatcher/src/snapshot/config.ts",
   "dispatcher/src/snapshot/pipeline.ts",
   "dispatcher/src/snapshot/probe-flags.ts",

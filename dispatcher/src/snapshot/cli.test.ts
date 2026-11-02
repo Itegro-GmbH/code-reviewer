@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { FakeSandboxService } from "../../../fakes/vercel-sandbox/service.ts";
 import {
   IMAGE_ID,
+  SYSBOX_PREPARE_TEXT,
   VM_PREPARE_TEXT,
   happyFake,
 } from "../test-support/snapshot-harness.ts";
@@ -22,6 +23,8 @@ const ARGS = [
   "ctx.tgz",
   "--vm-prepare",
   "vm-prepare.sh",
+  "--sysbox-prepare",
+  "sysbox-prepare.sh",
   "--out",
   "record.json",
 ];
@@ -47,6 +50,7 @@ function harness(
     Object.entries({
       "ctx.tgz": "tarball-bytes",
       "vm-prepare.sh": VM_PREPARE_TEXT,
+      "sysbox-prepare.sh": SYSBOX_PREPARE_TEXT,
       ...options.files,
     }),
   );
@@ -202,9 +206,50 @@ describe("the snapshot command", () => {
   });
 
   it.each([
-    [["--context", "ctx.tgz", "--vm-prepare", "vm-prepare.sh"], "--out"],
-    [["--vm-prepare", "vm-prepare.sh", "--out", "record.json"], "--context"],
-    [["--context", "ctx.tgz", "--out", "record.json"], "--vm-prepare"],
+    [
+      [
+        "--context",
+        "ctx.tgz",
+        "--vm-prepare",
+        "vm-prepare.sh",
+        "--sysbox-prepare",
+        "sysbox-prepare.sh",
+      ],
+      "--out",
+    ],
+    [
+      [
+        "--vm-prepare",
+        "vm-prepare.sh",
+        "--sysbox-prepare",
+        "sysbox-prepare.sh",
+        "--out",
+        "record.json",
+      ],
+      "--context",
+    ],
+    [
+      [
+        "--context",
+        "ctx.tgz",
+        "--sysbox-prepare",
+        "sysbox-prepare.sh",
+        "--out",
+        "record.json",
+      ],
+      "--vm-prepare",
+    ],
+    [
+      [
+        "--context",
+        "ctx.tgz",
+        "--vm-prepare",
+        "vm-prepare.sh",
+        "--out",
+        "record.json",
+      ],
+      "--sysbox-prepare",
+    ],
     [[...ARGS, "--keep", "zero"], "--keep"],
     [[...ARGS, "--keep"], "--keep"],
     [[...ARGS, "--commit", "not a sha"], "--commit"],
@@ -232,6 +277,14 @@ describe("the snapshot command", () => {
     h.files.delete("ctx.tgz");
     expect(await runCli(ARGS, h.deps)).toBe(2);
     expect(h.stderr.join("\n")).toContain("--context");
+    expect(h.fake.vms.size).toBe(0);
+  });
+
+  it("exits with 2 when the Sysbox boot script cannot be read, before it creates anything", async () => {
+    const h = harness();
+    h.files.delete("sysbox-prepare.sh");
+    expect(await runCli(ARGS, h.deps)).toBe(2);
+    expect(h.stderr.join("\n")).toContain("--sysbox-prepare");
     expect(h.fake.vms.size).toBe(0);
   });
 

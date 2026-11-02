@@ -37,6 +37,7 @@ const OPTION_NAME = /^--[a-z0-9-]{1,32}$/;
 const VALUE_OPTIONS = [
   "--context",
   "--vm-prepare",
+  "--sysbox-prepare",
   "--out",
   "--target",
   "--dockerfile",
@@ -70,6 +71,7 @@ class UsageError extends Error {
 type Parsed = {
   context: string;
   vmPrepare: string;
+  sysboxPrepare: string;
   out: string;
   commit?: string;
   overrides: Partial<PipelineConfig>;
@@ -125,6 +127,7 @@ function parse(argv: readonly string[]): Parsed {
   return {
     context: required("--context"),
     vmPrepare: required("--vm-prepare"),
+    sysboxPrepare: required("--sysbox-prepare"),
     out: required("--out"),
     ...(commit === undefined ? {} : { commit }),
     overrides,
@@ -181,6 +184,7 @@ export async function runCli(
 
   let context: Uint8Array;
   let vmPrepare: Uint8Array;
+  let sysboxPrepare: Uint8Array;
   try {
     context = deps.readFile(parsed.context);
   } catch {
@@ -191,6 +195,12 @@ export async function runCli(
     vmPrepare = deps.readFile(parsed.vmPrepare);
   } catch {
     logger.error("usage_invalid", { option: "--vm-prepare" });
+    return 2;
+  }
+  try {
+    sysboxPrepare = deps.readFile(parsed.sysboxPrepare);
+  } catch {
+    logger.error("usage_invalid", { option: "--sysbox-prepare" });
     return 2;
   }
 
@@ -204,6 +214,7 @@ export async function runCli(
         config,
         context,
         vmPrepareScript: new TextDecoder().decode(vmPrepare),
+        sysboxPrepareScript: new TextDecoder().decode(sysboxPrepare),
         commit: parsed.commit,
       },
     );
