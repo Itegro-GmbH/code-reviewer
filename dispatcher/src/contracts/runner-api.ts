@@ -219,12 +219,13 @@ export type ImplementerBranchName = string;
 export type ImplementerFileStatus =
   "added" | "modified" | "deleted" | "renamed" | "copied" | "typechange";
 /**
- * #746: the names of the environment variables the Worker container of an implementer job gets, agreed here and used by later changes (the container profile and the runner). They hold no secret. `RUNNER_IMPLEMENTER_WORK_DIR`: the directory of the work volume, always `/work`. `RUNNER_IMPLEMENTER_EGRESS_PORT`: the loopback port of the registries proxy, a decimal port number; present when the network is `registries`. `RUNNER_IMPLEMENTER_NETWORK`: one of ImplementerNetworkMode. The Dispatcher sets them, never the app and never a job; the runner trusts these and nothing a job says about its own network.
+ * #746: the names of the environment variables the Worker container of an implementer job gets, agreed here and used by later changes (the container profile and the runner). They hold no secret. `RUNNER_IMPLEMENTER_WORK_DIR`: the directory of the work volume, always `/work`. `RUNNER_IMPLEMENTER_EGRESS_PORT`: the loopback port of the registries proxy, a decimal port number; present when the network is `registries`. `RUNNER_IMPLEMENTER_NETWORK`: one of ImplementerNetworkMode. `RUNNER_IMPLEMENTER_MODEL_DOOR` (#745): `docker` when the container carries the VM's Docker socket and starts the model door, the container that holds the model key; unset, the model proxy runs in the Worker. The Dispatcher sets them, never the app and never a job; the runner trusts these and nothing a job says about its own network.
  */
 export type KnownImplementerEnvironmentName =
   | "RUNNER_IMPLEMENTER_WORK_DIR"
   | "RUNNER_IMPLEMENTER_EGRESS_PORT"
-  | "RUNNER_IMPLEMENTER_NETWORK";
+  | "RUNNER_IMPLEMENTER_NETWORK"
+  | "RUNNER_IMPLEMENTER_MODEL_DOOR";
 /**
  * #746: what the Worker of an implementer job can reach besides the model proxy and the git remote of its repository. `registries`: the package registries named by the deployment, through the loopback proxy of `RUNNER_IMPLEMENTER_EGRESS_PORT` (a default-deny proxy that allows only those hosts). `none`: nothing else.
  */

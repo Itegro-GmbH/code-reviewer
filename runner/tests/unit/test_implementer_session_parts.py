@@ -374,6 +374,9 @@ class FakeProxy:
     def __init__(self, failed: ErrorCode | None) -> None:
         self.last_upstream_error = failed
 
+    def upstream_error(self) -> ErrorCode | None:
+        return self.last_upstream_error
+
 
 def session_that_ended(ledger: BudgetLedger, failed: ErrorCode | None) -> ImplementerSession:
     """A session as far as `_stopped_by` needs it: the ledger and the proxy of its native job."""
@@ -385,8 +388,9 @@ def session_that_ended(ledger: BudgetLedger, failed: ErrorCode | None) -> Implem
         egress=EgressSettings(ImplementerNetwork.NONE, None),
         environment={},
     )
-    session._native = SimpleNamespace(  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
-        ledger=ledger, run=SimpleNamespace(proxy=FakeProxy(failed))
+    # The turn's model as `_stopped_by` reads it: the ledger and what the proxy kept of the outage.
+    session._model = SimpleNamespace(  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
+        ledger=ledger, upstream_error=FakeProxy(failed).upstream_error
     )
     return session
 

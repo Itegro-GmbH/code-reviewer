@@ -450,10 +450,16 @@ describe("the canary VM of a deployment that serves the Implementer (#765)", () 
       /--mount type=volume,source=code-reviewer-work-canary-[a-z0-9]{8},target=\/work/,
     );
     expect(args).toContain("--read-only");
+    // #745: the Implementer's probe runs with the VM's Docker socket and the model door's name, as a job does: the
+    // check of the door's Docker (`implementer_docker_unavailable`) is part of the verdict.
+    expect(valuesOf(args, "--mount")).toContain(
+      "type=bind,source=/var/run/docker.sock,target=/run/docker.sock,readonly",
+    );
     expect(valuesOf(args, "--env")).toEqual(
       expect.arrayContaining([
         "RUNNER_IMPLEMENTER_WORK_DIR=/work",
         "RUNNER_IMPLEMENTER_NETWORK=registries",
+        "RUNNER_IMPLEMENTER_MODEL_DOOR=docker",
       ]),
     );
     expect(args.at(-1)).toBe("probe");

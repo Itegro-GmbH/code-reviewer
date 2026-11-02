@@ -33,6 +33,8 @@ export const PROBE_REASONS = [
   "implementer_work_dir_missing",
   "implementer_work_dir_not_prepared",
   "implementer_work_dir_not_exec",
+  "implementer_docker_unavailable",
+  "implementer_docker_socket_open",
   // Written by the Dispatcher's canary, never by the runner (see `IMPLEMENTER_PROBE_FAILED`).
   "implementer_probe_failed",
 ] as const;

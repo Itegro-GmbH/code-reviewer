@@ -178,8 +178,10 @@ one instruction, and one turn is one `jobs` row of the kind `implementer`. It ex
   has one sentence for each in `app/src/runs/error-copy.ts`.
 - The names of the environment variables the Worker container of an implementer job gets (`KnownImplementerEnvironmentName`,
   `ImplementerNetworkMode`): `RUNNER_IMPLEMENTER_WORK_DIR` (always `/work`), `RUNNER_IMPLEMENTER_EGRESS_PORT` (the loopback port
-  of the registries proxy) and `RUNNER_IMPLEMENTER_NETWORK` (`registries` or `none`). The Dispatcher sets them; the container
-  profile that carries them is `ImplementerContainerSpec` of `worker-container.v1.json` (#760).
+  of the registries proxy), `RUNNER_IMPLEMENTER_NETWORK` (`registries` or `none`) and `RUNNER_IMPLEMENTER_MODEL_DOOR` (`docker`: the container
+  starts the model door through the VM's Docker, #745). The Dispatcher sets them; the container
+  profile that carries them is `ImplementerContainerSpec` of `worker-container.v1.json` (#760), which since #745 also carries the VM's Docker socket (`DockerSocket`)
+  and is the one spec that does.
 - Examples: `examples/implementer/RunnerJobInput.json`, `RunnerResult.json` and `SplitClaimResponse.json`.
 
 **A value of the kind never falls through to another path.** The app's claim builds the input of a turn (#753, `runner-api/README.md`,

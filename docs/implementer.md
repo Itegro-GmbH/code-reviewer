@@ -46,14 +46,17 @@ native path; the two registry providers (Anthropic, OpenRouter) are not offered.
    allowed; the cost limit is at most the operator's maximum. Then session, turn and job are written in one transaction and
    the Dispatcher is woken. The same client request id sends the same task back and writes nothing.
 2. **Claim.** The Dispatcher claims the job, creates a VM from the golden snapshot (2 vCPU, 4 GB), makes the work volume `/work`
-   in it and starts the Worker container with the Implementer's profile. The Dispatcher never sees a token or a key.
+   in it and starts the Worker container with the Implementer's profile. The Dispatcher never sees a token or a key. The Worker
+   is the **Control container** of the turn: it keeps the git token, makes the push and supervises, and the profile gives it
+   the VM's Docker socket so that it can start the model door (section "The model door").
 3. **Fetch.** The Worker asks the App for the job. Here, and only here, the App makes a git token for exactly this repository
    that holds `contents: write` and `metadata: read` and nothing else (no pull requests, no issues, no checks), and the model
    access of the chosen entry or key. The token lives with the turn and is switched off when the turn ends, however it ended.
 4. **Prepare.** The runner (root in the container) clones the base branch with depth 1 into a bare mirror that only it can
    enter. The agent gets a local clone of the mirror in `/work/repo` with no remote, no credential, the system identity and a
    new branch at the base tip. Nothing else is put into that repository: no hook, no guard, no spool.
-5. **Work.** OpenCode runs as an unprivileged user in `/work/repo` with a configuration the runner wrote. It reads, edits,
+5. **Work.** The runner starts the **model door**, a container of its own that holds the model key, and OpenCode then runs as an
+   unprivileged user in `/work/repo` with a configuration the runner wrote. It reads, edits,
    writes, searches and runs shell commands; it cannot fetch web pages, search the web, start sub-agents or ask a question.
    The task is the user message. When it ends its turn with uncommitted changes it gets one more message to commit them; what
    is still uncommitted afterwards is committed by the system ("Implementer: uncommitted changes of the turn") on the branch
@@ -178,7 +181,7 @@ every file of its repository, so root never opens it:
 | Name a branch anything git accepts | Make a name become an option, a force, a second ref or a command: a name that is not a plain branch name is dropped, the rest is used as one refspec argument |
 | Configure its repository to run programs on `git status`, `git fetch` or `git upload-pack` | Make root run them: only the engine user reads that config |
 | Fill the disk, burn CPU and run for the whole time limit | Keep working after the time limit or after the cost limit is used up |
-| Read everything it can reach in the VM | Read a credential: the git token is in the environment of one git process of the runner and in no file, argument or URL; the model key stays in the App, the agent has a loopback proxy and a job capability |
+| Read everything it can reach in the VM | Read a credential: the git token is in the environment of one git process of the runner and in no file, argument or URL; the model key is in the model door, a container the agent has no route to except its one port, and the agent has a bearer for it that is worth nothing anywhere else |
 | Reach the registries on the allowlist | Become root (no sudo), switch the rules of the network off, or reach any other host |
 
 **The risk, plainly.** With no rule about branches, the agent can move **any** branch forward, including the default branch, and
@@ -190,12 +193,92 @@ The commits that arrive carry whatever author and committer the agent chose; by 
 and "Implementer"). Who started the task is not in the commits: it is in the run (the session's `created_by`, shown on the Runs
 page).
 
+## The model door
+
+The model key, the model pin, the cost limit and the output cap are not in the Worker any more (#745, step 3 of
+`plans/implementer-sandbox.md`). They are in the **model door**, a container of its own on the VM's Docker that runs the same proxy
+the Worker used to run (the checks are the same code: the destination of the key, the cost policy, the admission of every
+request, the output cap). The Worker image is the door's image too (one image in the snapshot and one to verify), started
+with another entry point: `python -m code_reviewer_runner.implementer.door`. Reviews keep the proxy in the Worker, as before.
+
+**How Control starts it.** Over the Docker Engine API on the VM's socket (`implementer/docker_api.py`), not through a
+`docker` command: a request is a JSON document, so nothing that comes from a job, from the agent or from the repository can
+become an option of a command line, and every body is made from constants and from identifiers the daemon itself gave
+(`implementer/door_launcher.py`). It makes the **model network** (`--internal` with
+`com.docker.network.bridge.gateway_mode_ipv4=isolated`, range `10.213.77.0/29`: no exit and no route to the VM), joins it, makes
+the door's container, joins it to the model network at `10.213.77.2` and to the VM's default bridge (its only way to the
+provider), attaches to its standard streams, starts it and writes the **start document to its stdin**.
+
+**What the door is.** Non-root (the image's `runner` user), read-only root file system, every capability dropped,
+`no-new-privileges`, 256 MB without swap, 128 processes, a 16 MB `noexec` `/tmp`, no mount, no published port, IPv6 off, and
+**no environment variable of its own** (only what the image sets: `PATH` and the like, no secret). It holds the key and nothing else: no git token, no repository, no job text beyond the model access. A
+test (`runner/tests/unit/test_model_door_launcher.py`) builds the container's definition and fails when it is weakened, and
+fails when the key or the bearer is in any request to the daemon.
+
+**How the key gets there.** On the door's stdin, once. It is in no argument, no environment variable and no file of the
+container, and `docker inspect` shows none of it. The door parses it by the rules the job itself was parsed by
+(`parse_model_access`), builds the ledger and the proxy, serves them on `10.213.77.2:10180` and answers `ready`. When Control
+is gone (stdin closes) the door ends itself, and with it the key. Control drops its copy of the hand-off once the door has the
+key (the job's `model_access`, emptied together with the `llm` section of the job document it shares). It still holds the key
+in `job.llm.api_key` on purpose, to scrub it from every output of the turn, and the text the job was read from and the
+interpreter's memory are not wiped (Python cannot wipe a string). So Control is not key-free: what changed is that the agent's
+side of the VM no longer has a process that holds the key and answers for it, and nothing the agent can reach reads Control's memory.
+
+**How cost and usage reach Control.** On the door's stdout, as JSON lines (`implementer/door/protocol.py`): the ledger as the door counts
+it (tokens, cost, whether a call is open, what stopped the turn), whenever it changes, and a last one with the model calls of the trace when the door stops.
+That pipe is a channel between the Docker daemon and the process that started the door; no port and no file of it exists, so the
+agent can neither read nor forge the ledger, and **the door never calls Control**. Control keeps its own ledger for what only it sees (the
+clock of the turn and the tool calls of the agent) and reads the rest from the door (`implementer/door_ledger.py`). The cost
+limit is enforced at the door: a call that would pass it is refused there, before the provider is asked, and Control reads the
+reason (`cost_limit_reached`).
+
+**How the agent reaches it.** The agent still runs in the Worker container (it moves to a container of its own in step 4). The
+engine user's static network rules (installed once at start, `NET_ADMIN` dropped afterwards) allow it one more destination
+beside the two loopback ports: `10.213.77.2` on the proxy port, on any interface. The Worker has no port the agent can reach other than
+what it always had: nothing listens for it. In step 4 the agent container sits on the model network, which is internal and has no
+exit, and reaches the door at the same address; that is why the address is fixed and the network is the one the plan names.
+
+**Without the variable.** A container that is not given `RUNNER_IMPLEMENTER_MODEL_DOOR=docker` (an older Dispatcher, a test lane
+without Docker) runs the proxy in the Worker as before step 3. The Dispatcher sets it for every Implementer container, and the
+start-up check refuses to advertise `implementer` (`implementer_docker_unavailable`) when the variable is set and the VM's Docker does
+not answer, and (`implementer_docker_socket_open`) when the engine user, probed as that user at every start, can open the socket. Reviews are
+not touched by either: the container keeps `opencode` and the review engines, only `implementer` is left out.
+
+**Its only way out is the provider.** The door sits on the VM's default bridge, which routes to the internet and to the VM itself (its
+Docker gateway, its control port). So Control, before it tells the door anything, starts a one-shot container that shares the door's
+network namespace, holds `NET_ADMIN` (the door holds no capability) and installs an `ip` table (`EGRESS_RULES` in `door_launcher.py`):
+loopback, replies and DNS (port 53) are open, a new connection into the model network is dropped (the door answers the agent and opens none towards it, Control's address included), every private, link-local, shared and special range is dropped (the VM,
+its neighbours, other containers, the platform's services), the rest of the internet is open on port 443 only, and everything else is
+dropped. A door whose rules did not go in is taken away and the key is never written to it (`setup_failed`, free). Measured on a VM:
+from the door, port 443 of the provider answers, port 80 and the VM's services (`172.17.0.1:23456`, `169.254.0.1`) do not. Port 443
+is open to every public address because a provider behind a CDN has no stable address; the code of the door dials only the one
+destination of the entry (`HttpsUpstream`), and narrowing 443 to the provider by name is the second wall of the plan, the VM's
+network policy (step 7). Port 53 is open to every address, a channel for a compromised door only.
+
+**The Docker socket makes Control effectively root on the VM.** The Engine API can start a privileged container. That is
+accepted because the agent never reaches it: the socket is root's inside the container, the agent is another user (and from step 4
+another container), and the runner puts nothing of a job or of the agent's output into a request. A test of the container spec keeps the
+mount to exactly this socket, read-only, in this profile and no other.
+
+**When the door does not work.** A door that cannot be started (the daemon refuses a step, no `ready` in 30 seconds, the door ends first) ends
+the turn `setup_failed` with `model_door_unavailable` in the log: free, the model was never used. A door that refuses the model access of the job
+(an entry the proxy cannot serve) is `implementer_config_invalid`, free. A door that **dies during the turn** (killed, out of memory,
+the daemon gone) fails the turn with the sentence "the model door ended during the turn" and its exit code: `runner_error`, free, when no call was
+billed or open, and `agent_gave_up`, charged, when one was (the same rule the proxy in the Worker had: a turn that cost money never
+ends free). A call that was open when the door died leaves the cost **unknown** in the report (it is not made up: the usage carries no cost). What was committed is still pushed.
+
+**An oversized request body can end the turn.** The door has 256 MB and reads one request body at a time (up to 32 MiB, the
+provider's own limit); a body of very many tiny JSON blocks needs several times its size to parse, so such a body can get the door killed
+for its memory (exit code 137). Only the agent's own turn ends: the key stays in the door and the cost limit holds, so no limit on the
+size of a body is set (the owner's rule: guard money, key and exits). The outcome says so: "the container was killed for its memory (exit code 137);
+a request body too large for the door's memory ends the turn this way".
+
 ## Network in the agent phase
 
 The agent's user has no route to the internet. The firewall of the container (nftables, keyed on that user) allows two
 loopback ports only: the model proxy and, when the container's `RUNNER_IMPLEMENTER_NETWORK` is `registries`, the egress proxy.
-`none` starts no proxy and the agent has no network at all. The runner itself talks to GitHub as root, for the clone and the
-push.
+Where the model proxy is the door, the loopback port is replaced by the door's address (above). `none` starts no proxy and the
+agent has no network at all. The runner itself talks to GitHub as root, for the clone and the push.
 
 The egress proxy tunnels HTTPS `CONNECT host:443` to an **allowlist of package registries** and nothing else:
 
@@ -247,7 +330,7 @@ never beyond the time that is left of the final push | Runner, container spec |
 | Branch name | At most 200 characters, each part between slashes at most 240 bytes, git's rules, not the base branch | Form and route |
 | Base branches offered | 100 names, default first; a base beyond that can be typed | Route |
 | Result | 200 commits and 500 files (of the task's branch), 50 branches, 8,192 characters of summary, the whole report under 4 MB (Vercel cuts a body at 4.5 MB) | Contract and runner |
-| VM and container | 2 vCPU and 4 GB for the VM, 3 GB for the container without swap, 2048 processes, `/work` mounted `nosuid,nodev`, exec allowed | Dispatcher (`DISPATCHER_WORKER_CONFIG` can override the sizes) |
+| VM and container | 2 vCPU and 4 GB for the VM, 3 GB for the Worker container without swap, 2048 processes, `/work` mounted `nosuid,nodev`, exec allowed; the model door 256 MB beside it, and the Dispatcher refuses a size that leaves the VM no room for the OS, dockerd and the door | Dispatcher (`DISPATCHER_WORKER_CONFIG` can override the sizes) |
 | Parallel work | `RUNNER_DISPATCH_MAX_RUNNING` (2) for all kinds together, and one running turn per session | App and Dispatcher |
 
 **Billing.** Turns are billed at the Dynamic rate for now: the billing code treats the kind as `dynamic` (`projectKindOf`),
@@ -264,8 +347,8 @@ used):
 | `branch_exists` | **No longer produced.** Until the git model of 2026-11-02 it was raised at the first push. Now a branch that exists on GitHub with other history is a rejected branch (`non_fast_forward`) of the report and the turn ends `push_rejected`. Old runs keep the code and its class | free | Choose a new branch name and start again |
 | `base_branch_not_found` | The base branch was not on GitHub when the runner cloned | free | Check the name; it may have been deleted since the submit |
 | `clone_failed` | The repository could not be downloaded | free | Try again; look at the installation if it persists |
-| `setup_failed` | The runner could not prepare the workplace before the turn started: git missing, the mirror could not be made, a port of the slot was taken. It is the free code of a turn that never started: once the model was used, the same trouble shows as `agent_gave_up`. The Runs-page sentence says "the repository's own set-up steps", which is not what happens: no repository script is ever run | free | Look at the Worker log of the job; it is the image or the VM |
-| `agent_gave_up` | The agent ended with no new commit on any branch and nothing to commit, or its engine died after the model had been used (what it had committed is pushed when possible). The summary also says when files the agent wrote could not be kept, such as `opencode.json` | charged | Read its summary; try again with a clearer or smaller task |
+| `setup_failed` | The runner could not prepare the workplace before the turn started: git missing, the mirror could not be made, a port of the slot was taken, the model door could not be started (`model_door_unavailable` in the log). It is the free code of a turn that never started: once the model was used, the same trouble shows as `agent_gave_up`. The Runs-page sentence says "the repository's own set-up steps", which is not what happens: no repository script is ever run | free | Look at the Worker log of the job; it is the image or the VM |
+| `agent_gave_up` | The agent ended with no new commit on any branch and nothing to commit, or its engine died, or the model door went away ("the model door ended during the turn"), after the model had been used (what it had committed is pushed when possible). The summary also says when files the agent wrote could not be kept, such as `opencode.json` | charged | Read its summary; try again with a clearer or smaller task |
 | `push_rejected` | The task's branch did not arrive (the branch exists with other history, a rule, a permission, a change of `.github/workflows/` which is never allowed, or GitHub could not be reached), no branch arrived although some had commits, or the agent's repository could not be read at the end. The Runs page lists every branch with its reason; branches that were pushed stay on GitHub | charged | Read the reasons, check the branches, then start again |
 | `branch_violation` | **No longer produced** (there are no rules inside the workspace to violate). Old runs keep the code and its class | charged | Look at the branch |
 | `cost_limit_reached` | The calls so far cost the limit, so the next call was refused. What was committed is pushed when possible: check the branch | charged | Raise the limit within the maximum, or make the task smaller |
@@ -279,7 +362,7 @@ used):
 | `timeout` | The turn was still running 70 minutes after it started, so the app failed it. The Worker normally ends it before at its 3600 seconds | free | Check the branch for what was pushed |
 | `lease_lost`, `lease_expired` | The Worker no longer held the turn when it was ready, or stopped reporting, or the lease could not be confirmed before the final push; the result was not saved and nothing is pushed after the loss. Nothing is pushed during the turn, so a lost lease means no work reached GitHub | free | Start again |
 | `runner_shutdown` | The Worker was told to stop (SIGTERM) while it worked: the engine was ended, all committed branches were pushed if the lease was still held. A turn of the Implementer is never run twice, so the app gives it back and it ends here, as its last attempt. The usage of a stopped turn is not recorded yet (#799) | free | Check the branch for what was pushed; start again with a new branch name |
-| `runner_error` | The runner failed unexpectedly before any model call | free | Read the Worker log; start again |
+| `runner_error` | The runner failed unexpectedly before any model call, or the model door went away during the turn before any call was billed or open ("the model door ended during the turn" with its exit code, and "killed for its memory" when the kernel did it) | free | Read the Worker log; start again |
 | `dynamic_accounting_failed` | The model usage could not be accounted for, so the turn ended and its cost is not known. The work may be done: check the branch | free | Check the branch |
 | `llm_auth`, `llm_quota`, `llm_rate_limit`, `llm_timeout`, `llm_unavailable` | The model provider refused the key, has no credit, limits requests, is slow or is down. On the operator's key these are the operator's to fix and are not billed to the workspace; on the workspace's own key they are the workspace's | free on the operator's key, charged on the workspace's own | The key or the provider, then start again |
 
@@ -308,6 +391,10 @@ that were pushed first. A Worker that is stopped while it works (`runner_shutdow
 ## What is accepted, and until when
 
 These are decisions of the owner, not oversights.
+
+- **The Control container is effectively root on the VM** (#745, step 3). It has the VM's Docker socket so that it can start the
+  model door. The agent never reaches it; the runner puts nothing of a job or of the agent's output into a request to the socket.
+  In this step the agent still runs in that container, as another user, behind the socket's permissions; step 4 moves it away.
 
 - **Git is free, and every local branch is pushed.** No rule inside the workspace, none at the push: the agent can move any
   branch forward, including the default branch, and may push new branches (see "The risk, plainly"). Protect the default

@@ -9,6 +9,9 @@ slot ports, network rules, pinned OpenCode and `rg`, the probe as the engine use
 * git is installed and `setpriv` is (the final push reads the agent's repository through
   `setpriv ... git upload-pack`);
 * a container whose network is `registries` has the egress port in its rules;
+* a container that starts the model door (`RUNNER_IMPLEMENTER_MODEL_DOOR`, #745) reaches the VM's
+  Docker: its socket answers a ping, and the engine user, probed as that user, cannot open it (the
+  socket is root on the VM; a probe that cannot run counts as "can open");
 * the work directory is the volume of the container profile: present, prepared for the engine user
   (its home and its temporary directory in it, the CHOWN the profile expects of the Worker) and
   exec-capable (the agent runs the repository's own scripts there, and a `noexec` mount would fail
@@ -30,6 +33,7 @@ from typing import Any, cast
 from code_reviewer_runner.dynamic_review.self_check import SelfCheckFailed, SelfCheckReason
 from code_reviewer_runner.dynamic_review.static_isolation import ImplementerNetwork, SlotPorts
 
+from .docker_api import DOCKER_SOCKET, DockerApi
 from .git_process import TRUSTED_PATH
 
 # The engine user's home and temporary directory live in the work volume: the agent installs a
@@ -95,6 +99,49 @@ def runs_scripts_as(work_dir: Path, uid: int, gid: int) -> bool:
     return done.returncode == 0
 
 
+# Runs as the engine user: one `connect()` to the Docker socket. Fixed text, no input but the path.
+_DOCKER_PROBE = r"""
+import socket, sys
+try:
+    with socket.socket(socket.AF_UNIX) as probe:
+        probe.settimeout(5)
+        probe.connect(sys.argv[1])
+    print("connected")
+except OSError as error:
+    print("refused:" + type(error).__name__)
+"""
+_DOCKER_PROBE_SECONDS = 20.0
+
+
+def engine_user_can_open(uid: int, gid: int, socket_path: Path = Path(DOCKER_SOCKET)) -> bool:
+    """Whether the engine user can `connect()` to the Docker socket. Asked by running a probe as
+    that user, as root can open anything and would say nothing. Only a probe that ran and was
+    refused says no: one that could not run (no interpreter, the user cannot be switched to) says
+    yes."""
+    python = shutil.which("python3", path=TRUSTED_PATH)
+    if python is None:
+        return True
+    # The runner is root and becomes the engine user; a process that already is that user
+    # (a test) changes nothing.
+    switch: dict[str, Any] = (
+        {"user": uid, "group": gid, "extra_groups": ()} if uid != os.geteuid() else {}
+    )
+    try:
+        done: subprocess.CompletedProcess[str] = subprocess.run(
+            [python, "-I", "-c", _DOCKER_PROBE, str(socket_path)],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=_DOCKER_PROBE_SECONDS,
+            check=False,
+            env={"PATH": TRUSTED_PATH},
+            **switch,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return done.returncode != 0 or not done.stdout.startswith("refused:")
+
+
 @dataclass(frozen=True)
 class ImplementerSeams:
     """What the tests of the check replace; production leaves the defaults."""
@@ -103,6 +150,8 @@ class ImplementerSeams:
     prepare_work_dir: Callable[[Path, int, int], None] = prepare_work_dir
     runs_scripts_as: Callable[[Path, int, int], bool] = runs_scripts_as
     is_directory: Callable[[Path], bool] = lambda path: path.is_dir() and not path.is_symlink()
+    docker_answers: Callable[[], bool] = lambda: DockerApi().ping()
+    engine_reaches_docker: Callable[[int, int], bool] = engine_user_can_open
 
 
 def check_implementer_runner(
@@ -125,6 +174,11 @@ def check_implementer_runner(
             SelfCheckReason.IMPLEMENTER_EGRESS_RULES_MISSING,
             "the egress proxy port is not in the network rules",
         )
+    if ports is not None and ports.door is not None and not seams.docker_answers():
+        raise _failed(
+            SelfCheckReason.IMPLEMENTER_DOCKER_UNAVAILABLE,
+            "the container may start the model door and the VM's Docker does not answer",
+        )
     if user is None:
         raise _failed(SelfCheckReason.NOT_A_DYNAMIC_RUNNER, "no engine user is configured")
     if not seams.is_directory(work_dir):
@@ -132,6 +186,11 @@ def check_implementer_runner(
             SelfCheckReason.IMPLEMENTER_WORK_DIR_MISSING, "the work directory is not there"
         )
     uid, gid = user
+    if ports is not None and ports.door is not None and seams.engine_reaches_docker(uid, gid):
+        raise _failed(
+            SelfCheckReason.IMPLEMENTER_DOCKER_SOCKET_OPEN,
+            "the engine user can open the VM's Docker socket",
+        )
     try:
         seams.prepare_work_dir(work_dir, uid, gid)
     except OSError:

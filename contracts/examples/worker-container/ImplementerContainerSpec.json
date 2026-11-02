@@ -65,6 +65,10 @@
     "options": ["rw", "nosuid", "nodev"],
     "source": "named-volume"
   },
+  "dockerSocket": {
+    "source": "/var/run/docker.sock",
+    "target": "/run/docker.sock"
+  },
   "memory": {
     "limit": "3g",
     "reservation": "2560m",
@@ -85,7 +89,8 @@
     "RUNNER_DYNAMIC_MAX_COST_USD",
     "RUNNER_IMPLEMENTER_WORK_DIR",
     "RUNNER_IMPLEMENTER_EGRESS_PORT",
-    "RUNNER_IMPLEMENTER_NETWORK"
+    "RUNNER_IMPLEMENTER_NETWORK",
+    "RUNNER_IMPLEMENTER_MODEL_DOOR"
   ],
   "forbiddenKeys": [
     "privileged",
@@ -97,8 +102,7 @@
     "ipc",
     "uts",
     "userns",
-    "cgroupns",
-    "dockerSocket"
+    "cgroupns"
   ],
   "overridable": ["memory.limit", "memory.reservation", "memory.swap"]
 }

@@ -293,7 +293,8 @@ jobs:
   # target on the runner's Docker daemon and runs the Launcher's local mode against it and the fake App, so
   # `docker run <image id>` with the full rendered flag set (IPv6 sysctls, memory and swap, capabilities, tmpfs) is
   # proven on a real daemon, and nothing of one job is left for the next. The container reaches the fake App on the
-  # docker0 gateway. No login, no push, the read-only token.
+  # docker0 gateway. It also starts the model door of the Implementer from the real image with the real flags and
+  # runs the offline VM check against it (model-door.privileged.test.ts, #745). No login, no push, the read-only token.
   sandbox-local:
     name: "Dispatcher: Sandbox-Launcher with a real Docker daemon"
     needs: changes

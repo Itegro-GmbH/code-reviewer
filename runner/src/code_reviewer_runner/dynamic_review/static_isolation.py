@@ -41,6 +41,7 @@ from code_reviewer_runner.result import ErrorCode
 
 from .ipv6_off import disable_ipv6 as switch_ipv6_off
 from .ipv6_off import ipv6_problem as find_ipv6_problem
+from .model_door_route import MODEL_DOOR_ADDRESS, MODEL_DOOR_MODE, MODEL_DOOR_VARIABLE
 from .netguard import EgressMode, IsolationError, NetworkConfinement, select_egress_mode
 
 PROXY_PORT_VARIABLE = "RUNNER_DYNAMIC_PROXY_PORT"
@@ -81,6 +82,10 @@ class SlotPorts:
     proxy: int
     engine: int
     egress: int | None = None
+    # Where the model proxy is when it is a container of its own (#745, step 3): the engine user is
+    # allowed to reach that address on the `proxy` port. None: the proxy is in the Worker, on
+    # loopback.
+    door: tuple[str, int] | None = None
 
     @property
     def extra(self) -> tuple[int, ...]:
@@ -133,12 +138,26 @@ def egress_port(environment: Mapping[str, str]) -> int | None:
     return _port(environment, EGRESS_PORT_VARIABLE, DEFAULT_EGRESS_PORT)
 
 
+def model_door(environment: Mapping[str, str], port: int) -> tuple[str, int] | None:
+    """The model door's address and port when the container may start one
+    (`RUNNER_IMPLEMENTER_MODEL_DOOR=docker`, set by the Dispatcher for the Implementer's profile),
+    else None. The door listens on the slot's proxy port, at a fixed address."""
+    raw = environment.get(MODEL_DOOR_VARIABLE, "").strip()
+    if not raw:
+        return None
+    if raw != MODEL_DOOR_MODE:
+        raise IsolationError(f"{MODEL_DOOR_VARIABLE} must be {MODEL_DOOR_MODE}")
+    return MODEL_DOOR_ADDRESS, port
+
+
 def slot_ports(environment: Mapping[str, str]) -> SlotPorts:
     """The ports of the slot from trusted runner configuration. Raises `IsolationError`."""
+    proxy = _port(environment, PROXY_PORT_VARIABLE, DEFAULT_PROXY_PORT)
     ports = SlotPorts(
-        _port(environment, PROXY_PORT_VARIABLE, DEFAULT_PROXY_PORT),
+        proxy,
         _port(environment, ENGINE_PORT_VARIABLE, DEFAULT_ENGINE_PORT),
         egress_port(environment),
+        model_door(environment, proxy),
     )
     if ports.proxy == ports.engine:
         raise IsolationError(f"{PROXY_PORT_VARIABLE} and {ENGINE_PORT_VARIABLE} must differ")
@@ -308,8 +327,11 @@ def secure_startup(
     try:
         require_ports_outside_ephemeral_range(ports, ephemeral_range)
         mode = (detect or select_egress_mode)()
+        # `door` is passed only where there is one: an installer of a test that does not know
+        # the keyword keeps working, and a Dynamic container's call is what it always was.
+        door = {} if ports.door is None else {"door": ports.door}
         (install or NetworkConfinement(uid, mode=mode).apply)(
-            ports.proxy, ports.engine, *ports.extra
+            ports.proxy, ports.engine, *ports.extra, **door
         )
         # After the rules, not before: no engine runs at startup, and rules that could not be
         # installed must not leave the container, Diff jobs included, without IPv6 (review of #347).

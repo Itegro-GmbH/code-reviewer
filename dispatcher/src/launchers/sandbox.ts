@@ -98,6 +98,11 @@ export const SANDBOX_VCPUS = [1, 2, 4, 6, 8] as const;
 export const SANDBOX_MEMORY_PER_VCPU_MB = 2048;
 /** What the OS, dockerd and containerd need besides the container (the spike measured about 140 MB). */
 const VM_HEADROOM_MB = 256;
+/**
+ * The memory limit of the model door, the second container of an implementer turn (#745, step 3;
+ * `DOOR_MEMORY_BYTES` of runner/src/code_reviewer_runner/implementer/door_launcher.py). The VM holds it beside the Worker.
+ */
+export const MODEL_DOOR_MEMORY_MB = 256;
 
 /**
  * The size of the VM and the memory of the container per Worker kind when the operator configures nothing: the smallest
@@ -122,13 +127,16 @@ export const WORK_VOLUME_ROOT = "/var/lib/code-reviewer-work";
 /**
  * What the Worker of an implementer job is told besides the names of every container (`ImplementerEnvironmentName` of
  * runner-api.v1.json). The Dispatcher sets them, never the app and never a job: the work directory is the volume's, the
- * network is the registries proxy, and the port is the runner's own default (`DEFAULT_EGRESS_PORT` of the Dynamic
- * isolation), written down here so that the container does not depend on a default that could move.
+ * network is the registries proxy, the port is the runner's own default (`DEFAULT_EGRESS_PORT` of the Dynamic
+ * isolation), written down here so that the container does not depend on a default that could move, and the model door
+ * is the container that holds the key (the VM's Docker socket is in the profile).
  */
 export const IMPLEMENTER_ENVIRONMENT = {
   RUNNER_IMPLEMENTER_WORK_DIR: WORK_VOLUME_PATH,
   RUNNER_IMPLEMENTER_EGRESS_PORT: "10182",
   RUNNER_IMPLEMENTER_NETWORK: "registries",
+  // The container carries the VM's Docker socket and starts the model door with it (#745, step 3).
+  RUNNER_IMPLEMENTER_MODEL_DOOR: "docker",
 } as const;
 
 /** The container spec of a kind: the Implementer has its own profile, Diff and Dynamic the default one. */
@@ -216,10 +224,12 @@ function planOf(spec: LaunchSpec): Plan {
   };
   try {
     const rendered = applyOverrides(profileOf(spec.kind), overrides);
-    // A container that cannot fit in the VM beside the OS would be killed by the VM's own memory limit.
+    // A container that cannot fit in the VM beside the OS would be killed by the VM's own memory limit; an implementer
+    // turn also holds the model door beside its Worker.
+    const doorMb = spec.kind === "implementer" ? MODEL_DOOR_MEMORY_MB : 0;
     if (
       megabytes(rendered.memory.limit) >
-      vcpus * SANDBOX_MEMORY_PER_VCPU_MB - VM_HEADROOM_MB
+      vcpus * SANDBOX_MEMORY_PER_VCPU_MB - VM_HEADROOM_MB - doorMb
     )
       throw configInvalid();
   } catch (error) {
