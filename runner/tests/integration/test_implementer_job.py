@@ -41,14 +41,14 @@ from code_reviewer_runner.implementer import session as session_module
 from code_reviewer_runner.implementer.agent import AgentTurn
 from code_reviewer_runner.implementer.egress_config import EgressSettings
 from code_reviewer_runner.implementer.git_workspace import (
-    _Progress,  # pyright: ignore[reportPrivateUsage]
     AgentUser,
-    GitIdentity,
     BranchPush,
+    GitIdentity,
     GitWorkspace,
     PushReport,
     WorkspaceLayout,
     WorkspaceSpec,
+    _Progress,  # pyright: ignore[reportPrivateUsage]
 )
 from code_reviewer_runner.implementer.history import ChangeKind, CommitInfo, FileChange
 from code_reviewer_runner.implementer.job_run import (
@@ -777,7 +777,7 @@ def test_the_lease_is_asked_before_the_listing_and_before_every_push_not_once(pl
     )  # the listing, the form's push, one more
 
 
-# -- the report names every branch ------------------------------------------------------------------
+# -- the report names every branch --------------------------------------------------------------
 
 
 # #git-free
@@ -838,7 +838,7 @@ def test_a_form_branch_that_is_rejected_ends_the_turn_push_rejected_and_keeps_th
     def push_all(self: FakeGit, **options: Any) -> Any:
         report = original(self, **options)
         rejected = BranchPush(self.spec.branch, TIP, False, "non_fast_forward")
-        self._progress.branches[:] = [
+        self._progress.branches[:] = [  # pyright: ignore[reportPrivateUsage]
             rejected if entry.name == self.spec.branch else entry for entry in report.branches
         ]
         return self.push_report()

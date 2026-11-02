@@ -94,8 +94,8 @@ What happens to a block that is accepted:
   that succeeds with an unknown cost, or with no usage at all, is stored as `dynamic_accounting_failed` (`managed-cost-guard.ts`; a
   Dynamic result without usage keeps its old treatment). The members never read the
   cost of a run on the operator's key: the Runs views take it out (`run-view.ts`), the stored usage keeps it for the settlement.
-- Billing classes of the Implementer's codes are in `billing/outcome.ts`: `agent_gave_up`, `push_rejected`, `branch_violation` and
-  `time_limit_reached` are charged (the agent ran), the codes that end a turn before it are free.
+- Billing classes of the Implementer's codes are in `billing/outcome.ts`: `agent_gave_up`, `push_rejected`, `branch_violation` (no
+  longer produced) and `time_limit_reached` are charged (the agent ran), the codes that end a turn before it are free.
 
 ## Authentication
 

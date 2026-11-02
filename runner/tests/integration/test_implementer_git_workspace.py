@@ -13,7 +13,6 @@ tests/privileged/test_implementer_git_users.py.
 
 import os
 import stat
-import subprocess
 import threading
 from pathlib import Path
 

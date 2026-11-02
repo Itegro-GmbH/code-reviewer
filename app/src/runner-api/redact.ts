@@ -69,7 +69,7 @@ function redactBlockText(text: string, secrets: readonly string[]): string {
 
 /**
  * The text of an implementer block that a person or an agent wrote: the summary, the subjects of the commits and the paths of the
- * files (#754). The shas, the statuses, the flag and the saved agent session are not text of that kind and stay as they are.
+ * files (#754). The shas, the statuses, the flag and the saved agent session are not text of that kind and stay as they are. The names of the branches are the agent's text too.
  */
 function redactImplementer(
   block: ImplementerResult,
@@ -78,6 +78,14 @@ function redactImplementer(
   return {
     ...block,
     summary: redactBlockText(block.summary, secrets),
+    ...(block.branches === undefined
+      ? {}
+      : {
+          branches: block.branches.map((branch) => ({
+            ...branch,
+            name: redactBlockText(branch.name, secrets),
+          })),
+        }),
     commits: block.commits.map((commit) => ({
       ...commit,
       subject: redactBlockText(commit.subject, secrets),

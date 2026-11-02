@@ -384,8 +384,8 @@ def test_the_runner_never_executes_the_config_hooks_or_filters_of_the_agent_repo
         + f'[filter "trap"]\n\tclean = {script}\n\tsmudge = {script}\n'
         + f"[diff]\n\texternal = {script}\n"
         + f"[credential]\n\thelper = {script}\n"
-        + f"[gc]\n\tauto = 1\n[receive]\n\tfsckObjects = true\n"
-        + f"[safe]\n\tdirectory = *\n"
+        + "[gc]\n\tauto = 1\n[receive]\n\tfsckObjects = true\n"
+        + "[safe]\n\tdirectory = *\n"
     )
     hooks = workspace.repo / ".git" / "hooks"
     hooks.mkdir(exist_ok=True)
@@ -455,7 +455,7 @@ def test_root_never_gets_the_agents_repository_as_its_directory_or_git_dir(
         assert "--git-dir" not in args or args[args.index("--git-dir") + 1] == str(workspace.mirror)
         assert "-C" not in args
         if repo in args:
-            # The repository is only ever a remote, read by an upload-pack named on the command line.
+            # The repository is only a remote, read by an upload-pack named on the command line.
             assert args[0] in ("ls-remote", "-c", "--git-dir")
             assert any(word.startswith("--upload-pack=") for word in args)
             assert not any(word.startswith("safe.directory") for word in args)
@@ -515,7 +515,7 @@ def test_a_branch_that_points_at_a_tree_or_an_annotated_tag_is_not_pushed(rig: R
     assert rig.origin.tip(BRANCH) == good
 
 
-# -- the provider, the token and the clock ----------------------------------------------------------
+# -- the provider, the token and the clock ------------------------------------------------------
 
 
 def test_a_failed_push_never_names_the_token(rig: Rig) -> None:
@@ -812,7 +812,7 @@ def test_a_lost_lease_pushes_nothing_and_reads_nothing(rig: Rig) -> None:
 def test_a_lease_lost_between_two_branches_keeps_the_first_and_stops_before_the_second(
     rig: Rig,
 ) -> None:
-    workspace, asked = with_gate(rig, ["held", "held", "lost"])
+    workspace, _ = with_gate(rig, ["held", "held", "lost"])
     form = commit(workspace, "a.txt")
     make_branch(workspace, "two", "b.txt", start=workspace.start_commit)
 

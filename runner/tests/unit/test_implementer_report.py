@@ -271,7 +271,7 @@ def test_a_report_on_a_job_that_is_not_an_implementer_turn_is_never_passed_on() 
         {**block(), "branches": [rejected_branch(reason=None)]},
         {**block(), "branches": [rejected_branch(reason="Not Fast Forward")]},
         {**block(), "branches": [rejected_branch(reason="x" * 41)]},
-        {**block(), "branches": [pushed_branch(name="b%d" % n) for n in range(MAX_BRANCHES + 1)]},
+        {**block(), "branches": [pushed_branch(name=f"b{n}") for n in range(MAX_BRANCHES + 1)]},
         {**block(), "commits": [commit(n) for n in range(MAX_COMMITS + 1)]},
         {**block(), "filesChanged": [{"path": "a", "status": "added"}] * (MAX_FILES + 1)},
         "not a block",

@@ -171,7 +171,7 @@ class EngineTraces:
 
     def scan(self, secrets: dict[str, str], report_path: str) -> None:
         """Counts, per place and per secret, the files that hold it: the engine's home and temporary
-        directory, the agent's repository, the root's mirror, and `/run` (the guard's files, the
+        directory, the agent's repository, the root's mirror, and `/run` (the runner's own files, the
         engine's configuration, the Worker's files) without the lane's records. The capability is
         the engine's credential for the proxy of this job: it is in the engine's configuration
         under `/run` by design, so there it is left out."""

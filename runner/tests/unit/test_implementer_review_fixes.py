@@ -4,8 +4,6 @@
 the deadline of the turn and the scrub of the line. Each test fails without its fix."""
 
 import json
-import os
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -20,10 +18,10 @@ from code_reviewer_runner.implementer.report import (
     valid_block,
 )
 from code_reviewer_runner.implementer.session import ImplementerSession, SessionSeams
-from code_reviewer_runner.job import JobError, parse_implementer_input
+from code_reviewer_runner.job import parse_implementer_input
 from code_reviewer_runner.job_loop.reporting import fit_request, result_from_outcome
 from code_reviewer_runner.redaction import REDACTED, Redactor
-from code_reviewer_runner.result import ErrorCode, JobResult
+from code_reviewer_runner.result import JobResult
 
 EXAMPLE = (
     Path(__file__).resolve().parents[3]

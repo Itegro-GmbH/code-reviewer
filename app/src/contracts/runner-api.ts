@@ -96,7 +96,7 @@ export type KnownCheckoutReason =
   | "isolation"
   | "context";
 /**
- * The error codes the runner reports in a result (ErrorCode in the runner, plus runner_shutdown from the job loop). #746 adds the codes of the Implementer: `branch_exists` (the branch to create is already on the remote), `base_branch_not_found`, `clone_failed`, `setup_failed` (the repository's own set-up did not run), `agent_gave_up` (the agent ended without a result it stands behind), `push_rejected` (the remote refused the push), `branch_violation` (the work left the branch it was given), `time_limit_reached` and the existing `cost_limit_reached` (the two limits of the turn), `git_write_not_granted` (the token cannot write contents of the repository), `implementer_engine_unavailable` (no engine of the runner runs the kind) and `implementer_config_invalid` (the turn's options cannot be used). A caller branches on the code, never on a message. The app accepts any code of the form below and stores an unknown one as 'unknown' (the original stays in the stored result), so a newer runner never loses a result.
+ * The error codes the runner reports in a result (ErrorCode in the runner, plus runner_shutdown from the job loop). #746 adds the codes of the Implementer: `branch_exists` (no longer produced: a branch the remote refuses is a rejected entry of `branches` and the turn ends `push_rejected`; the word stays for runs that carry it), `base_branch_not_found`, `clone_failed`, `setup_failed` (the repository's own set-up did not run), `agent_gave_up` (the agent ended without a result it stands behind), `push_rejected` (the remote refused the push), `branch_violation` (no longer produced: git is free in the workspace; the word stays for runs that carry it), `time_limit_reached` and the existing `cost_limit_reached` (the two limits of the turn), `git_write_not_granted` (the token cannot write contents of the repository), `implementer_engine_unavailable` (no engine of the runner runs the kind) and `implementer_config_invalid` (the turn's options cannot be used). A caller branches on the code, never on a message. The app accepts any code of the form below and stores an unknown one as 'unknown' (the original stays in the stored result), so a newer runner never loses a result.
  */
 export type KnownRunnerErrorCode =
   | "invalid_job"
@@ -909,12 +909,21 @@ export interface ImplementerRepo {
   cloneUrl: string;
 }
 /**
- * #746: what a turn of the Implementer did, in `RunnerResult.implementer`. A closed object; later fields (checks, open questions, an export of the work) are additive in a later change. It is facts the runner measured in the repository, never text from the agent except `summary`, which is shown as plain text. `baseCommit` is the head of the base branch the work started from. `headCommit` is the last commit of the branch, or null when the turn made none. `pushed` says that the branch with `headCommit` is on the remote, and is never true without a `headCommit`. `commits` are the commits of the branch after the base commit, oldest first, at most 200 (more are cut off, the head commit is always the last); `filesChanged` are the files that differ between the base commit and the head commit, at most 500. `opencode` names the saved agent session a later turn continues, null when none was saved. A failed turn carries the block too, whenever the runner got as far as the repository.
+ * #746: what a turn of the Implementer did, in `RunnerResult.implementer`. A closed object; later fields (checks, open questions, an export of the work) are additive in a later change. It is facts the runner measured in the repository, never text from the agent except `summary`, which is shown as plain text. `baseCommit` is the head of the base branch the work started from. `headCommit` is the last commit of the branch, or null when the turn made none. `pushed` says that the branch with `headCommit` is on the remote, and is never true without a `headCommit`. The branch is the one the form named. The agent may create other branches, and the runner pushes all local branches of the agent's repository when the turn ends, each without force: `branches` has one entry for every branch the runner dealt with (at most 50), `pushed` or `rejected` with a reason word of the runner (`non_fast_forward`, `remote_rejected`, `workflows_not_allowed`, `provider_refused`, `provider_unavailable`, `unreadable`, `not_a_commit`, `out_of_time`, `excluded`; a caller treats an unknown word as a rejection without a reason). A branch with nothing new on the base commit is not listed. A result without `branches` comes from an older runner and means none. `commits` are the commits of the form's branch after the base commit, oldest first, at most 200 (more are cut off, the head commit is always the last); `filesChanged` are the files that differ between the base commit and the head commit, at most 500. `opencode` names the saved agent session a later turn continues, null when none was saved. A failed turn carries the block too, whenever the runner got as far as the repository.
  */
 export interface ImplementerResult {
   baseCommit: string;
   headCommit: string | null;
   pushed: boolean;
+  /**
+   * @maxItems 50
+   */
+  branches?: {
+    name: string;
+    head: string | null;
+    result: "pushed" | "rejected";
+    reason: string | null;
+  }[];
   /**
    * @maxItems 200
    */
@@ -1171,6 +1180,15 @@ export interface ImplementerResult1 {
   baseCommit: string;
   headCommit: string | null;
   pushed: boolean;
+  /**
+   * @maxItems 50
+   */
+  branches?: {
+    name: string;
+    head: string | null;
+    result: "pushed" | "rejected";
+    reason: string | null;
+  }[];
   /**
    * @maxItems 200
    */

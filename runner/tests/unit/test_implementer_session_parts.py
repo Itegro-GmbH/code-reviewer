@@ -22,6 +22,8 @@ from code_reviewer_runner.dynamic_review.netguard import IsolationError
 from code_reviewer_runner.dynamic_review.static_isolation import ImplementerNetwork
 from code_reviewer_runner.dynamic_review.tool_part_audit import ToolPartAudit
 from code_reviewer_runner.implementer.egress_config import EgressSettings
+from code_reviewer_runner.implementer.git_workspace import DIRTY_TIMEOUT, REPORT_READ_TIMEOUT
+from code_reviewer_runner.implementer.job_run import SIGTERM_BACKSTOP_SECONDS
 from code_reviewer_runner.implementer.session import (
     COST_LIMIT_DETAIL,
     DEADLINE_DETAIL,
@@ -29,16 +31,14 @@ from code_reviewer_runner.implementer.session import (
     FINAL_PUSH_SECONDS,
     GRACE_SECONDS,
     LEFTOVER_SECONDS,
-    STOP_PUSH_SECONDS,
     MAX_RETURNED_BYTES,
+    STOP_PUSH_SECONDS,
     TOKEN_CAP_DETAIL,
     ImplementerSession,
     agent_limits,
     classify,
     deadline_seconds,
 )
-from code_reviewer_runner.implementer.git_workspace import DIRTY_TIMEOUT, REPORT_READ_TIMEOUT
-from code_reviewer_runner.implementer.job_run import SIGTERM_BACKSTOP_SECONDS
 from code_reviewer_runner.implementer.turn_result import MAX_SUMMARY_CHARS, clip_summary
 from code_reviewer_runner.job import JobError, parse_implementer_input
 from code_reviewer_runner.redaction import REDACTED

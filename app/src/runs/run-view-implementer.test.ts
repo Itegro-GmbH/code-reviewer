@@ -243,6 +243,111 @@ describe("the detail of an implementer run", () => {
     ]);
   });
 
+  // The git model: every branch of the turn is shown, the task's own first.
+  it("lists every branch the turn pushed or tried to push, the task's own first, with links for the pushed ones and sentences for the others", () => {
+    const run = view(
+      turn({
+        result: resultWith({
+          branches: [
+            {
+              name: "experiment/two",
+              head: SHA_C,
+              result: "pushed",
+              reason: null,
+            },
+            {
+              name: "main",
+              head: SHA_A,
+              result: "rejected",
+              reason: "non_fast_forward",
+            },
+            {
+              name: "implementer/abc123",
+              head: SHA_B,
+              result: "pushed",
+              reason: null,
+            },
+            {
+              name: "wf",
+              head: null,
+              result: "rejected",
+              reason: "workflows_not_allowed",
+            },
+            {
+              name: "odd",
+              head: SHA_C,
+              result: "rejected",
+              reason: "a_word_from_the_future",
+            },
+            {
+              name: "proto",
+              head: SHA_C,
+              result: "rejected",
+              reason: "__proto__",
+            },
+          ],
+        }),
+      }),
+      source(),
+    ).implementer;
+
+    expect(run?.branches.more).toBe(0);
+    expect(run?.branches.shown.map((branch) => branch.name)).toEqual([
+      "implementer/abc123",
+      "experiment/two",
+      "main",
+      "wf",
+      "odd",
+      "proto",
+    ]);
+    const byName = Object.fromEntries(
+      (run?.branches.shown ?? []).map((branch) => [branch.name, branch]),
+    );
+    expect(byName["implementer/abc123"]).toMatchObject({
+      url: "https://github.com/acme/widgets/tree/implementer/abc123",
+      shortSha: SHA_B.slice(0, 7),
+      pushed: true,
+      reason: null,
+      isTaskBranch: true,
+    });
+    expect(byName["experiment/two"]).toMatchObject({
+      url: "https://github.com/acme/widgets/tree/experiment/two",
+      pushed: true,
+      isTaskBranch: false,
+    });
+    expect(byName.main).toMatchObject({ url: null, pushed: false });
+    expect(byName.main?.reason).toContain("never overwrites a branch");
+    expect(byName.wf?.reason).toContain(".github/workflows");
+    expect(byName.wf?.shortSha).toBeNull();
+    expect(byName.odd?.reason).toBe("The branch was not pushed.");
+    expect(byName.proto?.reason).toBe("The branch was not pushed.");
+  });
+
+  it("has no branches for a result of an older runner, and cleans the name of a branch like any text of the agent", () => {
+    const old = view(turn({ result: resultWith({}) }), source()).implementer;
+    const hostile = view(
+      turn({
+        result: resultWith({
+          branches: [
+            {
+              name: `x\u202ey${GIT_TOKEN}`,
+              head: SHA_B,
+              result: "pushed",
+              reason: null,
+            },
+          ],
+        }),
+      }),
+      source(),
+    ).implementer;
+
+    expect(old?.branches).toEqual({ shown: [], more: 0 });
+    const name = hostile?.branches.shown[0]?.name ?? "";
+    expect(name).not.toContain("\u202e");
+    expect(name).not.toContain(GIT_TOKEN);
+    expect(hostile?.branches.shown[0]?.url).toBeNull();
+  });
+
   // #758-T02
   it("shows the first 20 commits and says how many more there are", () => {
     const commits = Array.from({ length: 27 }, (_, index) => ({

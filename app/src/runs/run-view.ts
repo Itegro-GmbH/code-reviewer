@@ -92,6 +92,24 @@ export type ImplementerFileView = {
   status: ImplementerFileStatus;
 };
 
+/**
+ * One branch of the agent's repository at the end of a turn: the runner pushes all local branches, so there can be more than the
+ * one the form named. A pushed branch has a link; a rejected one has the sentence for its reason.
+ */
+export type ImplementerBranchView = {
+  /** Cleaned and cut. Untrusted text. */
+  name: string;
+  /** `<repository url>/tree/<branch>` for a pushed branch on a github.com repository, otherwise null. */
+  url: string | null;
+  /** The tip the runner took over, shortened; null when it could not be read. */
+  shortSha: string | null;
+  pushed: boolean;
+  /** Why a branch was not pushed, in a sentence; null for a pushed branch. */
+  reason: string | null;
+  /** The branch the form named. */
+  isTaskBranch: boolean;
+};
+
 /** What the detail page shows of a task besides the facts every run has. Built only from the fields listed here. */
 export type ImplementerDetailView = ImplementerRowView & {
   /** The branch the new one started from; null when the turn of the job cannot be read. Untrusted text. */
@@ -102,6 +120,8 @@ export type ImplementerDetailView = ImplementerRowView & {
   summary: string | null;
   commits: { shown: ImplementerCommitView[]; more: number };
   files: { count: number; shown: ImplementerFileView[]; more: number };
+  /** Every branch the runner pushed or tried to push when the turn ended, the task's branch first. Empty when none. */
+  branches: { shown: ImplementerBranchView[]; more: number };
   /** The last commit on the branch after the turn, when the turn pushed. */
   head: { shortSha: string; url: string | null } | null;
   /** For a task that did not succeed but pushed work: "N commits were pushed to <branch>."; null otherwise. */
@@ -319,17 +339,51 @@ const SHORT_SHA_CHARS = 7;
 /** How much of a task the detail page lists before it says "and N more" or shows an expander. */
 const MAX_LISTED_COMMITS = 20;
 const MAX_LISTED_FILES = 20;
+const MAX_LISTED_BRANCHES = IMPLEMENTER_RESULT_LIMITS.branches;
 const INSTRUCTION_PREVIEW_CHARS = 500;
 /** The most characters of an instruction the page can hold (the submit's own limit). */
 const MAX_INSTRUCTION_CHARS = 20_000;
 const MAX_SUBJECT_CHARS = 500;
 const MAX_PATH_CHARS = 300;
 
+/**
+ * The sentence for the word the runner gave for a branch it did not push. Every word has one; a word this version does not know
+ * (a newer runner) gets the plain sentence, so a result is never lost for an unknown reason.
+ */
+const BRANCH_REASONS: Readonly<Record<string, string>> = {
+  non_fast_forward:
+    "The branch already exists on GitHub with other history. The Implementer never overwrites a branch.",
+  remote_rejected:
+    "GitHub refused this branch, for example because of a rule on the repository.",
+  workflows_not_allowed:
+    "GitHub does not let this app change workflow files under .github/workflows, so the branch was not accepted.",
+  provider_refused:
+    "GitHub did not accept the access for this push, so the branch was not saved.",
+  provider_unavailable:
+    "GitHub could not be reached or did not take the push, so the branch was not saved.",
+  unreadable: "The branch could not be read from the workspace.",
+  not_a_commit: "The branch does not point at a commit.",
+  out_of_time: "There was no time left to push this branch.",
+  excluded: "This branch is not pushed.",
+};
+
+export function describeBranchReason(reason: string | null): string {
+  return reason !== null && Object.hasOwn(BRANCH_REASONS, reason)
+    ? (BRANCH_REASONS[reason] ?? "The branch was not pushed.")
+    : "The branch was not pushed.";
+}
+
 type StoredImplementerResult = {
   /** The result carries an `implementer` block at all: a result without one says nothing of the work, and is not "no work". */
   reported: boolean;
   headCommit: string | null;
   pushed: boolean;
+  branches: {
+    name: string;
+    head: string | null;
+    pushed: boolean;
+    reason: string | null;
+  }[];
   commits: { sha: string; subject: string }[];
   files: { path: string; status: ImplementerFileStatus }[];
   summary: string | null;
@@ -339,6 +393,7 @@ const EMPTY_IMPLEMENTER_RESULT: StoredImplementerResult = {
   reported: false,
   headCommit: null,
   pushed: false,
+  branches: [],
   commits: [],
   files: [],
   summary: null,
@@ -373,6 +428,27 @@ function readStoredImplementer(
       )
         commits.push({ sha: entry.sha, subject: entry.subject });
     }
+  const branches: StoredImplementerResult["branches"] = [];
+  if (Array.isArray(block.branches))
+    for (const entry of block.branches.slice(
+      0,
+      IMPLEMENTER_RESULT_LIMITS.branches,
+    )) {
+      if (
+        isRecord(entry) &&
+        typeof entry.name === "string" &&
+        (entry.result === "pushed" || entry.result === "rejected")
+      )
+        branches.push({
+          name: entry.name,
+          head:
+            typeof entry.head === "string" && COMMIT_SHA.test(entry.head)
+              ? entry.head
+              : null,
+          pushed: entry.result === "pushed",
+          reason: typeof entry.reason === "string" ? entry.reason : null,
+        });
+    }
   const files: StoredImplementerResult["files"] = [];
   if (Array.isArray(block.filesChanged))
     for (const entry of block.filesChanged.slice(
@@ -397,6 +473,7 @@ function readStoredImplementer(
         ? block.headCommit
         : null,
     pushed: block.pushed === true,
+    branches,
     commits,
     files,
     summary: typeof block.summary === "string" ? block.summary : null,
@@ -476,6 +553,17 @@ function implementerDetailView(
           IMPLEMENTER_RESULT_LIMITS.summaryChars,
           false,
         ).trim();
+  const branches = stored.branches
+    .map((branch): ImplementerBranchView => ({
+      name: agentText(head(branch.name, 255 * 4), 255, true),
+      url: branch.pushed ? githubBranchUrl(repositoryUrl, branch.name) : null,
+      shortSha:
+        branch.head === null ? null : branch.head.slice(0, SHORT_SHA_CHARS),
+      pushed: branch.pushed,
+      reason: branch.pushed ? null : describeBranchReason(branch.reason),
+      isTaskBranch: source !== null && branch.name === source.branch,
+    }))
+    .sort((a, b) => Number(b.isTaskBranch) - Number(a.isTaskBranch));
   const pushedHead =
     stored.pushed && stored.headCommit !== null ? stored.headCommit : null;
   const failed = job.status === "failed" || job.status === "cancelled";
@@ -504,6 +592,10 @@ function implementerDetailView(
       count: files.length,
       shown: files.slice(0, MAX_LISTED_FILES),
       more: Math.max(0, files.length - MAX_LISTED_FILES),
+    },
+    branches: {
+      shown: branches.slice(0, MAX_LISTED_BRANCHES),
+      more: Math.max(0, branches.length - MAX_LISTED_BRANCHES),
     },
     head:
       pushedHead === null

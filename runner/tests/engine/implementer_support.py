@@ -3,7 +3,7 @@
 """A whole Implementer turn (#764) against the real, pinned OpenCode. Not a test file.
 
 `ImplementerSession` runs unchanged: the production ledger and passthrough proxy (the key swapping
-last hop is a loopback double), the generated engine configuration and environment, the push loop
+last hop is a loopback double), the generated engine configuration and environment, the final push
 and the git workspace of #762 over a bare repository on the file system standing in for GitHub.
 The only scripted part is the model: the strict generic fake of `fakes/wire` plays one tool call or
 one text per request. Nothing here talks beyond loopback, and the tests run as an ordinary user
@@ -39,7 +39,7 @@ from code_reviewer_runner.implementer.git_workspace import GitWorkspace
 from code_reviewer_runner.implementer.session import ImplementerSession, SessionSeams
 from code_reviewer_runner.implementer.turn_result import TurnResult
 from code_reviewer_runner.job import ImplementerInput, parse_implementer_input
-from git_support import TOKEN, Origin, guard_git, raw
+from git_support import TOKEN, Origin, raw, system_git
 from passthrough_loopback import LoopbackUpstream
 from workspace_support import BRANCH, Rig
 
@@ -189,7 +189,6 @@ def implementer_turn(
     react: Callable[[Turned, Scene, dict[str, Any]], None] | None = None,
     usage_fault: UsageFault | None = None,
     instruction: str = INSTRUCTION,
-    tick: float = 0.3,
     entry: dict[str, Any] | None = None,
     context: int = 1_000_000,
     output: int = OUTPUT_LIMIT,
@@ -204,7 +203,7 @@ def implementer_turn(
 
     `react(turned, scene, body)` runs on every model call that offers tools, before it is answered:
     a test advances the clock (`scene.clock_offset`) or kills the engine there."""
-    git = guard_git()
+    git = system_git()
     rig = Rig(scratch, git, Origin(scratch, git))
     if seed is not None:
         # What the repository holds before the turn: committed to the base branch of the origin.
@@ -291,7 +290,6 @@ def implementer_turn(
                 upstream_for=lambda _url: hop,
                 popen=popen,
                 transport=transport,
-                tick_seconds=tick,
                 startup_seconds=60.0,
                 start_egress=start_egress,
                 scratch_dir=str(scratch / "engine"),

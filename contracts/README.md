@@ -173,7 +173,8 @@ one instruction, and one turn is one `jobs` row of the kind `implementer`. It ex
   `opencode {sessionId, version}` or null. Checks, open questions and an export of the work are additive later.
 - New stable error codes: `branch_exists`, `base_branch_not_found`, `clone_failed`, `setup_failed`, `agent_gave_up`,
   `push_rejected`, `branch_violation`, `time_limit_reached`, `git_write_not_granted`, `implementer_engine_unavailable` and
-  `implementer_config_invalid`. `cost_limit_reached` (#666) already existed and is the cost limit of a turn too. The app
+  `implementer_config_invalid` (`branch_exists` and `branch_violation` are no longer produced: git is free in the workspace and
+  a branch the remote refuses is a rejected entry of `branches`; the words stay for old runs). `cost_limit_reached` (#666) already existed and is the cost limit of a turn too. The app
   has one sentence for each in `app/src/runs/error-copy.ts`.
 - The names of the environment variables the Worker container of an implementer job gets (`KnownImplementerEnvironmentName`,
   `ImplementerNetworkMode`): `RUNNER_IMPLEMENTER_WORK_DIR` (always `/work`), `RUNNER_IMPLEMENTER_EGRESS_PORT` (the loopback port

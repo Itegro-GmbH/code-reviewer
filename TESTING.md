@@ -649,9 +649,8 @@ writable root filesystem, with an engine user that does not exist and with an en
 T09); a Diff job runs through the real PR-Agent in the read-only layout against the fake GitHub and LLM; `worker-once` runs one job
 against the fake App (Node, on the host) and exits with the job's outcome; `worker-reap` finds nothing to end; the engine user can
 write only in `/tmp`; and the image carries no Dispatcher bundle and no Node.js other than the pinned one (#324-T09, #761). The
-toolchain layer of the Implementer's agent is proven there too (#761): git 2.53 or newer and the other tools at the pinned versions, the
-guard hook root-owned with no `core.hooksPath` anywhere in the image, `guard_matrix.sh` passing as the engine user in the production
-layout (and failing, never passing, without a hook), and the size of the image against the budget of the shared image. Containers are removed on exit, also
+toolchain layer of the Implementer's agent is proven there too (#761): git and the other tools at the pinned versions, no git configuration
+(no `core.hooksPath`) anywhere in the image, and the size of the image against the budget of the shared image. Containers are removed on exit, also
 after a failure. What is not covered: a job with a working GitHub and LLM (the engine smoke covers that), and the VM and the
 snapshot of the real platform (the manual smoke of the deployment guide).
 

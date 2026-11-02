@@ -221,6 +221,45 @@ function TaskResult({
           </p>
         )}
       </Section>
+      {task.branches.shown.length === 0 ? null : (
+        <Section title="Branches">
+          <p className="text-sm text-muted-foreground">
+            When the task ends, every branch of the agent&apos;s workspace is
+            pushed to GitHub. The commits and files below are those of the
+            task&apos;s own branch.
+          </p>
+          <ul data-slot="run-branches" className="flex flex-col gap-1 text-sm">
+            {task.branches.shown.map((branch) => (
+              <li
+                key={branch.name}
+                data-branch-result={branch.pushed ? "pushed" : "rejected"}
+                className="break-words"
+              >
+                <MaybeLink href={branch.url}>{branch.name}</MaybeLink>{" "}
+                {branch.shortSha === null ? null : (
+                  <code className="font-mono text-xs text-muted-foreground">
+                    {branch.shortSha}
+                  </code>
+                )}{" "}
+                <span className="text-xs text-muted-foreground">
+                  {branch.pushed ? "pushed" : "not pushed"}
+                  {branch.isTaskBranch ? " (the task's branch)" : ""}
+                </span>
+                {branch.reason === null ? null : (
+                  <span className="block text-xs text-muted-foreground">
+                    {branch.reason}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+          {task.branches.more > 0 ? (
+            <p className="text-xs text-muted-foreground">
+              and {task.branches.more} more
+            </p>
+          ) : null}
+        </Section>
+      )}
       <Section title="Commits">
         {task.commits.shown.length === 0 ? (
           <p className="text-sm text-muted-foreground">

@@ -70,8 +70,6 @@ from .egress_proxy import EgressProxy
 from .git_workspace import (
     CONFIRM_PAUSE_SECONDS,
     CONFIRM_SECONDS,
-    DIRTY_TIMEOUT,
-    REPORT_READ_TIMEOUT,
     GitWorkspace,
     PushReport,
 )
@@ -84,10 +82,10 @@ _log = logging.getLogger(__name__)
 # What is kept back from the job's time limit for the end of the turn: the commit of what is left
 # and the final push (the plan: the last three minutes). A short limit keeps a third of it.
 GRACE_SECONDS = 180.0
-# How the grace is spent at a normal end: the look at the tree (`DIRTY_TIMEOUT`), the leftover commit
-# of the system, the final push and the two reads of the report (`REPORT_READ_TIMEOUT` each), with
-# `ENGINE_STOP_SECONDS` for the end of the engine before them; the sum stays below `GRACE_SECONDS`
-# (a test holds it).
+# How the grace is spent at a normal end: the look at the tree (`DIRTY_TIMEOUT`), the leftover
+# commit of the system, the final push and the two reads of the report (`REPORT_READ_TIMEOUT` each),
+# with `ENGINE_STOP_SECONDS` for the end of the engine before them; the sum stays below
+# `GRACE_SECONDS` (a test holds it).
 LEFTOVER_SECONDS = 40.0
 FINAL_PUSH_SECONDS = 100.0
 ENGINE_STOP_SECONDS = 5.0

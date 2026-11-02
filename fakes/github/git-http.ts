@@ -14,10 +14,44 @@
 // both on a branch without protection. A test therefore cannot learn from the fake that a client never forces: it
 // asserts the client's command. Nothing else is refused: tags, `refs/notes/*` and a fast-forward of the default
 // branch are accepted (a test asserts which refs were pushed). The repository is a fixture the test made, so a push
-// to its checked out branch is accepted as well and leaves its working tree alone. No hook runs. No other service.
+// to its checked out branch is accepted as well and leaves its working tree alone. One rule of GitHub is imitated by
+// a pre-receive hook of the fake's own: an App without the `workflows` permission cannot create or update a file
+// under `.github/workflows/` (the Implementer's App never has it), and the push of that ref is refused with GitHub's
+// words. No other hook runs. No other service.
 import { spawn } from "node:child_process";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
+
+// The words and the rule of GitHub for a push that touches a workflow file without the permission.
+const WORKFLOW_HOOK = `#!/bin/sh
+zero=0000000000000000000000000000000000000000
+status=0
+while read old new ref; do
+  [ "$new" = "$zero" ] && continue
+  file=$(git log --name-only --format= "$new" --not --all 2>/dev/null | grep -m1 '^\\.github/workflows/')
+  if [ -n "$file" ]; then
+    echo "refusing to allow a GitHub App to create or update workflow \`$file\` without \`workflows\` permission" >&2
+    status=1
+  fi
+done
+exit $status
+`;
+
+/** A directory with the fake's one hook, made once per process (and per user) in the temporary directory. */
+function hooksDirectory(): string {
+  const directory = join(
+    tmpdir(),
+    `cr-fake-github-hooks-${String(process.getuid?.() ?? 0)}`,
+  );
+  mkdirSync(directory, { recursive: true });
+  const hook = join(directory, "pre-receive");
+  writeFileSync(hook, WORKFLOW_HOOK);
+  chmodSync(hook, 0o755);
+  return directory;
+}
 
 /** The installation token of a `Basic x-access-token:<token>` header, or undefined. */
 export function basicToken(header: string | undefined): string | undefined {
@@ -108,7 +142,7 @@ function receivePack(
 ): Promise<Buffer> {
   return serve(
     [
-      "core.hooksPath=/dev/null",
+      `core.hooksPath=${hooksDirectory()}`,
       // Stricter than GitHub on purpose (see the top of the file): GitHub accepts a forced push and a deletion on a
       // branch without protection.
       "receive.denyNonFastForwards=true",

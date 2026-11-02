@@ -666,6 +666,7 @@ export const IMPLEMENTER_RESULT_LIMITS = {
   commits: 200,
   filesChanged: 500,
   summaryChars: 8192,
+  branches: 50,
 } as const;
 
 /**
@@ -683,13 +684,25 @@ export const IMPLEMENTER_MAX_BODY_BYTES =
     (IMPLEMENTER_RESULT_LIMITS.commits * (500 + 48) +
       IMPLEMENTER_RESULT_LIMITS.filesChanged * (4096 + 32) +
       IMPLEMENTER_RESULT_LIMITS.summaryChars +
+      IMPLEMENTER_RESULT_LIMITS.branches * (255 + 160) +
       (8192 + 2000));
+
+/** What became of one local branch of the agent's repository at the end of a turn (`branches` of `ImplementerResult`). */
+export type ImplementerBranchResult = {
+  name: string;
+  head: string | null;
+  result: "pushed" | "rejected";
+  /** A word of the runner (`non_fast_forward`, `remote_rejected`, ...); null for a pushed branch. */
+  reason: string | null;
+};
 
 /** #746: `ImplementerResult` in the contract: facts the runner measured in the repository, and a plain-text summary. */
 export type ImplementerResult = {
   baseCommit: string;
   headCommit: string | null;
   pushed: boolean;
+  /** Every branch the runner dealt with at the end of the turn; absent in the result of an older runner (none). */
+  branches?: ImplementerBranchResult[];
   commits: { sha: string; subject: string }[];
   filesChanged: { path: string; status: ImplementerFileStatus }[];
   summary: string;

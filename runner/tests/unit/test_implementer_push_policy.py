@@ -53,8 +53,8 @@ HOSTILE = [
     "a\x1bb",
     "a\x7fb",
     "a\x85b",
-    "a b",
-    "a b",
+    "a\u2028b",
+    "a\u00a0b",
     "a~b",
     "a^b",
     "a?b",

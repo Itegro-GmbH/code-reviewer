@@ -225,6 +225,52 @@ describe("the push of the fake GitHub", () => {
     ).toBe("hello\n");
   });
 
+  // The Implementer's App never has the `workflows` permission: GitHub refuses the push of that ref and takes the
+  // others (the runner pushes one ref per command).
+  it("refuses a push that creates a workflow file with GitHub's words and takes a plain branch beside it", async () => {
+    const context = await setup();
+    const token = await context.mint([WIDGETS.id], "write");
+    const workflow = await workingCopy(
+      context,
+      token,
+      "workflow",
+      "implementer/workflow",
+      ".github/workflows/smoke.yml",
+      "on: push\n",
+    );
+    const plain = await workingCopy(
+      context,
+      token,
+      "plain",
+      "implementer/plain",
+    );
+
+    const refused = await push(
+      workflow,
+      token,
+      context.remote,
+      "HEAD:refs/heads/implementer/workflow",
+    );
+    const taken = await push(
+      plain,
+      token,
+      context.remote,
+      "HEAD:refs/heads/implementer/plain",
+    );
+
+    expect(refused.ok).toBe(false);
+    expect(refused.output).toContain(
+      "refusing to allow a GitHub App to create or update workflow `.github/workflows/smoke.yml` without `workflows` permission",
+    );
+    expect(taken.ok).toBe(true);
+    expect(await branchSha(context.fake, token, "implementer/workflow")).toBe(
+      null,
+    );
+    expect(await branchSha(context.fake, token, "implementer/plain")).not.toBe(
+      null,
+    );
+  });
+
   // #766-T01
   it("accepts a second push that moves its own branch forward", async () => {
     const context = await setup();

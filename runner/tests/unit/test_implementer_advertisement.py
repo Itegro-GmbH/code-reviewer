@@ -411,7 +411,7 @@ def test_the_engines_the_loop_names_to_the_job_process_include_the_implementer()
     assert engines_from_environment({}) == ()
 
 
-# The owner's git model: nothing in the repository is guarded, so no prerequisite exists only for a guard.
+# The owner's git model: nothing in the repository is guarded, so no prerequisite exists for one.
 def test_the_reasons_that_only_the_guard_needed_are_gone() -> None:
     values = {reason.value for reason in SelfCheckReason}
 
