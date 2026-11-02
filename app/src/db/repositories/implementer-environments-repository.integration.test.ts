@@ -2,6 +2,7 @@
 
 // The environments of the Implementer (#818) against a real Postgres: what the repository keeps true (a name once per
 // workspace whatever its case, a bounded count, stored text as it is, nothing across workspaces).
+import { sql } from "kysely";
 import { describe, expect, it } from "vitest";
 import { createImplementerEnvironmentsRepository } from "./implementer-environments-repository.ts";
 import { createTestDatabase } from "../../test-support/test-database.ts";
@@ -116,6 +117,57 @@ describe("the environments repository", () => {
 
     expect(results.filter((result) => result.ok)).toHaveLength(1);
     expect(await a.list()).toHaveLength(2);
+  });
+
+  // #818-T03
+  it("takes the lock on the workspace row before it counts: a creator waits for one that holds the row", async () => {
+    const { db, a, idA } = await setup();
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let holding: () => void = () => undefined;
+    const holds = new Promise<void>((resolve) => {
+      holding = resolve;
+    });
+    // Another creator: it has the row of the workspace and has not finished.
+    const other = db.transaction().execute(async (trx) => {
+      await trx
+        .selectFrom("workspaces")
+        .select("id")
+        .where("id", "=", idA)
+        .forNoKeyUpdate()
+        .execute();
+      holding();
+      await held;
+    });
+    await holds;
+
+    let finished = false;
+    const creating = a.create(NODE, 50).then((outcome) => {
+      finished = true;
+      return outcome;
+    });
+    // It waits for a lock on the row: seen from another connection, a backend is blocked on a lock.
+    const deadline = Date.now() + 3_000;
+    let blocked = 0;
+    while (blocked === 0 && Date.now() < deadline) {
+      const { rows } = await sql<{
+        blocked: number;
+      }>`select count(*)::int as blocked from pg_stat_activity
+          where datname = current_database() and wait_event_type = 'Lock' and pid <> pg_backend_pid()`.execute(
+        db,
+      );
+      blocked = rows[0]?.blocked ?? 0;
+      if (blocked === 0)
+        await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(blocked).toBeGreaterThan(0);
+    expect(finished).toBe(false);
+
+    release();
+    await other;
+    expect((await creating).ok).toBe(true);
   });
 
   // #818-T03
