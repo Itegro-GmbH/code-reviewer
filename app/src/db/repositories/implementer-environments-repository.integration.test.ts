@@ -80,6 +80,31 @@ describe("the environments repository", () => {
     ]);
   });
 
+  // #818-T45
+  it("lists summaries without reading the script: name, size and whether there is a script, by name", async () => {
+    const { a, b } = await setup();
+    await a.create({ ...NODE, name: "pnpm", setupScript: "" }, 50);
+    await a.create(
+      { ...NODE, name: "Bun", vcpus: 1, setupScript: "x".repeat(65_536) },
+      50,
+    );
+    await b.create({ ...NODE, name: "foreign" }, 50);
+
+    const summaries = await a.listSummaries();
+
+    expect(summaries).toEqual([
+      { id: expect.any(String), name: "Bun", vcpus: 1, hasScript: true },
+      { id: expect.any(String), name: "pnpm", vcpus: 4, hasScript: false },
+    ]);
+    for (const summary of summaries)
+      expect(Object.keys(summary).sort()).toEqual([
+        "hasScript",
+        "id",
+        "name",
+        "vcpus",
+      ]);
+  });
+
   // #818-T03
   it("refuses a second name that differs only in case, and allows the same name in another workspace", async () => {
     const { a, b } = await setup();

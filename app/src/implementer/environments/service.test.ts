@@ -29,6 +29,14 @@ function fakeRepository(
   return {
     maximums,
     list: async () => [STORED],
+    listSummaries: async () => [
+      {
+        id: STORED.id,
+        name: STORED.name,
+        vcpus: STORED.vcpus,
+        hasScript: true,
+      },
+    ],
     get: async (id) => (id === STORED.id ? STORED : undefined),
     create: async (_environment, maximum): Promise<CreateOutcome> => {
       maximums.push(maximum);
@@ -76,6 +84,33 @@ describe("the environment service", () => {
       ],
       maximum: ENVIRONMENTS_PER_WORKSPACE_MAX,
     });
+  });
+
+  // #818-T46
+  it("lists the picker's view without the script: the repository is asked for summaries, not for the scripts", async () => {
+    const service = createEnvironmentService({
+      environments: fakeRepository({
+        list: () => {
+          throw new Error("the scripts must not be read for the picker");
+        },
+      }),
+    });
+
+    const listed = await service.listForPicker();
+
+    expect(listed).toEqual({
+      environments: [
+        {
+          id: "env-1",
+          name: "Node 22",
+          vcpus: 4,
+          memoryGb: 8,
+          hasScript: true,
+        },
+      ],
+      maximum: ENVIRONMENTS_PER_WORKSPACE_MAX,
+    });
+    expect(JSON.stringify(listed)).not.toContain("npm ci");
   });
 
   // #818-T07

@@ -91,9 +91,21 @@ export function createEnvironmentRouteHandlers({
 
   return {
     list: (request) =>
-      answer(request, async () =>
-        Response.json(await service.list(), { headers: NO_STORE }),
-      ),
+      answer(request, async () => {
+        // `?view=picker`: the list for the form's picker, without the scripts. Any other view is refused.
+        const view = new URL(request.url).searchParams.get("view");
+        if (view !== null && view !== "picker")
+          throw new EnvironmentError(
+            "ENVIRONMENT_REQUEST_INVALID",
+            "The view is not one that exists.",
+          );
+        return Response.json(
+          view === "picker"
+            ? await service.listForPicker()
+            : await service.list(),
+          { headers: NO_STORE },
+        );
+      }),
     create: (request) =>
       answer(request, async (user) =>
         Response.json(

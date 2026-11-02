@@ -5,7 +5,7 @@
 // the scripts (they can use them); only a person who may manage (`canManage`, the page asks the matrix) gets the buttons. It talks
 // to the routes of #818 only (`api.ts`), reads no secret, and shows no text from an answer: every refusal is a fixed sentence for
 // its code (`messages.ts`). The script is sent exactly as typed.
-import { useState, type FormEvent } from "react";
+import { useId, useState, type FormEvent } from "react";
 import { Button } from "../../../components/button.tsx";
 import { StatusRegion } from "../../../components/status-region.tsx";
 import { Alert, AlertDescription } from "../../../components/ui/alert.tsx";
@@ -111,18 +111,32 @@ function Environments({
   const [toDelete, setToDelete] = useState<EnvironmentView | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  // A delete is in flight: no second one starts until it has ended.
+  const [removing, setRemoving] = useState(false);
 
   const editedItem =
     editing?.kind === "edit"
       ? items.find((item) => item.id === editing.id)
       : undefined;
 
+  /** The row is gone from the screen, and so is the form when it was the one being edited. */
+  function dropRow(item: EnvironmentView) {
+    setItems((current) => current.filter((entry) => entry.id !== item.id));
+    setEditing((current) =>
+      current?.kind === "edit" && current.id === item.id ? null : current,
+    );
+  }
+
   async function remove(item: EnvironmentView) {
     setToDelete(null);
     setNotice(null);
     setProblem(null);
+    setRemoving(true);
     const result = await api.remove(item.id);
+    setRemoving(false);
     if (!result.ok) {
+      // It is not there any more (somebody deleted it): the row goes, as the person wanted.
+      if (result.code === "ENVIRONMENT_NOT_FOUND") dropRow(item);
       setProblem(
         describeEnvironmentFailure(product, {
           code: result.code,
@@ -131,7 +145,7 @@ function Environments({
       );
       return;
     }
-    setItems((current) => current.filter((entry) => entry.id !== item.id));
+    dropRow(item);
     setNotice(PAGE_COPY.deleted);
   }
 
@@ -153,6 +167,9 @@ function Environments({
 
   return (
     <div className="flex flex-col gap-6">
+      <Alert variant="info" role="status">
+        {PAGE_COPY.scriptsNotRunning}
+      </Alert>
       {problem !== null ? (
         <Alert variant="destructive">
           <AlertDescription>{problem}</AlertDescription>
@@ -221,6 +238,7 @@ function Environments({
                       variant="destructive"
                       size="sm"
                       aria-label={`${PAGE_COPY.delete} ${item.name}`}
+                      disabled={removing}
                       onClick={() => setToDelete(item)}
                     >
                       {PAGE_COPY.delete}
@@ -294,6 +312,7 @@ function EnvironmentForm({
   const [problem, setProblem] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const scriptBytes = new TextEncoder().encode(script).length;
+  const sizeMessageId = useId();
 
   function showIssues(issues: readonly { field: string; code: string }[]) {
     const next: FieldErrors = {};
@@ -366,6 +385,7 @@ function EnvironmentForm({
           value={String(vcpus)}
           onValueChange={(value) => setVcpus(Number(value))}
           aria-invalid={errors.vcpus !== undefined}
+          aria-describedby={sizeMessageId}
           className="grid-cols-1 sm:grid-cols-2"
         >
           {ENVIRONMENT_VCPUS.map((size) => (
@@ -379,9 +399,13 @@ function EnvironmentForm({
           ))}
         </RadioGroup>
         {errors.vcpus !== undefined ? (
-          <p className="text-sm text-destructive">{errors.vcpus}</p>
+          <p id={sizeMessageId} className="text-sm text-destructive">
+            {errors.vcpus}
+          </p>
         ) : (
-          <p className="text-sm text-muted-foreground">{PAGE_COPY.sizeHint}</p>
+          <p id={sizeMessageId} className="text-sm text-muted-foreground">
+            {PAGE_COPY.sizeHint}
+          </p>
         )}
       </fieldset>
 

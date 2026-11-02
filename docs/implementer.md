@@ -135,13 +135,14 @@ capability `implementer`, anywhere else the path is a 404 like an unknown one).
   keeps the standard, 2 vCPU and no script.
 - **The script** is text of at most 64 KB (UTF-8), literal data, stored exactly as written: no trimming, no changed line ends, no
   checking of what it says. Only what cannot be stored as text (a NUL byte, half of a character) is refused. It has no secrets
-  field and the page says so.
+  field and the page says so. **Setup scripts do not run yet** (the runner part of #818 is not built): the text is saved and nothing is
+  done with it when a task starts, and the page says so.
 - **Names** are unique within a workspace, whatever the case.
 - **Nothing points at an environment.** A task copies size and script when it starts (the next part of #818), so changing or
   deleting an environment never touches a running or a past task.
 
 Routes (all `Cache-Control: no-store`, errors `{ "error": <code> }` with the codes of `app/src/implementer/environments/errors.ts`):
-`GET /api/w/<slug>/environments` (every member), `POST` the same path, `PUT` and `DELETE /api/w/<slug>/environments/<id>` (Owner or
+`GET /api/w/<slug>/environments` (every member; `?view=picker` is the list for the task form's picker, without the scripts), `POST` the same path, `PUT` and `DELETE /api/w/<slug>/environments/<id>` (Owner or
 Admin).
 
 ## Limits
