@@ -116,6 +116,8 @@ const GADGETS = {
 };
 const BASE = "trunk";
 const KEY = "sk-deepseek-e2e-implementer-key-0123456789abcdef0123";
+// The workspace of E14 saves this key for Anthropic, a provider of the registry, for the length of that journey.
+const ANTHROPIC_KEY = "dummy-anthropic-e2e-implementer-key-0123456789abcdef";
 // One run of the agent takes a few seconds of the model's script and the pinned engine's start, a push and the end of the turn.
 const RUN_TIMEOUT = 80_000;
 const FIXTURE = "../fakes/fixtures/models-dev/implementer-lane.json";
@@ -936,6 +938,93 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     await expectQuiet();
   });
 
+  // #755-E14
+  test("E14 a workspace with an Anthropic key: the form offers Anthropic and its model, the task runs on the native path with that key, the engine marks the prompt for the cache, and the run costs the catalog's price of its calls with the cache at its own prices", async ({
+    page,
+  }) => {
+    const theLlm = required(llm, "The fake LLM");
+    const theDispatcher = required(dispatcher, "The Dispatcher");
+    const marker = "[E14-ANTHROPIC]";
+    // Every answer states the same usage (the Messages shape: the input without the cache, then what the cache read and wrote).
+    const usage = {
+      input_tokens: 1000,
+      output_tokens: 100,
+      cache_read_input_tokens: 4000,
+      cache_creation_input_tokens: 2000,
+    };
+    theLlm.setMessagesUsage(usage);
+    theLlm.scriptAgent({
+      when: { lastUserContains: marker },
+      steps: [
+        write("anthropic.txt", "a\n"),
+        commit("Add anthropic"),
+        bash("echo one"),
+        bash("echo two"),
+      ],
+      finalText: "Added anthropic.txt.",
+    });
+    await signInAsAdmin(page);
+    // The owner saves the key under Settings, LLM access, and the form must offer the provider (it said "No model is available").
+    const saved = await page.request.put(
+      `/api/w/${WORKSPACE}/llm-keys/anthropic`,
+      { data: { apiKey: ANTHROPIC_KEY } },
+    );
+    expect(saved.status(), await saved.text()).toBe(200);
+    try {
+      await page.goto(`/w/${WORKSPACE}/implementer`);
+      await expect(
+        page.getByRole("combobox", { name: "Provider", exact: true }),
+      ).toContainText("Anthropic");
+
+      const runId = await startTask(page, {
+        repository: GADGETS.fullName,
+        branch: "implementer/e14",
+        instruction: `${marker} Add anthropic.txt.`,
+        model: "Claude Sonnet 5.5",
+        costLimit: "1",
+      });
+      const ended = await runEnded(page, runId, RUN_TIMEOUT);
+      expect(ended.status).toBe("succeeded");
+      expect(subjectsAhead(gadgets().path, BASE, "implementer/e14")).toEqual([
+        "Add anthropic",
+      ]);
+
+      // The model was asked on the Messages wire, with the workspace's Anthropic key and no other.
+      const asked = theLlm.messageRequests();
+      expect(asked.length).toBeGreaterThanOrEqual(3);
+      for (const request of asked) expect(request.apiKey).toBe(ANTHROPIC_KEY);
+      // Prompt caching is on: the engine put its cache marks on the requests it sent.
+      expect(
+        asked.some((request) =>
+          JSON.stringify(request.body).includes('"cache_control"'),
+        ),
+        "the engine marked nothing for the cache",
+      ).toBe(true);
+      // The run costs what the catalog's price comes to for what the calls used, the cache read and the cache write at their own prices.
+      const perCall =
+        (usage.input_tokens * ANTHROPIC_BOOK.input +
+          usage.output_tokens * ANTHROPIC_BOOK.output +
+          usage.cache_read_input_tokens * ANTHROPIC_BOOK.cache_read +
+          usage.cache_creation_input_tokens * ANTHROPIC_BOOK.cache_write) /
+        1_000_000;
+      expect(ended.usage?.aiCalls).toBe(asked.length);
+      expect(ended.usage?.costUsd).toBeCloseTo(perCall * asked.length, 6);
+      await expectQuiet();
+      expect(
+        theDispatcher
+          .containers()
+          .filter((container) => container.mode === "worker-once")
+          .at(-1)
+          ?.log(),
+      ).toContain("worker done: ok");
+    } finally {
+      const removed = await page.request.delete(
+        `/api/w/${WORKSPACE}/llm-keys/anthropic`,
+      );
+      expect(removed.status(), await removed.text()).toBe(200);
+    }
+  });
+
   // #767-E09
   test("E09 no secret anywhere, and an agent that looks for one finds none: not the installation token, the model key or the credential of a job", async ({
     page,
@@ -967,7 +1056,13 @@ test.describe("a task on its way from the form of the Implementer to a branch on
 
     const tokens = await getIssuedInstallationTokens(request);
     expect(tokens.length).toBeGreaterThan(0);
-    const secrets = [KEY, ...tokens, ...factorySecrets(), ...allSecrets()];
+    const secrets = [
+      KEY,
+      ANTHROPIC_KEY,
+      ...tokens,
+      ...factorySecrets(),
+      ...allSecrets(),
+    ];
     // The capability of the engine's proxy is the engine's own credential for the loopback proxy of its job, worthless anywhere
     // else: the agent may read it (its configuration is its own), and it must be nowhere outside the container.
     const theCapabilities = capabilities();
@@ -1195,6 +1290,30 @@ const BOOK = (
     };
   }
 ).deepseek.models["claude-lane-coder"]?.cost ?? {
+  input: Number.NaN,
+  output: Number.NaN,
+  cache_read: Number.NaN,
+  cache_write: Number.NaN,
+};
+
+// The catalog's price of the model of E14, in US dollars per million tokens (the Anthropic model of the same fixture).
+const ANTHROPIC_BOOK = (
+  JSON.parse(readFileSync(resolve(process.cwd(), FIXTURE), "utf8")) as {
+    anthropic: {
+      models: Record<
+        string,
+        {
+          cost: {
+            input: number;
+            output: number;
+            cache_read: number;
+            cache_write: number;
+          };
+        }
+      >;
+    };
+  }
+).anthropic.models["claude-sonnet-5-5"]?.cost ?? {
   input: Number.NaN,
   output: Number.NaN,
   cache_read: Number.NaN,

@@ -6,6 +6,8 @@ import { describe, expect, it } from "vitest";
 import {
   catalogProviderIdOf,
   catalogRefOf,
+  implementerCatalogRefOf,
+  implementerProviderIdOf,
   nativeProviderIdOf,
   providerSlugOf,
 } from "./catalog-ref.ts";
@@ -85,5 +87,53 @@ describe("the catalog model a selection names", () => {
       "x".repeat(201),
     ])
       expect(catalogRefOf({ provider: "openai", model }, LEGACY)).toBeNull();
+  });
+});
+
+describe("the catalog model a task of the Implementer names", () => {
+  // The Implementer's agent is OpenCode, so it has no legacy wire: the registry's two providers are catalog providers for it.
+  it("is the catalog model of the registry's two providers too", () => {
+    expect(
+      implementerCatalogRefOf({
+        provider: "anthropic",
+        model: "claude-sonnet-5-5",
+      }),
+    ).toEqual({ providerId: "anthropic", modelId: "claude-sonnet-5-5" });
+    expect(
+      implementerCatalogRefOf({
+        provider: "openrouter",
+        model: "mistralai/mistral-saba",
+      }),
+    ).toEqual({ providerId: "openrouter", modelId: "mistralai/mistral-saba" });
+    expect(implementerProviderIdOf("anthropic")).toBe("anthropic");
+    expect(implementerProviderIdOf("openrouter")).toBe("openrouter");
+  });
+
+  it("answers for any other provider as the rule of the reviews does, and refuses what the catalog cannot serve", () => {
+    expect(
+      implementerCatalogRefOf({
+        provider: "deepseek",
+        model: "deepseek-v4-pro",
+      }),
+    ).toEqual(
+      catalogRefOf({ provider: "deepseek", model: "deepseek-v4-pro" }, LEGACY),
+    );
+    expect(implementerProviderIdOf("nosuchprovider")).toBeNull();
+    expect(implementerProviderIdOf("Anthropic")).toBeNull();
+    expect(
+      implementerCatalogRefOf({ provider: "anthropic", model: "../x" }),
+    ).toBeNull();
+  });
+
+  // The rule is the Implementer's alone: the reviews keep their rule, whatever this one says.
+  it("leaves the rule of the reviews as it is", () => {
+    expect(nativeProviderIdOf("anthropic", LEGACY)).toBeNull();
+    expect(nativeProviderIdOf("openrouter", LEGACY)).toBeNull();
+    expect(
+      catalogRefOf(
+        { provider: "anthropic", model: "claude-sonnet-5-5" },
+        LEGACY,
+      ),
+    ).toBeNull();
   });
 });

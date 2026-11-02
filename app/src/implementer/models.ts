@@ -4,7 +4,9 @@
 // it is the claim's (#753): the model must run on the native path (the passthrough proxy, an entry from the catalog and a cost
 // policy), because the agent is OpenCode. So:
 //  - on the workspace's own key a model is a provider and a model of the models.dev catalog (`src/native-providers/`), and the
-//    workspace has saved a key for the provider. The registry's two providers (their wires are not native) are not offered;
+//    workspace has saved a key for the provider. The registry's two providers are catalog providers here too: the agent is OpenCode
+//    and has no legacy wire, so their keys go through the passthrough proxy like any catalog provider's (the reviews keep the
+//    legacy wire of the two; `native-cost/catalog-ref.ts`, `implementerProviderIdOf`);
 //  - on the operator's key a model is a released catalog entry that serves Dynamic Review, that the plan allows, and whose model
 //    has a confirmed price and an entry in the catalog (`entryUsable`). The tenant never sees the provider or the model id of an
 //    entry (principle 2 of epic #420): the options carry the fields of `MemberCatalogEntry` only.
@@ -12,7 +14,7 @@
 import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import type { NativeCatalogReader } from "../native-providers/catalog.ts";
 import type { NativeModelView } from "../native-providers/catalog.ts";
-import { isNativeProvider } from "../review-settings/native-choice.ts";
+import { implementerProviderIdOf } from "../native-cost/catalog-ref.ts";
 import {
   refusalOfChoice,
   type CatalogEntryRefusal,
@@ -48,7 +50,7 @@ export type ImplementerModels = {
 
 export type ImplementerModelsDependencies = {
   keyMode(): Promise<"own" | "managed" | "unreadable">;
-  /** The slugs of the catalog providers the workspace holds a readable key for. */
+  /** The slugs of the providers (catalog providers and the registry's two) the workspace holds a readable key for. */
   configuredProviders(): Promise<ReadonlySet<string>>;
   nativeCatalog: Pick<
     NativeCatalogReader,
@@ -114,7 +116,8 @@ export function createImplementerModels(
           ? checkEntry(choice.entryId)
           : "wrong_key_mode";
       if ("entryId" in choice) return "wrong_key_mode";
-      if (!isNativeProvider(choice.provider)) return "provider_unsupported";
+      if (implementerProviderIdOf(choice.provider) === null)
+        return "provider_unsupported";
       if (!(await deps.configuredProviders()).has(choice.provider))
         return "no_key";
       const checked = await deps.nativeCatalog.checkSelection(

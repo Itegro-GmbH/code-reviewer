@@ -13,7 +13,7 @@ import { jobQueueFor } from "../jobs/shared.ts";
 import { keyModeForJob } from "../llm/resolve.ts";
 import { getWorkspaceLlm } from "../llm/shared.ts";
 import { getCatalogService } from "../model-catalog/shared.ts";
-import { getNativeCatalog } from "../native-providers/shared.ts";
+import { getImplementerCatalog } from "../native-providers/shared.ts";
 import { getNativeCost } from "../native-cost/shared.ts";
 import { catalogSelectionFrom } from "../review-settings/catalog-selection.ts";
 import { operatorCostLimitCentsFrom } from "../review-settings/operator-cost-limit-source.ts";
@@ -22,6 +22,7 @@ import {
   entryAllowed,
   type ResolvedEntitlements,
 } from "../workspaces/entitlements.ts";
+import { configuredKeyProviders } from "./key-providers.ts";
 import { createImplementerModels } from "./models.ts";
 import {
   createImplementerService,
@@ -59,13 +60,8 @@ export function implementerServiceFor(workspaceId: string): ImplementerService {
     registry: integrationRegistry,
     models: createImplementerModels({
       keyMode: async () => keyModeForJob(await readEntitlements()),
-      configuredProviders: async () =>
-        new Set(
-          (await keys.nativeStatuses())
-            .filter(({ status }) => status.state === "configured")
-            .map(({ provider }) => provider),
-        ),
-      nativeCatalog: getNativeCatalog(),
+      configuredProviders: () => configuredKeyProviders(keys),
+      nativeCatalog: getImplementerCatalog(),
       catalog: catalogSelectionFrom(catalog, async (id) =>
         entryAllowed(await readEntitlements(), { id }),
       ),

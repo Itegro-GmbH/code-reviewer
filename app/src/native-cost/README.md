@@ -22,6 +22,12 @@ slug) and the provider must be in `contracts/opencode-providers.v1.json` and **n
 job runs PR-Agent). **The registry does not accept a native slug in a selection yet**, so on the running server no job is native
 and the claim is the claim of today, unless the switch below turns the two registry providers native; #555 lifts the rest.
 
+**The Implementer is the exception (#755).** Its agent is OpenCode and has no legacy wire, so for a turn of the Implementer no
+provider is legacy: `implementerRefOf` (`implementerCatalogRefOf`) names `anthropic` and `openrouter` as catalog models, whatever
+the switch says, and the claim asks it for a turn and `refOf` for a review. Everything after the ref is the native claim below
+(the entry at the registry's pinned address, the own-key policy with the catalog's price, the cap). A Diff or Dynamic review
+never calls it.
+
 ## The switch (#578)
 
 `NATIVE_OPENCODE_PROVIDERS` in the environment of the app (`1`, `true` or `on`; anything else is off, `switch.ts`). **Default off.**

@@ -14,7 +14,11 @@ import {
 } from "../models-dev/job-entry.ts";
 import type { ModelPriceService } from "../model-prices/service.ts";
 import { isCanonicalCatalogAddress } from "./catalog-address.ts";
-import { catalogRefOf, type CatalogRef } from "./catalog-ref.ts";
+import {
+  catalogRefOf,
+  implementerCatalogRefOf,
+  type CatalogRef,
+} from "./catalog-ref.ts";
 import {
   managedPolicy,
   ownPolicy,
@@ -70,6 +74,14 @@ export type NativeCostService = {
   /** The catalog model a selection names, or null when the job does not take the native path (catalog-ref.ts). */
   refOf(selection: { provider: string; model: string }): CatalogRef | null;
   /**
+   * The same for a turn of the Implementer, whose agent is OpenCode and has no legacy wire: the registry's two providers are
+   * catalog models here too (catalog-ref.ts, `implementerCatalogRefOf`). A review never asks this.
+   */
+  implementerRefOf(selection: {
+    provider: string;
+    model: string;
+  }): CatalogRef | null;
+  /**
    * The cost policy of a job on this key. `managed`: only a model that is enabled and has a confirmed price passes; the
    * refusal carries a stable code (`catalog_price_unconfirmed`, `catalog_model_unavailable`) and an internal reason, both
    * for the log. `own`: always a policy, with the catalog's price when it states one and the instance's token cap. Never
@@ -100,6 +112,7 @@ export function createNativeCostService(deps: {
 }): NativeCostService {
   return {
     refOf: (selection) => catalogRefOf(selection, deps.legacyProviders),
+    implementerRefOf: implementerCatalogRefOf,
 
     async policyFor(keyMode, ref) {
       if (keyMode === "managed")

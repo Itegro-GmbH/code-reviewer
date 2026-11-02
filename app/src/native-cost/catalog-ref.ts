@@ -13,6 +13,10 @@
 // registry. The two providers of the registry are in both lists; their wires stay the production path until #556 removes
 // them, so a selection that names either is never native and nothing about its claim changes. The registry itself does not accept
 // a native slug in a selection yet: that, and the key per native provider, belong to the wiring and #555 (README.md).
+//
+// One kind has no legacy wire: a task of the Implementer (the agent is OpenCode). For it `implementerProviderIdOf` and
+// `implementerCatalogRefOf` below treat no provider as legacy, so the key of the registry's two providers reaches the agent through the
+// passthrough proxy like any catalog provider's. The reviews never call them.
 import { supportedProvider } from "../models-dev/opencode-providers.ts";
 
 /** A model of the catalog by the ids of models.dev. */
@@ -65,4 +69,21 @@ export function catalogRefOf(
   const providerId = nativeProviderIdOf(selection.provider, legacyProviders);
   if (providerId === null || !isCatalogModelId(selection.model)) return null;
   return { providerId, modelId: selection.model };
+}
+
+/**
+ * The models.dev provider id of a registry slug for a **task of the Implementer**, or null. Its agent is OpenCode, which has no
+ * legacy wire, so the registry's two providers are catalog providers here. Only the Implementer's own code asks this (the
+ * picker, the check at submit, the claim of a turn); `nativeProviderIdOf` is the rule of the reviews and does not change.
+ */
+export function implementerProviderIdOf(slug: string): string | null {
+  return nativeProviderIdOf(slug, []);
+}
+
+/** The catalog model a turn of the Implementer names (`implementerProviderIdOf`), or null when the catalog cannot serve it. */
+export function implementerCatalogRefOf(selection: {
+  provider: string;
+  model: string;
+}): CatalogRef | null {
+  return catalogRefOf(selection, []);
 }

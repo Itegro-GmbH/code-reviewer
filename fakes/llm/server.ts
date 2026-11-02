@@ -501,6 +501,107 @@ function messagesText(model: string, text: string, usage: FakeMessagesUsage) {
   };
 }
 
+/**
+ * A Messages answer as the server-sent events a client that asked for `stream: true` reads (Anthropic's events): the message with
+ * its input usage, each content block (text, a thinking block with its signature, a tool call with the arguments in two pieces, as a
+ * real stream cuts them), then the stop reason with the output tokens, and the end. The native path of the runner (the Implementer's,
+ * #755) always streams, so a fake that only answers JSON leaves its engine without an answer.
+ */
+export function messagesEvents(
+  document: ReturnType<typeof messagesText>,
+): string {
+  const content = document.content as Array<Record<string, unknown>>;
+  const { output_tokens: outputTokens, ...inputUsage } =
+    document.usage as unknown as Record<string, unknown>;
+  const events: Array<Record<string, unknown>> = [
+    {
+      type: "message_start",
+      message: {
+        ...document,
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { ...inputUsage, output_tokens: 1 },
+      },
+    },
+  ];
+  for (const [index, block] of content.entries()) {
+    if (block.type === "text") {
+      events.push(
+        {
+          type: "content_block_start",
+          index,
+          content_block: { type: "text", text: "" },
+        },
+        {
+          type: "content_block_delta",
+          index,
+          delta: { type: "text_delta", text: block.text },
+        },
+      );
+    } else if (block.type === "thinking") {
+      events.push(
+        {
+          type: "content_block_start",
+          index,
+          content_block: { type: "thinking", thinking: "" },
+        },
+        {
+          type: "content_block_delta",
+          index,
+          delta: { type: "signature_delta", signature: block.signature },
+        },
+      );
+    } else {
+      const input = JSON.stringify(block.input ?? {});
+      const half = Math.floor(input.length / 2);
+      events.push(
+        {
+          type: "content_block_start",
+          index,
+          content_block: {
+            type: "tool_use",
+            id: block.id,
+            name: block.name,
+            input: {},
+          },
+        },
+        {
+          type: "content_block_delta",
+          index,
+          delta: {
+            type: "input_json_delta",
+            partial_json: input.slice(0, half),
+          },
+        },
+        {
+          type: "content_block_delta",
+          index,
+          delta: { type: "input_json_delta", partial_json: input.slice(half) },
+        },
+      );
+    }
+    events.push({ type: "content_block_stop", index });
+  }
+  events.push(
+    {
+      type: "message_delta",
+      delta: {
+        stop_reason: document.stop_reason,
+        stop_sequence: document.stop_sequence,
+      },
+      usage: { output_tokens: outputTokens },
+    },
+    { type: "message_stop" },
+  );
+  return events
+    .map(
+      (event) =>
+        `event: ${String(event.type)}\ndata: ${JSON.stringify(event)}\n\n`,
+    )
+    .join("");
+}
+
 /** An Anthropic Messages answer that asks for tool calls. */
 function messagesToolUse(
   model: string,
@@ -760,7 +861,14 @@ export async function startLlmFake(
           if (refusal !== null) return send(refusal.status, refusal.body);
           const accept = (answer: Record<string, unknown>) => {
             strictApi.record(parsed, answer);
-            return send(200, answer);
+            if (parsed.stream !== true) return send(200, answer);
+            response.writeHead(200, {
+              "content-type": "text/event-stream",
+              "cache-control": "no-cache",
+            });
+            response.end(
+              messagesEvents(answer as ReturnType<typeof messagesText>),
+            );
           };
           let usage: FakeMessagesUsage = messagesUsage;
           if (promptCache !== null) {
