@@ -26,7 +26,7 @@ from typing import Any, Final
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 
 DOCKER_SOCKET: Final = "/run/docker.sock"
-DEFAULT_TIMEOUT_SECONDS: Final = 30.0
+DEFAULT_TIMEOUT_SECONDS: Final = 15.0
 _MAX_BODY_BYTES: Final = 4 * 1024 * 1024
 _STDOUT: Final = 1
 _STDERR: Final = 2

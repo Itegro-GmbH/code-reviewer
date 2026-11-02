@@ -91,7 +91,15 @@ case "${1:-}" in
       case "$1" in
         --interactive | --rm | --read-only) shift ;;
         --name) name="$2"; shift 2 ;;
-        --env) worker_env+=("$2"); shift 2 ;;
+        # The model door (#745) is a container the VM's Docker starts; this stand-in has no daemon behind it, so the Worker it
+        # runs keeps the model proxy in its own process (the lane's fake LLM is on loopback). The flag is recorded whole in
+        # `.args`; only the Worker's environment goes without it, so that it does not look for a Docker it cannot have.
+        --env)
+          case "$2" in
+            RUNNER_IMPLEMENTER_MODEL_DOOR=*) ;;
+            *) worker_env+=("$2") ;;
+          esac
+          shift 2 ;;
         # The work volume of the Implementer's profile (#760): one named volume at /work. The name has no comma and no
         # equals sign, so that it cannot add an option (`readonly=false`, `bind-propagation=...`, `volume-opt=...`, a
         # second `target=`). And the VM's Docker socket of that profile (#745), once, read-only, exactly the contract's

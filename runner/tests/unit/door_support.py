@@ -108,6 +108,7 @@ class DoorProcess:
     lines: list[dict[str, Any]] = field(default_factory=lambda: [])
     exit_code: list[int] = field(default_factory=lambda: [])
     thread: threading.Thread | None = None
+    reader: threading.Thread | None = None
     url: str = ""
     refused: bool = False
 
@@ -119,9 +120,11 @@ class DoorProcess:
         self.stdin.close()
 
     def wait(self, seconds: float = 10.0) -> int:
-        assert self.thread is not None
+        assert self.thread is not None and self.reader is not None
         self.thread.join(seconds)
         assert not self.thread.is_alive(), "the door did not end"
+        # Its output is read by another thread: every line it printed is in `lines` after this.
+        self.reader.join(seconds)
         return self.exit_code[0]
 
 
@@ -163,7 +166,8 @@ def run_door_here(
                 seen.set()
         seen.set()
 
-    threading.Thread(target=read, daemon=True).start()
+    process.reader = threading.Thread(target=read, daemon=True)
+    process.reader.start()
     process.thread = threading.Thread(target=main, daemon=True)
     process.thread.start()
     process.send((json.dumps(start_document()) if document is None else document) + "\n")
