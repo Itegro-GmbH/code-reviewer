@@ -1334,7 +1334,10 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     );
     // The run says which environment it used.
     await page.goto(`/w/${WORKSPACE}/runs/${runId}`);
-    await expect(page.getByText("Six cores (6 vCPU, 12 GB)")).toBeVisible();
+    // The facts of the run are in the page twice (the summary and its compact form): one of them is enough.
+    await expect(
+      page.getByText("Six cores (6 vCPU, 12 GB)").first(),
+    ).toBeVisible();
     await expectQuiet();
   });
 
