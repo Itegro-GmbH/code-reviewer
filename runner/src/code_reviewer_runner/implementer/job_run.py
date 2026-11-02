@@ -40,6 +40,8 @@ from typing import Protocol
 from code_reviewer_runner.capabilities import ENGINE_IMPLEMENTER, engines_from_environment
 from code_reviewer_runner.dynamic_review.budget import BudgetLedger
 from code_reviewer_runner.job import (
+    IMPLEMENTER_AGENT_MEMORY_VARIABLE,
+    IMPLEMENTER_SANDBOX_PROOF_VARIABLE,
     IMPLEMENTER_WORK_DIR,
     IMPLEMENTER_WORK_DIR_VARIABLE,
     ImplementerInput,
@@ -72,9 +74,9 @@ _log = logging.getLogger(__name__)
 SIGTERM_BACKSTOP_SECONDS = 55.0
 MAX_LOG_TAIL_CHARS = 4096
 # The names the Dispatcher gives the container (`ImplementerEnvironmentName` of runner-api.v1.json).
-SANDBOX_PROOF_VARIABLE = "RUNNER_IMPLEMENTER_SANDBOX_PROOF"
+SANDBOX_PROOF_VARIABLE = IMPLEMENTER_SANDBOX_PROOF_VARIABLE
 SANDBOX_PROVEN = "proven"
-AGENT_MEMORY_VARIABLE = "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB"
+AGENT_MEMORY_VARIABLE = IMPLEMENTER_AGENT_MEMORY_VARIABLE
 # The least memory the agent's container is worth starting with: OpenCode, its own Docker daemon and
 # the tools of a repository's tests do not fit in less (measured, `docs/implementer.md`). The
 # Dispatcher computes the limit from the size of the VM and says 0 when it is below this.

@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
 """A prepared Implementer workspace over a file-system origin, for the git workspace tests (#762);
-not a test file. The tests run as an ordinary user, so "the agent" and "root" are the same user here
-and `AgentUser` names the current one."""
+not a test file. The tests run as an ordinary user and there is no reader container: `LocalAccess`
+runs git in the repository on the machine, the way the reader does in its container, so "the agent"
+and "root" are the same user here."""
 
-import os
 import subprocess
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
+from code_reviewer_runner.implementer.git_process import TRUSTED_PATH, GitProcess, Outcome
 from code_reviewer_runner.implementer.git_workspace import (
-    AgentUser,
     GitIdentity,
     GitWorkspace,
     WorkspaceLayout,
@@ -21,8 +22,47 @@ IDENTITY = GitIdentity(name="Code Review Implementer", email="implementer@exampl
 BRANCH = "implementer/a1b2c3"
 
 
-def _agent() -> AgentUser:
-    return AgentUser(uid=os.geteuid(), gid=os.getegid())
+def agent_environment(home: Path, git: str) -> dict[str, str]:
+    """The environment of the agent's git in these tests: the identity and git's config files out of
+    play."""
+    return {
+        "PATH": ":".join(dict.fromkeys([str(Path(git).parent), *TRUSTED_PATH.split(":")])),
+        "HOME": str(home),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_AUTHOR_NAME": IDENTITY.name,
+        "GIT_AUTHOR_EMAIL": IDENTITY.email,
+        "GIT_COMMITTER_NAME": IDENTITY.name,
+        "GIT_COMMITTER_EMAIL": IDENTITY.email,
+    }
+
+
+class LocalAccess:
+    """`RepoAccess` over a repository on this machine: git run in it as the current user."""
+
+    def __init__(self, repo: Path, git: str, home: Path) -> None:
+        self.repo = repo
+        self.git = git
+        self._env = agent_environment(home, git)
+        self._process = GitProcess(git, self._env["PATH"], home, "unused-token")
+
+    @property
+    def repo_source(self) -> str:
+        return str(self.repo)
+
+    def upload_pack(self) -> str:
+        return f"{self.git} upload-pack"
+
+    def run(self, args: Sequence[str], *, timeout: float) -> Outcome:
+        return self._process.run(args, env=self._env, cwd=self.repo, timeout=timeout)
+
+    def stream(
+        self, args: Sequence[str], consume: Callable[[bytes], None], *, timeout: float
+    ) -> Outcome:
+        return self._process.stream(
+            args, env=self._env, cwd=self.repo, consume=consume, timeout=timeout
+        )
 
 
 class Rig:
@@ -32,12 +72,9 @@ class Rig:
         self.base = base
         self.git = git
         self.origin = origin
-        self.layout = WorkspaceLayout(
-            work_dir=base / "work",
-            run_dir=base / "run",
-            agent_home=base / "home",
-        )
-        self.layout.agent_home.mkdir()
+        self.layout = WorkspaceLayout(work_dir=base / "work", run_dir=base / "run")
+        self.home = base / "home"
+        self.home.mkdir()
 
     def workspace(
         self,
@@ -55,8 +92,8 @@ class Rig:
         return GitWorkspace(
             spec,
             self.layout,
-            _agent(),
             IDENTITY,
+            LocalAccess(self.layout.work_dir / "repo", git or self.git, self.home),
             git=git or self.git,
             schemes=schemes,
             timeout=timeout,
@@ -73,7 +110,7 @@ def agent_git(workspace: GitWorkspace, *args: str) -> subprocess.CompletedProces
     return subprocess.run(
         [workspace.git, *args],
         cwd=workspace.repo,
-        env=workspace.agent_environment(),
+        env=agent_environment(workspace.layout.run_dir.parent / "home", workspace.git),
         capture_output=True,
         text=True,
         check=False,

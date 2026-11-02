@@ -32,7 +32,6 @@ from pathlib import Path
 from typing import Any
 
 from code_reviewer_runner.dynamic_review.self_check import SelfCheckFailed, SelfCheckReason
-from code_reviewer_runner.dynamic_review.static_isolation import SlotPorts
 
 from .agent_container import AGENT_IMAGE_REFERENCE, AGENT_RUNTIME
 from .docker_api import DOCKER_SOCKET, DockerApi, DockerError
@@ -128,14 +127,14 @@ def check_implementer_runner(
     *,
     work_dir: Path,
     user: tuple[int, int] | None,
-    ports: SlotPorts | None,
+    docker: bool,
     seams: ImplementerSeams = ImplementerSeams(),  # noqa: B008 - frozen, shared on purpose
 ) -> None:
     """Raise `SelfCheckFailed` unless every property of the Implementer holds. The Dynamic
     self-check (the rules, the pins) has passed before this runs. Cheap checks first."""
     if seams.which("git", TRUSTED_PATH) is None:
         raise _failed(SelfCheckReason.IMPLEMENTER_GIT_MISSING, "git is not installed")
-    if ports is None or ports.door is None or not seams.docker_answers():
+    if not docker or not seams.docker_answers():
         raise _failed(
             SelfCheckReason.IMPLEMENTER_DOCKER_UNAVAILABLE,
             "the container has no Docker of the VM that answers",

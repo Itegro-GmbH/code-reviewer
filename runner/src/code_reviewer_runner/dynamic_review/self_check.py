@@ -159,19 +159,14 @@ def root_filesystem_read_only(root: Path = Path("/")) -> bool:
         return False
 
 
-def startup_probe(uid: int, gid: int, proxy_port: int, *extra_ports: int) -> None:
-    """Run the network probe as the engine user against listeners of ours on the proxy port and,
-    in an Implementer container, on the egress proxy's port (#763).
+def startup_probe(uid: int, gid: int, proxy_port: int) -> None:
+    """Run the network probe as the engine user against a listener of ours on the proxy port.
 
-    No job exists at startup, so the supervisor itself plays the model proxy (and the egress
-    proxy) for the probe's "allowed" connections. A port somebody else holds fails the probe: the
-    slot is not clean.
+    No job exists at startup, so the supervisor itself plays the model proxy for the probe's
+    "allowed" connection. A port somebody else holds fails the probe: the slot is not clean.
     """
     with contextlib.ExitStack() as stack:
-        for port, taken in (
-            (proxy_port, "the model proxy port of the slot is not free"),
-            *((port, "the egress proxy port of the slot is not free") for port in extra_ports),
-        ):
+        for port, taken in ((proxy_port, "the model proxy port of the slot is not free"),):
             listener = stack.enter_context(socket.socket())
             # A connection that only waits out its time on the port (the proxy of a job that just
             # ended) does not make the port taken; a live listener of somebody else still fails
@@ -182,7 +177,7 @@ def startup_probe(uid: int, gid: int, proxy_port: int, *extra_ports: int) -> Non
                 listener.listen(1)
             except OSError:
                 raise IsolationError(taken) from None
-        verify_confinement(uid, gid, proxy_port, *extra_ports)
+        verify_confinement(uid, gid, proxy_port)
 
 
 def version_as_user(executable: Path, uid: int, gid: int) -> str:
@@ -445,7 +440,7 @@ def check_dynamic_runner(
             "the engine does not report the pinned version as the engine user",
         )
     try:
-        probe(uid, gid, ports.proxy, *ports.extra)
+        probe(uid, gid, ports.proxy)
     except IsolationError:
         raise SelfCheckFailed(
             SelfCheckReason.NETWORK_PROBE_FAILED,

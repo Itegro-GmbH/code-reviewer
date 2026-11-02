@@ -3,7 +3,6 @@
 """The pure parts of the Implementer's git workspace (#762): what a workspace refuses to be built
 with, how the runner's git is started for the final push, and what travels in an error."""
 
-import shlex
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -12,7 +11,6 @@ import pytest
 
 from code_reviewer_runner.implementer.git_process import GitProcess, Outcome
 from code_reviewer_runner.implementer.git_workspace import (
-    AgentUser,
     GitIdentity,
     GitWorkspace,
     WorkspaceLayout,
@@ -20,39 +18,26 @@ from code_reviewer_runner.implementer.git_workspace import (
 )
 from code_reviewer_runner.job import JobError
 from code_reviewer_runner.result import ErrorCode
+from workspace_support import LocalAccess
 
 SHA = "a" * 40
 
 
 def _workspace(tmp_path: Path, **overrides: object) -> GitWorkspace:
-    layout = WorkspaceLayout(
-        work_dir=tmp_path / "work",
-        run_dir=tmp_path / "run",
-        agent_home=tmp_path / "home",
-    )
+    layout = WorkspaceLayout(work_dir=tmp_path / "work", run_dir=tmp_path / "run")
     spec = WorkspaceSpec(
         clone_url=str(overrides.pop("clone_url", "https://github.com/acme/widgets.git")),
         token="ghs_token",
         base_branch="main",
         branch="implementer/a1",
     )
-    agent = overrides.pop("agent", AgentUser(uid=10101, gid=10101))
-    assert isinstance(agent, AgentUser)
     return GitWorkspace(
         spec,
         layout,
-        agent,
         GitIdentity("Implementer", "i@example.invalid"),
+        LocalAccess(layout.work_dir / "repo", "git", tmp_path),
         **overrides,  # type: ignore[arg-type]
     )
-
-
-# #762-T10
-def test_the_agent_is_never_root(tmp_path: Path) -> None:
-    for uid, gid in ((0, 10101), (10101, 0)):
-        with pytest.raises(JobError) as refused:
-            _workspace(tmp_path, agent=AgentUser(uid=uid, gid=gid))
-        assert refused.value.code is ErrorCode.IMPLEMENTER_CONFIG_INVALID
 
 
 # #762-T10
@@ -152,10 +137,10 @@ def _ready(tmp_path: Path) -> GitWorkspace:
     return workspace
 
 
-# The agent's branches are listed by git running as the agent's user and fetched through an
-# upload-pack that runs as the agent's user, with no new privileges, named on the command line;
-# root never has the repository as its directory.
-def test_the_agents_branches_are_listed_and_fetched_by_an_upload_pack_that_runs_as_the_agents_user(
+# The agent's branches are listed by git in the reader and fetched through the upload-pack the access
+# names on the command line (in production `exec_pipe`, which runs it in the reader); Control never
+# has the repository as its directory.
+def test_the_agents_branches_are_listed_and_fetched_through_the_upload_pack_of_the_access(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls = _listing_git(monkeypatch, {"implementer/a1": "a" * 40, "second": "b" * 40})
@@ -168,11 +153,8 @@ def test_the_agents_branches_are_listed_and_fetched_by_an_upload_pack_that_runs_
     assert len(reads) == 2
     for call in reads:
         (option,) = [argument for argument in call if argument.startswith("--upload-pack=")]
-        command = shlex.split(option.removeprefix("--upload-pack="))
-        assert command[0].endswith("setpriv")
-        assert "--reuid=10101" in command and "--regid=10101" in command
-        assert "--clear-groups" in command and "--no-new-privs" in command
-        assert command[-1] == "upload-pack" and command[-2].endswith("git")
+        assert option == "--upload-pack=git upload-pack"
+        assert call[-2] == str(workspace.repo), "the source is what the access names"
     assert [entry.name for entry in report.branches] == ["implementer/a1", "second"]
 
 
@@ -189,7 +171,7 @@ def test_the_fetch_asks_for_protocol_2_so_the_advertisement_is_for_one_ref_only(
     assert ("-c", "protocol.version=2") in pairs
 
 
-def test_the_listing_is_read_as_the_agents_user_in_its_repository_never_by_root(
+def test_the_listing_is_read_through_the_access_in_the_repository_never_by_the_runners_git(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     seen: list[tuple[list[str], str]] = []

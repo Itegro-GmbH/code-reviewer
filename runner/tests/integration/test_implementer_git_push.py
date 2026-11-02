@@ -37,7 +37,16 @@ from code_reviewer_runner.implementer.git_workspace import (
 from code_reviewer_runner.job import JobError
 from code_reviewer_runner.result import ErrorCode
 from git_support import TOKEN, HttpOrigin, raw, still_running
-from workspace_support import BRANCH, IDENTITY, Rig, agent_git, commit, head_of
+from workspace_support import (
+    BRANCH,
+    IDENTITY,
+    LocalAccess,
+    Rig,
+    agent_environment,
+    agent_git,
+    commit,
+    head_of,
+)
 
 SECONDS = 120.0
 
@@ -403,7 +412,7 @@ def test_the_runner_never_executes_the_config_hooks_or_filters_of_the_agent_repo
         (hooks / hook).chmod(0o755)
     (workspace.repo / ".gitattributes").write_text("* filter=trap\n")
     (workspace.repo / "a.txt").write_text("a\n")
-    environment = workspace.agent_environment()
+    environment = agent_environment(rig.home, rig.git)
     for arguments in (["add", "-A"], ["commit", "-qm", "x", "--no-verify"]):
         subprocess.run(
             [
@@ -779,8 +788,8 @@ def with_gate(
     workspace = GitWorkspace(
         git_workspace.WorkspaceSpec(rig.origin.url, TOKEN, "main", BRANCH),
         rig.layout,
-        git_workspace.AgentUser(os.geteuid(), os.getegid()),
         IDENTITY,
+        LocalAccess(rig.layout.work_dir / "repo", rig.git, rig.home),
         git=rig.git,
         schemes=("file",),
         before_push=gate,
@@ -1220,36 +1229,6 @@ def test_an_error_of_the_provider_that_is_no_refusal_of_the_access_is_provider_e
 
     assert failed == [1]
     assert branch(report, BRANCH).reason == REASON_PROVIDER_ERROR
-
-
-# -- nothing of the agent's user runs when the token goes out -------------------------------------
-
-
-def test_the_agents_user_is_swept_right_before_each_push_and_a_failed_sweep_is_counted(
-    rig: Rig, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    events: list[str] = []
-    workspace = rig.prepared()
-    commit(workspace, "a.txt")
-    make_branch(workspace, "two", "b.txt", start=workspace.start_commit)
-    real = workspace._mirror  # pyright: ignore[reportPrivateUsage]
-
-    def mirror(args: list[str], **options: Any) -> Outcome:
-        if "push" in args:
-            events.append("push")
-        return real(args, **options)
-
-    def sweep() -> bool:
-        events.append("sweep")
-        return len(events) > 2  # the first sweep fails
-
-    monkeypatch.setattr(workspace, "_mirror", mirror)
-    workspace._sweep = sweep  # pyright: ignore[reportPrivateUsage]
-
-    report = push(workspace)
-
-    assert events == ["sweep", "push", "sweep", "push"]
-    assert report.sweeps_failed == 1 and report.pushed_any
 
 
 def test_the_report_says_whether_the_task_branch_is_among_the_local_branches(rig: Rig) -> None:

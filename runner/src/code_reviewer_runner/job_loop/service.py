@@ -166,7 +166,7 @@ def decide_implementer(
         run_check(
             work_dir=work_dir,
             user=settings.dynamic_engine_user,
-            ports=settings.dynamic_ports,
+            docker=settings.implementer_docker,
         )
     except Exception as error:
         reason: Any = getattr(error, "reason", None)
