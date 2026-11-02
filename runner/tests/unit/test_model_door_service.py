@@ -10,6 +10,7 @@ Control is gone."""
 
 import json
 import time
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -22,6 +23,7 @@ from door_support import (
     start_document,
 )
 from native_job_support import API_KEY
+from passthrough_support import ScriptedUpstream, streamed
 
 from code_reviewer_runner.dynamic_review.budget import BudgetLedger
 from code_reviewer_runner.dynamic_review.passthrough.families import spec_of
@@ -113,6 +115,56 @@ def test_the_ledger_is_reported_on_the_pipe_while_the_door_runs_and_finally_when
     assert len(final.model_calls) == 2, "the model calls of the trace come with the final status"
     assert any(not status.final and status.model_used for status in reported), "and live before"
     assert [status.seq for status in reported] == sorted(status.seq for status in reported)
+
+
+def _wait_for_status(
+    door: Any, matches: Callable[[dict[str, Any]], bool], seconds: float = 3.0
+) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if any(line["t"] == "status" and matches(line) for line in list(door.lines)):
+            return True
+        time.sleep(0.01)
+    return False
+
+
+# #745-T02
+def test_the_status_is_said_when_a_call_is_reserved_and_settled_not_when_the_door_next_looks() -> (
+    None
+):
+    seen: list[bool] = []
+    holder: list[Any] = []
+
+    def at_the_provider() -> None:
+        # The call is open and about to leave: the door has already said so.
+        seen.append(_wait_for_status(holder[0], lambda line: line["openCalls"] == 1))
+
+    upstream = ScriptedUpstream(streamed(FAMILY, 1), on_send=at_the_provider)
+    # The door looks at its ledger once in 30 seconds: only the ledger's own changes can be heard.
+    door = run_door_here(upstream, poll=30.0)
+    holder.append(door)
+
+    status, _ = post(door.url)
+
+    assert status == 200
+    assert seen == [True], "the reservation was reported before the provider was asked"
+    assert _wait_for_status(door, lambda line: line["modelUsed"] and line["openCalls"] == 0), (
+        "and the settled call at once: a door killed right after the call still has it booked"
+    )
+    door.end_of_input()
+    door.wait()
+
+
+# #745-T02
+def test_a_refusal_the_ledger_records_is_said_at_once_too() -> None:
+    document = start_document(max_cost=0.000001)
+    door = run_door_here(document=json.dumps(document), poll=30.0)
+
+    post(door.url)
+
+    assert _wait_for_status(door, lambda line: line["failure"] is not None)
+    door.end_of_input()
+    door.wait()
 
 
 # #745-T02

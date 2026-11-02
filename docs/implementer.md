@@ -218,9 +218,11 @@ fails when the key or the bearer is in any request to the daemon.
 **How the key gets there.** On the door's stdin, once. It is in no argument, no environment variable and no file of the
 container, and `docker inspect` shows none of it. The door parses it by the rules the job itself was parsed by
 (`parse_model_access`), builds the ledger and the proxy, serves them on `10.213.77.2:10180` and answers `ready`. When Control
-is gone (stdin closes) the door ends itself, and with it the key. Control itself still holds the key in memory while it
-runs (it reads the job from the App), so it keeps scrubbing it from every output; what changed is that the agent's side
-of the VM no longer has a process that holds it and answers for it.
+is gone (stdin closes) the door ends itself, and with it the key. Control drops its copy of the hand-off once the door has the
+key (the job's `model_access`, emptied together with the `llm` section of the job document it shares). It still holds the key
+in `job.llm.api_key` on purpose, to scrub it from every output of the turn, and the text the job was read from and the
+interpreter's memory are not wiped (Python cannot wipe a string). So Control is not key-free: what changed is that the agent's
+side of the VM no longer has a process that holds the key and answers for it, and nothing the agent can reach reads Control's memory.
 
 **How cost and usage reach Control.** On the door's stdout, as JSON lines (`implementer/door/protocol.py`): the ledger as the door counts
 it (tokens, cost, whether a call is open, what stopped the turn), whenever it changes, and a last one with the model calls of the trace when the door stops.
@@ -239,7 +241,8 @@ exit, and reaches the door at the same address; that is why the address is fixed
 **Without the variable.** A container that is not given `RUNNER_IMPLEMENTER_MODEL_DOOR=docker` (an older Dispatcher, a test lane
 without Docker) runs the proxy in the Worker as before step 3. The Dispatcher sets it for every Implementer container, and the
 start-up check refuses to advertise `implementer` (`implementer_docker_unavailable`) when the variable is set and the VM's Docker does
-not answer.
+not answer, and (`implementer_docker_socket_open`) when the engine user, probed as that user at every start, can open the socket. Reviews are
+not touched by either: the container keeps `opencode` and the review engines, only `implementer` is left out.
 
 **Its only way out is the provider.** The door sits on the VM's default bridge, which routes to the internet and to the VM itself (its
 Docker gateway, its control port). So Control, before it tells the door anything, starts a one-shot container that shares the door's
@@ -263,6 +266,12 @@ the turn `setup_failed` with `model_door_unavailable` in the log: free, the mode
 the daemon gone) fails the turn with the sentence "the model door ended during the turn" and its exit code: `runner_error`, free, when no call was
 billed or open, and `agent_gave_up`, charged, when one was (the same rule the proxy in the Worker had: a turn that cost money never
 ends free). A call that was open when the door died leaves the cost **unknown** in the report (it is not made up: the usage carries no cost). What was committed is still pushed.
+
+**An oversized request body can end the turn.** The door has 256 MB and reads one request body at a time (up to 32 MiB, the
+provider's own limit); a body of very many tiny JSON blocks needs several times its size to parse, so such a body can get the door killed
+for its memory (exit code 137). Only the agent's own turn ends: the key stays in the door and the cost limit holds, so no limit on the
+size of a body is set (the owner's rule: guard money, key and exits). The outcome says so: "the container was killed for its memory (exit code 137);
+a request body too large for the door's memory ends the turn this way".
 
 ## Network in the agent phase
 

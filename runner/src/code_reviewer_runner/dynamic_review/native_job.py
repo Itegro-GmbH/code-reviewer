@@ -151,6 +151,7 @@ def build_native(
     clock: Callable[[], float] = time.monotonic,
     limits: Callable[[Decimal, str], DynamicLimits] | None = None,
     capability: str | None = None,
+    ledger_type: type[BudgetLedger] = BudgetLedger,
 ) -> NativeJob:
     """`build_native_job` for any job that carries a model entry, a cost policy and the model
     access (#764: the Implementer's turn is one). `limits`, when given, makes the ledger's limits
@@ -193,6 +194,7 @@ def build_native(
         reasoning=entry.model["reasoning"] is True,
         superseded=superseded,
         clock=clock,
+        ledger_type=ledger_type,
     )
     return NativeJob(entry, made, capability)
 

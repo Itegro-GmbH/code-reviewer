@@ -32,6 +32,7 @@ from code_reviewer_runner.job import JobError, parse_model_access
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 
 from ..limits import agent_limits
+from .ledger import AnnouncingLedger
 from .protocol import (
     MAX_COMMAND_BYTES,
     MAX_START_BYTES,
@@ -55,6 +56,8 @@ _log = logging.getLogger(__name__)
 POLL_SECONDS = 0.1
 # The door ends itself this long after the turn's deadline if nobody stopped it.
 LINGER_SECONDS = 600.0
+# A stop waits this long for a call that is still being settled, so that the final status holds it.
+DRAIN_SECONDS = 2.0
 _MIN_PORT = 1024
 _MAX_PORT = 32767
 _MAX_DEADLINE_SECONDS = 24 * 60 * 60
@@ -143,6 +146,7 @@ class ModelDoor:
         self._clock = clock
         self._native: NativeJob | None = None
         self._server: PassthroughServer | None = None
+        self._announce: Callable[[], None] | None = None
         self._model = ""
         self._seq = 0
         self._began = clock()
@@ -151,6 +155,14 @@ class ModelDoor:
     def url(self) -> str:
         assert self._server is not None
         return self._server.url
+
+    def announce_changes_to(self, announce: Callable[[], None]) -> None:
+        """`announce` is called whenever a call changes the ledger (`AnnouncingLedger`)."""
+        self._announce = announce
+
+    def _changed(self) -> None:
+        if self._announce is not None:
+            self._announce()
 
     def start(self) -> None:
         start = self._start
@@ -174,10 +186,13 @@ class ModelDoor:
                 clock=self._clock,
                 limits=limits,
                 capability=start.capability,
+                ledger_type=AnnouncingLedger,
             )
         except LimitError:
             raise DoorRefused(REFUSED_CONFIG_INVALID) from None
         self._model = llm.model
+        assert isinstance(self._native.ledger, AnnouncingLedger)
+        self._native.ledger.announce = self._changed
         try:
             self._server = PassthroughServer(self._native.run.proxy, *self._bind).start()
         except OSError:
@@ -212,7 +227,7 @@ class ModelDoor:
 
     def stop(self) -> None:
         if self._server is not None:
-            self._server.stop(drain_seconds=0.0)
+            self._server.stop(drain_seconds=DRAIN_SECONDS)
             self._server = None
 
 
@@ -233,8 +248,37 @@ def _significant(status: DoorStatus) -> tuple[object, ...]:
     )
 
 
+class _Reporter:
+    """Says `ready` and then the ledger on stdout, from any thread: the poll of `run_door` and the
+    request threads of the proxy (through `AnnouncingLedger`). One lock orders the lines and their
+    serial numbers; nothing is said before `ready`."""
+
+    def __init__(self, door: ModelDoor, stdout: TextIO) -> None:
+        self._door = door
+        self._stdout = stdout
+        self._lock = threading.Lock()
+        self._open = False
+        self._last: tuple[object, ...] | None = None
+
+    def ready(self) -> None:
+        with self._lock:
+            _emit(self._stdout, {"t": MESSAGE_READY})
+            self._open = True
+
+    def report(self, *, final: bool = False) -> None:
+        with self._lock:
+            if not self._open:
+                return
+            status = self._door.status(final=final)
+            marker = _significant(status)
+            if final or marker != self._last:
+                self._last = marker
+                _emit(self._stdout, status_line(status))
+
+
 def _read_stop(stdin: TextIO, stop: threading.Event) -> None:
-    """Sets `stop` on `{"op": "stop"}`, on the end of stdin and on anything unreadable."""
+    """Sets `stop` on `{"op": "stop"}`, on the end of stdin and on anything unreadable: whatever
+    ends this thread ends the door, so that a reader that died never leaves the key served."""
     try:
         while not stop.is_set():
             line = stdin.readline(MAX_COMMAND_BYTES + 1)
@@ -249,7 +293,8 @@ def _read_stop(stdin: TextIO, stop: threading.Event) -> None:
                 break
     except (OSError, ValueError):
         pass
-    stop.set()
+    finally:
+        stop.set()
 
 
 def run_door(
@@ -263,7 +308,10 @@ def run_door(
 ) -> int:
     """The door process: read the start document, serve, report the ledger, end. Returns the exit
     code: 0 for an end that was asked for (a stop, or Control gone), 2 for a door that could not
-    start (`refused` was printed)."""
+    start (`refused` was printed).
+
+    The ledger is reported when a call changes it (reserve, settle) and, as a safety net, when the
+    poll finds it changed."""
     first = stdin.readline(MAX_START_BYTES + 1)
     door: ModelDoor | None = None
     try:
@@ -276,19 +324,17 @@ def run_door(
     finally:
         # The start document held the key; nothing here needs the text again.
         first = ""
+    reporter = _Reporter(door, stdout)
+    door.announce_changes_to(reporter.report)
     stop = threading.Event()
     threading.Thread(target=_read_stop, args=(stdin, stop), daemon=True).start()
-    _emit(stdout, {"t": MESSAGE_READY})
-    last: tuple[object, ...] | None = None
+    reporter.ready()
     try:
         while not stop.wait(poll_seconds):
             if door.overdue():
                 break
-            status = door.status()
-            if (marker := _significant(status)) != last:
-                last = marker
-                _emit(stdout, status_line(status))
+            reporter.report()
     finally:
         door.stop()
-        _emit(stdout, status_line(door.status(final=True)))
+        reporter.report(final=True)
     return 0

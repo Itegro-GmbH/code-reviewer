@@ -72,7 +72,7 @@ Rules (the CR-29 decisions, kept by the Worker host `job_loop/host.py`; tests in
   (`RUNNER_IMPLEMENTER_WORK_DIR` set) and only after `implementer/startup.py` passed as well: `git`, `setpriv`, the
   egress port in the network rules, and the work volume present, prepared for the engine
   user (its home and temporary directory in it: the `chown` the profile expects) and exec-capable (a script is really run
-  there as the engine user), and, where the container starts the model door (`RUNNER_IMPLEMENTER_MODEL_DOOR`, #745), the VM's Docker answers. Each failure is a stable reason (`implementer_setpriv_missing`, `implementer_work_dir_not_exec`, `implementer_docker_unavailable`, ...)
+  there as the engine user), and, where the container starts the model door (`RUNNER_IMPLEMENTER_MODEL_DOOR`, #745), the VM's Docker answers to root and the engine user cannot open its socket (`implementer_docker_socket_open`). Each failure is a stable reason (`implementer_setpriv_missing`, `implementer_work_dir_not_exec`, `implementer_docker_unavailable`, ...)
   in the log and in the verdict. A Worker that did not advertise it refuses an implementer job with
   `implementer_engine_unavailable`. The job process of a turn (`implementer/job_run.py`) asks the job host whether the lease
   is still held every 30 s while the agent works, before the final push lists anything and once more right before each `git push`

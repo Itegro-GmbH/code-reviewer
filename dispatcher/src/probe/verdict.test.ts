@@ -227,7 +227,7 @@ describe("the probe verdict", () => {
       reasons: ["implementer_setpriv_missing"],
       passed: true,
     });
-    expect(IMPLEMENTER_REASONS).toHaveLength(8);
+    expect(IMPLEMENTER_REASONS).toHaveLength(9);
     expect(IMPLEMENTER_REASONS.every((r) => PROBE_REASONS.includes(r))).toBe(
       true,
     );

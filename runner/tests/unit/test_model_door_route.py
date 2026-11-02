@@ -39,7 +39,11 @@ from code_reviewer_runner.implementer.door.protocol import DoorFailure, DoorStat
 from code_reviewer_runner.implementer.door_ledger import DoorLedger
 from code_reviewer_runner.implementer.door_model import build_door_ledger
 from code_reviewer_runner.implementer.door_state import DoorEnd, DoorState
-from code_reviewer_runner.implementer.startup import ImplementerSeams, check_implementer_runner
+from code_reviewer_runner.implementer.startup import (
+    ImplementerSeams,
+    check_implementer_runner,
+    engine_user_can_open,
+)
 from code_reviewer_runner.job import (
     IMPLEMENTER_ENVIRONMENT_NAMES,
     IMPLEMENTER_MODEL_DOOR_VARIABLE,
@@ -149,7 +153,7 @@ def test_the_probe_of_a_door_container_asks_for_the_door_not_for_loopback(
 # -- the self-check -------------------------------------------------------------------------------
 
 
-def _check(ports: SlotPorts, *, answers: bool) -> None:
+def _check(ports: SlotPorts, *, answers: bool, engine_reaches_docker: bool = False) -> None:
     check_implementer_runner(
         work_dir=Path("/work"),
         user=(UID, UID),
@@ -161,6 +165,7 @@ def _check(ports: SlotPorts, *, answers: bool) -> None:
             runs_scripts_as=lambda directory, uid, gid: True,
             is_directory=lambda path: True,
             docker_answers=lambda: answers,
+            engine_reaches_docker=lambda uid, gid: engine_reaches_docker,
         ),
     )
 
@@ -178,7 +183,70 @@ def test_a_container_that_starts_the_door_needs_the_docker_of_the_vm() -> None:
 
 # #745-T11
 def test_a_container_without_a_door_never_asks_the_daemon() -> None:
-    _check(SlotPorts(10180, 10181, 10182), answers=False)
+    _check(SlotPorts(10180, 10181, 10182), answers=False, engine_reaches_docker=True)
+
+
+# #745-T11
+def test_a_container_whose_engine_user_can_open_the_docker_socket_does_not_advertise() -> None:
+    # Control is root on the VM through that socket: if the agent's user can open it, nothing else
+    # of the door holds. The refusal is checked at every start, not only by the VM check.
+    with pytest.raises(SelfCheckFailed) as failure:
+        _check(SlotPorts(10180, 10181, 10182, DOOR), answers=True, engine_reaches_docker=True)
+
+    assert failure.value.reason is SelfCheckReason.IMPLEMENTER_DOCKER_SOCKET_OPEN
+    assert failure.value.reason.value == "implementer_docker_socket_open"
+
+
+# #745-T11
+def test_a_container_without_a_door_does_not_look_at_the_socket_of_the_engine_user() -> None:
+    _check(SlotPorts(10180, 10181, 10182), answers=True, engine_reaches_docker=True)
+
+
+@pytest.fixture
+def listening_socket(tmp_path: Path) -> Any:
+    import socket
+
+    path = tmp_path / "docker.sock"
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(path))
+    server.listen(4)
+    yield path
+    server.close()
+
+
+# #745-T11
+def test_the_probe_as_the_engine_user_sees_a_socket_it_can_open(listening_socket: Path) -> None:
+    import os
+
+    assert engine_user_can_open(os.getuid(), os.getgid(), listening_socket) is True
+
+
+# #745-T11
+def test_the_probe_as_the_engine_user_sees_a_socket_that_is_not_there(tmp_path: Path) -> None:
+    import os
+
+    assert engine_user_can_open(os.getuid(), os.getgid(), tmp_path / "none.sock") is False
+
+
+# #745-T11
+def test_the_probe_as_the_engine_user_sees_a_socket_that_refuses_it(listening_socket: Path) -> None:
+    import os
+
+    if os.geteuid() == 0:
+        pytest.skip("root opens any socket; the refusal is for the engine user")
+    listening_socket.chmod(0o000)
+
+    assert engine_user_can_open(os.getuid(), os.getgid(), listening_socket) is False
+
+
+# #745-T11
+def test_a_probe_that_cannot_run_is_not_a_refusal(tmp_path: Path) -> None:
+    # Nothing proves the user cannot open it: the answer is "can", and the check fails closed.
+    import os
+
+    if os.geteuid() == 0:
+        pytest.skip("root can become any user, so the probe can run")
+    assert engine_user_can_open(2**31 - 2, 2**31 - 2, tmp_path / "none.sock") is True
 
 
 # -- the job --------------------------------------------------------------------------------------

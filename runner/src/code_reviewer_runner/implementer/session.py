@@ -30,7 +30,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from code_reviewer_runner.dynamic_review.adapter import (
     PINNED_ENGINE_VERSION,
@@ -191,6 +191,17 @@ class TurnModel:
         if self.server is not None:
             self.server.stop(drain_seconds=0.0)
             self.server = None
+
+
+def forget_model_access(access: dict[str, Any]) -> None:
+    """Empty the dict the model door was handed (`ImplementerInput.model_access`). It shares its
+    `llm` section with the parsed job document, which is emptied with it. What this cannot reach:
+    `job.llm.api_key`, kept on purpose so that the key is scrubbed from every output of the turn,
+    the text the job was read from, and the interpreter's memory (strings are not wiped)."""
+    llm = access.get("llm")
+    if isinstance(llm, dict):
+        cast("dict[str, Any]", llm).clear()
+    access.clear()
 
 
 class ShutdownRequested(JobError):
@@ -439,18 +450,23 @@ class ImplementerSession:
         model = TurnModel(spec.model_entry, ledger, capability, "")
         self._model = model
         port = self.launch.proxy_port if self.launch is not None else 10180
-        running = start_door(
-            model_access=access,
-            capability=capability,
-            deadline_seconds=self._deadline_seconds(),
-            port=port,
-            environment={
-                name: value
-                for name, value in self.environment.items()
-                if name == "RUNNER_DYNAMIC_MAX_COST_USD"
-            },
-            seams=self.seams.door,
-        )
+        try:
+            running = start_door(
+                model_access=access,
+                capability=capability,
+                deadline_seconds=self._deadline_seconds(),
+                port=port,
+                environment={
+                    name: value
+                    for name, value in self.environment.items()
+                    if name == "RUNNER_DYNAMIC_MAX_COST_USD"
+                },
+                seams=self.seams.door,
+            )
+        finally:
+            # The door has the key (or the turn ends without one): Control's copy of the hand-off,
+            # and the `llm` section of the job document it shares, are emptied.
+            forget_model_access(access)
         ledger.attach(running.state)
         model.door, model.url = running, running.url
         return model

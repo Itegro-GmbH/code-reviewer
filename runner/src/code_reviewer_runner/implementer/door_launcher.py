@@ -3,8 +3,12 @@
 """Control starts the model door through the VM's Docker (#745, step 3).
 
 The Worker container of an Implementer turn is the Control container: it keeps the git token and the
-push and supervises. It does not keep the model key beyond handing it over. This module is how it
-hands it over:
+push and supervises. The model key is the door's: Control hands it over and then drops its own copy
+of the hand-off (`session.forget_model_access`: the job's `model_access` and the `llm` section it
+shares). What Control still holds is `job.llm.api_key`, kept on purpose so that the key is scrubbed
+from every output of the turn, the text the job was read from, and whatever Python's memory has not
+yet reused: strings are not wiped. Nothing the agent can reach reads that memory (the engine is
+another user, from step 4 another container). This module is how Control hands the key over:
 
 1. It reads its own container from the daemon (the image to start the door from: the door is the
    Worker image with another entry point, so there is one image in the snapshot and one to
@@ -284,23 +288,33 @@ class RunningDoor:
         self._reader.start()
 
     def _read(self) -> None:
-        for raw in self._streams.lines():
-            try:
-                line: Any = json.loads(raw)
-            except ValueError:
-                continue
-            given = as_object(line)
-            kind = None if given is None else given.get("t")
-            if kind == MESSAGE_READY:
-                self.state.ready()
-            elif kind == MESSAGE_REFUSED:
-                reason = given.get("reason") if given is not None else None
-                self.state.refused(reason if isinstance(reason, str) else "unknown")
-            elif kind == MESSAGE_STATUS:
-                status = parse_status(line)
-                if status is not None:
-                    self.state.update(status)
-        self.state.ended(self._how_it_ended())
+        """Whatever ends this thread says the door ended: a reader that died without it would leave
+        the turn waiting on a door nobody reads (a line nested too deep for the parser is a
+        `RecursionError`, not a `ValueError`)."""
+        try:
+            for raw in self._streams.lines():
+                self._take(raw)
+        except Exception:
+            _log.warning("the model door's output could not be read to its end")
+        finally:
+            self.state.ended(self._how_it_ended())
+
+    def _take(self, raw: bytes) -> None:
+        try:
+            line: Any = json.loads(raw)
+        except (ValueError, RecursionError):
+            return
+        given = as_object(line)
+        kind = None if given is None else given.get("t")
+        if kind == MESSAGE_READY:
+            self.state.ready()
+        elif kind == MESSAGE_REFUSED:
+            reason = given.get("reason") if given is not None else None
+            self.state.refused(reason if isinstance(reason, str) else "unknown")
+        elif kind == MESSAGE_STATUS:
+            status = parse_status(line)
+            if status is not None:
+                self.state.update(status)
 
     def _how_it_ended(self) -> DoorEnd:
         code: int | None = None
@@ -413,6 +427,16 @@ def start_door(
         _cleanup(api, container, network, own, streams)
         raise _unavailable(f"the daemon refused a step ({error.status})") from None
     except JobError:
+        _cleanup(api, container, network, own, streams)
+        raise
+    except Exception:
+        # Anything else (an answer the client cannot read is a `ValueError`) leaves the same
+        # things behind and ends the same way: nothing is kept for a door that was not started.
+        _cleanup(api, container, network, own, streams)
+        raise _unavailable(
+            "a step of the start failed in a way the daemon did not explain"
+        ) from None
+    except BaseException:
         _cleanup(api, container, network, own, streams)
         raise
     state.wait_ready(seams.ready_seconds)

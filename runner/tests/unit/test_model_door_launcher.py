@@ -59,6 +59,7 @@ from code_reviewer_runner.implementer.door_launcher import (
     rules_document,
     start_door,
 )
+from code_reviewer_runner.implementer.door_state import DoorState
 from code_reviewer_runner.implementer.egress_config import EgressSettings
 from code_reviewer_runner.implementer.session import ImplementerSession, SessionSeams, classify
 from code_reviewer_runner.job import JobError, parse_implementer_input
@@ -430,6 +431,30 @@ def test_a_door_that_dies_on_start_names_its_exit_code(rig: Rig) -> None:
     assert "exit code 3" in error.value.detail
 
 
+# #745-T07
+def test_any_failure_of_a_step_takes_what_was_made_away_not_only_the_daemons_refusals(
+    rig: Rig,
+) -> None:
+    class AttachFails(DockerApi):
+        def attach(self, container: str) -> Any:
+            raise ValueError("a frame the client cannot read")
+
+    seams = DoorSeams(
+        api=lambda: AttachFails(str(rig.engine.socket_path), timeout=5.0),
+        hostname=rig.seams.hostname,
+        ready_seconds=1.0,
+        stop_seconds=1.0,
+    )
+
+    with pytest.raises(JobError) as error:
+        rig.start(seams=seams)
+
+    assert error.value.code is ErrorCode.SETUP_FAILED
+    assert "model_door_unavailable" in error.value.detail
+    assert rig.engine.networks == {}, "the network is gone"
+    assert rig.engine.container(DOOR_CONTAINER_NAME).removed, "and so is the container"
+
+
 # -- the door that is killed during the turn ------------------------------------------------------
 
 
@@ -443,6 +468,7 @@ def test_a_door_killed_before_any_call_ends_the_turn_free_and_named(rig: Rig) ->
     failure = door.state.failure()
     assert failure is not None and failure.code is ErrorCode.RUNNER_ERROR
     assert "model door" in failure.detail and "137" in failure.detail
+    assert "memory" in failure.detail, "137 is named for what it usually is, an out-of-memory kill"
     assert door.state.model_used is False
     code, detail = classify(failure, used_model=door.state.model_used)
     assert code is ErrorCode.RUNNER_ERROR, "free: the model was never used"
@@ -462,6 +488,8 @@ def test_a_door_killed_after_a_billed_call_ends_the_turn_charged_and_named(rig: 
     failure = door.state.failure()
     assert failure is not None
     assert "memory" in failure.detail, "an out-of-memory kill says so"
+    assert "137" in failure.detail, "with the exit code the kernel gives it"
+    assert "request body" in failure.detail, "and that an oversized body can end the turn so"
     assert door.state.model_used is True
     code, _ = classify(failure, used_model=True)
     assert code is ErrorCode.AGENT_GAVE_UP, (
@@ -469,6 +497,57 @@ def test_a_door_killed_after_a_billed_call_ends_the_turn_charged_and_named(rig: 
     )
     assert door.state.upstream_error is None, "the door is the cause, not the provider"
     door.stop()
+
+
+class _Lines:
+    """The attached streams of a door that says what a test makes it say."""
+
+    def __init__(self, lines: Any) -> None:
+        self._lines = lines
+
+    def lines(self) -> Any:
+        return self._lines()
+
+
+def _running_over(lines: Any) -> RunningDoor:
+    class Gone:
+        def inspect_container(self, name: str) -> dict[str, Any]:
+            raise DockerError(404, "no such container")
+
+    door = RunningDoor(
+        cast("Any", Gone()),
+        cast("Any", _Lines(lines)),
+        DoorState(),
+        container="door",
+        network=None,
+        own="",
+        port=10180,
+        seams=DoorSeams(),
+    )
+    door.begin()
+    return door
+
+
+# #745-T08
+def test_a_line_the_reader_cannot_take_does_not_leave_the_door_without_an_end() -> None:
+    # Nested deeper than the parser's stack: RecursionError, not ValueError. The reader used to die
+    # with the door's state never ended, so the turn waited on a door nobody read.
+    door = _running_over(lambda: iter([b"[" * 200_000]))
+
+    assert _wait(lambda: door.state.end is not None), "the reader still said the door ended"
+    assert door.state.lost is not None
+
+
+# #745-T08
+def test_a_stream_that_raises_still_ends_the_state() -> None:
+    def broken() -> Any:
+        yield b'{"t":"ready"}'
+        raise RuntimeError("the connection broke in a way nobody listed")
+
+    door = _running_over(broken)
+
+    assert _wait(lambda: door.state.end is not None)
+    assert door.state.is_ready
 
 
 # -- the session: the same flows as before, through the door --------------------------------------
@@ -515,6 +594,33 @@ def test_the_session_starts_its_model_at_the_door_and_the_agent_gets_the_door_an
     )
     assert API_KEY not in json.dumps(config), "the agent is handed the door and a bearer, no key"
     model.stop()
+
+
+# #745-T09
+def test_control_drops_its_copy_of_the_model_access_once_the_door_has_it(rig: Rig) -> None:
+    session = door_session(rig)
+    access = session.job.model_access
+    assert access is not None and API_KEY in json.dumps(access)
+
+    model = session._start_model()  # pyright: ignore[reportPrivateUsage]
+
+    assert API_KEY not in json.dumps(session.job.model_access), "the copy of the hand-off is gone"
+    assert access == {} and session.job.model_access == {}
+    assert API_KEY in session.secrets(), "the one copy that scrubs the outputs of the turn stays"
+    model.stop()
+
+
+# #745-T09
+def test_control_drops_its_copy_of_the_model_access_when_the_door_does_not_start_too(
+    rig: Rig,
+) -> None:
+    rig.engine.refuse["/containers/create"] = 500
+    session = door_session(rig)
+
+    with pytest.raises(JobError):
+        session._start_model()  # pyright: ignore[reportPrivateUsage]
+
+    assert session.job.model_access == {}
 
 
 # #745-T09

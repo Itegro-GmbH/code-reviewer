@@ -12,6 +12,9 @@ from code_reviewer_runner.result import ErrorCode
 
 from .door.protocol import DoorStatus
 
+# 128 + SIGKILL: what Docker reports for a container the kernel killed for its memory.
+KILLED_EXIT_CODE = 137
+
 
 @dataclass(frozen=True)
 class DoorEnd:
@@ -24,9 +27,23 @@ class DoorEnd:
     unexpected: bool
 
     def sentence(self) -> str:
-        how = "the container was killed for its memory" if self.out_of_memory else "the container"
+        """What the turn's outcome says. 137 is SIGKILL: the kernel's out-of-memory kill of the
+        door's 256 MB (Docker may not have flagged it) is by far its most likely cause, and the
+        one the agent can bring about, with a request body that is too large to read and parse
+        (the cost limit and the key are not touched by it, so no limit guards the size)."""
+        if self.out_of_memory:
+            how = "the container was killed for its memory"
+        elif self.exit_code == KILLED_EXIT_CODE:
+            how = "the container was killed, most likely for its memory"
+        else:
+            how = "the container stopped"
         code = "" if self.exit_code is None else f" (exit code {self.exit_code})"
-        return f"the model door ended during the turn: {how} stopped{code}"
+        cause = (
+            "; a request body too large for the door's memory ends the turn this way"
+            if self.out_of_memory or self.exit_code == KILLED_EXIT_CODE
+            else ""
+        )
+        return f"the model door ended during the turn: {how}{code}{cause}"
 
 
 class DoorState:
