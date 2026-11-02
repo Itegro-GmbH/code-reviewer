@@ -47,6 +47,7 @@ export const IMAGE_INPUT_PATHS = [
   "runner/uv.lock",
   "runner/.python-version",
   "runner/src",
+  "runner/docker/agent-init.sh",
   "runner/scripts/fetch_opencode.py",
   "runner/scripts/fetch_ripgrep.py",
   "runner/scripts/fetch_toolchain.py",

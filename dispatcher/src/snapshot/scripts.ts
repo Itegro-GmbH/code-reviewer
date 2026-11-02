@@ -19,12 +19,14 @@ export const STEPS = {
   startDaemon: "start_daemon",
   buildImage: "build_image",
   inspectImage: "inspect_image",
+  inspectAgentImage: "inspect_agent_image",
   cleanBuilder: "clean_builder",
   checkNoContainers: "check_no_containers",
   stopDaemon: "stop_daemon",
   scanFilesystem: "scan_filesystem",
   startDaemonCheck: "start_daemon_check",
   inspectRestoredImage: "inspect_restored_image",
+  inspectRestoredAgentImage: "inspect_restored_agent_image",
   probe: "probe",
   sysboxProbe: "sysbox_probe",
 } as const;
@@ -180,12 +182,23 @@ if ! DOCKER_BUILDKIT=1 docker build --file ${shellQuote(config.dockerfile)} --ta
   tail -n 40 ${PATHS.buildLog} >&2
   exit 1
 fi
+# The Implementer's agent image: the same Dockerfile, its other target. The stages both need are in the build cache.
+if ! DOCKER_BUILDKIT=1 docker build --file ${shellQuote(config.dockerfile)} --target ${shellQuote(config.agentTarget)} --tag ${shellQuote(config.agentImageTag)} . >> ${PATHS.buildLog} 2>&1; then
+  tail -n 40 ${PATHS.buildLog} >&2
+  exit 1
+fi
 `;
 }
 
 export function inspectImageScript(config: PipelineConfig): string {
   return `${STRICT}
 docker image inspect --format '{{.Id}}' ${shellQuote(config.imageTag)}
+`;
+}
+
+export function inspectAgentImageScript(config: PipelineConfig): string {
+  return `${STRICT}
+docker image inspect --format '{{.Id}}' ${shellQuote(config.agentImageTag)}
 `;
 }
 
@@ -466,7 +479,7 @@ const SYSBOX_PROBE_PORT = 38417;
  * `sysbox_inner_container_failed`, `sysbox_network_check_inconclusive`, `sysbox_network_not_isolated`.
  */
 export function sysboxProbeScript(config: PipelineConfig): string {
-  const image = shellQuote(config.sysboxProbeImage);
+  const image = shellQuote(config.agentImageTag);
   return `set -uo pipefail
 image=${image}
 port=${SYSBOX_PROBE_PORT}
@@ -490,7 +503,8 @@ if ! boot_error=$(${PATHS.sysboxPrepareInstalled} 2>&1 > /dev/null); then
 fi
 report ok boot
 
-if ! timeout 120 docker pull --quiet "$image" > /dev/null 2>&1; then
+# The image the Implementer ships is in the snapshot: nothing is pulled, so the proof does not depend on a registry.
+if ! docker image inspect "$image" > /dev/null 2>&1; then
   report fail sysbox_probe_image_unavailable
   finish
 fi
@@ -501,14 +515,14 @@ if ! docker network create --internal -o com.docker.network.bridge.gateway_mode_
   finish
 fi
 
-if ! docker run --detach --runtime=sysbox-runc --network "$iso" --name "$box" --entrypoint sh "$image" \
-     -c 'exec dockerd --host=unix:///var/run/docker.sock --tls=false --ipv6=false --ip6tables=false' > /dev/null 2>&1; then
+# The agent's container as the Implementer starts it: the image's own init, which starts the inner Docker and says so.
+if ! docker run --detach --runtime=sysbox-runc --network "$iso" --name "$box" "$image" > /dev/null 2>&1; then
   report fail sysbox_container_failed
   finish
 fi
 ready=
 for _ in $(seq 1 300); do
-  if docker exec "$box" docker info > /dev/null 2>&1; then ready=1; break; fi
+  if docker exec "$box" test -e /run/agent-ready > /dev/null 2>&1 && docker exec "$box" docker info > /dev/null 2>&1; then ready=1; break; fi
   sleep 0.2
 done
 if [ -z "$ready" ]; then
@@ -517,13 +531,12 @@ if [ -z "$ready" ]; then
 fi
 report ok inner_docker
 
-# The inner container's image is made from two files of the container itself: nothing is pulled a second time.
-inner=$(docker exec "$box" sh -c 'tar -C / -cf - bin/busybox lib/ld-musl-x86_64.so.1 | docker import - sbxp-inner > /dev/null && docker run --rm sbxp-inner /bin/busybox echo sysbox-inner-ok' 2> /dev/null)
-if [ "$inner" != "sysbox-inner-ok" ]; then
-  report fail sysbox_inner_container_failed
-else
-  report ok inner_container
-fi
+# The inner container's image is made from one static file of the container itself: nothing is pulled.
+inner=$(docker exec "$box" sh -c 'tar -C / -cf - usr/local/bin/docker-init | docker import - sbxp-inner > /dev/null && docker run --rm --entrypoint /usr/local/bin/docker-init sbxp-inner --version' 2> /dev/null)
+case "$inner" in
+  *"tini version"*) report ok inner_container ;;
+  *) report fail sysbox_inner_container_failed ;;
+esac
 
 # The control: a listener on the VM, reached from a plain --internal network through its bridge address.
 python3 -c 'import socket, time

@@ -369,10 +369,10 @@ describe("the Sysbox proof of the check VM", () => {
     expect(lines[0]).toBe("SYSBOX_PROBE fail sysbox_boot_failed");
   });
 
-  it("says the proof did not run, not that Sysbox is broken, when its image cannot be pulled", () => {
+  it("says the proof did not run, not that Sysbox is broken, when the agent image is not in the snapshot", () => {
     const { lines } = runProof({
       prepare: "exit 0",
-      docker: 'if [ "$1" = pull ]; then exit 1; fi; exit 0',
+      docker: 'if [ "$1" = image ]; then exit 1; fi; exit 0',
     });
 
     expect(lines).toEqual([
@@ -444,10 +444,10 @@ case "$1" in
         echo $((calls + 1)) > "$0.alive"
         if [ "$calls" -lt ${o.aliveCalls} ]; then exit 0; fi
         exit 1 ;;
-      docker) exit 0 ;;
+      docker | test) exit 0 ;;
       sh)
         case "$5" in
-          *"docker import"*) echo sysbox-inner-ok; exit 0 ;;
+          *"docker import"*) echo "tini version 0.19.0 - git.de40ad0"; exit 0 ;;
           *1.1.1.1*) exit ${o.boxOutsideNc} ;;
           *ping*) exit ${o.boxPing} ;;
           *) exit ${o.boxLoopNc} ;;
@@ -516,14 +516,16 @@ exit 0`;
     );
   });
 
-  it("runs the container with the Sysbox runtime on the network with no exit, by the digest of the configured image", () => {
+  it("runs the agent image, as the Implementer starts it, with the Sysbox runtime on the network with no exit", () => {
     const script = sysboxProbeScript(config);
 
     expect(script).toContain(
       "docker network create --internal -o com.docker.network.bridge.gateway_mode_ipv4=isolated",
     );
     expect(script).toContain("--runtime=sysbox-runc");
-    expect(script).toContain(shellQuote(config.sysboxProbeImage));
+    expect(script).toContain(shellQuote(config.agentImageTag));
+    // Nothing is pulled: the image is the one in the snapshot.
+    expect(script).not.toContain("docker pull");
     // The control network is a plain --internal one; without it a "blocked" would prove nothing.
     expect(script).toContain('docker network create --internal "$ctl"');
     expect(script).toContain("sysbox_network_check_inconclusive");
@@ -534,7 +536,7 @@ exit 0`;
     const script = sysboxProbeScript(config);
     expect(script.indexOf(PATHS.sysboxPrepareInstalled)).toBeGreaterThan(-1);
     expect(script.indexOf(PATHS.sysboxPrepareInstalled)).toBeLessThan(
-      script.indexOf("docker pull"),
+      script.indexOf("docker image inspect"),
     );
   });
 

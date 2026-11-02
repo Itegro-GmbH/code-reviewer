@@ -79,13 +79,14 @@ class SelfCheckReason(StrEnum):
     # Why `implementer` is not advertised on top of a passing Dynamic check (#765,
     # `implementer/startup.py`). They are in the verdict next to the others.
     IMPLEMENTER_GIT_MISSING = "implementer_git_missing"
-    IMPLEMENTER_SETPRIV_MISSING = "implementer_setpriv_missing"
-    IMPLEMENTER_EGRESS_RULES_MISSING = "implementer_egress_rules_missing"
     IMPLEMENTER_WORK_DIR_MISSING = "implementer_work_dir_missing"
-    IMPLEMENTER_WORK_DIR_NOT_PREPARED = "implementer_work_dir_not_prepared"
-    IMPLEMENTER_WORK_DIR_NOT_EXEC = "implementer_work_dir_not_exec"
-    # The container may start a model door (#745, step 3) and the VM's Docker does not answer.
+    # The container starts the model door, the agent's container and the reader through the VM's
+    # Docker (#745) and that Docker does not answer ...
     IMPLEMENTER_DOCKER_UNAVAILABLE = "implementer_docker_unavailable"
+    # ... has no `sysbox-runc` runtime, or the agent image of the golden snapshot is not in the VM
+    # (#745, step 4).
+    IMPLEMENTER_SYSBOX_MISSING = "implementer_sysbox_missing"
+    IMPLEMENTER_AGENT_IMAGE_MISSING = "implementer_agent_image_missing"
     # ... and the engine user can open the VM's Docker socket, which is root on the VM (#745).
     IMPLEMENTER_DOCKER_SOCKET_OPEN = "implementer_docker_socket_open"
 

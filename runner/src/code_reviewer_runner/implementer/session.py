@@ -2,26 +2,28 @@
 
 """One Implementer turn from the instruction to the result (#764).
 
-The prepared workspace (`git_workspace.py`, #762) and the egress setting (#763) come in; the model
-proxy, the engine and the agent's session are started here, and everything is ended here. The flow:
+The prepared workspace (`git_workspace.py`, #762) comes in; the model door, the agent's container
+and the engine are started here, and everything is ended here. The flow:
 
-1. The ledger and the passthrough proxy are made from the job's model entry and cost policy, as for
-   a native Dynamic job (`native_job.build_native`); the clock of the ledger is the job's time limit
-   less the grace kept for the end (`GRACE_SECONDS`).
-2. The engine starts as the engine user in `/work/repo`, with the generated configuration and the
-   closed environment. Nothing is pushed while it works: the agent may rewrite history, and the
-   one push is at the end (a VM that dies mid-turn loses the work).
+1. The **model door** starts (`door_launcher.py`): the key, the model pin and the cost limit are in
+   a container of their own. The ledger here reads what the door counts (`door_model.py`); the
+   clock of the ledger is the job's time limit less the grace kept for the end (`GRACE_SECONDS`).
+2. The **agent's container** starts (`agent_container.py`, #745 step 4): OpenCode as root, with its
+   own Docker, on the network whose only other member is the door. Control starts the engine in it
+   and drives it only outward, through the Docker daemon. Nothing is pushed while it works: the
+   agent may rewrite history, and the one push is at the end (a VM that dies mid-turn loses the
+   work).
 3. The instruction is sent as the one user message. When the turn ends, a working tree that is
    still dirty gets **one** more message in the same session (a fixed text); what is dirty after
-   that is committed by the system as the engine user, without a model call.
-4. Whatever ended the turn (the agent, the cost limit, the clock, a crash of the engine, a stop),
-   the engine and everything of its user are ended first, the leftover is committed (not on a stop
-   or a lost lease), and **all local branches of the agent's repository are pushed**
-   (`GitWorkspace.push_all`; never after a lost lease). The result reports each branch with its
-   outcome, and the commits and files of the form's branch, with the stable code of what ended the
-   turn.
+   that is committed by the system in the reader, without a model call.
+4. Whatever ended the turn (the agent, the cost limit, the clock, a crash or the memory kill of the
+   agent's container, a stop), the agent's container is killed first (everything in it is gone),
+   the leftover is committed (not on a stop or a lost lease), and **all local branches of the
+   agent's repository are pushed** (`GitWorkspace.push_all`; never after a lost lease). The result
+   reports each branch with its outcome, and the commits and files of the form's branch, with the
+   stable code of what ended the turn.
 
-Nothing steers the agent: the cost limit (the proxy refuses the next call) and the clock are the
+Nothing steers the agent: the cost limit (the door refuses the next call) and the clock are the
 only brakes.
 """
 
@@ -29,8 +31,7 @@ import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from code_reviewer_runner.dynamic_review.adapter import (
     PINNED_ENGINE_VERSION,
@@ -43,36 +44,22 @@ from code_reviewer_runner.dynamic_review.budget import (
     LimitError,
 )
 from code_reviewer_runner.dynamic_review.config import new_proxy_capability
-from code_reviewer_runner.dynamic_review.engine_user import EngineLaunch
 from code_reviewer_runner.dynamic_review.job_model_entry import (
     JobModelEntry,
     native_model_reference,
     native_provider_config,
 )
-from code_reviewer_runner.dynamic_review.model_door_route import (
-    MODEL_DOOR_ADDRESS,
-    MODEL_DOOR_MODE,
-    MODEL_DOOR_VARIABLE,
-)
-from code_reviewer_runner.dynamic_review.native_job import (
-    NativeJob,
-    UpstreamFactory,
-    build_native,
-)
-from code_reviewer_runner.dynamic_review.netguard import IsolationError
+from code_reviewer_runner.dynamic_review.model_door_route import MODEL_DOOR_ADDRESS
 from code_reviewer_runner.dynamic_review.passthrough.families import WireFamily, spec_of
-from code_reviewer_runner.dynamic_review.passthrough.server import PassthroughServer
-from code_reviewer_runner.dynamic_review.passthrough.upstream import HttpsUpstream
-from code_reviewer_runner.dynamic_review.static_isolation import ImplementerNetwork
+from code_reviewer_runner.dynamic_review.static_isolation import slot_ports
 from code_reviewer_runner.job import ImplementerInput, JobError
 from code_reviewer_runner.result import ErrorCode, Usage
 
-from .agent import AgentTurn, ImplementerAgent
+from .agent import AgentTurn, EngineRuntime, ImplementerAgent
+from .agent_container import AGENT_HOME, AGENT_REPO, AGENT_TMP, ENGINE_PORT
 from .config import build_engine_config, implementer_environment
 from .door_launcher import DoorSeams, RunningDoor, start_door
 from .door_model import build_door_ledger
-from .egress_config import EgressSettings, start_egress
-from .egress_proxy import EgressProxy
 from .git_workspace import (
     CONFIRM_PAUSE_SECONDS,
     CONFIRM_SECONDS,
@@ -86,7 +73,6 @@ from .history import CommitInfo, FileChange
 from .limits import MAX_AGENT_REQUEST_BYTES as MAX_AGENT_REQUEST_BYTES
 from .limits import MAX_RETURNED_BYTES as MAX_RETURNED_BYTES
 from .limits import MAX_TOOL_RESULT_BYTES as MAX_TOOL_RESULT_BYTES
-from .limits import agent_limits
 from .prompts import LEFTOVER_PROMPT, instructions_text
 from .turn_result import TurnResult, clip_summary
 
@@ -133,10 +119,7 @@ def deadline_seconds(time_limit: float, elapsed: float) -> float:
 class SessionSeams:
     """What the tests of the session replace; production leaves the defaults."""
 
-    upstream_for: UpstreamFactory = HttpsUpstream
-    popen: Any = None
     transport: Transport = _http_request
-    port_source: Callable[[], int] | None = None
     # How long, and how often, the final push asks a lease the host cannot confirm (a stop uses at
     # most `STOP_CONFIRM_SECONDS` of it).
     confirm_seconds: float = CONFIRM_SECONDS
@@ -147,13 +130,16 @@ class SessionSeams:
     leftover_seconds: float = LEFTOVER_SECONDS
     lease_poll_seconds: float = LEASE_POLL_SECONDS
     startup_seconds: float | None = None
-    scratch_dir: str | None = None
     clock: Callable[[], float] = time.monotonic
-    # Starts the egress proxy of a registries container (default `egress_config.start_egress`).
-    start_egress: Callable[[EgressSettings], EgressProxy | None] | None = None
     # How the model door is started and what it talks to (#745, step 3); the defaults are the VM's
     # Docker. A test brings a daemon of its own.
     door: DoorSeams = field(default_factory=DoorSeams)
+
+
+class AgentPlace(EngineRuntime, Protocol):
+    """The agent's container: made before the engine starts, ended with everything in it."""
+
+    def create(self) -> None: ...
 
 
 # How long the last push of a stop asks a lease the host cannot confirm: a stop has a minute in
@@ -167,30 +153,22 @@ _NO_LEFTOVER = frozenset({ErrorCode.LEASE_LOST, ErrorCode.RUNNER_SHUTDOWN})
 
 @dataclass
 class TurnModel:
-    """What a turn reaches the model through: the model entry, the ledger of the turn, the bearer
-    the agent presents and where it presents it. The proxy is in this process (`door` is None, the
-    Worker's own, as before step 3) or in a container of its own (the model door, #745)."""
+    """What a turn reaches the model through: the model entry, the ledger of the turn (which reads
+    what the door counts), the bearer the agent presents and where it presents it."""
 
     entry: JobModelEntry
     ledger: BudgetLedger
     capability: str
     url: str
     door: RunningDoor | None = None
-    native: NativeJob | None = None
-    server: PassthroughServer | None = None
 
     def upstream_error(self) -> ErrorCode | None:
-        """The code of the provider's last failed call, as the proxy that made the call kept it."""
-        if self.door is not None:
-            return self.door.state.upstream_error
-        return None if self.native is None else self.native.run.proxy.last_upstream_error
+        """The code of the provider's last failed call, as the door's proxy kept it."""
+        return None if self.door is None else self.door.state.upstream_error
 
     def stop(self) -> None:
         if self.door is not None:
             self.door.stop()
-        if self.server is not None:
-            self.server.stop(drain_seconds=0.0)
-            self.server = None
 
 
 def forget_model_access(access: dict[str, Any]) -> None:
@@ -264,8 +242,6 @@ def _classified(error: BaseException) -> tuple[ErrorCode, str]:
         return _implementer_code(error.code), error.detail
     if isinstance(error, EngineError | JobError):
         return _implementer_code(error.code), error.detail
-    if isinstance(error, IsolationError):
-        return ErrorCode.SETUP_FAILED, error.detail
     return ErrorCode.RUNNER_ERROR, "the turn could not be run"
 
 
@@ -279,19 +255,10 @@ def _implementer_code(code: ErrorCode) -> ErrorCode:
     return code
 
 
-def _not_kept(
-    names: list[str], leftover_lost: bool, rescued: str | None = None, unchecked: bool = False
-) -> str:
-    """The sentences at the end of the summary about what of the agent's work was not kept: the
-    names the engine loads that it touched, and changes in the working tree that could not be
-    committed."""
+def _not_kept(leftover_lost: bool, rescued: str | None = None, unchecked: bool = False) -> str:
+    """The sentences at the end of the summary about what of the agent's work was not kept: work
+    saved from a detached HEAD, and changes in the working tree that could not be committed."""
     parts: list[str] = []
-    if names:
-        parts.append(
-            f"[Not made: the agent created or changed {', '.join(names)}. These files are not "
-            "available to the Implementer and cannot be changed in a run, so nothing of that "
-            "change was kept.]"
-        )
     if rescued is not None:
         parts.append(
             "[Saved: work that was committed on no branch (a detached HEAD) is on the branch "
@@ -299,9 +266,8 @@ def _not_kept(
         )
     if unchecked:
         parts.append(
-            "[Not checked: a process of the agent could not be ended, so changes in the working "
-            "tree "
-            "that were not committed were not looked for.]"
+            "[Not checked: the agent's container could not be confirmed gone, so changes in the "
+            "working tree that were not committed were not looked for.]"
         )
     if leftover_lost:
         parts.append(
@@ -313,7 +279,7 @@ def _not_kept(
 
 class ImplementerSession:
     """One turn. Build it with a prepared workspace; `run()` never raises for a failed turn (the
-    result holds the code) and ends every process it started."""
+    result holds the code) and ends everything it started."""
 
     def __init__(
         self,
@@ -321,11 +287,9 @@ class ImplementerSession:
         *,
         workspace: GitWorkspace,
         command: Sequence[str],
-        egress: EgressSettings,
+        place: Callable[[], AgentPlace],
         environment: Mapping[str, str],
         started: float | None = None,
-        launch: EngineLaunch | None = None,
-        ripgrep: Path | None = None,
         seams: SessionSeams = SessionSeams(),  # noqa: B008 - frozen, shared on purpose
         should_stop: Callable[[], bool] = lambda: False,
         max_seconds: float | None = None,
@@ -333,10 +297,8 @@ class ImplementerSession:
         self.job = job
         self.workspace = workspace
         self.command = tuple(command)
-        self.egress = egress
+        self._place_factory = place
         self.environment = environment
-        self.launch = launch
-        self.ripgrep = ripgrep
         self.seams = seams
         self._clock = seams.clock
         self._started = self._clock() if started is None else started
@@ -350,8 +312,8 @@ class ImplementerSession:
         self._session_id: str | None = None
         self._model: TurnModel | None = None
         self._leftover_lost = False
-        # False when the sweep after the engine could not end every process of the engine user: then
-        # nothing is run as that user for the leftover (a survivor could be racing the tree).
+        # False when the agent's container could not be confirmed gone: then nothing is run in the
+        # repository for the leftover (a survivor could be racing the tree).
         self._engine_ended = True
         # The branch made for work committed on a detached HEAD, if there was such work.
         self._rescued: str | None = None
@@ -377,22 +339,29 @@ class ImplementerSession:
     def run(self) -> TurnResult:
         agent: ImplementerAgent | None = None
         model: TurnModel | None = None
-        egress: EgressProxy | None = None
+        place: AgentPlace | None = None
         try:
             model = self._start_model()
-            egress = self._start_egress()
-            agent = self._agent(model)
-            agent.start()
+            place = self._place_factory()
+            place.create()
+            agent = self._agent(model, place)
+            agent.start(ENGINE_PORT)
             self._session_id = agent.session_id
             self._work(agent)
         except Exception as error:
             self._stopped_by(error)
         finally:
-            ended = agent.stop(quick=self._ends_quickly()) if agent is not None else True
+            # The agent's container is killed, everything in it with it: no process of the agent
+            # can change the repository or call the door from here on.
+            ended = True
+            if agent is not None:
+                ended = agent.stop()
+            elif place is not None:
+                ended = place.stop()
             self._engine_ended = ended
             if not ended:
-                self._note("the engine user's processes could not all be ended")
-            if model is not None and model.door is not None:
+                self._note("the agent's container could not be confirmed gone")
+            if model is not None:
                 # No call can come any more: the door says its last word, the cost is final.
                 model.stop()
         try:
@@ -400,36 +369,9 @@ class ImplementerSession:
         finally:
             if model is not None:
                 model.stop()
-            if egress is not None:
-                egress.stop()
         return self._result()
 
-    def _door_wanted(self) -> bool:
-        """The container may start a model door (the Dispatcher says so with the VM's Docker socket
-        and `RUNNER_IMPLEMENTER_MODEL_DOOR`); otherwise the proxy runs in this process."""
-        return self.environment.get(MODEL_DOOR_VARIABLE, "").strip() == MODEL_DOOR_MODE
-
     def _start_model(self) -> TurnModel:
-        spec = self.job.implementer
-        deadline = self._deadline_seconds()
-        if self._door_wanted():
-            return self._start_door(deadline)
-        native = build_native(
-            spec.model_entry,
-            spec.cost,
-            self.job.llm,
-            deadline=deadline,
-            environment=self.environment,
-            upstream_for=self.seams.upstream_for,
-            clock=self._clock,
-            limits=lambda max_cost, reason: agent_limits(deadline, max_cost, reason),
-        )
-        model = TurnModel(spec.model_entry, native.ledger, native.capability, "", native=native)
-        self._model = model
-        model.url, model.server = self._serve(native)
-        return model
-
-    def _start_door(self, deadline: float) -> TurnModel:
         """The model door (#745, step 3): the key, the model pin and the cost limit go to a
         container of its own, and this process keeps a ledger that reads what the door counts."""
         spec = self.job.implementer
@@ -438,6 +380,7 @@ class ImplementerSession:
             raise JobError(
                 ErrorCode.IMPLEMENTER_CONFIG_INVALID, "the job has no model access to hand over"
             )
+        deadline = self._deadline_seconds()
         ledger = build_door_ledger(
             spec.model_entry,
             spec.cost,
@@ -449,13 +392,12 @@ class ImplementerSession:
         capability = new_proxy_capability()
         model = TurnModel(spec.model_entry, ledger, capability, "")
         self._model = model
-        port = self.launch.proxy_port if self.launch is not None else 10180
         try:
             running = start_door(
                 model_access=access,
                 capability=capability,
                 deadline_seconds=self._deadline_seconds(),
-                port=port,
+                port=slot_ports(self.environment).proxy,
                 environment={
                     name: value
                     for name, value in self.environment.items()
@@ -471,41 +413,14 @@ class ImplementerSession:
         model.door, model.url = running, running.url
         return model
 
-    def _start_egress(self) -> EgressProxy | None:
-        """The allowlist proxy of a registries container (#763), listening before the engine's
-        network is proven (the probe of `EngineLaunch.confine` reaches it). `none` starts
-        nothing."""
-        if self.egress.network is ImplementerNetwork.NONE:
-            return None
-        if self.launch is not None:
-            self.launch.egress_port = self.egress.port
-        starter = self.seams.start_egress or start_egress
-        try:
-            return starter(self.egress)
-        except OSError:
-            raise JobError(
-                ErrorCode.SETUP_FAILED, "the egress proxy port of the slot is not free"
-            ) from None
-
-    def _serve(self, native: NativeJob) -> tuple[str, PassthroughServer]:
-        port = self.launch.proxy_port if self.launch is not None else 0
-        try:
-            server = PassthroughServer(native.run.proxy, "127.0.0.1", port).start()
-            return server.url, server
-        except OSError:
-            raise JobError(
-                ErrorCode.SETUP_FAILED, "the model proxy port of the slot is not free"
-            ) from None
-
-    def _agent(self, model: TurnModel) -> ImplementerAgent:
+    def _agent(self, model: TurnModel, place: AgentPlace) -> ImplementerAgent:
         entry, proxy_url = model.entry, model.url
-        door_host = MODEL_DOOR_ADDRESS if model.door is not None else None
         family = WireFamily(entry.family)
         provider = native_provider_config(
             entry,
             base_url=spec_of(family).proxy_base_url(proxy_url),
             api_key=model.capability,
-            door_host=door_host,
+            door_host=MODEL_DOOR_ADDRESS,
         )
 
         def make_config(instructions_path: str) -> dict[str, Any]:
@@ -516,43 +431,22 @@ class ImplementerSession:
                 proxy_url=proxy_url,
                 capability=model.capability,
                 instructions_path=instructions_path,
-                door_host=door_host,
+                door_host=MODEL_DOOR_ADDRESS,
             )
 
-        home = str(self.workspace.layout.agent_home)
-        if self.launch is not None and self.launch.home != home:
-            raise JobError(
-                ErrorCode.IMPLEMENTER_CONFIG_INVALID,
-                "the agent's home of the workspace is not the engine user's home",
-            )
         options: dict[str, Any] = {}
-        if self.seams.popen is not None:
-            options["popen"] = self.seams.popen
-        if self.seams.port_source is not None:
-            options["port_source"] = self.seams.port_source
         if self.seams.startup_seconds is not None:
             options["startup_seconds"] = self.seams.startup_seconds
-        scratch = self.seams.scratch_dir or (self.launch.tmpdir if self.launch else None)
-        environment = implementer_environment(
-            self.workspace.agent_environment(),
-            home=home,
-            scratch_dir=scratch or home,
-            tools_dir=str(self.ripgrep.parent) if self.ripgrep is not None else None,
-            egress=self.egress,
-        )
         return ImplementerAgent(
             ledger=model.ledger,
+            runtime=place,
             command=self.command,
-            directory=str(self.workspace.repo),
+            directory=AGENT_REPO,
             make_config=make_config,
-            instructions=(INSTRUCTIONS_FILE, instructions_text(self.egress.network)),
-            environment=environment,
+            instructions=(INSTRUCTIONS_FILE, instructions_text()),
+            environment=implementer_environment(home=AGENT_HOME, scratch_dir=AGENT_TMP),
             model=entry.model_id,
             provider_id=entry.provider_id,
-            proxy_url=proxy_url,
-            scratch_dir=self.seams.scratch_dir,
-            launch=self.launch,
-            ripgrep=self.ripgrep,
             transport=self.seams.transport,
             **options,
         )
@@ -610,7 +504,9 @@ class ImplementerSession:
         quick = self._ends_quickly()
         if not self._engine_ended:
             self._unchecked = True
-            self._note("nothing was committed or rescued: a process of the engine user is left")
+            self._note(
+                "nothing was committed or rescued: the agent's container is not confirmed gone"
+            )
         else:
             try:
                 self._rescued = self.workspace.rescue_detached_head()
@@ -650,11 +546,6 @@ class ImplementerSession:
                 )
             else:
                 self._note("the local branches of the agent's repository could not be read")
-        if report.sweeps_failed:
-            self._note(
-                f"{report.sweeps_failed} pushes were made while a process of the engine user "
-                "was left"
-            )
         if report.invalid:
             self._note(f"{report.invalid} local branches have names that are not pushed")
         if report.overflow:
@@ -694,11 +585,10 @@ class ImplementerSession:
             # success, whatever else was pushed.
             error = (ErrorCode.PUSH_REJECTED, "the work could not be pushed")
         usage = self._usage()
-        touched = self._touched_engine_inputs()
         summary = clip_summary(
             self._summary,
             self.secrets(),
-            tail=_not_kept(touched, self._leftover_lost, self._rescued, self._unchecked),
+            tail=_not_kept(self._leftover_lost, self._rescued, self._unchecked),
         )
         return TurnResult(
             error_code=None if error is None else error[0],
@@ -716,14 +606,6 @@ class ImplementerSession:
             usage=usage,
             notes=tuple(self._notes),
         )
-
-    def _touched_engine_inputs(self) -> list[str]:
-        """The names the engine loads that the agent created or changed: none of it is kept, and
-        the person is told (a loss they do not hear about is a silent one)."""
-        present = self.workspace.engine_inputs_present()
-        if present:
-            self._note("not kept, outside the sparse checkout: " + ", ".join(present))
-        return present
 
     def _usage(self) -> Usage:
         if self._model is None:

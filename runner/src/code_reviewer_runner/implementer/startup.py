@@ -1,102 +1,58 @@
-# SPDX-License-Identifier: LicenseRef-Proprietary
+"""The start-up self-check of the Implementer engine (#765, #745 step 4).
 
-"""The start-up self-check of the Implementer engine and the work directory it needs (#765).
+`implementer` is advertised only after the Dynamic self-check passed (root supervisor, the
+container's rules, the probe: `dynamic_review/self_check.py`) and this one holds as well:
 
-`implementer` is advertised only after the Dynamic self-check passed (root supervisor, engine user,
-slot ports, network rules, pinned OpenCode and `rg`, the probe as the engine user:
-`dynamic_review/self_check.py`) and this one holds as well:
+* git is installed (Control makes the mirror and pushes with it);
+* the container has the VM's Docker (`RUNNER_IMPLEMENTER_MODEL_DOOR=docker` puts its socket in the
+  profile): the socket answers a ping, the daemon has the `sysbox-runc` runtime registered, and the
+  agent image of the golden snapshot is in the VM. Control starts the model door, the agent's
+  container and the reader through it;
+* the engine user, probed as that user at every start, cannot open that socket (Control is root on
+  the VM through it). Nothing runs as that user for the Implementer any more; the check stays
+  because the user still exists in the container;
+* the work directory is the volume of the container profile (the mirror and the repository live in
+  it).
 
-* git is installed and `setpriv` is (the final push reads the agent's repository through
-  `setpriv ... git upload-pack`);
-* a container whose network is `registries` has the egress port in its rules;
-* a container that starts the model door (`RUNNER_IMPLEMENTER_MODEL_DOOR`, #745) reaches the VM's
-  Docker: its socket answers a ping, and the engine user, probed as that user, cannot open it (the
-  socket is root on the VM; a probe that cannot run counts as "can open");
-* the work directory is the volume of the container profile: present, prepared for the engine user
-  (its home and its temporary directory in it, the CHOWN the profile expects of the Worker) and
-  exec-capable (the agent runs the repository's own scripts there, and a `noexec` mount would fail
-  every one of them).
+That the Sysbox of the snapshot is **proven** is not asked here: this check decides what the
+container can do, and the deploy canary relies on it; an unproven snapshot must not take
+`implementer` away from a deployment (reviews would wait behind it, #797). It is the job's gate
+(`job_run.check_sandbox`): the turn ends `sandbox_unproven`, free.
 
 Each failure is a `SelfCheckReason` of its own that the startup logs and the probe verdict names.
 None carries a value.
 """
 
-import contextlib
 import os
 import shutil
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from code_reviewer_runner.dynamic_review.self_check import SelfCheckFailed, SelfCheckReason
-from code_reviewer_runner.dynamic_review.static_isolation import ImplementerNetwork, SlotPorts
+from code_reviewer_runner.dynamic_review.static_isolation import SlotPorts
 
-from .docker_api import DOCKER_SOCKET, DockerApi
+from .agent_container import AGENT_IMAGE_REFERENCE, AGENT_RUNTIME
+from .docker_api import DOCKER_SOCKET, DockerApi, DockerError
 from .git_process import TRUSTED_PATH
-
-# The engine user's home and temporary directory live in the work volume: the agent installs a
-# repository's dependencies and runs their scripts, and the root file system is read-only while the
-# other tmpfs are `noexec`.
-HOME_NAME = "home"
-TMP_NAME = "tmp"
-_EXEC_PROBE_NAME = ".exec-probe.sh"
-_EXEC_PROBE_SECONDS = 20.0
 
 
 def _failed(reason: SelfCheckReason, detail: str) -> SelfCheckFailed:
     return SelfCheckFailed(reason, detail)
 
 
-def prepare_work_dir(work_dir: Path, uid: int, gid: int) -> None:
-    """Make the engine user's home and temporary directory in the work volume (idempotent). The
-    volume itself stays root's: the repository and the mirror are made by the git workspace. A
-    directory that is a link, or owned by somebody else, is refused (`OSError`)."""
-    for name in (HOME_NAME, TMP_NAME):
-        directory = work_dir / name
-        with contextlib.suppress(FileExistsError):
-            directory.mkdir(mode=0o700)
-        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fchown(descriptor, uid, gid)
-            os.fchmod(descriptor, 0o700)
-        finally:
-            os.close(descriptor)
+def _agent_runtime_present() -> bool:
+    return AGENT_RUNTIME in DockerApi().runtimes()
 
 
-def runs_scripts_as(work_dir: Path, uid: int, gid: int) -> bool:
-    """Whether the engine user can execute a script that lies in the work directory. A `noexec`
-    mount refuses it for everybody; the permission of the directories can refuse the user."""
-    script = work_dir / TMP_NAME / _EXEC_PROBE_NAME
+def _agent_image_present() -> bool:
     try:
-        script.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
-        os.chown(script, uid, gid)
-        os.chmod(script, 0o700)
-        # The runner is root and becomes the engine user; a process that already is that user
-        # (a test) changes nothing.
-        switch: dict[str, Any] = (
-            {"user": uid, "group": gid, "extra_groups": ()} if uid != os.geteuid() else {}
-        )
-        done = cast(
-            "subprocess.CompletedProcess[bytes]",
-            subprocess.run(
-                [str(script)],
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                timeout=_EXEC_PROBE_SECONDS,
-                check=False,
-                cwd=work_dir / HOME_NAME,
-                env={"PATH": TRUSTED_PATH},
-                **switch,
-            ),
-        )
-    except (OSError, subprocess.SubprocessError):
+        DockerApi().inspect_image(AGENT_IMAGE_REFERENCE)
+    except DockerError:
         return False
-    finally:
-        with contextlib.suppress(OSError):
-            script.unlink()
-    return done.returncode == 0
+    return True
 
 
 # Runs as the engine user: one `connect()` to the Docker socket. Fixed text, no input but the path
@@ -161,10 +117,10 @@ class ImplementerSeams:
     """What the tests of the check replace; production leaves the defaults."""
 
     which: Callable[[str, str], str | None] = lambda name, path: shutil.which(name, path=path)
-    prepare_work_dir: Callable[[Path, int, int], None] = prepare_work_dir
-    runs_scripts_as: Callable[[Path, int, int], bool] = runs_scripts_as
     is_directory: Callable[[Path], bool] = lambda path: path.is_dir() and not path.is_symlink()
     docker_answers: Callable[[], bool] = lambda: DockerApi().ping()
+    sysbox_registered: Callable[[], bool] = _agent_runtime_present
+    agent_image_present: Callable[[], bool] = _agent_image_present
     engine_reaches_docker: Callable[[int, int], bool] = engine_user_can_open
 
 
@@ -173,25 +129,26 @@ def check_implementer_runner(
     work_dir: Path,
     user: tuple[int, int] | None,
     ports: SlotPorts | None,
-    network: ImplementerNetwork,
     seams: ImplementerSeams = ImplementerSeams(),  # noqa: B008 - frozen, shared on purpose
 ) -> None:
     """Raise `SelfCheckFailed` unless every property of the Implementer holds. The Dynamic
-    self-check (the engine user, the rules, the pins) has passed before this runs. Cheap checks
-    first, the work directory last (it changes the volume)."""
+    self-check (the rules, the pins) has passed before this runs. Cheap checks first."""
     if seams.which("git", TRUSTED_PATH) is None:
         raise _failed(SelfCheckReason.IMPLEMENTER_GIT_MISSING, "git is not installed")
-    if seams.which("setpriv", TRUSTED_PATH) is None:
-        raise _failed(SelfCheckReason.IMPLEMENTER_SETPRIV_MISSING, "setpriv is not installed")
-    if network is ImplementerNetwork.REGISTRIES and (ports is None or ports.egress is None):
-        raise _failed(
-            SelfCheckReason.IMPLEMENTER_EGRESS_RULES_MISSING,
-            "the egress proxy port is not in the network rules",
-        )
-    if ports is not None and ports.door is not None and not seams.docker_answers():
+    if ports is None or ports.door is None or not seams.docker_answers():
         raise _failed(
             SelfCheckReason.IMPLEMENTER_DOCKER_UNAVAILABLE,
-            "the container may start the model door and the VM's Docker does not answer",
+            "the container has no Docker of the VM that answers",
+        )
+    if not seams.sysbox_registered():
+        raise _failed(
+            SelfCheckReason.IMPLEMENTER_SYSBOX_MISSING,
+            "the VM's Docker has no sysbox-runc runtime",
+        )
+    if not seams.agent_image_present():
+        raise _failed(
+            SelfCheckReason.IMPLEMENTER_AGENT_IMAGE_MISSING,
+            "the agent image of the golden snapshot is not in the VM",
         )
     if user is None:
         raise _failed(SelfCheckReason.NOT_A_DYNAMIC_RUNNER, "no engine user is configured")
@@ -200,20 +157,8 @@ def check_implementer_runner(
             SelfCheckReason.IMPLEMENTER_WORK_DIR_MISSING, "the work directory is not there"
         )
     uid, gid = user
-    if ports is not None and ports.door is not None and seams.engine_reaches_docker(uid, gid):
+    if seams.engine_reaches_docker(uid, gid):
         raise _failed(
             SelfCheckReason.IMPLEMENTER_DOCKER_SOCKET_OPEN,
             "the engine user can open the VM's Docker socket",
-        )
-    try:
-        seams.prepare_work_dir(work_dir, uid, gid)
-    except OSError:
-        raise _failed(
-            SelfCheckReason.IMPLEMENTER_WORK_DIR_NOT_PREPARED,
-            "the engine user's directories in the work directory cannot be made",
-        ) from None
-    if not seams.runs_scripts_as(work_dir, uid, gid):
-        raise _failed(
-            SelfCheckReason.IMPLEMENTER_WORK_DIR_NOT_EXEC,
-            "the engine user cannot run a script in the work directory",
         )

@@ -1,78 +1,79 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""The engine of one Implementer turn (#764): the pinned OpenCode server, driven over its local
-HTTP API, with the write tools.
+"""The engine of one Implementer turn (#764): the pinned OpenCode server, driven over its HTTP API,
+with the write tools.
 
 It has the skeleton of the Dynamic Review's adapter (`dynamic_review/adapter.py`) and reuses its
-parts: the engine user and its network rules (`EngineLaunch`), a private home, `opencode serve` on
-the slot's loopback port, the HTTP client, the event stream that feeds the tool audit, and the
-ledger behind the model proxy. What it does not have is anything review-shaped: no structured
-answer, no findings, no wrap-up above the wire. The agent works until it ends its turn; the ledger
-refuses the next model call when the cost limit or the clock is reached, and that is what ends it.
+parts: the HTTP client, the event stream that feeds the tool audit, and the ledger behind the model
+door. What is different is *where* the engine runs (#745, step 4): in the agent's container
+(`agent_container.py`), as root, with its own Docker. Control starts it and reaches its port through
+the Docker daemon only (`EngineRuntime`); the engine has no address of Control's. What it does not
+have is anything review-shaped: no structured answer, no findings, no wrap-up above the wire. The
+agent works until it ends its turn; the ledger refuses the next model call when the cost limit or
+the clock is reached, and that is what ends it.
 
 Nothing here steers the agent: no step limit, no plan. The cost limit and the clock are the brakes.
-Prompt caching is whatever the stock engine and the passthrough proxy do for Dynamic; nothing here
-sets, removes or rewrites a cache marker.
+Prompt caching is whatever the stock engine and the model door do for Dynamic; nothing here sets,
+removes or rewrites a cache marker.
 """
 
 import json
 import logging
-import os
-import shutil
-import socket
-import subprocess
-import tempfile
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from code_reviewer_runner.dynamic_review.adapter import (
     DEADLINE_TOLERANCE_SECONDS,
     EVENTS_CONNECT_SECONDS,
     REASON_EXITED,
-    START_ATTEMPTS,
     STARTUP_SECONDS,
     TURN_TIMEOUT_MARGIN_SECONDS,
     WATCH_INTERVAL_SECONDS,
     EngineClient,
     EngineError,
-    EngineExited,
     Transport,
     _http_request,  # pyright: ignore[reportPrivateUsage]
     answer_text,
-    register_engine,
     turn_end_note,
-    unregister_engine,
 )
 from code_reviewer_runner.dynamic_review.budget import BudgetLedger
 from code_reviewer_runner.dynamic_review.engine_events import EventReader
-from code_reviewer_runner.dynamic_review.engine_user import EngineLaunch
 from code_reviewer_runner.dynamic_review.tool_part_audit import ToolPartAudit
 from code_reviewer_runner.job_loop.jsonvalues import as_object
-from code_reviewer_runner.process_group import end_group, has_exited
 from code_reviewer_runner.result import ErrorCode
 
 from .config import IMPLEMENTER_AGENT, SESSION_TITLE
 
 _log = logging.getLogger(__name__)
-_SURVIVOR = (
-    "a process of the engine's dedicated user could not be ended; its network rules stay and the "
-    "next job on this container refuses to start until it is gone"
-)
+
+# Where the engine's configuration goes in the agent's container, and the port it serves on.
+CONFIG_DIRECTORY = "/etc/code-reviewer"
+CONFIG_NAME = "opencode.json"
 
 
-def _free_port() -> int:
-    """A free loopback port for an engine that has no slot (the unprivileged tests)."""
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
+class EngineRuntime(Protocol):
+    """Where the engine runs and how Control reaches it: the agent's container
+    (`agent_container.AgentContainer`), or a process of a test."""
 
+    def write_files(self, files: Mapping[str, tuple[bytes, int]]) -> None:
+        """Put files (name -> (bytes, mode)) into the engine's configuration directory."""
+        ...
 
-def _port_of(url: str) -> int:
-    """The port of an `http://127.0.0.1:<port>` address the runner itself built."""
-    return int(url.rsplit(":", 1)[-1].split("/", 1)[0])
+    def start_engine(self, argv: list[str], environment: Mapping[str, str]) -> str:
+        """Start the engine and return the address Control reaches its HTTP port at."""
+        ...
+
+    def engine_running(self) -> bool: ...
+
+    def engine_end_note(self) -> str | None:
+        """What is known of how the engine's place ended by itself (None: it did not)."""
+        ...
+
+    def stop(self) -> bool:
+        """End the engine and everything of the agent's, and say whether nothing is left."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,7 @@ class ImplementerAgent:
         self,
         *,
         ledger: BudgetLedger,
+        runtime: EngineRuntime,
         command: Sequence[str],
         directory: str,
         make_config: Callable[[str], Mapping[str, Any]],
@@ -101,16 +103,9 @@ class ImplementerAgent:
         environment: Mapping[str, str],
         model: str,
         provider_id: str,
-        proxy_url: str,
-        scratch_dir: str | None = None,
-        launch: EngineLaunch | None = None,
-        ripgrep: Path | None = None,
-        require_ripgrep: bool = True,
         startup_seconds: float = STARTUP_SECONDS,
         events_connect_seconds: float = EVENTS_CONNECT_SECONDS,
         transport: Transport = _http_request,
-        port_source: Callable[[], int] = _free_port,
-        popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
     ) -> None:
         self.ledger = ledger
         self.command = tuple(command)
@@ -119,34 +114,17 @@ class ImplementerAgent:
         self.session_id: str | None = None
         # The configuration the engine was given (set by `start`).
         self.config: dict[str, Any] = {}
-        self.launch = launch
+        self._runtime = runtime
         # The configuration as a function of the path of the instruction file, which is only known
-        # where the file is written (the engine user's directory, or the scratch directory).
+        # where the file is written (the engine's configuration directory).
         self._make_config = make_config
         # (file name, text): the runner's addition to the stock prompt, written next to the config.
         self._instructions = instructions
         self._environment = dict(environment)
         self._provider_id = provider_id
-        self._proxy_url = proxy_url
-        self._ripgrep = ripgrep
-        self._require_ripgrep = require_ripgrep
         self._startup_seconds = startup_seconds
         self._events_connect_seconds = events_connect_seconds
         self._transport = transport
-        self._port_source = port_source
-        self._popen = popen
-        # The engine's own private directory: its config, and where its temporary files live when
-        # there is no dedicated user (the unprivileged tests). With a user, the scratch directory is
-        # the job's and the supervisor removes it with the job's lifetime.
-        self._scratch = (
-            Path(scratch_dir)
-            if scratch_dir
-            else Path(launch.tmpdir)
-            if launch
-            else Path(tempfile.mkdtemp(prefix="cr-implementer-"))
-        )
-        self._owns_scratch = launch is None and scratch_dir is None
-        self._process: subprocess.Popen[bytes] | None = None
         self._client: EngineClient | None = None
         self._events: EventReader | None = None
         # How long each message call took, in seconds on the ledger's clock.
@@ -154,70 +132,48 @@ class ImplementerAgent:
 
     # -- process --------------------------------------------------------------
 
-    def start(self) -> None:
+    def start(self, port: int) -> None:
         """Write the trusted config, start the engine, wait for it to be healthy and open the one
-        session. Raises `EngineError`, `LimitError` or `IsolationError`; the caller calls
-        `stop()`."""
+        session. Raises `EngineError` or `LimitError`; the caller calls `stop()`."""
         self.ledger.check_deadline()
         name, text = self._instructions
-        if self.launch is not None:
-            written = self.launch.write_file(name, text)
-            config = dict(self._make_config(str(written)))
-            config_path = self.launch.write_config(config)
-        else:
-            self._scratch.mkdir(parents=True, exist_ok=True)
-            os.chmod(self._scratch, 0o700)
-            written = self._scratch / name
-            written.write_text(text, encoding="utf-8")
-            os.chmod(written, 0o600)
-            config = dict(self._make_config(str(written)))
-            config_path = self._scratch / "opencode.json"
-            # The config carries the job's proxy capability: owner-only.
-            descriptor = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                stream.write(json.dumps(config))
+        config = dict(self._make_config(f"{CONFIG_DIRECTORY}/{name}"))
         self.config = config
+        self._runtime.write_files(
+            {
+                name: (text.encode("utf-8"), 0o644),
+                # The config carries the job's bearer for the model door: owner-only.
+                CONFIG_NAME: (json.dumps(config).encode("utf-8"), 0o600),
+            }
+        )
         environment = dict(self._environment)
         # The one file the engine reads its configuration from; `OPENCODE_CONFIG_DIR` is never set
         # (it makes the engine install a plugin package from the registry).
-        environment["OPENCODE_CONFIG"] = str(config_path)
-        if self._require_ripgrep and not self._verified_ripgrep_leads(environment["PATH"]):
-            raise EngineError(
-                ErrorCode.DYNAMIC_ENGINE_UNAVAILABLE,
-                "no verified ripgrep on the engine search path",
-            )
-        client = self._start_engine(environment)
+        environment["OPENCODE_CONFIG"] = f"{CONFIG_DIRECTORY}/{CONFIG_NAME}"
+        url = self._runtime.start_engine(
+            [
+                *self.command,
+                "serve",
+                "--hostname",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--print-logs",
+            ],
+            environment,
+        )
+        client = EngineClient(
+            url,
+            self.directory,
+            transport=self._transport,
+            provider_id=self._provider_id,
+            agent=IMPLEMENTER_AGENT,
+            session_title=SESSION_TITLE,
+        )
+        client.wait_healthy(self._startup_seconds, self._is_running)
         self._client = client
         self.session_id = client.create_session()
         self._open_audit(client, self.session_id)
-
-    def _start_engine(self, environment: dict[str, str]) -> EngineClient:
-        # With a dedicated user the port is the slot's fixed one (the static network rules name
-        # it); without, a free port is picked and a stranger taking it makes the engine exit, which
-        # is tried again. An answer is only trusted while our own process is alive.
-        for attempt in range(START_ATTEMPTS):
-            port = self._port_source() if self.launch is None else self.launch.engine_port
-            if self.launch is not None:
-                self.launch.confine(_port_of(self._proxy_url), port)
-            self._spawn(environment, port)
-            client = EngineClient(
-                f"http://127.0.0.1:{port}",
-                self.directory,
-                transport=self._transport,
-                provider_id=self._provider_id,
-                agent=IMPLEMENTER_AGENT,
-                session_title=SESSION_TITLE,
-            )
-            try:
-                client.wait_healthy(self._startup_seconds, self._is_running)
-                self._require_own_listener(port)
-            except EngineExited:
-                self._end_process()
-                if attempt + 1 == START_ATTEMPTS:
-                    raise
-                continue
-            return client
-        raise EngineExited()  # unreachable: the last attempt raises
 
     def _open_audit(self, client: EngineClient, session_id: str) -> None:
         """The audit of the engine's tool parts runs on its event stream beside the turns: it
@@ -228,74 +184,17 @@ class ImplementerAgent:
         events.start(self._events_connect_seconds)
         self._events = events
 
-    def _verified_ripgrep_leads(self, search_path: str) -> bool:
-        """The verified `rg` is an executable file and the first `rg` on the engine's PATH."""
-        if self._ripgrep is None or not os.access(self._ripgrep, os.X_OK):
-            return False
-        return shutil.which("rg", path=search_path) == str(self._ripgrep)
-
-    def _require_own_listener(self, port: int) -> None:
-        if self.launch is None or self.launch.owns_listener(port):
-            return
-        raise EngineError(
-            ErrorCode.DYNAMIC_ENGINE_UNAVAILABLE, "the engine port is not held by the engine user"
-        )
-
-    def _spawn(self, environment: dict[str, str], port: int) -> None:
-        argv = [*self.command, "serve", "--hostname", "127.0.0.1", "--port", str(port)]
-        options: dict[str, Any] = self.launch.spawn_options() if self.launch else {}
-        try:
-            process = self._popen(
-                [*argv, "--print-logs"],
-                env=environment,
-                cwd=self.directory,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-                **options,
-            )
-        except OSError:
-            raise EngineError(
-                ErrorCode.DYNAMIC_ENGINE_UNAVAILABLE, "the engine could not be started"
-            ) from None
-        self._process = process
-        register_engine(process.pid, self.launch)
-
     def _is_running(self) -> bool:
-        # Looking must not reap the engine: while its group is alive its id has to stay ours.
-        return self._process is not None and not has_exited(self._process)
+        return self._runtime.engine_running()
 
-    def stop(self, *, quick: bool = False) -> bool:
-        """End the audit, the whole process group and everything the engine user still runs. True
-        when nothing of that user is left (always True without a dedicated user). Safe to call
-        twice. The commit of leftovers and the push come after this: no process of the agent can
-        change the working tree from here on. `quick`: no wait for the engine to leave by itself
-        (a stop of the runner has seconds, not minutes)."""
+    def stop(self) -> bool:
+        """End the audit and the agent's place with everything in it. True when nothing is left.
+        Safe to call twice. The commit of leftovers and the push come after this: no process of the
+        agent can change the repository from here on."""
         if self._events is not None:
             self._events.stop()
             self._events = None
-        self._end_process(quick=quick)
-        clean = True
-        if self.launch is not None:
-            unregister_engine(None, self.launch)
-            clean = self.launch.close()
-            if not clean:
-                _log.warning(_SURVIVOR)
-        elif self._owns_scratch:
-            shutil.rmtree(self._scratch, ignore_errors=True)
-        return clean
-
-    def _end_process(self, *, quick: bool = False) -> None:
-        process = self._process
-        if process is not None:
-            # The engine leads its own session, so its pid is its process group id. Off the
-            # registry first, then the group is ended and the leader reaped last.
-            unregister_engine(process.pid, None)
-            end_group(process, 0.0 if quick else 5.0)
-            if self.launch is not None:
-                self.launch.sweep()  # a helper that left the group is still the user's process
-        self._process = None
+        return self._runtime.stop()
 
     @property
     def running(self) -> bool:
@@ -370,11 +269,11 @@ class ImplementerAgent:
         if failure is not None:
             raise failure
 
-    @staticmethod
-    def _exited() -> EngineError:
+    def _exited(self) -> EngineError:
+        note = self._runtime.engine_end_note()
         return EngineError(
             ErrorCode.DYNAMIC_ENGINE_UNAVAILABLE,
-            f"{REASON_EXITED}: the engine process ended during its turn",
+            note or f"{REASON_EXITED}: the engine process ended during its turn",
         )
 
     @staticmethod

@@ -19,11 +19,12 @@ describe("the pipeline configuration", () => {
     expect(config.dockerVersion).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
-  it("pins Sysbox to a release and its checksum, and the proof's image to a digest", () => {
+  it("pins Sysbox to a release and its checksum, and builds the agent image the proof runs", () => {
     const config = resolveConfig();
     expect(config.sysboxVersion).toBe("0.7.1");
     expect(config.sysboxSha256).toMatch(/^[0-9a-f]{64}$/);
-    expect(config.sysboxProbeImage).toMatch(/@sha256:[0-9a-f]{64}$/);
+    expect(config.agentTarget).toBe("agent");
+    expect(config.agentImageTag).toBe("code-reviewer-agent:golden");
   });
 
   it.each([
@@ -40,8 +41,8 @@ describe("the pipeline configuration", () => {
     ["sysboxVersion", "0.7.1; reboot"],
     ["sysboxSha256", "9d6d5484"],
     ["sysboxSha256", "G".repeat(64)],
-    ["sysboxProbeImage", "docker.io/library/docker:dind"], // a tag is not content: only a digest is accepted
-    ["sysboxProbeImage", "docker@sha256:abc"],
+    ["agentTarget", "agent --privileged"],
+    ["agentImageTag", "tag with space"],
     ["keep", 0],
     ["keep", 11],
     ["keep", 1.5],
