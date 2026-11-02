@@ -6,9 +6,16 @@ The engine is hostile: it is driven by an untrusted model that reads untrusted r
 A body that names the job's model and a small output cap is not yet a body the job may send: the
 provider would also serve server-side tools (web search, code execution, MCP servers), fetch the
 URL in an image part, bill several choices for one request or route to another model. So the body
-is walked against a closed schema of exactly what the pinned engine sends, and anything else is
-`request_not_allowed`. The base of every case here is a body the real pinned OpenCode sent
+is walked against a closed schema of what protects money, the key and the way out, and anything
+else is `request_not_allowed`. The base of every case here is a body the real pinned OpenCode sent
 (`fakes/wire/engine_requests.json`, captured by the engine test); each case changes one thing.
+
+**The conversation is opaque** (a deliberate decision of the owner, #810): what is inside
+`messages`, `input`, `contents`, `system` and `systemInstruction` is the engine's and the
+provider's business.
+The first closed walk refused a healthy second call of a real Sonnet run because the SDK replays the
+`caller` of a `tool_use` block. The closed items below (top-level keys, tools, the model pin, the
+output cap, `stream`, the numbers) each have a test, and the mutation checks of the PR break them.
 """
 
 import copy
@@ -144,6 +151,14 @@ TOP_LEVEL_FORBIDDEN: dict[str, Any] = {
     "logprobs": True,
     "safetySettings": [],
     "unknown_future_field": 1,
+    # Messages options that change what is paid or where data goes (#810).
+    "context_management": {"edits": [{"type": "clear_tool_uses_20250919"}]},
+    "speed": "fast",
+    "inference_geo": "us",
+    "output_config": {"effort": "max"},
+    "cache_control": {"type": "ephemeral", "ttl": "1h"},
+    "fallbacks": ["other-model"],
+    "stop_sequences": ["x"],
 }
 
 
@@ -269,6 +284,12 @@ def test_tools_that_are_not_a_list_of_objects_are_refused(family: WireFamily) ->
 # -- B1: content parts --
 
 URL = "https://evil.example/leak.png"
+HOLDER = {
+    WireFamily.OPENAI_CHAT: "messages",
+    WireFamily.OPENAI_RESPONSES: "input",
+    WireFamily.ANTHROPIC_MESSAGES: "messages",
+    WireFamily.GOOGLE: "contents",
+}
 
 
 def _chat_part(part: dict[str, Any]) -> Mutation:
@@ -330,17 +351,17 @@ PARTS: dict[WireFamily, list[Mutation]] = {
 }
 
 
-# #550-B1-S09
+# #810-S09 (was #550-B1-S09: every one of these was refused; the conversation is opaque now)
 @pytest.mark.parametrize(
     ("family", "index"),
     [(family, index) for family, parts in PARTS.items() for index in range(len(parts))],
 )
-def test_a_content_part_that_is_not_text_or_a_tool_exchange_is_refused(
+def test_a_content_part_of_any_kind_inside_the_conversation_is_the_providers_business(
     family: WireFamily, index: int
 ) -> None:
     document = captured(family)
     PARTS[family][index](document)
-    assert refused(family, document).code is RefusalCode.REQUEST_NOT_ALLOWED
+    assert admit(family, document).body
 
 
 # #550-B1-S10
@@ -362,17 +383,12 @@ def test_no_url_reaches_the_provider_in_a_part_even_inside_the_tool_exchange(
     assert admit(family, document).body
 
 
-# #550-B1-S11
+# #810-S11 (was #550-B1-S11)
 @pytest.mark.parametrize("family", FAMILIES)
-def test_a_message_with_a_role_or_key_the_engine_does_not_use_is_refused(
+def test_a_message_with_a_role_or_key_the_engine_does_not_use_is_the_providers_business(
     family: WireFamily,
 ) -> None:
-    holder = {
-        WireFamily.OPENAI_CHAT: "messages",
-        WireFamily.OPENAI_RESPONSES: "input",
-        WireFamily.ANTHROPIC_MESSAGES: "messages",
-        WireFamily.GOOGLE: "contents",
-    }[family]
+    holder = HOLDER[family]
     mutations: list[Callable[[dict[str, Any]], object]] = [
         lambda message: message.__setitem__("role", "root"),
         lambda message: message.__setitem__("attachments", [URL]),
@@ -381,18 +397,13 @@ def test_a_message_with_a_role_or_key_the_engine_does_not_use_is_refused(
     for mutate in mutations:
         document = captured(family)
         mutate(next(message for message in document[holder] if "role" in message))
-        assert refused(family, document).code is RefusalCode.REQUEST_NOT_ALLOWED
+        assert admit(family, document).body
 
 
 # #550-B1-S12
 @pytest.mark.parametrize("family", FAMILIES)
 def test_the_conversation_must_be_a_list_of_objects(family: WireFamily) -> None:
-    holder = {
-        WireFamily.OPENAI_CHAT: "messages",
-        WireFamily.OPENAI_RESPONSES: "input",
-        WireFamily.ANTHROPIC_MESSAGES: "messages",
-        WireFamily.GOOGLE: "contents",
-    }[family]
+    holder = HOLDER[family]
     for bad in ("hello", {"role": "user"}, [1], ["hello"], None):
         document = captured(family)
         document[holder] = bad
@@ -513,28 +524,22 @@ def test_a_body_without_an_output_cap_is_refused(family: WireFamily) -> None:
 # -- B1: the pieces that stay opaque are objects --
 
 
-# #550-B1-S22
-def test_a_chat_tool_call_that_is_not_a_function_call_is_refused() -> None:
+# #810-S22 (was #550-B1-S22 and S23: a tool call of another kind, an input item the engine does
+# not send)
+def test_what_the_engine_replays_of_a_tool_exchange_is_not_walked() -> None:
     document = captured(WireFamily.OPENAI_CHAT)
     assistant = next(m for m in document["messages"] if m.get("tool_calls"))
     assistant["tool_calls"][0]["type"] = "custom"
-    assert refused(WireFamily.OPENAI_CHAT, document).code is RefusalCode.REQUEST_NOT_ALLOWED
-
-
-# #550-B1-S23
-def test_a_responses_input_item_the_engine_does_not_send_is_refused() -> None:
+    assert admit(WireFamily.OPENAI_CHAT, document).body
     for item in (
         {"type": "web_search_call", "id": "w", "status": "completed"},
         {"type": "mcp_call", "id": "m"},
         {"type": "item_reference", "id": "x"},
-        {"type": "computer_call", "id": "c"},
         {"type": "function_call_output", "call_id": "c", "output": "x", "extra": URL},
     ):
         document = captured(WireFamily.OPENAI_RESPONSES)
         document["input"].append(item)
-        assert refused(WireFamily.OPENAI_RESPONSES, document).code is (
-            RefusalCode.REQUEST_NOT_ALLOWED
-        )
+        assert admit(WireFamily.OPENAI_RESPONSES, document).body
 
 
 # #550-B1-S24
@@ -575,13 +580,18 @@ def test_a_body_that_does_not_stream_is_refused_because_the_engine_always_does(
         assert refused(family, document).code is RefusalCode.REQUEST_NOT_ALLOWED
 
 
-# #550-R2-S4
-def test_a_cache_control_ttl_is_refused_until_the_one_hour_price_exists() -> None:
+# #810-R2-S4 (was #550-R2-S4): a one-hour cache write inside the conversation or the system prompt
+# is no longer refused by the schema; the price book prices the write the provider states
+# (`test_passthrough_usage_settlement.py`). A tool is not the conversation and stays closed.
+def test_a_cache_control_ttl_is_the_providers_business_in_the_conversation_but_not_on_a_tool() -> (
+    None
+):
     document = captured(WireFamily.ANTHROPIC_MESSAGES)
     document["system"][0]["cache_control"]["ttl"] = "1h"
-    assert refused(WireFamily.ANTHROPIC_MESSAGES, document).code is RefusalCode.REQUEST_NOT_ALLOWED
-    document["system"][0]["cache_control"] = {"type": "ephemeral"}
+    document["messages"][0]["content"][0]["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
     assert admit(WireFamily.ANTHROPIC_MESSAGES, document).body
+    document["tools"][0]["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
+    assert refused(WireFamily.ANTHROPIC_MESSAGES, document).code is RefusalCode.REQUEST_NOT_ALLOWED
 
 
 # #550-R2-N1

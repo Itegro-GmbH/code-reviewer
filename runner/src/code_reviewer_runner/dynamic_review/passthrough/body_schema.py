@@ -1,50 +1,84 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""The closed schema of a request body per wire family (#550).
+"""The closed schema of a request body per wire family (#550, opened for the conversation in #810).
 
 The engine is hostile: an untrusted model, steered by untrusted repository content, writes what it
-sends. Pinning the model and the output cap is not enough, because the provider does more for a
-request than answer it: server-side tools (web search, code execution, MCP servers, computer use)
-run and are billed at the provider's price and fetch what the request names; an image or file part
-makes the provider fetch a URL; `n` bills several choices for one request; routing fields send the
-request to another model. So the body is **walked against a closed schema** of exactly what the
-pinned engine sends (the keys of `fakes/wire/engine_requests.json`, captured from the real engine
-by the engine test), and everything else is refused:
+sends. The proxy guards what protects **money, the key and the way out**, and leaves the
+conversation alone:
 
-- a key that is not in the family's set is refused, **case sensitively** (`Model` is not `model`,
-  and an unknown key is refused whatever it is called); the keys of a nested object are closed too;
-- tools are **function tools only** (Chat and Responses `type: function`; Messages without a
-  `type`, or `custom`; Google `functionDeclarations`);
-- the content parts are text, the tool exchange of the family and the engine's reasoning blocks
-  (`thinking`, `redacted_thinking`, Responses `reasoning`, Google `thought`). **No image, audio,
-  file or document part at all**: the model entries are text-only, and a part that can carry a URL
-  or a file id is a part the provider can fetch. A URL that is text stays text;
-- `n` and `candidateCount` are exactly 1, `store` is `false`, there is no `service_tier`,
-  `background`, `previous_response_id`, `cachedContent` or routing field (none is a key of the set);
-- `stream` is `true` and present on the three families that have the key (the engine always
-  streams, and the tee reads a stream); a number is finite and at most 2^53; no `cache_control.ttl`
-  (a one-hour cache write is priced separately, #553);
-- exactly one spelling of the output cap, within the job's allowance. A second spelling of the same
-  field (`max_tokens` and `max_completion_tokens`, `generationConfig.maxOutputTokens` and its
-  snake-case twin) is refused, whatever its value.
+- **Closed, because it changes what is paid or where data goes.** The top-level keys of the body
+  (`mcp_servers`, `container`, `service_tier`, `context_management`, `speed`, `inference_geo`,
+  routing fields, `n`, anything unknown), case sensitively; the keys of the few nested option
+  objects (`thinking`, `tool_choice`, `stream_options`, `generationConfig`, ...); **tools: function
+  tools only** (Chat and Responses `type: function`; Messages without a `type`, or `custom`; Google
+  `functionDeclarations`), so no server tool (web search, code execution, computer use, MCP) ever
+  runs at the provider's price; `n` and `candidateCount` exactly 1, `store` `false`; `stream`
+  `true`; exactly one spelling of the output cap, within the job's allowance; a number is finite and
+  at most 2^53; no `cache_control.ttl` on a tool.
+- **Opaque, because it is the engine's and the provider's business.** The conversation (`messages`
+  of Chat and Messages, `input` of Responses, `contents` of Google), the system prompt (Messages
+  `system`, Google `systemInstruction`) and the schema of a tool are checked only for being an array
+  of objects (an object, for the instruction). What is inside (block types, `thinking` and its
+  signature, `tool_use` with its `caller`, `tool_result`, images, citations, `cache_control` on any
+  block) is not walked: the provider rejects what is invalid, and the SDK of the pinned engine adds
+  fields the capture of one run never showed (the `caller` of #810 was the first). This is a
+  deliberate decision of the owner (#810): the earlier closed walk refused a healthy turn at its
+  second call. A part that makes the provider fetch a URL, or a one-hour cache write, is therefore
+  no longer refused here; the price book prices the write the provider states, and a write it has
+  no price for is an unknown cost (`pricing.py`).
 
-The walk only checks. The body that is forwarded is the bytes that arrived. What the engine sends
-beyond these sets (a provider the capture did not cover) fails closed as `request_not_allowed`, and
-the key joins the set when a live capture shows it is the engine's (docs/spike/544-passthrough.md,
-section 7). The values of tool schemas, tool arguments and tool results are opaque objects or
-strings: the provider does not act on them.
+The walk only checks. The body that is forwarded is the bytes that arrived. A refusal carries the
+**path** of what failed (`NotAllowed.path`: `service_tier`, `tools[2].type`; never a value, a key
+name only when it is short and plain, else `<key>`), so that the next key the engine sends is found
+in one run (it reaches the log of the job through the recorded failure). What the engine sends
+beyond the closed sets fails closed as `request_not_allowed`, and the key joins the set when a live
+capture shows it is the engine's (docs/spike/544-passthrough.md, section 7).
 """
 
 import math
+import re
 from collections.abc import Callable, Collection, Mapping
 from functools import lru_cache
 from typing import Any, Final
 
 from code_reviewer_runner.dynamic_review.passthrough.families import WireFamily, spec_of
 
+# A key of a body is chosen by an untrusted engine: it is named in a log only when it is short and
+# plain, and a path stays short.
+_SAFE_NAME: Final = re.compile(r"[A-Za-z0-9_.\-]{1,40}")
+_PLACEHOLDER: Final = "<key>"
+_MAX_PATH: Final = 120
+UNKNOWN_KEY: Final = "unknown key"
+MISSING_KEY: Final = "missing key"
+INVALID_VALUE: Final = "invalid value"
+OUTPUT_CAP: Final = "output cap"
+
 
 class NotAllowed(Exception):
-    """The body is not one the engine sends. Carries nothing of the body."""
+    """The body is not one the engine sends. Carries where, and never a value of the body."""
+
+    def __init__(self, reason: str = INVALID_VALUE) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        # The path from the innermost key outward: the combinators add a segment as it unwinds.
+        self._segments: list[str] = []
+
+    def within(self, segment: str) -> "NotAllowed":
+        self._segments.append(segment)
+        return self
+
+    @property
+    def path(self) -> str:
+        """`tools[2].type (invalid value)`: where it failed and why, nothing the body said."""
+        text = ""
+        for segment in reversed(self._segments):
+            text += segment if segment.startswith("[") or not text else f".{segment}"
+        text = text[:_MAX_PATH] or "body"
+        return f"{text} ({self.reason})"
+
+
+def _name(key: object) -> str:
+    return key if isinstance(key, str) and _SAFE_NAME.fullmatch(key) else _PLACEHOLDER
 
 
 Check = Callable[[Any], None]
@@ -83,7 +117,7 @@ def count(value: Any) -> None:
 
 
 def mapping(value: Any) -> None:
-    """An object whose content the provider does not act on (a tool schema, a tool's arguments)."""
+    """An object the proxy does not look into: a tool schema, a tool's arguments, a message."""
     if not isinstance(value, dict):
         raise _no()
 
@@ -114,8 +148,12 @@ def array(item: Check) -> Check:
     def check(value: Any) -> None:
         if not isinstance(value, list):
             raise _no()
-        for element in value:  # pyright: ignore[reportUnknownVariableType]
-            item(element)
+        elements: list[Any] = value  # pyright: ignore[reportUnknownVariableType]
+        for index, element in enumerate(elements):
+            try:
+                item(element)
+            except NotAllowed as refusal:
+                raise refusal.within(f"[{index}]") from None
 
     return check
 
@@ -140,12 +178,25 @@ def obj(fields: Mapping[str, Check], required: Collection[str] = ()) -> Check:
         if not isinstance(value, dict):
             raise _no()
         document: dict[str, Any] = value  # pyright: ignore[reportUnknownVariableType]
-        if not document.keys() <= fields.keys() or not set(required) <= document.keys():
-            raise _no()
+        for name in document:
+            if name not in fields:
+                raise NotAllowed(UNKNOWN_KEY).within(_name(name))
+        for name in required:
+            if name not in document:
+                raise NotAllowed(MISSING_KEY).within(name)
         for name, item in document.items():
-            fields[name](item)
+            try:
+                fields[name](item)
+            except NotAllowed as refusal:
+                raise refusal.within(name) from None
 
     return check
+
+
+# The conversation, a system prompt and the like: an array of objects, and nothing inside is read.
+objects = array(mapping)
+# A message or block the engine may build as a plain string as well (a system prompt).
+objects_or_text = either(text, objects)
 
 
 _CACHE_CONTROL: Final = obj({"type": literal("ephemeral")}, ("type",))
@@ -156,43 +207,6 @@ _SAMPLING: Final = {"temperature": number, "top_p": number, "top_k": number}
 
 
 def _chat(allowance: int) -> Check:
-    part = obj(
-        {"type": literal("text"), "text": text, "cache_control": _CACHE_CONTROL}, ("type", "text")
-    )
-    call = obj(
-        {
-            "id": text,
-            "type": literal("function"),
-            "function": obj({"name": text, "arguments": text}, ("name", "arguments")),
-            "cache_control": _CACHE_CONTROL,
-        },
-        ("id", "type", "function"),
-    )
-    detail = obj(
-        {
-            "type": text,
-            "text": text,
-            "summary": text,
-            "data": text,
-            "id": text,
-            "format": text,
-            "signature": text,
-            "index": count,
-        }
-    )
-    message = obj(
-        {
-            "role": literal("system", "developer", "user", "assistant", "tool"),
-            "content": either(text, null, array(part)),
-            "tool_calls": array(call),
-            "tool_call_id": text,
-            "name": text,
-            "reasoning_content": text,
-            "reasoning_details": array(detail),
-            "cache_control": _CACHE_CONTROL,
-        },
-        ("role",),
-    )
     function = obj(
         {"name": text, "description": text, "parameters": mapping, "strict": boolean}, ("name",)
     )
@@ -210,7 +224,7 @@ def _chat(allowance: int) -> Check:
     return obj(
         {
             "model": text,
-            "messages": array(message),
+            "messages": objects,
             "tools": array(tool),
             "tool_choice": choice,
             "stream": literal(True),
@@ -230,44 +244,6 @@ def _chat(allowance: int) -> Check:
 
 
 def _responses(allowance: int) -> Check:
-    part = obj({"type": literal("input_text", "output_text"), "text": text}, ("type", "text"))
-    content = either(text, array(part))
-    message = obj(
-        {
-            "type": literal("message"),
-            "role": literal("system", "developer", "user", "assistant"),
-            "content": content,
-            "id": text,
-            "status": text,
-        },
-        ("role", "content"),
-    )
-    call = obj(
-        {
-            "type": literal("function_call"),
-            "call_id": text,
-            "name": text,
-            "arguments": text,
-            "id": text,
-            "status": text,
-        },
-        ("type", "call_id", "name", "arguments"),
-    )
-    output = obj(
-        {"type": literal("function_call_output"), "call_id": text, "output": content},
-        ("type", "call_id", "output"),
-    )
-    reasoning = obj(
-        {
-            "type": literal("reasoning"),
-            "id": text,
-            "summary": array(
-                obj({"type": literal("summary_text"), "text": text}, ("type", "text"))
-            ),
-            "encrypted_content": either(text, null),
-        },
-        ("type", "id", "summary"),
-    )
     tool = obj(
         {
             "type": literal("function"),
@@ -285,7 +261,7 @@ def _responses(allowance: int) -> Check:
     return obj(
         {
             "model": text,
-            "input": array(either(message, call, output, reasoning)),
+            "input": objects,
             "instructions": text,
             "tools": array(tool),
             "tool_choice": choice,
@@ -308,43 +284,6 @@ def _responses(allowance: int) -> Check:
 
 
 def _messages(allowance: int) -> Check:
-    block = obj(
-        {"type": literal("text"), "text": text, "cache_control": _CACHE_CONTROL}, ("type", "text")
-    )
-    tool_use = obj(
-        {
-            "type": literal("tool_use"),
-            "id": text,
-            "name": text,
-            "input": mapping,
-            "cache_control": _CACHE_CONTROL,
-        },
-        ("type", "id", "name", "input"),
-    )
-    result = obj(
-        {
-            "type": literal("tool_result"),
-            "tool_use_id": text,
-            "content": either(text, array(block)),
-            "is_error": boolean,
-            "cache_control": _CACHE_CONTROL,
-        },
-        ("type", "tool_use_id"),
-    )
-    thinking_block = obj(
-        {"type": literal("thinking"), "thinking": text, "signature": text},
-        ("type", "thinking", "signature"),
-    )
-    redacted = obj({"type": literal("redacted_thinking"), "data": text}, ("type", "data"))
-    message = obj(
-        {
-            "role": literal("user", "assistant"),
-            "content": either(
-                text, array(either(block, tool_use, result, thinking_block, redacted))
-            ),
-        },
-        ("role", "content"),
-    )
     tool = obj(
         {
             # Without a type, or `custom`: a function tool. Every other type is a server tool.
@@ -368,6 +307,7 @@ def _messages(allowance: int) -> Check:
     thinking = obj(
         {
             "type": literal("adaptive", "enabled", "disabled"),
+            "display": literal("omitted", "summarized"),
             "budget_tokens": bounded(allowance),
             "block_binding": obj({"prefix_mismatch_behavior": text}),
         },
@@ -377,8 +317,8 @@ def _messages(allowance: int) -> Check:
         {
             "model": text,
             "max_tokens": bounded(allowance),
-            "system": either(text, array(block)),
-            "messages": array(message),
+            "system": objects_or_text,
+            "messages": objects,
             "tools": array(tool),
             "tool_choice": choice,
             "thinking": thinking,
@@ -393,26 +333,6 @@ def _messages(allowance: int) -> Check:
 
 
 def _google(allowance: int) -> Check:
-    text_part = obj({"text": text, "thought": boolean, "thoughtSignature": text}, ("text",))
-    call = obj(
-        {
-            "functionCall": obj({"name": text, "args": mapping, "id": text}, ("name",)),
-            "thoughtSignature": text,
-        },
-        ("functionCall",),
-    )
-    response = obj(
-        {
-            "functionResponse": obj(
-                {"name": text, "response": mapping, "id": text}, ("name", "response")
-            )
-        },
-        ("functionResponse",),
-    )
-    content = obj(
-        {"role": literal("user", "model"), "parts": array(either(text_part, call, response))},
-        ("role", "parts"),
-    )
     declaration = obj(
         {"name": text, "description": text, "parameters": mapping, "parametersJsonSchema": mapping},
         ("name",),
@@ -446,10 +366,8 @@ def _google(allowance: int) -> Check:
     )
     return obj(
         {
-            "contents": array(content),
-            "systemInstruction": obj(
-                {"role": text, "parts": array(obj({"text": text}, ("text",)))}, ("parts",)
-            ),
+            "contents": objects,
+            "systemInstruction": mapping,
             "generationConfig": config,
             "tools": array(tool),
             "toolConfig": tool_config,
@@ -478,12 +396,17 @@ def check_body(family: WireFamily, document: dict[str, Any], allowance: int) -> 
     """
     _schema(family, allowance)(document)
     found: list[Any] = []
-    for path in spec_of(family).output_caps:
+    paths = spec_of(family).output_caps
+    for path in paths:
         node: Any = document
         for key in path:
             node = node.get(key) if isinstance(node, dict) else None  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
         if node is not None:
             found.append(node)  # pyright: ignore[reportUnknownArgumentType]
     if len(found) != 1:
-        raise _no()
+        # Absent, or two spellings of the same cap: named by its first spelling.
+        refusal = NotAllowed(OUTPUT_CAP)
+        for key in reversed(paths[0]):
+            refusal.within(key)
+        raise refusal
     return int(found[0])

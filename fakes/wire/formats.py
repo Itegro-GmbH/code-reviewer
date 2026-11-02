@@ -508,6 +508,7 @@ def _messages_usage(call: int, fault: UsageFault | None = None) -> dict[str, Any
                 "ephemeral_1h_input_tokens": usage.cache_write_1h,
             },
             "service_tier": "standard",
+            "inference_geo": "not_available",
         },
         fault,
     )
@@ -518,8 +519,18 @@ def _messages_content(turn: Turn, call: int) -> list[dict[str, Any]]:
     if turn.thinking:
         content.append({"type": "thinking", "thinking": turn.thinking, "signature": f"sig-{call}"})
     if turn.tool:
+        # The real API states who called the tool on every `tool_use` block: a call the model made
+        # itself is `{"type": "direct"}` (programmatic tool calling docs), and the pinned engine's
+        # SDK sends the field back with the block on the next request (the regression of
+        # `tests/engine/test_engine_opencode_anthropic_replay.py`).
         content.append(
-            {"type": "tool_use", "id": f"toolu_{call}", "name": turn.tool, "input": dict(turn.args)}
+            {
+                "type": "tool_use",
+                "id": f"toolu_{call}",
+                "name": turn.tool,
+                "input": dict(turn.args),
+                "caller": {"type": "direct"},
+            }
         )
     else:
         content.append({"type": "text", "text": turn.text})
@@ -560,16 +571,25 @@ def _messages_stream(
         ("message_start", {"type": "message_start", "message": message})
     ]
     for index, block in enumerate(_messages_content(turn, call)):
+        if index == 0:
+            # The first thing after `message_start` the real API sends.
+            events.append(("ping", {"type": "ping"}))
         opening: dict[str, Any]
         deltas: list[dict[str, Any]]
         if block["type"] == "thinking":
-            opening = {"type": "thinking", "thinking": ""}
+            opening = {"type": "thinking", "thinking": "", "signature": ""}
             deltas = [
                 {"type": "thinking_delta", "thinking": block["thinking"]},
                 {"type": "signature_delta", "signature": block["signature"]},
             ]
         elif block["type"] == "tool_use":
-            opening = {"type": "tool_use", "id": block["id"], "name": block["name"], "input": {}}
+            opening = {
+                "type": "tool_use",
+                "id": block["id"],
+                "name": block["name"],
+                "input": {},
+                "caller": block["caller"],
+            }
             deltas = [{"type": "input_json_delta", "partial_json": json.dumps(block["input"])}]
         else:
             opening = {"type": "text", "text": ""}
@@ -588,8 +608,9 @@ def _messages_stream(
                 )
             )
         events.append(("content_block_stop", {"type": "content_block_stop", "index": index}))
-    # ASSUMPTION, unconfirmed live: `message_delta` carries only the cumulative `output_tokens`. A
-    # real one may repeat `input_tokens` and the cache fields; a parser must not rely on either.
+    # What Anthropic documents for streaming: the usage of a `message_delta` is cumulative and
+    # repeats the input and cache fields of `message_start` next to the real `output_tokens`. (A
+    # parser must still not rely on either form, so `fakes/wire/upstream.py` keeps its variants.)
     delta: dict[str, Any] = {
         "type": "message_delta",
         "delta": {
@@ -598,7 +619,10 @@ def _messages_stream(
         },
     }
     if usage is not None:
-        delta["usage"] = {"output_tokens": usage["output_tokens"]}
+        delta["usage"] = {
+            "server_tool_use": {"web_search_requests": 0, "web_fetch_requests": 0},
+            **{key: value for key, value in usage.items() if key != "service_tier"},
+        }
     if fault == "out_of_order":
         events.insert(0, ("message_delta", delta))
     else:
