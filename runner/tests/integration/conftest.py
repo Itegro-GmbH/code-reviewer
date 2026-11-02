@@ -7,11 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from git_support import Origin, guard_git
+from git_support import Origin, system_git
 from workspace_support import Rig
 
 
 @pytest.fixture
 def rig(tmp_path: Path) -> Iterator[Rig]:
-    git = guard_git()
+    git = system_git()
     yield Rig(tmp_path, git, Origin(tmp_path, git))

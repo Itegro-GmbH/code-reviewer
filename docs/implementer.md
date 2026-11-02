@@ -14,8 +14,10 @@ code-review.com has none of it: no page, no route, no job kind, and its Dispatch
 
 A member of the workspace opens `/w/<slug>/implementer`, picks a repository, a base branch, a **new** branch name, writes
 the task, picks a model and, if they want, a lower cost limit. The task becomes one job. A fresh Sandbox VM starts, an
-OpenCode agent works in a clone, and its commits are pushed to the new branch. It does not open a pull request, does not
-merge and never touches the base branch. The person finds the branch on GitHub and the run on the Runs page.
+OpenCode agent works in a clone and starts on the new branch. Git is free for the agent inside that clone, and it has no way
+to push: when the turn ends, **the runner pushes every local branch of the clone** to GitHub, the new branch among them
+(section "The git rules"). It does not open a pull request and does not merge. The person finds the branches on GitHub and
+the run on the Runs page.
 
 Every member of a workspace may start a task (the permission `start_implementer_task`, minimum role member; one line in
 `app/src/workspaces/permissions.ts` raises it). The App pushes with its own identity whatever GitHub rights the person has, so
@@ -50,18 +52,23 @@ native path; the two registry providers (Anthropic, OpenRouter) are not offered.
    access of the chosen entry or key. The token lives with the turn and is switched off when the turn ends, however it ended.
 4. **Prepare.** The runner (root in the container) clones the base branch with depth 1 into a bare mirror that only it can
    enter. The agent gets a local clone of the mirror in `/work/repo` with no remote, no credential, the system identity and a
-   new branch at the base tip.
+   new branch at the base tip. Nothing else is put into that repository: no hook, no guard, no spool.
 5. **Work.** OpenCode runs as an unprivileged user in `/work/repo` with a configuration the runner wrote. It reads, edits,
    writes, searches and runs shell commands; it cannot fetch web pages, search the web, start sub-agents or ask a question.
    The task is the user message. When it ends its turn with uncommitted changes it gets one more message to commit them; what
-   is still uncommitted afterwards is committed by the system ("Implementer: uncommitted changes of the turn").
-6. **Push.** While the agent works, the runner looks at its branch and pushes new commits from the mirror, at most every
-   120 seconds, and once more at the end (below, "The git rules"). Before every push, and once more right before `git push`
-   itself, it asks whether the lease is still held; only `held` allows the push. A lost lease ends the turn `lease_lost` with
-   nothing pushed after it.
-7. **Report.** The Worker reports the result once: base and head commit, whether the head was pushed, the commits (at most
-   200), the changed files (at most 500), the agent's closing summary (at most 8,192 characters, with known secrets removed),
-   the OpenCode ids and the usage. The session becomes idle and the Runs page shows branch, commits, files, summary and cost.
+   is still uncommitted afterwards is committed by the system ("Implementer: uncommitted changes of the turn") on the branch
+   the agent is on. Work the agent committed on a detached HEAD, on no branch, is saved first, whether the tree is dirty or
+   not: the runner makes a branch `<the task's branch>-leftover-<id>` at HEAD and the push takes it with the others. The
+   branch is named in the summary and reported with the other branches.
+6. **Push.** Nothing is pushed while the agent works. When the turn ends, the runner pushes all local branches of the agent's
+   repository, without force, one at a time (below, "The git rules"). Before it lists anything, and again right before each
+   `git push`, it asks whether the lease is still held; only `held` allows a push. A lost lease ends the turn `lease_lost`
+   with nothing pushed after it.
+7. **Report.** The Worker reports the result once: base and head commit and whether the head was pushed (both of the branch
+   the form named), **every branch it pushed or tried to push with its outcome**, the commits (at most 200) and the changed
+   files (at most 500) of the form's branch, the agent's closing summary (at most 8,192 characters, with known secrets
+   removed), the OpenCode ids and the usage. The session becomes idle and the Runs page shows the branches, the commits, the
+   files, the summary and the cost.
 
 The repository's own `opencode.json`, `opencode.jsonc` and `.opencode/` are not in the agent's working tree, and nothing
 executable or configurable comes from the repository: no plugin, no MCP server, no formatter, no setup script, no repository
@@ -69,37 +76,119 @@ skill or instruction file. The agent is told when it touched such a name that it
 
 ## The git rules
 
-Two layers, and only the second is a guarantee.
+The owner's decision of 2026-11-02: inside its workspace the agent may do anything with git, it has no remote and no
+credential, and when the turn ends the runner pushes all local branches. There is no check of who committed, what descends
+from what, or which branch.
 
-**The accident guard.** A `reference-transaction` hook, root-owned and read-only in the image, keeps a well-meaning agent on
-its branch: the branch may only move forward and must contain the start commit, `HEAD` may only follow it, no other branch, tag
-or ref may be created or changed, the branch cannot be deleted, so amend, reset, rebase, a branch switch or a new branch are
-refused with a message the agent sees. It needs git 2.53 or newer (older git does not run the hook for a change of `HEAD`);
-the runner runs the guard's own test matrix at the start of each turn and the turn fails (`setup_failed`) if it does not hold.
-The hook also writes every tip update to a spool that tells the runner to look. It is a hint, not evidence.
+**Inside the workspace.** The agent may commit, amend, rebase, reset, create and switch branches, tag, stash, change the git
+configuration and bypass any hook. Nothing is installed in its repository and nothing watches it: no hook, no guard, no spool,
+no minimum version of git. It cannot push because it has no remote and no credential; the prompt says so in a few words. Work committed on a detached
+HEAD is on no branch, so before the push the runner saves it: a HEAD that is detached and contained in no local branch gets a
+branch `<the task's branch>-leftover-<id>` at HEAD, whether the tree is dirty or not, and the summary and the branch list name
+it.
 
-**The push check.** The runner never runs git inside a directory the agent controls. To push, it fetches the agent's branch
-into a scratch ref of the mirror (a failed or refused fetch is not guessed at), and checks, from exit statuses and objects
-and never from what git printed: the tip contains the start commit; it descends from the tip verified before; every commit
-since the start has exactly one author and one committer line, and **the committer is the system identity**. This last check
-catches accidents (a changed `user.name`, a commit made by a tool with another identity); it is not a proof of who made a
-commit, because the agent is handed that identity in its environment. Only then is the
-mirror's branch moved (compare and swap) and pushed to GitHub without force. A branch that was rewritten below what is pushed
-ends the turn `branch_violation`; GitHub keeps the last good tip.
+**The one push, at the end.** On every end that can still push (the agent finished, the cost limit, the time limit, the agent
+gave up, a stop with the lease still held), and never after a lost lease, the runner:
+
+1. asks the lease; a lease the host cannot confirm is asked again every 2 seconds for up to 30 seconds (20 on a stop), then the
+   turn ends `lease_lost`;
+2. lists the local branches of the agent's repository and drops names that are not branch names (a name git itself refuses,
+   or one that starts with `-` or `+`, holds a control character, a space or one of `~^:?*[\`); they are counted and never
+   shown or given to git;
+3. for each branch, the task's branch first: fetches it into a numbered scratch ref of the mirror (`refs/runner/in/<n>`, with
+   the objects checked), skips it when it is still at the base commit, asks the lease once more, and pushes that one ref from
+   the mirror to `refs/heads/<name>` with the installation token: **one refspec per command, no `+`, no force, no `--mirror`,
+   `--all`, `--tags` or `--delete`**. Only branches: no tag and no note is pushed, and nothing on GitHub is ever deleted;
+4. reports each branch as `pushed` or `rejected` with a reason word. One rejected branch does not stop the others.
+
+| Reason | What happened |
+|---|---|
+| `non_fast_forward` | The branch is on GitHub with other history (a rewrite of a branch that is already there, or a branch someone made after the submit check). The runner never forces |
+| `remote_rejected` | GitHub refused the update (a protection rule, a hook) |
+| `workflows_not_allowed` | The branch changes a file under `.github/workflows/`; the App never has the `workflows` permission, so GitHub refuses it |
+| `provider_refused` | GitHub refused the access (a 401, 403 or 404) |
+| `provider_error` | GitHub answered with another client error (for example a 413, a push that is too large, or a 422); it is not a refusal of the access and is not tried again |
+| `provider_unavailable` | GitHub could not be reached or did not take the push (a 5xx, a reset, a request timeout, 429), after one more try |
+| `timed_out` | A git command of the runner was killed at its time limit, so nothing is known of what it did: the push may or may not have reached GitHub (look at the branch there) |
+| `unreadable` | The branch could not be taken over from the agent's repository (a broken repository, objects git refuses) |
+| `not_a_commit` | The branch points at a tree or a tag, not a commit |
+| `out_of_time` | The time for the final push ran out before this branch |
+| `excluded` | The branch is in `PUSH_EXCLUDED_BRANCHES` (below) |
+
+A branch whose tip is the base commit is not listed. At most 50 branches are reported, the task's branch first and then the
+others in alphabetical order (a name in `PUSH_EXCLUDED_BRANCHES` is an entry too and counts toward the 50); local branches that
+are in no entry are counted in the result as `branchesDropped` (`invalid`: the name cannot be pushed, `overflow`: valid names
+beyond the 50), the Runs page says how many, and the prompt tells the agent the limit and the name rules. The turn **succeeds
+when the task's branch arrived, or when the task's branch is verifiably empty (it is at the base commit) and another branch
+arrived**. It ends `push_rejected` when the task's branch was not taken (rejected for any reason, among them `unreadable`,
+`not_a_commit` and `timed_out`, or gone from the repository) whatever else was pushed, when no branch arrived although some had
+commits, or when the agent's repository, or its list of branches (read up to 4 MiB), could not be read at all; it ends
+`agent_gave_up` when no branch has anything new. A rejected branch of the report is not an error of the turn by itself.
+
+**One place for a later rule.** `PUSH_EXCLUDED_BRANCHES` in `runner/src/code_reviewer_runner/implementer/push_policy.py` is
+empty. A rule such as "only the branch the form named" goes into `select_branches` in the same file and nowhere else.
+
+**Nothing is pushed during the turn.** The agent may rewrite history, so a push mid-turn would only conflict with the one at
+the end. The cost is that **a VM that dies before the end of the turn loses the work**: there is no periodic push to fall back
+on. The watch still asks the lease every 30 seconds while the agent works, so a turn that is no longer ours stops paying for
+the model.
+
+**Time.** The runner keeps the last 180 seconds of the time limit for the end: the look at the tree (10 s at most), the rescue
+of a detached HEAD (three git commands of 3 s at most), the commit of what is left (40 s), the final push (100 s) and the two
+reads of the report (5 s each), with 5 s for the end of the engine. A stop (SIGTERM) commits nothing (it still saves a
+detached HEAD on a branch); the process leaves itself 55 seconds, and the final push gets 30 of them. A test holds both sums.
+
+**How the root process stays safe from the agent's repository.** The runner is root in the container and the agent controls
+every file of its repository, so root never opens it:
+
+- Root never runs git with the agent's repository as its directory or git directory, so the hooks, `core.fsmonitor`,
+  `core.hooksPath`, filters, aliases, `core.pager` and `safe.directory` entries of that repository are never read by a root
+  process. No `safe.directory` is set for root.
+- The list of local branches is made by `git for-each-ref` run as the engine user in its repository. Its output is read as a
+  stream and **capped at 4 MiB** (about 40,000 branches); its error output is dropped. Over the cap git is ended and the turn
+  ends `push_rejected` with a sentence that says the list is too long, and nothing is pushed. The runner never holds more of
+  an agent-controlled list than the cap.
+- The mirror reads the agent's branches through `git upload-pack`, named on the command line (`--upload-pack`) and run by
+  `setpriv` as the engine user with `no_new_privs`, over protocol version 2 (so that the advertisement the runner reads is for
+  the one ref it asks for, and does not grow with the refs the agent made). That process reads the repository's config with
+  the agent's own rights; whatever that config makes it run, it runs as the engine user. The config of the repository does
+  not choose this command.
+- What comes back is an object stream, checked (`fetch.fsckObjects`, `transfer.fsckObjects`) and stored in a bare repository
+  that root alone owns (mode 0700) and whose config is the runner's (`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`, a
+  template-less `git init`, no automatic gc). Nothing is checked out there, so no filter, attribute or hook runs.
+- From the listing only the names are taken, and each is validated before it is put in a refspec. The local ref the branch is
+  fetched into is numbered, never built from the name. The tip is read from the mirror, never from what the listing printed.
+- `git status`, the rescue of a detached HEAD and the commit of what is left run as the engine user, with the agent's hooks
+  off (`core.hooksPath=/dev/null`, `--no-verify`). These commands and the upload-pack of each fetch run **after** the engine
+  was stopped and its user's processes swept, and a repository's config can make them leave a process behind. So the
+  runner ends every process of the engine user **once more right before each `git push`**. If the first sweep (after the
+  engine) cannot end every process, nothing is run as that user for a leftover commit or a rescue, and the summary says that
+  changes in the working tree were not looked for. If the sweep before a push fails, the push still goes ahead and the count
+  is noted: a process of the engine user cannot read the environment of the root `git push` (`e2e` journey E09 and the
+  privileged tests check that).
+- The token is in the environment of the one `git push` (and the clone) of the runner and in no argument, file, URL or process
+  of the agent. `e2e` journey E09 looks through the engine's directories, the repository, the mirror and `/run` for it.
 
 **What a hostile agent can and cannot do.**
 
 | It can | It cannot |
 |---|---|
-| Bypass the hook (`git -c core.hooksPath=/dev/null`, a hand-written ref file, `git config` in its clone) and rewrite its own branch | Get a rewrite onto GitHub: the push check refuses it and the turn ends `branch_violation` |
-| Write commits with any author and, since it knows the system identity, with that identity as committer too, so the committer check passes. Only the committer is checked on purpose, because `cherry-pick`, `am` and a merge keep the author of a legitimate commit | Make the check mean more than "no accident": it cannot tell the agent's honest commit from a forged one |
-| Fill the disk, burn CPU and run for the whole time limit | Keep working after the time limit or after the cost limit is used up: the runner ends the engine and the proxy refuses the next model call |
-| Read everything it can reach in the VM, including the repository and the files it installed | Read a credential: the git token is in the environment of one git process of the runner and in no file, argument or URL; the model key stays in the App, the agent has a loopback proxy and a job capability |
+| Rewrite, reset or delete anything in its own clone, with any identity, and bypass any hook | Push: it has no remote and no credential |
+| **Move any branch forward, including the default branch**, and **create new branches**, which the end of the turn pushes | Overwrite or delete a branch that is already on GitHub: the runner never forces and never deletes, and a rewrite is a rejected branch |
+| Name a branch anything git accepts | Make a name become an option, a force, a second ref or a command: a name that is not a plain branch name is dropped, the rest is used as one refspec argument |
+| Configure its repository to run programs on `git status`, `git fetch` or `git upload-pack` | Make root run them: only the engine user reads that config |
+| Fill the disk, burn CPU and run for the whole time limit | Keep working after the time limit or after the cost limit is used up |
+| Read everything it can reach in the VM | Read a credential: the git token is in the environment of one git process of the runner and in no file, argument or URL; the model key stays in the App, the agent has a loopback proxy and a job capability |
 | Reach the registries on the allowlist | Become root (no sudo), switch the rules of the network off, or reach any other host |
 
-The commits that pass carry one committer, the system identity (the product's name and "Implementer"). Who started the task
-is not in the commits: it is in the run (the session's `created_by`, shown on the Runs page). On GitHub the committer therefore
-says "an Implementer task", not who asked for it, and not that the system made the commit.
+**The risk, plainly.** With no rule about branches, the agent can move **any** branch forward, including the default branch, and
+may push new branches. The installation token holds `contents: write` on exactly this repository, so the only thing between a
+task and the default branch is what GitHub itself enforces: **protect the default branch** (a required pull request) on every
+repository a task runs on. Workflow files are the exception, because the App has no `workflows` permission.
+
+The commits that arrive carry whatever author and committer the agent chose; by default the system identity (the product's name
+and "Implementer"). Who started the task is not in the commits: it is in the run (the session's `created_by`, shown on the Runs
+page).
 
 ## Network in the agent phase
 
@@ -151,12 +240,13 @@ Admin).
 |---|---|---|
 | Cost of a turn | The operator's maximum per turn: 5.00 USD once the owner has set it in the factory's admin portal (General, Limits, "Maximum cost per review"); the default is 1.00 USD until then, which is too low for a task. A person may ask for a lower limit on the form (never above that maximum or 100 USD). Without one, the maximum applies | Claim, and the proxy of the Worker: it refuses the next model call once the calls so far cost that much, so a turn can end slightly above it by the last call |
 | Steps of the agent | None. There is no step limit, no plan, no approach rule: the cost limit is the brake | |
-| Time of a turn | 3600 seconds. The runner keeps the last 180 seconds for the commit of what is left and the final push (a third of a short limit). The Dispatcher stops the Worker at 3600 seconds (`DISPATCHER_WORKER_CONFIG`, `implementer.timeoutSeconds`, 60 to 21600) and the App fails a turn still running after 70 minutes with `timeout`; the App cannot read the Dispatcher's setting, so change the constants with it (`docs/dispatcher.md`). The runner holds a turn to the smaller of its time limit and `RUNNER_JOB_TIMEOUT_SECONDS` | Dispatcher, runner, App |
-| Stop | On SIGTERM the engine is ended at once, what is committed is pushed (if the lease is still held) and the turn ends `runner_shutdown`. The job process gets a grace of 60 seconds, ends itself after 55, and the container's stop timeout is 90 seconds; one question about the lease is bounded to 25 seconds at a normal end and 10 on a stop | Runner, container spec |
+| Time of a turn | 3600 seconds. The runner keeps the last 180 seconds for the commit of what is left and the final push of all branches (a third of a short limit; the split is in "The git rules"). The Dispatcher stops the Worker at 3600 seconds (`DISPATCHER_WORKER_CONFIG`, `implementer.timeoutSeconds`, 60 to 21600) and the App fails a turn still running after 70 minutes with `timeout`; the App cannot read the Dispatcher's setting, so change the constants with it (`docs/dispatcher.md`). The runner holds a turn to the smaller of its time limit and `RUNNER_JOB_TIMEOUT_SECONDS` | Dispatcher, runner, App |
+| Stop | On SIGTERM the engine is ended at once, all committed branches are pushed (if the lease is still held; nothing uncommitted is committed) and the turn ends `runner_shutdown`. The job process gets a grace of 60 seconds, ends itself after 55 (the final push gets 30 of them), and the container's stop timeout is 90 seconds; each lease question (before the listing and before each push) is retried for 30 seconds at a normal end and 20 on a stop, and
+never beyond the time that is left of the final push | Runner, container spec |
 | Task text | 20,000 characters | Form and route |
 | Branch name | At most 200 characters, each part between slashes at most 240 bytes, git's rules, not the base branch | Form and route |
 | Base branches offered | 100 names, default first; a base beyond that can be typed | Route |
-| Result | 200 commits, 500 files, 8,192 characters of summary, the whole report under 4 MB (Vercel cuts a body at 4.5 MB) | Contract and runner |
+| Result | 200 commits and 500 files (of the task's branch), 50 branches, 8,192 characters of summary, the whole report under 4 MB (Vercel cuts a body at 4.5 MB) | Contract and runner |
 | VM and container | 2 vCPU and 4 GB for the VM, 3 GB for the container without swap, 2048 processes, `/work` mounted `nosuid,nodev`, exec allowed | Dispatcher (`DISPATCHER_WORKER_CONFIG` can override the sizes) |
 | Parallel work | `RUNNER_DISPATCH_MAX_RUNNING` (2) for all kinds together, and one running turn per session | App and Dispatcher |
 
@@ -171,24 +261,24 @@ used):
 
 | Code | What happened | Billed | What to do |
 |---|---|---|---|
-| `branch_exists` | Raised only at the first push, which is the first batch after the agent's first commit or the final push, when GitHub answers `[rejected]` because the branch exists with other history (someone made it after the submit check). The agent has worked by then, so the model was used, and the run is still not billed. Nothing was pushed and the agent's work is lost | free | Choose a new branch name and start again |
+| `branch_exists` | **No longer produced.** Until the git model of 2026-11-02 it was raised at the first push. Now a branch that exists on GitHub with other history is a rejected branch (`non_fast_forward`) of the report and the turn ends `push_rejected`. Old runs keep the code and its class | free | Choose a new branch name and start again |
 | `base_branch_not_found` | The base branch was not on GitHub when the runner cloned | free | Check the name; it may have been deleted since the submit |
 | `clone_failed` | The repository could not be downloaded | free | Try again; look at the installation if it persists |
-| `setup_failed` | The runner could not prepare the workplace before the turn started: git too old, a guard file missing, the guard's self-test failed, the mirror could not be made, a port of the slot was taken. It is the free code of a turn that never started: once the model was used, the same trouble shows as `branch_violation`, and an unexpected error as `agent_gave_up`. The Runs-page sentence says "the repository's own set-up steps", which is not what happens: no repository script is ever run | free | Look at the Worker log of the job; it is the image or the VM |
-| `agent_gave_up` | The agent ended without a commit and nothing to commit, or its engine died after the model had been used (what it had committed is pushed when possible). The summary also says when files the agent wrote could not be kept, such as `opencode.json` | charged | Read its summary; try again with a clearer or smaller task |
-| `push_rejected` | The repository did not accept the pushed work (a rule, a permission, a push of `.github/workflows/` which is never allowed), or the final push could not reach GitHub. Work pushed earlier stays on the branch | charged | Check the branch, then start again |
-| `branch_violation` | The branch was rewritten below what was pushed, a commit has a committer that is not the system, or the repository could not be committed or checked after the agent ran. Commits pushed before stay; nothing after was saved | charged | Look at the branch; the agent did something it was told not to |
+| `setup_failed` | The runner could not prepare the workplace before the turn started: git missing, the mirror could not be made, a port of the slot was taken. It is the free code of a turn that never started: once the model was used, the same trouble shows as `agent_gave_up`. The Runs-page sentence says "the repository's own set-up steps", which is not what happens: no repository script is ever run | free | Look at the Worker log of the job; it is the image or the VM |
+| `agent_gave_up` | The agent ended with no new commit on any branch and nothing to commit, or its engine died after the model had been used (what it had committed is pushed when possible). The summary also says when files the agent wrote could not be kept, such as `opencode.json` | charged | Read its summary; try again with a clearer or smaller task |
+| `push_rejected` | The task's branch did not arrive (the branch exists with other history, a rule, a permission, a change of `.github/workflows/` which is never allowed, or GitHub could not be reached), no branch arrived although some had commits, or the agent's repository could not be read at the end. The Runs page lists every branch with its reason; branches that were pushed stay on GitHub | charged | Read the reasons, check the branches, then start again |
+| `branch_violation` | **No longer produced** (there are no rules inside the workspace to violate). Old runs keep the code and its class | charged | Look at the branch |
 | `cost_limit_reached` | The calls so far cost the limit, so the next call was refused. What was committed is pushed when possible: check the branch | charged | Raise the limit within the maximum, or make the task smaller |
-| `time_limit_reached` | The turn ran into its time limit. What was committed was pushed when possible | charged | Check the branch for what reached it |
+| `time_limit_reached` | The turn ran into its time limit. What was committed was pushed when possible (nothing is pushed earlier, so a VM that dies first loses the work) | charged | Check the branches for what reached GitHub |
 | `git_write_not_granted` | The installation has not accepted Contents write | free | Accept the new permission on GitHub ([`github-app.md`](github-app.md), "Update an existing App") |
-| `implementer_engine_unavailable` | The Worker did not advertise the engine (its start-up checks failed, or the container is not the Implementer's profile), the claim carried no cost limit, or the capability is off in the App | free | The Worker log names the stable reason (`implementer_git_too_old`, `implementer_work_dir_not_exec` and others); see the rollout |
+| `implementer_engine_unavailable` | The Worker did not advertise the engine (its start-up checks failed, or the container is not the Implementer's profile), the claim carried no cost limit, or the capability is off in the App | free | The Worker log names the stable reason (`implementer_setpriv_missing`, `implementer_work_dir_not_exec` and others); see the rollout |
 | `implementer_config_invalid` | The turn's settings cannot be used: a model entry the proxy cannot serve, the clone address, a turn without its record, or a job that reached the runner with neither `maxCostUsd` nor `operatorMaxCostUsd` | free | Look at the job log for the reason word |
 | `no_capable_runner` | Nobody that can run tasks claimed the turn within 30 minutes (3 hours while a Worker was busy with others of the kind). Here: the Dispatcher's entry for the factory does not list `implementer`, so the Launcher does not advertise it; or, until 2026-11-01, a slow listing of the platform's VMs (next row) | free | Rollout step 2, and the next row |
 | `fleet_list_failed` (a Dispatcher log line, not a code of the run) | With two or more Apps the Dispatcher lists the platform's VMs, at most once in five seconds, to count what each App occupies. A listing that gives no answer within 4 seconds counts as failed (the line carries its `ms`); the last good one is used for up to a minute, and after that the Dispatcher counts by its own launches and the claim goes on: the cap is a soft limit, the platform's concurrency limit the hard one. A failed listing no longer stops claims (it did on 2026-11-01, when 283 stopped VMs made the listing take 5.1 s and jobs ended `no_capable_runner`). Every listing that answers logs `fleet_listed` with its `ms` and `count`; the reaper deletes ended VMs after one day, 50 per run | free | A `fleet_list_failed` is a warning, not a cause of a task that does not start. Compare `ms` and `count` of the `fleet_listed` lines with the 4 seconds; if `count` grows, look at the reaper's `reap_done` (`deleted`, `deleteFailed`, `deleteKept`, `deleteNotTried`) |
 | `dispatch_unavailable` | Nothing claimed the turn within `RUNNER_DISPATCH_GIVE_UP_SECONDS` (60 minutes by default); the Dispatcher is down, protected or full ([`deployment-vercel.md`](deployment-vercel.md), 5.3) | free | Look at the App's sweep log and the Dispatcher's |
 | `timeout` | The turn was still running 70 minutes after it started, so the app failed it. The Worker normally ends it before at its 3600 seconds | free | Check the branch for what was pushed |
-| `lease_lost`, `lease_expired` | The Worker no longer held the turn when it was ready, or stopped reporting, or the lease could not be confirmed before a push; the result was not saved and nothing is pushed after the loss. Work pushed before stays on the branch | free | Start again if the branch lacks the work |
-| `runner_shutdown` | The Worker was told to stop (SIGTERM) while it worked: the engine was ended, what is committed was pushed if the lease was still held. A turn of the Implementer is never run twice, so the app gives it back and it ends here, as its last attempt. The usage of a stopped turn is not recorded yet (#799) | free | Check the branch for what was pushed; start again with a new branch name |
+| `lease_lost`, `lease_expired` | The Worker no longer held the turn when it was ready, or stopped reporting, or the lease could not be confirmed before the final push; the result was not saved and nothing is pushed after the loss. Nothing is pushed during the turn, so a lost lease means no work reached GitHub | free | Start again |
+| `runner_shutdown` | The Worker was told to stop (SIGTERM) while it worked: the engine was ended, all committed branches were pushed if the lease was still held. A turn of the Implementer is never run twice, so the app gives it back and it ends here, as its last attempt. The usage of a stopped turn is not recorded yet (#799) | free | Check the branch for what was pushed; start again with a new branch name |
 | `runner_error` | The runner failed unexpectedly before any model call | free | Read the Worker log; start again |
 | `dynamic_accounting_failed` | The model usage could not be accounted for, so the turn ended and its cost is not known. The work may be done: check the branch | free | Check the branch |
 | `llm_auth`, `llm_quota`, `llm_rate_limit`, `llm_timeout`, `llm_unavailable` | The model provider refused the key, has no credit, limits requests, is slow or is down. On the operator's key these are the operator's to fix and are not billed to the workspace; on the workspace's own key they are the workspace's | free on the operator's key, charged on the workspace's own | The key or the provider, then start again |
@@ -210,7 +300,8 @@ that were pushed first. A Worker that is stopped while it works (`runner_shutdow
   tested here.
 - **Secrets for tests.** No credential of any kind reaches the agent: tests that need an API key or a database URL cannot run.
 - **Pushes that touch `.github/workflows/`.** The App has no `workflows` permission and never asks for it for this; GitHub
-  rejects such a push and the task ends `push_rejected`. Change workflow files by hand ([`github-app.md`](github-app.md)).
+  rejects that branch (`workflows_not_allowed`) while the others arrive; a task whose own branch is the one rejected ends
+  `push_rejected`. Change workflow files by hand ([`github-app.md`](github-app.md)).
 - Opening or merging a pull request, a second turn on the same branch, a task on an existing branch, forks, other platforms
   than GitHub.
 
@@ -218,13 +309,14 @@ that were pushed first. A Worker that is stopped while it works (`runner_shutdow
 
 These are decisions of the owner, not oversights.
 
-- **Hooks are an accident guard.** A hostile agent can rewrite its own clone; it cannot rewrite GitHub (table above).
-- **The committer check is an accident check.** The agent knows the system identity, so a hostile agent can write any author
-  and the system committer. Nothing on GitHub proves that the system made a commit.
-- **A branch created meanwhile.** If someone creates the branch after the submit check and before the first push, and it
-  points at the base tip or at an ancestor of the agent's tip, GitHub fast-forwards it: the task lands on a branch it did not
-  create, with that person's earlier history under it. Any other history ends the turn `branch_exists`. The window is the
-  time between the submit check and the first push, which can be most of a turn.
+- **Git is free, and every local branch is pushed.** No rule inside the workspace, none at the push: the agent can move any
+  branch forward, including the default branch, and may push new branches (see "The risk, plainly"). Protect the default
+  branch on GitHub. What the end of the turn will not do is force or delete.
+- **The author and the committer are the agent's.** Nothing on GitHub proves that the system made a commit.
+- **The work of a VM that dies is lost.** Nothing is pushed during the turn.
+- **A branch created meanwhile.** If someone creates the task's branch after the submit check and before the end of the turn,
+  and it points at an ancestor of the agent's tip, GitHub fast-forwards it: the task lands on a branch it did not create, with
+  that person's earlier history under it. Any other history is a rejected branch (`non_fast_forward`).
 - **Exfiltration through a registry.** The egress rule looks at the name of the tunnel and nothing inside it. `registry.npmjs.org`
   accepts uploads, so an agent that holds an npm token (from the repository, or from prompt-injection text) can `npm publish`
   any file it can read, and the registry names sit on CDN addresses that other tenants share, so another endpoint behind the
@@ -240,10 +332,15 @@ These are decisions of the owner, not oversights.
 
 ## Open points
 
-- **#767**, the end to end journey of the whole path in the privileged lane, is not merged. The live smoke test is the first
-  run of the whole path on the platform.
+Open issues at the time of this change (2026-11-02):
+
+- **#745**, the epic of the first vertical slice, and **#768**, the operator guide and the live smoke test: the smoke test
+  ([`implementer-smoke-test.md`](implementer-smoke-test.md)) is the first run of the whole path on the platform and has not
+  been run for this git model.
+- **#784**: read-only registry access, before external users (above).
 - **#797**: a failed proof of the Implementer blocks code-review.com. The Dispatcher is shared, the deploy canary requires
   `implementer` as soon as the factory's entry names the kind, and the promotions of everything staged in that run wait for the
   canary. There is no switch that waives the proof; the way back is in the rollout, step 2.
 - **#799**: the usage of a turn that was stopped (`runner_shutdown`) is not recorded.
-- **#784**: read-only registry access, before external users (above).
+- **#794**, **#786**, **#775**: the follow-ups listed under "What is accepted".
+- Which branches may be pushed (`PUSH_EXCLUDED_BRANCHES`) is the owner's open question; the list is empty.

@@ -18,6 +18,7 @@ import { RunsList } from "./runs-list.tsx";
 afterEach(cleanup);
 
 const api = { list: vi.fn(), detail: vi.fn() } as unknown as RunsApi;
+const NONE_DROPPED = { invalid: 0, overflow: 0 };
 const SHA = "b".repeat(40);
 
 function row(overrides: Partial<RunRowView> = {}): RunRowView {
@@ -68,6 +69,20 @@ function task(
       count: 1,
       shown: [{ path: "src/health.ts", status: "added" }],
       more: 0,
+    },
+    branches: {
+      shown: [
+        {
+          name: "implementer/abc123",
+          url: "https://github.com/acme/widgets/tree/implementer/abc123",
+          shortSha: SHA.slice(0, 7),
+          pushed: true,
+          reason: null,
+          isTaskBranch: true,
+        },
+      ],
+      more: 0,
+      dropped: NONE_DROPPED,
     },
     head: {
       shortSha: SHA.slice(0, 7),
@@ -209,11 +224,15 @@ describe("the detail page of an implementer run", () => {
     expect(text).toContain("acme/widgets");
     expect(text).toContain("Base branch");
     expect(text).toContain("main");
+    // The facts and the list of branches both link to the task's branch.
     expect(
       screen
-        .getByRole("link", { name: "implementer/abc123" })
-        .getAttribute("href"),
-    ).toBe("https://github.com/acme/widgets/tree/implementer/abc123");
+        .getAllByRole("link", { name: "implementer/abc123" })
+        .map((link) => link.getAttribute("href")),
+    ).toEqual([
+      "https://github.com/acme/widgets/tree/implementer/abc123",
+      "https://github.com/acme/widgets/tree/implementer/abc123",
+    ]);
     expect(text).toContain("Implementer");
     expect(text).not.toContain("Pull request");
     expect(text).not.toContain("#-1");
@@ -231,6 +250,138 @@ describe("the detail page of an implementer run", () => {
     expect(text).toContain("src/health.ts");
     expect(text).toContain("Added a health endpoint.");
     expect(screen.queryByText(/Findings/)).toBeNull();
+  });
+
+  // The git model: the runner pushes all local branches, and the page shows every one with a link or a reason.
+  it("lists every branch of the task: a pushed one with a link, a rejected one with the sentence for its reason", () => {
+    const { container } = renderDetail(
+      detail({
+        implementer: task({
+          branches: {
+            shown: [
+              {
+                name: "implementer/abc123",
+                url: "https://github.com/acme/widgets/tree/implementer/abc123",
+                shortSha: SHA.slice(0, 7),
+                pushed: true,
+                reason: null,
+                isTaskBranch: true,
+              },
+              {
+                name: "experiment/two",
+                url: "https://github.com/acme/widgets/tree/experiment/two",
+                shortSha: "ccccccc",
+                pushed: true,
+                reason: null,
+                isTaskBranch: false,
+              },
+              {
+                name: "main",
+                url: null,
+                shortSha: "ddddddd",
+                pushed: false,
+                reason:
+                  "The branch already exists on GitHub with other history. The Implementer never overwrites a branch.",
+                isTaskBranch: false,
+              },
+            ],
+            more: 0,
+            dropped: NONE_DROPPED,
+          },
+        }),
+      }),
+    );
+
+    const list = container.querySelector('[data-slot="run-branches"]');
+    expect(list?.querySelectorAll("li")).toHaveLength(3);
+    expect(
+      screen.getByRole("link", { name: "experiment/two" }).getAttribute("href"),
+    ).toBe("https://github.com/acme/widgets/tree/experiment/two");
+    const rejected = container.querySelector('[data-branch-result="rejected"]');
+    expect(rejected?.textContent).toContain("main");
+    expect(rejected?.textContent).toContain("not pushed");
+    expect(rejected?.textContent).toContain("never overwrites a branch");
+    expect(rejected?.querySelector("a")).toBeNull();
+    expect(list?.textContent).toContain("the task's branch");
+  });
+
+  it("shows no list of branches for a task that pushed none", () => {
+    const { container } = renderDetail(
+      detail({
+        implementer: task({
+          branches: { shown: [], more: 0, dropped: NONE_DROPPED },
+          head: null,
+        }),
+      }),
+    );
+
+    expect(container.querySelector('[data-slot="run-branches"]')).toBeNull();
+    expect(screen.queryByText("Branches")).toBeNull();
+  });
+
+  it("says how many branches were left out, because of their name and because of the limit, even when none was pushed", () => {
+    const { container } = renderDetail(
+      detail({
+        implementer: task({
+          branches: {
+            shown: [],
+            more: 0,
+            dropped: { invalid: 2, overflow: 1 },
+          },
+          head: null,
+        }),
+      }),
+    );
+
+    expect(screen.getByText("Branches")).toBeTruthy();
+    expect(
+      container.querySelector('[data-slot="run-branches-invalid"]')
+        ?.textContent,
+    ).toBe("2 branches were not pushed because their names cannot be pushed.");
+    expect(
+      container.querySelector('[data-slot="run-branches-overflow"]')
+        ?.textContent,
+    ).toBe(
+      "1 further branch was not pushed because only 50 branches are pushed.",
+    );
+  });
+
+  it("says nothing about left-out branches when there are none", () => {
+    const { container } = renderDetail(detail({ implementer: task({}) }));
+
+    expect(
+      container.querySelector('[data-slot="run-branches-invalid"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-slot="run-branches-overflow"]'),
+    ).toBeNull();
+  });
+
+  it("renders a hostile branch name as text", () => {
+    const hostile = '<img src=x onerror="alert(1)">';
+    const { container } = renderDetail(
+      detail({
+        implementer: task({
+          branches: {
+            shown: [
+              {
+                name: hostile,
+                url: null,
+                shortSha: null,
+                pushed: false,
+                reason: "The branch was not pushed.",
+                isTaskBranch: false,
+              },
+            ],
+            more: 0,
+            dropped: NONE_DROPPED,
+          },
+        }),
+      }),
+    );
+
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.textContent).toContain(hostile);
   });
 
   // #758-T02

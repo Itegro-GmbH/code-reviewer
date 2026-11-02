@@ -4,8 +4,10 @@
 
 The workspace tests in tests/integration run as one ordinary user, so "the agent" and "root" are the
 same there. This file proves the separation: the agent's git commands run as the engine user, the
-config of the agent's repository is never executed with root's rights, and the engine user can read
-neither the token nor the mirror. Needs git 2.53 or newer with the HTTP transport (CI's)."""
+config of the agent's repository is never executed with root's rights, the final push of all local
+branches reads the agent's repository only through an upload-pack that runs as the engine user, and
+the engine user can read neither the token nor the mirror. Needs git with the HTTP transport
+(CI's)."""
 
 import os
 import secrets
@@ -23,7 +25,6 @@ from code_reviewer_runner.implementer.git_workspace import (
     AgentUser,
     GitIdentity,
     GitWorkspace,
-    PushOutcome,
     WorkspaceLayout,
     WorkspaceSpec,
 )
@@ -34,8 +35,7 @@ from git_support import (
     HttpOrigin,
     Origin,
     files_mentioning,
-    guard_directory,
-    guard_git,
+    system_git,
 )
 
 BRANCH = "implementer/a1b2c3"
@@ -57,10 +57,8 @@ def _workspace(base: Path, url: str, schemes: tuple[str, ...], git: str) -> GitW
     layout = WorkspaceLayout(
         work_dir=base / "work",
         run_dir=base / "run",
-        guard_dir=guard_directory(base / "guard"),
         agent_home=home,
     )
-    layout.guard_dir.chmod(0o755)
     spec = WorkspaceSpec(clone_url=url, token=TOKEN, base_branch="main", branch=BRANCH)
     return GitWorkspace(
         spec, layout, AgentUser(ENGINE_UID, ENGINE_GID), IDENTITY, git=git, schemes=schemes
@@ -94,10 +92,10 @@ def _can_list(path: Path) -> bool:
 
 
 # #762-T08
-def test_the_leftover_calls_and_the_self_test_run_as_the_engine_user(base: Path) -> None:
-    git = guard_git()
+def test_the_leftover_calls_run_as_the_engine_user(base: Path) -> None:
+    git = system_git()
     workspace = _workspace(base, Origin(base, git).url, ("file",), git)
-    workspace.prepare()  # the matrix runs as the engine user too
+    workspace.prepare()
     marker = base / "marker"
     marker.write_text("")
     marker.chmod(0o666)
@@ -116,14 +114,13 @@ def test_the_leftover_calls_and_the_self_test_run_as_the_engine_user(base: Path)
     assert (workspace.repo / ".git" / "HEAD").stat().st_uid == ENGINE_UID
     ran_as = set(marker.read_text().split())
     assert ran_as == {str(ENGINE_UID)}, "git status ran the agent's config, as the engine user"
-    assert workspace.spool_path.read_text().strip().endswith(sha)
 
 
 # #762-T09
 def test_no_root_operation_runs_what_the_agent_repository_configures(base: Path) -> None:
-    git = guard_git()
+    git = system_git()
     workspace = _workspace(base, Origin(base, git).url, ("file",), git)
-    workspace.prepare(self_test=False)
+    workspace.prepare()
     marker = base / "marker"
     marker.write_text("")
     marker.chmod(0o666)
@@ -160,9 +157,9 @@ def test_no_root_operation_runs_what_the_agent_repository_configures(base: Path)
         done = run_as_git(workspace, ["-c", "core.hooksPath=/dev/null", *step], env)
         assert done == 0
 
-    workspace.agent_tip()
-    workspace.push()
+    report = workspace.push_all(seconds=120.0)
 
+    assert report.pushed_any, "the final push ran, so the traps above had their chance"
     lines = marker.read_text().split()
     assert "0" not in lines, "a root operation ran something the agent configured"
 
@@ -212,48 +209,39 @@ def test_the_engine_user_can_read_neither_the_token_nor_the_mirror(base: Path) -
         assert errors == []
 
     workspace.create_agent_repository()
-    workspace.install_guard()
     assert not _can_list(workspace.mirror)
     assert not _can_read(workspace.mirror / "config")
     assert not _can_read(workspace.mirror / "HEAD")
     assert stat.S_IMODE(workspace.mirror.stat().st_mode) == 0o700
     assert workspace.mirror.stat().st_uid == 0
     assert files_mentioning(base / "work", TOKEN) == []
-    # What the engine user can write is the spool and its own tree, not the guard.
-    for name in ("guard.conf", "system.gitconfig"):
-        done = run_as(
-            ENGINE_UID,
-            ENGINE_GID,
-            "import sys; open(sys.argv[1], 'a').write('x')",
-            str(base / "run" / name),
-        )
-        assert done.returncode != 0, f"the engine user can change {name}"
-    appended = run_as(
+    # The engine user can write its own tree and nothing of the runner's: not the run directory.
+    done = run_as(
         ENGINE_UID,
         ENGINE_GID,
-        "import sys; open(sys.argv[1], 'a').write('1.0 ' + 'a' * 40 + '\\n')",
-        str(workspace.spool_path),
+        "import sys, os; open(os.path.join(sys.argv[1], 'x'), 'w').write('x')",
+        str(base / "run"),
     )
-    assert appended.returncode == 0, appended.stderr
+    assert done.returncode != 0, "the engine user can write in the runner's directory"
 
 
 # #762-T09
-def test_the_upload_pack_of_the_runner_runs_as_the_engine_user_and_reads_nothing_of_roots(
+def test_the_listing_and_the_upload_pack_run_as_the_engine_user_and_read_nothing_of_roots(
     base: Path,
 ) -> None:
-    real = guard_git()
+    real = system_git()
     uids = base / "uids"
     uids.write_text("")
     uids.chmod(0o666)
     programs = base / "bin"
     programs.mkdir(mode=0o755)
     wrapper = programs / "git"
-    wrapper.write_text(
-        f'#!/bin/sh\nif [ "$1" = upload-pack ]; then id -u >> {uids}; fi\nexec {real} "$@"\n'
-    )
+    # The listing is a `for-each-ref` of the engine user, the fetch an upload-pack of that user.
+    script = f'#!/bin/sh\ncase "$1" in upload-pack|for-each-ref) id -u >> {uids};; esac\n'
+    wrapper.write_text(script + f'exec {real} "$@"\n')
     wrapper.chmod(0o755)
     workspace = _workspace(base, Origin(base, real).url, ("file",), str(wrapper))
-    workspace.prepare(self_test=False)
+    workspace.prepare()
     # What the agent can point git at: a file only root can read, as its repository's `packed-refs`.
     line = "SECRET-LINE-" + secrets.token_hex(8)
     secret = base / "root-only"
@@ -274,26 +262,26 @@ def test_the_upload_pack_of_the_runner_runs_as_the_engine_user_and_reads_nothing
     assert line in control.stderr, "a root upload-pack should show the line (the premise)"
     uids.write_text("")
 
-    assert workspace.agent_tip() is None
-    with pytest.raises(JobError) as failed:
-        workspace.push()
+    report = workspace.push_all(seconds=60.0)
 
-    assert line not in str(failed.value) and line not in failed.value.detail
-    assert set(uids.read_text().split()) == {str(ENGINE_UID)}, "an upload-pack ran as someone else"
+    assert report.listed is False and report.branches == ()
+    assert line not in repr(report)
+    assert set(uids.read_text().split()) == {str(ENGINE_UID)}, "the listing ran as someone else"
     # and an honest turn is read by the same user
     packed.unlink()
     (workspace.repo / "new.txt").write_text("n\n")
     assert workspace.commit_all() is not None
     uids.write_text("")
 
-    assert workspace.agent_tip() is not None
-    assert workspace.push().outcome is PushOutcome.PUSHED
+    report = workspace.push_all(seconds=120.0)
+
+    assert report.pushed_any
     assert set(uids.read_text().split()) == {str(ENGINE_UID)}
 
 
 # #762-T02
 def test_a_work_directory_that_belongs_to_the_engine_user_is_refused(base: Path) -> None:
-    git = guard_git()
+    git = system_git()
     workspace = _workspace(base, Origin(base, git).url, ("file",), git)
     (base / "work").mkdir()
     os.chown(base / "work", ENGINE_UID, ENGINE_GID)
@@ -303,3 +291,52 @@ def test_a_work_directory_that_belongs_to_the_engine_user_is_refused(base: Path)
 
     assert refused.value.code is ErrorCode.SETUP_FAILED
     assert not (base / "work" / "mirror.git").exists()
+
+
+# The owner's git model: hostile branch names and a hostile local config, with real root and the
+# real engine user.
+def test_hostile_branch_names_and_config_neither_inject_nor_run_as_root(base: Path) -> None:
+    git = system_git()
+    origin = Origin(base, git)
+    workspace = _workspace(base, origin.url, ("file",), git)
+    workspace.prepare()
+    marker = base / "marker"
+    marker.write_text("")
+    marker.chmod(0o666)
+    script = base / "trap.sh"
+    script.write_text(f"#!/bin/sh\nid -u >> {marker}\nexit 0\n")
+    script.chmod(0o755)
+    config = workspace.repo / ".git" / "config"
+    config.write_text(
+        config.read_text()
+        + f"[core]\n\tfsmonitor = {script}\n\tsshCommand = {script}\n\tpager = {script}\n"
+        + f"[alias]\n\tfetch = !{script}\n\tpush = !{script}\n"
+        + f"[uploadpack]\n\tpackObjectsHook = {script}\n"
+        + f'[filter "trap"]\n\tclean = {script}\n[safe]\n\tdirectory = *\n'
+    )
+    names = ["a;touch${IFS}pwned", "$(touch${IFS}pwned)", "x'y", "plain"]
+    env = workspace.agent_environment()
+    for name in names:
+        for step in (
+            ["checkout", "-q", "-B", name, workspace.start_commit],
+            ["commit", "-q", "--allow-empty", "-m", name],
+        ):
+            assert run_as_git(workspace, ["-c", "core.hooksPath=/dev/null", *step], env) == 0
+    sha = subprocess.run(
+        [git, "rev-parse", "HEAD"], cwd=workspace.repo, capture_output=True, text=True,
+        env=env, user=ENGINE_UID, group=ENGINE_GID, extra_groups=[], check=True,
+    ).stdout.strip()  # fmt: skip
+    for hostile in ("--force", "+x", "-x"):
+        (workspace.repo / ".git" / "refs" / "heads" / hostile).write_text(sha + "\n")
+        os.chown(workspace.repo / ".git" / "refs" / "heads" / hostile, ENGINE_UID, ENGINE_GID)
+
+    report = workspace.push_all(seconds=120.0)
+
+    assert {entry.name for entry in report.branches} == set(names)
+    assert all(entry.pushed for entry in report.branches), report.branches
+    assert report.invalid == 3
+    assert "0" not in marker.read_text().split(), "a root operation ran something the agent set"
+    assert not (Path.cwd() / "pwned").exists() and not (base / "pwned").exists()
+    assert sorted(origin.branches()) == sorted(
+        ["refs/heads/main", *(f"refs/heads/{n}" for n in names)]
+    )

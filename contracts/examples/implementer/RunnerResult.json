@@ -19,6 +19,14 @@
     "baseCommit": "1f3a5c7e9b2d4f60a8c1e3b5d7f90a2c4e6b8d01",
     "headCommit": "9d8c7b6a5f4e3d2c1b0a99887766554433221100",
     "pushed": true,
+    "branches": [
+      {
+        "name": "implementer/a1b2c3",
+        "head": "9d8c7b6a5f4e3d2c1b0a99887766554433221100",
+        "result": "pushed",
+        "reason": null
+      }
+    ],
     "commits": [
       {
         "sha": "5a4b3c2d1e0f99887766554433221100aabbccdd",

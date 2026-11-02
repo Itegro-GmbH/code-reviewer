@@ -77,7 +77,7 @@ a secret. The order matters; each step has a check and a way back.
   Sandbox Launcher advertises `implementer` only when `DISPATCHER_APPS` names the kind, and `POST /probe` then requires the
   canary report to name it. The canary VM runs a second probe in the Implementer's container profile (the work volume made as a
   job's is); the two halves do not take each other down. If the second half cannot run, is no verdict, or fails a check
-  (`implementer_git_too_old`, `implementer_work_dir_not_exec`, an invalid `DISPATCHER_WORKER_CONFIG` entry and others), the
+  (`implementer_setpriv_missing`, `implementer_work_dir_not_exec`, an invalid `DISPATCHER_WORKER_CONFIG` entry and others), the
   Dynamic verdict stands and the report says `implementer_probe_failed` (or the Implementer's own reason). `POST /probe` answers
   `503`, and the canary of the workflow prints
   `canary: passed engines=pr-agent,opencode reasons=implementer_probe_failed missing=implementer, the release is blocked`.

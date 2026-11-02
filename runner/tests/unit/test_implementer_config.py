@@ -171,13 +171,12 @@ def test_the_provider_block_is_asserted_like_the_native_dynamic_one() -> None:
 
 # -- the environment of the engine and of its tools -------------------------------------------
 
-GUARD_AND_IDENTITY = {
+GIT_AND_IDENTITY = {
     "PATH": "/usr/local/bin:/usr/bin:/bin",
     "HOME": "/home/engine",
-    "GIT_CONFIG_SYSTEM": "/run/code-reviewer/system.gitconfig",
+    "GIT_CONFIG_NOSYSTEM": "1",
     "GIT_CONFIG_GLOBAL": "/dev/null",
     "GIT_TERMINAL_PROMPT": "0",
-    "CODE_REVIEWER_GUARD_CONF": "/run/code-reviewer/guard.conf",
     "GIT_AUTHOR_NAME": "Code Review Implementer",
     "GIT_AUTHOR_EMAIL": "implementer@example.invalid",
     "GIT_COMMITTER_NAME": "Code Review Implementer",
@@ -209,11 +208,10 @@ EXPECTED_NAMES = {
     "CI",
     "NO_COLOR",
     "PATH",
-    # git: the guard and the identity (GitWorkspace.agent_environment)
-    "GIT_CONFIG_SYSTEM",
+    # git: the config switches and the identity (GitWorkspace.agent_environment)
+    "GIT_CONFIG_NOSYSTEM",
     "GIT_CONFIG_GLOBAL",
     "GIT_TERMINAL_PROMPT",
-    "CODE_REVIEWER_GUARD_CONF",
     "GIT_AUTHOR_NAME",
     "GIT_AUTHOR_EMAIL",
     "GIT_COMMITTER_NAME",
@@ -231,7 +229,7 @@ EGRESS_NAMES = {
 def make_environment(network: ImplementerNetwork = ImplementerNetwork.REGISTRIES) -> dict[str, str]:
     settings = EgressSettings(network, 41002 if network is ImplementerNetwork.REGISTRIES else None)
     return implementer_environment(
-        GUARD_AND_IDENTITY,
+        GIT_AND_IDENTITY,
         home="/home/engine",
         scratch_dir="/tmp/engine",
         tools_dir="/opt/tools",
@@ -274,14 +272,14 @@ def test_the_path_leads_with_the_verified_tools_and_keeps_the_git_of_the_workspa
     assert environment["HOME"] == "/home/engine"
     assert environment["XDG_DATA_HOME"] == "/home/engine/.local/share"
     assert environment["HTTPS_PROXY"] == "http://127.0.0.1:41002"
-    assert environment["GIT_CONFIG_SYSTEM"] == "/run/code-reviewer/system.gitconfig"
+    assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
     assert "REVIEW_PROXY_URL" not in environment, "no variable of the review engine"
 
 
 # #764-T02
 def test_an_inherited_proxy_or_secret_variable_of_the_caller_does_not_pass() -> None:
     hostile = {
-        **GUARD_AND_IDENTITY,
+        **GIT_AND_IDENTITY,
         "NO_PROXY": "*",
         "ALL_PROXY": "http://evil",
         "GITHUB_TOKEN": "ghs_x",

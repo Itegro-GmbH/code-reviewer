@@ -367,15 +367,16 @@ describe("what the Implementer's journeys add to the lane (#767)", () => {
   });
 
   // #767
-  it("installs git, the guard files and the mount point of the work volume in the namespace, root-owned", () => {
+  it("installs git and the mount point of the work volume in the namespace, and no guard files", () => {
     expect(namespace).toContain('"$LANE_GIT_TREE/usr/local/$directory/."');
     expect(namespace).toMatch(/--no-preserve=ownership/);
-    expect(namespace).toMatch(
-      /install -m 0755 -o root -g root .*guard\/reference-transaction.*guard_matrix\.sh" \/opt\/code-reviewer\/guard\//,
-    );
+    expect(namespace).not.toContain("/opt/code-reviewer/guard");
     expect(namespace).toContain("mkdir /work");
     // The preflight names what is missing before any journey starts.
     expect(read("app/e2e/helpers/dynamic-preflight.ts")).toContain(
+      "/usr/local/bin/git",
+    );
+    expect(read("app/e2e/helpers/dynamic-preflight.ts")).not.toContain(
       "/opt/code-reviewer/guard",
     );
   });

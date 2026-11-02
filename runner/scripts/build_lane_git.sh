@@ -3,8 +3,8 @@
 
 # The pinned git for the privileged e2e lane (#767): the release of runner/git-pin.json, built from the verified source the way
 # the Worker image builds it (runner/Dockerfile, stage git-build: the same make variables), into a tree laid out as /usr/local
-# (the prefix) that the lane installs into its mount namespace. The Implementer's branch guard needs git 2.53 or newer, which a
-# GitHub runner's package does not promise; the Worker's own start-up self-check refuses an older one.
+# (the prefix) that the lane installs into its mount namespace. The lane runs the same git as the Worker image, not the one of the
+# GitHub runner.
 #
 #   scripts/build_lane_git.sh [DESTDIR]    prints DESTDIR (default ~/.cache/code-reviewer/lane-git/<version>)
 #

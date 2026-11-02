@@ -9,22 +9,23 @@ proxy, the engine and the agent's session are started here, and everything is en
    a native Dynamic job (`native_job.build_native`); the clock of the ledger is the job's time limit
    less the grace kept for the end (`GRACE_SECONDS`).
 2. The engine starts as the engine user in `/work/repo`, with the generated configuration and the
-   closed environment; the push loop (`PushLoop`) ticks on a thread of its own, so a slow push never
-   delays the watch on the limits.
+   closed environment. Nothing is pushed while it works: the agent may rewrite history, and the
+   one push is at the end (a VM that dies mid-turn loses the work).
 3. The instruction is sent as the one user message. When the turn ends, a working tree that is
    still dirty gets **one** more message in the same session (a fixed text); what is dirty after
    that is committed by the system as the engine user, without a model call.
-4. Whatever ended the turn (the agent, the cost limit, the clock, a crash of the engine), the
-   engine and everything of its user are ended first, the leftover is committed, and the final push
-   is made. The result reports what was committed and pushed, with the stable code of what ended
-   the turn.
+4. Whatever ended the turn (the agent, the cost limit, the clock, a crash of the engine, a stop),
+   the engine and everything of its user are ended first, the leftover is committed (not on a stop
+   or a lost lease), and **all local branches of the agent's repository are pushed**
+   (`GitWorkspace.push_all`; never after a lost lease). The result reports each branch with its
+   outcome, and the commits and files of the form's branch, with the stable code of what ended the
+   turn.
 
 Nothing steers the agent: the cost limit (the proxy refuses the next call) and the clock are the
 only brakes.
 """
 
 import logging
-import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -69,11 +70,9 @@ from .egress_proxy import EgressProxy
 from .git_workspace import (
     CONFIRM_PAUSE_SECONDS,
     CONFIRM_SECONDS,
-    PUSH_INTERVAL_SECONDS,
-    RETRY_BACKOFF_SECONDS,
+    LIST_TOO_LARGE,
     GitWorkspace,
-    PushLoop,
-    PushResult,
+    PushReport,
 )
 from .history import CommitInfo, FileChange
 from .prompts import LEFTOVER_PROMPT, instructions_text
@@ -84,9 +83,21 @@ _log = logging.getLogger(__name__)
 # What is kept back from the job's time limit for the end of the turn: the commit of what is left
 # and the final push (the plan: the last three minutes). A short limit keeps a third of it.
 GRACE_SECONDS = 180.0
-# How often the push loop looks at the agent's branch (the spool is a hint, the poll finds the
-# rest); a push itself is batched by the loop.
-TICK_SECONDS = 2.0
+# How the grace is spent at a normal end: the rescue of a detached HEAD (three git commands of
+# `RESCUE_STEP_TIMEOUT`), the look at the tree (`DIRTY_TIMEOUT`), the leftover commit of the system,
+# the final push and the two reads of the report (`REPORT_READ_TIMEOUT` each), with
+# `ENGINE_STOP_SECONDS` for the end of the engine before them; the sum stays below `GRACE_SECONDS`
+# (a test holds it).
+LEFTOVER_SECONDS = 40.0
+FINAL_PUSH_SECONDS = 100.0
+ENGINE_STOP_SECONDS = 5.0
+# A stop (SIGTERM) leaves the process `SIGTERM_BACKSTOP_SECONDS` in all (`job_run.py`): the engine
+# comes out of it, then the rescue of a detached HEAD, the final push (no leftover is committed) and
+# the two reads of the report.
+STOP_PUSH_SECONDS = 30.0
+# How often the watch asks the job host whether the job is still ours while the agent works (a
+# lost lease ends the turn at once; nothing is pushed in the meantime).
+LEASE_POLL_SECONDS = 30.0
 # The extra message for a dirty tree is only worth sending when this much of the clock is left.
 MIN_EXTRA_TURN_SECONDS = 20.0
 # What the ledger holds the results of tools to. There is no bound on a single result: the owner's
@@ -138,16 +149,15 @@ class SessionSeams:
     popen: Any = None
     transport: Transport = _http_request
     port_source: Callable[[], int] | None = None
-    tick_seconds: float = TICK_SECONDS
-    # How often at most a batch of commits is pushed while the agent works (the last push is not
-    # held back).
-    push_interval: float = PUSH_INTERVAL_SECONDS
-    # How long, and how often, the last push asks a lease the host cannot confirm (a stop uses at
+    # How long, and how often, the final push asks a lease the host cannot confirm (a stop uses at
     # most `STOP_CONFIRM_SECONDS` of it).
     confirm_seconds: float = CONFIRM_SECONDS
     confirm_pause: float = CONFIRM_PAUSE_SECONDS
-    # How long the push loop waits after a look that failed for a reason that is not the agent's.
-    retry_backoff: float = RETRY_BACKOFF_SECONDS
+    # The seconds the final push may take at a normal end and at a stop.
+    final_push_seconds: float = FINAL_PUSH_SECONDS
+    stop_push_seconds: float = STOP_PUSH_SECONDS
+    leftover_seconds: float = LEFTOVER_SECONDS
+    lease_poll_seconds: float = LEASE_POLL_SECONDS
     startup_seconds: float | None = None
     scratch_dir: str | None = None
     clock: Callable[[], float] = time.monotonic
@@ -159,18 +169,6 @@ class SessionSeams:
 # all (`IMPLEMENTER_TERMINATE_GRACE_SECONDS`), and the engine and the push come out of it.
 STOP_CONFIRM_SECONDS = 20.0
 
-# What stops a turn when the push loop meets it: the provider or the branch refuses for good, or
-# the job is not ours any more (the lease gate before a push, #765). Anything else the loop raises
-# (a transient failure the loop did not take for one, a bug) is logged, waited out, and the final
-# push still runs.
-_REFUSALS = frozenset(
-    {
-        ErrorCode.BRANCH_VIOLATION,
-        ErrorCode.PUSH_REJECTED,
-        ErrorCode.BRANCH_EXISTS,
-        ErrorCode.LEASE_LOST,
-    }
-)
 # The ends after which nothing is committed any more and nothing may be pushed that was not already
 # committed: the job is not ours, or the runner is going away within seconds.
 _NO_LEFTOVER = frozenset({ErrorCode.LEASE_LOST, ErrorCode.RUNNER_SHUTDOWN})
@@ -182,77 +180,6 @@ class ShutdownRequested(JobError):
 
     def __init__(self) -> None:
         super().__init__(ErrorCode.RUNNER_SHUTDOWN, "the runner was told to stop")
-
-
-_UNEXPECTED_PAUSE_SECONDS = 30.0
-
-
-class PushTicker:
-    """Ticks the push loop on a thread of its own and keeps the first error that ends the turn.
-
-    A `PushUnverified` (a look that failed, a push the provider could not take for now) is the
-    loop's own business: it looks again after a back-off. A refusal of the provider or of the branch
-    (`push_rejected`, `branch_exists`, `branch_violation`) ends the turn: `check()` raises it in the
-    watch and `finish()` raises it instead of a push that could only be refused again. Anything else
-    is not a reason to give up the commits: it is logged and the final push runs once.
-    """
-
-    def __init__(self, loop: PushLoop, interval: float) -> None:
-        self._loop = loop
-        self._interval = interval
-        self._lock = threading.Lock()
-        self._stop = threading.Event()
-        self._error: JobError | None = None
-        self._pause_until = 0.0
-        self._thread = threading.Thread(target=self._run, daemon=True)
-
-    def start(self) -> None:
-        self._thread.start()
-
-    def _run(self) -> None:
-        while not self._stop.wait(self._interval):
-            with self._lock:
-                if self._stop.is_set() or self._error is not None:
-                    return
-                if time.monotonic() < self._pause_until:
-                    continue
-                try:
-                    self._loop.tick()
-                except JobError as error:
-                    if error.code in _REFUSALS:
-                        self._error = error
-                        return
-                    self._unexpected()
-                except Exception:
-                    self._unexpected()
-
-    def _unexpected(self) -> None:
-        _log.exception("the push loop failed; the final push still runs")
-        self._pause_until = time.monotonic() + _UNEXPECTED_PAUSE_SECONDS
-
-    @property
-    def error(self) -> JobError | None:
-        return self._error
-
-    def check(self) -> None:
-        if self._error is not None:
-            raise self._error
-
-    def finish(self, *, confirm_seconds: float | None = None) -> PushResult:
-        """Stop ticking and make the last push, whatever the back-off. Waits for a tick in
-        flight. A refusal the loop met is raised instead: the push would only be refused again.
-        `confirm_seconds`: how long a lease the host cannot confirm is asked again."""
-        self._stop.set()
-        with self._lock:
-            if self._error is not None:
-                raise self._error
-            if confirm_seconds is None:
-                return self._loop.finish()
-            return self._loop.finish(confirm_seconds=confirm_seconds)
-
-    def close(self) -> None:
-        self._stop.set()
-        self._thread.join(timeout=5.0)
 
 
 def classify(
@@ -281,10 +208,9 @@ def classify(
         if used_model:
             return ErrorCode.AGENT_GAVE_UP, detail
     if code is ErrorCode.SETUP_FAILED and used_model:
-        # Whatever is wrong with the repository or its set-up after the agent ran is the state it
-        # left, and the model budget is spent: the charged class (`RepositoryUnusable` is the
-        # same), never the free one a turn that never started has.
-        return ErrorCode.BRANCH_VIOLATION, detail
+        # Whatever is wrong with the set-up after the agent ran, the model budget is spent: the
+        # charged class, never the free one a turn that never started has.
+        return ErrorCode.AGENT_GAVE_UP, detail
     return code, detail
 
 
@@ -323,15 +249,36 @@ def _implementer_code(code: ErrorCode) -> ErrorCode:
     return code
 
 
-def _not_kept(names: list[str]) -> str:
-    """The sentence at the end of the summary when the agent touched the names the engine loads."""
-    if not names:
-        return ""
-    return (
-        f"[Not made: the agent created or changed {', '.join(names)}. These files are not "
-        "available to the Implementer and cannot be changed in a run, so nothing of that change "
-        "was kept.]"
-    )
+def _not_kept(
+    names: list[str], leftover_lost: bool, rescued: str | None = None, unchecked: bool = False
+) -> str:
+    """The sentences at the end of the summary about what of the agent's work was not kept: the
+    names the engine loads that it touched, and changes in the working tree that could not be
+    committed."""
+    parts: list[str] = []
+    if names:
+        parts.append(
+            f"[Not made: the agent created or changed {', '.join(names)}. These files are not "
+            "available to the Implementer and cannot be changed in a run, so nothing of that "
+            "change was kept.]"
+        )
+    if rescued is not None:
+        parts.append(
+            "[Saved: work that was committed on no branch (a detached HEAD) is on the branch "
+            f"{rescued}.]"
+        )
+    if unchecked:
+        parts.append(
+            "[Not checked: a process of the agent could not be ended, so changes in the working "
+            "tree "
+            "that were not committed were not looked for.]"
+        )
+    if leftover_lost:
+        parts.append(
+            "[Not kept: changes in the working tree were not committed and could not be "
+            "committed by the system, so they are not on any branch.]"
+        )
+    return "\n".join(parts)
 
 
 class ImplementerSession:
@@ -372,7 +319,13 @@ class ImplementerSession:
         self._error: tuple[ErrorCode, str] | None = None
         self._session_id: str | None = None
         self._native: NativeJob | None = None
-        self._pushed: PushResult | None = None
+        self._leftover_lost = False
+        # False when the sweep after the engine could not end every process of the engine user: then
+        # nothing is run as that user for the leftover (a survivor could be racing the tree).
+        self._engine_ended = True
+        # The branch made for work committed on a detached HEAD, if there was such work.
+        self._rescued: str | None = None
+        self._unchecked = False
 
     @property
     def ledger(self) -> BudgetLedger | None:
@@ -394,7 +347,6 @@ class ImplementerSession:
     def run(self) -> TurnResult:
         agent: ImplementerAgent | None = None
         server: PassthroughServer | None = None
-        ticker: PushTicker | None = None
         egress: EgressProxy | None = None
         try:
             native = self._native_job()
@@ -404,33 +356,22 @@ class ImplementerSession:
             agent = self._agent(native, server.url)
             agent.start()
             self._session_id = agent.session_id
-            ticker = PushTicker(self._push_loop(), self.seams.tick_seconds)
-            ticker.start()
-            self._work(agent, ticker)
+            self._work(agent)
         except Exception as error:
             self._stopped_by(error)
         finally:
             ended = agent.stop(quick=self._ends_quickly()) if agent is not None else True
+            self._engine_ended = ended
             if not ended:
                 self._note("the engine user's processes could not all be ended")
         try:
-            self._finish(ticker)
+            self._finish()
         finally:
-            if ticker is not None:
-                ticker.close()
             if server is not None:
                 server.stop(drain_seconds=0.0)
             if egress is not None:
                 egress.stop()
         return self._result()
-
-    def _push_loop(self) -> PushLoop:
-        return PushLoop(
-            self.workspace,
-            interval=self.seams.push_interval,
-            confirm_pause=self.seams.confirm_pause,
-            retry_backoff=self.seams.retry_backoff,
-        )
 
     def _native_job(self) -> NativeJob:
         spec = self.job.implementer
@@ -533,17 +474,23 @@ class ImplementerSession:
         job is not ours any more."""
         return self._error is not None and self._error[0] in _NO_LEFTOVER
 
-    def _watch(self, ticker: PushTicker) -> Callable[[], None]:
+    def _watch(self) -> Callable[[], None]:
+        last = time.monotonic()
+
         def check() -> None:
+            nonlocal last
             if self._should_stop():
                 raise ShutdownRequested
-            ticker.check()
+            now = time.monotonic()
+            if now - last >= self.seams.lease_poll_seconds:
+                last = now
+                self.workspace.check_lease()
 
         return check
 
-    def _work(self, agent: ImplementerAgent, ticker: PushTicker) -> None:
+    def _work(self, agent: ImplementerAgent) -> None:
         """The instruction, and the one extra message when the tree is still dirty."""
-        check = self._watch(ticker)
+        check = self._watch()
         ended = agent.turn(self.job.implementer.instruction, check=check)
         self._summary = ended.text
         self._note("the agent ended its turn")
@@ -567,58 +514,112 @@ class ImplementerSession:
 
     # -- the end --------------------------------------------------------------
 
-    def _finish(self, ticker: PushTicker | None) -> None:
-        """The leftover commit and the final push, after the agent is gone. A failure here is the
-        turn's error only when nothing ended the turn before."""
+    def _finish(self) -> None:
+        """The leftover commit and the final push of all local branches, after the agent is gone.
+        A failure of the push is the turn's error only when nothing ended the turn before; a
+        leftover that cannot be committed is a note (the branches that are committed are pushed
+        all the same)."""
+        quick = self._ends_quickly()
+        if not self._engine_ended:
+            self._unchecked = True
+            self._note("nothing was committed or rescued: a process of the engine user is left")
+        else:
+            try:
+                self._rescued = self.workspace.rescue_detached_head()
+                if self._rescued is not None:
+                    self._note(f"work on a detached HEAD was saved on the branch {self._rescued}")
+            except Exception:
+                self._note("work on a detached HEAD could not be saved on a branch")
+            try:
+                if not quick and self.workspace.dirty():
+                    self.workspace.commit_all(seconds=self.seams.leftover_seconds)
+                    self._note("uncommitted changes were committed by the system")
+            except Exception:
+                self._leftover_lost = True
+                self._note("uncommitted changes could not be committed")
         try:
-            if not self._ends_quickly() and self.workspace.dirty():
-                self.workspace.commit_all()
-                self._note("uncommitted changes were committed by the system")
-        except Exception as error:
-            self._stopped_by(error)
-        try:
+            seconds = self.seams.stop_push_seconds if quick else self.seams.final_push_seconds
             window = (
                 min(STOP_CONFIRM_SECONDS, self.seams.confirm_seconds)
-                if self._ends_quickly()
+                if quick
                 else self.seams.confirm_seconds
             )
-            if ticker is not None:
-                self._pushed = ticker.finish(confirm_seconds=window)
-            else:
-                loop = self._push_loop()
-                self._pushed = loop.finish(confirm_seconds=window)
+            self.workspace.push_all(
+                seconds=seconds, confirm_seconds=window, confirm_pause=self.seams.confirm_pause
+            )
         except Exception as error:
             self._stopped_by(error)
+        self._note_branches(self.workspace.push_report())
+
+    def _note_branches(self, report: PushReport) -> None:
+        for branch in report.branches:
+            outcome = "pushed" if branch.pushed else f"rejected ({branch.reason})"
+            self._note(f"branch {branch.name}: {outcome}")
+        if not report.listed:
+            if report.list_problem == LIST_TOO_LARGE:
+                self._note(
+                    "the list of local branches of the agent's repository is too long to read"
+                )
+            else:
+                self._note("the local branches of the agent's repository could not be read")
+        if report.sweeps_failed:
+            self._note(
+                f"{report.sweeps_failed} pushes were made while a process of the engine user "
+                "was left"
+            )
+        if report.invalid:
+            self._note(f"{report.invalid} local branches have names that are not pushed")
+        if report.overflow:
+            self._note(f"{report.overflow} further branches were not pushed (limit)")
 
     def _result(self) -> TurnResult:
         workspace = self.workspace
-        commits: list[CommitInfo] = []
-        files: list[FileChange] = []
-        try:
-            commits = workspace.commits_since_start()
-            files = workspace.changed_files()
-        except JobError as error:
-            # The report would be a guess: the repository could not be read after the agent ran.
-            self._note("the commits and files of the branch could not be read")
-            self._stopped_by(error)
-        tip = workspace.agent_tip()
-        head = tip if tip is not None and tip != workspace.start_commit else None
-        pushed = head is not None and workspace.pushed_tip == head
+        report = workspace.push_report()
+        commits: list[CommitInfo] = workspace.commits_since_start()
+        files: list[FileChange] = workspace.changed_files()
+        head = report.form_head
+        form = next((b for b in report.branches if b.name == self.job.implementer.branch), None)
+        pushed = form is not None and form.pushed
         error = self._error
-        if error is None and head is None:
-            # No commit and nothing to commit: the agent did not do the task.
+        if error is None and not report.listed:
+            error = (
+                ErrorCode.PUSH_REJECTED,
+                "the repository of the agent could not be read"
+                + (
+                    ": its list of branches is too long"
+                    if report.list_problem == LIST_TOO_LARGE
+                    else ""
+                )
+                + ", so nothing was pushed",
+            )
+        elif error is None and not report.branches:
+            # No commit and nothing to commit, on no branch: the agent did not do the task.
             error = (ErrorCode.AGENT_GAVE_UP, "the agent ended without a commit")
-        elif error is None and not pushed:
+        elif error is None and (
+            not report.pushed_any
+            or (form is not None and not form.pushed)
+            or (form is None and not report.form_listed)
+        ):
+            # The task's branch has an entry only when it has work or could not be looked at (one
+            # that is verifiably empty, at the base commit, has none): an entry that was not pushed
+            # is work that did not arrive, and a branch that is gone is not verifiably empty. Not a
+            # success, whatever else was pushed.
             error = (ErrorCode.PUSH_REJECTED, "the work could not be pushed")
         usage = self._usage()
         touched = self._touched_engine_inputs()
-        summary = clip_summary(self._summary, self.secrets(), tail=_not_kept(touched))
+        summary = clip_summary(
+            self._summary,
+            self.secrets(),
+            tail=_not_kept(touched, self._leftover_lost, self._rescued, self._unchecked),
+        )
         return TurnResult(
             error_code=None if error is None else error[0],
             error_detail=None if error is None else error[1],
             base_commit=workspace.start_commit,
             head_commit=head,
             pushed=pushed,
+            branches=report.branches,
+            branches_dropped=(report.invalid, report.overflow),
             commits=tuple(commits),
             files_changed=tuple(files),
             summary=summary,

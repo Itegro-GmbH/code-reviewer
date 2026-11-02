@@ -13,6 +13,7 @@ from support import API_KEY, TOKEN
 from code_reviewer_runner.implementer.history import MAX_COMMITS, MAX_FILES
 from code_reviewer_runner.implementer.report import (
     BODY_BUDGET_BYTES,
+    MAX_BRANCHES,
     MAX_SUMMARY_CHARS,
     escaped_size,
     fit_block,
@@ -45,10 +46,27 @@ def block(commits: list[dict[str, str]] | None = None, **changes: Any) -> dict[s
         "baseCommit": BASE,
         "headCommit": head,
         "pushed": head is not None,
+        "branches": []
+        if head is None
+        else [{"name": "work/b", "head": head, "result": "pushed", "reason": None}],
         "commits": listed,
         "filesChanged": [{"path": "src/a.ts", "status": "added"}],
         "summary": "Done.",
         "opencode": {"sessionId": "ses_1", "version": "1.19.0"},
+        **changes,
+    }
+
+
+def pushed_branch(**changes: Any) -> dict[str, Any]:
+    return {"name": "work/b", "head": HEAD, "result": "pushed", "reason": None, **changes}
+
+
+def rejected_branch(**changes: Any) -> dict[str, Any]:
+    return {
+        "name": "other",
+        "head": HEAD,
+        "result": "rejected",
+        "reason": "non_fast_forward",
         **changes,
     }
 
@@ -243,6 +261,17 @@ def test_a_report_on_a_job_that_is_not_an_implementer_turn_is_never_passed_on() 
         {**block(), "filesChanged": [{"path": "", "status": "added"}]},
         {**block(), "summary": "x" * (MAX_SUMMARY_CHARS + 1)},
         {**block(), "opencode": {"sessionId": "s"}},
+        {**block(), "branches": "main"},
+        {**block(), "branches": [{"name": "a", "head": HEAD, "result": "pushed"}]},
+        {**block(), "branches": [{**pushed_branch(), "extra": 1}]},
+        {**block(), "branches": [{**pushed_branch(), "name": ""}]},
+        {**block(), "branches": [{**pushed_branch(), "head": None}]},
+        {**block(), "branches": [{**pushed_branch(), "reason": "non_fast_forward"}]},
+        {**block(), "branches": [{**pushed_branch(), "result": "maybe"}]},
+        {**block(), "branches": [rejected_branch(reason=None)]},
+        {**block(), "branches": [rejected_branch(reason="Not Fast Forward")]},
+        {**block(), "branches": [rejected_branch(reason="x" * 41)]},
+        {**block(), "branches": [pushed_branch(name=f"b{n}") for n in range(MAX_BRANCHES + 1)]},
         {**block(), "commits": [commit(n) for n in range(MAX_COMMITS + 1)]},
         {**block(), "filesChanged": [{"path": "a", "status": "added"}] * (MAX_FILES + 1)},
         "not a block",
@@ -303,3 +332,48 @@ def test_a_refused_whole_result_is_replaced_by_a_short_report_never_by_none() ->
     assert short["implementer"]["commits"] == [worst_case()["commits"][-1]]
     assert short["implementer"]["headCommit"] == worst_case()["headCommit"]
     assert escaped_size(short) < MAX_REQUEST_BYTES
+
+
+# The git model of the owner: every pushed branch is reported with its outcome.
+def test_a_report_with_pushed_and_rejected_branches_is_valid() -> None:
+    report = block(
+        branches=[
+            pushed_branch(),
+            rejected_branch(),
+            rejected_branch(name="third", head=None, reason="unreadable"),
+        ]
+    )
+
+    assert valid_block(report) == report
+
+
+def test_the_counts_of_the_branches_that_were_left_out_are_optional_and_checked() -> None:
+    counted = block(branchesDropped={"invalid": 3, "overflow": 7})
+
+    assert valid_block(counted) == counted
+    assert valid_block(block()) is not None  # an older shape, without the counts
+    for bad in (
+        None,
+        3,
+        {"invalid": 0},
+        {"invalid": 0, "overflow": 0, "extra": 1},
+        {"invalid": -1, "overflow": 0},
+        {"invalid": 1.5, "overflow": 0},
+        {"invalid": True, "overflow": 0},
+        {"invalid": 0, "overflow": 10**10},
+    ):
+        assert valid_block(block(branchesDropped=bad)) is None, bad
+
+
+def test_a_report_with_no_branch_at_all_is_valid_for_a_turn_that_pushed_nothing() -> None:
+    assert valid_block(block(commits=[], branches=[], filesChanged=[])) is not None
+
+
+def test_the_branches_stay_in_a_report_that_is_fitted_to_the_body() -> None:
+    report = worst_case()
+    report["branches"] = [pushed_branch(name=f"b{n}") for n in range(MAX_BRANCHES)]
+
+    fitted = fit_block(report, 0)
+
+    assert fitted["branches"] == report["branches"]
+    assert escaped_size(fitted) <= BODY_BUDGET_BYTES

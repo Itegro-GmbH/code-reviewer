@@ -170,11 +170,11 @@ class EngineTraces:
         return cast("subprocess.Popen[bytes]", subprocess.Popen(argv, **options))
 
     def scan(self, secrets: dict[str, str], report_path: str) -> None:
-        """Counts, per place and per secret, the files that hold it: the engine's home and temporary
-        directory, the agent's repository, the root's mirror, and `/run` (the guard's files, the
-        engine's configuration, the Worker's files) without the lane's records. The capability is
-        the engine's credential for the proxy of this job: it is in the engine's configuration
-        under `/run` by design, so there it is left out."""
+        """Counts, per place and per secret, the files that hold it: the engine's home and
+        temporary directory, the agent's repository, the root's mirror, and `/run` (the runner's own
+        files, the engine's configuration, the Worker's files) without the lane's records. The
+        capability is the engine's credential for the proxy of this job: it is in the engine's
+        configuration under `/run` by design, so there it is left out."""
         capabilities = {f"capability-{n}": c for n, c in enumerate(self.capabilities)}
         everything = {**secrets, **capabilities}
         records = os.path.dirname(report_path)
@@ -212,7 +212,25 @@ class EngineTraces:
             os.fchmod(handle.fileno(), 0o600)
             for capability in sorted(self.capabilities):
                 handle.write(capability + "\n")
-        Path(report_path).write_text(json.dumps({"roots": roots}), encoding="utf-8")
+        Path(report_path).write_text(
+            json.dumps({"roots": roots, "traps": self.traps()}), encoding="utf-8"
+        )
+
+    def traps(self) -> dict[str, Any]:
+        """What the traps an agent laid in its own repository left behind (journey E15): the user
+        ids a `trap.log` in the engine's directories names (a program the agent's git
+        configuration runs appends `id -u` to it) and the files its hostile branch names would
+        have made if a shell had read them (`e15-pwned*`). Only the engine's own user may ever
+        appear in the first."""
+        uids: list[str] = []
+        pwned: list[str] = []
+        for directory in sorted(self.directories):
+            for name in ("trap.log",):
+                path = Path(directory, name)
+                if path.is_file() and not path.is_symlink():
+                    uids.extend(path.read_text(encoding="utf-8", errors="replace").split())
+            pwned.extend(str(path) for path in Path(directory).glob("e15-pwned*"))
+        return {"uids": uids, "pwned": pwned}
 
 
 def clone_over_http() -> None:

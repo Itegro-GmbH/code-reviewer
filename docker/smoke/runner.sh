@@ -12,9 +12,9 @@
 # the startup self-check advertises `opencode` exactly when it should (#202). The entry modes are proven with the
 # flags of the hardened container spec (#324): `probe` prints a JSON verdict, `worker-once` runs one job against the
 # fake App (Node) and `worker-reap` is on the PATH; the image carries no Dispatcher bundle. The toolchain of the
-# Implementer's agent (#761) is proven here too: git 2.53 or newer, Node.js, pnpm, Python, uv, a compiler, jq and
-# unzip at the pinned versions, the guard hook root-owned with no hooksPath baked in, the guard matrix passing as
-# the engine user in the production layout, and the size of the image against the budget of the shared image. A real
+# Implementer's agent (#761) is proven here too: git, Node.js, pnpm, Python, uv, a compiler, jq and unzip at the
+# pinned versions, no git configuration baked into the image, and the size of the image against the budget of the
+# shared image. A real
 # Dynamic review runs in the image with the production flags against fakes of GitHub, the App and the model.
 set -euo pipefail
 
@@ -570,11 +570,10 @@ as_engine() {
 }
 
 # #761-T01
-step "git is the pinned release, 2.53 or newer, and the only git of the image"
+step "git is the pinned release and the only git of the image"
 git_pinned=$(pin_value "$git_pin" version)
 git_reported=$(as_engine git --version) || fail "git --version failed as the engine user"
 [ "$git_reported" = "git version $git_pinned" ] || fail "git reports '$git_reported', the pin says '$git_pinned'"
-[ "$(printf '%s\n%s\n' 2.53.0 "$git_pinned" | sort -V | head -n 1)" = 2.53.0 ] || fail "the pinned git $git_pinned is older than 2.53.0"
 git_paths=$(in_image "$image" sh -c 'command -v git; ls /usr/bin/git 2>/dev/null; ls /usr/local/libexec/git-core/git-remote-https') || fail "git or its https helper is missing"
 [ "$git_paths" = "$(printf '/usr/local/bin/git\n/usr/local/libexec/git-core/git-remote-https')" ] ||
   fail "unexpected git files (a distribution git, or no https helper):
@@ -627,13 +626,9 @@ scan_in_image "$image" "0" find /opt/node /opt/pnpm /usr/local/libexec/git-core 
 $SCAN_OUTPUT"
 
 # #761-T03
-step "the guard hook is root-owned, mode 0755, not writable by the engine user, and no hooksPath is baked in"
-facts=$(in_image "$image" stat -c '%n %u:%g %a' /opt/code-reviewer/guard /opt/code-reviewer/guard/reference-transaction /opt/code-reviewer/guard/guard_matrix.sh)
-[ "$facts" = "$(printf '/opt/code-reviewer/guard 0:0 755\n/opt/code-reviewer/guard/reference-transaction 0:0 755\n/opt/code-reviewer/guard/guard_matrix.sh 0:0 755')" ] ||
-  fail "unexpected owner or mode of the guard files:
-$facts"
-as_engine sh -c 'test ! -w /opt/code-reviewer/guard && test ! -w /opt/code-reviewer/guard/reference-transaction && ! touch /opt/code-reviewer/guard/x 2>/dev/null' ||
-  fail "the engine user can write the guard directory or hook"
+step "no git configuration is baked into the image, and no hook directory of the guard is left in it"
+[ -z "$(in_image "$image" sh -c 'ls -d /opt/code-reviewer/guard 2>/dev/null || true')" ] ||
+  fail "the image still has the directory of the branch guard"
 for user in 0 10101; do
   scope=$(docker run --rm --user "$user" --env HOME=/tmp --entrypoint git "$image" config --list --show-origin 2>/dev/null || true)
   [[ "$scope" != *hooksPath* ]] || fail "core.hooksPath is configured in the image for user $user:
@@ -642,22 +637,6 @@ done
 configs=$(in_image "$image" sh -c 'ls /etc/gitconfig /usr/local/etc/gitconfig /root/.gitconfig /root/.config/git/config /home/runner/.gitconfig 2>/dev/null || true')
 [ -z "$configs" ] || fail "the image bakes in a git configuration file:
 $configs"
-
-# #761-T04: the matrix as the engine user, in the production layout (read-only root, noexec tmpfs, no capability).
-step "the guard matrix passes as the engine user in the production layout"
-matrix_out=$(docker run --rm --network none --user 10101:10101 --cap-drop ALL --security-opt no-new-privileges:true \
-  "${dynamic_rootfs[@]}" --env HOME=/tmp --entrypoint /opt/code-reviewer/guard/guard_matrix.sh "$image") ||
-  fail "the guard matrix failed in the image:
-$matrix_out"
-matrix_line=$(printf '%s\n' "$matrix_out" | grep -E '^guard matrix: ') || fail "the guard matrix printed no verdict"
-[[ "$matrix_line" =~ ^guard\ matrix:\ ([0-9]+)\ passed,\ 0\ failed ]] || fail "the guard matrix has failures: $matrix_line"
-[ "${BASH_REMATCH[1]}" -ge 28 ] || fail "the guard matrix ran only ${BASH_REMATCH[1]} actions"
-printf '    %s\n' "$matrix_line"
-# A matrix that cannot find the hook says so and fails (exit status 2); it never passes quietly.
-status=0
-docker run --rm --network none --user 10101:10101 --env HOME=/tmp --env GUARD_DIR=/nonexistent \
-  --entrypoint /opt/code-reviewer/guard/guard_matrix.sh "$image" >/dev/null 2>&1 || status=$?
-[ "$status" -eq 2 ] || fail "the guard matrix without a hook ended with status $status, expected 2"
 
 # #761-T05: the image serves every kind of job, so the reviewer pays for what the Implementer needs. The growth is
 # the sum of the layers above the layer of the pin files (the toolchain layer and what follows it), in bytes as
