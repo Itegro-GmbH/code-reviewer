@@ -33,7 +33,7 @@ while read old new ref; do
   [ "$new" = "$zero" ] && continue
   file=$(git log --name-only --format= "$new" --not --all 2>/dev/null | grep -m1 '^\\.github/workflows/')
   if [ -n "$file" ]; then
-    echo "refusing to allow a GitHub App to create or update workflow \`$file\` without \`workflows\` permission" >&2
+    echo "refusing to allow a GitHub App to create or update workflow \\\`$file\\\` without \\\`workflows\\\` permission" >&2
     status=1
   fi
 done

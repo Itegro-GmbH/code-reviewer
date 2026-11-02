@@ -89,7 +89,9 @@ def test_an_https_address_is_accepted(tmp_path: Path) -> None:
     assert workspace.repo == tmp_path / "work" / "repo"
 
 
-def _listing_git(monkeypatch: pytest.MonkeyPatch, branches: dict[str, str]) -> list[list[str]]:
+def _listing_git(
+    monkeypatch: pytest.MonkeyPatch, branches: dict[str, str], fetched: dict[str, str] | None = None
+) -> list[list[str]]:
     """Every git the final push would run, recorded; the agent's repository lists these branches,
     every fetch works, the mirror knows the tips and pushes succeed (no process is started)."""
     calls: list[list[str]] = []
@@ -113,7 +115,8 @@ def _listing_git(monkeypatch: pytest.MonkeyPatch, branches: dict[str, str]) -> l
         if "fetch" in words:
             refspec = words[-1]
             source, _, destination = refspec.removeprefix("+").partition(":")
-            scratch[destination] = branches[source.removeprefix("refs/heads/")]
+            name = source.removeprefix("refs/heads/")
+            scratch[destination] = (fetched or branches)[name]
             return Outcome(0, "", "")
         if "rev-parse" in words:
             ref = words[-1].removesuffix("^{commit}")
@@ -187,6 +190,17 @@ def test_a_branch_the_listing_puts_at_the_start_commit_is_neither_fetched_nor_re
 
     assert [entry.name for entry in report.branches] == ["work"]
     assert sum("fetch" in call for call in calls) == 1
+
+
+def test_a_branch_that_the_fetch_shows_at_the_start_commit_is_not_pushed_whatever_the_listing_said(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _listing_git(monkeypatch, {"work": "a" * 40}, fetched={"work": START})
+    workspace = _ready(tmp_path)
+
+    report = workspace.push_all(seconds=60.0)
+
+    assert report.branches == () and not any("push" in call for call in calls)
 
 
 def test_every_git_on_the_mirror_switches_auto_gc_and_auto_maintenance_off(

@@ -325,7 +325,9 @@ describe("the detail of an implementer run", () => {
 
   it("has no branches for a result of an older runner, and cleans the name of a branch like any text of the agent", () => {
     const old = view(turn({ result: resultWith({}) }), source()).implementer;
-    const hostile = view(
+    const redact = (text: string) => text.replaceAll(GIT_TOKEN, "[redacted]");
+    const hostile = toRunDetailView(
+      PRODUCT,
       turn({
         result: resultWith({
           branches: [
@@ -338,6 +340,10 @@ describe("the detail of an implementer run", () => {
           ],
         }),
       }),
+      "acme/widgets",
+      NOW,
+      redact,
+      false,
       source(),
     ).implementer;
 

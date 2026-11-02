@@ -8,9 +8,9 @@
 // refs and never a token. The Implementer journey (#767) relies on this, so a wrong fake fails here first.
 import { execFile, execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { createGitRepository } from "../../../../../fakes/github/git-fixture.ts";
@@ -135,6 +135,7 @@ async function workingCopy(
     branch,
     setupResult.base,
   ]);
+  mkdirSync(dirname(join(clone, file)), { recursive: true });
   writeFileSync(join(clone, file), content);
   execFileSync("git", ["-C", clone, "add", "--all"]);
   await git(clone, token, "commit", "--quiet", "--message", `Add ${file}`);

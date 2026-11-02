@@ -554,15 +554,23 @@ function implementerDetailView(
           false,
         ).trim();
   const branches = stored.branches
-    .map((branch): ImplementerBranchView => ({
-      name: agentText(head(branch.name, 255 * 4), 255, true),
-      url: branch.pushed ? githubBranchUrl(repositoryUrl, branch.name) : null,
-      shortSha:
-        branch.head === null ? null : branch.head.slice(0, SHORT_SHA_CHARS),
-      pushed: branch.pushed,
-      reason: branch.pushed ? null : describeBranchReason(branch.reason),
-      isTaskBranch: source !== null && branch.name === source.branch,
-    }))
+    .map((branch): ImplementerBranchView => {
+      const name = agentText(head(branch.name, 255 * 4), 255, true);
+      return {
+        name,
+        // The link is made from the raw name; a name that had to be cleaned or redacted for display gets none, so that nothing
+        // the display took out can be in an address.
+        url:
+          branch.pushed && name === branch.name
+            ? githubBranchUrl(repositoryUrl, branch.name)
+            : null,
+        shortSha:
+          branch.head === null ? null : branch.head.slice(0, SHORT_SHA_CHARS),
+        pushed: branch.pushed,
+        reason: branch.pushed ? null : describeBranchReason(branch.reason),
+        isTaskBranch: source !== null && branch.name === source.branch,
+      };
+    })
     .sort((a, b) => Number(b.isTaskBranch) - Number(a.isTaskBranch));
   const pushedHead =
     stored.pushed && stored.headCommit !== null ? stored.headCommit : null;
