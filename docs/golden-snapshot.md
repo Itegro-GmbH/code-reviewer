@@ -1,8 +1,8 @@
 # Golden snapshot (hosted deployment)
 
 The hosted deployment (#316) runs every review job in a fresh Vercel Sandbox VM that is a clone of one **golden
-snapshot**: a VM image with a pinned Docker installed, the cgroup preparation script in place and the Worker image
-already built. This document is the runbook for that snapshot: how it is made, what proves it, when it is rebuilt, how
+snapshot**: a VM image with a pinned Docker installed, the cgroup preparation script in place, the Worker image
+already built and, for the Implementer's sandbox, a pinned Sysbox with its boot script (section "Sysbox"). This document is the runbook for that snapshot: how it is made, what proves it, when it is rebuilt, how
 it is rolled back and what happens to old ones. Since #403 **nobody runs any of it by hand**: the deployment pipeline
 decides, builds, proves, wires in and cleans up (`deployment-vercel.md`, section 5.1). The code is `dispatcher/src/snapshot/`; the workflow is
 `.github/workflows/golden-snapshot.yml`; the Sandbox double the tests use is `fakes/vercel-sandbox/`.
@@ -14,26 +14,29 @@ The place of the snapshot in a whole deployment, and the order of the steps arou
 `pnpm --dir dispatcher snapshot:build --context <tgz> --vm-prepare <sh> --out <json> [options]` (the workflow runs it).
 In order:
 
-| #   | Step (label in the logs)                                      | What happens                                                                                                                                                                                                                                                                                                    | Failure code (`SNAPSHOT_ERROR_CODES`)                             |
-| --- | ------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| 1   | `create_builder`, `record_base_manifest`                      | A persistent builder VM in `fra1` (2 vCPU / 4 GB) from the platform's default image, named `code-reviewer-golden-builder-<UTC time>`. Its first command records the **base manifest** (path, size, modification time of every file under the scan roots) before anything is installed (the scan section below). | `builder_create_failed`, `base_manifest_failed`                   |
-| 2   | `install_docker`                                              | `apt-get install docker.io=<pinned>* docker-buildx=<pinned>*`; the installed `docker.io` must start with the pinned version.                                                                                                                                                                                    | `docker_install_failed`, `docker_version_mismatch`                |
-| 3   | `write_daemon_config`, `install_host_scripts`, `start_daemon` | `/etc/docker/daemon.json` (IPv6 off), `docker/sandbox/vm-prepare.sh` into `/usr/local/sbin/vm-prepare.sh`, and a run of it: the same cgroup fix and `dockerd` start the Sandbox-Launcher (#329) runs on every job VM.                                                                                           | `daemon_config_failed`, `host_prepare_failed`                     |
-| 4   | `build_image`                                                 | The commit's tarball (`git archive`, tracked files only) is uploaded and `docker build --target <target>` runs in the VM. About 70 s in the spike. **No registry and no registry credential is involved.**                                                                                                      | `context_upload_failed`, `image_build_failed`                     |
-| 5   | `inspect_image`, `clean_builder`                              | The image id (`sha256:<64 hex>`, `docker image inspect --format '{{.Id}}'`) is read and becomes `imageDigest`. Build cache and staged files are removed.                                                                                                                                                        | `image_digest_invalid`                                            |
-| 6   | `check_no_containers`, `stop_daemon`                          | `docker ps -aq` must be empty (no container, running or not), then `dockerd` gets SIGTERM and the step waits until it, containerd and the shims are gone. Never SIGKILL.                                                                                                                                        | `containers_present`, `daemon_not_stopped`, `daemon_query_failed` |
-| 7   | `snapshot`                                                    | `snapshot({expiration: 0})`: **no expiry**. It must be `created` and available in `fra1`.                                                                                                                                                                                                                       | `snapshot_failed`, `snapshot_region_mismatch`                     |
-| 8   | `create_check_vm`                                             | A VM `code-reviewer-golden-check-<UTC time>`, **created from the new snapshot** with `persistent: false`, the way a job VM is.                                                                                                                                                                                  | `check_vm_failed`                                                 |
-| 9   | `scan_filesystem`                                             | No secret and no job data in what the pipeline added or changed in the restored snapshot (below).                                                                                                                                                                                                               | `scan_findings`, `scan_unreadable`                                |
-| 10  | `start_daemon_check`, `inspect_restored_image`                | `vm-prepare.sh` brings the daemon up; the image id must equal step 5.                                                                                                                                                                                                                                           | `host_prepare_failed`, `image_digest_mismatch`                    |
-| 11  | `probe`                                                       | The image runs in `probe` mode (#324) with the flags the shared renderer (#325) makes for the Sandbox variant (the hardened container spec plus the IPv6 sysctls); its verdict must advertise every engine in `requiredEngines` (`pr-agent`, `opencode`).                                                       | `probe_failed`, `probe_unreadable`, `engine_missing`              |
-| 12  | record, retention                                             | The record is returned and written; older builders are removed unless `--skip-retention` is given (the deployment removes them itself, below); the check VM is deleted.                                                                                                                                         | `record_invalid`; retention only warns                            |
+| #   | Step (label in the logs)                                      | What happens                                                                                                                                                                                                                                                                                                                                                                  | Failure code (`SNAPSHOT_ERROR_CODES`)                             |
+| --- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| 1   | `create_builder`, `record_base_manifest`                      | A persistent builder VM in `fra1` (2 vCPU / 4 GB) from the platform's default image, named `code-reviewer-golden-builder-<UTC time>`. Its first command records the **base manifest** (path, size, modification time of every file under the scan roots) before anything is installed (the scan section below).                                                               | `builder_create_failed`, `base_manifest_failed`                   |
+| 2   | `install_docker`                                              | `apt-get install docker.io=<pinned>* docker-buildx=<pinned>*`; the installed `docker.io` must start with the pinned version.                                                                                                                                                                                                                                                  | `docker_install_failed`, `docker_version_mismatch`                |
+| 2b  | `install_sysbox`                                              | The pinned Sysbox package, downloaded and checked against its checksum (section "Sysbox"). **The one step that never fails a run**: a failure is a warning and the record says `"sysbox": "unproven"`.                                                                                                                                                                        | warning `sysbox_install_failed`                                   |
+| 3   | `write_daemon_config`, `install_host_scripts`, `start_daemon` | `/etc/docker/daemon.json` (IPv6 off, the `sysbox-runc` runtime registered, `runc` still the default), `docker/sandbox/vm-prepare.sh` into `/usr/local/sbin/vm-prepare.sh` and `docker/sandbox/sysbox-prepare.sh` into `/usr/local/sbin/sysbox-prepare.sh`, and a run of vm-prepare: the same cgroup fix and `dockerd` start the Sandbox-Launcher (#329) runs on every job VM. | `daemon_config_failed`, `host_prepare_failed`                     |
+| 4   | `build_image`                                                 | The commit's tarball (`git archive`, tracked files only) is uploaded and `docker build --target <target>` runs in the VM. About 70 s in the spike. **No registry and no registry credential is involved.**                                                                                                                                                                    | `context_upload_failed`, `image_build_failed`                     |
+| 5   | `inspect_image`, `clean_builder`                              | The image id (`sha256:<64 hex>`, `docker image inspect --format '{{.Id}}'`) is read and becomes `imageDigest`. Build cache and staged files are removed.                                                                                                                                                                                                                      | `image_digest_invalid`                                            |
+| 6   | `check_no_containers`, `stop_daemon`                          | `docker ps -aq` must be empty (no container, running or not), then `dockerd` gets SIGTERM and the step waits until it, containerd and the shims are gone. Never SIGKILL.                                                                                                                                                                                                      | `containers_present`, `daemon_not_stopped`, `daemon_query_failed` |
+| 7   | `snapshot`                                                    | `snapshot({expiration: 0})`: **no expiry**. It must be `created` and available in `fra1`.                                                                                                                                                                                                                                                                                     | `snapshot_failed`, `snapshot_region_mismatch`                     |
+| 8   | `create_check_vm`                                             | A VM `code-reviewer-golden-check-<UTC time>`, **created from the new snapshot** with `persistent: false`, the way a job VM is.                                                                                                                                                                                                                                                | `check_vm_failed`                                                 |
+| 9   | `scan_filesystem`                                             | No secret and no job data in what the pipeline added or changed in the restored snapshot (below).                                                                                                                                                                                                                                                                             | `scan_findings`, `scan_unreadable`                                |
+| 10  | `start_daemon_check`, `inspect_restored_image`                | `vm-prepare.sh` brings the daemon up; the image id must equal step 5.                                                                                                                                                                                                                                                                                                         | `host_prepare_failed`, `image_digest_mismatch`                    |
+| 11  | `probe`                                                       | The image runs in `probe` mode (#324) with the flags the shared renderer (#325) makes for the Sandbox variant (the hardened container spec plus the IPv6 sysctls); its verdict must advertise every engine in `requiredEngines` (`pr-agent`, `opencode`).                                                                                                                     | `probe_failed`, `probe_unreadable`, `engine_missing`              |
+| 11b | `sysbox_probe`                                                | Sysbox boots as on a job VM and a container with its own Docker runs a container, on a network with no exit (section "Sysbox"). **Never fails a run**: warning `sysbox_probe_failed`, `"sysbox": "unproven"`.                                                                                                                                                                 | warning `sysbox_probe_failed`                                     |
+| 12  | record, retention                                             | The record is returned and written; older builders are removed unless `--skip-retention` is given (the deployment removes them itself, below); the check VM is deleted.                                                                                                                                                                                                       | `record_invalid`; retention only warns                            |
 
 **Fail closed.** If any step fails after the snapshot exists, the builder is deleted **with** its snapshots, so a bad
 snapshot is withdrawn and the run leaves no record. The record file named by `--out` is deleted when the run starts, so
 a failed run cannot leave the last good record looking current. If a VM or snapshot cannot be deleted, the error names
 it (`cleanupFailures`) and the operator removes it. A snapshot whose Dynamic self-check does not advertise `opencode` is
-never recorded.
+never recorded. Sysbox is the one exception: it is for the Implementer only, and the snapshot is shared by every kind of job, so a
+Sysbox that cannot be installed or proven never withdraws the snapshot (section "Sysbox").
 
 **What the pipeline never has.** It runs no job code, receives no job credential and no registry credential. The
 Vercel token is read from the environment, handed to the platform client and to nothing else (no VM command, file or
@@ -65,10 +68,12 @@ the container start of a Diff or Dynamic job does not read the new layers.
   "builtAt": "2026-10-15T18:00:00.000Z",
   "region": "fra1",
   "target": "sandbox",
-  "commit": "<sha>"
+  "commit": "<sha>",
+  "sysbox": "proven"
 }
 ```
 
+`sysbox` is `proven` or `unproven` (section "Sysbox"); the Launcher does not read it.
 `snapshotId` and `imageDigest` are what the Sandbox-Launcher (#329) is configured with. The Launcher creates job VMs
 from `snapshotId` in `fra1` and refuses to run when `docker image inspect` in the VM reports another id than
 `imageDigest`. The workflow keeps the record as the artifact `golden-snapshot-record` (90 days) and shows it in the run
@@ -110,7 +115,7 @@ code and, for a failed command, its exit status and the last lines of its error 
 
 The deployment rebuilds the snapshot when something that goes into the Worker image changed since the commit the
 snapshot in use was built from (exactly the files the image build consumes: what `runner/Dockerfile` copies, its ignore
-files, the license files, `docker/sandbox/vm-prepare.sh` and the four files of the build tool that decide what is
+files, the license files, `docker/sandbox/vm-prepare.sh`, `docker/sandbox/sysbox-prepare.sh` and the four files of the build tool that decide what is
 installed in the snapshot, `config.ts` with the pinned Docker and buildx versions and the default target among them: see
 `IMAGE_INPUT_PATHS` in `dispatcher/src/snapshot/pair.ts`), when that commit or the pair is missing (the first
 deployment), when the snapshot of the pair no longer exists, or when _Deploy production_ is started with
@@ -147,6 +152,89 @@ older one than the previous may already be deleted.
   its timeout; delete it by hand once it is stopped.
 - Snapshots are **region-bound to `fra1`**: no failover. If the region is unavailable, new jobs cannot start; there is
   no snapshot elsewhere to fall back on.
+
+## Sysbox
+
+The Implementer's agent will run in a container that has its own Docker (plan `plans/implementer-sandbox.md`, step 2 of 8; nothing runs an
+agent in such a container yet). That is [Sysbox](https://github.com/nestybox/sysbox), a container runtime in which root of the container
+is an unprivileged user of the VM (uid 165536), with its own `dockerd` inside. The snapshot carries it; only the Implementer's VM uses it.
+
+**What is installed.** `sysbox-ce` 0.7.1 (`sysbox_version`, `sysbox_sha256` in `dispatcher/src/snapshot/config.ts`): the package is
+downloaded from the project's GitHub release over https and installed only if its sha256 is the pinned one (the digest GitHub shows for the
+asset), together with `kmod`. The package's maintainer scripts call `systemctl` when a running Docker needs a restart; the VM has no
+systemd, so a `systemctl` that does nothing is first on the `PATH` of that one `apt-get` and is not left in the snapshot. A failed install
+purges what it unpacked. `daemon.json` registers the runtime (`sysbox-runc`) and does not make it the default: every container that does not
+name it runs as before, and a daemon whose runtime binary is missing starts all the same (measured), so nothing about a review depends on
+Sysbox. The package also adds the user `sysbox` with the sub-uid range 165536..231071 to `/etc/passwd`, `/etc/subuid` and `/etc/subgid`.
+To update it: take the new release's asset digest from GitHub, change the two values and let the proof of the next build decide. Sysbox officially
+supports Ubuntu up to 24.04 and the platform base image is 26.04: that is the reason for the proof below.
+
+**Boot steps: `docker/sandbox/sysbox-prepare.sh`**, installed as `/usr/local/sbin/sysbox-prepare.sh`, run as root after `vm-prepare.sh`:
+
+| #   | Step                                                                                                      | Why                                                                                                                                                                                 | Exit, name                                          |
+| --- | --------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| 0   | `sysbox-runc`, `sysbox-mgr`, `sysbox-fs` exist                                                            | the package is in this snapshot                                                                                                                                                     | 10 `sysbox_not_installed`                           |
+| 1   | `memory` and `pids` are enabled in the cgroup root                                                        | `vm-prepare.sh` made the root a domain with the controllers; measured: Sysbox needs nothing more than that layout                                                                   | 20 `sysbox_cgroup_not_ready`                        |
+| 2   | `chmod 666 /dev/net/tun`                                                                                  | root of a Sysbox container is uid 165536 and could not open the device (mode 0600). Part of the plan's recipe; a Sysbox container with its own Docker started without it (measured) | 21 `sysbox_tun_failed`                              |
+| 3   | `umount /proc/kcore /proc/keys` (only if mounted)                                                         | the platform mounts a read-only devtmpfs over both. **Without this `docker run --runtime=sysbox-runc` fails** (`re-mounting procfs caused: operation not permitted`)                | 22 `sysbox_proc_unmount_failed`                     |
+| 4   | `sysctl -q -e -p /lib/sysctl.d/99-sysbox-sysctl.conf`                                                     | the limits the package sets at install (inotify, keyring) are gone after a restore from the snapshot                                                                                | 23 `sysbox_sysctl_failed`                           |
+| 5   | `sysbox-mgr`, then `sysbox-fs`, detached, each waited for until it runs and its socket in `/run/sysbox` exists (one wait of 30 s for both) | the manager first: the file system service asks it for the id mapping                                                                                                               | 24 `sysbox_mgr_not_ready`, 25 `sysbox_fs_not_ready` |
+| 6   | `docker info` lists the `sysbox-runc` runtime                                                             | the daemon read `daemon.json` when `vm-prepare.sh` started it                                                                                                                       | 26 `sysbox_runtime_not_registered`                  |
+
+Each failure is a line `sysbox-prepare: <name> ...` on stderr and an exit status of its own, and nothing after the failed step runs. A second
+run in the same boot leaves a running pair alone. Steps 2 and 3 change the **whole VM** (the device and the two `/proc` files, which the
+platform masks for the VM's users); that is the reason the script is a separate file and not part of `vm-prepare.sh`.
+
+**Who runs it.** The Sandbox-Launcher, for the Implementer's VM only, after `vm-prepare.sh` and the image check and before the work volume
+(`SandboxDockerHost.prepareSysbox`, label `sysbox-prepare`, 40 s; `SYSBOX_PREPARE_SECONDS` and `IMPLEMENTER_LAUNCH_EXTRA_SECONDS` add it to the lifetime
+of that VM and to the launch deadline's budget). A failure ends the launch with the retryable `sysbox_not_ready`; the log line
+`sysbox_prepare_failed` carries `exitCode` and the redacted `stderrTail` with the name above. **The Diff and Dynamic launch and the canary VM do not run it**
+(a test pins that), and `vm-prepare.sh` is unchanged. Until step 4 of the plan the Implementer's container does not use Sysbox: the boot is
+there so that a platform that cannot do it is noticed now and not when the agent container needs it.
+
+**Reviews are not changed.** Measured on real VMs of the platform (2 vCPU, kernel 6.18.56, base image Ubuntu 26.04.1, 2026-11-02):
+`vm-prepare.sh` takes 0.48 s with the `sysbox-runc` entry in `daemon.json` and 0.48 s without it (three runs each in one VM, 0.47 to 0.51 s); the entry
+is the only change a review's VM sees. Through the Launcher's own host class, preparing a review's VM (`vm-prepare.sh` and the image check) took 1.8 to 1.9 s,
+and afterwards the VM still had both `/proc` mounts, `/dev/net/tun` at mode 0600 and no Sysbox process. The Implementer's VM takes 0.75 s more (the boot
+script itself runs in about 0.1 s, the rest is the round trip of one more command; a second run 0.46 s), and afterwards has no mount over `/proc/kcore` and `/proc/keys`,
+`/dev/net/tun` at 0666 and the two daemons. In the real pipeline run the package install took 5 s and the proof 12.5 s, and the scan found nothing in what Sysbox added.
+The snapshot grows by the package (49 MB installed) and the user entries; the proof's image is not in it.
+
+**The proof (step `sysbox_probe`).** In the check VM, after the Worker's own probe, the same boot script runs, then a container
+`--runtime=sysbox-runc` of a pinned image (`sysbox_probe_image`, `docker:29.9.2-dind` by digest, **pulled in the check VM only**: it is not in the snapshot, so a
+review's VM does not carry it) starts its own `dockerd`, imports an image from two of its own files and runs a container of it. The container is on
+the network the agent will have, `docker network create --internal -o com.docker.network.bridge.gateway_mode_ipv4=isolated`; from inside it, every address of the VM,
+the bridge of a second network, an outside address and an outside name must be unreachable. Nothing counts as "blocked" without a control that could have
+said "reachable": a plain `--internal` network must reach the VM's listener, a plain container on the VM (default network) must reach the same outside address
+(`nc -z 1.1.1.1 443`) and name (`ping example.com`) with the same tools, and the isolated container must still answer `docker exec <box> true` before and after the checks.
+A control that fails, a missing tool, no way out from the VM or a container that died is `sysbox_network_check_inconclusive` (unproven), never "isolated".
+This is a connectivity check, not the attack test of step 6.
+It prints `SYSBOX_PROBE ok <check>` or `SYSBOX_PROBE fail <reason>` per check and `SYSBOX_PROBE_DONE` last. Reasons: the names of the boot script,
+`sysbox_probe_image_unavailable` (the pull failed: the proof did not run), `sysbox_network_create_failed`, `sysbox_container_failed`,
+`sysbox_inner_docker_failed`, `sysbox_inner_container_failed`, `sysbox_network_check_inconclusive`, `sysbox_network_not_isolated`.
+
+**A Sysbox failure never holds back the snapshot.** The snapshot is shared by every kind of job and reviews do not use Sysbox; a failed proof
+that withdrew it would stop the release of code-review.com for a feature only the Implementer will use, the problem #797 describes for the Dispatcher's canary.
+So neither the install nor the proof ends a run: each is logged (`sysbox_install_failed`, `sysbox_probe_failed` with the reasons as `detail`), kept as a
+warning of the run and written to the record as `"sysbox": "unproven"` (a missing field reads the same). The snapshot still goes live.
+
+**What `unproven` means for an Implementer launch, today.** Nothing reads the record's verdict yet. The Launcher runs `sysbox-prepare.sh` and only that decides: a
+snapshot without the package (the script is absent in a snapshot from before this change, or it exits 10 because `sysbox-runc`, `sysbox-mgr` or `sysbox-fs` are missing: the usual result of a failed install)
+ends the launch with the retryable `sysbox_not_ready`. A snapshot whose install worked but whose proof failed (the inner Docker, the isolation check, a control that
+could not be established) **still launches**, because the boot steps pass on that VM and the Implementer's container does not use Sysbox before step 4 of the plan. A proof
+that failed in the boot step itself (the first line of the proof is the same script) fails the launch too, with the same name, unless the cause was transient. The gate on the proof's verdict
+(refusing a launch on a snapshot that is `unproven`, with a code of its own) comes with step 4, when the agent container starts depending on Sysbox.
+
+**Where it is shown, and what it cannot be.** A soft failure also comes from the network at build time (a GitHub 5xx for the package, a Docker Hub rate limit for the proof's image),
+not only from a broken Sysbox, and the deploy canary does not see it (it proves a review). So the build job of the run shows it twice: the warning annotation **Sysbox unproven**
+(on the page of the *Deploy production* run, where the run is watched before and while it promotes) and a line at the top of the job's summary; the reasons are in the log of the
+build step (`sysbox_install_failed`, `sysbox_probe_failed` with `detail`). It is only shown, never a condition: `snapshot-decide` runs before the build and cannot know it, and a
+promotion job checks the result of every job it needs (`deploy-production-promotion.test.ts`), so the verdict is not an input of either. The verdict is not persisted with the pair:
+a later release that **reuses** the snapshot (`inputs_unchanged`) shows nothing, and the way to get a fresh proof is a build, a change of an image input or *Deploy production*
+with `rebuild_snapshot` (transient causes then go away by themselves). Before the Implementer is released, read the `sysbox` field of the record of the last build (the artifact
+`golden-snapshot-record`).
+A cancelled run still ends as cancelled. **Not covered:** the platform's kernel is not part of the snapshot, so an update of it after the build is seen by the boot step
+of a job and by the next build's proof, not by the proof of this one; the deploy canary does not prove Sysbox (it would have to fail only the factory's lane, which is #797).
 
 ## The final scan (T06)
 
@@ -232,6 +320,7 @@ build artifact.
 | `base_manifest_failed`                                            | The first command of the builder could not record the base manifest (no file under the scan roots, or the disk is not writable). Nothing was installed or snapshotted.                                                                   |
 | `scan_findings`, `scan_unreadable`                                | The scan found something (kind and path are in the log) or did not finish (also: the manifest was missing or not the pinned one, or `find` or `grep` failed). The snapshot was deleted.                                                  |
 | `probe_failed`, `probe_unreadable`, `engine_missing`              | The image's own self-check failed or answered nonsense, or did not advertise a required engine (the stable reasons are listed). Dynamic stays unavailable; fix the cause (for example the nf_tables fallback of #345, the IPv6 sysctls). |
+| `sysbox_install_failed`, `sysbox_probe_failed`                    | **Never a failed run**: the warning of a Sysbox that could not be installed (a download, the checksum, the package) or proven (the reasons are in the log line). The record says `"sysbox": "unproven"`; see "Sysbox".                   |
 | `unexpected_error`                                                | A failure in the pipeline's own code (a bug): no snapshot is kept. Report it with the log.                                                                                                                                               |
 | `cancelled`                                                       | The run was interrupted; whatever it created was deleted.                                                                                                                                                                                |
 

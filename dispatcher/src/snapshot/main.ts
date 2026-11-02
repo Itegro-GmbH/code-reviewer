@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// `pnpm snapshot:build -- --context <tgz> --vm-prepare <sh> --out <json> [...]` (see cli.ts, docs/golden-snapshot.md).
+// `pnpm snapshot:build -- --context <tgz> --vm-prepare <sh> --sysbox-prepare <sh> --out <json> [...]` (see cli.ts, docs/golden-snapshot.md).
 // The one place that touches the file system, the process and the real platform SDK. Node strips the types.
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { runCli } from "./cli.ts";

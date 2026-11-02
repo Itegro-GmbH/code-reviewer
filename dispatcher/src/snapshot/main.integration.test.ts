@@ -43,11 +43,35 @@ describe("the snapshot:build entry file", () => {
       join(work, "missing.tgz"),
       "--vm-prepare",
       join(work, "missing.sh"),
+      "--sysbox-prepare",
+      join(work, "missing-sysbox.sh"),
       "--out",
       out,
     ]);
     expect(result.status).toBe(2);
     expect(result.stderr).toContain("--context");
+    expect(existsSync(out)).toBe(false);
+  });
+
+  // #745
+  it("names --sysbox-prepare when only that script is missing, and leaves no record", () => {
+    const out = join(work, "record-sysbox.json");
+    const context = join(work, "context-sysbox.tgz");
+    const script = join(work, "vm-prepare-sysbox.sh");
+    writeFileSync(context, "x");
+    writeFileSync(script, "#!/bin/sh\n");
+    const result = main([
+      "--context",
+      context,
+      "--vm-prepare",
+      script,
+      "--sysbox-prepare",
+      join(work, "missing-sysbox.sh"),
+      "--out",
+      out,
+    ]);
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain("--sysbox-prepare");
     expect(existsSync(out)).toBe(false);
   });
 
@@ -62,6 +86,8 @@ describe("the snapshot:build entry file", () => {
         "--context",
         context,
         "--vm-prepare",
+        script,
+        "--sysbox-prepare",
         script,
         "--out",
         join(work, "r.json"),

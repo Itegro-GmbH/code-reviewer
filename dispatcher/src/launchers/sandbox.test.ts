@@ -22,6 +22,8 @@ import {
   SANDBOX_IMAGE_REFERENCE,
   SANDBOX_REGION,
   SANDBOX_KIND_DEFAULTS,
+  IMPLEMENTER_LAUNCH_EXTRA_SECONDS,
+  SYSBOX_PREPARE_SECONDS,
   WORK_VOLUME_STEPS_SECONDS,
   minimumVmTimeoutMargin,
   planForKind,
@@ -708,7 +710,7 @@ describe("the Sandbox-Launcher", () => {
   });
 
   // #760-T05
-  it("makes the work volume of an implementer job after the host is prepared and before docker run, all on the job's VM", async () => {
+  it("makes the work volume of an implementer job after the host is prepared (Sysbox included) and before docker run, all on the job's VM", async () => {
     const result = await launch(build(), spec({ kind: "implementer" }));
 
     expect(result).toStrictEqual({ ok: true });
@@ -717,6 +719,7 @@ describe("the Sandbox-Launcher", () => {
       `create:${name}`,
       "exec:vm-prepare",
       "exec:image-id",
+      "exec:sysbox-prepare",
       "exec:work-volume-dir",
       "exec:work-volume-mount",
       "exec:work-volume-options",
@@ -899,6 +902,85 @@ describe("the Sandbox-Launcher", () => {
     });
   });
 
+  describe("the Sysbox boot of the Implementer's VM", () => {
+    it("runs sysbox-prepare.sh as root after vm-prepare.sh and the image check, from the golden snapshot", async () => {
+      await launch(build(), spec({ kind: "implementer" }));
+
+      const labels = service.execs.map((call) => call.label);
+      expect(labels.indexOf("sysbox-prepare")).toBeGreaterThan(
+        labels.indexOf("image-id"),
+      );
+      expect(
+        service.execs.find((call) => call.label === "sysbox-prepare"),
+      ).toMatchObject({
+        cmd: "/usr/local/sbin/sysbox-prepare.sh",
+        args: [],
+        sudo: true,
+        timeoutMs: 40_000,
+      });
+    });
+
+    // The point of the placement: a review's VM keeps its cgroup layout, its /proc and /dev as they were.
+    it("never runs it for a Diff or a Dynamic job", async () => {
+      await launch(build(), spec({ kind: "diff" }));
+      await launch(
+        build(),
+        spec({
+          kind: "dynamic",
+          jobId: "00000000-0000-4000-8000-000000000002",
+        }),
+      );
+
+      expect(
+        service.execs.filter((call) => call.label === "sysbox-prepare"),
+      ).toStrictEqual([]);
+      expect(service.execs.map((call) => call.cmd)).not.toContain(
+        "/usr/local/sbin/sysbox-prepare.sh",
+      );
+    });
+
+    it("fails the launch with the stable code sysbox_not_ready, stops the VM and runs no container when the boot fails", async () => {
+      service.onExec("sysbox-prepare", {
+        exitCode: 24,
+        stderr: `sysbox-prepare: sysbox_mgr_not_ready sysbox-mgr crashed\ncrj_${"A".repeat(43)}\n`,
+      });
+
+      const error = failure(
+        await launch(build(), spec({ kind: "implementer" })),
+      );
+
+      expect(error.code).toBe("sysbox_not_ready");
+      expect(error.retryable).toBe(true);
+      expect(service.stops).toStrictEqual([service.creates[0]?.name]);
+      expect(service.starts).toHaveLength(0);
+      expect(service.running()).toStrictEqual([]);
+      // The work volume is not made on a VM that cannot run its agent.
+      expect(service.execs.map((call) => call.label)).not.toContain(
+        "work-volume-dir",
+      );
+    });
+
+    it("logs the name the boot script gave its failure, its exit status and a redacted tail", async () => {
+      service.onExec("sysbox-prepare", {
+        exitCode: 22,
+        stderr: `sysbox-prepare: sysbox_proc_unmount_failed /proc/keys\ncrj_${"A".repeat(43)}\n`,
+      });
+
+      await launch(build(), spec({ kind: "implementer" }));
+
+      const line = logger.lines.find((entry) =>
+        entry.startsWith("warn sysbox_prepare_failed "),
+      );
+      expect(line).toBeDefined();
+      expect(line).toContain('"code":"sysbox_not_ready"');
+      expect(line).toContain('"exitCode":22');
+      expect(line).toContain(`"jobId":"${JOB_ID}"`);
+      expect(line).toContain("sysbox_proc_unmount_failed /proc/keys");
+      expect(line).toContain("[redacted]");
+      expect(line).not.toContain("crj_AAAA");
+    });
+  });
+
   // #760-T05
   it("stops the VM when a step of the work volume fails, and runs no container: the volume goes with the VM", async () => {
     service.onExec("work-volume-create", {
@@ -917,6 +999,7 @@ describe("the Sandbox-Launcher", () => {
     expect(service.execs.map((call) => call.label)).toStrictEqual([
       "vm-prepare",
       "image-id",
+      "sysbox-prepare",
       "work-volume-dir",
       "work-volume-mount",
       "work-volume-options",
@@ -1028,7 +1111,7 @@ describe("the Sandbox-Launcher", () => {
   });
 
   // #760-T10: the steps are part of the implementer's launch, which the VM's own timeout has to cover
-  it("lets an implementer VM live as long as its job, the margin and the steps of the work volume; Diff and Dynamic are unchanged", async () => {
+  it("lets an implementer VM live as long as its job, the margin, the Sysbox boot and the steps of the work volume; Diff and Dynamic are unchanged", async () => {
     const reported: Array<{ timeoutSeconds: number }> = [];
     await launch(
       build(),
@@ -1048,13 +1131,16 @@ describe("the Sandbox-Launcher", () => {
     );
 
     expect(WORK_VOLUME_STEPS_SECONDS).toBe(50);
+    expect(SYSBOX_PREPARE_SECONDS).toBe(40);
+    expect(IMPLEMENTER_LAUNCH_EXTRA_SECONDS).toBe(90);
     const [implementer, diff] = service.creates;
     expect(implementer?.timeoutMs).toBe(
-      (3600 + VM_TIMEOUT_MARGIN_SECONDS + WORK_VOLUME_STEPS_SECONDS) * 1000,
+      (3600 + VM_TIMEOUT_MARGIN_SECONDS + IMPLEMENTER_LAUNCH_EXTRA_SECONDS) *
+        1000,
     );
     expect(diff?.timeoutMs).toBe((1200 + VM_TIMEOUT_MARGIN_SECONDS) * 1000);
     expect(reported.map((vm) => vm.timeoutSeconds)).toStrictEqual([
-      3600 + VM_TIMEOUT_MARGIN_SECONDS + WORK_VOLUME_STEPS_SECONDS,
+      3600 + VM_TIMEOUT_MARGIN_SECONDS + IMPLEMENTER_LAUNCH_EXTRA_SECONDS,
       1200 + VM_TIMEOUT_MARGIN_SECONDS,
     ]);
   });

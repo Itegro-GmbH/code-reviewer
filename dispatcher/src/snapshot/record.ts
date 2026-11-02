@@ -13,5 +13,11 @@ export const GoldenRecordSchema = z.strictObject({
   region: z.literal("fra1"),
   target: z.string(),
   commit: z.string().optional(),
+  /**
+   * Whether Sysbox is installed in the snapshot and its proof (a container that runs its own Docker, on a network with no
+   * exit) passed in the check VM. `unproven` is not a failure of the snapshot: reviews do not use Sysbox, so a snapshot
+   * whose Sysbox is broken still goes live and the Implementer's own boot step names the problem.
+   */
+  sysbox: z.enum(["proven", "unproven"]).optional(),
 });
 export type GoldenRecord = z.infer<typeof GoldenRecordSchema>;

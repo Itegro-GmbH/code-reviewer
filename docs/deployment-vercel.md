@@ -871,7 +871,7 @@ snapshot it has:
    *The inputs* are exactly what the image build consumes (`IMAGE_INPUT_PATHS` in `dispatcher/src/snapshot/pair.ts`): the
    files `runner/Dockerfile` copies out of the build context (`runner/src`, `pyproject.toml`, `uv.lock`,
    `.python-version`, the two fetch scripts and the two pin files), the Dockerfile and the two ignore files, the license
-   files, `docker/sandbox/vm-prepare.sh`, and the four files of the build tool that decide what is installed and checked
+   files, `docker/sandbox/vm-prepare.sh`, `docker/sandbox/sysbox-prepare.sh`, and the four files of the build tool that decide what is installed and checked
    in the snapshot (`config.ts` with the pinned Docker versions and the default build target, `pipeline.ts`,
    `scripts.ts`, `probe-flags.ts`). A test parses the Dockerfile's `COPY` lines and fails when one is missing from the
    list and when the list names something the build does not copy; another follows the imports of `pipeline.ts`. The
