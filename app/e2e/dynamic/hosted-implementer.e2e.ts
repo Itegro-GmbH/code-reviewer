@@ -1311,8 +1311,10 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       "Fine",
       "Hostile1",
     ]);
+    // The second branch was made while the first was checked out, so it carries both commits.
     expect(subjectsAhead(gadgets().path, BASE, two)).toEqual([
       "Fine",
+      "Hostile1",
       "Hostile2",
     ]);
     expect(tipOf(gadgets().path, "--force")).toBeNull();
