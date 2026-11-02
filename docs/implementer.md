@@ -210,8 +210,8 @@ the door's container, joins it to the model network at `10.213.77.2` and to the 
 provider), attaches to its standard streams, starts it and writes the **start document to its stdin**.
 
 **What the door is.** Non-root (the image's `runner` user), read-only root file system, every capability dropped,
-`no-new-privileges`, 256 MB without swap, 128 processes, a 16 MB `noexec` `/tmp`, no mount, no published port, **no environment
-variable at all**. It holds the key and nothing else: no git token, no repository, no job text beyond the model access. A
+`no-new-privileges`, 256 MB without swap, 128 processes, a 16 MB `noexec` `/tmp`, no mount, no published port, IPv6 off, and
+**no environment variable of its own** (only what the image sets: `PATH` and the like, no secret). It holds the key and nothing else: no git token, no repository, no job text beyond the model access. A
 test (`runner/tests/unit/test_model_door_launcher.py`) builds the container's definition and fails when it is weakened, and
 fails when the key or the bearer is in any request to the daemon.
 
@@ -241,10 +241,16 @@ without Docker) runs the proxy in the Worker as before step 3. The Dispatcher se
 start-up check refuses to advertise `implementer` (`implementer_docker_unavailable`) when the variable is set and the VM's Docker does
 not answer.
 
-**What the door is not yet.** Its only outward route is meant to be the provider: the code of the door dials the one
-destination of the entry (`HttpsUpstream`: https, port 443, public addresses only, no redirect), but the container is on the VM's
-default bridge, which has a route to the internet. A rule of the network itself (the second wall of the plan: the Vercel network
-policy narrowed to GitHub, the provider and the App) comes with step 7.
+**Its only way out is the provider.** The door sits on the VM's default bridge, which routes to the internet and to the VM itself (its
+Docker gateway, its control port). So Control, before it tells the door anything, starts a one-shot container that shares the door's
+network namespace, holds `NET_ADMIN` (the door holds no capability) and installs an `ip` table (`EGRESS_RULES` in `door_launcher.py`):
+the model network, loopback, replies and DNS (port 53) are open, every private, link-local, shared and special range is dropped (the VM,
+its neighbours, other containers, the platform's services), the rest of the internet is open on port 443 only, and everything else is
+dropped. A door whose rules did not go in is taken away and the key is never written to it (`setup_failed`, free). Measured on a VM:
+from the door, port 443 of the provider answers, port 80 and the VM's services (`172.17.0.1:23456`, `169.254.0.1`) do not. Port 443
+is open to every public address because a provider behind a CDN has no stable address; the code of the door dials only the one
+destination of the entry (`HttpsUpstream`), and narrowing 443 to the provider by name is the second wall of the plan, the VM's
+network policy (step 7). Port 53 is open to every address, a channel for a compromised door only.
 
 **The Docker socket makes Control effectively root on the VM.** The Engine API can start a privileged container. That is
 accepted because the agent never reaches it: the socket is root's inside the container, the agent is another user (and from step 4
