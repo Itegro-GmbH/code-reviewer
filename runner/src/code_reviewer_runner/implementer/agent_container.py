@@ -24,10 +24,10 @@ What the container is:
 it with an exec and reaches its HTTP port through a loopback listener of its own that opens one exec
 per connection, running a relay that copies the bytes between the exec's standard streams and the
 engine's port (`Tunnel`). The agent has no address of Control's, no route to it and no port of it to
-connect to; the Docker daemon is the only thing that joins the two. Files go in through an exec that writes its
-standard input to a path (`write_files`): the archive call of the Engine API (`docker cp`) puts its
-files where a Sysbox container does not see them (measured, 2026-11-02: the call answers 200 and the
-directory stays empty).
+connect to; the Docker daemon is the only thing that joins the two. Files go in through an exec that
+writes its standard input to a path (`write_files`): the archive call of the Engine API (`docker
+cp`) puts its files where a Sysbox container does not see them (measured, 2026-11-02: the call
+answers 200 and the directory stays empty).
 
 **How it ends.** Control kills the container (SIGKILL to its init, which takes every process of it,
 the inner `dockerd` and anything the agent left running, with it) before it reads the repository.

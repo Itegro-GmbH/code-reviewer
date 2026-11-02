@@ -7,7 +7,7 @@
 // |----------------------------------------------------|--------------------------------------------------------------------|---------|
 // | SANDBOX_SNAPSHOT_ID                                | The golden snapshot (#330 record `snapshotId`)                     | none: no launcher, nothing is claimed |
 // | SANDBOX_IMAGE_DIGEST                               | The Worker image id in it (#330 record `imageDigest`), `sha256:...` | required with the snapshot |
-// | SANDBOX_SYSBOX_PROOF                              | The snapshot's Sysbox verdict (#330 record `sysbox`): `proven` or `unproven`. The Implementer's turn ends `sandbox_unproven` (free) unless it is `proven`; reviews never read it | unproven |
+// | SANDBOX_SYSBOX_PROOF                              | The snapshot's Sysbox verdict (#330 record `sysbox`): `proven` or `unproven`. An `unproven` one ends the Implementer's turn `sandbox_unproven` (free); reviews never read it | none: `unrecorded`, allowed until the deploy writes it |
 // | SANDBOX_HANDOVER_SECONDS                           | How long the container runs before the Worker counts as having taken over (1 to 120) | 20 |
 // | SANDBOX_VM_TIMEOUT_MARGIN_SECONDS                 | Seconds added to the job's timeout for the VM's own (the backstop that ends a VM nobody stops); at least 180 and 150 more than the hand-over time, at most 3600 | 300 |
 // | DISPATCHER_PROBE_TIMEOUT_SECONDS                  | How long a probe (`POST /probe`, the deploy canary) may take, canary VM included (30 to 600); the reaper (#364) takes a canary's lifetime from it | 150 |
@@ -164,7 +164,7 @@ export function sandboxFromEnvironment(
   )
     throw new ConfigError("SANDBOX_SYSBOX_PROOF", "invalid");
   const sysboxProof: SysboxProof =
-    sysboxProofValue === "proven" ? "proven" : "unproven";
+    sysboxProofValue === undefined ? "unrecorded" : sysboxProofValue;
   const handoverSeconds = integer(env, "SANDBOX_HANDOVER_SECONDS", {
     min: 1,
     max: 120,

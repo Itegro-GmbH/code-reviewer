@@ -794,7 +794,7 @@ describe("the Sandbox-Launcher", () => {
       "RUNNER_DIFF_JOB_USER=10001:10001",
       "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB=2560",
       "RUNNER_IMPLEMENTER_MODEL_DOOR=docker",
-      "RUNNER_IMPLEMENTER_SANDBOX_PROOF=unproven",
+      "RUNNER_IMPLEMENTER_SANDBOX_PROOF=unrecorded",
       "RUNNER_IMPLEMENTER_WORK_DIR=/work",
       "RUNNER_JOB_TIMEOUT_SECONDS=1200",
     ]);
@@ -956,11 +956,11 @@ describe("the Sandbox-Launcher", () => {
     );
   });
 
-  it("calls a verdict that is not given unproven", () => {
+  it("passes the verdict as it is, and a verdict that was never recorded as unrecorded", () => {
     expect(
-      implementerEnvironment(planForKind("implementer", {}), "unproven"),
+      implementerEnvironment(planForKind("implementer", {}), "unrecorded"),
     ).toStrictEqual({
-      RUNNER_IMPLEMENTER_SANDBOX_PROOF: "unproven",
+      RUNNER_IMPLEMENTER_SANDBOX_PROOF: "unrecorded",
       RUNNER_IMPLEMENTER_AGENT_MEMORY_MB: "2560",
     });
   });

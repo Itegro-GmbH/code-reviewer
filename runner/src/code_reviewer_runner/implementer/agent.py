@@ -279,8 +279,8 @@ class ImplementerAgent:
         if failure is None:
             return
         if failure.code is ErrorCode.DYNAMIC_ENGINE_UNAVAILABLE:
-            # The engine's stream or connection went away. If its place ended, say how: a stream that
-            # ended is the symptom, the container's death (or its memory kill) is the cause.
+            # The engine's stream or connection went away. If its place ended, say how: a stream
+            # that ended is the symptom, the container's death (or its memory kill) the cause.
             self._runtime.settle(SETTLE_SECONDS)
             note = self._runtime.engine_end_note()
             if note is not None:

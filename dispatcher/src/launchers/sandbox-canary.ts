@@ -167,7 +167,7 @@ export function createSandboxCanary(
         environment: {
           ...CONTAINER_ENVIRONMENT,
           ...IMPLEMENTER_ENVIRONMENT,
-          ...implementerEnvironment(plan, options.sysboxProof ?? "unproven"),
+          ...implementerEnvironment(plan, options.sysboxProof ?? "unrecorded"),
         },
         command: ["probe"],
         overrides: plan.overrides,
