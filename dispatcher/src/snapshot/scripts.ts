@@ -542,7 +542,23 @@ else
   finish
 fi
 
+# The outside targets get the same control: a plain container on the VM must reach them with the same tools, or a "blocked"
+# from the isolated box could only mean "no way out from here" or "no nc / ping in the image".
+outside_control() { docker run --rm --entrypoint sh "$image" -c "$1" > /dev/null 2>&1; }
+if outside_control 'nc -w 3 -z 1.1.1.1 443' && outside_control 'ping -c 1 -W 3 example.com'; then
+  report ok outside_control
+else
+  report fail sysbox_network_check_inconclusive
+  finish
+fi
+
 # The isolated network: every address the VM has, the control network's bridge, an outside address and an outside name.
+# A box that is gone makes every \`docker exec\` fail, which would read as "blocked": it must answer before and after.
+box_alive() { docker exec "$box" true > /dev/null 2>&1; }
+if ! box_alive; then
+  report fail sysbox_network_check_inconclusive
+  finish
+fi
 targets="$control_gateway $(ip -4 -o addr show | awk '{print $4}' | cut -d/ -f1 | tr '\\n' ' ')"
 leaks=0
 for target in $targets; do
@@ -552,6 +568,8 @@ if docker exec "$box" sh -c 'nc -w 3 -z 1.1.1.1 443' > /dev/null 2>&1; then leak
 if docker exec "$box" sh -c 'ping -c 1 -W 3 example.com' > /dev/null 2>&1; then leaks=$((leaks + 1)); fi
 if [ "$leaks" -ne 0 ]; then
   report fail sysbox_network_not_isolated
+elif ! box_alive; then
+  report fail sysbox_network_check_inconclusive
 else
   report ok network_isolated
 fi

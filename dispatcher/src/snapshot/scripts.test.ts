@@ -326,6 +326,11 @@ describe("the Sysbox proof of the check VM", () => {
     stand("timeout", 'shift; exec "$@"');
     // The waits of the proof are for a real daemon.
     stand("sleep", "exit 0");
+    // The VM's addresses: the proof asks the isolated network for each of them.
+    stand(
+      "ip",
+      "echo '2: eth0    inet 10.0.0.5/24 brd 10.0.0.255 scope global eth0'",
+    );
     const script = sysboxProbeScript(config).replaceAll(
       PATHS.sysboxPrepareInstalled,
       prepare,
@@ -392,6 +397,122 @@ describe("the Sysbox proof of the check VM", () => {
     });
     expect(answered.lines).toContain(
       "SYSBOX_PROBE fail sysbox_inner_docker_failed",
+    );
+  });
+
+  /**
+   * A docker that gets every step of the proof right and answers the network checks as told. `box` is what the isolated
+   * container's own `nc` and `ping` return (0 = the connection was made), `control` what a plain container on the VM
+   * returns for the same targets, `alive` how often `docker exec <box> true` succeeds before the box is gone.
+   */
+  function networkDocker(
+    options: {
+      boxLoopNc?: number;
+      boxOutsideNc?: number;
+      boxPing?: number;
+      vmControl?: number;
+      outsideNc?: number;
+      outsidePing?: number;
+      aliveCalls?: number;
+    } = {},
+  ) {
+    const o = {
+      boxLoopNc: 1,
+      boxOutsideNc: 1,
+      boxPing: 1,
+      vmControl: 0,
+      outsideNc: 0,
+      outsidePing: 0,
+      aliveCalls: 99,
+      ...options,
+    };
+    return `
+case "$1" in
+  network) if [ "$2" = inspect ]; then echo 172.30.0.1; fi; exit 0 ;;
+  run)
+    if [ "$2" = --detach ]; then exit 0; fi
+    for last; do :; done
+    case "$last" in
+      *1.1.1.1*) exit ${o.outsideNc} ;;
+      *ping*) exit ${o.outsidePing} ;;
+      *) exit ${o.vmControl} ;;
+    esac ;;
+  exec)
+    case "$3" in
+      true)
+        calls=$(cat "$0.alive" 2> /dev/null || echo 0)
+        echo $((calls + 1)) > "$0.alive"
+        if [ "$calls" -lt ${o.aliveCalls} ]; then exit 0; fi
+        exit 1 ;;
+      docker) exit 0 ;;
+      sh)
+        case "$5" in
+          *"docker import"*) echo sysbox-inner-ok; exit 0 ;;
+          *1.1.1.1*) exit ${o.boxOutsideNc} ;;
+          *ping*) exit ${o.boxPing} ;;
+          *) exit ${o.boxLoopNc} ;;
+        esac ;;
+    esac ;;
+esac
+exit 0`;
+  }
+
+  function isolation(options: Parameters<typeof networkDocker>[0]) {
+    return runProof({ prepare: "exit 0", docker: networkDocker(options) })
+      .lines;
+  }
+
+  it("proves the isolation when every address is blocked from the box and reachable from a plain container", () => {
+    const lines = isolation({});
+    expect(lines).toEqual([
+      "SYSBOX_PROBE ok boot",
+      "SYSBOX_PROBE ok inner_docker",
+      "SYSBOX_PROBE ok inner_container",
+      "SYSBOX_PROBE ok network_control",
+      "SYSBOX_PROBE ok outside_control",
+      "SYSBOX_PROBE ok network_isolated",
+      "SYSBOX_PROBE_DONE",
+    ]);
+  });
+
+  it.each([
+    ["an address of the VM", { boxLoopNc: 0 }],
+    ["an outside address", { boxOutsideNc: 0 }],
+    ["an outside name", { boxPing: 0 }],
+  ])("fails when the isolated container reaches %s", (_name, options) => {
+    const lines = isolation(options);
+    expect(lines).toContain("SYSBOX_PROBE fail sysbox_network_not_isolated");
+    expect(lines).not.toContain("SYSBOX_PROBE ok network_isolated");
+    expect(lines.at(-1)).toBe("SYSBOX_PROBE_DONE");
+  });
+
+  it.each([
+    ["the box is gone before the checks", { aliveCalls: 0 }],
+    ["the box is gone after the checks", { aliveCalls: 1 }],
+    ["a plain network cannot reach the VM's listener", { vmControl: 1 }],
+    ["a plain container has no way out to an address", { outsideNc: 1 }],
+    ["a plain container has no way out to a name", { outsidePing: 1 }],
+  ])(
+    "calls the check inconclusive, and not isolated, when %s",
+    (_name, options) => {
+      const lines = isolation({ ...options, boxLoopNc: 1 });
+      expect(lines).toContain(
+        "SYSBOX_PROBE fail sysbox_network_check_inconclusive",
+      );
+      expect(lines).not.toContain("SYSBOX_PROBE ok network_isolated");
+      expect(lines).not.toContain(
+        "SYSBOX_PROBE fail sysbox_network_not_isolated",
+      );
+      expect(lines.at(-1)).toBe("SYSBOX_PROBE_DONE");
+    },
+  );
+
+  it("asks a plain container on the VM for each outside target the isolated box is asked for", () => {
+    const script = sysboxProbeScript(config);
+    expect(script).toContain("nc -w 3 -z 1.1.1.1 443");
+    expect(script).toContain("ping -c 1 -W 3 example.com");
+    expect(script.indexOf('docker exec "$box" true')).toBeLessThan(
+      script.indexOf("for target in"),
     );
   });
 
