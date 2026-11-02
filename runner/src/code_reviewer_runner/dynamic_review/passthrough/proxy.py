@@ -383,8 +383,12 @@ class PassthroughProxy:
         detail = _REFUSAL_DETAIL[refused.code]
         if refused.code is not RefusalCode.CAPABILITY_INVALID:
             # An engine that asks for what it may not is misbehaving: the run stops. A caller that
-            # proved nothing is not the engine of this job and does not end it.
-            self.ledger.record_failure(LimitError(refused.error, detail))
+            # proved nothing is not the engine of this job and does not end it. What the run
+            # records says where the request failed (a path or a header name, never a value), so
+            # the log tail of the job names the next unknown in one run; the engine is told only
+            # the fixed sentence.
+            where = "" if refused.where is None else f" [{refused.where}]"
+            self.ledger.record_failure(LimitError(refused.error, detail + where))
         self._respond(sink, refused.status, _error_body(refused.code.value, detail))
 
     @staticmethod

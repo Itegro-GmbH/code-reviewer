@@ -288,6 +288,14 @@ export const turnErrorCopy = (
     "The model usage of this task could not be accounted for, so the task was ended and its cost is not known. The work may be done and pushed: check the branch.",
   time_limit_reached:
     "The task reached its time limit and was stopped. Work committed before then was pushed to the branch when possible, so check the branch for what reached it.",
+  // The table above says "Dynamic Review" for these three, which the same shared parts of the runner raise for a task: the
+  // request the agent made to the AI model was refused by the runner's own rules, the task used more than its allowance, or the
+  // conversation outgrew the model's window. Work committed before the stop was pushed when possible.
+  dynamic_policy_violation: `The task was stopped because a request of its agent to the AI model would have broken a safety rule of ${product.name}, so that request was not sent. Work committed before the stop was pushed to the branch when possible, so check the branch for what reached it. If this keeps happening, tell whoever runs ${product.name}.`,
+  dynamic_budget_exceeded:
+    "The task used more than its allowed budget and was stopped. Work committed before the stop was pushed to the branch when possible, so check the branch for what reached it.",
+  llm_context_length_exceeded:
+    "The conversation of the task grew larger than the model's context window, so the AI provider refused the request. Work committed before the stop was pushed to the branch when possible. Start a smaller task, or choose a model with a larger window.",
   // The runner reports this code for a repository that refused the pushed work (a rule, a permission, a file it does not take)
   // and for a final push that could not reach it; what was pushed earlier is on the branch.
   push_rejected:

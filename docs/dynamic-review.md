@@ -336,22 +336,44 @@ untrusted side):
   of the family, `content-type: application/json` (the engine's is checked, then dropped, so no parameter of its choosing
   reaches the provider), `accept-encoding: identity` (the tee cannot read a compressed answer) and the length itself. The
   body length must be measurable before it is read (a chunked body is a 411, one above `max_request_bytes` a 413).
-- **The body.** Read as JSON and walked against a **closed schema per family** (`passthrough/body_schema.py`): the
-  keys the pinned OpenCode sends (`fakes/wire/engine_requests.json` is one captured body per family), compared
-  case-sensitively, and nothing else, also inside messages, tools and options. `model` must be the job's (else 403
-  `model_not_allowed`); exactly one spelling of the output cap, within `min(limit.output, 32000)` (the cap the engine
-  really sends, spike #546), and a second spelling (`max_tokens` with `max_completion_tokens`, a snake-case
-  `generation_config`) is refused whatever its value. Tools are function tools only (Chat/Responses `type: function`,
-  Messages none or `custom`, Google `functionDeclarations`); no web search, code execution, MCP, computer use,
-  `mcp_servers` or `container`. Content parts are text, the tool exchange of the family and the engine's reasoning
-  blocks; **no image, audio, file or document part at all** (the model entries are text-only; a part that can carry a
-  URL is a part the provider can fetch). `stream` is present and `true` (the engine always streams; a non-stream call is refused), `n` and `candidateCount` are 1, `store` is `false`, a number is finite and no larger than 2^53, Google's `thinkingBudget` is within the allowance, `cache_control` has no `ttl` (a 1-hour write needs its own price, #553); no `service_tier`,
-  `background`, `previous_response_id`, `cachedContent`, `metadata`, `response_format` or OpenRouter routing. A key
-  given twice and a non-object are refused. The walk only checks: the bytes that go out are the bytes that came in.
-  What the engine sends for a provider that no capture has covered fails closed as `request_not_allowed`, and its key
-  joins the set once a live capture shows it is the engine's (spike section 7). The schema lets numeric sampling
-  options through (`temperature`, `top_p`, `top_k`, Google's `generationConfig` twins), which `ProviderTransform`
-  sets for some model ids; they are not in the captures and are an item of the live checklist (L12).
+- **The body.** Read as JSON and walked against a **closed schema per family** (`passthrough/body_schema.py`). The
+  rule (a decision of the owner, #810): the proxy guards **what is paid, the key and where data goes**, and leaves
+  **the conversation alone**.
+  - *Closed:* the top-level keys of the body, compared case-sensitively (`fakes/wire/engine_requests.json` is one
+    captured body per family; `mcp_servers`, `container`, `service_tier`, `context_management`, `speed`,
+    `inference_geo`, `output_config`, `background`, `previous_response_id`, `cachedContent`, `metadata`,
+    `response_format`, OpenRouter routing and anything unknown are refused), and the keys of the few nested option
+    objects (`thinking`, `tool_choice`, `stream_options`, `generationConfig`, ...). `model` must be the job's (else
+    403 `model_not_allowed`); exactly one spelling of the output cap, within `min(limit.output, 32000)` (the cap the
+    engine really sends, spike #546), and a second spelling (`max_tokens` with `max_completion_tokens`, a snake-case
+    `generation_config`) is refused whatever its value. **Tools are function tools only** (Chat/Responses
+    `type: function`, Messages none or `custom`, Google `functionDeclarations`): no web search, code execution, MCP or
+    computer use can run at the provider's price, whatever the conversation says. `stream` is present and `true` (a
+    non-stream call is refused), `n` and `candidateCount` are 1, `store` is `false`, a number is finite and no larger
+    than 2^53, Google's `thinkingBudget` is within the allowance, and a **tool** has no `cache_control.ttl`. A key
+    given twice and a non-object are refused.
+  - *Opaque:* the conversation (`messages` of Chat and Messages, `input` of Responses, `contents` of Google), the
+    system prompt (Messages `system`, Google `systemInstruction`) and the schema of a tool are checked only for being
+    an array of objects (an object for the instruction). Block types, `thinking` and its signature, the `caller` of a
+    `tool_use`, `tool_result` (with `is_error` and images), citations and a `cache_control` on any block are the
+    engine's and the provider's business, and the provider rejects what is invalid. The closed walk that stood here
+    before refused the second call of the first real Anthropic run, because the SDK of the pinned OpenCode sends back
+    the `caller` (`{"type": "direct"}`) that the Messages API states on every `tool_use`; the engine's SDK adds such
+    fields without notice, so a list of them would only ever be late. What this lets through: a part that makes the
+    provider fetch a URL (an image or document by URL), and a one-hour cache write. The price book prices the write the
+    provider states (`ephemeral_1h_input_tokens` at the 1-hour price) and a write the book has no price for is an
+    unknown cost that ends a managed run; see "The cost policy of a native job (#553)".
+  - The walk only checks: the bytes that go out are the bytes that came in. What the engine sends for a provider that
+    no capture has covered fails closed as `request_not_allowed`, and its key joins the set once a live capture shows
+    it is the engine's (spike section 7). The schema lets numeric sampling options through (`temperature`, `top_p`,
+    `top_k`, Google's `generationConfig` twins), which `ProviderTransform` sets for some model ids; they are an item of
+    the live checklist (L12).
+  - **A refusal names where it failed.** The run records the path of the key that failed, or the header, and never a
+    value: `service_tier (unknown key)`, `tools[1].type (invalid value)`, `max_tokens (output cap)`,
+    `header anthropic-beta`. A key name is written only when it is at most 40 characters of letters, digits and
+    `_ . -`, else `<key>`. It reaches the log tail of the job (`dynamic_policy_violation: the request is not one this
+    job may make [service_tier (unknown key)]`), scrubbed like every line of it; the engine is told only the fixed
+    sentence, as before. The next key the engine sends that is not on the list is therefore found in one run.
 - **One call at a time.** The engine's calls are serial. A second request while one is in flight is a 429
   `call_in_flight` with `retry-after: 1`, answered before anything is reserved or sent: not a call, no reason to end
   the run (it comes after the capability check, so a stranger only ever sees 401). It is refused and not queued: a
@@ -651,8 +673,11 @@ The book of a claim is read with `strict_cache_read` (`price_book.py`): a cache 
 (N4 of the review of PR #569). "Selectable" on the managed key includes complete cache prices (`availability()`: every level states a
 cache read; the Messages family also a 5-minute write); if a read slips past, the call is unpriced and the run ends
 `dynamic_accounting_failed`, which is free. The token cap books a call at the largest of its counts, its stated total and reasoning
-on top of the completion, and an unknown call at the estimate of its input plus the whole output allowance. `cache_control.ttl` stays out of the request schema: the pinned engine never sends one, and a 1-hour write is a price the
-book states but nothing asks for.
+on top of the completion, and an unknown call at the estimate of its input plus the whole output allowance. The request schema no longer looks inside the conversation (#810), so a `cache_control.ttl` of `1h` in a message or the system
+prompt reaches the provider. Priced right: the provider states the split of the write (`cache_creation.ephemeral_1h_input_tokens`)
+and it is priced with the book's 1-hour price; a book without that price makes the call an unknown cost, which ends a managed run.
+A provider that states no split at all (only `cache_creation_input_tokens`) has its write priced as a 5-minute write, which is the
+one case that could cost less than the truth; the real API states the split, and the cost limit bounds the run either way.
 
 ## Finalization above the wire (native providers, #552)
 

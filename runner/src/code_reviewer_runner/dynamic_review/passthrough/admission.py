@@ -67,13 +67,19 @@ _RUN_CODE: Final = {
 
 
 class Refused(Exception):
-    """A request the proxy does not forward. `error` is what the run records (not for a 401)."""
+    """A request the proxy does not forward. `error` is what the run records (not for a 401).
 
-    def __init__(self, code: RefusalCode) -> None:
+    `where` says what failed, for the operator's log and never for the engine: the path of a key of
+    the body (`service_tier (unknown key)`) or the name of a header (`header anthropic-beta`). It is
+    built from constants and plain short names, never from a value of the request.
+    """
+
+    def __init__(self, code: RefusalCode, where: str | None = None) -> None:
         super().__init__(code.value)
         self.code = code
         self.status = _STATUS[code]
         self.error = _RUN_CODE.get(code, ErrorCode.DYNAMIC_POLICY_VIOLATION)
+        self.where = where
 
 
 # The pinned engine sends `min(limit.output, 32000)` as the output cap, whatever the catalog says
@@ -155,8 +161,8 @@ def target_from_entry(entry: NativeEntry) -> PassthroughTarget:
     )
 
 
-def _not_allowed() -> Refused:
-    return Refused(RefusalCode.REQUEST_NOT_ALLOWED)
+def _not_allowed(where: str | None = None) -> Refused:
+    return Refused(RefusalCode.REQUEST_NOT_ALLOWED, where)
 
 
 def _no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -192,7 +198,7 @@ class Admission:
         pairs = [(name.lower(), value) for name, value in headers]
         self._check_capability(pairs)
         if method != "POST":
-            raise _not_allowed()
+            raise _not_allowed("method")
         self._check_target(raw_target)
         forwarded = self._forwarded_headers(pairs)
         length = self._content_length(pairs, max_request_bytes)
@@ -227,19 +233,21 @@ class Admission:
             found = _GOOGLE_MODEL_PATH.fullmatch(raw_target.partition("?")[0])
             if found is not None and found.group(1) != self._target.model:
                 raise Refused(RefusalCode.MODEL_NOT_ALLOWED)
-        raise _not_allowed()
+        raise _not_allowed("request target")
 
     def _forwarded_headers(self, pairs: Sequence[tuple[str, str]]) -> dict[str, str]:
         forwarded: dict[str, str] = {}
         for name, value in pairs:
             if name not in self._spec.request_headers:
                 continue
+            # Only the names of the allow-list reach a message: a header of the engine's own
+            # invention is dropped, not refused.
             if name in forwarded:
-                raise _not_allowed()
+                raise _not_allowed(f"header {name} (given twice)")
             if len(value) > _MAX_HEADER_VALUE or any(
                 (ord(char) < 32 and char != "\t") or ord(char) == 127 for char in value
             ):
-                raise _not_allowed()
+                raise _not_allowed(f"header {name} (invalid value)")
             forwarded[name] = value
         # The engine's content type is checked and then dropped: the proxy sends
         # `application/json` itself, so the provider never sees a parameter (a boundary, a charset)
@@ -249,15 +257,15 @@ class Admission:
             .lower()
             .startswith("application/json")
         ):
-            raise _not_allowed()
+            raise _not_allowed("header content-type")
         if "anthropic-version" in forwarded and (
             forwarded["anthropic-version"] not in ALLOWED_ANTHROPIC_VERSIONS
         ):
-            raise _not_allowed()
+            raise _not_allowed("header anthropic-version")
         if "anthropic-beta" in forwarded:
             betas = [beta.strip() for beta in forwarded["anthropic-beta"].split(",")]
             if any(beta not in ALLOWED_ANTHROPIC_BETAS for beta in betas):
-                raise _not_allowed()
+                raise _not_allowed("header anthropic-beta")
         return forwarded
 
     @staticmethod
@@ -284,13 +292,15 @@ class Admission:
         if not self._spec.model_in_route:
             requested = document.get("model")
             if not isinstance(requested, str):
-                raise _not_allowed()
+                raise _not_allowed("model (invalid value)")
             if requested != model:
                 raise Refused(RefusalCode.MODEL_NOT_ALLOWED)
         try:
             output_cap = check_body(self._target.family, document, self._target.output_allowance)
-        except (NotAllowed, OverflowError, RecursionError):
-            raise _not_allowed() from None
+        except NotAllowed as refusal:
+            raise _not_allowed(refusal.path) from None
+        except (OverflowError, RecursionError):
+            raise _not_allowed("body (too deep or too large)") from None
         return Admitted(
             body=body,
             model=model,
@@ -307,7 +317,7 @@ class Admission:
                 parse_constant=_refuse_constant,
             )
         except (ValueError, RecursionError):
-            raise _not_allowed() from None
+            raise _not_allowed("body (not JSON the proxy reads)") from None
         if not isinstance(value, dict):
-            raise _not_allowed()
+            raise _not_allowed("body (not an object)")
         return value  # pyright: ignore[reportUnknownVariableType]
