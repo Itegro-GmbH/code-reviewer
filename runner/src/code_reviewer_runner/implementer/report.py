@@ -190,6 +190,10 @@ def clip_texts(block: Mapping[str, Any]) -> dict[str, Any]:
     try:
         clipped: dict[str, Any] = dict(block)
         clipped["summary"] = clipped["summary"][:MAX_SUMMARY_CHARS]
+        clipped["branches"] = [
+            {**branch, "name": branch["name"][:MAX_BRANCH_NAME_CHARS]}
+            for branch in clipped["branches"]
+        ]
         clipped["commits"] = [
             {**commit, "subject": commit["subject"][:MAX_SUBJECT_CHARS]}
             for commit in clipped["commits"]

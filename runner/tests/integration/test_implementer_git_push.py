@@ -1117,6 +1117,26 @@ def rejected_line(name: str, reason: str) -> str:
     return f"!\trefs/runner/in/0:refs/heads/{name}\t[remote rejected] ({reason})\nDone\n"
 
 
+# #745: only git's own `[rejected]` means other history
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        ("[rejected] (fetch first)", REASON_NOT_FAST_FORWARD),
+        ("[rejected] (non-fast-forward)", REASON_NOT_FAST_FORWARD),
+        ("[remote failure] (remote failed to report status)", REASON_REMOTE_REJECTED),
+    ],
+)
+def test_a_refused_line_says_other_history_only_when_git_says_so(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch, status: str, expected: str
+) -> None:
+    workspace = rig.prepared()
+    commit(workspace, "a.txt")
+    line = f"!\trefs/runner/in/0:refs/heads/{BRANCH}\t{status}\nDone\n"
+    fail_pushes(workspace, monkeypatch, "error: failed to push", stdout=line, times=5)
+
+    assert branch(push(workspace), BRANCH).reason == expected
+
+
 def test_a_branch_called_workflow_that_is_refused_for_another_reason_is_remote_rejected(
     rig: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -840,7 +840,11 @@ class GitWorkspace:
                 ):
                     return REASON_WORKFLOWS
                 return REASON_REMOTE_REJECTED
-            return REASON_NOT_FAST_FORWARD
+            # Git's own `[rejected]` (non-fast-forward, fetch first, already exists) says the branch
+            # has other history. Anything else says nothing of the kind.
+            if any("[rejected]" in line for line in refused):
+                return REASON_NOT_FAST_FORWARD
+            return REASON_REMOTE_REJECTED
         if _is_access_refusal(detail):
             return REASON_PROVIDER_REFUSED
         if _is_client_error(detail):

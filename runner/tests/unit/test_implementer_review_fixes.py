@@ -122,6 +122,16 @@ def test_the_process_side_drops_them_too() -> None:
     assert valid_block(cleaned) is not None
 
 
+# #745: redaction can make a branch name longer than the contract's bound
+def test_a_branch_name_is_clipped_to_the_bound() -> None:
+    long_name = [{"name": "x" * 300, "head": HEAD, "result": "pushed", "reason": None}]
+
+    cleaned = clip_texts(block(branches=long_name))
+
+    assert cleaned["branches"][0]["name"] == "x" * 255
+    assert valid_block(cleaned) is not None
+
+
 # -- R5c: the deadline of the turn ----------------------------------------------------------------
 
 

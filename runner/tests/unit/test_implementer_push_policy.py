@@ -36,6 +36,11 @@ GOOD = [
     "at@sign",
     "comma,equals=percent%",
     "x.y",
+    # #745: not printable for Python, fine for git and the form. Dropping them loses the work.
+    "feat/\U0001f3f3\ufe0f\u200d\U0001f308",
+    "a\u200bb",
+    "a\u00adb",
+    "a\ue000b",
 ]
 
 # Each of these could change what a refspec, a ref update or a log line means.

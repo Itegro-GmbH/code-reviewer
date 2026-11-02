@@ -14,6 +14,7 @@ could be read as an option, a `+` (force), a `:` or a line break, is dropped and
 never shown and never given to git.
 """
 
+import unicodedata
 from dataclasses import dataclass, field
 
 # Branch names the final push never takes (exact names). Empty for now: the owner decides what, if
@@ -33,10 +34,16 @@ REASON_EXCLUDED = "excluded"
 _FORBIDDEN = frozenset(" ~^:?*[\\")
 
 
+def _is_control_or_separator(char: str) -> bool:
+    category = unicodedata.category(char)
+    return category == "Cc" or category.startswith("Z")
+
+
 def branch_name_problem(name: str) -> str | None:
     """Why `name` may not be pushed as `refs/heads/<name>`, or None when it may. Stricter than
-    `git check-ref-format` (a name this accepts git accepts as well): printable characters only,
-    none of git's forbidden ones, no leading `-` or `+`."""
+    `git check-ref-format` (a name this accepts git accepts as well): no control character, no
+    separator, none of git's forbidden ones, no leading `-` or `+`. Other Unicode stays allowed: the
+    form accepts it (an emoji with a joiner, say), and a name dropped here is work that is lost."""
     if not name or name.startswith(("-", "+")):
         return "a name cannot start with a dash or a plus, or be empty"
     try:
@@ -45,7 +52,7 @@ def branch_name_problem(name: str) -> str | None:
         return "a name must be valid UTF-8"
     if len(encoded) > MAX_NAME_BYTES:
         return "a name is too long"
-    if not name.isprintable() or any(char in _FORBIDDEN for char in name):
+    if any(_is_control_or_separator(char) or char in _FORBIDDEN for char in name):
         return "a name has a character git does not allow in a ref name"
     if name in ("@", "HEAD") or name.startswith("/") or name.endswith(("/", ".")):
         return "a name has a form git does not allow"
