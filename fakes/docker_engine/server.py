@@ -70,6 +70,8 @@ class FakeContainer:
     stdout_read: int = -1
     stdout_write: int = -1
     stderr_text: list[str] = field(default_factory=lambda: [])
+    # Everything that came on the container's stdin through the attached connection.
+    stdin_received: bytearray = field(default_factory=lambda: bytearray())
 
 
 class FakeDockerEngine:
@@ -82,6 +84,8 @@ class FakeDockerEngine:
         # A request whose path contains the key is answered with the status (and no effect).
         self.refuse: dict[str, int] = {}
         self.answers_ping = True
+        # The exit code of the one-shot container that installs the door's network rules.
+        self.rules_exit = 0
         self._lock = threading.Lock()
         self._count = 0
         engine = self
@@ -191,6 +195,9 @@ class FakeDockerEngine:
             self._create(connection, target, body)
         elif method == "POST" and parts[0] == "containers" and parts[-1] == "attach":
             self._attach(connection, reader, parts[1])
+        elif method == "POST" and parts[0] == "containers" and parts[-1] == "wait":
+            container = self.containers[parts[1]]
+            self._reply(connection, 200, {"StatusCode": container.exit_code or 0})
         elif method == "POST" and parts[0] == "containers" and parts[-1] == "start":
             self._start(connection, parts[1])
         elif method == "DELETE" and parts[0] == "containers":
@@ -257,8 +264,12 @@ class FakeDockerEngine:
 
     def _start(self, connection: socket.socket, ref: str) -> None:
         container = self.containers[ref]
-        container.running = True
         self._reply(connection, 204)
+        if container.document.get("Entrypoint") == ["/usr/sbin/nft"]:
+            # The one-shot container of the door's network rules: it ends at once.
+            container.exit_code = self.rules_exit
+            return
+        container.running = True
         behaviour = self.behaviour
         if behaviour is None:
             return
@@ -290,6 +301,7 @@ class FakeDockerEngine:
                 data = reader.read1(65536)
                 if not data:
                     break
+                container.stdin_received += data
                 try:
                     os.write(container.stdin_write, data)
                 except OSError:

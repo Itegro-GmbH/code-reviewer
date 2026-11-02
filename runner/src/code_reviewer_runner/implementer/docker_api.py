@@ -205,6 +205,16 @@ class DockerApi:
     def start_container(self, container: str) -> None:
         self.request("POST", f"/containers/{container}/start", ok=(204, 304))
 
+    def wait_container(self, container: str, *, timeout: float) -> int:
+        """Wait for a container to end: its exit code, or `DockerError` when it does not in time."""
+        answer = as_object(
+            self.request("POST", f"/containers/{container}/wait", timeout=timeout, ok=(200,))
+        )
+        code: Any = None if answer is None else answer.get("StatusCode")
+        if isinstance(code, bool) or not isinstance(code, int):
+            raise DockerError(0, "the daemon's answer has no exit code")
+        return code
+
     def remove_container(self, container: str) -> None:
         self.request("DELETE", f"/containers/{container}?force=1&v=1", ok=(200, 204, 404))
 

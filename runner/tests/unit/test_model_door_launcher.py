@@ -49,10 +49,14 @@ from code_reviewer_runner.implementer.docker_api import DockerApi, DockerError
 from code_reviewer_runner.implementer.door.service import run_door
 from code_reviewer_runner.implementer.door_launcher import (
     DOOR_CONTAINER_NAME,
+    EGRESS_RULES,
+    PRIVATE_RANGES,
+    RULES_CONTAINER_NAME,
     DoorSeams,
     RunningDoor,
     door_document,
     network_document,
+    rules_document,
     start_door,
 )
 from code_reviewer_runner.implementer.egress_config import EgressSettings
@@ -206,6 +210,118 @@ def test_the_model_network_has_no_exit_and_a_fixed_range_and_the_agent_side_join
     door_id = rig.engine.container(DOOR_CONTAINER_NAME).identifier
     assert members[door_id]["IPAMConfig"]["IPv4Address"] == MODEL_DOOR_ADDRESS
     door.stop()
+
+
+# -- the door's own network rules ----------------------------------------------------------------
+
+
+# #745-T19
+def test_the_rules_are_installed_by_a_one_shot_container_in_the_doors_namespace_before_the_key(
+    rig: Rig,
+) -> None:
+    door = rig.start()
+
+    helper = rig.engine.container(RULES_CONTAINER_NAME)
+    door_id = rig.engine.container(DOOR_CONTAINER_NAME).identifier
+    assert helper.document == rules_document(IMAGE_ID, door_id)
+    assert helper.removed, "it is a one-shot: gone when it has done"
+    paths = [target.split("?")[0] for _, target, _ in rig.engine.calls]
+    start_of_helper = paths.index(f"/containers/{helper.identifier}/start")
+    waited = paths.index(f"/containers/{helper.identifier}/wait")
+    started_door = paths.index(f"/containers/{door_id}/start")
+    assert started_door < start_of_helper < waited, (
+        "the door runs, its rules go in, then it is told"
+    )
+    assert rig.engine.container(DOOR_CONTAINER_NAME).stdin_received, "and then it was told"
+    door.stop()
+
+
+# #745-T19
+def test_the_rules_container_holds_net_admin_and_nothing_else_and_shares_nothing_but_the_namespace(
+    rig: Rig,
+) -> None:
+    door = rig.start()
+    document = rig.engine.container(RULES_CONTAINER_NAME).document
+    host = document["HostConfig"]
+
+    assert host["NetworkMode"].startswith("container:")
+    assert host["CapDrop"] == ["ALL"] and host["CapAdd"] == ["NET_ADMIN"]
+    assert host["ReadonlyRootfs"] is True and host["Privileged"] is False
+    assert host["SecurityOpt"] == ["no-new-privileges:true"]
+    for forbidden in ("Binds", "Mounts", "Devices", "PortBindings", "PidMode", "IpcMode"):
+        assert forbidden not in host
+    assert document["Entrypoint"] == ["/usr/sbin/nft"]
+    assert document["Cmd"] == [EGRESS_RULES], "the one command is a constant"
+    assert document["Env"] == []
+    door.stop()
+
+
+# #745-T19
+def test_the_rules_let_the_agent_side_dns_and_https_through_and_drop_the_vm_and_everything_else() -> (
+    None
+):
+    rules = EGRESS_RULES.split("; ")
+
+    assert rules[-1].endswith("output drop"), "the last word is no"
+    accept_model = next(i for i, r in enumerate(rules) if MODEL_NETWORK_SUBNET in r)
+    drop_private = next(i for i, r in enumerate(rules) if r.endswith("} drop"))
+    accept_https = next(i for i, r in enumerate(rules) if "dport 443 accept" in r)
+    assert accept_model < drop_private < accept_https, "the model network is inside 10.0.0.0/8"
+    assert any("th dport 53 accept" in r for r in rules), (
+        "the resolver of the VM is a private address"
+    )
+    assert any('oifname "lo" accept' in r for r in rules)
+    for private in (
+        "10.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "100.64.0.0/10",
+    ):
+        assert private in PRIVATE_RANGES and private in rules[drop_private]
+    assert not any("dport 80" in r or "dport 22" in r for r in rules)
+    assert "ip6" not in EGRESS_RULES, "an ip table: the door has no IPv6 (the sysctls say so)"
+
+
+# #745-T19
+def test_the_door_has_no_ipv6_because_its_rules_are_an_ip_table(rig: Rig) -> None:
+    door = rig.start()
+
+    host = rig.engine.container(DOOR_CONTAINER_NAME).document["HostConfig"]
+
+    assert host["Sysctls"] == {
+        "net.ipv6.conf.all.disable_ipv6": "1",
+        "net.ipv6.conf.default.disable_ipv6": "1",
+    }
+    door.stop()
+
+
+# #745-T19
+def test_a_door_whose_rules_did_not_go_in_never_gets_the_key_and_is_taken_away(
+    rig: Rig,
+) -> None:
+    rig.engine.rules_exit = 1
+
+    with pytest.raises(JobError) as error:
+        rig.start()
+
+    assert error.value.code is ErrorCode.SETUP_FAILED
+    assert "network rules" in error.value.detail and "model_door_unavailable" in error.value.detail
+    door = rig.engine.container(DOOR_CONTAINER_NAME)
+    assert bytes(door.stdin_received) == b"", "the start document, with the key, was never written"
+    assert door.removed and rig.engine.networks == {}
+    assert API_KEY not in call_bodies(rig.engine)
+
+
+# #745-T19
+def test_a_daemon_that_refuses_the_rules_container_is_the_same_free_end(rig: Rig) -> None:
+    rig.engine.refuse[f"name={RULES_CONTAINER_NAME}"] = 500
+
+    with pytest.raises(JobError) as error:
+        rig.start()
+
+    assert error.value.code is ErrorCode.SETUP_FAILED
+    assert bytes(rig.engine.container(DOOR_CONTAINER_NAME).stdin_received) == b""
 
 
 # -- what the door does behind the daemon ---------------------------------------------------------

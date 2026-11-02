@@ -84,6 +84,52 @@ READY_SECONDS: Final = 30.0
 STOP_SECONDS: Final = 5.0
 BRIDGE_NETWORK: Final = "bridge"
 
+# The door's own network rules (#745, step 3). The door is on the VM's default bridge, which has a
+# route to the internet and to the VM itself (its Docker gateway, its control port). A one-shot
+# container that shares the door's network namespace and holds `NET_ADMIN` (the door itself holds
+# no capability) installs these rules before the door is told the key:
+#
+# * the model network (the agent's side) and loopback (the embedded DNS) are open;
+# * replies are open, and DNS (port 53, the resolver of the VM is on a private address);
+# * every private, link-local, shared and special range is dropped: the VM, its neighbours, the
+#   other containers, the platform's services;
+# * what is left of the internet, port 443 only: the provider (`HttpsUpstream` dials port 443 of
+#   public addresses only, this says it again where the door cannot get round it);
+# * everything else is dropped.
+#
+# The provider's own address is not named (a name behind a CDN has no stable address): narrowing
+# 443 to the provider is the second wall of the plan, the VM's network policy (step 7).
+EGRESS_TABLE: Final = "door_egress"
+PRIVATE_RANGES: Final = (
+    "0.0.0.0/8",
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.0.0.0/24",
+    "192.168.0.0/16",
+    "198.18.0.0/15",
+    "224.0.0.0/3",
+)
+EGRESS_RULES: Final = "; ".join(
+    [
+        f"add table ip {EGRESS_TABLE}",
+        f"add chain ip {EGRESS_TABLE} output "
+        "{ type filter hook output priority 0 ; policy accept ; }",
+        f'add rule ip {EGRESS_TABLE} output oifname "lo" accept',
+        f"add rule ip {EGRESS_TABLE} output ip daddr {MODEL_NETWORK_SUBNET} accept",
+        f"add rule ip {EGRESS_TABLE} output ct state established,related accept",
+        f"add rule ip {EGRESS_TABLE} output meta l4proto {{ tcp, udp }} th dport 53 accept",
+        f"add rule ip {EGRESS_TABLE} output ip daddr {{ {', '.join(PRIVATE_RANGES)} }} drop",
+        f"add rule ip {EGRESS_TABLE} output tcp dport 443 accept",
+        f"add rule ip {EGRESS_TABLE} output drop",
+    ]
+)
+RULES_ENTRYPOINT: Final = ["/usr/sbin/nft"]
+RULES_SECONDS: Final = 20.0
+RULES_CONTAINER_NAME: Final = "code-reviewer-model-door-rules"
+
 
 def network_document() -> dict[str, Any]:
     """The model network: no exit, no route to the VM, a fixed range."""
@@ -130,6 +176,37 @@ def door_document(image: str) -> dict[str, Any]:
             "Tmpfs": {"/tmp": DOOR_TMPFS},
             "RestartPolicy": {"Name": "no"},
             "PublishAllPorts": False,
+            # The rules below are an `ip` table: it does not see IPv6, so the door has none.
+            "Sysctls": {
+                "net.ipv6.conf.all.disable_ipv6": "1",
+                "net.ipv6.conf.default.disable_ipv6": "1",
+            },
+        },
+    }
+
+
+def rules_document(image: str, door: str) -> dict[str, Any]:
+    """The one-shot container that installs the door's network rules: it shares the door's network
+    namespace and nothing else, holds `NET_ADMIN` and no other capability, and runs one command that
+    is a constant."""
+    return {
+        "Image": image,
+        "Entrypoint": RULES_ENTRYPOINT,
+        "Cmd": [EGRESS_RULES],
+        "User": "0:0",
+        "Env": [],
+        "Labels": {DOOR_ROLE_LABEL: "model-door-rules"},
+        "HostConfig": {
+            "NetworkMode": f"container:{door}",
+            "Privileged": False,
+            "ReadonlyRootfs": True,
+            "CapDrop": ["ALL"],
+            "CapAdd": ["NET_ADMIN"],
+            "SecurityOpt": ["no-new-privileges:true"],
+            "Memory": 64 * 1024 * 1024,
+            "MemorySwap": 64 * 1024 * 1024,
+            "PidsLimit": 16,
+            "RestartPolicy": {"Name": "no"},
         },
     }
 
@@ -321,6 +398,7 @@ def start_door(
         )  # fmt: skip
         running.begin()
         api.start_container(container)
+        _close_the_doors_network(api, image, container)
         document = start_document(
             model_access=model_access,
             capability=capability,
@@ -360,6 +438,22 @@ def start_door(
         running.stop()
         raise _unavailable("the door did not become ready in time")
     return running
+
+
+def _close_the_doors_network(api: DockerApi, image: str, door: str) -> None:
+    """Install the door's network rules before it is told anything. A door whose rules are not in
+    place is not used: this raises, and the caller takes the door away with the key never sent."""
+    helper = api.create_container(rules_document(image, door), RULES_CONTAINER_NAME)
+    try:
+        api.start_container(helper)
+        code = api.wait_container(helper, timeout=RULES_SECONDS)
+    finally:
+        try:
+            api.remove_container(helper)
+        except DockerError as error:
+            _log.warning("the rules container could not be removed (%s)", error.status)
+    if code != 0:
+        raise _unavailable(f"the door's network rules could not be installed (exit code {code})")
 
 
 def _cleanup(
