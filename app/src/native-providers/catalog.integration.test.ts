@@ -70,7 +70,9 @@ const BLOCKED_URL: StoredProvider["url"] = {
 describe.each(MODELS_DEV_ENGINES)(
   "the catalog of a workspace on $name",
   (engine) => {
-    async function setup() {
+    async function setup(
+      legacyProviders: readonly string[] = ["openrouter", "anthropic"],
+    ) {
       const { db } = await engine.create();
       const repository = createModelsDevRepository(db);
       await repository.apply({
@@ -116,10 +118,32 @@ describe.each(MODELS_DEV_ENGINES)(
         db,
         reader: createNativeCatalogReader({
           models: repository,
-          legacyProviders: ["openrouter", "anthropic"],
+          legacyProviders,
         }),
       };
     }
+
+    // The Implementer's picker reads the same catalog with no provider legacy (its agent is OpenCode); the reviews' reader above is unchanged.
+    describe("the catalog of the Implementer, for which no provider is legacy", () => {
+      it("offers the registry's two providers with their models, and the others as before", async () => {
+        const { reader } = await setup([]);
+
+        expect((await reader.providers()).map((entry) => entry.id)).toEqual([
+          "anthropic",
+          "deepseek",
+          "fireworks_ai",
+          "openai",
+          "openrouter",
+        ]);
+        expect((await reader.models("anthropic"))?.map((m) => m.id)).toEqual([
+          "claude-sonnet-5-5",
+        ]);
+        expect(
+          await reader.checkSelection("openrouter", "mistralai/mistral-saba"),
+        ).toMatchObject({ ok: true });
+        expect(await reader.providerAvailable("anthropic")).toBe(true);
+      });
+    });
 
     describe("the providers", () => {
       // #555-T01

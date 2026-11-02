@@ -292,6 +292,72 @@ describe.each(MODELS_DEV_ENGINES)(
       });
     });
 
+    describe("a task of the Implementer on the registry's providers", () => {
+      // The agent is OpenCode: the key of Anthropic or OpenRouter goes through the passthrough proxy with an entry and a policy.
+      it("names the catalog model of Anthropic and of OpenRouter, and the reviews still do not", async () => {
+        const t = await setup();
+
+        expect(
+          t.native.implementerRefOf({
+            provider: "anthropic",
+            model: "claude-sonnet-5-5",
+          }),
+        ).toEqual(SONNET);
+        expect(
+          t.native.implementerRefOf({
+            provider: "openrouter",
+            model: "mistralai/mistral-saba",
+          }),
+        ).toEqual(OPENROUTER);
+        expect(
+          t.native.refOf({ provider: "anthropic", model: "claude-sonnet-5-5" }),
+        ).toBeNull();
+        expect(
+          t.native.refOf({
+            provider: "openrouter",
+            model: "mistralai/mistral-saba",
+          }),
+        ).toBeNull();
+      });
+
+      // Prompt caching is on for Anthropic: the cache prices reach the runner, which prices cache reads and writes with them.
+      it("prices an Anthropic model on the own key with the cache read and cache write prices of the catalog, bound by the cap", async () => {
+        const t = await setup();
+
+        expect(await t.native.policyFor("own", SONNET)).toEqual({
+          ok: true,
+          policy: {
+            keyMode: "own",
+            maxTotalTokens: 4_000_000,
+            priceBook: expect.objectContaining({
+              input: "2000000",
+              output: "10000000",
+              cacheRead: "100000",
+              cacheWrite5m: "2500000",
+            }),
+          },
+          confirmation: null,
+        });
+      });
+
+      it("builds the entry of the registry's address, whatever pin a project holds for the provider", async () => {
+        const t = await setup();
+
+        expect(await t.native.entryFor(SONNET, undefined)).toMatchObject({
+          ok: true,
+          entry: {
+            providerId: "anthropic",
+            family: "anthropic-messages",
+            upstreamBaseUrl: "https://api.anthropic.com/v1",
+          },
+        });
+        expect(await t.native.entryFor(OPENROUTER, undefined)).toMatchObject({
+          ok: true,
+          entry: { upstreamBaseUrl: "https://openrouter.ai/api/v1" },
+        });
+      });
+    });
+
     describe("the address a selection is pinned to (#588)", () => {
       const MOVED = "https://api.attacker.example/v1";
 

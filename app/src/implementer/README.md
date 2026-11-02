@@ -104,8 +104,14 @@ One rule serves the picker (`models.options()`) and the submit (`models.check()`
 OpenCode, so the native path is mandatory (an entry from the catalog and a cost policy). The key mode of the workspace decides:
 
 - **own key**: the providers of the models.dev catalog (`src/native-providers/`) for which the workspace has saved a readable
-  key, and the models the catalog lists. The registry's two providers (Anthropic, OpenRouter) are not on the native path and are
-  not offered. Reasons: `provider_unsupported`, `no_key`, `model_not_in_catalog`.
+  key, and the models the catalog lists. Anthropic and OpenRouter are among them: the agent is OpenCode and has no legacy wire, so
+  for a task (and for a task only) neither is a legacy provider (`implementerProviderIdOf`, `implementerCatalogRefOf` in
+  `src/native-cost/catalog-ref.ts`). Their key is the one saved under LLM access (`configuredKeyProviders` reads the registry's
+  slots and the catalog providers'), the catalog is `getImplementerCatalog()`, and the claim of a turn on the workspace's own key takes the native path for
+  them (`nativeCost.implementerRefOf`, only for `keyMode` own; `resolveModelSelection` with `implementer`): the entry is built at the address the registry
+  pins (`api.anthropic.com/v1`, `openrouter.ai/api/v1`), the cost policy carries the catalog's price with the cache read and cache
+  write prices, and the engine marks the prompt for the cache. Reviews on the same providers keep the legacy wire. Reasons:
+  `provider_unsupported`, `no_key`, `model_not_in_catalog`.
 - **operator's key**: the released catalog entries that serve Dynamic Review, that the plan allows (`modelAccess`) and whose model
   has a confirmed price and a catalog entry (`nativeCost.policyFor("managed")` and `entryFor`). A member sees the fields of
   `MemberCatalogEntry` only: never the provider or the model id (principle 2 of epic #420). Reasons: `entry_unknown`,

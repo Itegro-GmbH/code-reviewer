@@ -480,8 +480,13 @@ def _catalog_llm_access(llm: dict[str, Any], slug: str) -> LlmAccess:
     )
 
 
-def _llm_access(data: dict[str, Any], *, catalog: bool = False) -> LlmAccess:
-    """`catalog`: the job is native, so a provider outside the registry may be a catalog one."""
+def _llm_access(
+    data: dict[str, Any], *, catalog: bool = False, catalog_model_id: bool = False
+) -> LlmAccess:
+    """`catalog`: the job is native, so a provider outside the registry may be a catalog one.
+    `catalog_model_id`: the job is a task of the Implementer, whose model comes from the catalog
+    whichever provider it is, so its id has the charset of a catalog id (the app's
+    `isCatalogModelId`) also for a provider of the registry. A review keeps the registry's rule."""
     llm = _section(data, "llm")
     _check_fields(llm, _LLM_FIELDS, "llm.")
     slug = _string(llm, "provider", "llm.")
@@ -493,7 +498,7 @@ def _llm_access(data: dict[str, Any], *, catalog: bool = False) -> LlmAccess:
             f"llm.provider must be one of: {', '.join(sorted(registered_provider_ids()))}"
         )
     model = _string(llm, "model", "llm.")
-    if not _MODEL.fullmatch(model):
+    if not (_CATALOG_MODEL if catalog_model_id else _MODEL).fullmatch(model):
         raise _invalid("llm.model contains characters that are not allowed in a model name")
     base_url = _llm_base_url(llm)
     return LlmAccess(
@@ -948,7 +953,7 @@ def _implementer_input(job: dict[str, Any]) -> ImplementerInput:
     spec = _implementer_spec(job, git)
     # A native job only: its provider may be a provider of the catalog, and the key goes to the
     # address of the entry and to no other.
-    llm = _llm_access(job, catalog=True)
+    llm = _llm_access(job, catalog=True, catalog_model_id=True)
     _entry_is_of_llm(spec.model_entry, llm, "implementer.modelEntry")
     return ImplementerInput(git=git, llm=llm, implementer=spec, env=_env(job))
 

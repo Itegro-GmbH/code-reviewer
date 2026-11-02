@@ -329,10 +329,9 @@ describe("the Implementer route files", () => {
     for (const [model, reason] of [
       [{ provider: "mistral", model: "mistral-large" }, "no_key"],
       [{ provider: "deepseek", model: "nope" }, "model_not_in_catalog"],
-      [
-        { provider: "anthropic", model: "claude-sonnet-5-5" },
-        "provider_unsupported",
-      ],
+      // Anthropic is a provider of the native path for a task, so without a saved key it is refused like any other provider.
+      [{ provider: "anthropic", model: "claude-sonnet-5-5" }, "no_key"],
+      [{ provider: "aihubmix", model: "m" }, "provider_unsupported"],
       [{ entryId: "entry-1" }, "wrong_key_mode"],
     ] as const) {
       const response = await tasksPost(body({ model }));

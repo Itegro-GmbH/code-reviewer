@@ -62,5 +62,42 @@
         }
       }
     }
+  },
+  "anthropic": {
+    "id": "anthropic",
+    "env": ["ANTHROPIC_API_KEY"],
+    "npm": "@ai-sdk/anthropic",
+    "name": "Anthropic",
+    "doc": "https://docs.anthropic.com/en/docs/about-claude/models",
+    "models": {
+      "claude-sonnet-5-5": {
+        "id": "claude-sonnet-5-5",
+        "name": "Claude Sonnet 5.5",
+        "description": "Claude Sonnet 5.5 of the Implementer's e2e lane",
+        "family": "claude-sonnet",
+        "attachment": false,
+        "reasoning": false,
+        "tool_call": true,
+        "structured_output": false,
+        "temperature": true,
+        "release_date": "2026-08-12",
+        "last_updated": "2026-08-22",
+        "modalities": {
+          "input": ["text"],
+          "output": ["text"]
+        },
+        "open_weights": false,
+        "limit": {
+          "context": 200000,
+          "output": 8192
+        },
+        "cost": {
+          "input": 0.3,
+          "output": 1.5,
+          "cache_read": 0.03,
+          "cache_write": 0.375
+        }
+      }
+    }
   }
 }

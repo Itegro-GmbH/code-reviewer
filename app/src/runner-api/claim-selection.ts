@@ -145,6 +145,10 @@ export async function selectModel(
       kind,
       runnerProviders,
       ...(deps.nativeModels === true ? { nativeModels: true } : {}),
+      // A task of the Implementer has no legacy wire (its agent is OpenCode); a review keeps the registry's.
+      ...(job.reviewKind === "implementer"
+        ? { implementer: true as const }
+        : {}),
       builtInModel: deps.builtInModel(kind),
       layers: layersOf(options, kind),
     };
