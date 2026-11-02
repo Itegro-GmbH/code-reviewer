@@ -413,7 +413,8 @@
             "name": "glob",
             "input": {
               "pattern": "**/*.py"
-            }
+            },
+            "caller": { "type": "direct" }
           }
         ]
       },
@@ -441,7 +442,8 @@
             "name": "read",
             "input": {
               "filePath": "/work/export/src/app.py"
-            }
+            },
+            "caller": { "type": "direct" }
           }
         ]
       },
@@ -469,7 +471,8 @@
             "name": "grep",
             "input": {
               "pattern": "def "
-            }
+            },
+            "caller": { "type": "direct" }
           }
         ]
       },
@@ -497,7 +500,8 @@
             "name": "read",
             "input": {
               "filePath": "/work/export/src/db.py"
-            }
+            },
+            "caller": { "type": "direct" }
           }
         ]
       },
@@ -525,7 +529,8 @@
             "name": "glob",
             "input": {
               "pattern": "*.md"
-            }
+            },
+            "caller": { "type": "direct" }
           }
         ]
       },
@@ -554,6 +559,7 @@
             "input": {
               "pattern": "query"
             },
+            "caller": { "type": "direct" },
             "cache_control": {
               "type": "ephemeral"
             }

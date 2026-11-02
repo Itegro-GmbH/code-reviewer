@@ -962,7 +962,10 @@ no sampling parameter, and its calls cost an unknown amount.
   `tests/engine/test_engine_anthropic.py` (the real PR-Agent and LiteLLM against the fake LLM that speaks the
   Messages API: the temperature of each listed model, the headers, the output, the exact cost) and
   `tests/engine/test_engine_opencode_anthropic.py` (the real pinned OpenCode behind the proxy's Messages wire,
-  steered models, thinking blocks and the recovery). The fake enforces Anthropic's 400s
+  steered models, thinking blocks and the recovery),
+  `tests/engine/test_engine_opencode_anthropic_replay.py` (the same engine against the real-shaped Messages
+  stream: the `caller` of a `tool_use` replayed, parallel tool calls, a failing tool, an image from a tool; #810).
+  The fake enforces Anthropic's 400s
   (the rules module of `fakes/llm/`, by the flags of the contract file).
 
 ## Prompt caching (#539)

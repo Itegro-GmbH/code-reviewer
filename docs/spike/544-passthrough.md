@@ -307,6 +307,20 @@ family in the live test (cache read/write tokens above 0 on the second call), no
   `low…max` (Messages, adaptive + `effort`). They apply only when a turn names a `variant`; the
   adapter does not, so the defaults above are what runs.
 
+### The first live run (#810): what the fakes hid
+
+The first real Implementer run on a real Anthropic key (`claude-sonnet-5-5`, this pin) made one good call and was
+refused at the second by `request_not_allowed`. Cause, from the bundled `@ai-sdk/anthropic` of the pinned binary and
+Anthropic's documentation: the Messages API states `"caller": {"type": "direct"}` on every `tool_use` block of a
+response, the SDK keeps it from the stream and sends it back on the replayed block (`tool_use` ... `caller`), and the
+closed schema of a message did not know the key. The Messages fake never stated one, so no test replayed it. The
+fake now speaks the real stream (`ping`, a thinking block with `signature_delta`, `caller` on `tool_use`,
+`service_tier` and `inference_geo`, the nested `cache_creation`, and a `message_delta` that repeats the input and cache
+fields), and the captured body in `fakes/wire/engine_requests.json` carries the `caller` the real engine sends back.
+The decision that followed: the proxy no longer walks the conversation (see `docs/dynamic-review.md`, "The body"), and a
+refusal names the path that failed (never a value) in the log tail. Section 7 stays as it is: L12 now also covers the
+top-level keys the engine sends for the real Claude models, which the diagnostics will name if one is missing.
+
 ### What the fakes assume (no live capture has confirmed any of it)
 
 - A Messages `message_delta` carries only `output_tokens`.
