@@ -339,6 +339,9 @@ describe("the sentences for the codes of a task", () => {
     "branch_violation",
     "cost_limit_reached",
     "time_limit_reached",
+    "dynamic_policy_violation",
+    "dynamic_budget_exceeded",
+    "llm_context_length_exceeded",
     "git_write_not_granted",
     "implementer_engine_unavailable",
     "implementer_config_invalid",
@@ -449,6 +452,41 @@ describe("the sentences for the codes of a task", () => {
     expect(text).not.toMatch(/Dynamic Review/);
     expect(text).toMatch(/pushed/);
     expect(text).toMatch(/accounted/);
+  });
+
+  // #810: the first live run of a task ended with this code and the person read about a Dynamic Review.
+  it("words the safety rule, the budget and the context window of a task without the Dynamic Review, a review or a pull request, and says pushed work stays", () => {
+    for (const code of [
+      "dynamic_policy_violation",
+      "dynamic_budget_exceeded",
+      "llm_context_length_exceeded",
+    ]) {
+      const { text } = describeTurnErrorCode(PRODUCT, code);
+      expect(text.replaceAll(PRODUCT.name, ""), code).not.toMatch(
+        /Dynamic Review|review|pull request/i,
+      );
+      expect(text, code).toMatch(/task/);
+    }
+    const rule = describeTurnErrorCode(
+      PRODUCT,
+      "dynamic_policy_violation",
+    ).text;
+    expect(rule).toMatch(/safety rule/);
+    expect(rule).toMatch(/pushed/);
+    expect(rule).toContain(PRODUCT.name);
+    expect(
+      describeTurnErrorCode(PRODUCT, "dynamic_budget_exceeded").text,
+    ).toMatch(/pushed/);
+  });
+
+  // #810: code-review.com keeps its golden sentences for the same codes.
+  it("leaves the sentences of code-review.com for these codes as they were", () => {
+    expect(describeErrorCode(PRODUCT, "dynamic_policy_violation").text).toBe(
+      "The Dynamic Review stopped because it would have broken a safety rule.",
+    );
+    expect(describeErrorCode(PRODUCT, "dynamic_budget_exceeded").text).toBe(
+      "The Dynamic Review used more than its allowed budget and was stopped.",
+    );
   });
 
   it("says for the time limit of a task whether pushed work stays", () => {

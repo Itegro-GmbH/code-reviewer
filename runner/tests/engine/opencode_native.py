@@ -97,6 +97,8 @@ class Provider:
     npm: bool = True
     steps: int = 6
     thinking: str = ""
+    # The model's turns when the test needs more than the six tool calls of `tool_script`.
+    script: Callable[[Path], Sequence[Turn]] | None = None
     others: Mapping[str, Mapping[str, Any]] = field(default_factory=lambda: {})
     served: Sequence[str] = ()
     pinned: bool = False

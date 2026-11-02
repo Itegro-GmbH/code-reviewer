@@ -116,7 +116,9 @@ def passthrough_engine(
             upstream = stack.enter_context(
                 ScriptedUpstream(
                     provider.family,
-                    tool_script(export, provider.steps, provider.thinking),
+                    provider.script(export)
+                    if provider.script is not None
+                    else tool_script(export, provider.steps, provider.thinking),
                     provider.model_id,
                     real_key=REAL_KEY,
                     judge=provider.judge,

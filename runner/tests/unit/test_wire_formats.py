@@ -117,8 +117,8 @@ def test_a_responses_answer_and_stream_report_usage_with_input_and_output_tokens
 
 
 # #546-T02
-# ASSUMPTION (unconfirmed live): `message_delta` carries only `output_tokens`; a real one may
-# repeat the input and cache fields.
+# The shape Anthropic documents for streaming: `message_delta` is cumulative and repeats the input
+# and cache fields next to the real `output_tokens`; `ping` follows the first block's start.
 def test_a_messages_stream_splits_the_usage_over_message_start_and_message_delta() -> None:
     usage = usage_for(3)
 
@@ -135,8 +135,13 @@ def test_a_messages_stream_splits_the_usage_over_message_start_and_message_delta
     }
     assert start["cache_creation_input_tokens"] == usage.cache_write_5m + usage.cache_write_1h
     delta = next(data for name, data in sequence if name == "message_delta")
-    assert delta["usage"] == {"output_tokens": usage.output}
+    assert delta["usage"]["output_tokens"] == usage.output
+    assert delta["usage"]["input_tokens"] == usage.input
+    assert delta["usage"]["cache_read_input_tokens"] == usage.cache_read
+    assert delta["usage"]["cache_creation"] == start["cache_creation"]
+    assert delta["usage"]["server_tool_use"] == {"web_search_requests": 0, "web_fetch_requests": 0}
     assert delta["delta"]["stop_reason"] == "end_turn"
+    assert "ping" in names
 
 
 # #546-T02
@@ -148,6 +153,9 @@ def test_a_messages_answer_has_the_whole_usage_and_the_tool_use_block() -> None:
     assert document["usage"]["output_tokens"] == usage.output
     assert document["usage"]["cache_creation"]["ephemeral_1h_input_tokens"] == usage.cache_write_1h
     assert document["stop_reason"] == "tool_use"
+    assert [block["caller"] for block in document["content"] if block["type"] == "tool_use"] == [
+        {"type": "direct"}
+    ]
     block = document["content"][0]
     assert (block["type"], block["name"], block["input"]) == (
         "tool_use",
