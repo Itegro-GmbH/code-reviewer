@@ -7,6 +7,7 @@ What the kernel does with the rules is the privileged suite; what the daemon doe
 Docker Engine of `test_model_door_launcher.py`."""
 
 import json
+from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -207,19 +208,20 @@ def test_the_door_judges_the_model_access_by_the_rules_of_the_job() -> None:
     assert cost.priced
 
 
-@pytest.mark.parametrize(
-    "mutate",
-    [
-        lambda a: a.pop("llm"),
-        lambda a: a.pop("cost"),
-        lambda a: a.update(extra=1),
-        lambda a: a["llm"].update(provider="openrouter"),
-        lambda a: a["modelEntry"].update(providerId="openrouter"),
-        lambda a: a["llm"].update(apiKey=""),
-    ],
-)
+Mutation = Callable[[dict[str, Any]], object]
+BROKEN_ACCESS: list[Mutation] = [
+    lambda a: a.pop("llm"),
+    lambda a: a.pop("cost"),
+    lambda a: a.update(extra=1),
+    lambda a: a["llm"].update(provider="openrouter"),
+    lambda a: a["modelEntry"].update(providerId="openrouter"),
+    lambda a: a["llm"].update(apiKey=""),
+]
+
+
+@pytest.mark.parametrize("mutate", BROKEN_ACCESS)
 # #745-T12
-def test_a_model_access_the_job_would_have_refused_is_refused(mutate: Any) -> None:
+def test_a_model_access_the_job_would_have_refused_is_refused(mutate: Mutation) -> None:
     access = model_access()
     mutate(access)
 

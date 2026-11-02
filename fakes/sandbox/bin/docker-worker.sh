@@ -85,18 +85,23 @@ case "${1:-}" in
     image=""
     mode=""
     mounts=0
+    socket=0
     declare -a worker_env=()
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --interactive | --rm | --read-only) shift ;;
         --name) name="$2"; shift 2 ;;
         --env) worker_env+=("$2"); shift 2 ;;
-        # The work volume of the Implementer's profile (#760) and nothing else: one named volume at /work. The name has
-        # no comma and no equals sign, so that it cannot add an option (`readonly=false`, `bind-propagation=...`,
-        # `volume-opt=...`, a second `target=`); a bind or any other mount is refused. Matched as a whole, never as a glob.
+        # The work volume of the Implementer's profile (#760): one named volume at /work. The name has no comma and no
+        # equals sign, so that it cannot add an option (`readonly=false`, `bind-propagation=...`, `volume-opt=...`, a
+        # second `target=`). And the VM's Docker socket of that profile (#745), once, read-only, exactly the contract's
+        # source and target: no other bind. Matched as a whole, never as a glob.
         --mount)
           if [ "$mounts" = 0 ] && [[ "${2:-}" =~ ^type=volume,source=code-reviewer-work-[A-Za-z0-9][A-Za-z0-9_.-]*,target=/work$ ]]; then
             mounts=1
+            shift 2
+          elif [ "$socket" = 0 ] && [ "${2:-}" = "type=bind,source=/var/run/docker.sock,target=/run/docker.sock,readonly" ]; then
+            socket=1
             shift 2
           else
             echo "docker-worker: unknown mount ${2:-}" >&2

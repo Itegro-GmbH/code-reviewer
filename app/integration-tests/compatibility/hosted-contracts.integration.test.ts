@@ -436,6 +436,7 @@ describe("the hardened container spec", () => {
       "RUNNER_IMPLEMENTER_WORK_DIR",
       "RUNNER_IMPLEMENTER_EGRESS_PORT",
       "RUNNER_IMPLEMENTER_NETWORK",
+      "RUNNER_IMPLEMENTER_MODEL_DOOR",
     ])
       expectInvalid(container, "ImplementerContainerSpec", {
         ...profile,

@@ -158,6 +158,7 @@ describe("the Sandbox-Launcher in local mode", () => {
           HOME: "/home/runner",
           RUNNER_DIFF_JOB_USER: "10001:10001",
           RUNNER_IMPLEMENTER_EGRESS_PORT: "10182",
+          RUNNER_IMPLEMENTER_MODEL_DOOR: "docker",
           RUNNER_IMPLEMENTER_NETWORK: "registries",
           RUNNER_IMPLEMENTER_WORK_DIR: "/work",
           RUNNER_JOB_TIMEOUT_SECONDS: "1200",

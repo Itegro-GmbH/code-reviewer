@@ -28,7 +28,10 @@ const IMPLEMENTER_ENVIRONMENT = {
   RUNNER_IMPLEMENTER_WORK_DIR: "/work",
   RUNNER_IMPLEMENTER_EGRESS_PORT: "10182",
   RUNNER_IMPLEMENTER_NETWORK: "registries",
+  RUNNER_IMPLEMENTER_MODEL_DOOR: "docker",
 };
+const DOCKER_SOCKET_MOUNT =
+  "type=bind,source=/var/run/docker.sock,target=/run/docker.sock,readonly";
 
 function codeOf(run: () => unknown): ContainerErrorCode | undefined {
   try {
@@ -76,11 +79,12 @@ function clone(): Record<string, unknown> {
 
 describe("rendering the implementer profile", () => {
   // #760-T02
-  it("mounts the work volume at /work with the volume's options and gives memory, pids and the three names", () => {
+  it("mounts the work volume at /work with the volume's options and the VM's Docker socket, and gives memory, pids and the four names", () => {
     const args = render({ environment: IMPLEMENTER_ENVIRONMENT });
 
     expect(valuesOf(args, "--mount")).toStrictEqual([
       `type=volume,source=${VOLUME},target=${WORK_VOLUME_PATH}`,
+      DOCKER_SOCKET_MOUNT,
     ]);
     expect(WORK_VOLUME_PATH).toBe("/work");
     expect(valuesOf(args, "--memory")).toStrictEqual(["3g"]);
@@ -89,6 +93,7 @@ describe("rendering the implementer profile", () => {
     expect(valuesOf(args, "--pids-limit")).toStrictEqual(["2048"]);
     expect(valuesOf(args, "--env")).toStrictEqual([
       "RUNNER_IMPLEMENTER_EGRESS_PORT=10182",
+      "RUNNER_IMPLEMENTER_MODEL_DOOR=docker",
       "RUNNER_IMPLEMENTER_NETWORK=registries",
       "RUNNER_IMPLEMENTER_WORK_DIR=/work",
     ]);
@@ -122,7 +127,7 @@ describe("rendering the implementer profile", () => {
   });
 
   // #760-T02
-  it("accepts the three names of the Implementer only in its own profile", () => {
+  it("accepts the four names of the Implementer only in its own profile", () => {
     expect(
       codeOf(() => render({ environment: IMPLEMENTER_ENVIRONMENT })),
     ).toBeUndefined();
@@ -144,13 +149,15 @@ describe("rendering the implementer profile", () => {
     const tmpfs = valuesOf(args, "--tmpfs");
     expect(tmpfs).toHaveLength(3);
     for (const mount of tmpfs) expect(mount).toContain("noexec");
-    // One mount, the work volume; nothing from the host and no second volume.
+    // Two mounts: the work volume, and the VM's Docker socket for the model door (#745), the only thing of the host that
+    // is in the container, read-only. No second volume, no other bind.
     const mounts = valuesOf(args, "--mount");
-    expect(mounts).toHaveLength(1);
+    expect(mounts).toHaveLength(2);
     expect(mounts[0]).toMatch(
       /^type=volume,source=[A-Za-z0-9_.-]+,target=\/work$/,
     );
     expect(mounts[0]).not.toMatch(/bind|readonly|ro\b/);
+    expect(mounts[1]).toBe(DOCKER_SOCKET_MOUNT);
     for (const flag of [
       "--volume",
       "-v",
@@ -270,6 +277,75 @@ describe("rendering the implementer profile", () => {
       delete (changed as { workVolume?: unknown }).workVolume;
 
     expect(codeOf(() => render({}, changed))).toBeDefined();
+  });
+
+  // #745-T14
+  it.each<[string, Record<string, unknown>]>([
+    [
+      "another source",
+      { dockerSocket: { source: "/", target: "/run/docker.sock" } },
+    ],
+    [
+      "another target",
+      {
+        dockerSocket: {
+          source: "/var/run/docker.sock",
+          target: "/work/docker.sock",
+        },
+      },
+    ],
+    [
+      "a second key in the socket",
+      {
+        dockerSocket: {
+          source: "/var/run/docker.sock",
+          target: "/run/docker.sock",
+          readonly: false,
+        },
+      },
+    ],
+    [
+      "a socket that is not an object",
+      { dockerSocket: "/var/run/docker.sock" },
+    ],
+    [
+      "a forbidden-keys list that says no spec has the socket",
+      { forbiddenKeys: WORKER_CONTAINER_SPEC.forbiddenKeys },
+    ],
+  ])("refuses the profile with %s", (_name, change) => {
+    expect(codeOf(() => render({}, { ...clone(), ...change }))).toBe(
+      "spec_not_hardened",
+    );
+  });
+
+  // #745-T14
+  it("refuses the profile without the VM's Docker socket", () => {
+    const changed = clone();
+    delete changed.dockerSocket;
+
+    expect(codeOf(() => render({}, changed))).toBe("spec_not_hardened");
+  });
+
+  // #745-T14
+  it("gives the VM's Docker socket to the Implementer's profile and to no other", () => {
+    expect(valuesOf(render(), "--mount")).toContain(DOCKER_SOCKET_MOUNT);
+    const standard = renderDockerRunArguments(WORKER_CONTAINER_SPEC, {
+      image: IMAGE,
+      command: [ENTRY_MODE_WORKER_ONCE],
+    });
+
+    expect(standard.join(" ")).not.toContain("docker.sock");
+    expect(
+      codeOf(() =>
+        renderDockerRunArguments(
+          {
+            ...structuredClone(WORKER_CONTAINER_SPEC),
+            dockerSocket: IMPLEMENTER_CONTAINER_SPEC.dockerSocket,
+          },
+          { image: IMAGE },
+        ),
+      ),
+    ).toBe("spec_forbidden_key");
   });
 
   // #760-T01
@@ -471,6 +547,7 @@ describe("the container launcher with the implementer profile", () => {
     const args = launches[0]?.args ?? [];
     expect(valuesOf(args, "--mount")).toStrictEqual([
       "type=volume,source=code-reviewer-work-job-7,target=/work",
+      DOCKER_SOCKET_MOUNT,
     ]);
     expect(args.join("\n")).not.toContain("crj_");
   });

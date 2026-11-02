@@ -168,7 +168,14 @@ export interface WorkVolume {
   source: "named-volume";
 }
 /**
- * The profile of the container for the Implementer (#760): the hardening floor of WorkerContainerSpec, value for value, plus one work volume and the room to build and test a repository. It differs from the default spec in exactly these fields: `workVolume` (new), `memory` (sized from the VM), `pids.limit` (2048) and `allowedEnvironment` (the three names of the Implementer added). The root filesystem stays read-only and every tmpfs stays noexec: the work volume is the only writable path where a program may run. A bind, a host path or an arbitrary volume has no key to live in. The Sandbox-Launcher chooses the profile by the job kind (implementer); Diff and Dynamic keep WorkerContainerSpec. examples/worker-container/ImplementerContainerSpec.json is the spec (the Dispatcher's copy and its test keep them equal).
+ * The VM's Docker socket, bind-mounted read-only into the Implementer's Control container so that it can start the model door (#745, step 3). The Engine API behind it can start a privileged container: the Control container is effectively root on the VM. That is accepted because the agent never reaches it (the socket is root's, the agent is another user and from step 4 another container), and it is why no request the runner makes to it carries a value from a job or from the agent (`runner/src/code_reviewer_runner/implementer/docker_api.py`). The default spec has no such mount: `dockerSocket` stays a forbidden key there.
+ */
+export interface DockerSocket {
+  source: "/var/run/docker.sock";
+  target: "/run/docker.sock";
+}
+/**
+ * The profile of the container for the Implementer (#760): the hardening floor of WorkerContainerSpec, value for value, plus one work volume and the room to build and test a repository. It differs from the default spec in exactly these fields: `workVolume` (new), `dockerSocket` (new, #745: the VM's Docker, for the model door), `memory` (sized from the VM), `pids.limit` (2048), `allowedEnvironment` (the four names of the Implementer added) and `forbiddenKeys` (without `dockerSocket`). The root filesystem stays read-only and every tmpfs stays noexec: the work volume is the only writable path where a program may run. A bind, a host path or an arbitrary volume has no key to live in. The Sandbox-Launcher chooses the profile by the job kind (implementer); Diff and Dynamic keep WorkerContainerSpec. examples/worker-container/ImplementerContainerSpec.json is the spec (the Dispatcher's copy and its test keep them equal).
  */
 export interface ImplementerContainerSpec {
   version: 1;
@@ -231,6 +238,7 @@ export interface ImplementerContainerSpec {
    */
   tmpfs: [TmpfsMount, TmpfsMount, TmpfsMount];
   workVolume: WorkVolume;
+  dockerSocket: DockerSocket;
   memory: MemoryLimits;
   pids: {
     limit: 2048;
@@ -244,7 +252,7 @@ export interface ImplementerContainerSpec {
   };
   allowedEnvironment: EnvironmentName[];
   /**
-   * Documentation that a tool can check: the keys that no spec has. The schema is closed, so none of them can be added.
+   * Documentation that a tool can check: the keys that no spec has. The Implementer's profile has `dockerSocket`, so it is the one key of the list that this profile does not name.
    */
   forbiddenKeys: ForbiddenKey[];
   /**

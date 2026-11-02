@@ -37,6 +37,7 @@
         "implementer_work_dir_missing",
         "implementer_work_dir_not_prepared",
         "implementer_work_dir_not_exec",
+        "implementer_docker_unavailable",
         "implementer_probe_failed"
       ]
     },

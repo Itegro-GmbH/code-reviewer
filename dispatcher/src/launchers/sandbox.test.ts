@@ -663,6 +663,26 @@ describe("the Sandbox-Launcher", () => {
     expect(service.creates).toStrictEqual([]);
   });
 
+  // #745-T15: the model door is a second container of an implementer turn, and the VM holds it beside the Worker.
+  it("keeps room for the model door beside the Worker of an implementer turn, and for no door beside a review's", async () => {
+    // 2 vCPU are 4096 MB: 256 for the OS and dockerd, 256 for the door. 3600m fits a review but not a turn.
+    const config = {
+      launcher: { vcpus: 2 },
+      container: { memory: { limit: "3600m", reservation: "3g" } },
+    };
+
+    expect(() => validateKindConfig("dynamic", config)).not.toThrow();
+    expect(() => validateKindConfig("implementer", config)).toThrow(
+      LaunchError,
+    );
+    expect(() =>
+      validateKindConfig("implementer", {
+        launcher: { vcpus: 2 },
+        container: { memory: { limit: "3584m", reservation: "3g" } },
+      }),
+    ).not.toThrow();
+  });
+
   // #329-T11
   it.each<[string, Record<string, string | number | boolean>]>([
     ["a VM size the platform does not have", { vcpus: 3 }],
@@ -750,7 +770,7 @@ describe("the Sandbox-Launcher", () => {
   });
 
   // #760-T02
-  it("starts an implementer job in the implementer profile: 2 vCPU, a 3 GB container, 2048 processes, the work volume and the three names", async () => {
+  it("starts an implementer job in the implementer profile: 2 vCPU, a 3 GB container, 2048 processes, the work volume, the Docker socket and the four names", async () => {
     await launch(build(), spec({ kind: "implementer" }));
 
     const args = dockerRun()?.args ?? [];
@@ -761,6 +781,7 @@ describe("the Sandbox-Launcher", () => {
     expect(valuesOf(args, "--pids-limit")).toStrictEqual(["2048"]);
     expect(valuesOf(args, "--mount")).toStrictEqual([
       `type=volume,source=code-reviewer-work-${JOB_ID},target=/work`,
+      "type=bind,source=/var/run/docker.sock,target=/run/docker.sock,readonly",
     ]);
     expect(args).toContain("--read-only");
     // The Sandbox additions apply to every kind.
@@ -769,6 +790,7 @@ describe("the Sandbox-Launcher", () => {
       "HOME=/home/runner",
       "RUNNER_DIFF_JOB_USER=10001:10001",
       "RUNNER_IMPLEMENTER_EGRESS_PORT=10182",
+      "RUNNER_IMPLEMENTER_MODEL_DOOR=docker",
       "RUNNER_IMPLEMENTER_NETWORK=registries",
       "RUNNER_IMPLEMENTER_WORK_DIR=/work",
       "RUNNER_JOB_TIMEOUT_SECONDS=1200",

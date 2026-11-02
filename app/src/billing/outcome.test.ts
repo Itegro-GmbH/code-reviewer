@@ -552,3 +552,24 @@ describe("the failures that incurred AI cost", () => {
     }
   });
 });
+
+// #745, step 3: the model door is a container of its own, and a door that does not work ends a turn with a code that
+// already exists, by the rule the in-process proxy already had (`implementer/session.py`, `classify`). The runner
+// decides which of the two codes a door that failed gets: the turn had not used the model (the door never started, was
+// refused or died before any call) is `setup_failed` or `runner_error`, free; it had (a call was billed or was open) is
+// `agent_gave_up`, charged. The doc `docs/implementer.md` names the door in these rows.
+describe("a model door that does not work (#745)", () => {
+  // #745-T08
+  it("is free when the model was never used and charged when it was", () => {
+    for (const code of [
+      "setup_failed",
+      "runner_error",
+      "implementer_config_invalid",
+    ] as const)
+      expect(classifyOutcome(failed(code)), code).toBe("free");
+    expect(classifyOutcome(failed("agent_gave_up"))).toBe(
+      AI_COST_FAILURE_CLASS,
+    );
+    expect(AI_COST_FAILURE_CLASS).toBe("charged");
+  });
+});

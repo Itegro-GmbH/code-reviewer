@@ -15,6 +15,12 @@
 // room to build a repository (`ImplementerContainerSpec`); a spec with a `workVolume` key is checked as that profile,
 // every other as the default one. Both profiles share every check of the floor.
 //
+// The Docker socket (#745, step 3): the Implementer's profile, and only it, carries the VM's Docker socket as one
+// read-only bind mount with exactly the source and the target of the contract, so that its Worker (the Control container)
+// can start the model door. That makes the Worker effectively root on the VM; it is accepted because the agent never
+// reaches it and the runner puts nothing of a job or of the agent's output into a request to the socket. `dockerSocket`
+// is a forbidden key of every other spec and of every option.
+//
 // Host preparation: `docker run` with a memory or pids limit fails inside a Sandbox VM until a root
 // script has made the cgroup v2 root a plain domain, before `dockerd` starts (docker/sandbox/vm-prepare.sh,
 // spike #317, finding F1). It is the host's job, not part of the flags; the golden snapshot (#330)
@@ -79,6 +85,7 @@ const FORBIDDEN_KEYS: ReadonlySet<string> = new Set([
   "dockerSocket",
 ]);
 const WORK_VOLUME_KEY = "workVolume";
+const DOCKER_SOCKET_KEY = "dockerSocket";
 const SPEC_KEYS: ReadonlySet<string> = new Set([
   "version",
   "user",
@@ -129,10 +136,14 @@ export const WORK_VOLUME_PATH = "/work";
 const WORK_VOLUME_OPTIONS = ["rw", "nosuid", "nodev"] as const;
 const WORK_VOLUME_SOURCE = "named-volume";
 const IMPLEMENTER_PIDS_LIMIT = 2048;
+/** The VM's Docker socket and where the Implementer's Control container sees it (the contract's `DockerSocket`). */
+export const DOCKER_SOCKET_SOURCE = "/var/run/docker.sock";
+export const DOCKER_SOCKET_TARGET = "/run/docker.sock";
 const IMPLEMENTER_ENVIRONMENT_NAMES = [
   "RUNNER_IMPLEMENTER_WORK_DIR",
   "RUNNER_IMPLEMENTER_EGRESS_PORT",
   "RUNNER_IMPLEMENTER_NETWORK",
+  "RUNNER_IMPLEMENTER_MODEL_DOOR",
 ] as const;
 
 const SIZE = /^[0-9]+[mg]$/;
@@ -279,6 +290,17 @@ function assertEnvironmentNames(
     notHardened("allowedEnvironment lacks a name of the Implementer");
 }
 
+/** The VM's Docker socket of the Implementer's profile: exactly the contract's source and target. Nothing else. */
+function assertDockerSocket(socket: unknown): void {
+  if (!isRecord(socket)) return notHardened("the docker socket");
+  const { source, target, ...rest } = socket;
+  if (Object.keys(rest).length > 0) return notHardened("a docker socket key");
+  if (source !== DOCKER_SOCKET_SOURCE)
+    return notHardened("the docker socket source");
+  if (target !== DOCKER_SOCKET_TARGET)
+    return notHardened("the docker socket target");
+}
+
 /** The one volume of the Implementer's profile: exactly `/work`, `rw,nosuid,nodev`, a named volume. Nothing else. */
 function assertWorkVolume(volume: unknown): void {
   if (!isRecord(volume)) return notHardened("the work volume");
@@ -299,16 +321,26 @@ export function assertHardenedSpec(
   spec: unknown,
 ): asserts spec is ContainerSpec {
   if (!isRecord(spec)) return notHardened("not an object");
+  // The Implementer's profile is the one with a work volume; it is also the one that carries the VM's Docker socket.
+  const implementer = WORK_VOLUME_KEY in spec;
   for (const key of Object.keys(spec)) {
-    if (FORBIDDEN_KEYS.has(key))
+    if (FORBIDDEN_KEYS.has(key) && !(implementer && key === DOCKER_SOCKET_KEY))
       refuse("spec_forbidden_key", `the spec has the forbidden key ${key}`);
   }
   for (const key of Object.keys(spec)) {
-    if (!SPEC_KEYS.has(key) && key !== WORK_VOLUME_KEY)
+    if (
+      !SPEC_KEYS.has(key) &&
+      key !== WORK_VOLUME_KEY &&
+      key !== DOCKER_SOCKET_KEY
+    )
       refuse("spec_unknown_key", `the spec has the unknown key ${key}`);
   }
-  const implementer = WORK_VOLUME_KEY in spec;
-  if (implementer) assertWorkVolume(spec[WORK_VOLUME_KEY]);
+  if (implementer) {
+    assertWorkVolume(spec[WORK_VOLUME_KEY]);
+    if (!(DOCKER_SOCKET_KEY in spec))
+      notHardened("the docker socket is missing");
+    assertDockerSocket(spec[DOCKER_SOCKET_KEY]);
+  }
   if (spec.version !== 1) notHardened("version");
   if (spec.user !== "0:0") notHardened("user");
   assertCapabilities(spec);
@@ -340,7 +372,9 @@ export function assertHardenedSpec(
   const forbidden: unknown = spec.forbiddenKeys;
   if (
     !Array.isArray(forbidden) ||
-    !forbidden.every((k) => FORBIDDEN_KEYS.has(k as string))
+    !forbidden.every((k) => FORBIDDEN_KEYS.has(k as string)) ||
+    // The profile that has the socket does not claim that no spec has it.
+    (implementer && forbidden.includes(DOCKER_SOCKET_KEY))
   )
     notHardened("forbiddenKeys");
   const overridable: unknown = spec.overridable;
@@ -544,6 +578,12 @@ export function renderDockerRunArguments(
           "--mount",
           `type=volume,source=${options.workVolume},target=${workVolume.path}`,
         ]),
+    ...("dockerSocket" in hardened
+      ? [
+          "--mount",
+          `type=bind,source=${hardened.dockerSocket.source},target=${hardened.dockerSocket.target},readonly`,
+        ]
+      : []),
     "--memory",
     memory.limit,
     "--memory-reservation",
