@@ -57,13 +57,16 @@ exactly four fields changed: one **work volume** at `/work`, **memory** 3 GB (re
 (`registries`) and `RUNNER_IMPLEMENTER_EGRESS_PORT` (`10182`). The floor is the same: root filesystem read-only, every tmpfs
 `noexec`, no privileged, no host bind, device or namespace, no Docker socket, `no-new-privileges`, the same capabilities. The
 work volume is the only writable path that may run a program; a bind or any other volume has no key in the schema.
-Docker cannot give a named volume mount options, so before `docker run` the launcher makes the volume in the job's VM as
-root, in five steps (`work-volume-dir`, `-mount`, `-options`, `-check`, `-create`): a directory below
+Before the volume the launcher runs `sysbox-prepare.sh` in the VM as root (label `sysbox-prepare`, 40 s, the Implementer's VM only: Diff and
+Dynamic launch as before): it makes the VM able to run a Sysbox container, the sandbox of the next steps of `plans/implementer-sandbox.md`, and a failure ends the
+launch with the retryable `sysbox_not_ready` (`docs/golden-snapshot.md`, "Sysbox"). Docker cannot give a named volume mount options, so before `docker run`
+the launcher makes the volume in the job's VM as root, in five steps (`work-volume-dir`, `-mount`, `-options`, `-check`, `-create`): a directory below
 `/var/lib/code-reviewer-work`, a mount of its own on it with `rw,nosuid,nodev` (no `noexec`), a read of `/proc/self/mountinfo`
 that must show exactly those options on that mount (a platform that ignored them would run the agent on a mount that honours
 the setuid bit, and nothing else would show it), and a Docker named volume `code-reviewer-work-<job id>` bound to it. The tools
 are `mkdir`, `mount` and `cat` of the base image (Ubuntu: `mount` is a required package), so the snapshot needs nothing added.
-Each step has 10 s; the five add 50 s to the lifetime of an implementer VM (`WORK_VOLUME_STEPS_SECONDS`), and
+Each step has 10 s; the five add 50 s and the Sysbox boot 40 s (`SYSBOX_PREPARE_SECONDS`) to the lifetime of an implementer VM
+(`IMPLEMENTER_LAUNCH_EXTRA_SECONDS`, 90 s with the volume steps `WORK_VOLUME_STEPS_SECONDS`), and
 `LAUNCH_STEPS_SECONDS` for Diff and Dynamic is unchanged. The mount and the volume belong to the VM, which is stopped after every failure and by the App's stop call; nothing is
 removed separately and nothing outlives the job. A failed, hung or unverified step stops the VM (`work_volume_failed`, retryable). The VM is
 2 vCPU / 4 GB by default (`SANDBOX_KIND_DEFAULTS.implementer`); `DISPATCHER_WORKER_CONFIG.implementer` overrides the vCPUs and

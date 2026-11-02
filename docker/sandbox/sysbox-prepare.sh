@@ -86,5 +86,9 @@ start sysbox-mgr sysmgr.sock 24
 start sysbox-fs sysfs.sock 25
 
 # 6. The runtime is registered by daemon.json when the daemon starts; this only reads it back.
-docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q '"sysbox-runc"' ||
-  fail 26 sysbox_runtime_not_registered "daemon.json"
+# (In a variable, not a pipe: `grep -q` leaving early would fail the pipeline of a docker that is still writing.)
+runtimes=$(docker info --format '{{json .Runtimes}}' 2>/dev/null) || runtimes=
+case "$runtimes" in
+  *'"sysbox-runc"'*) ;;
+  *) fail 26 sysbox_runtime_not_registered "daemon.json" ;;
+esac
