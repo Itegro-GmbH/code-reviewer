@@ -32,7 +32,14 @@ USAGE_ERROR = 2
 UNAVAILABLE = 3
 
 
-def main(argv: list[str], environment: dict[str, str]) -> int:
+def main(
+    argv: list[str],
+    environment: dict[str, str],
+    *,
+    api: DockerApi | None = None,
+    stdin_descriptor: int = 0,
+    stdout_descriptor: int = 1,
+) -> int:
     if argv != [CONTROL_REPO]:
         return USAGE_ERROR
     env = reader_environment()
@@ -41,7 +48,7 @@ def main(argv: list[str], environment: dict[str, str]) -> int:
         if not _PROTOCOL.fullmatch(protocol):
             return USAGE_ERROR
         env[UPLOAD_PACK_PROTOCOL_VARIABLE] = protocol
-    api = DockerApi()
+    api = api or DockerApi()
     try:
         exec_id = api.create_exec(
             READER_CONTAINER_NAME,
@@ -57,7 +64,7 @@ def main(argv: list[str], environment: dict[str, str]) -> int:
 
     def feed() -> None:
         try:
-            while data := os.read(0, 65536):
+            while data := os.read(stdin_descriptor, 65536):
                 streams.write(data)
         except OSError:
             pass
@@ -67,7 +74,7 @@ def main(argv: list[str], environment: dict[str, str]) -> int:
     threading.Thread(target=feed, daemon=True).start()
     try:
         for chunk in streams.chunks():
-            os.write(1, chunk)
+            os.write(stdout_descriptor, chunk)
     except OSError:
         return UNAVAILABLE
     finally:

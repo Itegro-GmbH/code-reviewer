@@ -287,25 +287,6 @@ class DockerApi:
         runtimes = None if info is None else as_object(info.get("Runtimes"))
         return set() if runtimes is None else set(runtimes)
 
-    def put_archive(self, container: str, directory: str, archive: bytes) -> None:
-        """Unpack a tar into `directory` of the container (which must exist)."""
-        connection = _UnixConnection(self._path, self._timeout)
-        try:
-            connection.request(
-                "PUT",
-                f"/containers/{container}/archive?path={directory}",
-                archive,
-                {"Content-Type": "application/x-tar"},
-            )
-            response = connection.getresponse()
-            data = response.read(_MAX_BODY_BYTES + 1)
-        except (OSError, http.client.HTTPException) as error:
-            raise DockerError(0, f"the daemon did not answer ({type(error).__name__})") from None
-        finally:
-            connection.close()
-        if response.status != 200:
-            raise DockerError(response.status, _message_of(data))
-
     def create_exec(self, container: str, document: dict[str, Any]) -> str:
         return _identifier(self.request("POST", f"/containers/{container}/exec", document))
 

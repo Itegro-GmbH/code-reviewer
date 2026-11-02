@@ -24,8 +24,10 @@ What the container is:
 it with an exec and reaches its HTTP port through a loopback listener of its own that opens one exec
 per connection, running a relay that copies the bytes between the exec's standard streams and the
 engine's port (`Tunnel`). The agent has no address of Control's, no route to it and no port of it to
-connect to; the Docker daemon is the only thing that joins the two. Files go in as a tar through the
-daemon (`write_files`).
+connect to; the Docker daemon is the only thing that joins the two. Files go in through an exec that writes its
+standard input to a path (`write_files`): the archive call of the Engine API (`docker cp`) puts its
+files where a Sysbox container does not see them (measured, 2026-11-02: the call answers 200 and the
+directory stays empty).
 
 **How it ends.** Control kills the container (SIGKILL to its init, which takes every process of it,
 the inner `dockerd` and anything the agent left running, with it) before it reads the repository.
@@ -34,10 +36,8 @@ A container that died by itself (killed for its memory, a crash) is seen by `wai
 """
 
 import contextlib
-import io
 import logging
 import socket
-import tarfile
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -80,6 +80,9 @@ STOP_SECONDS: Final = 15.0
 # How long an answer about the engine's process is trusted, so that the watch (every 50 ms) does
 # not put a call to the daemon behind every look.
 LIVENESS_SECONDS: Final = 0.5
+
+# What `write_files` runs: the standard input to a path, then its mode.
+WRITE_FILE_SCRIPT: Final = 'umask 077 && cat > "$1" && chmod "$2" "$1"'
 
 # The relay a connection of the tunnel runs in the container: bytes in on stdin go to the engine's
 # port, bytes from it go out on stdout. A constant (the port is the only argument).
@@ -148,21 +151,6 @@ def agent_document(image: str, work_volume: str, memory_bytes: int) -> dict[str,
     }
 
 
-def archive_of(files: Mapping[str, tuple[bytes, int]]) -> bytes:
-    """A tar of the given files (path relative to the directory it is unpacked into: name -> (bytes,
-    mode)), owned by root."""
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w") as archive:
-        for name, (data, mode) in files.items():
-            entry = tarfile.TarInfo(name)
-            entry.size = len(data)
-            entry.mode = mode
-            entry.uid = entry.gid = 0
-            entry.mtime = int(time.time())
-            archive.addfile(entry, io.BytesIO(data))
-    return buffer.getvalue()
-
-
 @dataclass(frozen=True)
 class AgentEnd:
     """How the agent's container ended: the exit code Docker reports (None: not read), whether the
@@ -176,7 +164,7 @@ class AgentEnd:
         if self.out_of_memory:
             how = "the container was killed for its memory"
         elif self.exit_code == 137:
-            how = "the container was killed, most likely for its memory"
+            how = "the container was killed (a signal: most likely the memory limit or a crash)"
         else:
             how = "the container stopped"
         code = "" if self.exit_code is None else f" (exit code {self.exit_code})"
@@ -324,7 +312,9 @@ class AgentContainer:
             self._seal_check(container)
         except DockerError as error:
             self._remove()
-            raise unavailable(f"the daemon refused a step ({error.status})") from None
+            raise unavailable(
+                f"the daemon refused a step ({error.status}: {error.message[:160]})"
+            ) from None
         except JobError:
             self._remove()
             raise
@@ -414,11 +404,24 @@ class AgentContainer:
     # -- files and the engine ----------------------------------------------------------------------
 
     def write_files(self, files: Mapping[str, tuple[bytes, int]]) -> None:
-        """Put files into the engine's configuration directory (created by the image)."""
+        """Put files into the engine's configuration directory (made by the image). Each is the
+        standard input of an exec that runs a constant script; the name and the mode are constants
+        of the runner, the content goes in no argument."""
         container = self._container
         if container is None:
             raise unavailable("there is no container")
-        self._api.put_archive(container, AGENT_CONFIG_DIRECTORY, archive_of(files))
+        for name, (data, mode) in files.items():
+            path = f"{AGENT_CONFIG_DIRECTORY}/{name}"
+            done = run_exec(
+                self._api,
+                container,
+                ["/bin/sh", "-c", WRITE_FILE_SCRIPT, "write", path, f"{mode:o}"],
+                stdin=data,
+                timeout=15.0,
+                name="write a file",
+            )
+            if done.returncode != 0 or done.unanswered:
+                raise unavailable("a file of the engine's configuration could not be written")
 
     def start_engine(self, argv: list[str], environment: Mapping[str, str]) -> str:
         """Start the engine as a detached exec and open the tunnel to its port. Returns the address
@@ -459,6 +462,9 @@ class AgentContainer:
             self._alive = False
         self._alive_checked = now
         return self._alive
+
+    def settle(self, seconds: float) -> None:
+        self._ended.wait(seconds)
 
     def engine_end_note(self) -> str | None:
         """How the container ended by itself, in words for the outcome; None while it did not."""

@@ -9,9 +9,14 @@ client runs against it unchanged. A "container" is a function: it gets the conta
 binary stream, `readline` until the end) and writes lines to its stdout, and the code it returns is
 the exit code. Tests make it the real door (`run_door`, in a thread) or anything that misbehaves.
 
+Step 4 of the sandbox plan adds what Control needs for the agent's container and the reader: `kill`,
+`GET /info` (the runtimes), `GET /images/<ref>/json`, `POST /containers/<id>/wait` that blocks until the container is gone, and exec: create, start
+(detached, or attached with the connection upgrade and the multiplexed frames) and inspect. An exec is
+a function too (`exec_behaviour`): it gets the command, its environment and directory, its stdin as a
+binary stream and a writer for its stdout, and returns the exit code.
+
 What it records, for the tests: every request (`calls`: method, path, JSON body), the containers
-with the document they were made from, the networks and who joined them. Nothing here talks to a
-real daemon, a real network or a real model.
+with the document they were made from, the networks and who joined them and the execs. Nothing here talks to a real daemon, a real network or a real model.
 """
 
 import contextlib
@@ -28,6 +33,8 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 IMAGE_ID = "sha256:" + "ab" * 32
+AGENT_IMAGE_ID = "sha256:" + "cd" * 32
+WORK_VOLUME = "code-reviewer-work-job-1"
 OWN_ID = "c0ffee" + "0" * 58
 HOSTNAME = OWN_ID[:12]
 
@@ -53,6 +60,19 @@ class _Stdout:
 
 # A container: (stdin, stdout, stderr writer) -> exit code.
 Behaviour = Callable[[BinaryIO, _Stdout, Callable[[str], None]], int]
+
+
+@dataclass
+class FakeExec:
+    identifier: str
+    container: str
+    document: dict[str, Any]
+    running: bool = False
+    exit_code: int | None = None
+
+
+# An exec: (the exec, its stdin, its stdout) -> exit code.
+ExecBehaviour = Callable[[FakeExec, BinaryIO, "_Stdout"], int]
 
 
 @dataclass
@@ -84,6 +104,13 @@ class FakeDockerEngine:
         # A request whose path contains the key is answered with the status (and no effect).
         self.refuse: dict[str, int] = {}
         self.answers_ping = True
+        # The runtimes the daemon lists, and the images it has (reference -> id).
+        self.runtimes: dict[str, Any] = {"runc": {}, "sysbox-runc": {}}
+        self.images: dict[str, str] = {"code-reviewer-agent:golden": AGENT_IMAGE_ID}
+        # What `inspect` of a container answers instead of what it was made with: name -> function.
+        self.inspect_override: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {}
+        self.exec_behaviour: ExecBehaviour | None = None
+        self.execs: dict[str, FakeExec] = {}
         # The exit code of the one-shot container that installs the door's network rules.
         self.rules_exit = 0
         self._lock = threading.Lock()
@@ -155,9 +182,10 @@ class FakeDockerEngine:
             headers[name.strip().lower()] = value.strip()
         length = int(headers.get("content-length", "0") or 0)
         raw = reader.read(length) if length else b""
-        body = json.loads(raw) if raw else None
+        is_json = "json" in headers.get("content-type", "json")
+        body = json.loads(raw) if raw and is_json else (raw or None)
         path = target.split("?", 1)[0]
-        self.calls.append((method, target, body))
+        self.calls.append((method, target, body if is_json else "<bytes>"))
         for key, status in self.refuse.items():
             if key in target:
                 self._reply(connection, status, {"message": f"refused {key}"})
@@ -196,8 +224,31 @@ class FakeDockerEngine:
         elif method == "POST" and parts[0] == "containers" and parts[-1] == "attach":
             self._attach(connection, reader, parts[1])
         elif method == "POST" and parts[0] == "containers" and parts[-1] == "wait":
-            container = self.containers[parts[1]]
-            self._reply(connection, 200, {"StatusCode": container.exit_code or 0})
+            self._wait(connection, parts[1])
+        elif method == "POST" and parts[0] == "containers" and parts[-1] == "kill":
+            self._kill_request(connection, parts[1])
+        elif method == "GET" and path == "/info":
+            self._reply(connection, 200, {"Runtimes": self.runtimes})
+        elif method == "GET" and parts[0] == "images" and parts[-1] == "json":
+            reference = "/".join(parts[1:-1])
+            if reference in self.images:
+                self._reply(connection, 200, {"Id": self.images[reference]})
+            else:
+                self._reply(connection, 404, {"message": "no such image"})
+        elif method == "POST" and parts[0] == "containers" and parts[-1] == "exec":
+            self._create_exec(connection, parts[1], body)
+        elif method == "POST" and parts[0] == "exec" and parts[-1] == "start":
+            self._start_exec(connection, reader, parts[1], body)
+        elif method == "GET" and parts[0] == "exec" and parts[-1] == "json":
+            made = self.execs.get(parts[1])
+            if made is None:
+                self._reply(connection, 404, {"message": "no such exec"})
+            else:
+                self._reply(
+                    connection,
+                    200,
+                    {"Running": made.running, "ExitCode": made.exit_code, "ID": made.identifier},
+                )
         elif method == "POST" and parts[0] == "containers" and parts[-1] == "start":
             self._start(connection, parts[1])
         elif method == "DELETE" and parts[0] == "containers":
@@ -211,7 +262,23 @@ class FakeDockerEngine:
 
     def _inspect(self, connection: socket.socket, ref: str) -> None:
         if ref in (HOSTNAME, OWN_ID):
-            self._reply(connection, 200, {"Id": OWN_ID, "Image": IMAGE_ID, "Name": "/control"})
+            self._reply(
+                connection,
+                200,
+                {
+                    "Id": OWN_ID,
+                    "Image": IMAGE_ID,
+                    "Name": "/control",
+                    "Mounts": [
+                        {
+                            "Type": "volume",
+                            "Name": WORK_VOLUME,
+                            "Destination": "/work",
+                            "Source": "/var/lib/docker/volumes/x/_data",
+                        }
+                    ],
+                },
+            )
             return
         container = self.containers.get(ref) or next(
             (c for c in self.containers.values() if c.name == ref), None
@@ -224,7 +291,23 @@ class FakeDockerEngine:
             "ExitCode": container.exit_code if container.exit_code is not None else 0,
             "OOMKilled": container.oom_killed,
         }
-        self._reply(connection, 200, {"Id": container.identifier, "State": state})
+        host = container.document.get("HostConfig", {})
+        mode = host.get("NetworkMode", "bridge")
+        networks = {name: {} for name in container.networks} or {mode: {}}
+        mounts = [
+            {"Type": m.get("Type"), "Destination": m.get("Target"), "Name": m.get("Source")}
+            for m in host.get("Mounts", [])
+        ]
+        answer = {
+            "Id": container.identifier,
+            "State": state,
+            "HostConfig": host,
+            "Config": container.document,
+            "NetworkSettings": {"Networks": networks},
+            "Mounts": mounts,
+        }
+        override = self.inspect_override.get(container.name)
+        self._reply(connection, 200, override(answer) if override else answer)
 
     def _create_network(self, connection: socket.socket, body: Any) -> None:
         name = body["Name"]
@@ -330,5 +413,106 @@ class FakeDockerEngine:
                 connection.sendall(struct.pack(">BxxxI", 1, len(data)) + data)
             except OSError:
                 return
+        with contextlib.suppress(OSError):
+            connection.shutdown(socket.SHUT_RDWR)
+
+    # -- step 4: kill, wait and exec ---------------------------------------------------------------
+
+    def _kill_request(self, connection: socket.socket, ref: str) -> None:
+        container = self.containers.get(ref) or next(
+            (c for c in self.containers.values() if c.name == ref), None
+        )
+        if container is None:
+            self._reply(connection, 404, {"message": "no such container"})
+            return
+        if not container.running:
+            self._reply(connection, 409, {"message": "not running"})
+            return
+        container.exit_code = 137
+        container.running = False
+        self._close(container)
+        self._reply(connection, 204)
+
+    def _wait(self, connection: socket.socket, ref: str) -> None:
+        container = self.containers.get(ref) or next(
+            (c for c in self.containers.values() if c.name == ref), None
+        )
+        if container is None:
+            self._reply(connection, 404, {"message": "no such container"})
+            return
+        # A container that was started runs until something ends it; one that never was is gone.
+        while container.running and not container.removed:
+            threading.Event().wait(0.02)
+        self._reply(connection, 200, {"StatusCode": container.exit_code or 0})
+
+    def _create_exec(self, connection: socket.socket, ref: str, body: Any) -> None:
+        container = self.containers.get(ref) or next(
+            (c for c in self.containers.values() if c.name == ref), None
+        )
+        if container is None or not container.running:
+            self._reply(connection, 409 if container else 404, {"message": "not running"})
+            return
+        identifier = self._next()
+        self.execs[identifier] = FakeExec(identifier, container.name, body)
+        self._reply(connection, 201, {"Id": identifier})
+
+    def _run_exec(self, made: FakeExec, stdin: BinaryIO, stdout: "_Stdout") -> None:
+        made.running = True
+        try:
+            behaviour = self.exec_behaviour
+            made.exit_code = 0 if behaviour is None else behaviour(made, stdin, stdout)
+        finally:
+            made.running = False
+            stdout.close()
+
+    def _start_exec(self, connection: socket.socket, reader: Any, ref: str, body: Any) -> None:
+        made = self.execs.get(ref)
+        if made is None:
+            self._reply(connection, 404, {"message": "no such exec"})
+            return
+        stdin_read, stdin_write = os.pipe()
+        stdout_read, stdout_write = os.pipe()
+        stdin = os.fdopen(stdin_read, "rb", buffering=0)
+        stdout = _Stdout(stdout_write)
+        detached = bool(body and body.get("Detach"))
+        if detached:
+            self._reply(connection, 200)
+            threading.Thread(target=self._run_exec, args=(made, stdin, stdout), daemon=True).start()
+            return
+        connection.sendall(
+            b"HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\n"
+            b"Connection: Upgrade\r\nUpgrade: tcp\r\n\r\n"
+        )
+
+        def pump_in() -> None:
+            try:
+                while True:
+                    data = reader.read1(65536)
+                    if not data:
+                        break
+                    os.write(stdin_write, data)
+            except OSError:
+                pass
+            finally:
+                with contextlib.suppress(OSError):
+                    os.close(stdin_write)
+
+        threading.Thread(target=pump_in, daemon=True).start()
+        runner = threading.Thread(target=self._run_exec, args=(made, stdin, stdout), daemon=True)
+        runner.start()
+        while True:
+            try:
+                data = os.read(stdout_read, 65536)
+            except OSError:
+                break
+            if not data:
+                break
+            try:
+                connection.sendall(struct.pack(">BxxxI", 1, len(data)) + data)
+            except OSError:
+                break
+        runner.join(5)
+        with contextlib.suppress(OSError):
+            os.close(stdout_read)
         with contextlib.suppress(OSError):
             connection.shutdown(socket.SHUT_RDWR)

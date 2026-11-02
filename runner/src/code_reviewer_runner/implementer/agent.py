@@ -48,6 +48,8 @@ from .config import IMPLEMENTER_AGENT, SESSION_TITLE
 
 _log = logging.getLogger(__name__)
 
+# How long a failed call to the engine waits for the place to say that it ended.
+SETTLE_SECONDS = 3.0
 # Where the engine's configuration goes in the agent's container, and the port it serves on.
 CONFIG_DIRECTORY = "/etc/code-reviewer"
 CONFIG_NAME = "opencode.json"
@@ -66,6 +68,12 @@ class EngineRuntime(Protocol):
         ...
 
     def engine_running(self) -> bool: ...
+
+    def settle(self, seconds: float) -> None:
+        """Wait up to `seconds` for the place to say how it ended, when the engine just failed: a
+        connection that breaks is seen before the daemon reports the container's end, and the
+        outcome should name the end, not the broken connection."""
+        ...
 
     def engine_end_note(self) -> str | None:
         """What is known of how the engine's place ended by itself (None: it did not)."""
@@ -246,8 +254,10 @@ class ImplementerAgent:
                 # unreachable engine: both end at the same moment and the order must not matter.
                 self.ledger.check_deadline(tolerance=DEADLINE_TOLERANCE_SECONDS)
                 failure = outcome[0]
-                if isinstance(failure, EngineError) and not self._is_running():
-                    raise self._exited()
+                if isinstance(failure, EngineError):
+                    self._runtime.settle(SETTLE_SECONDS)
+                    if not self._is_running():
+                        raise self._exited()
                 raise failure
         finally:
             self.turn_seconds.append(self.ledger.elapsed_seconds() - started)
@@ -266,8 +276,16 @@ class ImplementerAgent:
     def _raise_recorded_failure(self) -> None:
         """A limit or provider refusal the proxy recorded is the turn's result."""
         failure = self.ledger.failure
-        if failure is not None:
-            raise failure
+        if failure is None:
+            return
+        if failure.code is ErrorCode.DYNAMIC_ENGINE_UNAVAILABLE:
+            # The engine's stream or connection went away. If its place ended, say how: a stream that
+            # ended is the symptom, the container's death (or its memory kill) is the cause.
+            self._runtime.settle(SETTLE_SECONDS)
+            note = self._runtime.engine_end_note()
+            if note is not None:
+                raise EngineError(ErrorCode.DYNAMIC_ENGINE_UNAVAILABLE, note)
+        raise failure
 
     def _exited(self) -> EngineError:
         note = self._runtime.engine_end_note()
