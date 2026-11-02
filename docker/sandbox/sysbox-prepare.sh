@@ -15,7 +15,10 @@
 #               `docker run --runtime=sysbox-runc` fails with "re-mounting procfs caused: operation not permitted".
 #               This unmounts them for the WHOLE VM, which is why the script runs on the Implementer's VM only
 #   4. sysctl   the limits the Sysbox package sets at install time (inotify, keyring) are gone after a restore
-#   5. daemons  sysbox-mgr, then sysbox-fs, detached; each must answer on its socket
+#   5. daemons  sysbox-mgr, then sysbox-fs, detached; each must be a running process and own its socket (`-S`, the file
+#               exists and is a socket; whether the daemon answers on it is what `docker run` and the snapshot's proof find out).
+#               Both share ONE wait of at most 30 s, which is below the launcher's 40 s limit for this script
+#               (sandbox-host.ts), so a slow daemon is named here and not cut off there
 #   6. runtime  dockerd (started by vm-prepare.sh) must list the `sysbox-runc` runtime from daemon.json
 # Every step is idempotent (a second run in the same boot leaves a running pair alone) and every failure is loud: a
 # line `sysbox-prepare: <name> ...` on stderr and an exit status of its own, so a VM that is not ready never gets an agent.
@@ -23,7 +26,8 @@
 #   10 sysbox_not_installed   20 sysbox_cgroup_not_ready   21 sysbox_tun_failed        22 sysbox_proc_unmount_failed
 #   23 sysbox_sysctl_failed   24 sysbox_mgr_not_ready      25 sysbox_fs_not_ready      26 sysbox_runtime_not_registered
 #
-# The variables below exist for the test, which runs the script against a directory and stand-ins for the daemons.
+# The SYSBOX_PREPARE_* variables below exist for the test, which runs the script against a directory and stand-ins for the
+# daemons. Nothing sets them in production: the Launcher's `vm.exec` passes no environment, so the defaults are what runs.
 set -euo pipefail
 cgroup_root="${SYSBOX_PREPARE_CGROUP_ROOT:-/sys/fs/cgroup}"
 tun="${SYSBOX_PREPARE_TUN:-/dev/net/tun}"
@@ -31,7 +35,10 @@ mountinfo="${SYSBOX_PREPARE_MOUNTINFO:-/proc/self/mountinfo}"
 sysctl_conf="${SYSBOX_PREPARE_SYSCTL_CONF:-/lib/sysctl.d/99-sysbox-sysctl.conf}"
 run_dir="${SYSBOX_PREPARE_RUN_DIR:-/run/sysbox}"
 log_dir="${SYSBOX_PREPARE_LOG_DIR:-/var/log}"
+# Tenths of a second the two daemons may take together (not each): 30 s of waiting plus the other steps stay under the 40 s
+# the launcher gives this script.
 wait_tenths="${SYSBOX_PREPARE_WAIT_TENTHS:-300}"
+waited=0
 
 fail() {
   local status=$1 name=$2
@@ -74,11 +81,13 @@ fi
 
 # 5. The manager first: sysbox-fs asks it for the container's id mapping.
 start() {
-  local daemon=$1 socket=$2 status=$3 log="$log_dir/$1.log" _
+  local daemon=$1 socket=$2 status=$3 log="$log_dir/$1.log"
   if ! pgrep -x "$daemon" >/dev/null; then nohup setsid "$daemon" > "$log" 2>&1 & fi
-  for _ in $(seq 1 "$wait_tenths"); do
+  while :; do
     if pgrep -x "$daemon" >/dev/null && [ -S "$run_dir/$socket" ]; then return 0; fi
+    if [ "$waited" -ge "$wait_tenths" ]; then break; fi
     sleep 0.1
+    waited=$((waited + 1))
   done
   fail "$status" "${daemon//-/_}_not_ready" "$(log_tail "$log")"
 }

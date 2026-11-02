@@ -31,7 +31,7 @@ export const VM_PREPARE_PATH = "/usr/local/sbin/vm-prepare.sh";
 /** Installed beside it from docker/sandbox/sysbox-prepare.sh; run after vm-prepare.sh and only for the Implementer. */
 export const SYSBOX_PREPARE_PATH = "/usr/local/sbin/sysbox-prepare.sh";
 const VM_PREPARE_TIMEOUT_MS = 60_000;
-/** Measured at 0.1 s on a platform VM; the script itself waits up to 30 s for the two daemons. */
+/** Measured at 0.1 s on a platform VM; the script itself waits up to 30 s for the two daemons together, so a slow daemon is named by it before this limit cuts it off. */
 export const SYSBOX_PREPARE_TIMEOUT_MS = 40_000;
 /** The event of the log line of a failed `sysbox-prepare.sh`, next to the launch error code `sysbox_not_ready`. */
 export const SYSBOX_PREPARE_FAILED_EVENT = "sysbox_prepare_failed";

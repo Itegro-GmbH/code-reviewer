@@ -80,6 +80,8 @@ describe("docker/sandbox/sysbox-prepare.sh against stand-ins", () => {
       controllers?: string;
       mounts?: string;
       daemonReady?: { mgr?: boolean; fs?: boolean };
+      /** The manager answers only after the script has waited this many times (its `sleep 0.1`), and the waits are counted in `sleeps`. */
+      mgrAfterWaits?: number;
       runtimes?: string;
     } = {},
   ): Fixture {
@@ -136,7 +138,27 @@ ${ready ? `python3 -c 'import socket, sys, time; s = socket.socket(socket.AF_UNI
 echo $! >> "${dir}/pids"
 wait`,
       );
-    if (options.omit !== "sysbox-mgr")
+    if (options.mgrAfterWaits !== undefined) {
+      // The wait of the script, counted instead of slept; the manager binds its socket once the count has been reached.
+      stand(
+        bin,
+        "sleep",
+        `if [ "$1" != 0.1 ]; then exec /bin/sleep "$@"; fi
+echo wait >> "${dir}/sleeps"
+if [ "$(wc -l < "${dir}/sleeps")" -ge ${options.mgrAfterWaits} ]; then touch "${dir}/go"; fi
+exec /bin/sleep 0.01`,
+      );
+      stand(
+        bin,
+        "sysbox-mgr",
+        `echo "start sysbox-mgr" >> "${dir}/calls"; touch "${dir}/running/sysbox-mgr"
+python3 -c 'import os, socket, sys, time
+while not os.path.exists(sys.argv[2]): time.sleep(0.01)
+s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); time.sleep(30)' "${run}/sysmgr.sock" "${dir}/go" &
+echo $! >> "${dir}/pids"
+wait`,
+      );
+    } else if (options.omit !== "sysbox-mgr")
       daemon("sysbox-mgr", "sysmgr.sock", options.daemonReady?.mgr ?? true);
     if (options.omit !== "sysbox-fs")
       daemon("sysbox-fs", "sysfs.sock", options.daemonReady?.fs ?? true);
@@ -281,6 +303,19 @@ wait`,
       const result = run(fixture({ daemonReady: { fs: false } }));
       expect(result.status).toBe(25);
       expect(result.stderr).toContain("sysbox_fs_not_ready");
+    });
+
+    it("shares one wait between the two daemons, so a slow sysbox-fs is named and not cut off by the launcher's timeout", () => {
+      // 30 waits for both (SYSBOX_PREPARE_WAIT_TENTHS=30): the manager takes 20 of them, the file system never answers.
+      const fx = fixture({ mgrAfterWaits: 20, daemonReady: { fs: false } });
+
+      const result = run(fx);
+
+      expect(result.status).toBe(25);
+      expect(result.stderr).toContain("sysbox_fs_not_ready");
+      const waits = readFileSync(fx.file("sleeps"), "utf8").trim().split("\n");
+      expect(waits.length).toBeLessThanOrEqual(30);
+      expect(waits.length).toBeGreaterThanOrEqual(29);
     });
 
     it("names a Docker that does not list the runtime", () => {
