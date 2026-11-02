@@ -227,6 +227,22 @@ describe("golden snapshot workflow", () => {
     expect(existsSync(`${repoRoot}${path}`)).toBe(true);
   });
 
+  // Sysbox, plan implementer-sandbox step 2
+  it("passes the Sysbox boot script of the commit, which exists in the repository", () => {
+    const build = stepNamed("Build, check and record the snapshot");
+    const path = /--sysbox-prepare \.\.\/(\S+)/.exec(build.run ?? "")?.[1];
+    expect(path).toBe("docker/sandbox/sysbox-prepare.sh");
+    expect(existsSync(`${repoRoot}${path}`)).toBe(true);
+  });
+
+  // Sysbox, plan implementer-sandbox step 2: an unproven Sysbox is shown, never a failure (reviews do not use it)
+  it("shows an unproven Sysbox as a warning annotation of the run and does not fail on it", () => {
+    const show = stepNamed("Show the record");
+    expect(show.run).toContain("::warning title=Sysbox unproven::");
+    expect(show.run).toContain(".sysbox");
+    expect(show.run).not.toMatch(/::error|exit 1/);
+  });
+
   // #330-extra-workflow
   it("does not ignore a failure of any step", () => {
     for (const step of job.steps)

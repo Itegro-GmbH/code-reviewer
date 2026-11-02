@@ -9,6 +9,7 @@ import { IMPLEMENTER_PROBE_EXTRA_SECONDS } from "./sandbox-canary.ts";
 import {
   LAUNCH_STEPS_SECONDS,
   SANDBOX_HANDOVER_SECONDS,
+  IMPLEMENTER_LAUNCH_EXTRA_SECONDS,
   WORK_VOLUME_STEPS_SECONDS,
 } from "./sandbox.ts";
 import { recordingLogger } from "../test-support/harness.ts";
@@ -428,7 +429,7 @@ describe("the Sandbox-Launcher's configuration from the environment", () => {
     expect(
       SANDBOX_HANDOVER_SECONDS +
         LAUNCH_STEPS_SECONDS +
-        WORK_VOLUME_STEPS_SECONDS,
+        IMPLEMENTER_LAUNCH_EXTRA_SECONDS,
     ).toBeLessThanOrEqual(loadSettings(BASE).core.launchDeadlineSeconds);
   });
 

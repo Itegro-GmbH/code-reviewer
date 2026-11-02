@@ -8,7 +8,8 @@
 //   1. create a VM from the golden snapshot: `persistent: false`, region fra1, no failover region, a VM size per
 //      Worker kind, a timeout of the job's plus a margin as the backstop, a name nobody had before
 //   2. vm-prepare.sh as root (cgroup fix, dockerd), then the image in the VM must be the configured id; for the
-//      Implementer's profile the job's work volume is made in the VM (#760)
+//      Implementer's profile sysbox-prepare.sh makes the VM able to run a Sysbox container and the job's work volume is
+//      made in the VM (#760)
 //   3. `docker run --interactive` with the rendered flags; the start document goes through stdin only
 //   4. resolve once the Worker has taken over (sandbox-host.ts); the core heartbeats until then
 // After the hand-over the Launcher holds nothing (#487): no wait for the container, no supervision in `waitUntil`, no
@@ -44,6 +45,7 @@ import {
   WORKER_CONTAINER_SPEC,
 } from "./container-spec.ts";
 import {
+  SYSBOX_PREPARE_TIMEOUT_MS,
   SandboxDockerHost,
   WORK_VOLUME_STEP_TIMEOUT_MS,
 } from "./sandbox-host.ts";
@@ -81,6 +83,11 @@ export function minimumVmTimeoutMargin(handoverSeconds: number): number {
  */
 export const WORK_VOLUME_STEPS_SECONDS =
   (WORK_VOLUME_STEP_COUNT * WORK_VOLUME_STEP_TIMEOUT_MS) / 1000;
+/** The Implementer's VM runs `sysbox-prepare.sh` too (at most its timeout); like the volume steps it is not part of Diff's or Dynamic's launch. */
+export const SYSBOX_PREPARE_SECONDS = SYSBOX_PREPARE_TIMEOUT_MS / 1000;
+/** Everything an implementer launch takes beyond a review's: the Sysbox boot and the steps of the work volume. */
+export const IMPLEMENTER_LAUNCH_EXTRA_SECONDS =
+  SYSBOX_PREPARE_SECONDS + WORK_VOLUME_STEPS_SECONDS;
 /** How long the container must run for the Worker to count as having taken over (sandbox-host.ts). */
 export const SANDBOX_HANDOVER_SECONDS = 20;
 /** The tag the golden snapshot pipeline (#330) gives the Worker image in the snapshot. */
@@ -348,7 +355,7 @@ export function createSandboxLauncher(
     return (
       spec.timeoutSeconds +
       vmTimeoutMarginSeconds +
-      (spec.kind === "implementer" ? WORK_VOLUME_STEPS_SECONDS : 0)
+      (spec.kind === "implementer" ? IMPLEMENTER_LAUNCH_EXTRA_SECONDS : 0)
     );
   }
 
@@ -474,6 +481,8 @@ export function createSandboxLauncher(
       });
       try {
         await host.prepare(signal);
+        // Only the Implementer: the boot steps of Sysbox change the VM as a whole, and a review's VM stays as it was.
+        if (spec.kind === "implementer") await host.prepareSysbox(signal);
         if (spec.kind === "implementer")
           await host.createWorkVolume(
             workVolumeCommands(IMPLEMENTER_CONTAINER_SPEC, {

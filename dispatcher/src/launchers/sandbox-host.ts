@@ -5,6 +5,8 @@
 // life of the VM around that command:
 //
 //   prepare()  vm-prepare.sh as root (the cgroup fix, then dockerd, spike #317 F1), then the image check
+//   prepareSysbox()  the Implementer's VM only (plan implementer-sandbox, step 2): sysbox-prepare.sh as root, which makes the VM able
+//              to run a Sysbox container (a container with its own Docker). A review's VM never runs it
 //   createWorkVolume()  the Implementer's profile only (#760): the steps that make the job's work volume in this VM
 //   run()      `docker run --interactive ...` as a process with a stdin pipe; the start document is written to
 //              the pipe and the pipe closed. Nothing else carries it: not an argument, not the environment,
@@ -26,7 +28,13 @@ import { VM_PREPARE_FAILED_EVENT, stderrTail } from "./vm-prepare-log.ts";
 
 /** Installed into the golden snapshot by the pipeline (#330) from docker/sandbox/vm-prepare.sh. */
 export const VM_PREPARE_PATH = "/usr/local/sbin/vm-prepare.sh";
+/** Installed beside it from docker/sandbox/sysbox-prepare.sh; run after vm-prepare.sh and only for the Implementer. */
+export const SYSBOX_PREPARE_PATH = "/usr/local/sbin/sysbox-prepare.sh";
 const VM_PREPARE_TIMEOUT_MS = 60_000;
+/** Measured at 0.1 s on a platform VM; the script itself waits up to 30 s for the two daemons. */
+export const SYSBOX_PREPARE_TIMEOUT_MS = 40_000;
+/** The event of the log line of a failed `sysbox-prepare.sh`, next to the launch error code `sysbox_not_ready`. */
+export const SYSBOX_PREPARE_FAILED_EVENT = "sysbox_prepare_failed";
 const IMAGE_CHECK_TIMEOUT_MS = 30_000;
 const KILL_TIMEOUT_MS = 15_000;
 /** Each step of the work volume is a `mkdir`, a `mount` or one `docker volume create`: a second or so, never half a minute. */
@@ -144,6 +152,35 @@ export class SandboxDockerHost implements ContainerHost {
     // The text of the answer is not logged or echoed: only whether it is the configured id.
     if (image.stdout.trim() !== this.#options.imageDigest)
       throw new LaunchError("image_mismatch");
+  }
+
+  /**
+   * Makes the VM able to run a Sysbox container: `sysbox-prepare.sh` as root, after `prepare()`. It names its failure on stderr
+   * (`sysbox-prepare: sysbox_mgr_not_ready ...`); the log line carries the exit status and the end of that text, the error
+   * is the stable `sysbox_not_ready`. Called for the Implementer's VM only: it unmounts `/proc/kcore` and `/proc/keys` for
+   * the whole VM, and a review's VM has to stay as it was.
+   */
+  async prepareSysbox(signal: AbortSignal): Promise<void> {
+    const { vm } = this.#options;
+    const prepared = await vm.exec(
+      {
+        label: "sysbox-prepare",
+        cmd: SYSBOX_PREPARE_PATH,
+        args: [],
+        sudo: true,
+        timeoutMs: SYSBOX_PREPARE_TIMEOUT_MS,
+      },
+      signal,
+    );
+    if (prepared.exitCode === 0) return;
+    this.#options.logger.warn(SYSBOX_PREPARE_FAILED_EVENT, {
+      ...this.#options.logFields,
+      sandbox: vm.name,
+      code: "sysbox_not_ready",
+      exitCode: prepared.exitCode,
+      stderrTail: stderrTail(prepared.stderr),
+    });
+    throw new LaunchError("sysbox_not_ready", { retryable: true });
   }
 
   /**
