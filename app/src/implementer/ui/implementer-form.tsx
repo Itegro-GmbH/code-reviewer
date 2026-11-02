@@ -443,7 +443,7 @@ export function ImplementerForm({
     { id: STANDARD, label: FORM_COPY.environmentStandard },
     ...environmentList.map((candidate) => ({
       id: candidate.id,
-      label: `${candidate.name} (${candidate.vcpus} vCPU, ${candidate.memoryGb} GB${candidate.setupScript === "" ? "" : ", setup script"})`,
+      label: `${candidate.name} (${candidate.vcpus} vCPU, ${candidate.memoryGb} GB${candidate.hasScript ? ", setup script" : ""})`,
     })),
   ];
 
@@ -615,7 +615,7 @@ export function ImplementerForm({
           disabled={environments.state === "loading"}
           placeholder={FORM_COPY.environmentPlaceholder}
         />
-        {environment !== undefined && environment.setupScript !== "" ? (
+        {environment !== undefined && environment.hasScript ? (
           <p className="-mt-3 text-sm text-muted-foreground">
             {FORM_COPY.environmentScriptNote}
           </p>

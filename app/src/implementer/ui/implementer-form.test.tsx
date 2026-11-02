@@ -1532,9 +1532,7 @@ const NODE_ENV = {
   name: "Node 22",
   vcpus: 6,
   memoryGb: 12,
-  setupScript: "pnpm install\n",
-  createdAt: "2026-11-02T08:00:00.000Z",
-  updatedAt: "2026-11-02T08:00:00.000Z",
+  hasScript: true,
 };
 const BARE_ENV = {
   ...NODE_ENV,
@@ -1542,7 +1540,7 @@ const BARE_ENV = {
   name: "Bare",
   vcpus: 1,
   memoryGb: 2,
-  setupScript: "",
+  hasScript: false,
 };
 const withEnvironments = () =>
   fakeApi({
@@ -1624,7 +1622,7 @@ describe("the environment picker (#818)", () => {
   });
 
   // #818-T22
-  it("says what the chosen environment does before the agent starts", async () => {
+  it("says, for an environment with a script, that setup scripts do not run yet and a task with it will not run", async () => {
     const user = userEvent.setup();
     renderForm(withEnvironments());
     await waitFor(() =>
@@ -1633,9 +1631,10 @@ describe("the environment picker (#818)", () => {
 
     await chooseOption(user, control("Environment"), /^Node 22/);
 
-    expect(
-      screen.getByText(/runs its setup script once before the agent starts/i),
-    ).toBeTruthy();
+    const note = screen.getByText(/setup scripts do not run yet/i);
+    expect(note.textContent).toMatch(/will not run/i);
+    // Nothing is promised that the code does not do.
+    expect(note.textContent).not.toMatch(/runs its setup script/i);
   });
 
   // #818-T22
