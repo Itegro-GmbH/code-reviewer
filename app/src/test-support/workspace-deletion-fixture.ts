@@ -7,6 +7,7 @@ import { createBillingJournalRepository } from "../db/repositories/billing-journ
 import { createBillingNotificationsRepository } from "../db/repositories/billing-notifications-repository.ts";
 import { createBillingProfilesRepository } from "../db/repositories/billing-profiles-repository.ts";
 import { createBillingTopUpIntentsRepository } from "../db/repositories/billing-topup-intents-repository.ts";
+import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
 import { createInstallationLinkRequestsRepository } from "../db/repositories/installation-link-requests-repository.ts";
 import { createIntegrationsRepository } from "../db/repositories/integrations-repository.ts";
@@ -130,6 +131,16 @@ export async function seedWorkspaceForDeletion(
       createdBy: `owner-${tag}`,
     },
     async () => finished.id,
+  );
+  // #818-T05: an environment of the Implementer, which the erasure removes with the rest.
+  await createImplementerEnvironmentsRepository(db, workspaceId).create(
+    {
+      name: `Environment ${tag}`,
+      vcpus: 4,
+      setupScript: `echo ${tag}`,
+      createdBy: `owner-${tag}`,
+    },
+    50,
   );
   await db
     .insertInto("job_dispatches")

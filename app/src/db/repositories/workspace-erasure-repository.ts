@@ -182,6 +182,7 @@ export function createWorkspaceErasureRepository(
       for (const table of [
         "implementer_turns",
         "implementer_sessions",
+        "implementer_environments",
         "job_check_runs",
         "job_vm_runs",
         "usage_records",

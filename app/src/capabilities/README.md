@@ -18,7 +18,7 @@ such.
 `implementer` (#747) is allowed by the product `factory` only and is in no product's default, so an unset
 `PRODUCT_CAPABILITIES` never turns it on; code-review.com refuses it by name (the code wall). It needs `dynamic-review`
 (and so `review`). Its routes are the four behind the task form (`src/implementer/`, #755), classified `implementer` in `routes.ts` and
-asked again in each route file; the navigation entry (between the QA area and Runs) and the page `/w/<slug>/implementer` are classified and offered the same way (#756). The job kind `implementer` is already mapped to it (`CAPABILITY_OF_REVIEW_KIND`), so
+asked again in each route file; the navigation entry (between the QA area and Runs) and the page `/w/<slug>/implementer` are classified and offered the same way (#756). The environments page `/w/<slug>/environments`, its two route files and its navigation entry are `implementer` too (#818). The job kind `implementer` is already mapped to it (`CAPABILITY_OF_REVIEW_KIND`), so
 `allowsReviewKind("implementer")` is true only in a set that has the capability. A wrong setting stops the start
 (`DEPLOY_CONFIG_INVALID`, `src/deploy/startup.ts`); it names the variable and never repeats an unknown value.
 

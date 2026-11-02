@@ -67,6 +67,11 @@ export const USER_REFERENCES: ReadonlyArray<{
   },
   { table: "implementer_sessions", column: "created_by", handling: "move" },
   { table: "implementer_turns", column: "created_by", handling: "move" },
+  {
+    table: "implementer_environments",
+    column: "created_by",
+    handling: "move",
+  },
   { table: "invitations", column: "invited_by", handling: "move" },
   { table: "invitations", column: "accepted_by", handling: "move" },
   {
@@ -246,6 +251,12 @@ export async function mergeImportedUser(
       .execute();
     await trx
       .updateTable("implementer_turns")
+      .set({ created_by: actingUserId })
+      .where("created_by", "=", source.id)
+      .execute();
+    // Who made an environment (#818).
+    await trx
+      .updateTable("implementer_environments")
       .set({ created_by: actingUserId })
       .where("created_by", "=", source.id)
       .execute();

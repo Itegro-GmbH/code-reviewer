@@ -1,0 +1,10 @@
+{
+  "description": "The sizes and limits of an Implementer environment (#818): the VM sizes a task may ask for and the bounds of its setup script. A data file: no schema, nothing refers to it. The Dispatcher (SANDBOX_VCPUS in dispatcher/src/launchers/sandbox.ts) and the app (app/src/implementer/environments/limits.ts) each keep a typed copy that a test compares with this file; a size the Dispatcher does not list is refused at the launch.",
+  "vcpus": [1, 2, 4, 6, 8],
+  "memoryPerVcpuMb": 2048,
+  "defaultVcpus": 2,
+  "setupScript": {
+    "maxBytes": 65536,
+    "timeoutSeconds": 900
+  }
+}

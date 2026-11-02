@@ -321,3 +321,16 @@ describe("the implementer kind in the contracts the Dispatcher speaks (#746)", (
     ]);
   });
 });
+
+describe("the sizes of an Implementer environment (contracts/environment-sizes.v1.json)", () => {
+  // #818-T01
+  it("are the VM sizes the Launcher launches, with the same memory per vCPU", async () => {
+    const sizes = readContract<{ vcpus: number[]; memoryPerVcpuMb: number }>(
+      "environment-sizes.v1.json",
+    );
+    const { SANDBOX_VCPUS, SANDBOX_MEMORY_PER_VCPU_MB } =
+      await import("./launchers/sandbox.ts");
+    expect([...SANDBOX_VCPUS]).toEqual(sizes.vcpus);
+    expect(SANDBOX_MEMORY_PER_VCPU_MB).toBe(sizes.memoryPerVcpuMb);
+  });
+});

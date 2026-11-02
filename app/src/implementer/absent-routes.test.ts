@@ -82,6 +82,17 @@ describe("the routes of the Implementer form without the capability", () => {
     expect(implementerRoutes).toContain("/w/[workspace]/implementer");
   });
 
+  // #818-T15
+  it("has the environments routes and page in the table, so the loops below cover them", () => {
+    expect(implementerRoutes).toEqual(
+      expect.arrayContaining([
+        "/api/w/[workspace]/environments",
+        "/api/w/[workspace]/environments/[environmentId]",
+        "/w/[workspace]/environments",
+      ]),
+    );
+  });
+
   // #755-T10
   it.each(WITHOUT)(
     "are marked as missing by the proxy for %s, for a member and for a visitor, for every method",

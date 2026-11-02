@@ -122,6 +122,28 @@ spelling, a name with user information, any port other than 443, and a name that
 link-local or otherwise special address. It holds at most 32 tunnels and 64 connections and cuts a silent tunnel after 120
 seconds. A tool that ignores the proxy variables has no network at all, which fails closed.
 
+## Environments
+
+An environment is a start configuration for a task: a **name**, a **size** and a **setup script**. They are kept per workspace on
+the page `/w/<slug>/environments` (navigation entry "Environments", between Implementer and Runs; only in a deployment with the
+capability `implementer`, anywhere else the path is a 404 like an unknown one).
+
+- **Who:** every member sees the list and the scripts, because every member may use one. Owners and Admins create, change and
+  delete (`manage_implementer_environments`). A workspace holds at most 50.
+- **Sizes** are the platform's: 1, 2, 4, 6 and 8 vCPU with 2 GB per vCPU (2, 4, 8, 12, 16 GB), the range of the Pro plan. The list
+  is `contracts/environment-sizes.v1.json`; the app and the Dispatcher (`SANDBOX_VCPUS`) are both held to it by a test. A task without an environment
+  keeps the standard, 2 vCPU and no script.
+- **The script** is text of at most 64 KB (UTF-8), literal data, stored exactly as written: no trimming, no changed line ends, no
+  checking of what it says. Only what cannot be stored as text (a NUL byte, half of a character) is refused. It has no secrets
+  field and the page says so.
+- **Names** are unique within a workspace, whatever the case.
+- **Nothing points at an environment.** A task copies size and script when it starts (the next part of #818), so changing or
+  deleting an environment never touches a running or a past task.
+
+Routes (all `Cache-Control: no-store`, errors `{ "error": <code> }` with the codes of `app/src/implementer/environments/errors.ts`):
+`GET /api/w/<slug>/environments` (every member), `POST` the same path, `PUT` and `DELETE /api/w/<slug>/environments/<id>` (Owner or
+Admin).
+
 ## Limits
 
 | Limit | Value | Where it is decided |

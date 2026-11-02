@@ -27,6 +27,7 @@ const LATER_TABLES = [
   "billing_notifications",
   "implementer_sessions",
   "implementer_turns",
+  "implementer_environments",
 ];
 
 const beforeThisMigration: MigrationProvider = {
