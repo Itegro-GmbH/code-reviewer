@@ -140,12 +140,17 @@ jobs:
       - name: Show the record
         run: |
           # Sysbox is for the Implementer only and never holds back a snapshot: an unproven one is shown, not failed (docs/golden-snapshot.md).
-          if [ "$(jq -r '.sysbox // "unproven"' "$RUNNER_TEMP/golden-snapshot.json")" != "proven" ]; then
-            echo "::warning title=Sysbox unproven::The golden snapshot was recorded without a passing Sysbox proof. Reviews are not affected; the Implementer's VM will not start a Sysbox container. The log of the build step names the reason."
+          sysbox="$(jq -r '.sysbox // "unproven"' "$RUNNER_TEMP/golden-snapshot.json")"
+          if [ "$sysbox" != "proven" ]; then
+            echo "::warning title=Sysbox unproven::The golden snapshot was recorded without a passing Sysbox proof. Reviews are not affected. An Implementer launch fails only when the install failed (sysbox-prepare.sh missing or status 10); a failed proof with a working install still launches until the Implementer gates on this verdict (plan implementer-sandbox, step 4). The log of the build step names the reasons."
           fi
           {
             echo "### Golden snapshot"
             echo
+            if [ "$sysbox" != "proven" ]; then
+              echo "**Sysbox unproven.** Reviews are not affected; see the warning of this job and docs/golden-snapshot.md, section Sysbox."
+              echo
+            fi
             echo "Not wired into anything yet. A deployment makes it current after its canary passed and the promotion went through (docs/deployment-vercel.md, section 5.1)."
             echo
             echo '```json'

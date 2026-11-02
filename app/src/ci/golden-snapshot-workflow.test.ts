@@ -241,6 +241,9 @@ describe("golden snapshot workflow", () => {
     expect(show.run).toContain("::warning title=Sysbox unproven::");
     expect(show.run).toContain(".sysbox");
     expect(show.run).not.toMatch(/::error|exit 1/);
+    // It says what really happens: only a failed install stops an Implementer launch, until the gate of plan step 4.
+    expect(show.run).toContain("step 4");
+    expect(show.run).not.toContain("will not start a Sysbox container");
   });
 
   // #330-extra-workflow

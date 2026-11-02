@@ -178,7 +178,7 @@ supports Ubuntu up to 24.04 and the platform base image is 26.04: that is the re
 | 2   | `chmod 666 /dev/net/tun`                                                                                  | root of a Sysbox container is uid 165536 and could not open the device (mode 0600). Part of the plan's recipe; a Sysbox container with its own Docker started without it (measured) | 21 `sysbox_tun_failed`                              |
 | 3   | `umount /proc/kcore /proc/keys` (only if mounted)                                                         | the platform mounts a read-only devtmpfs over both. **Without this `docker run --runtime=sysbox-runc` fails** (`re-mounting procfs caused: operation not permitted`)                | 22 `sysbox_proc_unmount_failed`                     |
 | 4   | `sysctl -q -e -p /lib/sysctl.d/99-sysbox-sysctl.conf`                                                     | the limits the package sets at install (inotify, keyring) are gone after a restore from the snapshot                                                                                | 23 `sysbox_sysctl_failed`                           |
-| 5   | `sysbox-mgr`, then `sysbox-fs`, detached, each waited for until its socket in `/run/sysbox` exists (30 s) | the manager first: the file system service asks it for the id mapping                                                                                                               | 24 `sysbox_mgr_not_ready`, 25 `sysbox_fs_not_ready` |
+| 5   | `sysbox-mgr`, then `sysbox-fs`, detached, each waited for until it runs and its socket in `/run/sysbox` exists (one wait of 30 s for both) | the manager first: the file system service asks it for the id mapping                                                                                                               | 24 `sysbox_mgr_not_ready`, 25 `sysbox_fs_not_ready` |
 | 6   | `docker info` lists the `sysbox-runc` runtime                                                             | the daemon read `daemon.json` when `vm-prepare.sh` started it                                                                                                                       | 26 `sysbox_runtime_not_registered`                  |
 
 Each failure is a line `sysbox-prepare: <name> ...` on stderr and an exit status of its own, and nothing after the failed step runs. A second
@@ -204,8 +204,11 @@ The snapshot grows by the package (49 MB installed) and the user entries; the pr
 `--runtime=sysbox-runc` of a pinned image (`sysbox_probe_image`, `docker:29.9.2-dind` by digest, **pulled in the check VM only**: it is not in the snapshot, so a
 review's VM does not carry it) starts its own `dockerd`, imports an image from two of its own files and runs a container of it. The container is on
 the network the agent will have, `docker network create --internal -o com.docker.network.bridge.gateway_mode_ipv4=isolated`; from inside it, every address of the VM,
-the bridge of a second network, an outside address and an outside name must be unreachable. A plain `--internal` network is the control: the VM's listener
-must be reachable from it, or the check proves nothing (`sysbox_network_check_inconclusive`). This is a connectivity check, not the attack test of step 6.
+the bridge of a second network, an outside address and an outside name must be unreachable. Nothing counts as "blocked" without a control that could have
+said "reachable": a plain `--internal` network must reach the VM's listener, a plain container on the VM (default network) must reach the same outside address
+(`nc -z 1.1.1.1 443`) and name (`ping example.com`) with the same tools, and the isolated container must still answer `docker exec <box> true` before and after the checks.
+A control that fails, a missing tool, no way out from the VM or a container that died is `sysbox_network_check_inconclusive` (unproven), never "isolated".
+This is a connectivity check, not the attack test of step 6.
 It prints `SYSBOX_PROBE ok <check>` or `SYSBOX_PROBE fail <reason>` per check and `SYSBOX_PROBE_DONE` last. Reasons: the names of the boot script,
 `sysbox_probe_image_unavailable` (the pull failed: the proof did not run), `sysbox_network_create_failed`, `sysbox_container_failed`,
 `sysbox_inner_docker_failed`, `sysbox_inner_container_failed`, `sysbox_network_check_inconclusive`, `sysbox_network_not_isolated`.
@@ -213,8 +216,23 @@ It prints `SYSBOX_PROBE ok <check>` or `SYSBOX_PROBE fail <reason>` per check an
 **A Sysbox failure never holds back the snapshot.** The snapshot is shared by every kind of job and reviews do not use Sysbox; a failed proof
 that withdrew it would stop the release of code-review.com for a feature only the Implementer will use, the problem #797 describes for the Dispatcher's canary.
 So neither the install nor the proof ends a run: each is logged (`sysbox_install_failed`, `sysbox_probe_failed` with the reasons as `detail`), kept as a
-warning of the run and written to the record as `"sysbox": "unproven"` (a missing field reads the same). The workflow shows it as the annotation
-**Sysbox unproven** on the run. The snapshot still goes live; an Implementer job on it fails at the boot step with `sysbox_not_ready` and the name in the log.
+warning of the run and written to the record as `"sysbox": "unproven"` (a missing field reads the same). The snapshot still goes live.
+
+**What `unproven` means for an Implementer launch, today.** Nothing reads the record's verdict yet. The Launcher runs `sysbox-prepare.sh` and only that decides: a
+snapshot without the package (the script is absent in a snapshot from before this change, or it exits 10 because `sysbox-runc`, `sysbox-mgr` or `sysbox-fs` are missing: the usual result of a failed install)
+ends the launch with the retryable `sysbox_not_ready`. A snapshot whose install worked but whose proof failed (the inner Docker, the isolation check, a control that
+could not be established) **still launches**, because the boot steps pass on that VM and the Implementer's container does not use Sysbox before step 4 of the plan. A proof
+that failed in the boot step itself (the first line of the proof is the same script) fails the launch too, with the same name, unless the cause was transient. The gate on the proof's verdict
+(refusing a launch on a snapshot that is `unproven`, with a code of its own) comes with step 4, when the agent container starts depending on Sysbox.
+
+**Where it is shown, and what it cannot be.** A soft failure also comes from the network at build time (a GitHub 5xx for the package, a Docker Hub rate limit for the proof's image),
+not only from a broken Sysbox, and the deploy canary does not see it (it proves a review). So the build job of the run shows it twice: the warning annotation **Sysbox unproven**
+(on the page of the *Deploy production* run, where the run is watched before and while it promotes) and a line at the top of the job's summary; the reasons are in the log of the
+build step (`sysbox_install_failed`, `sysbox_probe_failed` with `detail`). It is only shown, never a condition: `snapshot-decide` runs before the build and cannot know it, and a
+promotion job checks the result of every job it needs (`deploy-production-promotion.test.ts`), so the verdict is not an input of either. The verdict is not persisted with the pair:
+a later release that **reuses** the snapshot (`inputs_unchanged`) shows nothing, and the way to get a fresh proof is a build, a change of an image input or *Deploy production*
+with `rebuild_snapshot` (transient causes then go away by themselves). Before the Implementer is released, read the `sysbox` field of the record of the last build (the artifact
+`golden-snapshot-record`).
 A cancelled run still ends as cancelled. **Not covered:** the platform's kernel is not part of the snapshot, so an update of it after the build is seen by the boot step
 of a job and by the next build's proof, not by the proof of this one; the deploy canary does not prove Sysbox (it would have to fail only the factory's lane, which is #797).
 
