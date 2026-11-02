@@ -226,7 +226,7 @@ def test_the_engine_user_can_read_neither_the_token_nor_the_mirror(base: Path) -
 
 
 # #762-T09
-def test_the_upload_pack_of_the_runner_runs_as_the_engine_user_and_reads_nothing_of_roots(
+def test_the_listing_and_the_upload_pack_run_as_the_engine_user_and_read_nothing_of_roots(
     base: Path,
 ) -> None:
     real = system_git()
@@ -236,9 +236,9 @@ def test_the_upload_pack_of_the_runner_runs_as_the_engine_user_and_reads_nothing
     programs = base / "bin"
     programs.mkdir(mode=0o755)
     wrapper = programs / "git"
-    wrapper.write_text(
-        f'#!/bin/sh\nif [ "$1" = upload-pack ]; then id -u >> {uids}; fi\nexec {real} "$@"\n'
-    )
+    # The listing is a `for-each-ref` of the engine user, the fetch an upload-pack of that user.
+    script = f'#!/bin/sh\ncase "$1" in upload-pack|for-each-ref) id -u >> {uids};; esac\n'
+    wrapper.write_text(script + f'exec {real} "$@"\n')
     wrapper.chmod(0o755)
     workspace = _workspace(base, Origin(base, real).url, ("file",), str(wrapper))
     workspace.prepare()
@@ -266,7 +266,7 @@ def test_the_upload_pack_of_the_runner_runs_as_the_engine_user_and_reads_nothing
 
     assert report.listed is False and report.branches == ()
     assert line not in repr(report)
-    assert set(uids.read_text().split()) == {str(ENGINE_UID)}, "an upload-pack ran as someone else"
+    assert set(uids.read_text().split()) == {str(ENGINE_UID)}, "the listing ran as someone else"
     # and an honest turn is read by the same user
     packed.unlink()
     (workspace.repo / "new.txt").write_text("n\n")
