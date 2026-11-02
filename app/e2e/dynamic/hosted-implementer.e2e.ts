@@ -9,7 +9,7 @@
 // from a script; nothing else is replaced but the last hops (the job wrapper `fakes/implementer/run_job_against_fake_llm.py`
 // puts the model's provider and the package registries on loopback, the only place the lane has) and the container itself.
 //
-// Journeys E01 to E12 and E14 are here; E13, the wall of code-review.com, is proven by the lower-level tests that the table of the pull
+// Journeys E01 to E12, E14 and E15 are here; E13, the wall of code-review.com, is proven by the lower-level tests that the table of the pull
 // request names. Every journey sends its task through the form (not the API); the agent's behaviour is the script of the fake
 // LLM. The texts of the scripts do not overlap: a script answers the first request whose last user message holds its marker,
 // so every instruction carries a marker of its own and none of them holds a phrase another script waits for.
@@ -839,8 +839,10 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       .locator('[data-slot="run-detail"]')
       .filter({ visible: true });
     await expect(
-      detail.locator('[data-branch-result="rejected"]'),
-    ).toContainText(existing);
+      detail.locator('[data-branch-result="rejected"]').filter({
+        hasText: existing,
+      }),
+    ).toContainText("not pushed");
     await expect(detail).toContainText("never overwrites a branch");
     await expectQuiet();
   });
@@ -1252,18 +1254,18 @@ test.describe("a task on its way from the form of the Implementer to a branch on
   });
 
   // The owner's git model: hostile branch names and a hostile configuration of the agent's own repository.
-  // #767-E14
-  test("E14 hostile branch names and a hostile git configuration: the names arrive as names, nothing is run by root, no ref becomes an option", async ({
+  // #767-E15
+  test("E15 hostile branch names and a hostile git configuration: the names arrive as names, nothing is run by root, no ref becomes an option", async ({
     page,
     request,
   }) => {
     const theLlm = required(llm, "The fake LLM");
-    const branch = "implementer/e14";
-    const one = "e14$(touch$IFS/work/tmp/e14-pwned)";
-    const two = "e14;touch$IFS/work/tmp/e14-pwned2";
+    const branch = "implementer/e15";
+    const one = "e15$(touch$IFS/work/tmp/e15-pwned)";
+    const two = "e15;touch$IFS/work/tmp/e15-pwned2";
     const trap = "/work/tmp/trap.sh";
     theLlm.scriptAgent({
-      when: { lastUserContains: "[E14-HOSTILE]" },
+      when: { lastUserContains: "[E15-HOSTILE]" },
       steps: [
         write("a.txt", "a\n"),
         commit("Fine"),
@@ -1298,7 +1300,7 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     const runId = await startTask(page, {
       repository: GADGETS.fullName,
       branch,
-      instruction: "[E14-HOSTILE] Add a.txt and then be difficult with git.",
+      instruction: "[E15-HOSTILE] Add a.txt and then be difficult with git.",
     });
     const ended = await runEnded(page, runId, RUN_TIMEOUT);
 

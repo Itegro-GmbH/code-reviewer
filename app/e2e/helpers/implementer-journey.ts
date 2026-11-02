@@ -449,7 +449,7 @@ export type EngineScan = {
   /** Per place the job wrapper looked through at the end of a job: how many files, and how many held each secret. */
   roots: Record<string, { files: number; found: Record<string, number> }>;
   /**
-   * What the traps of journey E14 left behind: the user ids a program run by the agent's git configuration wrote into the
+   * What the traps of journey E15 left behind: the user ids a program run by the agent's git configuration wrote into the
    * engine's temporary directory, and the files a shell reading a hostile branch name would have made.
    */
   traps?: { uids: string[]; pwned: string[] };

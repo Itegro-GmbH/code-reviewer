@@ -217,10 +217,10 @@ class EngineTraces:
         )
 
     def traps(self) -> dict[str, Any]:
-        """What the traps an agent laid in its own repository left behind (journey E14): the user
+        """What the traps an agent laid in its own repository left behind (journey E15): the user
         ids a `trap.log` in the engine's directories names (a program the agent's git
         configuration runs appends `id -u` to it) and the files its hostile branch names would
-        have made if a shell had read them (`e14-pwned*`). Only the engine's own user may ever
+        have made if a shell had read them (`e15-pwned*`). Only the engine's own user may ever
         appear in the first."""
         uids: list[str] = []
         pwned: list[str] = []
@@ -229,7 +229,7 @@ class EngineTraces:
                 path = Path(directory, name)
                 if path.is_file() and not path.is_symlink():
                     uids.extend(path.read_text(encoding="utf-8", errors="replace").split())
-            pwned.extend(str(path) for path in Path(directory).glob("e14-pwned*"))
+            pwned.extend(str(path) for path in Path(directory).glob("e15-pwned*"))
         return {"uids": uids, "pwned": pwned}
 
 
