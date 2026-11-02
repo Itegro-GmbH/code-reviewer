@@ -51,7 +51,7 @@ KEY = {
     WireFamily.ANTHROPIC_MESSAGES: "messages",
     WireFamily.GOOGLE: "google",
 }
-SECRET = "sk-ant-api03-THE-VALUE-OF-A-KEY-MUST-NEVER-BE-LOGGED"
+SECRET = "THE-VALUE-OF-A-KEY-MUST-NEVER-BE-LOGGED-0123456789"
 
 
 def captured(family: WireFamily) -> dict[str, Any]:
