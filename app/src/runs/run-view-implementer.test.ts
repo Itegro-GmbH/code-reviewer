@@ -617,6 +617,7 @@ describe("the detail of an implementer run", () => {
         "baseBranch",
         "branch",
         "branchUrl",
+        "branches",
         "commits",
         "files",
         "head",

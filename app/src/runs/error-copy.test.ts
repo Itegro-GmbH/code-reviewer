@@ -459,11 +459,11 @@ describe("the sentences for the codes of a task", () => {
   });
 
   // #765: the copy of the issue comment, for the final push that could not reach the repository too.
-  it("says for a rejected push that the repository refused the work or could not be reached, and that earlier pushes stay", () => {
+  it("says for a rejected push that GitHub refused the branch or could not be reached, points at the branch list, and that pushed branches stay", () => {
     const { text } = describeTurnErrorCode(PRODUCT, "push_rejected");
 
     expect(text).toBe(
-      "The repository did not accept the pushed work (it refused it, or could not be reached). Work already pushed stays on the branch.",
+      "GitHub did not take the work of this task: the branch was refused, or GitHub could not be reached. The branches below say which were pushed and why the others were not. A branch that was pushed stays on GitHub.",
     );
     expect(text).not.toMatch(/new branch/);
   });

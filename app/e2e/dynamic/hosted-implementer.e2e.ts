@@ -3,13 +3,13 @@
 // The Implementer through the factory deployment in the privileged lane (#767): a person fills in the form of the Implementer
 // page, the app queues the task and wakes the REAL Dispatcher (which serves the factory app as an entry of its registry, with
 // the kind `implementer`), whose Sandbox-Launcher starts the REAL Worker in the Implementer's container profile (root with the
-// capabilities of the hardened spec, a read-only root, a work volume at /work, git 2.53 and the guard files). The Worker
+// capabilities of the hardened spec, a read-only root, a work volume at /work and the pinned git). The Worker
 // clones the repository from the fake GitHub, runs the pinned OpenCode as the engine user behind the nft rules, the model proxy
-// and the egress proxy, and pushes the agent's commits to the fake GitHub. The model is the fake LLM, which plays the agent
+// and the egress proxy, and pushes all local branches of the agent's repository to the fake GitHub when the turn ends. The model is the fake LLM, which plays the agent
 // from a script; nothing else is replaced but the last hops (the job wrapper `fakes/implementer/run_job_against_fake_llm.py`
 // puts the model's provider and the package registries on loopback, the only place the lane has) and the container itself.
 //
-// Journeys E01 to E12 are here; E13, the wall of code-review.com, is proven by the lower-level tests that the table of the pull
+// Journeys E01 to E12 and E14 are here; E13, the wall of code-review.com, is proven by the lower-level tests that the table of the pull
 // request names. Every journey sends its task through the form (not the API); the agent's behaviour is the script of the fake
 // LLM. The texts of the scripts do not overlap: a script answers the first request whose last user message holds its marker,
 // so every instruction carries a marker of its own and none of them holds a phrase another script waits for.
@@ -64,17 +64,16 @@ import { allSecrets, containsSecret } from "../helpers/hosted-secrets";
 import {
   agentIsWaiting,
   bash,
-  branchPushed,
   capabilities,
   commit,
   commitsAhead,
   containerMountOf,
   engineScans,
+  expectOnlyTheseBranches,
   expectRunnerPushedOnlyForward,
   JOB_WRAPPER,
   leftoverWorkerProcesses,
   PROBE,
-  PROBE_DURING_PUSH,
   prepareRecords,
   processesInNamespaces,
   runData,
@@ -331,14 +330,16 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     return (await getPushes(request, GADGETS.fullName)).slice(before);
   }
 
-  /** The pushes of a journey are the agent's branch and nothing else: no tag, no note, no other branch, whatever the fake accepts. */
+  /**
+   * The pushes of a journey are the branches the agent made and nothing else: no tag, no note, no branch it did not have, whatever
+   * the fake accepts. The runner pushes one ref per command, so each push names one.
+   */
   function expectOnlyPushesOf(
     pushes: Array<{ refs: string[] }>,
-    branch: string,
+    ...branches: string[]
   ): void {
-    expect(pushes.length).toBeGreaterThan(0);
-    for (const push of pushes)
-      expect(push.refs).toEqual([`refs/heads/${branch}`]);
+    expectOnlyTheseBranches(pushes, branches);
+    for (const push of pushes) expect(push.refs).toHaveLength(1);
   }
 
   function gadgets(): GitRepository {
@@ -359,7 +360,7 @@ test.describe("a task on its way from the form of the Implementer to a branch on
   }
 
   // #767-E01
-  test("E01 the form preselects the default branch; the task is accepted, run by the Worker, and its two commits are on the branch, pushed during the turn and at the end", async ({
+  test("E01 the form preselects the default branch; the task is accepted, run by the Worker, nothing is pushed while the agent works and both commits are on the branch after the turn", async ({
     page,
     request,
   }) => {
@@ -391,7 +392,7 @@ test.describe("a task on its way from the form of the Implementer to a branch on
         write("farewell.txt", "Goodbye\n"),
         commit("Add farewell"),
       ],
-      // The agent waits before its third step, until the first commit is on GitHub (the test releases it).
+      // The agent waits before its third step, after its first commit (the test looks at GitHub and releases it).
       holdBefore: [2],
       finalText: "Added hello.txt and farewell.txt, one commit each.",
     });
@@ -405,10 +406,10 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       instruction,
     });
 
-    // During the turn: the first commit is on the branch at the fake GitHub while the agent waits and the run is running.
+    // During the turn: the agent has committed, and nothing is on GitHub; no push is made while it works.
     await agentIsWaiting(theLlm, page, runId, RUN_TIMEOUT);
-    await branchPushed(page, runId, gadgets().path, branch, RUN_TIMEOUT);
-    expect(subjectsAhead(gadgets().path, BASE, branch)).toEqual(["Add hello"]);
+    expect(tipOf(gadgets().path, branch)).toBeNull();
+    expect(await pushesSince(request, pushesBefore)).toHaveLength(0);
     expect((await runData(page, runId)).status).toBe("running");
     // The volume of the container, from the lane: a fresh tmpfs at /work that the engine's programs may run from.
     const mount = observeContainer();
@@ -430,7 +431,7 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     expect(tipOf(gadgets().path, BASE)).toBe(base);
     expect(commitsAhead(gadgets().path, BASE, branch)).toHaveLength(2);
     const pushes = await pushesSince(request, pushesBefore);
-    expect(pushes.length).toBeGreaterThanOrEqual(2);
+    expect(pushes).toHaveLength(1);
     expectOnlyPushesOf(pushes, branch);
     expectRunnerPushedOnlyForward(
       runnerGitCommands().slice(commandsBefore),
@@ -470,6 +471,11 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     await expect(detail).toContainText(
       "Added hello.txt and farewell.txt, one commit each.",
     );
+    // The branches of the turn: the one the form named, pushed.
+    const branches = detail.locator('[data-slot="run-branches"] li');
+    await expect(branches).toHaveCount(1);
+    await expect(branches.first()).toContainText(branch);
+    await expect(branches.first()).toContainText("pushed");
     await expect(detail.locator('[data-slot="run-model"]')).toContainText(
       "lane-coder",
     );
@@ -599,7 +605,7 @@ test.describe("a task on its way from the form of the Implementer to a branch on
   });
 
   // #767-E05
-  test("E05 the cost limit stops the turn: Failed with cost_limit_reached, and the pushed commit is shown", async ({
+  test("E05 the cost limit stops the turn: Failed with cost_limit_reached, and the commit pushed at the end is shown", async ({
     page,
     request,
   }) => {
@@ -615,7 +621,7 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     theLlm.scriptAgent({
       when: { lastUserContains: "[E05-COST]" },
       steps,
-      // The agent waits before its third step, until the commit is on GitHub.
+      // The agent waits before its third step, after the commit (the test makes the model's calls large and releases it).
       holdBefore: [2],
       finalText: "Done.",
     });
@@ -629,9 +635,9 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       costLimit: "0.01",
     });
     await agentIsWaiting(theLlm, page, runId, RUN_TIMEOUT);
-    await branchPushed(page, runId, gadgets().path, branch, RUN_TIMEOUT);
     observeContainer();
-    // The commit is on GitHub; from now on the model's calls are large, and the limit is reached within a few of them.
+    // The commit is made, and not on GitHub yet; from now on the model's calls are large, and the limit is reached within a few
+    // of them. The end of the turn pushes what was committed.
     theLlm.setChatUsage({ promptTokens: 8000, completionTokens: 100 });
     theLlm.release();
     const ended = await runEnded(page, runId, RUN_TIMEOUT);
@@ -652,33 +658,41 @@ test.describe("a task on its way from the form of the Implementer to a branch on
   });
 
   // #767-E06
-  test("E06 the accident guard: amend, checkout, reset and push are blocked or have no credential, and the branch only moves forward", async ({
+  test("E06 git is free in the workspace: amend, a new branch, reset and a bypassed hook all succeed, a push has nowhere to go, and every local branch arrives", async ({
     page,
     request,
   }) => {
     const theLlm = required(llm, "The fake LLM");
     const branch = "implementer/e06";
+    const side = "e06-side";
     // The address the runner itself pushes to: the agent's repository has no remote, so a push to it by name tells nothing about
     // the credential. By address it is the runner's remote itself: the engine user's network rules and the missing credential stop it.
     const remote = `${e2eEnv.githubUrl}/${GADGETS.fullName}.git`;
     theLlm.scriptAgent({
-      when: { lastUserContains: "[E06-GUARD]" },
+      when: { lastUserContains: "[E06-FREE]" },
       steps: [
         write("a.txt", "a\n"),
         commit("First"),
         bash("git commit --amend -q -m Amended; echo '[amend]' $?"),
-        bash(`git checkout ${BASE}; echo '[checkout]' $?`),
-        bash("git reset --hard HEAD~1; echo '[reset]' $?"),
+        bash(
+          `git switch -q -c ${side} && echo side > side.txt && git add -A && git commit -q -m Side; echo '[side]' $?`,
+        ),
+        bash(`git switch -q ${branch}; echo '[back]' $?`),
+        write("b.txt", "b\n"),
+        commit("Second"),
+        bash("git reset -q --hard HEAD~1; echo '[reset]' $?"),
+        write("c.txt", "c\n"),
+        bash(
+          "git -c core.hooksPath=/dev/null add -A && git -c core.hooksPath=/dev/null commit -q -m Third; echo '[bypass]' $?",
+        ),
         bash("git push origin HEAD; echo '[push]' $?"),
         bash(
           `GIT_TERMINAL_PROMPT=0 git push ${remote} HEAD:refs/heads/e06-direct 2>&1; echo '[push-direct]' $?`,
         ),
-        write("b.txt", "b\n"),
-        commit("Second"),
       ],
-      // The agent waits before the attempts, until its first commit is on GitHub.
+      // The agent waits after its first commit; the test looks at GitHub (nothing is there) and lets it go on.
       holdBefore: [2],
-      finalText: "Tried a few things, then added b.txt.",
+      finalText: "Rewrote some history, made a side branch, and added c.txt.",
     });
     await signInAsAdmin(page);
     const pushesBefore = (await getPushes(request, GADGETS.fullName)).length;
@@ -687,64 +701,93 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     const runId = await startTask(page, {
       repository: GADGETS.fullName,
       branch,
-      instruction: "[E06-GUARD] Add a.txt, then try to rewrite history.",
+      instruction: "[E06-FREE] Add a.txt, then use git however you like.",
     });
     await agentIsWaiting(theLlm, page, runId, RUN_TIMEOUT);
-    await branchPushed(page, runId, gadgets().path, branch, RUN_TIMEOUT);
+    expect(tipOf(gadgets().path, branch)).toBeNull();
     observeContainer();
     theLlm.release();
     const ended = await runEnded(page, runId, RUN_TIMEOUT);
 
     expect(ended.status).toBe("succeeded");
-    // Only forward: the first commit stays, the second follows it, nothing was rewritten.
+    // What the history became in the workspace is what arrived: the amended first commit and the third, on the task's branch;
+    // the amended commit and the side commit on the side branch. The reset dropped "Second" before anything was pushed.
     expect(subjectsAhead(gadgets().path, BASE, branch)).toEqual([
-      "First",
-      "Second",
+      "Amended",
+      "Third",
+    ]);
+    expect(subjectsAhead(gadgets().path, BASE, side)).toEqual([
+      "Amended",
+      "Side",
     ]);
     expect(tipOf(gadgets().path, BASE)).toBe(base);
     expect(tipOf(gadgets().path, "e06-direct")).toBeNull();
-    // What the agent was told by each attempt: the hook said no to the rewrites, and a push by name fails because the repository has no
-    // remote; a push to the runner's own address fails at the network (the engine user reaches loopback ports of its proxies only),
-    // before any credential is asked for.
+    // What the agent was told by each attempt: all the git it tried worked, a push by name fails because the repository has no
+    // remote, and a push to the runner's own address fails at the network (the engine user reaches loopback ports of its proxies
+    // only), before any credential is asked for.
     const shown = Object.values(
       required(theLlm.requests().at(-1), "The last request").toolResults,
     ).join("\n");
-    for (const attempt of ["amend", "checkout", "reset", "push"])
-      expect(shown, attempt).toMatch(new RegExp(`\\[${attempt}\\]\\s+[1-9]`));
-    expect(shown.match(/code-reviewer-guard: /g)?.length ?? 0).toBeGreaterThan(
-      1,
-    );
+    for (const attempt of ["amend", "side", "back", "reset", "bypass"])
+      expect(shown, attempt).toMatch(new RegExp(`\\[${attempt}\\]\\s+0`));
+    expect(shown).not.toContain("code-reviewer-guard");
+    expect(shown).toMatch(/\[push\]\s+[1-9]/);
     expect(shown).toMatch(/'origin' does not appear to be a git repository/);
     expect(shown).toMatch(
       /(Failed to connect|Connection refused|Couldn't connect)[\s\S]*\[push-direct\]\s+128/,
     );
     expect(shown).not.toMatch(/Authentication failed|could not read Username/);
-    // And nothing else reached GitHub: every push of the journey is the runner's, to the branch.
-    expectOnlyPushesOf(await pushesSince(request, pushesBefore), branch);
-    expectRunnerPushedOnlyForward(
-      runnerGitCommands().slice(commandsBefore),
+    // And nothing else reached GitHub: every push of the journey is the runner's, one command per branch, never forced.
+    expectOnlyPushesOf(await pushesSince(request, pushesBefore), branch, side);
+    expectRunnerPushedOnlyForward(runnerGitCommands().slice(commandsBefore), [
       branch,
-    );
+      side,
+    ]);
+    // The Runs page lists both branches, the task's first.
+    expect(
+      ended.implementer?.branches?.shown.map((b) => [b.name, b.pushed]),
+    ).toEqual([
+      [branch, true],
+      [side, true],
+    ]);
+    await page.goto(`/w/${WORKSPACE}/runs/${runId}`);
+    const listed = page
+      .locator('[data-slot="run-detail"]')
+      .filter({ visible: true })
+      .locator('[data-slot="run-branches"] li');
+    await expect(listed).toHaveCount(2);
+    await expect(listed.nth(0)).toContainText(branch);
+    await expect(listed.nth(1)).toContainText(side);
     await expectQuiet();
   });
 
   // #767-E07
-  test("E07 a bypass of the hook is caught by the push check: Failed with branch_violation, and the branch is where the last good push left it", async ({
+  test("E07 a rewrite of a branch that is already on GitHub and a workflow file are each rejected for their branch only, never forced, and the task's own branch arrives", async ({
     page,
     request,
   }) => {
     const theLlm = required(llm, "The fake LLM");
     const branch = "implementer/e07";
+    const existing = "e07-existing";
+    const workflow = "e07-workflow";
+    // Someone's branch, on GitHub at the base commit. The agent replaces it with unrelated history.
+    gadgets().setRef(`refs/heads/${existing}`, base);
     theLlm.scriptAgent({
-      when: { lastUserContains: "[E07-BYPASS]" },
+      when: { lastUserContains: "[E07-REWRITE]" },
       steps: [
         write("a.txt", "a\n"),
         commit("Good"),
         bash(
-          "git -c core.hooksPath=/dev/null reset -q --hard HEAD~1 && echo bad > b.txt && git add -A && git -c core.hooksPath=/dev/null commit -q -m Bad; echo '[bypass]' $?",
+          `git switch -q --orphan ${existing} && git rm -rfq . ; echo fresh > fresh.txt && git add -A && git commit -q -m Rewritten; echo '[rewrite]' $?`,
         ),
+        bash(`git switch -q ${branch}; echo '[back]' $?`),
+        // A branch that changes a workflow file: GitHub refuses it for this App (no `workflows` permission), the fake imitates that.
+        bash(
+          `git switch -q -c ${workflow} && mkdir -p .github/workflows && echo 'on: push' > .github/workflows/smoke.yml && git add -A && git commit -q -m Workflow; echo '[workflow]' $?`,
+        ),
+        bash(`git switch -q ${branch}; echo '[back-again]' $?`),
       ],
-      // The agent waits before the bypass, until the good commit is on GitHub; after it the turn ends and the final push checks it.
+      // The container is read while the agent waits after its first commit.
       holdBefore: [2],
       finalText: "Done.",
     });
@@ -755,25 +798,50 @@ test.describe("a task on its way from the form of the Implementer to a branch on
     const runId = await startTask(page, {
       repository: GADGETS.fullName,
       branch,
-      instruction: "[E07-BYPASS] Add a.txt and then rewrite history.",
+      instruction:
+        "[E07-REWRITE] Add a.txt and replace the history of e07-existing.",
     });
     await agentIsWaiting(theLlm, page, runId, RUN_TIMEOUT);
-    await branchPushed(page, runId, gadgets().path, branch, RUN_TIMEOUT);
     observeContainer();
-    const good = tipOf(gadgets().path, branch);
     theLlm.release();
     const ended = await runEnded(page, runId, RUN_TIMEOUT);
 
-    expect(ended.status).toBe("failed");
-    expect(ended.errorCode).toBe("branch_violation");
-    // The branch on GitHub is the good commit, and the rewrite never got there.
+    // The task's own branch arrived, so the turn succeeded; the rewrite is a rejected branch of the report.
+    expect(ended.status).toBe("succeeded");
     expect(subjectsAhead(gadgets().path, BASE, branch)).toEqual(["Good"]);
-    expect(tipOf(gadgets().path, branch)).toBe(good);
-    expectOnlyPushesOf(await pushesSince(request, pushesBefore), branch);
-    expectRunnerPushedOnlyForward(
-      runnerGitCommands().slice(commandsBefore),
-      branch,
+    expect(tipOf(gadgets().path, existing)).toBe(base);
+    const rejected = ended.implementer?.branches?.shown.find(
+      (entry) => entry.name === existing,
     );
+    expect(rejected?.pushed).toBe(false);
+    expect(rejected?.reason).toContain("never overwrites a branch");
+    // GitHub refused the branch with the workflow file, for that branch only.
+    expect(tipOf(gadgets().path, workflow)).toBeNull();
+    const refused = ended.implementer?.branches?.shown.find(
+      (entry) => entry.name === workflow,
+    );
+    expect(refused?.pushed).toBe(false);
+    expect(refused?.reason).toContain(".github/workflows");
+    // The runner tried each branch once, without force. The client itself stopped the rewrite (the provider's branch is not an
+    // ancestor of it), the provider refused the workflow file, and it took the task's own.
+    expectOnlyPushesOf(
+      await pushesSince(request, pushesBefore),
+      branch,
+      workflow,
+    );
+    expectRunnerPushedOnlyForward(runnerGitCommands().slice(commandsBefore), [
+      branch,
+      existing,
+      workflow,
+    ]);
+    await page.goto(`/w/${WORKSPACE}/runs/${runId}`);
+    const detail = page
+      .locator('[data-slot="run-detail"]')
+      .filter({ visible: true });
+    await expect(
+      detail.locator('[data-branch-result="rejected"]'),
+    ).toContainText(existing);
+    await expect(detail).toContainText("never overwrites a branch");
     await expectQuiet();
   });
 
@@ -1039,9 +1107,11 @@ test.describe("a task on its way from the form of the Implementer to a branch on
         // At the start: its own environment and everything of the container it can read.
         bash(`${PROBE}; echo '[probe-start-done]'`),
         write("probe.txt", "probe\n"),
-        // While the runner pushes: the same, and an attempt to read the environment of the root process that pushes.
-        bash(PROBE_DURING_PUSH),
+        commit("Add probe"),
       ],
+      // The root process that pushes (the runner's git, with the token in its environment) runs after the agent and all its
+      // processes are gone: nothing of the engine user exists then to read it (E10 and `expectQuiet` look for leftovers). What
+      // the agent could read of the root processes that exist while it works is probed above.
       finalText: "Looked around, then committed probe.txt.",
     });
     await signInAsAdmin(page);
@@ -1085,13 +1155,9 @@ test.describe("a task on its way from the form of the Implementer to a branch on
       /\[remote |remote\.[^\s=]+\.url|\burl\s*=|extraheader/i,
     );
     expect(probed).toMatch(/== git remote -v\n== ps/);
-    // while the runner pushed it looked for the root process, and could neither read its environment (where the token is) nor
-    // find the token in its arguments.
-    expect(probed).toContain("[push-seen] yes");
-    expect(probed).toMatch(/root push \d+ environ: [^\n]*Permission denied/);
-    expect(probed).toMatch(
-      /root push \d+ cmdline: [^\n]*refs\/heads\/implementer\/e09/,
-    );
+    // and could not read the environment of any root process of the container, where the runner's secrets are.
+    expect(probed).toMatch(/root \d+ environ: [^\n]*Permission denied/);
+    expect(probed).not.toMatch(/root \d+ environ: [^\n]*(PATH|HOME)=/);
     for (const secret of secrets)
       expect(
         containsSecret(probed, secret),
@@ -1183,6 +1249,109 @@ test.describe("a task on its way from the form of the Implementer to a branch on
           `a secret is in ${place}`,
         ).toEqual([]);
       }
+  });
+
+  // The owner's git model: hostile branch names and a hostile configuration of the agent's own repository.
+  // #767-E14
+  test("E14 hostile branch names and a hostile git configuration: the names arrive as names, nothing is run by root, no ref becomes an option", async ({
+    page,
+    request,
+  }) => {
+    const theLlm = required(llm, "The fake LLM");
+    const branch = "implementer/e14";
+    const one = "e14$(touch$IFS/work/tmp/e14-pwned)";
+    const two = "e14;touch$IFS/work/tmp/e14-pwned2";
+    const trap = "/work/tmp/trap.sh";
+    theLlm.scriptAgent({
+      when: { lastUserContains: "[E14-HOSTILE]" },
+      steps: [
+        write("a.txt", "a\n"),
+        commit("Fine"),
+        // A program that says who runs it. The agent makes git run it as itself (the control), and the traps below let root meet it.
+        bash(
+          `printf '#!/bin/sh\\nid -u >> /work/tmp/trap.log\\nexit 0\\n' > ${trap} && chmod +x ${trap}; echo '[trap]' $?`,
+        ),
+        bash(
+          `git config core.fsmonitor ${trap}; git config core.pager ${trap}; git config core.sshCommand ${trap}; ` +
+            `git config uploadpack.packObjectsHook ${trap}; git config alias.fetch '!${trap}'; ` +
+            `mkdir -p .git/hooks; cp ${trap} .git/hooks/pre-push; cp ${trap} .git/hooks/post-commit; echo '[config]' $?`,
+        ),
+        bash("git status --short > /dev/null; echo '[control]' $?"),
+        bash(
+          `git switch -q -c '${one}' && echo x > h1.txt && git add -A && git commit -q -m Hostile1; echo '[h1]' $?`,
+        ),
+        bash(
+          `git switch -q -c '${two}' && echo y > h2.txt && git add -A && git commit -q -m Hostile2; echo '[h2]' $?`,
+        ),
+        // Names git writes but that are no branch names for a push: they could be read as an option, a force or a path.
+        bash(
+          "git update-ref 'refs/heads/--force' HEAD; git update-ref 'refs/heads/+plus' HEAD; echo '[refs]' $?",
+        ),
+        bash(`git switch -q ${branch}; echo '[back]' $?`),
+      ],
+      finalText: "Set some traps and made some odd branches.",
+    });
+    await signInAsAdmin(page);
+    const pushesBefore = (await getPushes(request, GADGETS.fullName)).length;
+    const commandsBefore = runnerGitCommands().length;
+
+    const runId = await startTask(page, {
+      repository: GADGETS.fullName,
+      branch,
+      instruction: "[E14-HOSTILE] Add a.txt and then be difficult with git.",
+    });
+    const ended = await runEnded(page, runId, RUN_TIMEOUT);
+
+    expect(ended.status).toBe("succeeded");
+    // The names arrived as names: nothing in them was read by a shell, and the two refs that are no branch names are not on GitHub.
+    expect(subjectsAhead(gadgets().path, BASE, branch)).toEqual(["Fine"]);
+    expect(subjectsAhead(gadgets().path, BASE, one)).toEqual([
+      "Fine",
+      "Hostile1",
+    ]);
+    expect(subjectsAhead(gadgets().path, BASE, two)).toEqual([
+      "Fine",
+      "Hostile2",
+    ]);
+    expect(tipOf(gadgets().path, "--force")).toBeNull();
+    expect(tipOf(gadgets().path, "+plus")).toBeNull();
+    expectOnlyPushesOf(
+      await pushesSince(request, pushesBefore),
+      branch,
+      one,
+      two,
+    );
+    expectRunnerPushedOnlyForward(runnerGitCommands().slice(commandsBefore), [
+      branch,
+      one,
+      two,
+    ]);
+    // What the traps left behind, as the job wrapper found it at the end of the job: the control ran as the engine user, no root
+    // process ran a trap, and no shell made the file a hostile name would have made.
+    const withTraps = engineScans().filter(
+      (scan) => (scan.traps?.uids.length ?? 0) > 0,
+    );
+    expect(withTraps).toHaveLength(1);
+    expect(new Set(withTraps[0]?.traps?.uids)).toEqual(new Set(["10101"]));
+    for (const scan of engineScans())
+      expect(
+        scan.traps?.pwned ?? [],
+        "a hostile name was read by a shell",
+      ).toEqual([]);
+    const shown = Object.values(
+      required(theLlm.requests().at(-1), "The last request").toolResults,
+    ).join("\n");
+    for (const step of ["trap", "config", "control", "h1", "h2", "back"])
+      expect(shown, step).toMatch(new RegExp(`\\[${step}\\]\\s+0`));
+    // The Runs page shows the names as text.
+    await page.goto(`/w/${WORKSPACE}/runs/${runId}`);
+    const listed = page
+      .locator('[data-slot="run-detail"]')
+      .filter({ visible: true })
+      .locator('[data-slot="run-branches"]');
+    await expect(listed).toContainText(one);
+    await expect(listed).toContainText(two);
+    await expectQuiet();
   });
 
   // #767-E10
