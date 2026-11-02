@@ -107,8 +107,8 @@ OpenCode, so the native path is mandatory (an entry from the catalog and a cost 
   key, and the models the catalog lists. Anthropic and OpenRouter are among them: the agent is OpenCode and has no legacy wire, so
   for a task (and for a task only) neither is a legacy provider (`implementerProviderIdOf`, `implementerCatalogRefOf` in
   `src/native-cost/catalog-ref.ts`). Their key is the one saved under LLM access (`configuredKeyProviders` reads the registry's
-  slots and the catalog providers'), the catalog is `getImplementerCatalog()`, and the claim of the turn takes the native path for
-  them (`nativeCost.implementerRefOf`, `resolveModelSelection` with `implementer`): the entry is built at the address the registry
+  slots and the catalog providers'), the catalog is `getImplementerCatalog()`, and the claim of a turn on the workspace's own key takes the native path for
+  them (`nativeCost.implementerRefOf`, only for `keyMode` own; `resolveModelSelection` with `implementer`): the entry is built at the address the registry
   pins (`api.anthropic.com/v1`, `openrouter.ai/api/v1`), the cost policy carries the catalog's price with the cache read and cache
   write prices, and the engine marks the prompt for the cache. Reviews on the same providers keep the legacy wire. Reasons:
   `provider_unsupported`, `no_key`, `model_not_in_catalog`.

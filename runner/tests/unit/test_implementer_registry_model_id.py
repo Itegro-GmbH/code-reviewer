@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""The model id of a task on a provider of the registry (Anthropic, OpenRouter) is a catalog model id.
+"""The model id of a task on a provider of the registry is a catalog model id.
 
 The Implementer's agent is OpenCode and its model comes from the models.dev catalog, whose ids may
 hold `@` (the app accepts them: `isCatalogModelId`). The registry's own rule for these two
