@@ -114,6 +114,7 @@ const PROTECTED_ROUTES = [
   // The pages of a workspace: for its members only (src/workspaces/access-runtime.ts).
   "/w/[workspace]",
   "/w/[workspace]/connections",
+  "/w/[workspace]/environments",
   "/w/[workspace]/implementer",
   "/w/[workspace]/members",
   "/w/[workspace]/projects",
@@ -176,6 +177,9 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/github/connect",
   "/api/w/[workspace]/github/installations",
   "/api/w/[workspace]/github/installations/choose",
+  // The environments of the Implementer (#818).
+  "/api/w/[workspace]/environments",
+  "/api/w/[workspace]/environments/[environmentId]",
   // The routes behind the Implementer form (#755).
   "/api/w/[workspace]/implementer/models",
   "/api/w/[workspace]/implementer/repositories",

@@ -163,6 +163,7 @@ describe("the Implementer item in the sidebar", () => {
     ).toEqual([
       ["QA", "/w/acme/projects"],
       ["Implementer", "/w/acme/implementer"],
+      ["Environments", "/w/acme/environments"],
       ["Runs", "/w/acme/runs"],
       ["Connections", "/w/acme/connections"],
       ["Members", "/w/acme/members"],
@@ -227,6 +228,72 @@ describe("the Implementer item in the sidebar", () => {
       </CapabilitiesProvider>,
     );
     expect(labels()).not.toContain("Implementer");
+  });
+});
+
+describe("the Environments item in the sidebar (#818)", () => {
+  const WITH_IMPLEMENTER = createCapabilitySet([
+    "review",
+    "dynamic-review",
+    "implementer",
+  ]);
+
+  // #818-T10
+  it("sits between Implementer and Runs where the deployment has the capability", () => {
+    const labelsOf = (set: ReturnType<typeof createCapabilitySet>) =>
+      navItemsFor("/w/acme", identityFor("factory"), set).map(
+        (item) => item.label,
+      );
+
+    const labels = labelsOf(WITH_IMPLEMENTER);
+
+    expect(labels.indexOf("Environments")).toBe(
+      labels.indexOf("Implementer") + 1,
+    );
+    expect(labels.indexOf("Runs")).toBe(labels.indexOf("Environments") + 1);
+  });
+
+  // #818-T10
+  it("is in no list without the capability: code-review.com's, the factory's without it, a review-only set", () => {
+    for (const product of [
+      identityFor("code-review-com"),
+      identityFor("factory"),
+    ])
+      for (const set of [
+        undefined,
+        createCapabilitySet(PRODUCTS["code-review-com"].default),
+        createCapabilitySet(FACTORY),
+        createCapabilitySet(["review"]),
+        createCapabilitySet([]),
+      ])
+        expect(
+          navItemsFor("/w/acme", product, set).map((item) => item.label),
+        ).not.toContain("Environments");
+  });
+
+  // #818-T10
+  it("is the current page on its page and not on the Implementer's, and the Implementer is not current on it", () => {
+    navigation.pathname = "/w/acme/environments";
+    render(
+      <CapabilitiesProvider
+        capabilities={[...FACTORY, "implementer" satisfies Capability]}
+      >
+        <AppShell product={identityFor("factory")} userMenu={<span>menu</span>}>
+          <h1>Page</h1>
+        </AppShell>
+      </CapabilitiesProvider>,
+    );
+
+    expect(
+      screen
+        .getByRole("link", { name: "Environments" })
+        .getAttribute("aria-current"),
+    ).toBe("page");
+    expect(
+      screen
+        .getByRole("link", { name: "Implementer" })
+        .getAttribute("aria-current"),
+    ).toBeNull();
   });
 });
 

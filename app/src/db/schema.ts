@@ -1058,6 +1058,25 @@ export interface ImplementerTurnsTable {
   created_at: string;
 }
 
+/**
+ * A start configuration for an Implementer task (#818): a size and a setup script, kept per workspace. A task copies size and
+ * script at its start, so nothing points at this row: editing or deleting it touches no turn. `setup_script` is literal text,
+ * stored as it was written (no trimming, no normalised line ends), at most 64 KB of UTF-8.
+ */
+export interface ImplementerEnvironmentsTable {
+  id: string;
+  workspace_id: string;
+  /** Unique within the workspace, whatever the case. */
+  name: string;
+  /** A size of `contracts/environment-sizes.v1.json`; the app checks the list, the database only that it is positive. */
+  vcpus: number;
+  setup_script: string;
+  created_by: string;
+  /** ISO 8601 UTC. */
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Database {
   app_meta: AppMetaTable;
   users: UsersTable;
@@ -1088,6 +1107,7 @@ export interface Database {
   job_vm_runs: JobVmRunsTable;
   implementer_sessions: ImplementerSessionsTable;
   implementer_turns: ImplementerTurnsTable;
+  implementer_environments: ImplementerEnvironmentsTable;
   plan_handoff_tokens: PlanHandoffTokensTable;
   model_catalog_entries: ModelCatalogEntriesTable;
   models_dev_providers: ModelsDevProvidersTable;

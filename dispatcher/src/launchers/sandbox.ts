@@ -88,7 +88,7 @@ export const SANDBOX_IMAGE_REFERENCE = "code-reviewer-worker:golden";
 
 /** The VM sizes the platform has: 1 or an even number up to 8 vCPUs, 2 GB of memory per vCPU (spike #317). */
 export const SANDBOX_VCPUS = [1, 2, 4, 6, 8] as const;
-const MEMORY_PER_VCPU_MB = 2048;
+export const SANDBOX_MEMORY_PER_VCPU_MB = 2048;
 /** What the OS, dockerd and containerd need besides the container (the spike measured about 140 MB). */
 const VM_HEADROOM_MB = 256;
 
@@ -212,7 +212,7 @@ function planOf(spec: LaunchSpec): Plan {
     // A container that cannot fit in the VM beside the OS would be killed by the VM's own memory limit.
     if (
       megabytes(rendered.memory.limit) >
-      vcpus * MEMORY_PER_VCPU_MB - VM_HEADROOM_MB
+      vcpus * SANDBOX_MEMORY_PER_VCPU_MB - VM_HEADROOM_MB
     )
       throw configInvalid();
   } catch (error) {

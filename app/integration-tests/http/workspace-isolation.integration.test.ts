@@ -37,6 +37,7 @@ import {
   testGithubAppEnv,
 } from "../../src/test-support/github-app.ts";
 import { signedInMember } from "../../src/test-support/session-lookup.ts";
+import { createImplementerEnvironmentsRepository } from "../../src/db/repositories/implementer-environments-repository.ts";
 import { openRouteTestDatabase } from "../../src/test-support/test-database.ts";
 import { discoverRoutes } from "../../src/test-support/routes.ts";
 import { MINIMUM_ROLE } from "../../src/workspaces/permissions.ts";
@@ -64,6 +65,7 @@ type Ids = {
   runId: string;
   userId: string;
   invitationId: string;
+  environmentId: string;
 };
 
 /** What a row of the table needs to make a request: the parts of the address and the body. */
@@ -373,6 +375,52 @@ const ENTRIES: Entry[] = [
     }),
     params: () => ({}),
     file: "implementer/tasks/route.ts",
+    implementer: true,
+  },
+  {
+    // #818-T16: every member lists the environments of their own workspace; the other workspace's are not reachable.
+    name: "GET environments",
+    route: "/api/w/[workspace]/environments",
+    method: "GET",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/environments",
+    params: () => ({}),
+    file: "environments/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    // #818-T16: creating, changing and deleting are for an Owner and an Admin.
+    name: "POST environments",
+    route: "/api/w/[workspace]/environments",
+    method: "POST",
+    minRole: MINIMUM_ROLE.manage_implementer_environments,
+    path: () => "/environments",
+    body: () => ({ name: "Created by the matrix", vcpus: 2, setupScript: "" }),
+    params: () => ({}),
+    file: "environments/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    name: "PUT environments/[environmentId]",
+    route: "/api/w/[workspace]/environments/[environmentId]",
+    method: "PUT",
+    minRole: MINIMUM_ROLE.manage_implementer_environments,
+    path: (ids) => `/environments/${ids.environmentId}`,
+    body: () => ({ name: "Changed by the matrix", vcpus: 8, setupScript: "x" }),
+    params: (ids) => ({ environmentId: ids.environmentId }),
+    file: "environments/[environmentId]/route.ts",
+    implementer: true,
+  },
+  {
+    name: "DELETE environments/[environmentId]",
+    route: "/api/w/[workspace]/environments/[environmentId]",
+    method: "DELETE",
+    minRole: MINIMUM_ROLE.manage_implementer_environments,
+    path: (ids) => `/environments/${ids.environmentId}`,
+    params: (ids) => ({ environmentId: ids.environmentId }),
+    file: "environments/[environmentId]/route.ts",
     implementer: true,
   },
   {
@@ -708,11 +756,26 @@ async function seedWorkspace(
       expiresAt: new Date("2099-01-01T00:00:00.000Z"),
     },
   );
+  // An environment of the Implementer (#818): a request under the other workspace's slug must not reach it.
+  const environment = await createImplementerEnvironmentsRepository(
+    db,
+    workspace.id,
+  ).create(
+    {
+      name: `Environment of ${slug}`,
+      vcpus: 4,
+      setupScript: `echo ${slug}`,
+      createdBy: names.owner,
+    },
+    50,
+  );
+  if (!environment.ok) throw new Error("seeding failed");
   return {
     workspace,
     owner,
     keySentinel,
     ids: {
+      environmentId: environment.environment.id,
       integrationId: integration.id,
       repositoryId: repository.id,
       runId: job.job.id,
@@ -848,7 +911,8 @@ async function start() {
         | "invitations"
         | "workspace_members"
         | "plan_handoff_tokens"
-        | "billing_workspace_settings",
+        | "billing_workspace_settings"
+        | "implementer_environments",
     ) =>
       db
         .selectFrom(table)
@@ -868,6 +932,7 @@ async function start() {
       members: await select("workspace_members"),
       planHandoffTokens: await select("plan_handoff_tokens"),
       billingWorkspaceSettings: await select("billing_workspace_settings"),
+      implementerEnvironments: await select("implementer_environments"),
       projects: await db
         .selectFrom("projects")
         .innerJoin("repositories", "repositories.id", "projects.repository_id")

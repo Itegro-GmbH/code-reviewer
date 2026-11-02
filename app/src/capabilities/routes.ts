@@ -191,6 +191,14 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   { route: "/api/w/[workspace]/implementer/tasks", class: "implementer" },
   // The page of the form (#756).
   { route: "/w/[workspace]/implementer", class: "implementer" },
+  // The environments of the Implementer, a size and a setup script (#818): the routes and their page, in the navigation between
+  // Implementer and Runs.
+  { route: "/api/w/[workspace]/environments", class: "implementer" },
+  {
+    route: "/api/w/[workspace]/environments/[environmentId]",
+    class: "implementer",
+  },
+  { route: "/w/[workspace]/environments", class: "implementer" },
 
   // Billing: payments, balance, rates and everything that only exists while a workspace pays.
   { route: "/api/billing/webhook", class: "billing" },
