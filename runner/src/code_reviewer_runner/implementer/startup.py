@@ -115,8 +115,9 @@ _DOCKER_PROBE_SECONDS = 20.0
 
 def engine_user_can_open(uid: int, gid: int, socket_path: Path = Path(DOCKER_SOCKET)) -> bool:
     """Whether the engine user can `connect()` to the Docker socket. Asked by running a probe as
-    that user, as root can open anything and would say nothing. Only a probe that ran and was refused
-    says no: one that could not run (no interpreter, the user cannot be switched to) says yes."""
+    that user, as root can open anything and would say nothing. Only a probe that ran and was
+    refused says no: one that could not run (no interpreter, the user cannot be switched to) says
+    yes."""
     python = shutil.which("python3", path=TRUSTED_PATH)
     if python is None:
         return True
