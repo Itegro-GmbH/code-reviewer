@@ -225,7 +225,8 @@ def test_the_system_prompt_and_an_instruction_are_opaque_too() -> None:
 @pytest.mark.parametrize("family", list(WireFamily))
 def test_the_conversation_still_has_to_be_an_array_of_objects(family: WireFamily) -> None:
     holder = HOLDER[family]
-    for bad in ("hello", {"role": "user"}, [1], ["hello"], [[]], None):
+    bad_conversations: list[Any] = ["hello", {"role": "user"}, [1], ["hello"], [[]], None]
+    for bad in bad_conversations:
         document = captured(family)
         document[holder] = bad
         assert refusal_of(family, document).code is RefusalCode.REQUEST_NOT_ALLOWED

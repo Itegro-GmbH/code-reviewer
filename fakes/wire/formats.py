@@ -81,6 +81,9 @@ class Turn:
     # Why the answer ended, in the family's own word (chat: `length`, `content_filter`; messages:
     # `max_tokens`): the default is the end of a tool call or of a text.
     finish: str | None = None
+    # Further tool calls of the same assistant message (parallel tool use). Anthropic Messages
+    # states them as further `tool_use` blocks; the other families ignore them (#810).
+    also: tuple[tuple[str, Mapping[str, Any]], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -521,17 +524,17 @@ def _messages_content(turn: Turn, call: int) -> list[dict[str, Any]]:
     if turn.tool:
         # The real API states who called the tool on every `tool_use` block: a call the model made
         # itself is `{"type": "direct"}` (programmatic tool calling docs), and the pinned engine's
-        # SDK sends the field back with the block on the next request (the regression of
-        # `tests/engine/test_engine_opencode_anthropic_replay.py`).
-        content.append(
-            {
-                "type": "tool_use",
-                "id": f"toolu_{call}",
-                "name": turn.tool,
-                "input": dict(turn.args),
-                "caller": {"type": "direct"},
-            }
-        )
+        # SDK sends the field back with the block on the next request (the regression of #810).
+        for number, (name, args) in enumerate([(turn.tool, turn.args), *turn.also]):
+            content.append(
+                {
+                    "type": "tool_use",
+                    "id": f"toolu_{call}" if number == 0 else f"toolu_{call}_{number}",
+                    "name": name,
+                    "input": dict(args),
+                    "caller": {"type": "direct"},
+                }
+            )
     else:
         content.append({"type": "text", "text": turn.text})
     return content
