@@ -1234,3 +1234,116 @@ describe("the write token on every failure path of the claim and the build (#790
     expect(await h.queue.get(jobId)).toMatchObject({ status: "queued" });
   });
 });
+
+// #818: the environment a turn started with. The size reaches the Dispatcher in the claim's answer and nothing else of the
+// environment does; the script reaches the Worker in its input, only if it named the feature that reads it.
+describe("the environment of a turn (#818)", () => {
+  const WITH_ENVIRONMENT = `${WORKER_FEATURES},implementer_environment`;
+  const ENVIRONMENT = {
+    id: "env-1",
+    name: "Node 22",
+    vcpus: 6,
+    setupScript: "  pnpm install\r\n",
+  };
+
+  // #818-T26
+  it("tells the Dispatcher the size of the chosen environment in the answer of the claim, and the answer is valid", async () => {
+    const h = await start();
+    await h.turn({ environment: ENVIRONMENT });
+
+    const response = await h.claimSplit(DISPATCHER);
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { job: Record<string, unknown> };
+    expect(body.job).toMatchObject({ reviewKind: "implementer", vcpus: 6 });
+    expect(contract.check("SplitClaimResponse", body)).toStrictEqual({
+      valid: true,
+      errors: "",
+    });
+    // Nothing else of the environment: not its name, not its script.
+    expect(JSON.stringify(body)).not.toContain("pnpm");
+    expect(JSON.stringify(body)).not.toContain("Node 22");
+  });
+
+  // #818-T26
+  it("names no size for a turn without an environment, and none for a review", async () => {
+    const h = await start();
+    await h.turn();
+    const turn = (await (await h.claimSplit(DISPATCHER)).json()) as {
+      job: Record<string, unknown>;
+    };
+    await h.enqueueNew();
+    const review = (await (
+      await h.claimSplit({ engines: ["pr-agent"], llmProviders: BOTH })
+    ).json()) as { job: Record<string, unknown> };
+
+    expect(turn.job).not.toHaveProperty("vcpus");
+    expect(review.job).toMatchObject({
+      reviewKind: expect.not.stringMatching(/^implementer$/),
+    });
+    expect(review.job).not.toHaveProperty("vcpus");
+  });
+
+  // #818-T27 (the workspace has no such environment row at all: the script is the turn's own copy, never read from the live row)
+  it("gives the Worker the script of the environment, exactly as stored, in an input the contract accepts", async () => {
+    const h = await start();
+    await h.turn({ environment: ENVIRONMENT });
+
+    const { input } = await fetched(h, WITH_ENVIRONMENT);
+
+    expect(contract.check("RunnerJobInput", input)).toStrictEqual({
+      valid: true,
+      errors: "",
+    });
+    expect(input).toMatchObject({
+      implementer: {
+        environment: { name: "Node 22", setupScript: "  pnpm install\r\n" },
+      },
+    });
+    // The size is not the Worker's business: it is the machine it runs in.
+    expect(JSON.stringify(input)).not.toContain("vcpus");
+  });
+
+  // #818-T27
+  it("carries no environment for a turn without a script, whatever the Worker names", async () => {
+    const h = await start();
+    await h.turn({ environment: { ...ENVIRONMENT, setupScript: "" } });
+    const first = await fetched(h, WITH_ENVIRONMENT);
+    await h.turn();
+    const second = await fetched(h, WITH_ENVIRONMENT);
+
+    expect(JSON.stringify(first.input)).not.toContain('"environment"');
+    expect(JSON.stringify(second.input)).not.toContain('"environment"');
+  });
+
+  // #818-T27
+  it("ends a turn with a script, free and before any credential or token exists, when the Worker does not read environments", async () => {
+    const h = await start();
+    const { jobId } = await h.turn({ environment: ENVIRONMENT });
+    const split = await h.claimedSplit(DISPATCHER);
+
+    await h.worker.details(
+      split.job.id,
+      split.job.credential,
+      WORKER_FEATURES,
+      undefined,
+      BOTH.join(","),
+    );
+
+    expect(await h.queue.get(jobId)).toMatchObject({
+      status: "failed",
+      errorCode: "implementer_engine_unavailable",
+    });
+    expect(h.fake.issuedInstallationTokens()).toEqual([]);
+  });
+
+  // #818-T27
+  it("runs a turn without a script on a Worker that does not read environments, as before", async () => {
+    const h = await start();
+    await h.turn({ environment: { ...ENVIRONMENT, setupScript: "" } });
+
+    const { input } = await fetched(h);
+
+    expect(input.reviewKind).toBe("implementer");
+  });
+});

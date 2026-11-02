@@ -200,6 +200,9 @@ export const ERROR_CODE_CLASSES = {
   implementer_config_invalid: "free",
   sandbox_unproven: "free",
   sandbox_size_unsupported: "free",
+  // #818: the setup script of the environment failed or ran out of time. It runs before the model is called and before any model key
+  // or capability exists, so nothing was used: free, like the other ends before the agent.
+  environment_setup_failed: "free",
   agent_gave_up: AI_COST_FAILURE_CLASS,
   push_rejected: AI_COST_FAILURE_CLASS,
   branch_violation: AI_COST_FAILURE_CLASS,

@@ -1358,3 +1358,109 @@ describe("the implementer block of a result (#754)", () => {
     ).toContain("result.implementer");
   });
 });
+
+// #818: the setup block of a turn's result (`result.implementer.setup`, `ImplementerSetupResult` in the contract): what the setup
+// script of the environment did. Read like the rest of the block: closed, bounded, control characters stripped.
+describe("the setup block of an implementer result (#818)", () => {
+  const SHA_A = "a".repeat(40);
+  const block = (setup?: unknown) => ({
+    baseCommit: SHA_A,
+    headCommit: null,
+    pushed: false,
+    commits: [],
+    filesChanged: [],
+    summary: "",
+    opencode: null,
+    ...(setup === undefined ? {} : { setup }),
+  });
+  const setup = (overrides: Record<string, unknown> = {}) => ({
+    ok: false,
+    exitCode: 1,
+    timedOut: false,
+    durationSeconds: 42,
+    output: "ERR_PNPM_OUTDATED_LOCKFILE\n",
+    ...overrides,
+  });
+  const bodyWith = (implementer: unknown) => ({
+    leaseToken: TOKEN,
+    result: { ...GOOD_RESULT, implementer },
+  });
+
+  // #818-T25
+  it("keeps a valid setup block as it was sent, in a complete and in a Worker result", () => {
+    const complete = parseCompleteRequest(bodyWith(block(setup())));
+    const worker = parseWorkerResultRequest({
+      result: { ...GOOD_RESULT, implementer: block(setup()) },
+    });
+
+    expect(complete.ok && complete.value.result.implementer?.setup).toEqual(
+      setup(),
+    );
+    expect(worker.ok && worker.value.result.implementer?.setup).toEqual(
+      setup(),
+    );
+  });
+
+  // #818-T25
+  it("accepts a script that ran out of time (no exit status) and one that succeeded, and leaves the field out of a result without one", () => {
+    const timedOut = parseCompleteRequest(
+      bodyWith(block(setup({ exitCode: null, timedOut: true }))),
+    );
+    const fine = parseCompleteRequest(
+      bodyWith(block(setup({ ok: true, exitCode: 0, output: "" }))),
+    );
+    const none = parseCompleteRequest(bodyWith(block()));
+
+    expect(timedOut.ok).toBe(true);
+    expect(fine.ok).toBe(true);
+    expect(none.ok && "setup" in (none.value.result.implementer ?? {})).toBe(
+      false,
+    );
+  });
+
+  // #818-T25
+  it("strips control characters from the output, and keeps tabs and line breaks", () => {
+    const parsed = parseCompleteRequest(
+      bodyWith(block(setup({ output: "a\u0000b\u001b[0m\tc\nd\u007f" }))),
+    );
+
+    expect(parsed.ok && parsed.value.result.implementer?.setup?.output).toBe(
+      "ab[0m\tc\nd",
+    );
+  });
+
+  // #818-T25
+  it.each<[string, Record<string, unknown>, string]>([
+    ["an output over 8192 characters", { output: "x".repeat(8193) }, "output"],
+    ["an output that is not text", { output: 5 }, "output"],
+    ["a missing output", { output: undefined }, "output"],
+    ["ok that is not a boolean", { ok: "yes" }, "ok"],
+    ["an exit status that is a fraction", { exitCode: 1.5 }, "exitCode"],
+    ["an exit status above 255", { exitCode: 256 }, "exitCode"],
+    ["a missing exit status", { exitCode: undefined }, "exitCode"],
+    ["timedOut that is not a boolean", { timedOut: 1 }, "timedOut"],
+    ["a negative duration", { durationSeconds: -1 }, "durationSeconds"],
+    [
+      "a duration that is a fraction",
+      { durationSeconds: 1.5 },
+      "durationSeconds",
+    ],
+    ["a field the contract does not have", { script: "echo" }, "script"],
+  ])("refuses %s", (_name, change, field) => {
+    const parsed = parseCompleteRequest(bodyWith(block(setup(change))));
+
+    expect(fieldsOf(parsed).map((entry) => entry.field)).toContain(
+      `result.implementer.setup.${field}`,
+    );
+  });
+
+  // #818-T25
+  it("refuses a setup block that is not an object, including null", () => {
+    for (const value of [null, "ok", 3, []])
+      expect(
+        fieldsOf(parseCompleteRequest(bodyWith(block(value as never)))).map(
+          (entry) => entry.field,
+        ),
+      ).toContain("result.implementer.setup");
+  });
+});

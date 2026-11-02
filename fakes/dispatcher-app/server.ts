@@ -103,6 +103,8 @@ export type EnqueueOptions = {
   id?: string;
   reviewKind?: ReviewKind;
   input?: Record<string, unknown>;
+  /** #818: the VM size the claim answer names (any kind, so a test can show that only the Implementer's is believed). */
+  vcpus?: unknown;
 };
 
 export type LoggedRequest = {
@@ -144,6 +146,7 @@ type JobState = {
   id: string;
   reviewKind: ReviewKind;
   input: Record<string, unknown>;
+  vcpus?: unknown;
   status: JobStatus;
   attempts: number;
   claims: number;
@@ -283,6 +286,9 @@ export async function startDispatcherAppFake(
       id,
       reviewKind,
       input: structuredClone(enqueueOptions.input ?? defaultInputs[reviewKind]),
+      ...(enqueueOptions.vcpus === undefined
+        ? {}
+        : { vcpus: enqueueOptions.vcpus }),
       status: "queued",
       attempts: 0,
       claims: 0,
@@ -382,6 +388,7 @@ export async function startDispatcherAppFake(
             reviewKind: job.reviewKind,
             leaseExpiresAt: iso(LEASE_SECONDS),
             heartbeatIntervalSeconds: HEARTBEAT_SECONDS,
+            ...(job.vcpus === undefined ? {} : { vcpus: job.vcpus }),
           },
         },
       };
@@ -739,6 +746,7 @@ export async function startDispatcherAppFake(
         id: typeof body.id === "string" ? body.id : undefined,
         reviewKind:
           kind === "dynamic" || kind === "implementer" ? kind : "diff",
+        ...(body.vcpus === undefined ? {} : { vcpus: body.vcpus }),
       });
       return { status: 200, body: { id } };
     }

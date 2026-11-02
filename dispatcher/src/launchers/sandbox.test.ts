@@ -137,6 +137,8 @@ describe("the Sandbox-Launcher", () => {
         name: service.creates[0]?.name,
         startedAt: new Date("2026-10-19T10:00:00.000Z"),
         timeoutSeconds: 1200 + VM_TIMEOUT_MARGIN_SECONDS,
+        // #818: the size of the VM, which the core reports for an Implementer job only.
+        vcpus: 1,
       },
     ]);
     // Before anything else is done to the VM.
@@ -1727,4 +1729,16 @@ describe("the size of a job (#818)", () => {
       ]);
     },
   );
+
+  // #818-T37
+  it("tells the core the size of the VM it created, whichever way the size was decided", async () => {
+    const created: Array<number | undefined> = [];
+    const onVmCreated = (vm: { vcpus?: number }) => created.push(vm.vcpus);
+
+    await launch(build(), implementer({ vcpus: 4, onVmCreated }));
+    await launch(build(), implementer({ onVmCreated }));
+    await launch(build(), spec({ kind: "diff", onVmCreated }));
+
+    expect(created).toStrictEqual([4, 2, 1]);
+  });
 });

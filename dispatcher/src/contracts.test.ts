@@ -215,6 +215,16 @@ describe("the contracts the Dispatcher speaks", () => {
       parseSplitClaim({ ...split, job: { ...split.job, credential: "short" } }),
     ).toBeNull();
     expect(parseSplitClaim({ ...split, version: 2 })).toBeNull();
+    // #818: the size is optional and, when there, a whole number; anything else is an answer it cannot read.
+    expect(parseSplitClaim(split)).not.toHaveProperty("vcpus");
+    expect(
+      parseSplitClaim({ ...split, job: { ...split.job, vcpus: 4 } }),
+    ).toMatchObject({ vcpus: 4 });
+    for (const vcpus of ["4", 2.5, null, 0, 65, {}])
+      expect(
+        parseSplitClaim({ ...split, job: { ...split.job, vcpus } }),
+        String(vcpus),
+      ).toBeNull();
     // The raw example file is read from disk too, so a change of the schema file shows here.
     expect(
       JSON.parse(
@@ -305,6 +315,15 @@ describe("the implementer kind in the contracts the Dispatcher speaks (#746)", (
     for (const [definition, example] of [
       ["RunnerJobInput", "examples/implementer/RunnerJobInput.json"],
       ["RunnerResult", "examples/implementer/RunnerResult.json"],
+      // #818
+      [
+        "ImplementerEnvironment",
+        "examples/implementer/ImplementerEnvironment.json",
+      ],
+      [
+        "ImplementerSetupResult",
+        "examples/implementer/ImplementerSetupResult.json",
+      ],
     ] as const) {
       const check = validator("runner-api", definition);
       expect(
@@ -315,6 +334,8 @@ describe("the implementer kind in the contracts the Dispatcher speaks (#746)", (
     expect(
       readdirSync(join(CONTRACTS, "examples", "implementer")).sort(),
     ).toStrictEqual([
+      "ImplementerEnvironment.json",
+      "ImplementerSetupResult.json",
       "RunnerJobInput.json",
       "RunnerResult.json",
       "SplitClaimResponse.json",
