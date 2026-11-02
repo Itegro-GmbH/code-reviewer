@@ -478,7 +478,6 @@ describe("the operator guide states what the owner decided", () => {
       "a VM that dies before the end of the turn loses the work",
     ],
     ["no Go registry", "no Go module proxy"],
-    ["the egress rule", "allowlist of package registries"],
     ["the accepted exfiltration", "npm publish"],
     ["the issue that closes it", "#784"],
     ["the brake", "no step limit"],
@@ -553,9 +552,7 @@ describe("the operator guide states what the owner decided", () => {
       "`workflows_not_allowed`",
       "Root never runs git with the agent's repository",
       "`--upload-pack`",
-      "`no_new_privs`",
       "`branchesDropped`",
-      "once more right before each `git push`",
       "capped at 4 MiB",
       "`<the task's branch>-leftover-<id>`",
     ])
@@ -572,8 +569,9 @@ describe("the operator guide states what the owner decided", () => {
     const workspace = readText(
       "runner/src/code_reviewer_runner/implementer/git_workspace.py",
     );
-    expect(workspace).toContain('"--no-new-privs"');
-    expect(workspace).toContain('f"--upload-pack={self._upload_pack()}"');
+    expect(workspace).toContain(
+      'f"--upload-pack={self._access.upload_pack()}"',
+    );
     expect(workspace).toContain(
       '["push", "--porcelain", self.spec.clone_url, f"{scratch}:refs/heads/{name}"]',
     );
@@ -624,19 +622,6 @@ describe("the operator guide states what the owner decided", () => {
     expect(workspace).toContain("REASON_NOT_FAST_FORWARD");
     expect(workspace).not.toContain("BRANCH_EXISTS");
     expect(workspace).not.toContain("BRANCH_VIOLATION");
-  });
-
-  // #768-T01
-  it("lists the registries of the allowlist as the runner has them", () => {
-    const policy = readText(
-      "runner/src/code_reviewer_runner/implementer/egress_policy.py",
-    );
-    const block = policy.slice(policy.indexOf("DEFAULT_ALLOWLIST"));
-    const hosts = [...block.matchAll(/"([a-z0-9.-]+\.[a-z]+)"/g)].map(
-      (match) => match[1] as string,
-    );
-    expect(hosts.length).toBeGreaterThan(0);
-    for (const host of hosts) expect(guide, host).toContain(`\`${host}\``);
   });
 
   // #768-T01

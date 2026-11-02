@@ -53,10 +53,10 @@ installs a repository's dependencies and runs its tests (read-only root, `noexec
 volume). The Sandbox launcher picks the container spec by the job kind: Diff and Dynamic keep `WorkerContainerSpec`
 unchanged; `implementer` gets `ImplementerContainerSpec` (`contracts/worker-container.v1.json`), which is the same spec with
 exactly six fields changed: one **work volume** at `/work`, **the VM's Docker socket** (`/var/run/docker.sock` bind-mounted read-only at
-`/run/docker.sock`, #745: the Worker is the Control container of the turn and starts the model door, the container that holds the model key; it makes the Worker
-effectively root on the VM, accepted because the agent never reaches it, `docs/implementer.md`, "The model door"), **memory** 3 GB (reservation 2.5 GB, no swap; the VM has 4 GB, and 256 MB of
-it are the door's), **2048 processes**, the four **environment names** `RUNNER_IMPLEMENTER_WORK_DIR` (`/work`), `RUNNER_IMPLEMENTER_NETWORK`
-(`registries`), `RUNNER_IMPLEMENTER_EGRESS_PORT` (`10182`) and `RUNNER_IMPLEMENTER_MODEL_DOOR` (`docker`), and a `forbiddenKeys` list without `dockerSocket`. The floor is the same: root filesystem read-only, every tmpfs
+`/run/docker.sock`, #745: the Worker is the Control container of the turn and starts the model door, the agent's container and the reader; it makes the Worker
+effectively root on the VM, accepted because the agent never reaches it, `docs/implementer.md`, "The model door"), **memory** 768 MB (reservation 512 MB, no swap; the rest of the VM
+is the OS's 512 MB, the door's 256 MB and the agent's container, whose limit the Launcher computes and hands over as `RUNNER_IMPLEMENTER_AGENT_MEMORY_MB`: 2,560 MB at 2 vCPU), **2048 processes**, the four **environment names** `RUNNER_IMPLEMENTER_WORK_DIR` (`/work`),
+`RUNNER_IMPLEMENTER_MODEL_DOOR` (`docker`), `RUNNER_IMPLEMENTER_SANDBOX_PROOF` (the snapshot's Sysbox verdict: `proven`, `unproven`, or `unrecorded` while the deploy does not write it, `SANDBOX_SYSBOX_PROOF`) and `RUNNER_IMPLEMENTER_AGENT_MEMORY_MB`, and a `forbiddenKeys` list without `dockerSocket`. The floor is the same: root filesystem read-only, every tmpfs
 `noexec`, no privileged, no host bind, device or namespace (the Docker socket is the one exception, in this profile only), `no-new-privileges`, the same capabilities. The
 work volume is the only writable path that may run a program; a bind or any other volume has no key in the schema.
 Before the volume the launcher runs `sysbox-prepare.sh` in the VM as root (label `sysbox-prepare`, 40 s, the Implementer's VM only: Diff and

@@ -345,6 +345,8 @@ describe("the sentences for the codes of a task", () => {
     "git_write_not_granted",
     "implementer_engine_unavailable",
     "implementer_config_invalid",
+    "sandbox_unproven",
+    "sandbox_size_unsupported",
     "dynamic_accounting_failed",
     "timeout",
     "lease_expired",

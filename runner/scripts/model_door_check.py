@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""The proof of the model door on a real VM (#745, step 3): run as the Control container of the
-Implementer's profile, against the VM's own Docker.
+"""The proof of the model door on a real VM (#745, step 3; reworked for step 4): run as the Control
+container of the Implementer's profile, against the VM's own Docker.
 
     docker run <the flags of the Implementer's profile> --entrypoint /usr/bin/tini <image> -- \\
         /opt/venv/bin/python /driver/model_door_check.py
@@ -11,25 +11,27 @@ line per check (`{"check": ..., "ok": ..., ...}`), no value that is secret: the 
 made-up one (the provider answers it with a refusal, which is how the way to the provider is shown
 without a cost), and the key is searched for in the places the agent could look.
 
-1. startup as the container's own: the engine user's static rules with the door's route, then
-   `NET_ADMIN` dropped;
+Since step 4 the agent is not in this container: it is in a container of its own on the model
+network. A Sysbox container cannot run in the CI lane, so a **stand-in** takes its place here: a
+plain container of the Worker image on the model network, at the agent's address, with no
+capability and no network but that one. What is proven of the door does not depend on the runtime.
+
+1. the Docker socket answers, and the engine user (still in this container) cannot open it;
 2. the door: how long each step of the start takes, what the daemon says the door is (user, root
-   file system, capabilities, mounts, environment), what it weighs;
-3. as the engine user: the door is reachable and nothing else is (the probe of `confine`), a call
-   through the door reaches the provider and comes back refused for its key, the key is nowhere
-   the user can read (environment and command line of every process it can see, every file it can
-   read), the Docker socket is not its to open;
+   file system, capabilities, mounts, environment), what it weighs, that it has no IPv6;
+3. from the stand-in: the door is reachable and nothing else is (another port, the internet, the
+   VM's gateway and its control port), a call through the door reaches the provider and comes back
+   refused for its key, the key is nowhere the stand-in can read;
 4. a call over the cost limit is refused at the door and Control reads why;
 5. the door is killed: the turn's end is named and the cost class is the one the model use decides;
 6. the door answers the model network and opens nothing into it: a process in the door's network
-   namespace cannot open a connection to Control's address (DNS port included), and one on the
-   model network outside the door's rules can, so that the refusal is the rules and not a missing
-   route.
+   namespace cannot open a connection to the agent's address (DNS port included) or the VM, and one
+   on the model network outside the door's rules can, so that the refusal is the rules and not a
+   missing route.
 
 `--offline` (the CI lane with a real Docker daemon, no provider and no internet): the same run with
 the checks that need a real provider left out (a call that reaches it, the ledger read back after
-its refusal). Everything the door does before the provider is asked is still proven: the container
-as the daemon starts it, the rules, the way in for the agent, the cost refusal, the kill.
+its refusal).
 
 It pauses once (`PAUSE`) until `/work/resume` exists, so that the host can look at the door's
 container from outside (`docker top`, `docker exec`, `docker stats`) while it runs.
@@ -47,12 +49,11 @@ from typing import Any
 
 from code_reviewer_runner.dynamic_review.config import new_proxy_capability
 from code_reviewer_runner.dynamic_review.model_door_route import (
-    MODEL_CONTROL_ADDRESS,
+    MODEL_AGENT_ADDRESS,
     MODEL_DOOR_ADDRESS,
     MODEL_NETWORK_NAME,
 )
-from code_reviewer_runner.dynamic_review.netguard import verify_confinement
-from code_reviewer_runner.dynamic_review.static_isolation import secure_startup, slot_ports
+from code_reviewer_runner.dynamic_review.static_isolation import slot_ports
 from code_reviewer_runner.implementer import docker_api
 from code_reviewer_runner.implementer.docker_api import DockerApi
 from code_reviewer_runner.implementer.door_launcher import (
@@ -60,6 +61,7 @@ from code_reviewer_runner.implementer.door_launcher import (
     RunningDoor,
     start_door,
 )
+from code_reviewer_runner.implementer.exec_run import run_exec
 from code_reviewer_runner.implementer.session import classify
 from code_reviewer_runner.implementer.startup import engine_user_can_open
 from code_reviewer_runner.job import JobError
@@ -126,21 +128,59 @@ class Checks:
         return ok
 
 
-def as_engine_user(
-    code: str, *arguments: str, text: str | None = None
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [PYTHON, "-I", "-c", code, *arguments],
-        input=text,
-        user=ENGINE_UID,
-        group=ENGINE_GID,
-        extra_groups=(),
-        capture_output=True,
-        text=True,
-        timeout=120.0,
-        env={"PATH": "/usr/local/bin:/usr/bin:/bin"},
-        check=False,
-    )
+STAND_IN_NAME = "code-reviewer-door-check-agent"
+
+
+class StandIn:
+    """The agent's place in this check: a plain container of the Worker image on the model network
+    at the agent's address (a Sysbox container cannot run in the CI lane), no capability, no mount,
+    no network but that one."""
+
+    def __init__(self, api: DockerApi, image: str) -> None:
+        self.api = api
+        self.container = api.create_container(
+            {
+                "Image": image,
+                "Entrypoint": ["/usr/bin/tini", "--", "/usr/bin/sleep", "infinity"],
+                "Cmd": [],
+                "User": "10001:10001",
+                "Env": [],
+                "NetworkingConfig": {
+                    "EndpointsConfig": {
+                        MODEL_NETWORK_NAME: {"IPAMConfig": {"IPv4Address": MODEL_AGENT_ADDRESS}}
+                    }
+                },
+                "HostConfig": {
+                    "NetworkMode": MODEL_NETWORK_NAME,
+                    "Privileged": False,
+                    "ReadonlyRootfs": True,
+                    "CapDrop": ["ALL"],
+                    "SecurityOpt": ["no-new-privileges:true"],
+                    "Memory": 128 * 1024 * 1024,
+                    "MemorySwap": 128 * 1024 * 1024,
+                    "PidsLimit": 64,
+                    "Tmpfs": {"/tmp": "rw,noexec,nosuid,nodev,size=8m"},
+                    "RestartPolicy": {"Name": "no"},
+                },
+            },
+            STAND_IN_NAME,
+        )
+        api.start_container(self.container)
+
+    def python(
+        self, code: str, *arguments: str, text: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        done = run_exec(
+            self.api,
+            self.container,
+            [VENV_PYTHON, "-I", "-c", code, *arguments],
+            stdin=None if text is None else text.encode(),
+            timeout=120.0,
+        )
+        return subprocess.CompletedProcess([], done.returncode, done.stdout, "")
+
+    def remove(self) -> None:
+        self.api.remove_container(self.container)
 
 
 def answer(done: subprocess.CompletedProcess[str]) -> dict[str, Any]:
@@ -266,8 +306,8 @@ def start(max_cost: float, port: int, provider: str = "anthropic") -> tuple[Runn
     return door, capability
 
 
-def call(capability: str, port: int) -> dict[str, Any]:
-    return answer(as_engine_user(CALL, MODEL_DOOR_ADDRESS, str(port), capability))
+def call(agent: StandIn, capability: str, port: int) -> dict[str, Any]:
+    return answer(agent.python(CALL, MODEL_DOOR_ADDRESS, str(port), capability))
 
 
 def the_container(checks: Checks, api: DockerApi, capability: str) -> None:
@@ -303,24 +343,23 @@ def the_container(checks: Checks, api: DockerApi, capability: str) -> None:
     )
 
 
-def the_engine_user(checks: Checks, door: RunningDoor, capability: str, port: int) -> None:
-    try:
-        verify_confinement(ENGINE_UID, ENGINE_GID, port, allowed_host=MODEL_DOOR_ADDRESS)
-        checks.say("engine_user_reaches_the_door_and_nothing_else", True)
-    except Exception as error:  # the probe says what it found
-        checks.say("engine_user_reaches_the_door_and_nothing_else", False, error=str(error)[:200])
+def the_stand_in(
+    checks: Checks, agent: StandIn, door: RunningDoor, capability: str, port: int
+) -> None:
     elsewhere = (
         ("door_other_port", MODEL_DOOR_ADDRESS, 8080),
         ("door_ssh_port", MODEL_DOOR_ADDRESS, 22),
-        ("loopback_proxy_port", "127.0.0.1", port),
         ("internet", "1.1.1.1", 443),
         ("vm_gateway", "172.17.0.1", 23456),
+        ("model_network_gateway", "10.213.77.1", 22),
     )
+    got = agent.python(REACH, MODEL_DOOR_ADDRESS, str(port)).stdout.strip()
+    checks.say("agent_reaches_the_door", got == "reached", got=got)
     for label, address, where in elsewhere:
-        got = as_engine_user(REACH, address, str(where)).stdout.strip()
-        checks.say(f"engine_user_refused_{label}", got.startswith("refused"), got=got)
+        got = agent.python(REACH, address, str(where)).stdout.strip()
+        checks.say(f"agent_refused_{label}", got.startswith("refused"), got=got)
     if not OFFLINE:
-        outcome = call(capability, port)
+        outcome = call(agent, capability, port)
         # The provider answers the made-up key with a refusal: out and back works, at no cost.
         checks.say(
             "call_through_the_door_reaches_the_provider",
@@ -335,13 +374,13 @@ def the_engine_user(checks: Checks, door: RunningDoor, capability: str, port: in
             upstream_error=None if seen is None else seen.upstream_error,
             calls=None if seen is None else seen.usage["aiCalls"],
         )
-    wrong = call("not-the-capability-" + "x" * 30, port)
+    wrong = call(agent, "not-the-capability-" + "x" * 30, port)
     checks.say(
         "call_without_the_capability_is_refused", wrong.get("status") in REFUSED_STATUSES, **wrong
     )
-    looked = answer(as_engine_user(LOOK, text=KEY))
+    looked = answer(agent.python(LOOK, text=KEY))
     checks.say(
-        "key_is_nowhere_the_engine_user_can_read",
+        "key_is_nowhere_the_agent_can_read",
         looked.get("found") == [],
         **looked,
     )
@@ -424,19 +463,38 @@ def the_door_has_no_ipv6(checks: Checks, api: DockerApi) -> None:
     )
 
 
-def the_door_opens_nothing_into_the_model_network(checks: Checks, api: DockerApi) -> None:
+LISTEN = r"""
+import socket, sys, time
+listener = socket.socket()
+listener.bind((sys.argv[1], int(sys.argv[2])))
+listener.listen(8)
+time.sleep(60)
+"""
+
+
+def the_door_opens_nothing_into_the_model_network(
+    checks: Checks, api: DockerApi, agent: StandIn
+) -> None:
     image = str(api.inspect_container(socket.gethostname()).get("Image", ""))
-    for label, port in (("a_port", 0), ("dns_port", 53)):
-        with socket.socket() as listener:
-            listener.bind((MODEL_CONTROL_ADDRESS, port))
-            listener.listen(8)
-            where = int(listener.getsockname()[1])
-            reaches = connect_from(api, image, MODEL_NETWORK_NAME, MODEL_CONTROL_ADDRESS, where)
-            from_door = connect_from(
-                api, image, f"container:{DOOR_CONTAINER_NAME}", MODEL_CONTROL_ADDRESS, where
-            )
+    for label, port in (("a_port", 18080), ("dns_port", 53)):
+        # A listener at the agent's address, started in the stand-in (detached).
+        made = api.create_exec(
+            agent.container,
+            {
+                "Cmd": [VENV_PYTHON, "-I", "-c", LISTEN, MODEL_AGENT_ADDRESS, str(port)],
+                "AttachStdin": False,
+                "AttachStdout": False,
+                "AttachStderr": False,
+            },
+        )
+        api.start_exec_detached(made)
+        time.sleep(0.8)
+        reaches = connect_from(api, image, MODEL_NETWORK_NAME, MODEL_AGENT_ADDRESS, port)
+        from_door = connect_from(
+            api, image, f"container:{DOOR_CONTAINER_NAME}", MODEL_AGENT_ADDRESS, port
+        )
         checks.say(
-            f"door_namespace_cannot_open_a_connection_to_control_{label}",
+            f"door_namespace_cannot_open_a_connection_to_the_agent_{label}",
             reaches == CONNECTED and from_door == DROPPED,
             outside_the_rules=reaches,
             in_the_door=from_door,
@@ -451,9 +509,6 @@ def main() -> int:
     checks = Checks()
     ports = slot_ports(dict(os.environ))
     started = time.monotonic()
-    setup = secure_startup(ENGINE_UID, ports)
-    checks.say("startup", setup.rules_installed, mode=setup.mode.value, door=ports.door)
-
     path = docker_api.DOCKER_SOCKET
     checks.say("docker_socket", DockerApi().ping(), path=path, mode=oct(os.stat(path).st_mode))
     # The production function of the start-up check, not a copy of its probe.
@@ -472,10 +527,12 @@ def main() -> int:
         steps=STEPS[:],
     )
     api = DockerApi()
+    image = str(api.inspect_container(socket.gethostname()).get("Image", ""))
+    agent = StandIn(api, image)
     the_container(checks, api, capability)
     the_door_has_no_ipv6(checks, api)
-    the_engine_user(checks, door, capability, ports.proxy)
-    the_door_opens_nothing_into_the_model_network(checks, api)
+    the_stand_in(checks, agent, door, capability, ports.proxy)
+    the_door_opens_nothing_into_the_model_network(checks, api, agent)
 
     if not OFFLINE:
         # The host looks at the door from outside while it runs (`docker top`, `docker exec`, ...).
@@ -483,11 +540,14 @@ def main() -> int:
         end = time.monotonic() + 600
         while not Path("/work/resume").exists() and time.monotonic() < end:
             time.sleep(0.5)
+    # The agent goes first, as in a turn: a network with a member is not removed.
+    agent.remove()
     door.stop()
     checks.say("door_stop", door.state.end is not None and not door.state.end.unexpected)
 
     low, capability = start(0.000001, ports.proxy)
-    refusal = call(capability, ports.proxy)
+    agent = StandIn(api, image)
+    refusal = call(agent, capability, ports.proxy)
     time.sleep(0.5)
     failure = low.state.failure()
     checks.say(
@@ -499,6 +559,7 @@ def main() -> int:
         failure=None if failure is None else [failure.code.value, failure.detail],
         model_used=low.state.model_used,
     )
+    agent.remove()
     low.stop()
 
     victim, capability = start(2.5, ports.proxy)

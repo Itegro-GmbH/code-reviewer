@@ -198,6 +198,8 @@ export const ERROR_CODE_CLASSES = {
   git_write_not_granted: "free",
   implementer_engine_unavailable: "free",
   implementer_config_invalid: "free",
+  sandbox_unproven: "free",
+  sandbox_size_unsupported: "free",
   agent_gave_up: AI_COST_FAILURE_CLASS,
   push_rejected: AI_COST_FAILURE_CLASS,
   branch_violation: AI_COST_FAILURE_CLASS,

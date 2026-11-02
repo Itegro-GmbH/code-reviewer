@@ -419,7 +419,7 @@ describe("a Sandbox-Launcher with the probe endpoint over its canary VM (#479)",
 // #765: a deployment that serves the Implementer has the canary prove it, in a container of the Implementer's profile.
 describe("the canary VM of a deployment that serves the Implementer (#765)", () => {
   const WITH_IMPLEMENTER = `${JSON.stringify({ version: 1, engines: ["pr-agent", "opencode", "implementer"], reasons: [] })}\n`;
-  const WITHOUT_IMPLEMENTER = `${JSON.stringify({ version: 1, engines: ["pr-agent", "opencode"], reasons: ["implementer_work_dir_not_exec"] })}\n`;
+  const WITHOUT_IMPLEMENTER = `${JSON.stringify({ version: 1, engines: ["pr-agent", "opencode"], reasons: ["implementer_sysbox_missing"] })}\n`;
   const implementerCall = () =>
     service.execs.find((call) => call.label === "probe-implementer");
 
@@ -482,7 +482,7 @@ describe("the canary VM of a deployment that serves the Implementer (#765)", () 
       "implementer",
     ]);
     expect(refused?.engines).toStrictEqual(["pr-agent", "opencode"]);
-    expect(refused?.reasons).toStrictEqual(["implementer_work_dir_not_exec"]);
+    expect(refused?.reasons).toStrictEqual(["implementer_sysbox_missing"]);
   });
 
   it("does not let a failure of the Dynamic container be hidden by the Implementer's", async () => {

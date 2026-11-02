@@ -32,12 +32,10 @@
         "ripgrep_checksum_mismatch",
         "network_probe_failed",
         "implementer_git_missing",
-        "implementer_setpriv_missing",
-        "implementer_egress_rules_missing",
         "implementer_work_dir_missing",
-        "implementer_work_dir_not_prepared",
-        "implementer_work_dir_not_exec",
         "implementer_docker_unavailable",
+        "implementer_sysbox_missing",
+        "implementer_agent_image_missing",
         "implementer_docker_socket_open",
         "implementer_probe_failed"
       ]

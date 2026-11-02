@@ -274,7 +274,7 @@ could become a flag, with the stable codes of `CONTAINER_ERROR_CODES`.
   and the Dynamic-Worker then needs IPv6 off from the container spec. The shared spec does not have them
   (a full-mode host behaves as before); the default is no additions.
 - **The Implementer's profile (#760).** `IMPLEMENTER_CONTAINER_SPEC` (`ImplementerContainerSpec` of the contract) is the
-  default spec with a `workVolume` (`/work`, `rw,nosuid,nodev`, a named volume), `3g`/`2560m` memory, 2048 pids and the three
+  default spec with a `workVolume` (`/work`, `rw,nosuid,nodev`, a named volume), `768m`/`512m` memory, 2048 pids and the four
   `RUNNER_IMPLEMENTER_*` names. A spec with a `workVolume` key is checked as the profile (exact values, the floor shared),
   every other as the default one; `RenderOptions.workVolume` names the volume (required by the profile, refused by the
   default) and renders `--mount type=volume,source=<name>,target=/work`. `workVolumeCommands` returns the root steps that make
@@ -368,7 +368,7 @@ configuration both kinds get 1 vCPU / 2 GB and a container limit of `1536m` (res
 for `dockerd` and the OS; a limit that leaves the VM less than 256 MiB is refused. The spike suggests 2 vCPU / 4 GB for
 the Dynamic-Worker; its real peak is not measured yet, so that is a configuration change, not a code change. A wrong
 value of Diff or Dynamic fails the deployment at start (`DISPATCHER_WORKER_CONFIG`), not the first job. The Implementer (#760) defaults to
-2 vCPU / 4 GB and a container limit of `3g` (reservation `2560m`); `DISPATCHER_WORKER_CONFIG.implementer` overrides each value,
+2 vCPU / 4 GB and a container limit of `768m` (reservation `512m`; the agent's container gets the rest of the VM, `agentMemoryMb`); `DISPATCHER_WORKER_CONFIG.implementer` overrides each value,
 and a wrong value of it never stops the Dispatcher from starting: a
 deployment that serves the kind logs `worker_config_invalid` at start, and every launch of the kind is refused with
 `sandbox_config_invalid` until the value is corrected (a deployment that does not serve the kind does not read the entry). **The same value also fails the canary of a deployment that serves the kind** (the canary cannot size the Implementer's VM: its half is `implementer_probe_failed` and `POST /probe` is `503`), so the release of that deployment, code-review.com's included when it serves the kind, is blocked until the value is corrected. Its container is the profile `IMPLEMENTER_CONTAINER_SPEC` (next section), and its launch makes the work

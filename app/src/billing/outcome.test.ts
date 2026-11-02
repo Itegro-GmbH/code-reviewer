@@ -535,6 +535,8 @@ describe("the failures that incurred AI cost", () => {
       "git_write_not_granted",
       "implementer_engine_unavailable",
       "implementer_config_invalid",
+      "sandbox_unproven",
+      "sandbox_size_unsupported",
     ] as const) {
       expect(AI_COST_FAILURE_CODES, code).not.toContain(code);
       expect(ERROR_CODE_CLASSES[code], code).toBe("free");

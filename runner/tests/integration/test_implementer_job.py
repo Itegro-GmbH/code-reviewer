@@ -36,12 +36,10 @@ from code_reviewer_runner.capabilities import (
     ENGINES_VARIABLE,
 )
 from code_reviewer_runner.dynamic_review.budget import BudgetLedger, UnitCosts
-from code_reviewer_runner.dynamic_review.static_isolation import ImplementerNetwork
 from code_reviewer_runner.implementer import session as session_module
 from code_reviewer_runner.implementer.agent import AgentTurn
-from code_reviewer_runner.implementer.egress_config import EgressSettings
+from code_reviewer_runner.implementer.door_state import DoorState
 from code_reviewer_runner.implementer.git_workspace import (
-    AgentUser,
     BranchPush,
     GitIdentity,
     GitWorkspace,
@@ -57,7 +55,8 @@ from code_reviewer_runner.implementer.job_run import (
     TurnSetup,
     run_implementer_job,
 )
-from code_reviewer_runner.implementer.session import SessionSeams, agent_limits
+from code_reviewer_runner.implementer.limits import agent_limits
+from code_reviewer_runner.implementer.session import SessionSeams
 from code_reviewer_runner.job import JobError
 from code_reviewer_runner.job_loop.host import IMPLEMENTER_TERMINATE_GRACE_SECONDS
 from code_reviewer_runner.job_loop.settings import WorkerSettings
@@ -102,9 +101,9 @@ class FakeGit(GitWorkspace):
             WorkspaceSpec(
                 "https://github.com/acme/widgets.git", TOKEN, "main", "implementer/a1b2c3"
             ),
-            WorkspaceLayout(agent_home=base / "home", work_dir=base / "work", run_dir=base / "run"),
-            AgentUser(os.geteuid() or 1, os.getegid() or 1),
+            WorkspaceLayout(work_dir=base / "work", run_dir=base / "run"),
             GitIdentity("code-reviewer Implementer", "i@example.invalid"),
+            cast("Any", None),  # the reader: every command that would use it is replaced below
             before_push=before_push,
         )
         self._start: str | None = START
@@ -124,7 +123,6 @@ class FakeGit(GitWorkspace):
         self.rescue_name: str | None = None
         self.dropped: tuple[int, int] = (0, 0)
         self.form_gone = False
-        self.sweeps = 0
         self._prepare_error: JobError | None = None
 
     def fail_prepare(self, error: JobError) -> None:
@@ -164,14 +162,6 @@ class FakeGit(GitWorkspace):
         self.events.append("rescue")
         return self.rescue_name
 
-    def sweep_engine_user(self) -> bool:
-        self.events.append("sweep")
-        self.sweeps += 1
-        return True
-
-    def engine_inputs_present(self) -> list[str]:
-        return []
-
     def push_all(
         self, *, seconds: float, confirm_seconds: float = 0.0, confirm_pause: float = 0.0
     ) -> Any:
@@ -192,7 +182,6 @@ class FakeGit(GitWorkspace):
             mine.form_head = self.tip
             mine.form_ref = "refs/runner/in/0"
             self._ask_lease(deadline, confirm_seconds, confirm_pause)
-            self.sweep_engine_user()
             self.events.append("push")
             self.pushes.append(self.tip)
             mine.branches.append(BranchPush(self.spec.branch, self.tip, True, None))
@@ -204,6 +193,28 @@ class FakeGit(GitWorkspace):
             self.pushes.append(sha)
             mine.branches.append(BranchPush(name, sha, True, None))
         return self.push_report()
+
+
+@dataclass
+class FakePlace:
+    """The agent's container of the test: it exists and goes away, and holds nothing."""
+
+    def create(self) -> None:
+        return None
+
+    def stop(self) -> bool:
+        return True
+
+
+class FakeDoor:
+    """The model door of the test: what `RunningDoor` offers the session, with nothing behind it."""
+
+    def __init__(self) -> None:
+        self.state = DoorState()
+        self.url = "http://10.213.77.2:10180"
+
+    def stop(self) -> None:
+        return None
 
 
 @dataclass
@@ -223,7 +234,7 @@ class FakeAgent:
     def ledger(self) -> Any:
         return self.options["ledger"]
 
-    def start(self) -> None:
+    def start(self, port: int = 0) -> None:
         self.events.append("agent.start")
         self.session_id = "ses_fake"
 
@@ -244,7 +255,7 @@ class FakeAgent:
         return AgentTurn(text=self.script(self, check), note="end")
 
     def stop(self, *, quick: bool = False) -> bool:
-        self.events.append("stop(quick)" if quick else "stop")
+        self.events.append("stop" if quick else "stop")
         self.stopped.append(quick)
         return self.ends_clean
 
@@ -323,6 +334,8 @@ def environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
             monkeypatch.delenv(name)
     monkeypatch.setenv(ENGINES_VARIABLE, f"{ENGINE_DIFF},{ENGINE_DYNAMIC},{ENGINE_IMPLEMENTER}")
     monkeypatch.setenv("RUNNER_JOB_TIMEOUT_SECONDS", "600")
+    monkeypatch.setenv("RUNNER_IMPLEMENTER_SANDBOX_PROOF", "proven")
+    monkeypatch.setenv("RUNNER_IMPLEMENTER_AGENT_MEMORY_MB", "2560")
     yield
 
 
@@ -370,9 +383,7 @@ def play(
             if configure is not None:
                 configure(git)
             made.append(git)
-            return TurnSetup(
-                git, None, ("opencode",), None, EgressSettings(ImplementerNetwork.NONE, None)
-            )
+            return TurnSetup(git, FakePlace, ("opencode",))
 
         def agent_factory(**options: Any) -> FakeAgent:
             agent = FakeAgent(script, events, made[0], options, ends_clean=ends_clean)
@@ -380,10 +391,10 @@ def play(
             return agent
 
         monkeypatch.setattr(session_module, "ImplementerAgent", agent_factory)
+        monkeypatch.setattr(session_module, "start_door", lambda **options: FakeDoor())
         seams = JobSeams(
             setup=setup,
             session_seams=SessionSeams(
-                upstream_for=lambda _url: cast("Any", object()),
                 confirm_seconds=confirm_seconds,
                 confirm_pause=0.05,
                 lease_poll_seconds=0.05,
@@ -453,7 +464,7 @@ def test_a_job_in_and_a_valid_result_out_with_the_commit_pushed_once(play: Any) 
     assert result["implementer"]["opencode"]["sessionId"] == "ses_fake"
     assert result["usage"]["aiCalls"] >= 1
     assert turn.git.pushes == [TIP]
-    assert turn.events == ["agent.start", "turn", "stop", "rescue", "sweep", "push"]
+    assert turn.events == ["agent.start", "turn", "stop", "rescue", "push"]
     assert turn.git.prepared
 
 
@@ -639,8 +650,7 @@ def test_a_bug_after_the_model_was_used_is_never_the_free_runner_error(
 ) -> None:
     def setup(job: Any, env: Any, gate: Callable[[], None]) -> TurnSetup:
         git = FakeGit(tmp_path, gate)
-        egress = EgressSettings(ImplementerNetwork.NONE, None)
-        return TurnSetup(git, None, ("opencode",), None, egress)
+        return TurnSetup(git, FakePlace, ("opencode",))
 
     seams = JobSeams(setup=setup, session=SpentSession)
     monkeypatch.setattr(runner, "run_implementer_job", partial(run_implementer_job, seams=seams))
@@ -927,7 +937,7 @@ def test_sigterm_ends_the_engine_pushes_what_is_committed_and_reports_runner_shu
     assert turn.git.pushes == [TIP]
     # The engine first (quickly: seconds, not minutes), then the push, nothing in between: the
     # leftover is not committed on a stop.
-    assert turn.events == ["agent.start", "turn", "stop(quick)", "rescue", "sweep", "push"]
+    assert turn.events == ["agent.start", "turn", "stop", "rescue", "push"]
     assert result["implementer"]["pushed"] is True
     assert result["implementer"]["headCommit"] == TIP
     assert valid_result(result)
@@ -1103,7 +1113,9 @@ def test_work_saved_from_a_detached_head_is_in_the_summary_and_the_notes(play: A
     assert turn.events[:4] == ["agent.start", "turn", "stop", "rescue"]
 
 
-def test_the_agents_user_is_swept_again_after_the_leftover_and_before_the_push(play: Any) -> None:
+def test_the_leftover_is_committed_after_the_agents_container_is_gone_and_before_the_push(
+    play: Any,
+) -> None:
     turn = play(commits_then_ends(), dirty=True)
 
     assert turn.events == [
@@ -1113,12 +1125,11 @@ def test_the_agents_user_is_swept_again_after_the_leftover_and_before_the_push(p
         "stop",
         "rescue",
         "commit_all",
-        "sweep",
         "push",
     ]
 
 
-def test_when_the_agents_processes_could_not_all_be_ended_nothing_is_committed_as_that_user(
+def test_when_the_agents_container_is_not_confirmed_gone_nothing_is_committed(
     play: Any,
 ) -> None:
     def script(agent: FakeAgent, check: Callable[[], None]) -> str:
