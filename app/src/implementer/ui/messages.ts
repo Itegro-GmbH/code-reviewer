@@ -51,7 +51,7 @@ export const FORM_COPY = {
     "A size and a setup script for this task. Without a choice the standard applies. Environments are managed under",
   environmentLink: "Environments",
   environmentScriptNote:
-    "This environment runs its setup script once before the agent starts. It counts into the task's time limit, and a failing script ends the task without a model call.",
+    "This environment has a setup script, and setup scripts do not run yet. A task started with it will not run: it ends with an error before the AI model is called, and is not charged. Choose the standard or an environment without a script.",
   environmentLoadFailed:
     "The environments could not be loaded. A task can still be sent with the standard.",
   environmentStandard: "Standard (2 vCPU, 4 GB, no setup script)",

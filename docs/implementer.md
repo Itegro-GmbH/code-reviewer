@@ -139,7 +139,7 @@ capability `implementer`, anywhere else the path is a 404 like an unknown one).
   done with it when a task starts, and the page says so.
 - **Names** are unique within a workspace, whatever the case.
 - **The form** has an optional picker "Environment". It lists the standard first and then the environments with their size. A task
-  that names none is the task of before.
+  that names none is the task of before. The picker loads `GET /api/w/<slug>/environments?view=picker`, the list without the scripts (only whether there is one), so opening the form does not pull up to 50 scripts of 64 KB. An environment with a script is marked on the form as one that cannot run a task yet (setup scripts do not run yet).
 - **The task keeps its own copy.** When the task is sent, its turn copies the environment's name, size and script (`implementer_turns.environment_*`, no foreign key).
   Changing or deleting the environment later touches no running or past task, and sending the same request again after the environment
   was deleted still gives the first task back. The Runs page shows which environment and size a task used.
