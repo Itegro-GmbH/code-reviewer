@@ -1,10 +1,11 @@
 {
-  "description": "The sizes and limits of an Implementer environment (#818): the VM sizes of the platform, the ones an environment may name, the memory the agent's container gets at each, and the bounds of the setup script. A data file: no schema, nothing refers to it. The Dispatcher (SANDBOX_VCPUS, agentMemoryMb and IMPLEMENTER_MIN_AGENT_MEMORY_MB in dispatcher/src/launchers/sandbox.ts) and the app (app/src/implementer/environments/limits.ts) each keep a typed copy that a test compares with this file. A size an environment names is launched only if it is in `vcpus` and leaves the agent at least `minAgentMemoryMb`: 1 vCPU is a size of the platform (reviews run on it) and leaves the agent nothing, so an environment cannot name it and a task whose environment still has it is refused.",
+  "description": "The sizes and limits of an Implementer environment (#818): the VM sizes of the platform, the ones an environment may name, the memory the agent's container gets at each (the VM less the OS, Control, the door, the two readers and the part of the memory guard's floor above 512 MiB, `memoryGuard`: the runner's `vm_memory.py` holds the same two figures), and the bounds of the setup script. A data file: no schema, nothing refers to it. The Dispatcher (SANDBOX_VCPUS, agentMemoryMb and IMPLEMENTER_MIN_AGENT_MEMORY_MB in dispatcher/src/launchers/sandbox.ts) and the app (app/src/implementer/environments/limits.ts) each keep a typed copy that a test compares with this file. A size an environment names is launched only if it is in `vcpus` and leaves the agent at least `minAgentMemoryMb`: 1 vCPU is a size of the platform (reviews run on it) and leaves the agent nothing, so an environment cannot name it and a task whose environment still has it is refused.",
   "vcpus": [1, 2, 4, 6, 8],
   "environmentVcpus": [2, 4, 6, 8],
   "memoryPerVcpuMb": 2048,
   "minAgentMemoryMb": 1024,
-  "agentMemoryMb": { "1": 0, "2": 2048, "4": 6144, "6": 10240, "8": 14336 },
+  "agentMemoryMb": { "1": 0, "2": 2048, "4": 6000, "6": 9768, "8": 13537 },
+  "memoryGuard": { "minFloorMb": 512, "floorPercent": 8 },
   "defaultVcpus": 2,
   "setupScript": {
     "maxBytes": 65536,

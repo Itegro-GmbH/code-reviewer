@@ -12,28 +12,45 @@ one a reader with `DAC_READ_SEARCH` as the VM's root could use to read and write
 system, is refused. The refusal under `runc` is the missing capability; the one under Sysbox is
 the user namespace (a VM only proves that one: this lane's `runc` has none)."""
 
+import contextlib
+import json
 import os
+import subprocess
 import time
 from pathlib import Path
+from typing import Any, cast
 
+import lane_support
+import pytest
 from fakes.wire.formats import Turn
 from lane_support import (
     BRANCH,
+    LaneWorkspace,
     bash,
     docker,
+    lane_config,
     lane_turn,
     lane_workspace,
+    model_network,
     says,
     wait_for,
     write_file,
 )
 from opencode_native import REAL_KEY
 
+from code_reviewer_runner.dynamic_review.static_isolation import slot_ports
+from code_reviewer_runner.implementer.agent_container import (
+    AGENT_CONTAINER_NAME,
+    AgentContainer,
+    AgentSeams,
+)
 from code_reviewer_runner.implementer.git_workspace import LEFTOVER_MESSAGE
 from code_reviewer_runner.implementer.reader import (
     READER_CONTAINER_NAME,
+    READER_DROP_CAPABILITIES,
     READER_WRITER_CONTAINER_NAME,
 )
+from code_reviewer_runner.job import JobError
 from git_support import TOKEN, raw
 
 SHOCKER = r"""
@@ -327,3 +344,459 @@ def test_a_daemon_the_leftover_commit_starts_in_a_reader_is_gone_when_the_turn_h
         mark = (turned.workspace.repo / DAEMON_MARK).read_text()
         time.sleep(0.5)
         assert (turned.workspace.repo / DAEMON_MARK).read_text() == mark, "nothing writes any more"
+
+
+# -- what the agent plants in `.git` and in the tree, against the real reader (#745, step 6) ------
+#
+# Control never opens a path in the agent's repository: the reader does, a container with no
+# network, no token and no other mount. So what a hostile repository can do is bounded by the
+# reader: it may fail a command (a named outcome, never a hang of the turn), and it must not make
+# the commit or the push carry anything that is not the agent's own tree.
+
+
+@pytest.fixture(autouse=True)
+def small_reserve(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every workspace of the lane allocates a reserve disk that stays on the machine until the run
+    ends (the mount is held by the Docker daemon); this file makes many, so each gets the least
+    the runner accepts (it wants 256 MiB free on it) and not the lane's 512 MiB."""
+    monkeypatch.setattr(lane_support, "RESERVE_MEGABYTES", 320)
+
+
+SCRATCH_ROOTS = {
+    "etc",
+    "usr",
+    "opt",
+    "proc",
+    "sys",
+    "bin",
+    "lib",
+    "lib64",
+    "var",
+    "dev",
+    "run",
+    "tmp",
+    "sbin",
+    "home",
+    "root",
+}
+# A string that is in the reader's own /etc/passwd and in no file of the agent's tree.
+READER_ONLY = "root:x:0:0"
+
+
+def commit_before(lane: LaneWorkspace, name: str = "before.txt") -> str:
+    """What the agent committed before it turned hostile."""
+    repo = lane.workspace.repo
+    (repo / name).write_text("committed before\n")
+    git = lane.workspace.git
+    raw("add", "-A", cwd=repo, git=git)
+    raw(
+        "-c", "user.name=a", "-c", "user.email=a@example.invalid", "commit", "-qm", "Before",
+        cwd=repo, git=git,
+    )  # fmt: skip
+    return raw("rev-parse", "HEAD", cwd=repo, git=git)
+
+
+def pushed_entries(lane: LaneWorkspace, branch: str = BRANCH) -> list[str]:
+    """`<mode> <path>` of every entry of the tree that arrived at the origin."""
+    tip = lane.origin.tip(branch)
+    if tip is None:
+        return []
+    listing = raw("ls-tree", "-r", tip, cwd=lane.origin.path, git=lane.origin.git)
+    return [f"{line.split()[0]} {line.split(chr(9), 1)[1]}" for line in listing.splitlines()]
+
+
+def origin_holds(lane: LaneWorkspace, needle: str, branch: str = BRANCH) -> bool:
+    tip = lane.origin.tip(branch)
+    if tip is None:
+        return False
+    done = subprocess.run(
+        [lane.origin.git, "-C", str(lane.origin.path), "grep", "-q", "-F", needle, tip],
+        capture_output=True,
+        check=False,
+    )
+    return done.returncode == 0
+
+
+def finish(
+    lane: LaneWorkspace, *, commit_seconds: float, push_seconds: float
+) -> tuple[bool, float]:
+    """The end of a turn as the runner does it for the repository: the leftover commit (a failure is
+    noted, not raised), the readers made quiet, the push. Returns whether the commit worked and
+    how long it all took."""
+    began = time.monotonic()
+    committed = True
+    try:
+        lane.workspace.commit_all(seconds=commit_seconds)
+    except JobError:
+        committed = False
+    assert lane.workspace.quiet_readers(seconds=30.0) is True
+    lane.workspace.push_all(seconds=push_seconds)
+    return committed, time.monotonic() - began
+
+
+def processes_in(reader: str) -> int:
+    return len([name for name in in_reader(reader, "ls /proc").split() if name.isdigit()])
+
+
+# #745-S6-01
+def test_a_worktree_pointed_outside_the_repository_never_carries_the_readers_files(
+    tmp_path: Path,
+) -> None:
+    with lane_workspace(tmp_path) as lane:
+        commit_before(lane)
+        with (lane.workspace.repo / ".git" / "config").open("a") as config:
+            config.write("[core]\n\tworktree = /\n")
+        (lane.workspace.repo / "agent-file.txt").write_text("the agent's change\n")
+
+        committed, _ = finish(lane, commit_seconds=40.0, push_seconds=60.0)
+
+        entries = pushed_entries(lane)
+        names = [entry.split(" ", 1)[1] for entry in entries]
+        # The reader's own root file system is not the agent's tree: not one of its directories
+        # (nor its /etc/passwd) is in what arrived.
+        assert not [n for n in names if n.split("/")[0] in SCRATCH_ROOTS], names[:10]
+        assert not origin_holds(lane, READER_ONLY)
+        # What the agent committed before arrived. The leftover commit may fail (the agent made git
+        # look somewhere else): if it worked it holds the agent's file and nothing else.
+        assert "before.txt" in names, names[:10]
+        assert not committed or "agent-file.txt" in names, (committed, names[:10])
+
+
+# #745-S6-02
+def test_symlinks_the_agent_plants_are_committed_as_links_and_never_followed(
+    tmp_path: Path,
+) -> None:
+    with lane_workspace(tmp_path) as lane:
+        repo = lane.workspace.repo
+        commit_before(lane)
+        for name, target in {
+            "to-passwd": "/etc/passwd",
+            "to-root": "/",
+            "to-parent": "../../../..",
+            "to-itself": "to-itself",
+            "to-work": "/work",
+        }.items():
+            (repo / name).symlink_to(target)
+        # Files git reads for its own rules, as links to a file of the reader.
+        (repo / ".gitignore").symlink_to("/etc/passwd")
+        (repo / ".gitattributes").symlink_to("/etc/passwd")
+        (repo / "dir").mkdir()
+        (repo / "dir" / ".gitignore").symlink_to("/etc/shadow")
+
+        committed, _ = finish(lane, commit_seconds=40.0, push_seconds=60.0)
+
+        entries = pushed_entries(lane)
+        links = {e.split(" ", 1)[1] for e in entries if e.startswith("120000")}
+        assert committed
+        assert {"to-passwd", "to-root", "to-parent", "to-itself", "to-work"} <= links, entries
+        # A link is committed as its target text; the file behind it never was read.
+        assert not origin_holds(lane, READER_ONLY)
+        tip = lane.origin.tip(BRANCH) or ""
+        assert (
+            raw("cat-file", "-p", f"{tip}:to-passwd", cwd=lane.origin.path, git=lane.origin.git)
+            == "/etc/passwd"
+        )
+
+
+def plant_fifo_as_config(repo: Path) -> None:
+    config = repo / ".git" / "config"
+    config.unlink()
+    os.mkfifo(config)
+
+
+def plant_fifo_as_head(repo: Path) -> None:
+    head = repo / ".git" / "HEAD"
+    head.unlink()
+    os.mkfifo(head)
+
+
+def plant_garbage_head(repo: Path) -> None:
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/../../../../etc/passwd\n")
+
+
+def plant_alternates(repo: Path) -> None:
+    info = repo / ".git" / "objects" / "info"
+    info.mkdir(parents=True, exist_ok=True)
+    (info / "alternates").write_text("/proc\n/etc\n../../../..\n/repo/../../\n")
+
+
+def plant_symlink_refs(repo: Path) -> None:
+    heads = repo / ".git" / "refs" / "heads"
+    (heads / "evil-passwd").symlink_to("/etc/passwd")
+    (heads / "evil-environ").symlink_to("/proc/self/environ")
+    (heads / "evil-loop").symlink_to("evil-loop")
+
+
+def plant_packed_refs_garbage(repo: Path) -> None:
+    (repo / ".git" / "packed-refs").write_text(
+        "# pack-refs\nnot a sha refs/heads/x\n\x00\x01\x02\n"
+    )
+
+
+def plant_worktrees_and_modules(repo: Path) -> None:
+    """Pointers the repository's own layout can hold: a linked worktree whose gitdir is a file of
+    the reader, and a module whose path is outside."""
+    git_dir = repo / ".git" / "worktrees" / "evil"
+    git_dir.mkdir(parents=True)
+    (git_dir / "gitdir").write_text("/etc/passwd\n")
+    (git_dir / "HEAD").write_text("ref: refs/heads/main\n")
+    (repo / ".git" / "commondir").write_text("/\n")
+
+
+# Each hostile layout, and whether the repository can still be read afterwards (measured on a
+# VM, 2026-11-03). A HEAD that points nowhere is an unborn branch to git and the branches are
+# listed and pushed all the same; garbage in packed-refs, a `commondir` and a FIFO where git
+# reads its config or HEAD make the listing fail, which is the named outcome `unreadable` (the
+# FIFOs after the limit of 20 s of the listing, the others at once).
+HOSTILE_LAYOUTS = [
+    ("alternates_to_the_readers_files", plant_alternates, True),
+    ("symlinked_refs_to_files_of_the_reader", plant_symlink_refs, True),
+    ("garbage_packed_refs", plant_packed_refs_garbage, False),
+    ("garbage_head", plant_garbage_head, True),
+    ("worktree_and_commondir_pointers", plant_worktrees_and_modules, False),
+    ("fifo_as_config", plant_fifo_as_config, False),
+    ("fifo_as_head", plant_fifo_as_head, False),
+]
+
+
+# #745-S6-03
+# A regression that waits for a FIFO fails here, not at the job's limit.
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize(
+    ("planter", "readable"),
+    [pytest.param(p, r, id=i) for i, p, r in HOSTILE_LAYOUTS],
+)
+def test_a_hostile_git_directory_ends_the_end_of_the_turn_inside_its_limits_and_leaks_nothing(
+    tmp_path: Path, planter: object, readable: bool
+) -> None:
+    with lane_workspace(tmp_path) as lane:
+        commit_before(lane)
+        assert callable(planter)
+        planter(lane.workspace.repo)
+
+        committed, seconds = finish(lane, commit_seconds=8.0, push_seconds=25.0)
+
+        report = lane.workspace.push_report()
+        # Bounded: the three reads (commit 8 s, list 20 s, the reset) and nothing that waits for a
+        # FIFO or a loop for ever.
+        assert seconds < 90.0, seconds
+        # Nothing of the reader's files arrived, whatever else happened.
+        assert not origin_holds(lane, READER_ONLY)
+        names = [e.split(" ", 1)[1] for e in pushed_entries(lane)]
+        assert not [n for n in names if n.split("/")[0] in SCRATCH_ROOTS]
+        if readable:
+            assert report.listed and lane.origin.tip(BRANCH) is not None, (committed, report)
+            assert "before.txt" in names
+        else:
+            # An unreadable repository is the named outcome `unreadable`: nothing was listed, so no
+            # branch was pushed and nothing arrived.
+            assert not report.listed and report.list_problem == "unreadable", report
+            assert not report.pushed_any and not report.branches, report
+            assert lane.origin.tip(BRANCH) is None and names == [], (committed, names)
+        # No process of the hostile command is left behind once the readers were made quiet (the
+        # last list of the push may be blocked in the reader that was made quiet before it): only
+        # the init, its sleep and the command that counts.
+        assert lane.workspace.quiet_readers(seconds=30.0) is True
+        for reader in (READER_CONTAINER_NAME, READER_WRITER_CONTAINER_NAME):
+            assert processes_in(reader) <= 4, reader
+
+
+# #745-S6-04
+# A regression that waits for the huge file fails here, not at the job's limit.
+@pytest.mark.timeout(120)
+def test_a_file_too_big_to_hash_in_the_time_is_a_failed_commit_and_the_earlier_work_still_arrives(
+    tmp_path: Path,
+) -> None:
+    with lane_workspace(tmp_path) as lane:
+        commit_before(lane)
+        with (lane.workspace.repo / "huge.bin").open("wb") as handle:
+            handle.truncate(1 << 40)  # 1 TiB of nothing: sparse, and git has to read all of it
+        (lane.workspace.repo / "small.txt").write_text("and a small one\n")
+
+        committed, seconds = finish(lane, commit_seconds=10.0, push_seconds=40.0)
+
+        assert not committed, (
+            "the leftover commit does not finish in 10 s and is said to have failed"
+        )
+        assert seconds < 70.0, seconds
+        # What the agent had committed arrives, and neither the huge file nor the small one that
+        # went with it in the same failed commit.
+        names = [e.split(" ", 1)[1] for e in pushed_entries(lane)]
+        assert "before.txt" in names and "huge.bin" not in names and "small.txt" not in names, names
+        for reader in (READER_CONTAINER_NAME, READER_WRITER_CONTAINER_NAME):
+            assert processes_in(reader) <= 4, reader
+
+
+# #745-S6-05
+def test_branch_names_that_would_be_options_or_commands_are_dropped_and_nothing_runs(
+    tmp_path: Path,
+) -> None:
+    with lane_workspace(tmp_path) as lane:
+        tip = commit_before(lane)
+        heads = lane.workspace.repo / ".git" / "refs" / "heads"
+        hostile = [
+            "--upload-pack=touch${IFS}pwned-by-name",
+            "-fexec=touch",
+            "+force",
+            "new\nline",
+            "a b",
+            "x;touch${IFS}pwned-by-name",
+            "$(touch${IFS}pwned-by-name)",
+            "tab\there",
+        ]
+        for name in hostile:
+            (heads / name).write_text(tip + "\n")
+        (heads / "fine-branch").write_text(tip + "\n")
+        # Give "fine-branch" something of its own so that it is worth pushing.
+        raw(
+            "update-ref",
+            "refs/heads/fine-branch",
+            tip,
+            cwd=lane.workspace.repo,
+            git=lane.workspace.git,
+        )
+
+        _, _ = finish(lane, commit_seconds=20.0, push_seconds=60.0)
+
+        # Names that are legal in git ("x;touch" and "$(touch)" are) arrive as the plain argument
+        # they are; a name that is an option or holds a space or a line end is dropped.
+        sent = set(lane.origin.branches())
+        legal = {
+            "refs/heads/fine-branch",
+            "refs/heads/x;touch${IFS}pwned-by-name",
+            "refs/heads/$(touch${IFS}pwned-by-name)",
+        }
+        # The legal ones arrive, under exactly the name they have (the doc's claim).
+        assert legal <= sent, sorted(legal - sent)
+        # None of the others arrives, under its own name or as the pieces a line end would split
+        # it into (`for-each-ref` prints one name per line).
+        dropped = {
+            f"refs/heads/{piece}"
+            for name in hostile
+            if f"refs/heads/{name}" not in legal
+            for piece in name.split("\n")
+        }
+        assert not (dropped & sent), sorted(dropped & sent)
+        # The commands those names spell would have created this file, in the repository (the
+        # reader's working directory) or where the tests run.
+        assert not (lane.workspace.repo / "pwned-by-name").exists()
+        assert not Path("pwned-by-name").exists()
+        for reader in (READER_CONTAINER_NAME, READER_WRITER_CONTAINER_NAME):
+            assert "pwned-by-name" not in in_reader(reader, "ls /tmp /repo")
+
+
+STATUS_FIELDS = ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb", "NoNewPrivs")
+
+
+def status_of(reader: str, *argv: str) -> dict[str, str]:
+    done = docker("exec", reader, *argv, "/bin/cat", "/proc/self/status", check=False)
+    fields: dict[str, str] = {}
+    for line in done.stdout.splitlines():
+        key, _, value = line.partition(":")
+        if key in STATUS_FIELDS:
+            fields[key] = value.strip()
+    return fields
+
+
+# #745-S6-06
+def test_every_command_the_runner_starts_in_a_reader_holds_one_capability_and_no_new_privileges(
+    tmp_path: Path,
+) -> None:
+    with lane_workspace(tmp_path) as lane:
+        assert lane.reader.warm()
+        for reader in (READER_CONTAINER_NAME, READER_WRITER_CONTAINER_NAME):
+            status = status_of(reader, *READER_DROP_CAPABILITIES)
+            # DAC_OVERRIDE (bit 1) and nothing else, nothing inheritable or ambient, and no way to
+            # gain more: what a program the repository makes git run could ever hold.
+            assert int(status["CapEff"], 16) == 0x2, (reader, status)
+            assert int(status["CapPrm"], 16) == 0x2
+            assert int(status["CapBnd"], 16) == 0x2
+            assert int(status["CapAmb"], 16) == 0
+            assert int(status["CapInh"], 16) == 0
+            assert status["NoNewPrivs"] == "1"
+            document = json.loads(docker("inspect", reader).stdout)[0]
+            host = document["HostConfig"]
+            assert host["NetworkMode"] == "none" and host["ReadonlyRootfs"] is True
+            assert host["CapDrop"] == ["ALL"] and host["CapAdd"] == ["DAC_OVERRIDE"]
+            assert not host.get("Privileged") and "no-new-privileges:true" in host["SecurityOpt"]
+            assert [m["Destination"] for m in document["Mounts"]] == ["/repo"]
+
+
+PROBE = Path(__file__).resolve().parents[2] / "scripts" / "boundary_probe.py"
+
+
+def probe_in(container: str, config: dict[str, object]) -> dict[str, object]:
+    """`boundary_probe.py` run as root in a container of the lane; its one result line."""
+    done = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "-i",
+            container,
+            "/usr/local/bin/python3",
+            "-I",
+            "-",
+            json.dumps(config),
+        ],
+        input=PROBE.read_bytes(),
+        capture_output=True,
+        check=False,
+        timeout=180,
+    )
+    for line in reversed(done.stdout.decode("utf-8", "replace").splitlines()):
+        if line.startswith("PROBE_RESULT "):
+            result: dict[str, object] = json.loads(line.removeprefix("PROBE_RESULT "))
+            return result
+    raise AssertionError(f"the probe printed no result: {done.stderr[-300:]!r}")
+
+
+# #745-S6-07
+def test_the_agents_container_is_sealed_no_socket_of_the_vm_and_the_repository_is_its_only_mount(
+    tmp_path: Path,
+) -> None:
+    config = lane_config()
+    with lane_workspace(tmp_path) as lane, model_network(config, slot_ports({}).proxy):
+        agent = AgentContainer(
+            2048,
+            AgentSeams(
+                hostname=lambda: lane.control,
+                image=config.agent_image,
+                helper_image=config.agent_image,
+                runtime=config.runtime,
+                entrypoint=config.entrypoint,
+                ready_seconds=180.0,
+            ),
+        )
+        agent.create()
+        try:
+            document = json.loads(docker("inspect", AGENT_CONTAINER_NAME).stdout)[0]
+            host = document["HostConfig"]
+            assert host["Privileged"] is False and not host.get("Binds")
+            assert not host.get("Devices") and not host.get("CapAdd")
+            assert host.get("PidMode", "") == "" and host.get("IpcMode") != "host"
+            assert [m["Destination"] for m in document["Mounts"]] == ["/work/repo"]
+            assert sorted(document["NetworkSettings"]["Networks"]) == ["code-reviewer-model"]
+            assert host["PidsLimit"] == 16384 and host["Memory"] == 2048 * 1024 * 1024
+            vm_daemon = docker("info", "--format", "{{.ID}}").stdout.strip()
+
+            seen = probe_in(AGENT_CONTAINER_NAME, {"sections": ["sockets", "mounts", "ids"]})
+
+            sockets = cast(
+                "list[dict[str, object]]", cast("dict[str, Any]", seen["sockets"])["sockets"]
+            )
+            assert [s for s in sockets if s.get("daemon_id") == vm_daemon] == []
+            mounts = cast("list[dict[str, str]]", cast("dict[str, Any]", seen["mounts"])["mounts"])
+            words = ("docker.sock", "reserve", "mirror")
+            leaks = [
+                m for m in mounts if any(w in m["source"] + m["root"] + m["point"] for w in words)
+            ]
+            assert leaks == [] and any(m["point"] == "/work/repo" for m in mounts)
+        finally:
+            agent.stop()
+            agent.remove()
+
+
+# A tidy-up for a failed run: the planted FIFO and loop links are in a temporary directory that
+# pytest removes, but a reader that still holds one blocks its removal; the lane's own sweep
+# (`remove_leftovers`) removes the readers.
+_ = contextlib

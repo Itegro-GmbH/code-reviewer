@@ -83,6 +83,12 @@ class AttachedStreams:
             self._sock.shutdown(socket.SHUT_WR)
 
     def close(self) -> None:
+        """Shut the connection down, then close it. The shutdown is what wakes a thread that is
+        waiting in `recv()` on it (a timer ending a command that has run out of time): on Linux a
+        `close()` alone leaves that thread waiting until the peer says something, which a command
+        that prints nothing and does not end never does."""
+        with contextlib.suppress(OSError):
+            self._sock.shutdown(socket.SHUT_RDWR)
         with contextlib.suppress(OSError):
             self._sock.close()
 

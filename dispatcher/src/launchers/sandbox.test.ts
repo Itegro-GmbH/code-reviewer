@@ -17,6 +17,7 @@ import { createDispatcherCore } from "../core/dispatcher.ts";
 import { LaunchError, type LaunchSpec, type Launcher } from "../core/types.ts";
 import {
   DISPATCHER_TOKEN,
+  readContract,
   recordingLogger,
   settingsFor,
   startApp,
@@ -40,6 +41,9 @@ import {
   WORK_VOLUME_STEPS_SECONDS,
   minimumVmTimeoutMargin,
   agentMemoryMb,
+  MEMORY_GUARD_FLOOR_PERCENT,
+  MEMORY_GUARD_MIN_FLOOR_MB,
+  memoryGuardFloorMb,
   IMPLEMENTER_MIN_AGENT_MEMORY_MB,
   IMPLEMENTER_VM_HEADROOM_MB,
   MODEL_DOOR_MEMORY_MB,
@@ -1117,9 +1121,9 @@ describe("the Sandbox-Launcher", () => {
   it.each<[number, number]>([
     [1, 0],
     [2, 2048],
-    [4, 6144],
-    [6, 10240],
-    [8, 14336],
+    [4, 6000],
+    [6, 9768],
+    [8, 13537],
   ])(
     "leaves the agent's container %i vCPU: %i MB after the OS, Control, the door and the two readers",
     (vcpus, megabytes) => {
@@ -1130,20 +1134,51 @@ describe("the Sandbox-Launcher", () => {
     },
   );
 
-  // #745 step 4: the limits of a VM add up to the VM, at every size
+  // #745 step 4: the limits of a VM add up to the VM, at every size, less the part of the guard's floor that the OS's room does not
+  // hold (nothing at 2 vCPU, where the floor is the 512 MiB the room holds)
   it.each([2, 4, 6, 8])(
-    "has the limits of all its containers and the OS add up to no more than the VM at %i vCPU",
+    "has the limits of all its containers, the OS and the guard's floor add up to no more than the VM at %i vCPU",
     (vcpus) => {
       const plan = planForKind("implementer", { launcher: { vcpus } });
+      const room = vcpus * SANDBOX_MEMORY_PER_VCPU_MB;
       expect(
         IMPLEMENTER_VM_HEADROOM_MB +
+          (memoryGuardFloorMb(vcpus) - MEMORY_GUARD_MIN_FLOOR_MB) +
           768 +
           MODEL_DOOR_MEMORY_MB +
           READER_COUNT * READER_MEMORY_MB +
           plan.agentMemoryMb,
-      ).toBe(vcpus * SANDBOX_MEMORY_PER_VCPU_MB);
+      ).toBe(room);
     },
   );
+
+  // #745 step 6, fix round 3: an agent inside its own limit must not bring the VM below the floor the guard kills at. The limits of
+  // the agent, Control, the door and the readers leave the VM at least the guard's floor (the OS's room of 512 MB is the floor of
+  // 2 vCPU; above it the floor is taken off the agent), at every size.
+  it.each([2, 4, 6, 8])(
+    "leaves the VM at %i vCPU at least the guard's floor when the limits of all containers are used in full",
+    (vcpus) => {
+      const plan = planForKind("implementer", { launcher: { vcpus } });
+      const others =
+        768 + MODEL_DOOR_MEMORY_MB + READER_COUNT * READER_MEMORY_MB;
+      const left =
+        vcpus * SANDBOX_MEMORY_PER_VCPU_MB - plan.agentMemoryMb - others;
+      expect(left).toBeGreaterThanOrEqual(memoryGuardFloorMb(vcpus));
+      expect(left).toBeGreaterThanOrEqual(IMPLEMENTER_VM_HEADROOM_MB);
+    },
+  );
+
+  // #745 step 6, fix round 3: the floor is the one the runner's guard uses (a test of the runner holds the figures to the same file)
+  it("takes the guard's floor from the contract the runner's guard is held to", () => {
+    const guard = readContract<{
+      memoryGuard: { minFloorMb: number; floorPercent: number };
+    }>("environment-sizes.v1.json").memoryGuard;
+    expect(MEMORY_GUARD_MIN_FLOOR_MB).toBe(guard.minFloorMb);
+    expect(MEMORY_GUARD_FLOOR_PERCENT).toBe(guard.floorPercent);
+    expect([2, 4, 6, 8].map(memoryGuardFloorMb)).toStrictEqual([
+      512, 656, 984, 1311,
+    ]);
+  });
 
   // #745 step 4: a Control container that would not fit beside the door and the reader is refused at start
   it("refuses a Control container that leaves no room for the door and the reader", () => {
@@ -1726,9 +1761,9 @@ describe("the size of a job (#818)", () => {
   // #818-T30: the VM follows the job's size; Control keeps its own memory and the agent gets the rest.
   it.each([
     [2, 2048],
-    [4, 6144],
-    [6, 10240],
-    [8, 14336],
+    [4, 6000],
+    [6, 9768],
+    [8, 13537],
   ])(
     "creates the VM with the size of an Implementer job, %i vCPU, and leaves the agent %i MB",
     async (vcpus, agentMb) => {

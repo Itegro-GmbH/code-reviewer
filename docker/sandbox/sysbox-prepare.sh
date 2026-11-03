@@ -14,7 +14,8 @@
 #   3. proc     the platform mounts a read-only devtmpfs over /proc/kcore and /proc/keys. With it in place
 #               `docker run --runtime=sysbox-runc` fails with "re-mounting procfs caused: operation not permitted".
 #               This unmounts them for the WHOLE VM, which is why the script runs on the Implementer's VM only
-#   4. sysctl   the limits the Sysbox package sets at install time (inotify, keyring) are gone after a restore
+#   4. sysctl   the limits the Sysbox package sets at install time (inotify, keyring) are gone after a restore; and the table of
+#               open files is made too big to fill (below)
 #   5. daemons  sysbox-mgr, then sysbox-fs, detached; each must be a running process and own its socket (`-S`, the file
 #               exists and is a socket; whether the daemon answers on it is what `docker run` and the snapshot's proof find out).
 #               Both share ONE wait of at most 30 s, which is below the launcher's 40 s limit for this script
@@ -78,6 +79,20 @@ done
 if [ -f "$sysctl_conf" ]; then
   sysctl -q -e -p "$sysctl_conf" >/dev/null 2>&1 || fail 23 sysbox_sysctl_failed "$sysctl_conf"
 fi
+
+# 4b. The kernel's table of open files is one for the whole VM: 437,305 entries on a 4 GB VM (measured). Three root processes of
+# the agent filled it with 436,815 files (step 6, 2026-11-03) at a tenth of the container's memory limit, and the calls of Control
+# and of the platform's own agent began to fail with ENFILE (only a process with CAP_SYS_ADMIN of the VM is exempt). A file costs
+# the container that opens it 255 to 455 bytes of its memory cgroup (kernel 6.18, measured), so a table that cannot fill before the
+# container's limit (8.4 million files at 2 GB, 25 million at 6 GB, 59 million at 14 GB) leaves the memory limit to stop the agent.
+# That is why the table is made this big and not bounded: any bound the agent can reach (a root process opens a million files in a
+# few seconds, sixteen thousand processes are allowed) is ENFILE for Control. The cost is a gap the cgroup does not see: timer,
+# epoll and eventfd objects leave about 260 bytes each outside the container's memory cgroup, so a flood of them can use the VM's
+# memory before the limit is reached (on a 4 vCPU VM it stopped the VM dead). That is closed elsewhere, not here: the agent's and
+# the Setup container's processes have the highest OOM score (`AGENT_OOM_SCORE_ADJ`), and Control kills the container before the
+# VM is out of memory (`vm_memory.py`). Both are measured in docs/implementer.md, "The attack test (step 6)".
+file_max="${SYSBOX_PREPARE_FILE_MAX:-2147483647}"
+sysctl -q -w "fs.file-max=$file_max" >/dev/null 2>&1 || fail 23 sysbox_sysctl_failed "fs.file-max"
 
 # 5. The manager first: sysbox-fs asks it for the container's id mapping.
 start() {

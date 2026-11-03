@@ -54,6 +54,7 @@ from code_reviewer_runner.job_loop.jsonvalues import as_object
 from .agent_container import (
     AGENT_ENTRYPOINT,
     AGENT_IMAGE_REFERENCE,
+    AGENT_OOM_SCORE_ADJ,
     AGENT_PIDS_LIMIT,
     AGENT_REPO,
     AGENT_RUNTIME,
@@ -73,6 +74,7 @@ from .host_rules import (
     run_helper,
 )
 from .reader import REPO_SUBPATH, work_volume_of
+from .vm_memory import MEMINFO, REASON_VM_MEMORY, MemoryGuard
 
 _log = logging.getLogger(__name__)
 
@@ -255,6 +257,7 @@ def setup_document(
             "Memory": memory_bytes,
             "MemorySwap": memory_bytes,
             "PidsLimit": AGENT_PIDS_LIMIT,
+            "OomScoreAdj": AGENT_OOM_SCORE_ADJ,
             "RestartPolicy": {"Name": "no"},
             "PublishAllPorts": False,
             "Mounts": [
@@ -333,6 +336,8 @@ class SetupSeams:
     docker_stop_seconds: float = DOCKER_STOP_SECONDS
     # False only in a test that has no host namespace to put rules in (never in production).
     install_rules: bool = True
+    # The file the VM's memory is read from (`MemoryGuard`).
+    meminfo: str = MEMINFO
 
 
 def _variables(listed: object) -> set[str]:
@@ -362,6 +367,7 @@ class SetupContainer:
         self._container: str | None = None
         self._network: str | None = None
         self._ended = threading.Event()
+        self._guard: MemoryGuard | None = None
         self._notes: list[str] = []
 
     # -- the whole run -----------------------------------------------------------------------------
@@ -398,6 +404,10 @@ class SetupContainer:
             if outcome != OUTCOME_OK:
                 self._clean()
                 return self._ended_run(outcome, why, tail, begun, started, finished, code=code)
+            # The script is over and the memory it could take is back: the guard must not kill the
+            # container under `docker commit`, which reads its layer and needs memory of its own.
+            if self._guard is not None:
+                self._guard.close()
             try:
                 image = self._save(container, free_bytes)
             except _NoRoom as reason:
@@ -492,6 +502,13 @@ class SetupContainer:
         self._container = container
         api.start_container(container)
         threading.Thread(target=self._watch_end, args=(container,), daemon=True).start()
+        # The script is as free as the agent is and can take the VM's memory the same way:
+        # the container goes (the script ends as one whose container went away) before the VM
+        # is out of it.
+        self._guard = MemoryGuard(
+            lambda _: self._kill(), path=self._seams.meminfo, ended=self._ended
+        )
+        self._guard.start()
         self._wait_ready(container)
         self._seal_check(container, image)
         return container
@@ -670,12 +687,16 @@ class SetupContainer:
         except DockerError:
             return "the container ended during the script"
         code = state.get("ExitCode")
-        how = (
-            "was killed for its memory"
-            if state.get("OOMKilled") is True or code == 137
-            else "stopped"
-        )
-        return f"the container ended during the script: it {how}" + (
+        reason = ""
+        if self._guard is not None and self._guard.tripped_at is not None:
+            # The reason word first, as in the agent's report (`AgentEnd.sentence`).
+            reason = f"{REASON_VM_MEMORY}: "
+            how = "was killed because the VM was running out of memory"
+        elif state.get("OOMKilled") is True or code == 137:
+            how = "was killed for its memory"
+        else:
+            how = "stopped"
+        return f"{reason}the container ended during the script: it {how}" + (
             f" (exit code {code})" if isinstance(code, int) and not isinstance(code, bool) else ""
         )
 
@@ -767,6 +788,8 @@ class SetupContainer:
         a step that fails costs nothing and stops nothing (the VM goes with the turn)."""
         container, self._container = self._container, None
         network, self._network = self._network, None
+        if self._guard is not None:
+            self._guard.close()
         if container is not None:
             self._kill()
             try:
