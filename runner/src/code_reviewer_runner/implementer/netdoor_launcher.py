@@ -84,8 +84,10 @@ _log = logging.getLogger(__name__)
 NETDOOR_CONTAINER_NAME: Final = "code-reviewer-network-door"
 RULES_CONTAINER_NAME: Final = "code-reviewer-network-door-rules"
 # The proxy is a Python process with a thread or two for each connection. Measured RSS of the idle
-# process is about 35 MB (`docs/implementer.md`); the rest is for the connections it relays.
-NETDOOR_MEMORY_MB: Final = 128
+# process is 17 to 35 MB and with 120 tunnels open it stays under 70 MB (`docs/implementer.md`); the
+# rest is for the connections it relays. The Dispatcher takes the same figure off the agent's memory
+# (`NETWORK_DOOR_MEMORY_MB`; both are held to `contracts/environment-sizes.v1.json`).
+NETDOOR_MEMORY_MB: Final = 96
 NETDOOR_MEMORY_BYTES: Final = NETDOOR_MEMORY_MB * 1024 * 1024
 # 128 connections (`proxy.MAX_CONNECTIONS`), two threads each, and the process's own.
 NETDOOR_PIDS_LIMIT: Final = 400

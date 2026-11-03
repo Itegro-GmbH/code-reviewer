@@ -57,7 +57,7 @@ WORKER_FEATURES: tuple[str, ...] = (
     "operator_cost_limit",
     # #818: the Worker reads `implementer.environment` and runs its setup script before the model.
     "implementer_environment",
-    # #745, step 7: the Worker reads `implementer.environment.network` and starts the network door for it.
+    # #745, step 7: the Worker reads `implementer.environment.network` and starts the door for it.
     "implementer_network",
 )
 # The feature of `GET /api/runners/v1/version` that says the Worker API exists.

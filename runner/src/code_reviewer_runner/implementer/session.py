@@ -473,7 +473,11 @@ class ImplementerSession:
         if rule.mode == MODE_OPEN:
             self._vm_policy = VM_POLICY_UNCHANGED
         elif switch is None:
-            self._note("the VM's network policy was not changed: this runner has no way to do it")
+            # `off` without a switch is what a turn has always been: the report says nothing then.
+            if rule.mode != MODE_OFF:
+                self._note(
+                    "the VM's network policy was not changed: this runner has no way to do it"
+                )
         else:
             narrow_policy(
                 switch,

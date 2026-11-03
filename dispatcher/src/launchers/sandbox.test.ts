@@ -1183,6 +1183,14 @@ describe("the Sandbox-Launcher", () => {
     },
   );
 
+  // #745 step 7: the network door's limit is the figure of the contract, which the runner's door is held to as well
+  it("takes the network door's memory from the contract the runner's door is held to", () => {
+    const contract = readContract<{ networkDoorMemoryMb: number }>(
+      "environment-sizes.v1.json",
+    );
+    expect(NETWORK_DOOR_MEMORY_MB).toBe(contract.networkDoorMemoryMb);
+  });
+
   // #745 step 6, fix round 3: the floor is the one the runner's guard uses (a test of the runner holds the figures to the same file)
   it("takes the guard's floor from the contract the runner's guard is held to", () => {
     const guard = readContract<{
