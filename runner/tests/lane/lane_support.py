@@ -503,16 +503,16 @@ def lane_workspace(
     seed: Callable[[Path], None] | None = None,
     origin_setup: Callable[[Origin], None] | None = None,
     disk_megabytes: int | None = None,
+    origin_base: Path | None = None,
 ) -> Generator[LaneWorkspace]:
     """The origin (a bare repository standing in for GitHub), the work volume, the stand-in of the
     Control container and the real reader; the workspace is prepared (the mirror on the reserve
     directory, the agent's repository made and configured through the reader)."""
     config = lane_config()
     git = system_git()
-    # GitHub is not on the VM's disk: the stand-in for it is on memory, so that a disk the agent
-    # filled is not the origin's.
-    stand_in = Path("/dev/shm") / f"code-reviewer-lane-origin-{uuid.uuid4().hex[:8]}"
-    stand_in.mkdir()
+    # GitHub is not on the VM's disk. A run that fills the real disk of a VM names a directory on
+    # another file system (a tmpfs that allows hooks: the origin refuses some pushes with one).
+    stand_in = origin_base or scratch
     origin = Origin(stand_in, git)
     if seed is not None:
         seed(origin.seed)
@@ -548,7 +548,6 @@ def lane_workspace(
     )
     with ExitStack() as stack:
         # In the order they are undone: the readers, the stand-in, the volume, the mounts.
-        stack.callback(shutil.rmtree, stand_in, True)
         stack.callback(shutil.rmtree, run_dir, True)
         stack.callback(unmount, scratch / "vmdisk")
         stack.callback(unmount, work)
@@ -571,6 +570,7 @@ def lane_turn(
     seed: Callable[[Path], None] | None = None,
     origin_setup: Callable[[Origin], None] | None = None,
     disk_megabytes: int | None = None,
+    origin_base: Path | None = None,
     judge: Callable[[Mapping[str, str], Mapping[str, Any]], Refusal | None] | None = None,
     memory_mb: int = 2304,
 ) -> Generator[Turned]:
@@ -594,7 +594,11 @@ def lane_turn(
     with ExitStack() as stack:
         lane = stack.enter_context(
             lane_workspace(
-                scratch, seed=seed, origin_setup=origin_setup, disk_megabytes=disk_megabytes
+                scratch,
+                seed=seed,
+                origin_setup=origin_setup,
+                disk_megabytes=disk_megabytes,
+                origin_base=origin_base,
             )
         )
         config = lane.config
