@@ -59,6 +59,7 @@ def test_an_agent_that_fills_its_disk_still_gets_what_it_committed_pushed(tmp_pa
         assert turned.workspace.reserve_free_bytes() > 256 * 1024**2
 
 
+# #745-E16
 def test_a_commit_the_full_disk_could_not_take_is_said_not_hidden(tmp_path: Path) -> None:
     def script(repo: Path) -> list[Turn]:
         return [

@@ -352,6 +352,16 @@ Its role is exactly this, and nothing more (create a custom role and add the ide
 
 - **No** read of `/app` or `/dispatcher`, no other environment, no delete, no folder, project or identity
   administration. The secret path conditions are `$eq` `/ci` and `$eq` `/dispatcher`.
+- **Grant the fourth name, `SANDBOX_SYSBOX_PROOF`, before the first release that carries the Implementer's Sysbox gate (#745,
+  step 4).** Until then the role may have had three names. The persist job writes the verdict first (cleared to `unproven`) and
+  *creates* the key on that first write, so the identity needs *create* and *edit* on it exactly as on the other three, and the
+  grant is the owner's to make in Infisical, before the release is merged, not after. If it is missing: the release's
+  promotion has already happened when `persist` is refused (403 `infisical_write_failed`), so production runs the new
+  snapshot and the new Dispatcher while the run is **red**; `cleanup` runs only after `persist` succeeded or was skipped, so it
+  is **skipped** and the superseded snapshots stay (they cost money and count against the platform's limits); and every later
+  release repeats the same refusal at `persist`, because it tries the same first write again: they all stay red until the
+  permission is granted, after which *Re-run failed jobs* of the latest run writes the pair and lets the cleanup run.
+  Nothing live breaks meanwhile: the staged Dispatcher deployment carries its pair, the verdict included, as its own variables.
 - **The condition on the four secret names (`$in` the four names) is recommended hardening**: it makes the write
   path unable to touch any other key of `/dispatcher` even if the code that calls it were changed. The pipeline does not
   depend on it (the code fixes the four names itself), so a role without it works.
@@ -1310,7 +1320,10 @@ It is dormant in every release, and code-review.com is not touched at any step. 
 works (the same steps with their checks, who does them and what undoes each are in [`factory-bring-up.md`](factory-bring-up.md),
 "Switching on the Implementer"):
 
-1. **Release the code to `main`.** The pipeline migrates the second database first, runs `health-factory` with the old set
+1. **Release the code to `main`, after the owner has granted the machine identity *create* and *edit* on
+   `SANDBOX_SYSBOX_PROOF` of `/dispatcher`** (section 2.1; the key is new with the Sysbox gate of step 4 of the sandbox, so the
+   role of an existing deployment does not have it). Without it the release goes live and then fails at `persist` (red), the
+   `cleanup` is skipped and the next releases fail the same way until the permission exists. The pipeline migrates the second database first, runs `health-factory` with the old set
    (`dynamic-review,review`) and the canary on the rebuilt snapshot, and promotes. Nothing live changes.
 2. **`DISPATCHER_APPS`**, only after step 1 is live. Infisical `prod`, folder `/dispatcher`: in the factory entry set `kinds`
    to `["diff","dynamic","implementer"]`. Optional: an `implementer` entry of `DISPATCHER_WORKER_CONFIG` (sizes and

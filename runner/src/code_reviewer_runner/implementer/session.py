@@ -89,20 +89,23 @@ from .turn_result import TurnResult, clip_summary
 _log = logging.getLogger(__name__)
 
 # What is kept back from the job's time limit for the end of the turn: the commit of what is left
-# and the final push (the plan: the last three minutes). A short limit keeps a third of it.
-GRACE_SECONDS = 180.0
-# How the grace is spent at a normal end: the rescue of a detached HEAD (three git commands of
+# and the final push (the plan: the last three minutes; four and a half since the readers are made
+# quiet twice and the container's end got its measured ceilings). A short limit keeps a third of it.
+GRACE_SECONDS = 270.0
+# How the grace is spent at a normal end, every step at its ceiling: the end of the agent's container
+# (`ENGINE_STOP_SECONDS`: the kill call and the wait until the daemon says it is gone; its removal
+# comes after the push, `remove()`, and is in no sum), the first reset of the readers
+# (`READER_RESET_SECONDS`), the rescue of a detached HEAD (three git commands of
 # `RESCUE_STEP_TIMEOUT`), the look at the tree (`DIRTY_TIMEOUT`), the leftover commit of the system,
-# the final push and the two reads of the report (`REPORT_READ_TIMEOUT` each), with
-# `ENGINE_STOP_SECONDS` for the end of the agent's container before them (the kill call and the wait
-# until the daemon says it is gone, at most `KILL_SECONDS + STOP_SECONDS`; its removal comes after
-# the push, `remove()`, and is in no sum); the sum stays below `GRACE_SECONDS` (a test holds it).
+# the second reset of the readers (the commit ran the repository's filters in a reader that can
+# write), the final push and the two reads of the report (`REPORT_READ_TIMEOUT` each). The sum is
+# 214 s of the 270; a test holds it, and holds the slack (a fifth of the grace).
 LEFTOVER_SECONDS = 40.0
 FINAL_PUSH_SECONDS = 100.0
 ENGINE_STOP_SECONDS = KILL_SECONDS + STOP_SECONDS
 # A stop (SIGTERM) leaves the process `SIGTERM_BACKSTOP_SECONDS` in all (`job_run.py`): the engine
-# comes out of it, then the rescue of a detached HEAD, the final push (no leftover is committed) and
-# the two reads of the report.
+# comes out of it, then the reset of the readers, the rescue of a detached HEAD, the final push (no
+# leftover is committed, so no second reset) and the two reads of the report: 79 s of the 115.
 STOP_PUSH_SECONDS = 25.0
 # How often the watch asks the job host whether the job is still ours while the agent works (a
 # lost lease ends the turn at once; nothing is pushed in the meantime).
@@ -159,8 +162,8 @@ class AgentPlace(EngineRuntime, Protocol):
     def remove(self) -> None: ...
 
 
-# How long the last push of a stop asks a lease the host cannot confirm: a stop has a minute in
-# all (`IMPLEMENTER_TERMINATE_GRACE_SECONDS`), and the engine and the push come out of it.
+# How long the last push of a stop asks a lease the host cannot confirm: a stop has two minutes
+# in all (`IMPLEMENTER_TERMINATE_GRACE_SECONDS`), and the engine and the push come out of it.
 STOP_CONFIRM_SECONDS = 20.0
 
 # The ends after which nothing is committed any more and nothing may be pushed that was not already

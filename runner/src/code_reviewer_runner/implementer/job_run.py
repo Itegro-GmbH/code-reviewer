@@ -67,11 +67,11 @@ from .turn_result import TurnResult
 
 _log = logging.getLogger(__name__)
 
-# A SIGTERM gives the process `IMPLEMENTER_TERMINATE_GRACE_SECONDS` (60 s, `job_loop/host.py`)
+# A SIGTERM gives the process `IMPLEMENTER_TERMINATE_GRACE_SECONDS` (120 s, `job_loop/host.py`)
 # before the host kills the group; the process leaves itself five seconds less, so that its own
-# end comes first. The container's `stopTimeoutSeconds` (90) is above both. The engine comes out of
-# these 55 seconds, and so does the one final push (`session.STOP_PUSH_SECONDS`).
-SIGTERM_BACKSTOP_SECONDS = 55.0
+# end comes first. The container's `stopTimeoutSeconds` (150) is above both. The engine comes out of
+# these 115 seconds, and so does the one final push (`session.STOP_PUSH_SECONDS`).
+SIGTERM_BACKSTOP_SECONDS = 115.0
 MAX_LOG_TAIL_CHARS = 4096
 # The names the Dispatcher gives the container (`ImplementerEnvironmentName` of runner-api.v1.json).
 SANDBOX_PROOF_VARIABLE = IMPLEMENTER_SANDBOX_PROOF_VARIABLE

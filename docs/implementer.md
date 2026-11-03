@@ -144,12 +144,23 @@ the end. The cost is that **a VM that dies before the end of the turn loses the 
 on. The watch still asks the lease every 30 seconds while the agent works, so a turn that is no longer ours stops paying for
 the model.
 
-**Time.** The runner keeps the last 180 seconds of the time limit for the end: the look at the tree (10 s at most), the rescue
-of a detached HEAD (three git commands of 3 s at most), the commit of what is left (40 s), the final push (100 s) and the two
-reads of the report (5 s each), with 10 s for the end of the agent's container (the kill call 5 s at most, then the wait until the daemon says it is gone 5 s at most;
-the container is removed only after the push, on a thread of its own, because removing a Sysbox container with its inner Docker can take long and nothing waits for it).
-A stop (SIGTERM) commits nothing (it still saves a detached HEAD on a branch); the process leaves itself 55 seconds, and the final push gets 25 of them. A test holds both sums,
-with the real constants of the kill and the wait.
+**Time.** The runner keeps the last 270 seconds (four and a half minutes) of the time limit for the end. Every step is counted at its ceiling, and the sum at a normal end is
+214 seconds: the end of the agent's container 25 s (the kill call 15 s at most, then the wait until the daemon says it is gone 10 s at most; the container is removed only
+after the push, on a thread of its own, because removing a Sysbox container with its inner Docker can take long and nothing waits for it, which is right while one VM runs one turn), the first
+reset of the readers 10 s (below), the rescue of a detached HEAD (three git commands of 3 s at most), the look at the tree (10 s at most), the commit of what is left (40 s), the second reset
+of the readers 10 s, the final push (100 s) and the two reads of the report (5 s each). A stop (SIGTERM) commits nothing (it still saves a detached HEAD on a branch), resets the readers once, and
+the process leaves itself 115 seconds, of which the sum is 79 and the final push gets 25. A test holds both sums and the slack (a fifth of the grace, a quarter of the 115 s), with the real
+constants. **Why the ceilings are what they are.** Measured on a VM (2 vCPU): the kill call of the agent's container took 0.4 s idle, 2.0 s with two inner containers of a 1.5 GB image and 3.9 s
+with eight, and the wait after it 0.02 s, so the kill gets 15 s and the wait 10 s (an earlier round had 5 and 5, which a stack of a dozen inner services would have outgrown). The
+steps do not take their ceilings together except when the Docker daemon hangs, and then the push fails anyway and the report says what was and was not done; the slack is for the steps that
+take their ceiling and then some. The grace of the host after SIGTERM is 120 s and the container's stop timeout 150 s, both above the 115.
+
+**The readers are made quiet before the commit and before the push.** A filter driver of the agent's repository cannot be switched off by name, so it runs in the reader, and a program it starts
+with `setsid` outlives the command: `run_exec` on a timeout only closes its socket. A process left like that in a reader that can write could change the repository under the commit or the
+fetch of the push. So once the agent's container is gone, and again after the leftover commit (whose `git add` ran the filters in the reader that can write), Control sends `SIGKILL` to the init of each
+reader (which takes every process in its PID namespace) and starts it again (`ReaderAccess.reset`, `GitWorkspace.quiet_readers`), within 10 s each time; a reader that cannot be restarted is removed and made
+again, and one that cannot be had back is forgotten, so that no command runs in a reader that is not known to be quiet. The reset keeps the same containers (killing and starting needs no room on a
+full disk; making one does).
 
 **How the root process stays safe from the agent's repository.** The agent controls every file of its repository, so Control
 (root, with the token) never opens it:
@@ -473,8 +484,8 @@ Admin).
 |---|---|---|
 | Cost of a turn | The operator's maximum per turn: 5.00 USD once the owner has set it in the factory's admin portal (General, Limits, "Maximum cost per review"); the default is 1.00 USD until then, which is too low for a task. A person may ask for a lower limit on the form (never above that maximum or 100 USD). Without one, the maximum applies | Claim, and the proxy of the Worker: it refuses the next model call once the calls so far cost that much, so a turn can end slightly above it by the last call |
 | Steps of the agent | None. There is no step limit, no plan, no approach rule: the cost limit is the brake | |
-| Time of a turn | 3600 seconds. The runner keeps the last 180 seconds for the commit of what is left and the final push of all branches (a third of a short limit; the split is in "The git rules"). The Dispatcher stops the Worker at 3600 seconds (`DISPATCHER_WORKER_CONFIG`, `implementer.timeoutSeconds`, 60 to 21600) and the App fails a turn still running after 70 minutes with `timeout`; the App cannot read the Dispatcher's setting, so change the constants with it (`docs/dispatcher.md`). The runner holds a turn to the smaller of its time limit and `RUNNER_JOB_TIMEOUT_SECONDS` | Dispatcher, runner, App |
-| Stop | On SIGTERM the engine is ended at once, all committed branches are pushed (if the lease is still held; nothing uncommitted is committed) and the turn ends `runner_shutdown`. The job process gets a grace of 60 seconds, ends itself after 55 (the final push gets 30 of them), and the container's stop timeout is 90 seconds; each lease question (before the listing and before each push) is retried for 30 seconds at a normal end and 20 on a stop, and
+| Time of a turn | 3600 seconds. The runner keeps the last 270 seconds for the commit of what is left and the final push of all branches (a third of a short limit; the split is in "The git rules"). The Dispatcher stops the Worker at 3600 seconds (`DISPATCHER_WORKER_CONFIG`, `implementer.timeoutSeconds`, 60 to 21600) and the App fails a turn still running after 70 minutes with `timeout`; the App cannot read the Dispatcher's setting, so change the constants with it (`docs/dispatcher.md`). The runner holds a turn to the smaller of its time limit and `RUNNER_JOB_TIMEOUT_SECONDS` | Dispatcher, runner, App |
+| Stop | On SIGTERM the engine is ended at once, all committed branches are pushed (if the lease is still held; nothing uncommitted is committed) and the turn ends `runner_shutdown`. The job process gets a grace of 120 seconds, ends itself after 115 (the final push gets 25 of them), and the container's stop timeout is 150 seconds; each lease question (before the listing and before each push) is retried for 30 seconds at a normal end and 20 on a stop, and
 never beyond the time that is left of the final push | Runner, container spec |
 | Task text | 20,000 characters | Form and route |
 | Branch name | At most 200 characters, each part between slashes at most 240 bytes, git's rules, not the base branch | Form and route |
@@ -586,8 +597,12 @@ Open issues at the time of this change (2026-11-02):
 - **#784**: read-only registry access, before external users (above).
 - **The Sysbox verdict in the deploy** is written and read (the fourth member of the pair), and `unrecorded` is gone: the first release
   after it has no verdict anywhere, so the Implementer is refused (`sandbox_unproven`) until that release has built a snapshot and
-  promoted it (the changed image inputs rebuild it by themselves). Production steps: the machine identity's role needs *create* and
-  *edit* on `SANDBOX_SYSBOX_PROOF` of `/dispatcher` too (`docs/deployment-vercel.md`, section 2.1).
+  promoted it (the changed image inputs rebuild it by themselves). **Before the first release that carries this change the owner must
+  grant the machine identity's role *create* and *edit* on `SANDBOX_SYSBOX_PROOF` of `/dispatcher`** (`docs/deployment-vercel.md`,
+  section 2.1). It is not a step that can follow the release: the persist job writes the key right after the promotion, and without
+  the permission that write is refused. Then the run is red although production is live, `cleanup` is skipped (it needs `persist` to
+  have succeeded or been skipped), so the old snapshots are not removed, and every later release fails at `persist` the same way until
+  the permission is granted. Nothing has to be undone afterwards: *Re-run failed jobs* of the latest run writes the pair.
 - **#797**: a failed proof of the Implementer blocks code-review.com. The Dispatcher is shared, the deploy canary requires
   `implementer` as soon as the factory's entry names the kind, and the promotions of everything staged in that run wait for the
   canary. There is no switch that waives the proof; the way back is in the rollout, step 2.

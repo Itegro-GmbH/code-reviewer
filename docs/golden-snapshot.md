@@ -88,7 +88,9 @@ summary and as the outputs `snapshot-id`, `image-digest`, `commit` and `sysbox` 
 deployment, removes no snapshot of an earlier run and writes nothing to Infisical: _Deploy production_ wires the
 snapshot into a staged Dispatcher deployment, proves it with the canary, and only after the promotion writes it to
 Infisical (`SANDBOX_SNAPSHOT_ID`, `SANDBOX_IMAGE_DIGEST`, `SANDBOX_SNAPSHOT_COMMIT` and `SANDBOX_SYSBOX_PROOF` of `/dispatcher`) and removes
-the snapshots nobody needs.
+the snapshots nobody needs. **The write of `SANDBOX_SYSBOX_PROOF` needs the permission the owner grants before the first release with the
+Sysbox gate** (*create* and *edit* on that key, `docs/deployment-vercel.md`, section 2.1): without it `persist` fails after the promotion, the
+cleanup is skipped and every later release stays red until it is granted.
 
 ## Running it
 

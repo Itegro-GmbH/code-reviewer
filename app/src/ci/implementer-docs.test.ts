@@ -397,8 +397,8 @@ describe("the documents match the merged runner job and canary (#765)", () => {
 
   // #768-T01
   it("states the stop, the lease and the free codes as the runner has them", () => {
-    expect(text).toContain("a grace of 60 seconds");
-    expect(text).toContain("stop timeout is 90 seconds");
+    expect(text).toContain("a grace of 120 seconds");
+    expect(text).toContain("stop timeout is 150 seconds");
     expect(text).toContain("`runner_shutdown`");
     expect(text).toContain("never run twice");
     expect(text).toContain("#799");
@@ -406,10 +406,10 @@ describe("the documents match the merged runner job and canary (#765)", () => {
       "IMPLEMENTER_MAX_ATTEMPTS = 1",
     );
     expect(readText("dispatcher/src/launchers/container-spec.ts")).toContain(
-      "stopTimeoutSeconds: 90",
+      "stopTimeoutSeconds: 150",
     );
     const readme = flat(readText("runner/README.md"));
-    expect(readme).toContain("grace of 60 s after SIGTERM");
+    expect(readme).toContain("grace of 120 s after SIGTERM");
     expect(readme).toContain("neither `maxCostUsd` nor `operatorMaxCostUsd`");
   });
 
@@ -634,8 +634,8 @@ describe("the operator guide states what the owner decided", () => {
     expect(text).toContain("20,000 characters");
     expect(
       readText("runner/src/code_reviewer_runner/implementer/session.py"),
-    ).toContain("GRACE_SECONDS = 180.0");
-    expect(text).toContain("180 seconds");
+    ).toContain("GRACE_SECONDS = 270.0");
+    expect(text).toContain("270 seconds");
   });
 });
 

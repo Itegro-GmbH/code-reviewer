@@ -77,7 +77,7 @@
   "pids": {
     "limit": 2048
   },
-  "stopTimeoutSeconds": 90,
+  "stopTimeoutSeconds": 150,
   "network": {
     "mode": "bridge"
   },

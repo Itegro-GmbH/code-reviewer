@@ -49,7 +49,7 @@ export const WORKER_CONTAINER_SPEC: WorkerContainerSpec = {
   ],
   memory: { limit: "2g", reservation: "1536m", swap: "2g" },
   pids: { limit: 512 },
-  stopTimeoutSeconds: 90,
+  stopTimeoutSeconds: 150,
   network: { mode: "bridge" },
   allowedEnvironment: [
     "HOME",

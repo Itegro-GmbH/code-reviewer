@@ -79,8 +79,8 @@ Rules (the CR-29 decisions, kept by the Worker host `job_loop/host.py`; tests in
   had is a "not now": the watch asks again later and the final push asks again every 2 s for up to 30 s, 20 s on a stop, before
   the turn ends `lease_lost`), a SIGTERM ends the engine at once, pushes all committed branches and ends the turn
   `runner_shutdown` with its report (the host keeps the report and the usage in the result it gives the job back with; an
-  Implementer job gets a grace of 60 s after SIGTERM, the process ends itself after 55 s and the final push gets 30 of them,
-  all under the container's stop timeout of 90 s),
+  Implementer job gets a grace of 120 s after SIGTERM, the process ends itself after 115 s and the final push gets 25 of them,
+  all under the container's stop timeout of 150 s),
   a turn is held to the smaller of its time limit and `RUNNER_JOB_TIMEOUT_SECONDS`, a job that carries neither `maxCostUsd` nor
   `operatorMaxCostUsd` is refused with `implementer_config_invalid`, and the report (`implementer` in the result) is held to the contract and to 4 MB of escaped JSON, files
   first and then commits (`implementer/report.py`); a turn that never had a repository has no `implementer` key. The Worker
@@ -1199,8 +1199,8 @@ local branches**, without force. There is no check of who committed, what descen
 
 | Piece | What it is |
 |---|---|
-| Mirror `/work/mirror.git` | A bare, `--depth 1` clone of the base branch, root-owned, mode 0700, made without a template. The provider token is in the environment (`GIT_CONFIG_COUNT`, `http.extraHeader`) of the one git process that clones or pushes: never in argv, a config file, a URL or anything the engine user can read. Redirects are not followed. |
-| Agent repository `/work/repo` | A local clone of the mirror (no hard links) owned by the engine user: no remote, system identity, the new branch at the base tip, a sparse checkout without the three names the engine loads. Nothing else is installed in it: no hook, no guard, no spool. Root never runs git with it as working directory or git directory; `dirty()`, `rescue_detached_head()` and `commit_all()` run as the engine user, with the agent's hooks off. |
+| Mirror `/work/reserve/mirror.git` | A bare, `--depth 1` clone of the base branch, root-owned, mode 0700, made without a template, on the **reserve disk** (a pre-allocated 8 GiB file system below the work volume that the agent's container does not mount and cannot fill). The provider token is in the environment (`GIT_CONFIG_COUNT`, `http.extraHeader`) of the one git process that clones or pushes: never in argv, a config file, a URL or anything the agent can read. Redirects are not followed. |
+| Agent repository `/work/repo` | The Subpath `repo` of the work volume, which the agent's container mounts: a local clone of the mirror (no hard links) made in the **reader** with the repository read-write, before the agent exists: no remote, system identity, the new branch at the base tip, no sparse checkout. The agent is root in its own container and owns it. Nothing else is installed in it: no hook, no guard, no spool. Control never runs git with it as working directory or git directory; `dirty()` runs in the read-only reader, `rescue_detached_head()` and `commit_all()` in the one that can write, after the agent's container is killed, with the agent's hooks off. |
 | The directories | `/work` and `/run/code-reviewer` must belong to the runner, be no link and be writable by no one else, or the turn is `setup_failed`. |
 | The final push (`GitWorkspace.push_all`) | See below. Nothing is pushed during the turn. |
 | `push_policy.py` | `select_branches` is **the one place for a rule about which branches are pushed**; `PUSH_EXCLUDED_BRANCHES` (empty) is applied there and reported as `excluded`. `branch_name_problem` judges every name before it is put in a refspec. |
@@ -1209,15 +1209,15 @@ local branches**, without force. There is no check of who committed, what descen
 the lease held), never after a lost lease, `push_all(seconds=...)`:
 
 1. asks the lease (`before_push`; `LeaseNotConfirmed` is asked again every `confirm_pause` up to `confirm_seconds`, then `lease_lost`);
-2. lists the agent's local branches with `git for-each-ref` run as the engine user in its repository, streamed and capped at
+2. lists the agent's local branches with `git for-each-ref` run in the read-only reader, streamed and capped at
    `LIST_MAX_BYTES` (4 MiB; over it nothing is pushed and the turn ends `push_rejected`, `list_problem` says why); the names are
    checked (`push_policy`), a branch the listing puts at the start commit is skipped without a fetch, the task's branch comes
    first, at most 50 are taken (excluded names count toward them); the rest is counted in `branchesDropped`;
 3. per branch, `fetch --no-tags` over protocol 2 with `fetch.fsckObjects` and `transfer.fsckObjects` into `refs/runner/in/<n>` of the mirror
    (numbered: no name the agent chose becomes a local ref); the tip is read from the mirror and must be a commit; the lease is asked
    again; then **one** `git push --porcelain <url> refs/runner/in/<n>:refs/heads/<name>`: no `+`, no force, one refspec per
-   command, no `--mirror`, `--all`, `--tags` or `--delete`; the engine user's processes are ended once more (`sweep`) right
-   before it, since the fetch ran an upload-pack as that user;
+   command, no `--mirror`, `--all`, `--tags` or `--delete`; the fetch ran an upload-pack in the reader, which the runner killed and started again
+   before the commit and before this push (`quiet_readers`), so nothing a filter left behind is alive;
 4. classifies each failure into a reason word from the exit status and the `!` lines of the porcelain (`non_fast_forward`,
    `remote_rejected`, `workflows_not_allowed`, `provider_refused`, `provider_error`, `provider_unavailable`, `timed_out`,
    `unreadable`, `not_a_commit`, `out_of_time`, `out_of_space`, `excluded`); `workflows_not_allowed` is found only in the reason in the
@@ -1232,13 +1232,14 @@ and the runner sets no `safe.directory` for itself. Everything that looks inside
 which the runner names itself: `exec_pipe`, a command that runs `git upload-pack` in the reader through the Docker daemon; what the repository's config makes that process run, it runs in the reader.
 The result is an object stream that the mirror's git checks and stores in a repository only root can enter, whose config is the
 runner's and where nothing is checked out. **Decisions come from exit statuses and objects, never from what git printed.**
-`tests/integration/test_implementer_git_push.py` proves that no trap in the repository's config or hooks runs and that no root git
-has the repository as its directory; `tests/privileged/test_implementer_git_users.py` proves the same with real root and the real
-engine user.
+`tests/integration/test_implementer_git_push.py` proves that no trap in the repository's config or hooks runs in Control and that no root git
+has the repository as its directory; `tests/lane/test_reader_hostile.py` (E15) proves, on a real Docker daemon (and on a VM under Sysbox), what a hostile repository
+can do in the reader: nothing outside it.
 
-**Time.** `GRACE_SECONDS` (180) is kept back from the time limit: `DIRTY_TIMEOUT` 10, the leftover commit 40, the final push 100,
-two reads of the report from the mirror (`REPORT_READ_TIMEOUT`, 5 each) and 5 for the end of the engine. A stop commits nothing and
-gives the push 30 of the 55 seconds the process leaves itself. `test_implementer_session_parts.py` holds both sums.
+**Time.** `GRACE_SECONDS` (270) is kept back from the time limit; at a normal end every step is counted at its ceiling and the sum is 214 s: the end of
+the agent's container 25 (the kill call 15, the wait until it is gone 10), the first reset of the readers 10, the rescue of a detached HEAD 9, `DIRTY_TIMEOUT` 10, the leftover
+commit 40, the second reset of the readers 10, the final push 100 and two reads of the report from the mirror (`REPORT_READ_TIMEOUT`, 5 each). A stop commits nothing, resets the readers once
+and gives the push 25: 79 s of the 115 the process leaves itself. `test_implementer_session_parts.py` holds both sums and the slack (a fifth of the grace, a quarter of the stop).
 
 **The report.** `commits_since_start()` and `changed_files()` read the task's branch **from the mirror** after the push has taken
 it over (not from the agent's repository). `PushReport.branches` is each branch with its head and outcome; `form_head` is the tip
@@ -1246,25 +1247,15 @@ of the task's branch when it has work. The turn is `ok` when the task's branch a
 branch arrived; `push_rejected` when its branch has commits and was rejected, when nothing arrived although something had commits,
 or when the repository could not be read; `agent_gave_up` when no branch has anything new.
 
-The tests need git first on `PATH`; any version will do. The user separation (uids, what the engine user can read) is proven by
-`tests/privileged/test_implementer_git_users.py`.
-
-### The three names are not the agent's to change
-
-`dirty()` and `commit_all()` leave `.opencode`, `opencode.json` and `opencode.jsonc` at the root out of their commands (`:(exclude,top)`
-pathspecs). They never count as a change, never trigger the extra message and never block the commit of the rest: git refuses
-`git add -A` for a new path outside the sparse definition (exit 1), and an edit of a tracked one is invisible to it, so without this one
-such file made the whole turn fail charged after everything else was pushed. The instruction text tells the agent they are not
-available. When the agent created or changed one anyway, `engine_inputs_present()` finds it (an `lstat` of the three names) and the
-summary ends with a sentence of the runner's, "[Not made: the agent created or changed ...]", after the agent's text (the agent's text is
-cut to make room, never the sentence), and the job log notes it. A turn that did nothing else is `agent_gave_up` with that sentence.
+The tests need git first on `PATH`; any version will do. What a hostile repository can do is proven by the lane (`tests/lane`, `make test-lane`), which
+needs a Docker daemon and the two images.
 
 ## The Implementer's agent session (#764)
 
-`implementer/session.py` runs one turn; `agent.py` is its engine, `config.py` and `prompts.py` what the runner tells the engine. It
-has the skeleton of the Dynamic Review's adapter (the engine user and its network rules, a private home, `opencode serve` on the
-slot's loopback port, the HTTP client and event stream, the loopback model proxy with the job's capability and the ledger) and reuses
-those parts (`native_job.build_native`, `adapter.EngineClient`, `ToolPartAudit`); nothing is review-shaped.
+`implementer/session.py` runs one turn; `agent.py` is its engine, `config.py` and `prompts.py` what the runner tells the engine. The engine
+(`opencode serve`) runs in the agent's container (`agent_container.py`); Control reaches it through a loopback listener that opens one
+exec per connection, and the model through the **model door**, a container of its own that holds the key, the model pin and the cost limit
+(`door_launcher.py`); the ledger in this process reads what the door counts. Nothing is review-shaped.
 
 | Piece | What it is |
 |---|---|
@@ -1274,28 +1265,20 @@ those parts (`native_job.build_native`, `adapter.EngineClient`, `ToolPartAudit`)
 | Turn | The instruction is sent; the call blocks beside a watch that ends the turn at once when the ledger records a refusal, the clock runs out, the lease is lost (asked every 30 s) or the engine or its container dies. When the turn ends and the tree is dirty, **one** more message in the same session; what is dirty after that is committed by the system in the reader without a model call. |
 | End | Whatever ended the turn, the agent's container is killed first (everything in it; it is removed after the push); then a detached HEAD is saved on a `<branch>-leftover-<id>` branch and the leftover is committed (both run in the reader, and only when the container is confirmed gone); then the final push of all local branches (`push_all`); then the result. The model door is stopped last. |
 | Egress | None. The agent's container is on an internal network with no exit and reaches the model door only; the allowlist proxy of #763 is gone, and the network door of step 7 will give a rule per environment. |
-| Limits | The cost limit is the ledger's: the proxy refuses the next call and the turn ends `cost_limit_reached` (an own key's token cap is the same code). The clock is the job's `timeLimitSeconds` less 3 minutes (a third for a short limit; `deadline_seconds`): `time_limit_reached`. In both cases the committed and the leftover work is pushed first and the result reports it. There is no step limit and **no bound on a single tool result** (a `grep` answers 200 KB); the cumulative 256 MiB of results and the 32 MiB request are sanity bounds. |
+| Limits | The cost limit is the ledger's: the proxy refuses the next call and the turn ends `cost_limit_reached` (an own key's token cap is the same code). The clock is the job's `timeLimitSeconds` less 4.5 minutes (`GRACE_SECONDS`, 270 s; a third for a short limit; `deadline_seconds`): `time_limit_reached`. In both cases the committed and the leftover work is pushed first and the result reports it. There is no step limit and **no bound on a single tool result** (a `grep` answers 200 KB); the cumulative 256 MiB of results and the 32 MiB request are sanity bounds. |
 | Codes | `agent_gave_up` (no commit and a clean tree; the closing text is the summary; **also** an engine that died or a bound that ended the turn once the model was really used, that is a call was billed or may have been (`BudgetLedger.model_used`; reservations the provider turned away do not count), because that turn has cost money), `llm_unavailable` / `llm_timeout` when the engine gave up while the last call to the provider had failed (an outage, named from `proxy.last_upstream_error` as for Dynamic, and free when nothing was billed), `cost_limit_reached`, `time_limit_reached`, `push_rejected` and `setup_failed` (**`setup_failed` is the free code of a turn that never started: once the model was used it is `agent_gave_up`, and an unexpected error is `agent_gave_up`, never `runner_error`**; `branch_violation` and `branch_exists` are no longer produced), `lease_lost` and `runner_shutdown` (#765), `implementer_config_invalid` for a model entry the proxy cannot serve, and `runner_error`, free, for the same failures **before** any model call (the wire has no `internal_error`). |
 | Push errors | A push that failed with no refusal (a 5xx, a reset, a timeout, no route, a 429, a local error such as a permission problem on the mirror, or GitHub's `! [remote rejected] (internal error)` / `(failed to update ref)`) is tried once more and then that branch is `provider_unavailable`. A refusal (a `!` line of the porcelain, or an HTTP client error other than 408/425/429, or git reporting that credentials were refused; only the remote's own words count, a local "Permission denied" does not) is not tried again. Neither ends the turn by itself (see "The report" above). |
 | Result | `TurnResult.implementer_block()` is the contract's `ImplementerResult`: `branches` (every branch pushed or rejected, with its reason) and the commits and changed files of the task's branch (read from the mirror, bounded by `history.py`), the closing text as the summary (secrets redacted, 8 192 characters), the OpenCode session id and the pinned version. The usage is the ledger's, with the call trace as for Dynamic (numbers and the names `read`, `grep`, `glob`; the contract has no name yet for `write` and `bash`, which count as `other`). |
-| Prompt caching | Whatever the stock engine and the passthrough proxy do for Dynamic; nothing here sets, removes or rewrites a cache marker. `test_engine_implementer.py` checks for **each** wire family (Anthropic messages, OpenAI chat, OpenAI responses, Google) that every request extends the one before it (the prefix a provider caches, automatically or by mark), that the engine's marks reach the provider where the model takes them, that the Anthropic requests replayed through the cache rules of the fakes read their own prefix from the second call on, and that the ledger counts and prices what the provider states. |
+| Prompt caching | Whatever the stock engine and the model door do; nothing here sets, removes or rewrites a cache marker. `runner/tests/lane/test_implementer_wire.py` (#764-T09, in the lane since #745 step 4; the real-engine file `test_engine_implementer.py` it came from was removed with the engine user) checks, with the real OpenCode in the agent's container and the real door, that every request carries the engine's marks to the provider as it wrote them, that the Anthropic requests replayed through the cache rules of the fakes read their own prefix from the second call on, and that the ledger counts and prices what the provider states. The other wire families (OpenAI chat and responses, Google) are proven for the passthrough at the unit level (`test_passthrough_*.py`, `test_cache_usage.py`); their end-to-end proof with the real engine is not in the lane yet (step 8). |
 
-### Nothing executable or configurable comes from the repository
+### What the repository can configure
 
-The flags `OPENCODE_PURE` and `OPENCODE_DISABLE_PROJECT_CONFIG` are not enough in the pinned 1.19.0, and this was shown, not assumed
-(`test_nothing_executable_or_configurable_is_loaded_from_the_repository`, which fails without the fix). The engine has two
-configuration services. The older one honours the flag. The newer one (`@opencode/v2/Config`, which loads plugins, commands and
-agents) looks for `.opencode`, `opencode.json` and `opencode.jsonc` from its working directory up to the project root with **no
-check of any flag**, so a repository's `.opencode/plugin/*.js`, `.opencode/plugins/*.js`, a `plugin` entry of its `opencode.json`
-and its `.opencode/command` and `agent` files were loaded and executed at the first request. There is no environment variable that
-stops it, and running the engine in another directory would take the agent out of the repository.
-
-The mechanism is the agent's working tree: `create_agent_repository` makes it a **sparse checkout** that leaves out `.opencode`,
-`opencode.json` and `opencode.jsonc` at the root (`ENGINE_INPUTS`). They stay in every commit, so a push never deletes them, and they
-are never on disk for the engine to find. A name that is a file or a link is left out too. Nested `.opencode` directories are not
-reached by the engine's search (it stops at the project root). Known limits: a task that must change those files cannot commit them
-(`git add` refuses a path outside the sparse definition), and an agent can undo the sparse checkout with its own bash, but then it
-runs code it chose itself, which it can anyway.
+Nothing is kept from the engine. Since #745 step 4 the engine runs as root in the **agent's own container** (no secret, no network but
+the model door), and the repository is the agent's: a `.opencode` directory, an `opencode.json` or a plugin in it is loaded and run
+there, where it can reach nothing that matters. The sparse checkout that used to leave the three names out, the pathspec exclusions of
+`dirty()` and `commit_all()` and `engine_inputs_present()` are gone with the engine user. What a repository's configuration still cannot
+do is change the three things the door pins outside the container: the model (a config that names another one is refused at the door,
+`MODEL_NOT_ALLOWED`), the cost limit and the key.
 
 ## Engine tests
 
