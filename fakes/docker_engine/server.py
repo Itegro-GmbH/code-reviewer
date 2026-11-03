@@ -393,13 +393,15 @@ class FakeDockerEngine:
 
     def _start(self, connection: socket.socket, ref: str) -> None:
         container = self.containers[ref]
-        self._reply(connection, 204)
         labels: dict[str, str] = container.document.get("Labels") or {}
         role = labels.get("code-reviewer.role", "")
         if container.document.get("Entrypoint") == ["/usr/sbin/nft"] or role in ONE_SHOT_ROLES:
-            # A one-shot container of the network rules or of the bridge's IPv6: it ends at once.
+            # A one-shot container of the network rules or of the bridge's IPv6: it ends at once. Its
+            # exit code is set before the start is answered, so that a `wait` right after sees it.
             container.exit_code = self.ipv6_exit if role == "bridge-ipv6" else self.rules_exit
+            self._reply(connection, 204)
             return
+        self._reply(connection, 204)
         container.running = True
         behaviour = self.behaviour
         if behaviour is None:
