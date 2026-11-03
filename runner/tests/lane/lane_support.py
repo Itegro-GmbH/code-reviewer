@@ -475,7 +475,11 @@ def _make_volume(scratch: Path, disk_megabytes: int | None) -> tuple[Path, str, 
 
 
 def unmount(path: Path) -> None:
-    subprocess.run(["umount", "-R", str(path)], capture_output=True, check=False)
+    """Everything mounted at and below the path. The recursive bind of the work directory stands on
+    top of the mounts it copied, so one pass takes the copies and the next the originals."""
+    for _ in range(3):
+        if subprocess.run(["umount", "-R", str(path)], capture_output=True, check=False).returncode:
+            break
 
 
 @dataclass

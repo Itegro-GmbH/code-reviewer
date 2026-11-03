@@ -82,8 +82,8 @@ READY_SECONDS: Final = 60.0
 # the container is gone. The removal is a third, **after the push** (`remove()`), because a Sysbox
 # container with its inner Docker can take long to remove and nothing has to wait for it: killed is
 # enough to read the repository.
-KILL_SECONDS: Final = 3.0
-STOP_SECONDS: Final = 7.0
+KILL_SECONDS: Final = 5.0
+STOP_SECONDS: Final = 5.0
 REMOVE_SECONDS: Final = 15.0
 # How long an answer about the engine's process is trusted, so that the watch (every 50 ms) does
 # not put a call to the daemon behind every look.

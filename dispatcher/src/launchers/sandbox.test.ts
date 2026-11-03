@@ -23,6 +23,7 @@ import {
   SANDBOX_REGION,
   SANDBOX_KIND_DEFAULTS,
   IMPLEMENTER_LAUNCH_EXTRA_SECONDS,
+  RUN_DIRECTORY_STEPS_SECONDS,
   SYSBOX_PREPARE_SECONDS,
   WORK_VOLUME_STEPS_SECONDS,
   minimumVmTimeoutMargin,
@@ -742,6 +743,84 @@ describe("the Sandbox-Launcher", () => {
     ).toStrictEqual(["pr-agent"]);
   });
 
+  // #745-T29: with the VM's disk full Docker can still run a command in a container (the pipes of an exec are files below
+  // /run), so those directories are memory, made before the daemon starts, on an implementer's VM only
+  it("puts the directories Docker keeps its runtime in on memory before the daemon starts, for an implementer's VM and no other", async () => {
+    await launch(build(), spec({ kind: "implementer" }));
+    await launch(
+      build(),
+      spec({ kind: "diff", jobId: "00000000-0000-4000-8000-000000000002" }),
+    );
+
+    const first = service.execs.filter(
+      (call) => call.vm === service.creates[0]?.name,
+    );
+    expect(
+      first.slice(0, 4).map((call) => [call.label, call.cmd, ...call.args]),
+    ).toStrictEqual([
+      [
+        "run-directories",
+        "mkdir",
+        "-p",
+        "--",
+        "/run/docker",
+        "/run/containerd",
+      ],
+      [
+        "run-directory-docker",
+        "mount",
+        "-t",
+        "tmpfs",
+        "-o",
+        "size=64m,mode=0711,nosuid,nodev",
+        "tmpfs",
+        "/run/docker",
+      ],
+      [
+        "run-directory-containerd",
+        "mount",
+        "-t",
+        "tmpfs",
+        "-o",
+        "size=64m,mode=0711,nosuid,nodev",
+        "tmpfs",
+        "/run/containerd",
+      ],
+      ["vm-prepare", "/usr/local/sbin/vm-prepare.sh"],
+    ]);
+    for (const call of first.slice(0, 3)) expect(call.sudo).toBe(true);
+    const second = service.execs.filter(
+      (call) => call.vm === service.creates[1]?.name,
+    );
+    expect(second.some((call) => call.label.startsWith("run-director"))).toBe(
+      false,
+    );
+  });
+
+  // #745-T29
+  it.each([
+    "run-directories",
+    "run-directory-docker",
+    "run-directory-containerd",
+  ])(
+    "stops the VM with the retryable docker_not_ready when %s fails, and runs nothing after it",
+    async (label) => {
+      service.onExec(label, { exitCode: 32, stderr: "mount: nope" });
+
+      const error = failure(
+        await launch(build(), spec({ kind: "implementer" })),
+      );
+
+      expect(error.code).toBe("docker_not_ready");
+      expect(error.retryable).toBe(true);
+      expect(service.stops).toStrictEqual([service.creates[0]?.name]);
+      expect(service.execs.some((call) => call.label === "vm-prepare")).toBe(
+        false,
+      );
+      expect(service.starts).toHaveLength(0);
+    },
+  );
+
   // #760-T05
   it("makes the work volume of an implementer job after the host is prepared (Sysbox included) and before docker run, all on the job's VM", async () => {
     const result = await launch(build(), spec({ kind: "implementer" }));
@@ -750,6 +829,9 @@ describe("the Sandbox-Launcher", () => {
     const name = service.creates[0]?.name ?? "";
     expect(service.events).toStrictEqual([
       `create:${name}`,
+      "exec:run-directories",
+      "exec:run-directory-docker",
+      "exec:run-directory-containerd",
       "exec:vm-prepare",
       "exec:image-id",
       "exec:sysbox-prepare",
@@ -1104,6 +1186,9 @@ describe("the Sandbox-Launcher", () => {
     expect(service.running()).toStrictEqual([]);
     expect(service.starts).toHaveLength(0);
     expect(service.execs.map((call) => call.label)).toStrictEqual([
+      "run-directories",
+      "run-directory-docker",
+      "run-directory-containerd",
       "vm-prepare",
       "image-id",
       "sysbox-prepare",
@@ -1245,7 +1330,8 @@ describe("the Sandbox-Launcher", () => {
 
     expect(WORK_VOLUME_STEPS_SECONDS).toBe(80);
     expect(SYSBOX_PREPARE_SECONDS).toBe(40);
-    expect(IMPLEMENTER_LAUNCH_EXTRA_SECONDS).toBe(120);
+    expect(RUN_DIRECTORY_STEPS_SECONDS).toBe(9);
+    expect(IMPLEMENTER_LAUNCH_EXTRA_SECONDS).toBe(129);
     const [implementer, diff] = service.creates;
     expect(implementer?.timeoutMs).toBe(
       (3600 + VM_TIMEOUT_MARGIN_SECONDS + IMPLEMENTER_LAUNCH_EXTRA_SECONDS) *

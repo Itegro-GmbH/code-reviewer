@@ -45,6 +45,8 @@ import {
   WORKER_CONTAINER_SPEC,
 } from "./container-spec.ts";
 import {
+  RUN_DIRECTORY_COMMANDS,
+  RUN_DIRECTORY_STEP_TIMEOUT_MS,
   SYSBOX_PREPARE_TIMEOUT_MS,
   SandboxDockerHost,
   WORK_VOLUME_STEP_TIMEOUT_MS,
@@ -83,11 +85,16 @@ export function minimumVmTimeoutMargin(handoverSeconds: number): number {
  */
 export const WORK_VOLUME_STEPS_SECONDS =
   (WORK_VOLUME_STEP_COUNT * WORK_VOLUME_STEP_TIMEOUT_MS) / 1000;
+/** The three steps that put Docker's runtime directories on memory, before `vm-prepare.sh` on the Implementer's VM. */
+export const RUN_DIRECTORY_STEPS_SECONDS =
+  (RUN_DIRECTORY_COMMANDS.length * RUN_DIRECTORY_STEP_TIMEOUT_MS) / 1000;
 /** The Implementer's VM runs `sysbox-prepare.sh` too (at most its timeout); like the volume steps it is not part of Diff's or Dynamic's launch. */
 export const SYSBOX_PREPARE_SECONDS = SYSBOX_PREPARE_TIMEOUT_MS / 1000;
 /** Everything an implementer launch takes beyond a review's: the Sysbox boot and the steps of the work volume. */
 export const IMPLEMENTER_LAUNCH_EXTRA_SECONDS =
-  SYSBOX_PREPARE_SECONDS + WORK_VOLUME_STEPS_SECONDS;
+  RUN_DIRECTORY_STEPS_SECONDS +
+  SYSBOX_PREPARE_SECONDS +
+  WORK_VOLUME_STEPS_SECONDS;
 /** How long the container must run for the Worker to count as having taken over (sandbox-host.ts). */
 export const SANDBOX_HANDOVER_SECONDS = 20;
 /** The tag the golden snapshot pipeline (#330) gives the Worker image in the snapshot. */
@@ -558,6 +565,8 @@ export function createSandboxLauncher(
         handoverSeconds,
       });
       try {
+        if (spec.kind === "implementer")
+          await host.prepareRunDirectories(signal);
         await host.prepare(signal);
         // Only the Implementer: the boot steps of Sysbox change the VM as a whole, and a review's VM stays as it was.
         if (spec.kind === "implementer") await host.prepareSysbox(signal);
