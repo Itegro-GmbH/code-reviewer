@@ -120,7 +120,7 @@ describe("docker/sandbox/sysbox-prepare.sh against stand-ins", () => {
     stand(
       bin,
       "sysctl",
-      `echo "sysctl $*" >> "${dir}/calls"; if [ -f "${dir}/sysctl-fails" ]; then exit 255; fi`,
+      `echo "sysctl $*" >> "${dir}/calls"; if [ -f "${dir}/sysctl-fails" ]; then exit 255; fi; if [ -f "${dir}/sysctl-write-fails" ] && [ "$2" = "-w" ]; then exit 255; fi`,
     );
     stand(
       bin,
@@ -205,6 +205,7 @@ wait`,
       "umount /proc/kcore",
       "umount /proc/keys",
       `sysctl -q -e -p ${fx.file("sysctl.conf")}`,
+      "sysctl -q -w fs.file-max=2147483647",
       "start sysbox-mgr",
       "start sysbox-fs",
       "docker info --format {{json .Runtimes}}",
@@ -288,6 +289,24 @@ wait`,
       const result = run(fx);
       expect(result.status).toBe(23);
       expect(result.stderr).toContain("sysbox_sysctl_failed");
+      expect(result.calls.some((call) => call.startsWith("start"))).toBe(false);
+    });
+
+    // #745 step 6: the VM's table of open files (437,305 entries on a 4 GB VM) was filled by one root process of the agent in
+    // about ten seconds with a tenth of its memory limit, and the calls of Control began to fail. The table is made too big to
+    // fill, so that the agent's memory limit is what stops it.
+    it("makes the table of open files too big for the agent's memory limit to let it fill", () => {
+      const result = run(fixture());
+      expect(result.calls).toContain("sysctl -q -w fs.file-max=2147483647");
+      expect(code).toContain("fs.file-max");
+    });
+
+    it("names a size of the table of open files the kernel refused, and starts no daemon", () => {
+      const fx = fixture();
+      writeFileSync(fx.file("sysctl-write-fails"), "");
+      const result = run(fx);
+      expect(result.status).toBe(23);
+      expect(result.stderr).toContain("sysbox_sysctl_failed fs.file-max");
       expect(result.calls.some((call) => call.startsWith("start"))).toBe(false);
     });
 

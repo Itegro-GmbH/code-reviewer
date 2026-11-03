@@ -14,7 +14,8 @@
 #   3. proc     the platform mounts a read-only devtmpfs over /proc/kcore and /proc/keys. With it in place
 #               `docker run --runtime=sysbox-runc` fails with "re-mounting procfs caused: operation not permitted".
 #               This unmounts them for the WHOLE VM, which is why the script runs on the Implementer's VM only
-#   4. sysctl   the limits the Sysbox package sets at install time (inotify, keyring) are gone after a restore
+#   4. sysctl   the limits the Sysbox package sets at install time (inotify, keyring) are gone after a restore; and the table of
+#               open files is made too big to fill (below)
 #   5. daemons  sysbox-mgr, then sysbox-fs, detached; each must be a running process and own its socket (`-S`, the file
 #               exists and is a socket; whether the daemon answers on it is what `docker run` and the snapshot's proof find out).
 #               Both share ONE wait of at most 30 s, which is below the launcher's 40 s limit for this script
@@ -78,6 +79,15 @@ done
 if [ -f "$sysctl_conf" ]; then
   sysctl -q -e -p "$sysctl_conf" >/dev/null 2>&1 || fail 23 sysbox_sysctl_failed "$sysctl_conf"
 fi
+
+# 4b. The kernel's table of open files is one for the whole VM: 437,305 entries on a 4 GB VM (measured). A file costs the
+# container that opens it about 300 bytes of its own memory, so a root process that does nothing but open files filled the table
+# at 437,305 (136,290 + 184,692 + 115,833 in three processes, step 6, 2026-11-03) with a tenth of its memory limit, and the
+# calls of Control and of the platform's own agent on the VM began to fail with ENFILE. With a table that cannot fill before the
+# memory limit of the agent's container (the most it can have, at 8 vCPU, is 14 GB, 47 million files), the memory cgroup is what
+# stops it, and it stops only the agent.
+file_max="${SYSBOX_PREPARE_FILE_MAX:-2147483647}"
+sysctl -q -w "fs.file-max=$file_max" >/dev/null 2>&1 || fail 23 sysbox_sysctl_failed "fs.file-max"
 
 # 5. The manager first: sysbox-fs asks it for the container's id mapping.
 start() {
