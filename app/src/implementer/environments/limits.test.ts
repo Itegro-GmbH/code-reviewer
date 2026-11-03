@@ -15,6 +15,7 @@ import {
   SETUP_SCRIPT_TIMEOUT_SECONDS,
   memoryGbOf,
 } from "./limits.ts";
+import { AGENT_MEMORY_GB } from "../../runs/run-view.ts";
 
 const SIZES = JSON.parse(
   readFileSync(
@@ -33,6 +34,7 @@ const SIZES = JSON.parse(
   vcpus: number[];
   environmentVcpus: number[];
   minAgentMemoryMb: number;
+  memoryGuard: { minFloorMb: number; floorPercent: number };
   agentMemoryMb: Record<string, number>;
   memoryPerVcpuMb: number;
   defaultVcpus: number;
@@ -55,12 +57,19 @@ describe("the sizes and limits of an environment", () => {
     expect(SETUP_SCRIPT_TIMEOUT_SECONDS).toBe(SIZES.setupScript.timeoutSeconds);
   });
 
+  // #745-T06: the run page keeps its own copy of the GB (it is below the Implementer), and it is the figure the form shows
+  it("show the same GB on the run page as in the form, for every size of the platform", () => {
+    for (const vcpus of [1, ...ENVIRONMENT_VCPUS])
+      expect(AGENT_MEMORY_GB[vcpus]).toBe(memoryGbOf(vcpus));
+    expect(SIZES.memoryGuard).toEqual({ minFloorMb: 512, floorPercent: 8 });
+  });
+
   // #818-T01
   it("state the decisions of the issue: 64 KB, 15 minutes, 2 GB per vCPU and the standard of 2 vCPU", () => {
     expect(SETUP_SCRIPT_MAX_BYTES).toBe(64 * 1024);
     expect(SETUP_SCRIPT_TIMEOUT_SECONDS).toBe(15 * 60);
-    // The memory shown is the agent's: what the VM has left after the OS, Control, the model door and the readers.
-    expect(ENVIRONMENT_VCPUS.map(memoryGbOf)).toEqual([2, 6, 10, 14]);
+    // The memory shown is the agent's: what the VM has left after the OS, Control, the model door, the readers and the memory guard's floor.
+    expect(ENVIRONMENT_VCPUS.map(memoryGbOf)).toEqual([2, 5.8, 9.5, 13.2]);
     expect(DEFAULT_VCPUS).toBe(2);
     expect(ENVIRONMENT_NAME_MAX_LENGTH).toBeGreaterThan(0);
   });

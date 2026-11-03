@@ -72,7 +72,7 @@ from code_reviewer_runner.implementer.setup_container import (
     SETUP_NETWORK_NAME,
     SetupContainer,
 )
-from code_reviewer_runner.implementer.vm_memory import read_memory
+from code_reviewer_runner.implementer.vm_memory import floor_bytes, read_memory
 
 Json = dict[str, Any]
 SKIP_ABUSE = "--skip-abuse" in sys.argv[1:]
@@ -229,15 +229,28 @@ class Rig:
     def host_json(self, code: str, *, timeout: float = 60.0) -> Json:
         """A one-shot container in the VM's own network namespace (no capability, no mount) that
         prints one JSON line: the VM's addresses, listeners and IPv6 state."""
+        return self.helper_json(code, {"NetworkMode": "host"}, "HOST_RESULT ", timeout=timeout)
+
+    def helper_json(
+        self,
+        code: str,
+        host_config: Json,
+        marker: str,
+        *,
+        timeout: float = 60.0,
+        argv: list[str] | None = None,
+    ) -> Json:
+        """A one-shot container of the golden image (root, no capability, read-only, 64 MiB) with the
+        namespace `host_config` names, running `code`; the JSON after `marker` in its output."""
         helper = self.api.create_container(
             {
                 "Image": "code-reviewer-agent:golden",
-                "Entrypoint": [PYTHON, "-I", "-c", code],
+                "Entrypoint": [PYTHON, "-I", "-c", code, *(argv or [])],
                 "Cmd": [],
                 "User": "0:0",
                 "Env": [],
                 "HostConfig": {
-                    "NetworkMode": "host",
+                    **host_config,
                     "Privileged": False,
                     "ReadonlyRootfs": True,
                     "CapDrop": ["ALL"],
@@ -258,7 +271,18 @@ class Rig:
         finally:
             with contextlib.suppress(DockerError):
                 self.api.remove_container(helper)
-        return last_json(out.decode("utf-8", "replace"), "HOST_RESULT ")
+        return last_json(out.decode("utf-8", "replace"), marker)
+
+    def vm_processes_of(self, container: str) -> Json:
+        """The VM's own view of a container's processes: pid, name, uid and OOM score of every process
+        whose cgroup is the container's (the helper shares the VM's pid namespace)."""
+        identifier = str(self.api.inspect_container(container)["Id"])
+        return self.helper_json(VM_PIDS, {"PidMode": "host"}, "PIDS_RESULT ", argv=[identifier])
+
+    def oom_kill_view(self) -> Json:
+        """Every cgroup's `oom_kill` counter, read through the VM's own cgroup tree (the helper has the
+        host's cgroup namespace), and the kernel's count."""
+        return self.helper_json(CGROUP_OOM, {"CgroupnsMode": "host"}, "OOM_RESULT ", timeout=90.0)
 
     # -- the setup ---------------------------------------------------------------------------
 
@@ -324,6 +348,54 @@ result = {
     "sysctls": {n: read("/proc/sys/" + n) for n in ("kernel/panic", "kernel/printk", "kernel/sysrq")},
 }
 print("HOST_RESULT " + json.dumps(result), flush=True)
+"""
+
+
+VM_PIDS = r"""
+import json, os, sys
+wanted = sys.argv[1]
+found = []
+for entry in sorted(os.listdir("/proc"), key=lambda e: int(e) if e.isdigit() else 0):
+    if not entry.isdigit():
+        continue
+    try:
+        cgroup = open(f"/proc/{entry}/cgroup").read()
+        if wanted not in cgroup:
+            continue
+        status = open(f"/proc/{entry}/status").read()
+        uid = next(l.split()[1] for l in status.splitlines() if l.startswith("Uid:"))
+        found.append({
+            "pid": int(entry),
+            "comm": open(f"/proc/{entry}/comm").read().strip(),
+            "oom_score_adj": int(open(f"/proc/{entry}/oom_score_adj").read()),
+            "uid": int(uid),
+            "cmd": open(f"/proc/{entry}/cmdline").read().replace("\0", " ")[:70],
+        })
+    except (OSError, StopIteration, ValueError):
+        continue
+print("PIDS_RESULT " + json.dumps({"processes": found}), flush=True)
+"""
+CGROUP_OOM = r"""
+import json, os
+root = "/sys/fs/cgroup"
+groups = {}
+for path, dirs, files in os.walk(root):
+    if path.count("/") - root.count("/") > 6:
+        dirs[:] = []
+        continue
+    if "memory.events" in files:
+        try:
+            for line in open(os.path.join(path, "memory.events")):
+                name, _, value = line.partition(" ")
+                if name == "oom_kill":
+                    groups[os.path.relpath(path, root)] = int(value)
+        except OSError:
+            pass
+kills = 0
+for line in open("/proc/vmstat"):
+    if line.startswith("oom_kill "):
+        kills = int(line.split()[1])
+print("OOM_RESULT " + json.dumps({"groups": groups, "vmstat": kills}), flush=True)
 """
 
 
@@ -1526,6 +1598,7 @@ def section_setup_container(lab: Rig) -> None:
             "cgroup",
             "proc",
             "look",
+            "oom",
         ],
         # The Setup's own Docker has a bridge on 172.17.0.1 too, the VM's docker0 address: root takes
         # it away first, so that the connects to the VM's gateway really leave the container.
@@ -1572,7 +1645,9 @@ def section_setup_container(lab: Rig) -> None:
             listening = True
             break
     back: Json = {}
+    setup_vm_view: Json = {}
     if listening:
+        setup_vm_view = lab.vm_processes_of(SETUP_CONTAINER_NAME)
         back = lab.in_agent(
             {
                 "sections": ["net"],
@@ -1652,6 +1727,17 @@ def section_setup_container(lab: Rig) -> None:
         listening and bool(back) and not any(reached(v) for v in back.values()),
         listening=listening,
         **back,
+    )
+    checks.say(
+        "oom",
+        "setup_processes_have_oom_score_1000_and_root_cannot_lower_it",
+        "in the Setup container's script (an exec) and as the VM sees the container's cgroup: oom_score_adj 1000 for every process, every lowering refused, no CAP_SYS_RESOURCE; the VM sees the script's shell among them",
+        oom_facts_hold(got["oom"]) and vm_scores_hold(setup_vm_view, "/bin/sh"),
+        **got["oom"],
+        vm=[
+            f"{p.get('pid')}:{p.get('comm')}:{p.get('oom_score_adj')}"
+            for p in setup_vm_view.get("processes", [])
+        ][:24],
     )
     connects = got["ipv6"]["neighbour_connects"]
     checks.say(
@@ -1787,11 +1873,51 @@ with open("/fill.bin", "wb", buffering=0) as handle:
 """
 
 
-class Sampler:
-    """Control's own health while the agent misbehaves: every half second one call to the daemon,
-    one command in a reader, the door's state and the VM's free memory."""
+MEMORY_SAMPLE_SECONDS = 0.02
+MEMINFO_FIELDS = ("MemFree", "Active(file)", "Inactive(file)", "MemAvailable")
 
-    def __init__(self) -> None:
+
+def read_meminfo() -> dict[str, int]:
+    """The fields of `MEMINFO_FIELDS` of /proc/meminfo, in MiB."""
+    values: dict[str, int] = {}
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        name, _, rest = line.partition(":")
+        if name in MEMINFO_FIELDS:
+            values[name] = int(rest.split()[0]) // 1024
+    return values
+
+
+def guard_floor_mib() -> int:
+    """The floor Control's guard kills at on this VM, in MiB (0 when /proc/meminfo cannot be read)."""
+    read = read_memory()
+    return 0 if read is None else floor_bytes(read[1]) // MIB
+
+
+def oom_outside(before: Json, after: Json, container_ids: list[str]) -> list[str]:
+    """The cgroups that were not the agent's or the Setup container's (named by their ids), nor above
+    or below one of them, and whose `oom_kill` counter rose between two readings of the VM's tree."""
+    both = {**before["groups"], **after["groups"]}
+    ours = [path for path in both if any(identifier in path for identifier in container_ids)]
+    inside = {path for path in ours}
+    for path in ours:
+        parts = path.split("/")
+        inside.update("/".join(parts[:n]) for n in range(1, len(parts)))
+    return sorted(
+        path
+        for path, count in after["groups"].items()
+        if path not in inside and path in before["groups"] and count > before["groups"][path]
+    )
+
+
+class Sampler:
+    """Control's own health while the agent misbehaves: every half second one call to the daemon and
+    one command in a reader, and, 50 times a second and on a thread of their own, the VM's memory as
+    the guard reads it (free memory and the file cache) and as the kernel says it (`MemAvailable`).
+    With a rig it also reads the VM's `oom_kill` counters (the kernel's, and every cgroup's through
+    the VM's cgroup tree) before and after, so that a kill by the kernel's OOM killer that was not in
+    the agent's or the Setup container's cgroup shows."""
+
+    def __init__(self, lab: "Rig | None" = None, *, others: list[str] | None = None) -> None:
         self.api = DockerApi()
         self.latencies: list[float] = []
         self.failures = 0
@@ -1799,17 +1925,62 @@ class Sampler:
         # What is really left: free memory and the page cache of files. `MemAvailable` counts the structures
         # of open files as reclaimable, and an open file is not (it said 2.2 GB when the VM ran out).
         self.min_headroom_mib = 10**9
+        self.min_free_mib = 10**9
         self.most_files_open = 0
+        self.samples = 0
+        self.longest_gap = 0.0
+        self.oom_kills = 0
+        self.oom_outside: list[str] = []
+        self._lab = lab
+        self._container_ids = (
+            [
+                str(lab.api.inspect_container(n)["Id"])
+                for n in (AGENT_CONTAINER_NAME, *(others or []))
+            ]
+            if lab is not None
+            else []
+        )
+        self._before: Json = {}
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
+        self._memory = threading.Thread(target=self._run_memory, daemon=True)
 
     def __enter__(self) -> "Sampler":
+        if self._lab is not None:
+            self._before = self._lab.oom_kill_view()
         self._thread.start()
+        self._memory.start()
         return self
 
     def __exit__(self, *_: object) -> None:
         self._stop.set()
         self._thread.join(10.0)
+        self._memory.join(10.0)
+        if self._lab is not None:
+            after = self._lab.oom_kill_view()
+            if "groups" in self._before and "groups" in after:
+                self.oom_kills = int(after["vmstat"]) - int(self._before["vmstat"])
+                self.oom_outside = oom_outside(self._before, after, self._container_ids)
+            else:
+                self.oom_kills = -1
+                self.oom_outside = ["unreadable"]
+
+    def _run_memory(self) -> None:
+        last = time.monotonic()
+        while not self._stop.is_set():
+            with contextlib.suppress(OSError, ValueError, KeyError):
+                memory = read_meminfo()
+                free = memory["MemFree"]
+                self.min_free_mib = min(self.min_free_mib, free)
+                self.min_headroom_mib = min(
+                    self.min_headroom_mib, free + memory["Active(file)"] + memory["Inactive(file)"]
+                )
+                self.min_available_mib = min(self.min_available_mib, memory["MemAvailable"])
+            now = time.monotonic()
+            self.longest_gap = max(self.longest_gap, now - last)
+            last = now
+            self.samples += 1
+            self._stop.wait(MEMORY_SAMPLE_SECONDS)
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -1825,19 +1996,25 @@ class Sampler:
                 self.most_files_open = max(
                     self.most_files_open, int(Path("/proc/sys/fs/file-nr").read_text().split()[0])
                 )
-            left = read_memory()
-            if left is not None:
-                self.min_headroom_mib = min(self.min_headroom_mib, left[0] // MIB)
-            for line in Path("/proc/meminfo").read_text().splitlines():
-                if line.startswith("MemAvailable"):
-                    self.min_available_mib = min(
-                        self.min_available_mib, int(line.split()[1]) // 1024
-                    )
             self._stop.wait(0.5)
 
     @property
     def worst(self) -> float:
         return round(max(self.latencies or [0.0]), 2)
+
+    @property
+    def memory(self) -> Json:
+        """What the report shows of the memory: the least the VM had by the guard's measure and by the
+        kernel's, how often it was looked at, and the kernel's OOM kills."""
+        return {
+            "min_headroom_mib": self.min_headroom_mib,
+            "min_memfree_mib": self.min_free_mib,
+            "min_memavailable_mib": self.min_available_mib,
+            "samples": self.samples,
+            "longest_gap_ms": round(self.longest_gap * 1000),
+            "kernel_oom_kills": self.oom_kills,
+            "oom_kills_outside_agent_and_setup": self.oom_outside,
+        }
 
 
 def whole_and_running(lab: Rig) -> dict[str, bool]:
@@ -1887,9 +2064,8 @@ def fd_flood(lab: Rig, reader: ReaderAccess, label: str, kinds: str) -> None:
     # Enough processes that their own tables (1,048,576 entries each) cannot hold what the memory limit
     # would allow: about 450 bytes of the limit per object of the leakiest kinds.
     processes = max(12, MEMORY_MB * MIB // (450 * 1_048_576) * 2 + 2)
-    before = vm_oom_kills()
     began = time.monotonic()
-    with Sampler() as sampler:
+    with Sampler(lab) as sampler:
         done = run_exec(
             lab.api,
             AGENT_CONTAINER_NAME,
@@ -1933,13 +2109,15 @@ def fd_flood(lab: Rig, reader: ReaderAccess, label: str, kinds: str) -> None:
         "open_file_flood_in_the_agent_does_not_starve_control"
         if label == "mixed"
         else "open_file_flood_of_the_leakiest_objects_does_not_starve_control",
-        f"twelve root processes open {kinds} until EMFILE, ENOMEM or the memory limit stops them (past the old table of {OLD_FILE_MAX_4GB}, table now {limit}): the table never fills, Control's calls and a command in a reader never fail, door and readers stay up, the VM keeps at least 300 MiB of free memory and file cache",
+        f"twelve root processes open {kinds} until EMFILE, ENOMEM or the memory limit stops them (past the old table of {OLD_FILE_MAX_4GB}, table now {limit}): the table never fills, Control's calls and a command in a reader never fail, door and readers stay up, the VM keeps at least 300 MiB of free memory and file cache (looked at 50 times a second), no kernel OOM kill happens outside the agent's cgroup and none at all when Control's guard stopped the agent",
         stopped
         and peak > OLD_FILE_MAX_4GB
         and peak < limit
         and sampler.failures == 0
         and sampler.worst < 10.0
         and sampler.min_headroom_mib >= 300
+        and not sampler.oom_outside
+        and (not by_control or sampler.oom_kills == 0)
         and reader_ok.returncode == 0
         and reader_ok.stdout.startswith("git version")
         and all(whole_and_running(lab).values()),
@@ -1948,9 +2126,9 @@ def fd_flood(lab: Rig, reader: ReaderAccess, label: str, kinds: str) -> None:
         opened_by_the_agent=opened,
         children_stopped_by=stopped_by,
         most_files_open_system_wide=peak,
-        vm_min_available_mib=sampler.min_available_mib,
-        vm_min_headroom_mib=sampler.min_headroom_mib,
-        vm_oom_kills=vm_oom_kills() - before,
+        memory=sampler.memory,
+        guard_lowest_mib=None if lab.agent.lowest_left is None else lab.agent.lowest_left // MIB,
+        guard_floor_mib=guard_floor_mib(),
         worst_latency_s=sampler.worst,
         failures=sampler.failures,
         agent_oom_killed=state.get("OOMKilled"),
@@ -1976,18 +2154,162 @@ def last_flood(text: str) -> list[list[int]]:
     return []
 
 
-def vm_oom_kills() -> int:
-    """How many processes the kernel's OOM killer has killed since boot, in a cgroup or in the VM."""
-    for line in Path("/proc/vmstat").read_text().splitlines():
-        if line.startswith("oom_kill "):
-            return int(line.split()[1])
-    return 0
+LOWERINGS = ("0", "-1", "-1000", "500", "999")
+
+
+def oom_facts_hold(facts: Json) -> bool:
+    """What a process of a container (started by an exec, as the engine is) finds of its OOM score:
+    1000 for itself, its child and the container's init; every lowering refused and the score still
+    1000; raising it to 1000 allowed (the control: the file is writable, only lowering is not)."""
+    return (
+        facts.get("self") == "1000"
+        and facts.get("child") == "1000"
+        and facts.get("init") == "1000"
+        and facts.get("uid") == 0
+        and facts.get("cap_sys_resource") is False
+        and all(
+            str(facts.get("writes", {}).get(value, "")).startswith("error:")
+            and str(facts["writes"][value]).endswith("-> 1000")
+            for value in LOWERINGS
+        )
+        and facts.get("after_lowering") == "1000"
+        and facts.get("raise_to_1000") == "written -> 1000"
+    )
+
+
+def vm_scores_hold(view: Json, needle: str) -> bool:
+    """The VM's view of a container: processes (more than init and the daemon), the one the exec
+    started among them, and every one of them at 1000."""
+    processes = view.get("processes", [])
+    return (
+        len(processes) >= 3
+        and any(needle in str(p.get("cmd", "")) for p in processes)
+        and all(p.get("oom_score_adj") == 1000 for p in processes)
+    )
+
+
+def section_oom_score(lab: Rig) -> None:
+    """The OOM score is told to be 1000 for everything the agent runs, so that the VM's kernel kills
+    the agent first, never Control. Checked from inside (a process the daemon's exec started), from
+    the VM (the pids of the container's cgroup, among them the engine as `start_engine` starts it and a
+    plain exec) and for what root of the container can do about it."""
+    checks = lab.checks
+    facts = lab.in_agent({"sections": ["oom"]}).get("oom", {})
+    checks.say(
+        "oom",
+        "agent_processes_have_oom_score_1000_and_root_cannot_lower_it",
+        "in an exec in the agent's container: oom_score_adj 1000 for the process, its child and init; writing 0, -1, -1000, 500 and 999 fails (EACCES or EPERM) and leaves 1000; no CAP_SYS_RESOURCE; writing 1000 works",
+        oom_facts_hold(facts),
+        **facts,
+    )
+    # The engine as `start_engine` starts it, and a plain exec beside it; both stay for the VM's view.
+    lab.agent.start_engine([PYTHON, "-I", "-c", "import time; time.sleep(900)  # standin"], {})
+    plain = threading.Thread(
+        target=lambda: lab.agent_run(
+            [PYTHON, "-I", "-c", "import time; time.sleep(900)  # plain"], timeout=60.0
+        ),
+        daemon=True,
+    )
+    plain.start()
+    view: Json = {}
+    for _ in range(40):
+        time.sleep(0.5)
+        view = lab.vm_processes_of(AGENT_CONTAINER_NAME)
+        cmds = " ".join(str(p.get("cmd", "")) for p in view.get("processes", []))
+        if "# standin" in cmds and "# plain" in cmds:
+            break
+    processes = view.get("processes", [])
+    checks.say(
+        "oom",
+        "vm_sees_every_process_of_the_agents_container_at_oom_score_1000",
+        "read from the VM: every process in the agent container's cgroup (init, the engine started like start_engine does, a plain exec, their shells) has oom_score_adj 1000, as seen by the kernel that picks the victim",
+        vm_scores_hold(view, "# standin")
+        and any("# plain" in str(p.get("cmd", "")) for p in processes),
+        processes=[f"{p.get('pid')}:{p.get('comm')}:{p.get('oom_score_adj')}" for p in processes][
+            :24
+        ],
+        count=len(processes),
+    )
+    fresh_agent(lab)
+    plain.join(10.0)
+
+
+HEAVY = """
+import sys, time
+limit_mib, share, hold = int(sys.argv[1]), float(sys.argv[2]), float(sys.argv[3])
+target = int(limit_mib * share)
+chunks = []
+step = 32
+while len(chunks) * step < target:
+    chunks.append(bytearray(b"\\xa5") * (step * 1024 * 1024))
+print("HELD_MIB", len(chunks) * step, flush=True)
+end = time.time() + hold
+while time.time() < end:
+    for chunk in chunks:  # touch every page again and again, as a build that works on what it holds
+        chunk[::4096] = b"\\x5a" * len(chunk[::4096])
+    time.sleep(0.2)
+print("DONE", len(chunks) * step, flush=True)
+"""
+HEAVY_SHARE = 0.9
+HEAVY_HOLD_SECONDS = 30
+
+
+def section_heavy_build(lab: Rig) -> None:
+    """A legitimate heavy build: one process takes 90% of the agent's memory limit and works on it
+    for 30 seconds. The agent is inside its own limit, so it must not be killed: not by its cgroup
+    and not by Control's guard, which acts on what the VM has left."""
+    checks = lab.checks
+    with Sampler(lab) as sampler:
+        began = time.monotonic()
+        code, out = lab.agent_run(
+            [PYTHON, "-I", "-c", HEAVY, str(MEMORY_MB), str(HEAVY_SHARE), str(HEAVY_HOLD_SECONDS)],
+            timeout=180.0,
+        )
+        took = time.monotonic() - began
+    held = max([int(x.split()[1]) for x in out.splitlines() if x.startswith("HELD_MIB")] or [0])
+    done = any(x.startswith("DONE") for x in out.splitlines())
+    state = lab.api.inspect_container(AGENT_CONTAINER_NAME)["State"]
+    end = lab.agent.end
+    floor = guard_floor_mib()
+    checks.say(
+        "abuse",
+        "legitimate_heavy_build_inside_the_agents_limit_is_not_killed",
+        f"a process holding {int(HEAVY_SHARE * 100)}% of the agent's {MEMORY_MB} MiB limit for {HEAVY_HOLD_SECONDS} s ends by itself with status 0: the agent's container keeps running, the memory cgroup does not kill it, Control's guard does not fire, the VM never has less free memory and file cache than the guard's floor, no kernel OOM kill happens",
+        code == 0
+        and done
+        and held >= int(MEMORY_MB * HEAVY_SHARE) - 32
+        and took >= HEAVY_HOLD_SECONDS
+        and state.get("Running") is True
+        and state.get("OOMKilled") is False
+        and end is None
+        and lab.agent.tripped_at is None
+        and sampler.min_headroom_mib > floor
+        and sampler.oom_kills == 0
+        and not sampler.oom_outside
+        and sampler.failures == 0
+        and sampler.worst < 10.0
+        and all(whole_and_running(lab).values()),
+        exit_code=code,
+        held_mib=held,
+        share_of_limit=round(held / MEMORY_MB, 3),
+        seconds=round(took, 1),
+        floor_mib=floor,
+        memory=sampler.memory,
+        guard_lowest_mib=None if lab.agent.lowest_left is None else lab.agent.lowest_left // MIB,
+        guard_fired=lab.agent.tripped_at is not None,
+        worst_latency_s=sampler.worst,
+        failures=sampler.failures,
+        agent_oom_killed=state.get("OOMKilled"),
+        agent_running=state.get("Running"),
+    )
 
 
 def section_abuse(lab: Rig, reader: ReaderAccess) -> None:
     checks = lab.checks
+    # -- a legitimate heavy build -----------------------------------------------------------
+    section_heavy_build(lab)
     # -- memory ------------------------------------------------------------------------------
-    with Sampler() as sampler:
+    with Sampler(lab) as sampler:
         began = time.monotonic()
         code, out = lab.agent_run([PYTHON, "-I", "-c", HOG], timeout=240.0)
         took = time.monotonic() - began
@@ -1998,17 +2320,18 @@ def section_abuse(lab: Rig, reader: ReaderAccess) -> None:
     checks.say(
         "abuse",
         "memory_hog_in_the_agent_is_stopped_at_its_limit_and_control_is_unharmed",
-        f"an allocation loop dies at about {MEMORY_MB} MiB (the cgroup's limit), the VM keeps at least 300 MiB available, Control's calls and a command in a reader never fail, door and readers stay up",
+        f"an allocation loop dies at about {MEMORY_MB} MiB (the cgroup's limit), the VM keeps at least 300 MiB available (looked at 50 times a second), no kernel OOM kill happens outside the agent's cgroup, Control's calls and a command in a reader never fail, door and readers stay up",
         code != 0
         and MEMORY_MB // 2 <= allocated <= MEMORY_MB
         and sampler.min_available_mib >= 300
+        and not sampler.oom_outside
         and sampler.failures == 0
         and sampler.worst < 10.0
         and all(whole_and_running(lab).values()),
         exit_code=code,
         allocated_mib=allocated,
         seconds=round(took, 1),
-        vm_min_available_mib=sampler.min_available_mib,
+        memory=sampler.memory,
         worst_latency_s=sampler.worst,
         failures=sampler.failures,
         agent_oom_killed=state.get("OOMKilled"),
@@ -2169,6 +2492,7 @@ def main() -> int:
         section_sockets_and_volume(lab)
         section_door(lab)
         section_setup_container(lab)
+        section_oom_score(lab)
         if not SKIP_ABUSE:
             section_abuse(lab, reader)
     finally:

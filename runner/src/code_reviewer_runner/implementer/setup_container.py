@@ -74,7 +74,7 @@ from .host_rules import (
     run_helper,
 )
 from .reader import REPO_SUBPATH, work_volume_of
-from .vm_memory import MEMINFO, MemoryGuard
+from .vm_memory import MEMINFO, REASON_VM_MEMORY, MemoryGuard
 
 _log = logging.getLogger(__name__)
 
@@ -404,6 +404,10 @@ class SetupContainer:
             if outcome != OUTCOME_OK:
                 self._clean()
                 return self._ended_run(outcome, why, tail, begun, started, finished, code=code)
+            # The script is over and the memory it could take is back: the guard must not kill the
+            # container under `docker commit`, which reads its layer and needs memory of its own.
+            if self._guard is not None:
+                self._guard.close()
             try:
                 image = self._save(container, free_bytes)
             except _NoRoom as reason:
@@ -501,7 +505,9 @@ class SetupContainer:
         # The script is as free as the agent is and can take the VM's memory the same way:
         # the container goes (the script ends as one whose container went away) before the VM
         # is out of it.
-        self._guard = MemoryGuard(lambda _: self._kill(), path=self._seams.meminfo)
+        self._guard = MemoryGuard(
+            lambda _: self._kill(), path=self._seams.meminfo, ended=self._ended
+        )
         self._guard.start()
         self._wait_ready(container)
         self._seal_check(container, image)
@@ -681,13 +687,16 @@ class SetupContainer:
         except DockerError:
             return "the container ended during the script"
         code = state.get("ExitCode")
+        reason = ""
         if self._guard is not None and self._guard.tripped_at is not None:
+            # The reason word first, as in the agent's report (`AgentEnd.sentence`).
+            reason = f"{REASON_VM_MEMORY}: "
             how = "was killed because the VM was running out of memory"
         elif state.get("OOMKilled") is True or code == 137:
             how = "was killed for its memory"
         else:
             how = "stopped"
-        return f"the container ended during the script: it {how}" + (
+        return f"{reason}the container ended during the script: it {how}" + (
             f" (exit code {code})" if isinstance(code, int) and not isinstance(code, bool) else ""
         )
 

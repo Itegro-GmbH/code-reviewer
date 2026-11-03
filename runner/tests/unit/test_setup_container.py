@@ -427,7 +427,27 @@ def test_a_vm_running_out_of_memory_ends_the_script_and_says_so(rig: Rig) -> Non
     done = run(rig, seconds=30)
     assert done.outcome == OUTCOME_SCRIPT_FAILED
     assert "because the VM was running out of memory" in done.detail
+    assert done.detail.startswith("vm_memory: ")
     assert all(c.removed for c in rig.engine.containers.values())
+
+
+# #745-T11: the script is over when `docker commit` runs; the guard is closed by then and does
+# not kill the container under it
+def test_the_guard_is_closed_when_the_script_ended_well_before_the_commit(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    saved = sc.SetupContainer._save  # pyright: ignore[reportPrivateUsage]
+
+    def squeezed(self: Any, container: str, free_bytes: Any) -> str:
+        rig.set_left(300_000)  # below the floor while the layer is being saved
+        threading.Event().wait(0.5)  # five looks of the guard
+        return saved(self, container, free_bytes)
+
+    monkeypatch.setattr(sc.SetupContainer, "_save", squeezed)
+    done = run(rig)
+    assert done.outcome == OUTCOME_OK and done.image is not None
+    assert rig.engine.committed, "the commit ran"
+    assert "running out of memory" not in done.detail
 
 
 # -- the result ------------------------------------------------------------------------------------

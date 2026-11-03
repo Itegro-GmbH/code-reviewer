@@ -63,7 +63,7 @@ from .host_rules import (
     inet_failure_note,
 )
 from .reader import REPO_SUBPATH, work_volume_of
-from .vm_memory import MEMINFO, MemoryGuard
+from .vm_memory import MEMINFO, REASON_VM_MEMORY, MemoryGuard
 
 _log = logging.getLogger(__name__)
 
@@ -210,7 +210,10 @@ class AgentEnd:
         else:
             how = "the container stopped"
         code = "" if self.exit_code is None else f" (exit code {self.exit_code})"
-        return f"the agent's container ended during the turn: {how}{code}"
+        # The reason word first: the report carries it as the start of the detail, like the
+        # engine's reasons.
+        reason = f"{REASON_VM_MEMORY}: " if self.vm_memory else ""
+        return f"{reason}the agent's container ended during the turn: {how}{code}"
 
 
 class Tunnel:
@@ -385,8 +388,11 @@ class AgentContainer:
             )
             self._container = container
             api.start_container(container)
+            # Before the watch: `_watch_end` reads whether the guard killed the container.
+            self._guard = MemoryGuard(
+                self._vm_memory_low, path=self._seams.meminfo, ended=self._ended
+            )
             threading.Thread(target=self._watch_end, args=(container,), daemon=True).start()
-            self._guard = MemoryGuard(self._vm_memory_low, path=self._seams.meminfo)
             self._guard.start()
             self._wait_ready(container)
             self._seal_check(container)
@@ -480,6 +486,17 @@ class AgentContainer:
         """The VM is about to run out of memory (`MemoryGuard`): the agent goes."""
         _ = available
         self._kill()
+
+    @property
+    def tripped_at(self) -> int | None:
+        """What the VM had left when the guard fired (bytes); None while it did not."""
+        return None if self._guard is None else self._guard.tripped_at
+
+    @property
+    def lowest_left(self) -> int | None:
+        """The least memory the VM had (free memory and file cache, bytes) while the guard looked,
+        also after it killed the container; None before the first look. For the attack test."""
+        return None if self._guard is None else self._guard.lowest_left
 
     @property
     def end(self) -> AgentEnd | None:

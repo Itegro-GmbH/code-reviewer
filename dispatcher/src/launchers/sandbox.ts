@@ -132,16 +132,38 @@ export const READER_MEMORY_MB = 256;
 export const READER_COUNT = 2;
 
 /**
+ * The floor of the memory guard: Control kills the agent's container when the VM has less memory left than this
+ * (`floor_bytes` of runner/src/code_reviewer_runner/implementer/vm_memory.py: 512 MiB or 8% of the VM's memory, whichever is more).
+ * The figures are in `contracts/environment-sizes.v1.json` (`memoryGuard`), which a test holds to the runner's too.
+ */
+export const MEMORY_GUARD_MIN_FLOOR_MB = 512;
+export const MEMORY_GUARD_FLOOR_PERCENT = 8;
+
+/** The guard's floor for a VM of this many vCPUs, in MB (rounded up). */
+export function memoryGuardFloorMb(vcpus: number): number {
+  return Math.max(
+    MEMORY_GUARD_MIN_FLOOR_MB,
+    Math.ceil(
+      (vcpus * SANDBOX_MEMORY_PER_VCPU_MB * MEMORY_GUARD_FLOOR_PERCENT) / 100,
+    ),
+  );
+}
+
+/**
  * What is left of an implementer VM for the agent's container (#745, step 4): the VM's memory (2 GB per vCPU) less the OS and the
- * daemons, Control (its container's limit), the model door and the two readers. Every figure is in the table of "The agent's
- * container" in docs/implementer.md, with the measurements behind the limits. The Worker refuses a value below its minimum
- * (`MIN_AGENT_MEMORY_MB` of the runner's job_run.py) with the free `sandbox_size_unsupported`; this function only does the sum.
+ * daemons, Control (its container's limit), the model door and the two readers, **and less the part of the guard's floor above the
+ * 512 MiB that the OS's room already holds**. The guard kills the agent when the VM has less than `memoryGuardFloorMb` left; at 4, 6
+ * and 8 vCPU that is 656, 984 and 1,311 MB, and an agent inside its own limit must not be able to bring the VM below it. Every figure
+ * is in the table of "The agent's container" in docs/implementer.md, with the measurements behind the limits. The Worker refuses a
+ * value below its minimum (`MIN_AGENT_MEMORY_MB` of the runner's job_run.py) with the free `sandbox_size_unsupported`; this function
+ * only does the sum.
  */
 export function agentMemoryMb(vcpus: number, controlMb: number): number {
   return Math.max(
     0,
     vcpus * SANDBOX_MEMORY_PER_VCPU_MB -
       IMPLEMENTER_VM_HEADROOM_MB -
+      (memoryGuardFloorMb(vcpus) - MEMORY_GUARD_MIN_FLOOR_MB) -
       controlMb -
       MODEL_DOOR_MEMORY_MB -
       READER_COUNT * READER_MEMORY_MB,

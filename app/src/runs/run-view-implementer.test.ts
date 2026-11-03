@@ -1142,7 +1142,7 @@ describe("the environment of an implementer run (#818)", () => {
     expect(run.implementer?.environment).toMatchObject({
       name: "Node 22",
       vcpus: 6,
-      memoryGb: 10,
+      memoryGb: 9.5,
     });
   });
 

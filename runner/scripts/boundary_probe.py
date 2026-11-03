@@ -528,6 +528,57 @@ def section_proc(config: Json) -> Json:
     return results
 
 
+def _oom_write(value: str) -> str:
+    """Try to write `value` to this process' `oom_score_adj`: what happened, what it holds after."""
+    path = "/proc/self/oom_score_adj"
+    try:
+        with open(path, "w") as handle:
+            handle.write(value)
+        outcome = "written"
+    except OSError as error:
+        outcome = "error:" + errno.errorcode.get(error.errno or 0, str(error.errno))
+    return f"{outcome} -> {_read(path).strip()}"
+
+
+def section_oom(_config: Json) -> Json:
+    """The OOM score of this process (an exec of the daemon, as the engine is), of its children and
+    of the container's init, and whether root of the container can lower it. Raising it is always
+    allowed (the control); lowering it takes `CAP_SYS_RESOURCE` of the VM's user namespace."""
+    child = subprocess.run(
+        ["/bin/sh", "-c", "cat /proc/self/oom_score_adj"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    ).stdout.strip()
+    own = _read("/proc/self/oom_score_adj").strip()
+    writes = {value: _oom_write(value) for value in ("0", "-1", "-1000", "500", "999")}
+    after_lowering = _read("/proc/self/oom_score_adj").strip()
+    raised = _oom_write("1000")
+    return {
+        "self": own,
+        "child": child,
+        "init": _read("/proc/1/oom_score_adj").strip(),
+        "writes": writes,
+        "after_lowering": after_lowering,
+        "raise_to_1000": raised,
+        "uid": os.getuid(),
+        "cap_sys_resource": bool(
+            int(
+                next(
+                    (
+                        line.split()[1]
+                        for line in _read("/proc/self/status").splitlines()
+                        if line.startswith("CapEff:")
+                    ),
+                    "0",
+                ),
+                16,
+            )
+            & (1 << 24)
+        ),
+    }
+
+
 def section_devices(config: Json) -> Json:
     present = {
         name: os.path.exists(f"/dev/{name}") for name in cast("list[str]", config["devices"])
@@ -780,6 +831,7 @@ SECTIONS: dict[str, Callable[[Json], Json]] = {
     "proc": section_proc,
     "devices": section_devices,
     "cgroup": section_cgroup,
+    "oom": section_oom,
     "look": section_look,
     "listen": section_listen,
 }

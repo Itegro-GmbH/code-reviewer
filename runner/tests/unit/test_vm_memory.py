@@ -4,12 +4,18 @@
 larger of 512 MiB and 8%, the callback runs once when less is available, and an unreadable file is
 no news."""
 
+import json
 import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 from code_reviewer_runner.implementer.vm_memory import (
+    FLOOR_FRACTION,
+    FLOOR_MIN_BYTES,
+    REASON_VM_MEMORY,
     MemoryGuard,
     floor_bytes,
     read_memory,
@@ -84,18 +90,138 @@ def test_an_unreadable_file_is_no_news_and_a_closed_guard_does_not_call(tmp_path
     assert called == []
 
 
+def wait_until(condition: Callable[[], bool], seconds: float = 3.0) -> bool:
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if condition():
+            return True
+        time.sleep(0.01)
+    return condition()
+
+
+# #745-T07: a kill that failed is tried again, every retry interval, as long as the VM stays below
+# the floor and the container has not ended
 @pytest.mark.unit
-def test_a_callback_that_fails_does_not_end_the_program(tmp_path: Path) -> None:
+def test_a_callback_that_fails_is_logged_and_tried_again(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     path = tmp_path / "meminfo"
     meminfo(path, available_mib=1)
+    attempts: list[int] = []
 
-    def broken(_: int) -> None:
-        raise RuntimeError("no")
+    def broken(left: int) -> None:
+        attempts.append(left)
+        if len(attempts) < 3:
+            raise RuntimeError("no")
 
-    guard = MemoryGuard(broken, path=str(path), interval=0.01)
+    guard = MemoryGuard(broken, path=str(path), interval=0.005, retry_seconds=0.02)
+    with caplog.at_level("ERROR"):
+        guard.start()
+        assert wait_until(lambda: len(attempts) >= 5)
+    guard.close()
+    assert guard.tripped_at == MIB and guard.failures == 2
+    assert [r.levelname for r in caplog.records].count("ERROR") == 1, "the first failure is logged"
+    assert "could not kill the container" in caplog.text
+
+
+@pytest.mark.unit
+def test_the_call_is_repeated_while_the_memory_stays_low_and_stops_when_the_container_ended(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "meminfo"
+    meminfo(path, available_mib=100)
+    attempts: list[int] = []
+    ended = threading.Event()
+    guard = MemoryGuard(
+        attempts.append, path=str(path), interval=0.005, retry_seconds=0.03, ended=ended
+    )
     guard.start()
-    for _ in range(100):
-        if guard.tripped_at is not None:
-            break
-        threading.Event().wait(0.02)
-    assert guard.tripped_at == MIB
+    assert wait_until(lambda: len(attempts) >= 4), "repeated about every retry interval"
+    ended.set()
+    time.sleep(0.05)
+    settled = len(attempts)
+    time.sleep(0.15)
+    assert len(attempts) == settled, "nothing more once the container is gone"
+    guard.close()
+
+
+@pytest.mark.unit
+def test_the_call_is_not_repeated_once_the_memory_is_back_above_the_floor(tmp_path: Path) -> None:
+    path = tmp_path / "meminfo"
+    meminfo(path, available_mib=100)
+    attempts: list[int] = []
+    guard = MemoryGuard(attempts.append, path=str(path), interval=0.005, retry_seconds=0.02)
+    guard.start()
+    assert wait_until(lambda: len(attempts) >= 2)
+    meminfo(path, available_mib=4000)
+    time.sleep(0.06)
+    settled = len(attempts)
+    time.sleep(0.15)
+    assert len(attempts) == settled
+    guard.close()
+
+
+# #745-T08: the guard keeps looking after it fired, so the report has the least memory the VM had
+@pytest.mark.unit
+def test_the_lowest_memory_seen_is_kept_after_the_guard_fired(tmp_path: Path) -> None:
+    path = tmp_path / "meminfo"
+    meminfo(path, available_mib=3000)
+    fired = threading.Event()
+    guard = MemoryGuard(lambda _: fired.set(), path=str(path), interval=0.005)
+    guard.start()
+    assert wait_until(lambda: guard.lowest_left == 3000 * MIB)
+    meminfo(path, available_mib=400)
+    assert fired.wait(2.0)
+    meminfo(path, available_mib=90)  # lower, after the call
+    assert wait_until(lambda: guard.lowest_left == 90 * MIB)
+    meminfo(path, available_mib=6000)  # the kill gave the memory back
+    time.sleep(0.05)
+    guard.close()
+    assert guard.tripped_at == 400 * MIB and guard.lowest_left == 90 * MIB
+
+
+# #745-T09: a file that cannot be read for a while is said once, not at every look
+@pytest.mark.unit
+def test_an_unreadable_file_is_logged_once_after_many_reads_in_a_row(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = tmp_path / "meminfo"
+    guard = MemoryGuard(lambda _: None, path=str(path), interval=0.002, unreadable_after=5)
+    with caplog.at_level("WARNING"):
+        guard.start()
+        assert wait_until(lambda: "guard is blind" in caplog.text)
+        time.sleep(0.1)
+    assert caplog.text.count("guard is blind") == 1
+    meminfo(path, available_mib=4000)  # readable again
+    assert wait_until(lambda: guard.lowest_left == 4000 * MIB)
+    guard.close()
+
+
+# #745-T10: the floor is the figure of the contract the Dispatcher's agent memory is computed from
+@pytest.mark.unit
+def test_the_floor_is_the_one_the_dispatcher_takes_off_the_agents_memory() -> None:
+    contract = json.loads(
+        (Path(__file__).parents[3] / "contracts" / "environment-sizes.v1.json").read_text()
+    )
+    assert contract["memoryGuard"]["minFloorMb"] * MIB == FLOOR_MIN_BYTES
+    assert contract["memoryGuard"]["floorPercent"] / 100 == FLOOR_FRACTION
+    per_vcpu = contract["memoryPerVcpuMb"]
+    headroom = 512  # the OS's room, `IMPLEMENTER_VM_HEADROOM_MB`
+    others = 768 + 256 + 2 * 256  # Control, the door, both readers
+    for vcpus in contract["environmentVcpus"]:
+        ram = vcpus * per_vcpu
+        floor_mb = -(-floor_bytes(ram * MIB) // MIB)  # up
+        # the agent's limit, the others' limits and the guard's floor (the OS's room is the floor
+        # of 2 vCPU) fit in the VM at every size
+        agent = contract["agentMemoryMb"][str(vcpus)]
+        assert agent + others + max(headroom, floor_mb) <= ram, vcpus
+
+
+@pytest.mark.unit
+def test_a_guard_kill_starts_the_sentence_of_the_turns_end_with_its_reason_word() -> None:
+    from code_reviewer_runner.implementer.agent_container import AgentEnd
+
+    ended = AgentEnd(137, False, True, vm_memory=True).sentence()
+    assert ended.startswith(f"{REASON_VM_MEMORY}: the agent's container ended during the turn")
+    assert "running out of memory" in ended
+    assert REASON_VM_MEMORY not in AgentEnd(137, True, True).sentence()

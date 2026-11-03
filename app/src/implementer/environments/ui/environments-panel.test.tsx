@@ -34,7 +34,7 @@ const NODE: EnvironmentView = {
   id: "env-1",
   name: "Node 22",
   vcpus: 4,
-  memoryGb: 6,
+  memoryGb: 5.8,
   sizeSupported: true,
   setupScript: "pnpm install\n",
   createdAt: "2026-11-02T08:00:00.000Z",
@@ -110,7 +110,9 @@ describe("the list of environments", () => {
     const node = (await screen.findByText("Node 22")).closest("li");
     expect(node).not.toBeNull();
     expect(within(node as HTMLElement).getByText(/4 vCPU/)).toBeTruthy();
-    expect(within(node as HTMLElement).getByText(/6 GB memory/)).toBeTruthy();
+    expect(
+      within(node as HTMLElement).getByText(/5\.8 GB memory/),
+    ).toBeTruthy();
     expect(within(node as HTMLElement).getByText(/pnpm install/)).toBeTruthy();
     const bare = screen.getByText("Bare").closest("li") as HTMLElement;
     expect(within(bare).getByText("No setup script")).toBeTruthy();
@@ -196,13 +198,15 @@ describe("creating an environment", () => {
     expect(screen.queryByRole("radio", { name: /^1 vCPU/ })).toBeNull();
     for (const [vcpus, gb] of [
       [2, 2],
-      [4, 6],
-      [6, 10],
-      [8, 14],
+      [4, 5.8],
+      [6, 9.5],
+      [8, 13.2],
     ] as const)
       expect(
         screen.getByRole("radio", {
-          name: new RegExp(`^${vcpus} vCPU.*${gb} GB memory`),
+          name: new RegExp(
+            `^${vcpus} vCPU.*${String(gb).replace(".", "\\.")} GB memory`,
+          ),
         }),
       ).toBeTruthy();
     expect(

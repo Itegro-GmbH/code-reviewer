@@ -553,15 +553,15 @@ function implementerRowView(
 
 const MAX_ENVIRONMENT_NAME_CHARS = 200;
 /**
- * What the agent's container got at each size of the platform, in GB (`agentMemoryMb` of `contracts/environment-sizes.v1.json`); not imported from the
+ * What the agent's container got at each size of the platform, in GB with one decimal, rounded down (`agentMemoryMb` of `contracts/environment-sizes.v1.json`); not imported from the
  * Implementer: this module is below it. A test holds it to the file. A size not in the list (it cannot be started) shows 0.
  */
 export const AGENT_MEMORY_GB: Readonly<Record<number, number>> = {
   1: 0,
   2: 2,
-  4: 6,
-  6: 10,
-  8: 14,
+  4: 5.8,
+  6: 9.5,
+  8: 13.2,
 };
 
 /** The setup block of a stored result, or null: read field by field like the rest, an entry that is not what the contract says is left out. */

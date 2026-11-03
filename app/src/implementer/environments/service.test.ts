@@ -76,7 +76,7 @@ describe("the environment service", () => {
           id: "env-1",
           name: "Node 22",
           vcpus: 4,
-          memoryGb: 6,
+          memoryGb: 5.8,
           sizeSupported: true,
           setupScript: "npm ci\n",
           createdAt: "2026-11-02T08:00:00.000Z",
@@ -105,7 +105,7 @@ describe("the environment service", () => {
           id: "env-1",
           name: "Node 22",
           vcpus: 4,
-          memoryGb: 6,
+          memoryGb: 5.8,
           sizeSupported: true,
           hasScript: true,
         },
@@ -122,7 +122,7 @@ describe("the environment service", () => {
 
     const created = await service.create({ id: "u-1" }, BODY);
 
-    expect(created).toMatchObject({ id: "env-1", vcpus: 4, memoryGb: 6 });
+    expect(created).toMatchObject({ id: "env-1", vcpus: 4, memoryGb: 5.8 });
     expect(repository.maximums).toEqual([ENVIRONMENTS_PER_WORKSPACE_MAX]);
   });
 

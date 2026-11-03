@@ -425,6 +425,7 @@ def test_the_vm_running_out_of_memory_ends_the_agent_and_says_so(rig: Rig) -> No
     lost = place.lost
     assert lost is not None and lost.vm_memory and lost.unexpected
     assert "because the VM was running out of memory" in lost.sentence()
+    assert lost.sentence().startswith("vm_memory: "), "the reason word starts the detail"
     made = rig.engine.container(AGENT_CONTAINER_NAME)
     assert made.exit_code == 137, "the container was killed"
     assert place.engine_end_note() == lost.sentence()
