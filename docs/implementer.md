@@ -642,7 +642,7 @@ from a container of its own Docker:
 
 The platform's own network already refuses a good part of the private ranges (the "before" column shows it); what the rules add is the VM itself,
 which the Setup bridge reaches by default, and the bridge-to-bridge routes. Under `runc` (the lane in CI) the same probes give the same answers.
-The same test lane on the VM: all 25 tests of `runner/tests/lane` under `sysbox-runc` (243 s), the 8 of the environment under `runc` as well.
+The whole lane on a fresh VM at the final head: 25 of 25 tests of `runner/tests/lane` under `sysbox-runc` (262 s) and 25 of 25 under `runc` (192 s, as CI runs it).
 
 *The failures.* A script that exited 3 ended the turn `environment_setup_failed` with its two output lines and no model side (no door, no model
 network); a script that slept past its time was killed at the limit (`timedOut`, null status); one that filled the work volume's disk failed with "No
