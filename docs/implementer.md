@@ -624,7 +624,7 @@ In the agent, the file the script left in the container's file system was there 
 listed `postgres:17-alpine`, `docker run` started it and `psql -c 'select 6*7'` answered 42; the agent's commit arrived. The commit is the long part and
 grows with the image (about 64 MB/s here); its ceiling of 300 s holds an image of roughly 19 GB.
 
-*What the Setup container reaches*, through the production code (`lane_environment` with a Control stand-in on the default bridge, a model network with
+*What the Setup container reaches*, through the production code (the lane's environment helper with a Control stand-in on the default bridge, a model network with
 the door's relay at `10.213.77.2` and on the default bridge, and the VM's own control service on port 23456). From the container and, for the last block,
 from a container of its own Docker:
 
