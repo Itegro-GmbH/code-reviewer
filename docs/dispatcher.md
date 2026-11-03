@@ -78,7 +78,9 @@ Each step has 10 s; the eight add 80 s, the Sysbox boot 40 s (`SYSBOX_PREPARE_SE
 `LAUNCH_STEPS_SECONDS` for Diff and Dynamic is unchanged (a test holds the sum under the launch deadline of the core). The mounts and the volume belong to the VM, which is stopped after every failure and by the App's stop call; nothing is
 removed separately and nothing outlives the job. A failed, hung or unverified step stops the VM (`work_volume_failed`, retryable). The VM is
 2 vCPU / 4 GB by default (`SANDBOX_KIND_DEFAULTS.implementer`); `DISPATCHER_WORKER_CONFIG.implementer` overrides the vCPUs and
-the container memory value by value, and a limit the VM cannot hold beside the OS, the door and the reader is refused as `sandbox_config_invalid` at
+the container memory value by value, and **a task's environment names the size of its own VM** (#818: `job.vcpus` of the App's claim answer, believed for the kind `implementer` only,
+only 2, 4, 6 or 8: 1 vCPU leaves the agent less than `IMPLEMENTER_MIN_AGENT_MEMORY_MB` and is refused with `sandbox_size_unsupported` before a VM is created; precedence: the task's
+environment, then the configuration, then the default; the Control container keeps its memory at every size, the agent's container gets what the VM has left; `docs/implementer.md`, "Environments"), and a limit the VM cannot hold beside the OS, the door and the reader is refused as `sandbox_config_invalid` at
 every launch of the kind. At start a deployment that serves the kind only logs `worker_config_invalid` for such a value and
 starts, and Diff and Dynamic do not read the entry. For a deployment that serves the kind the same value fails the canary (its VM is sized by it): see below. The operator's Dynamic variables (`RUNNER_DYNAMIC_*`) are not
 given to an implementer container. The platform gives a VM a 64 GB disk (measured at 1, 2 and 8 vCPU: the same XFS file system, 61 GB free on a fresh VM, no quotas), which is the room of the agent, of the work volume
