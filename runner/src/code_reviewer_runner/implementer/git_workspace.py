@@ -118,7 +118,16 @@ SCRATCH_PREFIX = "refs/runner/in/"
 # The mirror is the runner's alone: no git in it may start a `gc --auto` or `maintenance run
 # --auto` that outlives it (they detach into the background, and survive the group kill of a
 # timeout).
-_MIRROR_OPTIONS = ("-c", "gc.auto=0", "-c", "maintenance.auto=false")
+# `core.bigFileThreshold` as in the reader: big blobs are stored whole, so packing them for the push
+# stays within Control's memory. The objects and their names are the same either way.
+_MIRROR_OPTIONS = (
+    "-c",
+    "gc.auto=0",
+    "-c",
+    "maintenance.auto=false",
+    "-c",
+    "core.bigFileThreshold=1m",
+)
 _PLAIN_FETCH = ("--no-tags", "--no-write-fetch-head")
 # Only the leftover commit of the system: the agent's hooks do not run for it.
 _LEFTOVER_OPTIONS = ("core.hooksPath=/dev/null", "commit.gpgsign=false")

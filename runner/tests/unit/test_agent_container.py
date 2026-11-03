@@ -644,6 +644,23 @@ def test_a_reset_that_cannot_make_the_readers_quiet_says_so_and_leaves_none_behi
     access.close()
 
 
+# #745-T23: a reader that cannot be restarted in time is not made again after the deadline
+def test_a_reset_past_its_deadline_forgets_the_reader_instead_of_making_it_again(
+    rig: Rig,
+) -> None:
+    access = ReaderAccess(None, ReaderSeams(rig.api, lambda: HOSTNAME))
+    assert access.warm()
+    rig.engine.refuse["/kill"] = 500
+    rig.engine.calls.clear()
+
+    assert access.reset(seconds=0.0) is False
+
+    assert not [call for call in rig.engine.calls if call[1].startswith("/containers/create")]
+    # The next command makes a new one, which is quiet: the old one is gone.
+    assert access.run(["status"], timeout=5.0).returncode == 0
+    access.close()
+
+
 # #745-T23
 def test_the_reader_is_made_under_the_runtime_the_seam_names(rig: Rig) -> None:
     access = ReaderAccess(None, ReaderSeams(rig.api, lambda: HOSTNAME, runtime="runc"))

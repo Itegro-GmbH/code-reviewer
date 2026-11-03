@@ -303,7 +303,12 @@ class ReaderAccess:
                 continue
             if self._restart(container, deadline):
                 continue
-            self._drop(writable)
+            self._drop(writable, timeout=max(1.0, deadline - time.monotonic()))
+            # Making a reader again is four calls to the daemon; past the deadline it is forgotten,
+            # so that a hanging daemon cannot eat the time of the push.
+            if time.monotonic() >= deadline:
+                quiet = False
+                continue
             quiet = self._ensure(writable) is not None and quiet
         return quiet
 
@@ -349,12 +354,12 @@ class ReaderAccess:
             return None
         return self._containers.get(writable)
 
-    def _drop(self, writable: bool) -> None:
+    def _drop(self, writable: bool, *, timeout: float | None = None) -> None:
         container = self._containers.pop(writable, None)
         if container is None:
             return
         try:
-            self._api.remove_container(container)
+            self._api.remove_container(container, timeout=timeout)
         except DockerError as error:
             _log.warning("the reader could not be removed (%s)", error.status)
 
