@@ -207,19 +207,22 @@ echo '--- done'
         assert "--- done" in shown
         # Not the token, not the key, not a variable named like one.
         assert TOKEN not in shown and REAL_KEY not in shown
-        names = {
-            line.split("=", 1)[0]
+        variables = dict(
+            line.split("=", 1)
             for part in shown.split("--- ")
             if part.startswith(("environment", "pid 1"))
             for line in part.splitlines()[1:]
             if "=" in line
-        }
-        assert names, shown
-        for name in names:
+        )
+        assert variables, shown
+        # Not one variable named like a credential that holds a value. (The Python base image names
+        # two public values, `GPG_KEY` and `PYTHON_SHA256`; the agent image empties them.)
+        for name, value in variables.items():
             upper = name.upper()
-            assert not any(
+            named = any(
                 word in upper for word in ("TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL")
-            ), name
+            )
+            assert not (named and value), name
         # No socket of the VM, no device, no mount but the repository.
         mounts = shown.split("--- mounts")[1].split("--- files")[0]
         assert "docker.sock" not in mounts and "/work/repo" in mounts
@@ -264,7 +267,7 @@ def test_the_setup_container_cannot_reach_the_vms_services_over_ipv4_or_ipv6(
     # What root in the container can do about IPv6: switch it on and look for the bridge's
     # link-local address, as the measured attack did.
     ipv6 = f"""
-sysctl -qw net.ipv6.conf.all.disable_ipv6=0 net.ipv6.conf.eth0.disable_ipv6=0
+sysctl -qw net.ipv6.conf.all.disable_ipv6=0 net.ipv6.conf.eth0.disable_ipv6=0 || true
 sleep 3; ping -6 -c1 -W1 ff02::1%eth0 >/dev/null 2>&1
 for address in $(ip -6 neigh show dev eth0 | awk '/^fe80/ {{print $1}}'); do
   if timeout 4 bash -c "echo > /dev/tcp/$address%eth0/{port}" 2>/dev/null; then
