@@ -36,7 +36,7 @@ export type LlmProviderId = string;
  */
 export type KnownLlmProvider = "openrouter" | "anthropic";
 /**
- * The claim features this version of the contract defines (`features` in ClaimRequest). A reader ignores a feature name it does not know. `dynamic_capabilities` (#279): the runner reads `dynamic.capabilities`. `worker_credential` (#318): the caller is a Dispatcher and wants the split answer; the job input and its secrets reach only the Worker, with the per-job credential. `supersede` (#396): the runner understands `job.superseded` in a heartbeat answer and stops gracefully (it finishes the model requests in flight, sends no more, publishes nothing, reports its result and usage). The app supersedes a running job only when the claim named it. A Worker names it in the `features` of its details request. `dynamic_cost_policy` (#553): the runner reads `dynamic.cost` and enforces it (the price book of the managed key as the only price source, the token cap of an own key). A job that carries a cost policy goes only to a caller that named it; the app ends the job with `dynamic_engine_unavailable` otherwise, since a runner that did not read the policy would run without its bound. `vm_lifecycle` (#498): the caller is a Dispatcher that reports the VM it creates to the app (POST /api/runners/v1/jobs/{id}/vm, `KnownAppFeature` of the same name) so the app can measure billable minutes; the app records that it has seen a Dispatcher with and without it, and refuses to switch billing on while a Dispatcher without it has claimed recently. `cost_limit` (#666): the runner reads `llm.maxCostUsd` and enforces it next to the operator's own limit. The app sends it only to a caller that named it; a caller without it gets the job without the field and runs with the operator's own limit alone (a refused review is worse than a project limit that is not kept while a release rolls out), and the app logs that. A Worker names it in the `features` of its details request. `operator_cost_limit` (#689): the runner reads `llm.operatorMaxCostUsd`, the most one review may cost as the operator set it in the admin portal, and holds a review to the smaller of that and `llm.maxCostUsd`; it no longer reads `RUNNER_DYNAMIC_MAX_COST_USD` for a job that carries the field. The app sends it only to a caller that named it. A caller that names `cost_limit` alone gets the smaller of the two in `llm.maxCostUsd`; a caller that names neither gets neither field, and the app logs that. A Worker names it in the `features` of its details request. `implementer_environment` (#818): the runner reads `implementer.environment` of a turn and runs its setup script before the model. The app sends `environment` only to a caller that named it, and ends a turn whose environment has a script with `implementer_engine_unavailable` (free) for a caller that did not, since a turn that silently skipped its script would run on a base the person did not choose. A Worker names it in the `features` of its details request.
+ * The claim features this version of the contract defines (`features` in ClaimRequest). A reader ignores a feature name it does not know. `dynamic_capabilities` (#279): the runner reads `dynamic.capabilities`. `worker_credential` (#318): the caller is a Dispatcher and wants the split answer; the job input and its secrets reach only the Worker, with the per-job credential. `supersede` (#396): the runner understands `job.superseded` in a heartbeat answer and stops gracefully (it finishes the model requests in flight, sends no more, publishes nothing, reports its result and usage). The app supersedes a running job only when the claim named it. A Worker names it in the `features` of its details request. `dynamic_cost_policy` (#553): the runner reads `dynamic.cost` and enforces it (the price book of the managed key as the only price source, the token cap of an own key). A job that carries a cost policy goes only to a caller that named it; the app ends the job with `dynamic_engine_unavailable` otherwise, since a runner that did not read the policy would run without its bound. `vm_lifecycle` (#498): the caller is a Dispatcher that reports the VM it creates to the app (POST /api/runners/v1/jobs/{id}/vm, `KnownAppFeature` of the same name) so the app can measure billable minutes; the app records that it has seen a Dispatcher with and without it, and refuses to switch billing on while a Dispatcher without it has claimed recently. `cost_limit` (#666): the runner reads `llm.maxCostUsd` and enforces it next to the operator's own limit. The app sends it only to a caller that named it; a caller without it gets the job without the field and runs with the operator's own limit alone (a refused review is worse than a project limit that is not kept while a release rolls out), and the app logs that. A Worker names it in the `features` of its details request. `operator_cost_limit` (#689): the runner reads `llm.operatorMaxCostUsd`, the most one review may cost as the operator set it in the admin portal, and holds a review to the smaller of that and `llm.maxCostUsd`; it no longer reads `RUNNER_DYNAMIC_MAX_COST_USD` for a job that carries the field. The app sends it only to a caller that named it. A caller that names `cost_limit` alone gets the smaller of the two in `llm.maxCostUsd`; a caller that names neither gets neither field, and the app logs that. A Worker names it in the `features` of its details request. `implementer_environment` (#818): the runner reads `implementer.environment` of a turn and runs its setup script before the model. The app sends `environment` only to a caller that named it, and ends a turn whose environment has a script with `implementer_engine_unavailable` (free) for a caller that did not, since a turn that silently skipped its script would run on a base the person did not choose. A Worker names it in the `features` of its details request. `implementer_network` (#745, step 7): the runner reads `implementer.environment.network`, the environment's rule for the agent's network (`off`, an own list, `open`), and starts the network door for it. The app sends a `network` other than `off` only to a caller that named it and ends such a turn with `implementer_engine_unavailable` (free) for a caller that did not, since a runner that did not read the rule would give the agent a network the person did not choose, or none where one was asked for. A Worker names it in the `features` of its details request.
  */
 export type KnownClaimFeature =
   | "dynamic_capabilities"
@@ -46,7 +46,8 @@ export type KnownClaimFeature =
   | "vm_lifecycle"
   | "cost_limit"
   | "operator_cost_limit"
-  | "implementer_environment";
+  | "implementer_environment"
+  | "implementer_network";
 /**
  * #318: the per-job credential. 256 random bits, base64url without padding, behind the prefix `crj_`. The app mints it at claim; it is valid only for that job and only while the claim holds, and it is the one thing a Worker holds (Authorization: Bearer). Secret: never log it, never put it in an argument, an environment variable or a file; the Dispatcher passes it to the Worker on stdin.
  */
@@ -223,13 +224,14 @@ export type ImplementerBranchName = string;
 export type ImplementerFileStatus =
   "added" | "modified" | "deleted" | "renamed" | "copied" | "typechange";
 /**
- * #746: the names of the environment variables the Worker container of an implementer job gets, agreed here and used by later changes (the container profile and the runner). They hold no secret. `RUNNER_IMPLEMENTER_WORK_DIR`: the directory of the work volume, always `/work`. `RUNNER_IMPLEMENTER_MODEL_DOOR` (#745): `docker` when the container carries the VM's Docker socket, through which it starts the model door, the agent's container and the reader; unset, the container is not an Implementer's. `RUNNER_IMPLEMENTER_SANDBOX_PROOF` (#745, step 4): `proven` or `unproven`, the golden snapshot's Sysbox verdict (the fourth member of the snapshot pair; a deployment that was never told one passes `unproven`); anything but `proven` ends a turn `sandbox_unproven`, free. `RUNNER_IMPLEMENTER_AGENT_MEMORY_MB`: the memory limit of the agent's container in MB, computed from the VM's size; `0` ends a turn `sandbox_size_unsupported`, free. The Dispatcher sets them, never the app and never a job.
+ * #746: the names of the environment variables the Worker container of an implementer job gets, agreed here and used by later changes (the container profile and the runner). They hold no secret. `RUNNER_IMPLEMENTER_WORK_DIR`: the directory of the work volume, always `/work`. `RUNNER_IMPLEMENTER_MODEL_DOOR` (#745): `docker` when the container carries the VM's Docker socket, through which it starts the model door, the agent's container and the reader; unset, the container is not an Implementer's. `RUNNER_IMPLEMENTER_SANDBOX_PROOF` (#745, step 4): `proven` or `unproven`, the golden snapshot's Sysbox verdict (the fourth member of the snapshot pair; a deployment that was never told one passes `unproven`); anything but `proven` ends a turn `sandbox_unproven`, free. `RUNNER_IMPLEMENTER_AGENT_MEMORY_MB`: the memory limit of the agent's container in MB, computed from the VM's size; `0` ends a turn `sandbox_size_unsupported`, free. `RUNNER_IMPLEMENTER_NETWORK_SWITCH` (#745, step 7): a JSON document with the address of the Dispatcher's network call, the VM's name, the rule the Dispatcher read in the claim and a token signed over them; the Worker sends it back to narrow the VM's network policy after the setup. Absent (a deployment without the call), the policy is not changed and the report says so. It holds no secret that opens more than that one call for that one VM. The Dispatcher sets them, never the app and never a job.
  */
 export type KnownImplementerEnvironmentName =
   | "RUNNER_IMPLEMENTER_WORK_DIR"
   | "RUNNER_IMPLEMENTER_MODEL_DOOR"
   | "RUNNER_IMPLEMENTER_SANDBOX_PROOF"
-  | "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB";
+  | "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB"
+  | "RUNNER_IMPLEMENTER_NETWORK_SWITCH";
 /**
  * The engine's tools; every other name a model called is `other`.
  */
@@ -911,11 +913,47 @@ export interface ImplementerRepo {
   cloneUrl: string;
 }
 /**
- * #818: the environment a turn was started with, as the turn copied it when it started: the setup script the runner runs once in the repository's folder after the clone and before the model is called. Present only when the environment has a script and the caller named the claim feature `implementer_environment`; a turn without a script carries nothing (the size of the VM is the Dispatcher's business, it reaches the Worker as the VM it runs in). `setupScript` is literal text of at most 64 KB of UTF-8, written by a member of the workspace: it is data to run, never a command of the app, and it holds no secret by design (there is no field for one). `name` is for the run's log line only.
+ * #818: the environment a turn was started with, as the turn copied it when it started: the setup script the runner runs once in the repository's folder after the clone and before the model is called, and (#745, step 7) the rule for the agent's network. Present only when the environment has a script or a network rule other than `off`, and the caller named the claim feature `implementer_environment` (and `implementer_network` for a rule); a turn with neither carries nothing (the size of the VM is the Dispatcher's business, it reaches the Worker as the VM it runs in). `setupScript`, when present, is literal text of at most 64 KB of UTF-8, written by a member of the workspace: it is data to run, never a command of the app, and it holds no secret by design (there is no field for one). `network`, when present, is the rule the network door enforces; absent means `off`. `name` is for the run's log line only.
  */
 export interface ImplementerEnvironment {
   name: string;
-  setupScript: string;
+  setupScript?: string;
+  network?: ImplementerNetworkRule;
+}
+/**
+ * #745, step 7: the rule for the agent's network, as the owner of the environment wrote it. `off`: the agent has no network and no network door is started. `list`: the agent reaches the host names in `hosts` through the network door and no others; an entry is a host name in its ASCII (punycode) lower-case form, either exact (`registry.npmjs.org`) or a suffix (`*.pythonhosted.org`, any name below `pythonhosted.org`, not the name itself), never an IP address, a port or a path; a suffix has at least two labels after the `*.`; at most 100 entries. `open`: the agent reaches any public name. In every mode the door refuses IP literals, names that resolve to a private, loopback, link-local, shared or metadata address, and ports other than 80 and 443. `hosts` is empty unless the mode is `list`, and not empty then.
+ */
+export interface ImplementerNetworkRule {
+  mode: "off" | "list" | "open";
+  /**
+   * @maxItems 100
+   */
+  hosts: string[];
+}
+/**
+ * #745, step 7: what the network door did in a turn, in `ImplementerResult.network`; present when the turn had an environment with a network rule other than `off` and the door was started (and for a refused start, `door` false). `connections` are the connections the door saw, one entry for each distinct host, port and outcome, with their count and the bytes each way (the bytes the door relayed, both directions, counted at the end of a connection; nothing of their content is kept), at most 100 (`dropped` counts the entries that did not fit); `reason` is a word of the door for a refusal (`not_listed`, `ip_literal`, `private_address`, `port_not_allowed`, `unresolvable`, `bad_request`, `too_many_connections`) and null for an allowed connection. `vmPolicy` says what the second wall did: `narrowed` (the VM's network policy was cut to GitHub, the model provider, the app and the rule), `unchanged` (the rule is `open`, so the policy was left as it was), `not_configured` (this runner was started without a way to change the policy, the first wall alone held).
+ */
+export interface ImplementerNetworkReport {
+  mode: "off" | "list" | "open";
+  door: boolean;
+  vmPolicy: "narrowed" | "unchanged" | "not_configured";
+  allowed: number;
+  refused: number;
+  bytesIn: number;
+  bytesOut: number;
+  dropped: number;
+  /**
+   * @maxItems 100
+   */
+  connections: {
+    host: string;
+    port: number;
+    outcome: "allowed" | "refused";
+    reason: string | null;
+    count: number;
+    bytesIn: number;
+    bytesOut: number;
+  }[];
 }
 /**
  * #818: what the setup script of a turn did, in `ImplementerResult.setup`; present when a script ran, absent otherwise. `ok` is whether it ended with exit status 0 within its time limit. `exitCode` is its exit status, null when it did not end by itself (the time limit, `timedOut`, or a signal). `output` is the end of what it wrote to stdout and stderr together, at most 8192 characters, with every secret known to the runner removed like every log line. A failed script ends the turn with the error code `environment_setup_failed` before the model is called.
@@ -967,6 +1005,7 @@ export interface ImplementerResult {
     version: string;
   } | null;
   setup?: ImplementerSetupResult;
+  network?: ImplementerNetworkReport;
 }
 /**
  * 200 from POST /api/runners/v1/claim. 204 without a body means there is nothing to do. Cache-Control is always no-store.
@@ -1237,6 +1276,7 @@ export interface ImplementerResult1 {
     version: string;
   } | null;
   setup?: ImplementerSetupResult;
+  network?: ImplementerNetworkReport;
 }
 /**
  * The whole request body must not exceed 65536 bytes (413 otherwise).
@@ -1280,9 +1320,20 @@ export interface SplitClaimResponse {
      * #818: the VM size in vCPUs that the turn's environment asks for. Present only for a job of the kind `implementer` that was started with an environment; absent otherwise, and then the Dispatcher's configuration and default apply. It comes from the app's authenticated answer only. The Dispatcher launches only the sizes of the platform (`contracts/environment-sizes.v1.json`) and fails the launch with its own code for any other, and it ignores the field for every other kind, so a review can never name a size.
      */
     vcpus?: number;
+    network?: ImplementerNetworkRule1;
     [k: string]: unknown;
   };
   [k: string]: unknown;
+}
+/**
+ * #745, step 7: the rule for the agent's network, as the owner of the environment wrote it. `off`: the agent has no network and no network door is started. `list`: the agent reaches the host names in `hosts` through the network door and no others; an entry is a host name in its ASCII (punycode) lower-case form, either exact (`registry.npmjs.org`) or a suffix (`*.pythonhosted.org`, any name below `pythonhosted.org`, not the name itself), never an IP address, a port or a path; a suffix has at least two labels after the `*.`; at most 100 entries. `open`: the agent reaches any public name. In every mode the door refuses IP literals, names that resolve to a private, loopback, link-local, shared or metadata address, and ports other than 80 and 443. `hosts` is empty unless the mode is `list`, and not empty then.
+ */
+export interface ImplementerNetworkRule1 {
+  mode: "off" | "list" | "open";
+  /**
+   * @maxItems 100
+   */
+  hosts: string[];
 }
 /**
  * #318: POST /api/runners/v1/jobs/{id}/release, with the dispatcher credential (RUNNER_TOKEN) in Authorization and the job credential in the body. Gives the job back to the queue (or fails it on the last attempt).
