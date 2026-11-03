@@ -197,19 +197,17 @@ def preflight(config: LaneConfig) -> None:
 
 
 def remove_fixed() -> None:
-    """The containers the turn names by constants, and the model network."""
-    for name in (
-        AGENT_CONTAINER_NAME,
-        READER_CONTAINER_NAME,
-        READER_WRITER_CONTAINER_NAME,
-        RELAY_CONTAINER,
-    ):
+    """The containers of the turn's model side that the turn names by constants, and the network.
+    Not the readers: they are made when the workspace is prepared, before the network is."""
+    for name in (AGENT_CONTAINER_NAME, RELAY_CONTAINER):
         docker("rm", "-f", name, check=False)
     docker("network", "rm", MODEL_NETWORK_NAME, check=False)
 
 
 def remove_leftovers() -> None:
     """What a lane that died left: the fixed names, the network and the stand-ins of Control."""
+    for name in (READER_CONTAINER_NAME, READER_WRITER_CONTAINER_NAME):
+        docker("rm", "-f", name, check=False)
     remove_fixed()
     for container in docker(
         "ps", "-aq", "--filter", "label=code-reviewer.lane=1", check=False
