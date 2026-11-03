@@ -201,7 +201,9 @@ def make_environment() -> dict[str, str]:
 
 
 # #745 step 4: the repository's own OpenCode files apply; nothing here switches them off.
-def test_the_engine_environment_does_not_switch_off_the_repositorys_configuration_or_skills() -> None:
+def test_the_engine_environment_does_not_switch_off_the_repositorys_configuration_or_skills() -> (
+    None
+):
     environment = make_environment()
 
     for flag in (

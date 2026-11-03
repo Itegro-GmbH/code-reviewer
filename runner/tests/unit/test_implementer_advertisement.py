@@ -66,6 +66,14 @@ def yes() -> bool:
     return True
 
 
+def socket_closed(uid: int, gid: int) -> bool:
+    return False
+
+
+def socket_open(uid: int, gid: int) -> bool:
+    return True
+
+
 def no() -> bool:
     return False
 
@@ -78,7 +86,7 @@ def seams(**changes: Any) -> ImplementerSeams:
         "docker_answers": yes,
         "sysbox_registered": yes,
         "agent_image_present": yes,
-        "engine_reaches_docker": lambda uid, gid: False,
+        "engine_reaches_docker": socket_closed,
     }
     return ImplementerSeams(**{**base, **changes})
 
@@ -113,7 +121,7 @@ def test_with_every_prerequisite_the_check_passes() -> None:
         ({"sysbox_registered": no}, "sysbox_missing"),
         ({"agent_image_present": no}, "agent_image_missing"),
         ({"is_directory": is_no_directory}, "work_dir_missing"),
-        ({"engine_reaches_docker": lambda uid, gid: True}, "docker_socket_open"),
+        ({"engine_reaches_docker": socket_open}, "docker_socket_open"),
     ],
 )
 def test_each_missing_prerequisite_has_a_reason_of_its_own(
@@ -127,9 +135,13 @@ def test_without_an_engine_user_there_is_nothing_to_check_against() -> None:
     assert refused(user=None) is SelfCheckReason.NOT_A_DYNAMIC_RUNNER
 
 
-# #745 step 4: the proof of the snapshot's Sysbox is not asked here. An unproven snapshot must not take
-# `implementer` away from a deployment (the deploy canary requires it, #797); the job's gate does that.
-def test_whether_the_snapshots_sysbox_is_proven_is_not_a_prerequisite_of_the_advertisement() -> None:
+# #745 step 4: the proof of the snapshot's Sysbox is not asked here. An unproven snapshot must not
+# take
+# `implementer` away from a deployment (the deploy canary requires it, #797); the job's gate does
+# that.
+def test_whether_the_snapshots_sysbox_is_proven_is_not_a_prerequisite_of_the_advertisement() -> (
+    None
+):
     values = {reason.value for reason in SelfCheckReason}
 
     assert not any("unproven" in value or "proof" in value for value in values)

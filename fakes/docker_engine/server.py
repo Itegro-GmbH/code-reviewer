@@ -9,14 +9,16 @@ client runs against it unchanged. A "container" is a function: it gets the conta
 binary stream, `readline` until the end) and writes lines to its stdout, and the code it returns is
 the exit code. Tests make it the real door (`run_door`, in a thread) or anything that misbehaves.
 
-Step 4 of the sandbox plan adds what Control needs for the agent's container and the reader: `kill`,
-`GET /info` (the runtimes), `GET /images/<ref>/json`, `POST /containers/<id>/wait` that blocks until the container is gone, and exec: create, start
-(detached, or attached with the connection upgrade and the multiplexed frames) and inspect. An exec is
-a function too (`exec_behaviour`): it gets the command, its environment and directory, its stdin as a
-binary stream and a writer for its stdout, and returns the exit code.
+Step 4 of the sandbox plan adds what Control needs for the agent's container and the reader:
+`kill`, `GET /info` (the runtimes), `GET /images/<ref>/json`, `POST /containers/<id>/wait` that
+blocks until the container is gone, and exec: create, start (detached, or attached with the
+connection upgrade and the multiplexed frames) and inspect. An exec is a function too
+(`exec_behaviour`): it gets the command, its environment and directory, its stdin as a binary
+stream and a writer for its stdout, and returns the exit code.
 
 What it records, for the tests: every request (`calls`: method, path, JSON body), the containers
-with the document they were made from, the networks and who joined them and the execs. Nothing here talks to a real daemon, a real network or a real model.
+with the document they were made from, the networks and who joined them and the execs. Nothing here
+talks to a real daemon, a real network or a real model.
 """
 
 import contextlib
@@ -293,12 +295,14 @@ class FakeDockerEngine:
         }
         host = container.document.get("HostConfig", {})
         mode = host.get("NetworkMode", "bridge")
-        networks = {name: {} for name in container.networks} or {mode: {}}
+        networks: dict[str, dict[str, Any]] = {name: {} for name in container.networks} or {
+            mode: {}
+        }
         mounts = [
             {"Type": m.get("Type"), "Destination": m.get("Target"), "Name": m.get("Source")}
             for m in host.get("Mounts", [])
         ]
-        answer = {
+        answer: dict[str, Any] = {
             "Id": container.identifier,
             "State": state,
             "HostConfig": host,

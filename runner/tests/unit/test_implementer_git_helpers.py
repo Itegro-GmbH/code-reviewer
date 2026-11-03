@@ -137,7 +137,8 @@ def _ready(tmp_path: Path) -> GitWorkspace:
     return workspace
 
 
-# The agent's branches are listed by git in the reader and fetched through the upload-pack the access
+# The agent's branches are listed by git in the reader and fetched through the upload-pack the
+# access
 # names on the command line (in production `exec_pipe`, which runs it in the reader); Control never
 # has the repository as its directory.
 def test_the_agents_branches_are_listed_and_fetched_through_the_upload_pack_of_the_access(

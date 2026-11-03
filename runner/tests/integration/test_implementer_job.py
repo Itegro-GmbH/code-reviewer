@@ -18,7 +18,7 @@ import signal
 import socket
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from functools import partial
@@ -202,8 +202,27 @@ class FakePlace:
     def create(self) -> None:
         return None
 
+    def write_files(self, files: Mapping[str, tuple[bytes, int]]) -> None:
+        return None
+
+    def start_engine(self, argv: list[str], environment: Mapping[str, str]) -> str:
+        return "http://127.0.0.1:4096"
+
+    def engine_running(self) -> bool:
+        return True
+
+    def settle(self, seconds: float) -> None:
+        return None
+
+    def engine_end_note(self) -> str | None:
+        return None
+
     def stop(self) -> bool:
         return True
+
+
+def fake_door(**options: Any) -> "FakeDoor":
+    return FakeDoor()
 
 
 class FakeDoor:
@@ -255,7 +274,7 @@ class FakeAgent:
         return AgentTurn(text=self.script(self, check), note="end")
 
     def stop(self, *, quick: bool = False) -> bool:
-        self.events.append("stop" if quick else "stop")
+        self.events.append("stop")
         self.stopped.append(quick)
         return self.ends_clean
 
@@ -391,7 +410,7 @@ def play(
             return agent
 
         monkeypatch.setattr(session_module, "ImplementerAgent", agent_factory)
-        monkeypatch.setattr(session_module, "start_door", lambda **options: FakeDoor())
+        monkeypatch.setattr(session_module, "start_door", fake_door)
         seams = JobSeams(
             setup=setup,
             session_seams=SessionSeams(

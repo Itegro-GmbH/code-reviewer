@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""The gate of the Implementer's sandbox (#745, step 4): a turn does not start on a snapshot whose Sysbox
-is not proven or on a VM that leaves the agent's container too little, and says so with a code of its
-own that does not bill. Reviews never read it."""
+"""The gate of the Implementer's sandbox (#745, step 4): a turn does not start on a snapshot
+whose Sysbox is not proven or on a VM that leaves the agent's container too little, and says so
+with a code of its own that does not bill. Reviews never read it."""
 
 import threading
 from collections.abc import Mapping

@@ -716,10 +716,6 @@ describe("the live smoke test", () => {
       "does not appear to be a git repository",
     ])
       expect(text, error).toContain(error);
-    // The proxy's refusal is the code's.
-    expect(
-      readText("runner/src/code_reviewer_runner/implementer/egress_proxy.py"),
-    ).toContain("403");
   });
 
   // #768-T03

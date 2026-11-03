@@ -49,7 +49,8 @@ DOOR = (MODEL_DOOR_ADDRESS, 10180)
 # -- the rules ------------------------------------------------------------------------------------
 
 
-# #745 step 4: the engine user of Control reaches no door. The agent is in a container of its own, and the
+# #745 step 4: the engine user of Control reaches no door. The agent is in a container of its own,
+# and the
 # rules of this container name the loopback proxy and the engine only.
 def test_the_rules_of_the_engine_user_name_no_door_and_no_egress_proxy() -> None:
     script = ruleset(UID, 10180, 10181)

@@ -111,7 +111,7 @@ FROM ${DOCKER_IMAGE} AS docker-bins
 # ---- agent: the image of the Implementer's agent container (#745, step 4) ----
 # OpenCode (the pinned, verified binary of the engine-tools stage), its own Docker (dockerd, the CLI, buildx, compose,
 # runc, containerd's shim) and the tools of an engineer: git 2.53, Node.js and pnpm, uv, Python (the base image), a
-# compiler, make, jq, unzip, curl, nc and ping. Root, no secret, no credential, no key; it is started by the Control
+# compiler, make, jq, unzip, nc and ping. Root, no secret, no credential, no key; it is started by the Control
 # container through the Engine API under the Sysbox runtime (runner/src/code_reviewer_runner/implementer/agent_container.py).
 # It is also the base of the Setup container of step 5 (root, `docker commit`). It carries none of the runner:
 # no venv, no PR-Agent, no license of the product beyond the ones the toolchain brings. It is not the default target
@@ -125,7 +125,7 @@ USER 0:0
 # (Debian's default), which is what the inner Docker needs under Sysbox (measured with the dind image's own).
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
-        tini iptables ca-certificates curl procps xz-utils pigz iproute2 netcat-openbsd iputils-ping \
+        tini iptables ca-certificates procps xz-utils pigz iproute2 netcat-openbsd iputils-ping \
         openssh-client less gcc g++ make libc6-dev jq unzip libcurl3-gnutls \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=docker-bins --chown=0:0 /usr/local/bin/docker /usr/local/bin/dockerd /usr/local/bin/docker-init \

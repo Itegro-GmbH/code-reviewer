@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LicenseRef-Proprietary
+
 """The start-up self-check of the Implementer engine (#765, #745 step 4).
 
 `implementer` is advertised only after the Dynamic self-check passed (root supervisor, the

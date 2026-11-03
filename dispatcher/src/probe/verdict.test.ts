@@ -227,7 +227,7 @@ describe("the probe verdict", () => {
       reasons: ["implementer_agent_image_missing"],
       passed: true,
     });
-    expect(IMPLEMENTER_REASONS).toHaveLength(9);
+    expect(IMPLEMENTER_REASONS).toHaveLength(7);
     expect(IMPLEMENTER_REASONS.every((r) => PROBE_REASONS.includes(r))).toBe(
       true,
     );

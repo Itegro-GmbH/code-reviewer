@@ -128,7 +128,7 @@ def everything_sent(engine: FakeDockerEngine) -> str:
     return json.dumps([[method, target, body] for method, target, body in engine.calls])
 
 
-# -- the definition ------------------------------------------------------------------------------
+# -- the definition -----------------------------------------------------------------------------
 
 
 # #745-T20
@@ -257,7 +257,7 @@ def test_the_inner_docker_has_to_say_ready_and_a_container_that_never_does_is_gi
     slow.stop()
 
 
-# -- driving it only outward ------------------------------------------------------------------
+# -- driving it only outward --------------------------------------------------------------------
 
 
 # #745-T21
@@ -343,7 +343,7 @@ def test_nothing_in_the_definition_lets_the_agent_connect_to_control(rig: Rig) -
     place.stop()
 
 
-# -- when the container ends ------------------------------------------------------------------------
+# -- when the container ends --------------------------------------------------------------------
 
 
 def wait_for(check: Callable[[], bool], seconds: float = 3.0) -> bool:
@@ -398,7 +398,7 @@ def test_the_engine_process_ending_alone_is_the_engine_not_running_while_the_con
     place.stop()
 
 
-# -- the reader ---------------------------------------------------------------------------------------
+# -- the reader ---------------------------------------------------------------------------------
 
 
 # #745-T23
@@ -525,7 +525,7 @@ def test_the_upload_pack_the_fetch_runs_is_the_pipe_module_not_a_command_of_the_
     assert access.repo_source == "/work/repo"
 
 
-# -- the pipe ----------------------------------------------------------------------------------------
+# -- the pipe -----------------------------------------------------------------------------------
 
 
 def pipe_run(

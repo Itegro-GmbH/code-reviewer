@@ -203,7 +203,8 @@ def test_the_model_network_has_no_exit_and_a_fixed_range_and_control_is_not_on_i
     assert document["IPAM"]["Config"][0]["Subnet"] == MODEL_NETWORK_SUBNET
     assert document["Name"] == MODEL_NETWORK_NAME
     members = network["members"]
-    # #745 step 4: Control talks to the door over its standard streams and to the agent through the daemon.
+    # #745 step 4: Control talks to the door over its standard streams and to the agent through the
+    # daemon.
     # It has no address on this network, so nothing on it has an address of Control's to connect to.
     assert OWN_ID not in members
     assert set(members) == {rig.engine.container(DOOR_CONTAINER_NAME).identifier}
