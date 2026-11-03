@@ -11,6 +11,14 @@ import { formatTimestamp } from "../codecs.ts";
 import { UNIQUE_VIOLATION, errorCode } from "../errors.ts";
 import type { Database, ImplementerEnvironmentsTable } from "../schema.ts";
 import type { WorkspaceId } from "../workspace-scope.ts";
+import {
+  hostsToText,
+  isNetworkMode,
+  NETWORK_OFF,
+  ruleOf,
+  type NetworkMode,
+  type NetworkRule,
+} from "../../network-rule/network.ts";
 
 export type StoredEnvironment = {
   id: string;
@@ -18,6 +26,8 @@ export type StoredEnvironment = {
   name: string;
   vcpus: number;
   setupScript: string;
+  /** #745, step 7: the rule for the agent's network. Every environment that existed before it reads `off`. */
+  network: NetworkRule;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
@@ -29,12 +39,16 @@ export type EnvironmentSummary = {
   name: string;
   vcpus: number;
   hasScript: boolean;
+  /** The mode of the network rule, not its hosts. */
+  networkMode: NetworkMode;
 };
 
 export type EnvironmentFields = {
   name: string;
   vcpus: number;
   setupScript: string;
+  /** Left out: `off`. */
+  network?: NetworkRule;
 };
 
 export type NewEnvironment = EnvironmentFields & { createdBy: string };
@@ -72,6 +86,7 @@ function environmentFrom(
     name: row.name,
     vcpus: row.vcpus,
     setupScript: row.setup_script,
+    network: ruleOf(row.network_mode, row.network_hosts),
     createdBy: row.created_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -106,6 +121,7 @@ export function createImplementerEnvironmentsRepository(
           "name",
           "vcpus",
           sql<boolean>`octet_length(setup_script) > 0`.as("has_script"),
+          "network_mode",
         ])
         .where("workspace_id", "=", workspaceId)
         .orderBy((eb) => eb.fn("lower", ["name"]))
@@ -116,6 +132,7 @@ export function createImplementerEnvironmentsRepository(
         name: row.name,
         vcpus: row.vcpus,
         hasScript: row.has_script,
+        networkMode: isNetworkMode(row.network_mode) ? row.network_mode : "off",
       }));
     },
 
@@ -155,6 +172,10 @@ export function createImplementerEnvironmentsRepository(
             name: environment.name,
             vcpus: environment.vcpus,
             setup_script: environment.setupScript,
+            network_mode: (environment.network ?? NETWORK_OFF).mode,
+            network_hosts: hostsToText(
+              (environment.network ?? NETWORK_OFF).hosts,
+            ),
             created_by: environment.createdBy,
             created_at: timestamp,
             updated_at: timestamp,
@@ -176,6 +197,8 @@ export function createImplementerEnvironmentsRepository(
             name: fields.name,
             vcpus: fields.vcpus,
             setup_script: fields.setupScript,
+            network_mode: (fields.network ?? NETWORK_OFF).mode,
+            network_hosts: hostsToText((fields.network ?? NETWORK_OFF).hosts),
             updated_at: formatTimestamp(now()),
           })
           .where("workspace_id", "=", workspaceId)

@@ -5,6 +5,7 @@
 // instruction, a token that may write exactly this repository, the model with its cost policy) and reads no pull request. The
 // write token is switched off at GitHub as soon as it is not needed any more: when it never reached the Worker, and when the
 // turn is over (review of #776). A deployment without the capability reaches none of this.
+import type { NetworkRule } from "../../src/network-rule/network.ts";
 import { describe, expect, it } from "vitest";
 import {
   createFakeAdapter,
@@ -1343,6 +1344,157 @@ describe("the environment of a turn (#818)", () => {
     await h.turn({ environment: { ...ENVIRONMENT, setupScript: "" } });
 
     const { input } = await fetched(h);
+
+    expect(input.reviewKind).toBe("implementer");
+  });
+});
+
+// #745, step 7: the environment's rule for the agent's network. The Dispatcher gets the rule for every Implementer job (a task
+// without an environment is `off`) so that it can narrow the VM's network policy; the Worker gets it in its input, only if it
+// named the feature that reads it.
+describe("the network rule of a turn (#745)", () => {
+  const WITH_NETWORK = `${WORKER_FEATURES},implementer_environment,implementer_network`;
+  const LIST: NetworkRule = {
+    mode: "list",
+    hosts: ["registry.npmjs.org", "*.pythonhosted.org"],
+  };
+  const ENVIRONMENT = {
+    id: "env-1",
+    name: "Node 22",
+    vcpus: 6,
+    setupScript: "  pnpm install\r\n",
+    network: LIST,
+  };
+
+  // #745-T46
+  it("tells the Dispatcher the rule of the chosen environment, and the answer is valid", async () => {
+    const h = await start();
+    await h.turn({ environment: ENVIRONMENT });
+
+    const response = await h.claimSplit(DISPATCHER);
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { job: Record<string, unknown> };
+    expect(body.job).toMatchObject({ vcpus: 6, network: LIST });
+    expect(contract.check("SplitClaimResponse", body)).toStrictEqual({
+      valid: true,
+      errors: "",
+    });
+    expect(JSON.stringify(body)).not.toContain("pnpm");
+  });
+
+  // #745-T46
+  it("tells the Dispatcher off for a task without an environment and for an environment with no rule, and nothing for a review", async () => {
+    const h = await start();
+    await h.turn();
+    const plain = (await (await h.claimSplit(DISPATCHER)).json()) as {
+      job: Record<string, unknown>;
+    };
+    await h.turn({ environment: { ...ENVIRONMENT, network: undefined } });
+    const bare = (await (await h.claimSplit(DISPATCHER)).json()) as {
+      job: Record<string, unknown>;
+    };
+    await h.enqueueNew();
+    const review = (await (
+      await h.claimSplit({ engines: ["pr-agent"], llmProviders: BOTH })
+    ).json()) as { job: Record<string, unknown> };
+
+    expect(plain.job.network).toEqual({ mode: "off", hosts: [] });
+    expect(bare.job.network).toEqual({ mode: "off", hosts: [] });
+    expect(review.job).not.toHaveProperty("network");
+  });
+
+  // #745-T47
+  it("gives the Worker the rule next to the script, in an input the contract accepts", async () => {
+    const h = await start();
+    await h.turn({ environment: ENVIRONMENT });
+
+    const { input } = await fetched(h, WITH_NETWORK);
+
+    expect(contract.check("RunnerJobInput", input)).toStrictEqual({
+      valid: true,
+      errors: "",
+    });
+    expect(input).toMatchObject({
+      implementer: {
+        environment: {
+          name: "Node 22",
+          setupScript: "  pnpm install\r\n",
+          network: LIST,
+        },
+      },
+    });
+  });
+
+  // #745-T47
+  it("gives the Worker an environment with a rule and no script", async () => {
+    const h = await start();
+    await h.turn({ environment: { ...ENVIRONMENT, setupScript: "" } });
+
+    const { input } = await fetched(h, WITH_NETWORK);
+
+    expect(contract.check("RunnerJobInput", input)).toStrictEqual({
+      valid: true,
+      errors: "",
+    });
+    const environment = (
+      input as unknown as {
+        implementer: { environment: Record<string, unknown> };
+      }
+    ).implementer.environment;
+    expect(environment).toEqual({ name: "Node 22", network: LIST });
+  });
+
+  // #745-T47
+  it("carries no rule for the rule off: the Worker's default is the same", async () => {
+    const h = await start();
+    await h.turn({
+      environment: { ...ENVIRONMENT, network: { mode: "off", hosts: [] } },
+    });
+
+    const { input } = await fetched(h, WITH_NETWORK);
+
+    expect(
+      (
+        input as unknown as {
+          implementer: { environment: Record<string, unknown> };
+        }
+      ).implementer.environment,
+    ).toEqual({ name: "Node 22", setupScript: "  pnpm install\r\n" });
+  });
+
+  // #745-T48
+  it("ends a turn with a rule, free and before any credential or token exists, when the Worker does not read rules", async () => {
+    const h = await start();
+    const { jobId } = await h.turn({ environment: ENVIRONMENT });
+    const split = await h.claimedSplit(DISPATCHER);
+
+    await h.worker.details(
+      split.job.id,
+      split.job.credential,
+      `${WORKER_FEATURES},implementer_environment`,
+      undefined,
+      BOTH.join(","),
+    );
+
+    expect(await h.queue.get(jobId)).toMatchObject({
+      status: "failed",
+      errorCode: "implementer_engine_unavailable",
+    });
+    expect(h.fake.issuedInstallationTokens()).toEqual([]);
+  });
+
+  // #745-T48
+  it("runs a turn whose rule is off on a Worker that does not read rules, as before", async () => {
+    const h = await start();
+    await h.turn({
+      environment: { ...ENVIRONMENT, network: { mode: "off", hosts: [] } },
+    });
+
+    const { input } = await fetched(
+      h,
+      `${WORKER_FEATURES},implementer_environment`,
+    );
 
     expect(input.reviewKind).toBe("implementer");
   });

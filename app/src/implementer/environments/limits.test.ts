@@ -68,8 +68,8 @@ describe("the sizes and limits of an environment", () => {
   it("state the decisions of the issue: 64 KB, 15 minutes, 2 GB per vCPU and the standard of 2 vCPU", () => {
     expect(SETUP_SCRIPT_MAX_BYTES).toBe(64 * 1024);
     expect(SETUP_SCRIPT_TIMEOUT_SECONDS).toBe(15 * 60);
-    // The memory shown is the agent's: what the VM has left after the OS, Control, the model door, the readers and the memory guard's floor.
-    expect(ENVIRONMENT_VCPUS.map(memoryGbOf)).toEqual([2, 5.8, 9.5, 13.2]);
+    // The memory shown is the agent's: what the VM has left after the OS, Control, the model door, the network door, the readers and the memory guard's floor.
+    expect(ENVIRONMENT_VCPUS.map(memoryGbOf)).toEqual([1.9, 5.7, 9.4, 13.1]);
     expect(DEFAULT_VCPUS).toBe(2);
     expect(ENVIRONMENT_NAME_MAX_LENGTH).toBeGreaterThan(0);
   });

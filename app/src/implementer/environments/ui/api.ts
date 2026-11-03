@@ -8,13 +8,16 @@ import {
   type FetchLike,
   type RequestResult,
 } from "../../../ui/json-request.ts";
+import type { NetworkRule } from "../../../network-rule/network.ts";
 import type { EnvironmentList, EnvironmentView } from "../service.ts";
 
-/** The body of `POST` and `PUT`: the three fields of an environment. */
+/** The body of `POST` and `PUT`: the fields of an environment. */
 export type EnvironmentBody = {
   name: string;
   vcpus: number;
   setupScript: string;
+  /** #745, step 7: the rule for the agent's network. */
+  network: NetworkRule;
 };
 
 export type EnvironmentApi = {

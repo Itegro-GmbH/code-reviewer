@@ -17,6 +17,7 @@ const STORED: StoredEnvironment = {
   name: "Node 22",
   vcpus: 4,
   setupScript: "npm ci\n",
+  network: { mode: "off", hosts: [] },
   createdBy: "u-1",
   createdAt: "2026-11-02T08:00:00.000Z",
   updatedAt: "2026-11-02T09:00:00.000Z",
@@ -35,6 +36,7 @@ function fakeRepository(
         name: STORED.name,
         vcpus: STORED.vcpus,
         hasScript: true,
+        networkMode: "off",
       },
     ],
     get: async (id) => (id === STORED.id ? STORED : undefined),
@@ -76,9 +78,10 @@ describe("the environment service", () => {
           id: "env-1",
           name: "Node 22",
           vcpus: 4,
-          memoryGb: 5.8,
+          memoryGb: 5.7,
           sizeSupported: true,
           setupScript: "npm ci\n",
+          network: { mode: "off", hosts: [] },
           createdAt: "2026-11-02T08:00:00.000Z",
           updatedAt: "2026-11-02T09:00:00.000Z",
         },
@@ -105,9 +108,10 @@ describe("the environment service", () => {
           id: "env-1",
           name: "Node 22",
           vcpus: 4,
-          memoryGb: 5.8,
+          memoryGb: 5.7,
           sizeSupported: true,
           hasScript: true,
+          networkMode: "off",
         },
       ],
       maximum: ENVIRONMENTS_PER_WORKSPACE_MAX,
@@ -122,7 +126,7 @@ describe("the environment service", () => {
 
     const created = await service.create({ id: "u-1" }, BODY);
 
-    expect(created).toMatchObject({ id: "env-1", vcpus: 4, memoryGb: 5.8 });
+    expect(created).toMatchObject({ id: "env-1", vcpus: 4, memoryGb: 5.7 });
     expect(repository.maximums).toEqual([ENVIRONMENTS_PER_WORKSPACE_MAX]);
   });
 

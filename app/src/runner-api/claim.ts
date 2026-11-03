@@ -37,6 +37,7 @@ import type {
   StoredImplementerTurn,
 } from "../db/repositories/implementer-repository.ts";
 import type { RepositoriesRepository } from "../db/repositories/repositories-repository.ts";
+import { NETWORK_OFF, type NetworkRule } from "../network-rule/network.ts";
 import { IntegrationError } from "../integrations/errors.ts";
 import { revealGitAccess } from "../integrations/normalized.ts";
 import type { IntegrationRegistry } from "../integrations/registry.ts";
@@ -347,7 +348,13 @@ export type Checked = {
     /** The https address the runner clones from and pushes to, with no credential in it (`cloneUrlOf`). */
     cloneUrl: string;
     /** #818: the environment the turn copied when it started; null for a task without one. */
-    environment: { name: string; vcpus: number; setupScript: string } | null;
+    environment: {
+      name: string;
+      vcpus: number;
+      setupScript: string;
+      /** #745, step 7: the rule for the agent's network; `off` when the turn has none. */
+      network: NetworkRule;
+    } | null;
   } | null;
 };
 
@@ -1053,6 +1060,7 @@ export async function checkJob(
                 name: turn.turn.environment.name,
                 vcpus: turn.turn.environment.vcpus,
                 setupScript: turn.turn.environment.setupScript,
+                network: turn.turn.environment.network ?? NETWORK_OFF,
               },
       },
     };
@@ -1160,6 +1168,11 @@ export async function buildJobInput(
   const script = implementer?.environment?.setupScript ?? "";
   if (script !== "" && !features.includes("implementer_environment"))
     return refuse("implementer_engine_unavailable", "reason=environment");
+  // #745, step 7: the same for the rule for the agent's network. A Worker that does not read it would give the agent a network the
+  // person did not choose, or none where one was asked for; `off` is what a Worker without the feature does anyway.
+  const network = implementer?.environment?.network ?? NETWORK_OFF;
+  if (network.mode !== "off" && !features.includes("implementer_network"))
+    return refuse("implementer_engine_unavailable", "reason=network");
   if (costLimit.enforced === "none")
     deps.logger.info(
       `[runner-api] job=${job.id} carries no cost limit: the runner names neither claim feature cost_limit nor operator_cost_limit, so a Dynamic Review is held only to the runner's own RUNNER_DYNAMIC_MAX_COST_USD and a Diff Review to none`,
@@ -1275,12 +1288,15 @@ export async function buildJobInput(
             cost,
             modelEntry,
             // #818: only a script travels to the Worker, and only to one that reads it (the refusal above).
-            ...(script === "" || implementer.environment === null
+            // A script, a rule other than `off`, or both. The script is left out when empty (the contract has no empty script).
+            ...(implementer.environment === null ||
+            (script === "" && network.mode === "off")
               ? {}
               : {
                   environment: {
                     name: implementer.environment.name,
-                    setupScript: script,
+                    ...(script === "" ? {} : { setupScript: script }),
+                    ...(network.mode === "off" ? {} : { network }),
                   },
                 }),
           },
@@ -1401,6 +1417,14 @@ async function prepare(
           ...(checked.implementer?.environment == null
             ? {}
             : { vcpus: checked.implementer.environment.vcpus }),
+          // #745, step 7: the rule for the agent's network, for the Dispatcher that narrows the VM's network policy after the setup.
+          // Every Implementer job has one (a task without an environment is `off`); no other kind does.
+          ...(checked.implementer === null
+            ? {}
+            : {
+                network:
+                  checked.implementer.environment?.network ?? NETWORK_OFF,
+              }),
         },
       },
     };

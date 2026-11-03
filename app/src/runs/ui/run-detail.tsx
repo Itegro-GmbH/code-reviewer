@@ -216,6 +216,112 @@ function TaskSetup({ task }: { task: ImplementerDetailView }) {
   );
 }
 
+const NETWORK_MODE_TEXT = {
+  off: "Off: the agent had no network.",
+  list: "Only the hosts of the environment's list.",
+  open: "Any public host.",
+} as const;
+
+const VM_POLICY_TEXT: Record<string, string> = {
+  narrowed:
+    "The VM's network policy was narrowed to GitHub, the model provider, this app and the rule.",
+  unchanged: "The VM's network policy was left as it was (any public host).",
+  not_configured:
+    "The VM's network policy was not changed: only the network door's own rules held.",
+};
+
+const bytesText = (bytes: number) =>
+  bytes < 1024
+    ? `${String(bytes)} B`
+    : bytes < 1024 * 1024
+      ? `${(bytes / 1024).toFixed(1)} KB`
+      : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+
+/**
+ * What the network door saw (#745, step 7): the rule the task ran with and, when the runner reported one, the connections the door
+ * allowed or refused, by host and port, with their bytes. Nothing of what was sent is kept. The hosts are what the agent asked
+ * for, text the agent chose, rendered as text.
+ */
+function TaskNetwork({ task }: { task: ImplementerDetailView }) {
+  const network = task.environment?.network;
+  if (network === undefined) return null;
+  const report = network.report;
+  if (network.mode === "off" && report === null) return null;
+  return (
+    <Section title="Network">
+      <p data-slot="run-network-rule" className="text-sm">
+        {NETWORK_MODE_TEXT[network.mode]}
+      </p>
+      {network.mode === "list" ? (
+        <ul
+          aria-label="Hosts of the environment's list"
+          className="flex flex-wrap gap-x-4 gap-y-1 font-mono text-sm break-all"
+        >
+          {network.hosts.map((host) => (
+            <li key={host}>{host}</li>
+          ))}
+        </ul>
+      ) : null}
+      {report === null ? (
+        <p className="text-sm text-muted-foreground">
+          The runner reported no connections.
+        </p>
+      ) : (
+        <>
+          <p data-slot="run-network-summary" className="text-sm">
+            {report.allowed} allowed, {report.refused} refused;{" "}
+            {bytesText(report.bytesIn)} received, {bytesText(report.bytesOut)}{" "}
+            sent. {VM_POLICY_TEXT[report.vmPolicy] ?? ""}
+          </p>
+          {report.connections.length === 0 ? null : (
+            <table
+              data-slot="run-network-connections"
+              className="w-full text-left text-sm"
+            >
+              <caption className="sr-only">
+                Connections of the network door
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Host</th>
+                  <th scope="col">Port</th>
+                  <th scope="col">Result</th>
+                  <th scope="col">Count</th>
+                  <th scope="col">Received</th>
+                  <th scope="col">Sent</th>
+                </tr>
+              </thead>
+              <tbody>
+                {report.connections.map((connection, index) => (
+                  <tr
+                    key={`${connection.host}:${String(connection.port)}:${connection.outcome}:${String(index)}`}
+                  >
+                    <td className="font-mono break-all">{connection.host}</td>
+                    <td>{connection.port}</td>
+                    <td>
+                      {connection.outcome === "allowed"
+                        ? "allowed"
+                        : `refused (${connection.reason ?? "no reason"})`}
+                    </td>
+                    <td>{connection.count}</td>
+                    <td>{bytesText(connection.bytesIn)}</td>
+                    <td>{bytesText(connection.bytesOut)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {report.dropped > 0 ? (
+            <p className="text-sm text-muted-foreground">
+              {report.dropped} more entries did not fit in the report.
+            </p>
+          ) : null}
+        </>
+      )}
+    </Section>
+  );
+}
+
 /** What the agent did: its own summary, the commits and the files. Every text here is from the agent or the repository. */
 function TaskResult({
   task,
@@ -605,6 +711,7 @@ export function RunDetail({
         <>
           <TaskInstruction task={task} />
           <TaskSetup task={task} />
+          <TaskNetwork task={task} />
           <TaskResult task={task} run={run} />
         </>
       )}

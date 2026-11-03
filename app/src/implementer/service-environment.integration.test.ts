@@ -125,6 +125,71 @@ describe("a task with an environment", () => {
     });
   });
 
+  // #745-T49: the rule for the agent's network is part of the copy
+  it("copies the environment's network rule into the turn and keeps it when the environment is changed", async () => {
+    const { service, body, environments, h } = await setup();
+    const made = await environments.create(
+      {
+        name: "Py",
+        vcpus: 2,
+        setupScript: "",
+        network: { mode: "list", hosts: ["pypi.org", "*.pythonhosted.org"] },
+        createdBy: USER.id,
+      },
+      50,
+    );
+    if (!made.ok) throw new Error("seeding failed");
+
+    const started = await service.startTask(
+      USER,
+      body({ environmentId: made.environment.id }),
+    );
+    await environments.update(made.environment.id, {
+      name: "Py",
+      vcpus: 2,
+      setupScript: "",
+      network: { mode: "open", hosts: [] },
+    });
+
+    const turn = await h.db
+      .selectFrom("implementer_turns")
+      .select(["environment_network_mode", "environment_network_hosts"])
+      .where("session_id", "=", started.sessionId)
+      .executeTakeFirstOrThrow();
+    expect(turn).toEqual({
+      environment_network_mode: "list",
+      environment_network_hosts: "pypi.org\n*.pythonhosted.org",
+    });
+  });
+
+  // #745-T49
+  it("copies off for an environment with no rule, and nothing for a task without an environment", async () => {
+    const { service, body, environment, h } = await setup();
+
+    const withEnvironment = await service.startTask(
+      USER,
+      body({ environmentId: environment.id }),
+    );
+    const without = await service.startTask(
+      USER,
+      body({ branch: "implementer/other", clientRequestId: "request-2" }),
+    );
+
+    const modes = await Promise.all(
+      [withEnvironment.sessionId, without.sessionId].map((sessionId) =>
+        h.db
+          .selectFrom("implementer_turns")
+          .select(["environment_network_mode", "environment_network_hosts"])
+          .where("session_id", "=", sessionId)
+          .executeTakeFirstOrThrow(),
+      ),
+    );
+    expect(modes).toEqual([
+      { environment_network_mode: "off", environment_network_hosts: "" },
+      { environment_network_mode: null, environment_network_hosts: null },
+    ]);
+  });
+
   // #818-T21
   it("refuses an environment that does not exist, and one of another workspace, with the same code and writes nothing", async () => {
     const { service, body, h, counts } = await setup();

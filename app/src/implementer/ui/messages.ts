@@ -51,7 +51,12 @@ export const FORM_COPY = {
     "A size and a setup script for this task. The script runs once in a container of its own, before the agent starts. Without a choice the standard applies. Environments are managed under",
   environmentLink: "Environments",
   environmentScriptNote:
-    "This environment has a setup script. It runs as root in a container of its own with full internet access and no secrets, before the agent starts, and its time counts toward the task's time limit. If it fails, the task stops before the AI model is called and is not charged. The agent then works without internet access.",
+    "This environment has a setup script. It runs as root in a container of its own with full internet access and no secrets, before the agent starts, and its time counts toward the task's time limit. If it fails, the task stops before the AI model is called and is not charged.",
+  environmentNoNetworkNote: "The agent then works without internet access.",
+  environmentNetworkNoteList:
+    "The agent reaches the network through a proxy that allows only the hosts of this environment's list (see Environments). Anything the agent can read can be sent to those hosts.",
+  environmentNetworkNoteOpen:
+    "The agent reaches any public host through a proxy. Anything the agent can read can be sent out; use it for repositories whose content you would be ready to publish.",
   environmentSizeUnsupportedNote:
     "This environment has a size that is no longer offered: 1 vCPU leaves the agent no memory. A task started with it is refused. Choose another environment, or change the size under Environments.",
   environmentLoadFailed:

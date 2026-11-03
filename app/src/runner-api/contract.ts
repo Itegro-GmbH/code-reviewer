@@ -52,6 +52,10 @@ export const CLAIM_FEATURES = [
   // #818: the runner reads `implementer.environment` and runs its setup script before the model. Sent only to a caller that named
   // it; a turn whose environment has a script is refused (`implementer_engine_unavailable`, free) for a caller that did not.
   "implementer_environment",
+  // #745, step 7: the runner reads `implementer.environment.network` and starts the network door for it. Sent only to a caller that
+  // named it; a turn whose environment has a rule other than `off` is refused (`implementer_engine_unavailable`, free) for a
+  // caller that did not.
+  "implementer_network",
 ] as const;
 export type ClaimFeature = (typeof CLAIM_FEATURES)[number];
 
