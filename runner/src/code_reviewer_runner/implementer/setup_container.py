@@ -95,20 +95,17 @@ RUN_SCRIPT: Final = (
     'else exec /bin/bash -e "$1" 2>&1; fi'
 )
 
-# What happens after a script that ended well: remove the script's file, then stop the container's
-# Docker the way a daemon is stopped (SIGTERM, wait), so that its images are on disk in one piece. The
-# container's init ends with the daemon and the container stops by itself. Exit status 1: it did not
-# stop in time. A container with no daemon (the test lane under runc) has no pid file: nothing to do.
-FINISH_SCRIPT: Final = r"""
+# What happens after a script that ended well: remove the script's file, then ask the container's
+# Docker to stop the way a daemon is stopped (SIGTERM), so that its images are on disk in one piece. The
+# container's init ends with the daemon and the container stops by itself, which also ends this exec:
+# its exit status says nothing, so Control waits for the container, not for the exec. A container with
+# no daemon (the test lane under runc) has no pid file and says so.
+NO_DOCKER: Final = "no-docker"
+FINISH_SCRIPT: Final = f"""
 rm -f "$1"
-pid=$(cat /var/run/docker.pid 2>/dev/null) || exit 0
-kill -TERM "$pid" 2>/dev/null || exit 0
-i=0
-while kill -0 "$pid" 2>/dev/null; do
-  i=$((i + 1))
-  [ "$i" -gt 1500 ] && exit 1
-  sleep 0.2
-done
+pid=$(cat /var/run/docker.pid 2>/dev/null) || {{ echo {NO_DOCKER}; exit 0; }}
+kill -TERM "$pid" 2>/dev/null || {{ echo {NO_DOCKER}; exit 0; }}
+echo stopping
 """
 
 # The VM's firewall for the Setup container's bridge (see the module text). An `ip` table in the
@@ -147,7 +144,9 @@ NFT: Final = "/usr/sbin/nft"
 # turn's time budget); these are the parts around it, and `SETUP_OVERHEAD_SECONDS` is their sum: what
 # the caller must leave besides the script.
 READY_SECONDS: Final = 60.0
-FINISH_EXEC_SECONDS: Final = 330.0
+FINISH_EXEC_SECONDS: Final = 30.0
+# How long the container's Docker has to stop and end the container by itself.
+DOCKER_STOP_SECONDS: Final = 120.0
 STOP_GRACE_SECONDS: Final = 20
 STOP_WAIT_SECONDS: Final = 40.0
 COMMIT_SECONDS: Final = 300.0
@@ -156,6 +155,7 @@ SETUP_OVERHEAD_SECONDS: Final = (
     RULES_SECONDS * 3
     + READY_SECONDS
     + FINISH_EXEC_SECONDS
+    + DOCKER_STOP_SECONDS
     + STOP_WAIT_SECONDS
     + COMMIT_SECONDS
     + REMOVE_SECONDS
@@ -297,6 +297,7 @@ class SetupSeams:
     ready_seconds: float = READY_SECONDS
     commit_seconds: float = COMMIT_SECONDS
     finish_seconds: float = FINISH_EXEC_SECONDS
+    docker_stop_seconds: float = DOCKER_STOP_SECONDS
     # False only in a test that has no host namespace to put rules in (never in production).
     install_rules: bool = True
 
@@ -623,9 +624,9 @@ class SetupContainer:
     # -- the result --------------------------------------------------------------------------------
 
     def _save(self, container: str) -> str:
-        """Stop the container's Docker and then the container, and commit its file system. Under
-        Sysbox the stop is what writes the inner Docker's images into the file system the commit
-        reads."""
+        """Stop the container's Docker, then the container, and commit its file system. Under
+        Sysbox the stop of the inner Docker is what ends the container, and the end of the
+        container is what writes the inner Docker's images into the file system the commit reads."""
         api = self._api
         finished = run_exec(
             api,
@@ -634,9 +635,11 @@ class SetupContainer:
             timeout=self._seams.finish_seconds,
             name="the end of the setup",
         )
-        if finished.returncode != 0 or finished.unanswered:
+        if NO_DOCKER in finished.stdout or self._ended.is_set():
+            # Nothing runs in the container but its init: stop it.
+            api.stop_container(container, grace=STOP_GRACE_SECONDS, timeout=STOP_WAIT_SECONDS + 30.0)
+        elif not self._ended.wait(self._seams.docker_stop_seconds):
             raise _Unavailable("the container's Docker did not stop in time, so its images are not kept")
-        api.stop_container(container, grace=STOP_GRACE_SECONDS, timeout=STOP_WAIT_SECONDS + 30.0)
         if not self._ended.wait(STOP_WAIT_SECONDS):
             raise _Unavailable("the container did not stop, so its file system is not kept")
         return api.commit_container(

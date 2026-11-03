@@ -61,7 +61,9 @@ class Rig:
         self.script_text = ""
         self.script_output = "installing\n"
         self.script_waits = False
-        self.finish_exit = 0
+        # What the end script finds: "stops" (the container's Docker stops and the container
+        # ends with it), "no-docker" (nothing runs in it but its init) or "hangs".
+        self.finish_mode = "no-docker"
         self.execs: list[tuple[list[str], dict[str, str], str | None]] = []
 
     def api(self) -> DockerApi:
@@ -94,7 +96,13 @@ class Rig:
                 return 137
             return self.script_exit
         if argv[:3] == ["/bin/sh", "-c", sc.FINISH_SCRIPT]:
-            return self.finish_exit
+            if self.finish_mode == "no-docker":
+                stdout.write(sc.NO_DOCKER + "\n")
+            else:
+                stdout.write("stopping\n")
+                if self.finish_mode == "stops":
+                    threading.Timer(0.2, lambda: self.engine.kill(sc.SETUP_CONTAINER_NAME, exit_code=0)).start()
+            return 0
         return 0
 
     def stop(self) -> None:
@@ -356,6 +364,7 @@ def test_a_script_that_ended_well_becomes_the_image_after_the_docker_is_stopped(
     remove_at = max(i for i, n in enumerate(names) if n.startswith("DELETE containers"))
     assert stop_at < commit_at < remove_at
     assert any(e[0][:3] == ["/bin/sh", "-c", sc.FINISH_SCRIPT] for e in rig.execs)
+    assert any(t.split("?")[0].endswith("/stop") for m, t, _ in rig.engine.calls if m == "POST")
     repository, tag = rig.engine.committed[0][1]["repo"], rig.engine.committed[0][1]["tag"]
     assert (repository, tag) == (sc.SETUP_IMAGE_REPOSITORY, sc.SETUP_IMAGE_TAG)
     assert rig.engine.committed[0][1]["pause"] == "false"
@@ -370,10 +379,21 @@ def test_the_script_file_is_removed_before_the_commit(rig: Rig) -> None:
 
 # #818-T15
 def test_a_docker_that_does_not_stop_means_the_images_are_not_kept(rig: Rig) -> None:
-    rig.finish_exit = 1
-    done = run(rig)
-    assert done.outcome == OUTCOME_NOT_SAVED and "did not stop" in done.detail
+    rig.finish_mode = "hangs"
+    done = run(rig, docker_stop_seconds=0.5)
+    assert done.outcome == OUTCOME_NOT_SAVED and "Docker did not stop" in done.detail
     assert rig.engine.committed == []
+
+
+# #818-T15b
+def test_a_docker_that_stops_ends_the_container_by_itself_and_then_the_commit_happens(
+    rig: Rig,
+) -> None:
+    rig.finish_mode = "stops"
+    done = run(rig)
+    assert done.outcome == OUTCOME_OK and done.image is not None
+    # The container ended by itself: no stop call was needed.
+    assert not any(t.split("?")[0].endswith("/stop") for m, t, _ in rig.engine.calls if m == "POST")
 
 
 # #818-T16

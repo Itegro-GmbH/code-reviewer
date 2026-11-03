@@ -203,6 +203,8 @@ class Rig:
                 made.killed.wait(30)
                 return 137
             return self.script_exit
+        if argv[:3] == ["/bin/sh", "-c", sc.FINISH_SCRIPT]:
+            stdout.write(sc.NO_DOCKER + "\n")
         return 0
 
 
