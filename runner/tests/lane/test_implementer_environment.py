@@ -85,9 +85,11 @@ def test_the_agent_starts_from_what_the_script_left_and_the_tracked_files_are_ba
     def script(repo: Path) -> list[Turn]:
         return [
             bash(
-                "cp /opt/setup-marker marker-copy.txt; git status --short > status.txt; "
+                "cp /opt/setup-marker marker-copy.txt; cp setup-made.txt made-copy.txt; "
+                "git status --short > status.txt; "
                 + inner
-                + "git add marker-copy.txt status.txt images.txt && git commit -qm 'Use the setup'"
+                + "git add marker-copy.txt made-copy.txt status.txt images.txt "
+                + "&& git commit -qm 'Use the setup'"
             ),
             says("Used what the setup left."),
         ]
@@ -111,10 +113,20 @@ def test_the_agent_starts_from_what_the_script_left_and_the_tracked_files_are_ba
         tip = result.head_commit or ""
         shown = raw("show", f"{tip}:marker-copy.txt", cwd=turned.origin.path, git=turned.origin.git)
         assert shown.strip() == "made-by-setup"
-        # What the script added to the repository is in the agent's tree (untracked); the tracked
-        # file it changed was put back, so it is no change of the agent's.
+        # What the script added to the repository is in the agent's tree and the agent used it, but
+        # it is no change of the agent's: not in `git status`, not on the branch, and the tree is
+        # clean at the end, so the agent got no extra message. The tracked file the script changed
+        # was put back.
         status = raw("show", f"{tip}:status.txt", cwd=turned.origin.path, git=turned.origin.git)
-        assert "?? setup-made.txt" in status and "README.md" not in status
+        assert "setup-made.txt" not in status and "README.md" not in status
+        copy = raw("show", f"{tip}:made-copy.txt", cwd=turned.origin.path, git=turned.origin.git)
+        assert copy.strip() == "untracked"
+        on_branch = raw(
+            "ls-tree", "-r", "--name-only", tip, cwd=turned.origin.path, git=turned.origin.git
+        )
+        assert "setup-made.txt" not in on_branch.split()
+        assert len(turned.messages) == 1, "a clean tree gets no extra message"
+        assert any("script added are in the agent's tree" in n for n in prepared.notes)
         assert any(
             "1 tracked file(s) the script changed were put back" in n for n in prepared.notes
         )
