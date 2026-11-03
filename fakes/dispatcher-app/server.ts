@@ -105,6 +105,8 @@ export type EnqueueOptions = {
   input?: Record<string, unknown>;
   /** #818: the VM size the claim answer names (any kind, so a test can show that only the Implementer's is believed). */
   vcpus?: unknown;
+  /** #745, step 7: the network rule the claim answer names (any kind, like `vcpus`). */
+  network?: unknown;
 };
 
 export type LoggedRequest = {
@@ -147,6 +149,7 @@ type JobState = {
   reviewKind: ReviewKind;
   input: Record<string, unknown>;
   vcpus?: unknown;
+  network?: unknown;
   status: JobStatus;
   attempts: number;
   claims: number;
@@ -289,6 +292,9 @@ export async function startDispatcherAppFake(
       ...(enqueueOptions.vcpus === undefined
         ? {}
         : { vcpus: enqueueOptions.vcpus }),
+      ...(enqueueOptions.network === undefined
+        ? {}
+        : { network: enqueueOptions.network }),
       status: "queued",
       attempts: 0,
       claims: 0,
@@ -389,6 +395,7 @@ export async function startDispatcherAppFake(
             leaseExpiresAt: iso(LEASE_SECONDS),
             heartbeatIntervalSeconds: HEARTBEAT_SECONDS,
             ...(job.vcpus === undefined ? {} : { vcpus: job.vcpus }),
+            ...(job.network === undefined ? {} : { network: job.network }),
           },
         },
       };
@@ -747,6 +754,7 @@ export async function startDispatcherAppFake(
         reviewKind:
           kind === "dynamic" || kind === "implementer" ? kind : "diff",
         ...(body.vcpus === undefined ? {} : { vcpus: body.vcpus }),
+        ...(body.network === undefined ? {} : { network: body.network }),
       });
       return { status: 200, body: { id } };
     }

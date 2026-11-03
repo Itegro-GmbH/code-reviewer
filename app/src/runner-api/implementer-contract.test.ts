@@ -458,6 +458,7 @@ describe("the lists of the implementer kind", () => {
       "RUNNER_IMPLEMENTER_MODEL_DOOR",
       "RUNNER_IMPLEMENTER_SANDBOX_PROOF",
       "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB",
+      "RUNNER_IMPLEMENTER_NETWORK_SWITCH",
     ]);
     expect([...IMPLEMENTER_ENVIRONMENT_NAMES].sort()).toStrictEqual(
       [...(defs.KnownImplementerEnvironmentName?.enum ?? [])].sort(),

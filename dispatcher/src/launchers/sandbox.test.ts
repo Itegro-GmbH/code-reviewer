@@ -15,6 +15,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { FakeSandboxService } from "../../../fakes/sandbox/service.ts";
 import { createDispatcherCore } from "../core/dispatcher.ts";
 import { LaunchError, type LaunchSpec, type Launcher } from "../core/types.ts";
+import type { NetworkRule } from "../network/rule.ts";
 import {
   DISPATCHER_TOKEN,
   readContract,
@@ -1226,6 +1227,70 @@ describe("the Sandbox-Launcher", () => {
     await launch(build({}), spec({ kind: "implementer" }));
     expect(valuesOf(dockerRun()?.args ?? [], "--env")).toContain(
       "RUNNER_IMPLEMENTER_SANDBOX_PROOF=unproven",
+    );
+  });
+
+  // #745-T34: the second wall's call, given to the Control container of an Implementer VM and to no other
+  describe("the network switch of an Implementer VM (#745, step 7)", () => {
+    const RULE: NetworkRule = { mode: "list", hosts: ["registry.npmjs.org"] };
+    const switchFor = (input: {
+      appId: string;
+      vm: string;
+      rule: NetworkRule;
+    }) =>
+      JSON.stringify({
+        url: "https://dispatcher.example.test/network",
+        vm: input.vm,
+        appId: input.appId,
+        network: input.rule,
+        token: "t".repeat(64),
+      });
+
+    it("hands the document made for this VM and this rule to the container, as one variable", async () => {
+      await launch(
+        build({ networkSwitch: switchFor }),
+        spec({ kind: "implementer", network: RULE }),
+      );
+
+      const given = valuesOf(dockerRun()?.args ?? [], "--env").find((entry) =>
+        entry.startsWith("RUNNER_IMPLEMENTER_NETWORK_SWITCH="),
+      );
+      expect(given).toBeDefined();
+      const document = JSON.parse(
+        (given ?? "").slice("RUNNER_IMPLEMENTER_NETWORK_SWITCH=".length),
+      ) as { vm: string; appId: string; network: unknown };
+      expect(document.vm).toBe(service.creates[0]?.name);
+      expect(document.appId).toBe("reviewer");
+      expect(document.network).toStrictEqual(RULE);
+    });
+
+    it("hands nothing when the deployment has no address to be called at, or the App named no rule", async () => {
+      await launch(build({}), spec({ kind: "implementer", network: RULE }));
+      expect(
+        valuesOf(dockerRun()?.args ?? [], "--env").join(" "),
+      ).not.toContain("NETWORK_SWITCH");
+
+      service = new FakeSandboxService();
+      await launch(
+        build({ networkSwitch: switchFor }),
+        spec({ kind: "implementer" }),
+      );
+      expect(
+        valuesOf(dockerRun()?.args ?? [], "--env").join(" "),
+      ).not.toContain("NETWORK_SWITCH");
+    });
+
+    it.each(["diff", "dynamic"] as const)(
+      "never hands it to a %s container",
+      async (kind) => {
+        await launch(
+          build({ networkSwitch: switchFor }),
+          spec({ kind, network: RULE }),
+        );
+        expect(
+          valuesOf(dockerRun()?.args ?? [], "--env").join(" "),
+        ).not.toContain("NETWORK_SWITCH");
+      },
     );
   });
 

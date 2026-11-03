@@ -122,8 +122,14 @@ const splitClaim = z.object({
 export function parseSplitClaim(body: unknown): ClaimedJob | null {
   const parsed = splitClaim.safeParse(body);
   if (!parsed.success) return null;
-  const { id, credential, reviewKind, heartbeatIntervalSeconds, vcpus, network } =
-    parsed.data.job;
+  const {
+    id,
+    credential,
+    reviewKind,
+    heartbeatIntervalSeconds,
+    vcpus,
+    network,
+  } = parsed.data.job;
   return {
     id,
     credential,
