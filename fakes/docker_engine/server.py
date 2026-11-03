@@ -397,8 +397,8 @@ class FakeDockerEngine:
         role = labels.get("code-reviewer.role", "")
         nft = container.document.get("Entrypoint") == ["/usr/sbin/nft"]
         if nft or role in ONE_SHOT_ROLES:
-            # A one-shot container of the network rules or of the bridge's IPv6: it ends at once. Its
-            # exit code is set before the start is answered, so that a `wait` right after sees it.
+            # A one-shot container of the network rules or of the bridge's IPv6: it ends at once.
+            # Its exit code is set before the start is answered, so that a `wait` sees it.
             container.exit_code = self.ipv6_exit if role == "bridge-ipv6" else self.rules_exit
             self._reply(connection, 204)
             return
