@@ -14,11 +14,11 @@ its veth, it cannot reach):
   namespace), find the bridge's link-local address (`fe80::...%eth0`, a neighbour it finds by
   pinging `ff02::1`) and connect to **port 23456 of the VM** over it: the VM's control service
   listens on `*`, and neither the isolated gateway mode nor an `ip` table sees IPv6 (the VM's
-  kernel has no `ip6` or `inet` netfilter). The bridge has an IPv6 address because the kernel gives every
-  interface a link-local one when it comes up. With `addrgenmode none` and the address flushed, the
-  host side has no IPv6 address on that segment and there is nothing to connect to (measured: the
-  same probe times out; a container that joins afterwards finds no neighbour). The VM does not
-  forward IPv6 (`net.ipv6.conf.all.forwarding = 0`).
+  kernel has no `ip6` or `inet` netfilter). The bridge has an IPv6 address because the kernel
+  gives every interface a link-local one when it comes up. With `addrgenmode none` and the address
+  flushed, the host side has no IPv6 address on that segment and there is nothing to connect to
+  (measured: the same probe times out; a container that joins afterwards finds no neighbour). The
+  VM does not forward IPv6 (`net.ipv6.conf.all.forwarding = 0`).
 
 The commands are constants, with the bridge's name as the one value: a name the daemon gave, or one
 of ours, held to the characters of an interface name (`bridge_name`).
