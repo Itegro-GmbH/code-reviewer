@@ -452,9 +452,9 @@ describe("the hardened container spec", () => {
       });
     for (const missing of [
       "RUNNER_IMPLEMENTER_WORK_DIR",
-      "RUNNER_IMPLEMENTER_EGRESS_PORT",
-      "RUNNER_IMPLEMENTER_NETWORK",
       "RUNNER_IMPLEMENTER_MODEL_DOOR",
+      "RUNNER_IMPLEMENTER_SANDBOX_PROOF",
+      "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB",
     ])
       expectInvalid(container, "ImplementerContainerSpec", {
         ...profile,

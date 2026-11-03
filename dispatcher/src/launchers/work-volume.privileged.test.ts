@@ -113,6 +113,9 @@ describe("the Implementer's container profile on a real daemon", () => {
     expect(output).toContain("ROOT_READ_ONLY");
     expect(output).toContain("TMP_NO_EXEC");
     expect(output).toContain("PIDS_MAX 2048");
-    expect(output).toContain(`MEMORY_MAX ${3 * 1024 ** 3}`);
+    // The profile's own limit ("768m"), so that the test follows the profile and not a copy of its number.
+    const limit = /^(\d+)m$/.exec(IMPLEMENTER_CONTAINER_SPEC.memory.limit);
+    expect(limit).not.toBeNull();
+    expect(output).toContain(`MEMORY_MAX ${Number(limit?.[1]) * 1024 ** 2}`);
   });
 });
