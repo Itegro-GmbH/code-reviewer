@@ -670,6 +670,10 @@ class GitWorkspace:
         except OSError:
             return None
 
+    def reserve_free_bytes(self) -> int:
+        """What the mirror's file system has left (the reserve disk in production)."""
+        return self._space(self.mirror).free_bytes
+
     def check_lease(self) -> None:
         """One question to the job host while the agent works: raises `lease_lost` (or whatever the
         gate raises) when the job is no longer ours, so that the turn ends and the model is not paid

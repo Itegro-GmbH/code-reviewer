@@ -326,7 +326,7 @@ jobs:
     needs: changes
     if: ${{ github.event_name == 'pull_request' && (github.base_ref == 'main' || needs.changes.outputs.runner == 'true') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -368,7 +368,7 @@ jobs:
           LANE_WORKER_IMAGE: code-reviewer-worker:lane
           LANE_AGENT_IMAGE: code-reviewer-agent:lane
           LANE_RUNTIME: runc
-        run: make lane
+        run: sudo -E .venv/bin/python -m pytest -m lane tests/lane -q -p no:cacheprovider
 
   runner-fast:
     name: "Runner: static & tests"

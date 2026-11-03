@@ -430,20 +430,52 @@ class Turned:
         return docker("exec", container, *argv, check=False)
 
 
-def _make_volume(scratch: Path) -> tuple[Path, str, str]:
-    """The work volume the way the Launcher makes it (a local volume over a directory of the
-    machine) and the stand-in of the Control container: created, never started, with the volume
-    at /work and the Worker image, which is all the reader and the agent read from it."""
+def mount(*args: str) -> None:
+    done = subprocess.run(["mount", *args], capture_output=True, text=True, check=False)
+    if done.returncode != 0:
+        raise AssertionError(f"mount {' '.join(args)}: {done.stderr.strip()}")
+
+
+def loop_filesystem(image: Path, megabytes: int, target: Path) -> None:
+    """A file system of a fixed size over a loop device, as the Launcher makes the reserve disk:
+    allocated, not sparse, so that nothing else can take its blocks."""
+    target.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["fallocate", "-l", f"{megabytes}M", str(image)], check=True)
+    options = ["-q", "-F", "-m", "0", "-O", "^has_journal", "-E", "lazy_itable_init=1,nodiscard"]
+    subprocess.run(["mkfs.ext4", *options, str(image)], check=True)
+    mount("-o", "loop,nosuid,nodev", str(image), str(target))
+
+
+# The reserve disk of the lane is small (the real one is an eighth of the VM's disk).
+RESERVE_MEGABYTES = 512
+
+
+def _make_volume(scratch: Path, disk_megabytes: int | None) -> tuple[Path, str, str]:
+    """The work volume the way the Launcher makes it (`workVolumeCommands`): a directory with the
+    reserve disk mounted below it, bound onto itself recursively, and a local volume over it with
+    `rbind`; then the stand-in of the Control container's name. With `disk_megabytes`, the
+    directory lives on a file system of that size, the lane's stand-in for the VM's disk, which an
+    agent can fill without taking anything from the machine."""
     token = uuid.uuid4().hex[:8]
-    work = scratch / "work"
-    work.mkdir()
+    parent = scratch
+    if disk_megabytes is not None:
+        parent = scratch / "vmdisk"
+        loop_filesystem(scratch / "vmdisk.img", disk_megabytes, parent)
+    work = parent / "work"
+    (work / "reserve").mkdir(parents=True)
+    loop_filesystem(scratch / "reserve.img", RESERVE_MEGABYTES, work / "reserve")
+    mount("--rbind", str(work), str(work))
     volume = f"code-reviewer-lane-work-{token}"
     control = f"code-reviewer-lane-control-{token}"
     docker(
         "volume", "create", "--driver", "local", "--opt", "type=none",
-        "--opt", f"device={work}", "--opt", "o=bind", volume,
+        "--opt", f"device={work}", "--opt", "o=rbind", volume,
     )  # fmt: skip
     return work, volume, control
+
+
+def unmount(path: Path) -> None:
+    subprocess.run(["umount", "-R", str(path)], capture_output=True, check=False)
 
 
 @dataclass
@@ -466,6 +498,7 @@ def lane_workspace(
     *,
     seed: Callable[[Path], None] | None = None,
     origin_setup: Callable[[Origin], None] | None = None,
+    disk_megabytes: int | None = None,
 ) -> Generator[LaneWorkspace]:
     """The origin (a bare repository standing in for GitHub), the work volume, the stand-in of the
     Control container and the real reader; the workspace is prepared (the mirror on the reserve
@@ -480,7 +513,7 @@ def lane_workspace(
         raw("push", "-q", "origin", "main", cwd=origin.seed, git=git)
     if origin_setup is not None:
         origin_setup(origin)
-    work, volume, control = _make_volume(scratch)
+    work, volume, control = _make_volume(scratch, disk_megabytes)
     docker(
         "create", "--name", control, "--label", "code-reviewer.lane=1",
         "--mount", f"type=volume,src={volume},dst=/work", config.worker_image, "probe",
@@ -504,7 +537,9 @@ def lane_workspace(
         schemes=("file",),
     )
     with ExitStack() as stack:
-        stack.callback(shutil.rmtree, work, True)
+        # In the order they are undone: the readers, the stand-in, the volume, the mounts.
+        stack.callback(unmount, scratch / "vmdisk")
+        stack.callback(unmount, work)
         stack.callback(docker, "volume", "rm", "-f", volume, check=False)
         stack.callback(docker, "rm", "-f", control, check=False)
         stack.callback(reader.close)
@@ -523,6 +558,7 @@ def lane_turn(
     time_limit: int = 3600,
     seed: Callable[[Path], None] | None = None,
     origin_setup: Callable[[Origin], None] | None = None,
+    disk_megabytes: int | None = None,
     judge: Callable[[Mapping[str, str], Mapping[str, Any]], Refusal | None] | None = None,
     memory_mb: int = 2304,
 ) -> Generator[Turned]:
@@ -544,7 +580,11 @@ def lane_turn(
 
     entry = ENTRIES[family]
     with ExitStack() as stack:
-        lane = stack.enter_context(lane_workspace(scratch, seed=seed, origin_setup=origin_setup))
+        lane = stack.enter_context(
+            lane_workspace(
+                scratch, seed=seed, origin_setup=origin_setup, disk_megabytes=disk_megabytes
+            )
+        )
         config = lane.config
         stack.enter_context(model_network(config, port))
         upstream = stack.enter_context(
