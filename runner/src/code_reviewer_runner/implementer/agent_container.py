@@ -30,7 +30,8 @@ cp`) puts its files where a Sysbox container does not see them (measured, 2026-1
 answers 200 and the directory stays empty).
 
 **How it ends.** Control kills the container (SIGKILL to its init, which takes every process of it,
-the inner `dockerd` and anything the agent left running, with it) before it reads the repository.
+the inner `dockerd` and anything the agent left running, with it) before it reads the repository, and waits
+until the daemon says it is gone (`stop()`, at most `KILL_SECONDS + STOP_SECONDS`). It is removed after the push (`remove()`).
 A container that died by itself (killed for its memory, a crash) is seen by `wait` and named
 (`AgentEnd`).
 """
@@ -76,7 +77,13 @@ PYTHON: Final = "/usr/local/bin/python3"
 OPENCODE: Final = "/usr/local/bin/opencode"
 ENGINE_LOG: Final = "/tmp/opencode.log"
 READY_SECONDS: Final = 60.0
-STOP_SECONDS: Final = 15.0
+# The end of the container, in two parts that cost time at the end of a turn (the grace of the session counts
+# `KILL_SECONDS + STOP_SECONDS`): the kill call, and the wait until the daemon says the container is gone. The
+# removal is a third, **after the push** (`remove()`), because a Sysbox container with its inner Docker can take long
+# to remove and nothing has to wait for it: killed is enough to read the repository.
+KILL_SECONDS: Final = 3.0
+STOP_SECONDS: Final = 7.0
+REMOVE_SECONDS: Final = 15.0
 # How long an answer about the engine's process is trusted, so that the watch (every 50 ms) does
 # not put a call to the daemon behind every look.
 LIVENESS_SECONDS: Final = 0.5
@@ -477,7 +484,7 @@ class AgentContainer:
         container = self._container
         if container is not None:
             try:
-                self._api.kill_container(container)
+                self._api.kill_container(container, timeout=KILL_SECONDS)
             except DockerError as error:
                 _log.warning("the agent's container could not be killed (%s)", error.status)
 
@@ -486,19 +493,22 @@ class AgentContainer:
         if container is None:
             return
         try:
-            self._api.remove_container(container)
+            self._api.remove_container(container, timeout=REMOVE_SECONDS)
         except DockerError as error:
             _log.warning("the agent's container could not be removed (%s)", error.status)
 
     def stop(self) -> bool:
         """End the turn's engine and the container with everything in it, and wait until it is gone.
-        True when the container is known to be gone: the repository can be read. Safe to call
-        twice."""
+        True when the container is known to be gone: the repository can be read. The container is
+        killed, not removed (`remove()` does that after the push). Safe to call twice."""
         self._stopping.set()
         if self._tunnel is not None:
             self._tunnel.close()
             self._tunnel = None
         self._kill()
-        gone = self._ended.wait(STOP_SECONDS) if self._container is not None else True
+        return self._ended.wait(STOP_SECONDS) if self._container is not None else True
+
+    def remove(self) -> None:
+        """Take the (killed) container away. After the push, when nothing waits for it any more;
+        `stop()` has to have run. Safe to call twice."""
         self._remove()
-        return gone

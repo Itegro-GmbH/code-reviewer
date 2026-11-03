@@ -28,6 +28,7 @@ only brakes.
 """
 
 import logging
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -56,7 +57,14 @@ from code_reviewer_runner.job import ImplementerInput, JobError
 from code_reviewer_runner.result import ErrorCode, Usage
 
 from .agent import AgentTurn, EngineRuntime, ImplementerAgent
-from .agent_container import AGENT_HOME, AGENT_REPO, AGENT_TMP, ENGINE_PORT
+from .agent_container import (
+    AGENT_HOME,
+    AGENT_REPO,
+    AGENT_TMP,
+    ENGINE_PORT,
+    KILL_SECONDS,
+    STOP_SECONDS,
+)
 from .config import build_engine_config, implementer_environment
 from .door_launcher import DoorSeams, RunningDoor, start_door
 from .door_model import build_door_ledger
@@ -84,15 +92,16 @@ GRACE_SECONDS = 180.0
 # How the grace is spent at a normal end: the rescue of a detached HEAD (three git commands of
 # `RESCUE_STEP_TIMEOUT`), the look at the tree (`DIRTY_TIMEOUT`), the leftover commit of the system,
 # the final push and the two reads of the report (`REPORT_READ_TIMEOUT` each), with
-# `ENGINE_STOP_SECONDS` for the end of the engine before them; the sum stays below `GRACE_SECONDS`
-# (a test holds it).
+# `ENGINE_STOP_SECONDS` for the end of the agent's container before them (the kill call and the wait
+# until the daemon says it is gone, at most `KILL_SECONDS + STOP_SECONDS`; its removal comes after
+# the push, `remove()`, and is in no sum); the sum stays below `GRACE_SECONDS` (a test holds it).
 LEFTOVER_SECONDS = 40.0
 FINAL_PUSH_SECONDS = 100.0
-ENGINE_STOP_SECONDS = 5.0
+ENGINE_STOP_SECONDS = KILL_SECONDS + STOP_SECONDS
 # A stop (SIGTERM) leaves the process `SIGTERM_BACKSTOP_SECONDS` in all (`job_run.py`): the engine
 # comes out of it, then the rescue of a detached HEAD, the final push (no leftover is committed) and
 # the two reads of the report.
-STOP_PUSH_SECONDS = 30.0
+STOP_PUSH_SECONDS = 25.0
 # How often the watch asks the job host whether the job is still ours while the agent works (a
 # lost lease ends the turn at once; nothing is pushed in the meantime).
 LEASE_POLL_SECONDS = 30.0
@@ -137,9 +146,12 @@ class SessionSeams:
 
 
 class AgentPlace(EngineRuntime, Protocol):
-    """The agent's container: made before the engine starts, ended with everything in it."""
+    """The agent's container: made before the engine starts, killed with everything in it (`stop`)
+    and taken away after the push (`remove`)."""
 
     def create(self) -> None: ...
+
+    def remove(self) -> None: ...
 
 
 # How long the last push of a stop asks a lease the host cannot confirm: a stop has a minute in
@@ -318,6 +330,8 @@ class ImplementerSession:
         # The branch made for work committed on a detached HEAD, if there was such work.
         self._rescued: str | None = None
         self._unchecked = False
+        # The thread that removes the agent's container after the push (None before and without one).
+        self._removal: threading.Thread | None = None
 
     @property
     def ledger(self) -> BudgetLedger | None:
@@ -369,7 +383,24 @@ class ImplementerSession:
         finally:
             if model is not None:
                 model.stop()
-        return self._result()
+        result = self._result()
+        self._remove_place(place)
+        return result
+
+    def _remove_place(self, place: AgentPlace | None) -> None:
+        """Take the killed container away, after the push and the reads: nothing waits for it (the
+        VM goes with the turn), so it is done on a thread of its own and never delays the result."""
+        if place is None:
+            return
+
+        def remove() -> None:
+            try:
+                place.remove()
+            except Exception:
+                _log.warning("the agent's container could not be removed")
+
+        self._removal = threading.Thread(target=remove, daemon=True)
+        self._removal.start()
 
     def _start_model(self) -> TurnModel:
         """The model door (#745, step 3): the key, the model pin and the cost limit go to a

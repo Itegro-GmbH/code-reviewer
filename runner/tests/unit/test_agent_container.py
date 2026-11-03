@@ -381,9 +381,15 @@ def test_stop_kills_the_container_waits_until_it_is_gone_and_is_not_a_loss(rig: 
 
     assert gone is True
     made = rig.engine.container(AGENT_CONTAINER_NAME)
-    assert made.exit_code == 137 and made.removed
+    assert made.exit_code == 137
+    assert not made.removed, "the removal is not part of the stop: it comes after the push"
     assert place.lost is None, "an end that Control asked for is not the agent's crash"
     assert place.stop() is True, "twice is safe"
+
+    place.remove()
+
+    assert made.removed
+    place.remove()  # twice is safe
 
 
 # #745-T22

@@ -220,8 +220,10 @@ class DockerApi:
             raise DockerError(0, "the daemon's answer has no exit code")
         return code
 
-    def remove_container(self, container: str) -> None:
-        self.request("DELETE", f"/containers/{container}?force=1&v=1", ok=(200, 204, 404))
+    def remove_container(self, container: str, *, timeout: float | None = None) -> None:
+        self.request(
+            "DELETE", f"/containers/{container}?force=1&v=1", ok=(200, 204, 404), timeout=timeout
+        )
 
     # -- the standard streams -------------------------------------------------------------------
 
@@ -270,10 +272,12 @@ class DockerApi:
 
     # -- the agent container (#745, step 4) -------------------------------------------------------
 
-    def kill_container(self, container: str) -> None:
+    def kill_container(self, container: str, *, timeout: float | None = None) -> None:
         """SIGKILL the container's init, and with it every process in it. A container that is not
         running (409) or gone (404) is what was wanted."""
-        self.request("POST", f"/containers/{container}/kill?signal=KILL", ok=(204, 404, 409))
+        self.request(
+            "POST", f"/containers/{container}/kill?signal=KILL", ok=(204, 404, 409), timeout=timeout
+        )
 
     def inspect_image(self, reference: str) -> dict[str, Any]:
         answer = as_object(self.request("GET", f"/images/{reference}/json"))

@@ -145,8 +145,10 @@ the model.
 
 **Time.** The runner keeps the last 180 seconds of the time limit for the end: the look at the tree (10 s at most), the rescue
 of a detached HEAD (three git commands of 3 s at most), the commit of what is left (40 s), the final push (100 s) and the two
-reads of the report (5 s each), with 5 s for the end of the engine. A stop (SIGTERM) commits nothing (it still saves a
-detached HEAD on a branch); the process leaves itself 55 seconds, and the final push gets 30 of them. A test holds both sums.
+reads of the report (5 s each), with 10 s for the end of the agent's container (the kill call 3 s at most, then the wait until the daemon says it is gone 7 s at most;
+the container is removed only after the push, on a thread of its own, because removing a Sysbox container with its inner Docker can take long and nothing waits for it).
+A stop (SIGTERM) commits nothing (it still saves a detached HEAD on a branch); the process leaves itself 55 seconds, and the final push gets 25 of them. A test holds both sums,
+with the real constants of the kill and the wait.
 
 **How the root process stays safe from the agent's repository.** The agent controls every file of its repository, so Control
 (root, with the token) never opens it:

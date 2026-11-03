@@ -197,7 +197,11 @@ class FakeGit(GitWorkspace):
 
 @dataclass
 class FakePlace:
-    """The agent's container of the test: it exists and goes away, and holds nothing."""
+    """The agent's container of the test: it exists and goes away, and holds nothing. `remove`
+    notes the events of the turn as they were when it was asked to."""
+
+    events: list[str] = field(default_factory=lambda: [])
+    removals: list[tuple[str, ...]] = field(default_factory=lambda: [])
 
     def create(self) -> None:
         return None
@@ -219,6 +223,9 @@ class FakePlace:
 
     def stop(self) -> bool:
         return True
+
+    def remove(self) -> None:
+        self.removals.append(tuple(self.events))
 
 
 def fake_door(**options: Any) -> "FakeDoor":
@@ -315,6 +322,8 @@ class Turn:
     output: str
     events: list[str]
     hard_stops: list[int]
+    # The events of the turn at the time the agent's container was asked to be removed, per request.
+    removals: list[tuple[str, ...]] = field(default_factory=lambda: [])
 
     @property
     def lines(self) -> list[str]:
@@ -380,6 +389,7 @@ def play(
         ends_clean: bool = True,
     ) -> Turn:
         events: list[str] = []
+        removals: list[tuple[str, ...]] = []
         made: list[FakeGit] = []
         agents: list[FakeAgent] = []
         hard_stops: list[int] = []
@@ -402,7 +412,7 @@ def play(
             if configure is not None:
                 configure(git)
             made.append(git)
-            return TurnSetup(git, FakePlace, ("opencode",))
+            return TurnSetup(git, lambda: FakePlace(events, removals), ("opencode",))
 
         def agent_factory(**options: Any) -> FakeAgent:
             agent = FakeAgent(script, events, made[0], options, ends_clean=ends_clean)
@@ -434,7 +444,14 @@ def play(
         code = runner.main([], stdin=io.StringIO(job_text(cost_limit=cost_limit)), stdout=output)
         git = made[0] if made else FakeGit(tmp_path, None)
         return Turn(
-            git, agents[0] if agents else None, lease, code, output.getvalue(), events, hard_stops
+            git,
+            agents[0] if agents else None,
+            lease,
+            code,
+            output.getvalue(),
+            events,
+            hard_stops,
+            removals,
         )
 
     yield run
@@ -485,6 +502,15 @@ def test_a_job_in_and_a_valid_result_out_with_the_commit_pushed_once(play: Any) 
     assert turn.git.pushes == [TIP]
     assert turn.events == ["agent.start", "turn", "stop", "rescue", "push"]
     assert turn.git.prepared
+
+
+# #745-T22: the container is killed before anything is read and removed after the push
+def test_the_agents_container_is_removed_after_the_push_not_before(play: Any) -> None:
+    turn = play(commits_then_ends())
+
+    assert wait_for(lambda: bool(turn.removals)), "the container is taken away in the end"
+    assert turn.removals[0][-1] == "push" and "stop" in turn.removals[0]
+    assert turn.events[:3] == ["agent.start", "turn", "stop"]
 
 
 # #765-T04: the result is the last thing a turn does, and it is written exactly once.

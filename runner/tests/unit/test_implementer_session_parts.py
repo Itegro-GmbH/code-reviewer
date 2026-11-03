@@ -24,6 +24,7 @@ from code_reviewer_runner.implementer.git_workspace import (
     REPORT_READ_TIMEOUT,
     RESCUE_STEP_TIMEOUT,
 )
+from code_reviewer_runner.implementer.agent_container import KILL_SECONDS, STOP_SECONDS
 from code_reviewer_runner.implementer.job_run import SIGTERM_BACKSTOP_SECONDS
 from code_reviewer_runner.implementer.limits import agent_limits
 from code_reviewer_runner.implementer.session import (
@@ -433,6 +434,9 @@ def test_the_session_names_the_outage_the_proxy_kept(failure: ErrorCode) -> None
 
 # The one final push has to fit the end of the turn, at a normal end and at a stop.
 def test_the_end_of_a_turn_fits_the_grace_and_a_stop_fits_the_sigterm_backstop() -> None:
+    # The container is killed (the kill call, then the wait until the daemon says it is gone) before
+    # anything is read; its removal comes after the push and is in no sum.
+    assert ENGINE_STOP_SECONDS == KILL_SECONDS + STOP_SECONDS
     reads = 2 * REPORT_READ_TIMEOUT
     rescue = 3 * RESCUE_STEP_TIMEOUT  # symbolic-ref, for-each-ref, switch; at a stop too
     normal = (
