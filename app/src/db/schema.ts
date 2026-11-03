@@ -550,6 +550,8 @@ export interface JobVmRunsTable {
   billable: ColumnType<number, number | undefined, number>;
   /** `ceil(seconds / 60)` of the span once the end is known, at least 1; null before that. */
   billable_minutes: number | null;
+  /** The VM's size in vCPUs where the Dispatcher said it (#818: reported for the Implementer only), so minutes can be priced by size; null otherwise. */
+  vcpus: ColumnType<number | null, number | null | undefined, number | null>;
   created_at: string;
   updated_at: string;
 }
@@ -1056,6 +1058,49 @@ export interface ImplementerTurnsTable {
   job_id: string;
   created_by: string;
   created_at: string;
+  /**
+   * The environment the person chose, copied when the turn was written (#818): all four are null (the standard: no script, the
+   * Dispatcher's size) or all are set. No foreign key: editing or deleting the environment never reaches the turn.
+   */
+  environment_id: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  environment_name: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  environment_vcpus: ColumnType<
+    number | null,
+    number | null | undefined,
+    number | null
+  >;
+  environment_setup_script: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+}
+
+/**
+ * A start configuration for an Implementer task (#818): a size and a setup script, kept per workspace. A task copies size and
+ * script at its start, so nothing points at this row: editing or deleting it touches no turn. `setup_script` is literal text,
+ * stored as it was written (no trimming, no normalised line ends), at most 64 KB of UTF-8.
+ */
+export interface ImplementerEnvironmentsTable {
+  id: string;
+  workspace_id: string;
+  /** Unique within the workspace, whatever the case. */
+  name: string;
+  /** A size of `contracts/environment-sizes.v1.json`; the app checks the list, the database only that it is positive. */
+  vcpus: number;
+  setup_script: string;
+  created_by: string;
+  /** ISO 8601 UTC. */
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Database {
@@ -1088,6 +1133,7 @@ export interface Database {
   job_vm_runs: JobVmRunsTable;
   implementer_sessions: ImplementerSessionsTable;
   implementer_turns: ImplementerTurnsTable;
+  implementer_environments: ImplementerEnvironmentsTable;
   plan_handoff_tokens: PlanHandoffTokensTable;
   model_catalog_entries: ModelCatalogEntriesTable;
   models_dev_providers: ModelsDevProvidersTable;

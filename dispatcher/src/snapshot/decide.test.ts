@@ -10,6 +10,7 @@ const PAIR: SnapshotPair = {
   snapshotId: "snap_example01",
   imageDigest: `sha256:${"a".repeat(64)}`,
   commit: OLD,
+  sysbox: "proven",
 };
 
 function deps(overrides: Partial<DecideDeps> = {}): DecideDeps & {
@@ -215,6 +216,7 @@ describe("whether the snapshot has to be rebuilt", () => {
       snapshotId: "snap_example02",
       imageDigest: `sha256:${"b".repeat(64)}`,
       commit: NEW,
+      sysbox: "proven",
     };
     const d = deps({ live: () => Promise.resolve(livePair) });
 

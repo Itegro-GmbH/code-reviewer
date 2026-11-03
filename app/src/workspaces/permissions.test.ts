@@ -23,6 +23,8 @@ const MATRIX: Record<WorkspaceAction, [boolean, boolean, boolean]> = {
   start_review: [true, true, true],
   // #755-T14: every member may start an Implementer task (one line to raise it).
   start_implementer_task: [true, true, true],
+  // #818-T09: any member may use an environment (the picker lists them), Owners and Admins create, change and delete them.
+  manage_implementer_environments: [false, true, true],
   // #588-T42: a Member saves the settings of a project, but confirming or moving the pinned address of its catalog provider is
   // `manage_llm_key` (below).
   change_project_settings: [true, true, true],

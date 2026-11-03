@@ -183,6 +183,9 @@ export const errorCopy = (
     "The repository could not be downloaded, so the task did not start.",
   setup_failed:
     "The repository's own set-up steps did not complete, so the task could not start.",
+  // #818: the setup script of the task's environment failed or ran out of time. The page shows the end of its output.
+  environment_setup_failed:
+    "The setup script of this task's environment did not finish successfully, so the task was stopped before the AI model was called and nothing was charged. The end of the script's output is shown below. Fix the script in Environments, then start the task again.",
   agent_gave_up:
     "The agent stopped without a result it could stand behind. Read its summary, then try again with a clearer or smaller task.",
   push_rejected:
@@ -197,6 +200,10 @@ export const errorCopy = (
     "No worker that answered can run tasks yet, so this task did not start.",
   implementer_config_invalid:
     "The settings of this task could not be used, so it did not start.",
+  sandbox_unproven:
+    "The environment for tasks has not been proven safe on this platform version yet, so the task did not start and was not billed.",
+  sandbox_size_unsupported:
+    "The chosen size leaves too little memory for the agent's own container, so the task did not start and was not billed. Choose a larger size.",
   unknown: "The run failed for a reason this version does not know.",
 });
 
@@ -278,8 +285,8 @@ export const turnErrorCopy = (
   product: ProductIdentity,
 ): Readonly<Record<string, string>> => ({
   ...errorCopy(product),
-  // The runner reports this code for every way the work could not be kept on its branch, among them a repository that could not
-  // be committed or verified; whatever was pushed before the stop is still on the branch.
+  // No longer reported (git is free in the workspace and each branch is judged by GitHub at the end), but runs that carry it stay
+  // readable.
   branch_violation:
     "The task was stopped because its work could not be kept safely on the branch it was given. Commits pushed before that stay on the branch; nothing after that was saved.",
   cost_limit_reached: `The task stopped at its cost limit: it sent no further request to the AI model once the calls so far had cost that much. The limit is the one chosen for this task or the maximum cost per task set by ${product.name}, whichever is lower. Work committed before the stop was pushed to the branch when possible, so check the branch for what reached it.`,
@@ -296,10 +303,12 @@ export const turnErrorCopy = (
     "The task used more than its allowed budget and was stopped. Work committed before the stop was pushed to the branch when possible, so check the branch for what reached it.",
   llm_context_length_exceeded:
     "The conversation of the task grew larger than the model's context window, so the AI provider refused the request. Work committed before the stop was pushed to the branch when possible. Start a smaller task, or choose a model with a larger window.",
-  // The runner reports this code for a repository that refused the pushed work (a rule, a permission, a file it does not take)
-  // and for a final push that could not reach it; what was pushed earlier is on the branch.
+  // The runner reports this code when the task's branch did not arrive on GitHub, or when no branch did: GitHub refused it (the
+  // branch already exists with other history, a rule, a permission, a workflow file, an answer that was an error) or could not be
+  // reached, the push took too long, or the runner could not read the agent's repository (or its list of branches) and so pushed
+  // nothing. The page lists every branch with the reason; a branch that was pushed stays.
   push_rejected:
-    "The repository did not accept the pushed work (it refused it, or could not be reached). Work already pushed stays on the branch.",
+    "The work of this task did not arrive on GitHub. Either GitHub refused the branch, did not answer or answered with an error, the push took too long, or the workspace of the agent could not be read, in which case nothing was pushed. The branches below, if there are any, say which were pushed and why the others were not. A branch that was pushed stays on GitHub.",
   // The table above says "Reviews" for a workspace that is paused or has used up its plan; a task is not a review.
   workspace_suspended:
     "Tasks are paused for this workspace, so this task did not start and no AI model was used. Ask whoever manages this workspace's plan.",

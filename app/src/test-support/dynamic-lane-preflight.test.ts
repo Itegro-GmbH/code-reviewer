@@ -12,8 +12,6 @@ import {
   describeMissing,
   ENGINE_UID,
   GIT_PATH,
-  GUARD_DIR,
-  GUARD_FILES,
   LANE_ITEMS,
   OPENCODE_PATH,
   RIPGREP_PATH,
@@ -29,7 +27,6 @@ const GOOD: LaneFacts = {
   engineUid: ENGINE_UID,
   engineUser: { uid: ENGINE_UID, gid: ENGINE_UID },
   git: { path: GIT_PATH, version: "git version 2.53.0" },
-  guard: { dir: GUARD_DIR, missing: [] },
 };
 
 const PREFLIGHT = fileURLToPath(
@@ -104,33 +101,15 @@ describe("the preflight of the privileged Dynamic e2e lane", () => {
   });
 
   // #767
-  it("names git when it is older than the branch guard needs, and when it cannot be run", () => {
+  it("names git when it cannot be run, and accepts any version that runs", () => {
+    const none = checkLane({ ...GOOD, git: { path: GIT_PATH, version: null } });
     const old = checkLane({
       ...GOOD,
       git: { path: GIT_PATH, version: "git version 2.43.0" },
     });
-    const none = checkLane({ ...GOOD, git: { path: GIT_PATH, version: null } });
-    const newer = checkLane({
-      ...GOOD,
-      git: { path: GIT_PATH, version: "git version 2.100.1" },
-    });
 
-    expect(old.map((item) => item.item)).toEqual(["git"]);
-    expect(old[0]?.message).toContain("2.53");
     expect(none.map((item) => item.item)).toEqual(["git"]);
-    expect(newer).toEqual([]);
-  });
-
-  // #767
-  it("names the guard files of the Implementer that are missing", () => {
-    const missing = checkLane({
-      ...GOOD,
-      guard: { dir: GUARD_DIR, missing: ["guard_matrix.sh"] },
-    });
-
-    expect(missing.map((item) => item.item)).toEqual(["guard_files"]);
-    expect(missing[0]?.message).toContain("guard_matrix.sh");
-    expect(missing[0]?.message).toContain(GUARD_DIR);
+    expect(old).toEqual([]);
   });
 
   // #253-P06
@@ -143,7 +122,6 @@ describe("the preflight of the privileged Dynamic e2e lane", () => {
       engineUid: ENGINE_UID,
       engineUser: null,
       git: { path: GIT_PATH, version: null },
-      guard: { dir: GUARD_DIR, missing: [...GUARD_FILES] },
     });
 
     expect(missing.map((item) => item.item).sort()).toEqual(
@@ -186,7 +164,6 @@ describe("the preflight of the privileged Dynamic e2e lane", () => {
     expect(facts.nft.usable).toBe(true);
     expect(facts.engineUser).toEqual({ uid: 10101, gid: 10101 });
     expect(facts.engineUid).toBe(10101);
-    expect(facts.guard.missing).toEqual([...GUARD_FILES]);
     expect(asked).toContain(`${GIT_PATH} --version`);
     expect(asked).toContain("nft list ruleset");
     expect(asked).toContain("getent passwd 10101");
@@ -216,7 +193,6 @@ describe("the preflight of the privileged Dynamic e2e lane", () => {
       LANE_RIPGREP_PATH: "/nonexistent/rg",
       LANE_ENGINE_UID: "4242",
       LANE_GIT_PATH: "/nonexistent/git",
-      LANE_GUARD_DIR: "/nonexistent/guard",
     };
     const done = spawnSync(process.execPath, [PREFLIGHT], {
       encoding: "utf8",
@@ -232,7 +208,6 @@ describe("the preflight of the privileged Dynamic e2e lane", () => {
       "nft",
       "engine_user",
       "git",
-      "guard_files",
     ] as const)
       expect(done.stderr, item).toContain(item);
     expect(done.stderr).toContain("/nonexistent/opencode");

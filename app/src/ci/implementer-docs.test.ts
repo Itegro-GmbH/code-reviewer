@@ -7,6 +7,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { describeBranchReason } from "../runs/run-view.ts";
 import { listTrackedFiles } from "./tracked-files.ts";
 import { readText, repoRoot } from "./workflow-support.ts";
 
@@ -356,7 +357,7 @@ describe("the documents match the merged runner job and canary (#765)", () => {
     ] as const)
       expect(doc, file).not.toContain("State of the code");
     const open = flat(section(guide, "## Open points"));
-    for (const issue of ["#767", "#797", "#799", "#784"])
+    for (const issue of ["#745", "#768", "#784", "#797", "#799"])
       expect(open, issue).toContain(issue);
   });
 
@@ -396,8 +397,8 @@ describe("the documents match the merged runner job and canary (#765)", () => {
 
   // #768-T01
   it("states the stop, the lease and the free codes as the runner has them", () => {
-    expect(text).toContain("a grace of 60 seconds");
-    expect(text).toContain("stop timeout is 90 seconds");
+    expect(text).toContain("a grace of 120 seconds");
+    expect(text).toContain("stop timeout is 150 seconds");
     expect(text).toContain("`runner_shutdown`");
     expect(text).toContain("never run twice");
     expect(text).toContain("#799");
@@ -405,10 +406,10 @@ describe("the documents match the merged runner job and canary (#765)", () => {
       "IMPLEMENTER_MAX_ATTEMPTS = 1",
     );
     expect(readText("dispatcher/src/launchers/container-spec.ts")).toContain(
-      "stopTimeoutSeconds: 90",
+      "stopTimeoutSeconds: 150",
     );
     const readme = flat(readText("runner/README.md"));
-    expect(readme).toContain("grace of 60 s after SIGTERM");
+    expect(readme).toContain("grace of 120 s after SIGTERM");
     expect(readme).toContain("neither `maxCostUsd` nor `operatorMaxCostUsd`");
   });
 
@@ -467,9 +468,16 @@ describe("the operator guide states what the owner decided", () => {
       "the branch name of a turn that failed before it started",
       "keeps its branch name",
     ],
-    ["the identity check", "committer"],
+    ["the identity of the commits", "committer"],
+    [
+      "the plain statement of the risk",
+      "any** branch forward, including the default branch",
+    ],
+    [
+      "the lost work of a VM that dies",
+      "a VM that dies before the end of the turn loses the work",
+    ],
     ["no Go registry", "no Go module proxy"],
-    ["the egress rule", "allowlist of package registries"],
     ["the accepted exfiltration", "npm publish"],
     ["the issue that closes it", "#784"],
     ["the brake", "no step limit"],
@@ -529,52 +537,92 @@ describe("the operator guide states what the owner decided", () => {
     expect(flat(guide)).toContain("`app/src/billing/outcome.ts`");
   });
 
-  // #768-T01
-  it("says what the committer check is: an accident check that a hostile agent can satisfy", () => {
-    expect(text).not.toContain("Write a commit with a forged committer");
-    expect(text).not.toContain("whoever started it");
-    expect(text).toContain("it is not a proof of who made a commit");
-    expect(text).toContain("The committer check is an accident check");
-    // The code gives the agent the identity it is then checked against.
+  // The owner's git model (2026-11-02): git is free in the workspace, every local branch is pushed, nothing is forced.
+  it("states the git model: free git, no remote, all local branches pushed at the end, no force, and the one place for a later rule", () => {
+    const rules = flat(section(guide, "## The git rules"));
+    for (const phrase of [
+      "anything with git",
+      "no remote and no credential",
+      "pushes all local branches",
+      "no `+`, no force",
+      "`PUSH_EXCLUDED_BRANCHES`",
+      "`select_branches`",
+      "Nothing is pushed during the turn",
+      "`non_fast_forward`",
+      "`workflows_not_allowed`",
+      "Root never runs git with the agent's repository",
+      "`--upload-pack`",
+      "`branchesDropped`",
+      "capped at 4 MiB",
+      "`<the task's branch>-leftover-<id>`",
+    ])
+      expect(rules, phrase).toContain(phrase);
+    // What the guide says is what the code does.
+    const policy = readText(
+      "runner/src/code_reviewer_runner/implementer/push_policy.py",
+    );
+    expect(policy).toContain(
+      "PUSH_EXCLUDED_BRANCHES: frozenset[str] = frozenset()",
+    );
+    expect(policy).toContain("def select_branches(");
+    expect(policy).toContain("MAX_PUSHED_BRANCHES = 50");
     const workspace = readText(
       "runner/src/code_reviewer_runner/implementer/git_workspace.py",
     );
-    expect(workspace).toContain('"GIT_COMMITTER_NAME": self.identity.name');
     expect(workspace).toContain(
-      "system = (self.identity.name, self.identity.email)",
+      'f"--upload-pack={self._access.upload_pack()}"',
     );
+    expect(workspace).toContain(
+      '["push", "--porcelain", self.spec.clone_url, f"{scratch}:refs/heads/{name}"]',
+    );
+    expect(workspace).not.toContain("--force");
+    expect(workspace).not.toContain("safe.directory=");
+    expect(text).not.toContain("accident guard");
+    expect(text).not.toContain("The committer check");
+    for (const reason of [
+      "non_fast_forward",
+      "remote_rejected",
+      "workflows_not_allowed",
+      "provider_refused",
+      "provider_error",
+      "provider_unavailable",
+      "timed_out",
+      "unreadable",
+      "not_a_commit",
+      "out_of_time",
+      "out_of_space",
+      "excluded",
+    ])
+      expect(rules, reason).toContain(`\`${reason}\``);
+    // Every word the runner can give for a branch is in the guide and has a sentence of its own on the Runs page.
+    const words = [
+      ...(workspace + policy).matchAll(/^REASON_[A-Z_]+ = "([a-z_]+)"$/gm),
+    ]
+      .map((found) => found[1] ?? "")
+      .filter((word) => word !== "");
+    expect(words.length).toBeGreaterThanOrEqual(11);
+    for (const word of words) {
+      expect(rules, word).toContain(`\`${word}\``);
+      expect(describeBranchReason(word), word).not.toBe(
+        "The branch was not pushed.",
+      );
+    }
   });
 
-  // #768-T01
-  it("says when branch_exists arises, that the model was used and the run is not billed, and what a branch made meanwhile does", () => {
-    expect(text).toContain("Raised only at the first push");
-    expect(text).toContain(
-      "the model was used, and the run is still not billed",
-    );
-    expect(text).toContain("fast-forwards it");
-    expect(text).not.toContain("Nothing was changed");
-    expect(text).not.toContain("A branch name is used once per repository");
-    const workspace = readText(
-      "runner/src/code_reviewer_runner/implementer/git_workspace.py",
-    );
-    expect(workspace).toContain('"[rejected]" in line for line in refused');
-    expect(workspace).toContain("first = self._pushed is None");
+  // The guide says which branches the codes of the old model are gone for.
+  it("says that branch_exists and branch_violation are no longer produced and that a refused branch is a rejected entry", () => {
+    expect(text).toContain("| `branch_exists` | **No longer produced.**");
+    expect(text).toContain("| `branch_violation` | **No longer produced**");
+    expect(text).toContain("`non_fast_forward`");
     expect(readText("app/src/billing/outcome.ts")).toContain(
       'branch_exists: "free"',
     );
-  });
-
-  // #768-T01
-  it("lists the registries of the allowlist as the runner has them", () => {
-    const policy = readText(
-      "runner/src/code_reviewer_runner/implementer/egress_policy.py",
+    const workspace = readText(
+      "runner/src/code_reviewer_runner/implementer/git_workspace.py",
     );
-    const block = policy.slice(policy.indexOf("DEFAULT_ALLOWLIST"));
-    const hosts = [...block.matchAll(/"([a-z0-9.-]+\.[a-z]+)"/g)].map(
-      (match) => match[1] as string,
-    );
-    expect(hosts.length).toBeGreaterThan(0);
-    for (const host of hosts) expect(guide, host).toContain(`\`${host}\``);
+    expect(workspace).toContain("REASON_NOT_FAST_FORWARD");
+    expect(workspace).not.toContain("BRANCH_EXISTS");
+    expect(workspace).not.toContain("BRANCH_VIOLATION");
   });
 
   // #768-T01
@@ -586,8 +634,8 @@ describe("the operator guide states what the owner decided", () => {
     expect(text).toContain("20,000 characters");
     expect(
       readText("runner/src/code_reviewer_runner/implementer/session.py"),
-    ).toContain("GRACE_SECONDS = 180.0");
-    expect(text).toContain("180 seconds");
+    ).toContain("GRACE_SECONDS = 270.0");
+    expect(text).toContain("270 seconds");
   });
 });
 
@@ -666,16 +714,9 @@ describe("the live smoke test", () => {
       "Tunnel connection failed: 403 Forbidden",
       "CONNECT tunnel failed, response 403",
       "PONG",
-      "code-reviewer-guard:",
+      "does not appear to be a git repository",
     ])
       expect(text, error).toContain(error);
-    // The hook message and the proxy's refusal are the code's.
-    expect(readText("runner/guard/reference-transaction")).toContain(
-      "code-reviewer-guard:",
-    );
-    expect(
-      readText("runner/src/code_reviewer_runner/implementer/egress_proxy.py"),
-    ).toContain("403");
   });
 
   // #768-T03

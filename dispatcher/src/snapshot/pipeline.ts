@@ -18,20 +18,29 @@ import { GoldenRecordSchema } from "./record.ts";
 import type { GoldenRecord } from "./record.ts";
 import { BUILDER_PREFIX } from "./names.ts";
 import { planRetention } from "./retention.ts";
-import { PATHS, SCAN_DONE, STEPS, EXIT_VERSION_MISMATCH } from "./scripts.ts";
+import {
+  EXIT_VERSION_MISMATCH,
+  PATHS,
+  SCAN_DONE,
+  STEPS,
+  SYSBOX_PROBE_DONE,
+} from "./scripts.ts";
 import {
   buildImageScript,
   checkNoContainersScript,
   cleanBuilderScript,
   daemonConfigJson,
+  inspectAgentImageScript,
   inspectImageScript,
   installDockerScript,
   installHostScriptsScript,
+  installSysboxScript,
   probeScript,
   recordBaseManifestScript,
   scanScript,
   startDaemonScript,
   stopDaemonScript,
+  sysboxProbeScript,
   writeDaemonConfigScript,
 } from "./scripts.ts";
 import type { ExecResult, SandboxVm, SnapshotService } from "./service.ts";
@@ -42,6 +51,8 @@ export type PipelineInput = {
   context: Uint8Array;
   /** The text of docker/sandbox/vm-prepare.sh. */
   vmPrepareScript: string;
+  /** The text of docker/sandbox/sysbox-prepare.sh: installed beside it, run on the Implementer's VM only. */
+  sysboxPrepareScript: string;
   /** The commit the context was made from, for the record. */
   commit?: string;
 };
@@ -67,6 +78,7 @@ const IMAGE_ID = /^sha256:[0-9a-f]{64}$/;
 const SAFE_WORD = /^[a-z0-9_]{1,64}$/;
 const ENGINE_NAME = /^[a-z][a-z0-9_-]{0,31}$/;
 const SAFE_PATH = /^[\x21-\x7e]{1,300}$/;
+const SYSBOX_FAILURE = /^SYSBOX_PROBE fail ([a-z][a-z0-9_]{0,63})$/;
 const MAX_ERROR_LINES = 20;
 const MAX_ERROR_LINE = 200;
 
@@ -105,6 +117,9 @@ class Run {
   private builder: SandboxVm | undefined;
   private check: SandboxVm | undefined;
   private snapshotId: string | undefined;
+  /** Whether Sysbox was installed in the builder, and whether the check VM proved it. Neither ever fails the run. */
+  private sysboxInstalled = false;
+  private sysboxProven = false;
   private readonly warnings: string[] = [];
   private readonly deps: PipelineDeps;
   private readonly input: PipelineInput;
@@ -174,6 +189,19 @@ class Run {
         codes: { [EXIT_VERSION_MISMATCH]: "docker_version_mismatch" },
       },
     );
+    // Before the daemon configuration is written: the package edits daemon.json and the pipeline's file replaces that.
+    this.sysboxInstalled = await this.softStep(
+      STEPS.installSysbox,
+      "sysbox_install_failed",
+      () =>
+        this.exec(
+          builder,
+          STEPS.installSysbox,
+          installSysboxScript(config),
+          "sysbox_install_failed",
+          { sudo: true, timeoutMs: 5 * 60_000 },
+        ),
+    );
     await this.write(
       builder,
       PATHS.daemonJson,
@@ -192,6 +220,13 @@ class Run {
       builder,
       PATHS.vmPrepare,
       this.input.vmPrepareScript,
+      "host_prepare_failed",
+      STEPS.installHostScripts,
+    );
+    await this.write(
+      builder,
+      PATHS.sysboxPrepare,
+      this.input.sysboxPrepareScript,
       "host_prepare_failed",
       STEPS.installHostScripts,
     );
@@ -234,6 +269,12 @@ class Run {
       builder,
       STEPS.inspectImage,
       "image_build_failed",
+    );
+    const agentImageDigest = await this.imageId(
+      builder,
+      STEPS.inspectAgentImage,
+      "image_build_failed",
+      inspectAgentImageScript,
     );
     await this.exec(
       builder,
@@ -278,16 +319,24 @@ class Run {
     );
 
     const snapshotId = await this.takeSnapshot(builder);
-    await this.verifySnapshot(snapshotId, stamp, imageDigest, manifestSha256);
+    await this.verifySnapshot(
+      snapshotId,
+      stamp,
+      imageDigest,
+      agentImageDigest,
+      manifestSha256,
+    );
 
     const record = GoldenRecordSchema.safeParse({
       version: 1,
       snapshotId,
       imageDigest,
+      agentImageDigest,
       builtAt: builtAt.toISOString(),
       region: config.region,
       target: config.target,
       ...(this.input.commit ? { commit: this.input.commit } : {}),
+      sysbox: this.sysboxProven ? "proven" : "unproven",
     });
     if (!record.success)
       throw new SnapshotPipelineError("record_invalid", "record");
@@ -326,6 +375,7 @@ class Run {
     snapshotId: string,
     stamp: string,
     imageDigest: string,
+    agentImageDigest: string,
     manifestSha256: string,
   ): Promise<void> {
     const { config } = this;
@@ -372,6 +422,18 @@ class Run {
         "image_digest_mismatch",
         STEPS.inspectRestoredImage,
       );
+    // The Implementer's agent image travels in the snapshot too, and must be the one that was built.
+    const restoredAgent = await this.imageId(
+      check,
+      STEPS.inspectRestoredAgentImage,
+      "image_digest_invalid",
+      inspectAgentImageScript,
+    );
+    if (restoredAgent !== agentImageDigest)
+      throw new SnapshotPipelineError(
+        "image_digest_mismatch",
+        STEPS.inspectRestoredAgentImage,
+      );
 
     const probe = await this.exec(
       check,
@@ -384,6 +446,76 @@ class Run {
       },
     );
     this.checkVerdict(probe.stdout);
+    await this.proveSysbox(check);
+  }
+
+  /**
+   * The Sysbox proof (`sysboxProbeScript`) in the check VM. Soft: the snapshot is shared by every kind of job and reviews
+   * do not use Sysbox, so a Sysbox that is broken on the platform (a new kernel, a new base image) must not hold back
+   * a release of code-review.com (#797 is the same rule for the Implementer's proof of the Dispatcher). It becomes a warning
+   * with the reasons in the log and `sysbox: "unproven"` in the record; the Implementer's boot step names the problem.
+   */
+  private async proveSysbox(check: SandboxVm): Promise<void> {
+    if (!this.sysboxInstalled) return;
+    this.sysboxProven = await this.softStep(
+      STEPS.sysboxProbe,
+      "sysbox_probe_failed",
+      async () => {
+        const result = await this.exec(
+          check,
+          STEPS.sysboxProbe,
+          sysboxProbeScript(this.config),
+          "sysbox_probe_failed",
+          { sudo: true, timeoutMs: 5 * 60_000 },
+        );
+        const lines = result.stdout
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => line !== "");
+        const reasons = lines
+          .map((line) => SYSBOX_FAILURE.exec(line)?.[1])
+          .filter((reason): reason is string => reason !== undefined);
+        if (lines.at(-1) !== SYSBOX_PROBE_DONE)
+          throw new SnapshotPipelineError(
+            "sysbox_probe_failed",
+            STEPS.sysboxProbe,
+            ["unreadable"],
+          );
+        if (reasons.length > 0)
+          throw new SnapshotPipelineError(
+            "sysbox_probe_failed",
+            STEPS.sysboxProbe,
+            reasons.slice(0, 8),
+          );
+      },
+    );
+  }
+
+  /**
+   * A step that may fail without failing the run: a failure is logged with its detail and kept as the warning of its code.
+   * A cancelled run still ends the run.
+   */
+  private async softStep(
+    step: string,
+    code: SnapshotErrorCode,
+    action: () => Promise<unknown>,
+  ): Promise<boolean> {
+    try {
+      await action();
+      return true;
+    } catch (error) {
+      if (this.deps.signal?.aborted)
+        throw new SnapshotPipelineError("cancelled", step);
+      this.warnings.push(code);
+      this.deps.logger.warn(code, {
+        step,
+        detail:
+          error instanceof SnapshotPipelineError
+            ? error.detail
+            : ["unexpected_error"],
+      });
+      return false;
+    }
   }
 
   private checkScan(stdout: string): void {
@@ -561,14 +693,11 @@ class Run {
     vm: SandboxVm,
     label: string,
     code: SnapshotErrorCode,
+    script: (config: PipelineConfig) => string = inspectImageScript,
   ): Promise<string> {
-    const result = await this.exec(
-      vm,
-      label,
-      inspectImageScript(this.config),
-      code,
-      { sudo: true },
-    );
+    const result = await this.exec(vm, label, script(this.config), code, {
+      sudo: true,
+    });
     const id = result.stdout.trim();
     if (!IMAGE_ID.test(id))
       throw new SnapshotPipelineError("image_digest_invalid", label);

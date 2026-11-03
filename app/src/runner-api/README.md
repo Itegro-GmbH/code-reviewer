@@ -94,8 +94,8 @@ What happens to a block that is accepted:
   that succeeds with an unknown cost, or with no usage at all, is stored as `dynamic_accounting_failed` (`managed-cost-guard.ts`; a
   Dynamic result without usage keeps its old treatment). The members never read the
   cost of a run on the operator's key: the Runs views take it out (`run-view.ts`), the stored usage keeps it for the settlement.
-- Billing classes of the Implementer's codes are in `billing/outcome.ts`: `agent_gave_up`, `push_rejected`, `branch_violation` and
-  `time_limit_reached` are charged (the agent ran), the codes that end a turn before it are free.
+- Billing classes of the Implementer's codes are in `billing/outcome.ts`: `agent_gave_up`, `push_rejected`, `branch_violation` (no
+  longer produced) and `time_limit_reached` are charged (the agent ran), the codes that end a turn before it are free.
 
 ## Authentication
 
@@ -307,6 +307,14 @@ query or fragment); an address that does not ends the job `implementer_config_in
 A turn needs a runner that names `cost_limit` or `operator_cost_limit` (and `dynamic_cost_policy`): the cost limit is the brake of a turn and
 the runner has no limit of its own for this kind, so a caller that names neither ends the job `implementer_engine_unavailable`, as for an
 engine that cannot run the kind, before any credential exists.
+
+**The environment of a turn (#818).** The turn holds a copy of the environment the person chose (`implementer_turns.environment_*`). It leaves
+the App in two places, and in no other: the claim answer of the Dispatcher carries `job.vcpus` (the size, for the kind `implementer` and only
+when an environment was chosen; the Dispatcher launches the VM before any Worker exists), and the input of the Worker carries
+`implementer.environment {name, setupScript}` when the script is not empty. The script goes only to a caller that names the claim feature
+`implementer_environment`: for one that does not, the job ends `implementer_engine_unavailable` (free) before any credential exists, since a
+script that is silently skipped would run the task on a base the person did not choose. The Worker reports what the script did in
+`result.implementer.setup`; a script that fails ends the turn with `environment_setup_failed` (free, `billing/outcome.ts`).
 
 A failure that may pass (GitHub down while the installation is read or the token is made) gives the job back with `Retry-After`.
 A turn is never run twice (`maxAttempts` 1), so it is put back in the queue only while **no input was ever handed to a Worker**: the

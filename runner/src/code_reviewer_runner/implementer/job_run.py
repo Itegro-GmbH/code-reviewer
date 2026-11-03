@@ -7,51 +7,45 @@ This module joins the pieces that already exist and are tested apart:
 
 1. the engine is advertised (`implementer` in the engines the host handed over), or the job is
    refused with `implementer_engine_unavailable` before anything is touched;
-2. the setup (`production_setup`): the engine user, its home and temporary directory in the work
-   volume (the `chown` the container profile expects), the engine launch with its network proven,
-   the git workspace with the lease gate in front of every push;
-3. the turn (`ImplementerSession`, #764), in which a SIGTERM is a stop: the engine is ended at once,
-   what is committed is pushed (if the lease is still held) and the turn ends `runner_shutdown`;
-4. the result: the facts of the turn in a `JobResult`, the report held to the contract and to 4 MB
+2. the sandbox gate (`check_sandbox`, #745 step 4): the golden snapshot's Sysbox must be proven
+   and the VM big enough for the agent's container, or the turn ends `sandbox_unproven` or
+   `sandbox_size_unsupported`, free, before anything is touched;
+3. the setup (`production_setup`): the reader and the git workspace with the lease gate in front
+   of every push, and the agent's container as a thing the session makes when it needs it;
+3b. the environment's setup script (#818, `environment_setup.py`), when the task has one: in a
+   Setup container of its own, before the model door exists. A script that fails ends the turn
+   `environment_setup_failed`, free, with its output on the Runs page; one that succeeds leaves the
+   image the agent's container starts from;
+4. the turn (`ImplementerSession`, #764), in which a SIGTERM is a stop: the engine is ended at once,
+   what is committed on all local branches is pushed (if the lease is still held) and the turn ends
+   `runner_shutdown`;
+5. the result: the facts of the turn in a `JobResult`, the report held to the contract and to 4 MB
    (`report.py`), and no `implementer` key at all when no repository existed.
 
 **The lease.** The job host owns the lease token and beats the heart; this process asks it over the
-descriptor it was handed, before every push (`lease_gate`). Only `held` allows a push: a lost,
-superseded or unconfirmed lease ends the turn `lease_lost` and nothing is pushed after it. That is
-the `lease_check` rule of Dynamic, applied to the one write this kind makes.
+descriptor it was handed, before the final push lists anything and before every `git push`
+(`lease_gate`). Only `held` allows a push: a lost, superseded or unconfirmed lease ends the turn
+`lease_lost` and nothing is pushed after it. That is the `lease_check` rule of Dynamic, applied to
+the one write this kind makes.
 
 **A turn that cost money never ends free.** An unexpected error after the agent ran is
 `agent_gave_up`, not `runner_error`; the session classes `setup_failed` after the model was used as
-`branch_violation` (a repository that cannot be committed or verified is `RepositoryUnusable`, the
-same code).
+`agent_gave_up` too.
 """
 
 import logging
-import os
-import shlex
 import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Protocol
 
-from code_reviewer_runner.capabilities import (
-    ENGINE_IMPLEMENTER,
-    OPENCODE_COMMAND_VARIABLE,
-    RIPGREP_PATH_VARIABLE,
-    engines_from_environment,
-)
+from code_reviewer_runner.capabilities import ENGINE_IMPLEMENTER, engines_from_environment
 from code_reviewer_runner.dynamic_review.budget import BudgetLedger
-from code_reviewer_runner.dynamic_review.engine_user import EngineLaunch, sweep_user
-from code_reviewer_runner.dynamic_review.limits import CheckoutError
-from code_reviewer_runner.dynamic_review.netguard import (
-    IsolationError,
-    egress_mode_from_environment,
-)
-from code_reviewer_runner.dynamic_review.static_isolation import slot_ports
-from code_reviewer_runner.dynamic_review.supervisor import engine_identity
 from code_reviewer_runner.job import (
+    IMPLEMENTER_AGENT_MEMORY_VARIABLE,
+    IMPLEMENTER_SANDBOX_PROOF_VARIABLE,
     IMPLEMENTER_WORK_DIR,
     IMPLEMENTER_WORK_DIR_VARIABLE,
     ImplementerInput,
@@ -62,28 +56,37 @@ from code_reviewer_runner.redaction import Redactor
 from code_reviewer_runner.result import ErrorCode, JobResult, Usage
 from code_reviewer_runner.usage_probe import UsageProbe
 
-from .egress_config import EgressConfigError, EgressSettings, egress_settings_from_environment
+from .agent_container import OPENCODE, AgentContainer, AgentSeams
+from .environment_setup import EnvironmentSetup, log_output, run_environment_setup
 from .git_workspace import (
-    AgentUser,
     GitIdentity,
     GitWorkspace,
     LeaseNotConfirmed,
     WorkspaceLayout,
     WorkspaceSpec,
 )
+from .reader import ReaderAccess
 from .report import clip_texts, escaped_size, fit_block, valid_block
-from .session import ImplementerSession, SessionSeams
-from .startup import HOME_NAME, TMP_NAME, prepare_work_dir
+from .session import AgentPlace, ImplementerSession, SessionSeams
+from .setup_container import SetupSeams
 from .turn_result import TurnResult
 
 _log = logging.getLogger(__name__)
 
-# A SIGTERM gives the process `IMPLEMENTER_TERMINATE_GRACE_SECONDS` (60 s, `job_loop/host.py`)
+# A SIGTERM gives the process `IMPLEMENTER_TERMINATE_GRACE_SECONDS` (120 s, `job_loop/host.py`)
 # before the host kills the group; the process leaves itself five seconds less, so that its own
-# end comes first. The container's `stopTimeoutSeconds` (90) is above both.
-SIGTERM_BACKSTOP_SECONDS = 55.0
+# end comes first. The container's `stopTimeoutSeconds` (150) is above both. The engine comes out of
+# these 115 seconds, and so does the one final push (`session.STOP_PUSH_SECONDS`).
+SIGTERM_BACKSTOP_SECONDS = 115.0
 MAX_LOG_TAIL_CHARS = 4096
-_ENGINE_DIRECTORY = "engine"
+# The names the Dispatcher gives the container (`ImplementerEnvironmentName` of runner-api.v1.json).
+SANDBOX_PROOF_VARIABLE = IMPLEMENTER_SANDBOX_PROOF_VARIABLE
+SANDBOX_PROVEN = "proven"
+AGENT_MEMORY_VARIABLE = IMPLEMENTER_AGENT_MEMORY_VARIABLE
+# The least memory the agent's container is worth starting with: OpenCode, its own Docker daemon and
+# the tools of a repository's tests do not fit in less (measured, `docs/implementer.md`). The
+# Dispatcher computes the limit from the size of the VM and says 0 when it is below this.
+MIN_AGENT_MEMORY_MB = 1024
 
 
 class TurnLike(Protocol):
@@ -100,15 +103,28 @@ class TurnLike(Protocol):
 
 
 @dataclass(frozen=True)
+class EnvironmentHost:
+    """How a turn runs the environment's setup script and starts the agent from its result (#818):
+    `run` makes the agent's image of what the script left (or the reason it did not), `place` makes
+    the agent's container from that image. A `TurnSetup` without one cannot run a task that names a
+    script."""
+
+    run: Callable[
+        [ImplementerInput, Callable[[], float], Callable[[], bool], float], EnvironmentSetup
+    ]
+    place: Callable[[str], Callable[[], AgentPlace]]
+
+
+@dataclass(frozen=True)
 class TurnSetup:
-    """What a turn needs, made from trusted configuration only. `launch` is None where there is no
-    dedicated engine user (the tests of the glue)."""
+    """What a turn needs, made from trusted configuration only: the git workspace (whose reader is
+    closed with `close`), what makes the agent's container, and the engine's command in it."""
 
     workspace: GitWorkspace
-    launch: EngineLaunch | None
+    place: Callable[[], AgentPlace]
     command: tuple[str, ...]
-    ripgrep: Path | None
-    egress: EgressSettings
+    close: Callable[[], None] = lambda: None
+    environment: EnvironmentHost | None = None
 
 
 SetupFactory = Callable[[ImplementerInput, Mapping[str, str], Callable[[], None]], TurnSetup]
@@ -151,55 +167,45 @@ def identity_for(job: ImplementerInput) -> GitIdentity:
     return GitIdentity(name=f"{bot} Implementer", email="implementer@users.noreply.invalid")
 
 
-def _setup_failed(detail: str) -> JobError:
-    return JobError(ErrorCode.SETUP_FAILED, detail)
+def check_sandbox(environment: Mapping[str, str]) -> JobError | None:
+    """The gate of #745, step 4, from what the Dispatcher says about this VM: the golden snapshot's
+    Sysbox verdict must be `proven` and the VM must leave the agent's container enough memory.
+    Anything else, an `unproven` verdict or a missing or unreadable value, is a free end, named,
+    before any clone or container: the model was never used. The verdict is the fourth member of
+    the snapshot pair (`SANDBOX_SYSBOX_PROOF`), so a Dispatcher that was never told one has said
+    `unproven`."""
+    if environment.get(SANDBOX_PROOF_VARIABLE, "").strip() != SANDBOX_PROVEN:
+        return JobError(
+            ErrorCode.SANDBOX_UNPROVEN,
+            "the golden snapshot's Sysbox is not proven, so the agent's container does not start",
+        )
+    raw = environment.get(AGENT_MEMORY_VARIABLE, "").strip()
+    memory = int(raw) if raw.isascii() and raw.isdigit() else 0
+    if memory < MIN_AGENT_MEMORY_MB:
+        return JobError(
+            ErrorCode.SANDBOX_SIZE_UNSUPPORTED,
+            f"this VM leaves the agent's container less than {MIN_AGENT_MEMORY_MB} MB",
+        )
+    return None
 
 
 def production_setup(
     job: ImplementerInput, environment: Mapping[str, str], gate: Callable[[], None]
 ) -> TurnSetup:
-    """The setup of a real container: the engine user, the work volume, the network. Raises
+    """The setup of a real container: the reader, the work volume, the git workspace. Raises
     `JobError` with a stable code; nothing of the job's credentials is read from the environment."""
-    try:
-        identity = engine_identity(environment)
-        ports = slot_ports(environment)
-        mode = egress_mode_from_environment(environment)
-        egress = egress_settings_from_environment(environment)
-    except CheckoutError:
-        raise _setup_failed("the engine user is not usable") from None
-    except IsolationError:
-        raise _setup_failed("the slot of the engine is not usable") from None
-    except EgressConfigError:
-        raise JobError(
-            ErrorCode.IMPLEMENTER_CONFIG_INVALID, "the network setting of the container is unusable"
-        ) from None
-    command = shlex.split(environment.get(OPENCODE_COMMAND_VARIABLE, ""))
-    ripgrep = environment.get(RIPGREP_PATH_VARIABLE, "")
-    if not command or not ripgrep:
-        raise JobError(
-            ErrorCode.IMPLEMENTER_ENGINE_UNAVAILABLE, "no verified engine command was handed over"
-        )
-    if not sweep_user(identity.uid, identity.gid):
-        # A survivor of an earlier job could read what this one makes: it does not start.
-        raise _setup_failed("a process of the engine user from an earlier job cannot be ended")
     work_dir = Path(environment.get(IMPLEMENTER_WORK_DIR_VARIABLE) or IMPLEMENTER_WORK_DIR)
-    try:
-        # The `chown` the container profile expects of the Worker: the engine user's home and
-        # temporary directory in the volume (the volume itself is root's).
-        prepare_work_dir(work_dir, identity.uid, identity.gid)
-    except OSError:
-        raise _setup_failed(
-            "the engine user's directories in the work volume cannot be made"
-        ) from None
-    layout = WorkspaceLayout(agent_home=work_dir / HOME_NAME, work_dir=work_dir)
-    config_dir = layout.run_dir / _ENGINE_DIRECTORY
-    try:
-        # Root's, enterable but not listable by the engine user: the engine's config goes in.
-        config_dir.mkdir(mode=0o711, parents=True, exist_ok=True)
-        os.chmod(config_dir, 0o711)
-    except OSError:
-        raise _setup_failed("the directory of the engine's configuration cannot be made") from None
+    memory = int(environment.get(AGENT_MEMORY_VARIABLE, "0").strip())
     spec = job.implementer
+    identity = identity_for(job)
+    reader = ReaderAccess(
+        {
+            "GIT_AUTHOR_NAME": identity.name,
+            "GIT_AUTHOR_EMAIL": identity.email,
+            "GIT_COMMITTER_NAME": identity.name,
+            "GIT_COMMITTER_EMAIL": identity.email,
+        }
+    )
     workspace = GitWorkspace(
         WorkspaceSpec(
             clone_url=spec.repo.clone_url,
@@ -207,23 +213,40 @@ def production_setup(
             base_branch=spec.base_branch,
             branch=spec.branch,
         ),
-        layout,
-        AgentUser(identity.uid, identity.gid),
-        identity_for(job),
+        WorkspaceLayout(work_dir=work_dir),
+        identity,
+        reader,
         before_push=gate,
     )
-    launch = EngineLaunch(
-        uid=identity.uid,
-        gid=identity.gid,
-        home=str(work_dir / HOME_NAME),
-        tmpdir=str(work_dir / TMP_NAME),
-        config_dir=config_dir,
-        proxy_port=ports.proxy,
-        engine_port=ports.engine,
-        egress_port=ports.egress,
-        egress_mode=mode,
+
+    def run_environment(
+        turn: ImplementerInput,
+        elapsed: Callable[[], float],
+        should_stop: Callable[[], bool],
+        time_limit: float,
+    ) -> EnvironmentSetup:
+        assert spec.environment is not None
+        return run_environment_setup(
+            spec.environment,
+            workspace=workspace,
+            memory_mb=memory,
+            time_limit=time_limit,
+            elapsed=elapsed,
+            should_stop=should_stop,
+            secrets=turn.secrets,
+            seams=SetupSeams(),
+        )
+
+    def place_from(image: str) -> Callable[[], AgentPlace]:
+        return lambda: AgentContainer(memory, AgentSeams(image=image))
+
+    return TurnSetup(
+        workspace,
+        lambda: AgentContainer(memory),
+        (OPENCODE,),
+        close=reader.close,
+        environment=EnvironmentHost(run_environment, place_from),
     )
-    return TurnSetup(workspace, launch, tuple(command), Path(ripgrep), egress)
 
 
 # -- the result -----------------------------------------------------------------------------------
@@ -240,15 +263,18 @@ def failure(
     duration_ms: int,
     usage: Usage | None = None,
     block: dict[str, object] | None = None,
+    log_extra: str = "",
 ) -> JobResult:
     """A failed turn. The usage is reported only when the model was used; the code is never a free
-    one for a turn that used it (`charged`)."""
+    one for a turn that used it (`charged`). `log_extra` goes in front of the code line (the notes
+    of the environment's setup)."""
+    line = f"{code.value}: {detail}"
     return JobResult(
         ok=False,
         duration_ms=duration_ms,
         comment_url=None,
         error_code=code,
-        log_tail=f"{code.value}: {detail}",
+        log_tail=(f"{log_extra}\n{line}" if log_extra else line)[-MAX_LOG_TAIL_CHARS:],
         usage=usage if usage is not None and usage.used_the_model else None,
         implementer=_fitted(block, None),
     )
@@ -302,9 +328,12 @@ def result_of(turn: TurnResult, *, duration_ms: int, secrets: tuple[str, ...]) -
     )
 
 
-def _early_block(workspace: GitWorkspace | None) -> dict[str, object] | None:
+def _early_block(
+    workspace: GitWorkspace | None, setup: Mapping[str, object] | None = None
+) -> dict[str, object] | None:
     """The report of a turn that failed after the repository was cloned but before the agent ran:
-    where it started and nothing else. None when there is no repository to speak of."""
+    where it started and nothing else (and what the environment's script did, when it ran). None
+    when there is no repository to speak of."""
     if workspace is None:
         return None
     try:
@@ -312,9 +341,12 @@ def _early_block(workspace: GitWorkspace | None) -> dict[str, object] | None:
     except JobError:
         return None
     return {
+        **({} if setup is None else {"setup": dict(setup)}),
         "baseCommit": start,
         "headCommit": None,
         "pushed": False,
+        "branches": [],
+        "branchesDropped": {"invalid": 0, "overflow": 0},
         "commits": [],
         "filesChanged": [],
         "summary": "",
@@ -361,14 +393,24 @@ def run_implementer_job(
             "the job carries no cost limit, so the turn does not start",
             duration_ms=_elapsed_ms(clock, started),
         )
+    refused = check_sandbox(environment)
+    if refused is not None:
+        return failure(refused.code, refused.detail, duration_ms=_elapsed_ms(clock, started))
     # No answer is no lease: a process started without the channel never pushes.
     gate = lease_gate(lease_check or (lambda: LeaseState.UNCONFIRMED))
     setup: TurnSetup | None = None
     session: TurnLike | None = None
+    prepared: EnvironmentSetup | None = None
     try:
         factory = seams.setup or production_setup
         setup = factory(job, environment, gate)
         setup.workspace.prepare()
+        if job.implementer.environment is not None:
+            prepared = _environment(job, setup, started, shutdown, seams, process_timeout)
+            if prepared.error is not None:
+                raise prepared.error
+            assert prepared.image is not None and setup.environment is not None
+            setup = replace(setup, place=setup.environment.place(prepared.image))
         session = _session(job, setup, started, environment, shutdown, seams, process_timeout)
         if usage_probe is not None:
             usage_probe.watch(lambda: _usage_of(session, job))
@@ -379,7 +421,11 @@ def run_implementer_job(
             error.code,
             error.detail,
             duration_ms=_elapsed_ms(clock, started),
-            block=_early_block(setup.workspace if setup is not None else None),
+            block=_early_block(
+                setup.workspace if setup is not None else None,
+                None if prepared is None else prepared.block,
+            ),
+            log_extra=_environment_log(prepared),
         )
     except Exception:
         _remember_secrets(session, secrets_sink)
@@ -394,9 +440,50 @@ def run_implementer_job(
             usage=usage,
             block=_early_block(setup.workspace if setup is not None else None),
         )
+    finally:
+        if setup is not None:
+            setup.close()
     # The capability of the turn's model proxy is a secret of this turn too.
     _remember_secrets(session, secrets_sink)
+    if prepared is not None:
+        turn = replace(turn, setup=prepared.block, notes=(*prepared.notes, *turn.notes))
     return result_of(turn, duration_ms=_elapsed_ms(clock, started), secrets=session.secrets())
+
+
+def _environment(
+    job: ImplementerInput,
+    setup: TurnSetup,
+    started: float,
+    shutdown: threading.Event,
+    seams: JobSeams,
+    process_timeout: float | None,
+) -> EnvironmentSetup:
+    """The environment's script, run in its Setup container (#818). The time it takes is part of
+    the turn's: the limit it is held to is the smaller of the job's and the process's, as the
+    session's own deadline is."""
+    if setup.environment is None:
+        raise JobError(
+            ErrorCode.IMPLEMENTER_CONFIG_INVALID,
+            "this runner cannot run the setup script of an environment",
+        )
+    limit = float(job.implementer.limits.time_limit_seconds)
+    if process_timeout is not None:
+        limit = min(limit, process_timeout)
+    clock = seams.clock
+    return setup.environment.run(job, lambda: clock() - started, shutdown.is_set, limit)
+
+
+def _environment_log(prepared: EnvironmentSetup | None) -> str:
+    """The notes of the setup step and the end of the script's output, for the log line of a turn
+    that ended there."""
+    if prepared is None:
+        return ""
+    lines = list(prepared.notes)
+    output = log_output(prepared)
+    if output:
+        lines.append("--- the end of the script's output ---")
+        lines.append(output)
+    return "\n".join(lines)
 
 
 def _session(
@@ -411,11 +498,9 @@ def _session(
     options: dict[str, object] = {
         "workspace": setup.workspace,
         "command": setup.command,
-        "egress": setup.egress,
+        "place": setup.place,
         "environment": environment,
         "started": started,
-        "launch": setup.launch,
-        "ripgrep": setup.ripgrep,
         "seams": seams.session_seams,
         "should_stop": shutdown.is_set,
         "max_seconds": process_timeout,

@@ -371,7 +371,7 @@ describe("the hardened container spec", () => {
   );
 
   // #760-T01
-  it("accepts the implementer profile, which differs from the default spec in the work volume, the memory, the pids limit and the environment names only", () => {
+  it("accepts the implementer profile, which differs from the default spec in the work volume, the Docker socket, the memory, the pids limit, the environment names and the forbidden keys only", () => {
     const base = spec();
     const profile = spec("ImplementerContainerSpec");
 
@@ -384,10 +384,28 @@ describe("the hardened container spec", () => {
     );
     expect(differing.sort()).toStrictEqual([
       "allowedEnvironment",
+      "dockerSocket",
+      "forbiddenKeys",
       "memory",
       "pids",
       "workVolume",
     ]);
+    // #745: the forbidden keys differ by `dockerSocket` alone, and the default spec keeps it forbidden.
+    const forbidden = base.forbiddenKeys as string[];
+    const profileForbidden = profile.forbiddenKeys as string[];
+    expect(forbidden).toContain("dockerSocket");
+    expect(profileForbidden).not.toContain("dockerSocket");
+    expect(
+      forbidden.filter((key) => !profileForbidden.includes(key)),
+    ).toStrictEqual(["dockerSocket"]);
+    expect(
+      profileForbidden.filter((key) => !forbidden.includes(key)),
+    ).toStrictEqual([]);
+    expect("dockerSocket" in base).toBe(false);
+    expectInvalid(container, "WorkerContainerSpec", {
+      ...base,
+      dockerSocket: profile.dockerSocket,
+    });
   });
 
   // #760-T01
@@ -434,8 +452,9 @@ describe("the hardened container spec", () => {
       });
     for (const missing of [
       "RUNNER_IMPLEMENTER_WORK_DIR",
-      "RUNNER_IMPLEMENTER_EGRESS_PORT",
-      "RUNNER_IMPLEMENTER_NETWORK",
+      "RUNNER_IMPLEMENTER_MODEL_DOOR",
+      "RUNNER_IMPLEMENTER_SANDBOX_PROOF",
+      "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB",
     ])
       expectInvalid(container, "ImplementerContainerSpec", {
         ...profile,

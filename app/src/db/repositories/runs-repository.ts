@@ -210,6 +210,8 @@ export function createRunsRepository(
           "implementer_sessions.branch as session_branch",
           "implementer_sessions.base_branch as session_base_branch",
           "implementer_turns.instruction as turn_instruction",
+          "implementer_turns.environment_name as turn_environment_name",
+          "implementer_turns.environment_vcpus as turn_environment_vcpus",
           "usage_records.key_mode as key_mode",
           "usage_records.catalog_entry_id as catalog_entry_id",
           "usage_records.model_tier as model_tier",
@@ -229,6 +231,8 @@ export function createRunsRepository(
         session_branch: branch,
         session_base_branch: baseBranch,
         turn_instruction: instruction,
+        turn_environment_name: environmentName,
+        turn_environment_vcpus: environmentVcpus,
         ...job
       } = row;
       return {
@@ -240,7 +244,17 @@ export function createRunsRepository(
         ...(branch === null || baseBranch === null || instruction === null
           ? {}
           : {
-              implementer: { branch, baseBranch, instruction, repositoryUrl },
+              implementer: {
+                branch,
+                baseBranch,
+                instruction,
+                repositoryUrl,
+                // #818: the environment the turn copied; none for a task without one.
+                environment:
+                  environmentName === null || environmentVcpus === null
+                    ? null
+                    : { name: environmentName, vcpus: environmentVcpus },
+              },
             }),
       };
     },

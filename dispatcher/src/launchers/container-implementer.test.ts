@@ -8,6 +8,7 @@ import {
   WORK_VOLUME_PATH,
   applyOverrides,
   renderDockerRunArguments,
+  RESERVE_DISK_GIB,
   workVolumeCommands,
   workVolumeName,
   type ContainerErrorCode,
@@ -26,9 +27,12 @@ const VOLUME = "code-reviewer-work-job-1";
 const ROOT = "/var/lib/code-reviewer-work";
 const IMPLEMENTER_ENVIRONMENT = {
   RUNNER_IMPLEMENTER_WORK_DIR: "/work",
-  RUNNER_IMPLEMENTER_EGRESS_PORT: "10182",
-  RUNNER_IMPLEMENTER_NETWORK: "registries",
+  RUNNER_IMPLEMENTER_MODEL_DOOR: "docker",
+  RUNNER_IMPLEMENTER_SANDBOX_PROOF: "proven",
+  RUNNER_IMPLEMENTER_AGENT_MEMORY_MB: "2560",
 };
+const DOCKER_SOCKET_MOUNT =
+  "type=bind,source=/var/run/docker.sock,target=/run/docker.sock,readonly";
 
 function codeOf(run: () => unknown): ContainerErrorCode | undefined {
   try {
@@ -76,20 +80,22 @@ function clone(): Record<string, unknown> {
 
 describe("rendering the implementer profile", () => {
   // #760-T02
-  it("mounts the work volume at /work with the volume's options and gives memory, pids and the three names", () => {
+  it("mounts the work volume at /work with the volume's options and the VM's Docker socket, and gives memory, pids and the four names", () => {
     const args = render({ environment: IMPLEMENTER_ENVIRONMENT });
 
     expect(valuesOf(args, "--mount")).toStrictEqual([
       `type=volume,source=${VOLUME},target=${WORK_VOLUME_PATH}`,
+      DOCKER_SOCKET_MOUNT,
     ]);
     expect(WORK_VOLUME_PATH).toBe("/work");
-    expect(valuesOf(args, "--memory")).toStrictEqual(["3g"]);
-    expect(valuesOf(args, "--memory-reservation")).toStrictEqual(["2560m"]);
-    expect(valuesOf(args, "--memory-swap")).toStrictEqual(["3g"]);
+    expect(valuesOf(args, "--memory")).toStrictEqual(["768m"]);
+    expect(valuesOf(args, "--memory-reservation")).toStrictEqual(["512m"]);
+    expect(valuesOf(args, "--memory-swap")).toStrictEqual(["768m"]);
     expect(valuesOf(args, "--pids-limit")).toStrictEqual(["2048"]);
     expect(valuesOf(args, "--env")).toStrictEqual([
-      "RUNNER_IMPLEMENTER_EGRESS_PORT=10182",
-      "RUNNER_IMPLEMENTER_NETWORK=registries",
+      "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB=2560",
+      "RUNNER_IMPLEMENTER_MODEL_DOOR=docker",
+      "RUNNER_IMPLEMENTER_SANDBOX_PROOF=proven",
       "RUNNER_IMPLEMENTER_WORK_DIR=/work",
     ]);
   });
@@ -122,7 +128,7 @@ describe("rendering the implementer profile", () => {
   });
 
   // #760-T02
-  it("accepts the three names of the Implementer only in its own profile", () => {
+  it("accepts the four names of the Implementer only in its own profile", () => {
     expect(
       codeOf(() => render({ environment: IMPLEMENTER_ENVIRONMENT })),
     ).toBeUndefined();
@@ -144,13 +150,15 @@ describe("rendering the implementer profile", () => {
     const tmpfs = valuesOf(args, "--tmpfs");
     expect(tmpfs).toHaveLength(3);
     for (const mount of tmpfs) expect(mount).toContain("noexec");
-    // One mount, the work volume; nothing from the host and no second volume.
+    // Two mounts: the work volume, and the VM's Docker socket for the model door (#745), the only thing of the host that
+    // is in the container, read-only. No second volume, no other bind.
     const mounts = valuesOf(args, "--mount");
-    expect(mounts).toHaveLength(1);
+    expect(mounts).toHaveLength(2);
     expect(mounts[0]).toMatch(
       /^type=volume,source=[A-Za-z0-9_.-]+,target=\/work$/,
     );
     expect(mounts[0]).not.toMatch(/bind|readonly|ro\b/);
+    expect(mounts[1]).toBe(DOCKER_SOCKET_MOUNT);
     for (const flag of [
       "--volume",
       "-v",
@@ -272,6 +280,75 @@ describe("rendering the implementer profile", () => {
     expect(codeOf(() => render({}, changed))).toBeDefined();
   });
 
+  // #745-T14
+  it.each<[string, Record<string, unknown>]>([
+    [
+      "another source",
+      { dockerSocket: { source: "/", target: "/run/docker.sock" } },
+    ],
+    [
+      "another target",
+      {
+        dockerSocket: {
+          source: "/var/run/docker.sock",
+          target: "/work/docker.sock",
+        },
+      },
+    ],
+    [
+      "a second key in the socket",
+      {
+        dockerSocket: {
+          source: "/var/run/docker.sock",
+          target: "/run/docker.sock",
+          readonly: false,
+        },
+      },
+    ],
+    [
+      "a socket that is not an object",
+      { dockerSocket: "/var/run/docker.sock" },
+    ],
+    [
+      "a forbidden-keys list that says no spec has the socket",
+      { forbiddenKeys: WORKER_CONTAINER_SPEC.forbiddenKeys },
+    ],
+  ])("refuses the profile with %s", (_name, change) => {
+    expect(codeOf(() => render({}, { ...clone(), ...change }))).toBe(
+      "spec_not_hardened",
+    );
+  });
+
+  // #745-T14
+  it("refuses the profile without the VM's Docker socket", () => {
+    const changed = clone();
+    delete changed.dockerSocket;
+
+    expect(codeOf(() => render({}, changed))).toBe("spec_not_hardened");
+  });
+
+  // #745-T14
+  it("gives the VM's Docker socket to the Implementer's profile and to no other", () => {
+    expect(valuesOf(render(), "--mount")).toContain(DOCKER_SOCKET_MOUNT);
+    const standard = renderDockerRunArguments(WORKER_CONTAINER_SPEC, {
+      image: IMAGE,
+      command: [ENTRY_MODE_WORKER_ONCE],
+    });
+
+    expect(standard.join(" ")).not.toContain("docker.sock");
+    expect(
+      codeOf(() =>
+        renderDockerRunArguments(
+          {
+            ...structuredClone(WORKER_CONTAINER_SPEC),
+            dockerSocket: IMPLEMENTER_CONTAINER_SPEC.dockerSocket,
+          },
+          { image: IMAGE },
+        ),
+      ),
+    ).toBe("spec_forbidden_key");
+  });
+
   // #760-T01
   it("refuses a default spec that carries a work volume without the rest of the profile", () => {
     const hybrid = {
@@ -323,16 +400,34 @@ describe("the commands that make the work volume", () => {
 
     expect(commands.map((command) => command.label)).toStrictEqual([
       "work-volume-dir",
+      "work-volume-reserve-image",
+      "work-volume-reserve-fs",
+      "work-volume-reserve-mount",
       "work-volume-mount",
       "work-volume-options",
       "work-volume-check",
       "work-volume-create",
     ]);
+    const image = `${ROOT}/${VOLUME}.reserve.img`;
     expect(
       commands.map((command) => [command.cmd, ...command.args]),
     ).toStrictEqual([
-      ["mkdir", "-p", "--", directory],
-      ["mount", "--bind", directory, directory],
+      ["mkdir", "-p", "--", `${directory}/reserve`],
+      ["fallocate", "-l", "8G", image],
+      [
+        "mkfs.ext4",
+        "-q",
+        "-F",
+        "-m",
+        "0",
+        "-O",
+        "^has_journal",
+        "-E",
+        "lazy_itable_init=1,nodiscard",
+        image,
+      ],
+      ["mount", "-o", "loop,nosuid,nodev", image, `${directory}/reserve`],
+      ["mount", "--rbind", directory, directory],
       ["mount", "-o", "remount,bind,rw,nosuid,nodev", directory],
       ["cat", "/proc/self/mountinfo"],
       [
@@ -346,11 +441,13 @@ describe("the commands that make the work volume", () => {
         "--opt",
         `device=${directory}`,
         "--opt",
-        "o=bind",
+        "o=rbind",
         VOLUME,
       ],
     ]);
     for (const command of commands) expect(command.sudo).toBe(true);
+    // #745: the reserve disk is allocated (fallocate, not a sparse file) and is no sixteenth of the VM's disk or less
+    expect(RESERVE_DISK_GIB).toBe(8);
     // Programs may run on the volume: no noexec anywhere, and no shell.
     expect(JSON.stringify(commands)).not.toContain("noexec");
     expect(commands.map((command) => command.cmd)).not.toContain("sh");
@@ -370,11 +467,29 @@ describe("the commands that make the work volume", () => {
     const line = (options: string, mountPoint = directory) =>
       `101 22 8:1 ${directory} ${mountPoint} ${options} shared:1 - ext4 /dev/sda1 rw,nosuid,nodev`;
     const root = "22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw";
+    // The reserve disk below the volume: a mount of its own, as `rbind` shows it.
+    const reserve = (options = "rw,nosuid,nodev,relatime") =>
+      line(options, `${directory}/reserve`);
 
-    it("accepts the mount the remount made: read-write, nosuid, nodev", () => {
-      expect(check()(`${root}\n${line("rw,nosuid,nodev,relatime")}\n`)).toBe(
-        true,
-      );
+    it("accepts the mount the remount made: read-write, nosuid, nodev, with the reserve disk below it", () => {
+      expect(
+        check()(`${root}\n${line("rw,nosuid,nodev,relatime")}\n${reserve()}\n`),
+      ).toBe(true);
+    });
+
+    // #745: the reserve disk is what keeps Control's mirror safe from a full disk, so it has to be there and be plain
+    it.each([
+      ["missing", ""],
+      ["without nosuid", `${reserve("rw,nodev,relatime")}\n`],
+      ["without nodev", `${reserve("rw,nosuid,relatime")}\n`],
+      ["read-only", `${reserve("ro,nosuid,nodev,relatime")}\n`],
+      ["noexec", `${reserve("rw,nosuid,nodev,noexec,relatime")}\n`],
+    ])("refuses a volume whose reserve disk is %s", (_what, reserveLines) => {
+      expect(
+        check()(
+          `${root}\n${line("rw,nosuid,nodev,relatime")}\n${reserveLines}`,
+        ),
+      ).toBe(false);
     });
 
     it.each([
@@ -408,7 +523,7 @@ describe("the commands that make the work volume", () => {
       ).toBe(false);
       expect(
         check()(
-          `${line("rw,relatime")}\n${line("rw,nosuid,nodev,relatime")}\n`,
+          `${line("rw,relatime")}\n${line("rw,nosuid,nodev,relatime")}\n${reserve()}\n`,
         ),
       ).toBe(true);
     });
@@ -471,6 +586,7 @@ describe("the container launcher with the implementer profile", () => {
     const args = launches[0]?.args ?? [];
     expect(valuesOf(args, "--mount")).toStrictEqual([
       "type=volume,source=code-reviewer-work-job-7,target=/work",
+      DOCKER_SOCKET_MOUNT,
     ]);
     expect(args.join("\n")).not.toContain("crj_");
   });

@@ -5,6 +5,7 @@
 // contents write and that has accepted it, a user, the real job queue and the service wired to all of them. The model check is
 // a stand-in that allows everything unless a test says otherwise; the rule itself is proven in src/implementer/models.test.ts.
 import type { FakePermissions } from "../../../fakes/github/server.ts";
+import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import { createImplementerService } from "../implementer/service.ts";
 import type { ImplementerModels } from "../implementer/models.ts";
 import { createTestQueue } from "./jobs.ts";
@@ -66,6 +67,7 @@ export async function startImplementerHarness(
     repositories: h.repositories,
     integrations: h.integrations,
     registry: h.registry,
+    environments: createImplementerEnvironmentsRepository(h.db, h.workspaceId),
     models: options.models ?? ALLOW_ALL,
     queue,
     operatorCostLimitCents: async () => options.operatorCostLimitCents ?? 500,

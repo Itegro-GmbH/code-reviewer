@@ -91,6 +91,10 @@ test.describe("a deployment with the capabilities review and dynamic-review", ()
       `/api/w/${slug}/implementer/tasks`,
       // The page of the form (#756-T09).
       `/w/${slug}/implementer`,
+      // The environments of the Implementer (#818): the routes and the page.
+      `/api/w/${slug}/environments`,
+      `/api/w/${slug}/environments/x`,
+      `/w/${slug}/environments`,
     ];
     for (const [label, method, headers] of READS) {
       const expected = await observe(page, MISSING, { method, headers });

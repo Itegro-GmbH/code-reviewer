@@ -2,7 +2,7 @@
 
 // Writes the golden snapshot pair to Infisical, `prod` `/dispatcher` (#403), after a deployment is live, so that the
 // next deployment and Secret Sync know which snapshot production runs. It signs in with the machine identity of the
-// workflows (Universal Auth) and touches exactly three secrets: the names are fixed here, the identity's role should
+// workflows (Universal Auth) and touches exactly four secrets: the names are fixed here, the identity's role should
 // say the same (docs/deployment-vercel.md, section 2.1). The client secret goes to the one https address it is
 // given, nothing is read back, no error text is ever repeated and no value is logged. A secret that does not exist
 // yet is created (the first deployment).
@@ -30,12 +30,24 @@ export type PersistResult =
 
 const ENVIRONMENT = "prod";
 const SECRET_PATH = "/dispatcher";
-/** The only names this module ever writes, in the order it writes them. */
-const NAMES = [
-  PAIR_VARIABLES.snapshotId,
-  PAIR_VARIABLES.imageDigest,
-  PAIR_VARIABLES.commit,
-] as const;
+/**
+ * The only names this module ever writes, in the order it writes them. The verdict is written twice around the rest: cleared
+ * to `unproven` first and set to the pair's own last, so that a write that fails in between leaves a pair that is not
+ * proven (never the `proven` of an older snapshot next to a newer snapshot id), and the Implementer refuses it.
+ */
+function writes(pair: SnapshotPair): Array<[string, string]> {
+  const values = pairToEnv(pair);
+  const verdict = PAIR_VARIABLES.sysbox;
+  return [
+    [verdict, "unproven"],
+    [PAIR_VARIABLES.snapshotId, values[PAIR_VARIABLES.snapshotId] ?? ""],
+    [PAIR_VARIABLES.imageDigest, values[PAIR_VARIABLES.imageDigest] ?? ""],
+    [PAIR_VARIABLES.commit, values[PAIR_VARIABLES.commit] ?? ""],
+    ...(pair.sysbox === "proven"
+      ? ([[verdict, pair.sysbox]] as Array<[string, string]>)
+      : []),
+  ];
+}
 
 class Unreachable extends Error {}
 
@@ -131,14 +143,13 @@ export async function persistPair(
     )
       return { ok: false, code: "infisical_project_unavailable" };
 
-    const values = pairToEnv(pair);
-    for (const name of NAMES) {
+    for (const [name, value] of writes(pair)) {
       const url = new URL(`/api/v4/secrets/${name}`, root);
       const body = {
         projectId,
         environment: ENVIRONMENT,
         secretPath: SECRET_PATH,
-        secretValue: values[name],
+        secretValue: value,
         type: "shared",
       };
       let written = await call(request, url, "PATCH", auth, body);

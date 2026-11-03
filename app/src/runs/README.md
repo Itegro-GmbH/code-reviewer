@@ -73,7 +73,7 @@ variant. The key is **absent** on a Diff or Dynamic run, which keeps their JSON 
   path 300) and rendered as plain text. A link is made only from the repository url and an encoded branch name or a 40-character
   sha (`githubBranchUrl`, `githubCommitUrl`); a name with a `..` part gets none.
 - **Sentences**: `turnErrorCopy` in `error-copy.ts` words the codes where the table of code-review.com does not fit a task
-  (`branch_violation`, `cost_limit_reached`, `dynamic_accounting_failed`, `time_limit_reached`, `push_rejected`, and the
+  (`branch_violation` for old runs, `cost_limit_reached`, `dynamic_accounting_failed`, `time_limit_reached`, `push_rejected`, and the
   ones that promise a new run on the next push). Nothing in it promises a pull request; the table of code-review.com is not
   changed (its golden stays).
 

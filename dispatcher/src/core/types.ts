@@ -75,6 +75,8 @@ export type CreatedVm = {
   name: string;
   startedAt: Date;
   timeoutSeconds: number;
+  /** #818: the VM's size in vCPUs; the core reports it for a job of the Implementer only. */
+  vcpus?: number;
 };
 
 /** Everything a Launcher needs to start the Worker of one job. The credential is a secret: never log it. */
@@ -89,6 +91,12 @@ export type LaunchSpec = {
   /** How long the Worker may live, from the start. */
   timeoutSeconds: number;
   config: LaunchConfig;
+  /**
+   * #818: the VM size in vCPUs that the job's own environment asks for (an Implementer job only; the core sets it from the App's
+   * authenticated claim answer and for no other kind). The Launcher accepts only the sizes of the platform and fails the launch
+   * with its own code for any other. Absent: the kind's configuration and default apply.
+   */
+  vcpus?: number;
   /**
    * #493: a Launcher that creates a VM calls this right after the create returned. The core reports the VM to the App,
    * best effort and in the background; the call returns at once and never throws, and nothing it does can fail the

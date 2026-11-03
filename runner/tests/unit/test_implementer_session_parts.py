@@ -18,20 +18,27 @@ from code_reviewer_runner.dynamic_review.budget import (
     Reservation,
     UnitCosts,
 )
-from code_reviewer_runner.dynamic_review.netguard import IsolationError
-from code_reviewer_runner.dynamic_review.static_isolation import ImplementerNetwork
 from code_reviewer_runner.dynamic_review.tool_part_audit import ToolPartAudit
-from code_reviewer_runner.implementer.egress_config import EgressSettings
-from code_reviewer_runner.implementer.git_workspace import PushOutcome, PushResult
+from code_reviewer_runner.implementer.agent_container import KILL_SECONDS, STOP_SECONDS
+from code_reviewer_runner.implementer.git_workspace import (
+    DIRTY_TIMEOUT,
+    REPORT_READ_TIMEOUT,
+    RESCUE_STEP_TIMEOUT,
+)
+from code_reviewer_runner.implementer.job_run import SIGTERM_BACKSTOP_SECONDS
+from code_reviewer_runner.implementer.limits import agent_limits
+from code_reviewer_runner.implementer.reader import RESET_SECONDS as READER_RESET_SECONDS
 from code_reviewer_runner.implementer.session import (
     COST_LIMIT_DETAIL,
     DEADLINE_DETAIL,
+    ENGINE_STOP_SECONDS,
+    FINAL_PUSH_SECONDS,
     GRACE_SECONDS,
+    LEFTOVER_SECONDS,
     MAX_RETURNED_BYTES,
+    STOP_PUSH_SECONDS,
     TOKEN_CAP_DETAIL,
     ImplementerSession,
-    PushTicker,
-    agent_limits,
     classify,
     deadline_seconds,
 )
@@ -163,10 +170,10 @@ def test_a_single_result_cannot_pass_the_cumulative_bound_either() -> None:
 @pytest.mark.parametrize(
     ("limit", "elapsed", "left"),
     [
-        (3600, 0.0, 3420.0),  # the last three minutes are kept back
-        (3600, 100.0, 3320.0),  # and what the job spent before the turn
+        (3600, 0.0, 3330.0),  # the last four and a half minutes are kept back
+        (3600, 100.0, 3230.0),  # and what the job spent before the turn
         (60, 0.0, 40.0),  # a short limit keeps a third
-        (14_400, 0.0, 14_220.0),
+        (14_400, 0.0, 14_130.0),
         (120, 30.0, 50.0),
     ],
 )
@@ -174,7 +181,7 @@ def test_the_clock_of_the_turn_keeps_the_grace_back(
     limit: int, elapsed: float, left: float
 ) -> None:
     assert deadline_seconds(limit, elapsed) == pytest.approx(left)
-    assert GRACE_SECONDS == 180.0
+    assert GRACE_SECONDS == 270.0
 
 
 # -- the codes ----------------------------------------------------------------------------------
@@ -218,7 +225,6 @@ def test_the_token_cap_of_an_own_key_is_the_cost_limit() -> None:
             ErrorCode.DYNAMIC_ACCOUNTING_FAILED,
         ),
         (LimitError(ErrorCode.DYNAMIC_CONFIG_INVALID, "no"), ErrorCode.IMPLEMENTER_CONFIG_INVALID),
-        (JobError(ErrorCode.BRANCH_VIOLATION, "rewritten"), ErrorCode.BRANCH_VIOLATION),
         (JobError(ErrorCode.PUSH_REJECTED, "refused"), ErrorCode.PUSH_REJECTED),
         (JobError(ErrorCode.LEASE_LOST, "not ours"), ErrorCode.LEASE_LOST),
         (JobError(ErrorCode.RUNNER_SHUTDOWN, "stop"), ErrorCode.RUNNER_SHUTDOWN),
@@ -232,30 +238,19 @@ def test_what_ends_a_turn_has_a_stable_code_whether_or_not_the_model_was_used(
 
 
 # #765: `setup_failed` is the free code of a turn that never started. After the model was used,
-# whatever is wrong with the repository or its set-up is the state the agent left: the charged
-# `branch_violation`, the code `RepositoryUnusable` also carries.
+# whatever is wrong with the set-up is the charged `agent_gave_up`.
 @pytest.mark.parametrize(
     "error",
     [
-        IsolationError("the engine ports are not the ones the network rules allow"),
+        JobError(ErrorCode.SETUP_FAILED, "agent_container_unavailable: the daemon refused a step"),
         JobError(ErrorCode.SETUP_FAILED, "git status failed"),
     ],
 )
-def test_setup_failed_is_free_before_the_model_and_branch_violation_after(
+def test_setup_failed_is_free_before_the_model_and_agent_gave_up_after(
     error: BaseException,
 ) -> None:
     assert classify(error, used_model=False)[0] is ErrorCode.SETUP_FAILED
-    assert classify(error, used_model=True)[0] is ErrorCode.BRANCH_VIOLATION
-
-
-# #765
-def test_an_unusable_repository_after_the_agent_ran_is_the_charged_code() -> None:
-    from code_reviewer_runner.implementer.git_workspace import RepositoryUnusable
-
-    for used in (False, True):
-        assert classify(RepositoryUnusable("git status failed"), used_model=used)[0] is (
-            ErrorCode.BRANCH_VIOLATION
-        )
+    assert classify(error, used_model=True)[0] is ErrorCode.AGENT_GAVE_UP
 
 
 # #765
@@ -290,81 +285,6 @@ def test_the_sentence_of_a_classified_error_never_carries_the_text_of_an_unknown
     None
 ):
     assert classify(RuntimeError("secret-from-the-repo"))[1] == "the turn could not be run"
-
-
-# -- the push ticker -----------------------------------------------------------------------------
-
-
-class FakeLoop:
-    """A push loop whose tick fails the way a test says; `finish` records that it ran."""
-
-    def __init__(self, tick_error: BaseException | None = None) -> None:
-        self.tick_error = tick_error
-        self.ticks = 0
-        self.finished = 0
-
-    def tick(self) -> None:
-        self.ticks += 1
-        if self.tick_error is not None:
-            raise self.tick_error
-
-    def finish(self) -> PushResult:
-        self.finished += 1
-        return PushResult(PushOutcome.PUSHED, "a" * 40)
-
-
-def run_ticker(loop: FakeLoop) -> PushTicker:
-    ticker = PushTicker(loop, 0.01)  # type: ignore[arg-type]  # a double with the loop's two methods
-    ticker.start()
-    deadline = time.monotonic() + 5
-    while loop.ticks == 0 and time.monotonic() < deadline:
-        time.sleep(0.01)
-    return ticker
-
-
-# #764-R4
-@pytest.mark.parametrize(
-    "error",
-    [
-        RuntimeError("the loop broke"),
-        JobError(ErrorCode.RUNNER_ERROR, "something else"),
-        JobError(ErrorCode.SETUP_FAILED, "something else"),
-    ],
-)
-def test_a_failure_of_the_loop_that_is_no_refusal_does_not_cost_the_final_push(
-    error: BaseException,
-) -> None:
-    loop = FakeLoop(error)
-    ticker = run_ticker(loop)
-
-    ticker.check()  # no stored error: the turn goes on
-    result = ticker.finish()
-    ticker.close()
-
-    assert loop.finished == 1 and result.outcome is PushOutcome.PUSHED
-
-
-# #764-R4
-@pytest.mark.parametrize(
-    "code", [ErrorCode.PUSH_REJECTED, ErrorCode.BRANCH_EXISTS, ErrorCode.BRANCH_VIOLATION]
-)
-def test_a_refusal_stops_the_turn_and_no_push_is_made_that_could_only_be_refused_again(
-    code: ErrorCode,
-) -> None:
-    loop = FakeLoop(JobError(code, "no"))
-    ticker = run_ticker(loop)
-    deadline = time.monotonic() + 5
-    while ticker.error is None and time.monotonic() < deadline:
-        time.sleep(0.01)
-
-    with pytest.raises(JobError) as stopped:
-        ticker.check()
-    with pytest.raises(JobError) as again:
-        ticker.finish()
-    ticker.close()
-
-    assert stopped.value.code is code and again.value.code is code
-    assert loop.finished == 0
 
 
 # -- the model was used, or only reserved (#764, second review) ----------------------------------
@@ -453,6 +373,9 @@ class FakeProxy:
     def __init__(self, failed: ErrorCode | None) -> None:
         self.last_upstream_error = failed
 
+    def upstream_error(self) -> ErrorCode | None:
+        return self.last_upstream_error
+
 
 def session_that_ended(ledger: BudgetLedger, failed: ErrorCode | None) -> ImplementerSession:
     """A session as far as `_stopped_by` needs it: the ledger and the proxy of its native job."""
@@ -461,11 +384,12 @@ def session_that_ended(ledger: BudgetLedger, failed: ErrorCode | None) -> Implem
         job,
         workspace=None,  # type: ignore[arg-type]  # not read by _stopped_by
         command=["opencode"],
-        egress=EgressSettings(ImplementerNetwork.NONE, None),
+        place=lambda: None,  # type: ignore[arg-type,return-value]
         environment={},
     )
-    session._native = SimpleNamespace(  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
-        ledger=ledger, run=SimpleNamespace(proxy=FakeProxy(failed))
+    # The turn's model as `_stopped_by` reads it: the ledger and what the proxy kept of the outage.
+    session._model = SimpleNamespace(  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
+        ledger=ledger, upstream_error=FakeProxy(failed).upstream_error
     )
     return session
 
@@ -507,3 +431,32 @@ def test_the_session_names_the_outage_the_proxy_kept(failure: ErrorCode) -> None
     )
 
     assert ended_with(session_that_ended(ledger, failure), ENGINE_GAVE_UP) is failure
+
+
+# The one final push has to fit the end of the turn, at a normal end and at a stop, with room:
+# every step is counted at its ceiling and they never all take it, but a daemon that hangs makes
+# several of them take it at once.
+def test_the_end_of_a_turn_fits_the_grace_and_a_stop_fits_the_sigterm_backstop() -> None:
+    # The container is killed (the kill call, then the wait until the daemon says it is gone) before
+    # anything is read; its removal comes after the push and is in no sum.
+    assert ENGINE_STOP_SECONDS == KILL_SECONDS + STOP_SECONDS == 25.0
+    reads = 2 * REPORT_READ_TIMEOUT
+    rescue = 3 * RESCUE_STEP_TIMEOUT  # symbolic-ref, for-each-ref, switch; at a stop too
+    # The readers are made quiet after the kill and, when the system committed the leftover, again
+    # after the commit (its filters ran in a reader that can write).
+    quiet = READER_RESET_SECONDS
+    normal = (
+        ENGINE_STOP_SECONDS
+        + quiet
+        + rescue
+        + DIRTY_TIMEOUT
+        + LEFTOVER_SECONDS
+        + quiet
+        + FINAL_PUSH_SECONDS
+        + reads
+    )
+    stop = ENGINE_STOP_SECONDS + quiet + rescue + STOP_PUSH_SECONDS + reads
+
+    assert normal == 214.0 and stop == 79.0
+    assert normal <= 0.85 * GRACE_SECONDS
+    assert stop <= 0.75 * SIGTERM_BACKSTOP_SECONDS

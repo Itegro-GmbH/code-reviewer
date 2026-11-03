@@ -10,6 +10,7 @@ import {
   type RequestResult,
 } from "../../ui/json-request.ts";
 import type { ModelOptions } from "../models.ts";
+import type { EnvironmentPickerList } from "../environments/service.ts";
 import type { BranchChoices, RepositoryChoice } from "../service.ts";
 
 /** The body of `POST .../implementer/tasks`. */
@@ -21,6 +22,8 @@ export type StartTaskRequest = {
   model: ModelChoice;
   /** Whole US cents; left out when the person set no limit of their own. */
   costLimitCents?: number;
+  /** The environment of the workspace to start with (#818); left out for the standard. */
+  environmentId?: string;
   /** One per form load: a retry of the same form is the same task. */
   clientRequestId: string;
 };
@@ -29,6 +32,8 @@ export type ImplementerApi = {
   repositories(): Promise<RequestResult<{ repositories: RepositoryChoice[] }>>;
   branches(repositoryId: string): Promise<RequestResult<BranchChoices>>;
   models(): Promise<RequestResult<ModelOptions>>;
+  /** The environments of the workspace (#818) for the picker: no scripts, only whether there is one. */
+  environments(): Promise<RequestResult<EnvironmentPickerList>>;
   startTask(
     request: StartTaskRequest,
   ): Promise<RequestResult<{ runId: string; sessionId: string }>>;
@@ -48,6 +53,12 @@ export function createImplementerApi(
         `${base}/repositories/${encodeURIComponent(repositoryId)}/branches`,
       ),
     models: () => requestJson(fetchImpl, "GET", `${base}/models`),
+    environments: () =>
+      requestJson(
+        fetchImpl,
+        "GET",
+        `${workspaceApiPath(workspaceSlug, "/environments")}?view=picker`,
+      ),
     startTask: (request) =>
       requestJson(fetchImpl, "POST", `${base}/tasks`, request),
   };

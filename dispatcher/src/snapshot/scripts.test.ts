@@ -38,6 +38,7 @@ import {
   daemonConfigJson,
   installDockerScript,
   installHostScriptsScript,
+  installSysboxScript,
   inspectImageScript,
   probeRunArguments,
   probeScript,
@@ -47,6 +48,7 @@ import {
   shellQuote,
   startDaemonScript,
   stopDaemonScript,
+  sysboxProbeScript,
   writeDaemonConfigScript,
 } from "./scripts.ts";
 
@@ -76,6 +78,7 @@ function syntaxErrors(script: string): string {
 describe("the scripts the builder VM runs", () => {
   const everyScript: Record<string, string> = {
     installDocker: installDockerScript(config),
+    installSysbox: installSysboxScript(config),
     writeDaemonConfig: writeDaemonConfigScript(),
     installHostScripts: installHostScriptsScript(),
     startDaemon: startDaemonScript(),
@@ -128,6 +131,11 @@ describe("the scripts the builder VM runs", () => {
       ip6tables: false,
       "live-restore": false,
     });
+    // The runtime is registered, not made the default: every container that does not name it runs as before.
+    expect(parsed).toMatchObject({
+      runtimes: { "sysbox-runc": { path: "/usr/bin/sysbox-runc" } },
+    });
+    expect(parsed).not.toHaveProperty("default-runtime");
     expect(parsed).not.toHaveProperty("hosts");
     expect(parsed).not.toHaveProperty("insecure-registries");
     expect(parsed).not.toHaveProperty("tls");
@@ -140,6 +148,11 @@ describe("the scripts the builder VM runs", () => {
     expect(installHostScriptsScript()).toContain(
       `install -D -m 0755 -o root -g root ${PATHS.vmPrepare} ${PATHS.vmPrepareInstalled}`,
     );
+    expect(installHostScriptsScript()).toContain(
+      `install -D -m 0755 -o root -g root ${PATHS.sysboxPrepare} ${PATHS.sysboxPrepareInstalled}`,
+    );
+    // The daemon start of the snapshot and of every job VM is vm-prepare.sh alone: Sysbox is a step of its own.
+    expect(startDaemonScript()).not.toContain("sysbox");
     expect(startDaemonScript()).toContain(PATHS.vmPrepareInstalled);
   });
 
@@ -177,6 +190,427 @@ describe("the scripts the builder VM runs", () => {
     expect(script).toContain("docker builder prune -af");
     expect(script).toContain("rm -rf /tmp/golden-*");
     expect(script).toContain("sync");
+  });
+});
+
+describe("the Sysbox install of the builder VM", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "golden-sysbox-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /**
+   * Runs the real script with stand-ins for the tools that would change the machine (curl, apt-get, dpkg, dpkg-query,
+   * sysbox-runc), which record what they are called with. The package is written under the test's directory.
+   */
+  function runInstall(options: {
+    packageText: string;
+    sha256: string;
+    installedVersion?: string;
+  }) {
+    const bin = join(dir, "bin");
+    mkdirSync(bin);
+    const calls = join(dir, "calls");
+    const deb = join(dir, "sysbox.deb");
+    const stand = (name: string, body: string) => {
+      writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`);
+      chmodSync(join(bin, name), 0o755);
+    };
+    stand(
+      "curl",
+      `echo "curl $*" >> ${calls}
+while [ "$#" -gt 0 ]; do if [ "$1" = "--output" ]; then out=$2; fi; shift; done
+printf '%s' ${shellQuote(options.packageText)} > "$out"`,
+    );
+    stand(
+      "apt-get",
+      `echo "apt-get $* systemctl=$(command -v systemctl)" >> ${calls}`,
+    );
+    stand("dpkg", `echo "dpkg $*" >> ${calls}`);
+    stand(
+      "dpkg-query",
+      `echo ${shellQuote(options.installedVersion ?? "0.7.1.linux")}`,
+    );
+    stand("sysbox-runc", `echo "sysbox-runc $*" >> ${calls}`);
+    const script = installSysboxScript(
+      resolveConfig({ sysboxSha256: options.sha256 }),
+    ).replaceAll(PATHS.sysboxDeb, deb);
+    const result = spawnSync("bash", ["-c", script], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+    });
+    const recorded = existsSync(calls)
+      ? readFileSync(calls, "utf8").trim().split("\n")
+      : [];
+    return { result, calls: recorded, deb };
+  }
+
+  const sha256 = (text: string) =>
+    createHash("sha256").update(text).digest("hex");
+
+  it("downloads the pinned release over https and installs it with a stub systemctl first on the PATH", () => {
+    const { result, calls, deb } = runInstall({
+      packageText: "the package",
+      sha256: sha256("the package"),
+    });
+
+    expect(result.status).toBe(0);
+    expect(calls[0]).toContain(
+      "https://github.com/nestybox/sysbox/releases/download/v0.7.1/sysbox-ce_0.7.1.linux_amd64.deb",
+    );
+    const apt = calls.find((call) => call.startsWith("apt-get"));
+    expect(apt).toContain(`install -y -qq ${deb} kmod`);
+    // The stub is what the maintainer scripts of the package find; it is gone afterwards.
+    const stub = /systemctl=(\S+)/.exec(apt ?? "")?.[1] ?? "";
+    expect(stub).toMatch(/\/systemctl$/);
+    expect(existsSync(stub)).toBe(false);
+    expect(existsSync(deb)).toBe(false);
+    expect(calls.some((call) => call.startsWith("dpkg --purge"))).toBe(false);
+  });
+
+  it("refuses a package that is not the pinned one before apt sees it, and exits with its own status", () => {
+    const { result, calls, deb } = runInstall({
+      packageText: "another package",
+      sha256: sha256("the package"),
+    });
+
+    expect(result.status).toBe(41);
+    expect(result.stderr).toContain("not the pinned one");
+    expect(calls.some((call) => call.startsWith("apt-get"))).toBe(false);
+    expect(existsSync(deb)).toBe(false);
+  });
+
+  it("purges what it unpacked when the installed version is not the pinned one", () => {
+    const { result, calls } = runInstall({
+      packageText: "the package",
+      sha256: sha256("the package"),
+      installedVersion: "0.8.0.linux",
+    });
+
+    expect(result.status).toBe(44);
+    expect(calls).toContain("dpkg --purge --force-all sysbox-ce");
+  });
+
+  it("leaves no fake systemctl in the snapshot: the stub lives in a directory of its own", () => {
+    const script = installSysboxScript(config);
+    expect(script).toContain("stub=$(mktemp -d)");
+    expect(script).not.toMatch(/\/usr\/(local\/)?s?bin\/systemctl/);
+  });
+});
+
+describe("the Sysbox proof of the check VM", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "golden-sysbox-probe-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** The proof with a stand-in for sysbox-prepare.sh and for docker; the lines it prints are what the pipeline reads. */
+  function runProof(options: { prepare: string; docker?: string }) {
+    const here = mkdtempSync(join(dir, "run-"));
+    const bin = join(here, "bin");
+    mkdirSync(bin);
+    const prepare = join(here, "sysbox-prepare.sh");
+    writeFileSync(prepare, `#!/bin/sh\n${options.prepare}\n`);
+    chmodSync(prepare, 0o755);
+    const stand = (name: string, body: string) => {
+      writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`);
+      chmodSync(join(bin, name), 0o755);
+    };
+    stand("docker", options.docker ?? "exit 0");
+    stand("timeout", 'shift; exec "$@"');
+    // The waits of the proof are for a real daemon.
+    stand("sleep", "exit 0");
+    // The VM's addresses: the proof asks the isolated network for each of them.
+    stand(
+      "ip",
+      "echo '2: eth0    inet 10.0.0.5/24 brd 10.0.0.255 scope global eth0'",
+    );
+    const script = sysboxProbeScript(config).replaceAll(
+      PATHS.sysboxPrepareInstalled,
+      prepare,
+    );
+    const result = spawnSync("bash", ["-c", script], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+    });
+    return { result, lines: result.stdout.trim().split("\n") };
+  }
+
+  it("is valid bash that ends with its marker and never exits non-zero for what it found", () => {
+    const { result, lines } = runProof({
+      prepare: "echo 'sysbox-prepare: sysbox_mgr_not_ready tail' >&2; exit 24",
+    });
+
+    expect(result.status).toBe(0);
+    expect(lines.at(-1)).toBe("SYSBOX_PROBE_DONE");
+  });
+
+  it("names the failure of the boot step by the name the boot script gave it, and runs nothing else", () => {
+    const { lines } = runProof({
+      prepare:
+        "echo 'sysbox-prepare: sysbox_proc_unmount_failed /proc/keys' >&2; exit 22",
+      docker: "echo docker was called >&2; exit 0",
+    });
+
+    expect(lines).toEqual([
+      "SYSBOX_PROBE fail sysbox_proc_unmount_failed",
+      "SYSBOX_PROBE_DONE",
+    ]);
+  });
+
+  it("falls back to a name of its own when the boot step fails without one", () => {
+    const { lines } = runProof({ prepare: "exit 1" });
+    expect(lines[0]).toBe("SYSBOX_PROBE fail sysbox_boot_failed");
+  });
+
+  it("says the proof did not run, not that Sysbox is broken, when the agent image is not in the snapshot", () => {
+    const { lines } = runProof({
+      prepare: "exit 0",
+      docker: 'if [ "$1" = image ]; then exit 1; fi; exit 0',
+    });
+
+    expect(lines).toEqual([
+      "SYSBOX_PROBE ok boot",
+      "SYSBOX_PROBE fail sysbox_probe_image_unavailable",
+      "SYSBOX_PROBE_DONE",
+    ]);
+  });
+
+  it("reports a container that does not start and a daemon in it that does not answer", () => {
+    const started = runProof({
+      prepare: "exit 0",
+      docker:
+        'if [ "$1" = run ] && [ "$2" = --detach ]; then exit 1; fi; exit 0',
+    });
+    expect(started.lines).toContain(
+      "SYSBOX_PROBE fail sysbox_container_failed",
+    );
+
+    const answered = runProof({
+      prepare: "exit 0",
+      docker: 'if [ "$1" = exec ]; then exit 1; fi; exit 0',
+    });
+    expect(answered.lines).toContain(
+      "SYSBOX_PROBE fail sysbox_inner_docker_failed",
+    );
+  });
+
+  /**
+   * A docker that gets every step of the proof right and answers the network checks as told. `box` is what the isolated
+   * container's own `nc` and `ping` return (0 = the connection was made), `control` what a plain container on the VM
+   * returns for the same targets, `alive` how often `docker exec <box> true` succeeds before the box is gone.
+   */
+  function networkDocker(
+    options: {
+      boxLoopNc?: number;
+      boxOutsideNc?: number;
+      boxPing?: number;
+      vmControl?: number;
+      outsideNc?: number;
+      outsidePing?: number;
+      aliveCalls?: number;
+      /** What the agent's container gets of the Subpath volume: 0 = it reads and writes. */
+      volumeBox?: number;
+      /** The owner the VM's root sees on the file the agent wrote. */
+      volumeOwner?: number;
+      /** The proof of the reader (`reader_proof`, run in the Worker image): 0 = every check ok, 1 = one failed, 2 = no answer. */
+      readerProof?: number;
+    } = {},
+  ) {
+    const o = {
+      boxLoopNc: 1,
+      boxOutsideNc: 1,
+      boxPing: 1,
+      vmControl: 0,
+      outsideNc: 0,
+      outsidePing: 0,
+      aliveCalls: 99,
+      volumeBox: 0,
+      volumeOwner: 0,
+      readerProof: 0,
+      ...options,
+    };
+    return `
+case "$1" in
+  network) if [ "$2" = inspect ]; then echo 172.30.0.1; fi; exit 0 ;;
+  run)
+    if [ "$2" = --detach ]; then exit 0; fi
+    for last; do :; done
+    case "$last" in
+      *"mkdir -p /v/repo"*) exit 0 ;;
+      *"stat -c"*) echo ${o.volumeOwner}; exit 0 ;;
+      *"--runtime=sysbox-runc"*)
+        case ${o.readerProof} in
+          0) echo "READER_PROOF ok reader_contained"; echo "READER_PROOF done" ;;
+          1) echo "READER_PROOF fail reader_remount"; echo "READER_PROOF done" ;;
+        esac
+        exit 0 ;;
+      *1.1.1.1*) exit ${o.outsideNc} ;;
+      *ping*) exit ${o.outsidePing} ;;
+      *) exit ${o.vmControl} ;;
+    esac ;;
+  exec)
+    case "$3" in
+      true)
+        calls=$(cat "$0.alive" 2> /dev/null || echo 0)
+        echo $((calls + 1)) > "$0.alive"
+        if [ "$calls" -lt ${o.aliveCalls} ]; then exit 0; fi
+        exit 1 ;;
+      docker | test) exit 0 ;;
+      sh)
+        case "$5" in
+          *"/work/repo/from-control"*) exit ${o.volumeBox} ;;
+          *"docker import"*) echo "tini version 0.19.0 - git.de40ad0"; exit 0 ;;
+          *1.1.1.1*) exit ${o.boxOutsideNc} ;;
+          *ping*) exit ${o.boxPing} ;;
+          *) exit ${o.boxLoopNc} ;;
+        esac ;;
+    esac ;;
+esac
+exit 0`;
+  }
+
+  function isolation(options: Parameters<typeof networkDocker>[0]) {
+    return runProof({ prepare: "exit 0", docker: networkDocker(options) })
+      .lines;
+  }
+
+  it("proves the isolation when every address is blocked from the box and reachable from a plain container", () => {
+    const lines = isolation({});
+    expect(lines).toEqual([
+      "SYSBOX_PROBE ok boot",
+      "SYSBOX_PROBE ok inner_docker",
+      "SYSBOX_PROBE ok inner_container",
+      "SYSBOX_PROBE ok volume_mapped",
+      "SYSBOX_PROBE ok reader",
+      "SYSBOX_PROBE ok network_control",
+      "SYSBOX_PROBE ok outside_control",
+      "SYSBOX_PROBE ok network_isolated",
+      "SYSBOX_PROBE_DONE",
+    ]);
+  });
+
+  // #745-T02: the Subpath volume is part of the proof, so that the id mapping the work volume needs is proven too
+  it.each([
+    [
+      "the agent cannot use the Subpath volume",
+      { volumeBox: 1 },
+      "sysbox_volume_failed",
+    ],
+    [
+      "the files the agent wrote do not belong to the VM's root",
+      { volumeOwner: 165536 },
+      "sysbox_volume_not_mapped",
+    ],
+    [
+      "the reader the Worker makes can be written or remounted",
+      { readerProof: 1 },
+      "sysbox_reader_not_contained",
+    ],
+    [
+      "the proof of the reader gives no answer",
+      { readerProof: 2 },
+      "sysbox_reader_not_contained",
+    ],
+  ])("fails with a reason of its own when %s", (_name, options, reason) => {
+    const lines = isolation(options);
+    expect(lines).toContain(`SYSBOX_PROBE fail ${reason}`);
+    // The mapping can be right and the reader still not contained; the other reasons stop before the reader is looked at.
+    if (reason === "sysbox_reader_not_contained")
+      expect(lines).not.toContain("SYSBOX_PROBE ok reader");
+    else expect(lines).not.toContain("SYSBOX_PROBE ok volume_mapped");
+    expect(lines.at(-1)).toBe("SYSBOX_PROBE_DONE");
+  });
+
+  // #745: the reader of the proof is the one production makes, not a copy of its flags
+  it("mounts a Subpath of a named volume into the agent's container and has the Worker image prove the reader it makes", () => {
+    const script = sysboxProbeScript(config);
+    expect(script).toContain(
+      '--mount type=volume,source="$vol",target=/work/repo,volume-subpath=repo',
+    );
+    expect(script).toContain("code_reviewer_runner.implementer.reader_proof");
+    expect(script).toContain("/var/run/docker.sock");
+    expect(script).toContain(config.imageTag);
+    // No reader of its own: `--cap-drop` is ignored by Sysbox, and a copy of the flags is not the spec that ships.
+    expect(script).not.toMatch(/--cap-drop/);
+    expect(script).not.toContain("reader-wrote");
+  });
+
+  it.each([
+    ["an address of the VM", { boxLoopNc: 0 }],
+    ["an outside address", { boxOutsideNc: 0 }],
+    ["an outside name", { boxPing: 0 }],
+  ])("fails when the isolated container reaches %s", (_name, options) => {
+    const lines = isolation(options);
+    expect(lines).toContain("SYSBOX_PROBE fail sysbox_network_not_isolated");
+    expect(lines).not.toContain("SYSBOX_PROBE ok network_isolated");
+    expect(lines.at(-1)).toBe("SYSBOX_PROBE_DONE");
+  });
+
+  it.each([
+    ["the box is gone before the checks", { aliveCalls: 0 }],
+    ["the box is gone after the checks", { aliveCalls: 1 }],
+    ["a plain network cannot reach the VM's listener", { vmControl: 1 }],
+    ["a plain container has no way out to an address", { outsideNc: 1 }],
+    ["a plain container has no way out to a name", { outsidePing: 1 }],
+  ])(
+    "calls the check inconclusive, and not isolated, when %s",
+    (_name, options) => {
+      const lines = isolation({ ...options, boxLoopNc: 1 });
+      expect(lines).toContain(
+        "SYSBOX_PROBE fail sysbox_network_check_inconclusive",
+      );
+      expect(lines).not.toContain("SYSBOX_PROBE ok network_isolated");
+      expect(lines).not.toContain(
+        "SYSBOX_PROBE fail sysbox_network_not_isolated",
+      );
+      expect(lines.at(-1)).toBe("SYSBOX_PROBE_DONE");
+    },
+  );
+
+  it("asks a plain container on the VM for each outside target the isolated box is asked for", () => {
+    const script = sysboxProbeScript(config);
+    expect(script).toContain("nc -w 3 -z 1.1.1.1 443");
+    expect(script).toContain("ping -c 1 -W 3 example.com");
+    expect(script.indexOf('docker exec "$box" true')).toBeLessThan(
+      script.indexOf("for target in"),
+    );
+  });
+
+  it("runs the agent image, as the Implementer starts it, with the Sysbox runtime on the network with no exit", () => {
+    const script = sysboxProbeScript(config);
+
+    expect(script).toContain(
+      "docker network create --internal -o com.docker.network.bridge.gateway_mode_ipv4=isolated",
+    );
+    expect(script).toContain("--runtime=sysbox-runc");
+    expect(script).toContain(shellQuote(config.agentImageTag));
+    // Nothing is pulled: the image is the one in the snapshot.
+    expect(script).not.toContain("docker pull");
+    // The control network is a plain --internal one; without it a "blocked" would prove nothing.
+    expect(script).toContain('docker network create --internal "$ctl"');
+    expect(script).toContain("sysbox_network_check_inconclusive");
+    expect(script).toContain("sysbox_network_not_isolated");
+  });
+
+  it("starts with the boot script of the job VMs, so that the proof covers the steps a job runs", () => {
+    const script = sysboxProbeScript(config);
+    expect(script.indexOf(PATHS.sysboxPrepareInstalled)).toBeGreaterThan(-1);
+    expect(script.indexOf(PATHS.sysboxPrepareInstalled)).toBeLessThan(
+      script.indexOf("docker image inspect"),
+    );
+  });
+
+  it("holds no secret", () => {
+    expect(sysboxProbeScript(config)).not.toMatch(
+      /token|secret|password|credential/i,
+    );
   });
 });
 

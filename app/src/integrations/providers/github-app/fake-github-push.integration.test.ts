@@ -8,9 +8,9 @@
 // refs and never a token. The Implementer journey (#767) relies on this, so a wrong fake fails here first.
 import { execFile, execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { createGitRepository } from "../../../../../fakes/github/git-fixture.ts";
@@ -135,6 +135,7 @@ async function workingCopy(
     branch,
     setupResult.base,
   ]);
+  mkdirSync(dirname(join(clone, file)), { recursive: true });
   writeFileSync(join(clone, file), content);
   execFileSync("git", ["-C", clone, "add", "--all"]);
   await git(clone, token, "commit", "--quiet", "--message", `Add ${file}`);
@@ -223,6 +224,52 @@ describe("the push of the fake GitHub", () => {
         encoding: "utf8",
       }),
     ).toBe("hello\n");
+  });
+
+  // The Implementer's App never has the `workflows` permission: GitHub refuses the push of that ref and takes the
+  // others (the runner pushes one ref per command).
+  it("refuses a push that creates a workflow file with GitHub's words and takes a plain branch beside it", async () => {
+    const context = await setup();
+    const token = await context.mint([WIDGETS.id], "write");
+    const workflow = await workingCopy(
+      context,
+      token,
+      "workflow",
+      "implementer/workflow",
+      ".github/workflows/smoke.yml",
+      "on: push\n",
+    );
+    const plain = await workingCopy(
+      context,
+      token,
+      "plain",
+      "implementer/plain",
+    );
+
+    const refused = await push(
+      workflow,
+      token,
+      context.remote,
+      "HEAD:refs/heads/implementer/workflow",
+    );
+    const taken = await push(
+      plain,
+      token,
+      context.remote,
+      "HEAD:refs/heads/implementer/plain",
+    );
+
+    expect(refused.ok).toBe(false);
+    expect(refused.output).toContain(
+      "refusing to allow a GitHub App to create or update workflow `.github/workflows/smoke.yml` without `workflows` permission",
+    );
+    expect(taken.ok).toBe(true);
+    expect(await branchSha(context.fake, token, "implementer/workflow")).toBe(
+      null,
+    );
+    expect(await branchSha(context.fake, token, "implementer/plain")).not.toBe(
+      null,
+    );
   });
 
   // #766-T01

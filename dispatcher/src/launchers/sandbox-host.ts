@@ -5,6 +5,8 @@
 // life of the VM around that command:
 //
 //   prepare()  vm-prepare.sh as root (the cgroup fix, then dockerd, spike #317 F1), then the image check
+//   prepareSysbox()  the Implementer's VM only (plan implementer-sandbox, step 2): sysbox-prepare.sh as root, which makes the VM able
+//              to run a Sysbox container (a container with its own Docker). A review's VM never runs it
 //   createWorkVolume()  the Implementer's profile only (#760): the steps that make the job's work volume in this VM
 //   run()      `docker run --interactive ...` as a process with a stdin pipe; the start document is written to
 //              the pipe and the pipe closed. Nothing else carries it: not an argument, not the environment,
@@ -26,11 +28,80 @@ import { VM_PREPARE_FAILED_EVENT, stderrTail } from "./vm-prepare-log.ts";
 
 /** Installed into the golden snapshot by the pipeline (#330) from docker/sandbox/vm-prepare.sh. */
 export const VM_PREPARE_PATH = "/usr/local/sbin/vm-prepare.sh";
+/** Installed beside it from docker/sandbox/sysbox-prepare.sh; run after vm-prepare.sh and only for the Implementer. */
+export const SYSBOX_PREPARE_PATH = "/usr/local/sbin/sysbox-prepare.sh";
 const VM_PREPARE_TIMEOUT_MS = 60_000;
+/** Measured at 0.1 s on a platform VM; the script itself waits up to 30 s for the two daemons together, so a slow daemon is named by it before this limit cuts it off. */
+export const SYSBOX_PREPARE_TIMEOUT_MS = 40_000;
+/** The event of the log line of a failed `sysbox-prepare.sh`, next to the launch error code `sysbox_not_ready`. */
+export const SYSBOX_PREPARE_FAILED_EVENT = "sysbox_prepare_failed";
+/**
+ * The directories Docker keeps its runtime state in (the pipes of every `exec`, the shims of the containers), put on memory for
+ * the Implementer's VM before the daemon starts. The VM's `/run` is a directory of its one XFS disk, and the pipes of an exec are
+ * files in it: with the disk full by the agent's doing, no command could be run in a container (measured: "failed to open stdout
+ * fifo ... no space left on device"), neither the runner's look at the repository nor its tunnel to the agent. On memory, they
+ * work on a full disk. So is the temporary directory of the daemon and of the runtime that runs an exec (`runc-process...` in
+ * `/tmp`, measured): the daemon is started with `TMPDIR` in the second directory, which is therefore open to everybody
+ * (sticky, as `/tmp` is) and is the VM's, not the container's.
+ */
+export const DOCKER_TMPDIR = "/run/containerd";
+export const RUN_DIRECTORY_COMMANDS = [
+  {
+    label: "run-directories",
+    cmd: "mkdir",
+    args: ["-p", "--", "/run/docker", "/run/containerd"],
+  },
+  {
+    label: "run-directory-docker",
+    cmd: "mount",
+    args: [
+      "-t",
+      "tmpfs",
+      "-o",
+      "size=64m,mode=0711,nosuid,nodev",
+      "tmpfs",
+      "/run/docker",
+    ],
+  },
+  {
+    label: "run-directory-containerd",
+    cmd: "mount",
+    args: [
+      "-t",
+      "tmpfs",
+      "-o",
+      "size=64m,mode=1777,nosuid,nodev",
+      "tmpfs",
+      "/run/containerd",
+    ],
+  },
+] as const;
+/** Each is a `mkdir` or a `mount`: a few milliseconds. The three together stay a small part of the launch deadline of the core (a test pins the sum). */
+export const RUN_DIRECTORY_STEP_TIMEOUT_MS = 3_000;
+/**
+ * IPv6 off for the containers the daemon makes later (the Implementer's VM only): the kernel's default for new interfaces,
+ * `net.ipv6.conf.default.disable_ipv6`, is 1 before the daemon starts, so no bridge it creates has an IPv6 address and root in a
+ * container cannot switch it on and find the bridge's link-local address behind which the VM's control port listens
+ * (`runner/.../implementer/host_rules.py`). Only `default` is written (and read back): `all`, `lo` and `eth0` stay as the platform
+ * has them, since the platform reaches the VM through them. A kernel with no IPv6 has no such file, which is the same as off. The
+ * daemon's own `ipv6: false` (`daemonConfigJson`) stays; this is the VM's side of it.
+ */
+export const IPV6_OFF_COMMANDS = [
+  {
+    label: "ipv6-off",
+    cmd: "sh",
+    args: [
+      "-c",
+      'f=/proc/sys/net/ipv6/conf/default/disable_ipv6; [ -e "$f" ] || exit 0; ' +
+        'echo 1 > "$f" || exit 1; [ "$(cat "$f")" = 1 ] || exit 1',
+    ],
+  },
+] as const;
+export const IPV6_OFF_STEP_TIMEOUT_MS = 3_000;
 const IMAGE_CHECK_TIMEOUT_MS = 30_000;
 const KILL_TIMEOUT_MS = 15_000;
-/** Each step of the work volume is a `mkdir`, a `mount` or one `docker volume create`: a second or so, never half a minute. */
-export const WORK_VOLUME_STEP_TIMEOUT_MS = 10_000;
+/** Each step of the work volume is a `mkdir`, a `mount` or one `docker volume create`: a second or so, never half a minute. 9 s leaves the seconds the run-directory and IPv6 steps need within the core's launch deadline (a test pins the sum and its margin). */
+export const WORK_VOLUME_STEP_TIMEOUT_MS = 9_000;
 
 export type SandboxDockerHostOptions = {
   vm: SandboxVm;
@@ -87,6 +158,7 @@ export class SandboxDockerHost implements ContainerHost {
    */
   readonly handover: Promise<void>;
   readonly #options: SandboxDockerHostOptions;
+  #memoryRunDirectories = false;
   #settle!: { resolve: () => void; reject: (error: unknown) => void };
   #settled = false;
 
@@ -98,14 +170,77 @@ export class SandboxDockerHost implements ContainerHost {
     this.handover.catch(() => undefined);
   }
 
+  /**
+   * Puts the runtime directories of Docker on memory (`RUN_DIRECTORY_COMMANDS`), before `prepare()` starts the daemon. For the
+   * Implementer's VM only: a review's VM stays as it was. A step that fails ends the launch with the retryable
+   * `docker_not_ready`; the log names the step and the exit status, never the text.
+   */
+  async prepareRunDirectories(signal: AbortSignal): Promise<void> {
+    const { vm } = this.#options;
+    this.#memoryRunDirectories = true;
+    for (const command of RUN_DIRECTORY_COMMANDS) {
+      const done = await vm.exec(
+        {
+          label: command.label,
+          cmd: command.cmd,
+          args: command.args,
+          sudo: true,
+          timeoutMs: RUN_DIRECTORY_STEP_TIMEOUT_MS,
+        },
+        signal,
+      );
+      if (done.exitCode === 0) continue;
+      this.#options.logger.warn("run_directory_failed", {
+        ...this.#options.logFields,
+        sandbox: vm.name,
+        step: command.label,
+        code: "docker_not_ready",
+        exitCode: done.exitCode,
+      });
+      throw new LaunchError("docker_not_ready", { retryable: true });
+    }
+  }
+
+  /**
+   * Switches IPv6 off in the VM's kernel (`IPV6_OFF_COMMANDS`), before `prepare()` starts the daemon. For the Implementer's VM
+   * only. A step that fails ends the launch with the retryable `docker_not_ready`; the log names the step and the exit status.
+   */
+  async disableIpv6(signal: AbortSignal): Promise<void> {
+    const { vm } = this.#options;
+    for (const command of IPV6_OFF_COMMANDS) {
+      const done = await vm.exec(
+        {
+          label: command.label,
+          cmd: command.cmd,
+          args: command.args,
+          sudo: true,
+          timeoutMs: IPV6_OFF_STEP_TIMEOUT_MS,
+        },
+        signal,
+      );
+      if (done.exitCode === 0) continue;
+      this.#options.logger.warn("ipv6_off_failed", {
+        ...this.#options.logFields,
+        sandbox: vm.name,
+        step: command.label,
+        code: "docker_not_ready",
+        exitCode: done.exitCode,
+      });
+      throw new LaunchError("docker_not_ready", { retryable: true });
+    }
+  }
+
   /** Starts the daemon and proves the image in the VM is the one the Dispatcher is configured with. */
   async prepare(signal: AbortSignal): Promise<void> {
     const { vm } = this.#options;
+    // On memory (`prepareRunDirectories`), the daemon is started with its temporary directory there too.
     const prepared = await vm.exec(
       {
         label: "vm-prepare",
-        cmd: VM_PREPARE_PATH,
-        args: [],
+        cmd: this.#memoryRunDirectories ? "env" : VM_PREPARE_PATH,
+        args: this.#memoryRunDirectories
+          ? [`TMPDIR=${DOCKER_TMPDIR}`, VM_PREPARE_PATH]
+          : [],
         sudo: true,
         timeoutMs: VM_PREPARE_TIMEOUT_MS,
       },
@@ -144,6 +279,35 @@ export class SandboxDockerHost implements ContainerHost {
     // The text of the answer is not logged or echoed: only whether it is the configured id.
     if (image.stdout.trim() !== this.#options.imageDigest)
       throw new LaunchError("image_mismatch");
+  }
+
+  /**
+   * Makes the VM able to run a Sysbox container: `sysbox-prepare.sh` as root, after `prepare()`. It names its failure on stderr
+   * (`sysbox-prepare: sysbox_mgr_not_ready ...`); the log line carries the exit status and the end of that text, the error
+   * is the stable `sysbox_not_ready`. Called for the Implementer's VM only: it unmounts `/proc/kcore` and `/proc/keys` for
+   * the whole VM, and a review's VM has to stay as it was.
+   */
+  async prepareSysbox(signal: AbortSignal): Promise<void> {
+    const { vm } = this.#options;
+    const prepared = await vm.exec(
+      {
+        label: "sysbox-prepare",
+        cmd: SYSBOX_PREPARE_PATH,
+        args: [],
+        sudo: true,
+        timeoutMs: SYSBOX_PREPARE_TIMEOUT_MS,
+      },
+      signal,
+    );
+    if (prepared.exitCode === 0) return;
+    this.#options.logger.warn(SYSBOX_PREPARE_FAILED_EVENT, {
+      ...this.#options.logFields,
+      sandbox: vm.name,
+      code: "sysbox_not_ready",
+      exitCode: prepared.exitCode,
+      stderrTail: stderrTail(prepared.stderr),
+    });
+    throw new LaunchError("sysbox_not_ready", { retryable: true });
   }
 
   /**

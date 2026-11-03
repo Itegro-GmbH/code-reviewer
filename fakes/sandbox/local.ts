@@ -7,7 +7,7 @@
 // Dispatcher (fakes/ is shared by every project).
 //
 // What local mode is not: a VM. There is no snapshot (the image is whatever the local daemon has), no cgroup fix
-// and no daemon start (`vm-prepare.sh` succeeds without doing anything), no `sudo`, no mounts (the work volume's
+// and no daemon start (`vm-prepare.sh`, the Implementer's `sysbox-prepare.sh` and its `ipv6-off` step succeed without doing anything), no `sudo`, no mounts (the work volume's
 // `mkdir` and `mount` succeed without doing anything, and a read of the mountinfo shows what they asked for) and no kernel of its own. What
 // it proves is the container spec end to end and that nothing of one job is left for the next: the directory of a
 // stopped "VM" is removed and every container it started is force-removed.
@@ -69,10 +69,18 @@ type LocalVmState = {
 };
 
 const PREPARE = "/usr/local/sbin/vm-prepare.sh";
-// The steps of the Implementer's work volume that change the VM itself (#760): a directory and a mount. Local mode has
-// no VM of its own (like the cgroup fix and the daemon start, they succeed without doing anything); the `docker volume
-// create` that follows them is a docker command and goes to the daemon, or the stand-in, like any other.
-const HOST_STEPS: ReadonlySet<string> = new Set(["mkdir", "mount"]);
+// Like the cgroup fix: local mode has no kernel of its own to prepare for Sysbox.
+const SYSBOX_PREPARE = "/usr/local/sbin/sysbox-prepare.sh";
+// The steps of the Implementer's launch that change the VM itself (#760, #745): a directory, a mount, the reserve disk's image
+// and its file system. Local mode has no VM of its own (like the cgroup fix and the daemon start, they succeed without doing
+// anything); the `docker volume create` that follows them is a docker command and goes to the daemon, or the stand-in, like
+// any other.
+const HOST_STEPS: ReadonlySet<string> = new Set([
+  "mkdir",
+  "mount",
+  "fallocate",
+  "mkfs.ext4",
+]);
 const MOUNTINFO = "/proc/self/mountinfo";
 
 function abortError(): Error {
@@ -241,7 +249,14 @@ export class LocalSandboxService {
           (resolve, reject) => {
             if (state.stopped) return reject(new Error("The VM is stopped."));
             if (signal?.aborted) return reject(abortError());
-            if (request.cmd === PREPARE)
+            // The Implementer's VM starts the daemon through `env TMPDIR=... vm-prepare.sh` (#745).
+            // `ipv6-off` writes the kernel's files: a stand-in on the host's own kernel never does.
+            if (
+              request.label === "ipv6-off" ||
+              request.cmd === PREPARE ||
+              request.cmd === SYSBOX_PREPARE ||
+              (request.cmd === "env" && request.args.includes(PREPARE))
+            )
               return resolve({ exitCode: 0, stdout: "", stderr: "" });
             if (HOST_STEPS.has(request.cmd)) {
               state.hostSteps.push({ cmd: request.cmd, args: request.args });

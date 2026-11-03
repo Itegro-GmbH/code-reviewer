@@ -10,6 +10,15 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
   workspaces: ["deleted_at"],
   // #692: the PostHog identity of the landing page; null for every user that exists.
   users: ["posthog_distinct_id", "posthog_session_id", "posthog_captured_at"],
+  // #818: the environment a task started with; null for every turn that exists (no environment: the standard).
+  implementer_turns: [
+    "environment_id",
+    "environment_name",
+    "environment_vcpus",
+    "environment_setup_script",
+  ],
+  // #818: the size of the VM where the Dispatcher reported it; null for every VM that exists.
+  job_vm_runs: ["vcpus"],
 };
 
 /** `rows` of `table` without the columns that migrations after the one under test added; those columns must be null. */

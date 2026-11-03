@@ -15,6 +15,12 @@
 // room to build a repository (`ImplementerContainerSpec`); a spec with a `workVolume` key is checked as that profile,
 // every other as the default one. Both profiles share every check of the floor.
 //
+// The Docker socket (#745, step 3): the Implementer's profile, and only it, carries the VM's Docker socket as one
+// read-only bind mount with exactly the source and the target of the contract, so that its Worker (the Control container)
+// can start the model door. That makes the Worker effectively root on the VM; it is accepted because the agent never
+// reaches it and the runner puts nothing of a job or of the agent's output into a request to the socket. `dockerSocket`
+// is a forbidden key of every other spec and of every option.
+//
 // Host preparation: `docker run` with a memory or pids limit fails inside a Sandbox VM until a root
 // script has made the cgroup v2 root a plain domain, before `dockerd` starts (docker/sandbox/vm-prepare.sh,
 // spike #317, finding F1). It is the host's job, not part of the flags; the golden snapshot (#330)
@@ -79,6 +85,7 @@ const FORBIDDEN_KEYS: ReadonlySet<string> = new Set([
   "dockerSocket",
 ]);
 const WORK_VOLUME_KEY = "workVolume";
+const DOCKER_SOCKET_KEY = "dockerSocket";
 const SPEC_KEYS: ReadonlySet<string> = new Set([
   "version",
   "user",
@@ -129,10 +136,14 @@ export const WORK_VOLUME_PATH = "/work";
 const WORK_VOLUME_OPTIONS = ["rw", "nosuid", "nodev"] as const;
 const WORK_VOLUME_SOURCE = "named-volume";
 const IMPLEMENTER_PIDS_LIMIT = 2048;
+/** The VM's Docker socket and where the Implementer's Control container sees it (the contract's `DockerSocket`). */
+export const DOCKER_SOCKET_SOURCE = "/var/run/docker.sock";
+export const DOCKER_SOCKET_TARGET = "/run/docker.sock";
 const IMPLEMENTER_ENVIRONMENT_NAMES = [
   "RUNNER_IMPLEMENTER_WORK_DIR",
-  "RUNNER_IMPLEMENTER_EGRESS_PORT",
-  "RUNNER_IMPLEMENTER_NETWORK",
+  "RUNNER_IMPLEMENTER_MODEL_DOOR",
+  "RUNNER_IMPLEMENTER_SANDBOX_PROOF",
+  "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB",
 ] as const;
 
 const SIZE = /^[0-9]+[mg]$/;
@@ -279,6 +290,17 @@ function assertEnvironmentNames(
     notHardened("allowedEnvironment lacks a name of the Implementer");
 }
 
+/** The VM's Docker socket of the Implementer's profile: exactly the contract's source and target. Nothing else. */
+function assertDockerSocket(socket: unknown): void {
+  if (!isRecord(socket)) return notHardened("the docker socket");
+  const { source, target, ...rest } = socket;
+  if (Object.keys(rest).length > 0) return notHardened("a docker socket key");
+  if (source !== DOCKER_SOCKET_SOURCE)
+    return notHardened("the docker socket source");
+  if (target !== DOCKER_SOCKET_TARGET)
+    return notHardened("the docker socket target");
+}
+
 /** The one volume of the Implementer's profile: exactly `/work`, `rw,nosuid,nodev`, a named volume. Nothing else. */
 function assertWorkVolume(volume: unknown): void {
   if (!isRecord(volume)) return notHardened("the work volume");
@@ -299,16 +321,26 @@ export function assertHardenedSpec(
   spec: unknown,
 ): asserts spec is ContainerSpec {
   if (!isRecord(spec)) return notHardened("not an object");
+  // The Implementer's profile is the one with a work volume; it is also the one that carries the VM's Docker socket.
+  const implementer = WORK_VOLUME_KEY in spec;
   for (const key of Object.keys(spec)) {
-    if (FORBIDDEN_KEYS.has(key))
+    if (FORBIDDEN_KEYS.has(key) && !(implementer && key === DOCKER_SOCKET_KEY))
       refuse("spec_forbidden_key", `the spec has the forbidden key ${key}`);
   }
   for (const key of Object.keys(spec)) {
-    if (!SPEC_KEYS.has(key) && key !== WORK_VOLUME_KEY)
+    if (
+      !SPEC_KEYS.has(key) &&
+      key !== WORK_VOLUME_KEY &&
+      key !== DOCKER_SOCKET_KEY
+    )
       refuse("spec_unknown_key", `the spec has the unknown key ${key}`);
   }
-  const implementer = WORK_VOLUME_KEY in spec;
-  if (implementer) assertWorkVolume(spec[WORK_VOLUME_KEY]);
+  if (implementer) {
+    assertWorkVolume(spec[WORK_VOLUME_KEY]);
+    if (!(DOCKER_SOCKET_KEY in spec))
+      notHardened("the docker socket is missing");
+    assertDockerSocket(spec[DOCKER_SOCKET_KEY]);
+  }
   if (spec.version !== 1) notHardened("version");
   if (spec.user !== "0:0") notHardened("user");
   assertCapabilities(spec);
@@ -340,7 +372,9 @@ export function assertHardenedSpec(
   const forbidden: unknown = spec.forbiddenKeys;
   if (
     !Array.isArray(forbidden) ||
-    !forbidden.every((k) => FORBIDDEN_KEYS.has(k as string))
+    !forbidden.every((k) => FORBIDDEN_KEYS.has(k as string)) ||
+    // The profile that has the socket does not claim that no spec has it.
+    (implementer && forbidden.includes(DOCKER_SOCKET_KEY))
   )
     notHardened("forbiddenKeys");
   const overridable: unknown = spec.overridable;
@@ -544,6 +578,12 @@ export function renderDockerRunArguments(
           "--mount",
           `type=volume,source=${options.workVolume},target=${workVolume.path}`,
         ]),
+    ...("dockerSocket" in hardened
+      ? [
+          "--mount",
+          `type=bind,source=${hardened.dockerSocket.source},target=${hardened.dockerSocket.target},readonly`,
+        ]
+      : []),
     "--memory",
     memory.limit,
     "--memory-reservation",
@@ -588,7 +628,14 @@ export interface HostCommand {
 }
 
 /** How many steps `workVolumeCommands` has: the Launcher budgets time for each (`WORK_VOLUME_STEPS_SECONDS`). */
-export const WORK_VOLUME_STEP_COUNT = 5;
+export const WORK_VOLUME_STEP_COUNT = 8;
+
+/**
+ * The size of the reserve disk of a work volume: an eighth of the 64 GB disk every VM size has (measured on 1, 2 and 8 vCPU,
+ * `docs/implementer.md`, "The disk"). It is allocated, not sparse, when the volume is made, so nothing the agent writes can
+ * take it. Control's mirror lives on it and nothing else.
+ */
+export const RESERVE_DISK_GIB = 8;
 
 /**
  * Whether `mountinfo` (the text of `/proc/self/mountinfo`) shows a mount at `directory` that has all of `options` and no
@@ -621,6 +668,14 @@ export function mountHasOptions(
  * mount that honours the setuid bit and nothing else would show it. A mount
  * made in the VM lives and dies with the VM, and so does the volume: no step leaves anything behind. `root` is a
  * plain absolute directory of the VM; the volume gets a directory below it named like itself.
+ *
+ * **The reserve disk (#745, the agent can fill the VM's disk).** The VM's disk is one XFS file system without quotas, so a
+ * limit on what the agent writes (the repository, the layers of its container, the images of its own Docker) cannot be had.
+ * What can be had is a place the agent cannot fill: below the volume, at `reserve`, a file system of its own (a
+ * pre-allocated image, `RESERVE_DISK_GIB`, formatted and mounted over a loop device, `nosuid,nodev`) that holds Control's
+ * mirror and nothing else. The agent's container mounts the Subpath `repo` of the volume and sees none of it. The volume is
+ * made with `rbind`, so Control sees the mount below it. Whatever the agent writes to the VM's disk, the blocks of the
+ * mirror are already taken.
  */
 export function workVolumeCommands(
   spec: unknown,
@@ -635,6 +690,8 @@ export function workVolumeCommands(
   checkOption(options.name, VOLUME_NAME, "the work volume");
   checkOption(options.root, HOST_ROOT, "the work volume root");
   const directory = `${options.root}/${options.name}`;
+  const reserveDirectory = `${directory}/reserve`;
+  const reserveImage = `${options.root}/${options.name}.reserve.img`;
   const step = (
     label: string,
     cmd: string,
@@ -646,8 +703,36 @@ export function workVolumeCommands(
     sudo: true,
   });
   return [
-    step("work-volume-dir", "mkdir", "-p", "--", directory),
-    step("work-volume-mount", "mount", "--bind", directory, directory),
+    step("work-volume-dir", "mkdir", "-p", "--", reserveDirectory),
+    step(
+      "work-volume-reserve-image",
+      "fallocate",
+      "-l",
+      `${String(RESERVE_DISK_GIB)}G`,
+      reserveImage,
+    ),
+    step(
+      "work-volume-reserve-fs",
+      "mkfs.ext4",
+      "-q",
+      "-F",
+      "-m",
+      "0",
+      "-O",
+      "^has_journal",
+      "-E",
+      "lazy_itable_init=1,nodiscard",
+      reserveImage,
+    ),
+    step(
+      "work-volume-reserve-mount",
+      "mount",
+      "-o",
+      "loop,nosuid,nodev",
+      reserveImage,
+      reserveDirectory,
+    ),
+    step("work-volume-mount", "mount", "--rbind", directory, directory),
     step(
       "work-volume-options",
       "mount",
@@ -658,7 +743,9 @@ export function workVolumeCommands(
     {
       ...step("work-volume-check", "cat", "/proc/self/mountinfo"),
       check: (mountinfo) =>
-        mountHasOptions(mountinfo, directory, spec.workVolume.options),
+        mountHasOptions(mountinfo, directory, spec.workVolume.options) &&
+        // The reserve disk is a mount of its own below the volume, read-write and without the setuid bit or devices.
+        mountHasOptions(mountinfo, reserveDirectory, ["rw", "nosuid", "nodev"]),
     },
     step(
       "work-volume-create",
@@ -672,7 +759,7 @@ export function workVolumeCommands(
       "--opt",
       `device=${directory}`,
       "--opt",
-      "o=bind",
+      "o=rbind",
       options.name,
     ),
   ];

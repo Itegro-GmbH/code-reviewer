@@ -4,6 +4,7 @@
 // instance admin links the GitHub identity of an imported operator who has no other credential, and the two
 // accounts become one. Against the fake GitHub (authorization with PKCE, the token, the profile) and a real
 // database. Every refusal leaves the database exactly as it was; the merge is one transaction.
+import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import { describe, expect, it } from "vitest";
 import { githubIdentityLinked } from "../admin/github-identity.ts";
 import { createRateLimitsRepository } from "../db/repositories/rate-limits-repository.ts";
@@ -390,6 +391,28 @@ describe("merging the instance admin with an imported operator", () => {
     expect(
       await ctx.db
         .selectFrom("implementer_turns")
+        .select("created_by")
+        .execute(),
+    ).toEqual([{ created_by: "admin" }]);
+  });
+
+  // #818-T05
+  it("keeps who made an Implementer environment: it moves to the admin when the operator is retired", async () => {
+    const ctx = await setup();
+    await adminAndImportedOperator(ctx);
+    await createImplementerEnvironmentsRepository(
+      ctx.db,
+      ctx.workspace.id,
+    ).create(
+      { name: "Node", vcpus: 2, setupScript: "", createdBy: "operator" },
+      50,
+    );
+
+    expect(await ctx.link(ADMIN)).toEqual({ ok: true, outcome: "merged" });
+
+    expect(
+      await ctx.db
+        .selectFrom("implementer_environments")
         .select("created_by")
         .execute(),
     ).toEqual([{ created_by: "admin" }]);

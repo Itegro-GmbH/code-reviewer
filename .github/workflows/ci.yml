@@ -293,7 +293,8 @@ jobs:
   # target on the runner's Docker daemon and runs the Launcher's local mode against it and the fake App, so
   # `docker run <image id>` with the full rendered flag set (IPv6 sysctls, memory and swap, capabilities, tmpfs) is
   # proven on a real daemon, and nothing of one job is left for the next. The container reaches the fake App on the
-  # docker0 gateway. No login, no push, the read-only token.
+  # docker0 gateway. It also starts the model door of the Implementer from the real image with the real flags and
+  # runs the offline VM check against it (model-door.privileged.test.ts, #745). No login, no push, the read-only token.
   sandbox-local:
     name: "Dispatcher: Sandbox-Launcher with a real Docker daemon"
     needs: changes
@@ -312,6 +313,62 @@ jobs:
         run: pnpm install --frozen-lockfile --filter code-reviewer-dispatcher...
       - name: Run the Sandbox-Launcher against a real Docker daemon
         run: make test-sandbox-local
+
+  # The lane of a whole Implementer turn (#745, step 4): the real agent image with the pinned OpenCode in a container of
+  # its own, the real reader, the real model door code and the production session, against a scripted model and a bare
+  # repository standing in for GitHub (runner/tests/lane, `make test-lane`). CI has no Sysbox, so the containers run under
+  # `runc` and the image's init, which starts the inner Docker, is replaced by one that only says it is ready: the lane
+  # proves the flow of the turn, the reader, the volume and the leftovers, not the Sysbox wall, the id mapping of the
+  # volume or the isolated network (a VM with Sysbox proves those: the golden snapshot's proof and the spike run of
+  # docs/implementer.md). It runs the tests as root, as Control does, on the GitHub-hosted VM. No secret, no login, no push.
+  implementer-lane:
+    name: "Runner: Implementer turn on a real Docker daemon (runc)"
+    needs: changes
+    if: ${{ github.event_name == 'pull_request' && (github.base_ref == 'main' || needs.changes.outputs.runner == 'true') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.0"
+          enable-cache: true
+          cache-dependency-glob: runner/uv.lock
+      - name: Install the runner
+        working-directory: runner
+        run: uv sync --locked
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build the Worker image (the reader, the stand-in of Control and the relay of the door)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: runner/Dockerfile
+          target: sandbox
+          load: true
+          push: false
+          tags: code-reviewer-worker:lane
+          cache-from: type=gha,scope=runner-sandbox
+          cache-to: type=gha,mode=max,scope=runner-sandbox
+      - name: Build the agent image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: runner/Dockerfile
+          target: agent
+          load: true
+          push: false
+          tags: code-reviewer-agent:lane
+          cache-from: type=gha,scope=runner-agent
+          cache-to: type=gha,mode=max,scope=runner-agent
+      - name: Run the lane
+        working-directory: runner
+        env:
+          LANE_WORKER_IMAGE: code-reviewer-worker:lane
+          LANE_AGENT_IMAGE: code-reviewer-agent:lane
+          LANE_RUNTIME: runc
+        run: sudo -E .venv/bin/python -m pytest -m lane tests/lane -q -p no:cacheprovider
 
   runner-fast:
     name: "Runner: static & tests"
@@ -625,9 +682,9 @@ jobs:
       # here: the lane uses the pinned one (the runner's self-check compares it with runner/ripgrep-pin.json).
       - name: Install nftables
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends nftables
-      # The Implementer's git (#767): the Worker's start-up self-check wants git 2.53 or newer, which a package of the runner image
-      # does not promise, so the lane builds the pinned release (runner/git-pin.json) from its verified source, the way the Worker
-      # image does (runner/scripts/build_lane_git.sh). These are the headers that build needs; the result is cached.
+      # The Implementer's git (#767): the lane runs the same git as the Worker image, not the one of the runner image, so it
+      # builds the pinned release (runner/git-pin.json) from its verified source, the way the Worker image does
+      # (runner/scripts/build_lane_git.sh). These are the headers that build needs; the result is cached.
       - name: Install what builds git
         run: sudo apt-get install --yes --no-install-recommends libcurl4-openssl-dev zlib1g-dev
       - name: Restore the pinned git
@@ -759,7 +816,7 @@ jobs:
   # fails on any failed or cancelled job and accepts skipped jobs (path filter).
   ci-passed:
     name: All checks passed?
-    needs: [changes, website, app-fast, app-int, dispatcher-fast, runner-fast, engine, e2e, e2e-hosted, e2e-dynamic, licenses, image-runner-sandbox, sandbox-local, actionlint]
+    needs: [changes, website, app-fast, app-int, dispatcher-fast, runner-fast, implementer-lane, engine, e2e, e2e-hosted, e2e-dynamic, licenses, image-runner-sandbox, sandbox-local, actionlint]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5

@@ -10,22 +10,20 @@ shares is off. What differs is the tool set: the agent writes. Permissions are d
 leave the machine or ask a person (`webfetch`, `websearch`, `task`, `question`) are denied by name
 and every other, present or future, by the wildcard.
 
-Nothing executable or configurable comes from the repository (owner rule): no plugin, no MCP server,
-no LSP, no formatter, no setup script, and no repository skill or instruction file (the discovery
-flags of the engine are on, `skills.paths` is empty). The flags are not a proof of isolation on
-their own (spike #85); the engine user, the read-only guard files and the closed network are.
+The engine runs as root in the agent's own container (#745, step 4), where it is free: what the
+repository brings (its `opencode.json`, `.opencode/`, instruction files and skills) may apply, and
+the engine's project discovery is on. What no file of the repository can change is what the model
+door holds: the model (the door refuses any other), the cost limit, the output cap and the key (the
+engine only holds a bearer that is worth nothing anywhere else), and the agent has no address to
+send a request to other than the door's. The runner's own configuration below is a
+`OPENCODE_CONFIG` file; a repository's file is merged over it and cannot take those away.
 """
 
 from collections.abc import Mapping
 from typing import Any
 
-from code_reviewer_runner.dynamic_review.config import (
-    checked_native_provider,
-    engine_environment,
-)
+from code_reviewer_runner.dynamic_review.config import checked_native_provider
 from code_reviewer_runner.dynamic_review.passthrough.families import WireFamily
-
-from .egress_config import EgressSettings, apply_egress_environment
 
 # The one agent the run may use; the request names it and may name no other.
 IMPLEMENTER_AGENT = "implementer"
@@ -64,6 +62,7 @@ def build_engine_config(
     proxy_url: str,
     capability: str,
     instructions_path: str,
+    door_host: str | None = None,
 ) -> dict[str, Any]:
     """The whole engine configuration of one turn, as data the runner writes itself.
 
@@ -74,7 +73,9 @@ def build_engine_config(
     `headers`, would be the one way around it. The real key and the upstream address are not
     parameters of this function.
     """
-    checked_native_provider(provider, model_reference, family, proxy_url, capability)
+    checked_native_provider(
+        provider, model_reference, family, proxy_url, capability, door_host=door_host
+    )
     if not instructions_path.startswith("/"):
         raise ValueError("the instruction file must be an absolute path the runner wrote")
     return {
@@ -108,52 +109,39 @@ def build_engine_config(
     }
 
 
-_COMPACTION_FLAGS = ("OPENCODE_DISABLE_AUTOCOMPACT", "OPENCODE_DISABLE_PRUNE")
-# What the engine takes from the workspace's environment: git's guard, the identity and the config
-# that points git at the guard. PATH and HOME are composed here, and nothing else passes.
-_WORKSPACE_NAMES = (
-    "GIT_CONFIG_SYSTEM",
-    "GIT_CONFIG_GLOBAL",
-    "GIT_TERMINAL_PROMPT",
-    "CODE_REVIEWER_GUARD_CONF",
-    "GIT_AUTHOR_NAME",
-    "GIT_AUTHOR_EMAIL",
-    "GIT_COMMITTER_NAME",
-    "GIT_COMMITTER_EMAIL",
-)
+# The engine's environment (#745, step 4). Nothing here restricts what the agent may do or use; the
+# flags keep the engine from reaching for a network it does not have (the model list, an update, a
+# language server, a plugin package, a share link, telemetry), which would only make it wait.
+_ENGINE_FLAGS: dict[str, str] = {
+    "OPENCODE_PURE": "true",
+    "OPENCODE_DISABLE_DEFAULT_PLUGINS": "true",
+    "OPENCODE_DISABLE_MODELS_FETCH": "true",
+    "OPENCODE_DISABLE_AUTOUPDATE": "true",
+    "OPENCODE_DISABLE_LSP_DOWNLOAD": "true",
+    "OPENCODE_DISABLE_FFF": "true",
+    "OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER": "true",
+    "OPENCODE_DISABLE_EMBEDDED_WEB_UI": "true",
+    "OPENCODE_DISABLE_SHARE": "true",
+    "OPENCODE_DISABLE_TELEMETRY": "true",
+    "DO_NOT_TRACK": "1",
+}
+AGENT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
-def implementer_environment(
-    workspace: Mapping[str, str],
-    *,
-    home: str,
-    scratch_dir: str,
-    tools_dir: str | None,
-    egress: EgressSettings,
-) -> dict[str, str]:
-    """The environment of the engine, which its tools inherit (#764): the flags of the Dynamic
-    engine, the private home, a minimal `PATH` (the verified tools first, then the workspace's,
-    which holds the git of the guard), the git identity and guard variables of the workspace
-    (`GitWorkspace.agent_environment`) and the egress proxy variables (#763). Built from names,
-    never by inheriting: no credential of any kind, no `NO_PROXY`.
-
-    `workspace` must be the workspace's own environment (`GitWorkspace.agent_environment()`); only
-    the names above are taken from it."""
-    environment = engine_environment(
-        proxy_url="",
-        home=home,
-        scratch_dir=scratch_dir,
-        node_bin=None,
-        tools_dir=None,
-    )
-    # Compaction and pruning are the engine's own (see `build_engine_config`).
-    for name in _COMPACTION_FLAGS:
-        environment.pop(name, None)
-    # A variable of the review engine that names the proxy and that nothing here reads.
-    environment.pop("REVIEW_PROXY_URL", None)
-    path = workspace.get("PATH", "/usr/local/bin:/usr/bin:/bin")
-    environment["PATH"] = f"{tools_dir}:{path}" if tools_dir else path
-    for name in _WORKSPACE_NAMES:
-        if name in workspace:
-            environment[name] = workspace[name]
-    return apply_egress_environment(environment, egress)
+def implementer_environment(*, home: str, scratch_dir: str) -> dict[str, str]:
+    """The environment of the engine, which its tools inherit: the flags above, the agent's home and
+    scratch directory, `PATH` and the few variables that make tools behave in a place nobody
+    watches. Built from names, never by inheriting. It carries no credential of any kind; the
+    container has none to give."""
+    environment = dict(_ENGINE_FLAGS)
+    environment["HOME"] = home
+    environment["XDG_CONFIG_HOME"] = f"{home}/.config"
+    environment["XDG_DATA_HOME"] = f"{home}/.local/share"
+    environment["XDG_CACHE_HOME"] = f"{home}/.cache"
+    environment["XDG_STATE_HOME"] = f"{home}/.local/state"
+    environment["TMPDIR"] = scratch_dir
+    environment["CI"] = "1"
+    environment["NO_COLOR"] = "1"
+    environment["GIT_TERMINAL_PROMPT"] = "0"
+    environment["PATH"] = AGENT_PATH
+    return environment

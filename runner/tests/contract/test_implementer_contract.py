@@ -44,6 +44,8 @@ NEW_ERROR_CODES = (
     "git_write_not_granted",
     "implementer_engine_unavailable",
     "implementer_config_invalid",
+    "sandbox_unproven",
+    "sandbox_size_unsupported",
 )
 
 
@@ -209,6 +211,13 @@ def test_the_example_of_the_result_is_valid() -> None:
     assert _accepts("RunnerResult", without)
 
 
+def test_the_counts_of_the_branches_that_were_left_out_are_optional_and_accepted() -> None:
+    counted = _result()
+    counted["implementer"]["branchesDropped"] = {"invalid": 3, "overflow": 7}
+    assert _accepts("RunnerResult", counted)
+    assert _accepts("RunnerResult", _result())  # the example has none: still valid
+
+
 def _result_set(path: tuple[str, ...], value: Any) -> Callable[[Document], None]:
     def edit(result: Document) -> None:
         target = result["implementer"]
@@ -249,6 +258,15 @@ RESULT_REFUSALS: dict[str, Callable[[Document], None]] = {
     "unknown file status": _item_set("filesChanged", "status", "moved"),
     "pushed that is not a boolean": _result_set(("pushed",), "yes"),
     "pushed without a head commit": _pushed_without_head,
+    "dropped counts with an unknown field": _result_set(
+        ("branchesDropped",), {"invalid": 0, "overflow": 0, "somethingNew": 1}
+    ),
+    "dropped counts without the overflow": _result_set(("branchesDropped",), {"invalid": 0}),
+    "a negative dropped count": _result_set(("branchesDropped",), {"invalid": -1, "overflow": 0}),
+    "a dropped count that is not a whole number": _result_set(
+        ("branchesDropped",), {"invalid": 0, "overflow": 1.5}
+    ),
+    "dropped counts that are null": _result_set(("branchesDropped",), None),
 }
 
 
@@ -321,14 +339,12 @@ def test_the_names_the_worker_container_gets_are_the_names_of_the_file() -> None
 
     assert runner_job.IMPLEMENTER_ENVIRONMENT_NAMES == (
         "RUNNER_IMPLEMENTER_WORK_DIR",
-        "RUNNER_IMPLEMENTER_EGRESS_PORT",
-        "RUNNER_IMPLEMENTER_NETWORK",
+        "RUNNER_IMPLEMENTER_MODEL_DOOR",
+        "RUNNER_IMPLEMENTER_SANDBOX_PROOF",
+        "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB",
     )
     assert sorted(runner_job.IMPLEMENTER_ENVIRONMENT_NAMES) == sorted(
         defs["KnownImplementerEnvironmentName"]["enum"]
-    )
-    assert sorted(runner_job.IMPLEMENTER_NETWORK_MODES) == sorted(
-        defs["ImplementerNetworkMode"]["enum"]
     )
     assert runner_job.IMPLEMENTER_WORK_DIR == "/work"
 

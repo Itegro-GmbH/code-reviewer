@@ -175,6 +175,47 @@ function TaskInstruction({ task }: { task: ImplementerDetailView }) {
   );
 }
 
+/**
+ * What the setup script of the task's environment did (#818): how it ended and the end of its output. The output is a text from a
+ * program that ran repository code, cleaned and stripped of known secrets by the view, and rendered as text.
+ */
+function TaskSetup({ task }: { task: ImplementerDetailView }) {
+  const setup = task.environment?.setup;
+  if (setup === null || setup === undefined) return null;
+  const how =
+    setup.outcome === "ok"
+      ? "The script finished successfully"
+      : setup.outcome === "timed_out"
+        ? "The script ran out of time"
+        : setup.exitCode === null
+          ? "The script was stopped"
+          : setup.exitCode === 0
+            ? // Exit status 0 and still not ok: the script finished, but its result could not be kept. The last line of the output says why.
+              "The script finished, but its result could not be kept"
+            : `The script failed with exit status ${String(setup.exitCode)}`;
+  return (
+    <Section title="Setup script">
+      <p data-slot="run-setup-outcome" className="text-sm">
+        {how} after {setup.durationSeconds} s.
+      </p>
+      {setup.output === "" ? (
+        <p className="text-sm text-muted-foreground">
+          The script wrote no output.
+        </p>
+      ) : (
+        <pre
+          data-slot="run-setup-output"
+          tabIndex={0}
+          aria-label="End of the output of the setup script"
+          className="max-h-96 overflow-auto rounded-lg border border-border bg-background p-3 font-mono text-sm break-words whitespace-pre-wrap"
+        >
+          {setup.output}
+        </pre>
+      )}
+    </Section>
+  );
+}
+
 /** What the agent did: its own summary, the commits and the files. Every text here is from the agent or the repository. */
 function TaskResult({
   task,
@@ -221,6 +262,73 @@ function TaskResult({
           </p>
         )}
       </Section>
+      {task.branches.shown.length === 0 &&
+      task.branches.dropped.invalid === 0 &&
+      task.branches.dropped.overflow === 0 ? null : (
+        <Section title="Branches">
+          <p className="text-sm text-muted-foreground">
+            When the task ends, every branch of the agent&apos;s workspace is
+            pushed to GitHub. The commits and files below are those of the
+            task&apos;s own branch.
+          </p>
+          <ul data-slot="run-branches" className="flex flex-col gap-1 text-sm">
+            {task.branches.shown.map((branch) => (
+              <li
+                key={branch.name}
+                data-branch-result={branch.pushed ? "pushed" : "rejected"}
+                className="break-words"
+              >
+                <MaybeLink href={branch.url}>{branch.name}</MaybeLink>{" "}
+                {branch.shortSha === null ? null : (
+                  <code className="font-mono text-xs text-muted-foreground">
+                    {branch.shortSha}
+                  </code>
+                )}{" "}
+                <span className="text-xs text-muted-foreground">
+                  {branch.pushed ? "pushed" : "not pushed"}
+                  {branch.isTaskBranch ? " (the task's branch)" : ""}
+                </span>
+                {branch.reason === null ? null : (
+                  <span className="block text-xs text-muted-foreground">
+                    {branch.reason}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+          {task.branches.more > 0 ? (
+            <p className="text-xs text-muted-foreground">
+              and {task.branches.more} more
+            </p>
+          ) : null}
+          {task.branches.dropped.invalid > 0 ? (
+            <p
+              data-slot="run-branches-invalid"
+              className="text-xs text-muted-foreground"
+            >
+              {task.branches.dropped.invalid}{" "}
+              {task.branches.dropped.invalid === 1
+                ? "branch was"
+                : "branches were"}{" "}
+              not pushed because{" "}
+              {task.branches.dropped.invalid === 1 ? "its name" : "their names"}{" "}
+              cannot be pushed.
+            </p>
+          ) : null}
+          {task.branches.dropped.overflow > 0 ? (
+            <p
+              data-slot="run-branches-overflow"
+              className="text-xs text-muted-foreground"
+            >
+              {task.branches.dropped.overflow} further{" "}
+              {task.branches.dropped.overflow === 1
+                ? "branch was"
+                : "branches were"}{" "}
+              not pushed because only 50 branches are pushed.
+            </p>
+          ) : null}
+        </Section>
+      )}
       <Section title="Commits">
         {task.commits.shown.length === 0 ? (
           <p className="text-sm text-muted-foreground">
@@ -361,6 +469,19 @@ export function RunDetail({
       : [
           projectItem,
           { term: "Kind", description: JOB_KIND_NAMES[run.reviewKind] },
+          ...(task.environment === null
+            ? []
+            : [
+                {
+                  term: "Environment",
+                  description: (
+                    <span className="break-words">
+                      {task.environment.name} ({task.environment.vcpus} vCPU,{" "}
+                      {task.environment.memoryGb} GB memory)
+                    </span>
+                  ),
+                },
+              ]),
           ...(task.baseBranch === null
             ? []
             : [
@@ -483,6 +604,7 @@ export function RunDetail({
       ) : (
         <>
           <TaskInstruction task={task} />
+          <TaskSetup task={task} />
           <TaskResult task={task} run={run} />
         </>
       )}

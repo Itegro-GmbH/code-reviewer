@@ -6,23 +6,34 @@
 // `/dispatcher`, synced by Secret Sync), the meta of a Dispatcher deployment (so that the live deployment says which
 // pair it was started with) and the record of the build.
 
+/** The Sysbox verdict of the snapshot's proof (the record's `sysbox`). Only `proven` lets the Implementer start. */
+export type SysboxVerdict = "proven" | "unproven";
+
 export type SnapshotPair = {
   snapshotId: string;
   imageDigest: string;
   /** The commit the snapshot was built from: what the Worker image inputs are compared with. */
   commit: string;
+  /**
+   * The verdict of the snapshot's Sysbox proof (#745). It travels with the snapshot id, written and replaced with it,
+   * so that a `proven` of an older snapshot cannot stay behind a newer one. Whatever is not exactly `proven` (a pair
+   * from before this member existed, a value nobody can read) is `unproven`. Reviews never read it.
+   */
+  sysbox: SysboxVerdict;
 };
 
 export const PAIR_VARIABLES = {
   snapshotId: "SANDBOX_SNAPSHOT_ID",
   imageDigest: "SANDBOX_IMAGE_DIGEST",
   commit: "SANDBOX_SNAPSHOT_COMMIT",
+  sysbox: "SANDBOX_SYSBOX_PROOF",
 } as const;
 
 export const PAIR_META = {
   snapshotId: "sandboxSnapshotId",
   imageDigest: "sandboxImageDigest",
   commit: "sandboxSnapshotCommit",
+  sysbox: "sandboxSysboxProof",
 } as const;
 
 /**
@@ -32,7 +43,8 @@ export const PAIR_META = {
  *  - the files `runner/Dockerfile` copies out of the build context (a test parses its `COPY` lines and fails when one is
  *    missing here, and when this list names something the build does not copy), and the files that decide what the
  *    build context holds (`runner/Dockerfile.dockerignore`, the Dockerfile itself);
- *  - the script the snapshot's VM runs on every start (`docker/sandbox/vm-prepare.sh`);
+ *  - the scripts the snapshot's VM runs at its start (`docker/sandbox/vm-prepare.sh` on every VM, `docker/sandbox/sysbox-prepare.sh`
+ *    on the Implementer's);
  *  - the files of the build tool that decide what is installed and checked in the snapshot (the pinned Docker
  *    versions and the default build target live in `config.ts`; a test follows the imports of `pipeline.ts`).
  */
@@ -46,17 +58,17 @@ export const IMAGE_INPUT_PATHS = [
   "runner/uv.lock",
   "runner/.python-version",
   "runner/src",
+  "runner/docker/agent-init.sh",
   "runner/scripts/fetch_opencode.py",
   "runner/scripts/fetch_ripgrep.py",
   "runner/scripts/fetch_toolchain.py",
-  "runner/scripts/guard_matrix.sh",
-  "runner/guard/reference-transaction",
   "runner/opencode-pin.json",
   "runner/ripgrep-pin.json",
   "runner/git-pin.json",
   "runner/node-pin.json",
   "runner/pnpm-pin.json",
   "docker/sandbox/vm-prepare.sh",
+  "docker/sandbox/sysbox-prepare.sh",
   "dispatcher/src/snapshot/config.ts",
   "dispatcher/src/snapshot/pipeline.ts",
   "dispatcher/src/snapshot/probe-flags.ts",
@@ -74,16 +86,24 @@ export const isImageDigest = (value: unknown): value is string =>
 export const isCommit = (value: unknown): value is string =>
   typeof value === "string" && COMMIT.test(value);
 
-/** The pair, or undefined unless all three values are there and of the right shape. */
+/** The verdict of a value: `proven` only when it is exactly that, else `unproven` (never an error, never a guess). */
+export const sysboxVerdictOf = (value: unknown): SysboxVerdict =>
+  value === "proven" ? "proven" : "unproven";
+
+/**
+ * The pair, or undefined unless the snapshot id, the image digest and the commit are there and of the right shape. The
+ * verdict is read as `sysboxVerdictOf` does: a pair without one is a pair that is not proven.
+ */
 export function pairFromValues(
   snapshotId: unknown,
   imageDigest: unknown,
   commit: unknown,
+  sysbox?: unknown,
 ): SnapshotPair | undefined {
   if (!isSnapshotId(snapshotId) || !isImageDigest(imageDigest))
     return undefined;
   if (!isCommit(commit)) return undefined;
-  return { snapshotId, imageDigest, commit };
+  return { snapshotId, imageDigest, commit, sysbox: sysboxVerdictOf(sysbox) };
 }
 
 export function pairFrom(
@@ -93,6 +113,7 @@ export function pairFrom(
     variables[PAIR_VARIABLES.snapshotId],
     variables[PAIR_VARIABLES.imageDigest],
     variables[PAIR_VARIABLES.commit],
+    variables[PAIR_VARIABLES.sysbox],
   );
 }
 
@@ -101,6 +122,7 @@ export function pairToEnv(pair: SnapshotPair): Record<string, string> {
     [PAIR_VARIABLES.snapshotId]: pair.snapshotId,
     [PAIR_VARIABLES.imageDigest]: pair.imageDigest,
     [PAIR_VARIABLES.commit]: pair.commit,
+    [PAIR_VARIABLES.sysbox]: pair.sysbox,
   };
 }
 
@@ -109,6 +131,7 @@ export function pairToMeta(pair: SnapshotPair): Record<string, string> {
     [PAIR_META.snapshotId]: pair.snapshotId,
     [PAIR_META.imageDigest]: pair.imageDigest,
     [PAIR_META.commit]: pair.commit,
+    [PAIR_META.sysbox]: pair.sysbox,
   };
 }
 
@@ -121,7 +144,8 @@ export function pairsEqual(
     b !== undefined &&
     a.snapshotId === b.snapshotId &&
     a.imageDigest === b.imageDigest &&
-    a.commit === b.commit
+    a.commit === b.commit &&
+    a.sysbox === b.sysbox
   );
 }
 

@@ -49,6 +49,9 @@ export const CLAIM_FEATURES = [
   // holds a review to the smaller of that and `llm.maxCostUsd`. Sent only to a caller that named it; a caller with `cost_limit`
   // alone gets the smaller of the two in `llm.maxCostUsd`, one with neither gets neither (`job-cost-limit.ts`).
   "operator_cost_limit",
+  // #818: the runner reads `implementer.environment` and runs its setup script before the model. Sent only to a caller that named
+  // it; a turn whose environment has a script is refused (`implementer_engine_unavailable`, free) for a caller that did not.
+  "implementer_environment",
 ] as const;
 export type ClaimFeature = (typeof CLAIM_FEATURES)[number];
 
@@ -135,6 +138,8 @@ export type VmStartRequest = {
   vmName: string;
   startedAt: string;
   timeoutSeconds: number;
+  /** #818: the size of the VM in vCPUs; reported for a job of the kind `implementer` only. */
+  vcpus?: number;
 };
 
 /** #493: the name of a VM (`VmName`): the platform's, as the Dispatcher stops it. */
@@ -144,6 +149,8 @@ export const VM_STARTED_AT_PATTERN =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 /** #493: the range of `VmStartRequest.timeoutSeconds`. */
 export const VM_TIMEOUT_SECONDS_RANGE = { min: 60, max: 86_400 } as const;
+/** #818: the range of `VmStartRequest.vcpus`. */
+export const VM_VCPUS_RANGE = { min: 1, max: 64 } as const;
 
 /** #493: 200 from the report (`VmStartResponse`). `replayed`: the VM was known; nothing changed. */
 export type VmStartResponse = {
@@ -248,6 +255,10 @@ export const RUNNER_ERROR_CODES = [
   "git_write_not_granted",
   "implementer_engine_unavailable",
   "implementer_config_invalid",
+  "sandbox_unproven",
+  "sandbox_size_unsupported",
+  // #818: the setup script of the environment failed (a non-zero exit or its time limit) before the model was called.
+  "environment_setup_failed",
 ] as const;
 export type RunnerErrorCode = (typeof RUNNER_ERROR_CODES)[number];
 
@@ -324,15 +335,12 @@ export type ReviewKind = (typeof RUNNER_REVIEW_KINDS)[number];
  */
 export const IMPLEMENTER_ENVIRONMENT_NAMES = [
   "RUNNER_IMPLEMENTER_WORK_DIR",
-  "RUNNER_IMPLEMENTER_EGRESS_PORT",
-  "RUNNER_IMPLEMENTER_NETWORK",
+  "RUNNER_IMPLEMENTER_MODEL_DOOR",
+  "RUNNER_IMPLEMENTER_SANDBOX_PROOF",
+  "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB",
 ] as const;
 export type ImplementerEnvironmentName =
   (typeof IMPLEMENTER_ENVIRONMENT_NAMES)[number];
-
-/** #746: what the Worker of an implementer job can reach besides the model proxy and its repository (`ImplementerNetworkMode`). */
-export const IMPLEMENTER_NETWORK_MODES = ["registries", "none"] as const;
-export type ImplementerNetworkMode = (typeof IMPLEMENTER_NETWORK_MODES)[number];
 
 /** #746: the directory of the work volume (`RUNNER_IMPLEMENTER_WORK_DIR`). */
 export const IMPLEMENTER_WORK_DIR = "/work";
@@ -497,6 +505,8 @@ export type SplitClaimResponse = {
     reviewKind: ReviewKind;
     leaseExpiresAt: string;
     heartbeatIntervalSeconds: number;
+    /** #818: the VM size the turn's environment asks for; only for a turn that has an environment. */
+    vcpus?: number;
   };
 };
 
@@ -661,11 +671,15 @@ export const IMPLEMENTER_FILE_STATUSES = [
 ] as const;
 export type ImplementerFileStatus = (typeof IMPLEMENTER_FILE_STATUSES)[number];
 
+/** The longest end of a setup script's output a result carries (`ImplementerSetupResult`), in characters. */
+export const IMPLEMENTER_SETUP_OUTPUT_CHARS = 8192;
+
 /** The bounds of `ImplementerResult`, the same as the schema. */
 export const IMPLEMENTER_RESULT_LIMITS = {
   commits: 200,
   filesChanged: 500,
   summaryChars: 8192,
+  branches: 50,
 } as const;
 
 /**
@@ -683,17 +697,47 @@ export const IMPLEMENTER_MAX_BODY_BYTES =
     (IMPLEMENTER_RESULT_LIMITS.commits * (500 + 48) +
       IMPLEMENTER_RESULT_LIMITS.filesChanged * (4096 + 32) +
       IMPLEMENTER_RESULT_LIMITS.summaryChars +
+      IMPLEMENTER_RESULT_LIMITS.branches * (255 + 160) +
+      IMPLEMENTER_SETUP_OUTPUT_CHARS +
       (8192 + 2000));
+
+/** What became of one local branch of the agent's repository at the end of a turn (`branches` of `ImplementerResult`). */
+export type ImplementerBranchResult = {
+  name: string;
+  head: string | null;
+  result: "pushed" | "rejected";
+  /** A word of the runner (`non_fast_forward`, `remote_rejected`, ...); null for a pushed branch. */
+  reason: string | null;
+};
+
+/** #818: what the setup script of the turn's environment did (`ImplementerSetupResult`); `output` is the scrubbed end of its output. */
+export type ImplementerSetupResult = {
+  ok: boolean;
+  /** The exit status; null when the script did not end by itself (its time limit, a signal). */
+  exitCode: number | null;
+  timedOut: boolean;
+  durationSeconds: number;
+  output: string;
+};
 
 /** #746: `ImplementerResult` in the contract: facts the runner measured in the repository, and a plain-text summary. */
 export type ImplementerResult = {
   baseCommit: string;
   headCommit: string | null;
   pushed: boolean;
+  /** Every branch the runner dealt with at the end of the turn; absent in the result of an older runner (none). */
+  branches?: ImplementerBranchResult[];
+  /**
+   * The local branches that are in no entry of `branches`: `invalid` those whose name cannot be pushed, `overflow` the valid ones beyond
+   * the limit. Absent in the result of an older runner (none).
+   */
+  branchesDropped?: { invalid: number; overflow: number };
   commits: { sha: string; subject: string }[];
   filesChanged: { path: string; status: ImplementerFileStatus }[];
   summary: string;
   opencode: { sessionId: string; version: string } | null;
+  /** #818: present when a setup script ran. */
+  setup?: ImplementerSetupResult;
 };
 
 export type CompleteRequest = { leaseToken: string; result: RunnerResult };

@@ -123,6 +123,8 @@ describe("the migrations of both epics", () => {
       "20261025140000_add_users_posthog_identity",
       "20261030140000_create_implementer_sessions_and_turns",
       "20261030190000_widen_review_kind_checks_for_implementer",
+      "20261102140000_create_implementer_environments",
+      "20261102150000_add_implementer_turn_environment",
     ]);
   });
 
@@ -167,6 +169,7 @@ describe("starting the database", () => {
       "billing_webhook_events",
       "billing_workspace_settings",
       "email_verification_tokens",
+      "implementer_environments",
       "implementer_sessions",
       "implementer_turns",
       "installation_link_requests",

@@ -4,11 +4,14 @@ import { describe, expect, it } from "vitest";
 import { FakeSandboxService } from "../../../fakes/vercel-sandbox/service.ts";
 import { createLogger } from "../core/logger.ts";
 import {
+  AGENT_IMAGE_ID,
   IMAGE_ID,
   MANIFEST_HASH,
   MANIFEST_OK,
   OTHER_IMAGE_ID,
   PROBE_OK,
+  SYSBOX_PREPARE_TEXT,
+  SYSBOX_PROBE_OK,
   VM_PREPARE_TEXT,
   happyFake,
   testConfig,
@@ -69,11 +72,13 @@ describe("the golden snapshot pipeline", () => {
       `create:${builder}`,
       `exec:${STEPS.recordBaseManifest}`,
       `exec:${STEPS.installDocker}`,
+      `exec:${STEPS.installSysbox}`,
       `exec:${STEPS.writeDaemonConfig}`,
       `exec:${STEPS.installHostScripts}`,
       `exec:${STEPS.startDaemon}`,
       `exec:${STEPS.buildImage}`,
       `exec:${STEPS.inspectImage}`,
+      `exec:${STEPS.inspectAgentImage}`,
       `exec:${STEPS.cleanBuilder}`,
       `exec:${STEPS.checkNoContainers}`,
       `exec:${STEPS.stopDaemon}`,
@@ -82,22 +87,27 @@ describe("the golden snapshot pipeline", () => {
       `exec:${STEPS.scanFilesystem}`,
       `exec:${STEPS.startDaemonCheck}`,
       `exec:${STEPS.inspectRestoredImage}`,
+      `exec:${STEPS.inspectRestoredAgentImage}`,
       `exec:${STEPS.probe}`,
+      `exec:${STEPS.sysboxProbe}`,
       `destroy:${check}`,
     ]);
     expect(fake.events.filter((event) => event.startsWith("write:"))).toEqual([
       `write:${PATHS.daemonJson}`,
       `write:${PATHS.vmPrepare}`,
+      `write:${PATHS.sysboxPrepare}`,
       `write:${PATHS.context}`,
     ]);
     expect(record).toEqual({
       version: 1,
       snapshotId: [...fake.snapshots.keys()][0],
       imageDigest: IMAGE_ID,
+      agentImageDigest: AGENT_IMAGE_ID,
       builtAt: "2026-10-15T18:00:00.000Z",
       region: "fra1",
       target: "sandbox",
       commit: "0123456789abcdef0123456789abcdef01234567",
+      sysbox: "proven",
     });
     expect(fake.liveSnapshotIds()).toEqual([record.snapshotId]);
   });
@@ -374,6 +384,7 @@ describe("the golden snapshot pipeline", () => {
     const fake = new FakeSandboxService({ snapshotRegions: ["iad1"] });
     fake.onExec(STEPS.recordBaseManifest, { stdout: MANIFEST_OK });
     fake.onExec(STEPS.inspectImage, { stdout: `${IMAGE_ID}\n` });
+    fake.onExec(STEPS.inspectAgentImage, { stdout: `${AGENT_IMAGE_ID}\n` });
     const error = await failure(run(fake).result);
     expect(error.code).toBe("snapshot_region_mismatch");
     expectNothingPublished(fake);
@@ -571,6 +582,143 @@ describe("the golden snapshot pipeline", () => {
     });
   });
 
+  // Sysbox is for the Implementer only (plan implementer-sandbox, step 2). The snapshot is shared by every kind of job, so
+  // nothing Sysbox does may stop it: reviews must keep getting their snapshot, as #797 asks of the Implementer's proof.
+  describe("Sysbox, which never holds back the snapshot", () => {
+    const BUILDER = "code-reviewer-golden-builder-20261015T180000Z";
+    const CHECK = "code-reviewer-golden-check-20261015T180000Z";
+
+    it("installs it in the builder before the daemon configuration is written over the package's edit, and puts both host scripts in the snapshot", async () => {
+      const fake = happyFake();
+      await run(fake).result;
+
+      const events = fake.events;
+      expect(events.indexOf(`exec:${STEPS.installSysbox}`)).toBeGreaterThan(
+        events.indexOf(`exec:${STEPS.installDocker}`),
+      );
+      expect(events.indexOf(`exec:${STEPS.installSysbox}`)).toBeLessThan(
+        events.indexOf(`write:${PATHS.daemonJson}`),
+      );
+      const install = fake.callsFor(STEPS.installSysbox)[0];
+      expect(install?.vm).toBe(BUILDER);
+      expect(install?.sudo).toBe(true);
+      expect(fake.vms.get(BUILDER)?.files.get(PATHS.sysboxPrepare)).toBe(
+        SYSBOX_PREPARE_TEXT,
+      );
+      expect(fake.vms.get(BUILDER)?.files.get(PATHS.vmPrepare)).toBe(
+        VM_PREPARE_TEXT,
+      );
+    });
+
+    it("proves it in the check VM after the Worker's own self-check and records it as proven", async () => {
+      const fake = happyFake();
+      const { record, warnings } = await run(fake).result;
+
+      const proof = fake.callsFor(STEPS.sysboxProbe)[0];
+      expect(proof?.vm).toBe(CHECK);
+      expect(proof?.sudo).toBe(true);
+      expect(fake.events.indexOf(`exec:${STEPS.sysboxProbe}`)).toBeGreaterThan(
+        fake.events.indexOf(`exec:${STEPS.probe}`),
+      );
+      expect(record.sysbox).toBe("proven");
+      expect(warnings).toEqual([]);
+    });
+
+    it("records the snapshot as unproven and warns, but still returns it, when the install fails", async () => {
+      const fake = happyFake();
+      fake.onExec(STEPS.installSysbox, {
+        exitCode: 41,
+        stderr: "the Sysbox package is not the pinned one\n",
+      });
+      const { result, lines } = run(fake);
+      const { record, warnings } = await result;
+
+      expect(record.sysbox).toBe("unproven");
+      expect(warnings).toEqual(["sysbox_install_failed"]);
+      expect(fake.liveSnapshotIds()).toEqual([record.snapshotId]);
+      // Nothing to prove: the check VM does not run the proof of a package that is not there.
+      expect(fake.callsFor(STEPS.sysboxProbe)).toHaveLength(0);
+      const warning = lines.find((line) =>
+        line.includes('"event":"sysbox_install_failed"'),
+      );
+      expect(warning).toContain("exit 41");
+      expect(warning).toContain("is not the pinned one");
+    });
+
+    it("records the snapshot as unproven and names the reasons when the proof finds a problem", async () => {
+      const fake = happyFake();
+      fake.onExec(STEPS.sysboxProbe, {
+        stdout:
+          "SYSBOX_PROBE ok boot\nSYSBOX_PROBE fail sysbox_inner_docker_failed\nSYSBOX_PROBE_DONE\n",
+      });
+      const { result, lines } = run(fake);
+      const { record, warnings } = await result;
+
+      expect(record.sysbox).toBe("unproven");
+      expect(warnings).toEqual(["sysbox_probe_failed"]);
+      expect(fake.liveSnapshotIds()).toEqual([record.snapshotId]);
+      expect(
+        lines.find((line) => line.includes('"event":"sysbox_probe_failed"')),
+      ).toContain("sysbox_inner_docker_failed");
+    });
+
+    it.each([
+      ["a proof that leaks", "SYSBOX_PROBE fail sysbox_network_not_isolated"],
+      [
+        "a proof that could not pull its image",
+        "SYSBOX_PROBE fail sysbox_probe_image_unavailable",
+      ],
+      ["a boot step that failed", "SYSBOX_PROBE fail sysbox_mgr_not_ready"],
+    ])("does not take %s for a pass", async (_name, line) => {
+      const fake = happyFake();
+      fake.onExec(STEPS.sysboxProbe, {
+        stdout: `${line}\nSYSBOX_PROBE_DONE\n`,
+      });
+      const { record } = await run(fake).result;
+      expect(record.sysbox).toBe("unproven");
+    });
+
+    it("does not take a proof that did not finish for a pass", async () => {
+      const fake = happyFake();
+      fake.onExec(STEPS.sysboxProbe, { stdout: "SYSBOX_PROBE ok boot\n" });
+      const { record, warnings } = await run(fake).result;
+      expect(record.sysbox).toBe("unproven");
+      expect(warnings).toEqual(["sysbox_probe_failed"]);
+    });
+
+    it("warns, and does not fail, when the proof command itself fails", async () => {
+      const fake = happyFake();
+      fake.onExec(STEPS.sysboxProbe, { exitCode: 124 });
+      const { record, warnings } = await run(fake).result;
+      expect(record.sysbox).toBe("unproven");
+      expect(warnings).toEqual(["sysbox_probe_failed"]);
+    });
+
+    it("still ends the run when it is cancelled during the Sysbox install", async () => {
+      const fake = happyFake();
+      const abort = new AbortController();
+      fake.onExec(STEPS.installSysbox, () => {
+        abort.abort();
+        throw new Error("The operation was aborted");
+      });
+      const error = await failure(
+        run(fake, testInput(), { signal: abort.signal }).result,
+      );
+      expect(error.code).toBe("cancelled");
+      expect(fake.vms.get(BUILDER)?.state).toBe("deleted");
+    });
+
+    it("leaves the Worker's own proof as strict as it was: a Sysbox that works does not excuse a missing engine", async () => {
+      const fake = happyFake();
+      fake.onExec(STEPS.probe, {
+        stdout: '{"version":1,"engines":["pr-agent"],"reasons":[]}\n',
+      });
+      const error = await failure(run(fake).result);
+      expect(error.code).toBe("engine_missing");
+      expectNothingPublished(fake);
+    });
+  });
+
   it("stops at the next step when the signal aborts, and cleans up", async () => {
     const fake = happyFake();
     const abort = new AbortController();
@@ -730,10 +878,15 @@ describe("retention in the pipeline", () => {
     const fake = new RefusingList();
     fake.onExec(STEPS.recordBaseManifest, { stdout: MANIFEST_OK });
     fake.onExec(STEPS.inspectImage, { stdout: `${IMAGE_ID}\n` });
+    fake.onExec(STEPS.inspectAgentImage, { stdout: `${AGENT_IMAGE_ID}\n` });
     fake.onExec(STEPS.checkNoContainers, { stdout: "" });
     fake.onExec(STEPS.scanFilesystem, { stdout: "SCAN_DONE\n" });
     fake.onExec(STEPS.inspectRestoredImage, { stdout: `${IMAGE_ID}\n` });
+    fake.onExec(STEPS.inspectRestoredAgentImage, {
+      stdout: `${AGENT_IMAGE_ID}\n`,
+    });
     fake.onExec(STEPS.probe, { stdout: PROBE_OK });
+    fake.onExec(STEPS.sysboxProbe, { stdout: SYSBOX_PROBE_OK });
     const old = fake.seedBuilder(
       "code-reviewer-golden-builder-20260101T000000Z",
       1,

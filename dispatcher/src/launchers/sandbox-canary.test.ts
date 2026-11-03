@@ -419,7 +419,7 @@ describe("a Sandbox-Launcher with the probe endpoint over its canary VM (#479)",
 // #765: a deployment that serves the Implementer has the canary prove it, in a container of the Implementer's profile.
 describe("the canary VM of a deployment that serves the Implementer (#765)", () => {
   const WITH_IMPLEMENTER = `${JSON.stringify({ version: 1, engines: ["pr-agent", "opencode", "implementer"], reasons: [] })}\n`;
-  const WITHOUT_IMPLEMENTER = `${JSON.stringify({ version: 1, engines: ["pr-agent", "opencode"], reasons: ["implementer_work_dir_not_exec"] })}\n`;
+  const WITHOUT_IMPLEMENTER = `${JSON.stringify({ version: 1, engines: ["pr-agent", "opencode"], reasons: ["implementer_sysbox_missing"] })}\n`;
   const implementerCall = () =>
     service.execs.find((call) => call.label === "probe-implementer");
 
@@ -439,6 +439,9 @@ describe("the canary VM of a deployment that serves the Implementer (#765)", () 
       "image-id",
       "probe",
       "work-volume-dir",
+      "work-volume-reserve-image",
+      "work-volume-reserve-fs",
+      "work-volume-reserve-mount",
       "work-volume-mount",
       "work-volume-options",
       "work-volume-check",
@@ -450,10 +453,16 @@ describe("the canary VM of a deployment that serves the Implementer (#765)", () 
       /--mount type=volume,source=code-reviewer-work-canary-[a-z0-9]{8},target=\/work/,
     );
     expect(args).toContain("--read-only");
+    // #745: the Implementer's probe runs with the VM's Docker socket and the model door's name, as a job does: the
+    // check of the door's Docker (`implementer_docker_unavailable`) is part of the verdict.
+    expect(valuesOf(args, "--mount")).toContain(
+      "type=bind,source=/var/run/docker.sock,target=/run/docker.sock,readonly",
+    );
     expect(valuesOf(args, "--env")).toEqual(
       expect.arrayContaining([
         "RUNNER_IMPLEMENTER_WORK_DIR=/work",
-        "RUNNER_IMPLEMENTER_NETWORK=registries",
+        "RUNNER_IMPLEMENTER_MODEL_DOOR=docker",
+        "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB=2048",
       ]),
     );
     expect(args.at(-1)).toBe("probe");
@@ -476,7 +485,7 @@ describe("the canary VM of a deployment that serves the Implementer (#765)", () 
       "implementer",
     ]);
     expect(refused?.engines).toStrictEqual(["pr-agent", "opencode"]);
-    expect(refused?.reasons).toStrictEqual(["implementer_work_dir_not_exec"]);
+    expect(refused?.reasons).toStrictEqual(["implementer_sysbox_missing"]);
   });
 
   it("does not let a failure of the Dynamic container be hidden by the Implementer's", async () => {
@@ -784,17 +793,17 @@ describe("the flags of the Implementer's probe (#765)", () => {
     // The differences are only these, and each is the probe's own.
     expect(probe.at(-1)).toBe("probe");
     expect(job.at(-1)).not.toBe("probe");
-    expect(valuesOf(probe, "--memory")).toStrictEqual(["3g"]);
+    expect(valuesOf(probe, "--memory")).toStrictEqual(["768m"]);
     expect(valuesOf(probe, "--pids-limit")).toStrictEqual(["2048"]);
     expect(valuesOf(probe, "--sysctl").length).toBeGreaterThan(0);
   });
 
   it("follows the Implementer's configured container memory, not the Dynamic one", async () => {
-    const config = { container: { memory: { limit: "3500m" } } };
+    const config = { container: { memory: { limit: "2800m" } } };
     const probe = await probeArgs(config);
 
-    expect(valuesOf(probe, "--memory")).toStrictEqual(["3500m"]);
-    expect(valuesOf(probe, "--memory-reservation")).toStrictEqual(["2560m"]);
+    expect(valuesOf(probe, "--memory")).toStrictEqual(["2800m"]);
+    expect(valuesOf(probe, "--memory-reservation")).toStrictEqual(["512m"]);
     expect(valuesOf(probeCall()?.args ?? [], "--memory")).toStrictEqual([
       "1536m",
     ]);

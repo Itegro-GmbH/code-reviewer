@@ -926,3 +926,74 @@ describe("the Dispatcher core after the hand-over", () => {
     expect(releases()).toStrictEqual([]);
   });
 });
+
+describe("the size of a job (#818)", () => {
+  /** A core that serves the Implementer as well as the reviews. */
+  const buildAll = () =>
+    build(
+      {
+        engines: ["pr-agent", "opencode", "implementer"],
+        kinds: ["diff", "dynamic", "implementer"],
+      },
+      { engines: ["pr-agent", "opencode", "implementer"] },
+    );
+  // #818-T36
+  it("passes the size the App names for a job of the Implementer to the Launcher, and for nothing else", async () => {
+    const withSize = app.enqueue({ reviewKind: "implementer", vcpus: 6 });
+    const withoutSize = app.enqueue({ reviewKind: "implementer" });
+    const { core, launcher } = buildAll();
+
+    await handled(
+      core.handle({
+        appId: "reviewer",
+        jobId: withSize,
+        reviewKind: "implementer",
+      }),
+    );
+    await handled(
+      core.handle({
+        appId: "reviewer",
+        jobId: withoutSize,
+        reviewKind: "implementer",
+      }),
+    );
+
+    expect(launcher.launches[0]?.vcpus).toBe(6);
+    expect(launcher.launches[1]?.vcpus).toBeUndefined();
+  });
+
+  // #818-T36
+  it.each(["diff", "dynamic"] as const)(
+    "never hands a %s job's size to the Launcher, even when the App's answer names one",
+    async (reviewKind) => {
+      const jobId = app.enqueue({ reviewKind, vcpus: 8 });
+      const { core, launcher } = buildAll();
+
+      await handled(core.handle({ appId: "reviewer", jobId, reviewKind }));
+
+      expect(launcher.launches).toHaveLength(1);
+      expect(launcher.launches[0]?.vcpus).toBeUndefined();
+    },
+  );
+
+  // #818-T36
+  it.each([
+    ["text", "4"],
+    ["a fraction", 2.5],
+    ["null", null],
+    ["an object", {}],
+  ])(
+    "treats a claim answer whose size is %s as an answer it cannot read: nothing is launched",
+    async (_name, vcpus) => {
+      const jobId = app.enqueue({ reviewKind: "implementer", vcpus });
+      const { core, launcher } = buildAll();
+
+      const result = await handled(
+        core.handle({ appId: "reviewer", jobId, reviewKind: "implementer" }),
+      );
+
+      expect(result.outcome).not.toBe("started");
+      expect(launcher.launches).toHaveLength(0);
+    },
+  );
+});

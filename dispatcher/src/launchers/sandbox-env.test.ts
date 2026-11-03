@@ -9,6 +9,7 @@ import { IMPLEMENTER_PROBE_EXTRA_SECONDS } from "./sandbox-canary.ts";
 import {
   LAUNCH_STEPS_SECONDS,
   SANDBOX_HANDOVER_SECONDS,
+  IMPLEMENTER_LAUNCH_EXTRA_SECONDS,
   WORK_VOLUME_STEPS_SECONDS,
 } from "./sandbox.ts";
 import { recordingLogger } from "../test-support/harness.ts";
@@ -78,6 +79,45 @@ describe("the Sandbox-Launcher's configuration from the environment", () => {
       await launcher.capabilities(new AbortController().signal),
     ).toStrictEqual(["pr-agent", "opencode"]);
   });
+
+  // #745 step 4: the verdict of the snapshot's record is optional and read only by the Implementer
+  it.each(["proven", "unproven", undefined])(
+    "accepts the snapshot's Sysbox verdict %s",
+    (verdict) => {
+      const sandbox = sandboxFromEnvironment(
+        configured(
+          verdict === undefined ? {} : { SANDBOX_SYSBOX_PROOF: verdict },
+        ),
+        never,
+      );
+      expect(
+        sandbox.launcher({
+          settings: loadSettings(BASE),
+          logger: recordingLogger(),
+          background: () => undefined,
+        }),
+      ).not.toBe(noLauncher);
+    },
+  );
+
+  // #745-T02: reviews never read the verdict, so whatever it holds, the Dispatcher starts; the Implementer's gate then
+  // sees `unproven` for everything but exactly `proven`
+  it.each(["probably", "Proven", "proven ", "unrecorded", ""])(
+    "starts with the Sysbox verdict %j and does not take it for proven",
+    (verdict) => {
+      const sandbox = sandboxFromEnvironment(
+        configured({ SANDBOX_SYSBOX_PROOF: verdict }),
+        never,
+      );
+      expect(
+        sandbox.launcher({
+          settings: loadSettings(BASE),
+          logger: recordingLogger(),
+          background: () => undefined,
+        }),
+      ).not.toBe(noLauncher);
+    },
+  );
 
   // #329 (additional): the record of the golden snapshot pipeline (#330) is what these variables hold
   it("accepts the snapshot id and the image id of a golden snapshot record as they are", () => {
@@ -424,12 +464,16 @@ describe("the Sandbox-Launcher's configuration from the environment", () => {
   });
 
   // #760-T10
-  it("fits the steps of an implementer launch in the launch deadline of the core, with the Worker's hand-over", () => {
-    expect(
+  it("fits the steps of an implementer launch in the launch deadline of the core, with the Worker's hand-over and a margin of 5 seconds", () => {
+    const steps =
       SANDBOX_HANDOVER_SECONDS +
-        LAUNCH_STEPS_SECONDS +
-        WORK_VOLUME_STEPS_SECONDS,
-    ).toBeLessThanOrEqual(loadSettings(BASE).core.launchDeadlineSeconds);
+      LAUNCH_STEPS_SECONDS +
+      IMPLEMENTER_LAUNCH_EXTRA_SECONDS;
+    // 20 + 150 + 124 = 294 of 300: the run-directory steps (3 x 3 s) and the IPv6 step (3 s) have their 3 s because the eight
+    // steps of the work volume have 9 s each. A step that grows must take its seconds from another ceiling.
+    expect(steps).toBeLessThanOrEqual(
+      loadSettings(BASE).core.launchDeadlineSeconds - 5,
+    );
   });
 
   // #765-D1, D2: the probe that `POST /probe` runs is built from the environment of the deployment.

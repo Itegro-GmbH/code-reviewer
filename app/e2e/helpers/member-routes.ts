@@ -100,6 +100,8 @@ export function addressesOf(
         route.pattern === "/api/w/:workspace/llm-key-mode" ||
         route.pattern.startsWith("/api/w/:workspace/implementer/") ||
         route.pattern === "/w/:workspace/implementer" ||
+        route.pattern === "/w/:workspace/environments" ||
+        route.pattern.startsWith("/api/w/:workspace/environments") ||
         route.pattern === "/w/:workspace/settings/billing",
     },
   ];
@@ -131,6 +133,7 @@ export function addressesOf(
             { value: "openrouter", refused: false },
             { value: "no-such-provider", refused: true },
           ];
+        case "environmentId":
         case "integrationId":
         case "invitationId":
         case "userId":

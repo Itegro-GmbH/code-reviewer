@@ -62,7 +62,7 @@ describe("the implementer profile the launcher ships", () => {
   });
 
   // #760-T01
-  it("differs from the default spec in exactly the work volume, the memory, the pids limit and the environment names", () => {
+  it("differs from the default spec in exactly the work volume, the Docker socket, the memory, the pids limit, the environment names and the list of forbidden keys", () => {
     const keys = new Set([
       ...Object.keys(WORKER_CONTAINER_SPEC),
       ...Object.keys(IMPLEMENTER_CONTAINER_SPEC),
@@ -79,22 +79,35 @@ describe("the implementer profile the launcher ships", () => {
 
     expect(differing.sort()).toStrictEqual([
       "allowedEnvironment",
+      "dockerSocket",
+      "forbiddenKeys",
       "memory",
       "pids",
       "workVolume",
     ]);
+    // #745: the VM's Docker socket, for the model door; the list of forbidden keys is the default's without it.
+    expect(IMPLEMENTER_CONTAINER_SPEC.dockerSocket).toStrictEqual({
+      source: "/var/run/docker.sock",
+      target: "/run/docker.sock",
+    });
+    expect(IMPLEMENTER_CONTAINER_SPEC.forbiddenKeys).toStrictEqual(
+      WORKER_CONTAINER_SPEC.forbiddenKeys.filter(
+        (key) => key !== "dockerSocket",
+      ),
+    );
     expect(IMPLEMENTER_CONTAINER_SPEC.pids).toStrictEqual({ limit: 2048 });
     expect(IMPLEMENTER_CONTAINER_SPEC.workVolume).toStrictEqual({
       path: "/work",
       options: ["rw", "nosuid", "nodev"],
       source: "named-volume",
     });
-    // The default list is kept whole; the profile adds the three names of the Implementer to it.
+    // The default list is kept whole; the profile adds the four names of the Implementer to it.
     expect(IMPLEMENTER_CONTAINER_SPEC.allowedEnvironment).toStrictEqual([
       ...WORKER_CONTAINER_SPEC.allowedEnvironment,
       "RUNNER_IMPLEMENTER_WORK_DIR",
-      "RUNNER_IMPLEMENTER_EGRESS_PORT",
-      "RUNNER_IMPLEMENTER_NETWORK",
+      "RUNNER_IMPLEMENTER_MODEL_DOOR",
+      "RUNNER_IMPLEMENTER_SANDBOX_PROOF",
+      "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB",
     ]);
   });
 
@@ -108,7 +121,6 @@ describe("the implementer profile the launcher ships", () => {
       "readOnly",
       "tmpfs",
       "network",
-      "forbiddenKeys",
       "overridable",
     ] as const)
       expect(IMPLEMENTER_CONTAINER_SPEC[key]).toStrictEqual(

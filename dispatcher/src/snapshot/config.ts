@@ -18,6 +18,20 @@ export type PipelineConfig = {
   /** Pinned apt versions: `docker.io=<version>*`. Another version on the base image fails the run. */
   dockerVersion: string;
   buildxVersion: string;
+  /**
+   * Sysbox (plan implementer-sandbox, step 2): the release that is installed, and the sha256 of its package. The package is
+   * downloaded from the project's GitHub release and refused unless it has this checksum.
+   */
+  sysboxVersion: string;
+  sysboxSha256: string;
+  /**
+   * The Implementer's agent image (plan implementer-sandbox, step 4): the second target of the same Dockerfile, built into
+   * the snapshot beside the Worker image and tagged here. The snapshot's Sysbox proof runs a container of it, so the proof
+   * is of the image the Implementer ships and needs no pull; its Docker binaries come from the digest-pinned \`docker:dind\`
+   * stage of the Dockerfile.
+   */
+  agentTarget: string;
+  agentImageTag: string;
   /** In the commit's tarball, and the build target of that Dockerfile. */
   dockerfile: string;
   target: string;
@@ -48,6 +62,12 @@ export const DEFAULT_CONFIG: PipelineConfig = {
   // something nobody tested.
   dockerVersion: "29.1.3",
   buildxVersion: "0.30.1",
+  // Sysbox 0.7.1 (sysbox-ce_0.7.1.linux_amd64.deb) as measured on the platform VM; its digest is the one GitHub shows for the asset.
+  sysboxVersion: "0.7.1",
+  sysboxSha256:
+    "9d6d5484f980d0a17f86c492c1262015c2afb66280bdb97215b79fde6a0261c5",
+  agentTarget: "agent",
+  agentImageTag: "code-reviewer-agent:golden",
   dockerfile: "runner/Dockerfile",
   target: "sandbox",
   imageTag: "code-reviewer-worker:golden",
@@ -59,6 +79,7 @@ export const DEFAULT_CONFIG: PipelineConfig = {
 };
 
 const VERSION = /^\d+\.\d+(\.\d+){0,2}$/;
+const SHA256 = /^[0-9a-f]{64}$/;
 const PATH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/;
 const TARGET = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 const IMAGE_TAG = /^[a-z0-9][a-z0-9._/-]{0,62}(:[A-Za-z0-9._-]{1,64})?$/;
@@ -124,6 +145,10 @@ export function resolveConfig(
     ),
     dockerVersion: text("dockerVersion", merged.dockerVersion, VERSION),
     buildxVersion: text("buildxVersion", merged.buildxVersion, VERSION),
+    sysboxVersion: text("sysboxVersion", merged.sysboxVersion, VERSION),
+    sysboxSha256: text("sysboxSha256", merged.sysboxSha256, SHA256),
+    agentTarget: text("agentTarget", merged.agentTarget, TARGET),
+    agentImageTag: text("agentImageTag", merged.agentImageTag, IMAGE_TAG),
     dockerfile: text("dockerfile", merged.dockerfile, PATH),
     target: text("target", merged.target, TARGET),
     imageTag: text("imageTag", merged.imageTag, IMAGE_TAG),

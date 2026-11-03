@@ -35,6 +35,7 @@ import { createBillingTopUpIntentsRepository } from "./billing-topup-intents-rep
 import { createBillingProfilesRepository } from "./billing-profiles-repository.ts";
 import { createBillingNotificationsRepository } from "./billing-notifications-repository.ts";
 import { createBillingWorkspaceSettingsRepository } from "./billing-workspace-settings-repository.ts";
+import { createImplementerEnvironmentsRepository } from "./implementer-environments-repository.ts";
 import { createImplementerRepository } from "./implementer-repository.ts";
 
 const SHA = "b".repeat(40);
@@ -64,6 +65,7 @@ function reposOf(db: Kysely<Database>, workspaceId: string) {
     limits: createBillingWorkspaceSettingsRepository(db, workspaceId),
     notifications: createBillingNotificationsRepository(db, workspaceId),
     implementer: createImplementerRepository(db, workspaceId),
+    environments: createImplementerEnvironmentsRepository(db, workspaceId),
     erasure: createWorkspaceErasureRepository(db, workspaceId),
   };
 }
@@ -375,7 +377,20 @@ async function seed(
             return turnJob.job.id;
           },
         );
+  // An environment of the Implementer (#818) in every workspace, under the same name: the other workspace's is there to be read,
+  // changed and deleted.
+  const created = await repos.environments.create(
+    {
+      name: "Standard tools",
+      vcpus: 4,
+      setupScript: `echo ${tag}`,
+      createdBy: `user-${tag}`,
+    },
+    50,
+  );
+  if (!created.ok) throw new Error("seeding failed");
   return {
+    environment: created.environment,
     implementer: started,
     topUpIntentId: topUpIntent.id,
     unpagedIntentId: unpagedIntent.id,
@@ -528,6 +543,12 @@ async function rowsOf(db: Kysely<Database>, workspaceId: string) {
       .execute(),
     implementerTurns: await db
       .selectFrom("implementer_turns")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("id")
+      .execute(),
+    implementerEnvironments: await db
+      .selectFrom("implementer_environments")
       .selectAll()
       .where("workspace_id", "=", workspaceId)
       .orderBy("id")
@@ -1703,6 +1724,55 @@ const CASES: Case[] = [
         ),
       ),
     expectAnswer: notFound("IMPLEMENTER_REPOSITORY_NOT_FOUND"),
+  },
+  // implementer environments (#818-T04): B's environments are not A's to read, change or delete
+  {
+    name: "environments.list",
+    run: (a) => a.environments.list(),
+    expectAnswer: (answer, a) => expect(answer).toEqual([a.environment]),
+  },
+  {
+    name: "environments.listSummaries",
+    run: (a) => a.environments.listSummaries(),
+    expectAnswer: (answer, a) =>
+      expect(answer).toEqual([
+        {
+          id: a.environment.id,
+          name: a.environment.name,
+          vcpus: a.environment.vcpus,
+          hasScript: true,
+        },
+      ]),
+  },
+  {
+    name: "environments.get",
+    run: (a, b) => a.environments.get(b.environment.id),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "environments.create",
+    run: (a) =>
+      a.environments.create(
+        { name: "Another", vcpus: 2, setupScript: "", createdBy: "user-a" },
+        50,
+      ),
+    expectAnswer: (answer) => expect(answer).toMatchObject({ ok: true }),
+  },
+  {
+    name: "environments.update",
+    run: (a, b) =>
+      a.environments.update(b.environment.id, {
+        name: "hijacked",
+        vcpus: 8,
+        setupScript: "hijacked",
+      }),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ ok: false, reason: "not_found" }),
+  },
+  {
+    name: "environments.remove",
+    run: (a, b) => a.environments.remove(b.environment.id),
+    expectAnswer: (answer) => expect(answer).toBe(false),
   },
   // runs
   {

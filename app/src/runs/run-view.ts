@@ -12,6 +12,7 @@ import { checkCallTrace } from "../runner-api/call-trace.ts";
 import {
   IMPLEMENTER_FILE_STATUSES,
   IMPLEMENTER_RESULT_LIMITS,
+  IMPLEMENTER_SETUP_OUTPUT_CHARS,
   STOPPED_EARLY_REASONS,
   type ImplementerFileStatus,
   type RunnerCallTrace,
@@ -77,6 +78,25 @@ export type ImplementerRowView = {
   branchUrl: string | null;
 };
 
+/** What the setup script of a task's environment did (#818): shown only when the result carries it. */
+export type ImplementerSetupView = {
+  /** `timed_out`: it did not end by itself within its time limit; `failed`: a non-zero exit status or a signal. */
+  outcome: "ok" | "failed" | "timed_out";
+  exitCode: number | null;
+  durationSeconds: number;
+  /** The end of its output, cleaned and stripped of known secrets. Untrusted text, rendered as text. */
+  output: string;
+};
+
+/** The environment a task started with, as the turn copied it (#818). */
+export type ImplementerEnvironmentView = {
+  /** Untrusted text from a member of the workspace. */
+  name: string;
+  vcpus: number;
+  memoryGb: number;
+  setup: ImplementerSetupView | null;
+};
+
 /** One commit of a task, as the run shows it. */
 export type ImplementerCommitView = {
   shortSha: string;
@@ -92,6 +112,24 @@ export type ImplementerFileView = {
   status: ImplementerFileStatus;
 };
 
+/**
+ * One branch of the agent's repository at the end of a turn: the runner pushes all local branches, so there can be more than the
+ * one the form named. A pushed branch has a link; a rejected one has the sentence for its reason.
+ */
+export type ImplementerBranchView = {
+  /** Cleaned and cut. Untrusted text. */
+  name: string;
+  /** `<repository url>/tree/<branch>` for a pushed branch on a github.com repository, otherwise null. */
+  url: string | null;
+  /** The tip the runner took over, shortened; null when it could not be read. */
+  shortSha: string | null;
+  pushed: boolean;
+  /** Why a branch was not pushed, in a sentence; null for a pushed branch. */
+  reason: string | null;
+  /** The branch the form named. */
+  isTaskBranch: boolean;
+};
+
 /** What the detail page shows of a task besides the facts every run has. Built only from the fields listed here. */
 export type ImplementerDetailView = ImplementerRowView & {
   /** The branch the new one started from; null when the turn of the job cannot be read. Untrusted text. */
@@ -102,6 +140,15 @@ export type ImplementerDetailView = ImplementerRowView & {
   summary: string | null;
   commits: { shown: ImplementerCommitView[]; more: number };
   files: { count: number; shown: ImplementerFileView[]; more: number };
+  /** Every branch the runner pushed or tried to push when the turn ended, the task's branch first. Empty when none. */
+  branches: {
+    shown: ImplementerBranchView[];
+    more: number;
+    /** Local branches that are in no entry: their name cannot be pushed, or they are beyond the limit of 50. */
+    dropped: { invalid: number; overflow: number };
+  };
+  /** The environment the task started with; null for a task without one (the standard). */
+  environment: ImplementerEnvironmentView | null;
   /** The last commit on the branch after the turn, when the turn pushed. */
   head: { shortSha: string; url: string | null } | null;
   /** For a task that did not succeed but pushed work: "N commits were pushed to <branch>."; null otherwise. */
@@ -124,6 +171,8 @@ export type ImplementerRowSource = {
 export type ImplementerDetailSource = ImplementerRowSource & {
   baseBranch: string;
   instruction: string;
+  /** The environment the turn copied when it started (#818); absent or null for a task without one. */
+  environment?: { name: string; vcpus: number } | null;
 };
 
 /**
@@ -319,17 +368,59 @@ const SHORT_SHA_CHARS = 7;
 /** How much of a task the detail page lists before it says "and N more" or shows an expander. */
 const MAX_LISTED_COMMITS = 20;
 const MAX_LISTED_FILES = 20;
+const MAX_LISTED_BRANCHES = IMPLEMENTER_RESULT_LIMITS.branches;
 const INSTRUCTION_PREVIEW_CHARS = 500;
 /** The most characters of an instruction the page can hold (the submit's own limit). */
 const MAX_INSTRUCTION_CHARS = 20_000;
 const MAX_SUBJECT_CHARS = 500;
 const MAX_PATH_CHARS = 300;
 
+/**
+ * The sentence for the word the runner gave for a branch it did not push. Every word has one; a word this version does not know
+ * (a newer runner) gets the plain sentence, so a result is never lost for an unknown reason.
+ */
+const BRANCH_REASONS: Readonly<Record<string, string>> = {
+  non_fast_forward:
+    "The branch already exists on GitHub with other history. The Implementer never overwrites a branch.",
+  remote_rejected:
+    "GitHub refused this branch, for example because of a rule on the repository.",
+  workflows_not_allowed:
+    "GitHub does not let this app change workflow files under .github/workflows, so the branch was not accepted.",
+  provider_refused:
+    "GitHub did not accept the access for this push, so the branch was not saved.",
+  provider_unavailable:
+    "GitHub could not be reached or did not take the push, so the branch was not saved.",
+  provider_error:
+    "GitHub answered the push with an error that is not a refusal of the access, for example because the push was too large, so the branch was not saved.",
+  timed_out:
+    "The push or the reading of this branch took too long and was stopped. Whether GitHub received anything is not known: check the branch on GitHub.",
+  unreadable: "The branch could not be read from the workspace.",
+  not_a_commit: "The branch does not point at a commit.",
+  out_of_time: "There was no time left to push this branch.",
+  out_of_space:
+    "The disk of the workspace had no room left to take this branch over, so it was not pushed.",
+  excluded: "This branch is not pushed.",
+};
+
+export function describeBranchReason(reason: string | null): string {
+  return reason !== null && Object.hasOwn(BRANCH_REASONS, reason)
+    ? (BRANCH_REASONS[reason] ?? "The branch was not pushed.")
+    : "The branch was not pushed.";
+}
+
 type StoredImplementerResult = {
   /** The result carries an `implementer` block at all: a result without one says nothing of the work, and is not "no work". */
   reported: boolean;
   headCommit: string | null;
   pushed: boolean;
+  branches: {
+    name: string;
+    head: string | null;
+    pushed: boolean;
+    reason: string | null;
+  }[];
+  /** Local branches that are in no entry of `branches` (a result of an older runner has none). */
+  branchesDropped: { invalid: number; overflow: number };
   commits: { sha: string; subject: string }[];
   files: { path: string; status: ImplementerFileStatus }[];
   summary: string | null;
@@ -339,6 +430,8 @@ const EMPTY_IMPLEMENTER_RESULT: StoredImplementerResult = {
   reported: false,
   headCommit: null,
   pushed: false,
+  branches: [],
+  branchesDropped: { invalid: 0, overflow: 0 },
   commits: [],
   files: [],
   summary: null,
@@ -346,6 +439,23 @@ const EMPTY_IMPLEMENTER_RESULT: StoredImplementerResult = {
 
 function isRecord(value: unknown): value is Record<string, JsonValue> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** A count of `branchesDropped` as stored: a whole number from 0 up, else 0 (the row may be older than the check). */
+function droppedCount(value: JsonValue | undefined): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : 0;
+}
+
+function readBranchesDropped(
+  value: JsonValue | undefined,
+): StoredImplementerResult["branchesDropped"] {
+  if (!isRecord(value)) return { invalid: 0, overflow: 0 };
+  return {
+    invalid: droppedCount(value.invalid),
+    overflow: droppedCount(value.overflow),
+  };
 }
 
 /**
@@ -373,6 +483,27 @@ function readStoredImplementer(
       )
         commits.push({ sha: entry.sha, subject: entry.subject });
     }
+  const branches: StoredImplementerResult["branches"] = [];
+  if (Array.isArray(block.branches))
+    for (const entry of block.branches.slice(
+      0,
+      IMPLEMENTER_RESULT_LIMITS.branches,
+    )) {
+      if (
+        isRecord(entry) &&
+        typeof entry.name === "string" &&
+        (entry.result === "pushed" || entry.result === "rejected")
+      )
+        branches.push({
+          name: entry.name,
+          head:
+            typeof entry.head === "string" && COMMIT_SHA.test(entry.head)
+              ? entry.head
+              : null,
+          pushed: entry.result === "pushed",
+          reason: typeof entry.reason === "string" ? entry.reason : null,
+        });
+    }
   const files: StoredImplementerResult["files"] = [];
   if (Array.isArray(block.filesChanged))
     for (const entry of block.filesChanged.slice(
@@ -397,6 +528,8 @@ function readStoredImplementer(
         ? block.headCommit
         : null,
     pushed: block.pushed === true,
+    branches,
+    branchesDropped: readBranchesDropped(block.branchesDropped),
     commits,
     files,
     summary: typeof block.summary === "string" ? block.summary : null,
@@ -415,6 +548,88 @@ function implementerRowView(
   return {
     branch: display(cleanTaskLine(head(source.branch, 1000))),
     branchUrl: githubBranchUrl(source.repositoryUrl, source.branch),
+  };
+}
+
+const MAX_ENVIRONMENT_NAME_CHARS = 200;
+/**
+ * What the agent's container got at each size of the platform, in GB with one decimal, rounded down (`agentMemoryMb` of `contracts/environment-sizes.v1.json`); not imported from the
+ * Implementer: this module is below it. A test holds it to the file. A size not in the list (it cannot be started) shows 0.
+ */
+export const AGENT_MEMORY_GB: Readonly<Record<number, number>> = {
+  1: 0,
+  2: 2,
+  4: 5.8,
+  6: 9.5,
+  8: 13.2,
+};
+
+/** The setup block of a stored result, or null: read field by field like the rest, an entry that is not what the contract says is left out. */
+function readStoredSetup(result: JsonValue | null): {
+  ok: boolean;
+  exitCode: number | null;
+  timedOut: boolean;
+  durationSeconds: number;
+  output: string;
+} | null {
+  if (!isRecord(result) || !isRecord(result.implementer)) return null;
+  const setup = result.implementer.setup;
+  if (!isRecord(setup)) return null;
+  const { ok, exitCode, timedOut, durationSeconds, output } = setup;
+  if (
+    typeof ok !== "boolean" ||
+    typeof timedOut !== "boolean" ||
+    !(exitCode === null || Number.isSafeInteger(exitCode)) ||
+    !isCount(durationSeconds) ||
+    typeof output !== "string"
+  )
+    return null;
+  return {
+    ok,
+    exitCode: exitCode as number | null,
+    timedOut,
+    durationSeconds,
+    output,
+  };
+}
+
+/**
+ * The environment of a task (#818). The name is a text from a member of the workspace and the output a text from a program that
+ * ran repository code: both are cleaned, stripped of known secrets and cut, and rendered as text by the page. The output keeps
+ * its END (the end of a failing install is what says why).
+ */
+function environmentView(
+  source: ImplementerDetailSource | null,
+  result: JsonValue | null,
+  display: (text: string) => string,
+): ImplementerEnvironmentView | null {
+  const environment = source?.environment ?? null;
+  if (environment === null) return null;
+  const stored = readStoredSetup(result);
+  const setup: ImplementerSetupView | null =
+    stored === null
+      ? null
+      : {
+          outcome: stored.ok ? "ok" : stored.timedOut ? "timed_out" : "failed",
+          exitCode: stored.exitCode,
+          durationSeconds: stored.durationSeconds,
+          output: Array.from(
+            display(
+              cleanTaskText(
+                stored.output.slice(-IMPLEMENTER_SETUP_OUTPUT_CHARS * 4),
+              ),
+            ).trimEnd(),
+          )
+            .slice(-IMPLEMENTER_SETUP_OUTPUT_CHARS)
+            .join(""),
+        };
+  return {
+    name: display(
+      cleanTaskLine(head(environment.name, MAX_ENVIRONMENT_NAME_CHARS * 4)),
+    ),
+    vcpus: environment.vcpus,
+    memoryGb: AGENT_MEMORY_GB[environment.vcpus] ?? 0,
+    setup,
   };
 }
 
@@ -476,6 +691,25 @@ function implementerDetailView(
           IMPLEMENTER_RESULT_LIMITS.summaryChars,
           false,
         ).trim();
+  const branches = stored.branches
+    .map((branch): ImplementerBranchView => {
+      const name = agentText(head(branch.name, 255 * 4), 255, true);
+      return {
+        name,
+        // The link is made from the raw name; a name that had to be cleaned or redacted for display gets none, so that nothing
+        // the display took out can be in an address.
+        url:
+          branch.pushed && name === branch.name
+            ? githubBranchUrl(repositoryUrl, branch.name)
+            : null,
+        shortSha:
+          branch.head === null ? null : branch.head.slice(0, SHORT_SHA_CHARS),
+        pushed: branch.pushed,
+        reason: branch.pushed ? null : describeBranchReason(branch.reason),
+        isTaskBranch: source !== null && branch.name === source.branch,
+      };
+    })
+    .sort((a, b) => Number(b.isTaskBranch) - Number(a.isTaskBranch));
   const pushedHead =
     stored.pushed && stored.headCommit !== null ? stored.headCommit : null;
   const failed = job.status === "failed" || job.status === "cancelled";
@@ -496,6 +730,7 @@ function implementerDetailView(
           : null,
     },
     summary: summary === "" ? null : summary,
+    environment: environmentView(source, job.result, display),
     commits: {
       shown: commits.slice(0, MAX_LISTED_COMMITS),
       more: Math.max(0, commits.length - MAX_LISTED_COMMITS),
@@ -504,6 +739,11 @@ function implementerDetailView(
       count: files.length,
       shown: files.slice(0, MAX_LISTED_FILES),
       more: Math.max(0, files.length - MAX_LISTED_FILES),
+    },
+    branches: {
+      shown: branches.slice(0, MAX_LISTED_BRANCHES),
+      more: Math.max(0, branches.length - MAX_LISTED_BRANCHES),
+      dropped: stored.branchesDropped,
     },
     head:
       pushedHead === null

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""The Implementer's git workspace (#762): clone into a runner-owned mirror, the agent's repository,
-the accident guard and the leftover API. The push side is in test_implementer_git_push.py.
+"""The Implementer's git workspace (#762): clone into a runner-owned mirror, the agent's repository
+(where git is free: nothing is installed in it) and the leftover API. The final push is in
+test_implementer_git_push.py.
 
 Everything runs against a bare repository on the file system standing in for GitHub, except the
 token tests, which clone and push over HTTP on loopback (`HttpOrigin`). The tests run as an ordinary
@@ -18,11 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from code_reviewer_runner.implementer.git_workspace import (
-    LEFTOVER_MESSAGE,
-    GitWorkspace,
-    RepositoryUnusable,
-)
+from code_reviewer_runner.implementer.git_workspace import LEFTOVER_MESSAGE, GitWorkspace
 from code_reviewer_runner.job import JobError
 from code_reviewer_runner.result import ErrorCode
 from git_support import (
@@ -33,14 +30,7 @@ from git_support import (
     processes_mentioning,
     raw,
 )
-from workspace_support import (
-    BRANCH,
-    IDENTITY,
-    Rig,
-    agent_git,
-    reset_to,
-    spool_lines,
-)
+from workspace_support import BRANCH, IDENTITY, Rig, agent_git, commit, head_of
 
 
 # #762-T01
@@ -139,47 +129,16 @@ def test_the_agent_repository_has_the_new_branch_at_the_base_tip_and_no_remote(r
     assert raw("config", "user.email", cwd=repo, git=rig.git) == IDENTITY.email
     assert repo.stat().st_uid == os.geteuid()
     assert (repo / "README.md").read_text() == "# demo\n"
-    assert not (repo.parent / "mirror.git" / "refs" / "heads" / BRANCH).exists()
+    assert not (repo.parent / "reserve" / "mirror.git" / "refs" / "heads" / BRANCH).exists()
 
 
-# #762-T02
-def test_the_agent_environment_names_the_guard_and_no_credential(rig: Rig) -> None:
+def test_nothing_is_installed_in_the_agents_repository(rig: Rig) -> None:
     workspace = rig.prepared()
 
-    environment = workspace.agent_environment()
-
-    assert environment["GIT_CONFIG_SYSTEM"] == str(rig.base / "run" / "system.gitconfig")
-    assert environment["CODE_REVIEWER_GUARD_CONF"] == str(rig.base / "run" / "guard.conf")
-    assert environment["HOME"] == str(rig.layout.agent_home)
-    assert environment["GIT_AUTHOR_NAME"] == IDENTITY.name
-    assert all(TOKEN not in value for value in environment.values())
-    assert "GIT_CONFIG_COUNT" not in environment
-    conf = (rig.base / "run" / "guard.conf").read_text()
-    assert f"START={workspace.start_commit}" in conf
-    assert str(rig.base / "run" / "spool") in conf
-
-
-# #762-T02
-def test_a_branch_name_with_shell_characters_cannot_change_the_guard_configuration(
-    rig: Rig, tmp_path: Path
-) -> None:
-    marker = tmp_path / "marker"
-    branch = f"fix/$(touch${{IFS}}{marker})`touch${{IFS}}{marker}`;x"
-    workspace = rig.workspace(branch=branch)
-    workspace.prepare(self_test=False)
-
-    done = subprocess.run(
-        [rig.git, "commit", "--allow-empty", "-qm", "c"],
-        cwd=workspace.repo,
-        env=workspace.agent_environment(),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert done.returncode == 0, done.stderr
-    assert not marker.exists()
-    assert len(spool_lines(workspace)) == 1
+    hooks = workspace.repo / ".git" / "hooks"
+    assert not hooks.exists() or list(hooks.iterdir()) == []
+    config = (workspace.repo / ".git" / "config").read_text()
+    assert "hooksPath" not in config and "[remote" not in config
 
 
 # #762-T02
@@ -193,7 +152,7 @@ def test_a_branch_git_would_not_accept_or_equal_to_the_base_is_refused_before_an
     workspace = rig.workspace(branch=branch)
 
     with pytest.raises(JobError) as refused:
-        workspace.prepare(self_test=False)
+        workspace.prepare()
 
     assert refused.value.code is ErrorCode.IMPLEMENTER_CONFIG_INVALID
     assert not (rig.base / "work").exists() or not any((rig.base / "work").iterdir())
@@ -204,67 +163,9 @@ def test_a_work_directory_that_is_not_empty_is_refused(rig: Rig) -> None:
     (rig.base / "work" / "repo").mkdir(parents=True)
 
     with pytest.raises(JobError) as refused:
-        rig.workspace().prepare(self_test=False)
+        rig.workspace().prepare()
 
     assert refused.value.code is ErrorCode.SETUP_FAILED
-
-
-ALLOWED = {
-    "commit": ["sh", "-c", "echo n > n.txt && git add n.txt && git commit -qm n"],
-    "empty commit": ["git", "commit", "--allow-empty", "-qm", "e"],
-    "revert": ["git", "revert", "--no-edit", "HEAD"],
-    "cherry-pick of a new commit": [
-        "sh",
-        "-c",
-        "git fetch -q {side} side && git cherry-pick FETCH_HEAD",
-    ],
-    "ff-merge of a new commit": [
-        "sh",
-        "-c",
-        "git fetch -q {side} side && git merge -q --ff-only FETCH_HEAD",
-    ],
-}
-
-
-# #762-T03
-@pytest.mark.parametrize("name", sorted(ALLOWED))
-def test_allowed_actions_work_and_signal(rig: Rig, name: str) -> None:
-    workspace = rig.prepared()
-    # The repo needs a commit of its own to revert; the base tip is the start, so make one.
-    (workspace.repo / "mine.txt").write_text("mine\n")
-    assert agent_git(workspace, "add", "-A").returncode == 0
-    first = agent_git(workspace, "commit", "-qm", "mine")
-    assert first.returncode == 0, first.stderr
-    side = _side_repo(rig, workspace)
-    base = raw("rev-parse", "HEAD", cwd=workspace.repo, git=rig.git)
-    workspace.spool_path.write_text("")
-    command = [part.format(side=side) for part in ALLOWED[name]]
-
-    done = subprocess.run(
-        command if command[0] != "git" else [rig.git, *command[1:]],
-        cwd=workspace.repo,
-        env={
-            **workspace.agent_environment(),
-            "PATH": f"{Path(rig.git).parent}:{os.environ['PATH']}",
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert done.returncode == 0, done.stderr
-    assert raw("rev-parse", "HEAD", cwd=workspace.repo, git=rig.git) != base
-    assert len(spool_lines(workspace)) >= 1
-
-
-# #762-T03
-def test_stash_and_fetch_work(rig: Rig) -> None:
-    workspace = rig.prepared()
-    (workspace.repo / "README.md").write_text("changed\n")
-
-    assert agent_git(workspace, "stash").returncode == 0
-    assert agent_git(workspace, "stash", "pop").returncode == 0
-    assert agent_git(workspace, "fetch", str(rig.origin.path), "main").returncode == 0
 
 
 def _side_repo(rig: Rig, workspace: GitWorkspace) -> Path:
@@ -278,7 +179,8 @@ def _side_repo(rig: Rig, workspace: GitWorkspace) -> Path:
     return side
 
 
-BLOCKED = {
+# What the guard used to refuse is the agent's to do now.
+FREE = {
     "amend": ["commit", "--amend", "-qm", "amended"],
     "reset --soft": ["reset", "-q", "--soft", "HEAD~1"],
     "reset --hard": ["reset", "-q", "--hard", "HEAD~1"],
@@ -286,6 +188,7 @@ BLOCKED = {
     "rebase -f": ["rebase", "-q", "-f", "{start}"],
     "branch": ["branch", "other"],
     "tag": ["tag", "v1"],
+    "annotated tag": ["tag", "-a", "-m", "t", "v2"],
     "checkout -b": ["checkout", "-q", "-b", "other"],
     "switch -c": ["switch", "-q", "-c", "other"],
     "checkout the base branch": ["checkout", "-q", "main"],
@@ -296,110 +199,54 @@ BLOCKED = {
     "update-ref back to the start": ["update-ref", "refs/heads/{branch}", "{start}"],
     "branch rename": ["branch", "-m", "{branch}", "renamed"],
     "worktree add": ["worktree", "add", "-q", "-b", "wt", "{wt}"],
+    "delete another branch": ["branch", "-D", "main"],
+    "notes": ["notes", "add", "-m", "n"],
+    "stash": ["stash", "list"],
+    "config": ["config", "user.name", "Somebody Else"],
+    "hooks off": ["-c", "core.hooksPath=/dev/null", "commit", "--allow-empty", "-qm", "h"],
+    "empty commit": ["commit", "--allow-empty", "-qm", "e"],
+    "revert": ["revert", "--no-edit", "HEAD"],
+    "merge a new commit": ["merge", "-q", "--no-edit", "--allow-unrelated-histories", "side"],
 }
 
 
-# #762-T04
-@pytest.mark.parametrize("name", sorted(BLOCKED))
-def test_blocked_actions_fail_and_leave_the_branch(rig: Rig, name: str) -> None:
+# The owner's decision: inside its workspace the agent may do anything with git.
+@pytest.mark.parametrize("name", sorted(FREE))
+def test_git_is_free_inside_the_workspace(rig: Rig, name: str) -> None:
     workspace = rig.prepared()
-    for number in (1, 2):
-        made = agent_git(workspace, "commit", "--allow-empty", "-qm", f"c{number}")
-        assert made.returncode == 0, made.stderr
-    tip = raw("rev-parse", "HEAD", cwd=workspace.repo, git=rig.git)
-    reset_to(workspace, tip)
-    workspace.spool_path.write_text("")
+    commit(workspace, "c1.txt")
+    commit(workspace, "c2.txt")
+    side = _side_repo(rig, workspace)
+    assert agent_git(workspace, "fetch", "-q", str(side), "side:side").returncode == 0
     arguments = [
         part.format(start=workspace.start_commit, branch=BRANCH, wt=rig.base / "wt")
-        for part in BLOCKED[name]
+        for part in FREE[name]
     ]
 
     done = agent_git(workspace, *arguments)
 
-    assert done.returncode != 0, f"{name} succeeded"
-    assert raw("rev-parse", f"refs/heads/{BRANCH}", cwd=workspace.repo, git=rig.git) == tip
-    assert raw("symbolic-ref", "HEAD", cwd=workspace.repo, git=rig.git) == f"refs/heads/{BRANCH}"
-    assert spool_lines(workspace) == []
+    assert done.returncode == 0, f"{name}: {done.stderr}"
 
 
-# #762-T04
-def test_deleting_the_branch_is_blocked(rig: Rig) -> None:
+def test_stash_and_fetch_work(rig: Rig) -> None:
     workspace = rig.prepared()
-    tip = raw("rev-parse", "HEAD", cwd=workspace.repo, git=rig.git)
-    raw(
-        "checkout", "-q", "--detach", cwd=workspace.repo, git=rig.git, GIT_CONFIG_SYSTEM="/dev/null"
-    )
+    (workspace.repo / "README.md").write_text("changed\n")
 
-    done = agent_git(workspace, "branch", "-D", BRANCH)
-
-    assert done.returncode != 0
-    assert raw("rev-parse", f"refs/heads/{BRANCH}", cwd=workspace.repo, git=rig.git) == tip
+    assert agent_git(workspace, "stash").returncode == 0
+    assert agent_git(workspace, "stash", "pop").returncode == 0
+    assert agent_git(workspace, "fetch", str(rig.origin.path), "main").returncode == 0
 
 
-# #762-T11
-def test_the_self_test_passes_on_a_good_guard(rig: Rig) -> None:
-    workspace = rig.workspace()
+def test_the_agent_has_no_way_to_push(rig: Rig) -> None:
+    workspace = rig.prepared()
+    commit_here = agent_git(workspace, "commit", "--allow-empty", "-qm", "c")
+    assert commit_here.returncode == 0
 
-    workspace.self_test()
+    plain = agent_git(workspace, "push")
+    named = agent_git(workspace, "push", "origin", BRANCH)
 
-
-# #762-T11
-def test_the_guard_matrix_failing_makes_the_turn_a_setup_failure(rig: Rig) -> None:
-    matrix = rig.layout.guard_dir / "guard_matrix.sh"
-    matrix.write_text("#!/bin/sh\necho 'FAIL  block  commit --amend: it succeeded'\nexit 1\n")
-
-    with pytest.raises(JobError) as refused:
-        rig.workspace().self_test()
-
-    assert refused.value.code is ErrorCode.SETUP_FAILED
-    assert "commit --amend" in refused.value.detail
-
-
-# #762-T11
-def test_a_matrix_that_cannot_run_is_a_setup_failure(rig: Rig) -> None:
-    matrix = rig.layout.guard_dir / "guard_matrix.sh"
-    matrix.write_text("#!/bin/sh\necho 'guard_matrix: git 2.43 is older' >&2\nexit 2\n")
-
-    with pytest.raises(JobError) as refused:
-        rig.workspace().self_test()
-
-    assert refused.value.code is ErrorCode.SETUP_FAILED
-
-
-# #762-T11
-@pytest.mark.parametrize("missing", ["guard_matrix.sh", "reference-transaction"])
-def test_a_missing_guard_file_is_a_setup_failure(rig: Rig, missing: str) -> None:
-    (rig.layout.guard_dir / missing).unlink()
-
-    with pytest.raises(JobError) as refused:
-        rig.workspace().self_test()
-
-    assert refused.value.code is ErrorCode.SETUP_FAILED
-
-
-# #762-T11
-def test_a_git_older_than_2_53_is_a_setup_failure(rig: Rig, tmp_path: Path) -> None:
-    old = tmp_path / "old" / "git"
-    old.parent.mkdir()
-    old.write_text("#!/bin/sh\necho 'git version 2.43.0'\n")
-    old.chmod(0o755)
-
-    with pytest.raises(JobError) as refused:
-        rig.workspace(git=str(old)).self_test()
-
-    assert refused.value.code is ErrorCode.SETUP_FAILED
-    assert "2.43" in refused.value.detail
-
-
-# #762-T11
-def test_prepare_runs_the_self_test_first_and_does_nothing_when_it_fails(rig: Rig) -> None:
-    (rig.layout.guard_dir / "guard_matrix.sh").write_text("#!/bin/sh\nexit 1\n")
-
-    with pytest.raises(JobError) as refused:
-        rig.workspace().prepare()
-
-    assert refused.value.code is ErrorCode.SETUP_FAILED
-    assert not (rig.base / "work" / "mirror.git").exists()
+    assert plain.returncode != 0 and named.returncode != 0
+    assert rig.origin.tip(BRANCH) is None
 
 
 # #762-T08
@@ -426,7 +273,6 @@ def test_commit_all_commits_everything_with_the_fixed_message_and_signals(rig: R
         f"{IDENTITY.name} <{IDENTITY.email}>"
     )
     assert workspace.dirty() is False
-    assert sha is not None and spool_lines(workspace)[-1].endswith(sha)
 
 
 # #762-T08
@@ -434,73 +280,70 @@ def test_commit_all_of_a_clean_tree_commits_nothing(rig: Rig) -> None:
     workspace = rig.prepared()
 
     assert workspace.commit_all() is None
-    assert spool_lines(workspace) == []
 
 
 # #762-T08
-def test_commit_all_goes_through_the_guard(rig: Rig) -> None:
-    workspace = rig.prepared()
-    (workspace.repo / "new.txt").write_text("n\n")
-    # A guard that denies everything: its configuration is gone.
-    (rig.base / "run" / "guard.conf").unlink()
-
-    with pytest.raises(RepositoryUnusable) as refused:
-        workspace.commit_all()
-
-    # The agent ran and spent the model budget: not a free class (`setup_failed`).
-    assert refused.value.code is ErrorCode.BRANCH_VIOLATION
-    assert "the guard configuration is not usable" in refused.value.detail
-
-
-# #762-T08
-def test_a_local_hooks_path_of_the_agent_does_not_run_or_speak_in_the_leftover_commit(
-    rig: Rig,
-) -> None:
+def test_a_local_hooks_path_of_the_agent_does_not_run_in_the_leftover_commit(rig: Rig) -> None:
     workspace = rig.prepared()
     hooks = rig.base / "agent-hooks"
     hooks.mkdir()
     marker = rig.base / "hook-ran"
     script = hooks / "pre-commit"
-    script.write_text(
-        f"#!/bin/sh\n: > {marker}\necho 'code-reviewer-guard: SECRET-FROM-THE-AGENT' >&2\nexit 1\n"
-    )
+    script.write_text(f"#!/bin/sh\n: > {marker}\necho 'SECRET-FROM-THE-AGENT' >&2\nexit 1\n")
     script.chmod(0o755)
     raw("config", "core.hooksPath", str(hooks), cwd=workspace.repo, git=rig.git)
     (workspace.repo / "new.txt").write_text("n\n")
 
     sha = workspace.commit_all()
 
-    assert sha is not None and sha == raw("rev-parse", "HEAD", cwd=workspace.repo, git=rig.git)
+    assert sha is not None and sha == head_of(workspace)
     assert not marker.exists(), "the agent's own pre-commit ran in a call of the runner"
-    assert spool_lines(workspace)[-1].endswith(sha), "the guard of the image still ran"
 
 
-# #762-T09
-def test_text_the_agent_chose_does_not_reach_the_error_of_a_denied_leftover_commit(
+def test_a_leftover_commit_on_a_detached_head_gets_a_branch_of_its_own(rig: Rig) -> None:
+    workspace = rig.prepared()
+    assert agent_git(workspace, "checkout", "-q", "--detach").returncode == 0
+    (workspace.repo / "new.txt").write_text("n\n")
+
+    sha = workspace.commit_all()
+
+    assert sha == head_of(workspace)
+    branch = agent_git(workspace, "symbolic-ref", "--short", "HEAD")
+    assert branch.returncode == 0 and branch.stdout.startswith(f"{BRANCH}-leftover-")
+
+
+def test_a_leftover_commit_goes_to_the_branch_the_agent_is_on(rig: Rig) -> None:
+    workspace = rig.prepared()
+    assert agent_git(workspace, "checkout", "-q", "-b", "elsewhere").returncode == 0
+    (workspace.repo / "new.txt").write_text("n\n")
+
+    sha = workspace.commit_all()
+
+    assert raw("rev-parse", "refs/heads/elsewhere", cwd=workspace.repo, git=rig.git) == sha
+    assert raw("rev-parse", f"refs/heads/{BRANCH}", cwd=workspace.repo, git=rig.git) == (
+        workspace.start_commit
+    )
+
+
+def test_a_leftover_commit_that_git_refuses_is_setup_failed_and_names_nothing_of_the_agent(
     rig: Rig,
 ) -> None:
     workspace = rig.prepared()
-    name = "SECRET-BRANCH-" + "x" * 20
-    done = agent_git(workspace, "-c", "core.hooksPath=/dev/null", "checkout", "-q", "-b", name)
-    assert done.returncode == 0, done.stderr
     (workspace.repo / "new.txt").write_text("n\n")
+    (workspace.repo / ".git" / "index.lock").write_text("SECRET-LINE-OF-THE-AGENT")
 
-    with pytest.raises(RepositoryUnusable) as refused:
+    with pytest.raises(JobError) as refused:
         workspace.commit_all()
 
-    assert name not in refused.value.detail and name not in str(refused.value)
-    assert "only the agent's branch may be updated" in refused.value.detail
+    assert refused.value.code is ErrorCode.SETUP_FAILED
+    assert "SECRET-LINE-OF-THE-AGENT" not in refused.value.detail
 
 
-# #762-T08
-def test_a_status_that_fails_after_the_agent_ran_is_a_charged_class(rig: Rig) -> None:
+def test_a_status_that_fails_says_clean_and_the_leftover_is_not_tried(rig: Rig) -> None:
     workspace = rig.prepared()
     (workspace.repo / ".git" / "HEAD").write_text("garbage\n")
 
-    with pytest.raises(RepositoryUnusable) as refused:
-        workspace.dirty()
-
-    assert refused.value.code is ErrorCode.BRANCH_VIOLATION
+    assert workspace.dirty() is False
 
 
 # #762-T10
@@ -510,40 +353,6 @@ def test_no_file_of_the_workspace_has_the_token_and_the_mirror_is_private(rig: R
 
     assert files_mentioning(rig.base, TOKEN) == []
     assert stat.S_IMODE(workspace.mirror.stat().st_mode) & 0o077 == 0
-    for name in ("guard.conf", "system.gitconfig"):
-        mode = stat.S_IMODE((rig.base / "run" / name).stat().st_mode)
-        assert mode & 0o022 == 0, f"{name} must not be writable by anyone else"
-
-
-# #762-T02
-def test_the_guard_acts_only_in_the_agents_repository(rig: Rig) -> None:
-    workspace = rig.prepared()
-    assert f"REPO={workspace.repo}\n" in workspace.guard_conf_path.read_text()
-    fixture = rig.base / "fixture"
-    environment = workspace.agent_environment()
-
-    def elsewhere(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [workspace.git, *args],
-            cwd=cwd,
-            env=environment,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-    # What a test suite of the repository does: a fixture with its own history and branches.
-    assert elsewhere("init", "-q", "-b", "main", str(fixture), cwd=rig.base).returncode == 0
-    committed = elsewhere("commit", "-q", "--allow-empty", "-m", "fixture", cwd=fixture)
-    assert committed.returncode == 0, committed.stderr
-    switched = elsewhere("checkout", "-q", "-b", "other", cwd=fixture)
-    assert switched.returncode == 0, switched.stderr
-    cloned = elsewhere("clone", "-q", str(fixture), str(rig.base / "second"), cwd=rig.base)
-    assert cloned.returncode == 0, cloned.stderr
-    # and the agent's own repository is still guarded
-    denied = agent_git(workspace, "checkout", "-q", "-b", "other")
-    assert denied.returncode != 0
-    assert "code-reviewer-guard" in denied.stderr
 
 
 # #762-T02
@@ -588,25 +397,6 @@ def test_a_directory_that_is_a_file_is_refused(rig: Rig) -> None:
 
 
 # #762-T02
-def test_a_run_directory_swapped_for_a_link_before_the_guard_is_written_is_refused(
-    rig: Rig,
-) -> None:
-    workspace = rig.workspace()
-    workspace.clone_mirror()
-    workspace.create_agent_repository()
-    target = rig.base / "elsewhere"
-    target.mkdir(mode=0o700)
-    (rig.base / "run").rmdir()
-    (rig.base / "run").symlink_to(target)
-
-    with pytest.raises(JobError) as refused:
-        workspace.install_guard()
-
-    assert refused.value.code is ErrorCode.SETUP_FAILED
-    assert list(target.iterdir()) == []
-
-
-# #762-T02
 def test_a_plain_directory_of_the_runner_is_accepted_and_made_enterable(rig: Rig) -> None:
     directory = rig.base / "work"
     directory.mkdir()
@@ -617,140 +407,268 @@ def test_a_plain_directory_of_the_runner_is_accepted_and_made_enterable(rig: Rig
     assert stat.S_IMODE(directory.stat().st_mode) == 0o755
 
 
-# -- what the engine would load from the working tree is not on disk (#764) ----------------------
-
-HOSTILE = {
-    ".opencode/plugin/evil.js": "export default async () => ({})\n",
-    "opencode.json": '{"plugin": ["./evil.js"]}\n',
-    "opencode.jsonc": "{}\n",
-    "src/keep.txt": "kept\n",
-}
+# -- the repository after an environment's setup script (#818) ----------------------------------
 
 
-def seed_hostile(rig: Rig) -> None:
-    seed = rig.origin.seed
-    for name, text in HOSTILE.items():
-        (seed / name).parent.mkdir(parents=True, exist_ok=True)
-        (seed / name).write_text(text)
-    raw("add", "-A", cwd=seed, git=rig.git)
-    raw("commit", "-qm", "hostile", cwd=seed, git=rig.git)
-    raw("push", "-q", "origin", "main", cwd=seed, git=rig.git)
+def after_a_script(rig: Rig):
+    """A prepared workspace whose repository a script has worked in: a tracked file changed, a
+    file added that git does not ignore, one it does, and a folder."""
+    workspace = rig.prepared()
+    repo = workspace.repo
+    (repo / ".gitignore").write_text("node_modules/\n")
+    (repo / "README.md").write_text("changed by the script\n")
+    (repo / "generated.txt").write_text("made by the script\n")
+    (repo / "venv").mkdir()
+    (repo / "venv" / "bin.txt").write_text("x\n")
+    (repo / "node_modules").mkdir()
+    (repo / "node_modules" / "pkg.js").write_text("x\n")
+    return workspace
 
 
-# #764-R6
-def test_the_files_the_engine_loads_from_its_directory_are_not_in_the_working_tree(
+# #818-T60
+def test_the_tracked_files_a_script_changed_are_put_back(rig: Rig) -> None:
+    workspace = after_a_script(rig)
+
+    restored = workspace.settle_after_setup()
+
+    assert restored == ["README.md"] and workspace.restored_count == 1
+    assert (workspace.repo / "README.md").read_text() == "# demo\n"
+    assert raw("diff", "--stat", "HEAD", cwd=workspace.repo, git=rig.git) == ""
+
+
+# #818-T61
+def test_what_the_script_added_stays_in_the_tree_and_is_no_change_of_the_agent(rig: Rig) -> None:
+    workspace = after_a_script(rig)
+
+    workspace.settle_after_setup()
+
+    repo = workspace.repo
+    assert (repo / "generated.txt").read_text() == "made by the script\n"
+    assert (repo / "venv" / "bin.txt").exists() and (repo / "node_modules" / "pkg.js").exists()
+    assert workspace.dirty() is False, "the agent has changed nothing"
+    assert raw("status", "--porcelain", cwd=repo, git=rig.git) == ""
+    assert workspace.commit_all() is None, "the system's commit takes none of it"
+    # generated.txt, venv/ and .gitignore itself (node_modules/ is ignored by it)
+    assert workspace.excluded_count == 3
+
+
+# #818-T62
+def test_the_agents_own_new_file_is_a_change_and_a_script_file_can_be_added_by_name(
     rig: Rig,
 ) -> None:
-    seed_hostile(rig)
+    workspace = after_a_script(rig)
+    workspace.settle_after_setup()
+    repo = workspace.repo
 
-    workspace = rig.prepared()
-
-    assert not (workspace.repo / ".opencode").exists()
-    assert not (workspace.repo / "opencode.json").exists()
-    assert not (workspace.repo / "opencode.jsonc").exists()
-    assert (workspace.repo / "src" / "keep.txt").read_text() == "kept\n"
-    assert workspace.dirty() is False, "a missing file of the sparse checkout is not a change"
-
-
-# #764-R6
-def test_a_commit_of_the_agent_keeps_them_in_the_tree_and_the_push_does_not_delete_them(
-    rig: Rig,
-) -> None:
-    seed_hostile(rig)
-    workspace = rig.prepared()
-    (workspace.repo / "new.txt").write_text("x\n")
-    assert agent_git(workspace, "add", "-A").returncode == 0
-    assert agent_git(workspace, "commit", "-qm", "new").returncode == 0
-
-    result = workspace.push()
-
-    tree = raw("ls-tree", "-r", "--name-only", result.head or "", cwd=workspace.mirror, git=rig.git)
-    assert set(HOSTILE) | {"new.txt", "README.md", "src/app.py"} <= set(tree.splitlines())
-    assert [change.path for change in workspace.changed_files()] == ["new.txt"]
-
-
-# #764-R6
-def test_a_name_that_is_a_link_or_a_file_instead_of_a_directory_is_left_out_too(
-    rig: Rig,
-) -> None:
-    seed = rig.origin.seed
-    (seed / ".opencode").symlink_to("/etc")
-    raw("add", "-A", cwd=seed, git=rig.git)
-    raw("commit", "-qm", "link", cwd=seed, git=rig.git)
-    raw("push", "-q", "origin", "main", cwd=seed, git=rig.git)
-
-    workspace = rig.prepared()
-
-    assert not (workspace.repo / ".opencode").exists()
-    assert not (workspace.repo / ".opencode").is_symlink()
-
-
-# -- the three names the engine loads are not the agent's to change (#764, second review) ---------
-
-
-def commit_all_changes(workspace: GitWorkspace) -> str | None:
-    return workspace.commit_all("Add the work")
-
-
-def tree_of(rig: Rig, workspace: GitWorkspace) -> list[str]:
-    head = raw("rev-parse", "HEAD", cwd=workspace.repo, git=rig.git)
-    return raw("ls-tree", "-r", "--name-only", head, cwd=workspace.repo, git=rig.git).splitlines()
-
-
-# #764-R11
-@pytest.mark.parametrize("name", ["opencode.json", "opencode.jsonc", ".opencode/plugin/x.js"])
-def test_a_new_file_the_engine_loads_is_no_change_and_blocks_no_commit(rig: Rig, name: str) -> None:
-    workspace = rig.prepared()
-    (workspace.repo / name).parent.mkdir(parents=True, exist_ok=True)
-    (workspace.repo / name).write_text("{}\n")
-
-    assert workspace.dirty() is False, "these names never count as a change"
-    assert commit_all_changes(workspace) is None, "and there is nothing to commit"
-    assert workspace.engine_inputs_present() == [name.split("/")[0]]
-
-
-# #764-R11
-def test_the_rest_of_the_work_is_committed_whatever_is_beside_it(rig: Rig) -> None:
-    seed_hostile(rig)  # a tracked opencode.json, opencode.jsonc and .opencode/plugin/evil.js
-    workspace = rig.prepared()
-    (workspace.repo / "opencode.json").write_text('{"changed": true}\n')  # an edit of a tracked one
-    (workspace.repo / ".opencode").mkdir()
-    (workspace.repo / ".opencode" / "new.md").write_text("new\n")
-    (workspace.repo / "src" / "keep.txt").write_text("the real work\n")
-    (workspace.repo / "docs").mkdir()
-    (workspace.repo / "docs" / "opencode.json").write_text("{}\n")  # nested: an ordinary file
+    (repo / "mine.txt").write_text("the agent's\n")
     assert workspace.dirty() is True
-
-    sha = commit_all_changes(workspace)
-
-    assert sha is not None
-    changed = {change.path for change in workspace.changed_files()}
-    assert changed == {"src/keep.txt", "docs/opencode.json"}
-    tree = tree_of(rig, workspace)
-    assert "opencode.json" in tree and ".opencode/plugin/evil.js" in tree, "the tracked ones stay"
-    assert ".opencode/new.md" not in tree
-    head_json = raw("show", "HEAD:opencode.json", cwd=workspace.repo, git=rig.git)
-    assert "changed" not in head_json, "an edit of a tracked one is not in the commit"
-    assert workspace.engine_inputs_present() == [".opencode", "opencode.json"]
-    assert workspace.dirty() is False, "after the commit only the ignored names are left"
+    sha = workspace.commit_all()
+    committed = raw("show", "--name-only", "--format=", sha or "", cwd=repo, git=rig.git)
+    assert committed.split() == ["mine.txt"]
+    # The agent can still choose to commit a file the script made, by name.
+    raw("add", "-f", "generated.txt", cwd=repo, git=rig.git)
+    assert raw("diff", "--cached", "--name-only", cwd=repo, git=rig.git) == "generated.txt"
 
 
-# #764-R11
-def test_an_edit_of_a_tracked_file_the_engine_loads_alone_is_no_change(rig: Rig) -> None:
-    seed_hostile(rig)
+# #818-T63
+def test_names_git_reads_in_a_pattern_are_kept_out_all_the_same(rig: Rig) -> None:
     workspace = rig.prepared()
-    (workspace.repo / "opencode.json").write_text('{"changed": true}\n')
+    repo = workspace.repo
+    odd = ["#hash.txt", "!bang.txt", "star*.txt", "q?.txt", "[br].txt", "back\\slash.txt", "tail "]
+    for name in odd:
+        (repo / name).write_text("x\n")
+
+    workspace.settle_after_setup()
 
     assert workspace.dirty() is False
-    assert commit_all_changes(workspace) is None
-    assert workspace.engine_inputs_present() == ["opencode.json"]
+    assert workspace.commit_all() is None
+    assert workspace.excluded_count == len(odd)
 
 
-# #764-R11
-def test_nothing_is_reported_when_the_agent_did_not_touch_them(rig: Rig) -> None:
-    seed_hostile(rig)
+def _git(rig: Rig, workspace: GitWorkspace, *args: str) -> str:
+    return raw(*args, cwd=workspace.repo, git=rig.git)
+
+
+def _heads(rig: Rig, workspace: GitWorkspace) -> dict[str, str]:
+    listed = _git(rig, workspace, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads")
+    return {line.split()[0]: line.split()[1] for line in listed.splitlines()}
+
+
+# #818-T67
+def test_a_commit_of_the_script_is_undone_and_its_files_stay_as_the_base(rig: Rig) -> None:
     workspace = rig.prepared()
-    (workspace.repo / "a.txt").write_text("x\n")
+    repo, start = workspace.repo, workspace.start_commit
+    (repo / "README.md").write_text("changed and committed by the script\n")
+    (repo / "made.txt").write_text("added and committed by the script\n")
+    _git(rig, workspace, "add", "-A")
+    _git(rig, workspace, "commit", "-qm", "script commit")
+    _git(rig, workspace, "commit", "-q", "--allow-empty", "-m", "second")
 
-    assert workspace.engine_inputs_present() == []
-    assert commit_all_changes(workspace) is not None
+    workspace.settle_after_setup()
+
+    assert _git(rig, workspace, "rev-parse", "HEAD").strip() == start
+    assert _heads(rig, workspace)[f"refs/heads/{BRANCH}"] == start
+    assert workspace.script_commits == 2
+    # The tracked file is back, the added one is a plain file of the tree and not a change.
+    assert (repo / "README.md").read_text() == "# demo\n"
+    assert (repo / "made.txt").exists()
+    assert workspace.dirty() is False and workspace.commit_all() is None
+    assert workspace.commits_since_start() == []
+
+
+# #818-T68
+def test_a_branch_a_tag_and_a_commit_on_the_base_branch_of_the_script_do_not_survive(
+    rig: Rig,
+) -> None:
+    workspace = rig.prepared()
+    start = workspace.start_commit
+    _git(rig, workspace, "checkout", "-q", "-b", "script-branch")
+    _git(rig, workspace, "commit", "-q", "--allow-empty", "-m", "on a branch")
+    _git(rig, workspace, "tag", "v1")
+    _git(rig, workspace, "tag", "-a", "-m", "annotated", "v2")
+    _git(rig, workspace, "checkout", "-q", "main")
+    _git(rig, workspace, "commit", "-q", "--allow-empty", "-m", "on the base branch")
+    _git(rig, workspace, "checkout", "-q", "--detach")
+    _git(rig, workspace, "commit", "-q", "--allow-empty", "-m", "detached")
+
+    workspace.settle_after_setup()
+
+    assert _git(rig, workspace, "symbolic-ref", "HEAD").strip() == f"refs/heads/{BRANCH}"
+    assert _heads(rig, workspace) == {
+        f"refs/heads/{BRANCH}": start,
+        "refs/heads/main": start,
+    }
+    assert _git(rig, workspace, "tag", "--list").strip() == ""
+    assert workspace.dropped_refs == 3  # script-branch, v1, v2
+    # What the final push would take over: nothing.
+    assert workspace.commits_since_start() == []
+
+
+# #818-T69
+def test_a_script_that_deleted_the_task_branch_or_left_an_unborn_head_gets_it_back(
+    rig: Rig,
+) -> None:
+    workspace = rig.prepared()
+    start = workspace.start_commit
+    _git(rig, workspace, "checkout", "-q", "--orphan", "fresh")
+    _git(rig, workspace, "branch", "-D", BRANCH)
+
+    workspace.settle_after_setup()
+
+    assert _git(rig, workspace, "symbolic-ref", "HEAD").strip() == f"refs/heads/{BRANCH}"
+    assert _heads(rig, workspace)[f"refs/heads/{BRANCH}"] == start
+    assert (workspace.repo / "README.md").read_text() == "# demo\n"
+
+
+# #818-T70
+def test_many_branches_and_tags_of_the_script_are_all_dropped(rig: Rig) -> None:
+    workspace = rig.prepared()
+    for number in range(230):
+        _git(rig, workspace, "branch", f"b{number}")
+        _git(rig, workspace, "tag", f"t{number}")
+
+    workspace.settle_after_setup()
+
+    assert set(_heads(rig, workspace)) == {f"refs/heads/{BRANCH}", "refs/heads/main"}
+    assert _git(rig, workspace, "tag", "--list").strip() == ""
+    assert workspace.dropped_refs == 230 * 2
+
+
+# #818-T70b
+def test_a_branch_a_linked_worktree_of_the_script_has_checked_out_is_dropped_too(
+    rig: Rig, tmp_path: Path
+) -> None:
+    """`git branch -D` refuses a branch checked out in another worktree and the turn died
+    `setup_failed`; the script's branches go with `update-ref`, wherever they are checked out."""
+    workspace = rig.prepared()
+    start = workspace.start_commit
+    _git(rig, workspace, "worktree", "add", "-q", "-b", "tmp", str(tmp_path / "linked"))
+
+    workspace.settle_after_setup()
+
+    assert _heads(rig, workspace) == {
+        f"refs/heads/{BRANCH}": start,
+        "refs/heads/main": start,
+    }
+    assert workspace.dropped_refs == 1
+    assert workspace.commits_since_start() == []
+
+
+# #818-T70d
+def test_a_symbolic_ref_of_the_script_goes_itself_not_the_branch_it_points_at(rig: Rig) -> None:
+    """Without `no-deref`, `update-ref` deleted the target of a symbolic ref: a script could make
+    the turn lose its task branch or its base branch."""
+    workspace = rig.prepared()
+    start = workspace.start_commit
+    _git(rig, workspace, "symbolic-ref", "refs/heads/to-task", f"refs/heads/{BRANCH}")
+    _git(rig, workspace, "symbolic-ref", "refs/heads/to-base", "refs/heads/main")
+    _git(rig, workspace, "symbolic-ref", "refs/tags/to-head", "HEAD")
+
+    workspace.settle_after_setup()
+
+    assert _heads(rig, workspace) == {
+        f"refs/heads/{BRANCH}": start,
+        "refs/heads/main": start,
+    }
+    assert _git(rig, workspace, "tag", "--list").strip() == ""
+    assert _git(rig, workspace, "rev-parse", "--verify", "HEAD").strip() == start
+    assert workspace.dropped_refs == 3
+
+
+# #818-T70c
+def test_more_refs_than_a_listing_of_a_mebibyte_are_dropped_streamed(rig: Rig) -> None:
+    """1,200 branches with names of 1,000 bytes (a path of nested folders in the ref store) are a
+    listing of 1.2 MB: the old cap of 1 MiB ended the turn with `setup_failed`."""
+    workspace = rig.prepared()
+    start = workspace.start_commit
+    folders = "/".join(f"{letter}" * 200 for letter in "abcd")
+    count = 1200
+    commands = "".join(
+        f"create refs/heads/{folders}/{number:04d}{'x' * 192}\0{start}\0" for number in range(count)
+    )
+    created = subprocess.run(
+        [rig.git, "update-ref", "--stdin", "-z"],
+        cwd=workspace.repo,
+        input=commands.encode(),
+        capture_output=True,
+        check=False,
+    )
+    assert created.returncode == 0, created.stderr
+    assert len(_git(rig, workspace, "for-each-ref", "--format=%(refname)", "refs/heads")) > 1024**2
+
+    workspace.settle_after_setup()
+
+    assert set(_heads(rig, workspace)) == {f"refs/heads/{BRANCH}", "refs/heads/main"}
+    assert workspace.dropped_refs == count
+
+
+# #818-T64
+def test_a_clean_repository_is_left_alone_and_nothing_is_written(rig: Rig) -> None:
+    workspace = rig.prepared()
+
+    assert workspace.settle_after_setup() == []
+
+    assert workspace.restored_count == 0 and workspace.excluded_count == 0
+    exclude = workspace.repo / ".git" / "info" / "exclude"
+    assert "generated" not in (exclude.read_text() if exclude.exists() else "")
+
+
+# #818-T65
+def test_a_repository_the_script_broke_ends_the_step_with_setup_failed(rig: Rig) -> None:
+    import shutil
+
+    workspace = rig.prepared()
+    shutil.rmtree(workspace.repo / ".git")
+
+    with pytest.raises(JobError) as refused:
+        workspace.settle_after_setup()
+    assert refused.value.code is ErrorCode.SETUP_FAILED
+
+
+# #818-T66
+def test_the_patterns_are_anchored_escaped_and_leave_out_a_name_with_a_line_end() -> None:
+    from code_reviewer_runner.implementer.git_workspace import exclude_patterns
+
+    listing = b"a.txt\0dir/\0we*ird[1]\0two\nlines\0trail \0\0"
+
+    assert exclude_patterns(listing) == [b"/a.txt", b"/dir/", b"/we\\*ird\\[1\\]", b"/trail\\ "]

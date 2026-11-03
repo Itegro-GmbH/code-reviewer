@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""The findings of the two reviews of #765: the last push and its lease, the texts of the report,
+"""The findings of the two reviews of #765: the texts of the report,
 the deadline of the turn and the scrub of the line. Each test fails without its fix."""
 
 import json
-import os
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -14,28 +12,16 @@ from loop_support import outcome
 from support import API_KEY, TOKEN
 
 from code_reviewer_runner import runner
-from code_reviewer_runner.implementer.git_process import Outcome
-from code_reviewer_runner.implementer.git_workspace import (
-    AgentUser,
-    GitIdentity,
-    GitWorkspace,
-    LeaseNotConfirmed,
-    PushLoop,
-    PushOutcome,
-    PushResult,
-    WorkspaceLayout,
-    WorkspaceSpec,
-)
 from code_reviewer_runner.implementer.report import (
     MAX_SUBJECT_CHARS,
     clip_texts,
     valid_block,
 )
 from code_reviewer_runner.implementer.session import ImplementerSession, SessionSeams
-from code_reviewer_runner.job import JobError, parse_implementer_input
+from code_reviewer_runner.job import parse_implementer_input
 from code_reviewer_runner.job_loop.reporting import fit_request, result_from_outcome
 from code_reviewer_runner.redaction import REDACTED, Redactor
-from code_reviewer_runner.result import ErrorCode, JobResult
+from code_reviewer_runner.result import JobResult
 
 EXAMPLE = (
     Path(__file__).resolve().parents[3]
@@ -53,6 +39,7 @@ def block(**changes: Any) -> dict[str, Any]:
         "baseCommit": BASE,
         "headCommit": HEAD,
         "pushed": True,
+        "branches": [{"name": "work/b", "head": HEAD, "result": "pushed", "reason": None}],
         "commits": [{"sha": HEAD, "subject": "Add it"}],
         "filesChanged": [{"path": "src/a.ts", "status": "added"}],
         "summary": "Done.",
@@ -74,134 +61,6 @@ def line(report: object, **changes: Any) -> bytes:
         **changes,
     }
     return json.dumps(document).encode() + b"\n"
-
-
-# -- R5a: the lease is asked once more right before the command that writes -----------------------
-
-
-class Recording(GitWorkspace):
-    """The real `_push_from_mirror`, with the git commands replaced by a record."""
-
-    def __init__(self, base: Path, gate: Callable[[], None]) -> None:
-        super().__init__(
-            WorkspaceSpec("https://github.com/acme/widgets.git", TOKEN, "main", "work/b"),
-            WorkspaceLayout(agent_home=base / "h", work_dir=base / "w", run_dir=base / "r"),
-            AgentUser(os.geteuid() or 1, os.getegid() or 1),
-            GitIdentity("x Implementer", "i@example.invalid"),
-            before_push=gate,
-        )
-        self.commands: list[str] = []
-
-    def _mirror(  # type: ignore[override]
-        self, args: list[str], *, protocols: str = "file", token: bool = False, **_: Any
-    ) -> Outcome:
-        self.commands.append(args[0])
-        return Outcome(0, "", "")
-
-
-# #765-R5a
-def test_the_lease_is_asked_again_right_before_the_push_command(tmp_path: Path) -> None:
-    events: list[str] = []
-    workspace = Recording(tmp_path, lambda: events.append("lease"))
-    workspace.commands = events
-
-    workspace._push_from_mirror("refs/heads/work/b", "a" * 40)  # pyright: ignore[reportPrivateUsage]
-
-    assert events == ["lease", "push"]
-
-
-# #765-R5a: a lease that is lost while the fetch and the checks ran stops the push.
-def test_a_lease_lost_during_the_checks_stops_the_push_command(tmp_path: Path) -> None:
-    def lost() -> None:
-        raise JobError(ErrorCode.LEASE_LOST, "not ours")
-
-    workspace = Recording(tmp_path, lost)
-
-    with pytest.raises(JobError):
-        workspace._push_from_mirror("refs/heads/work/b", "a" * 40)  # pyright: ignore[reportPrivateUsage]
-
-    assert workspace.commands == []
-
-
-# -- R2: the last push asks again within its window -----------------------------------------------
-
-
-class Pushes:
-    """A workspace whose `push` answers from a script: `LeaseNotConfirmed` or a result."""
-
-    def __init__(self, script: list[bool]) -> None:
-        self.script = script
-        self.calls = 0
-        self.start_commit = BASE
-
-    def push(self) -> PushResult:
-        answer = self.script[min(self.calls, len(self.script) - 1)]
-        self.calls += 1
-        if not answer:
-            raise LeaseNotConfirmed
-        return PushResult(PushOutcome.PUSHED, HEAD)
-
-
-class Time:
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def clock(self) -> float:
-        return self.now
-
-    def sleep(self, seconds: float) -> None:
-        self.now += seconds
-
-
-def loop_over(pushes: Pushes, time: Time) -> PushLoop:
-    return PushLoop(
-        pushes,  # type: ignore[arg-type]  # the part of a workspace the loop uses
-        clock=time.clock,
-        sleep=time.sleep,
-        confirm_pause=2.0,
-    )
-
-
-# #765-R2
-def test_the_last_push_asks_again_until_the_app_answers() -> None:
-    pushes, time = Pushes([False, False, True]), Time()
-
-    result = loop_over(pushes, time).finish(confirm_seconds=30)
-
-    assert result.outcome is PushOutcome.PUSHED
-    assert pushes.calls == 3 and time.now == 4.0
-
-
-# #765-R2
-def test_a_lease_that_stays_unconfirmed_ends_the_turn_lease_lost_after_its_window() -> None:
-    pushes, time = Pushes([False]), Time()
-
-    with pytest.raises(JobError) as ended:
-        loop_over(pushes, time).finish(confirm_seconds=10)
-
-    assert ended.value.code is ErrorCode.LEASE_LOST
-    assert time.now <= 10.0 and pushes.calls >= 4
-
-
-# #765-R2: the periodic push takes it for what it is: look again after the back-off, no end.
-def test_a_tick_that_meets_a_silent_app_waits_and_does_not_end_the_turn() -> None:
-    pushes, time = Pushes([False, True]), Time()
-    loop = PushLoop(
-        pushes,  # type: ignore[arg-type]
-        clock=time.clock,
-        retry_backoff=10.0,
-        sleep=time.sleep,
-    )
-    loop._pending = True  # pyright: ignore[reportPrivateUsage]
-    loop._workspace.spool_signalled = lambda: False  # type: ignore[attr-defined]
-    loop._workspace.agent_tip = lambda: HEAD  # type: ignore[attr-defined]
-
-    assert loop.tick() is None  # unconfirmed: nothing pushed, no error
-    time.now += 5
-    assert loop.tick() is None  # still inside the back-off
-    time.now += 6
-    result = loop.tick()
-    assert result is not None and result.outcome is PushOutcome.PUSHED
 
 
 # -- R3: a text that redaction made longer --------------------------------------------------------
@@ -263,6 +122,16 @@ def test_the_process_side_drops_them_too() -> None:
     assert valid_block(cleaned) is not None
 
 
+# #745: redaction can make a branch name longer than the contract's bound
+def test_a_branch_name_is_clipped_to_the_bound() -> None:
+    long_name = [{"name": "x" * 300, "head": HEAD, "result": "pushed", "reason": None}]
+
+    cleaned = clip_texts(block(branches=long_name))
+
+    assert cleaned["branches"][0]["name"] == "x" * 255
+    assert valid_block(cleaned) is not None
+
+
 # -- R5c: the deadline of the turn ----------------------------------------------------------------
 
 
@@ -279,7 +148,7 @@ def session_with(max_seconds: float | None) -> ImplementerSession:
         job(),
         workspace=None,  # type: ignore[arg-type]  # the deadline reads none of it
         command=("opencode",),
-        egress=None,  # type: ignore[arg-type]
+        place=lambda: None,  # type: ignore[arg-type,return-value]
         environment={},
         started=0.0,
         seams=SessionSeams(clock=lambda: 100.0),
@@ -289,12 +158,13 @@ def session_with(max_seconds: float | None) -> ImplementerSession:
 
 # #765-R5c
 def test_the_turn_is_held_to_the_smaller_of_its_limit_and_the_process_timeout() -> None:
-    # 3600 s limit: 180 s kept back, 100 s spent.
-    assert session_with(None)._deadline_seconds() == 3600 - 180 - 100  # pyright: ignore[reportPrivateUsage]
-    # A timeout of 600 s leaves 600 - 180 - 100 for the agent, so the last push still happens.
-    assert session_with(600)._deadline_seconds() == 600 - 180 - 100  # pyright: ignore[reportPrivateUsage]
+    # 3600 s limit: 270 s kept back, 100 s spent.
+    assert session_with(None)._deadline_seconds() == 3600 - 270 - 100  # pyright: ignore[reportPrivateUsage]
+    # A timeout of 600 s keeps a third back (200 s) and leaves 600 - 200 - 100 for the agent, so the
+    # last push still happens.
+    assert session_with(600)._deadline_seconds() == 600 - 200 - 100  # pyright: ignore[reportPrivateUsage]
     # A timeout above the limit changes nothing.
-    assert session_with(7200)._deadline_seconds() == 3600 - 180 - 100  # pyright: ignore[reportPrivateUsage]
+    assert session_with(7200)._deadline_seconds() == 3600 - 270 - 100  # pyright: ignore[reportPrivateUsage]
 
 
 # -- R6: the scrub of the printed line ------------------------------------------------------------

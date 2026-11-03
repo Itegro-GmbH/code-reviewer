@@ -1,0 +1,4 @@
+{
+  "name": "Node 22",
+  "setupScript": "corepack enable\npnpm install --frozen-lockfile\n"
+}

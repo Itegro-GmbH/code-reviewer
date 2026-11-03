@@ -22,6 +22,8 @@ export type StartInput = {
   model: ModelChoice;
   /** The customer's limit for the turn in whole US cents; null when none was asked for. */
   costLimitCents: number | null;
+  /** The environment of the workspace to start the task with (#818); null for none: the standard. */
+  environmentId: string | null;
   clientRequestId: string;
 };
 
@@ -132,6 +134,17 @@ export function validateStartInput(body: unknown): StartInputCheck {
   )
     refuse("costLimitCents", "invalid");
 
+  const environmentId = fields.environmentId ?? null;
+  if (environmentId !== null) {
+    if (typeof environmentId !== "string") refuse("environmentId", "invalid");
+    else if (environmentId === "") refuse("environmentId", "required");
+    else if (
+      environmentId.length > ID_MAX_LENGTH ||
+      CONTROL_OR_NEWLINE.test(environmentId)
+    )
+      refuse("environmentId", "invalid");
+  }
+
   const requestId = fields.clientRequestId;
   if (requestId === undefined || requestId === "")
     refuse("clientRequestId", "required");
@@ -151,6 +164,7 @@ export function validateStartInput(body: unknown): StartInputCheck {
       instruction: instruction as string,
       model: model as ModelChoice,
       costLimitCents: cost as number | null,
+      environmentId: environmentId as string | null,
       clientRequestId: requestId as string,
     },
   };

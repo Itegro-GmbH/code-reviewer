@@ -78,6 +78,9 @@ class ErrorCode(StrEnum):
     SUPERSEDED = "superseded"
     # The Implementer (#746). Stable codes a caller branches on; a turn that fails is never run
     # again silently. `COST_LIMIT_REACHED` above is the cost limit of a turn as well.
+    # `BRANCH_EXISTS` and `BRANCH_VIOLATION` are no longer produced since git is free in the
+    # workspace and the final push reports each branch by itself; they stay for the runs that carry
+    # them and for older runners (contracts/runner-api.v1.json).
     BRANCH_EXISTS = "branch_exists"
     BASE_BRANCH_NOT_FOUND = "base_branch_not_found"
     CLONE_FAILED = "clone_failed"
@@ -89,6 +92,15 @@ class ErrorCode(StrEnum):
     GIT_WRITE_NOT_GRANTED = "git_write_not_granted"
     IMPLEMENTER_ENGINE_UNAVAILABLE = "implementer_engine_unavailable"
     IMPLEMENTER_CONFIG_INVALID = "implementer_config_invalid"
+    # The golden snapshot's Sysbox is not proven (the build's proof did not pass or was not read),
+    # so the agent's container does not start; the VM is too small for it (#745, step 4). Free: the
+    # model was never used.
+    SANDBOX_UNPROVEN = "sandbox_unproven"
+    SANDBOX_SIZE_UNSUPPORTED = "sandbox_size_unsupported"
+    # #818: the setup script of the environment failed (a non-zero exit, its time limit, the disk)
+    # or
+    # its result could not be saved as the agent's image. Before the model: free.
+    ENVIRONMENT_SETUP_FAILED = "environment_setup_failed"
     # The runner was told to stop (SIGTERM, #765): what is committed was pushed, and the job host
     # gives the job back to the queue under this code.
     RUNNER_SHUTDOWN = "runner_shutdown"

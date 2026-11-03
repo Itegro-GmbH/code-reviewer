@@ -10,6 +10,9 @@ export const SNAPSHOT_ERROR_CODES = [
   "docker_version_mismatch",
   "daemon_config_failed",
   "host_prepare_failed",
+  // The two Sysbox steps never end a run (reviews do not use Sysbox): they name what a warning and `sysbox: "unproven"` of the record say.
+  "sysbox_install_failed",
+  "sysbox_probe_failed",
   "context_upload_failed",
   "image_build_failed",
   "image_digest_invalid",

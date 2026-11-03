@@ -10,7 +10,7 @@ DISPATCHER := pnpm --dir dispatcher
 RUNNER := uv --directory runner
 
 .PHONY: help install lint lint-app lint-dispatcher lint-runner typecheck typecheck-app typecheck-dispatcher typecheck-runner \
-	test-unit test-unit-app test-unit-dispatcher test-unit-runner test-integration check-licenses fix-spdx-headers generate-contracts check-contracts test-engine test-engine-smoke test-e2e test-e2e-hosted test-e2e-dynamic test-sandbox-local test-images verify
+	test-unit test-unit-app test-unit-dispatcher test-unit-runner test-integration check-licenses fix-spdx-headers generate-contracts check-contracts test-engine test-engine-smoke test-e2e test-e2e-hosted test-e2e-dynamic test-sandbox-local test-lane test-images verify
 
 help:
 	@echo "make install           install app, dispatcher and runner dependencies from the lockfiles (one pnpm-lock.yaml at the root, runner/uv.lock)"
@@ -28,6 +28,7 @@ help:
 	@echo "make test-e2e-hosted   the hosted deployment on fakes: app, Dispatcher and Worker over loopback (needs E2E_DATABASE_URL, a Postgres server; ARGS=... to filter)"
 	@echo "make test-e2e-dynamic   the privileged Dynamic Review journey with the real OpenCode (root and nft, CI-first, ARGS=... to filter)"
 	@echo "make test-sandbox-local  the Sandbox-Launcher's local mode with a real Docker daemon and the Worker image (needs Docker, not part of verify)"
+	@echo "make test-lane        a whole Implementer turn on a real Docker daemon: the real agent image, reader and OpenCode under runc (needs Docker and sudo, not part of verify)"
 	@echo "make test-images       build the Worker image (the sandbox target) and run its smoke test (needs Docker)"
 	@echo "make verify            lint, typecheck, unit and host integration tests and the license check; run before every PR"
 
@@ -128,6 +129,15 @@ test-e2e-dynamic:
 test-sandbox-local:
 	docker build --file runner/Dockerfile --target sandbox --tag code-reviewer-worker:local .
 	SANDBOX_LOCAL_IMAGE=code-reviewer-worker:local TEST_ALLOWED_HOSTS=$${SANDBOX_LOCAL_APP_HOST:-172.17.0.1} $(DISPATCHER) test:privileged
+
+# The lane of a whole Implementer turn (#745, step 4): the real agent image, the real reader and the pinned OpenCode on a
+# real Docker daemon under runc (set LANE_RUNTIME=sysbox-runc on a machine with Sysbox), as root, as Control runs. Builds the
+# `sandbox` and `agent` targets; fails, with the missing item named, where it cannot run. Not part of `make verify`; CI runs it
+# as the job `implementer-lane`.
+test-lane:
+	docker build --file runner/Dockerfile --target sandbox --tag code-reviewer-worker:lane .
+	docker build --file runner/Dockerfile --target agent --tag code-reviewer-agent:lane .
+	cd runner && sudo -E env LANE_WORKER_IMAGE=code-reviewer-worker:lane LANE_AGENT_IMAGE=code-reviewer-agent:lane LANE_RUNTIME=$${LANE_RUNTIME:-runc} .venv/bin/python -m pytest -m lane tests/lane -q -p no:cacheprovider
 
 # Builds the Worker image (the `sandbox` target of runner/Dockerfile, the only image of the project) and runs
 # docker/smoke/runner.sh against it. Needs a running Docker daemon and fails without one. Not part of

@@ -74,9 +74,11 @@ def test_the_implementer_reasons_are_in_the_list_and_only_they() -> None:
         reason.value for reason in SelfCheckReason if reason.value.startswith("implementer_")
     }
 
-    assert len(implementer) == 8
+    assert len(implementer) == 6
     assert implementer <= set(_PROBE["$defs"]["ProbeReason"]["enum"])
-    assert "implementer_work_dir_not_exec" in implementer
+    assert "implementer_sysbox_missing" in implementer
+    assert "implementer_docker_unavailable" in implementer  # #745
+    assert "implementer_docker_socket_open" in implementer  # #745
 
 
 @pytest.mark.contract
@@ -92,7 +94,7 @@ def test_the_engines_of_the_contract_are_the_engines_a_runner_can_advertise() ->
     [
         Verdict(("pr-agent", "opencode")),
         Verdict(("pr-agent", "opencode", "implementer")),
-        Verdict(("pr-agent", "opencode"), ("implementer_work_dir_not_exec",)),
+        Verdict(("pr-agent", "opencode"), ("implementer_sysbox_missing",)),
         Verdict(("pr-agent",), (SelfCheckReason.ROOT_FILESYSTEM_WRITABLE.value,)),
         Verdict(("pr-agent",), tuple(reason.value for reason in SelfCheckReason)),
         Verdict(("pr-agent", "opencode"), ("implementer_probe_failed",)),

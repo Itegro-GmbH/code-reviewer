@@ -18,6 +18,7 @@ const PAIR: SnapshotPair = {
   snapshotId: "snap_example01",
   imageDigest: `sha256:${"a".repeat(64)}`,
   commit: "1".repeat(40),
+  sysbox: "proven",
 };
 
 type Seen = { url: URL; headers: Headers; redirect: string };

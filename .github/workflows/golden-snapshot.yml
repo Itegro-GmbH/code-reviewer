@@ -55,6 +55,9 @@ on:
       commit:
         description: The commit it was built from
         value: ${{ jobs.build.outputs.commit }}
+      sysbox:
+        description: The verdict of the snapshot's Sysbox proof, proven or unproven (the fourth member of the snapshot pair)
+        value: ${{ jobs.build.outputs.sysbox }}
 
 permissions:
   contents: read
@@ -82,6 +85,7 @@ jobs:
       snapshot-id: ${{ steps.record.outputs.snapshot-id }}
       image-digest: ${{ steps.record.outputs.image-digest }}
       commit: ${{ steps.record.outputs.commit }}
+      sysbox: ${{ steps.record.outputs.sysbox }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -117,6 +121,7 @@ jobs:
           args=(
             --context "$RUNNER_TEMP/context.tgz"
             --vm-prepare ../docker/sandbox/vm-prepare.sh
+            --sysbox-prepare ../docker/sandbox/sysbox-prepare.sh
             --out "$RUNNER_TEMP/golden-snapshot.json"
             --commit "$GITHUB_SHA"
             --skip-retention
@@ -135,12 +140,23 @@ jobs:
             echo "snapshot-id=$(jq -r .snapshotId "$RUNNER_TEMP/golden-snapshot.json")"
             echo "image-digest=$(jq -r .imageDigest "$RUNNER_TEMP/golden-snapshot.json")"
             echo "commit=$(jq -r .commit "$RUNNER_TEMP/golden-snapshot.json")"
+            # Whatever the record does not say exactly is unproven: only `proven` lets the Implementer start.
+            echo "sysbox=$(jq -r 'if .sysbox == "proven" then "proven" else "unproven" end' "$RUNNER_TEMP/golden-snapshot.json")"
           } >> "$GITHUB_OUTPUT"
       - name: Show the record
         run: |
+          # Sysbox is for the Implementer only and never holds back a snapshot: an unproven one is shown, not failed (docs/golden-snapshot.md).
+          sysbox="$(jq -r '.sysbox // "unproven"' "$RUNNER_TEMP/golden-snapshot.json")"
+          if [ "$sysbox" != "proven" ]; then
+            echo "::warning title=Sysbox unproven::The golden snapshot was recorded without a passing Sysbox proof. Reviews are not affected. The verdict travels with the snapshot pair, and an Implementer turn does not start on a snapshot whose verdict is not proven (sandbox_unproven, free). The log of the build step names the reasons."
+          fi
           {
             echo "### Golden snapshot"
             echo
+            if [ "$sysbox" != "proven" ]; then
+              echo "**Sysbox unproven.** Reviews are not affected; see the warning of this job and docs/golden-snapshot.md, section Sysbox."
+              echo
+            fi
             echo "Not wired into anything yet. A deployment makes it current after its canary passed and the promotion went through (docs/deployment-vercel.md, section 5.1)."
             echo
             echo '```json'

@@ -206,7 +206,7 @@ describe("the probe verdict", () => {
         line({
           version: 1,
           engines: three,
-          reasons: ["implementer_work_dir_not_exec"],
+          reasons: ["implementer_sysbox_missing"],
         }),
       )?.engines,
     ).toStrictEqual(["pr-agent", "opencode"]);
@@ -218,16 +218,16 @@ describe("the probe verdict", () => {
       line({
         version: 1,
         engines: ["pr-agent", "opencode"],
-        reasons: ["implementer_git_too_old"],
+        reasons: ["implementer_agent_image_missing"],
       }),
     );
 
     expect(verdict).toStrictEqual({
       engines: ["pr-agent", "opencode"],
-      reasons: ["implementer_git_too_old"],
+      reasons: ["implementer_agent_image_missing"],
       passed: true,
     });
-    expect(IMPLEMENTER_REASONS).toHaveLength(9);
+    expect(IMPLEMENTER_REASONS).toHaveLength(7);
     expect(IMPLEMENTER_REASONS.every((r) => PROBE_REASONS.includes(r))).toBe(
       true,
     );
@@ -319,12 +319,12 @@ describe("the probe verdict", () => {
       const own = line({
         version: 1,
         engines: ["pr-agent", "opencode"],
-        reasons: ["implementer_work_dir_not_exec"],
+        reasons: ["implementer_sysbox_missing"],
       });
       const { verdict } = merged(dynamic, own);
 
       expect(verdict?.engines).toStrictEqual(["pr-agent", "opencode"]);
-      expect(verdict?.reasons).toStrictEqual(["implementer_work_dir_not_exec"]);
+      expect(verdict?.reasons).toStrictEqual(["implementer_sysbox_missing"]);
     });
 
     it("does not let a reason it does not know vanish: the proof is missing and says so", () => {

@@ -18,7 +18,12 @@ import { withoutColumnsAddedLater } from "../../test-support/columns-added-later
 
 const SPLIT = "20261030140000_create_implementer_sessions_and_turns";
 const T = "2026-10-30T08:00:00.000Z";
-const NEW_TABLES = ["implementer_sessions", "implementer_turns"];
+// `implementer_environments` is a later migration's table; this one never touches it.
+const NEW_TABLES = [
+  "implementer_sessions",
+  "implementer_turns",
+  "implementer_environments",
+];
 
 /** The migrations the previous release's database ran: everything before the new one. */
 const beforeThisMigration: MigrationProvider = {

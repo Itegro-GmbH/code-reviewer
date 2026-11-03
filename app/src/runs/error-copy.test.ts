@@ -334,6 +334,7 @@ describe("the sentences for the codes of a task", () => {
     "base_branch_not_found",
     "clone_failed",
     "setup_failed",
+    "environment_setup_failed",
     "agent_gave_up",
     "push_rejected",
     "branch_violation",
@@ -345,6 +346,8 @@ describe("the sentences for the codes of a task", () => {
     "git_write_not_granted",
     "implementer_engine_unavailable",
     "implementer_config_invalid",
+    "sandbox_unproven",
+    "sandbox_size_unsupported",
     "dynamic_accounting_failed",
     "timeout",
     "lease_expired",
@@ -497,12 +500,13 @@ describe("the sentences for the codes of a task", () => {
   });
 
   // #765: the copy of the issue comment, for the final push that could not reach the repository too.
-  it("says for a rejected push that the repository refused the work or could not be reached, and that earlier pushes stay", () => {
+  it("says for a rejected push that GitHub refused it, did not answer or answered with an error, that it took too long, or that the workspace could not be read, and that pushed branches stay", () => {
     const { text } = describeTurnErrorCode(PRODUCT, "push_rejected");
 
     expect(text).toBe(
-      "The repository did not accept the pushed work (it refused it, or could not be reached). Work already pushed stays on the branch.",
+      "The work of this task did not arrive on GitHub. Either GitHub refused the branch, did not answer or answered with an error, the push took too long, or the workspace of the agent could not be read, in which case nothing was pushed. The branches below, if there are any, say which were pushed and why the others were not. A branch that was pushed stays on GitHub.",
     );
+    expect(text).toContain("workspace of the agent could not be read");
     expect(text).not.toMatch(/new branch/);
   });
 

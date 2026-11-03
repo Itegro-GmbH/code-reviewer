@@ -17,6 +17,7 @@ import type {
   VmStartRequest,
   FindingPriority,
   ImplementerResult,
+  ImplementerSetupResult,
   ReviewFindings,
   RunnerResult,
   RunnerUsage,
@@ -29,6 +30,7 @@ import {
   FINDING_PRIORITIES,
   IMPLEMENTER_FILE_STATUSES,
   IMPLEMENTER_RESULT_LIMITS,
+  IMPLEMENTER_SETUP_OUTPUT_CHARS,
   LLM_PROVIDER_ID_PATTERN,
   MAX_FINDING_COUNT,
   MAX_LLM_PROVIDERS,
@@ -38,6 +40,7 @@ import {
   VM_NAME_PATTERN,
   VM_STARTED_AT_PATTERN,
   VM_TIMEOUT_SECONDS_RANGE,
+  VM_VCPUS_RANGE,
 } from "./contract.ts";
 import { WORKER_CREDENTIAL_PATTERN } from "../jobs/worker-credential.ts";
 import { checkCallTrace } from "./call-trace.ts";
@@ -366,6 +369,7 @@ const VM_START_FIELDS = [
   "vmName",
   "startedAt",
   "timeoutSeconds",
+  "vcpus",
 ] as const;
 
 /**
@@ -408,6 +412,15 @@ export function parseVmStartRequest(body: unknown): Parsed<VmStartRequest> {
     timeout > VM_TIMEOUT_SECONDS_RANGE.max
   )
     check.fail("timeoutSeconds", "invalid");
+  const vcpus = body.vcpus;
+  if (
+    vcpus !== undefined &&
+    (typeof vcpus !== "number" ||
+      !Number.isInteger(vcpus) ||
+      vcpus < VM_VCPUS_RANGE.min ||
+      vcpus > VM_VCPUS_RANGE.max)
+  )
+    check.fail("vcpus", "invalid");
   if (check.fields.length > 0) return { ok: false, fields: check.fields };
   return {
     ok: true,
@@ -416,6 +429,7 @@ export function parseVmStartRequest(body: unknown): Parsed<VmStartRequest> {
       vmName: vmName as string,
       startedAt: startedAt as string,
       timeoutSeconds: timeout as number,
+      ...(vcpus === undefined ? {} : { vcpus: vcpus as number }),
     },
   };
 }
@@ -568,6 +582,10 @@ const MAX_COMMIT_SUBJECT_CHARS = 500;
 const MAX_FILE_PATH_CHARS = 4096;
 const MAX_OPENCODE_SESSION_ID_CHARS = 200;
 const MAX_OPENCODE_VERSION_CHARS = 64;
+const MAX_BRANCH_NAME_CHARS = 255;
+const MAX_BRANCH_REASON_CHARS = 40;
+/** The word of the runner for why a branch was not pushed: any word of this form is taken, a newer runner may say more. */
+const BRANCH_REASON = /^[a-z][a-z_]*$/;
 
 /** The keys of `source` that are not in `allowed`, refused under `prefix`: these objects are closed. */
 function refuseUnknownKeys(
@@ -664,6 +682,110 @@ function parseImplementerFiles(
   return check.fields.length > before ? undefined : files;
 }
 
+/**
+ * The branches of an implementer block (`branches`, optional: the result of an older runner has none): closed objects, at most
+ * `IMPLEMENTER_RESULT_LIMITS.branches`. A pushed branch has a head and no reason; a rejected one has a reason word and may have
+ * no head (it could not be read).
+ */
+function parseImplementerBranches(
+  check: Checker,
+  value: unknown,
+  field: string,
+): NonNullable<ImplementerResult["branches"]> | undefined {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return check.fail(field, "invalid");
+  if (value.length > IMPLEMENTER_RESULT_LIMITS.branches)
+    return check.fail(field, "too_long");
+  const before = check.fields.length;
+  const branches: NonNullable<ImplementerResult["branches"]> = [];
+  value.forEach((entry: unknown, index) => {
+    const where = `${field}[${String(index)}]`;
+    if (!isRecord(entry)) {
+      check.fail(where, "invalid");
+      return;
+    }
+    refuseUnknownKeys(
+      check,
+      entry,
+      ["name", "head", "result", "reason"],
+      `${where}.`,
+    );
+    const name = check.string(entry, "name", `${where}.name`, {
+      min: 1,
+      max: MAX_BRANCH_NAME_CHARS,
+      stripControls: true,
+    });
+    const head =
+      entry.head === null
+        ? null
+        : commitSha(check, entry, "head", `${where}.head`);
+    const result = entry.result;
+    const resultOk = result === "pushed" || result === "rejected";
+    if (!resultOk)
+      check.fail(
+        `${where}.result`,
+        result === undefined ? "required" : "invalid",
+      );
+    const reason = entry.reason;
+    const reasonOk =
+      reason === null ||
+      (typeof reason === "string" &&
+        reason.length <= MAX_BRANCH_REASON_CHARS &&
+        BRANCH_REASON.test(reason));
+    if (!reasonOk)
+      check.fail(
+        `${where}.reason`,
+        reason === undefined ? "required" : "invalid",
+      );
+    if (resultOk && reasonOk) {
+      if (result === "pushed" && (head === null || reason !== null))
+        check.fail(`${where}.result`, "invalid");
+      if (result === "rejected" && reason === null)
+        check.fail(`${where}.reason`, "required");
+    }
+    if (name !== undefined && head !== undefined && resultOk && reasonOk)
+      branches.push({
+        name,
+        head,
+        result: result as "pushed" | "rejected",
+        reason: reason as string | null,
+      });
+  });
+  return check.fields.length > before ? undefined : branches;
+}
+
+/** The most of either count of `branchesDropped` (a repository holds far fewer refs than this). */
+const MAX_BRANCHES_DROPPED = 1_000_000_000;
+
+/** `branchesDropped` of an implementer block (optional): a closed object of two counts. */
+function parseImplementerBranchesDropped(
+  check: Checker,
+  value: unknown,
+  field: string,
+): ImplementerResult["branchesDropped"] | null | undefined {
+  if (value === undefined) return null;
+  if (!isRecord(value)) return check.fail(field, "invalid");
+  const before = check.fields.length;
+  refuseUnknownKeys(check, value, ["invalid", "overflow"], `${field}.`);
+  const counts: Record<"invalid" | "overflow", number> = {
+    invalid: 0,
+    overflow: 0,
+  };
+  for (const key of ["invalid", "overflow"] as const) {
+    const count = value[key];
+    if (count === undefined) check.fail(`${field}.${key}`, "required");
+    else if (
+      typeof count !== "number" ||
+      !Number.isInteger(count) ||
+      count < 0 ||
+      count > MAX_BRANCHES_DROPPED
+    )
+      check.fail(`${field}.${key}`, "invalid");
+    else counts[key] = count;
+  }
+  return check.fields.length > before ? undefined : counts;
+}
+
 /** The saved agent session of an implementer block: null, or a closed object with both fields. */
 function parseImplementerOpencode(
   check: Checker,
@@ -694,6 +816,60 @@ function parseImplementerOpencode(
   return { sessionId, version };
 }
 
+/** The setup block of an implementer block (#818, `ImplementerSetupResult`): closed, every field required, the output bounded. */
+function parseImplementerSetup(
+  check: Checker,
+  value: unknown,
+  field: string,
+): ImplementerSetupResult | undefined {
+  if (!isRecord(value)) return check.fail(field, "invalid");
+  const before = check.fields.length;
+  refuseUnknownKeys(
+    check,
+    value,
+    ["ok", "exitCode", "timedOut", "durationSeconds", "output"],
+    `${field}.`,
+  );
+  const { ok, exitCode, timedOut, durationSeconds } = value;
+  if (typeof ok !== "boolean")
+    check.fail(`${field}.ok`, ok === undefined ? "required" : "invalid");
+  if (exitCode === undefined) check.fail(`${field}.exitCode`, "required");
+  else if (
+    exitCode !== null &&
+    (typeof exitCode !== "number" ||
+      !Number.isInteger(exitCode) ||
+      exitCode < -255 ||
+      exitCode > 255)
+  )
+    check.fail(`${field}.exitCode`, "invalid");
+  if (typeof timedOut !== "boolean")
+    check.fail(
+      `${field}.timedOut`,
+      timedOut === undefined ? "required" : "invalid",
+    );
+  if (durationSeconds === undefined)
+    check.fail(`${field}.durationSeconds`, "required");
+  else if (
+    typeof durationSeconds !== "number" ||
+    !Number.isInteger(durationSeconds) ||
+    durationSeconds < 0 ||
+    durationSeconds > 86_400
+  )
+    check.fail(`${field}.durationSeconds`, "invalid");
+  const output = check.string(value, "output", `${field}.output`, {
+    max: IMPLEMENTER_SETUP_OUTPUT_CHARS,
+    stripControls: true,
+  });
+  if (check.fields.length > before || output === undefined) return undefined;
+  return {
+    ok: ok as boolean,
+    exitCode: exitCode as number | null,
+    timedOut: timedOut as boolean,
+    durationSeconds: durationSeconds as number,
+    output,
+  };
+}
+
 /**
  * The implementer block of a result (#754, `ImplementerResult` in the contract): closed, every field required, the bounds of the
  * schema. Absent is "no block" (a failure before the runner had a repository, and every job that is not a turn); `null` is not
@@ -717,10 +893,13 @@ function parseImplementerResult(
       "baseCommit",
       "headCommit",
       "pushed",
+      "branches",
+      "branchesDropped",
       "commits",
       "filesChanged",
       "summary",
       "opencode",
+      "setup",
     ],
     prefix,
   );
@@ -740,6 +919,16 @@ function parseImplementerResult(
       `${prefix}pushed`,
       pushed === undefined ? "required" : "invalid",
     );
+  const branches = parseImplementerBranches(
+    check,
+    value.branches,
+    `${prefix}branches`,
+  );
+  const branchesDropped = parseImplementerBranchesDropped(
+    check,
+    value.branchesDropped,
+    `${prefix}branchesDropped`,
+  );
   const commits = parseImplementerCommits(
     check,
     value.commits,
@@ -759,6 +948,10 @@ function parseImplementerResult(
     value.opencode,
     `${prefix}opencode`,
   );
+  const setup =
+    value.setup === undefined
+      ? undefined
+      : parseImplementerSetup(check, value.setup, `${prefix}setup`);
   if (typeof pushed === "boolean" && headCommit !== undefined) {
     if (pushed && headCommit === null) check.fail(`${prefix}pushed`, "invalid");
     const last = commits?.at(-1);
@@ -770,20 +963,27 @@ function parseImplementerResult(
     baseCommit === undefined ||
     headCommit === undefined ||
     typeof pushed !== "boolean" ||
+    branches === undefined ||
+    branchesDropped === undefined ||
     commits === undefined ||
     filesChanged === undefined ||
     summary === undefined ||
-    opencode === undefined
+    opencode === undefined ||
+    (value.setup !== undefined && setup === undefined)
   )
     return undefined;
   return {
     baseCommit,
     headCommit,
     pushed,
+    // Kept only when the runner sent them: a result of an older runner stays as it was.
+    ...(value.branches === undefined ? {} : { branches }),
+    ...(branchesDropped === null ? {} : { branchesDropped }),
     commits,
     filesChanged,
     summary,
     opencode,
+    ...(setup === undefined ? {} : { setup }),
   };
 }
 

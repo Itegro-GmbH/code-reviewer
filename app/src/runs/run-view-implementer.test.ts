@@ -243,6 +243,173 @@ describe("the detail of an implementer run", () => {
     ]);
   });
 
+  // The git model: every branch of the turn is shown, the task's own first.
+  it("lists every branch the turn pushed or tried to push, the task's own first, with links for the pushed ones and sentences for the others", () => {
+    const run = view(
+      turn({
+        result: resultWith({
+          branches: [
+            {
+              name: "experiment/two",
+              head: SHA_C,
+              result: "pushed",
+              reason: null,
+            },
+            {
+              name: "main",
+              head: SHA_A,
+              result: "rejected",
+              reason: "non_fast_forward",
+            },
+            {
+              name: "implementer/abc123",
+              head: SHA_B,
+              result: "pushed",
+              reason: null,
+            },
+            {
+              name: "wf",
+              head: null,
+              result: "rejected",
+              reason: "workflows_not_allowed",
+            },
+            {
+              name: "odd",
+              head: SHA_C,
+              result: "rejected",
+              reason: "a_word_from_the_future",
+            },
+            {
+              name: "proto",
+              head: SHA_C,
+              result: "rejected",
+              reason: "__proto__",
+            },
+          ],
+        }),
+      }),
+      source(),
+    ).implementer;
+
+    expect(run?.branches.more).toBe(0);
+    expect(run?.branches.shown.map((branch) => branch.name)).toEqual([
+      "implementer/abc123",
+      "experiment/two",
+      "main",
+      "wf",
+      "odd",
+      "proto",
+    ]);
+    const byName = Object.fromEntries(
+      (run?.branches.shown ?? []).map((branch) => [branch.name, branch]),
+    );
+    expect(byName["implementer/abc123"]).toMatchObject({
+      url: "https://github.com/acme/widgets/tree/implementer/abc123",
+      shortSha: SHA_B.slice(0, 7),
+      pushed: true,
+      reason: null,
+      isTaskBranch: true,
+    });
+    expect(byName["experiment/two"]).toMatchObject({
+      url: "https://github.com/acme/widgets/tree/experiment/two",
+      pushed: true,
+      isTaskBranch: false,
+    });
+    expect(byName.main).toMatchObject({ url: null, pushed: false });
+    expect(byName.main?.reason).toContain("never overwrites a branch");
+    expect(byName.wf?.reason).toContain(".github/workflows");
+    expect(byName.wf?.shortSha).toBeNull();
+    expect(byName.odd?.reason).toBe("The branch was not pushed.");
+    expect(byName.proto?.reason).toBe("The branch was not pushed.");
+  });
+
+  it("has no branches for a result of an older runner, and cleans the name of a branch like any text of the agent", () => {
+    const old = view(turn({ result: resultWith({}) }), source()).implementer;
+    const redact = (text: string) => text.replaceAll(GIT_TOKEN, "[redacted]");
+    const hostile = toRunDetailView(
+      PRODUCT,
+      turn({
+        result: resultWith({
+          branches: [
+            {
+              name: `x\u202ey${GIT_TOKEN}`,
+              head: SHA_B,
+              result: "pushed",
+              reason: null,
+            },
+          ],
+        }),
+      }),
+      "acme/widgets",
+      NOW,
+      redact,
+      false,
+      source(),
+    ).implementer;
+
+    expect(old?.branches).toEqual({
+      shown: [],
+      more: 0,
+      dropped: { invalid: 0, overflow: 0 },
+    });
+    const name = hostile?.branches.shown[0]?.name ?? "";
+    expect(name).not.toContain("\u202e");
+    expect(name).not.toContain(GIT_TOKEN);
+    expect(hostile?.branches.shown[0]?.url).toBeNull();
+  });
+
+  it("carries the counts of the branches that were left out, and reads a count that is not a whole number from 0 as none", () => {
+    const counted = view(
+      turn({
+        result: resultWith({ branchesDropped: { invalid: 3, overflow: 7 } }),
+      }),
+      source(),
+    ).implementer;
+    const odd = view(
+      turn({
+        result: resultWith({ branchesDropped: { invalid: -2, overflow: "x" } }),
+      }),
+      source(),
+    ).implementer;
+
+    expect(counted?.branches.dropped).toEqual({ invalid: 3, overflow: 7 });
+    expect(odd?.branches.dropped).toEqual({ invalid: 0, overflow: 0 });
+  });
+
+  it("has a sentence for a push that was killed at its time limit and for an answer of GitHub that is no refusal of the access", () => {
+    const run = view(
+      turn({
+        result: resultWith({
+          branches: [
+            { name: "a", head: SHA_B, result: "rejected", reason: "timed_out" },
+            {
+              name: "b",
+              head: SHA_B,
+              result: "rejected",
+              reason: "provider_error",
+            },
+            {
+              name: "c",
+              head: SHA_B,
+              result: "rejected",
+              reason: "provider_refused",
+            },
+          ],
+        }),
+      }),
+      source(),
+    ).implementer;
+    const byName = Object.fromEntries(
+      (run?.branches.shown ?? []).map((branch) => [branch.name, branch.reason]),
+    );
+
+    expect(byName.a).toContain("took too long");
+    expect(byName.a).toContain("not known");
+    expect(byName.b).toContain("not a refusal of the access");
+    expect(byName.c).toContain("did not accept the access");
+    expect(new Set(Object.values(byName)).size).toBe(3);
+  });
+
   // #758-T02
   it("shows the first 20 commits and says how many more there are", () => {
     const commits = Array.from({ length: 27 }, (_, index) => ({
@@ -512,7 +679,9 @@ describe("the detail of an implementer run", () => {
         "baseBranch",
         "branch",
         "branchUrl",
+        "branches",
         "commits",
+        "environment",
         "files",
         "head",
         "instruction",
@@ -926,5 +1095,171 @@ describe("the checkout reason is a Dynamic Review's", () => {
 
     expect(task.errorReason).toBeNull();
     expect(dynamic.errorReason).toMatchObject({ code: "ref_moved" });
+  });
+});
+
+// #818: the environment a task started with, and what its setup script did. Both are shown to the people who can open the run;
+// the script's output is text from a program and is cleaned, stripped of known secrets and cut like the rest.
+describe("the environment of an implementer run (#818)", () => {
+  const withEnvironment = (
+    overrides: Partial<
+      NonNullable<ImplementerDetailSource["environment"]>
+    > = {},
+  ) =>
+    source({
+      environment: { name: "Node 22", vcpus: 6, ...overrides },
+    });
+  const setup = (overrides: Record<string, JsonValue> = {}) => ({
+    ok: false,
+    exitCode: 1,
+    timedOut: false,
+    durationSeconds: 42,
+    output: "ERR_PNPM_OUTDATED_LOCKFILE\n",
+    ...overrides,
+  });
+  const failedJob = (setupBlock: JsonValue | undefined) =>
+    turn({
+      status: "failed",
+      errorCode: "environment_setup_failed",
+      result: resultWith(
+        {
+          headCommit: null,
+          pushed: false,
+          commits: [],
+          filesChanged: [],
+          summary: "",
+          opencode: null,
+          ...(setupBlock === undefined ? {} : { setup: setupBlock }),
+        },
+        { ok: false },
+      ),
+    });
+
+  // #818-T29
+  it("names the environment and its size", () => {
+    const run = view(turn(), withEnvironment());
+
+    expect(run.implementer?.environment).toMatchObject({
+      name: "Node 22",
+      vcpus: 6,
+      memoryGb: 9.5,
+    });
+  });
+
+  // #818-T29
+  it("says nothing of an environment for a task that started without one, and for every other kind", () => {
+    expect(view(turn(), source()).implementer?.environment).toBeNull();
+    expect(
+      view(turn({ reviewKind: "diff", prNumber: 7 }), null).implementer,
+    ).toBeUndefined();
+  });
+
+  // #818-T29
+  it("shows what a failed setup script did: the status, the time and the end of its output", () => {
+    const run = view(failedJob(setup()), withEnvironment());
+
+    expect(run.implementer?.environment?.setup).toEqual({
+      outcome: "failed",
+      exitCode: 1,
+      durationSeconds: 42,
+      output: "ERR_PNPM_OUTDATED_LOCKFILE",
+    });
+    expect(run.errorCode).toBe("environment_setup_failed");
+    expect(run.errorCodeKnown).toBe(true);
+    expect(run.problem).toContain("setup script");
+  });
+
+  // #818-T29
+  it("says a script that ran out of time ran out of time, and one that succeeded succeeded", () => {
+    const slow = view(
+      failedJob(
+        setup({ exitCode: null, timedOut: true, durationSeconds: 900 }),
+      ),
+      withEnvironment(),
+    );
+    const fine = view(
+      turn({
+        result: resultWith({
+          setup: setup({ ok: true, exitCode: 0, output: "" }),
+        }),
+      }),
+      withEnvironment(),
+    );
+
+    expect(slow.implementer?.environment?.setup).toMatchObject({
+      outcome: "timed_out",
+      exitCode: null,
+    });
+    expect(fine.implementer?.environment?.setup).toMatchObject({
+      outcome: "ok",
+      exitCode: 0,
+      output: "",
+    });
+  });
+
+  // #818-T29
+  it("has no setup block for a result without one: a task whose environment has no script, or one that died before it", () => {
+    const run = view(failedJob(undefined), withEnvironment());
+
+    expect(run.implementer?.environment).toMatchObject({ name: "Node 22" });
+    expect(run.implementer?.environment?.setup).toBeNull();
+  });
+
+  // #818-T29
+  it("cleans the output, takes known secrets out of it and cuts it", () => {
+    const secret = ["ghs", "abcdefghijklmnopqrstuvwxyz0123"].join("_");
+    const redact = (text: string) => text.split(secret).join("[removed]");
+    // The END is what is kept: the secret is in the last lines, after much that is cut off.
+    const output =
+      "x".repeat(20_000) + `\n\u001b[31mfail\u001b[0m ${secret}\u0000\n`;
+
+    const run = toRunDetailView(
+      PRODUCT,
+      failedJob(setup({ output })),
+      "acme/widgets",
+      NOW,
+      redact,
+      false,
+      withEnvironment(),
+    );
+
+    const shown = run.implementer?.environment?.setup?.output ?? "";
+    expect(shown).not.toContain(secret);
+    expect(shown).toContain("[removed]");
+    expect(shown).not.toContain("\u001b");
+    expect(shown).not.toContain("\u0000");
+    expect(shown.length).toBeLessThanOrEqual(8192);
+  });
+
+  // #818-T29
+  it("shows the output of a run on the operator's key without naming a provider", () => {
+    const run = toRunDetailView(
+      PRODUCT,
+      failedJob(setup({ output: "401 from openrouter.ai while installing" })),
+      "acme/widgets",
+      NOW,
+      undefined,
+      true,
+      withEnvironment(),
+    );
+
+    expect(run.implementer?.environment?.setup?.output).not.toMatch(
+      /openrouter/i,
+    );
+  });
+
+  // #818-T29
+  it("ignores a setup block that is not what the contract says, instead of showing it", () => {
+    for (const bad of [
+      "oops",
+      null,
+      [],
+      setup({ output: 5 }),
+      setup({ ok: "yes" }),
+    ])
+      expect(
+        view(failedJob(bad as JsonValue), withEnvironment()).implementer
+          ?.environment?.setup,
+      ).toBeNull();
   });
 });

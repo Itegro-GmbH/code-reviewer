@@ -26,6 +26,7 @@ const SCOPED = [
   "billing-topup-intents-repository.ts",
   "billing-workspace-settings-repository.ts",
   "installation-link-requests-repository.ts",
+  "implementer-environments-repository.ts",
   "implementer-repository.ts",
   "integrations-repository.ts",
   "invitations-repository.ts",

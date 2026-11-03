@@ -3,7 +3,7 @@
 """Pins down the pins of the Implementer toolchain and the helper that installs them (#761).
 
 The agent of the Implementer runs git, node, pnpm and compilers inside the Worker container. git is
-built from a pinned source release (Debian's is older than the 2.53 the branch guard needs), node
+built from a pinned source release, node
 and pnpm are unpacked from pinned release archives. Each is named by exact version, release asset
 and SHA-256, checked like the engine and ripgrep: a download is accepted only with the pinned size
 and digest, before anything is unpacked. Nothing here touches the network: the download is injected.
@@ -107,11 +107,10 @@ def test_a_pin_names_an_exact_release_with_digests(component: str) -> None:
 
 
 # #761-T01
-def test_git_is_pinned_to_a_release_the_branch_guard_can_see_a_checkout_in() -> None:
+def test_git_is_pinned_to_a_release_built_from_source() -> None:
     pin = pin_of("git")
 
-    version = tuple(int(part) for part in pin["version"].split("."))
-    assert version >= (2, 53, 0)
+    assert "guard" not in pin["notes"], "git is free in the workspace: the pin has no guard to name"
     assert pin["license"] == "GPL-2.0-only"
     # Built from the source tarball, so there is no pinned executable.
     assert "executableSha256" not in pin["platforms"]["linux-x64"]

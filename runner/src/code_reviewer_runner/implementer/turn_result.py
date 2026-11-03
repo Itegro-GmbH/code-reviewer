@@ -14,6 +14,7 @@ from typing import Any
 
 from ..redaction import Redactor
 from ..result import ErrorCode, Usage
+from .git_workspace import BranchPush
 from .history import CommitInfo, FileChange
 
 MAX_SUMMARY_CHARS = 8192
@@ -43,7 +44,13 @@ class TurnResult:
     error_detail: str | None
     base_commit: str
     head_commit: str | None
+    # The form's branch: its tip when it has work on top of the base commit, and whether it arrived.
     pushed: bool
+    # Every local branch of the agent's repository the final push dealt with, pushed or rejected.
+    branches: tuple[BranchPush, ...]
+    # How many local branches were left out: (names that cannot be pushed, valid names beyond
+    # the limit).
+    branches_dropped: tuple[int, int]
     commits: tuple[CommitInfo, ...]
     files_changed: tuple[FileChange, ...]
     summary: str
@@ -52,6 +59,8 @@ class TurnResult:
     usage: Usage
     # Facts for the job log (counts and stable words), in order.
     notes: tuple[str, ...] = field(default_factory=tuple)
+    # #818: what the environment's setup script did (`ImplementerSetupResult`); None: no script ran.
+    setup: dict[str, Any] | None = None
 
     @property
     def ok(self) -> bool:
@@ -68,8 +77,22 @@ class TurnResult:
             "baseCommit": self.base_commit,
             "headCommit": self.head_commit,
             "pushed": self.pushed,
+            "branches": [
+                {
+                    "name": branch.name,
+                    "head": branch.head,
+                    "result": "pushed" if branch.pushed else "rejected",
+                    "reason": branch.reason,
+                }
+                for branch in self.branches
+            ],
+            "branchesDropped": {
+                "invalid": self.branches_dropped[0],
+                "overflow": self.branches_dropped[1],
+            },
             "commits": [{"sha": c.sha, "subject": c.subject} for c in self.commits],
             "filesChanged": [{"path": f.path, "status": f.kind.value} for f in self.files_changed],
             "summary": self.summary,
             "opencode": opencode,
+            **({} if self.setup is None else {"setup": self.setup}),
         }

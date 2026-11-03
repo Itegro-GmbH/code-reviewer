@@ -654,6 +654,7 @@ def _populated(ok: bool) -> JobResult:
             "baseCommit": "1" * 40,
             "headCommit": "2" * 40,
             "pushed": True,
+            "branches": [{"name": "work/b", "head": "2" * 40, "result": "pushed", "reason": None}],
             "commits": [{"sha": "2" * 40, "subject": "Add it"}],
             "filesChanged": [{"path": "a.ts", "status": "added"}],
             "summary": "Done.",

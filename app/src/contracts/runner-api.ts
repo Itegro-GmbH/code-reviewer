@@ -36,7 +36,7 @@ export type LlmProviderId = string;
  */
 export type KnownLlmProvider = "openrouter" | "anthropic";
 /**
- * The claim features this version of the contract defines (`features` in ClaimRequest). A reader ignores a feature name it does not know. `dynamic_capabilities` (#279): the runner reads `dynamic.capabilities`. `worker_credential` (#318): the caller is a Dispatcher and wants the split answer; the job input and its secrets reach only the Worker, with the per-job credential. `supersede` (#396): the runner understands `job.superseded` in a heartbeat answer and stops gracefully (it finishes the model requests in flight, sends no more, publishes nothing, reports its result and usage). The app supersedes a running job only when the claim named it. A Worker names it in the `features` of its details request. `dynamic_cost_policy` (#553): the runner reads `dynamic.cost` and enforces it (the price book of the managed key as the only price source, the token cap of an own key). A job that carries a cost policy goes only to a caller that named it; the app ends the job with `dynamic_engine_unavailable` otherwise, since a runner that did not read the policy would run without its bound. `vm_lifecycle` (#498): the caller is a Dispatcher that reports the VM it creates to the app (POST /api/runners/v1/jobs/{id}/vm, `KnownAppFeature` of the same name) so the app can measure billable minutes; the app records that it has seen a Dispatcher with and without it, and refuses to switch billing on while a Dispatcher without it has claimed recently. `cost_limit` (#666): the runner reads `llm.maxCostUsd` and enforces it next to the operator's own limit. The app sends it only to a caller that named it; a caller without it gets the job without the field and runs with the operator's own limit alone (a refused review is worse than a project limit that is not kept while a release rolls out), and the app logs that. A Worker names it in the `features` of its details request. `operator_cost_limit` (#689): the runner reads `llm.operatorMaxCostUsd`, the most one review may cost as the operator set it in the admin portal, and holds a review to the smaller of that and `llm.maxCostUsd`; it no longer reads `RUNNER_DYNAMIC_MAX_COST_USD` for a job that carries the field. The app sends it only to a caller that named it. A caller that names `cost_limit` alone gets the smaller of the two in `llm.maxCostUsd`; a caller that names neither gets neither field, and the app logs that. A Worker names it in the `features` of its details request.
+ * The claim features this version of the contract defines (`features` in ClaimRequest). A reader ignores a feature name it does not know. `dynamic_capabilities` (#279): the runner reads `dynamic.capabilities`. `worker_credential` (#318): the caller is a Dispatcher and wants the split answer; the job input and its secrets reach only the Worker, with the per-job credential. `supersede` (#396): the runner understands `job.superseded` in a heartbeat answer and stops gracefully (it finishes the model requests in flight, sends no more, publishes nothing, reports its result and usage). The app supersedes a running job only when the claim named it. A Worker names it in the `features` of its details request. `dynamic_cost_policy` (#553): the runner reads `dynamic.cost` and enforces it (the price book of the managed key as the only price source, the token cap of an own key). A job that carries a cost policy goes only to a caller that named it; the app ends the job with `dynamic_engine_unavailable` otherwise, since a runner that did not read the policy would run without its bound. `vm_lifecycle` (#498): the caller is a Dispatcher that reports the VM it creates to the app (POST /api/runners/v1/jobs/{id}/vm, `KnownAppFeature` of the same name) so the app can measure billable minutes; the app records that it has seen a Dispatcher with and without it, and refuses to switch billing on while a Dispatcher without it has claimed recently. `cost_limit` (#666): the runner reads `llm.maxCostUsd` and enforces it next to the operator's own limit. The app sends it only to a caller that named it; a caller without it gets the job without the field and runs with the operator's own limit alone (a refused review is worse than a project limit that is not kept while a release rolls out), and the app logs that. A Worker names it in the `features` of its details request. `operator_cost_limit` (#689): the runner reads `llm.operatorMaxCostUsd`, the most one review may cost as the operator set it in the admin portal, and holds a review to the smaller of that and `llm.maxCostUsd`; it no longer reads `RUNNER_DYNAMIC_MAX_COST_USD` for a job that carries the field. The app sends it only to a caller that named it. A caller that names `cost_limit` alone gets the smaller of the two in `llm.maxCostUsd`; a caller that names neither gets neither field, and the app logs that. A Worker names it in the `features` of its details request. `implementer_environment` (#818): the runner reads `implementer.environment` of a turn and runs its setup script before the model. The app sends `environment` only to a caller that named it, and ends a turn whose environment has a script with `implementer_engine_unavailable` (free) for a caller that did not, since a turn that silently skipped its script would run on a base the person did not choose. A Worker names it in the `features` of its details request.
  */
 export type KnownClaimFeature =
   | "dynamic_capabilities"
@@ -45,7 +45,8 @@ export type KnownClaimFeature =
   | "dynamic_cost_policy"
   | "vm_lifecycle"
   | "cost_limit"
-  | "operator_cost_limit";
+  | "operator_cost_limit"
+  | "implementer_environment";
 /**
  * #318: the per-job credential. 256 random bits, base64url without padding, behind the prefix `crj_`. The app mints it at claim; it is valid only for that job and only while the claim holds, and it is the one thing a Worker holds (Authorization: Bearer). Secret: never log it, never put it in an argument, an environment variable or a file; the Dispatcher passes it to the Worker on stdin.
  */
@@ -96,7 +97,7 @@ export type KnownCheckoutReason =
   | "isolation"
   | "context";
 /**
- * The error codes the runner reports in a result (ErrorCode in the runner, plus runner_shutdown from the job loop). #746 adds the codes of the Implementer: `branch_exists` (the branch to create is already on the remote), `base_branch_not_found`, `clone_failed`, `setup_failed` (the repository's own set-up did not run), `agent_gave_up` (the agent ended without a result it stands behind), `push_rejected` (the remote refused the push), `branch_violation` (the work left the branch it was given), `time_limit_reached` and the existing `cost_limit_reached` (the two limits of the turn), `git_write_not_granted` (the token cannot write contents of the repository), `implementer_engine_unavailable` (no engine of the runner runs the kind) and `implementer_config_invalid` (the turn's options cannot be used). A caller branches on the code, never on a message. The app accepts any code of the form below and stores an unknown one as 'unknown' (the original stays in the stored result), so a newer runner never loses a result.
+ * The error codes the runner reports in a result (ErrorCode in the runner, plus runner_shutdown from the job loop). #746 adds the codes of the Implementer: `branch_exists` (no longer produced: a branch the remote refuses is a rejected entry of `branches` and the turn ends `push_rejected`; the word stays for runs that carry it), `base_branch_not_found`, `clone_failed`, `setup_failed` (the repository's own set-up did not run), `agent_gave_up` (the agent ended without a result it stands behind), `push_rejected` (the remote refused the push), `branch_violation` (no longer produced: git is free in the workspace; the word stays for runs that carry it), `time_limit_reached` and the existing `cost_limit_reached` (the two limits of the turn), `git_write_not_granted` (the token cannot write contents of the repository), `implementer_engine_unavailable` (no engine of the runner runs the kind) and `implementer_config_invalid` (the turn's options cannot be used). A caller branches on the code, never on a message. The app accepts any code of the form below and stores an unknown one as 'unknown' (the original stays in the stored result), so a newer runner never loses a result.
  */
 export type KnownRunnerErrorCode =
   | "invalid_job"
@@ -149,7 +150,10 @@ export type KnownRunnerErrorCode =
   | "time_limit_reached"
   | "git_write_not_granted"
   | "implementer_engine_unavailable"
-  | "implementer_config_invalid";
+  | "implementer_config_invalid"
+  | "sandbox_unproven"
+  | "sandbox_size_unsupported"
+  | "environment_setup_failed";
 /**
  * Exactly the job the runner reads on stdin (see runner/src/code_reviewer_runner/job.py). Closed: the runner refuses unknown fields. Contains secrets (git.token, llm.apiKey): only the claim response carries it. #746: for `reviewKind: implementer` the job carries the `implementer` object instead of `prUrl`, `command`, `base` and `dynamic`; `git.token` is then a token that may write the contents of exactly the repository named in `implementer.repo` and nothing else.
  */
@@ -219,16 +223,13 @@ export type ImplementerBranchName = string;
 export type ImplementerFileStatus =
   "added" | "modified" | "deleted" | "renamed" | "copied" | "typechange";
 /**
- * #746: the names of the environment variables the Worker container of an implementer job gets, agreed here and used by later changes (the container profile and the runner). They hold no secret. `RUNNER_IMPLEMENTER_WORK_DIR`: the directory of the work volume, always `/work`. `RUNNER_IMPLEMENTER_EGRESS_PORT`: the loopback port of the registries proxy, a decimal port number; present when the network is `registries`. `RUNNER_IMPLEMENTER_NETWORK`: one of ImplementerNetworkMode. The Dispatcher sets them, never the app and never a job; the runner trusts these and nothing a job says about its own network.
+ * #746: the names of the environment variables the Worker container of an implementer job gets, agreed here and used by later changes (the container profile and the runner). They hold no secret. `RUNNER_IMPLEMENTER_WORK_DIR`: the directory of the work volume, always `/work`. `RUNNER_IMPLEMENTER_MODEL_DOOR` (#745): `docker` when the container carries the VM's Docker socket, through which it starts the model door, the agent's container and the reader; unset, the container is not an Implementer's. `RUNNER_IMPLEMENTER_SANDBOX_PROOF` (#745, step 4): `proven` or `unproven`, the golden snapshot's Sysbox verdict (the fourth member of the snapshot pair; a deployment that was never told one passes `unproven`); anything but `proven` ends a turn `sandbox_unproven`, free. `RUNNER_IMPLEMENTER_AGENT_MEMORY_MB`: the memory limit of the agent's container in MB, computed from the VM's size; `0` ends a turn `sandbox_size_unsupported`, free. The Dispatcher sets them, never the app and never a job.
  */
 export type KnownImplementerEnvironmentName =
   | "RUNNER_IMPLEMENTER_WORK_DIR"
-  | "RUNNER_IMPLEMENTER_EGRESS_PORT"
-  | "RUNNER_IMPLEMENTER_NETWORK";
-/**
- * #746: what the Worker of an implementer job can reach besides the model proxy and the git remote of its repository. `registries`: the package registries named by the deployment, through the loopback proxy of `RUNNER_IMPLEMENTER_EGRESS_PORT` (a default-deny proxy that allows only those hosts). `none`: nothing else.
- */
-export type ImplementerNetworkMode = "registries" | "none";
+  | "RUNNER_IMPLEMENTER_MODEL_DOOR"
+  | "RUNNER_IMPLEMENTER_SANDBOX_PROOF"
+  | "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB";
 /**
  * The engine's tools; every other name a model called is `other`.
  */
@@ -900,6 +901,7 @@ export interface ImplementerJob {
   cost: DynamicCostPolicy;
   modelEntry: DynamicModelEntry;
   capabilities?: DynamicModelCapabilities;
+  environment?: ImplementerEnvironment;
 }
 /**
  * #746: the one repository a turn works on. `fullName` is `owner/name`; `cloneUrl` is the https address the runner clones from (the host of the git provider), with no credential in it: the token is in `git.token`.
@@ -909,12 +911,42 @@ export interface ImplementerRepo {
   cloneUrl: string;
 }
 /**
- * #746: what a turn of the Implementer did, in `RunnerResult.implementer`. A closed object; later fields (checks, open questions, an export of the work) are additive in a later change. It is facts the runner measured in the repository, never text from the agent except `summary`, which is shown as plain text. `baseCommit` is the head of the base branch the work started from. `headCommit` is the last commit of the branch, or null when the turn made none. `pushed` says that the branch with `headCommit` is on the remote, and is never true without a `headCommit`. `commits` are the commits of the branch after the base commit, oldest first, at most 200 (more are cut off, the head commit is always the last); `filesChanged` are the files that differ between the base commit and the head commit, at most 500. `opencode` names the saved agent session a later turn continues, null when none was saved. A failed turn carries the block too, whenever the runner got as far as the repository.
+ * #818: the environment a turn was started with, as the turn copied it when it started: the setup script the runner runs once in the repository's folder after the clone and before the model is called. Present only when the environment has a script and the caller named the claim feature `implementer_environment`; a turn without a script carries nothing (the size of the VM is the Dispatcher's business, it reaches the Worker as the VM it runs in). `setupScript` is literal text of at most 64 KB of UTF-8, written by a member of the workspace: it is data to run, never a command of the app, and it holds no secret by design (there is no field for one). `name` is for the run's log line only.
+ */
+export interface ImplementerEnvironment {
+  name: string;
+  setupScript: string;
+}
+/**
+ * #818: what the setup script of a turn did, in `ImplementerResult.setup`; present when a script ran, absent otherwise. `ok` is whether it ended with exit status 0 within its time limit. `exitCode` is its exit status, null when it did not end by itself (the time limit, `timedOut`, or a signal). `output` is the end of what it wrote to stdout and stderr together, at most 8192 characters, with every secret known to the runner removed like every log line. A failed script ends the turn with the error code `environment_setup_failed` before the model is called.
+ */
+export interface ImplementerSetupResult {
+  ok: boolean;
+  exitCode: number | null;
+  timedOut: boolean;
+  durationSeconds: number;
+  output: string;
+}
+/**
+ * #746: what a turn of the Implementer did, in `RunnerResult.implementer`. A closed object; later fields (checks, open questions, an export of the work) are additive in a later change. It is facts the runner measured in the repository, never text from the agent except `summary`, which is shown as plain text. `baseCommit` is the head of the base branch the work started from. `headCommit` is the last commit of the branch, or null when the turn made none. `pushed` says that the branch with `headCommit` is on the remote, and is never true without a `headCommit`. The branch is the one the form named. The agent may create other branches, and the runner pushes all local branches of the agent's repository when the turn ends, each without force: `branches` has one entry for every branch the runner dealt with (at most 50, the task's branch first and then alphabetical), `pushed` or `rejected` with a reason word of the runner (`non_fast_forward`, `remote_rejected`, `workflows_not_allowed`, `provider_refused`, `provider_error`, `provider_unavailable`, `timed_out`, `unreadable`, `not_a_commit`, `out_of_time`, `excluded`; a caller treats an unknown word as a rejection without a reason). A branch with nothing new on the base commit is not listed. `branchesDropped` counts the local branches that are in no entry: `invalid` those whose name cannot be pushed, `overflow` the valid ones beyond the limit of 50 (an unreadable list of branches, or one too long to read, has no entries and the turn ends `push_rejected`). A result without `branches` comes from an older runner and means none. `commits` are the commits of the form's branch after the base commit, oldest first, at most 200 (more are cut off, the head commit is always the last); `filesChanged` are the files that differ between the base commit and the head commit, at most 500. `opencode` names the saved agent session a later turn continues, null when none was saved. A failed turn carries the block too, whenever the runner got as far as the repository.
  */
 export interface ImplementerResult {
   baseCommit: string;
   headCommit: string | null;
   pushed: boolean;
+  branchesDropped?: {
+    invalid: number;
+    overflow: number;
+  };
+  /**
+   * @maxItems 50
+   */
+  branches?: {
+    name: string;
+    head: string | null;
+    result: "pushed" | "rejected";
+    reason: string | null;
+  }[];
   /**
    * @maxItems 200
    */
@@ -934,6 +966,7 @@ export interface ImplementerResult {
     sessionId: string;
     version: string;
   } | null;
+  setup?: ImplementerSetupResult;
 }
 /**
  * 200 from POST /api/runners/v1/claim. 204 without a body means there is nothing to do. Cache-Control is always no-store.
@@ -1171,6 +1204,19 @@ export interface ImplementerResult1 {
   baseCommit: string;
   headCommit: string | null;
   pushed: boolean;
+  branchesDropped?: {
+    invalid: number;
+    overflow: number;
+  };
+  /**
+   * @maxItems 50
+   */
+  branches?: {
+    name: string;
+    head: string | null;
+    result: "pushed" | "rejected";
+    reason: string | null;
+  }[];
   /**
    * @maxItems 200
    */
@@ -1190,6 +1236,7 @@ export interface ImplementerResult1 {
     sessionId: string;
     version: string;
   } | null;
+  setup?: ImplementerSetupResult;
 }
 /**
  * The whole request body must not exceed 65536 bytes (413 otherwise).
@@ -1229,6 +1276,10 @@ export interface SplitClaimResponse {
      * How often the lease must be extended; the Dispatcher heartbeats with the credential until the Worker takes over.
      */
     heartbeatIntervalSeconds: number;
+    /**
+     * #818: the VM size in vCPUs that the turn's environment asks for. Present only for a job of the kind `implementer` that was started with an environment; absent otherwise, and then the Dispatcher's configuration and default apply. It comes from the app's authenticated answer only. The Dispatcher launches only the sizes of the platform (`contracts/environment-sizes.v1.json`) and fails the launch with its own code for any other, and it ignores the field for every other kind, so a review can never name a size.
+     */
+    vcpus?: number;
     [k: string]: unknown;
   };
   [k: string]: unknown;
@@ -1268,6 +1319,10 @@ export interface VmStartRequest {
    */
   startedAt: string;
   timeoutSeconds: number;
+  /**
+   * #818: the size of the VM in vCPUs, reported for a job of the kind `implementer` only (an app of the release before refuses an unknown field of this closed body, and a report that is refused costs only the measuring of the minutes), so that minutes can be priced by size.
+   */
+  vcpus?: number;
 }
 /**
  * #493: 200 from the report. `recorded`: the VM is stored. `replayed`: the VM was known; nothing changed.

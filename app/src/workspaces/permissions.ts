@@ -27,6 +27,8 @@ export const WORKSPACE_ACTIONS = [
   "start_review",
   /** Send a task to the Implementer (#755; factory only, the routes do not exist elsewhere). */
   "start_implementer_task",
+  /** Create, change and delete the Implementer's environments (a size and a setup script; #818). Any member may use one. */
+  "manage_implementer_environments",
   /** Change the settings of one project. */
   "change_project_settings",
   /** Switch a project on or off: which repositories are reviewed (and paid for). */
@@ -63,6 +65,7 @@ export const MINIMUM_ROLE: Record<WorkspaceAction, WorkspaceRole> = {
   view: "member",
   start_review: "member",
   start_implementer_task: "member",
+  manage_implementer_environments: "admin",
   change_project_settings: "member",
   manage_projects: "admin",
   manage_review_defaults: "admin",

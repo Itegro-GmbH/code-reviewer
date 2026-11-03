@@ -1501,6 +1501,13 @@ class BudgetLedger:
             )
 
     @property
+    def open_calls(self) -> int:
+        """How many reserved calls are still open: not settled and not given back. The model door
+        reports it so that a door that dies in the middle of a call is known to have had one."""
+        with self._lock:
+            return len(self._open)
+
+    @property
     def model_used(self) -> bool:
         """True when the model was really used: a call was billed (its usage was read), or may
         have been (its usage was never seen, or its cost could not be read). `model_calls` is not

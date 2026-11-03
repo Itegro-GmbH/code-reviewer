@@ -18,6 +18,7 @@ import { RunsList } from "./runs-list.tsx";
 afterEach(cleanup);
 
 const api = { list: vi.fn(), detail: vi.fn() } as unknown as RunsApi;
+const NONE_DROPPED = { invalid: 0, overflow: 0 };
 const SHA = "b".repeat(40);
 
 function row(overrides: Partial<RunRowView> = {}): RunRowView {
@@ -54,6 +55,7 @@ function task(
     baseBranch: "main",
     instruction: { preview: "Add a health endpoint.", full: null },
     summary: "Added a health endpoint.",
+    environment: null,
     commits: {
       shown: [
         {
@@ -68,6 +70,20 @@ function task(
       count: 1,
       shown: [{ path: "src/health.ts", status: "added" }],
       more: 0,
+    },
+    branches: {
+      shown: [
+        {
+          name: "implementer/abc123",
+          url: "https://github.com/acme/widgets/tree/implementer/abc123",
+          shortSha: SHA.slice(0, 7),
+          pushed: true,
+          reason: null,
+          isTaskBranch: true,
+        },
+      ],
+      more: 0,
+      dropped: NONE_DROPPED,
     },
     head: {
       shortSha: SHA.slice(0, 7),
@@ -209,11 +225,15 @@ describe("the detail page of an implementer run", () => {
     expect(text).toContain("acme/widgets");
     expect(text).toContain("Base branch");
     expect(text).toContain("main");
+    // The facts and the list of branches both link to the task's branch.
     expect(
       screen
-        .getByRole("link", { name: "implementer/abc123" })
-        .getAttribute("href"),
-    ).toBe("https://github.com/acme/widgets/tree/implementer/abc123");
+        .getAllByRole("link", { name: "implementer/abc123" })
+        .map((link) => link.getAttribute("href")),
+    ).toEqual([
+      "https://github.com/acme/widgets/tree/implementer/abc123",
+      "https://github.com/acme/widgets/tree/implementer/abc123",
+    ]);
     expect(text).toContain("Implementer");
     expect(text).not.toContain("Pull request");
     expect(text).not.toContain("#-1");
@@ -231,6 +251,138 @@ describe("the detail page of an implementer run", () => {
     expect(text).toContain("src/health.ts");
     expect(text).toContain("Added a health endpoint.");
     expect(screen.queryByText(/Findings/)).toBeNull();
+  });
+
+  // The git model: the runner pushes all local branches, and the page shows every one with a link or a reason.
+  it("lists every branch of the task: a pushed one with a link, a rejected one with the sentence for its reason", () => {
+    const { container } = renderDetail(
+      detail({
+        implementer: task({
+          branches: {
+            shown: [
+              {
+                name: "implementer/abc123",
+                url: "https://github.com/acme/widgets/tree/implementer/abc123",
+                shortSha: SHA.slice(0, 7),
+                pushed: true,
+                reason: null,
+                isTaskBranch: true,
+              },
+              {
+                name: "experiment/two",
+                url: "https://github.com/acme/widgets/tree/experiment/two",
+                shortSha: "ccccccc",
+                pushed: true,
+                reason: null,
+                isTaskBranch: false,
+              },
+              {
+                name: "main",
+                url: null,
+                shortSha: "ddddddd",
+                pushed: false,
+                reason:
+                  "The branch already exists on GitHub with other history. The Implementer never overwrites a branch.",
+                isTaskBranch: false,
+              },
+            ],
+            more: 0,
+            dropped: NONE_DROPPED,
+          },
+        }),
+      }),
+    );
+
+    const list = container.querySelector('[data-slot="run-branches"]');
+    expect(list?.querySelectorAll("li")).toHaveLength(3);
+    expect(
+      screen.getByRole("link", { name: "experiment/two" }).getAttribute("href"),
+    ).toBe("https://github.com/acme/widgets/tree/experiment/two");
+    const rejected = container.querySelector('[data-branch-result="rejected"]');
+    expect(rejected?.textContent).toContain("main");
+    expect(rejected?.textContent).toContain("not pushed");
+    expect(rejected?.textContent).toContain("never overwrites a branch");
+    expect(rejected?.querySelector("a")).toBeNull();
+    expect(list?.textContent).toContain("the task's branch");
+  });
+
+  it("shows no list of branches for a task that pushed none", () => {
+    const { container } = renderDetail(
+      detail({
+        implementer: task({
+          branches: { shown: [], more: 0, dropped: NONE_DROPPED },
+          head: null,
+        }),
+      }),
+    );
+
+    expect(container.querySelector('[data-slot="run-branches"]')).toBeNull();
+    expect(screen.queryByText("Branches")).toBeNull();
+  });
+
+  it("says how many branches were left out, because of their name and because of the limit, even when none was pushed", () => {
+    const { container } = renderDetail(
+      detail({
+        implementer: task({
+          branches: {
+            shown: [],
+            more: 0,
+            dropped: { invalid: 2, overflow: 1 },
+          },
+          head: null,
+        }),
+      }),
+    );
+
+    expect(screen.getByText("Branches")).toBeTruthy();
+    expect(
+      container.querySelector('[data-slot="run-branches-invalid"]')
+        ?.textContent,
+    ).toBe("2 branches were not pushed because their names cannot be pushed.");
+    expect(
+      container.querySelector('[data-slot="run-branches-overflow"]')
+        ?.textContent,
+    ).toBe(
+      "1 further branch was not pushed because only 50 branches are pushed.",
+    );
+  });
+
+  it("says nothing about left-out branches when there are none", () => {
+    const { container } = renderDetail(detail({ implementer: task({}) }));
+
+    expect(
+      container.querySelector('[data-slot="run-branches-invalid"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-slot="run-branches-overflow"]'),
+    ).toBeNull();
+  });
+
+  it("renders a hostile branch name as text", () => {
+    const hostile = '<img src=x onerror="alert(1)">';
+    const { container } = renderDetail(
+      detail({
+        implementer: task({
+          branches: {
+            shown: [
+              {
+                name: hostile,
+                url: null,
+                shortSha: null,
+                pushed: false,
+                reason: "The branch was not pushed.",
+                isTaskBranch: false,
+              },
+            ],
+            more: 0,
+            dropped: NONE_DROPPED,
+          },
+        }),
+      }),
+    );
+
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.textContent).toContain(hostile);
   });
 
   // #758-T02
@@ -431,5 +583,161 @@ describe("the detail page of an implementer run", () => {
     expect(container.textContent).toContain("Pull request");
     expect(container.textContent).toContain("/review");
     expect(container.textContent).not.toContain("Base branch");
+  });
+});
+
+// #818: which environment and size a task used, and the output of a setup script that failed.
+describe("the environment on the detail page of an implementer run (#818)", () => {
+  const environment = (
+    overrides: Partial<NonNullable<ImplementerDetailView["environment"]>> = {},
+  ): NonNullable<ImplementerDetailView["environment"]> => ({
+    name: "Node 22",
+    vcpus: 6,
+    memoryGb: 12,
+    setup: null,
+    ...overrides,
+  });
+
+  // #818-T30
+  it("names the environment and its size among the facts of the run", () => {
+    renderDetail(detail({ implementer: task({ environment: environment() }) }));
+
+    const term = screen.getByText("Environment");
+    const description = term.nextElementSibling;
+    expect(description?.textContent).toContain("Node 22");
+    expect(description?.textContent).toContain("6 vCPU, 12 GB");
+  });
+
+  // #818-T30
+  it("shows no environment line for a task that started without one", () => {
+    renderDetail(detail());
+
+    expect(screen.queryByText("Environment")).toBeNull();
+  });
+
+  // #818-T30
+  it("shows the end of the output of a failed script, with its exit status and time, as text", () => {
+    renderDetail(
+      detail({
+        status: "failed",
+        errorCode: "environment_setup_failed",
+        errorCodeKnown: true,
+        implementer: task({
+          reported: true,
+          environment: environment({
+            setup: {
+              outcome: "failed",
+              exitCode: 1,
+              durationSeconds: 42,
+              output: "ERR_PNPM_OUTDATED_LOCKFILE <b>not bold</b>",
+            },
+          }),
+        }),
+      }),
+    );
+
+    const section = screen
+      .getByRole("heading", { name: "Setup script" })
+      .closest("[role=region]") as HTMLElement;
+    expect(section.textContent).toContain("exit status 1");
+    expect(section.textContent).toContain("42 s");
+    const output = section.querySelector("[data-slot=run-setup-output]");
+    expect(output?.textContent).toBe(
+      "ERR_PNPM_OUTDATED_LOCKFILE <b>not bold</b>",
+    );
+    expect(output?.querySelector("b")).toBeNull();
+  });
+
+  // #818-T30
+  it("says a script that ran out of time ran out of time, and one that worked worked", () => {
+    const timedOut = renderDetail(
+      detail({
+        status: "failed",
+        implementer: task({
+          environment: environment({
+            setup: {
+              outcome: "timed_out",
+              exitCode: null,
+              durationSeconds: 900,
+              output: "",
+            },
+          }),
+        }),
+      }),
+    );
+    expect(timedOut.container.textContent).toContain("ran out of time");
+    cleanup();
+
+    const fine = renderDetail(
+      detail({
+        implementer: task({
+          environment: environment({
+            setup: {
+              outcome: "ok",
+              exitCode: 0,
+              durationSeconds: 12,
+              output: "",
+            },
+          }),
+        }),
+      }),
+    );
+    expect(fine.container.textContent).toContain("finished");
+    expect(fine.container.textContent).not.toContain("ran out of time");
+  });
+
+  // #818-T30b
+  it("says a script that exited 0 but whose result could not be kept finished, and shows why from the end of the output", () => {
+    renderDetail(
+      detail({
+        status: "failed",
+        errorCode: "environment_setup_failed",
+        errorCodeKnown: true,
+        implementer: task({
+          reported: true,
+          environment: environment({
+            setup: {
+              outcome: "failed",
+              exitCode: 0,
+              durationSeconds: 31,
+              output:
+                "installing\n[setup] the VM had no room to save the setup result: the VM's disk has 100 MB left and the result of the script needs about 1280 MB",
+            },
+          }),
+        }),
+      }),
+    );
+
+    const section = screen
+      .getByRole("heading", { name: "Setup script" })
+      .closest("[role=region]") as HTMLElement;
+    expect(section.textContent).toContain(
+      "The script finished, but its result could not be kept after 31 s",
+    );
+    expect(section.textContent).not.toContain("failed with exit status");
+    expect(
+      section.querySelector("[data-slot=run-setup-output]")?.textContent,
+    ).toContain("[setup] the VM had no room to save the setup result");
+  });
+
+  // #818-T30
+  it("shows an empty output as such instead of an empty box", () => {
+    renderDetail(
+      detail({
+        status: "failed",
+        implementer: task({
+          environment: environment({
+            setup: {
+              outcome: "failed",
+              exitCode: 2,
+              durationSeconds: 1,
+              output: "",
+            },
+          }),
+        }),
+      }),
+    );
+
+    expect(screen.getByText("The script wrote no output.")).toBeTruthy();
   });
 });

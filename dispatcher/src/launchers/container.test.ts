@@ -116,7 +116,7 @@ describe("rendering the hardened container spec", () => {
     ]);
     expect(args).toContain("--read-only");
     expect(valuesOf(args, "--pids-limit")).toEqual(["512"]);
-    expect(valuesOf(args, "--stop-timeout")).toEqual(["90"]);
+    expect(valuesOf(args, "--stop-timeout")).toEqual(["150"]);
     expect(valuesOf(args, "--network")).toEqual(["bridge"]);
     expect(args.slice(-2)).toEqual([IMAGE, ENTRY_MODE_WORKER_ONCE]);
   });
@@ -168,7 +168,13 @@ describe("rendering the hardened container spec", () => {
       ["host network (key)", { networkMode: "host" }, "spec_forbidden_key"],
       ["the host pid namespace", { pid: "host" }, "spec_forbidden_key"],
       ["the host ipc namespace", { ipc: "host" }, "spec_forbidden_key"],
-      ["the docker socket", { dockerSocket: true }, "spec_forbidden_key"],
+      // The Implementer's profile has the VM's Docker socket (#745) and holds it to its exact value; every other spec
+      // has no such key at all.
+      [
+        "the docker socket",
+        { dockerSocket: true },
+        "workVolume" in base ? "spec_not_hardened" : "spec_forbidden_key",
+      ],
       [
         "host network (value)",
         { network: { mode: "host" } },

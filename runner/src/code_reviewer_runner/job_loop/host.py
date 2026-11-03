@@ -130,13 +130,13 @@ IMPLEMENTER_PASSTHROUGH_VARIABLES = (
 # carries the commits and files of the turn, up to the 4 MB the body is held to (`report.py`).
 IMPLEMENTER_STDOUT_KEEP_BYTES = 6 * 1024 * 1024
 # A stopped turn of the Implementer has to end its engine, ask the lease and push: the process
-# gets this long after SIGTERM before it is killed (the container's own `stopTimeoutSeconds` is 90,
+# gets this long after SIGTERM before it is killed (the container's own `stopTimeoutSeconds` is 150,
 # and the report of the stop comes after it). The process leaves itself less
 # (`job_run.SIGTERM_BACKSTOP_SECONDS`).
-IMPLEMENTER_TERMINATE_GRACE_SECONDS = 60.0
+IMPLEMENTER_TERMINATE_GRACE_SECONDS = 120.0
 # One lease question of an Implementer turn is bounded. At a normal end the last push must not
 # lose a good turn to a slow app: 25 s a question, and the window of the last push (30 s, asked
-# again) fits the grace of 180 s the end keeps. A stop has a minute in all and no time for an app
+# again) fits the grace of 270 s the end keeps. A stop has two minutes in all and no time for an app
 # that does not answer: 10 s a question.
 IMPLEMENTER_LEASE_CHECK_BUDGET_SECONDS = 25.0
 IMPLEMENTER_STOP_LEASE_CHECK_BUDGET_SECONDS = 10.0

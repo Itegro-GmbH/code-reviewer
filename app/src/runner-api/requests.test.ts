@@ -951,6 +951,179 @@ describe("the implementer block of a result (#754)", () => {
     expect(worker.ok && worker.value.result.implementer).toEqual(block());
   });
 
+  // The git model: every branch of the agent's repository is reported with its outcome.
+  describe("the branches", () => {
+    const pushed = {
+      name: "work/b",
+      head: SHA_B,
+      result: "pushed",
+      reason: null,
+    };
+    const rejected = {
+      name: "main",
+      head: SHA_A,
+      result: "rejected",
+      reason: "non_fast_forward",
+    };
+    const parsed = (branches: unknown) =>
+      parseCompleteRequest(bodyWith({ ...block(), branches }));
+
+    it("keeps pushed and rejected branches as sent, and leaves the field out when the runner sent none", () => {
+      const both = parsed([pushed, rejected]);
+      const none = parseCompleteRequest(bodyWith(block()));
+
+      expect(both.ok && both.value.result.implementer?.branches).toEqual([
+        pushed,
+        rejected,
+      ]);
+      expect(
+        none.ok && "branches" in (none.value.result.implementer ?? {}),
+      ).toBe(false);
+    });
+
+    it("takes a rejected branch that could not be read, and a reason word it does not know", () => {
+      const unread = {
+        name: "x",
+        head: null,
+        result: "rejected",
+        reason: "new_word",
+      };
+
+      const done = parsed([unread]);
+
+      expect(done.ok && done.value.result.implementer?.branches).toEqual([
+        unread,
+      ]);
+    });
+
+    it.each<[string, unknown, string]>([
+      [
+        "51 branches",
+        Array.from({ length: 51 }, () => pushed),
+        "result.implementer.branches",
+      ],
+      [
+        "a branch list that is not a list",
+        "main",
+        "result.implementer.branches",
+      ],
+      [
+        "an unknown field",
+        [{ ...pushed, extra: 1 }],
+        "result.implementer.branches[0].extra",
+      ],
+      [
+        "an empty name",
+        [{ ...pushed, name: "" }],
+        "result.implementer.branches[0].name",
+      ],
+      [
+        "a name over 255 characters",
+        [{ ...pushed, name: "n".repeat(256) }],
+        "result.implementer.branches[0].name",
+      ],
+      [
+        "a bad head",
+        [{ ...pushed, head: "abc" }],
+        "result.implementer.branches[0].head",
+      ],
+      [
+        "a result the contract does not name",
+        [{ ...pushed, result: "maybe" }],
+        "result.implementer.branches[0].result",
+      ],
+      [
+        "a pushed branch without a head",
+        [{ ...pushed, head: null }],
+        "result.implementer.branches[0].result",
+      ],
+      [
+        "a pushed branch with a reason",
+        [{ ...pushed, reason: "x" }],
+        "result.implementer.branches[0].result",
+      ],
+      [
+        "a rejected branch without a reason",
+        [{ ...rejected, reason: null }],
+        "result.implementer.branches[0].reason",
+      ],
+      [
+        "a reason that is not a word",
+        [{ ...rejected, reason: "Not Fast" }],
+        "result.implementer.branches[0].reason",
+      ],
+    ])("refuses %s", (_, branches, field) => {
+      const done = parsed(branches);
+
+      expect(done.ok).toBe(false);
+      expect(!done.ok && done.fields.map((entry) => entry.field)).toContain(
+        field,
+      );
+    });
+
+    it("removes control characters from a name like it does from a path", () => {
+      const done = parsed([{ ...pushed, name: "a\u0000b" }]);
+
+      expect(
+        done.ok && done.value.result.implementer?.branches?.[0]?.name,
+      ).toBe("ab");
+    });
+  });
+
+  describe("the counts of the branches that were left out", () => {
+    const parsed = (branchesDropped: unknown) =>
+      parseCompleteRequest(bodyWith({ ...block(), branchesDropped }));
+
+    it("keeps the counts as sent, and leaves the field out when the runner sent none", () => {
+      const done = parsed({ invalid: 3, overflow: 7 });
+      const none = parseCompleteRequest(bodyWith(block()));
+
+      expect(done.ok && done.value.result.implementer?.branchesDropped).toEqual(
+        { invalid: 3, overflow: 7 },
+      );
+      expect(
+        none.ok && "branchesDropped" in (none.value.result.implementer ?? {}),
+      ).toBe(false);
+    });
+
+    it.each<[string, unknown, string]>([
+      ["not an object", 3, "result.implementer.branchesDropped"],
+      ["null", null, "result.implementer.branchesDropped"],
+      [
+        "an unknown field",
+        { invalid: 0, overflow: 0, extra: 1 },
+        "result.implementer.branchesDropped.extra",
+      ],
+      [
+        "a missing count",
+        { invalid: 0 },
+        "result.implementer.branchesDropped.overflow",
+      ],
+      [
+        "a negative count",
+        { invalid: -1, overflow: 0 },
+        "result.implementer.branchesDropped.invalid",
+      ],
+      [
+        "a count that is not a whole number",
+        { invalid: 0, overflow: 1.5 },
+        "result.implementer.branchesDropped.overflow",
+      ],
+      [
+        "a count that is not a number",
+        { invalid: "3", overflow: 0 },
+        "result.implementer.branchesDropped.invalid",
+      ],
+    ])("refuses %s", (_, counts, field) => {
+      const done = parsed(counts);
+
+      expect(done.ok).toBe(false);
+      expect(!done.ok && done.fields.map((entry) => entry.field)).toContain(
+        field,
+      );
+    });
+  });
+
   // #754-T03
   it("leaves the field out of a result that has none, and accepts a turn that made no commit", () => {
     const none = parseCompleteRequest({
@@ -1183,5 +1356,111 @@ describe("the implementer block of a result (#754)", () => {
         (entry) => entry.field,
       ),
     ).toContain("result.implementer");
+  });
+});
+
+// #818: the setup block of a turn's result (`result.implementer.setup`, `ImplementerSetupResult` in the contract): what the setup
+// script of the environment did. Read like the rest of the block: closed, bounded, control characters stripped.
+describe("the setup block of an implementer result (#818)", () => {
+  const SHA_A = "a".repeat(40);
+  const block = (setup?: unknown) => ({
+    baseCommit: SHA_A,
+    headCommit: null,
+    pushed: false,
+    commits: [],
+    filesChanged: [],
+    summary: "",
+    opencode: null,
+    ...(setup === undefined ? {} : { setup }),
+  });
+  const setup = (overrides: Record<string, unknown> = {}) => ({
+    ok: false,
+    exitCode: 1,
+    timedOut: false,
+    durationSeconds: 42,
+    output: "ERR_PNPM_OUTDATED_LOCKFILE\n",
+    ...overrides,
+  });
+  const bodyWith = (implementer: unknown) => ({
+    leaseToken: TOKEN,
+    result: { ...GOOD_RESULT, implementer },
+  });
+
+  // #818-T25
+  it("keeps a valid setup block as it was sent, in a complete and in a Worker result", () => {
+    const complete = parseCompleteRequest(bodyWith(block(setup())));
+    const worker = parseWorkerResultRequest({
+      result: { ...GOOD_RESULT, implementer: block(setup()) },
+    });
+
+    expect(complete.ok && complete.value.result.implementer?.setup).toEqual(
+      setup(),
+    );
+    expect(worker.ok && worker.value.result.implementer?.setup).toEqual(
+      setup(),
+    );
+  });
+
+  // #818-T25
+  it("accepts a script that ran out of time (no exit status) and one that succeeded, and leaves the field out of a result without one", () => {
+    const timedOut = parseCompleteRequest(
+      bodyWith(block(setup({ exitCode: null, timedOut: true }))),
+    );
+    const fine = parseCompleteRequest(
+      bodyWith(block(setup({ ok: true, exitCode: 0, output: "" }))),
+    );
+    const none = parseCompleteRequest(bodyWith(block()));
+
+    expect(timedOut.ok).toBe(true);
+    expect(fine.ok).toBe(true);
+    expect(none.ok && "setup" in (none.value.result.implementer ?? {})).toBe(
+      false,
+    );
+  });
+
+  // #818-T25
+  it("strips control characters from the output, and keeps tabs and line breaks", () => {
+    const parsed = parseCompleteRequest(
+      bodyWith(block(setup({ output: "a\u0000b\u001b[0m\tc\nd\u007f" }))),
+    );
+
+    expect(parsed.ok && parsed.value.result.implementer?.setup?.output).toBe(
+      "ab[0m\tc\nd",
+    );
+  });
+
+  // #818-T25
+  it.each<[string, Record<string, unknown>, string]>([
+    ["an output over 8192 characters", { output: "x".repeat(8193) }, "output"],
+    ["an output that is not text", { output: 5 }, "output"],
+    ["a missing output", { output: undefined }, "output"],
+    ["ok that is not a boolean", { ok: "yes" }, "ok"],
+    ["an exit status that is a fraction", { exitCode: 1.5 }, "exitCode"],
+    ["an exit status above 255", { exitCode: 256 }, "exitCode"],
+    ["a missing exit status", { exitCode: undefined }, "exitCode"],
+    ["timedOut that is not a boolean", { timedOut: 1 }, "timedOut"],
+    ["a negative duration", { durationSeconds: -1 }, "durationSeconds"],
+    [
+      "a duration that is a fraction",
+      { durationSeconds: 1.5 },
+      "durationSeconds",
+    ],
+    ["a field the contract does not have", { script: "echo" }, "script"],
+  ])("refuses %s", (_name, change, field) => {
+    const parsed = parseCompleteRequest(bodyWith(block(setup(change))));
+
+    expect(fieldsOf(parsed).map((entry) => entry.field)).toContain(
+      `result.implementer.setup.${field}`,
+    );
+  });
+
+  // #818-T25
+  it("refuses a setup block that is not an object, including null", () => {
+    for (const value of [null, "ok", 3, []])
+      expect(
+        fieldsOf(parseCompleteRequest(bodyWith(block(value as never)))).map(
+          (entry) => entry.field,
+        ),
+      ).toContain("result.implementer.setup");
   });
 });

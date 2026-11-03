@@ -95,7 +95,13 @@ _IMPLEMENTER_FIELDS = {
     "cost",
     "modelEntry",
     "capabilities",
+    "environment",
 }
+_IMPLEMENTER_ENVIRONMENT_FIELDS = {"name", "setupScript"}
+# The bounds of the contract (`contracts/environment-sizes.v1.json`): a script is text of at most
+# 64 KB.
+MAX_SETUP_SCRIPT_BYTES = 64 * 1024
+MAX_ENVIRONMENT_NAME_CHARS = 80
 _IMPLEMENTER_REPO_FIELDS = {"fullName", "cloneUrl"}
 _IMPLEMENTER_LIMIT_FIELDS = {"timeLimitSeconds"}
 MAX_INSTRUCTION_CHARS = 20_000
@@ -110,16 +116,19 @@ _CLONE_URL = re.compile(r"https://[^\s@]{1,2040}")
 # `KnownImplementerEnvironmentName` of the contract; a test compares them). The Dispatcher sets
 # them.
 IMPLEMENTER_WORK_DIR_VARIABLE = "RUNNER_IMPLEMENTER_WORK_DIR"
-IMPLEMENTER_EGRESS_PORT_VARIABLE = "RUNNER_IMPLEMENTER_EGRESS_PORT"
-IMPLEMENTER_NETWORK_VARIABLE = "RUNNER_IMPLEMENTER_NETWORK"
+# #745, step 3: `docker` when the container carries the VM's Docker socket, which it starts the
+# model door, the agent's container (step 4) and the reader with.
+IMPLEMENTER_MODEL_DOOR_VARIABLE = "RUNNER_IMPLEMENTER_MODEL_DOOR"
+# #745, step 4: the golden snapshot's Sysbox verdict and the memory of the agent's container.
+IMPLEMENTER_SANDBOX_PROOF_VARIABLE = "RUNNER_IMPLEMENTER_SANDBOX_PROOF"
+IMPLEMENTER_AGENT_MEMORY_VARIABLE = "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB"
 IMPLEMENTER_ENVIRONMENT_NAMES: tuple[str, ...] = (
     IMPLEMENTER_WORK_DIR_VARIABLE,
-    IMPLEMENTER_EGRESS_PORT_VARIABLE,
-    IMPLEMENTER_NETWORK_VARIABLE,
+    IMPLEMENTER_MODEL_DOOR_VARIABLE,
+    IMPLEMENTER_SANDBOX_PROOF_VARIABLE,
+    IMPLEMENTER_AGENT_MEMORY_VARIABLE,
 )
 IMPLEMENTER_WORK_DIR = "/work"
-# What the Worker of an implementer job can reach besides the model proxy and its repository.
-IMPLEMENTER_NETWORK_MODES: tuple[str, ...] = ("registries", "none")
 _GIT_FIELDS = {"provider", "baseUrl", "token", "botLogin"}
 _LLM_FIELDS = {
     "provider",
@@ -290,6 +299,17 @@ class ImplementerLimits:
 
 
 @dataclass(frozen=True)
+class ImplementerEnvironment:
+    """The environment a turn was started with (#818, `ImplementerEnvironment` of the contract): the
+    setup script that runs once in the repository's folder, in a container of its own, before the
+    model is called. Present only when the environment has a script. The script is data written by a
+    member of the workspace; it holds no secret and is never read as a command of the app."""
+
+    name: str
+    setup_script: str
+
+
+@dataclass(frozen=True)
 class ImplementerSpec:
     """What an implementer job asks for (#746, `ImplementerJob` of the contract). Closed.
 
@@ -305,6 +325,7 @@ class ImplementerSpec:
     cost: CostPolicy
     model_entry: JobModelEntry
     capabilities: JobCapabilities | None = None
+    environment: ImplementerEnvironment | None = None
 
 
 class JobError(Exception):
@@ -374,6 +395,10 @@ class ImplementerInput:
     llm: LlmAccess
     implementer: ImplementerSpec
     env: dict[str, str] = field(default_factory=lambda: {})
+    # The parts of the job text that the model door is built from (`llm`, `modelEntry`, `cost`), as
+    # they came (#745, step 3). The door parses them again with `parse_model_access`, so that it
+    # judges them by the very rules the job was judged by. Holds the key: never printed.
+    model_access: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
     @property
     def secrets(self) -> tuple[str, ...]:
@@ -944,7 +969,35 @@ def _implementer_spec(data: dict[str, Any], git: GitAccess) -> ImplementerSpec:
         cost=cost,
         model_entry=entry,
         capabilities=_job_capabilities(spec),
+        environment=_implementer_environment(spec),
     )
+
+
+def _implementer_environment(spec: dict[str, Any]) -> ImplementerEnvironment | None:
+    """The `implementer.environment` object (#818). Closed. A script of only white space is no
+    script: the Worker would have nothing to run, so the app does not send one."""
+    if "environment" not in spec:
+        return None
+    given = _object(spec["environment"], "implementer.environment")
+    _check_fields(given, _IMPLEMENTER_ENVIRONMENT_FIELDS, "implementer.environment.")
+    name, script = given.get("name"), given.get("setupScript")
+    if not isinstance(name, str) or not 1 <= len(name) <= MAX_ENVIRONMENT_NAME_CHARS:
+        raise _invalid(
+            "implementer.environment.name must be a string of 1 to "
+            f"{MAX_ENVIRONMENT_NAME_CHARS} characters"
+        )
+    if not isinstance(script, str) or not script.strip():
+        raise _invalid("implementer.environment.setupScript must be a non-empty string")
+    try:
+        too_long = len(script.encode("utf-8")) > MAX_SETUP_SCRIPT_BYTES
+    except UnicodeEncodeError:  # half of a character: not text
+        too_long = True
+    if "\x00" in script or too_long:
+        raise _invalid(
+            "implementer.environment.setupScript must be text of at most "
+            f"{MAX_SETUP_SCRIPT_BYTES} bytes without a NUL"
+        )
+    return ImplementerEnvironment(name=name, setup_script=script)
 
 
 def _implementer_input(job: dict[str, Any]) -> ImplementerInput:
@@ -955,7 +1008,35 @@ def _implementer_input(job: dict[str, Any]) -> ImplementerInput:
     # address of the entry and to no other.
     llm = _llm_access(job, catalog=True, catalog_model_id=True)
     _entry_is_of_llm(spec.model_entry, llm, "implementer.modelEntry")
-    return ImplementerInput(git=git, llm=llm, implementer=spec, env=_env(job))
+    raw_spec = _section(job, "implementer")
+    return ImplementerInput(
+        git=git,
+        llm=llm,
+        implementer=spec,
+        env=_env(job),
+        model_access={
+            "llm": job["llm"],
+            "modelEntry": raw_spec["modelEntry"],
+            "cost": raw_spec["cost"],
+        },
+    )
+
+
+def parse_model_access(document: object) -> tuple[LlmAccess, JobModelEntry, CostPolicy]:
+    """The model access of an Implementer turn from `ImplementerInput.model_access`, judged by the
+    rules of the job itself (#745, step 3): the `llm` section of a task, the model entry and the
+    cost policy, and the entry must be of the provider the key belongs to. Raises `JobError`."""
+    data = _object(document, "the model access")
+    _check_fields(data, {"llm", "modelEntry", "cost"}, "")
+    for name in ("llm", "modelEntry", "cost"):
+        if name not in data:
+            raise _invalid(f"{name} is required")
+    llm = _llm_access(data, catalog=True, catalog_model_id=True)
+    cost = _job_cost_policy(data)
+    entry = _job_model_entry(data)
+    assert cost is not None and entry is not None  # both keys are present
+    _entry_is_of_llm(entry, llm, "modelEntry")
+    return llm, entry, cost
 
 
 def parse_implementer_input(raw: str) -> ImplementerInput:

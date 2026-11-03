@@ -66,7 +66,7 @@ describe("golden snapshot workflow", () => {
   });
 
   // #403-T13
-  it("gives the deployment the snapshot, the image id and the commit as outputs", () => {
+  it("gives the deployment the snapshot, the image id, the commit and the Sysbox verdict as outputs", () => {
     const outputs =
       (
         workflow.on.workflow_call as {
@@ -77,6 +77,7 @@ describe("golden snapshot workflow", () => {
       "commit",
       "image-digest",
       "snapshot-id",
+      "sysbox",
     ]);
     for (const output of Object.values(outputs))
       expect(output.value).toMatch(/^\$\{\{ jobs\.build\.outputs\./);
@@ -87,6 +88,9 @@ describe("golden snapshot workflow", () => {
     expect(job.outputs?.["snapshot-id"]).toBe(
       "${{ steps.record.outputs.snapshot-id }}",
     );
+    // #745-T02: the verdict is `proven` only when the record says exactly that; a missing field is `unproven`.
+    expect(read.run).toContain('if .sysbox == "proven"');
+    expect(job.outputs?.sysbox).toBe("${{ steps.record.outputs.sysbox }}");
   });
 
   // #403-T22
@@ -225,6 +229,26 @@ describe("golden snapshot workflow", () => {
     const path = /--vm-prepare \.\.\/(\S+)/.exec(build.run ?? "")?.[1];
     expect(path).toBe("docker/sandbox/vm-prepare.sh");
     expect(existsSync(`${repoRoot}${path}`)).toBe(true);
+  });
+
+  // Sysbox, plan implementer-sandbox step 2
+  it("passes the Sysbox boot script of the commit, which exists in the repository", () => {
+    const build = stepNamed("Build, check and record the snapshot");
+    const path = /--sysbox-prepare \.\.\/(\S+)/.exec(build.run ?? "")?.[1];
+    expect(path).toBe("docker/sandbox/sysbox-prepare.sh");
+    expect(existsSync(`${repoRoot}${path}`)).toBe(true);
+  });
+
+  // Sysbox, plan implementer-sandbox step 2: an unproven Sysbox is shown, never a failure (reviews do not use it)
+  it("shows an unproven Sysbox as a warning annotation of the run and does not fail on it", () => {
+    const show = stepNamed("Show the record");
+    expect(show.run).toContain("::warning title=Sysbox unproven::");
+    expect(show.run).toContain(".sysbox");
+    expect(show.run).not.toMatch(/::error|exit 1/);
+    // It says what really happens: the verdict travels with the pair and only `proven` lets an Implementer turn start.
+    expect(show.run).toContain("sandbox_unproven");
+    expect(show.run).not.toContain("still launches");
+    expect(show.run).not.toContain("will not start a Sysbox container");
   });
 
   // #330-extra-workflow
