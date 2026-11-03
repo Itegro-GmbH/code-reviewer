@@ -12,6 +12,7 @@ real VM"."""
 
 import socket
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 from unittest import mock
 
@@ -52,6 +53,14 @@ echo untracked > /work/repo/setup-made.txt
 echo '# changed by the setup' >> /work/repo/README.md
 echo 'setup is done'
 """
+
+
+@pytest.fixture(autouse=True)
+def no_committed_image_between_tests() -> Iterator[None]:
+    """A test starts without the image an earlier one committed, and leaves none."""
+    docker("image", "rm", IMAGE, check=False)
+    yield
+    docker("image", "rm", IMAGE, check=False)
 
 
 def nothing_of_the_setup_is_left() -> None:
