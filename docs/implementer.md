@@ -19,6 +19,11 @@ the agent inside that clone, and it has no way to push: when the turn ends, **th
 clone** to GitHub, the new branch among them (section "The git rules"). It does not open a pull request and does not merge.
 The person finds the branches on GitHub and the run on the Runs page.
 
+A task may name an **environment** (section "Environments"): a size for the VM and a setup script. The script runs once, before the agent
+starts, in a container of its own with full internet access and no secret of any kind (section "The environment's setup script"); what it
+leaves behind, installed packages, browsers and the images its Docker pulled, is what the agent starts with. A task without an environment
+is the task of before.
+
 Every member of a workspace may start a task (the permission `start_implementer_task`, minimum role member; one line in
 `app/src/workspaces/permissions.ts` raises it). The App pushes with its own identity whatever GitHub rights the person has, so
 this is a decision for internal use: before outside users arrive, move it to Admin and up.
@@ -59,7 +64,10 @@ native path; the two registry providers (Anthropic, OpenRouter) are not offered.
    enter. It makes the agent's repository in `/work/repo` as a local clone of that mirror, and the reader (a container of its
    own, section "How Control reads the agent's repository") gives it no remote, no credential, the system identity and a new
    branch at the base tip. Nothing else is put into that repository: no hook, no guard, no spool.
-5. **Work.** The runner starts the **model door**, a container of its own that holds the model key, and the **agent's container**,
+5. **Set up** (only when the task's environment has a script). The runner starts the **Setup container** from the agent's image, runs the
+   script in it with full internet access, and commits the container as the agent's image; a script that fails ends the turn here, free,
+   before the model door exists (section "The environment's setup script"). Without a script nothing happens and nothing changes.
+6. **Work.** The runner starts the **model door**, a container of its own that holds the model key, and the **agent's container**,
    and OpenCode then runs there as root in `/work/repo` with a configuration the runner wrote. It reads, edits, writes,
    searches and runs shell commands, and starts containers in its own Docker; it cannot fetch web pages, search the web,
    start sub-agents or ask a question, and it has no network but the door.
@@ -68,11 +76,11 @@ native path; the two registry providers (Anthropic, OpenRouter) are not offered.
    the agent is on. Work the agent committed on a detached HEAD, on no branch, is saved first, whether the tree is dirty or
    not: the runner makes a branch `<the task's branch>-leftover-<id>` at HEAD and the push takes it with the others. The
    branch is named in the summary and reported with the other branches.
-6. **Push.** Nothing is pushed while the agent works. When the turn ends, the agent's container is killed, and then the
+7. **Push.** Nothing is pushed while the agent works. When the turn ends, the agent's container is killed, and then the
    runner pushes all local branches of the agent's repository, without force, one at a time (below, "The git rules"). Before it lists anything, and again right before each
    `git push`, it asks whether the lease is still held; only `held` allows a push. A lost lease ends the turn `lease_lost`
    with nothing pushed after it.
-7. **Report.** The Worker reports the result once: base and head commit and whether the head was pushed (both of the branch
+8. **Report.** The Worker reports the result once: base and head commit and whether the head was pushed (both of the branch
    the form named), **every branch it pushed or tried to push with its outcome**, the commits (at most 200) and the changed
    files (at most 500) of the form's branch, the agent's closing summary (at most 8,192 characters, with known secrets
    removed), the OpenCode ids and the usage. The session becomes idle and the Runs page shows the branches, the commits, the
@@ -476,11 +484,104 @@ container that used to confine the agent's user, and the allowlist proxy of pack
 
 **What this breaks until step 7 (the network door).** `npm install`, `pnpm install`, `pip install`, `apt-get`, `cargo`, `go get` and `docker pull`
 all need a registry and now fail ("lookup registry-1.docker.io ... server misbehaving", measured). Whatever a task needs must already
-be in the image: the toolchain of the agent image is there, and from step 5 the Setup container (full internet, no secrets, its result
-becomes the agent image with `docker commit`) installs the rest. Until then a repository whose dependencies are not in the image can be read
-and edited but not built or tested here.
+be in the image: the toolchain of the agent image is there, and an environment's setup script (section "The environment's setup script":
+full internet, no secrets, its result becomes the agent image with `docker commit`) installs the rest. A task without an environment, or with a
+repository whose dependencies the script does not install, can read and edit but not build or test.
 
 There is no Go module proxy and there never was one.
+
+## The environment's setup script
+
+A task whose environment has a script runs it once, between the clone and the model (step 5 of "The data flow"). A task without an
+environment, or with an environment without a script, has no Setup container, no extra network, no extra image and no extra second.
+Everything below is `setup_container.py` (the container), `environment_setup.py` (the step: budget, output, the tracked files, the codes)
+and `host_rules.py` (what Control does to the VM's own network), driven by `job_run.py` before the session exists.
+
+**The Setup container** is a throw-away container of the **agent's own image**, under `sysbox-runc`, as root, with its own `dockerd`,
+the `repo` directory of the work volume mounted as `/work/repo` (the Subpath the agent will get, so the mirror is out of its reach) and the
+agent's limits: its memory (what the VM has left after the OS, Control, the door and the readers, no swap) and 16,384 processes. **It has no
+secret of any kind**: no git token, no model key, no job token, no environment variable besides the image's own, no mount besides the
+repository, no socket, no device, no label of the job, and the image carries none either. Its definition is made of constants and of
+identifiers the daemon gave; Control reads the container back from the daemon before the script is written and stops the run if it is
+privileged, not under Sysbox, on another network, has another mount or another variable (`_seal_check`). The model door does not exist yet
+while it runs, and the script's text is in one place only, a file in this container.
+
+**The script runs as the owner's rule says: free inside, guarded outside.** It is written to `/tmp/code-reviewer-setup.sh` and run as root
+with `/work/repo` as its working directory, by `bash -e` (a failing command ends it, as in a `run:` step of GitHub Actions), or by the interpreter of
+its first line when that starts with `#!`. Its environment is the image's plus `HOME=/root` and `DEBIAN_FRONTEND=noninteractive`. Its
+standard output and standard error are one stream. It may install anything, start its own Docker, pull images, and use the internet on any
+port. Nothing in it is on a list of allowed commands.
+
+**How it gets the internet and nothing of ours.** The container is alone on a Docker network of its own (`code-reviewer-setup`, a bridge
+named `crsetup0`, range `10.213.78.0/29`, not internal, so Docker masquerades its traffic). Its DNS servers are public resolvers named in
+its definition (`1.1.1.1`, `8.8.8.8`): the VM's resolver is on a private address. What it must not reach is closed on **the VM's side of
+the bridge**, in the VM's own network namespace, by two things that a one-shot container installs before the Setup container exists
+(`host_rules.py`: the host's network namespace, `NET_ADMIN` and no other capability, a read-only root, no mount, a constant command):
+
+1. an `nft` table `setup_egress` (family `ip`, hooks at priority -10 so that it runs before Docker's own rules, whose only verdicts are
+   drops): everything that comes **into the VM** from the bridge is dropped (that is the VM's control port `23456`, every other service,
+   the bridge's own gateway), and what is **routed through** the VM is dropped when it is going to a private, link-local, shared or special
+   range (`10/8`, `100.64/10`, `127/8`, `169.254/16` where the platform's own addresses are, `172.16/12`, `192.168/16` and the rest of
+   `PRIVATE_RANGES`) or into another bridge (`docker0` where Control and the door's bridge side are, the `br-*` bridges, the model network)
+   and nothing else; the rest of the internet is open on every port, which includes the containers of the Setup's own Docker, whose
+   traffic is routed through the Setup container's address;
+2. **no IPv6 address on the bridge** (`ip link set dev crsetup0 addrgenmode none`, `ip -6 addr flush`). The VM's kernel has no `ip6` and no
+   `inet` netfilter (`nft` answers "Operation not supported", measured), so the table cannot see IPv6, and the VM does not forward IPv6.
+   But root in a container can switch IPv6 on in its own namespace, ping `ff02::1`, find the bridge's link-local address and connect to
+   **port 23456 of the VM** over it (measured, below): the control service listens on `*`. With the address taken off the bridge there is
+   nothing to connect to. **The same hole was in the model network of the agent's container (step 4) and is closed the same way**
+   (`AgentContainer.create` does it before the container is made).
+
+These are on the VM's side because the container is root of a user namespace of its own and owns its network namespace: any rule it
+installs inside, its script can flush (and one `nft flush ruleset` in it changes nothing outside, measured). The rules are read back
+(`list table`) and a Setup whose network is not closed is never started (`setup_failed`, free).
+
+**Time.** The script has 15 minutes at most (`contracts/environment-sizes.v1.json`). The whole step is part of the turn's 60 minutes: the
+agent's own deadline is counted from the start of the job, so the minutes of the step are gone from it. Around the script the step may
+take, at its ceilings, 20 s for each of the three host helpers, 60 s until the container's Docker is ready, 30 s for the end script,
+120 s for the container's Docker to stop, 40 s for the stop, 300 s for the commit and 120 s for the removal, 730 s together
+(`SETUP_OVERHEAD_SECONDS`); a test holds the sum. The script is held to what the limit leaves after the grace for the end of the turn
+(270 s), those 730 s and **at least 10 minutes for the agent** (`MIN_AGENT_SECONDS`); with the normal 3600 s that is the 15 minutes. A
+limit that leaves less than a minute for the script ends the turn here, free ("the time limit of the turn leaves no room for the setup
+script"). A script that runs out of its time is killed with its container and ends the turn.
+
+**What the Runs page gets.** The `setup` block of the result: whether it succeeded, the exit status (empty when the script did not end by
+itself), whether it ran out of time, the seconds, and the **end of its output** (stdout and stderr together). The output is kept as the last
+64 KiB while it runs (memory is bounded whatever the script prints), then cleaned: terminal escape sequences and control characters out,
+a carriage return a line end, the job's secrets removed, the last 8,192 characters. The log line of a failed turn has the notes of the step
+and the last 1,200 characters of it. The page renders it as text.
+
+**What becomes of what it did.** When the script ends with status 0: the script's file is removed, the container's own Docker is stopped the
+way a daemon is stopped (SIGTERM; the container's init ends with it and the container stops by itself), and the container's file system is
+committed (`docker commit`, `POST /commit`) as `code-reviewer-agent:environment`. **Under Sysbox a stopped container's file system holds its
+inner Docker's images** (Sysbox writes them back into it when the container stops; measured on a VM, below), so the packages and the
+browsers the script installed and the images its Docker pulled are in the image. The Setup container is then removed, and the Agent container
+starts from the committed image by its id (`AgentSeams.image`). The repository volume is not part of the commit: the files the script left in
+`/work/repo` are in the volume, which the agent mounts as before. There is no cache of the result: every turn runs its script.
+
+**The repository after the script (the rule for tracked files).** The script ran in the repository's folder and may have changed anything in
+it. What it added (untracked files: `node_modules`, a virtual environment, build output, a file it wrote) stays in the agent's working
+tree: that is what a setup is for. **A change to a file that git tracks is undone before the agent starts** (`GitWorkspace.restore_tracked`:
+`git reset --hard` in the reader, after `git status` counted them), and the log says how many files were put back and names the first five.
+The reason is the end of the turn: it commits what is left and pushes all branches, so a lockfile an install rewrote or a configuration a
+script patched would arrive on the branch as the agent's work, and the agent would not know which of its changes were its own. The agent
+starts from the commit it was promised. This is the one rule about what the script did, and it is a rule about where the agent starts, not
+about what the script may do; if it turns out to be wrong, `restore_tracked` is the one place. A script that left the repository unreadable
+(it removed `.git`) ends the turn with `environment_setup_failed`.
+
+**When it fails.** A script that exits non-zero, runs past its time limit, fills the disk, is killed for the memory of the container (the
+log says so: "killed for its memory"), or leaves a container whose result cannot be committed (the disk) ends the turn `environment_setup_failed`
+**before the model door exists**: nothing was handed a key, nothing was used, the turn is free, and the Runs page shows the exit status, the
+seconds, whether it timed out and the end of the output. A Setup container that could not be had (the daemon refused a step, the network rules
+did not go in, the container was not what was asked for) is `setup_failed`, free as well, with the reason word in the log: it is the runner's, not
+the script's. A SIGTERM during the script kills the container and ends the turn `runner_shutdown` as for the agent.
+
+**Disk and memory.** Setup has the agent's limits for memory and processes. What it writes goes to the VM's disk like everything the agent
+writes: the container's file system, the inner Docker's images, the commit (an image the size of what changed, for the measured
+Playwright environment below) and, while the agent runs from it, the agent's own copy of the inner images. **Control's reserve disk is
+untouched** by any of it: the mirror is on its own 8 GiB file system, and a script that fills the work volume or the VM's disk fails with
+"No space left on device" (the lane proves it with a small stand-in disk), the step reads how much of the disk is left after the script and
+says so when it is under 1 GiB.
 
 ## Environments
 
@@ -490,20 +591,61 @@ capability `implementer`, anywhere else the path is a 404 like an unknown one).
 
 - **Who:** every member sees the list and the scripts, because every member may use one. Owners and Admins create, change and
   delete (`manage_implementer_environments`). A workspace holds at most 50.
-- **Sizes** are the platform's: 1, 2, 4, 6 and 8 vCPU with 2 GB per vCPU (2, 4, 8, 12, 16 GB), the range of the Pro plan. The list
-  is `contracts/environment-sizes.v1.json`; the app and the Dispatcher (`SANDBOX_VCPUS`) are both held to it by a test. A task without an environment
-  keeps the standard, 2 vCPU and no script.
+- **Sizes** are 2, 4, 6 and 8 vCPU. The VM has 2 GB per vCPU and the system around the agent takes 2 GB of it (the OS and the Sysbox daemons
+  512 MB, Control 768 MB, the model door 256 MB, the two readers 512 MB), so the **agent's container gets 2, 6, 10 and 14 GB**: the
+  page shows that figure ("4 vCPU, 6 GB memory"), the memory `sandbox.ts` computes (`agentMemoryMb`). **1 vCPU is not offered**: it is a size of
+  the platform (reviews run on it) and leaves the agent's container nothing. An environment that still has it (a row made before this
+  change; the table has no default for the column and the form's default was 2, so such a row exists only where a member chose 1) is
+  listed as it is, with its 1 vCPU and a sentence that a task started with it is refused until another size is chosen; the form opens with no
+  size chosen and does not save before one is; the picker of the task form lists it as "(1 vCPU, no longer offered)" and a task started with it
+  is refused at the submit with `IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED` (422), before a session, a turn, a job or a VM exists: free. The sizes,
+  the memory per size and the least memory an agent is worth starting with (1,024 MB) are `contracts/environment-sizes.v1.json`; the app and
+  the Dispatcher are both held to it by a test. A task without an environment keeps the standard: 2 vCPU, no script.
 - **The script** is text of at most 64 KB (UTF-8), literal data, stored exactly as written: no trimming, no changed line ends, no
   checking of what it says. Only what cannot be stored as text (a NUL byte, half of a character) is refused. It has no secrets
-  field and the page says so. **Setup scripts do not run yet** (the runner part of #818 is not built): the text is saved and nothing is
-  done with it when a task starts, and the page says so.
+  field and the page says so. **It runs when a task starts** (section "The environment's setup script"), and the page says what it
+  gets: root, full internet, no secrets, a container of its own, `bash -e`, 15 minutes, the tracked files put back, and an agent that has no
+  internet afterwards.
 - **Names** are unique within a workspace, whatever the case.
-- **Nothing points at an environment.** A task copies size and script when it starts (the next part of #818), so changing or
-  deleting an environment never touches a running or a past task.
+- **The form** has an optional picker "Environment". It lists the standard first and then the environments with their size and memory,
+  and says "setup script" next to those that have one. A task that names none is the task of before.
+- **The task keeps its own copy.** When the task is sent, its turn copies the environment's name, size and script
+  (`implementer_turns.environment_*`, no foreign key). Changing or deleting the environment later touches no running or past task, and
+  sending the same request again after the environment was deleted still gives the first task back. The Runs page shows which environment
+  and size a task used, and what its script did (how it ended, the seconds and the end of its output).
 
 Routes (all `Cache-Control: no-store`, errors `{ "error": <code> }` with the codes of `app/src/implementer/environments/errors.ts`):
 `GET /api/w/<slug>/environments` (every member; `?view=picker` is the list for the task form's picker, without the scripts), `POST` the same path, `PUT` and `DELETE /api/w/<slug>/environments/<id>` (Owner or
 Admin).
+
+### How the environment reaches the runner and the VM
+
+The Dispatcher creates the VM when it claims the job, before any Worker exists, so the **size** comes from the App's answer to the claim
+and from nothing else, and the **script** from the job the Worker fetches:
+
+1. The claim answer (`SplitClaimResponse`, authenticated with the Dispatcher's credential) carries `job.vcpus` for a turn that has an
+   environment, and for nothing else. Neither the name nor the script is in it.
+2. The core of the Dispatcher believes the number for the kind `implementer` only. A review job's answer may say anything: the field is
+   dropped, so a review can never name a size.
+3. The Launcher accepts only the sizes of `SANDBOX_VCPUS` (1, 2, 4, 6, 8) and, for a job, only those that leave the agent at least 1,024
+   MB (`IMPLEMENTER_MIN_AGENT_MEMORY_MB`): anything else, 1 vCPU included, fails the launch with `sandbox_size_unsupported` (not
+   retryable, nothing created); a size the platform itself refuses at the create reaches the usual codes (`sandbox_rejected`,
+   `sandbox_quota_exceeded`).
+4. **Precedence** of the size of an Implementer VM: the turn's environment, then `DISPATCHER_WORKER_CONFIG.implementer.launcher.vcpus`, then
+   the default of the kind (2). **The memory of the Control container does not follow the size** (768 MB at every size; the operator's
+   `container.memory` for the kind applies at every size): the size is the agent's, which gets what the VM has left (`RUNNER_IMPLEMENTER_AGENT_MEMORY_MB`,
+   2,048 at 2 vCPU, 6,144 at 4, 10,240 at 6 and 14,336 at 8). An operator who configures `launcher.vcpus: 1` for the kind still gets the
+   Worker's free `sandbox_size_unsupported` at the start of every turn.
+5. The Dispatcher reports the VM's size with the VM (`vcpus` in `VmStartRequest`) for an Implementer job only (an App of the release before
+   refuses a field it does not know, and a refused report only costs the measuring of the minutes), and the App keeps it in
+   `job_vm_runs.vcpus`, so that minutes can be priced per size later. Billing is off in the factory; nothing is charged by size today.
+6. The script reaches the Worker as `implementer.environment` (`name`, `setupScript`) in the job, and **only to a Worker that names the claim
+   feature `implementer_environment`**: for any other, a task whose environment has a script is refused at the claim
+   (`implementer_engine_unavailable`, free) rather than run without it on a base the person did not choose. The result carries
+   `implementer.setup` (`ok`, `exitCode`, `timedOut`, `durationSeconds`, `output`) when a script ran.
+
+What does not depend on the size: the work volume is a directory of the VM's disk (64 GB on the Pro plan, whatever the vCPUs), the reserve disk
+(8 GiB), `pids` of the Control container, the steps of the volume, and a VM lives `timeoutSeconds` plus the margin whatever its size.
 
 ## Limits
 
@@ -511,14 +653,15 @@ Admin).
 |---|---|---|
 | Cost of a turn | The operator's maximum per turn: 5.00 USD once the owner has set it in the factory's admin portal (General, Limits, "Maximum cost per review"); the default is 1.00 USD until then, which is too low for a task. A person may ask for a lower limit on the form (never above that maximum or 100 USD). Without one, the maximum applies | Claim, and the proxy of the Worker: it refuses the next model call once the calls so far cost that much, so a turn can end slightly above it by the last call |
 | Steps of the agent | None. There is no step limit, no plan, no approach rule: the cost limit is the brake | |
-| Time of a turn | 3600 seconds. The runner keeps the last 270 seconds for the commit of what is left and the final push of all branches (a third of a short limit; the split is in "The git rules"). The Dispatcher stops the Worker at 3600 seconds (`DISPATCHER_WORKER_CONFIG`, `implementer.timeoutSeconds`, 60 to 21600) and the App fails a turn still running after 70 minutes with `timeout`; the App cannot read the Dispatcher's setting, so change the constants with it (`docs/dispatcher.md`). The runner holds a turn to the smaller of its time limit and `RUNNER_JOB_TIMEOUT_SECONDS` | Dispatcher, runner, App |
+| Time of a turn | 3600 seconds, **the environment's setup script included** (it runs inside them; section "The environment's setup script"). The runner keeps the last 270 seconds for the commit of what is left and the final push of all branches (a third of a short limit; the split is in "The git rules"). The Dispatcher stops the Worker at 3600 seconds (`DISPATCHER_WORKER_CONFIG`, `implementer.timeoutSeconds`, 60 to 21600) and the App fails a turn still running after 70 minutes with `timeout`; the App cannot read the Dispatcher's setting, so change the constants with it (`docs/dispatcher.md`). The runner holds a turn to the smaller of its time limit and `RUNNER_JOB_TIMEOUT_SECONDS` | Dispatcher, runner, App |
 | Stop | On SIGTERM the engine is ended at once, all committed branches are pushed (if the lease is still held; nothing uncommitted is committed) and the turn ends `runner_shutdown`. The job process gets a grace of 120 seconds, ends itself after 115 (the final push gets 25 of them), and the container's stop timeout is 150 seconds; each lease question (before the listing and before each push) is retried for 30 seconds at a normal end and 20 on a stop, and
 never beyond the time that is left of the final push | Runner, container spec |
 | Task text | 20,000 characters | Form and route |
 | Branch name | At most 200 characters, each part between slashes at most 240 bytes, git's rules, not the base branch | Form and route |
 | Base branches offered | 100 names, default first; a base beyond that can be typed | Route |
 | Result | 200 commits and 500 files (of the task's branch), 50 branches, 8,192 characters of summary, the whole report under 4 MB (Vercel cuts a body at 4.5 MB) | Contract and runner |
-| VM and containers | 2 vCPU and 4 GB for the VM; the Control container 768 MB without swap and 2048 processes, `/work` mounted `nosuid,nodev`; the model door 256 MB; the two readers 256 MB each; the agent's container the rest after 512 MB for the OS and the daemons (2,048 MB at 2 vCPU, section "The agent's container" for the other sizes), no swap. The Dispatcher refuses a size that leaves the VM no room for Control, the door, the readers and the OS (`sandbox_config_invalid`); a size that leaves the agent less than 1,024 MB (1 vCPU) is `sandbox_size_unsupported`, free, from the Worker | Dispatcher (`DISPATCHER_WORKER_CONFIG` can override the sizes), runner |
+| VM and containers | 2 vCPU and 4 GB for the VM; the Control container 768 MB without swap and 2048 processes, `/work` mounted `nosuid,nodev`; the model door 256 MB; the two readers 256 MB each; the agent's container the rest after 512 MB for the OS and the daemons (2,048 MB at 2 vCPU, section "The agent's container" for the other sizes), no swap. The Dispatcher refuses a size that leaves the VM no room for Control, the door, the readers and the OS (`sandbox_config_invalid`); a size that leaves the agent less than 1,024 MB (1 vCPU) is `sandbox_size_unsupported`, free, from the Worker, and from the Launcher for a job that names it. A task whose environment names a size (2, 4, 6 or 8 vCPU) gets that VM and, at that size, 2,048, 6,144, 10,240 or 14,336 MB for the agent ("Environments"); Control stays at 768 MB | Dispatcher (`DISPATCHER_WORKER_CONFIG` can override the default size), runner |
+| Setup script | 64 KB of text, 15 minutes, the whole step (start, script, saving the image) at most 730 seconds more, all of it inside the 3600 seconds of the turn, and the agent keeps at least 10 minutes; the end of its output, 8,192 characters, reaches the Runs page | Contract, runner (`environment_setup.py`) |
 | Parallel work | `RUNNER_DISPATCH_MAX_RUNNING` (2) for all kinds together, and one running turn per session | App and Dispatcher |
 
 **Billing.** Turns are billed at the Dynamic rate for now: the billing code treats the kind as `dynamic` (`projectKindOf`),
@@ -537,6 +680,7 @@ used):
 | `clone_failed` | The repository could not be downloaded | free | Try again; look at the installation if it persists |
 | `setup_failed` | The runner could not prepare the workplace before the turn started: git missing, the mirror could not be made, the model door could not be started (`model_door_unavailable` in the log), the agent's container could not be had (`agent_container_unavailable` in the log: no Sysbox runtime, the agent image missing, the daemon refused a step, the inner Docker did not become ready, or the container was not what was asked for). It is the free code of a turn that never started: once the model was used, the same trouble shows as `agent_gave_up`. The Runs-page sentence says "the repository's own set-up steps", which is not what happens: no repository script is ever run | free | Look at the Worker log of the job; it is the image or the VM |
 | `sandbox_unproven` | The golden snapshot's Sysbox is not proven (its build's proof did not pass, or the Dispatcher was told so). The turn ends before the clone | free | Look at the `sysbox` field of the snapshot's record and the log of its build step; rebuild the snapshot |
+| `environment_setup_failed` | The setup script of the task's environment exited with a status other than 0, ran out of its time (15 minutes, or what the turn's limit leaves), was killed for the memory of its container, filled the disk, or left a result that could not be saved as the agent's image. It runs before the model door exists, so nothing was used. The Runs page shows the exit status, the seconds, whether it timed out and the end of the output (the job's secrets removed) | free | Fix the script in Environments and send the task again |
 | `sandbox_size_unsupported` | The VM leaves the agent's container less than 1,024 MB (a 1 vCPU VM does: 512 MB). The turn ends before the clone | free | Choose a size of 2 vCPU or more |
 | `agent_gave_up` | The agent ended with no new commit on any branch and nothing to commit, or its engine died, or its container ended ("the agent's container ended during the turn": killed, most likely for its memory), or the model door went away ("the model door ended during the turn"), after the model had been used (what it had committed is pushed when possible). The summary also says when files the agent wrote could not be kept, such as `opencode.json` | charged | Read its summary; try again with a clearer or smaller task |
 | `push_rejected` | The task's branch did not arrive (the branch exists with other history, a rule, a permission, a change of `.github/workflows/` which is never allowed, or GitHub could not be reached), no branch arrived although some had commits, or the agent's repository could not be read at the end. The Runs page lists every branch with its reason; branches that were pushed stay on GitHub | charged | Read the reasons, check the branches, then start again |
@@ -567,9 +711,9 @@ that were pushed first. A Worker that is stopped while it works (`runner_shutdow
 
 ## Out of scope
 
-- **Setup scripts and registries.** The repository's own install and set-up steps are not run, and the agent has no network to
-  install anything: the Setup container and the environment's script come with step 5, the network door with step 7. Until then
-  a repository whose dependencies are not in the image can be read and edited, not built.
+- **The repository's own setup scripts and registries for the agent.** The repository's own install and set-up steps are not run. What a
+  task needs is installed by the environment's script, which has the internet; the agent has none until the network door (step 7 of the plan).
+  Private registries do not work in the script either: it has no secrets, and a credential for one would be a new step.
 - **Secrets for tests.** No credential of any kind reaches the agent: tests that need an API key or a database URL cannot run
   against a real service (a database in the agent's own Docker is fine).
 - **Pushes that touch `.github/workflows/`.** The App has no `workflows` permission and never asks for it for this; GitHub
