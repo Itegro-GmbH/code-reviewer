@@ -338,8 +338,9 @@ echo "neighbours: $(ip -6 neigh show dev eth0 | grep -c '^fe80')"
             assert "OPEN" not in shown, shown
             # No link-local neighbour on the bridge, so nothing to connect to over IPv6.
             assert "neighbours: 0" in shown, shown
-            # IPv6 was off in the container's namespace before its root switched it on.
-            assert "ipv6 off in this namespace: all=1 eth0=1" in shown, shown
+            # IPv6 was off on the container's interface before its root tried to switch it on
+            # (`all` is the namespace's default and says nothing about the interface).
+            assert "eth0=1" in shown, shown
             # The `inet` table beside the `ip` one, for a kernel that has the family: read back,
             # its two drops (IPv6 from the Setup bridge to the VM, and to a private range).
             if inet_family_supported(config):

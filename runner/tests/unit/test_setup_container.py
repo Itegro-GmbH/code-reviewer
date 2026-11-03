@@ -293,7 +293,7 @@ def test_a_kernel_without_the_inet_family_does_not_stop_the_setup(rig: Rig) -> N
 # #818-IPV6-02
 def test_the_inet_table_drops_ipv6_from_the_bridge_to_the_vm_and_to_private_ranges() -> None:
     rules = host_rules.inet_rules("setup", sc.SETUP_BRIDGE)
-    assert f"add table inet {host_rules.INET_TABLE}_setup" in rules
+    assert "add table inet implementer_ipv6_setup" in rules
     assert rules.count("flush table inet") == 1, "a second install is the same as the first"
     # Nothing but drops, and every rule is about the one bridge.
     assert "accept" not in rules.replace("policy accept", "")

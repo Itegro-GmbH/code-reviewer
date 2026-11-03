@@ -147,7 +147,11 @@ def close_bridge_ipv6(api: DockerApi, image: str, network: str) -> None:
     run_helper(api, image, ["/bin/sh", "-c"], [ipv6_script(bridge_of(api, network))], "bridge-ipv6")
 
 
-INET_TABLE: Final = "implementer_ipv6"
+# One table per role, named in full: the names are a closed set, never built from a value.
+INET_TABLES: Final = {
+    "setup": "implementer_ipv6_setup",
+    "agent": "implementer_ipv6_agent",
+}
 # What an IPv6 packet of a container must not be sent to: the unspecified and loopback addresses,
 # IPv4 inside IPv6, the NAT64 prefix, unique local, link-local and multicast (the VM, its
 # neighbours, the platform).
@@ -163,10 +167,11 @@ IPV6_PRIVATE_RANGES: Final = (
 
 
 def inet_table(role: str) -> str:
-    """The table of one role (`setup`, `agent`): a word, so a name is never built from a value."""
-    if re.fullmatch(r"[a-z]{1,16}", role) is None:
-        raise HelperFailed("the role has no usable name")
-    return f"{INET_TABLE}_{role}"
+    """The table of one role (`setup`, `agent`)."""
+    table = INET_TABLES.get(role)
+    if table is None:
+        raise HelperFailed("the role has no table")
+    return table
 
 
 def inet_rules(role: str, bridge: str) -> str:
