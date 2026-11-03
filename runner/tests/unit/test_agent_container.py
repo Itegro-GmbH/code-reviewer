@@ -38,6 +38,7 @@ from code_reviewer_runner.dynamic_review.model_door_route import (
 )
 from code_reviewer_runner.implementer import agent_container as ac
 from code_reviewer_runner.implementer import exec_pipe
+from code_reviewer_runner.implementer import reader as ac_reader
 from code_reviewer_runner.implementer.agent_container import (
     AGENT_CONTAINER_NAME,
     AgentContainer,
@@ -47,6 +48,7 @@ from code_reviewer_runner.implementer.agent_container import (
 from code_reviewer_runner.implementer.docker_api import DockerApi
 from code_reviewer_runner.implementer.reader import (
     READER_CONTAINER_NAME,
+    READER_WRITER_CONTAINER_NAME,
     ReaderAccess,
     ReaderSeams,
     reader_document,
@@ -408,29 +410,46 @@ def test_the_engine_process_ending_alone_is_the_engine_not_running_while_the_con
 
 
 # #745-T23
-def test_the_reader_has_no_network_no_token_no_socket_and_the_repository_only() -> None:
+def test_the_reader_runs_under_sysbox_with_no_added_capability_no_network_no_token_no_socket() -> (
+    None
+):
     document = reader_document(IMAGE_ID, WORK_VOLUME)
 
     host = document["HostConfig"]
+    # Agent-planted code runs here (a `core.fsmonitor`, a filter): the wall is the runtime, the
+    # same one the agent runs under, and not a capability. Nothing is added, and above all not
+    # DAC_READ_SEARCH and DAC_OVERRIDE as host root (`open_by_handle_at` reaches the VM's files).
+    assert host["Runtime"] == "sysbox-runc"
+    assert "CapAdd" not in host and "CapDrop" not in host
     assert host["NetworkMode"] == "none" and document["NetworkDisabled"] is True
     assert host["Privileged"] is False and host["ReadonlyRootfs"] is True
-    assert host["CapDrop"] == ["ALL"] and sorted(host["CapAdd"]) == [
-        "DAC_OVERRIDE",
-        "DAC_READ_SEARCH",
-        "FOWNER",
-    ]
     assert host["SecurityOpt"] == ["no-new-privileges:true"]
+    assert host["Memory"] == host["MemorySwap"] == 256 * 1024 * 1024, "small, and counted in full"
     assert host["Mounts"] == [
         {
             "Type": "volume",
             "Source": WORK_VOLUME,
             "Target": "/repo",
-            "ReadOnly": False,
+            "ReadOnly": True,
             "VolumeOptions": {"Subpath": "repo", "NoCopy": True},
         }
     ]
     assert "Binds" not in host and "docker.sock" not in json.dumps(document)
     assert document["Env"] == ["PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/tmp"], "no secret"
+
+
+# #745-T23
+def test_the_volume_is_read_only_for_the_reader_wherever_git_allows_it() -> None:
+    reading = reader_document(IMAGE_ID, WORK_VOLUME)
+    writing = reader_document(IMAGE_ID, WORK_VOLUME, writable=True)
+
+    assert reading["HostConfig"]["Mounts"][0]["ReadOnly"] is True
+    assert writing["HostConfig"]["Mounts"][0]["ReadOnly"] is False
+    # The writer differs in that one thing and in the label that tells it apart.
+    assert writing["Labels"] != reading["Labels"]
+    for document in (reading, writing):
+        assert document["HostConfig"]["Runtime"] == "sysbox-runc"
+        assert "CapAdd" not in document["HostConfig"]
 
 
 # #745-T23
@@ -448,11 +467,60 @@ def test_the_reader_is_made_on_the_first_command_runs_git_in_the_repository_and_
     assert done.returncode == 0
     assert sum(1 for c in rig.engine.containers.values() if c.name == READER_CONTAINER_NAME) == 1
     argv, env, workdir = rig.execs[0]
-    assert argv == ["/usr/local/bin/git", "-c", "safe.directory=/repo", "status", "--porcelain"]
+    # Nothing the agent planted runs if an option can prevent it: the container is the wall, these
+    # are the cheap extra (the fsmonitor and the hooks of the repository's config, background work).
+    assert argv == [
+        "/usr/local/bin/git",
+        *ac_reader.READER_GIT_OPTIONS,
+        "status",
+        "--porcelain",
+    ]
+    assert "core.fsmonitor=false" in argv and "core.hooksPath=/dev/null" in argv
+    assert "safe.directory=/repo" in argv
     assert workdir == "/repo" and env["GIT_AUTHOR_NAME"] == "Implementer"
     assert env["GIT_CONFIG_GLOBAL"] == "/dev/null" and "TOKEN" not in json.dumps(env).upper()
     access.close()
     assert rig.engine.container(READER_CONTAINER_NAME).removed
+
+
+# #745-T23
+def test_a_read_runs_in_the_read_only_reader_and_a_write_in_a_second_one_made_when_needed(
+    rig: Rig,
+) -> None:
+    access = ReaderAccess(None, ReaderSeams(rig.api, lambda: HOSTNAME))
+
+    access.run(["status"], timeout=5.0)
+    access.stream(["for-each-ref"], lambda chunk: None, timeout=5.0)
+
+    names = {c.name for c in rig.engine.containers.values()}
+    assert READER_CONTAINER_NAME in names and READER_WRITER_CONTAINER_NAME not in names
+
+    access.run(["add", "-A"], timeout=5.0, write=True)
+    access.run(["rev-parse", "HEAD"], timeout=5.0)
+
+    reading = rig.engine.container(READER_CONTAINER_NAME)
+    writing = rig.engine.container(READER_WRITER_CONTAINER_NAME)
+    assert reading.document["HostConfig"]["Mounts"][0]["ReadOnly"] is True
+    assert writing.document["HostConfig"]["Mounts"][0]["ReadOnly"] is False
+    went_to = [(made.document["Cmd"][-1], made.container) for made in rig.engine.execs.values()]
+    assert went_to == [
+        ("status", READER_CONTAINER_NAME),
+        ("for-each-ref", READER_CONTAINER_NAME),
+        ("-A", READER_WRITER_CONTAINER_NAME),
+        ("HEAD", READER_CONTAINER_NAME),
+    ]
+    access.close()
+    assert reading.removed and writing.removed
+
+
+# #745-T23
+def test_the_reader_is_made_under_the_runtime_the_seam_names(rig: Rig) -> None:
+    access = ReaderAccess(None, ReaderSeams(rig.api, lambda: HOSTNAME, runtime="runc"))
+
+    access.run(["status"], timeout=5.0)
+
+    assert rig.engine.container(READER_CONTAINER_NAME).document["HostConfig"]["Runtime"] == "runc"
+    access.close()
 
 
 # #745-T23
@@ -581,11 +649,11 @@ def test_the_pipe_runs_upload_pack_in_the_reader_and_carries_the_streams_and_the
     (made,) = list(rig.engine.execs.values())[-1:]
     assert made.document["Cmd"] == [
         "/usr/local/bin/git",
-        "-c",
-        "safe.directory=/repo",
+        *ac_reader.READER_GIT_OPTIONS,
         "upload-pack",
         "/repo",
     ]
+    assert made.container == READER_CONTAINER_NAME, "a fetch only reads: the read-only reader"
     assert "GIT_PROTOCOL=version=2" in made.document["Env"]
     assert made.document["WorkingDir"] == "/repo"
 

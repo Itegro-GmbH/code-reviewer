@@ -22,6 +22,7 @@ from .reader import (
     CONTROL_REPO,
     GIT,
     READER_CONTAINER_NAME,
+    READER_GIT_OPTIONS,
     READER_REPO,
     UPLOAD_PACK_PROTOCOL_VARIABLE,
     reader_environment,
@@ -53,7 +54,7 @@ def main(
         exec_id = api.create_exec(
             READER_CONTAINER_NAME,
             exec_document(
-                [GIT, "-c", f"safe.directory={READER_REPO}", "upload-pack", READER_REPO],
+                [GIT, *READER_GIT_OPTIONS, "upload-pack", READER_REPO],
                 env=env,
                 workdir=READER_REPO,
             ),

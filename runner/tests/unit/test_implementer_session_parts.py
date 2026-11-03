@@ -19,12 +19,12 @@ from code_reviewer_runner.dynamic_review.budget import (
     UnitCosts,
 )
 from code_reviewer_runner.dynamic_review.tool_part_audit import ToolPartAudit
+from code_reviewer_runner.implementer.agent_container import KILL_SECONDS, STOP_SECONDS
 from code_reviewer_runner.implementer.git_workspace import (
     DIRTY_TIMEOUT,
     REPORT_READ_TIMEOUT,
     RESCUE_STEP_TIMEOUT,
 )
-from code_reviewer_runner.implementer.agent_container import KILL_SECONDS, STOP_SECONDS
 from code_reviewer_runner.implementer.job_run import SIGTERM_BACKSTOP_SECONDS
 from code_reviewer_runner.implementer.limits import agent_limits
 from code_reviewer_runner.implementer.session import (

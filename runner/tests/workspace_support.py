@@ -54,7 +54,7 @@ class LocalAccess:
     def upload_pack(self) -> str:
         return f"{self.git} upload-pack"
 
-    def run(self, args: Sequence[str], *, timeout: float) -> Outcome:
+    def run(self, args: Sequence[str], *, timeout: float, write: bool = False) -> Outcome:
         return self._process.run(args, env=self._env, cwd=self.repo, timeout=timeout)
 
     def stream(

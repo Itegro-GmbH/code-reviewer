@@ -30,10 +30,10 @@ cp`) puts its files where a Sysbox container does not see them (measured, 2026-1
 answers 200 and the directory stays empty).
 
 **How it ends.** Control kills the container (SIGKILL to its init, which takes every process of it,
-the inner `dockerd` and anything the agent left running, with it) before it reads the repository, and waits
-until the daemon says it is gone (`stop()`, at most `KILL_SECONDS + STOP_SECONDS`). It is removed after the push (`remove()`).
-A container that died by itself (killed for its memory, a crash) is seen by `wait` and named
-(`AgentEnd`).
+the inner `dockerd` and anything the agent left running, with it) before it reads the repository,
+and waits until the daemon says it is gone (`stop()`, at most `KILL_SECONDS + STOP_SECONDS`). It is
+removed after the push (`remove()`). A container that died by itself (killed for its memory, a
+crash) is seen by `wait` and named (`AgentEnd`).
 """
 
 import contextlib
@@ -77,10 +77,11 @@ PYTHON: Final = "/usr/local/bin/python3"
 OPENCODE: Final = "/usr/local/bin/opencode"
 ENGINE_LOG: Final = "/tmp/opencode.log"
 READY_SECONDS: Final = 60.0
-# The end of the container, in two parts that cost time at the end of a turn (the grace of the session counts
-# `KILL_SECONDS + STOP_SECONDS`): the kill call, and the wait until the daemon says the container is gone. The
-# removal is a third, **after the push** (`remove()`), because a Sysbox container with its inner Docker can take long
-# to remove and nothing has to wait for it: killed is enough to read the repository.
+# The end of the container, in two parts that cost time at the end of a turn (the grace of the
+# session counts `KILL_SECONDS + STOP_SECONDS`): the kill call, and the wait until the daemon says
+# the container is gone. The removal is a third, **after the push** (`remove()`), because a Sysbox
+# container with its inner Docker can take long to remove and nothing has to wait for it: killed is
+# enough to read the repository.
 KILL_SECONDS: Final = 3.0
 STOP_SECONDS: Final = 7.0
 REMOVE_SECONDS: Final = 15.0

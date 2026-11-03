@@ -330,7 +330,7 @@ class ImplementerSession:
         # The branch made for work committed on a detached HEAD, if there was such work.
         self._rescued: str | None = None
         self._unchecked = False
-        # The thread that removes the agent's container after the push (None before and without one).
+        # The thread that removes the agent's container after the push (None before it).
         self._removal: threading.Thread | None = None
 
     @property

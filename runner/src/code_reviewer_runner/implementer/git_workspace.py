@@ -21,18 +21,26 @@ What the system does, and what the agent can and cannot:
   history, so a VM that dies mid-turn loses the work.
 * **How Control stays safe from the agent's repository.** Control never runs git with that
   repository as working directory or git directory, and never opens a path in it: everything that
-  looks inside runs in the **reader** (`reader.py`), a container with the repository and no
-  network, no token and no other mount, and whatever the repository's config makes git run, it runs
-  there. The list of branches is made by `git for-each-ref` in the reader, read as a stream and
+  looks inside runs in the **reader** (`reader.py`), a container under the Sysbox runtime with the
+  repository and no network, no token and no other mount, and whatever the repository's config
+  makes git run, it runs there, where it cannot reach the VM. The repository is read-only for
+  every look; only the steps that change it (the set-up before the agent exists, the rescue of a
+  detached HEAD and the leftover commit after the agent's container is gone) run in the second
+  reader that has it read-write. The list of branches is made by `git for-each-ref` in the reader,
+  read as a stream and
   capped (`LIST_MAX_BYTES`); the mirror reads the branches through `git upload-pack` in the reader,
   piped to Control's `git fetch` (`exec_pipe.py`). What comes back is an object stream that the
   mirror's git checks (`fsckObjects`) and stores; the mirror is bare (nothing is checked out, no
   filter or hook runs) and its config is the runner's. The names of the branches are the only thing
   taken from the listing, and each is validated (`push_policy`) before it is put in a refspec; the
-  tip of a branch is read from the mirror, never from what the listing printed. `git status`, the
-  rescue of a detached HEAD and the leftover commit run in the reader too, after the agent's
-  container is gone. The one thing Control does in the repository's directory is making it (`git
-  clone` of its own mirror, before the agent exists).
+  tip of a branch is read from the mirror, never from what the listing printed. **When each runs:**
+  the look at the status of the tree (`dirty`) runs **while the agent's container is still alive**,
+  because its answer decides whether the agent gets one more message; it is a read in the read-only
+  reader, and an agent that changes the tree under it only changes that answer. The rescue of a
+  detached HEAD and the leftover commit run in the reader that writes, **after** the agent's
+  container is killed and confirmed gone (nothing is committed or rescued otherwise), and the
+  listing and the fetch of the final push follow. The one thing Control does in the repository's
+  directory is making it (`git clone` of its own mirror, before the agent exists).
 """
 
 import os
@@ -153,8 +161,10 @@ class RepoAccess(Protocol):
         """The command Control's `git fetch --upload-pack=` runs to read the agent's branches."""
         ...
 
-    def run(self, args: Sequence[str], *, timeout: float) -> Outcome:
-        """One git command in the repository; never raises on a failed command."""
+    def run(self, args: Sequence[str], *, timeout: float, write: bool = False) -> Outcome:
+        """One git command in the repository; never raises on a failed command. A command that
+        changes the repository says `write`: it runs where the repository is read-write, and only
+        those do."""
         ...
 
     def stream(
@@ -425,7 +435,7 @@ class GitWorkspace:
             ["checkout", "-q", "-b", self.spec.branch],
         )
         for arguments in setup:
-            done = self._access.run(arguments, timeout=self._timeout)
+            done = self._access.run(arguments, timeout=self._timeout, write=True)
             if done.returncode != 0:
                 raise fail(
                     ErrorCode.SETUP_FAILED,
@@ -439,7 +449,8 @@ class GitWorkspace:
     # -- the leftover (in the reader) -------------------------------------------------------
 
     def dirty(self) -> bool:
-        """Whether the working tree has changes, untracked files included. Runs in the reader. Only
+        """Whether the working tree has changes, untracked files included. Runs in the read-only
+        reader, while the agent may still be running (it decides on the extra message). Only
         the first byte of what `git status` prints is looked at: the output is the agent's (a tree
         with a million untracked files prints megabytes) and the answer is whether it has any. A
         status that fails says nothing about the tree: False (`commit_all` is not tried)."""
@@ -474,7 +485,9 @@ class GitWorkspace:
 
         def run(arguments: list[str]) -> Outcome:
             remaining = max(1.0, deadline - self._clock())
-            return self._access.run([*options, *arguments], timeout=min(self._timeout, remaining))
+            return self._access.run(
+                [*options, *arguments], timeout=min(self._timeout, remaining), write=True
+            )
 
         added = run(["add", "-A"])
         if added.returncode != 0:
@@ -692,7 +705,7 @@ class GitWorkspace:
         if containing.stdout.strip():
             return None
         name = f"{self.spec.branch}-leftover-{uuid.uuid4().hex[:8]}"
-        moved = self._reader(["switch", "-q", "-c", name], timeout=RESCUE_STEP_TIMEOUT)
+        moved = self._reader(["switch", "-q", "-c", name], timeout=RESCUE_STEP_TIMEOUT, write=True)
         if moved.returncode != 0:
             raise fail(ErrorCode.SETUP_FAILED, "git switch failed: " + self._agent_detail(moved))
         return name
@@ -879,9 +892,12 @@ class GitWorkspace:
             timeout=min(self._timeout, REPORT_READ_TIMEOUT),
         )
 
-    def _reader(self, args: Sequence[str], *, timeout: float | None = None) -> Outcome:
-        """A git command in the agent's repository, run in the reader (never here)."""
-        return self._access.run(args, timeout=timeout or self._timeout)
+    def _reader(
+        self, args: Sequence[str], *, timeout: float | None = None, write: bool = False
+    ) -> Outcome:
+        """A git command in the agent's repository, run in a reader (never here); `write` for a
+        command that changes it."""
+        return self._access.run(args, timeout=timeout or self._timeout, write=write)
 
     def _reader_stream(
         self, args: Sequence[str], consume: Callable[[bytes], None], *, timeout: float | None = None
