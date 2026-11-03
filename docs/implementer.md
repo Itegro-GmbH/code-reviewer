@@ -172,11 +172,13 @@ with the real constants of the kill and the wait.
   never sees the mirror: its container mounts the `repo` directory of the work volume and nothing else of it.
 - From the listing only the names are taken, and each is validated before it is put in a refspec. The local ref the branch is
   fetched into is numbered, never built from the name. The tip is read from the mirror, never from what the listing printed.
-- `git status`, the rescue of a detached HEAD and the commit of what is left run in the reader, **after** the agent's
-  container was killed. The container is killed first (SIGKILL to its init, which takes every process of it with it, the
-  agent's `dockerd` and anything it left running), so nothing of the agent can change the repository or call the door while the
-  runner reads it. If the container cannot be confirmed gone, nothing is committed or rescued and the summary says that
-  changes in the working tree were not looked for.
+- **When each runs.** `git status` (`dirty()`) runs in the read-only reader **while the agent's container is still alive**: its
+  answer decides whether the agent gets one more message, so it has to be asked while the agent can answer; an agent that
+  changes the tree under it changes that answer and nothing else. The rescue of a detached HEAD and the commit of what is left run in the reader that
+  writes, **after** the agent's container was killed and confirmed gone, and so do the list of branches and the fetch of the final push. The
+  container is killed first (SIGKILL to its init, which takes every process of it with it, the agent's `dockerd` and anything it left
+  running), so nothing of the agent can change the repository or call the door while the runner changes or reads it. If the container
+  cannot be confirmed gone, nothing is committed or rescued and the summary says that changes in the working tree were not looked for.
 - The token is in the environment of the one `git push` (and the clone) of the runner and in no argument, file, URL or process
   of the agent's side. The reader holds no token; the push runs in Control, from the mirror.
 
@@ -308,12 +310,23 @@ daemon is the only thing that joins the two. This was chosen over a port in the 
 needs Control and the agent on a common network, from which the agent could connect back. Nothing in the agent opens a connection to
 Control.
 
-**How Control reads the agent's repository.** In the **reader**: a container of the Worker image (which has git), `NetworkMode: none`, no token and no
-secret, a read-only root file system, `no-new-privileges`, three capabilities to read and write files of any owner (the files the
-agent's root made are owned by the VM's root, and it may chown them), and the repository as its only mount. Control runs `git` in it
-through exec for `status`, the leftover commit, the rescue of a detached HEAD and the list of branches, and the fetch of the final push
-reads `git upload-pack` in it, piped to Control's `git fetch` (`exec_pipe`). A hostile repository (hooks, config, symlinks, alternates)
-can only run things there, where there is nothing to reach. Control never opens a path in the repository.
+**How Control reads the agent's repository.** In the **reader**, under the same runtime as the agent: a container of the Worker image (which
+has git), `sysbox-runc`, `NetworkMode: none`, no token and no secret, a read-only root file system, `no-new-privileges`, 256 MB, and the
+repository as its only mount, **read-only** for every look (the list of branches, the status, the `git upload-pack` of the final fetch,
+piped to Control's `git fetch` by `exec_pipe`). The steps that change the repository (the set-up before the agent exists, the rescue of a
+detached HEAD and the leftover commit after the container is gone) run in a **second reader** with the repository read-write; both are made
+before the agent starts (`ReaderAccess.warm`), so that nothing has to be created when the VM's disk may be full. Control runs `git` in them
+through exec. No capability is added: the first version of the reader ran on plain runc as the VM's root with `DAC_READ_SEARCH` and
+`DAC_OVERRIDE`, and the default seccomp profile allows `open_by_handle_at`, so a `core.fsmonitor` planted in the repository could read and
+write any file of the VM's root file system. **Proven on a real VM (2026-11-03, 2 vCPU, a `spike-` VM from a snapshot built from the branch):**
+that reader configuration, with a planted fsmonitor that calls name_to_handle_at and `open_by_handle_at`, opened a handle for a file, then for the root of
+the VM's file system (inode 128 on the XFS), listed it, read `/etc/hostname` and **wrote `/var/lib/cr-escape-marker` on the VM's root**; the same
+call under `sysbox-runc` with no added capability returned `EPERM` at both stages and nothing was written (root of the reader is the unprivileged
+uid 165536 of the VM, uid_map 0 165536 65536; what it holds as capabilities exists inside its user namespace only). Git is also told not to run what the
+repository names where an option can stop it (`core.fsmonitor=false`, `core.hooksPath=/dev/null`, `gc.auto=0`, `maintenance.auto=false`,
+`core.untrackedCache=false`): with them the planted fsmonitor does not start at all. A filter driver of the repository cannot be switched
+off by name, so it runs, in the reader, and is contained: the container is the wall, not the options. A hostile repository (hooks, config,
+filters, symlinks, alternates) can only run things where there is nothing to reach. Control never opens a path in the repository.
 
 **When the container ends before the turn does.** A container that is killed (out of memory, a crash, the daemon) or whose engine process
 dies is named in the outcome ("the agent's container ended during the turn: the container was killed (a signal: most likely the memory
@@ -348,6 +361,63 @@ With the agent's container killed after two commits the turn ended `agent_gave_u
 process killed, the same code with "the engine process ended during its turn". On a 1 vCPU VM (2,287 MB) the gate refuses with
 `sandbox_size_unsupported` in 0 s; with the check lowered by hand, the same scripted turn ran inside 768 MB (peak 500 MB), which says
 that a 1 vCPU VM cannot host a real repository's tests, not that the stack cannot start.
+
+## How the agent's container is tested
+
+Three places, each with its own limits, and the last one only a VM with Sysbox can fill:
+
+* **Unit and integration tests** (`runner/tests/unit`, `tests/integration`) run the session, the reader, the pipe and the git workspace against the fake Docker Engine of `fakes/docker_engine` and a scripted engine
+  (`FakeAgent`, `FakePlace`): the flow of a turn, the budget sums, the leftover, the reasons of the push, what the daemon is asked for. `test_implementer_job.py` is the glue and not the proof that a turn works.
+* **The lane** (`runner/tests/lane`, marker `lane`, CI job `implementer-lane`, `make test-lane`) runs **a whole turn on a real Docker daemon**: the real `agent` image with the pinned OpenCode in a container of its own, the real reader
+  (git in a container, driven through the Engine API), the real door code (`run_door`, behind a relay container at the door's address on the model network), the production `ImplementerSession` and ledger, and a bare repository standing in for GitHub; the model
+  is the strict scripted fake of `fakes/wire`. The journeys are the ones of the plan's table that still mean something with the agent in its own container: E01 (a commit arrives once, at the end), E03 and E04 (a dirty tree gets one more message,
+  then the system commits it), E05 (the cost limit), E06 (git is free, every local branch arrives, a push has nowhere to go), E07 (a rewrite of a branch on the remote is `non_fast_forward`, a workflow file is `workflows_not_allowed`, the others arrive), E09 (the
+  agent looks for a secret and finds none; none is on the volume or in the definition of a container), E12 (a text-only agent gave up), E15 (a hostile repository against the real reader), and E16 (an agent that fills its disk). E08, E10 and `test_implementer_git_users.py` belonged to the old topology (a proxy
+  and an engine user in the Control container) and are gone. The seams are `AgentSeams.runtime` and `.entrypoint` and `ReaderSeams.runtime` and `.python`; production never sets them.
+  **CI has no Sysbox**, so the lane runs the containers under `runc`, with an entry point in place of the image's init that skips the inner `dockerd` (it says it is ready), on a bridge network with an exit. It therefore proves the flow of the turn, the reader, the reserve
+  disk and the volume, the leftovers and the secrets; it does **not** prove the Sysbox wall (the `open_by_handle_at` refusal there is the missing capability of runc, not the user namespace), the id mapping of the volume, the
+  isolated network or the agent's own Docker.
+* **A VM with Sysbox** proves those, and the lane runs there too (`LANE_RUNTIME=sysbox-runc`): the same tests, the image's own init with the inner Docker, the production network (`--internal`, isolated gateway) and the reader under Sysbox. The golden snapshot's proof
+  (`docs/golden-snapshot.md`) checks the Subpath volume, the id mapping and the network on every build. Results of the run on a `spike-` VM are under "Measured on real VMs" in "The agent's container".
+
+## The disk
+
+The agent is root in a container with its own Docker and no rule inside it, so it can fill the VM's disk: with the repository, with the
+layer of its container, with the images and volumes of its own Docker. The first design put Control's mirror (the bare repository the final push
+fetches the agent's branches into) on the same work volume, so a full disk meant a failed fetch and lost work.
+
+**What the VM has.** One XFS file system of 64 GB (`/dev/vdb`, mounted `noatime`, **no quotas**), the same at 1, 2 and 8 vCPU (measured); 61 GB are free
+on a fresh VM, 58 GB on one restored from the golden snapshot (6.8 GB are the two images and the base). `/run` and `/tmp` are directories of
+it, not memory. Because it has no quota and no project quota can be switched on for a mounted root, the agent's writes cannot be limited
+where they go (the repository, the layer of its container, the inner Docker's data); what can be done is to keep something it cannot fill.
+
+**What Control gets: a reserve disk.** For every job the Launcher makes a file of **8 GiB** (an eighth of the disk; `fallocate`, so the blocks are
+taken at once and stay taken), puts an ext4 file system on it, mounts it over a loop device on `reserve` below the work volume, and makes the volume with a recursive bind
+(`work-volume-reserve-*`, `docs/dispatcher.md`). Control's mirror is `/work/reserve/mirror.git`. The agent's container mounts the Subpath
+`repo` of the volume and sees none of it. Whatever the agent writes to the VM's disk, the blocks of the mirror are already taken (measured: with the root file system at 100% a 2 GiB write
+to the reserve succeeded at 374 MB/s). The cost is 8 of the 58 GB the agent could have had; the agent keeps about 50 GB for images and builds.
+
+**What Control also needs on a full disk: a command in a container.** The first run on a real VM with the disk full by the agent's doing ended with nothing pushed, because
+every `docker exec` failed: the pipes of an exec are files in `/run/docker/containerd`, and `runc exec` writes `/tmp/runc-process...`, both on the full disk
+("failed to open stdout fifo ... no space left on device", "OCI runtime exec failed: open /tmp/runc-process...: no space left on device"). Control looks at the repository and reaches the
+agent's engine only through exec. So on the Implementer's VM the launcher puts `/run/docker` and `/run/containerd` on memory (64 MB each) before the daemon starts, and starts the
+daemon with `TMPDIR=/run/containerd` (`docs/dispatcher.md`); the readers are made before the agent runs, so that no container has to be created later.
+`docker kill`, `docker inspect` and `wait` need nothing from the disk (measured: the kill took 0.4 to 0.5 s with 0 bytes free).
+
+**Before the fetch: the room is asked for.** Before any branch is taken over the runner asks the mirror's file system for its free bytes and inodes
+(`MIN_FREE_BYTES` 256 MiB, `MIN_FREE_INODES` 10,000). Too little: no fetch is started, and every branch is reported `rejected (out_of_space)`; a fetch that fails with the room gone says the same instead
+of `unreadable`. The summary says "the disk of the workspace had no room left", and, whenever the VM's disk has less than 1 GiB left at the end, "the VM's disk had N MB left at the end". The reserve is full only
+when the agent *committed* more than 8 GiB of objects. What the agent wrote when the disk was full is the agent's: the leftover commit of its working tree needs room in its repository and is
+reported "uncommitted changes could not be committed" when there is none; what it committed before arrives.
+
+**Proven on a real VM (2026-11-03).** The agent filled the layer of its container (`dd` to 100%, 648 KB free on the 64 GB disk) and then its repository; it had committed one file before.
+The OpenCode in its container could not go on (its own disk was full), the turn ended `agent_gave_up` (charged: the model was used), the container was killed in 0.5 s, the
+commit was fetched into the mirror, **pushed, and the branch on the stand-in for GitHub is the commit**; the notes say that the leftover could not be committed and that the VM's disk had 0 MB left. The same run
+without the memory directories ended with "the local branches of the agent's repository could not be read" and nothing pushed. In CI (without Sysbox) the lane gives the work volume a 700 MB file system of
+its own as the stand-in for the VM's disk and fills that (`runner/tests/lane/test_disk.py`).
+
+**What is not bounded.** Inodes: an agent that makes millions of files exhausts the inodes of the XFS (it allocates them dynamically) as it exhausts the blocks; the reserve has its own. The
+agent can still fill the disk, and a build that needs more room fails: it is not a question of money, key or exit. And the leftover of a full disk is the agent's.
 
 ## Network in the agent phase
 
