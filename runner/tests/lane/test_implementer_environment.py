@@ -291,7 +291,7 @@ echo "neighbours: $(ip -6 neigh show dev eth0 | grep -c '^fe80')"
         ).stdout  # fmt: skip
         assert "reached" in control
         with lane_environment(tmp_path, script) as (_, step):
-            assert step.error is None and step.block is not None, step.notes
+            assert step.error is None and step.block is not None, (step.notes, step.block)
             shown = step.block["output"]
             assert f"blocked {SETUP_NETWORK_GATEWAY}:{port}" in shown, shown
             assert f"blocked {gateway}:{port}" in shown, shown
