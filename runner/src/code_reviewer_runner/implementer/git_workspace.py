@@ -596,19 +596,15 @@ class GitWorkspace:
         * A file the script **added** and git does not ignore is kept in the working tree and put on
           the repository's local ignore list (`.git/info/exclude`, never committed, never pushed):
           the agent sees and uses it, but it is not "a change of the agent", so the tree is not
-          dirty
-          because of it (no extra message), the system's commit of what is left does not take it,
-          and
-          the agent's own `git add -A` does not either. What the repository itself ignores
-          (`node_modules`, a virtual environment, build output) needs nothing. An agent that wants
-          one
-          of them in a commit adds it by name with `git add -f`.
+          dirty because of it (no extra message), the system's commit of what is left does not
+          take it, and the agent's own `git add -A` does not either. What the repository itself
+          ignores (`node_modules`, a virtual environment, build output) needs nothing. An agent
+          that wants one of them in a commit adds it by name with `git add -f`.
 
         Returns the paths of the tracked files that were restored, at most five (the count is
         `restored_count`), cleaned of control characters. Raises `JobError` (`setup_failed`) when
-        the
-        repository cannot be read afterwards, or the lists cannot be kept: a script that broke it
-        ends the turn, free."""
+        the repository cannot be read afterwards, or the lists cannot be kept: a script that broke
+        it ends the turn, free."""
         deadline = self._clock() + seconds
         names: list[str] = []
         entries = 0
@@ -1148,8 +1144,7 @@ class GitWorkspace:
 
 
 # What `settle_after_setup` keeps of the untracked entries a script left: 10,000 of them and 1 MiB
-# of
-# their names.
+# of their names.
 EXCLUDE_MAX_ENTRIES = 10_000
 EXCLUDE_MAX_BYTES = 1024 * 1024
 _PATTERN_SPECIALS = re.compile(rb"([\\*?\[\]])")
@@ -1158,8 +1153,7 @@ _PATTERN_SPECIALS = re.compile(rb"([\\*?\[\]])")
 def exclude_patterns(listing: bytes) -> list[bytes]:
     """`git ls-files --others --directory -z` as lines of an ignore file: each name anchored at the
     top (`/name`), the characters git reads in a pattern escaped, a leading `#` or `!` and a
-    trailing
-    space protected. A name with a line end has no such line and is left out."""
+    trailing space protected. A name with a line end has no such line and is left out."""
     patterns: list[bytes] = []
     for name in listing.split(b"\0"):
         if not name or b"\n" in name:

@@ -91,8 +91,7 @@ def clean_output(raw: bytes, secrets: Iterable[str]) -> str:
 class EnvironmentSetup:
     """What the step made. `image` is the agent's image when it succeeded. `block` is the
     `ImplementerSetupResult` of the report (None when the script never ran: the Setup container
-    could
-    not be had). `error` is why the turn ends, else None. `notes` are facts for the job's log."""
+    could not be had). `error` is why the turn ends, else None. `notes` are facts for the log."""
 
     image: str | None
     block: dict[str, Any] | None

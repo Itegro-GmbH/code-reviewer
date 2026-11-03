@@ -97,13 +97,10 @@ RUN_SCRIPT: Final = (
 )
 
 # What happens after a script that ended well: remove the script's file, then ask the container's
-# Docker to stop the way a daemon is stopped (SIGTERM), so that its images are on disk in one
-# piece. The
-# container's init ends with the daemon and the container stops by itself, which also ends this
-# exec:
-# its exit status says nothing, so Control waits for the container, not for the exec. A container
-# with
-# no daemon (the test lane under runc) has no pid file and says so.
+# Docker to stop the way a daemon is stopped (SIGTERM), so that its images are on disk in one piece.
+# The container's init ends with the daemon and the container stops by itself, which also ends this
+# exec: its exit status says nothing, so Control waits for the container, not for the exec. A
+# container with no daemon (the test lane under runc) has no pid file and says so.
 NO_DOCKER: Final = "no-docker"
 FINISH_SCRIPT: Final = f"""
 rm -f "$1"
@@ -147,8 +144,7 @@ NFT: Final = "/usr/sbin/nft"
 
 # How long each part may take. The script's own limit comes from the caller (it is counted in the
 # turn's time budget); these are the parts around it, and `SETUP_OVERHEAD_SECONDS` is their sum:
-# what
-# the caller must leave besides the script.
+# what the caller must leave besides the script.
 READY_SECONDS: Final = 60.0
 FINISH_EXEC_SECONDS: Final = 30.0
 # How long the container's Docker has to stop and end the container by itself.

@@ -12,10 +12,9 @@ its veth, it cannot reach):
   platform VM (2026-11-03): root in a container on an `internal`, `isolated` network, or on the
   Setup network, can switch IPv6 on in its own namespace (Docker leaves it off, a sysctl of that
   namespace), find the bridge's link-local address (`fe80::...%eth0`, a neighbour it finds by
-  pinging
-  `ff02::1`) and connect to **port 23456 of the VM** over it: the VM's control service listens on
-  `*`, and neither the isolated gateway mode nor an `ip` table sees IPv6 (the VM's kernel has no
-  `ip6` or `inet` netfilter). The bridge has an IPv6 address because the kernel gives every
+  pinging `ff02::1`) and connect to **port 23456 of the VM** over it: the VM's control service
+  listens on `*`, and neither the isolated gateway mode nor an `ip` table sees IPv6 (the VM's
+  kernel has no `ip6` or `inet` netfilter). The bridge has an IPv6 address because the kernel gives every
   interface a link-local one when it comes up. With `addrgenmode none` and the address flushed, the
   host side has no IPv6 address on that segment and there is nothing to connect to (measured: the
   same probe times out; a container that joins afterwards finds no neighbour). The VM does not
