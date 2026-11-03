@@ -129,6 +129,7 @@ _MIRROR_OPTIONS = (
     "core.bigFileThreshold=1m",
 )
 _PLAIN_FETCH = ("--no-tags", "--no-write-fetch-head")
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 # Only the leftover commit of the system: the agent's hooks do not run for it.
 _LEFTOVER_OPTIONS = ("core.hooksPath=/dev/null", "commit.gpgsign=false")
 
@@ -395,6 +396,8 @@ class GitWorkspace:
         self._start: str | None = None
         self._names_checked = False
         self._progress = _Progress()
+        # How many tracked files `restore_tracked` found changed (0 before it ran).
+        self.restored_count = 0
 
     # -- what the caller needs -------------------------------------------------------------------
 
@@ -573,6 +576,65 @@ class GitWorkspace:
                 ErrorCode.SETUP_FAILED, "the new commit cannot be read: " + self._agent_detail(head)
             )
         return head.stdout.strip()
+
+    # -- after the environment's script (in the reader) ---------------------------------------
+
+    def restore_tracked(self, *, seconds: float = 120.0) -> list[str]:
+        """After a successful setup script (#818): put every tracked file back to what HEAD says,
+        in the working tree and the index, and leave the rest of the tree as the script made it.
+        What the script installed in the repository's folder (`node_modules`, a virtual
+        environment, build output, a file it wrote) is untracked and stays; a change it made to a
+        tracked file (a lockfile an install rewrote, a patched configuration) does not stay, because
+        the end of the turn commits and pushes whatever the tree holds and a change nobody asked for
+        would arrive on the branch. The agent starts from the commit it was promised.
+
+        Returns the paths that were restored, at most five (the count is in the log line of the
+        caller through `len`), cleaned of control characters. Raises `JobError` (`setup_failed`)
+        when the repository cannot be read afterwards: a script that broke it ends the turn, free."""
+        deadline = self._clock() + seconds
+        names: list[str] = []
+        entries = 0
+        carry = bytearray()
+
+        def take(chunk: bytes) -> None:
+            nonlocal entries
+            carry.extend(chunk)
+            while (end := carry.find(b"\0")) >= 0:
+                entry = bytes(carry[:end])
+                del carry[: end + 1]
+                if len(entry) > 3:
+                    entries += 1
+                    if len(names) < 5:
+                        names.append(_plain(entry[3:].decode("utf-8", errors="replace")))
+            if len(carry) > 65536:
+                raise StopReading
+
+        remaining = max(1.0, deadline - self._clock())
+        status = self._reader_stream(
+            ["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=no"],
+            take,
+            timeout=min(self._timeout, remaining),
+        )
+        if status.returncode != 0:
+            raise fail(ErrorCode.SETUP_FAILED, "the repository cannot be read after the script")
+        if entries:
+            options = [arg for setting in _LEFTOVER_OPTIONS for arg in ("-c", setting)]
+            remaining = max(1.0, deadline - self._clock())
+            restored = self._access.run(
+                [*options, "reset", "--hard", "-q"],
+                timeout=min(self._timeout, remaining),
+                write=True,
+            )
+            if restored.returncode != 0:
+                raise fail(
+                    ErrorCode.SETUP_FAILED,
+                    "the tracked files could not be put back: " + self._agent_detail(restored),
+                )
+        head = self._access.run(["rev-parse", "--verify", "HEAD"], timeout=self._timeout)
+        if head.returncode != 0 or not head.stdout.strip():
+            raise fail(ErrorCode.SETUP_FAILED, "the repository has no HEAD after the script")
+        self.restored_count = entries
+        return names
 
     # -- the final push ---------------------------------------------------------------------------
 
@@ -1011,6 +1073,11 @@ class GitWorkspace:
         does not travel (`fatal: unexpected line in ./packed-refs: <that line>`), only the
         status."""
         return f"status {outcome.returncode}"
+
+
+def _plain(text: str) -> str:
+    """A path of the agent's repository as a log may carry it: no control character, at most 200."""
+    return _CONTROL_CHARS.sub("?", text)[:200]
 
 
 def _own_directory(path: Path) -> None:

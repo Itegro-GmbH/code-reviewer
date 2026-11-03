@@ -12,6 +12,10 @@ This module joins the pieces that already exist and are tested apart:
    `sandbox_size_unsupported`, free, before anything is touched;
 3. the setup (`production_setup`): the reader and the git workspace with the lease gate in front
    of every push, and the agent's container as a thing the session makes when it needs it;
+3b. the environment's setup script (#818, `environment_setup.py`), when the task has one: in a
+   Setup container of its own, before the model door exists. A script that fails ends the turn
+   `environment_setup_failed`, free, with its output on the Runs page; one that succeeds leaves the
+   image the agent's container starts from;
 4. the turn (`ImplementerSession`, #764), in which a SIGTERM is a stop: the engine is ended at once,
    what is committed on all local branches is pushed (if the lease is still held) and the turn ends
    `runner_shutdown`;
@@ -33,7 +37,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -52,7 +56,8 @@ from code_reviewer_runner.redaction import Redactor
 from code_reviewer_runner.result import ErrorCode, JobResult, Usage
 from code_reviewer_runner.usage_probe import UsageProbe
 
-from .agent_container import OPENCODE, AgentContainer
+from .agent_container import OPENCODE, AgentContainer, AgentSeams
+from .environment_setup import EnvironmentSetup, log_output, run_environment_setup
 from .git_workspace import (
     GitIdentity,
     GitWorkspace,
@@ -63,6 +68,7 @@ from .git_workspace import (
 from .reader import ReaderAccess
 from .report import clip_texts, escaped_size, fit_block, valid_block
 from .session import AgentPlace, ImplementerSession, SessionSeams
+from .setup_container import SetupSeams
 from .turn_result import TurnResult
 
 _log = logging.getLogger(__name__)
@@ -97,6 +103,17 @@ class TurnLike(Protocol):
 
 
 @dataclass(frozen=True)
+class EnvironmentHost:
+    """How a turn runs the environment's setup script and starts the agent from its result (#818):
+    `run` makes the agent's image of what the script left (or the reason it did not), `place` makes
+    the agent's container from that image. A `TurnSetup` without one cannot run a task that names a
+    script."""
+
+    run: Callable[[ImplementerInput, Callable[[], float], Callable[[], bool], float], EnvironmentSetup]
+    place: Callable[[str], Callable[[], AgentPlace]]
+
+
+@dataclass(frozen=True)
 class TurnSetup:
     """What a turn needs, made from trusted configuration only: the git workspace (whose reader is
     closed with `close`), what makes the agent's container, and the engine's command in it."""
@@ -105,6 +122,7 @@ class TurnSetup:
     place: Callable[[], AgentPlace]
     command: tuple[str, ...]
     close: Callable[[], None] = lambda: None
+    environment: EnvironmentHost | None = None
 
 
 SetupFactory = Callable[[ImplementerInput, Mapping[str, str], Callable[[], None]], TurnSetup]
@@ -198,7 +216,35 @@ def production_setup(
         reader,
         before_push=gate,
     )
-    return TurnSetup(workspace, lambda: AgentContainer(memory), (OPENCODE,), close=reader.close)
+
+    def run_environment(
+        turn: ImplementerInput,
+        elapsed: Callable[[], float],
+        should_stop: Callable[[], bool],
+        time_limit: float,
+    ) -> EnvironmentSetup:
+        assert spec.environment is not None
+        return run_environment_setup(
+            spec.environment,
+            workspace=workspace,
+            memory_mb=memory,
+            time_limit=time_limit,
+            elapsed=elapsed,
+            should_stop=should_stop,
+            secrets=turn.secrets,
+            seams=SetupSeams(),
+        )
+
+    def place_from(image: str) -> Callable[[], AgentPlace]:
+        return lambda: AgentContainer(memory, AgentSeams(image=image))
+
+    return TurnSetup(
+        workspace,
+        lambda: AgentContainer(memory),
+        (OPENCODE,),
+        close=reader.close,
+        environment=EnvironmentHost(run_environment, place_from),
+    )
 
 
 # -- the result -----------------------------------------------------------------------------------
@@ -215,15 +261,18 @@ def failure(
     duration_ms: int,
     usage: Usage | None = None,
     block: dict[str, object] | None = None,
+    log_extra: str = "",
 ) -> JobResult:
     """A failed turn. The usage is reported only when the model was used; the code is never a free
-    one for a turn that used it (`charged`)."""
+    one for a turn that used it (`charged`). `log_extra` goes in front of the code line (the notes
+    of the environment's setup)."""
+    line = f"{code.value}: {detail}"
     return JobResult(
         ok=False,
         duration_ms=duration_ms,
         comment_url=None,
         error_code=code,
-        log_tail=f"{code.value}: {detail}",
+        log_tail=(f"{log_extra}\n{line}" if log_extra else line)[-MAX_LOG_TAIL_CHARS:],
         usage=usage if usage is not None and usage.used_the_model else None,
         implementer=_fitted(block, None),
     )
@@ -277,9 +326,12 @@ def result_of(turn: TurnResult, *, duration_ms: int, secrets: tuple[str, ...]) -
     )
 
 
-def _early_block(workspace: GitWorkspace | None) -> dict[str, object] | None:
+def _early_block(
+    workspace: GitWorkspace | None, setup: Mapping[str, object] | None = None
+) -> dict[str, object] | None:
     """The report of a turn that failed after the repository was cloned but before the agent ran:
-    where it started and nothing else. None when there is no repository to speak of."""
+    where it started and nothing else (and what the environment's script did, when it ran). None
+    when there is no repository to speak of."""
     if workspace is None:
         return None
     try:
@@ -287,6 +339,7 @@ def _early_block(workspace: GitWorkspace | None) -> dict[str, object] | None:
     except JobError:
         return None
     return {
+        **({} if setup is None else {"setup": dict(setup)}),
         "baseCommit": start,
         "headCommit": None,
         "pushed": False,
@@ -345,10 +398,17 @@ def run_implementer_job(
     gate = lease_gate(lease_check or (lambda: LeaseState.UNCONFIRMED))
     setup: TurnSetup | None = None
     session: TurnLike | None = None
+    prepared: EnvironmentSetup | None = None
     try:
         factory = seams.setup or production_setup
         setup = factory(job, environment, gate)
         setup.workspace.prepare()
+        if job.implementer.environment is not None:
+            prepared = _environment(job, setup, started, shutdown, seams, process_timeout)
+            if prepared.error is not None:
+                raise prepared.error
+            assert prepared.image is not None and setup.environment is not None
+            setup = replace(setup, place=setup.environment.place(prepared.image))
         session = _session(job, setup, started, environment, shutdown, seams, process_timeout)
         if usage_probe is not None:
             usage_probe.watch(lambda: _usage_of(session, job))
@@ -359,7 +419,11 @@ def run_implementer_job(
             error.code,
             error.detail,
             duration_ms=_elapsed_ms(clock, started),
-            block=_early_block(setup.workspace if setup is not None else None),
+            block=_early_block(
+                setup.workspace if setup is not None else None,
+                None if prepared is None else prepared.block,
+            ),
+            log_extra=_environment_log(prepared),
         )
     except Exception:
         _remember_secrets(session, secrets_sink)
@@ -379,7 +443,45 @@ def run_implementer_job(
             setup.close()
     # The capability of the turn's model proxy is a secret of this turn too.
     _remember_secrets(session, secrets_sink)
+    if prepared is not None:
+        turn = replace(turn, setup=prepared.block, notes=(*prepared.notes, *turn.notes))
     return result_of(turn, duration_ms=_elapsed_ms(clock, started), secrets=session.secrets())
+
+
+def _environment(
+    job: ImplementerInput,
+    setup: TurnSetup,
+    started: float,
+    shutdown: threading.Event,
+    seams: JobSeams,
+    process_timeout: float | None,
+) -> EnvironmentSetup:
+    """The environment's script, run in its Setup container (#818). The time it takes is part of
+    the turn's: the limit it is held to is the smaller of the job's and the process's, as the
+    session's own deadline is."""
+    if setup.environment is None:
+        raise JobError(
+            ErrorCode.IMPLEMENTER_CONFIG_INVALID,
+            "this runner cannot run the setup script of an environment",
+        )
+    limit = float(job.implementer.limits.time_limit_seconds)
+    if process_timeout is not None:
+        limit = min(limit, process_timeout)
+    clock = seams.clock
+    return setup.environment.run(job, lambda: clock() - started, shutdown.is_set, limit)
+
+
+def _environment_log(prepared: EnvironmentSetup | None) -> str:
+    """The notes of the setup step and the end of the script's output, for the log line of a turn
+    that ended there."""
+    if prepared is None:
+        return ""
+    lines = list(prepared.notes)
+    output = log_output(prepared)
+    if output:
+        lines.append("--- the end of the script's output ---")
+        lines.append(output)
+    return "\n".join(lines)
 
 
 def _session(

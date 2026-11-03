@@ -95,7 +95,12 @@ _IMPLEMENTER_FIELDS = {
     "cost",
     "modelEntry",
     "capabilities",
+    "environment",
 }
+_IMPLEMENTER_ENVIRONMENT_FIELDS = {"name", "setupScript"}
+# The bounds of the contract (`contracts/environment-sizes.v1.json`): a script is text of at most 64 KB.
+MAX_SETUP_SCRIPT_BYTES = 64 * 1024
+MAX_ENVIRONMENT_NAME_CHARS = 80
 _IMPLEMENTER_REPO_FIELDS = {"fullName", "cloneUrl"}
 _IMPLEMENTER_LIMIT_FIELDS = {"timeLimitSeconds"}
 MAX_INSTRUCTION_CHARS = 20_000
@@ -293,6 +298,17 @@ class ImplementerLimits:
 
 
 @dataclass(frozen=True)
+class ImplementerEnvironment:
+    """The environment a turn was started with (#818, `ImplementerEnvironment` of the contract): the
+    setup script that runs once in the repository's folder, in a container of its own, before the
+    model is called. Present only when the environment has a script. The script is data written by a
+    member of the workspace; it holds no secret and is never read as a command of the app."""
+
+    name: str
+    setup_script: str
+
+
+@dataclass(frozen=True)
 class ImplementerSpec:
     """What an implementer job asks for (#746, `ImplementerJob` of the contract). Closed.
 
@@ -308,6 +324,7 @@ class ImplementerSpec:
     cost: CostPolicy
     model_entry: JobModelEntry
     capabilities: JobCapabilities | None = None
+    environment: ImplementerEnvironment | None = None
 
 
 class JobError(Exception):
@@ -951,7 +968,30 @@ def _implementer_spec(data: dict[str, Any], git: GitAccess) -> ImplementerSpec:
         cost=cost,
         model_entry=entry,
         capabilities=_job_capabilities(spec),
+        environment=_implementer_environment(spec),
     )
+
+
+def _implementer_environment(spec: dict[str, Any]) -> ImplementerEnvironment | None:
+    """The `implementer.environment` object (#818). Closed. A script of only white space is no
+    script: the Worker would have nothing to run, so the app does not send one."""
+    if "environment" not in spec:
+        return None
+    given = _object(spec["environment"], "implementer.environment")
+    _check_fields(given, _IMPLEMENTER_ENVIRONMENT_FIELDS, "implementer.environment.")
+    name, script = given.get("name"), given.get("setupScript")
+    if not isinstance(name, str) or not 1 <= len(name) <= MAX_ENVIRONMENT_NAME_CHARS:
+        raise _invalid(
+            "implementer.environment.name must be a string of 1 to "
+            f"{MAX_ENVIRONMENT_NAME_CHARS} characters"
+        )
+    if not isinstance(script, str) or not script.strip():
+        raise _invalid("implementer.environment.setupScript must be a non-empty string")
+    if "\x00" in script or len(script.encode("utf-8", errors="strict")) > MAX_SETUP_SCRIPT_BYTES:
+        raise _invalid(
+            f"implementer.environment.setupScript must be text of at most {MAX_SETUP_SCRIPT_BYTES} bytes"
+        )
+    return ImplementerEnvironment(name=name, setup_script=script)
 
 
 def _implementer_input(job: dict[str, Any]) -> ImplementerInput:

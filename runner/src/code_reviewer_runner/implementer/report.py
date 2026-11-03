@@ -52,6 +52,7 @@ _BLOCK_KEYS = frozenset(
         "filesChanged",
         "summary",
         "opencode",
+        "setup",
     }
 )
 MAX_BRANCHES = 50
@@ -59,7 +60,9 @@ MAX_BRANCH_NAME_CHARS = 255
 MAX_REASON_CHARS = 40
 _REASON = re.compile(r"[a-z][a-z_]*")
 # Not required: a block without the count (an older shape) is still one the app reads.
-_OPTIONAL_KEYS = frozenset({"branchesDropped"})
+_OPTIONAL_KEYS = frozenset({"branchesDropped", "setup"})
+MAX_SETUP_OUTPUT_CHARS = 8192
+_SETUP_KEYS = frozenset({"ok", "exitCode", "timedOut", "durationSeconds", "output"})
 MAX_DROPPED = 1_000_000_000
 _STATUSES = frozenset(kind.value for kind in ChangeKind)
 
@@ -121,6 +124,26 @@ def _dropped_ok(value: object) -> bool:
     )
 
 
+def _setup_ok(value: object) -> bool:
+    """The `setup` block (#818, `ImplementerSetupResult`): closed, every field present."""
+    setup = as_object(value)
+    if setup is None or set(setup) != _SETUP_KEYS:
+        return False
+    code, duration = setup["exitCode"], setup["durationSeconds"]
+    return (
+        isinstance(setup["ok"], bool)
+        and isinstance(setup["timedOut"], bool)
+        and (
+            code is None
+            or (isinstance(code, int) and not isinstance(code, bool) and -255 <= code <= 255)
+        )
+        and isinstance(duration, int)
+        and not isinstance(duration, bool)
+        and 0 <= duration <= 86_400
+        and _is_string(setup["output"], MAX_SETUP_OUTPUT_CHARS)
+    )
+
+
 def _branch_ok(value: object) -> bool:
     branch = as_object(value)
     if branch is None or set(branch) != {"name", "head", "result", "reason"}:
@@ -153,6 +176,8 @@ def valid_block(value: object) -> dict[str, Any] | None:
     if block is None or not _BLOCK_KEYS - _OPTIONAL_KEYS <= set(block) <= _BLOCK_KEYS:
         return None
     if "branchesDropped" in block and not _dropped_ok(block["branchesDropped"]):
+        return None
+    if "setup" in block and not _setup_ok(block["setup"]):
         return None
     base, head, pushed = block["baseCommit"], block["headCommit"], block["pushed"]
     commits, files, branches = block["commits"], block["filesChanged"], block["branches"]
@@ -190,6 +215,11 @@ def clip_texts(block: Mapping[str, Any]) -> dict[str, Any]:
     try:
         clipped: dict[str, Any] = dict(block)
         clipped["summary"] = clipped["summary"][:MAX_SUMMARY_CHARS]
+        if isinstance(clipped.get("setup"), dict):
+            clipped["setup"] = {
+                **clipped["setup"],
+                "output": str(clipped["setup"].get("output", ""))[:MAX_SETUP_OUTPUT_CHARS],
+            }
         clipped["branches"] = [
             {**branch, "name": branch["name"][:MAX_BRANCH_NAME_CHARS]}
             for branch in clipped["branches"]

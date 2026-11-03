@@ -55,6 +55,8 @@ WORKER_FEATURES: tuple[str, ...] = (
     "dynamic_cost_policy",
     "cost_limit",
     "operator_cost_limit",
+    # #818: the Worker reads `implementer.environment` and runs its setup script before the model.
+    "implementer_environment",
 )
 # The feature of `GET /api/runners/v1/version` that says the Worker API exists.
 FEATURE_WORKER_API = "worker_api"

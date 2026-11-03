@@ -279,6 +279,31 @@ class DockerApi:
             "POST", f"/containers/{container}/kill?signal=KILL", ok=(204, 404, 409), timeout=timeout
         )
 
+    def stop_container(self, container: str, *, grace: int, timeout: float) -> None:
+        """SIGTERM the container's init, SIGKILL after `grace` seconds. A container that is already
+        stopped (304) or gone (404) is what was wanted. Under Sysbox a stop that ends the init
+        by itself is the one that lets it write the inner Docker's data back into the container's
+        file system, where `commit_container` finds it (#818)."""
+        self.request(
+            "POST", f"/containers/{container}/stop?t={int(grace)}", ok=(204, 304, 404), timeout=timeout
+        )
+
+    def commit_container(self, container: str, repository: str, tag: str, *, timeout: float) -> str:
+        """Make an image of a container's file system (the image id). The container is not paused:
+        the caller has stopped it. The repository and the tag are constants of the runner."""
+        answer = as_object(
+            self.request(
+                "POST",
+                f"/commit?container={container}&repo={repository}&tag={tag}&pause=false",
+                ok=(201,),
+                timeout=timeout,
+            )
+        )
+        identifier: Any = None if answer is None else answer.get("Id")
+        if not isinstance(identifier, str) or not identifier.startswith("sha256:"):
+            raise DockerError(0, "the daemon's answer has no image id")
+        return identifier
+
     def inspect_image(self, reference: str) -> dict[str, Any]:
         answer = as_object(self.request("GET", f"/images/{reference}/json"))
         if answer is None:

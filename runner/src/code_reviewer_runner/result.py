@@ -97,6 +97,9 @@ class ErrorCode(StrEnum):
     # model was never used.
     SANDBOX_UNPROVEN = "sandbox_unproven"
     SANDBOX_SIZE_UNSUPPORTED = "sandbox_size_unsupported"
+    # #818: the setup script of the environment failed (a non-zero exit, its time limit, the disk) or
+    # its result could not be saved as the agent's image. Before the model: free.
+    ENVIRONMENT_SETUP_FAILED = "environment_setup_failed"
     # The runner was told to stop (SIGTERM, #765): what is committed was pushed, and the job host
     # gives the job back to the queue under this code.
     RUNNER_SHUTDOWN = "runner_shutdown"
