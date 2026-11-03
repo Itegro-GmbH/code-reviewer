@@ -518,7 +518,9 @@ def lane_workspace(
         "create", "--name", control, "--label", "code-reviewer.lane=1",
         "--mount", f"type=volume,src={volume},dst=/work", config.worker_image, "probe",
     )  # fmt: skip
-    layout = WorkspaceLayout(work_dir=work, run_dir=scratch / "run")
+    # The runner's own files are on memory, as /run is in the container: a full disk is not theirs.
+    run_dir = Path("/dev/shm") / f"code-reviewer-lane-run-{uuid.uuid4().hex[:8]}"
+    layout = WorkspaceLayout(work_dir=work, run_dir=run_dir)
     reader = ReaderAccess(
         {
             "GIT_AUTHOR_NAME": IDENTITY.name,
@@ -538,6 +540,7 @@ def lane_workspace(
     )
     with ExitStack() as stack:
         # In the order they are undone: the readers, the stand-in, the volume, the mounts.
+        stack.callback(shutil.rmtree, run_dir, True)
         stack.callback(unmount, scratch / "vmdisk")
         stack.callback(unmount, work)
         stack.callback(docker, "volume", "rm", "-f", volume, check=False)

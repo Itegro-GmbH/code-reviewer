@@ -1,14 +1,20 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""A whole Implementer job through the runner's entry point, in process (#765).
+"""A whole Implementer job through the runner's entry point, in process (#765): the glue, not the
+agent.
 
 `runner.main` reads the job from stdin and prints one result line; everything between is the
-production code: the entry point, the job glue, the session, the push ticker, the push loop and the
-`push()` of the git workspace with the lease gate in front of it. Only two things are doubles: the
-engine (`FakeAgent` stands in for the OpenCode process, which the engine lane proves) and the git
-commands behind `push()` (`FakeGit` records the push instead of running git; the real git paths are
-the tests of #762). The lease answers come over a real socket pair, the way the job host gives them,
-and a SIGTERM is a real signal to this process.
+production code: the entry point, the job glue, the session, the lease gate, the push loop and the
+leftover handling of the git workspace. Three things are doubles, and each is proven somewhere
+else: the engine and the agent's container (`FakeAgent` and `FakePlace` stand in for OpenCode in
+its container; `tests/lane` runs the real agent image with the pinned OpenCode, the real reader and
+the real door code on a real Docker daemon, and a VM with Sysbox runs the same), the model door
+(`FakeDoor`, a door with nothing behind it; the door's own tests are in `tests/unit`), and the git
+commands behind the push (`FakeGit` records the push instead of running git; the real git paths
+are the tests of #762). The lease answers come over a real socket pair, the way the job host gives
+them, and a SIGTERM is a real signal to this process. So this file holds the cases that need a
+scripted engine to be forced (a lease lost at a given moment, a stop in the middle of a turn, a
+container that is not confirmed gone); it is not the proof that a turn works end to end.
 """
 
 import io
