@@ -268,7 +268,7 @@ def test_the_setup_container_cannot_reach_the_vms_services_over_ipv4_or_ipv6(
     # link-local address, as the measured attack did.
     ipv6 = f"""
 sysctl -qw net.ipv6.conf.all.disable_ipv6=0 net.ipv6.conf.eth0.disable_ipv6=0 || true
-sleep 3; ping -6 -c1 -W1 ff02::1%eth0 >/dev/null 2>&1
+sleep 3; ping -6 -c1 -W1 ff02::1%eth0 >/dev/null 2>&1 || true
 for address in $(ip -6 neigh show dev eth0 | awk '/^fe80/ {{print $1}}'); do
   if timeout 4 bash -c "echo > /dev/tcp/$address%eth0/{port}" 2>/dev/null; then
     echo "OPEN6 $address"; else echo "blocked6 $address"; fi
