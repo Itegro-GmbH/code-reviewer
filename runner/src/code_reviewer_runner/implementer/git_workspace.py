@@ -56,7 +56,7 @@ import shutil
 import stat
 import time
 import uuid
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -83,6 +83,7 @@ from .history import (
     parse_name_status,
 )
 from .push_policy import select_branches
+from .ref_drop import RefDeletions, RefListingFailed
 
 LEFTOVER_MESSAGE = "Implementer: uncommitted changes of the turn"
 # The final push asks the lease again every this often, for up to `confirm_seconds` (#765).
@@ -129,6 +130,7 @@ _MIRROR_OPTIONS = (
     "core.bigFileThreshold=1m",
 )
 _PLAIN_FETCH = ("--no-tags", "--no-write-fetch-head")
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 # Only the leftover commit of the system: the agent's hooks do not run for it.
 _LEFTOVER_OPTIONS = ("core.hooksPath=/dev/null", "commit.gpgsign=false")
 
@@ -213,6 +215,10 @@ class RepoAccess(Protocol):
         done for all of them."""
         ...
 
+    def append_exclude(self, data: bytes, *, timeout: float) -> Outcome:
+        """Append lines to the repository's local ignore file (`.git/info/exclude`)."""
+        ...
+
     def run(self, args: Sequence[str], *, timeout: float, write: bool = False) -> Outcome:
         """One git command in the repository; never raises on a failed command. A command that
         changes the repository says `write`: it runs where the repository is read-write, and only
@@ -223,6 +229,13 @@ class RepoAccess(Protocol):
         self, args: Sequence[str], consume: Callable[[bytes], None], *, timeout: float
     ) -> Outcome:
         """`run` for output that is read as a stream and not kept."""
+        ...
+
+    def update_refs(
+        self, options: Sequence[str], commands: Iterable[bytes], *, timeout: float
+    ) -> Outcome:
+        """`git <options> update-ref --stdin -z` in the repository (where it is read-write) with
+        `commands` as its standard input, written as they are produced."""
         ...
 
 
@@ -395,6 +408,14 @@ class GitWorkspace:
         self._start: str | None = None
         self._names_checked = False
         self._progress = _Progress()
+        # How many tracked files `settle_after_setup` found changed, and how many entries it put on
+        # the local ignore list (0 before it ran).
+        self.restored_count = 0
+        self.excluded_count = 0
+        # How many commits and how many branches and tags the script made, which
+        # `settle_after_setup` took away (0 before it ran).
+        self.script_commits = 0
+        self.dropped_refs = 0
 
     # -- what the caller needs -------------------------------------------------------------------
 
@@ -573,6 +594,193 @@ class GitWorkspace:
                 ErrorCode.SETUP_FAILED, "the new commit cannot be read: " + self._agent_detail(head)
             )
         return head.stdout.strip()
+
+    # -- after the environment's script (in the reader) ---------------------------------------
+
+    def settle_after_setup(self, *, seconds: float = 120.0) -> list[str]:
+        """After a successful setup script (#818): the repository is what the agent starts from, and
+        what the script did to it is the **base** of the turn, not a change the agent made.
+
+        * **Its history is undone** (`_return_to_start`): the script may have run `git commit`,
+          `git checkout -b`, `git tag` or `git reset`, and the turn ends by pushing every local
+          branch, so a commit of the script would arrive on GitHub as the agent's work. HEAD goes
+          back to the task's branch at `start_commit`, the base branch to `start_commit`, and every
+          other branch and tag is deleted. The files of a commit the script made are not lost
+          with the commit (see the next two points: a changed tracked file is put back, an added
+          one stays as the script left it). Reflogs and objects stay in the repository.
+        * A change to a file git **tracks** is undone, in the working tree and the index
+          (`git reset --hard`, after `git status` counted them): the turn ends by committing and
+          pushing whatever the tree holds and a lockfile an install rewrote or a configuration a
+          script patched would arrive on the branch as the agent's work.
+        * A file the script **added** (also one it committed: the commit is gone and the file is
+          plain again) and git does not ignore is kept in the working tree and put on the
+          repository's local ignore list (`.git/info/exclude`, never committed, never pushed): the
+          agent sees and uses it, but it is not "a change of the agent", so the tree is not dirty
+          because of it (no extra message), the system's commit of what is left does not take it,
+          and the agent's own `git add -A` does not either. **A folder goes on the list whole**
+          (`node_modules`, a cache, a virtual environment belong there): a file the agent adds
+          inside such a folder later is not committed unless it adds it by name with `git add -f`.
+          What the repository itself ignores needs nothing.
+
+        Returns the paths of the tracked files that were restored, at most five (the count is
+        `restored_count`), cleaned of control characters. Raises `JobError` (`setup_failed`) when
+        the repository cannot be read afterwards, or the lists cannot be kept: a script that broke
+        it ends the turn, free."""
+        deadline = self._clock() + seconds
+        names: list[str] = []
+        entries = 0
+        carry = bytearray()
+
+        def take(chunk: bytes) -> None:
+            nonlocal entries
+            carry.extend(chunk)
+            while (end := carry.find(b"\0")) >= 0:
+                entry = bytes(carry[:end])
+                del carry[: end + 1]
+                if len(entry) > 3:
+                    entries += 1
+                    if len(names) < 5:
+                        names.append(_plain(entry[3:].decode("utf-8", errors="replace")))
+            if len(carry) > 65536:
+                raise StopReading
+
+        def left() -> float:
+            return min(self._timeout, max(1.0, deadline - self._clock()))
+
+        self._return_to_start(left)
+        status = self._reader_stream(
+            ["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=no"],
+            take,
+            timeout=left(),
+        )
+        if status.returncode != 0:
+            raise fail(ErrorCode.SETUP_FAILED, "the repository cannot be read after the script")
+        if entries:
+            options = [arg for setting in _LEFTOVER_OPTIONS for arg in ("-c", setting)]
+            restored = self._access.run(
+                [*options, "reset", "--hard", "-q"], timeout=left(), write=True
+            )
+            if restored.returncode != 0:
+                raise fail(
+                    ErrorCode.SETUP_FAILED,
+                    "the tracked files could not be put back: " + self._agent_detail(restored),
+                )
+        head = self._access.run(["rev-parse", "--verify", "HEAD"], timeout=self._timeout)
+        if head.returncode != 0 or not head.stdout.strip():
+            raise fail(ErrorCode.SETUP_FAILED, "the repository has no HEAD after the script")
+        self.restored_count = entries
+        self._exclude_what_the_script_added(left)
+        return names
+
+    def _return_to_start(self, left: Callable[[], float]) -> None:
+        """The history of the script is undone: HEAD on the task's branch, the task's branch and the
+        base branch at `start_commit`, every other branch and every tag deleted. The index is
+        reset to the start (mixed): the working tree is not touched, so what the script committed
+        is now a change of the tree like any other (`settle_after_setup` deals with it)."""
+        start = self.start_commit
+        task = self.spec.branch
+        base = self.spec.base_branch
+        options = [arg for setting in _LEFTOVER_OPTIONS for arg in ("-c", setting)]
+
+        def git(args: list[str], what: str) -> Outcome:
+            done = self._access.run([*options, *args], timeout=left(), write=True)
+            if done.returncode != 0:
+                raise fail(ErrorCode.SETUP_FAILED, f"{what}: " + self._agent_detail(done))
+            return done
+
+        counted = self._access.run(["rev-list", "--count", "--all", "--not", start], timeout=left())
+        if counted.returncode != 0 or not counted.stdout.strip().isdigit():
+            raise fail(ErrorCode.SETUP_FAILED, "the repository cannot be read after the script")
+        self.script_commits = int(counted.stdout.strip())
+        git(
+            ["symbolic-ref", "HEAD", f"refs/heads/{task}"],
+            "the task's branch cannot be checked out",
+        )
+        git(["reset", "-q", "--mixed", start], "the repository cannot be put back to its start")
+        if base != task:
+            git(["update-ref", f"refs/heads/{base}", start], "the base branch cannot be put back")
+        deletions = RefDeletions(
+            lambda consume: self._access.stream(
+                ["for-each-ref", "--format=%(refname)%00", "refs/heads/", "refs/tags/"],
+                consume,
+                timeout=left(),
+            ),
+            {task, base},
+        )
+        # `update-ref` takes a branch a linked worktree of the script has checked out, `branch -D`
+        # does not; the listing is streamed into it, so no count or length of names is limited.
+        try:
+            removed = self._access.update_refs(
+                [arg for setting in _LEFTOVER_OPTIONS for arg in ("-c", setting)],
+                deletions,
+                timeout=left(),
+            )
+        except RefListingFailed as error:
+            raise fail(
+                ErrorCode.SETUP_FAILED,
+                f"the branches and tags the script made cannot be listed ({error})",
+            ) from error
+        if removed.returncode != 0:
+            raise fail(
+                ErrorCode.SETUP_FAILED,
+                "the branches and tags the script made could not be removed: "
+                + self._agent_detail(removed),
+            )
+        self.dropped_refs = deletions.count
+
+    def _exclude_what_the_script_added(self, left: Callable[[], float]) -> None:
+        """Put what the script added, and git does not ignore, on the local ignore list: the
+        top-level entries (a folder with its whole content counts as one), anchored, with git's
+        special characters escaped. A name with a line end cannot be written as a pattern and stays
+        as it is; a tree with more entries than `EXCLUDE_MAX_ENTRIES` or more text than
+        `EXCLUDE_MAX_BYTES` ends the turn rather than half of it being kept."""
+        listed = bytearray()
+        too_long = False
+
+        def take(chunk: bytes) -> None:
+            nonlocal too_long
+            listed.extend(chunk)
+            if len(listed) > EXCLUDE_MAX_BYTES:
+                too_long = True
+                raise StopReading
+
+        done = self._reader_stream(
+            [
+                "--no-optional-locks",
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "--directory",
+                "--no-empty-directory",
+                "-z",
+            ],
+            take,
+            timeout=left(),
+        )
+        if too_long or (done.returncode != 0 and not listed):
+            raise fail(
+                ErrorCode.SETUP_FAILED,
+                "the files the script added cannot be listed ("
+                + ("there are too many" if too_long else self._agent_detail(done))
+                + ")",
+            )
+        patterns = exclude_patterns(bytes(listed))
+        if len(patterns) > EXCLUDE_MAX_ENTRIES:
+            raise fail(
+                ErrorCode.SETUP_FAILED,
+                f"the script left more than {EXCLUDE_MAX_ENTRIES} untracked folders and files in "
+                "the repository's top folders",
+            )
+        self.excluded_count = len(patterns)
+        if not patterns:
+            return
+        written = self._access.append_exclude(b"\n".join(patterns) + b"\n", timeout=left())
+        if written.returncode != 0 or written.unanswered:
+            raise fail(
+                ErrorCode.SETUP_FAILED,
+                "what the script added could not be kept out of the commits: "
+                + self._agent_detail(written),
+            )
 
     # -- the final push ---------------------------------------------------------------------------
 
@@ -1011,6 +1219,33 @@ class GitWorkspace:
         does not travel (`fatal: unexpected line in ./packed-refs: <that line>`), only the
         status."""
         return f"status {outcome.returncode}"
+
+
+# What `settle_after_setup` keeps of the untracked entries a script left: 10,000 of them and 1 MiB
+# of their names.
+EXCLUDE_MAX_ENTRIES = 10_000
+EXCLUDE_MAX_BYTES = 1024 * 1024
+_PATTERN_SPECIALS = re.compile(rb"([\\*?\[\]])")
+
+
+def exclude_patterns(listing: bytes) -> list[bytes]:
+    """`git ls-files --others --directory -z` as lines of an ignore file: each name anchored at the
+    top (`/name`), the characters git reads in a pattern escaped, a leading `#` or `!` and a
+    trailing space protected. A name with a line end has no such line and is left out."""
+    patterns: list[bytes] = []
+    for name in listing.split(b"\0"):
+        if not name or b"\n" in name:
+            continue
+        escaped = _PATTERN_SPECIALS.sub(rb"\\\1", name)
+        if escaped.endswith(b" "):
+            escaped = escaped[:-1] + b"\\ "
+        patterns.append(b"/" + escaped)
+    return patterns
+
+
+def _plain(text: str) -> str:
+    """A path of the agent's repository as a log may carry it: no control character, at most 200."""
+    return _CONTROL_CHARS.sub("?", text)[:200]
 
 
 def _own_directory(path: Path) -> None:

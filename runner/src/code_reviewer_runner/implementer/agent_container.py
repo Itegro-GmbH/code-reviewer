@@ -55,6 +55,13 @@ from code_reviewer_runner.result import ErrorCode
 
 from .docker_api import AttachedStreams, DockerApi, DockerError
 from .exec_run import exec_document, run_exec
+from .host_rules import (
+    INET_FAILED,
+    HelperFailed,
+    close_bridge_inet,
+    close_bridge_ipv6,
+    inet_failure_note,
+)
 from .reader import REPO_SUBPATH, work_volume_of
 
 _log = logging.getLogger(__name__)
@@ -280,6 +287,9 @@ class AgentSeams:
     clock: Callable[[], float] = time.monotonic
     ready_seconds: float = READY_SECONDS
     image: str = AGENT_IMAGE_REFERENCE
+    # The image the host helper runs from, for the `ip` it has: the golden agent image, never one
+    # an environment's script made (it could have removed the tool).
+    helper_image: str = AGENT_IMAGE_REFERENCE
     # The runtime of the container: Sysbox in production. The test lane on a machine without Sysbox
     # (CI) starts the real image under `runc` with an entrypoint that skips the inner Docker, which
     # has to write `READY_FILE` itself. Production never sets either.
@@ -314,10 +324,12 @@ class AgentContainer:
 
     # -- the container -----------------------------------------------------------------------------
 
-    def create(self) -> None:
-        """Make the container under the Sysbox runtime, start it and wait for its Docker. Raises
-        `JobError` (`setup_failed`, free) when it cannot be had; whatever was made is removed."""
+    def create(self) -> tuple[str, ...]:
+        """Make the container under the Sysbox runtime, start it and wait for its Docker. Returns
+        the notes for the report (a check that did not hold, never a failure). Raises `JobError`
+        (`setup_failed`, free) when it cannot be had; whatever was made is removed."""
         api = self._api
+        notes: list[str] = []
         try:
             if self._seams.runtime not in api.runtimes():
                 raise unavailable(f"the daemon has no {self._seams.runtime} runtime")
@@ -326,6 +338,22 @@ class AgentContainer:
             volume = work_volume_of(own)
             if not image:
                 raise unavailable("the agent image is not in this VM")
+            # The VM's side of the model network gets no IPv6 address before the agent exists:
+            # root in the container can switch IPv6 on and would find the bridge's link-local
+            # address and, behind it, the VM's control port (`host_rules.py`).
+            try:
+                close_bridge_ipv6(api, self._seams.helper_image, MODEL_NETWORK_NAME)
+            except HelperFailed as failed:
+                raise unavailable(
+                    f"the model network could not be closed to IPv6 ({failed.reason})"
+                ) from None
+            # Beside it, for a kernel that has the `inet` family, a drop of IPv6 from that bridge
+            # (`nft` is in the Worker's image, which is the image of this container). Not required.
+            control_image = str(own.get("Image", ""))
+            if control_image and (
+                close_bridge_inet(api, control_image, MODEL_NETWORK_NAME, "agent") == INET_FAILED
+            ):
+                notes.append(inet_failure_note("model"))
             container = api.create_container(
                 agent_document(
                     image,
@@ -341,6 +369,7 @@ class AgentContainer:
             threading.Thread(target=self._watch_end, args=(container,), daemon=True).start()
             self._wait_ready(container)
             self._seal_check(container)
+            return tuple(notes)
         except DockerError as error:
             self._remove()
             raise unavailable(

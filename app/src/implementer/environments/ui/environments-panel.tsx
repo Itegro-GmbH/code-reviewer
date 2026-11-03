@@ -34,6 +34,7 @@ import { validateEnvironmentInput } from "../input.ts";
 import {
   DEFAULT_VCPUS,
   ENVIRONMENT_VCPUS,
+  isEnvironmentVcpus,
   SETUP_SCRIPT_MAX_BYTES,
   memoryGbOf,
 } from "../limits.ts";
@@ -54,7 +55,8 @@ const loadList = (api: EnvironmentApi) => api.list();
 type Editing = { kind: "new" } | { kind: "edit"; id: string } | null;
 type FieldErrors = Partial<Record<EnvironmentIssue["field"], string>>;
 
-const sizeLabel = (vcpus: number) => `${vcpus} vCPU, ${memoryGbOf(vcpus)} GB`;
+const sizeLabel = (vcpus: number) =>
+  `${vcpus} vCPU, ${memoryGbOf(vcpus)} GB memory`;
 const kb = (bytes: number) => `${(bytes / 1024).toFixed(1)} KB`;
 
 export function EnvironmentsPanel({
@@ -168,7 +170,7 @@ function Environments({
   return (
     <div className="flex flex-col gap-6">
       <Alert variant="info" role="status">
-        {PAGE_COPY.scriptsNotRunning}
+        {PAGE_COPY.scriptsRunning}
       </Alert>
       {problem !== null ? (
         <Alert variant="destructive">
@@ -217,9 +219,15 @@ function Environments({
                   <h2 className="text-lg leading-7 font-semibold break-words">
                     {item.name}
                   </h2>
-                  <p className="text-sm text-muted-foreground">
-                    {sizeLabel(item.vcpus)}
-                  </p>
+                  {item.sizeSupported ? (
+                    <p className="text-sm text-muted-foreground">
+                      {sizeLabel(item.vcpus)}
+                    </p>
+                  ) : (
+                    <p className="text-sm text-destructive">
+                      {item.vcpus} vCPU. {PAGE_COPY.sizeUnsupportedShort}
+                    </p>
+                  )}
                 </div>
                 {canManage ? (
                   <div className="flex flex-wrap gap-2">
@@ -381,6 +389,11 @@ function EnvironmentForm({
 
       <fieldset data-field="vcpus" className="flex flex-col gap-2">
         <legend className="mb-2 text-sm font-semibold">{PAGE_COPY.size}</legend>
+        {item !== undefined && !isEnvironmentVcpus(item.vcpus) ? (
+          <p className="text-sm text-destructive">
+            {PAGE_COPY.sizeUnsupported}
+          </p>
+        ) : null}
         <RadioGroup
           value={String(vcpus)}
           onValueChange={(value) => setVcpus(Number(value))}

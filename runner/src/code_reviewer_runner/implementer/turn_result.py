@@ -59,6 +59,8 @@ class TurnResult:
     usage: Usage
     # Facts for the job log (counts and stable words), in order.
     notes: tuple[str, ...] = field(default_factory=tuple)
+    # #818: what the environment's setup script did (`ImplementerSetupResult`); None: no script ran.
+    setup: dict[str, Any] | None = None
 
     @property
     def ok(self) -> bool:
@@ -92,4 +94,5 @@ class TurnResult:
             "filesChanged": [{"path": f.path, "status": f.kind.value} for f in self.files_changed],
             "summary": self.summary,
             "opencode": opencode,
+            **({} if self.setup is None else {"setup": self.setup}),
         }

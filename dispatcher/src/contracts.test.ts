@@ -215,6 +215,16 @@ describe("the contracts the Dispatcher speaks", () => {
       parseSplitClaim({ ...split, job: { ...split.job, credential: "short" } }),
     ).toBeNull();
     expect(parseSplitClaim({ ...split, version: 2 })).toBeNull();
+    // #818: the size is optional and, when there, a whole number; anything else is an answer it cannot read.
+    expect(parseSplitClaim(split)).not.toHaveProperty("vcpus");
+    expect(
+      parseSplitClaim({ ...split, job: { ...split.job, vcpus: 4 } }),
+    ).toMatchObject({ vcpus: 4 });
+    for (const vcpus of ["4", 2.5, null, 0, 65, {}])
+      expect(
+        parseSplitClaim({ ...split, job: { ...split.job, vcpus } }),
+        String(vcpus),
+      ).toBeNull();
     // The raw example file is read from disk too, so a change of the schema file shows here.
     expect(
       JSON.parse(
@@ -305,6 +315,15 @@ describe("the implementer kind in the contracts the Dispatcher speaks (#746)", (
     for (const [definition, example] of [
       ["RunnerJobInput", "examples/implementer/RunnerJobInput.json"],
       ["RunnerResult", "examples/implementer/RunnerResult.json"],
+      // #818
+      [
+        "ImplementerEnvironment",
+        "examples/implementer/ImplementerEnvironment.json",
+      ],
+      [
+        "ImplementerSetupResult",
+        "examples/implementer/ImplementerSetupResult.json",
+      ],
     ] as const) {
       const check = validator("runner-api", definition);
       expect(
@@ -315,6 +334,8 @@ describe("the implementer kind in the contracts the Dispatcher speaks (#746)", (
     expect(
       readdirSync(join(CONTRACTS, "examples", "implementer")).sort(),
     ).toStrictEqual([
+      "ImplementerEnvironment.json",
+      "ImplementerSetupResult.json",
       "RunnerJobInput.json",
       "RunnerResult.json",
       "SplitClaimResponse.json",
@@ -332,5 +353,34 @@ describe("the sizes of an Implementer environment (contracts/environment-sizes.v
       await import("./launchers/sandbox.ts");
     expect([...SANDBOX_VCPUS]).toEqual(sizes.vcpus);
     expect(SANDBOX_MEMORY_PER_VCPU_MB).toBe(sizes.memoryPerVcpuMb);
+  });
+
+  // #818-T02: what the agent gets at each size is what the Launcher computes (Control at its default 768 MB), and the sizes an
+  // environment may name are exactly those that leave the agent enough to start with.
+  it("name the memory the agent's container gets at each size and the sizes that leave it enough", async () => {
+    const sizes = readContract<{
+      vcpus: number[];
+      environmentVcpus: number[];
+      minAgentMemoryMb: number;
+      agentMemoryMb: Record<string, number>;
+    }>("environment-sizes.v1.json");
+    const {
+      agentMemoryMb,
+      IMPLEMENTER_MIN_AGENT_MEMORY_MB,
+      SANDBOX_KIND_DEFAULTS,
+    } = await import("./launchers/sandbox.ts");
+    const control = Number.parseInt(
+      SANDBOX_KIND_DEFAULTS.implementer.memory.limit,
+    );
+    for (const vcpus of sizes.vcpus)
+      expect(sizes.agentMemoryMb[String(vcpus)]).toBe(
+        agentMemoryMb(vcpus, control),
+      );
+    expect(sizes.minAgentMemoryMb).toBe(IMPLEMENTER_MIN_AGENT_MEMORY_MB);
+    expect(sizes.environmentVcpus).toEqual(
+      sizes.vcpus.filter(
+        (vcpus) => agentMemoryMb(vcpus, control) >= sizes.minAgentMemoryMb,
+      ),
+    );
   });
 });

@@ -41,6 +41,34 @@ REQUIRED = [
 ]
 
 
+# What the setup left, for a turn whose environment has a script (#818).
+SETUP_SENTENCES = [
+    "Files and folders that the environment's setup left in the repository before you started",
+    "are kept out of git as whole folders",
+    "what you create inside such a folder is not committed either unless you add it by name "
+    "with git add -f",
+]
+
+
+# #818-PROMPT-01
+@pytest.mark.parametrize("sentence", SETUP_SENTENCES)
+def test_a_turn_with_a_setup_script_is_told_about_whole_excluded_folders(sentence: str) -> None:
+    assert sentence in instructions_text(with_setup=True)
+
+
+# #818-PROMPT-02
+@pytest.mark.parametrize("sentence", SETUP_SENTENCES)
+def test_a_turn_without_one_is_not_told_about_what_a_setup_left(sentence: str) -> None:
+    assert sentence not in instructions_text()
+    assert "git add -f" not in instructions_text()
+
+
+# #818-PROMPT-03
+@pytest.mark.parametrize("sentence", REQUIRED)
+def test_every_required_sentence_is_in_the_text_of_a_turn_with_a_setup_too(sentence: str) -> None:
+    assert sentence in instructions_text(with_setup=True)
+
+
 # #764-R7
 @pytest.mark.parametrize("sentence", REQUIRED)
 def test_every_required_sentence_is_in_the_text(sentence: str) -> None:

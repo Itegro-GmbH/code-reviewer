@@ -36,6 +36,11 @@ export type ClaimedJob = {
   credential: string;
   reviewKind: WireReviewKind;
   heartbeatIntervalSeconds: number;
+  /**
+   * #818: the VM size the App names for a turn of the Implementer. Read from the App's authenticated answer only; the core uses it
+   * for the kind `implementer` and for no other, and the Launcher accepts only the sizes of the platform.
+   */
+  vcpus?: number;
 };
 
 export type ClaimResult =
@@ -101,6 +106,8 @@ const splitClaim = z.object({
     reviewKind: z.enum(CONTRACT_REVIEW_KINDS),
     leaseExpiresAt: z.string(),
     heartbeatIntervalSeconds: z.number().int().min(1).max(3600),
+    // The contract's range; which sizes are launched is the Launcher's decision (`SANDBOX_VCPUS`).
+    vcpus: z.number().int().min(1).max(64).optional(),
   }),
 });
 
@@ -108,9 +115,15 @@ const splitClaim = z.object({
 export function parseSplitClaim(body: unknown): ClaimedJob | null {
   const parsed = splitClaim.safeParse(body);
   if (!parsed.success) return null;
-  const { id, credential, reviewKind, heartbeatIntervalSeconds } =
+  const { id, credential, reviewKind, heartbeatIntervalSeconds, vcpus } =
     parsed.data.job;
-  return { id, credential, reviewKind, heartbeatIntervalSeconds };
+  return {
+    id,
+    credential,
+    reviewKind,
+    heartbeatIntervalSeconds,
+    ...(vcpus === undefined ? {} : { vcpus }),
+  };
 }
 
 const jobStateAnswer = z.object({
@@ -303,7 +316,12 @@ export function createAppClient(options: AppClientOptions) {
     async reportVm(
       jobId: string,
       credential: string,
-      vm: { name: string; startedAt: Date; timeoutSeconds: number },
+      vm: {
+        name: string;
+        startedAt: Date;
+        timeoutSeconds: number;
+        vcpus?: number;
+      },
     ): Promise<VmReportResult> {
       const response = await send(
         `/api/runners/v1/jobs/${encodeURIComponent(jobId)}/vm`,
@@ -315,6 +333,7 @@ export function createAppClient(options: AppClientOptions) {
             vmName: vm.name,
             startedAt: vm.startedAt.toISOString(),
             timeoutSeconds: vm.timeoutSeconds,
+            ...(vm.vcpus === undefined ? {} : { vcpus: vm.vcpus }),
           },
         },
       );

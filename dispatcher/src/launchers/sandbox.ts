@@ -45,6 +45,8 @@ import {
   WORKER_CONTAINER_SPEC,
 } from "./container-spec.ts";
 import {
+  IPV6_OFF_COMMANDS,
+  IPV6_OFF_STEP_TIMEOUT_MS,
   RUN_DIRECTORY_COMMANDS,
   RUN_DIRECTORY_STEP_TIMEOUT_MS,
   SYSBOX_PREPARE_TIMEOUT_MS,
@@ -88,11 +90,15 @@ export const WORK_VOLUME_STEPS_SECONDS =
 /** The three steps that put Docker's runtime directories on memory, before `vm-prepare.sh` on the Implementer's VM. */
 export const RUN_DIRECTORY_STEPS_SECONDS =
   (RUN_DIRECTORY_COMMANDS.length * RUN_DIRECTORY_STEP_TIMEOUT_MS) / 1000;
+/** The step that switches IPv6 off in the Implementer's VM, before the daemon starts. */
+export const IPV6_OFF_STEPS_SECONDS =
+  (IPV6_OFF_COMMANDS.length * IPV6_OFF_STEP_TIMEOUT_MS) / 1000;
 /** The Implementer's VM runs `sysbox-prepare.sh` too (at most its timeout); like the volume steps it is not part of Diff's or Dynamic's launch. */
 export const SYSBOX_PREPARE_SECONDS = SYSBOX_PREPARE_TIMEOUT_MS / 1000;
 /** Everything an implementer launch takes beyond a review's: the Sysbox boot and the steps of the work volume. */
 export const IMPLEMENTER_LAUNCH_EXTRA_SECONDS =
   RUN_DIRECTORY_STEPS_SECONDS +
+  IPV6_OFF_STEPS_SECONDS +
   SYSBOX_PREPARE_SECONDS +
   WORK_VOLUME_STEPS_SECONDS;
 /** How long the container must run for the Worker to count as having taken over (sandbox-host.ts). */
@@ -158,6 +164,18 @@ export const SANDBOX_KIND_DEFAULTS: Readonly<
   dynamic: { vcpus: 1, memory: { limit: "1536m", reservation: "1280m" } },
   implementer: { vcpus: 2, memory: { limit: "768m", reservation: "512m" } },
 };
+
+function isSandboxVcpus(
+  value: unknown,
+): value is (typeof SANDBOX_VCPUS)[number] {
+  return (SANDBOX_VCPUS as readonly unknown[]).includes(value);
+}
+
+/**
+ * The least memory the agent's container is worth starting with (`MIN_AGENT_MEMORY_MB` of the runner's job_run.py; a test holds the two
+ * together). A size of an Implementer job that leaves it less is refused before a VM is created: 1 vCPU, where nothing is left.
+ */
+export const IMPLEMENTER_MIN_AGENT_MEMORY_MB = 1024;
 
 /** The directory of the VM below which the work volume of a job gets its own (a mount of its own, `workVolumeCommands`). */
 export const WORK_VOLUME_ROOT = "/var/lib/code-reviewer-work";
@@ -257,16 +275,25 @@ function planOf(spec: LaunchSpec): Plan {
   const options = config.launcher ?? {};
   for (const key of Object.keys(options))
     if (key !== "vcpus") throw configInvalid();
-  const vcpus = options.vcpus ?? defaults.vcpus;
+  // #818: the size an Implementer job asks for. Precedence: the job's size, then the kind's configuration
+  // (`DISPATCHER_WORKER_CONFIG`), then the kind's default. A reviewer job never names a size, whatever the spec says. Only the
+  // sizes of the platform are launched; any other is refused with its own code, before a VM is created.
+  const jobSize = spec.kind === "implementer" ? spec.vcpus : undefined;
+  if (jobSize !== undefined && !isSandboxVcpus(jobSize))
+    throw new LaunchError("sandbox_size_unsupported");
+  const vcpus = jobSize ?? options.vcpus ?? defaults.vcpus;
+  if (!isSandboxVcpus(vcpus)) throw configInvalid();
+  // The Control container keeps its own memory whatever the size: the size is the agent's, and the agent gets what the VM has left
+  // (`agentMemoryMb`). A size the platform has but that leaves the agent less than it can start with (1 vCPU) is refused for a job.
+  const memory = { ...defaults.memory, ...config.container?.memory };
   if (
-    typeof vcpus !== "number" ||
-    !(SANDBOX_VCPUS as readonly number[]).includes(vcpus)
+    jobSize !== undefined &&
+    agentMemoryMb(jobSize, megabytes(memory.limit)) <
+      IMPLEMENTER_MIN_AGENT_MEMORY_MB
   )
-    throw configInvalid();
+    throw new LaunchError("sandbox_size_unsupported");
 
-  const overrides: WorkerContainerOverrides = {
-    memory: { ...defaults.memory, ...config.container?.memory },
-  };
+  const overrides: WorkerContainerOverrides = { memory };
   try {
     const rendered = applyOverrides(profileOf(spec.kind), overrides);
     // A container that cannot fit in the VM beside the OS would be killed by the VM's own memory limit; an implementer
@@ -556,6 +583,7 @@ export function createSandboxLauncher(
           name,
           startedAt: createdAt,
           timeoutSeconds: vmLifetimeSeconds(spec),
+          vcpus: plan.vcpus,
         });
       } catch {
         // Only that it failed.
@@ -572,6 +600,7 @@ export function createSandboxLauncher(
       try {
         if (spec.kind === "implementer")
           await host.prepareRunDirectories(signal);
+        if (spec.kind === "implementer") await host.disableIpv6(signal);
         await host.prepare(signal);
         // Only the Implementer: the boot steps of Sysbox change the VM as a whole, and a review's VM stays as it was.
         if (spec.kind === "implementer") await host.prepareSysbox(signal);

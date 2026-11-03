@@ -346,6 +346,8 @@ export type Checked = {
     baseBranch: string;
     /** The https address the runner clones from and pushes to, with no credential in it (`cloneUrlOf`). */
     cloneUrl: string;
+    /** #818: the environment the turn copied when it started; null for a task without one. */
+    environment: { name: string; vcpus: number; setupScript: string } | null;
   } | null;
 };
 
@@ -1044,6 +1046,14 @@ export async function checkJob(
         branch: turn.session.branch,
         baseBranch: turn.session.baseBranch,
         cloneUrl,
+        environment:
+          turn.turn.environment === null
+            ? null
+            : {
+                name: turn.turn.environment.name,
+                vcpus: turn.turn.environment.vcpus,
+                setupScript: turn.turn.environment.setupScript,
+              },
       },
     };
   }
@@ -1145,6 +1155,11 @@ export async function buildJobInput(
   // neither feature cannot run one: it ends here, as for an engine that cannot run the kind, before any credential exists.
   if (implementer !== null && costLimit.enforced === "none")
     return refuse("implementer_engine_unavailable");
+  // #818: a script that the Worker cannot read would be skipped, and the turn would run on a base the person did not choose: it ends
+  // here, free, before any credential or token exists, like a Worker that cannot enforce the cost limit.
+  const script = implementer?.environment?.setupScript ?? "";
+  if (script !== "" && !features.includes("implementer_environment"))
+    return refuse("implementer_engine_unavailable", "reason=environment");
   if (costLimit.enforced === "none")
     deps.logger.info(
       `[runner-api] job=${job.id} carries no cost limit: the runner names neither claim feature cost_limit nor operator_cost_limit, so a Dynamic Review is held only to the runner's own RUNNER_DYNAMIC_MAX_COST_USD and a Diff Review to none`,
@@ -1259,6 +1274,15 @@ export async function buildJobInput(
             limits: { timeLimitSeconds: IMPLEMENTER_TIME_LIMIT_SECONDS },
             cost,
             modelEntry,
+            // #818: only a script travels to the Worker, and only to one that reads it (the refusal above).
+            ...(script === "" || implementer.environment === null
+              ? {}
+              : {
+                  environment: {
+                    name: implementer.environment.name,
+                    setupScript: script,
+                  },
+                }),
           },
           git: {
             provider: "github",
@@ -1372,6 +1396,11 @@ async function prepare(
           reviewKind: job.reviewKind,
           leaseExpiresAt: job.leaseExpiresAt,
           heartbeatIntervalSeconds: deps.heartbeatIntervalSeconds,
+          // #818: the size the turn's environment asks for, for the Dispatcher that launches the VM before any Worker exists. Only a
+          // turn that has an environment names one, and nothing else of the environment is in this answer.
+          ...(checked.implementer?.environment == null
+            ? {}
+            : { vcpus: checked.implementer.environment.vcpus }),
         },
       },
     };

@@ -34,7 +34,8 @@ const NODE: EnvironmentView = {
   id: "env-1",
   name: "Node 22",
   vcpus: 4,
-  memoryGb: 8,
+  memoryGb: 6,
+  sizeSupported: true,
   setupScript: "pnpm install\n",
   createdAt: "2026-11-02T08:00:00.000Z",
   updatedAt: "2026-11-02T08:00:00.000Z",
@@ -44,7 +45,17 @@ const BARE: EnvironmentView = {
   id: "env-2",
   name: "Bare",
   vcpus: 2,
-  memoryGb: 4,
+  memoryGb: 2,
+  setupScript: "",
+};
+// Made when 1 vCPU was offered.
+const OLD: EnvironmentView = {
+  ...NODE,
+  id: "env-9",
+  name: "One core",
+  vcpus: 1,
+  memoryGb: 0,
+  sizeSupported: false,
   setupScript: "",
 };
 
@@ -64,14 +75,14 @@ function fakeApi(
           ...NODE,
           id: "env-3",
           ...body,
-          memoryGb: body.vcpus * 2,
+          memoryGb: body.vcpus * 2 - 2,
         },
       });
     },
     update: async (id, body) => {
       updated.push([id, body]);
       return ok({
-        environment: { ...NODE, id, ...body, memoryGb: body.vcpus * 2 },
+        environment: { ...NODE, id, ...body, memoryGb: body.vcpus * 2 - 2 },
       });
     },
     remove: async (id) => {
@@ -99,7 +110,7 @@ describe("the list of environments", () => {
     const node = (await screen.findByText("Node 22")).closest("li");
     expect(node).not.toBeNull();
     expect(within(node as HTMLElement).getByText(/4 vCPU/)).toBeTruthy();
-    expect(within(node as HTMLElement).getByText(/8 GB/)).toBeTruthy();
+    expect(within(node as HTMLElement).getByText(/6 GB memory/)).toBeTruthy();
     expect(within(node as HTMLElement).getByText(/pnpm install/)).toBeTruthy();
     const bare = screen.getByText("Bare").closest("li") as HTMLElement;
     expect(within(bare).getByText("No setup script")).toBeTruthy();
@@ -180,17 +191,18 @@ describe("creating an environment", () => {
     const radios = screen.getAllByRole("radio");
     expect(
       radios.map((radio) => radio.getAttribute("aria-label") ?? radio.id),
-    ).toHaveLength(5);
+    ).toHaveLength(4);
+    // 1 vCPU is not offered: it leaves the agent no memory. The memory shown is the agent's.
+    expect(screen.queryByRole("radio", { name: /^1 vCPU/ })).toBeNull();
     for (const [vcpus, gb] of [
-      [1, 2],
-      [2, 4],
-      [4, 8],
-      [6, 12],
-      [8, 16],
+      [2, 2],
+      [4, 6],
+      [6, 10],
+      [8, 14],
     ] as const)
       expect(
         screen.getByRole("radio", {
-          name: new RegExp(`^${vcpus} vCPU.*${gb} GB`),
+          name: new RegExp(`^${vcpus} vCPU.*${gb} GB memory`),
         }),
       ).toBeTruthy();
     expect(
@@ -352,18 +364,21 @@ describe("changing and deleting", () => {
 
 describe("what the page says about the script (#819 review)", () => {
   // #818-T40
-  it("says plainly that setup scripts do not run yet, for a person who manages and for one who does not", async () => {
+  it("says plainly that setup scripts run when a task starts, for a person who manages and for one who does not", async () => {
     for (const canManage of [true, false]) {
       show(fakeApi().api, canManage);
-      expect(
-        await screen.findByText(/setup scripts do not run yet/i),
-      ).toBeTruthy();
+      const note = await screen.findByText(
+        /setup scripts run when a task starts/i,
+      );
+      expect(note.textContent).toMatch(/as root/);
+      expect(note.textContent).toMatch(/no secrets/);
+      expect(screen.queryByText(/do not run yet/i)).toBeNull();
       cleanup();
     }
   });
 
   // #818-T40
-  it("describes the script as running as root with full internet access in its own container without secrets, the agent starting afterwards with its own restricted network — as a plan, not a fact", async () => {
+  it("describes the script as it is: root, full internet, a container of its own without secrets, bash -e, the limit, the tracked files put back, and the agent without internet", async () => {
     show(fakeApi([]).api, true);
     await screen.findByText(/standard/);
     await userEvent.click(
@@ -375,14 +390,58 @@ describe("what the page says about the script (#819 review)", () => {
         .getByLabelText("Setup script")
         .closest("[data-field]") as HTMLElement
     ).textContent;
-    expect(hint).toMatch(/do not run yet/i);
     expect(hint).toMatch(/as root/);
-    expect(hint).toMatch(/full internet access/);
-    expect(hint).toMatch(/own container with no secrets/);
-    expect(hint).toMatch(/restricted network/);
-    // The old wording gave the script the agent's network.
+    expect(hint).toMatch(/full internet access and no secrets/);
+    expect(hint).toMatch(/container of its own/);
+    expect(hint).toMatch(/bash, with -e/);
+    expect(hint).toMatch(/15 minutes/);
+    expect(hint).toMatch(/not charged/);
+    expect(hint).toMatch(/tracked by git are undone/);
+    expect(hint).toMatch(/the agent has no internet access/);
+    expect(hint).not.toMatch(/do not run yet/i);
     expect(hint).not.toMatch(/same network as the agent/);
-    expect(hint).not.toMatch(/registries/);
+  });
+});
+
+describe("an environment with a size that is no longer offered (1 vCPU)", () => {
+  // #818-T47
+  it("is listed as it is, with a sentence that a task started with it is refused", async () => {
+    show(fakeApi([NODE, OLD]).api, true);
+
+    const old = (await screen.findByText("One core")).closest(
+      "li",
+    ) as HTMLElement;
+    expect(within(old).getByText(/1 vCPU\. No longer offered/)).toBeTruthy();
+    expect(
+      within(old).getByText(/refused until you choose another size/),
+    ).toBeTruthy();
+    const node = screen.getByText("Node 22").closest("li") as HTMLElement;
+    expect(within(node).queryByText(/No longer offered/)).toBeNull();
+  });
+
+  // #818-T47
+  it("opens for editing with no size chosen and a note, and saves only when a size is chosen", async () => {
+    const { api, updated } = fakeApi([OLD]);
+    show(api, true);
+    const old = (await screen.findByText("One core")).closest(
+      "li",
+    ) as HTMLElement;
+    await userEvent.click(within(old).getByRole("button", { name: /edit/i }));
+
+    expect(screen.getByText(/1 vCPU leaves the agent no memory/)).toBeTruthy();
+    for (const radio of screen.getAllByRole("radio"))
+      expect(radio.getAttribute("aria-checked")).toBe("false");
+
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(updated).toEqual([]);
+    expect(
+      await screen.findByText(describeFieldIssue("vcpus", "invalid")),
+    ).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("radio", { name: /^4 vCPU/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(updated).toHaveLength(1));
+    expect(updated[0]?.[1].vcpus).toBe(4);
   });
 });
 
@@ -518,9 +577,7 @@ describe("the size group (#819 review)", () => {
         .split(" ")
         .map((id) => document.getElementById(id)?.textContent ?? "");
 
-    expect(describedBy()).toEqual([
-      expect.stringContaining("2 GB of memory per vCPU"),
-    ]);
+    expect(describedBy()).toEqual([expect.stringContaining("2 GB per vCPU")]);
     expect(group.getAttribute("aria-invalid")).not.toBe("true");
 
     await userEvent.type(screen.getByLabelText("Name"), "x");

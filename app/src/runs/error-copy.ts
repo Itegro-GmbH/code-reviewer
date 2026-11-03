@@ -183,6 +183,9 @@ export const errorCopy = (
     "The repository could not be downloaded, so the task did not start.",
   setup_failed:
     "The repository's own set-up steps did not complete, so the task could not start.",
+  // #818: the setup script of the task's environment failed or ran out of time. The page shows the end of its output.
+  environment_setup_failed:
+    "The setup script of this task's environment did not finish successfully, so the task was stopped before the AI model was called and nothing was charged. The end of the script's output is shown below. Fix the script in Environments, then start the task again.",
   agent_gave_up:
     "The agent stopped without a result it could stand behind. Read its summary, then try again with a clearer or smaller task.",
   push_rejected:

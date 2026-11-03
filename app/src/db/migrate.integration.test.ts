@@ -124,6 +124,7 @@ describe("the migrations of both epics", () => {
       "20261030140000_create_implementer_sessions_and_turns",
       "20261030190000_widen_review_kind_checks_for_implementer",
       "20261102140000_create_implementer_environments",
+      "20261102150000_add_implementer_turn_environment",
     ]);
   });
 

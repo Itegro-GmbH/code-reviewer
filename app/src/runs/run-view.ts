@@ -12,6 +12,7 @@ import { checkCallTrace } from "../runner-api/call-trace.ts";
 import {
   IMPLEMENTER_FILE_STATUSES,
   IMPLEMENTER_RESULT_LIMITS,
+  IMPLEMENTER_SETUP_OUTPUT_CHARS,
   STOPPED_EARLY_REASONS,
   type ImplementerFileStatus,
   type RunnerCallTrace,
@@ -77,6 +78,25 @@ export type ImplementerRowView = {
   branchUrl: string | null;
 };
 
+/** What the setup script of a task's environment did (#818): shown only when the result carries it. */
+export type ImplementerSetupView = {
+  /** `timed_out`: it did not end by itself within its time limit; `failed`: a non-zero exit status or a signal. */
+  outcome: "ok" | "failed" | "timed_out";
+  exitCode: number | null;
+  durationSeconds: number;
+  /** The end of its output, cleaned and stripped of known secrets. Untrusted text, rendered as text. */
+  output: string;
+};
+
+/** The environment a task started with, as the turn copied it (#818). */
+export type ImplementerEnvironmentView = {
+  /** Untrusted text from a member of the workspace. */
+  name: string;
+  vcpus: number;
+  memoryGb: number;
+  setup: ImplementerSetupView | null;
+};
+
 /** One commit of a task, as the run shows it. */
 export type ImplementerCommitView = {
   shortSha: string;
@@ -127,6 +147,8 @@ export type ImplementerDetailView = ImplementerRowView & {
     /** Local branches that are in no entry: their name cannot be pushed, or they are beyond the limit of 50. */
     dropped: { invalid: number; overflow: number };
   };
+  /** The environment the task started with; null for a task without one (the standard). */
+  environment: ImplementerEnvironmentView | null;
   /** The last commit on the branch after the turn, when the turn pushed. */
   head: { shortSha: string; url: string | null } | null;
   /** For a task that did not succeed but pushed work: "N commits were pushed to <branch>."; null otherwise. */
@@ -149,6 +171,8 @@ export type ImplementerRowSource = {
 export type ImplementerDetailSource = ImplementerRowSource & {
   baseBranch: string;
   instruction: string;
+  /** The environment the turn copied when it started (#818); absent or null for a task without one. */
+  environment?: { name: string; vcpus: number } | null;
 };
 
 /**
@@ -527,6 +551,88 @@ function implementerRowView(
   };
 }
 
+const MAX_ENVIRONMENT_NAME_CHARS = 200;
+/**
+ * What the agent's container got at each size of the platform, in GB (`agentMemoryMb` of `contracts/environment-sizes.v1.json`); not imported from the
+ * Implementer: this module is below it. A test holds it to the file. A size not in the list (it cannot be started) shows 0.
+ */
+export const AGENT_MEMORY_GB: Readonly<Record<number, number>> = {
+  1: 0,
+  2: 2,
+  4: 6,
+  6: 10,
+  8: 14,
+};
+
+/** The setup block of a stored result, or null: read field by field like the rest, an entry that is not what the contract says is left out. */
+function readStoredSetup(result: JsonValue | null): {
+  ok: boolean;
+  exitCode: number | null;
+  timedOut: boolean;
+  durationSeconds: number;
+  output: string;
+} | null {
+  if (!isRecord(result) || !isRecord(result.implementer)) return null;
+  const setup = result.implementer.setup;
+  if (!isRecord(setup)) return null;
+  const { ok, exitCode, timedOut, durationSeconds, output } = setup;
+  if (
+    typeof ok !== "boolean" ||
+    typeof timedOut !== "boolean" ||
+    !(exitCode === null || Number.isSafeInteger(exitCode)) ||
+    !isCount(durationSeconds) ||
+    typeof output !== "string"
+  )
+    return null;
+  return {
+    ok,
+    exitCode: exitCode as number | null,
+    timedOut,
+    durationSeconds,
+    output,
+  };
+}
+
+/**
+ * The environment of a task (#818). The name is a text from a member of the workspace and the output a text from a program that
+ * ran repository code: both are cleaned, stripped of known secrets and cut, and rendered as text by the page. The output keeps
+ * its END (the end of a failing install is what says why).
+ */
+function environmentView(
+  source: ImplementerDetailSource | null,
+  result: JsonValue | null,
+  display: (text: string) => string,
+): ImplementerEnvironmentView | null {
+  const environment = source?.environment ?? null;
+  if (environment === null) return null;
+  const stored = readStoredSetup(result);
+  const setup: ImplementerSetupView | null =
+    stored === null
+      ? null
+      : {
+          outcome: stored.ok ? "ok" : stored.timedOut ? "timed_out" : "failed",
+          exitCode: stored.exitCode,
+          durationSeconds: stored.durationSeconds,
+          output: Array.from(
+            display(
+              cleanTaskText(
+                stored.output.slice(-IMPLEMENTER_SETUP_OUTPUT_CHARS * 4),
+              ),
+            ).trimEnd(),
+          )
+            .slice(-IMPLEMENTER_SETUP_OUTPUT_CHARS)
+            .join(""),
+        };
+  return {
+    name: display(
+      cleanTaskLine(head(environment.name, MAX_ENVIRONMENT_NAME_CHARS * 4)),
+    ),
+    vcpus: environment.vcpus,
+    memoryGb: AGENT_MEMORY_GB[environment.vcpus] ?? 0,
+    setup,
+  };
+}
+
 function plural(count: number, one: string, many: string): string {
   return count === 1 ? one : many;
 }
@@ -624,6 +730,7 @@ function implementerDetailView(
           : null,
     },
     summary: summary === "" ? null : summary,
+    environment: environmentView(source, job.result, display),
     commits: {
       shown: commits.slice(0, MAX_LISTED_COMMITS),
       more: Math.max(0, commits.length - MAX_LISTED_COMMITS),

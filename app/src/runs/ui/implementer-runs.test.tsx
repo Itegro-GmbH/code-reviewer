@@ -55,6 +55,7 @@ function task(
     baseBranch: "main",
     instruction: { preview: "Add a health endpoint.", full: null },
     summary: "Added a health endpoint.",
+    environment: null,
     commits: {
       shown: [
         {
@@ -582,5 +583,161 @@ describe("the detail page of an implementer run", () => {
     expect(container.textContent).toContain("Pull request");
     expect(container.textContent).toContain("/review");
     expect(container.textContent).not.toContain("Base branch");
+  });
+});
+
+// #818: which environment and size a task used, and the output of a setup script that failed.
+describe("the environment on the detail page of an implementer run (#818)", () => {
+  const environment = (
+    overrides: Partial<NonNullable<ImplementerDetailView["environment"]>> = {},
+  ): NonNullable<ImplementerDetailView["environment"]> => ({
+    name: "Node 22",
+    vcpus: 6,
+    memoryGb: 12,
+    setup: null,
+    ...overrides,
+  });
+
+  // #818-T30
+  it("names the environment and its size among the facts of the run", () => {
+    renderDetail(detail({ implementer: task({ environment: environment() }) }));
+
+    const term = screen.getByText("Environment");
+    const description = term.nextElementSibling;
+    expect(description?.textContent).toContain("Node 22");
+    expect(description?.textContent).toContain("6 vCPU, 12 GB");
+  });
+
+  // #818-T30
+  it("shows no environment line for a task that started without one", () => {
+    renderDetail(detail());
+
+    expect(screen.queryByText("Environment")).toBeNull();
+  });
+
+  // #818-T30
+  it("shows the end of the output of a failed script, with its exit status and time, as text", () => {
+    renderDetail(
+      detail({
+        status: "failed",
+        errorCode: "environment_setup_failed",
+        errorCodeKnown: true,
+        implementer: task({
+          reported: true,
+          environment: environment({
+            setup: {
+              outcome: "failed",
+              exitCode: 1,
+              durationSeconds: 42,
+              output: "ERR_PNPM_OUTDATED_LOCKFILE <b>not bold</b>",
+            },
+          }),
+        }),
+      }),
+    );
+
+    const section = screen
+      .getByRole("heading", { name: "Setup script" })
+      .closest("[role=region]") as HTMLElement;
+    expect(section.textContent).toContain("exit status 1");
+    expect(section.textContent).toContain("42 s");
+    const output = section.querySelector("[data-slot=run-setup-output]");
+    expect(output?.textContent).toBe(
+      "ERR_PNPM_OUTDATED_LOCKFILE <b>not bold</b>",
+    );
+    expect(output?.querySelector("b")).toBeNull();
+  });
+
+  // #818-T30
+  it("says a script that ran out of time ran out of time, and one that worked worked", () => {
+    const timedOut = renderDetail(
+      detail({
+        status: "failed",
+        implementer: task({
+          environment: environment({
+            setup: {
+              outcome: "timed_out",
+              exitCode: null,
+              durationSeconds: 900,
+              output: "",
+            },
+          }),
+        }),
+      }),
+    );
+    expect(timedOut.container.textContent).toContain("ran out of time");
+    cleanup();
+
+    const fine = renderDetail(
+      detail({
+        implementer: task({
+          environment: environment({
+            setup: {
+              outcome: "ok",
+              exitCode: 0,
+              durationSeconds: 12,
+              output: "",
+            },
+          }),
+        }),
+      }),
+    );
+    expect(fine.container.textContent).toContain("finished");
+    expect(fine.container.textContent).not.toContain("ran out of time");
+  });
+
+  // #818-T30b
+  it("says a script that exited 0 but whose result could not be kept finished, and shows why from the end of the output", () => {
+    renderDetail(
+      detail({
+        status: "failed",
+        errorCode: "environment_setup_failed",
+        errorCodeKnown: true,
+        implementer: task({
+          reported: true,
+          environment: environment({
+            setup: {
+              outcome: "failed",
+              exitCode: 0,
+              durationSeconds: 31,
+              output:
+                "installing\n[setup] the VM had no room to save the setup result: the VM's disk has 100 MB left and the result of the script needs about 1280 MB",
+            },
+          }),
+        }),
+      }),
+    );
+
+    const section = screen
+      .getByRole("heading", { name: "Setup script" })
+      .closest("[role=region]") as HTMLElement;
+    expect(section.textContent).toContain(
+      "The script finished, but its result could not be kept after 31 s",
+    );
+    expect(section.textContent).not.toContain("failed with exit status");
+    expect(
+      section.querySelector("[data-slot=run-setup-output]")?.textContent,
+    ).toContain("[setup] the VM had no room to save the setup result");
+  });
+
+  // #818-T30
+  it("shows an empty output as such instead of an empty box", () => {
+    renderDetail(
+      detail({
+        status: "failed",
+        implementer: task({
+          environment: environment({
+            setup: {
+              outcome: "failed",
+              exitCode: 2,
+              durationSeconds: 1,
+              output: "",
+            },
+          }),
+        }),
+      }),
+    );
+
+    expect(screen.getByText("The script wrote no output.")).toBeTruthy();
   });
 });

@@ -34,6 +34,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, BinaryIO
 
+# The roles of the helpers that run once and end (door rules, Setup rules, a bridge's IPv6).
+ONE_SHOT_ROLES = frozenset(
+    {
+        "model-door-rules",
+        "setup-rules",
+        "setup-rules-check",
+        "bridge-ipv6",
+        "setup-ipv6-rules",
+        "agent-ipv6-rules",
+    }
+)
 IMAGE_ID = "sha256:" + "ab" * 32
 AGENT_IMAGE_ID = "sha256:" + "cd" * 32
 WORK_VOLUME = "code-reviewer-work-job-1"
@@ -71,6 +82,8 @@ class FakeExec:
     document: dict[str, Any]
     running: bool = False
     exit_code: int | None = None
+    # Set when its container is killed or stopped: a behaviour that waits should wait on this.
+    killed: threading.Event = field(default_factory=threading.Event)
 
 
 # An exec: (the exec, its stdin, its stdout) -> exit code.
@@ -108,13 +121,24 @@ class FakeDockerEngine:
         self.answers_ping = True
         # The runtimes the daemon lists, and the images it has (reference -> id).
         self.runtimes: dict[str, Any] = {"runc": {}, "sysbox-runc": {}}
-        self.images: dict[str, str] = {"code-reviewer-agent:golden": AGENT_IMAGE_ID}
+        self.images: dict[str, str] = {
+            "code-reviewer-agent:golden": AGENT_IMAGE_ID,
+            AGENT_IMAGE_ID: AGENT_IMAGE_ID,
+        }
         # What `inspect` of a container answers instead of what it was made with: name -> function.
         self.inspect_override: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {}
         self.exec_behaviour: ExecBehaviour | None = None
         self.execs: dict[str, FakeExec] = {}
         # The exit code of the one-shot container that installs the door's network rules.
         self.rules_exit = 0
+        self.ipv6_exit = 0
+        # The `inet` tables beside the `ip` ones: a kernel without the family refuses them.
+        self.inet_exit = 0
+        # `docker stop` of a container: the exit status it ends with, and whether it never ends.
+        self.stop_exit = 0
+        self.stop_hangs = False
+        self.commit_fails = False
+        self.committed: list[tuple[str, dict[str, str], str]] = []
         self._lock = threading.Lock()
         self._count = 0
         engine = self
@@ -148,6 +172,7 @@ class FakeDockerEngine:
         container.oom_killed = oom
         container.running = False
         self._close(container)
+        self._end_execs(container.name)
 
     def container(self, name: str) -> FakeContainer:
         return self._by_name(name)
@@ -213,14 +238,33 @@ class FakeDockerEngine:
         parts = path.strip("/").split("/")
         if path == "/_ping":
             self._reply(connection, 200 if self.answers_ping else 500)
-        elif method == "GET" and parts[0] == "containers" and parts[-1] == "json":
+        elif method == "GET" and parts[0] == "containers" and parts[-1].split("?")[0] == "json":
             self._inspect(connection, parts[1])
         elif method == "POST" and path == "/networks/create":
             self._create_network(connection, body)
         elif method == "POST" and parts[0] == "networks" and parts[-1] in ("connect", "disconnect"):
             self._join(connection, parts[1], parts[2], body)
+        elif method == "GET" and parts[0] == "networks" and len(parts) == 2:
+            entry = self.networks.get(parts[1]) or next(
+                (n for n in self.networks.values() if n["Name"] == parts[1]), None
+            )
+            if entry is None:
+                self._reply(connection, 404, {"message": "no such network"})
+            else:
+                identifier = next(i for i, n in self.networks.items() if n is entry)
+                self._reply(
+                    connection,
+                    200,
+                    {
+                        "Id": identifier,
+                        "Name": entry["Name"],
+                        "Options": entry["document"].get("Options") or {},
+                    },
+                )
         elif method == "DELETE" and parts[0] == "networks":
             self.networks.pop(parts[1], None)
+            for identifier in [i for i, n in self.networks.items() if n["Name"] == parts[1]]:
+                del self.networks[identifier]
             self._reply(connection, 204)
         elif method == "POST" and path == "/containers/create":
             self._create(connection, target, body)
@@ -230,12 +274,20 @@ class FakeDockerEngine:
             self._wait(connection, parts[1])
         elif method == "POST" and parts[0] == "containers" and parts[-1] == "kill":
             self._kill_request(connection, parts[1])
+        elif method == "POST" and parts[0] == "containers" and parts[-1] == "stop":
+            self._stop_request(connection, parts[1])
+        elif method == "POST" and parts[0] == "commit":
+            self._commit(connection, target)
         elif method == "GET" and path == "/info":
             self._reply(connection, 200, {"Runtimes": self.runtimes})
         elif method == "GET" and parts[0] == "images" and parts[-1] == "json":
             reference = "/".join(parts[1:-1])
             if reference in self.images:
-                self._reply(connection, 200, {"Id": self.images[reference]})
+                self._reply(
+                    connection,
+                    200,
+                    {"Id": self.images[reference], "Size": 123_456_789, "Config": {"Env": []}},
+                )
             else:
                 self._reply(connection, 404, {"message": "no such image"})
         elif method == "POST" and parts[0] == "containers" and parts[-1] == "exec":
@@ -352,11 +404,21 @@ class FakeDockerEngine:
 
     def _start(self, connection: socket.socket, ref: str) -> None:
         container = self.containers[ref]
-        self._reply(connection, 204)
-        if container.document.get("Entrypoint") == ["/usr/sbin/nft"]:
-            # The one-shot container of the door's network rules: it ends at once.
-            container.exit_code = self.rules_exit
+        labels: dict[str, str] = container.document.get("Labels") or {}
+        role = labels.get("code-reviewer.role", "")
+        nft = container.document.get("Entrypoint") == ["/usr/sbin/nft"]
+        if nft or role in ONE_SHOT_ROLES:
+            # A one-shot container of the network rules or of the bridge's IPv6: it ends at once.
+            # Its exit code is set before the start is answered, so that a `wait` sees it.
+            if role == "bridge-ipv6":
+                container.exit_code = self.ipv6_exit
+            elif role.endswith("-ipv6-rules"):
+                container.exit_code = self.inet_exit
+            else:
+                container.exit_code = self.rules_exit
+            self._reply(connection, 204)
             return
+        self._reply(connection, 204)
         container.running = True
         behaviour = self.behaviour
         if behaviour is None:
@@ -436,7 +498,54 @@ class FakeDockerEngine:
         container.exit_code = 137
         container.running = False
         self._close(container)
+        self._end_execs(container.name)
         self._reply(connection, 204)
+
+    def _stop_request(self, connection: socket.socket, ref: str) -> None:
+        """A graceful stop: the container ends with status 0 (or, for a test, `stop_exit`)."""
+        container = self.containers.get(ref) or next(
+            (c for c in self.containers.values() if c.name == ref), None
+        )
+        if container is None:
+            self._reply(connection, 404, {"message": "no such container"})
+            return
+        if not container.running:
+            self._reply(connection, 304)
+            return
+        if self.stop_hangs:
+            self._reply(connection, 204)
+            return
+        container.exit_code = self.stop_exit
+        container.running = False
+        self._close(container)
+        self._end_execs(container.name)
+        self._reply(connection, 204)
+
+    def _end_execs(self, container: str) -> None:
+        for made in list(self.execs.values()):
+            if made.container == container:
+                made.killed.set()
+
+    def _commit(self, connection: socket.socket, target: str) -> None:
+        """`docker commit`: an image id, remembered under `repo:tag`; the container must exist."""
+        query = dict(
+            part.split("=", 1) for part in target.split("?", 1)[-1].split("&") if "=" in part
+        )
+        ref = query.get("container", "")
+        container = self.containers.get(ref) or next(
+            (c for c in self.containers.values() if c.name == ref), None
+        )
+        if container is None:
+            self._reply(connection, 404, {"message": "no such container"})
+            return
+        if self.commit_fails:
+            self._reply(connection, 500, {"message": "no space left on device"})
+            return
+        identifier = "sha256:" + format(len(self.images) + 1, "064x")
+        self.images[f"{query.get('repo')}:{query.get('tag')}"] = identifier
+        self.images[identifier] = identifier
+        self.committed.append((container.name, dict(query), identifier))
+        self._reply(connection, 201, {"Id": identifier})
 
     def _wait(self, connection: socket.socket, ref: str) -> None:
         container = self.containers.get(ref) or next(

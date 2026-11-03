@@ -550,6 +550,8 @@ export interface JobVmRunsTable {
   billable: ColumnType<number, number | undefined, number>;
   /** `ceil(seconds / 60)` of the span once the end is known, at least 1; null before that. */
   billable_minutes: number | null;
+  /** The VM's size in vCPUs where the Dispatcher said it (#818: reported for the Implementer only), so minutes can be priced by size; null otherwise. */
+  vcpus: ColumnType<number | null, number | null | undefined, number | null>;
   created_at: string;
   updated_at: string;
 }
@@ -1056,6 +1058,30 @@ export interface ImplementerTurnsTable {
   job_id: string;
   created_by: string;
   created_at: string;
+  /**
+   * The environment the person chose, copied when the turn was written (#818): all four are null (the standard: no script, the
+   * Dispatcher's size) or all are set. No foreign key: editing or deleting the environment never reaches the turn.
+   */
+  environment_id: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  environment_name: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  environment_vcpus: ColumnType<
+    number | null,
+    number | null | undefined,
+    number | null
+  >;
+  environment_setup_script: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
 }
 
 /**

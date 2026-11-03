@@ -40,8 +40,15 @@ describe("the body of an environment", () => {
   });
 
   // #818-T06
-  it.each([1, 2, 4, 6, 8])("accepts %i vCPU", (vcpus) => {
+  it.each([2, 4, 6, 8])("accepts %i vCPU", (vcpus) => {
     expect(validateEnvironmentInput({ ...GOOD, vcpus }).ok).toBe(true);
+  });
+
+  // #818-T02: 1 vCPU is a size of the platform that leaves the agent's container no memory, so an environment cannot name it
+  it("refuses 1 vCPU, which leaves the agent no memory", () => {
+    expect(issuesOf({ ...GOOD, vcpus: 1 })).toEqual([
+      { field: "vcpus", code: "invalid" },
+    ]);
   });
 
   // #818-T06

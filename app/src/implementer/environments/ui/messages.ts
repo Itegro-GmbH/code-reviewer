@@ -44,12 +44,17 @@ export const PAGE_COPY = {
   name: "Name",
   nameHint: `Up to ${ENVIRONMENT_NAME_MAX_LENGTH} characters. Each name is used once in the workspace.`,
   size: "Size",
-  sizeHint: "The size of the VM the task runs in. 2 GB of memory per vCPU.",
+  sizeHint:
+    "The size of the VM the task runs in. The memory shown is what the agent's container gets: the VM has 2 GB per vCPU, and the system around the agent takes 2 GB of it.",
+  sizeUnsupported:
+    "This environment has a size that is no longer offered: 1 vCPU leaves the agent no memory. A task started with it is refused. Choose a size below and save.",
+  sizeUnsupportedShort:
+    "No longer offered. A task started with this environment is refused until you choose another size.",
   script: "Setup script",
   scriptHint:
-    "Setup scripts do not run yet: the text is saved, and a task does nothing with it for now. Once they run, the script will run as root with full internet access, in its own container with no secrets, and the agent will start afterwards with its own restricted network. The text is stored as written and shown to every member. Keep secrets out of it: there is no secrets field.",
-  scriptsNotRunning:
-    "Setup scripts do not run yet. They are saved with the environment, and nothing is done with them when a task starts.",
+    "The script runs once when a task starts, as root in a container of its own with full internet access and no secrets, in the repository's folder (bash, with -e: a failing command ends it; a first line starting with #! picks another interpreter). What it installs, including the images its Docker pulls, is what the agent starts with; the agent has no internet access. A script that fails or runs longer than 15 minutes stops the task before the AI model is called, and the task is not charged. Changes it makes to files tracked by git are undone before the agent starts. The text is stored as written and shown to every member. Keep secrets out of it: there is no secrets field.",
+  scriptsRunning:
+    "Setup scripts run when a task starts: as root, with full internet access and no secrets, in a container of its own, before the agent starts.",
   scriptLabelShown: "Setup script",
   noScript: "No setup script",
   saved: "The environment was saved.",

@@ -229,4 +229,43 @@ describe("the report of a VM start", () => {
       ["vm-two", 2, true],
     ]);
   });
+
+  // #818-T34
+  it("stores the size of the VM when the Dispatcher reports it (an Implementer job), and null when it does not", async () => {
+    const h = await startRunnerApiHarness();
+    const sized = await runningJob(h, 7);
+    const plain = await runningJob(h, 8);
+
+    const first = await h.vmStart(
+      sized.job.id,
+      report(h, sized.credential, { vcpus: 6 }),
+    );
+    const second = await h.vmStart(plain.job.id, report(h, plain.credential));
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(await h.vmRuns.list(sized.job.id)).toStrictEqual([
+      expect.objectContaining({ vcpus: 6 }),
+    ]);
+    expect(await h.vmRuns.list(plain.job.id)).toStrictEqual([
+      expect.objectContaining({ vcpus: null }),
+    ]);
+  });
+
+  // #818-T34
+  it.each([
+    ["zero", 0],
+    ["a size above 64", 65],
+    ["a fraction", 2.5],
+    ["text", "4"],
+    ["null", null],
+  ])("refuses a VM size of %s, storing nothing", async (_name, vcpus) => {
+    const h = await startRunnerApiHarness();
+    const { job, credential } = await runningJob(h);
+
+    const response = await h.vmStart(job.id, report(h, credential, { vcpus }));
+
+    expect(response.status).toBe(400);
+    expect(await h.vmRuns.list(job.id)).toStrictEqual([]);
+  });
 });

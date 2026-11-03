@@ -567,7 +567,16 @@ export function createDispatcherCore(deps: CoreDependencies): DispatcherCore {
   ): Promise<void> {
     try {
       for (let attempt = 0; ; attempt += 1) {
-        const result = await state.client.reportVm(job.id, job.credential, vm);
+        // #818: the size is reported for a turn of the Implementer only; an App of the release before refuses a field it does not
+        // know, and a review's VM is measured by its minutes alone.
+        const result = await state.client.reportVm(job.id, job.credential, {
+          name: vm.name,
+          startedAt: vm.startedAt,
+          timeoutSeconds: vm.timeoutSeconds,
+          ...(job.reviewKind === "implementer" && vm.vcpus !== undefined
+            ? { vcpus: vm.vcpus }
+            : {}),
+        });
         if (result === "recorded") return;
         const pause = VM_REPORT_RETRY_MS[attempt];
         if (result === "refused" || pause === undefined) break;
@@ -601,6 +610,10 @@ export function createDispatcherCore(deps: CoreDependencies): DispatcherCore {
         kind: job.reviewKind,
         timeoutSeconds: jobTimeoutFor(settings, job.reviewKind),
         config: launchConfigFor(settings, job.reviewKind),
+        // #818: the size is believed for a turn of the Implementer and for no other kind: a review can never name one.
+        ...(job.reviewKind === "implementer" && job.vcpus !== undefined
+          ? { vcpus: job.vcpus }
+          : {}),
         onVmCreated,
       },
       guard.signal,

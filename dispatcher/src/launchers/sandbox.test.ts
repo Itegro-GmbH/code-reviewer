@@ -1,5 +1,16 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
+import { spawnSync } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { FakeSandboxService } from "../../../fakes/sandbox/service.ts";
 import { createDispatcherCore } from "../core/dispatcher.ts";
@@ -16,18 +27,20 @@ import { ManualClock, settle } from "../test-support/manual-clock.ts";
 import { DEFAULT_CONFIG } from "../snapshot/config.ts";
 import { PATHS } from "../snapshot/scripts.ts";
 import { WORKER_CONTAINER_SPEC } from "./container-spec.ts";
-import { VM_PREPARE_PATH } from "./sandbox-host.ts";
+import { IPV6_OFF_COMMANDS, VM_PREPARE_PATH } from "./sandbox-host.ts";
 import {
   SANDBOX_HANDOVER_SECONDS,
   SANDBOX_IMAGE_REFERENCE,
   SANDBOX_REGION,
   SANDBOX_KIND_DEFAULTS,
   IMPLEMENTER_LAUNCH_EXTRA_SECONDS,
+  IPV6_OFF_STEPS_SECONDS,
   RUN_DIRECTORY_STEPS_SECONDS,
   SYSBOX_PREPARE_SECONDS,
   WORK_VOLUME_STEPS_SECONDS,
   minimumVmTimeoutMargin,
   agentMemoryMb,
+  IMPLEMENTER_MIN_AGENT_MEMORY_MB,
   IMPLEMENTER_VM_HEADROOM_MB,
   MODEL_DOOR_MEMORY_MB,
   READER_COUNT,
@@ -137,6 +150,8 @@ describe("the Sandbox-Launcher", () => {
         name: service.creates[0]?.name,
         startedAt: new Date("2026-10-19T10:00:00.000Z"),
         timeoutSeconds: 1200 + VM_TIMEOUT_MARGIN_SECONDS,
+        // #818: the size of the VM, which the core reports for an Implementer job only.
+        vcpus: 1,
       },
     ]);
     // Before anything else is done to the VM.
@@ -757,7 +772,7 @@ describe("the Sandbox-Launcher", () => {
       (call) => call.vm === service.creates[0]?.name,
     );
     expect(
-      first.slice(0, 4).map((call) => [call.label, call.cmd, ...call.args]),
+      first.slice(0, 5).map((call) => [call.label, call.cmd, ...call.args]),
     ).toStrictEqual([
       [
         "run-directories",
@@ -787,6 +802,13 @@ describe("the Sandbox-Launcher", () => {
         "tmpfs",
         "/run/containerd",
       ],
+      // IPv6 is off in the whole kernel before the daemon exists: the VM's side of every bridge is born without it.
+      [
+        "ipv6-off",
+        "sh",
+        "-c",
+        expect.stringContaining("/proc/sys/net/ipv6/conf"),
+      ],
       // The daemon starts with its temporary directory on memory too (`runc exec` writes a file there).
       [
         "vm-prepare",
@@ -795,7 +817,7 @@ describe("the Sandbox-Launcher", () => {
         "/usr/local/sbin/vm-prepare.sh",
       ],
     ]);
-    for (const call of first.slice(0, 3)) expect(call.sudo).toBe(true);
+    for (const call of first.slice(0, 4)) expect(call.sudo).toBe(true);
     const second = service.execs.filter(
       (call) => call.vm === service.creates[1]?.name,
     );
@@ -809,6 +831,7 @@ describe("the Sandbox-Launcher", () => {
     "run-directories",
     "run-directory-docker",
     "run-directory-containerd",
+    "ipv6-off",
   ])(
     "stops the VM with the retryable docker_not_ready when %s fails, and runs nothing after it",
     async (label) => {
@@ -828,6 +851,63 @@ describe("the Sandbox-Launcher", () => {
     },
   );
 
+  // #818-IPV6: the step is a script over the kernel's files, run here over a directory of the same shape
+  describe("the ipv6-off step", () => {
+    const script = IPV6_OFF_COMMANDS[0].args[1].replaceAll(
+      "/proc/sys/net/ipv6/conf",
+      "$IPV6_DIR",
+    );
+    const run = (directory: string) =>
+      spawnSync("sh", ["-c", script], { env: { IPV6_DIR: directory } });
+    const interfaces = ["all", "default", "lo", "eth0", "docker0"];
+    const value = (root: string, name: string) =>
+      readFileSync(join(root, name, "disable_ipv6"), "utf8").trim();
+
+    it("writes 1 to the default for new interfaces, reads it back, and leaves all, lo, eth0 and every other interface alone", () => {
+      const root = mkdtempSync(join(tmpdir(), "ipv6-off-"));
+      try {
+        for (const name of interfaces) {
+          mkdirSync(join(root, name));
+          writeFileSync(join(root, name, "disable_ipv6"), "0\n");
+        }
+        expect(run(root).status).toBe(0);
+        expect(value(root, "default")).toBe("1");
+        for (const name of interfaces.filter((name) => name !== "default"))
+          expect(value(root, name)).toBe("0");
+      } finally {
+        rmSync(root, { recursive: true });
+      }
+    });
+
+    it("is the same as off for a kernel with no IPv6 (no file)", () => {
+      expect(run(join(tmpdir(), "ipv6-off-absent")).status).toBe(0);
+    });
+
+    it("fails when the file cannot be written", () => {
+      const root = mkdtempSync(join(tmpdir(), "ipv6-off-"));
+      try {
+        mkdirSync(join(root, "default"));
+        // A directory where the file should be: the write fails, so the step does.
+        mkdirSync(join(root, "default", "disable_ipv6"));
+        expect(run(root).status).not.toBe(0);
+      } finally {
+        rmSync(root, { recursive: true });
+      }
+    });
+
+    it("fails when the value read back is not 1, though the write was taken", () => {
+      const root = mkdtempSync(join(tmpdir(), "ipv6-off-"));
+      try {
+        mkdirSync(join(root, "default"));
+        // The write goes to /dev/null and succeeds; the read back is empty.
+        symlinkSync("/dev/null", join(root, "default", "disable_ipv6"));
+        expect(run(root).status).not.toBe(0);
+      } finally {
+        rmSync(root, { recursive: true });
+      }
+    });
+  });
+
   // #760-T05
   it("makes the work volume of an implementer job after the host is prepared (Sysbox included) and before docker run, all on the job's VM", async () => {
     const result = await launch(build(), spec({ kind: "implementer" }));
@@ -839,6 +919,7 @@ describe("the Sandbox-Launcher", () => {
       "exec:run-directories",
       "exec:run-directory-docker",
       "exec:run-directory-containerd",
+      "exec:ipv6-off",
       "exec:vm-prepare",
       "exec:image-id",
       "exec:sysbox-prepare",
@@ -1197,6 +1278,7 @@ describe("the Sandbox-Launcher", () => {
       "run-directories",
       "run-directory-docker",
       "run-directory-containerd",
+      "ipv6-off",
       "vm-prepare",
       "image-id",
       "sysbox-prepare",
@@ -1280,8 +1362,8 @@ describe("the Sandbox-Launcher", () => {
     expect(service.starts).toHaveLength(0);
   });
 
-  // #760-T10: the constant 10 s was never exercised; a hung step has to end the launch, not wait for the VM's timeout
-  it("ends a hung step of the work volume after 10 seconds, not before, with work_volume_failed and the VM stopped", async () => {
+  // #760-T10: the constant 9 s was never exercised; a hung step has to end the launch, not wait for the VM's timeout
+  it("ends a hung step of the work volume after 9 seconds, not before, with work_volume_failed and the VM stopped", async () => {
     service.hangOn("work-volume-mount");
     const launcher = build();
     const ended = launcher
@@ -1292,7 +1374,7 @@ describe("the Sandbox-Launcher", () => {
       );
     await settle();
 
-    await clock.advance(9_999);
+    await clock.advance(8_999);
     expect(service.stops).toStrictEqual([]);
     await clock.advance(1);
     const error = (await ended) as LaunchError;
@@ -1306,14 +1388,14 @@ describe("the Sandbox-Launcher", () => {
   });
 
   // #760-T10
-  it("gives every step of the work volume its own 10 seconds and passes the same limit to the platform", async () => {
+  it("gives every step of the work volume its own 9 seconds and passes the same limit to the platform", async () => {
     await launch(build(), spec({ kind: "implementer" }));
 
     const steps = service.execs.filter((call) =>
       call.label.startsWith("work-volume"),
     );
     expect(steps).toHaveLength(8);
-    for (const call of steps) expect(call.timeoutMs).toBe(10_000);
+    for (const call of steps) expect(call.timeoutMs).toBe(9_000);
   });
 
   // #760-T10: the steps are part of the implementer's launch, which the VM's own timeout has to cover
@@ -1336,10 +1418,11 @@ describe("the Sandbox-Launcher", () => {
       }),
     );
 
-    expect(WORK_VOLUME_STEPS_SECONDS).toBe(80);
+    expect(WORK_VOLUME_STEPS_SECONDS).toBe(72);
     expect(SYSBOX_PREPARE_SECONDS).toBe(40);
     expect(RUN_DIRECTORY_STEPS_SECONDS).toBe(9);
-    expect(IMPLEMENTER_LAUNCH_EXTRA_SECONDS).toBe(129);
+    expect(IPV6_OFF_STEPS_SECONDS).toBe(3);
+    expect(IMPLEMENTER_LAUNCH_EXTRA_SECONDS).toBe(124);
     const [implementer, diff] = service.creates;
     expect(implementer?.timeoutMs).toBe(
       (3600 + VM_TIMEOUT_MARGIN_SECONDS + IMPLEMENTER_LAUNCH_EXTRA_SECONDS) *
@@ -1629,5 +1712,131 @@ describe("the Sandbox-Launcher in the Dispatcher core", () => {
     } finally {
       await app.close();
     }
+  });
+});
+
+describe("the size of a job (#818)", () => {
+  const implementer = (overrides: Partial<LaunchSpec> = {}) =>
+    spec({
+      kind: "implementer",
+      timeoutSeconds: 3600,
+      ...overrides,
+    });
+
+  // #818-T30: the VM follows the job's size; Control keeps its own memory and the agent gets the rest.
+  it.each([
+    [2, 2048],
+    [4, 6144],
+    [6, 10240],
+    [8, 14336],
+  ])(
+    "creates the VM with the size of an Implementer job, %i vCPU, and leaves the agent %i MB",
+    async (vcpus, agentMb) => {
+      const result = await launch(build(), implementer({ vcpus }));
+
+      expect(result).toStrictEqual({ ok: true });
+      expect(service.creates[0]?.vcpus).toBe(vcpus);
+      const args = dockerRun()?.args ?? [];
+      // Control is the same container at every size.
+      expect(valuesOf(args, "--memory")).toStrictEqual(["768m"]);
+      expect(valuesOf(args, "--memory-reservation")).toStrictEqual(["512m"]);
+      const environment = valuesOf(args, "--env").join(" ");
+      expect(environment).toContain(
+        `RUNNER_IMPLEMENTER_AGENT_MEMORY_MB=${agentMb}`,
+      );
+      expect(
+        planForKind("implementer", { launcher: { vcpus } }).agentMemoryMb,
+      ).toBe(agentMb);
+    },
+  );
+
+  // #818-T30
+  it("keeps the standard when the job names no size: 2 vCPU, Control at 768 MB, as before", async () => {
+    await launch(build(), implementer());
+
+    expect(service.creates[0]?.vcpus).toBe(2);
+    expect(valuesOf(dockerRun()?.args ?? [], "--memory")).toStrictEqual([
+      "768m",
+    ]);
+  });
+
+  // #818-T31
+  it("the size of the job wins over the operator's configuration of the kind, which wins over the default; the operator's memory for the kind is Control's at every size", async () => {
+    const configured = {
+      launcher: { vcpus: 4 },
+      container: { memory: { limit: "1g", reservation: "768m" } },
+    };
+
+    await launch(build(), implementer({ config: configured }));
+    await launch(build(), implementer({ config: configured, vcpus: 6 }));
+
+    expect(service.creates.map((created) => created.vcpus)).toStrictEqual([
+      4, 6,
+    ]);
+    const [withoutSize, withSize] = service.starts.filter(
+      (start) => start.label === "docker-run",
+    );
+    expect(valuesOf(withoutSize?.args ?? [], "--memory")).toStrictEqual(["1g"]);
+    expect(valuesOf(withSize?.args ?? [], "--memory")).toStrictEqual(["1g"]);
+  });
+
+  // #818-T32
+  it.each<[string, unknown]>([
+    ["a size the platform does not have", 3],
+    ["more than the plan has", 16],
+    ["zero", 0],
+    ["a negative size", -2],
+    ["a fraction", 2.5],
+    ["not a number", "4"],
+    ["not a finite number", Number.NaN],
+  ])(
+    "refuses %s with its own code before it creates anything",
+    async (_what, vcpus) => {
+      const error = failure(
+        await launch(build(), implementer({ vcpus: vcpus as number })),
+      );
+
+      expect(error.code).toBe("sandbox_size_unsupported");
+      expect(error.retryable).toBe(false);
+      expect(service.creates).toStrictEqual([]);
+    },
+  );
+
+  // #818-T32b: 1 vCPU is a size of the platform (reviews use it) but leaves the agent nothing.
+  it("refuses 1 vCPU for an Implementer job: the platform has it, the agent would get no memory", async () => {
+    const error = failure(await launch(build(), implementer({ vcpus: 1 })));
+
+    expect(error.code).toBe("sandbox_size_unsupported");
+    expect(error.retryable).toBe(false);
+    expect(service.creates).toStrictEqual([]);
+    expect(agentMemoryMb(1, 768)).toBeLessThan(IMPLEMENTER_MIN_AGENT_MEMORY_MB);
+    expect(agentMemoryMb(2, 768)).toBeGreaterThanOrEqual(
+      IMPLEMENTER_MIN_AGENT_MEMORY_MB,
+    );
+  });
+
+  // #818-T33
+  it.each(["diff", "dynamic"] as const)(
+    "never lets a %s job name a size: it is launched with the kind's own, whatever the spec says",
+    async (kind) => {
+      await launch(build(), spec({ kind, vcpus: 8 }));
+
+      expect(service.creates[0]?.vcpus).toBe(1);
+      expect(valuesOf(dockerRun()?.args ?? [], "--memory")).toStrictEqual([
+        "1536m",
+      ]);
+    },
+  );
+
+  // #818-T37
+  it("tells the core the size of the VM it created, whichever way the size was decided", async () => {
+    const created: Array<number | undefined> = [];
+    const onVmCreated = (vm: { vcpus?: number }) => created.push(vm.vcpus);
+
+    await launch(build(), implementer({ vcpus: 4, onVmCreated }));
+    await launch(build(), implementer({ onVmCreated }));
+    await launch(build(), spec({ kind: "diff", onVmCreated }));
+
+    expect(created).toStrictEqual([4, 2, 1]);
   });
 });

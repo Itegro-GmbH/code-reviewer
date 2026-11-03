@@ -45,6 +45,18 @@ export const FORM_COPY = {
   providerPlaceholder: "Choose a provider",
   model: "Model",
   modelPlaceholder: "Choose a model",
+  environment: "Environment",
+  environmentPlaceholder: "Choose an environment",
+  environmentHint:
+    "A size and a setup script for this task. The script runs once in a container of its own, before the agent starts. Without a choice the standard applies. Environments are managed under",
+  environmentLink: "Environments",
+  environmentScriptNote:
+    "This environment has a setup script. It runs as root in a container of its own with full internet access and no secrets, before the agent starts, and its time counts toward the task's time limit. If it fails, the task stops before the AI model is called and is not charged. The agent then works without internet access.",
+  environmentSizeUnsupportedNote:
+    "This environment has a size that is no longer offered: 1 vCPU leaves the agent no memory. A task started with it is refused. Choose another environment, or change the size under Environments.",
+  environmentLoadFailed:
+    "The environments could not be loaded. A task can still be sent with the standard.",
+  environmentStandard: "Standard (2 vCPU, 2 GB memory, no setup script)",
   costLimit: "Cost limit (USD, optional)",
   costLimitHint:
     "The task stops when it reaches this amount. Leave empty for the maximum.",
@@ -179,6 +191,13 @@ const FIELD_COPY: Record<
     invalid: "This model choice cannot be used. Choose the model again.",
     too_long: "This model choice cannot be used. Choose the model again.",
   },
+  environmentId: {
+    required: "Choose an environment, or the standard.",
+    invalid:
+      "This environment cannot be used. Reload the page and choose another.",
+    too_long:
+      "This environment cannot be used. Reload the page and choose another.",
+  },
   costLimitCents: {
     required: "Enter an amount, for example 2.50, or leave the field empty.",
     invalid: "Enter an amount in dollars, for example 2.50.",
@@ -261,6 +280,10 @@ const failureCopy = (
     "This name clashes with a branch of the repository: a branch name cannot be a folder of another (foo and foo/bar). A new branch name is needed.",
   IMPLEMENTER_REQUEST_REUSED:
     "A task with this form was already started, and what you sent now is not that task. Open the task that was started, or reload the page to send a new one.",
+  IMPLEMENTER_ENVIRONMENT_NOT_FOUND:
+    "This environment does not exist any more. Choose another, or the standard.",
+  IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED:
+    "The size of this environment is no longer offered (1 vCPU leaves the agent no memory), so the task was not started and nothing was charged. Change the size under Environments to 2 vCPU or more, or choose another environment.",
   IMPLEMENTER_MODEL_NOT_ALLOWED: hasReason(failure.reason)
     ? MODEL_REFUSAL_COPY[failure.reason]
     : MODEL_REFUSED_GENERIC,

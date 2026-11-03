@@ -40,7 +40,7 @@ export async function handleVmStart(
   if ((await deps.queue.get(jobId)) === undefined)
     return errorResponse(404, "RUNNER_JOB_NOT_FOUND");
 
-  const { credential, vmName, startedAt, timeoutSeconds } = parsed.value;
+  const { credential, vmName, startedAt, timeoutSeconds, vcpus } = parsed.value;
   const job = await deps.queue.holding(jobId, workerLeaseToken(credential));
   // A credential that is not a claim of the job is 401; the claim of that credential having ended is 409.
   if (job === undefined) return workerUnauthorized();
@@ -57,6 +57,7 @@ export async function handleVmStart(
     attempt: job.attempts + 1,
     startedAt: new Date(startedAt),
     vmTimeoutSeconds: timeoutSeconds,
+    ...(vcpus === undefined ? {} : { vcpus }),
   });
   if (result === "refused") {
     deps.logger.info(

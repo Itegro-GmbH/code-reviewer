@@ -10,14 +10,21 @@ import type {
 } from "../../db/repositories/implementer-environments-repository.ts";
 import { EnvironmentError } from "./errors.ts";
 import { validateEnvironmentInput } from "./input.ts";
-import { ENVIRONMENTS_PER_WORKSPACE_MAX, memoryGbOf } from "./limits.ts";
+import {
+  ENVIRONMENTS_PER_WORKSPACE_MAX,
+  isEnvironmentVcpus,
+  memoryGbOf,
+} from "./limits.ts";
 
 /** An environment as the page and the picker see it. The script is shown to every member: they can use it. */
 export type EnvironmentView = {
   id: string;
   name: string;
   vcpus: number;
+  /** The memory the agent's container gets at this size, in GB (0 for a size that leaves it none). */
   memoryGb: number;
+  /** Whether a task can be started with this size. False for a size that is no longer offered (1 vCPU): shown as it is, refused at submit. */
+  sizeSupported: boolean;
   setupScript: string;
   createdAt: string;
   updatedAt: string;
@@ -35,6 +42,7 @@ export type EnvironmentPickerView = {
   name: string;
   vcpus: number;
   memoryGb: number;
+  sizeSupported: boolean;
   hasScript: boolean;
 };
 
@@ -61,6 +69,7 @@ function viewOf(environment: StoredEnvironment): EnvironmentView {
     name: environment.name,
     vcpus: environment.vcpus,
     memoryGb: memoryGbOf(environment.vcpus),
+    sizeSupported: isEnvironmentVcpus(environment.vcpus),
     setupScript: environment.setupScript,
     createdAt: environment.createdAt,
     updatedAt: environment.updatedAt,
@@ -115,6 +124,7 @@ export function createEnvironmentService({
         environments: (await environments.listSummaries()).map((summary) => ({
           ...summary,
           memoryGb: memoryGbOf(summary.vcpus),
+          sizeSupported: isEnvironmentVcpus(summary.vcpus),
         })),
         maximum: ENVIRONMENTS_PER_WORKSPACE_MAX,
       };

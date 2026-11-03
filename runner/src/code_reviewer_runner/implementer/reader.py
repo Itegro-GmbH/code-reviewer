@@ -53,7 +53,7 @@ the place where that decision costs nothing.
 import logging
 import socket
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, cast
 
@@ -134,6 +134,10 @@ READER_GIT_OPTIONS: Final = (
     "-c",
     "core.bigFileThreshold=1m",
 )
+
+
+# What `append_exclude` runs: the directory and the file are git's own, the text comes on stdin.
+APPEND_EXCLUDE_SCRIPT: Final = "umask 022 && mkdir -p .git/info && cat >> .git/info/exclude"
 
 
 def reader_argv(args: Sequence[str]) -> list[str]:
@@ -268,6 +272,44 @@ class ReaderAccess:
             workdir=READER_REPO,
             timeout=timeout,
             name=f"git {args[0] if args else ''}",
+        )
+
+    def append_exclude(self, data: bytes, *, timeout: float) -> Outcome:
+        """Append lines to the repository's `info/exclude` (git's local ignore file, never
+        committed), in the reader that writes. For the step after an environment's script (#818):
+        what it left untracked is the base of the turn, not a change of the agent. The text is the
+        standard input of a constant script, under the same one capability as every command of a
+        reader."""
+        container = self._ensure(True)
+        if container is None:
+            return Outcome(255, "", "the reader cannot run", unanswered=True)
+        return run_exec(
+            self._api,
+            container,
+            [*READER_DROP_CAPABILITIES, "/bin/sh", "-c", APPEND_EXCLUDE_SCRIPT, "append"],
+            stdin=data,
+            workdir=READER_REPO,
+            timeout=timeout,
+            name="append to the exclude file",
+        )
+
+    def update_refs(
+        self, options: Sequence[str], commands: Iterable[bytes], *, timeout: float
+    ) -> Outcome:
+        """`git update-ref --stdin -z` in the reader that writes, the commands streamed to its
+        standard input (#818: the refs a setup script made are removed this way)."""
+        container = self._ensure(True)
+        if container is None:
+            return Outcome(255, "", "the reader cannot run", unanswered=True)
+        return run_exec(
+            self._api,
+            container,
+            reader_argv([*options, "update-ref", "--stdin", "-z"]),
+            env=self._environment,
+            stdin=commands,
+            workdir=READER_REPO,
+            timeout=timeout,
+            name="git update-ref",
         )
 
     def stream(
