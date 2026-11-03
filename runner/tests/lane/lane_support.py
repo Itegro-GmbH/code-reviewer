@@ -509,7 +509,11 @@ def lane_workspace(
     directory, the agent's repository made and configured through the reader)."""
     config = lane_config()
     git = system_git()
-    origin = Origin(scratch, git)
+    # GitHub is not on the VM's disk: the stand-in for it is on memory, so that a disk the agent
+    # filled is not the origin's.
+    stand_in = Path("/dev/shm") / f"code-reviewer-lane-origin-{uuid.uuid4().hex[:8]}"
+    stand_in.mkdir()
+    origin = Origin(stand_in, git)
     if seed is not None:
         seed(origin.seed)
         raw("add", "-A", cwd=origin.seed, git=git)
@@ -544,6 +548,7 @@ def lane_workspace(
     )
     with ExitStack() as stack:
         # In the order they are undone: the readers, the stand-in, the volume, the mounts.
+        stack.callback(shutil.rmtree, stand_in, True)
         stack.callback(shutil.rmtree, run_dir, True)
         stack.callback(unmount, scratch / "vmdisk")
         stack.callback(unmount, work)

@@ -40,8 +40,11 @@ export const SYSBOX_PREPARE_FAILED_EVENT = "sysbox_prepare_failed";
  * the Implementer's VM before the daemon starts. The VM's `/run` is a directory of its one XFS disk, and the pipes of an exec are
  * files in it: with the disk full by the agent's doing, no command could be run in a container (measured: "failed to open stdout
  * fifo ... no space left on device"), neither the runner's look at the repository nor its tunnel to the agent. On memory, they
- * work on a full disk.
+ * work on a full disk. So is the temporary directory of the daemon and of the runtime that runs an exec (`runc-process...` in
+ * `/tmp`, measured): the daemon is started with `TMPDIR` in the second directory, which is therefore open to everybody
+ * (sticky, as `/tmp` is) and is the VM's, not the container's.
  */
+export const DOCKER_TMPDIR = "/run/containerd";
 export const RUN_DIRECTORY_COMMANDS = [
   {
     label: "run-directories",
@@ -67,7 +70,7 @@ export const RUN_DIRECTORY_COMMANDS = [
       "-t",
       "tmpfs",
       "-o",
-      "size=64m,mode=0711,nosuid,nodev",
+      "size=64m,mode=1777,nosuid,nodev",
       "tmpfs",
       "/run/containerd",
     ],
@@ -135,6 +138,7 @@ export class SandboxDockerHost implements ContainerHost {
    */
   readonly handover: Promise<void>;
   readonly #options: SandboxDockerHostOptions;
+  #memoryRunDirectories = false;
   #settle!: { resolve: () => void; reject: (error: unknown) => void };
   #settled = false;
 
@@ -153,6 +157,7 @@ export class SandboxDockerHost implements ContainerHost {
    */
   async prepareRunDirectories(signal: AbortSignal): Promise<void> {
     const { vm } = this.#options;
+    this.#memoryRunDirectories = true;
     for (const command of RUN_DIRECTORY_COMMANDS) {
       const done = await vm.exec(
         {
@@ -179,11 +184,14 @@ export class SandboxDockerHost implements ContainerHost {
   /** Starts the daemon and proves the image in the VM is the one the Dispatcher is configured with. */
   async prepare(signal: AbortSignal): Promise<void> {
     const { vm } = this.#options;
+    // On memory (`prepareRunDirectories`), the daemon is started with its temporary directory there too.
     const prepared = await vm.exec(
       {
         label: "vm-prepare",
-        cmd: VM_PREPARE_PATH,
-        args: [],
+        cmd: this.#memoryRunDirectories ? "env" : VM_PREPARE_PATH,
+        args: this.#memoryRunDirectories
+          ? [`TMPDIR=${DOCKER_TMPDIR}`, VM_PREPARE_PATH]
+          : [],
         sudo: true,
         timeoutMs: VM_PREPARE_TIMEOUT_MS,
       },

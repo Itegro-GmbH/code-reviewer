@@ -782,11 +782,17 @@ describe("the Sandbox-Launcher", () => {
         "-t",
         "tmpfs",
         "-o",
-        "size=64m,mode=0711,nosuid,nodev",
+        "size=64m,mode=1777,nosuid,nodev",
         "tmpfs",
         "/run/containerd",
       ],
-      ["vm-prepare", "/usr/local/sbin/vm-prepare.sh"],
+      // The daemon starts with its temporary directory on memory too (`runc exec` writes a file there).
+      [
+        "vm-prepare",
+        "env",
+        "TMPDIR=/run/containerd",
+        "/usr/local/sbin/vm-prepare.sh",
+      ],
     ]);
     for (const call of first.slice(0, 3)) expect(call.sudo).toBe(true);
     const second = service.execs.filter(
