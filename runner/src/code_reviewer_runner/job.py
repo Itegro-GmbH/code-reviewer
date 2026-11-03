@@ -987,9 +987,14 @@ def _implementer_environment(spec: dict[str, Any]) -> ImplementerEnvironment | N
         )
     if not isinstance(script, str) or not script.strip():
         raise _invalid("implementer.environment.setupScript must be a non-empty string")
-    if "\x00" in script or len(script.encode("utf-8", errors="strict")) > MAX_SETUP_SCRIPT_BYTES:
+    try:
+        too_long = len(script.encode("utf-8")) > MAX_SETUP_SCRIPT_BYTES
+    except UnicodeEncodeError:  # half of a character: not text
+        too_long = True
+    if "\x00" in script or too_long:
         raise _invalid(
-            f"implementer.environment.setupScript must be text of at most {MAX_SETUP_SCRIPT_BYTES} bytes"
+            "implementer.environment.setupScript must be text of at most "
+            f"{MAX_SETUP_SCRIPT_BYTES} bytes without a NUL"
         )
     return ImplementerEnvironment(name=name, setup_script=script)
 

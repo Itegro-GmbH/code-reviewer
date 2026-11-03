@@ -28,7 +28,7 @@ the VM's side of the bridge, not in the container: the container is root of a us
 own and owns its network namespace, so anything installed inside it, the script could remove; the
 host's rules, it cannot reach. Packets from its bridge to the VM itself (input) are dropped; packets
 that would be routed anywhere private, or into another bridge (the default bridge Control is on,
-the model network), or over IPv6, are dropped; the rest of the internet is open on every port,
+the model network), are dropped (IPv6 is not forwarded by the VM at all); the rest of the internet is open on every port,
 which includes the inner containers of its own Docker (their traffic is routed through the
 container's address). DNS goes to public resolvers named in the container's definition, because the
 VM's own resolver is on a private address. A Setup whose rules did not go in is never started.
@@ -60,14 +60,14 @@ from .agent_container import (
     WRITE_FILE_SCRIPT,
 )
 from .docker_api import DockerApi, DockerError
-from .door_launcher import PRIVATE_RANGES, RULES_ENTRYPOINT
-from .exec_run import exec_document, run_exec
+from .door_launcher import PRIVATE_RANGES
+from .exec_run import run_exec
+from .host_rules import HelperFailed, close_bridge_ipv6, run_helper
 from .reader import REPO_SUBPATH, work_volume_of
 
 _log = logging.getLogger(__name__)
 
 SETUP_CONTAINER_NAME: Final = "code-reviewer-setup"
-SETUP_RULES_CONTAINER_NAME: Final = "code-reviewer-setup-rules"
 SETUP_ROLE_LABEL: Final = "code-reviewer.role"
 SETUP_NETWORK_NAME: Final = "code-reviewer-setup"
 # The bridge's own name, so that the rules can name it before it exists (a name is matched when a
@@ -111,34 +111,37 @@ while kill -0 "$pid" 2>/dev/null; do
 done
 """
 
-# The VM's firewall for the Setup container's bridge (see the module text). An `inet` table in the
+# The VM's firewall for the Setup container's bridge (see the module text). An `ip` table in the
 # host's namespace, hooked before Docker's own rules (priority -10), whose only verdicts are drops:
 # whatever it does not drop goes on to Docker's rules as before. Rules for a bridge that does not
-# exist yet are fine, a name is matched when a packet arrives.
+# exist yet are fine, a name is matched when a packet arrives. (An `inet` table is what one would
+# write; the kernel of the platform's VM does not support the family, nor `ip6`: measured 2026-11-03,
+# `Operation not supported`. Its IPv6 forwarding is off, `net.ipv6.conf.all.forwarding = 0`, and the
+# bridge has no IPv6 address.)
 EGRESS_TABLE: Final = "setup_egress"
 EGRESS_RULES: Final = "; ".join(
     [
-        f"add table inet {EGRESS_TABLE}",
-        # To the VM itself (its control port, its services, the bridge's gateway, Docker's DNS): nothing.
-        f"add chain inet {EGRESS_TABLE} input "
+        f"add table ip {EGRESS_TABLE}",
+        # To the VM itself (its control port, its services, the bridge's gateway): nothing.
+        f"add chain ip {EGRESS_TABLE} input "
         "{ type filter hook input priority -10 ; policy accept ; }",
-        f'add rule inet {EGRESS_TABLE} input iifname "{SETUP_BRIDGE}" drop',
-        # Through the VM: no IPv6, no private range (the platform, the neighbours, the other
-        # containers), no other bridge (Control's, the door's, the model network), nowhere but out.
-        f"add chain inet {EGRESS_TABLE} forward "
+        f'add rule ip {EGRESS_TABLE} input iifname "{SETUP_BRIDGE}" drop',
+        # Through the VM: no private range (the platform, the neighbours, the other containers), no
+        # other bridge (Control's, the door's, the model network), nowhere but out.
+        f"add chain ip {EGRESS_TABLE} forward "
         "{ type filter hook forward priority -10 ; policy accept ; }",
-        f'add rule inet {EGRESS_TABLE} forward iifname "{SETUP_BRIDGE}" meta nfproto ipv6 drop',
-        f'add rule inet {EGRESS_TABLE} forward iifname "{SETUP_BRIDGE}" '
+        f'add rule ip {EGRESS_TABLE} forward iifname "{SETUP_BRIDGE}" '
         f"ip daddr {{ {', '.join(PRIVATE_RANGES)} }} drop",
-        f'add rule inet {EGRESS_TABLE} forward iifname "{SETUP_BRIDGE}" oifname "docker0" drop',
-        f'add rule inet {EGRESS_TABLE} forward iifname "{SETUP_BRIDGE}" oifname "br-*" drop',
-        f'add rule inet {EGRESS_TABLE} forward iifname "{SETUP_BRIDGE}" oifname "veth*" drop',
-        f'add rule inet {EGRESS_TABLE} forward oifname "{SETUP_BRIDGE}" iifname "docker0" drop',
-        f'add rule inet {EGRESS_TABLE} forward oifname "{SETUP_BRIDGE}" iifname "br-*" drop',
+        f'add rule ip {EGRESS_TABLE} forward iifname "{SETUP_BRIDGE}" oifname "docker0" drop',
+        f'add rule ip {EGRESS_TABLE} forward iifname "{SETUP_BRIDGE}" oifname "br-*" drop',
+        f'add rule ip {EGRESS_TABLE} forward iifname "{SETUP_BRIDGE}" oifname "veth*" drop',
+        f'add rule ip {EGRESS_TABLE} forward oifname "{SETUP_BRIDGE}" iifname "docker0" drop',
+        f'add rule ip {EGRESS_TABLE} forward oifname "{SETUP_BRIDGE}" iifname "br-*" drop',
     ]
 )
-CHECK_RULES: Final = f"list table inet {EGRESS_TABLE}"
+CHECK_RULES: Final = f"list table ip {EGRESS_TABLE}"
 RULES_SECONDS: Final = 20.0
+NFT: Final = "/usr/sbin/nft"
 
 # How long each part may take. The script's own limit comes from the caller (it is counted in the
 # turn's time budget); these are the parts around it, and `SETUP_OVERHEAD_SECONDS` is their sum: what
@@ -150,7 +153,7 @@ STOP_WAIT_SECONDS: Final = 40.0
 COMMIT_SECONDS: Final = 300.0
 REMOVE_SECONDS: Final = 120.0
 SETUP_OVERHEAD_SECONDS: Final = (
-    RULES_SECONDS * 2
+    RULES_SECONDS * 3
     + READY_SECONDS
     + FINISH_EXEC_SECONDS
     + STOP_WAIT_SECONDS
@@ -185,31 +188,6 @@ def network_document() -> dict[str, Any]:
         },
         "Options": {"com.docker.network.bridge.name": SETUP_BRIDGE},
         "Labels": {SETUP_ROLE_LABEL: "setup-network"},
-    }
-
-
-def rules_document(image: str, command: str) -> dict[str, Any]:
-    """The one-shot container that installs (or reads back) the VM's rules for the Setup bridge: the
-    host's network namespace, `NET_ADMIN` and no other capability, no mount, one constant command."""
-    return {
-        "Image": image,
-        "Entrypoint": RULES_ENTRYPOINT,
-        "Cmd": [command],
-        "User": "0:0",
-        "Env": [],
-        "Labels": {SETUP_ROLE_LABEL: "setup-rules"},
-        "HostConfig": {
-            "NetworkMode": "host",
-            "Privileged": False,
-            "ReadonlyRootfs": True,
-            "CapDrop": ["ALL"],
-            "CapAdd": ["NET_ADMIN"],
-            "SecurityOpt": ["no-new-privileges:true"],
-            "Memory": 64 * 1024 * 1024,
-            "MemorySwap": 64 * 1024 * 1024,
-            "PidsLimit": 16,
-            "RestartPolicy": {"Name": "no"},
-        },
     }
 
 
@@ -312,6 +290,8 @@ class SetupSeams:
     hostname: Callable[[], str] = socket.gethostname
     clock: Callable[[], float] = time.monotonic
     image: str = AGENT_IMAGE_REFERENCE
+    # The image the host helpers run from, for the `ip` it has: the agent's golden one.
+    helper_image: str = AGENT_IMAGE_REFERENCE
     runtime: str = AGENT_RUNTIME
     entrypoint: Sequence[str] | None = None
     ready_seconds: float = READY_SECONDS
@@ -437,10 +417,9 @@ class SetupContainer:
             raise _Unavailable(f"setup_unavailable: the daemon has no {self._seams.runtime} runtime")
         # A network of an earlier run (a VM runs one turn, but a retry of the step must not trip).
         api.remove_network(SETUP_NETWORK_NAME)
-        if self._seams.install_rules:
-            self._rules(worker_image, EGRESS_RULES)
-            self._rules(worker_image, CHECK_RULES)
         self._network = api.create_network(network_document())
+        if self._seams.install_rules:
+            self._close_the_network(worker_image)
         container = api.create_container(
             setup_document(
                 image,
@@ -458,23 +437,20 @@ class SetupContainer:
         self._seal_check(container, image)
         return container
 
-    def _rules(self, image: str, command: str) -> None:
-        """Run the rules container once. Raises `_Unavailable` unless it ended with status 0: a
-        Setup whose rules are not in place is not started."""
+    def _close_the_network(self, worker_image: str) -> None:
+        """The VM's side of the Setup bridge, before the Setup container exists: no IPv6 address
+        on it, and the `nft` table that closes everything of ours (`EGRESS_RULES`), read back once.
+        Raises `_Unavailable` unless all of it is in place: a Setup whose network is not closed is
+        never started."""
         api = self._api
-        helper = api.create_container(rules_document(image, command), SETUP_RULES_CONTAINER_NAME)
         try:
-            api.start_container(helper)
-            code = api.wait_container(helper, timeout=RULES_SECONDS)
-        finally:
-            try:
-                api.remove_container(helper)
-            except DockerError as error:
-                _log.warning("the setup rules container could not be removed (%s)", error.status)
-        if code != 0:
+            close_bridge_ipv6(api, self._seams.helper_image, SETUP_NETWORK_NAME)
+            run_helper(api, worker_image, [NFT], [EGRESS_RULES], "setup-rules", seconds=RULES_SECONDS)
+            run_helper(api, worker_image, [NFT], [CHECK_RULES], "setup-rules-check", seconds=RULES_SECONDS)
+        except HelperFailed as failed:
             raise _Unavailable(
-                f"setup_unavailable: the network rules could not be installed (exit code {code})"
-            )
+                f"setup_unavailable: the network rules could not be installed ({failed.reason})"
+            ) from None
 
     def _wait_ready(self, container: str) -> None:
         end = self._seams.clock() + self._seams.ready_seconds
@@ -611,7 +587,10 @@ class SetupContainer:
                 return OUTCOME_SCRIPT_FAILED, None, lost
             return OUTCOME_UNAVAILABLE, None, "setup_unavailable: the script's status is unknown"
         if outcome.returncode != 0:
-            return OUTCOME_SCRIPT_FAILED, outcome.returncode, ""
+            # A status of a script that was killed along with its container (137) comes with the
+            # container's own account of how it ended.
+            lost = self._lost() if self._ended.wait(0.5) else ""
+            return OUTCOME_SCRIPT_FAILED, outcome.returncode, lost
         return OUTCOME_OK, 0, ""
 
     def _lost(self) -> str:

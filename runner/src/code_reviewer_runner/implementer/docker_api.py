@@ -193,6 +193,12 @@ class DockerApi:
     def create_network(self, document: dict[str, Any]) -> str:
         return _identifier(self.request("POST", "/networks/create", document))
 
+    def inspect_network(self, network: str) -> dict[str, Any]:
+        answer = as_object(self.request("GET", f"/networks/{network}"))
+        if answer is None:
+            raise DockerError(0, "the daemon's answer is not a network")
+        return answer
+
     def connect_network(self, network: str, document: dict[str, Any]) -> None:
         self.request("POST", f"/networks/{network}/connect", document)
 

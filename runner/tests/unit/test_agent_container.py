@@ -46,6 +46,7 @@ from code_reviewer_runner.implementer.agent_container import (
     agent_document,
 )
 from code_reviewer_runner.implementer.docker_api import DockerApi
+from code_reviewer_runner.implementer.door_launcher import network_document
 from code_reviewer_runner.implementer.reader import (
     READER_CONTAINER_NAME,
     READER_WRITER_CONTAINER_NAME,
@@ -72,6 +73,8 @@ class Rig:
         self.engine.exec_behaviour = self.behave
         self.relay_port: int | None = None
         self._tries = 0
+        # The model network the door's start made before the agent's container exists.
+        DockerApi(str(self.socket), timeout=5.0).create_network(network_document())
 
     def api(self) -> DockerApi:
         return DockerApi(str(self.socket), timeout=5.0)
@@ -832,3 +835,38 @@ def test_the_pipe_without_a_reader_is_unavailable_not_a_crash(rig: Rig) -> None:
     code, _ = pipe_run(rig, ["/work/repo"], {}, b"")
 
     assert code in (exec_pipe.UNAVAILABLE, exec_pipe.USAGE_ERROR)
+
+
+# #818-T60
+def test_the_vms_side_of_the_model_network_has_no_ipv6_address_before_the_agent_exists(
+    rig: Rig,
+) -> None:
+    """Measured on a VM: root in a container on an internal, isolated network switches IPv6 on,
+    finds the bridge's link-local address and reaches the VM's control port over it. Control takes
+    the address off the bridge before the agent's container is made."""
+    from code_reviewer_runner.implementer import host_rules
+
+    container(rig).create()
+    helpers = [c for c in rig.engine.containers.values() if c.name == host_rules.HELPER_NAME]
+    assert [h.document["Labels"]["code-reviewer.role"] for h in helpers] == ["bridge-ipv6"]
+    helper = helpers[0]
+    assert helper.document["Cmd"] == [
+        "ip link set dev br-000000000000 addrgenmode none && ip -6 addr flush dev br-000000000000"
+    ]
+    host = helper.document["HostConfig"]
+    assert host["NetworkMode"] == "host" and host["CapAdd"] == ["NET_ADMIN"]
+    # The agent image, which has `ip`; never an image an environment's script made.
+    assert helper.document["Image"] == "code-reviewer-agent:golden"
+    created = [t for m, t, _ in rig.engine.calls if m == "POST" and "containers/create" in t]
+    assert created[0].endswith(host_rules.HELPER_NAME)
+    assert created[-1].endswith(AGENT_CONTAINER_NAME)
+
+
+# #818-T61
+def test_a_model_network_that_cannot_be_closed_to_ipv6_ends_the_turn_free(rig: Rig) -> None:
+    rig.engine.ipv6_exit = 1
+    with pytest.raises(JobError) as refused:
+        container(rig).create()
+    assert refused.value.code is ErrorCode.SETUP_FAILED
+    assert "IPv6" in refused.value.detail
+    assert not any(c.name == AGENT_CONTAINER_NAME for c in rig.engine.containers.values())

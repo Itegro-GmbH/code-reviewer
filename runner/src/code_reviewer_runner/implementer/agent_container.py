@@ -55,6 +55,7 @@ from code_reviewer_runner.result import ErrorCode
 
 from .docker_api import AttachedStreams, DockerApi, DockerError
 from .exec_run import exec_document, run_exec
+from .host_rules import HelperFailed, close_bridge_ipv6
 from .reader import REPO_SUBPATH, work_volume_of
 
 _log = logging.getLogger(__name__)
@@ -280,6 +281,9 @@ class AgentSeams:
     clock: Callable[[], float] = time.monotonic
     ready_seconds: float = READY_SECONDS
     image: str = AGENT_IMAGE_REFERENCE
+    # The image the host helper runs from, for the `ip` it has: the golden agent image, never one
+    # an environment's script made (it could have removed the tool).
+    helper_image: str = AGENT_IMAGE_REFERENCE
     # The runtime of the container: Sysbox in production. The test lane on a machine without Sysbox
     # (CI) starts the real image under `runc` with an entrypoint that skips the inner Docker, which
     # has to write `READY_FILE` itself. Production never sets either.
@@ -326,6 +330,15 @@ class AgentContainer:
             volume = work_volume_of(own)
             if not image:
                 raise unavailable("the agent image is not in this VM")
+            # The VM's side of the model network gets no IPv6 address before the agent exists:
+            # root in the container can switch IPv6 on and would find the bridge's link-local
+            # address and, behind it, the VM's control port (`host_rules.py`).
+            try:
+                close_bridge_ipv6(api, self._seams.helper_image, MODEL_NETWORK_NAME)
+            except HelperFailed as failed:
+                raise unavailable(
+                    f"the model network could not be closed to IPv6 ({failed.reason})"
+                ) from None
             container = api.create_container(
                 agent_document(
                     image,
