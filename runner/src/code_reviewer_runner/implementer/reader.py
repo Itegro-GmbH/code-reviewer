@@ -261,8 +261,14 @@ class ReaderAccess:
             )
             self._containers[writable] = container
             self._api.start_container(container)
-        except (DockerError, JobError):
-            _log.warning("the reader could not be started")
+        except (DockerError, JobError) as error:
+            # What the daemon said is about containers and paths of this VM, never about the job.
+            reason = (
+                f"{error.status}: {error.message[:160]}"
+                if isinstance(error, DockerError)
+                else error.detail[:160]
+            )
+            _log.warning("the reader could not be started (%s)", reason)
             self._drop(writable)
             return None
         return self._containers.get(writable)
