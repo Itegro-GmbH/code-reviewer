@@ -31,7 +31,7 @@ def test_an_agent_that_fills_its_disk_still_gets_what_it_committed_pushed(tmp_pa
             write_file(repo, "before.txt", "before the disk was full\n"),
             commit("Before the disk was full"),
             bash(
-                "dd if=/dev/zero of=/work/repo/fill.bin bs=1M 2>&1 | tail -1; "
+                "dd if=/dev/zero of=/work/repo/fill.bin bs=1M 2>&1 | head -2; "
                 "df -k /work/repo | tail -1; echo '[filled]'"
             ),
             write_file(repo, "after.txt", "after\n"),
