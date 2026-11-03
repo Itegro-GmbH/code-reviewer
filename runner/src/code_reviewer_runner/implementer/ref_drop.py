@@ -66,8 +66,9 @@ class RefDeletions:
                     if ref in kept or not ref.startswith((HEADS, TAGS)):
                         continue
                     self.count += 1
-                    # `-z`: the command, a space, the ref, NUL, an empty old value, NUL.
-                    made += b"delete " + ref + b"\0\0"
+                    # `-z`: the command, a space, the ref, NUL, an empty old value, NUL. `no-deref`:
+                    # a symbolic ref the script made goes itself, not the branch it points at.
+                    made += b"option no-deref\0delete " + ref + b"\0\0"
                 if made and not put(bytes(made)):
                     raise RefListingFailed("the deletions are no longer read")
 

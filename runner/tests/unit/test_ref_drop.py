@@ -37,7 +37,9 @@ def test_every_branch_but_the_kept_ones_and_every_tag_becomes_a_delete_command()
     commands = b"".join(deletions)
 
     assert commands == (
-        b"delete refs/heads/tmp\0\0delete refs/tags/v1\0\0delete refs/heads/\xff\xfe\0\0"
+        b"option no-deref\0delete refs/heads/tmp\0\0"
+        b"option no-deref\0delete refs/tags/v1\0\0"
+        b"option no-deref\0delete refs/heads/\xff\xfe\0\0"
     )
     assert deletions.count == 3
 
@@ -67,5 +69,5 @@ def test_a_consumer_that_stops_early_does_not_leave_the_listing_blocked() -> Non
     first = next(commands)
     commands.close()  # joins the listing's thread, which is told to stop
 
-    assert first.startswith(b"delete refs/heads/")
+    assert first.startswith(b"option no-deref\0delete refs/heads/")
     assert threading.active_count() == threads

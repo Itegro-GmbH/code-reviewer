@@ -594,6 +594,27 @@ def test_a_branch_a_linked_worktree_of_the_script_has_checked_out_is_dropped_too
     assert workspace.commits_since_start() == []
 
 
+# #818-T70d
+def test_a_symbolic_ref_of_the_script_goes_itself_not_the_branch_it_points_at(rig: Rig) -> None:
+    """Without `no-deref`, `update-ref` deleted the target of a symbolic ref: a script could make
+    the turn lose its task branch or its base branch."""
+    workspace = rig.prepared()
+    start = workspace.start_commit
+    _git(rig, workspace, "symbolic-ref", "refs/heads/to-task", f"refs/heads/{BRANCH}")
+    _git(rig, workspace, "symbolic-ref", "refs/heads/to-base", "refs/heads/main")
+    _git(rig, workspace, "symbolic-ref", "refs/tags/to-head", "HEAD")
+
+    workspace.settle_after_setup()
+
+    assert _heads(rig, workspace) == {
+        f"refs/heads/{BRANCH}": start,
+        "refs/heads/main": start,
+    }
+    assert _git(rig, workspace, "tag", "--list").strip() == ""
+    assert _git(rig, workspace, "rev-parse", "--verify", "HEAD").strip() == start
+    assert workspace.dropped_refs == 3
+
+
 # #818-T70c
 def test_more_refs_than_a_listing_of_a_mebibyte_are_dropped_streamed(rig: Rig) -> None:
     """1,200 branches with names of 1,000 bytes (a path of nested folders in the ref store) are a
