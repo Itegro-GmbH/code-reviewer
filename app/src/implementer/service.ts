@@ -24,6 +24,7 @@ import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import { JobQueueError } from "../jobs/errors.ts";
 import type { EnqueueImplementerTurnResult } from "../jobs/job-types.ts";
 import type { JobQueue } from "../jobs/job-queue.ts";
+import { isEnvironmentVcpus } from "./environments/limits.ts";
 import { branchConflict } from "./branch-name.ts";
 import { ImplementerError, type UnwritableReason } from "./errors.ts";
 import type { ImplementerModels, ModelOptions } from "./models.ts";
@@ -355,6 +356,12 @@ export function createImplementerService(
           throw new ImplementerError(
             "IMPLEMENTER_ENVIRONMENT_NOT_FOUND",
             "There is no such environment in this workspace.",
+          );
+        // A size that is no longer offered (1 vCPU) is shown on the page as it is and refused here, before a turn, a job or a VM exists.
+        if (!isEnvironmentVcpus(found.vcpus))
+          throw new ImplementerError(
+            "IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED",
+            "The size of this environment is no longer offered.",
           );
         environment = {
           id: found.id,

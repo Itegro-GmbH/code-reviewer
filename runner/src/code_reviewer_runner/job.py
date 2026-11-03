@@ -98,7 +98,8 @@ _IMPLEMENTER_FIELDS = {
     "environment",
 }
 _IMPLEMENTER_ENVIRONMENT_FIELDS = {"name", "setupScript"}
-# The bounds of the contract (`contracts/environment-sizes.v1.json`): a script is text of at most 64 KB.
+# The bounds of the contract (`contracts/environment-sizes.v1.json`): a script is text of at most
+# 64 KB.
 MAX_SETUP_SCRIPT_BYTES = 64 * 1024
 MAX_ENVIRONMENT_NAME_CHARS = 80
 _IMPLEMENTER_REPO_FIELDS = {"fullName", "cloneUrl"}

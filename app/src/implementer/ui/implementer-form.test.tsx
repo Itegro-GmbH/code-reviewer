@@ -1531,21 +1531,34 @@ const NODE_ENV = {
   id: "env-node",
   name: "Node 22",
   vcpus: 6,
-  memoryGb: 12,
+  memoryGb: 10,
+  sizeSupported: true,
   hasScript: true,
 };
 const BARE_ENV = {
   ...NODE_ENV,
   id: "env-bare",
   name: "Bare",
-  vcpus: 1,
+  vcpus: 2,
   memoryGb: 2,
+  hasScript: false,
+};
+// An environment made when 1 vCPU was offered: shown as it is, refused at submit.
+const OLD_ENV = {
+  ...NODE_ENV,
+  id: "env-old",
+  name: "One core",
+  vcpus: 1,
+  memoryGb: 0,
+  sizeSupported: false,
   hasScript: false,
 };
 const withEnvironments = () =>
   fakeApi({
     environments: vi.fn<ImplementerApi["environments"]>(() =>
-      Promise.resolve(ok({ environments: [BARE_ENV, NODE_ENV], maximum: 50 })),
+      Promise.resolve(
+        ok({ environments: [BARE_ENV, NODE_ENV, OLD_ENV], maximum: 50 }),
+      ),
     ),
   });
 
@@ -1562,9 +1575,10 @@ describe("the environment picker (#818)", () => {
     const options = await screen.findAllByRole("option");
 
     expect(options.map((option) => option.textContent)).toEqual([
-      "Standard (2 vCPU, 4 GB, no setup script)",
-      "Bare (1 vCPU, 2 GB)",
-      "Node 22 (6 vCPU, 12 GB, setup script)",
+      "Standard (2 vCPU, 2 GB memory, no setup script)",
+      "Bare (2 vCPU, 2 GB memory)",
+      "Node 22 (6 vCPU, 10 GB memory, setup script)",
+      "One core (1 vCPU, no longer offered)",
     ]);
     expect(control("Environment").textContent).toContain("Standard");
   });
@@ -1622,7 +1636,7 @@ describe("the environment picker (#818)", () => {
   });
 
   // #818-T22
-  it("says, for an environment with a script, that setup scripts do not run yet and a task with it will not run", async () => {
+  it("says, for an environment with a script, what the script is and what it costs when it fails", async () => {
     const user = userEvent.setup();
     renderForm(withEnvironments());
     await waitFor(() =>
@@ -1631,10 +1645,35 @@ describe("the environment picker (#818)", () => {
 
     await chooseOption(user, control("Environment"), /^Node 22/);
 
-    const note = screen.getByText(/setup scripts do not run yet/i);
-    expect(note.textContent).toMatch(/will not run/i);
-    // Nothing is promised that the code does not do.
-    expect(note.textContent).not.toMatch(/runs its setup script/i);
+    const note = screen.getByText(/has a setup script/i);
+    expect(note.textContent).toMatch(/root/i);
+    expect(note.textContent).toMatch(/full internet access and no secrets/i);
+    expect(note.textContent).toMatch(/not charged/i);
+    // It does not say the scripts are not run: they are.
+    expect(screen.queryByText(/do not run yet/i)).toBeNull();
+  });
+
+  // #818-T23: an environment that still has 1 vCPU is shown as it is, and the task is refused with a clear message
+  it("shows an environment with a size that is no longer offered, says so when it is chosen, and shows the server's refusal", async () => {
+    const user = userEvent.setup();
+    const api = withEnvironments();
+    api.startTask.mockResolvedValueOnce(
+      refused(422, "IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED"),
+    );
+    renderForm(api);
+    await fillIn(user);
+    await chooseOption(user, control("Environment"), /^One core/);
+
+    expect(screen.getByText(/1 vCPU leaves the agent no memory/i)).toBeTruthy();
+    await user.click(startButton());
+
+    expect(
+      await screen.findByText(/no longer offered \(1 vCPU leaves the agent no memory\)/i),
+    ).toBeTruthy();
+    expect(control("Environment").getAttribute("aria-invalid")).toBe("true");
+    expect(api.startTask.mock.calls[0]?.[0]).toMatchObject({
+      environmentId: "env-old",
+    });
   });
 
   // #818-T22

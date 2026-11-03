@@ -28,7 +28,8 @@ the VM's side of the bridge, not in the container: the container is root of a us
 own and owns its network namespace, so anything installed inside it, the script could remove; the
 host's rules, it cannot reach. Packets from its bridge to the VM itself (input) are dropped; packets
 that would be routed anywhere private, or into another bridge (the default bridge Control is on,
-the model network), are dropped (IPv6 is not forwarded by the VM at all); the rest of the internet is open on every port,
+the model network), are dropped (IPv6 is not forwarded by the VM at all); the rest of the internet
+is open on every port,
 which includes the inner containers of its own Docker (their traffic is routed through the
 container's address). DNS goes to public resolvers named in the container's definition, because the
 VM's own resolver is on a private address. A Setup whose rules did not go in is never started.
@@ -46,7 +47,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 
@@ -96,9 +97,12 @@ RUN_SCRIPT: Final = (
 )
 
 # What happens after a script that ended well: remove the script's file, then ask the container's
-# Docker to stop the way a daemon is stopped (SIGTERM), so that its images are on disk in one piece. The
-# container's init ends with the daemon and the container stops by itself, which also ends this exec:
-# its exit status says nothing, so Control waits for the container, not for the exec. A container with
+# Docker to stop the way a daemon is stopped (SIGTERM), so that its images are on disk in one
+# piece. The
+# container's init ends with the daemon and the container stops by itself, which also ends this
+# exec:
+# its exit status says nothing, so Control waits for the container, not for the exec. A container
+# with
 # no daemon (the test lane under runc) has no pid file and says so.
 NO_DOCKER: Final = "no-docker"
 FINISH_SCRIPT: Final = f"""
@@ -112,7 +116,8 @@ echo stopping
 # host's namespace, hooked before Docker's own rules (priority -10), whose only verdicts are drops:
 # whatever it does not drop goes on to Docker's rules as before. Rules for a bridge that does not
 # exist yet are fine, a name is matched when a packet arrives. (An `inet` table is what one would
-# write; the kernel of the platform's VM does not support the family, nor `ip6`: measured 2026-11-03,
+# write; the kernel of the platform's VM does not support the family, nor `ip6`: measured
+# 2026-11-03,
 # `Operation not supported`. Its IPv6 forwarding is off, `net.ipv6.conf.all.forwarding = 0`, and the
 # bridge has no IPv6 address.)
 EGRESS_TABLE: Final = "setup_egress"
@@ -141,7 +146,8 @@ RULES_SECONDS: Final = 20.0
 NFT: Final = "/usr/sbin/nft"
 
 # How long each part may take. The script's own limit comes from the caller (it is counted in the
-# turn's time budget); these are the parts around it, and `SETUP_OVERHEAD_SECONDS` is their sum: what
+# turn's time budget); these are the parts around it, and `SETUP_OVERHEAD_SECONDS` is their sum:
+# what
 # the caller must leave besides the script.
 READY_SECONDS: Final = 60.0
 FINISH_EXEC_SECONDS: Final = 30.0
@@ -212,9 +218,7 @@ def setup_document(
         "WorkingDir": AGENT_REPO,
         "Labels": {SETUP_ROLE_LABEL: "setup"},
         "NetworkingConfig": {
-            "EndpointsConfig": {
-                SETUP_NETWORK_NAME: {"IPAMConfig": {"IPv4Address": SETUP_ADDRESS}}
-            }
+            "EndpointsConfig": {SETUP_NETWORK_NAME: {"IPAMConfig": {"IPv4Address": SETUP_ADDRESS}}}
         },
         "HostConfig": {
             "Runtime": runtime,
@@ -300,6 +304,13 @@ class SetupSeams:
     docker_stop_seconds: float = DOCKER_STOP_SECONDS
     # False only in a test that has no host namespace to put rules in (never in production).
     install_rules: bool = True
+
+
+def _variables(listed: object) -> set[str]:
+    """The `NAME=value` entries of a container's or an image's `Env`."""
+    if not isinstance(listed, list):
+        return set()
+    return {entry for entry in cast("list[Any]", listed) if isinstance(entry, str)}
 
 
 class _Unavailable(Exception):
@@ -415,7 +426,9 @@ class SetupContainer:
         if not worker_image or not image:
             raise _Unavailable("setup_unavailable: an image of the VM is missing")
         if self._seams.runtime not in api.runtimes():
-            raise _Unavailable(f"setup_unavailable: the daemon has no {self._seams.runtime} runtime")
+            raise _Unavailable(
+                f"setup_unavailable: the daemon has no {self._seams.runtime} runtime"
+            )
         # A network of an earlier run (a VM runs one turn, but a retry of the step must not trip).
         api.remove_network(SETUP_NETWORK_NAME)
         self._network = api.create_network(network_document())
@@ -446,8 +459,12 @@ class SetupContainer:
         api = self._api
         try:
             close_bridge_ipv6(api, self._seams.helper_image, SETUP_NETWORK_NAME)
-            run_helper(api, worker_image, [NFT], [EGRESS_RULES], "setup-rules", seconds=RULES_SECONDS)
-            run_helper(api, worker_image, [NFT], [CHECK_RULES], "setup-rules-check", seconds=RULES_SECONDS)
+            run_helper(
+                api, worker_image, [NFT], [EGRESS_RULES], "setup-rules", seconds=RULES_SECONDS
+            )
+            run_helper(
+                api, worker_image, [NFT], [CHECK_RULES], "setup-rules-check", seconds=RULES_SECONDS
+            )
         except HelperFailed as failed:
             raise _Unavailable(
                 f"setup_unavailable: the network rules could not be installed ({failed.reason})"
@@ -457,7 +474,9 @@ class SetupContainer:
         end = self._seams.clock() + self._seams.ready_seconds
         while True:
             if self._ended.is_set():
-                raise _Unavailable("setup_unavailable: the container ended before its Docker was ready")
+                raise _Unavailable(
+                    "setup_unavailable: the container ended before its Docker was ready"
+                )
             done = run_exec(self._api, container, ["/usr/bin/test", "-e", READY_FILE], timeout=10.0)
             if done.returncode == 0 and not done.unanswered:
                 return
@@ -490,18 +509,14 @@ class SetupContainer:
         if set(networks) != {SETUP_NETWORK_NAME}:
             problems.append("networks")
         destinations: set[object] = set()
-        for mount in mounts if isinstance(mounts, list) else []:
+        for mount in cast("list[Any]", mounts) if isinstance(mounts, list) else []:
             given = as_object(mount)
             destinations.add(None if given is None else given.get("Destination"))
         if destinations - {AGENT_REPO}:
             problems.append("mounts")
         # Not one variable besides the image's own.
-        given_env = config.get("Env")
         image_config = as_object(self._api.inspect_image(image).get("Config")) or {}
-        image_env = image_config.get("Env")
-        if set(given_env if isinstance(given_env, list) else []) != set(
-            image_env if isinstance(image_env, list) else []
-        ):
+        if _variables(config.get("Env")) != _variables(image_config.get("Env")):
             problems.append("environment")
         if problems:
             self._kill()
@@ -637,9 +652,13 @@ class SetupContainer:
         )
         if NO_DOCKER in finished.stdout or self._ended.is_set():
             # Nothing runs in the container but its init: stop it.
-            api.stop_container(container, grace=STOP_GRACE_SECONDS, timeout=STOP_WAIT_SECONDS + 30.0)
+            api.stop_container(
+                container, grace=STOP_GRACE_SECONDS, timeout=STOP_WAIT_SECONDS + 30.0
+            )
         elif not self._ended.wait(self._seams.docker_stop_seconds):
-            raise _Unavailable("the container's Docker did not stop in time, so its images are not kept")
+            raise _Unavailable(
+                "the container's Docker did not stop in time, so its images are not kept"
+            )
         if not self._ended.wait(STOP_WAIT_SECONDS):
             raise _Unavailable("the container did not stop, so its file system is not kept")
         return api.commit_container(

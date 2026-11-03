@@ -354,4 +354,24 @@ describe("the sizes of an Implementer environment (contracts/environment-sizes.v
     expect([...SANDBOX_VCPUS]).toEqual(sizes.vcpus);
     expect(SANDBOX_MEMORY_PER_VCPU_MB).toBe(sizes.memoryPerVcpuMb);
   });
+
+  // #818-T02: what the agent gets at each size is what the Launcher computes (Control at its default 768 MB), and the sizes an
+  // environment may name are exactly those that leave the agent enough to start with.
+  it("name the memory the agent's container gets at each size and the sizes that leave it enough", async () => {
+    const sizes = readContract<{
+      vcpus: number[];
+      environmentVcpus: number[];
+      minAgentMemoryMb: number;
+      agentMemoryMb: Record<string, number>;
+    }>("environment-sizes.v1.json");
+    const { agentMemoryMb, IMPLEMENTER_MIN_AGENT_MEMORY_MB, SANDBOX_KIND_DEFAULTS } =
+      await import("./launchers/sandbox.ts");
+    const control = Number.parseInt(SANDBOX_KIND_DEFAULTS.implementer.memory.limit);
+    for (const vcpus of sizes.vcpus)
+      expect(sizes.agentMemoryMb[String(vcpus)]).toBe(agentMemoryMb(vcpus, control));
+    expect(sizes.minAgentMemoryMb).toBe(IMPLEMENTER_MIN_AGENT_MEMORY_MB);
+    expect(sizes.environmentVcpus).toEqual(
+      sizes.vcpus.filter((vcpus) => agentMemoryMb(vcpus, control) >= sizes.minAgentMemoryMb),
+    );
+  });
 });

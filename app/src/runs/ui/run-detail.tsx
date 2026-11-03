@@ -474,7 +474,7 @@ export function RunDetail({
                   description: (
                     <span className="break-words">
                       {task.environment.name} ({task.environment.vcpus} vCPU,{" "}
-                      {task.environment.memoryGb} GB)
+                      {task.environment.memoryGb} GB memory)
                     </span>
                   ),
                 },

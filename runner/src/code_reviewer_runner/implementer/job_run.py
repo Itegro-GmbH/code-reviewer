@@ -109,7 +109,9 @@ class EnvironmentHost:
     the agent's container from that image. A `TurnSetup` without one cannot run a task that names a
     script."""
 
-    run: Callable[[ImplementerInput, Callable[[], float], Callable[[], bool], float], EnvironmentSetup]
+    run: Callable[
+        [ImplementerInput, Callable[[], float], Callable[[], bool], float], EnvironmentSetup
+    ]
     place: Callable[[str], Callable[[], AgentPlace]]
 
 

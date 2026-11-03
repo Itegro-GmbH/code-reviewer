@@ -82,13 +82,13 @@ from code_reviewer_runner.implementer.git_workspace import (
     WorkspaceLayout,
     WorkspaceSpec,
 )
+from code_reviewer_runner.implementer.host_rules import HELPER_NAME
 from code_reviewer_runner.implementer.reader import (
     READER_CONTAINER_NAME,
     READER_WRITER_CONTAINER_NAME,
     ReaderAccess,
     ReaderSeams,
 )
-from code_reviewer_runner.implementer.host_rules import HELPER_NAME
 from code_reviewer_runner.implementer.session import ImplementerSession, SessionSeams
 from code_reviewer_runner.implementer.setup_container import (
     SETUP_CONTAINER_NAME,
@@ -98,7 +98,11 @@ from code_reviewer_runner.implementer.setup_container import (
     SetupSeams,
 )
 from code_reviewer_runner.implementer.turn_result import TurnResult
-from code_reviewer_runner.job import ImplementerEnvironment, ImplementerInput, parse_implementer_input
+from code_reviewer_runner.job import (
+    ImplementerEnvironment,
+    ImplementerInput,
+    parse_implementer_input,
+)
 from git_support import TOKEN, Origin, raw, system_git
 from passthrough_loopback import LoopbackUpstream
 
@@ -633,7 +637,8 @@ def lane_environment(
     should_stop: Callable[[], bool] = lambda: False,
 ) -> Generator[tuple[LaneWorkspace, EnvironmentSetup]]:
     """Only the environment's step: the prepared workspace and what the script did. For the scripts
-    that fail, run out of time or fill the disk, and the questions about the Setup container itself."""
+    that fail, run out of time or fill the disk, and the questions about the Setup container
+    itself."""
     with lane_workspace(scratch, seed=seed, disk_megabytes=disk_megabytes) as lane:
         step = environment_step(
             lane, script, memory_mb=memory_mb, time_limit=time_limit, should_stop=should_stop

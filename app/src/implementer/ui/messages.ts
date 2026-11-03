@@ -48,13 +48,15 @@ export const FORM_COPY = {
   environment: "Environment",
   environmentPlaceholder: "Choose an environment",
   environmentHint:
-    "A size and a setup script for this task. Without a choice the standard applies. Environments are managed under",
+    "A size and a setup script for this task. The script runs once in a container of its own, before the agent starts. Without a choice the standard applies. Environments are managed under",
   environmentLink: "Environments",
   environmentScriptNote:
-    "This environment has a setup script, and setup scripts do not run yet. A task started with it will not run: it ends with an error before the AI model is called, and is not charged. Choose the standard or an environment without a script.",
+    "This environment has a setup script. It runs as root in a container of its own with full internet access and no secrets, before the agent starts, and its time counts toward the task's time limit. If it fails, the task stops before the AI model is called and is not charged. The agent then works without internet access.",
+  environmentSizeUnsupportedNote:
+    "This environment has a size that is no longer offered: 1 vCPU leaves the agent no memory. A task started with it is refused. Choose another environment, or change the size under Environments.",
   environmentLoadFailed:
     "The environments could not be loaded. A task can still be sent with the standard.",
-  environmentStandard: "Standard (2 vCPU, 4 GB, no setup script)",
+  environmentStandard: "Standard (2 vCPU, 2 GB memory, no setup script)",
   costLimit: "Cost limit (USD, optional)",
   costLimitHint:
     "The task stops when it reaches this amount. Leave empty for the maximum.",
@@ -280,6 +282,8 @@ const failureCopy = (
     "A task with this form was already started, and what you sent now is not that task. Open the task that was started, or reload the page to send a new one.",
   IMPLEMENTER_ENVIRONMENT_NOT_FOUND:
     "This environment does not exist any more. Choose another, or the standard.",
+  IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED:
+    "The size of this environment is no longer offered (1 vCPU leaves the agent no memory), so the task was not started and nothing was charged. Change the size under Environments to 2 vCPU or more, or choose another environment.",
   IMPLEMENTER_MODEL_NOT_ALLOWED: hasReason(failure.reason)
     ? MODEL_REFUSAL_COPY[failure.reason]
     : MODEL_REFUSED_GENERIC,

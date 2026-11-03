@@ -28,6 +28,7 @@ import {
   WORK_VOLUME_STEPS_SECONDS,
   minimumVmTimeoutMargin,
   agentMemoryMb,
+  IMPLEMENTER_MIN_AGENT_MEMORY_MB,
   IMPLEMENTER_VM_HEADROOM_MB,
   MODEL_DOOR_MEMORY_MB,
   READER_COUNT,
@@ -1642,57 +1643,61 @@ describe("the size of a job (#818)", () => {
       ...overrides,
     });
 
-  // #818-T30
+  // #818-T30: the VM follows the job's size; Control keeps its own memory and the agent gets the rest.
   it.each([
-    [1, "1536m", "1280m"],
-    [2, "3072m", "2560m"],
-    [4, "7168m", "6656m"],
-    [6, "11264m", "10752m"],
-    [8, "15360m", "14848m"],
+    [2, 2048],
+    [4, 6144],
+    [6, 10240],
+    [8, 14336],
   ])(
-    "creates the VM with the size of an Implementer job, %i vCPU, and the container memory follows it",
-    async (vcpus, limit, reservation) => {
+    "creates the VM with the size of an Implementer job, %i vCPU, and leaves the agent %i MB",
+    async (vcpus, agentMb) => {
       const result = await launch(build(), implementer({ vcpus }));
 
       expect(result).toStrictEqual({ ok: true });
       expect(service.creates[0]?.vcpus).toBe(vcpus);
       const args = dockerRun()?.args ?? [];
-      expect(valuesOf(args, "--memory")).toStrictEqual([limit]);
-      expect(valuesOf(args, "--memory-swap")).toStrictEqual([limit]);
-      expect(valuesOf(args, "--memory-reservation")).toStrictEqual([
-        reservation,
-      ]);
-      // What the container may have fits in the VM beside the OS and Docker: at most VM memory minus 256 MB.
-      expect(Number.parseInt(limit)).toBeLessThanOrEqual(vcpus * 2048 - 256);
+      // Control is the same container at every size.
+      expect(valuesOf(args, "--memory")).toStrictEqual(["768m"]);
+      expect(valuesOf(args, "--memory-reservation")).toStrictEqual(["512m"]);
+      const environment = valuesOf(args, "--env").join(" ");
+      expect(environment).toContain(
+        `RUNNER_IMPLEMENTER_AGENT_MEMORY_MB=${agentMb}`,
+      );
+      expect(planForKind("implementer", { launcher: { vcpus } }).agentMemoryMb).toBe(
+        agentMb,
+      );
     },
   );
 
   // #818-T30
-  it("keeps the standard when the job names no size: 2 vCPU and 3 GB, as before", async () => {
+  it("keeps the standard when the job names no size: 2 vCPU, Control at 768 MB, as before", async () => {
     await launch(build(), implementer());
 
     expect(service.creates[0]?.vcpus).toBe(2);
-    expect(valuesOf(dockerRun()?.args ?? [], "--memory")).toStrictEqual(["3g"]);
+    expect(valuesOf(dockerRun()?.args ?? [], "--memory")).toStrictEqual([
+      "768m",
+    ]);
   });
 
   // #818-T31
-  it("the size of the job wins over the operator's configuration of the kind, which wins over the default; memory follows the job's size", async () => {
+  it("the size of the job wins over the operator's configuration of the kind, which wins over the default; the operator's memory for the kind is Control's at every size", async () => {
     const configured = {
       launcher: { vcpus: 4 },
-      container: { memory: { limit: "6g", reservation: "5g" } },
+      container: { memory: { limit: "1g", reservation: "768m" } },
     };
 
     await launch(build(), implementer({ config: configured }));
-    await launch(build(), implementer({ config: configured, vcpus: 1 }));
+    await launch(build(), implementer({ config: configured, vcpus: 6 }));
 
     expect(service.creates.map((created) => created.vcpus)).toStrictEqual([
-      4, 1,
+      4, 6,
     ]);
     const [withoutSize, withSize] = service.starts.filter(
       (start) => start.label === "docker-run",
     );
-    expect(valuesOf(withoutSize?.args ?? [], "--memory")).toStrictEqual(["6g"]);
-    expect(valuesOf(withSize?.args ?? [], "--memory")).toStrictEqual(["1536m"]);
+    expect(valuesOf(withoutSize?.args ?? [], "--memory")).toStrictEqual(["1g"]);
+    expect(valuesOf(withSize?.args ?? [], "--memory")).toStrictEqual(["1g"]);
   });
 
   // #818-T32
@@ -1716,6 +1721,19 @@ describe("the size of a job (#818)", () => {
       expect(service.creates).toStrictEqual([]);
     },
   );
+
+  // #818-T32b: 1 vCPU is a size of the platform (reviews use it) but leaves the agent nothing.
+  it("refuses 1 vCPU for an Implementer job: the platform has it, the agent would get no memory", async () => {
+    const error = failure(await launch(build(), implementer({ vcpus: 1 })));
+
+    expect(error.code).toBe("sandbox_size_unsupported");
+    expect(error.retryable).toBe(false);
+    expect(service.creates).toStrictEqual([]);
+    expect(agentMemoryMb(1, 768)).toBeLessThan(IMPLEMENTER_MIN_AGENT_MEMORY_MB);
+    expect(agentMemoryMb(2, 768)).toBeGreaterThanOrEqual(
+      IMPLEMENTER_MIN_AGENT_MEMORY_MB,
+    );
+  });
 
   // #818-T33
   it.each(["diff", "dynamic"] as const)(

@@ -166,18 +166,10 @@ function isSandboxVcpus(
 }
 
 /**
- * The container memory of an Implementer job that chose a size (#818): the VM's memory (2 GB per vCPU) minus 1 GB for the OS,
- * dockerd and the work volume's page cache, as the default 2 vCPU / 3 GB already is; for 1 vCPU the 1.5 GB a review runs in (the
- * VM keeps 512 MB). The reservation is 512 MB below the limit (256 MB for 1 vCPU, as for a review).
+ * The least memory the agent's container is worth starting with (`MIN_AGENT_MEMORY_MB` of the runner's job_run.py; a test holds the two
+ * together). A size of an Implementer job that leaves it less is refused before a VM is created: 1 vCPU, where nothing is left.
  */
-export function implementerMemoryFor(vcpus: number): {
-  limit: string;
-  reservation: string;
-} {
-  if (vcpus <= 1) return { limit: "1536m", reservation: "1280m" };
-  const limit = vcpus * SANDBOX_MEMORY_PER_VCPU_MB - 1024;
-  return { limit: `${limit}m`, reservation: `${limit - 512}m` };
-}
+export const IMPLEMENTER_MIN_AGENT_MEMORY_MB = 1024;
 
 /** The directory of the VM below which the work volume of a job gets its own (a mount of its own, `workVolumeCommands`). */
 export const WORK_VOLUME_ROOT = "/var/lib/code-reviewer-work";
@@ -285,14 +277,17 @@ function planOf(spec: LaunchSpec): Plan {
     throw new LaunchError("sandbox_size_unsupported");
   const vcpus = jobSize ?? options.vcpus ?? defaults.vcpus;
   if (!isSandboxVcpus(vcpus)) throw configInvalid();
+  // The Control container keeps its own memory whatever the size: the size is the agent's, and the agent gets what the VM has left
+  // (`agentMemoryMb`). A size the platform has but that leaves the agent less than it can start with (1 vCPU) is refused for a job.
+  const memory = { ...defaults.memory, ...config.container?.memory };
+  if (
+    jobSize !== undefined &&
+    agentMemoryMb(jobSize, megabytes(memory.limit)) <
+      IMPLEMENTER_MIN_AGENT_MEMORY_MB
+  )
+    throw new LaunchError("sandbox_size_unsupported");
 
-  const overrides: WorkerContainerOverrides = {
-    // The memory of a chosen size follows the size; the operator's memory for the kind applies to the jobs that name none.
-    memory:
-      jobSize !== undefined
-        ? implementerMemoryFor(jobSize)
-        : { ...defaults.memory, ...config.container?.memory },
-  };
+  const overrides: WorkerContainerOverrides = { memory };
   try {
     const rendered = applyOverrides(profileOf(spec.kind), overrides);
     // A container that cannot fit in the VM beside the OS would be killed by the VM's own memory limit; an implementer

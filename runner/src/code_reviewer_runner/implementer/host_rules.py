@@ -11,7 +11,8 @@ its veth, it cannot reach):
 * **No IPv6 address on the VM's side of a container's bridge** (`close_bridge_ipv6`). Measured on a
   platform VM (2026-11-03): root in a container on an `internal`, `isolated` network, or on the
   Setup network, can switch IPv6 on in its own namespace (Docker leaves it off, a sysctl of that
-  namespace), find the bridge's link-local address (`fe80::...%eth0`, a neighbour it finds by pinging
+  namespace), find the bridge's link-local address (`fe80::...%eth0`, a neighbour it finds by
+  pinging
   `ff02::1`) and connect to **port 23456 of the VM** over it: the VM's control service listens on
   `*`, and neither the isolated gateway mode nor an `ip` table sees IPv6 (the VM's kernel has no
   `ip6` or `inet` netfilter). The bridge has an IPv6 address because the kernel gives every
@@ -69,7 +70,9 @@ def bridge_of(api: DockerApi, network: str) -> str:
     return bridge_name(f"br-{identifier[:12]}")
 
 
-def helper_document(image: str, entrypoint: list[str], command: list[str], role: str) -> dict[str, Any]:
+def helper_document(
+    image: str, entrypoint: list[str], command: list[str], role: str
+) -> dict[str, Any]:
     """The one-shot container: the host's network namespace, `NET_ADMIN` and no other capability,
     a read-only root, no mount, no environment, one constant command."""
     return {
@@ -106,7 +109,9 @@ def run_helper(
     """Run one helper to its end; `HelperFailed` unless it ended with status 0. The container is
     always removed."""
     try:
-        helper = api.create_container(helper_document(image, entrypoint, command, role), HELPER_NAME)
+        helper = api.create_container(
+            helper_document(image, entrypoint, command, role), HELPER_NAME
+        )
     except DockerError as error:
         raise HelperFailed(f"the helper could not be made ({error.status})") from None
     try:
@@ -131,7 +136,6 @@ def ipv6_script(bridge: str) -> str:
 
 def close_bridge_ipv6(api: DockerApi, image: str, network: str) -> None:
     """Take the VM's IPv6 address off the bridge of `network`, before any container joins it. The
-    image must have `ip` (the agent image does; the Worker image does not). Raises `HelperFailed`."""
-    run_helper(
-        api, image, ["/bin/sh", "-c"], [ipv6_script(bridge_of(api, network))], "bridge-ipv6"
-    )
+    image must have `ip` (the agent image does; the Worker image does not). Raises
+    `HelperFailed`."""
+    run_helper(api, image, ["/bin/sh", "-c"], [ipv6_script(bridge_of(api, network))], "bridge-ipv6")

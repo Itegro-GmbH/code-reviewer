@@ -115,14 +115,19 @@ def test_the_agent_starts_from_what_the_script_left_and_the_tracked_files_are_ba
         # file it changed was put back, so it is no change of the agent's.
         status = raw("show", f"{tip}:status.txt", cwd=turned.origin.path, git=turned.origin.git)
         assert "?? setup-made.txt" in status and "README.md" not in status
-        assert any("1 tracked file(s) the script changed were put back" in n for n in prepared.notes)
+        assert any(
+            "1 tracked file(s) the script changed were put back" in n for n in prepared.notes
+        )
         assert [f.path for f in result.files_changed if f.path == "README.md"] == []
         if under_sysbox:
             images = raw("show", f"{tip}:images.txt", cwd=turned.origin.path, git=turned.origin.git)
             assert "tiny:setup" in images
         # The image is the one that was committed, by repository and tag, and the Setup container
         # and its network are gone.
-        assert docker("image", "inspect", IMAGE, "--format", "{{.Id}}").stdout.strip() == prepared.image
+        assert (
+            docker("image", "inspect", IMAGE, "--format", "{{.Id}}").stdout.strip()
+            == prepared.image
+        )
     nothing_of_the_setup_is_left()
 
 
@@ -142,10 +147,14 @@ def test_a_script_that_fails_ends_before_the_model_and_leaves_its_output(tmp_pat
     nothing_of_the_setup_is_left()
 
 
+def three_seconds(limit: float, elapsed: float) -> float:
+    return 3.0
+
+
 # #818-L03
 def test_a_script_that_runs_out_of_time_is_stopped_and_says_so(tmp_path: Path) -> None:
     with (
-        mock.patch.object(es, "script_seconds", lambda limit, elapsed: 3.0),
+        mock.patch.object(es, "script_seconds", three_seconds),
         mock.patch.object(es, "MIN_SCRIPT_SECONDS", 1.0),
         lane_environment(tmp_path, "echo started\nsleep 600\necho never\n") as (_, step),
     ):
@@ -175,9 +184,11 @@ def test_a_script_that_fills_the_disk_fails_and_the_reserve_is_untouched(tmp_pat
 def test_a_stop_of_the_runner_ends_the_script_and_removes_the_container(tmp_path: Path) -> None:
     stop = threading.Event()
     threading.Timer(4.0, stop.set).start()
-    with pytest.raises(ShutdownRequested):
-        with lane_environment(tmp_path, "sleep 600\n", should_stop=stop.is_set):
-            pass
+    with (
+        pytest.raises(ShutdownRequested),
+        lane_environment(tmp_path, "sleep 600\n", should_stop=stop.is_set),
+    ):
+        pass
     nothing_of_the_setup_is_left()
 
 
@@ -187,7 +198,7 @@ def test_the_setup_container_has_no_secret_of_any_kind(tmp_path: Path) -> None:
 echo '--- environment'; env | sort
 echo '--- pid 1'; tr '\0' '\n' < /proc/1/environ | sort
 echo '--- mounts'; cat /proc/self/mountinfo
-echo '--- files'; ls -la /run /run/secrets /var/run 2>&1
+echo '--- files'; ls -la /run /run/secrets /var/run 2>&1 || true
 echo '--- done'
 """
     with lane_environment(tmp_path, probe) as (_, step):
@@ -206,7 +217,9 @@ echo '--- done'
         assert names, shown
         for name in names:
             upper = name.upper()
-            assert not any(word in upper for word in ("TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL")), name
+            assert not any(
+                word in upper for word in ("TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL")
+            ), name
         # No socket of the VM, no device, no mount but the repository.
         mounts = shown.split("--- mounts")[1].split("--- files")[0]
         assert "docker.sock" not in mounts and "/work/repo" in mounts
@@ -245,7 +258,7 @@ def test_the_setup_container_cannot_reach_the_vms_services_over_ipv4_or_ipv6(
     config = lane_config()
     gateway = bridge_gateway()
     reach = (
-        "t() { if timeout 4 bash -c \"echo > /dev/tcp/$1/$2\" 2>/dev/null; "
+        't() { if timeout 4 bash -c "echo > /dev/tcp/$1/$2" 2>/dev/null; '
         'then echo "OPEN $1:$2"; else echo "blocked $1:$2"; fi; }\n'
     )
     # What root in the container can do about IPv6: switch it on and look for the bridge's

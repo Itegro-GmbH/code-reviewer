@@ -552,8 +552,17 @@ function implementerRowView(
 }
 
 const MAX_ENVIRONMENT_NAME_CHARS = 200;
-/** The platform's memory per vCPU (`contracts/environment-sizes.v1.json`); not imported from the Implementer: this module is below it. */
-const MEMORY_GB_PER_VCPU = 2;
+/**
+ * What the agent's container got at each size of the platform, in GB (`agentMemoryMb` of `contracts/environment-sizes.v1.json`); not imported from the
+ * Implementer: this module is below it. A test holds it to the file. A size not in the list (it cannot be started) shows 0.
+ */
+export const AGENT_MEMORY_GB: Readonly<Record<number, number>> = {
+  1: 0,
+  2: 2,
+  4: 6,
+  6: 10,
+  8: 14,
+};
 
 /** The setup block of a stored result, or null: read field by field like the rest, an entry that is not what the contract says is left out. */
 function readStoredSetup(result: JsonValue | null): {
@@ -619,7 +628,7 @@ function environmentView(
       cleanTaskLine(head(environment.name, MAX_ENVIRONMENT_NAME_CHARS * 4)),
     ),
     vcpus: environment.vcpus,
-    memoryGb: environment.vcpus * MEMORY_GB_PER_VCPU,
+    memoryGb: AGENT_MEMORY_GB[environment.vcpus] ?? 0,
     setup,
   };
 }

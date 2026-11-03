@@ -15,7 +15,7 @@ import re
 import sys
 import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -101,7 +101,9 @@ class Rig:
             else:
                 stdout.write("stopping\n")
                 if self.finish_mode == "stops":
-                    threading.Timer(0.2, lambda: self.engine.kill(sc.SETUP_CONTAINER_NAME, exit_code=0)).start()
+                    threading.Timer(
+                        0.2, lambda: self.engine.kill(sc.SETUP_CONTAINER_NAME, exit_code=0)
+                    ).start()
             return 0
         return 0
 
@@ -182,7 +184,7 @@ def test_the_document_is_made_of_constants_and_the_given_names_only() -> None:
     }  # fmt: skip
 
 
-# -- the network ------------------------------------------------------------------------------------
+# -- the network -----------------------------------------------------------------------------------
 
 
 # #818-T04
@@ -216,18 +218,20 @@ def test_the_rules_close_everything_of_ours_and_only_drop() -> None:
 def test_the_vms_side_of_the_bridge_is_closed_before_the_setup_container_exists(rig: Rig) -> None:
     done = run(rig)
     assert done.outcome == OUTCOME_OK
-    helpers = [
-        c for c in rig.engine.containers.values() if c.name == host_rules.HELPER_NAME
-    ]
+    helpers = [c for c in rig.engine.containers.values() if c.name == host_rules.HELPER_NAME]
     roles = [c.document["Labels"]["code-reviewer.role"] for c in helpers]
     assert roles == ["bridge-ipv6", "setup-rules", "setup-rules-check"]
     ipv6, rules, check = helpers
     assert ipv6.document["Cmd"] == [
-        f"ip link set dev {sc.SETUP_BRIDGE} addrgenmode none && ip -6 addr flush dev {sc.SETUP_BRIDGE}"
+        f"ip link set dev {sc.SETUP_BRIDGE} addrgenmode none "
+        f"&& ip -6 addr flush dev {sc.SETUP_BRIDGE}"
     ]
     assert rules.document["Cmd"] == [sc.EGRESS_RULES] and check.document["Cmd"] == [sc.CHECK_RULES]
-    # The IPv6 helper runs from the agent image (it has `ip`), the rules from the Worker's (it has `nft`).
-    assert ipv6.document["Image"] == sc.AGENT_IMAGE_REFERENCE and rules.document["Image"] == IMAGE_ID
+    # The IPv6 helper runs from the agent image (it has `ip`), the rules from the Worker's (it has
+    # `nft`).
+    assert (
+        ipv6.document["Image"] == sc.AGENT_IMAGE_REFERENCE and rules.document["Image"] == IMAGE_ID
+    )
     for helper in helpers:
         host = helper.document["HostConfig"]
         assert host["NetworkMode"] == "host"
@@ -266,7 +270,7 @@ def test_a_setup_whose_bridge_could_not_be_closed_to_ipv6_is_never_started(rig: 
     )
 
 
-# -- the script -------------------------------------------------------------------------------------
+# -- the script ------------------------------------------------------------------------------------
 
 
 # #818-T07
@@ -346,7 +350,7 @@ def test_a_container_killed_under_the_script_is_the_scripts_and_says_why(rig: Ri
     assert "killed for its memory" in done.detail
 
 
-# -- the result -------------------------------------------------------------------------------------
+# -- the result ------------------------------------------------------------------------------------
 
 
 # #818-T13
@@ -358,7 +362,10 @@ def test_a_script_that_ended_well_becomes_the_image_after_the_docker_is_stopped(
     # The order: the end script (it removes the file and stops the container's Docker), the stop of
     # the container, the commit, the removal.
     paths = [(m, t.split("?")[0]) for m, t, _ in rig.engine.calls]
-    names = [f"{m} {p.split('/')[1]}{'/' + p.split('/')[-1] if len(p.split('/')) > 2 else ''}" for m, p in paths]
+    names = [
+        f"{m} {p.split('/')[1]}{'/' + p.split('/')[-1] if len(p.split('/')) > 2 else ''}"
+        for m, p in paths
+    ]
     stop_at = max(i for i, n in enumerate(names) if n.endswith("/stop"))
     commit_at = names.index("POST commit")
     remove_at = max(i for i, n in enumerate(names) if n.startswith("DELETE containers"))
@@ -406,7 +413,9 @@ def test_a_commit_the_disk_cannot_hold_is_told_as_such(rig: Rig) -> None:
 
 
 # #818-T17
-def test_a_container_that_never_stops_is_not_committed(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_container_that_never_stops_is_not_committed(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(sc, "STOP_WAIT_SECONDS", 0.3)
     rig.engine.stop_hangs = True
     done = run(rig)
@@ -414,32 +423,40 @@ def test_a_container_that_never_stops_is_not_committed(rig: Rig, monkeypatch: py
     assert rig.engine.committed == []
 
 
-# -- what is checked before the script ------------------------------------------------------------------
+# -- what is checked before the script -------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("change", "word"),
-    [
-        (lambda a: {**a, "HostConfig": {**a["HostConfig"], "Privileged": True}}, "privileged"),
-        (lambda a: {**a, "HostConfig": {**a["HostConfig"], "Runtime": "runc"}}, "runtime"),
-        (lambda a: {**a, "HostConfig": {**a["HostConfig"], "Binds": ["/:/host"]}}, "host access"),
-        (
-            lambda a: {
-                **a,
-                "NetworkSettings": {"Networks": {sc.SETUP_NETWORK_NAME: {}, "bridge": {}}},
-            },
-            "networks",
-        ),
-        (
-            lambda a: {
-                **a,
-                "Mounts": [*a["Mounts"], {"Type": "bind", "Destination": "/var/run/docker.sock"}],
-            },
-            "mounts",
-        ),
-        (lambda a: {**a, "Config": {"Env": ["GIT_TOKEN=x"]}}, "environment"),
-    ],
-)
+def _host(**changes: Any) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    def change(answer: dict[str, Any]) -> dict[str, Any]:
+        return {**answer, "HostConfig": {**answer["HostConfig"], **changes}}
+
+    return change
+
+
+def _networks(answer: dict[str, Any]) -> dict[str, Any]:
+    return {**answer, "NetworkSettings": {"Networks": {sc.SETUP_NETWORK_NAME: {}, "bridge": {}}}}
+
+
+def _mounts(answer: dict[str, Any]) -> dict[str, Any]:
+    socket_mount = {"Type": "bind", "Destination": "/var/run/docker.sock"}
+    return {**answer, "Mounts": [*answer["Mounts"], socket_mount]}
+
+
+def _environment(answer: dict[str, Any]) -> dict[str, Any]:
+    return {**answer, "Config": {"Env": ["GIT_TOKEN=x"]}}
+
+
+CHANGES: list[tuple[Callable[[dict[str, Any]], dict[str, Any]], str]] = [
+    (_host(Privileged=True), "privileged"),
+    (_host(Runtime="runc"), "runtime"),
+    (_host(Binds=["/:/host"]), "host access"),
+    (_networks, "networks"),
+    (_mounts, "mounts"),
+    (_environment, "environment"),
+]
+
+
+@pytest.mark.parametrize(("change", "word"), CHANGES)
 # #818-T18
 def test_a_container_that_is_not_what_was_asked_for_never_gets_the_script(
     rig: Rig, change: Any, word: str
@@ -464,7 +481,9 @@ def test_the_ready_file_is_waited_for(rig: Rig) -> None:
     assert any(e[0] == ["/usr/bin/test", "-e", READY_FILE] for e in rig.execs)
 
 
-def test_the_runtime_and_entrypoint_of_a_lane_without_sysbox_are_the_agents_to_name(rig: Rig) -> None:
+def test_the_runtime_and_entrypoint_of_a_lane_without_sysbox_are_the_agents_to_name(
+    rig: Rig,
+) -> None:
     rig.engine.runtimes["runc"] = {}
     done = run(rig, runtime="runc", entrypoint=("/bin/sleep", "infinity"))
     assert done.outcome == OUTCOME_OK

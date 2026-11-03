@@ -85,6 +85,7 @@ const FIELD_OF_FAILURE: Record<string, FieldKey> = {
   IMPLEMENTER_BASE_BRANCH_NOT_FOUND: "baseBranch",
   IMPLEMENTER_MODEL_NOT_ALLOWED: "model",
   IMPLEMENTER_ENVIRONMENT_NOT_FOUND: "environment",
+  IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED: "environment",
   EXCEEDS_OPERATOR_MAXIMUM: "cost",
 };
 
@@ -443,7 +444,9 @@ export function ImplementerForm({
     { id: STANDARD, label: FORM_COPY.environmentStandard },
     ...environmentList.map((candidate) => ({
       id: candidate.id,
-      label: `${candidate.name} (${candidate.vcpus} vCPU, ${candidate.memoryGb} GB${candidate.hasScript ? ", setup script" : ""})`,
+      label: candidate.sizeSupported
+        ? `${candidate.name} (${candidate.vcpus} vCPU, ${candidate.memoryGb} GB memory${candidate.hasScript ? ", setup script" : ""})`
+        : `${candidate.name} (${candidate.vcpus} vCPU, no longer offered)`,
     })),
   ];
 
@@ -615,7 +618,11 @@ export function ImplementerForm({
           disabled={environments.state === "loading"}
           placeholder={FORM_COPY.environmentPlaceholder}
         />
-        {environment !== undefined && environment.hasScript ? (
+        {environment !== undefined && !environment.sizeSupported ? (
+          <p className="-mt-3 text-sm text-destructive">
+            {FORM_COPY.environmentSizeUnsupportedNote}
+          </p>
+        ) : environment !== undefined && environment.hasScript ? (
           <p className="-mt-3 text-sm text-muted-foreground">
             {FORM_COPY.environmentScriptNote}
           </p>

@@ -38,6 +38,11 @@ export const IMPLEMENTER_ERROR_CODES = [
   "IMPLEMENTER_REQUEST_REUSED",
   /** The environment named by the body is not one of this workspace (another workspace's looks the same), or it was deleted. 404. */
   "IMPLEMENTER_ENVIRONMENT_NOT_FOUND",
+  /**
+   * The environment's size is one that is no longer offered (1 vCPU leaves the agent's container no memory). The task is refused before
+   * anything is written, so nothing is started and nothing is charged; the person changes the size in Environments. 422.
+   */
+  "IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED",
   /** The model is not one the claim would run (`reason` says why). 422. */
   "IMPLEMENTER_MODEL_NOT_ALLOWED",
   /** The cost limit is above the operator's maximum per turn; the answer carries `maximumCents`. 422. */
@@ -64,6 +69,7 @@ export const IMPLEMENTER_ERROR_STATUS: Record<
   IMPLEMENTER_BRANCH_CONFLICT: 409,
   IMPLEMENTER_REQUEST_REUSED: 409,
   IMPLEMENTER_ENVIRONMENT_NOT_FOUND: 404,
+  IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED: 422,
   IMPLEMENTER_MODEL_NOT_ALLOWED: 422,
   EXCEEDS_OPERATOR_MAXIMUM: 422,
   IMPLEMENTER_GITHUB_UNAVAILABLE: 503,

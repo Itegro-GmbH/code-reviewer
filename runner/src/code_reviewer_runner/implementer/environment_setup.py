@@ -8,10 +8,13 @@ words of its result.
 model door exists: a script that fails ends the turn here, free, and the model key was never
 handed to anything. The agent's container starts from the image this step made.
 
-**The time.** The script has `SETUP_SCRIPT_SECONDS` (15 minutes, `contracts/environment-sizes.v1.json`)
+**The time.** The script has `SETUP_SCRIPT_SECONDS` (15 minutes,
+`contracts/environment-sizes.v1.json`)
 at most, and the whole step (start, script, saving the image) is part of the turn's time limit: the
-agent's own deadline is counted from the start of the job, so the minutes of the step are gone from it
-(`session.deadline_seconds`). The script is also held to what the limit leaves: the grace for the end
+agent's own deadline is counted from the start of the job, so the minutes of the step are gone from
+it
+(`session.deadline_seconds`). The script is also held to what the limit leaves: the grace for the
+end
 of the turn, the parts of the step around the script (`SETUP_OVERHEAD_SECONDS`) and at least
 `MIN_AGENT_SECONDS` for the agent; a limit that leaves less than `MIN_SCRIPT_SECONDS` for the script
 ends the turn here, free, saying so.
@@ -20,13 +23,15 @@ ends the turn here, free, saying so.
 anything in it. What it added (untracked files, `node_modules`, a virtual environment, build
 output) stays: that is what a setup is for. A change to a **tracked** file is undone
 (`GitWorkspace.restore_tracked`), because the turn ends by committing and pushing whatever the tree
-holds, and a lockfile an install rewrote would arrive on the branch as the agent's work. The log says
+holds, and a lockfile an install rewrote would arrive on the branch as the agent's work. The log
+says
 how many files were put back and names the first few. This is the one rule about what the script
 did; it is a rule about where the agent starts, not about what the script may do.
 
 **What the page gets.** The `setup` block of the result (`ImplementerSetupResult`): ok, the exit
 status (None when the script did not end by itself), whether it ran out of time, the seconds, and
-the end of its output (stdout and stderr together) with the job's secrets removed, control characters
+the end of its output (stdout and stderr together) with the job's secrets removed, control
+characters
 taken out, at most 8,192 characters.
 """
 
@@ -41,10 +46,9 @@ from code_reviewer_runner.redaction import Redactor
 from code_reviewer_runner.result import ErrorCode
 
 from .git_workspace import GitWorkspace
-from .session import GRACE_SECONDS, ShutdownRequested, deadline_seconds
+from .session import ShutdownRequested, deadline_seconds
 from .setup_container import (
     OUTCOME_NOT_SAVED,
-    OUTCOME_OK,
     OUTCOME_SCRIPT_FAILED,
     OUTCOME_STOPPED,
     OUTCOME_TIMED_OUT,
@@ -89,7 +93,8 @@ def clean_output(raw: bytes, secrets: Iterable[str]) -> str:
 @dataclass(frozen=True)
 class EnvironmentSetup:
     """What the step made. `image` is the agent's image when it succeeded. `block` is the
-    `ImplementerSetupResult` of the report (None when the script never ran: the Setup container could
+    `ImplementerSetupResult` of the report (None when the script never ran: the Setup container
+    could
     not be had). `error` is why the turn ends, else None. `notes` are facts for the job's log."""
 
     image: str | None

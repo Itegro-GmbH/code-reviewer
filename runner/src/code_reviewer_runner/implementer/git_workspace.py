@@ -590,7 +590,8 @@ class GitWorkspace:
 
         Returns the paths that were restored, at most five (the count is in the log line of the
         caller through `len`), cleaned of control characters. Raises `JobError` (`setup_failed`)
-        when the repository cannot be read afterwards: a script that broke it ends the turn, free."""
+        when the repository cannot be read afterwards: a script that broke it ends the turn,
+        free."""
         deadline = self._clock() + seconds
         names: list[str] = []
         entries = 0

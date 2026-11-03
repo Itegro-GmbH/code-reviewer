@@ -394,7 +394,8 @@ class FakeDockerEngine:
     def _start(self, connection: socket.socket, ref: str) -> None:
         container = self.containers[ref]
         self._reply(connection, 204)
-        role = (container.document.get("Labels") or {}).get("code-reviewer.role", "")
+        labels: dict[str, str] = container.document.get("Labels") or {}
+        role = labels.get("code-reviewer.role", "")
         if container.document.get("Entrypoint") == ["/usr/sbin/nft"] or role in ONE_SHOT_ROLES:
             # A one-shot container of the network rules or of the bridge's IPv6: it ends at once.
             container.exit_code = self.ipv6_exit if role == "bridge-ipv6" else self.rules_exit
@@ -507,8 +508,10 @@ class FakeDockerEngine:
                 made.killed.set()
 
     def _commit(self, connection: socket.socket, target: str) -> None:
-        """`docker commit`: an image id, remembered under `repo:tag`. The container must be known."""
-        query = dict(part.split("=", 1) for part in target.split("?", 1)[-1].split("&") if "=" in part)
+        """`docker commit`: an image id, remembered under `repo:tag`; the container must exist."""
+        query = dict(
+            part.split("=", 1) for part in target.split("?", 1)[-1].split("&") if "=" in part
+        )
         ref = query.get("container", "")
         container = self.containers.get(ref) or next(
             (c for c in self.containers.values() if c.name == ref), None

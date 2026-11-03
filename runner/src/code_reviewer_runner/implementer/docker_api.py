@@ -291,7 +291,10 @@ class DockerApi:
         by itself is the one that lets it write the inner Docker's data back into the container's
         file system, where `commit_container` finds it (#818)."""
         self.request(
-            "POST", f"/containers/{container}/stop?t={int(grace)}", ok=(204, 304, 404), timeout=timeout
+            "POST",
+            f"/containers/{container}/stop?t={int(grace)}",
+            ok=(204, 304, 404),
+            timeout=timeout,
         )
 
     def commit_container(self, container: str, repository: str, tag: str, *, timeout: float) -> str:

@@ -9,7 +9,7 @@ import json
 import sys
 import tempfile
 import threading
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -272,6 +272,7 @@ def test_a_script_that_fails_ends_with_its_status_and_its_output(rig: Rig) -> No
     done = step(rig, Workspace())
     assert done.error is not None and done.error.code is ErrorCode.ENVIRONMENT_SETUP_FAILED
     assert "exit status 7" in done.error.detail
+    assert done.block is not None
     assert done.block == {
         "ok": False,
         "exitCode": 7,
@@ -293,9 +294,11 @@ def test_a_script_that_runs_out_of_time_says_so(rig: Rig) -> None:
 
 
 # #818-T45
-def test_a_timeout_is_timed_out_with_a_null_status(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_timeout_is_timed_out_with_a_null_status(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
     rig.waits = True
-    monkeypatch.setattr(es, "script_seconds", lambda limit, elapsed: 0.5 + es.MIN_SCRIPT_SECONDS)
+    monkeypatch.setattr(es, "script_seconds", _half_a_second)
     monkeypatch.setattr(es, "MIN_SCRIPT_SECONDS", 0.0)
     done = step(rig, Workspace())
     assert done.error is not None and done.error.code is ErrorCode.ENVIRONMENT_SETUP_FAILED
@@ -331,7 +334,7 @@ def test_a_commit_the_disk_cannot_hold_is_the_environments_failure_and_names_the
     assert any("100 MB left" in note for note in done.notes)
 
 
-# -- the whole job -----------------------------------------------------------------------------------
+# -- the whole job ---------------------------------------------------------------------------------
 
 
 class SessionDouble:
@@ -400,9 +403,13 @@ def job_run(
         lease_check=lambda: LeaseState.HELD,
         shutdown=threading.Event(),
         engines=("implementer",),
-        seams=JobSeams(setup=lambda *a: setup(*a), session=session),
+        seams=JobSeams(setup=setup, session=session),
     )
     return result, ran, placed
+
+
+def _half_a_second(limit: float, elapsed: float) -> float:
+    return 0.5 + es.MIN_SCRIPT_SECONDS
 
 
 def failing_step() -> es.EnvironmentSetup:
@@ -451,10 +458,6 @@ def test_a_good_script_makes_the_agent_start_from_its_image() -> None:
         ("setup: ready",),
     )
     calls: list[Any] = []
-    try:
-        job_run(good, session_calls=calls)
-    except AssertionError:
-        pass  # the session double does not run a turn
     result, ran, placed = job_run(good, session_calls=calls)
     assert placed == ["sha256:" + "ee" * 32]
     assert ran == ["prepare", "setup", "session"]
@@ -485,6 +488,3 @@ def test_the_early_report_is_one_the_app_reads_with_no_commit() -> None:
     result, _, _ = job_run(failing_step())
     assert result.implementer is not None
     assert json.loads(json.dumps(result.implementer))["setup"]["timedOut"] is False
-
-
-def _unused(_: Mapping[str, str]) -> None: ...

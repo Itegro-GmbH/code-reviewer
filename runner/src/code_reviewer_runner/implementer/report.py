@@ -127,7 +127,7 @@ def _dropped_ok(value: object) -> bool:
 def _setup_ok(value: object) -> bool:
     """The `setup` block (#818, `ImplementerSetupResult`): closed, every field present."""
     setup = as_object(value)
-    if setup is None or set(setup) != _SETUP_KEYS:
+    if setup is None or frozenset(setup) != _SETUP_KEYS:
         return False
     code, duration = setup["exitCode"], setup["durationSeconds"]
     return (

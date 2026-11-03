@@ -149,6 +149,27 @@ describe("a task with an environment", () => {
     expect(await counts()).toEqual({ jobs: 0, sessions: 0, turns: 0 });
   });
 
+  // #818-T23: 1 vCPU leaves the agent's container no memory. The tab no longer offers it; a row made before is read as it is
+  // and the task is refused before anything is written.
+  it("refuses an environment whose size is no longer offered (1 vCPU), writes nothing, and takes the size from the stored row", async () => {
+    const { service, body, h, environments, counts } = await setup();
+    const old = await environments.create(
+      { name: "One core", vcpus: 1, setupScript: "echo hi", createdBy: USER.id },
+      50,
+    );
+    if (!old.ok) throw new Error("seeding failed");
+
+    const refusal = await failureOf(
+      service.startTask(USER, body({ environmentId: old.environment.id })),
+    );
+
+    expect(refusal).toMatchObject({
+      code: "IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED",
+    });
+    expect(await counts()).toEqual({ jobs: 0, sessions: 0, turns: 0 });
+    void h;
+  });
+
   // #818-T21
   it("refuses an environment id that is not text, is empty or has a NUL byte, as an invalid request", async () => {
     const { service, body } = await setup();
