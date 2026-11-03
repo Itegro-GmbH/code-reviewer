@@ -72,6 +72,10 @@ from code_reviewer_runner.implementer.door.protocol import (
 from code_reviewer_runner.implementer.door.status import parse_status
 from code_reviewer_runner.implementer.door_launcher import start_document
 from code_reviewer_runner.implementer.door_state import DoorEnd, DoorState
+from code_reviewer_runner.implementer.environment_setup import (
+    EnvironmentSetup,
+    run_environment_setup,
+)
 from code_reviewer_runner.implementer.git_workspace import (
     GitIdentity,
     GitWorkspace,
@@ -84,9 +88,17 @@ from code_reviewer_runner.implementer.reader import (
     ReaderAccess,
     ReaderSeams,
 )
+from code_reviewer_runner.implementer.host_rules import HELPER_NAME
 from code_reviewer_runner.implementer.session import ImplementerSession, SessionSeams
+from code_reviewer_runner.implementer.setup_container import (
+    SETUP_CONTAINER_NAME,
+    SETUP_IMAGE_REPOSITORY,
+    SETUP_IMAGE_TAG,
+    SETUP_NETWORK_NAME,
+    SetupSeams,
+)
 from code_reviewer_runner.implementer.turn_result import TurnResult
-from code_reviewer_runner.job import ImplementerInput, parse_implementer_input
+from code_reviewer_runner.job import ImplementerEnvironment, ImplementerInput, parse_implementer_input
 from git_support import TOKEN, Origin, raw, system_git
 from passthrough_loopback import LoopbackUpstream
 
@@ -199,13 +211,27 @@ def preflight(config: LaneConfig) -> None:
 def remove_fixed() -> None:
     """The containers of the turn's model side that the turn names by constants, and the network.
     Not the readers: they are made when the workspace is prepared, before the network is."""
-    for name in (AGENT_CONTAINER_NAME, RELAY_CONTAINER):
+    for name in (AGENT_CONTAINER_NAME, RELAY_CONTAINER, SETUP_CONTAINER_NAME, HELPER_NAME):
         docker("rm", "-f", name, check=False)
     docker("network", "rm", MODEL_NETWORK_NAME, check=False)
+    docker("network", "rm", SETUP_NETWORK_NAME, check=False)
+
+
+def remove_setup_leftovers(config: LaneConfig) -> None:
+    """The image a Setup container was committed to, and the firewall table in the host's
+    namespace that its network got (the table only names the Setup bridge; it is removed so that
+    the machine is as the lane found it)."""
+    docker("image", "rm", f"{SETUP_IMAGE_REPOSITORY}:{SETUP_IMAGE_TAG}", check=False)
+    docker(
+        "run", "--rm", "--user", "0:0", "--network", "host", "--cap-drop", "ALL",
+        "--cap-add", "NET_ADMIN", "--entrypoint", "/usr/sbin/nft", config.worker_image,
+        "delete table ip setup_egress", check=False,
+    )  # fmt: skip
 
 
 def remove_leftovers() -> None:
     """What a lane that died left: the fixed names, the network and the stand-ins of Control."""
+    remove_setup_leftovers(lane_config())
     for name in (READER_CONTAINER_NAME, READER_WRITER_CONTAINER_NAME):
         docker("rm", "-f", name, check=False)
     remove_fixed()
@@ -389,6 +415,8 @@ class Turned:
     # The messages the runner sent the engine: (session id, text of the one text part).
     messages: list[tuple[str, str]] = field(default_factory=lambda: [])
     doors: list[LaneDoor] = field(default_factory=lambda: [])
+    # The environment's setup step, when the turn had one.
+    setup: EnvironmentSetup | None = None
 
     @property
     def requests(self) -> list[dict[str, Any]]:
@@ -558,6 +586,61 @@ def lane_workspace(
         yield LaneWorkspace(config, origin, workspace, reader, scratch, volume, control)
 
 
+def setup_seams(lane: LaneWorkspace) -> SetupSeams:
+    """The Setup container of the lane: the lane's images and runtime, Control's stand-in as the
+    container the work volume is read from."""
+    config = lane.config
+    return SetupSeams(
+        hostname=lambda: lane.control,
+        image=config.agent_image,
+        helper_image=config.agent_image,
+        runtime=config.runtime,
+        entrypoint=config.entrypoint,
+        ready_seconds=180.0,
+    )
+
+
+def environment_step(
+    lane: LaneWorkspace,
+    script: str,
+    *,
+    memory_mb: int = 2048,
+    time_limit: float = 3600.0,
+    should_stop: Callable[[], bool] = lambda: False,
+) -> EnvironmentSetup:
+    """The environment's script as `job_run` runs it, against the lane's workspace."""
+    return run_environment_setup(
+        ImplementerEnvironment("lane environment", script),
+        workspace=lane.workspace,
+        memory_mb=memory_mb,
+        time_limit=time_limit,
+        elapsed=lambda: 0.0,
+        should_stop=should_stop,
+        secrets=(TOKEN, REAL_KEY),
+        seams=setup_seams(lane),
+    )
+
+
+@contextmanager
+def lane_environment(
+    scratch: Path,
+    script: str,
+    *,
+    seed: Callable[[Path], None] | None = None,
+    disk_megabytes: int | None = None,
+    memory_mb: int = 2048,
+    time_limit: float = 3600.0,
+    should_stop: Callable[[], bool] = lambda: False,
+) -> Generator[tuple[LaneWorkspace, EnvironmentSetup]]:
+    """Only the environment's step: the prepared workspace and what the script did. For the scripts
+    that fail, run out of time or fill the disk, and the questions about the Setup container itself."""
+    with lane_workspace(scratch, seed=seed, disk_megabytes=disk_megabytes) as lane:
+        step = environment_step(
+            lane, script, memory_mb=memory_mb, time_limit=time_limit, should_stop=should_stop
+        )
+        yield lane, step
+
+
 @contextmanager
 def lane_turn(
     scratch: Path,
@@ -573,9 +656,13 @@ def lane_turn(
     origin_base: Path | None = None,
     judge: Callable[[Mapping[str, str], Mapping[str, Any]], Refusal | None] | None = None,
     memory_mb: int = 2048,
+    setup_script: str | None = None,
 ) -> Generator[Turned]:
     """Run one whole turn to its result against a model that follows `script(repo)` (the path of
-    the repository in the agent's container)."""
+    the repository in the agent's container). With `setup_script`, the environment's script runs
+    first in a Setup container (`run_environment_setup`, as `job_run` runs it) and the agent's
+    container starts from the image it made; a script that fails raises: use `lane_environment`
+    for those."""
     job = implementer_job(family, time_limit=time_limit, instruction=instruction)
     port = slot_ports({}).proxy
     messages: list[tuple[str, str]] = []
@@ -602,6 +689,11 @@ def lane_turn(
             )
         )
         config = lane.config
+        prepared: EnvironmentSetup | None = None
+        if setup_script is not None:
+            prepared = environment_step(lane, setup_script, memory_mb=memory_mb)
+            if prepared.error is not None:
+                raise AssertionError(f"the setup failed: {prepared.error.detail}")
         stack.enter_context(model_network(config, port))
         upstream = stack.enter_context(
             ScriptedUpstream(
@@ -620,7 +712,8 @@ def lane_turn(
                 memory_mb,
                 AgentSeams(
                     hostname=lambda: lane.control,
-                    image=config.agent_image,
+                    image=config.agent_image if prepared is None else str(prepared.image),
+                    helper_image=config.agent_image,
                     runtime=config.runtime,
                     entrypoint=config.entrypoint,
                     ready_seconds=180.0,
@@ -645,6 +738,7 @@ def lane_turn(
             volume=lane.volume,
             messages=messages,
             doors=doors,
+            setup=prepared,
         )
         with mock.patch.object(session_module, "start_door", make_door):
             turned.result = session.run()
@@ -694,6 +788,7 @@ __all__ = [
     "commit",
     "docker",
     "lane_config",
+    "lane_environment",
     "lane_turn",
     "lane_workspace",
     "preflight",
