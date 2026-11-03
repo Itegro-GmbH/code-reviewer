@@ -181,7 +181,7 @@ export type SandboxLauncherOptions = {
   /**
    * The snapshot's Sysbox verdict from its record (`SANDBOX_SYSBOX_PROOF`, #745 step 4). Only the Implementer reads it:
    * an `unproven` one makes the Worker end the turn `sandbox_unproven`, free, before it touches anything. Reviews never look
-   * at it, so an unproven snapshot cannot hold them back. Absent is `unrecorded` (see `SysboxProof`).
+   * at it, so an unproven snapshot cannot hold them back. Absent is `unproven` (see `SysboxProof`).
    */
   sysboxProof?: SysboxProof;
   logger: Logger;
@@ -317,11 +317,10 @@ function environmentOf(
 }
 
 /**
- * The golden snapshot's Sysbox verdict (the record's `sysbox`, `SANDBOX_SYSBOX_PROOF` of the Dispatcher). `unrecorded` is a
- * Dispatcher that was never told one: the deploy pipeline does not write the verdict to Infisical yet (a follow-up of #745
- * step 4), and until it does the Implementer is not refused for a verdict nobody could have given. An `unproven` one refuses.
+ * The golden snapshot's Sysbox verdict (the record's `sysbox`, `SANDBOX_SYSBOX_PROOF` of the Dispatcher, a member of the
+ * snapshot pair). Only `proven` lets the Implementer start; a Dispatcher that was never told a verdict has `unproven`.
  */
-export type SysboxProof = "proven" | "unproven" | "unrecorded";
+export type SysboxProof = "proven" | "unproven";
 
 /**
  * The two names that depend on the launch (#745, step 4): the snapshot's Sysbox verdict, which the Worker turns into a free
@@ -579,7 +578,7 @@ export function createSandboxLauncher(
             spec.kind,
             options.dynamicEnvironment,
             plan,
-            options.sysboxProof ?? "unrecorded",
+            options.sysboxProof ?? "unproven",
           ),
           additions: SANDBOX_LAUNCHER_ADDITIONS,
         });

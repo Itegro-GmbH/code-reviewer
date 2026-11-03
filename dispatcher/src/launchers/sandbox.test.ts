@@ -794,7 +794,7 @@ describe("the Sandbox-Launcher", () => {
       "RUNNER_DIFF_JOB_USER=10001:10001",
       "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB=2560",
       "RUNNER_IMPLEMENTER_MODEL_DOOR=docker",
-      "RUNNER_IMPLEMENTER_SANDBOX_PROOF=unrecorded",
+      "RUNNER_IMPLEMENTER_SANDBOX_PROOF=unproven",
       "RUNNER_IMPLEMENTER_WORK_DIR=/work",
       "RUNNER_JOB_TIMEOUT_SECONDS=1200",
     ]);
@@ -956,13 +956,18 @@ describe("the Sandbox-Launcher", () => {
     );
   });
 
-  it("passes the verdict as it is, and a verdict that was never recorded as unrecorded", () => {
+  // #745-T02: no verdict is no proof
+  it("passes the verdict as it is, and a launch that was given none as unproven", async () => {
     expect(
-      implementerEnvironment(planForKind("implementer", {}), "unrecorded"),
+      implementerEnvironment(planForKind("implementer", {}), "unproven"),
     ).toStrictEqual({
-      RUNNER_IMPLEMENTER_SANDBOX_PROOF: "unrecorded",
+      RUNNER_IMPLEMENTER_SANDBOX_PROOF: "unproven",
       RUNNER_IMPLEMENTER_AGENT_MEMORY_MB: "2560",
     });
+    await launch(build({}), spec({ kind: "implementer" }));
+    expect(valuesOf(dockerRun()?.args ?? [], "--env")).toContain(
+      "RUNNER_IMPLEMENTER_SANDBOX_PROOF=unproven",
+    );
   });
 
   describe("the Sysbox boot of the Implementer's VM", () => {

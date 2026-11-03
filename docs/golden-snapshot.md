@@ -84,10 +84,10 @@ the container start of a Diff or Dynamic job does not read the new layers.
 `snapshotId` and `imageDigest` are what the Sandbox-Launcher (#329) is configured with. The Launcher creates job VMs
 from `snapshotId` in `fra1` and refuses to run when `docker image inspect` in the VM reports another id than
 `imageDigest`. The workflow keeps the record as the artifact `golden-snapshot-record` (90 days) and shows it in the run
-summary and as the outputs `snapshot-id`, `image-digest` and `commit` of the workflow. The build itself changes no
+summary and as the outputs `snapshot-id`, `image-digest`, `commit` and `sysbox` of the workflow. The build itself changes no
 deployment, removes no snapshot of an earlier run and writes nothing to Infisical: _Deploy production_ wires the
 snapshot into a staged Dispatcher deployment, proves it with the canary, and only after the promotion writes it to
-Infisical (`SANDBOX_SNAPSHOT_ID`, `SANDBOX_IMAGE_DIGEST` and `SANDBOX_SNAPSHOT_COMMIT` of `/dispatcher`) and removes
+Infisical (`SANDBOX_SNAPSHOT_ID`, `SANDBOX_IMAGE_DIGEST`, `SANDBOX_SNAPSHOT_COMMIT` and `SANDBOX_SYSBOX_PROOF` of `/dispatcher`) and removes
 the snapshots nobody needs.
 
 ## Running it
@@ -225,20 +225,20 @@ warning of the run and written to the record as `"sysbox": "unproven"` (a missin
 
 **What `unproven` means for an Implementer launch.** Two things, and neither touches a review. A snapshot without the package (the script is absent in a snapshot from before, or it exits 10
 because `sysbox-runc`, `sysbox-mgr` or `sysbox-fs` are missing) ends the launch with the retryable `sysbox_not_ready`. And the gate of step 4: the Dispatcher's `SANDBOX_SYSBOX_PROOF` (the record's
-`sysbox`) goes to the Control container as `RUNNER_IMPLEMENTER_SANDBOX_PROOF`, and an `unproven` one ends the turn `sandbox_unproven`, free, before anything is cloned. The deploy canary does not ask
+`sysbox`) goes to the Control container as `RUNNER_IMPLEMENTER_SANDBOX_PROOF`, and anything but `proven` (an `unproven` one, none at all) ends the turn `sandbox_unproven`, free, before anything is cloned. The deploy canary does not ask
 for the proof (its start-up check wants the Docker, the Sysbox runtime and the agent image, not the verdict), so an unproven snapshot cannot hold back a release of code-review.com (#797).
-**Not done yet:** the deploy pipeline does not write the record's verdict to the Dispatcher's variables (the pair of `SANDBOX_SNAPSHOT_ID`, `SANDBOX_IMAGE_DIGEST` and `SANDBOX_SNAPSHOT_COMMIT` has no fourth
-member), so a Dispatcher that was never told one passes `unrecorded`, which is not refused. The follow-up adds `SANDBOX_SYSBOX_PROOF` to the pair (`golden-snapshot.yml` output, `vercel-stage.yml`,
-`snapshot:ops persist`, the meta of the deployment) and then `unrecorded` can be refused.
+**The verdict is the fourth member of the pair.** `golden-snapshot.yml` outputs it (`sysbox`: `proven` only when the record says exactly that, else `unproven`), `deploy-production.yml` passes it on
+(`snapshot-decide` reuses the verdict of the pair it reuses), `vercel-stage.yml` sets `SANDBOX_SYSBOX_PROOF` and the meta `sandboxSysboxProof` on the staged deployment together with the snapshot id (all four or none),
+and `snapshot:ops persist` writes it to Infisical: cleared to `unproven` first, the other three, the real verdict last, so a half-written pair is never `proven`. A rollback restores the verdict of the deployment it returns to, and a deployment from
+before this member has none, which reads `unproven`. **Nothing is `unrecorded` any more:** a Dispatcher that was never told a verdict has `unproven` and the Implementer does not start on it. Reviews never read the variable, whatever it holds.
 
 **Where it is shown, and what it cannot be.** A soft failure also comes from the network at build time (a GitHub 5xx for the package, a Docker Hub rate limit for the proof's image),
 not only from a broken Sysbox, and the deploy canary does not see it (it proves a review). So the build job of the run shows it twice: the warning annotation **Sysbox unproven**
 (on the page of the *Deploy production* run, where the run is watched before and while it promotes) and a line at the top of the job's summary; the reasons are in the log of the
 build step (`sysbox_install_failed`, `sysbox_probe_failed` with `detail`). It is only shown, never a condition: `snapshot-decide` runs before the build and cannot know it, and a
-promotion job checks the result of every job it needs (`deploy-production-promotion.test.ts`), so the verdict is not an input of either. The verdict is not persisted with the pair:
-a later release that **reuses** the snapshot (`inputs_unchanged`) shows nothing, and the way to get a fresh proof is a build, a change of an image input or *Deploy production*
-with `rebuild_snapshot` (transient causes then go away by themselves). Before the Implementer is released, read the `sysbox` field of the record of the last build (the artifact
-`golden-snapshot-record`).
+promotion job checks the result of every job it needs (`deploy-production-promotion.test.ts`), so the verdict is not an input of either. The verdict is persisted with the pair:
+a later release that **reuses** the snapshot (`inputs_unchanged`) reuses its verdict too, `unproven` included, and the way to get a fresh proof is a build, a change of an image input or *Deploy production*
+with `rebuild_snapshot` (transient causes then go away by themselves). The record of the last build (the artifact `golden-snapshot-record`) has the `sysbox` field with the reasons in the log.
 A cancelled run still ends as cancelled. **Not covered:** the platform's kernel is not part of the snapshot, so an update of it after the build is seen by the boot step
 of a job and by the next build's proof, not by the proof of this one; the deploy canary does not prove Sysbox (it would have to fail only the factory's lane, which is #797).
 

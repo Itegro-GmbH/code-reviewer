@@ -14,6 +14,7 @@ const PAIR: SnapshotPair = {
   snapshotId: "snap_example01",
   imageDigest: `sha256:${"a".repeat(64)}`,
   commit: "1".repeat(40),
+  sysbox: "proven",
 };
 const TOKEN = "access-token-not-real";
 
@@ -69,10 +70,11 @@ describe("writing the snapshot pair to Infisical", () => {
     "SANDBOX_SNAPSHOT_ID",
     "SANDBOX_IMAGE_DIGEST",
     "SANDBOX_SNAPSHOT_COMMIT",
+    "SANDBOX_SYSBOX_PROOF",
   ];
 
   // #403-T15
-  it("signs in with the machine identity, finds the project by its slug and updates the three secrets of /dispatcher in prod", async () => {
+  it("signs in with the machine identity, finds the project by its slug and updates the four secrets of /dispatcher in prod", async () => {
     const { fetch, seen } = infisical(undefined, ALL);
 
     expect(await persistPair(TARGET, PAIR, fetch)).toEqual({ ok: true });
@@ -90,9 +92,13 @@ describe("writing the snapshot pair to Infisical", () => {
     expect(lookup.url.pathname).toBe("/api/v1/projects/slug/example-project");
     expect(lookup.headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
     const writes = seen.filter((entry) => entry.method === "PATCH");
-    expect(writes.map((entry) => entry.url.pathname.split("/").pop())).toEqual(
-      ALL,
-    );
+    expect(writes.map((entry) => entry.url.pathname.split("/").pop())).toEqual([
+      "SANDBOX_SYSBOX_PROOF",
+      "SANDBOX_SNAPSHOT_ID",
+      "SANDBOX_IMAGE_DIGEST",
+      "SANDBOX_SNAPSHOT_COMMIT",
+      "SANDBOX_SYSBOX_PROOF",
+    ]);
     for (const write of writes) {
       expect(write.url.pathname).toMatch(/^\/api\/v4\/secrets\/SANDBOX_/);
       expect(write.headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
@@ -103,10 +109,14 @@ describe("writing the snapshot pair to Infisical", () => {
         type: "shared",
       });
     }
+    // #745-T02: the verdict is cleared first and set last, so that a write that fails in between leaves a pair that is not
+    // proven, never the `proven` of an older snapshot next to a newer snapshot id.
     expect(writes.map((entry) => entry.body?.secretValue)).toEqual([
+      "unproven",
       PAIR.snapshotId,
       PAIR.imageDigest,
       PAIR.commit,
+      "proven",
     ]);
     // Nothing is read, and every call is made without following a redirect.
     expect(
@@ -130,7 +140,12 @@ describe("writing the snapshot pair to Infisical", () => {
         entry.url.pathname.startsWith("/api/v4/secrets/"),
     );
     expect(created.map((entry) => entry.url.pathname.split("/").pop())).toEqual(
-      ["SANDBOX_IMAGE_DIGEST", "SANDBOX_SNAPSHOT_COMMIT"],
+      [
+        "SANDBOX_SYSBOX_PROOF",
+        "SANDBOX_IMAGE_DIGEST",
+        "SANDBOX_SNAPSHOT_COMMIT",
+        "SANDBOX_SYSBOX_PROOF",
+      ],
     );
     expect(created[0]?.body).toMatchObject({
       environment: "prod",
@@ -139,8 +154,42 @@ describe("writing the snapshot pair to Infisical", () => {
     });
   });
 
+  // #745-T02
+  it("writes an unproven pair with the verdict cleared once and no `proven` at any point", async () => {
+    const { fetch, seen } = infisical(undefined, ALL);
+
+    await persistPair(TARGET, { ...PAIR, sysbox: "unproven" }, fetch);
+
+    const verdicts = seen
+      .filter((entry) => entry.url.pathname.endsWith("/SANDBOX_SYSBOX_PROOF"))
+      .map((entry) => entry.body?.secretValue);
+    expect(verdicts).toEqual(["unproven"]);
+  });
+
+  // #745-T02
+  it("leaves the verdict cleared when a write fails before the last one", async () => {
+    const { fetch, seen } = infisical(
+      (entry) =>
+        entry.method === "PATCH" &&
+        entry.url.pathname.endsWith("/SANDBOX_SNAPSHOT_COMMIT")
+          ? Response.json({ message: "no" }, { status: 500 })
+          : undefined,
+      ALL,
+    );
+
+    expect(await persistPair(TARGET, PAIR, fetch)).toEqual({
+      ok: false,
+      code: "infisical_write_failed",
+    });
+
+    const verdicts = seen
+      .filter((entry) => entry.url.pathname.endsWith("/SANDBOX_SYSBOX_PROOF"))
+      .map((entry) => entry.body?.secretValue);
+    expect(verdicts).toEqual(["unproven"]);
+  });
+
   // #403-T15
-  it("writes only the three names, whatever the pair holds", async () => {
+  it("writes only the four names, whatever the pair holds", async () => {
     const { fetch, seen } = infisical(undefined, ALL);
 
     await persistPair(TARGET, PAIR, fetch);

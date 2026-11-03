@@ -991,14 +991,14 @@ describe("the deployment pipeline in the guide", () => {
   });
 
   // #403-T19
-  it("describes the one identity's role exactly: read /ci, create and edit three keys of /dispatcher, nothing else", () => {
+  it("describes the one identity's role exactly: read /ci, create and edit four keys of /dispatcher, nothing else", () => {
     const text = flat(setup);
     expect(text).toContain("**one** identity");
     expect(setup).toContain(
       "| Secrets: describe and read value | `prod` | `/ci` | any |",
     );
     expect(setup).toContain(
-      "| Secrets: describe, create and edit | `prod` | `/dispatcher` | `SANDBOX_SNAPSHOT_ID`, `SANDBOX_IMAGE_DIGEST`, `SANDBOX_SNAPSHOT_COMMIT` |",
+      "| Secrets: describe, create and edit | `prod` | `/dispatcher` | `SANDBOX_SNAPSHOT_ID`, `SANDBOX_IMAGE_DIGEST`, `SANDBOX_SNAPSHOT_COMMIT`, `SANDBOX_SYSBOX_PROOF` |",
     );
     expect(text).toContain("**No** read of `/app` or `/dispatcher`");
     expect(text).toContain("recommended hardening");

@@ -76,8 +76,6 @@ MAX_LOG_TAIL_CHARS = 4096
 # The names the Dispatcher gives the container (`ImplementerEnvironmentName` of runner-api.v1.json).
 SANDBOX_PROOF_VARIABLE = IMPLEMENTER_SANDBOX_PROOF_VARIABLE
 SANDBOX_PROVEN = "proven"
-# A Dispatcher that was never told a verdict (the deploy does not write it yet) is not refused.
-SANDBOX_UNRECORDED = "unrecorded"
 AGENT_MEMORY_VARIABLE = IMPLEMENTER_AGENT_MEMORY_VARIABLE
 # The least memory the agent's container is worth starting with: OpenCode, its own Docker daemon and
 # the tools of a repository's tests do not fit in less (measured, `docs/implementer.md`). The
@@ -151,15 +149,12 @@ def identity_for(job: ImplementerInput) -> GitIdentity:
 
 def check_sandbox(environment: Mapping[str, str]) -> JobError | None:
     """The gate of #745, step 4, from what the Dispatcher says about this VM: the golden snapshot's
-    Sysbox verdict must be `proven` (or `unrecorded`: the deploy pipeline does not write the
-    verdict yet, and until it does a Dispatcher that was never told one is not refused for it) and
-    the VM must leave the agent's container enough memory. Anything else, an `unproven` verdict or
-    a missing or unreadable value, is a free end, named, before any clone or container: the model
-    was never used."""
-    if environment.get(SANDBOX_PROOF_VARIABLE, "").strip() not in (
-        SANDBOX_PROVEN,
-        SANDBOX_UNRECORDED,
-    ):
+    Sysbox verdict must be `proven` and the VM must leave the agent's container enough memory.
+    Anything else, an `unproven` verdict or a missing or unreadable value, is a free end, named,
+    before any clone or container: the model was never used. The verdict is the fourth member of
+    the snapshot pair (`SANDBOX_SYSBOX_PROOF`), so a Dispatcher that was never told one has said
+    `unproven`."""
+    if environment.get(SANDBOX_PROOF_VARIABLE, "").strip() != SANDBOX_PROVEN:
         return JobError(
             ErrorCode.SANDBOX_UNPROVEN,
             "the golden snapshot's Sysbox is not proven, so the agent's container does not start",

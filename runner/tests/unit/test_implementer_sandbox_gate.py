@@ -39,13 +39,10 @@ def test_a_proven_snapshot_and_a_vm_with_room_pass() -> None:
 
 
 # #745-T25
-def test_a_verdict_that_was_never_recorded_is_not_a_refusal_yet() -> None:
-    assert check_sandbox(environment("unrecorded")) is None
-
-
-# #745-T25
-@pytest.mark.parametrize("proof", ["unproven", "", "PROVEN", "yes", None])
-def test_anything_but_proven_or_unrecorded_is_the_free_sandbox_unproven(proof: str | None) -> None:
+@pytest.mark.parametrize(
+    "proof", ["unproven", "unrecorded", "", " ", "PROVEN", "yes", "proven proven", None]
+)
+def test_anything_but_proven_is_the_free_sandbox_unproven(proof: str | None) -> None:
     refused = check_sandbox(environment(proof))
 
     assert refused is not None and refused.code is ErrorCode.SANDBOX_UNPROVEN

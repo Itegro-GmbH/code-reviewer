@@ -100,6 +100,25 @@ describe("the Sandbox-Launcher's configuration from the environment", () => {
     },
   );
 
+  // #745-T02: reviews never read the verdict, so whatever it holds, the Dispatcher starts; the Implementer's gate then
+  // sees `unproven` for everything but exactly `proven`
+  it.each(["probably", "Proven", "proven ", "unrecorded", ""])(
+    "starts with the Sysbox verdict %j and does not take it for proven",
+    (verdict) => {
+      const sandbox = sandboxFromEnvironment(
+        configured({ SANDBOX_SYSBOX_PROOF: verdict }),
+        never,
+      );
+      expect(
+        sandbox.launcher({
+          settings: loadSettings(BASE),
+          logger: recordingLogger(),
+          background: () => undefined,
+        }),
+      ).not.toBe(noLauncher);
+    },
+  );
+
   // #329 (additional): the record of the golden snapshot pipeline (#330) is what these variables hold
   it("accepts the snapshot id and the image id of a golden snapshot record as they are", () => {
     const record = GoldenRecordSchema.parse({
@@ -154,11 +173,6 @@ describe("the Sandbox-Launcher's configuration from the environment", () => {
       "an image id of the wrong length",
       configured({ SANDBOX_IMAGE_DIGEST: "sha256:abc" }),
       "SANDBOX_IMAGE_DIGEST",
-    ],
-    [
-      "a Sysbox verdict that is neither proven nor unproven",
-      configured({ SANDBOX_SYSBOX_PROOF: "probably" }),
-      "SANDBOX_SYSBOX_PROOF",
     ],
     [
       "a hand-over time of zero",

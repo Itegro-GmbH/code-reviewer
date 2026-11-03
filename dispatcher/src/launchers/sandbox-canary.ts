@@ -87,7 +87,11 @@ export type SandboxCanaryOptions = {
    * canary then also runs the probe in the Implementer's profile.
    */
   implementer?: { config: LaunchConfig };
-  /** The snapshot's Sysbox verdict, given to the Implementer's probe as a job's container gets it (the probe does not read it). */
+  /**
+   * The snapshot's Sysbox verdict, given to the Implementer's probe as a job's container gets it. The probe does not read it
+   * (it proves the container's profile, not the gate), so the canary passes what the Dispatcher knows and `unproven` when
+   * it knows nothing: it never makes up a `proven` for a path that was not proven.
+   */
   sysboxProof?: SysboxProof;
   /** Where the work volume of the Implementer's probe is made; the Launcher's own root unless a test brings one. */
   workVolumeRoot?: string;
@@ -167,7 +171,7 @@ export function createSandboxCanary(
         environment: {
           ...CONTAINER_ENVIRONMENT,
           ...IMPLEMENTER_ENVIRONMENT,
-          ...implementerEnvironment(plan, options.sysboxProof ?? "unrecorded"),
+          ...implementerEnvironment(plan, options.sysboxProof ?? "unproven"),
         },
         command: ["probe"],
         overrides: plan.overrides,

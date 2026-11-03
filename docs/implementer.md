@@ -324,9 +324,12 @@ image itself (a container under Sysbox with its own Docker, an inner container, 
 proves what the Implementer ships and needs no pull. The Dispatcher hands the verdict to the Control container
 (`RUNNER_IMPLEMENTER_SANDBOX_PROOF`); an `unproven` snapshot ends the turn `sandbox_unproven`, free, before anything is cloned, and
 reviews never read the variable, so it cannot hold them back (nor the deploy canary: the start-up check does not ask for the proof).
-**Open point:** the deploy pipeline does not write the verdict to the Dispatcher's variables yet (`SANDBOX_SYSBOX_PROOF`); a
-Dispatcher that was never told one passes `unrecorded`, which is not refused. A follow-up writes the verdict with the snapshot pair,
-and then `unrecorded` can be refused too.
+The verdict is the **fourth member of the snapshot pair** (`SANDBOX_SYSBOX_PROOF` next to `SANDBOX_SNAPSHOT_ID`,
+`SANDBOX_IMAGE_DIGEST` and `SANDBOX_SNAPSHOT_COMMIT`): the golden snapshot workflow outputs it, `vercel-stage.yml` sets it on the
+staged deployment as a variable and as meta, and `snapshot:ops persist` writes it to Infisical, cleared to `unproven` before the
+other three and set to its real value last, so that a stale `proven` cannot stay behind a newer snapshot id. **Only `proven` lets a
+turn start**: an `unproven` verdict, a Dispatcher that was never told one, and any other value all end it `sandbox_unproven`, free.
+The deploy canary passes the Dispatcher's own verdict to the Implementer's probe, which does not read it; it never makes up a `proven`.
 
 **Measured on real VMs (2026-11-02, `spike-` VMs from a snapshot built from the branch, 2 vCPU and 4 GB unless said).** Boot of Sysbox
 0.27 s after `vm-prepare.sh` (0.73 s). The agent's container is made, started and has its inner Docker ready 1.5 to 1.8 s after the call;
@@ -499,9 +502,10 @@ Open issues at the time of this change (2026-11-02):
   ([`implementer-smoke-test.md`](implementer-smoke-test.md)) is the first run of the whole path on the platform and has not
   been run for this git model.
 - **#784**: read-only registry access, before external users (above).
-- **The Sysbox verdict in the deploy.** `SANDBOX_SYSBOX_PROOF` is read by the Dispatcher (`unproven` refuses), but the deploy pipeline does not
-  persist the record's `sysbox` field with the snapshot pair yet (`golden-snapshot.yml` output, `vercel-stage.yml` variable and meta,
-  `snapshot:ops persist`, `snapshot-decide`). Until it does, a Dispatcher passes `unrecorded` and nothing is refused.
+- **The Sysbox verdict in the deploy** is written and read (the fourth member of the pair), and `unrecorded` is gone: the first release
+  after it has no verdict anywhere, so the Implementer is refused (`sandbox_unproven`) until that release has built a snapshot and
+  promoted it (the changed image inputs rebuild it by themselves). Production steps: the machine identity's role needs *create* and
+  *edit* on `SANDBOX_SYSBOX_PROOF` of `/dispatcher` too (`docs/deployment-vercel.md`, section 2.1).
 - **#797**: a failed proof of the Implementer blocks code-review.com. The Dispatcher is shared, the deploy canary requires
   `implementer` as soon as the factory's entry names the kind, and the promotions of everything staged in that run wait for the
   canary. There is no switch that waives the proof; the way back is in the rollout, step 2.
