@@ -419,8 +419,8 @@ describe("the Sysbox proof of the check VM", () => {
       volumeBox?: number;
       /** The owner the VM's root sees on the file the agent wrote. */
       volumeOwner?: number;
-      /** The reader (no capability, read-only): 0 = it read both files and could not write. */
-      volumeReader?: number;
+      /** The proof of the reader (`reader_proof`, run in the Worker image): 0 = every check ok, 1 = one failed, 2 = no answer. */
+      readerProof?: number;
     } = {},
   ) {
     const o = {
@@ -433,7 +433,7 @@ describe("the Sysbox proof of the check VM", () => {
       aliveCalls: 99,
       volumeBox: 0,
       volumeOwner: 0,
-      volumeReader: 0,
+      readerProof: 0,
       ...options,
     };
     return `
@@ -445,7 +445,12 @@ case "$1" in
     case "$last" in
       *"mkdir -p /v/repo"*) exit 0 ;;
       *"stat -c"*) echo ${o.volumeOwner}; exit 0 ;;
-      *"reader-wrote"*) exit ${o.volumeReader} ;;
+      *"--runtime=sysbox-runc"*)
+        case ${o.readerProof} in
+          0) echo "READER_PROOF ok reader_contained"; echo "READER_PROOF done" ;;
+          1) echo "READER_PROOF fail reader_remount"; echo "READER_PROOF done" ;;
+        esac
+        exit 0 ;;
       *1.1.1.1*) exit ${o.outsideNc} ;;
       *ping*) exit ${o.outsidePing} ;;
       *) exit ${o.vmControl} ;;
@@ -483,6 +488,7 @@ exit 0`;
       "SYSBOX_PROBE ok inner_docker",
       "SYSBOX_PROBE ok inner_container",
       "SYSBOX_PROBE ok volume_mapped",
+      "SYSBOX_PROBE ok reader",
       "SYSBOX_PROBE ok network_control",
       "SYSBOX_PROBE ok outside_control",
       "SYSBOX_PROBE ok network_isolated",
@@ -503,23 +509,39 @@ exit 0`;
       "sysbox_volume_not_mapped",
     ],
     [
-      "the reader cannot read them or can write",
-      { volumeReader: 1 },
-      "sysbox_volume_not_mapped",
+      "the reader the Worker makes can be written or remounted",
+      { readerProof: 1 },
+      "sysbox_reader_not_contained",
+    ],
+    [
+      "the proof of the reader gives no answer",
+      { readerProof: 2 },
+      "sysbox_reader_not_contained",
     ],
   ])("fails with a reason of its own when %s", (_name, options, reason) => {
     const lines = isolation(options);
     expect(lines).toContain(`SYSBOX_PROBE fail ${reason}`);
-    expect(lines).not.toContain("SYSBOX_PROBE ok volume_mapped");
+    // The mapping can be right and the reader still not contained; the other reasons stop before the reader is looked at.
+    if (reason === "sysbox_reader_not_contained")
+      expect(lines).not.toContain("SYSBOX_PROBE ok reader");
+    else expect(lines).not.toContain("SYSBOX_PROBE ok volume_mapped");
     expect(lines.at(-1)).toBe("SYSBOX_PROBE_DONE");
   });
 
-  it("mounts a Subpath of a named volume into the agent's container and a read-only one without capabilities into a second", () => {
+  // #745: the reader of the proof is the one production makes, not a copy of its flags
+  it("mounts a Subpath of a named volume into the agent's container and has the Worker image prove the reader it makes", () => {
     const script = sysboxProbeScript(config);
     expect(script).toContain(
       '--mount type=volume,source="$vol",target=/work/repo,volume-subpath=repo',
     );
-    expect(script).toMatch(/--cap-drop ALL[^\n]*volume-subpath=repo,readonly/);
+    expect(script).toContain(
+      "code_reviewer_runner.implementer.reader_proof",
+    );
+    expect(script).toContain("/var/run/docker.sock");
+    expect(script).toContain(config.imageTag);
+    // No reader of its own: `--cap-drop` is ignored by Sysbox, and a copy of the flags is not the spec that ships.
+    expect(script).not.toMatch(/--cap-drop/);
+    expect(script).not.toContain("reader-wrote");
   });
 
   it.each([

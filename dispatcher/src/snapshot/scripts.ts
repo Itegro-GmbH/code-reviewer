@@ -476,17 +476,20 @@ const SYSBOX_PROBE_PORT = 38417;
  * It prints one `SYSBOX_PROBE ok <check>` or `SYSBOX_PROBE fail <reason>` per check and `SYSBOX_PROBE_DONE` last, and ends 0
  * whatever it found: the pipeline reads the lines. Reasons: the names of `sysbox-prepare.sh`, `sysbox_probe_image_unavailable`
  * (the pull failed: the proof did not run), `sysbox_container_failed`, `sysbox_inner_docker_failed`,
- * `sysbox_inner_container_failed`, `sysbox_volume_failed`, `sysbox_volume_not_mapped`, `sysbox_network_check_inconclusive`,
+ * `sysbox_inner_container_failed`, `sysbox_volume_failed`, `sysbox_volume_not_mapped`, `sysbox_reader_not_contained`, `sysbox_network_check_inconclusive`,
  * `sysbox_network_not_isolated`.
  *
  * It also proves what the Implementer's work volume needs: the agent's container mounts a **Subpath** of a named volume
  * (`volume-subpath=repo`), as Control mounts it, and must read what the VM's root put there and write there; what it writes
  * must belong to the VM's root (the id mapping of the mount works: Control's and the reader's view of the files agree);
- * and a second Sysbox container with no capability and the same Subpath read-only (the reader) must read the agent's file and
- * must not be able to write.
+ * and the readers must be contained: the Worker image's \`reader_proof\` makes the two readers of production (\`reader_document\`,
+ * read-only and read-write, over the same Subpath) and runs in them the commands production runs; the read-only one reads the
+ * agent's file and can neither write nor remount, no command holds more than \`DAC_OVERRIDE\`, and the root file system stays read-only
+ * (\`sysbox_reader_not_contained\` otherwise). Sysbox ignores \`--cap-drop\`, so a hand-written reader would prove nothing.
  */
 export function sysboxProbeScript(config: PipelineConfig): string {
   const image = shellQuote(config.agentImageTag);
+  const workerImage = shellQuote(config.imageTag);
   return `set -uo pipefail
 image=${image}
 port=${SYSBOX_PROBE_PORT}
@@ -560,10 +563,17 @@ esac
 if docker exec "$box" sh -c 'cat /work/repo/from-control > /dev/null && echo agent > /work/repo/from-agent && cat /work/repo/from-agent > /dev/null' > /dev/null 2>&1; then
   owner=$(docker run --rm --entrypoint sh --mount type=volume,source="$vol",target=/v "$image" -c 'stat -c %u /v/repo/from-agent' 2> /dev/null)
   if [ "$owner" = 0 ]; then
-    if docker run --rm --runtime=sysbox-runc --network none --cap-drop ALL --entrypoint sh --mount type=volume,source="$vol",target=/repo,volume-subpath=repo,readonly "$image" -c 'cat /repo/from-control /repo/from-agent > /dev/null && ! touch /repo/reader-wrote 2> /dev/null' > /dev/null 2>&1; then
-      report ok volume_mapped
+    report ok volume_mapped
+    # The reader is the one the Worker makes: its image runs \`reader_proof\`, which sends the daemon the reader's own document over
+    # this volume (both readers, read-only and read-write) and runs in them the commands production runs.
+    reader_image=$(docker image inspect --format '{{.Id}}' ${workerImage} 2> /dev/null)
+    reader_lines=$(timeout 120 docker run --rm --user 0:0 --entrypoint /opt/venv/bin/python --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock ${workerImage} -I -m code_reviewer_runner.implementer.reader_proof --image "$reader_image" --volume "$vol" --runtime=sysbox-runc 2> /dev/null)
+    if printf '%s\n' "$reader_lines" | grep -qx 'READER_PROOF ok reader_contained' &&
+       printf '%s\n' "$reader_lines" | grep -qx 'READER_PROOF done' &&
+       ! printf '%s\n' "$reader_lines" | grep -q '^READER_PROOF fail '; then
+      report ok reader
     else
-      report fail sysbox_volume_not_mapped
+      report fail sysbox_reader_not_contained
     fi
   else
     report fail sysbox_volume_not_mapped

@@ -441,10 +441,12 @@ def test_the_reader_runs_under_sysbox_with_no_added_capability_no_network_no_tok
 
     host = document["HostConfig"]
     # Agent-planted code runs here (a `core.fsmonitor`, a filter): the wall is the runtime, the
-    # same one the agent runs under, and not a capability. Nothing is added, and above all not
-    # DAC_READ_SEARCH and DAC_OVERRIDE as host root (`open_by_handle_at` reaches the VM's files).
+    # same one the agent runs under. Every capability is dropped and the one that is needed is
+    # added back: DAC_OVERRIDE, to read and write what the agent's other users made. Never
+    # DAC_READ_SEARCH (`open_by_handle_at` reaches the VM's files as host root). Sysbox gives root
+    # all of them whatever the container says (measured), so every command also drops them itself.
     assert host["Runtime"] == "sysbox-runc"
-    assert "CapAdd" not in host and "CapDrop" not in host
+    assert host["CapDrop"] == ["ALL"] and host["CapAdd"] == ["DAC_OVERRIDE"]
     assert host["NetworkMode"] == "none" and document["NetworkDisabled"] is True
     assert host["Privileged"] is False and host["ReadonlyRootfs"] is True
     assert host["SecurityOpt"] == ["no-new-privileges:true"]
@@ -473,7 +475,8 @@ def test_the_volume_is_read_only_for_the_reader_wherever_git_allows_it() -> None
     assert writing["Labels"] != reading["Labels"]
     for document in (reading, writing):
         assert document["HostConfig"]["Runtime"] == "sysbox-runc"
-        assert "CapAdd" not in document["HostConfig"]
+        assert document["HostConfig"]["CapDrop"] == ["ALL"]
+        assert document["HostConfig"]["CapAdd"] == ["DAC_OVERRIDE"]
 
 
 # #745-T23
@@ -494,6 +497,10 @@ def test_the_reader_is_made_on_the_first_command_runs_git_in_the_repository_and_
     # Nothing the agent planted runs if an option can prevent it: the container is the wall, these
     # are the cheap extra (the fsmonitor and the hooks of the repository's config, background work).
     assert argv == [
+        "/usr/bin/setpriv",
+        "--bounding-set=-all,+dac_override",
+        "--inh-caps=-all",
+        "--no-new-privs",
         "/usr/local/bin/git",
         *ac_reader.READER_GIT_OPTIONS,
         "status",
@@ -558,6 +565,74 @@ def test_a_reader_that_cannot_be_made_fails_the_warm_up_so_the_turn_ends_free(ri
     access = ReaderAccess(None, ReaderSeams(rig.api, lambda: HOSTNAME))
 
     assert access.warm() is False
+
+
+# #745-T23: a process a filter left behind (`setsid`) lives in the reader until the reader is killed
+def test_the_readers_are_killed_and_started_again_so_that_no_process_of_the_repository_survives(
+    rig: Rig,
+) -> None:
+    access = ReaderAccess(None, ReaderSeams(rig.api, lambda: HOSTNAME))
+    assert access.warm()
+    before = {c.name: c.identifier for c in rig.engine.containers.values()}
+    rig.engine.calls.clear()
+
+    assert access.reset(seconds=5.0) is True
+
+    ours = {made.identifier: made.name for made in rig.engine.containers.values()}
+    steps = [
+        (method, target.split("/")[2], target.split("/")[3].split("?")[0])
+        for method, target, _ in rig.engine.calls
+        if target.startswith("/containers/") and not target.endswith("/exec")
+    ]
+    for name in (READER_CONTAINER_NAME, READER_WRITER_CONTAINER_NAME):
+        identifier = before[name]
+        mine = [(method, step) for method, container, step in steps if container == identifier]
+        # SIGKILL to the init takes the whole process tree of the container; then it is started.
+        assert mine[0] == ("POST", "kill"), name
+        assert ("POST", "start") in mine and mine.index(("POST", "kill")) < mine.index(
+            ("POST", "start")
+        ), name
+        assert rig.engine.container(name).running and not rig.engine.container(name).removed
+    assert set(ours.values()) >= {READER_CONTAINER_NAME, READER_WRITER_CONTAINER_NAME}
+    # They still answer.
+    assert access.run(["status"], timeout=5.0).returncode == 0
+    assert access.run(["add", "-A"], timeout=5.0, write=True).returncode == 0
+    access.close()
+
+
+# #745-T23
+def test_a_reader_that_cannot_be_restarted_is_made_again_and_a_reset_with_no_reader_is_a_noop(
+    rig: Rig,
+) -> None:
+    access = ReaderAccess(None, ReaderSeams(rig.api, lambda: HOSTNAME))
+    assert access.reset(seconds=5.0) is True, "nothing was made, nothing can survive"
+    assert not rig.engine.containers
+    assert access.warm()
+    old = rig.engine.container(READER_CONTAINER_NAME).identifier
+    rig.engine.refuse[f"/containers/{old}/kill"] = 500
+
+    assert access.reset(seconds=5.0) is True
+
+    names = [c.name for c in rig.engine.containers.values() if not c.removed]
+    assert sorted(names) == [READER_CONTAINER_NAME, READER_WRITER_CONTAINER_NAME]
+    assert rig.engine.container(READER_CONTAINER_NAME).identifier != old
+    access.close()
+
+
+# #745-T23: the writer is the one that can change the repository; a failed reset is said
+def test_a_reset_that_cannot_make_the_readers_quiet_says_so_and_leaves_none_behind(
+    rig: Rig,
+) -> None:
+    access = ReaderAccess(None, ReaderSeams(rig.api, lambda: HOSTNAME))
+    assert access.warm()
+    rig.engine.refuse["/kill"] = 500
+    rig.engine.refuse["/containers/create"] = 500
+
+    assert access.reset(seconds=5.0) is False
+
+    done = access.run(["status"], timeout=5.0)
+    assert done.unanswered, "a reader that is not known to be quiet is not used"
+    access.close()
 
 
 # #745-T23
@@ -695,6 +770,7 @@ def test_the_pipe_runs_upload_pack_in_the_reader_and_carries_the_streams_and_the
     assert data == b"advertisement:0014command=ls-refs\n"
     (made,) = list(rig.engine.execs.values())[-1:]
     assert made.document["Cmd"] == [
+        *ac_reader.READER_DROP_CAPABILITIES,
         "/usr/local/bin/git",
         *ac_reader.READER_GIT_OPTIONS,
         "upload-pack",

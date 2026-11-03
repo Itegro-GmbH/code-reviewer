@@ -127,6 +127,7 @@ class FakeGit(GitWorkspace):
         # The task's branch was looked at and not taken over: (reason, head or None).
         self.form_rejected: tuple[str, str | None] | None = None
         self.rescue_name: str | None = None
+        self.readers_quiet = True
         self.dropped: tuple[int, int] = (0, 0)
         self.form_gone = False
         # What the volume of the VM has left, as the workspace would say (None: it cannot say).
@@ -172,6 +173,10 @@ class FakeGit(GitWorkspace):
     def rescue_detached_head(self) -> str | None:
         self.events.append("rescue")
         return self.rescue_name
+
+    def quiet_readers(self, *, seconds: float) -> bool:
+        self.events.append("quiet")
+        return self.readers_quiet
 
     def push_all(
         self, *, seconds: float, confirm_seconds: float = 0.0, confirm_pause: float = 0.0
@@ -511,7 +516,7 @@ def test_a_job_in_and_a_valid_result_out_with_the_commit_pushed_once(play: Any) 
     assert result["implementer"]["opencode"]["sessionId"] == "ses_fake"
     assert result["usage"]["aiCalls"] >= 1
     assert turn.git.pushes == [TIP]
-    assert turn.events == ["agent.start", "turn", "stop", "rescue", "push"]
+    assert turn.events == ["agent.start", "turn", "stop", "quiet", "rescue", "push"]
     assert turn.git.prepared
 
 
@@ -993,7 +998,7 @@ def test_sigterm_ends_the_engine_pushes_what_is_committed_and_reports_runner_shu
     assert turn.git.pushes == [TIP]
     # The engine first (quickly: seconds, not minutes), then the push, nothing in between: the
     # leftover is not committed on a stop.
-    assert turn.events == ["agent.start", "turn", "stop", "rescue", "push"]
+    assert turn.events == ["agent.start", "turn", "stop", "quiet", "rescue", "push"]
     assert result["implementer"]["pushed"] is True
     assert result["implementer"]["headCommit"] == TIP
     assert valid_result(result)
@@ -1166,7 +1171,7 @@ def test_work_saved_from_a_detached_head_is_in_the_summary_and_the_notes(play: A
     turn = play(commits_then_ends(), configure=configure)
 
     assert "implementer/a1b2c3-leftover-1234abcd" in turn.result["implementer"]["summary"]
-    assert turn.events[:4] == ["agent.start", "turn", "stop", "rescue"]
+    assert turn.events[:5] == ["agent.start", "turn", "stop", "quiet", "rescue"]
 
 
 # #745-T27: a disk that is full is said, not hidden
@@ -1204,10 +1209,32 @@ def test_the_leftover_is_committed_after_the_agents_container_is_gone_and_before
         "turn",
         "turn",
         "stop",
+        "quiet",
         "rescue",
         "commit_all",
+        "quiet",
         "push",
     ]
+
+
+# #745: a process a filter left in a reader must not live on into the commit or the push
+def test_a_clean_tree_needs_one_quiet_and_none_for_a_commit_that_is_not_made(
+    play: Any,
+) -> None:
+    turn = play(commits_then_ends(), dirty=False)
+
+    assert turn.events.count("quiet") == 1 and "commit_all" not in turn.events
+    assert turn.events.index("quiet") < turn.events.index("rescue")
+
+
+def test_readers_that_cannot_be_made_quiet_are_said_and_the_end_goes_on(play: Any) -> None:
+    def configure(git: Any) -> None:
+        git.readers_quiet = False
+
+    turn = play(commits_then_ends(), dirty=True, configure=configure)
+
+    assert "could not be made quiet" in turn.result["logTail"]
+    assert turn.git.pushes, "the push is still tried; it fails closed on a reader it cannot use"
 
 
 def test_when_the_agents_container_is_not_confirmed_gone_nothing_is_committed(

@@ -207,8 +207,8 @@ class DockerApi:
     def create_container(self, document: dict[str, Any], name: str) -> str:
         return _identifier(self.request("POST", f"/containers/create?name={name}", document))
 
-    def start_container(self, container: str) -> None:
-        self.request("POST", f"/containers/{container}/start", ok=(204, 304))
+    def start_container(self, container: str, *, timeout: float | None = None) -> None:
+        self.request("POST", f"/containers/{container}/start", ok=(204, 304), timeout=timeout)
 
     def wait_container(self, container: str, *, timeout: float) -> int:
         """Wait for a container to end: its exit code, or `DockerError` when it does not in time."""

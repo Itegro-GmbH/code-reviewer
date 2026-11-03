@@ -198,6 +198,12 @@ class RepoAccess(Protocol):
         cannot be had."""
         ...
 
+    def reset(self, *, seconds: float) -> bool:
+        """Kill every process that exists in the places git runs and start them again, so that
+        nothing a repository's filter or hook left behind is alive. False when that could not be
+        done for all of them."""
+        ...
+
     def run(self, args: Sequence[str], *, timeout: float, write: bool = False) -> Outcome:
         """One git command in the repository; never raises on a failed command. A command that
         changes the repository says `write`: it runs where the repository is read-write, and only
@@ -737,6 +743,13 @@ class GitWorkspace:
             if ref.startswith("refs/heads/"):
                 branches.append((ref.removeprefix("refs/heads/"), tip))
         return branches
+
+    def quiet_readers(self, *, seconds: float) -> bool:
+        """Kill what runs in the readers and start them again. Runs once the agent's container is
+        gone and again after the leftover commit: a filter of the agent's repository can leave a
+        process behind (`setsid`), and in a reader with the repository read-write it could change
+        the repository under the commit or the fetch of the push."""
+        return self._access.reset(seconds=seconds)
 
     def rescue_detached_head(self) -> str | None:
         """Work committed on a detached HEAD is on no branch, so the final push would not see it.

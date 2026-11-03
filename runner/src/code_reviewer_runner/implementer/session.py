@@ -83,6 +83,7 @@ from .limits import MAX_AGENT_REQUEST_BYTES as MAX_AGENT_REQUEST_BYTES
 from .limits import MAX_RETURNED_BYTES as MAX_RETURNED_BYTES
 from .limits import MAX_TOOL_RESULT_BYTES as MAX_TOOL_RESULT_BYTES
 from .prompts import LEFTOVER_PROMPT, instructions_text
+from .reader import RESET_SECONDS as READER_RESET_SECONDS
 from .turn_result import TurnResult, clip_summary
 
 _log = logging.getLogger(__name__)
@@ -140,6 +141,7 @@ class SessionSeams:
     final_push_seconds: float = FINAL_PUSH_SECONDS
     stop_push_seconds: float = STOP_PUSH_SECONDS
     leftover_seconds: float = LEFTOVER_SECONDS
+    reader_reset_seconds: float = READER_RESET_SECONDS
     lease_poll_seconds: float = LEASE_POLL_SECONDS
     startup_seconds: float | None = None
     clock: Callable[[], float] = time.monotonic
@@ -542,6 +544,7 @@ class ImplementerSession:
                 "nothing was committed or rescued: the agent's container is not confirmed gone"
             )
         else:
+            self._quiet()
             try:
                 self._rescued = self.workspace.rescue_detached_head()
                 if self._rescued is not None:
@@ -550,8 +553,12 @@ class ImplementerSession:
                 self._note("work on a detached HEAD could not be saved on a branch")
             try:
                 if not quick and self.workspace.dirty():
-                    self.workspace.commit_all(seconds=self.seams.leftover_seconds)
-                    self._note("uncommitted changes were committed by the system")
+                    try:
+                        self.workspace.commit_all(seconds=self.seams.leftover_seconds)
+                        self._note("uncommitted changes were committed by the system")
+                    finally:
+                        # The commit ran the repository's filters in a reader that can write.
+                        self._quiet()
             except Exception:
                 self._leftover_lost = True
                 self._note("uncommitted changes could not be committed")
@@ -569,6 +576,17 @@ class ImplementerSession:
             self._stopped_by(error)
         self._note_branches(self.workspace.push_report())
         self._note_disk()
+
+    def _quiet(self) -> None:
+        """Kill what runs in the readers and start them again (`GitWorkspace.quiet_readers`):
+        before anything is read or committed after the agent, and before the push. A reader that
+        cannot be had back fails the commands that need it, and the push says so."""
+        try:
+            quiet = self.workspace.quiet_readers(seconds=self.seams.reader_reset_seconds)
+        except Exception:
+            quiet = False
+        if not quiet:
+            self._note("the readers could not be made quiet: what ran in them may still run")
 
     def _note_disk(self) -> None:
         """Say so when the VM's disk is nearly full at the end: the agent filled it, or the work is

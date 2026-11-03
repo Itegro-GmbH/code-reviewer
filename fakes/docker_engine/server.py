@@ -153,7 +153,8 @@ class FakeDockerEngine:
         return self._by_name(name)
 
     def _by_name(self, name: str) -> FakeContainer:
-        return next(c for c in self.containers.values() if c.name == name)
+        """The newest container of that name: a removed one gives its name to the next."""
+        return next(c for c in reversed(self.containers.values()) if c.name == name)
 
     def _close(self, container: FakeContainer) -> None:
         """Close the container's write ends, each once: a descriptor number closed twice would
@@ -339,7 +340,7 @@ class FakeDockerEngine:
 
     def _create(self, connection: socket.socket, target: str, body: Any) -> None:
         name = target.split("name=", 1)[1] if "name=" in target else self._next()[:12]
-        if any(c.name == name for c in self.containers.values()):
+        if any(c.name == name and not c.removed for c in self.containers.values()):
             self._reply(connection, 409, {"message": "name in use"})
             return
         identifier = self._next()

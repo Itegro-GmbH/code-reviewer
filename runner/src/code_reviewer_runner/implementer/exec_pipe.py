@@ -20,11 +20,10 @@ from .docker_api import DockerApi, DockerError
 from .exec_run import exec_document, exit_status
 from .reader import (
     CONTROL_REPO,
-    GIT,
     READER_CONTAINER_NAME,
-    READER_GIT_OPTIONS,
     READER_REPO,
     UPLOAD_PACK_PROTOCOL_VARIABLE,
+    reader_argv,
     reader_environment,
 )
 
@@ -54,7 +53,7 @@ def main(
         exec_id = api.create_exec(
             READER_CONTAINER_NAME,
             exec_document(
-                [GIT, *READER_GIT_OPTIONS, "upload-pack", READER_REPO],
+                reader_argv(["upload-pack", READER_REPO]),
                 env=env,
                 workdir=READER_REPO,
             ),

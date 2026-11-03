@@ -9,15 +9,26 @@ and nothing else: no network (`none`), no token, no secret, no socket, no other 
 root file system and a small memory limit. Whatever a repository's config makes git run, it runs
 there, and it must not matter.
 
-**What makes it not matter: the runtime.** The reader runs under `sysbox-runc`, the runtime the
-agent runs under, with no capability added: its root is an unprivileged user of the VM (a mapped
-uid), and what it holds as capabilities exists inside its own user namespace only. An earlier
-reader ran on plain runc as the VM's root with `DAC_READ_SEARCH` and `DAC_OVERRIDE`, and the default
-seccomp profile allows `open_by_handle_at`: a planted `core.fsmonitor` could reach any file of the
-VM's root file system and write into Control's own image layer. Under Sysbox the same call has no
-right to the VM's files (proven on a real VM, `docs/implementer.md`). The git options below are
-the cheap extra (nothing the agent planted runs if an option can stop it); the container is the
-wall, not the options.
+**What makes it not matter: the runtime, and a bounding set of one.** The reader runs under
+`sysbox-runc`, the runtime the agent runs under: its root is an unprivileged user of the VM (a
+mapped uid), and what it holds as capabilities exists inside its own user namespace only. An
+earlier reader ran on plain runc as the VM's root with `DAC_READ_SEARCH` and `DAC_OVERRIDE`, and the
+default seccomp profile allows `open_by_handle_at`: a planted `core.fsmonitor` could reach any file
+of the VM's root file system and write into Control's own image layer. Under Sysbox the same call
+has no right to the VM's files (proven on a real VM, `docs/implementer.md`).
+
+Sysbox also ignores the container's `CapDrop` (measured on a VM: with `CapDrop: ["ALL"]` the init
+and every exec still hold all 41 capabilities of the user namespace, `CAP_SYS_ADMIN` included). So
+the document says `CapDrop ALL` and `CapAdd DAC_OVERRIDE` (what a plain-runc lane gets, and what the
+document means), and **every command starts through `setpriv`** (`READER_DROP_CAPABILITIES`), which
+cuts the bounding set to `DAC_OVERRIDE` before git starts: whatever a repository makes git run holds
+that one capability at most. `DAC_OVERRIDE` is the minimum (measured: `add -A`, `commit` and
+`switch -c` work with it alone over files of mode 600, directories of mode 700 and a git directory
+of another uid; with none, `status` cannot open a directory and `add` fails on the index). Even with
+all capabilities the read-only reader cannot remount its volume writable (the mount's flags are
+locked by the user namespace that made them); that is asserted on a VM (`test_reader_hostile.py`).
+The git options below are the cheap extra (nothing the agent planted runs if an option can stop it);
+the container is the wall, not the options.
 
 **The volume is read-only for it wherever git allows it.** There are two readers, made when they
 are first needed: the one every look uses (the list of branches, the status, the upload-pack of the
@@ -41,6 +52,7 @@ the place where that decision costs nothing.
 
 import logging
 import socket
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, cast
@@ -66,11 +78,28 @@ CONTROL_REPO: Final = "/work/repo"
 WORK_VOLUME_TARGET: Final = "/work"
 REPO_SUBPATH: Final = "repo"
 GIT: Final = "/usr/local/bin/git"
+SETPRIV: Final = "/usr/bin/setpriv"
+# The one capability a command in a reader keeps: DAC_OVERRIDE, to read and write what the agent's
+# other users made (files of mode 600, directories of mode 700, a git directory of another uid).
+# Not DAC_READ_SEARCH (`open_by_handle_at`), not FOWNER or anything else (measured: add, commit
+# and switch work with this one alone).
+READER_CAPABILITY: Final = "DAC_OVERRIDE"
+# Under Sysbox the container's `CapDrop` changes nothing: root and every exec of it hold all 41
+# capabilities of its user namespace (measured on a VM). So each command drops them itself, before
+# git starts: the bounding set is what a process the repository makes git run could ever hold.
+READER_DROP_CAPABILITIES: Final = (
+    SETPRIV,
+    f"--bounding-set=-all,+{READER_CAPABILITY.lower()}",
+    "--inh-caps=-all",
+    "--no-new-privs",
+)
 # Small, and counted in full in the VM's memory (`READER_MEMORY_MB` of
 # dispatcher/src/launchers/sandbox.ts).
 READER_MEMORY_BYTES: Final = 256 * 1024 * 1024
 READER_PIDS_LIMIT: Final = 256
 READER_TMPFS: Final = "rw,noexec,nosuid,nodev,size=64m,mode=1777"
+# The most a reset of the readers takes, all of them together (`ReaderAccess.reset`).
+RESET_SECONDS: Final = 10.0
 READER_ENTRYPOINT: Final = ["/usr/bin/tini", "--", "/usr/bin/sleep", "infinity"]
 READER_PATH: Final = "/usr/local/bin:/usr/bin:/bin"
 # The upload-pack that Control's `git fetch` is told to run for the agent's repository: the module
@@ -99,6 +128,12 @@ READER_GIT_OPTIONS: Final = (
     "-c",
     "protocol.ext.allow=never",
 )
+
+
+def reader_argv(args: Sequence[str]) -> list[str]:
+    """The command of every look into the repository: git with its options, under the one
+    capability a reader keeps."""
+    return [*READER_DROP_CAPABILITIES, GIT, *READER_GIT_OPTIONS, *args]
 
 
 def reader_environment(identity: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -135,6 +170,8 @@ def reader_document(
             "Runtime": runtime,
             "NetworkMode": "none",
             "Privileged": False,
+            "CapDrop": ["ALL"],
+            "CapAdd": [READER_CAPABILITY],
             "ReadonlyRootfs": True,
             "SecurityOpt": ["no-new-privileges:true"],
             "Memory": READER_MEMORY_BYTES,
@@ -220,7 +257,7 @@ class ReaderAccess:
         return run_exec(
             self._api,
             container,
-            [GIT, *READER_GIT_OPTIONS, *args],
+            reader_argv(args),
             env=self._environment,
             workdir=READER_REPO,
             timeout=timeout,
@@ -236,13 +273,46 @@ class ReaderAccess:
         return run_exec(
             self._api,
             container,
-            [GIT, *READER_GIT_OPTIONS, *args],
+            reader_argv(args),
             env=self._environment,
             workdir=READER_REPO,
             timeout=timeout,
             consume=consume,
             name=f"git {args[0] if args else ''}",
         )
+
+    def reset(self, *, seconds: float = RESET_SECONDS) -> bool:
+        """Make every reader that exists quiet: SIGKILL to its init takes every process in it (a
+        filter that left a daemon behind with `setsid` included), then it is started again. The
+        agent's container is gone when this runs, and a process left in a reader could change the
+        repository under the commit or the push. A reader that cannot be restarted is removed
+        (forced: that kills it too) and made again; if that fails too it is forgotten, so that no
+        command runs in a reader that is not known to be quiet. False when any of them could not
+        be had back. Within `seconds` in all."""
+        deadline = time.monotonic() + seconds
+        quiet = True
+        for writable in (False, True):
+            container = self._containers.get(writable)
+            if container is None:
+                continue
+            if self._restart(container, deadline):
+                continue
+            self._drop(writable)
+            quiet = self._ensure(writable) is not None and quiet
+        return quiet
+
+    def _restart(self, container: str, deadline: float) -> bool:
+        def left() -> float:
+            return max(1.0, deadline - time.monotonic())
+
+        try:
+            self._api.kill_container(container, timeout=left())
+            self._api.wait_container(container, timeout=left())
+            self._api.start_container(container, timeout=left())
+        except DockerError as error:
+            _log.warning("a reader could not be restarted (%s)", error.status)
+            return False
+        return True
 
     def _ensure(self, writable: bool) -> str | None:
         existing = self._containers.get(writable)
