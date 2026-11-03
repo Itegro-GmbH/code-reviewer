@@ -163,6 +163,8 @@ def test_a_host_name_is_not_a_literal(text: str) -> None:
         "*example.com",
         "bücher.example",
         "[::1]",
+        "foo.1",
+        "foo.0x7f",
         " registry.npmjs.org",
         "",
     ],

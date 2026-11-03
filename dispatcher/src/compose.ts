@@ -12,6 +12,8 @@ import { createAppClient } from "./core/app-client.ts";
 import { liveJobVmsByApp } from "./reaper/live-vms.ts";
 import { createReaper } from "./reaper/reaper.ts";
 import { mountReaperRoute } from "./reaper/route.ts";
+import { publicUrlOf } from "./network/public-url.ts";
+import { mountNetworkRoute } from "./triggers/network.ts";
 import { mountStopRoute } from "./triggers/stop.ts";
 import { webhookTrigger } from "./triggers/webhook.ts";
 
@@ -128,6 +130,17 @@ export function composeDispatcher(
       logger,
       background: options.background,
     });
+    // #745, step 7: the call by which an Implementer VM's Control container has its network policy narrowed after the setup (the
+    // second wall of the network door). Only where there is a platform fleet and an address to be called at.
+    const publicUrl = publicUrlOf(options.env);
+    if (publicUrl !== undefined)
+      mountNetworkRoute(dispatcher.app, {
+        apps: settings.core.apps,
+        keys: settings.signingKeys,
+        fleet: setup.fleet,
+        publicUrl,
+        logger,
+      });
     // Without it the route refuses everyone and leftover VMs are billed until their own timeout.
     if (settings.cronSecret === undefined)
       logger.warn("reaper_cron_secret_missing");

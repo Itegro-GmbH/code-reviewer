@@ -87,7 +87,11 @@ def _entry_form(entry: str) -> str | None:
     in the comparison form, not an address. None when it is not that."""
     body = entry[2:] if entry.startswith("*.") else entry
     name = ascii_name(body)
-    if name is None or name != body or len(name.split(".")) < 2 or is_ip_literal(name):
+    labels = None if name is None else name.split(".")
+    if name is None or labels is None or name != body or len(labels) < 2 or is_ip_literal(name):
+        return None
+    if not labels[-1][0].isalpha():
+        # The last label starts with a letter, as every top-level domain does and no address does.
         return None
     # A name the comparison form would change (upper case, a trailing dot, Unicode) is not an
     # entry: the app writes the form, so a different one is a bug or a hand-made job.

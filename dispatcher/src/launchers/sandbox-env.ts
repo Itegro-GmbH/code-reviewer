@@ -14,6 +14,7 @@
 // | DISPATCHER_PROBE_REUSE_SECONDS                    | A forced probe (`POST /probe`) is served from an answer younger than this instead of a new canary VM (0 to 600; 0: never) | 60 |
 // | DISPATCHER_PROBE_TTL_SECONDS                      | **Deprecated (#479), ignored.** Dispatch no longer runs a probe, so no answer has a time to live. Any value is accepted with a warning, for one release, so that an existing deployment still starts | none |
 // | RUNNER_DYNAMIC_CAPABILITIES, RUNNER_DYNAMIC_MAX_COST_USD | The operator's Dynamic configuration, given to the container of a Dynamic job and to the canary (a JSON object; a plain positive decimal) | none |
+// | DISPATCHER_PUBLIC_URL                              | #745 step 7: the https address this Dispatcher is reached at, the base of the network switch call a VM makes (`POST /network`) | `https://$VERCEL_PROJECT_PRODUCTION_URL`; neither: no switch, the VM's policy is not narrowed |
 // | VERCEL_TOKEN, VERCEL_TEAM_ID, VERCEL_PROJECT_ID    | Platform access by token. Without a token the OIDC token is used   | OIDC |
 //
 // VM size and container memory per Worker kind are part of DISPATCHER_WORKER_CONFIG (`launcher.vcpus`,
@@ -31,6 +32,8 @@ import {
   type Logger,
 } from "../core/types.ts";
 import { systemClock } from "../core/clock.ts";
+import { publicUrlOf, NETWORK_ROUTE_PATH } from "../network/public-url.ts";
+import { switchToken } from "../network/switch-token.ts";
 import { createCapabilityProbe } from "../probe/capability-probe.ts";
 import { withProbeEndpoint } from "../probe/probe-endpoint.ts";
 import type { SandboxFleet, SandboxService } from "./sandbox-service.ts";
@@ -188,6 +191,7 @@ export function sandboxFromEnvironment(
   const probeSecondsFor = (servesImplementer: boolean) =>
     probeTimeoutSeconds +
     (servesImplementer ? IMPLEMENTER_PROBE_EXTRA_SECONDS : 0);
+  const publicUrl = publicUrlOf(env);
   const access = credentials(env);
   const secrets = [access?.token, read(env, "VERCEL_OIDC_TOKEN")].filter(
     (secret): secret is string => secret !== undefined,
@@ -263,6 +267,25 @@ export function sandboxFromEnvironment(
         logger,
         dynamicEnvironment: dynamic,
         servesImplementer,
+        // #745, step 7: what the Control container of an Implementer VM needs to ask for its network policy to be narrowed. The key
+        // is the app's current signing secret, the token is derived from it for this purpose only (`network/switch-token.ts`).
+        ...(publicUrl === undefined
+          ? {}
+          : {
+              networkSwitch: ({ appId, vm, rule }) => {
+                const key = settings.signingKeys.find(
+                  (candidate) => candidate.appId === appId,
+                );
+                if (key === undefined) return undefined;
+                return JSON.stringify({
+                  url: `${publicUrl}${NETWORK_ROUTE_PATH}`,
+                  vm,
+                  appId,
+                  network: rule,
+                  token: switchToken(key.secret, appId, vm, rule),
+                });
+              },
+            }),
       });
       // A deployment that serves neither a Dynamic job nor the Implementer has nothing to prove: no canary VM is ever
       // made for it.
