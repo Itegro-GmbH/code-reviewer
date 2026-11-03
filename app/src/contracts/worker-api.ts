@@ -69,6 +69,16 @@ export type RunnerJobInput = {
   env: JobEnv;
 };
 /**
+ * #818: the environment a turn was started with, as the turn copied it when it started: the setup script the runner runs once in the repository's folder after the clone and before the model is called, and (#745, step 7) the rule for the agent's network. Present only when the environment has a script or a network rule other than `off`, and the caller named the claim feature `implementer_environment` (and `implementer_network` for a rule); a turn with neither carries nothing (the size of the VM is the Dispatcher's business, it reaches the Worker as the VM it runs in). `setupScript`, when present, is literal text of at most 64 KB of UTF-8, written by a member of the workspace: it is data to run, never a command of the app, and it holds no secret by design (there is no field for one). `network`, when present, is the rule the network door enforces; absent means `off`. At least one of the two is present. `name` is for the run's log line only.
+ */
+export type ImplementerEnvironment = {
+  [k: string]: unknown;
+} & {
+  name: string;
+  setupScript?: string;
+  network?: ImplementerNetworkRule;
+};
+/**
  * What the runner prints when a job ends (the output of code-reviewer-run-job), plus an optional errorMessage. The runner has redacted secrets from logTail; the app removes anything that still looks like one before it stores the result.
  */
 export type RunnerResult = {
@@ -502,15 +512,7 @@ export interface ImplementerRepo {
   cloneUrl: string;
 }
 /**
- * #818: the environment a turn was started with, as the turn copied it when it started: the setup script the runner runs once in the repository's folder after the clone and before the model is called, and (#745, step 7) the rule for the agent's network. Present only when the environment has a script or a network rule other than `off`, and the caller named the claim feature `implementer_environment` (and `implementer_network` for a rule); a turn with neither carries nothing (the size of the VM is the Dispatcher's business, it reaches the Worker as the VM it runs in). `setupScript`, when present, is literal text of at most 64 KB of UTF-8, written by a member of the workspace: it is data to run, never a command of the app, and it holds no secret by design (there is no field for one). `network`, when present, is the rule the network door enforces; absent means `off`. `name` is for the run's log line only.
- */
-export interface ImplementerEnvironment {
-  name: string;
-  setupScript?: string;
-  network?: ImplementerNetworkRule;
-}
-/**
- * #745, step 7: the rule for the agent's network, as the owner of the environment wrote it. `off`: the agent has no network and no network door is started. `list`: the agent reaches the host names in `hosts` through the network door and no others; an entry is a host name in its ASCII (punycode) lower-case form, either exact (`registry.npmjs.org`) or a suffix (`*.pythonhosted.org`, any name below `pythonhosted.org`, not the name itself), never an IP address, a port or a path; a suffix has at least two labels after the `*.`; at most 100 entries. `open`: the agent reaches any public name. In every mode the door refuses IP literals, names that resolve to a private, loopback, link-local, shared or metadata address, and ports other than 80 and 443. `hosts` is empty unless the mode is `list`, and not empty then.
+ * #745, step 7: the rule for the agent's network, as the owner of the environment wrote it. `off`: the agent has no network and no network door is started. `list`: the agent reaches the host names in `hosts` through the network door and no others; an entry is a host name in its ASCII (punycode) lower-case form, either exact (`registry.npmjs.org`) or a suffix (`*.pythonhosted.org`, any name below `pythonhosted.org`, not the name itself), never an IP address, a port or a path; both have at least two labels (after the `*.` for a suffix); at most 100 entries. `open`: the agent reaches any public name. In every mode the door refuses IP literals, names that resolve to a private, loopback, link-local, shared or metadata address, and ports other than 80 and 443. `hosts` is empty unless the mode is `list`, and not empty then.
  */
 export interface ImplementerNetworkRule {
   mode: "off" | "list" | "open";
@@ -637,7 +639,7 @@ export interface ImplementerSetupResult {
   output: string;
 }
 /**
- * #745, step 7: what the network door did in a turn, in `ImplementerResult.network`; present when the turn had an environment with a network rule other than `off` and the door was started (and for a refused start, `door` false). `connections` are the connections the door saw, one entry for each distinct host, port and outcome, with their count and the bytes each way (the bytes the door relayed, both directions, counted at the end of a connection; nothing of their content is kept), at most 100 (`dropped` counts the entries that did not fit); `reason` is a word of the door for a refusal (`not_listed`, `ip_literal`, `private_address`, `port_not_allowed`, `unresolvable`, `bad_request`, `too_many_connections`) and null for an allowed connection. `vmPolicy` says what the second wall did: `narrowed` (the VM's network policy was cut to GitHub, the model provider, the app and the rule), `unchanged` (the rule is `open`, so the policy was left as it was), `not_configured` (this runner was started without a way to change the policy, the first wall alone held).
+ * #745, step 7: what the network door did in a turn, in `ImplementerResult.network`; present whenever the turn had a network door or the VM's network policy was changed (so for the rule `off` too, when the policy was narrowed; `door` is false then). `connections` are the connections the door saw, one entry for each distinct host, port and outcome, with their count and the bytes each way (the bytes the door relayed, both directions, counted at the end of a connection; nothing of their content is kept), at most 100 (`dropped` counts the entries that did not fit); `reason` is a word of the door for a refusal (`not_listed`, `ip_literal`, `private_address`, `port_not_allowed`, `unresolvable`, `bad_request`, `too_many_connections`, `upstream_failed`) and null for an allowed connection. `vmPolicy` says what the second wall did: `narrowed` (the VM's network policy was cut to GitHub, the model provider, the app and the rule), `unchanged` (the rule is `open`, so the policy was left as it was), `not_configured` (this runner was started without a way to change the policy, the first wall alone held).
  */
 export interface ImplementerNetworkReport {
   mode: "off" | "list" | "open";

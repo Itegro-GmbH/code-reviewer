@@ -61,6 +61,8 @@ class TurnResult:
     notes: tuple[str, ...] = field(default_factory=tuple)
     # #818: what the environment's setup script did (`ImplementerSetupResult`); None: no script ran.
     setup: dict[str, Any] | None = None
+    # #745, step 7: what the network door did (`ImplementerNetworkReport`); None: no rule but `off`.
+    network: dict[str, Any] | None = None
 
     @property
     def ok(self) -> bool:
@@ -95,4 +97,5 @@ class TurnResult:
             "summary": self.summary,
             "opencode": opencode,
             **({} if self.setup is None else {"setup": self.setup}),
+            **({} if self.network is None else {"network": self.network}),
         }

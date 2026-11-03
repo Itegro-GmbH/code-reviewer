@@ -65,6 +65,7 @@ from .git_workspace import (
     WorkspaceLayout,
     WorkspaceSpec,
 )
+from .network_rule import OFF
 from .reader import ReaderAccess
 from .report import clip_texts, escaped_size, fit_block, valid_block
 from .session import AgentPlace, ImplementerSession, SessionSeams
@@ -237,12 +238,14 @@ def production_setup(
             seams=SetupSeams(),
         )
 
+    rule = OFF if spec.environment is None else spec.environment.network
+
     def place_from(image: str) -> Callable[[], AgentPlace]:
-        return lambda: AgentContainer(memory, AgentSeams(image=image))
+        return lambda: AgentContainer(memory, AgentSeams(image=image), rule)
 
     return TurnSetup(
         workspace,
-        lambda: AgentContainer(memory),
+        lambda: AgentContainer(memory, rule=rule),
         (OPENCODE,),
         close=reader.close,
         environment=EnvironmentHost(run_environment, place_from),
@@ -405,7 +408,7 @@ def run_implementer_job(
         factory = seams.setup or production_setup
         setup = factory(job, environment, gate)
         setup.workspace.prepare()
-        if job.implementer.environment is not None:
+        if job.implementer.environment is not None and job.implementer.environment.has_script:
             prepared = _environment(job, setup, started, shutdown, seams, process_timeout)
             if prepared.error is not None:
                 raise prepared.error
