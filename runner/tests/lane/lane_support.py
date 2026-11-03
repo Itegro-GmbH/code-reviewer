@@ -209,7 +209,7 @@ def remove_fixed() -> None:
 
 
 def remove_leftovers() -> None:
-    """Everything a lane that died left: the fixed names, the network and the stand-ins of Control."""
+    """What a lane that died left: the fixed names, the network and the stand-ins of Control."""
     remove_fixed()
     for container in docker(
         "ps", "-aq", "--filter", "label=code-reviewer.lane=1", check=False
@@ -448,22 +448,30 @@ def _make_volume(scratch: Path) -> tuple[Path, str, str]:
     return work, volume, control
 
 
+@dataclass
+class LaneWorkspace:
+    """The prepared workspace of a turn: the origin, the work volume, the Control stand-in, the real
+    reader over them, and the agent's repository made through the reader."""
+
+    config: LaneConfig
+    origin: Origin
+    workspace: GitWorkspace
+    reader: ReaderAccess
+    scratch: Path
+    volume: str
+    control: str
+
+
 @contextmanager
-def lane_turn(
+def lane_workspace(
     scratch: Path,
-    script: Callable[[Path], list[Turn]],
     *,
-    family: Family = "messages",
-    limit: str = "5.00",
-    instruction: str = INSTRUCTION,
-    time_limit: int = 3600,
     seed: Callable[[Path], None] | None = None,
     origin_setup: Callable[[Origin], None] | None = None,
-    judge: Callable[[Mapping[str, str], Mapping[str, Any]], Refusal | None] | None = None,
-    memory_mb: int = 2304,
-) -> Generator[Turned]:
-    """Run one whole turn to its result against a model that follows `script(repo)` (the path of
-    the repository in the agent's container)."""
+) -> Generator[LaneWorkspace]:
+    """The origin (a bare repository standing in for GitHub), the work volume, the stand-in of the
+    Control container and the real reader; the workspace is prepared (the mirror on the reserve
+    directory, the agent's repository made and configured through the reader)."""
     config = lane_config()
     git = system_git()
     origin = Origin(scratch, git)
@@ -497,6 +505,31 @@ def lane_turn(
         git=git,
         schemes=("file",),
     )
+    with ExitStack() as stack:
+        stack.callback(shutil.rmtree, work, True)
+        stack.callback(docker, "volume", "rm", "-f", volume, check=False)
+        stack.callback(docker, "rm", "-f", control, check=False)
+        stack.callback(reader.close)
+        workspace.prepare()
+        yield LaneWorkspace(config, origin, workspace, reader, scratch, volume, control)
+
+
+@contextmanager
+def lane_turn(
+    scratch: Path,
+    script: Callable[[Path], list[Turn]],
+    *,
+    family: Family = "messages",
+    limit: str = "5.00",
+    instruction: str = INSTRUCTION,
+    time_limit: int = 3600,
+    seed: Callable[[Path], None] | None = None,
+    origin_setup: Callable[[Origin], None] | None = None,
+    judge: Callable[[Mapping[str, str], Mapping[str, Any]], Refusal | None] | None = None,
+    memory_mb: int = 2304,
+) -> Generator[Turned]:
+    """Run one whole turn to its result against a model that follows `script(repo)` (the path of
+    the repository in the agent's container)."""
     job = implementer_job(family, time_limit=time_limit, instruction=instruction)
     port = slot_ports({}).proxy
     messages: list[tuple[str, str]] = []
@@ -507,19 +540,15 @@ def lane_turn(
     ) -> tuple[int, bytes]:
         if method == "POST" and body is not None and url.endswith("/message"):
             document = json.loads(body)
-            messages.append(
-                (url.rsplit("/session/", 1)[1].split("/", 1)[0], document["parts"][0]["text"])
-            )
+            session = url.rsplit("/session/", 1)[1].split("/", 1)[0]
+            messages.append((session, document["parts"][0]["text"]))
         return session_module._http_request(method, url, body, headers, timeout)  # pyright: ignore[reportPrivateUsage]
 
     entry = ENTRIES[family]
     with ExitStack() as stack:
-        stack.callback(shutil.rmtree, scratch / "work", True)
-        stack.callback(docker, "volume", "rm", "-f", volume, check=False)
-        stack.callback(docker, "rm", "-f", control, check=False)
-        stack.callback(reader.close)
+        lane = stack.enter_context(lane_workspace(scratch, seed=seed, origin_setup=origin_setup))
+        config = lane.config
         stack.enter_context(model_network(config, port))
-        workspace.prepare()
         upstream = stack.enter_context(
             ScriptedUpstream(
                 family, script(REPO_IN_AGENT), entry["model"], real_key=REAL_KEY, judge=judge
@@ -536,7 +565,7 @@ def lane_turn(
             return AgentContainer(
                 memory_mb,
                 AgentSeams(
-                    hostname=lambda: control,
+                    hostname=lambda: lane.control,
                     image=config.agent_image,
                     runtime=config.runtime,
                     entrypoint=config.entrypoint,
@@ -546,7 +575,7 @@ def lane_turn(
 
         session = ImplementerSession(
             job,
-            workspace=workspace,
+            workspace=lane.workspace,
             command=[OPENCODE],
             place=place,
             environment={"RUNNER_DYNAMIC_MAX_COST_USD": limit},
@@ -555,11 +584,11 @@ def lane_turn(
         turned = Turned(
             config=config,
             upstream=upstream,
-            origin=origin,
-            workspace=workspace,
+            origin=lane.origin,
+            workspace=lane.workspace,
             session=session,
             scratch=scratch,
-            volume=volume,
+            volume=lane.volume,
             messages=messages,
             doors=doors,
         )
@@ -605,12 +634,14 @@ __all__ = [
     "BRANCH",
     "INSTRUCTION",
     "MODEL_AGENT_ADDRESS",
+    "LaneWorkspace",
     "Turned",
     "bash",
     "commit",
     "docker",
     "lane_config",
     "lane_turn",
+    "lane_workspace",
     "preflight",
     "says",
     "wait_for",
