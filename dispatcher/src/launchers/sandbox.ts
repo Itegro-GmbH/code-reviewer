@@ -116,17 +116,20 @@ export const IMPLEMENTER_VM_HEADROOM_MB = 512;
  */
 export const MODEL_DOOR_MEMORY_MB = 256;
 /**
- * The memory limit of the reader, the container in which Control looks at the agent's repository (`READER_MEMORY_BYTES` of
- * runner/src/code_reviewer_runner/implementer/reader.py). It runs while the agent runs (the look at the tree), so its limit is
- * counted in full, like every other one: the limits of the containers and the OS never add up to more than the VM.
+ * The memory limit of one reader, a container in which Control looks at the agent's repository (`READER_MEMORY_BYTES` of
+ * runner/src/code_reviewer_runner/implementer/reader.py). There are **two** of them (`READER_COUNT`): the one every look uses, which
+ * runs while the agent runs (the look at the tree), and the one that writes (the set-up, the rescue of a detached HEAD and the
+ * leftover commit). Both exist from the start of the turn (`ReaderAccess.warm`), so both limits are counted in full, like every other
+ * one: the limits of the containers and the OS never add up to more than the VM.
  */
 export const READER_MEMORY_MB = 256;
+export const READER_COUNT = 2;
 
 /**
  * What is left of an implementer VM for the agent's container (#745, step 4): the VM's memory (2 GB per vCPU) less the OS and the
- * daemons, Control (its container's limit), the model door and the reader. At 1, 2, 4, 6 and 8 vCPU with Control at 768 MB that is
- * 256, 2304, 6400, 10496 and 14592 MB (the OS 512, Control 768, the door 256 and the reader 256 are 1792 MB). The Worker refuses a value below its minimum (`MIN_AGENT_MEMORY_MB` of the runner's
- * job_run.py) with the free `sandbox_size_unsupported`; this function only does the sum.
+ * daemons, Control (its container's limit), the model door and the two readers. Every figure is in the table of "The agent's
+ * container" in docs/implementer.md, with the measurements behind the limits. The Worker refuses a value below its minimum
+ * (`MIN_AGENT_MEMORY_MB` of the runner's job_run.py) with the free `sandbox_size_unsupported`; this function only does the sum.
  */
 export function agentMemoryMb(vcpus: number, controlMb: number): number {
   return Math.max(
@@ -135,7 +138,7 @@ export function agentMemoryMb(vcpus: number, controlMb: number): number {
       IMPLEMENTER_VM_HEADROOM_MB -
       controlMb -
       MODEL_DOOR_MEMORY_MB -
-      READER_MEMORY_MB,
+      READER_COUNT * READER_MEMORY_MB,
   );
 }
 
@@ -267,9 +270,11 @@ function planOf(spec: LaunchSpec): Plan {
   try {
     const rendered = applyOverrides(profileOf(spec.kind), overrides);
     // A container that cannot fit in the VM beside the OS would be killed by the VM's own memory limit; an implementer
-    // turn also holds the model door and the reader beside its Worker.
+    // turn also holds the model door and the two readers beside its Worker.
     const implementer = spec.kind === "implementer";
-    const doorMb = implementer ? MODEL_DOOR_MEMORY_MB + READER_MEMORY_MB : 0;
+    const doorMb = implementer
+      ? MODEL_DOOR_MEMORY_MB + READER_COUNT * READER_MEMORY_MB
+      : 0;
     const headroomMb = implementer
       ? IMPLEMENTER_VM_HEADROOM_MB
       : VM_HEADROOM_MB;

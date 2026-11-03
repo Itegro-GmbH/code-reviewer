@@ -127,6 +127,12 @@ READER_GIT_OPTIONS: Final = (
     "maintenance.auto=false",
     "-c",
     "protocol.ext.allow=never",
+    # Every blob over 1 MB is streamed and not delta-compressed. Without it `pack-objects` of the
+    # final fetch reads each blob under git's 512 MB default whole into memory, twice (measured on a
+    # VM: a repository of 3.7 GB in files of 100 MB was OOM-killed at 128, 256 and 512 MB; with this
+    # option the same fetch ran at 128 MB). The cost is a bigger pack for large binaries.
+    "-c",
+    "core.bigFileThreshold=1m",
 )
 
 

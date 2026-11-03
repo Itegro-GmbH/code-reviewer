@@ -1228,7 +1228,7 @@ the lease held), never after a lost lease, `push_all(seconds=...)`:
 
 **How root stays safe.** Root never opens the agent's repository (no `-C`, no `--git-dir`, no cwd in it), so the hooks,
 `core.fsmonitor`, filters, aliases, `core.pager`, `core.hooksPath` and `safe.directory` it holds are never read by a root process,
-and the runner sets no `safe.directory` for itself. Everything that looks inside the repository runs in the **reader**, a container under the Sysbox runtime with no added capability, no network and no token, with the repository read-only for every look and a second one with it read-write for the changes after the agent is gone (`implementer/reader.py`; its mirror lives on the reserve disk `/work/reserve`); the one door is `--upload-pack`,
+and the runner sets no `safe.directory` for itself. Everything that looks inside the repository runs in the **reader**, a container under the Sysbox runtime whose commands keep one capability (`DAC_OVERRIDE`), with no network and no token, with the repository read-only for every look and a second one with it read-write for the changes after the agent is gone (`implementer/reader.py`; its mirror lives on the reserve disk `/work/reserve`); the one door is `--upload-pack`,
 which the runner names itself: `exec_pipe`, a command that runs `git upload-pack` in the reader through the Docker daemon; what the repository's config makes that process run, it runs in the reader.
 The result is an object stream that the mirror's git checks and stores in a repository only root can enter, whose config is the
 runner's and where nothing is checked out. **Decisions come from exit statuses and objects, never from what git printed.**

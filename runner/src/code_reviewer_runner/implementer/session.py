@@ -397,7 +397,14 @@ class ImplementerSession:
 
     def _remove_place(self, place: AgentPlace | None) -> None:
         """Take the killed container away, after the push and the reads: nothing waits for it (the
-        VM goes with the turn), so it is done on a thread of its own and never delays the result."""
+        VM goes with the turn), so it is done on a thread of its own and never delays the result.
+
+        Two limits, both on purpose. It happens only on a normal return of `run()`: a turn that
+        raises, or a process that is stopped (SIGTERM) before it gets here, leaves the killed
+        container for the VM to take with it. And the thread is a daemon: the process may exit
+        before the removal ends. Both are fine because **one VM runs one turn** (the Launcher makes a
+        VM per job and deletes it after the result); they would not be if a VM ran a second turn,
+        which would find the name of the old container taken (`AGENT_CONTAINER_NAME`)."""
         if place is None:
             return
 

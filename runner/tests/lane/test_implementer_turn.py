@@ -7,6 +7,7 @@ table that still mean something with the agent in a container of its own: E01, E
 and E09 here, E06 and E07 in `test_implementer_git.py`, E15 in `test_reader_hostile.py`."""
 
 import re
+import threading
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -215,3 +216,43 @@ def test_no_secret_is_anywhere_the_agent_can_look_and_none_is_left_on_the_volume
             turned.workspace.layout.work_dir, TOKEN, REAL_KEY, capability
         )
         assert on_the_volume == [], [str(path) for path in on_the_volume]
+
+
+# #745-E17: the agent's container is killed in the middle of the turn (memory, a crash, the daemon)
+def test_a_container_killed_mid_turn_ends_the_turn_named_and_what_was_committed_arrives(
+    tmp_path: Path,
+) -> None:
+    def script(repo: Path) -> list[Turn]:
+        return [
+            write_file(repo, "one.txt"),
+            commit("Add one"),
+            write_file(repo, "two.txt"),
+            commit("Add two"),
+            bash("sleep 600"),
+        ]
+
+    def kill_after_two_commits() -> None:
+        while not stop.is_set():
+            counted = docker(
+                "exec", AGENT_CONTAINER_NAME, "git", "-C", "/work/repo", "rev-list", "--count",
+                "HEAD", check=False,
+            )  # fmt: skip
+            if counted.returncode == 0 and int(counted.stdout.strip() or 0) >= 3:
+                docker("kill", AGENT_CONTAINER_NAME, check=False)
+                return
+            stop.wait(0.3)
+
+    stop = threading.Event()
+    killer = threading.Thread(target=kill_after_two_commits, daemon=True)
+    killer.start()
+    try:
+        with lane_turn(tmp_path, script) as turned:
+            result = turned.result
+
+            assert result.error_code is ErrorCode.AGENT_GAVE_UP, (result.error_code, result.notes)
+            assert "the agent's container ended during the turn" in (result.error_detail or "")
+            assert [c.subject for c in result.commits] == ["Add one", "Add two"]
+            assert result.pushed and turned.origin_tip() == result.head_commit
+    finally:
+        stop.set()
+        killer.join(10.0)

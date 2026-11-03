@@ -16,7 +16,17 @@ import os
 import time
 from pathlib import Path
 
-from lane_support import BRANCH, docker, lane_workspace, wait_for
+from fakes.wire.formats import Turn
+from lane_support import (
+    BRANCH,
+    bash,
+    docker,
+    lane_turn,
+    lane_workspace,
+    says,
+    wait_for,
+    write_file,
+)
 from opencode_native import REAL_KEY
 
 from code_reviewer_runner.implementer.git_workspace import LEFTOVER_MESSAGE
@@ -288,3 +298,32 @@ def test_what_the_agents_other_users_own_is_committed_with_the_one_capability_th
             git=workspace.git,
         )  # fmt: skip
         assert "private.txt" in tree.split() and "pgdata/PG_VERSION" in tree.split()
+
+
+# #745: the end of a whole turn does it: the system commits the leftover, the filter starts a daemon
+# in the reader that can write, and nothing of it is alive when the push has been made
+def test_a_daemon_the_leftover_commit_starts_in_a_reader_is_gone_when_the_turn_has_pushed(
+    tmp_path: Path,
+) -> None:
+    def script(repo: Path) -> list[Turn]:
+        return [
+            write_file(repo, "df.sh", DAEMON_FILTER),
+            write_file(repo, ".gitattributes", "* filter=daemon\n"),
+            bash("chmod +x df.sh && git config filter.daemon.clean /repo/df.sh"),
+            write_file(repo, "notes.txt"),
+            says("Done."),
+            says("I will not commit."),
+        ]
+
+    with lane_turn(tmp_path, script) as turned:
+        result = turned.result
+
+        assert result.ok, (result.error_code, result.error_detail, result.notes)
+        assert [c.subject for c in result.commits] == [LEFTOVER_MESSAGE]
+        assert result.pushed and turned.origin_tip() == result.head_commit
+        assert (turned.workspace.repo / DAEMON_MARK).exists(), "the filter ran: the control"
+        for reader in (READER_CONTAINER_NAME, READER_WRITER_CONTAINER_NAME):
+            assert alive_in(reader) == [], reader
+        mark = (turned.workspace.repo / DAEMON_MARK).read_text()
+        time.sleep(0.5)
+        assert (turned.workspace.repo / DAEMON_MARK).read_text() == mark, "nothing writes any more"

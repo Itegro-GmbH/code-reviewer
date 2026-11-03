@@ -322,14 +322,23 @@ needs Control and the agent on a common network, from which the agent could conn
 Control.
 
 **How Control reads the agent's repository.** In the **reader**, under the same runtime as the agent: a container of the Worker image (which
-has git), `sysbox-runc`, `NetworkMode: none`, no token and no secret, a read-only root file system, `no-new-privileges`, 256 MB, and the
+has git), `sysbox-runc`, `NetworkMode: none`, no token and no secret, a read-only root file system, `no-new-privileges`, `CapDrop ALL` with `CapAdd DAC_OVERRIDE`, a memory limit (below), and the
 repository as its only mount, **read-only** for every look (the list of branches, the status, the `git upload-pack` of the final fetch,
 piped to Control's `git fetch` by `exec_pipe`). The steps that change the repository (the set-up before the agent exists, the rescue of a
 detached HEAD and the leftover commit after the container is gone) run in a **second reader** with the repository read-write; both are made
 before the agent starts (`ReaderAccess.warm`), so that nothing has to be created when the VM's disk may be full. Control runs `git` in them
-through exec. No capability is added: the first version of the reader ran on plain runc as the VM's root with `DAC_READ_SEARCH` and
+through exec. **Capabilities.** The first version of the reader ran on plain runc as the VM's root with `DAC_READ_SEARCH` and
 `DAC_OVERRIDE`, and the default seccomp profile allows `open_by_handle_at`, so a `core.fsmonitor` planted in the repository could read and
-write any file of the VM's root file system. **Proven on a real VM (2026-11-03, 2 vCPU, a `spike-` VM from a snapshot built from the branch):**
+write any file of the VM's root file system. The reader now keeps one capability, `DAC_OVERRIDE` (to read and write what the agent's other
+users made: files of mode 600, directories of mode 700, a git directory of another uid), and **measured on a real VM (2026-11-03, 2 vCPU): Sysbox
+ignores the container's `CapDrop`**: with `CapDrop: ["ALL"]` the init and every exec of the container still held all 41 capabilities of its user
+namespace (`CapEff 000001ffffffffff`, `CAP_SYS_ADMIN` among them), so the old proof of the snapshot (`docker run --cap-drop ALL`) proved nothing about the reader that ships. So the document
+says `CapDrop ALL` and `CapAdd DAC_OVERRIDE` (that is what a plain-runc lane gets), and **every command the reader runs starts through `setpriv --bounding-set=-all,+dac_override
+--inh-caps=-all --no-new-privs`** (`READER_DROP_CAPABILITIES`): `CapEff` of the command is `0000000000000002`. `DAC_OVERRIDE` is the minimum (measured over a repository with files of mode 400 and 600
+owned by uid 1000, a directory of mode 700 owned by uid 999 and a git directory owned by uid 1000: with no capability `status` cannot open the directory and `add` fails on the index; with this one `add -A`, `commit`
+and `switch -c` work; `FOWNER` is not needed). **A remount does not make the volume writable, with or without that bounding set**: in the read-only reader `touch` gives "Read-only file
+system", `mount -o remount,rw /repo` and `mount -o remount,rw /` give "permission denied", also from a command that holds all 41 capabilities (the mount's flags are locked by the user namespace
+that made it); `test_reader_hostile.py` asserts it on a VM and, with the capability missing, under runc. **Proven on a real VM (2026-11-03, 2 vCPU, a `spike-` VM from a snapshot built from the branch):**
 that reader configuration, with a planted fsmonitor that calls name_to_handle_at and `open_by_handle_at`, opened a handle for a file, then for the root of
 the VM's file system (inode 128 on the XFS), listed it, read `/etc/hostname` and **wrote `/var/lib/cr-escape-marker` on the VM's root**; the same
 call under `sysbox-runc` with no added capability returned `EPERM` at both stages and nothing was written (root of the reader is the unprivileged

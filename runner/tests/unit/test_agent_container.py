@@ -464,6 +464,15 @@ def test_the_reader_runs_under_sysbox_with_no_added_capability_no_network_no_tok
     assert document["Env"] == ["PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/tmp"], "no secret"
 
 
+# #745: a repository of a few GB must not OOM-kill pack-objects in the small reader
+def test_the_readers_git_streams_large_blobs_instead_of_holding_them_in_memory() -> None:
+    options = list(ac_reader.READER_GIT_OPTIONS)
+
+    assert options[options.index("core.bigFileThreshold=1m") - 1] == "-c"
+    assert ac_reader.reader_argv(["status"])[-1] == "status"
+    assert "core.bigFileThreshold=1m" in ac_reader.reader_argv(["upload-pack", "/repo"])
+
+
 # #745-T23
 def test_the_volume_is_read_only_for_the_reader_wherever_git_allows_it() -> None:
     reading = reader_document(IMAGE_ID, WORK_VOLUME)
