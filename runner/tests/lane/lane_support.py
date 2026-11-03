@@ -196,8 +196,8 @@ def preflight(config: LaneConfig) -> None:
         raise AssertionError(f"the daemon has no {config.runtime} runtime")
 
 
-def remove_leftovers() -> None:
-    """The containers of a lane that died, by their fixed names, and its network."""
+def remove_fixed() -> None:
+    """The containers the turn names by constants, and the model network."""
     for name in (
         AGENT_CONTAINER_NAME,
         READER_CONTAINER_NAME,
@@ -205,11 +205,16 @@ def remove_leftovers() -> None:
         RELAY_CONTAINER,
     ):
         docker("rm", "-f", name, check=False)
+    docker("network", "rm", MODEL_NETWORK_NAME, check=False)
+
+
+def remove_leftovers() -> None:
+    """Everything a lane that died left: the fixed names, the network and the stand-ins of Control."""
+    remove_fixed()
     for container in docker(
         "ps", "-aq", "--filter", "label=code-reviewer.lane=1", check=False
     ).stdout.split():
         docker("rm", "-f", container, check=False)
-    docker("network", "rm", MODEL_NETWORK_NAME, check=False)
 
 
 def bridge_gateway() -> str:
@@ -223,7 +228,7 @@ def model_network(config: LaneConfig, port: int) -> Generator[None]:
     """The model network of the turn and the relay container that stands at the door's address on
     it. Under Sysbox the network is the production one (`--internal`, isolated gateway), so the
     agent reaches nothing but the relay; under runc it is a plain bridge."""
-    remove_leftovers()
+    remove_fixed()
     options = (
         ["--internal", "-o", "com.docker.network.bridge.gateway_mode_ipv4=isolated"]
         if config.under_sysbox
@@ -245,7 +250,7 @@ def model_network(config: LaneConfig, port: int) -> Generator[None]:
     try:
         yield
     finally:
-        remove_leftovers()
+        remove_fixed()
 
 
 class LaneDoor:
