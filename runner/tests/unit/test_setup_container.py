@@ -61,6 +61,9 @@ class Rig:
         self.script_text = ""
         self.script_output = "installing\n"
         self.script_waits = False
+        # Set when the script's exec begins: tests that stop the run or the container while the script
+        # runs wait for this, not for a time (a slow host starts the container later than any timer).
+        self.script_started = threading.Event()
         # What the end script finds: "stops" (the container's Docker stops and the container
         # ends with it), "no-docker" (nothing runs in it but its init) or "hangs".
         self.finish_mode = "no-docker"
@@ -90,6 +93,7 @@ class Rig:
             self.script_text = stdin.read().decode()
             return 0
         if argv[:3] == ["/bin/sh", "-c", sc.RUN_SCRIPT]:
+            self.script_started.set()
             stdout.write(self.script_output)
             if self.script_waits:
                 made.killed.wait(30)
@@ -329,9 +333,9 @@ def test_a_script_that_runs_out_of_time_is_killed_and_its_output_is_kept(rig: Ri
 # #818-T11
 def test_a_stop_of_the_runner_ends_the_script_and_removes_the_container(rig: Rig) -> None:
     rig.script_waits = True
-    stop = threading.Event()
-    threading.Timer(0.4, stop.set).start()
-    done = run(rig, seconds=30, should_stop=stop.is_set)
+    # The stop is asked for exactly when the script is running, however long the start took.
+    done = run(rig, seconds=30, should_stop=rig.script_started.is_set)
+    assert rig.script_started.is_set()
     assert done.outcome == OUTCOME_STOPPED
     assert all(c.removed for c in rig.engine.containers.values())
 
@@ -341,10 +345,11 @@ def test_a_container_killed_under_the_script_is_the_scripts_and_says_why(rig: Ri
     rig.script_waits = True
 
     def oom() -> None:
+        rig.script_started.wait(30)
         setup = next(c for c in rig.engine.containers.values() if c.name == sc.SETUP_CONTAINER_NAME)
         rig.engine.kill(setup.name, exit_code=137, oom=True)
 
-    threading.Timer(0.4, oom).start()
+    threading.Thread(target=oom, daemon=True).start()
     done = run(rig, seconds=30)
     assert done.outcome == OUTCOME_SCRIPT_FAILED
     assert "killed for its memory" in done.detail

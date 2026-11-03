@@ -180,6 +180,8 @@ class Rig:
         self.script_exit = 0
         self.script_output = "added 300 packages\n"
         self.waits = False
+        # Set when the script's exec begins, so that a stop is asked for while it runs and not at a time.
+        self.script_started = threading.Event()
 
     def api(self) -> DockerApi:
         return DockerApi(str(self.directory / "docker.sock"), timeout=5.0)
@@ -199,6 +201,7 @@ class Rig:
             stdin.read()
             return 0
         if argv[:3] == ["/bin/sh", "-c", sc.RUN_SCRIPT]:
+            self.script_started.set()
             stdout.write(self.script_output)
             if self.waits:
                 made.killed.wait(30)
@@ -317,10 +320,9 @@ def test_a_timeout_is_timed_out_with_a_null_status(
 # #818-T46
 def test_a_stop_of_the_runner_is_not_a_failure_of_the_script(rig: Rig) -> None:
     rig.waits = True
-    stop = threading.Event()
-    threading.Timer(0.5, stop.set).start()
     with pytest.raises(ShutdownRequested):
-        step(rig, Workspace(), should_stop=stop.is_set)
+        step(rig, Workspace(), should_stop=rig.script_started.is_set)
+    assert rig.script_started.is_set()
 
 
 # #818-T47
