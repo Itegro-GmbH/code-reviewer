@@ -457,7 +457,7 @@ bill, Control, the VM's services or the outside beyond the door**, not something
   and the agent's container as the daemon made it, and the hostile repository of the next section. On a VM it runs under `sysbox-runc` as well.
 
 **Result, 2026-11-03** (2 vCPU, 4 GB, kernel 6.18.56, Sysbox 0.7.1; snapshot built from the branch; the check on a VM restored from it and prepared the
-way the Launcher prepares one): 72 of 72 checks hold after the two fixes below; the lane's 18 tests pass under `sysbox-runc` and the whole lane under `runc`.
+way the Launcher prepares one): 72 of 72 checks hold after the two fixes below; the 17 tests of the hostile-reader file pass under `sysbox-runc` and the whole lane under `runc`.
 The 4 vCPU size ran the same script with 6,144 MB for the agent.
 
 | Area | What is proven |

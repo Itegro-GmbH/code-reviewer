@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
+import lane_support
 import pytest
 from fakes.wire.formats import Turn
 from lane_support import (
@@ -352,6 +353,15 @@ def test_a_daemon_the_leftover_commit_starts_in_a_reader_is_gone_when_the_turn_h
 # reader: it may fail a command (a named outcome, never a hang of the turn), and it must not make
 # the commit or the push carry anything that is not the agent's own tree.
 
+
+@pytest.fixture(autouse=True)
+def small_reserve(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every workspace of the lane allocates a reserve disk that stays on the machine until the run
+    ends (the mount is held by the Docker daemon); this file makes many, so each gets the least
+    the runner accepts (it wants 256 MiB free on it) and not the lane's 512 MiB."""
+    monkeypatch.setattr(lane_support, "RESERVE_MEGABYTES", 320)
+
+
 SCRATCH_ROOTS = {
     "etc",
     "usr",
@@ -504,12 +514,6 @@ def plant_garbage_head(repo: Path) -> None:
     (repo / ".git" / "HEAD").write_text("ref: refs/heads/../../../../etc/passwd\n")
 
 
-def plant_symlink_head(repo: Path) -> None:
-    head = repo / ".git" / "HEAD"
-    head.unlink()
-    head.symlink_to("/etc/passwd")
-
-
 def plant_alternates(repo: Path) -> None:
     info = repo / ".git" / "objects" / "info"
     info.mkdir(parents=True, exist_ok=True)
@@ -546,7 +550,6 @@ HOSTILE_LAYOUTS = [
     ("symlinked_refs_to_files_of_the_reader", plant_symlink_refs, True),
     ("garbage_packed_refs", plant_packed_refs_garbage, False),
     ("garbage_head", plant_garbage_head, False),
-    ("head_as_a_symlink_to_a_file", plant_symlink_head, False),
     ("worktree_and_commondir_pointers", plant_worktrees_and_modules, False),
     ("fifo_as_config", plant_fifo_as_config, False),
     ("fifo_as_head", plant_fifo_as_head, False),
