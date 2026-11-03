@@ -1741,6 +1741,7 @@ const CASES: Case[] = [
           name: a.environment.name,
           vcpus: a.environment.vcpus,
           hasScript: true,
+          networkMode: "off",
         },
       ]),
   },
