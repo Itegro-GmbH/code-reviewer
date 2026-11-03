@@ -362,6 +362,15 @@ process killed, the same code with "the engine process ended during its turn". O
 `sandbox_size_unsupported` in 0 s; with the check lowered by hand, the same scripted turn ran inside 768 MB (peak 500 MB), which says
 that a 1 vCPU VM cannot host a real repository's tests, not that the stack cannot start.
 
+**Measured on a real VM, round of the review of #824 (2026-11-03, 2 vCPU, 4 GB, `spike-` VMs from snapshots built from the branch, head `3e115264`, `sysbox: proven` with the Subpath volume in the proof).**
+The launch steps of the Dispatcher (`SandboxDockerHost` and `workVolumeCommands`, run for real through the Vercel adapter) took 8.0 s in all: the three run-directory steps 0.5 to 0.6 s each (platform round trips),
+`vm-prepare.sh` 1.3 s, the image check 0.5 s, `sysbox-prepare.sh` 0.7 s, the eight volume steps 0.5 s each (the work in them is 5 to 40 ms: `fallocate` of 8 GiB 5 ms, `mkfs.ext4` 16 ms, loop mount 15 ms). The whole lane (11 journeys) passes
+under `sysbox-runc` in 108 s, and under `runc` in 79 s. Memory: a fresh VM with Docker and the two Sysbox daemons up uses 351 MB (512 are reserved); during a turn the used memory peaked at 1.35 GB of 4.28 GB with the agent
+pulling a 1.5 GB image into its own Docker and running two containers in it (the agent's container 612 MiB, the relay 12, the readers under 1 MiB each); so the limits that add up to the VM (1,792 MB plus the agent's 2,304) are a guarantee and not a forecast.
+Stop: the kill of the agent's container took 0.4 to 0.5 s idle and **3.5 s** with that inner Docker (hence a kill call of up to 5 s), the wait until it is gone about 0 s after the kill, the removal 0.3 s (done after the push). The network, from
+the agent in a turn: the door's relay at `10.213.77.2` reached; the model network's gateway, the VM's docker0 gateway, the VM's control port `23456`, `1.1.1.1:443`, a name lookup (ping and `getent`) all blocked, and the agent's only routes are the model network and its own inner `docker0`;
+a plain container on the VM with the same tools reaches the host listener, `1.1.1.1:443` and resolves `example.com`. The reader attack and the full disk are under "The agent's container" and "The disk".
+
 ## How the agent's container is tested
 
 Three places, each with its own limits, and the last one only a VM with Sysbox can fill:
