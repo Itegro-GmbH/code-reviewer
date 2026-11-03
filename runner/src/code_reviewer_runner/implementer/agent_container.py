@@ -83,9 +83,10 @@ AGENT_PIDS_LIMIT: Final = 16384
 # or epoll object, measured on the VM's kernel 6.18), so a flood of them can take the whole VM's
 # memory before the container's limit is reached. The VM's own OOM killer then picks its victim by
 # this score: the agent's (and the Setup container's) processes first, never Control, the door,
-# the readers or the daemons. The agent's root is in a user namespace and cannot lower the value
-# (that takes CAP_SYS_RESOURCE in the VM's). `vm_memory.MemoryGuard` acts before the kernel has
-# to.
+# the readers or the daemons. It is a preference, not a bound: under Sysbox the agent's root can
+# lower the score of its own processes to -999 (measured, 2026-11-03; -1000 is refused), so the
+# VM's memory is held by `vm_memory.MemoryGuard`, which acts before the kernel has to and does
+# not depend on the score.
 AGENT_OOM_SCORE_ADJ: Final = 1000
 AGENT_ENTRYPOINT: Final = ["/usr/bin/tini", "--", "/usr/local/bin/agent-init"]
 # The file the image's init writes once the inner Docker answers.

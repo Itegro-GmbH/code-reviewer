@@ -1730,10 +1730,13 @@ def section_setup_container(lab: Rig) -> None:
     )
     checks.say(
         "oom",
-        "setup_processes_have_oom_score_1000_and_root_cannot_lower_it",
-        "in the Setup container's script (an exec) and as the VM sees the container's cgroup: oom_score_adj 1000 for every process, every lowering refused, no CAP_SYS_RESOURCE; the VM sees the script's shell among them",
-        oom_facts_hold(got["oom"]) and vm_scores_hold(setup_vm_view, "/bin/sh"),
-        **got["oom"],
+        "setup_processes_start_at_oom_score_1000",
+        "in the Setup container's script (an exec) and as the VM sees the container's cgroup: oom_score_adj 1000 for every process; the VM sees the script's shell among them; lowering is as in the agent's container",
+        oom_start_holds(got["oom"])
+        and vm_scores_hold(setup_vm_view, "/bin/sh")
+        and oom_lowering(got["oom"]) in ("none", "to -999"),
+        lowering=oom_lowering(got["oom"]),
+        facts=got["oom"],
         vm=[
             f"{p.get('pid')}:{p.get('comm')}:{p.get('oom_score_adj')}"
             for p in setup_vm_view.get("processes", [])
@@ -1815,6 +1818,14 @@ import ctypes, errno, json, mmap, os, resource, signal, socket, struct, sys, tim
 libc = ctypes.CDLL(None, use_errno=True)
 hold, procs, cap = float(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
 kinds = sys.argv[4].split(",")
+lowered = "no"
+if len(sys.argv) > 5:
+    try:
+        open("/proc/self/oom_score_adj", "w").write(sys.argv[5])
+        lowered = open("/proc/self/oom_score_adj").read().strip()
+    except OSError as error:
+        lowered = "error:%d" % error.errno
+print("SCORE", lowered, flush=True)
 def call(fd):
     if fd < 0:
         raise OSError(ctypes.get_errno(), "call")
@@ -1898,7 +1909,7 @@ def oom_outside(before: Json, after: Json, container_ids: list[str]) -> list[str
     or below one of them, and whose `oom_kill` counter rose between two readings of the VM's tree."""
     both = {**before["groups"], **after["groups"]}
     ours = [path for path in both if any(identifier in path for identifier in container_ids)]
-    inside = {path for path in ours}
+    inside = {".", *ours}  # the root is above everything
     for path in ours:
         parts = path.split("/")
         inside.update("/".join(parts[:n]) for n in range(1, len(parts)))
@@ -2069,7 +2080,17 @@ def fd_flood(lab: Rig, reader: ReaderAccess, label: str, kinds: str) -> None:
         done = run_exec(
             lab.api,
             AGENT_CONTAINER_NAME,
-            [PYTHON, "-I", "-c", FDS, "8", str(processes), str(FLOOD_CAP), kinds],
+            [
+                PYTHON,
+                "-I",
+                "-c",
+                FDS,
+                "8",
+                str(processes),
+                str(FLOOD_CAP),
+                kinds,
+                *(["-999"] if label == "leaky" else []),
+            ],
             timeout=180.0,
             name="fds",
         )
@@ -2109,7 +2130,7 @@ def fd_flood(lab: Rig, reader: ReaderAccess, label: str, kinds: str) -> None:
         "open_file_flood_in_the_agent_does_not_starve_control"
         if label == "mixed"
         else "open_file_flood_of_the_leakiest_objects_does_not_starve_control",
-        f"twelve root processes open {kinds} until EMFILE, ENOMEM or the memory limit stops them (past the old table of {OLD_FILE_MAX_4GB}, table now {limit}): the table never fills, Control's calls and a command in a reader never fail, door and readers stay up, the VM keeps at least 300 MiB of free memory and file cache (looked at 50 times a second), no kernel OOM kill happens outside the agent's cgroup and none at all when Control's guard stopped the agent",
+        f"twelve root processes open {kinds} until EMFILE, ENOMEM or the memory limit stops them (past the old table of {OLD_FILE_MAX_4GB}, table now {limit}): the table never fills, Control's calls and a command in a reader never fail, door and readers stay up, the VM keeps at least 300 MiB of free memory and file cache (looked at 50 times a second), no kernel OOM kill happens outside the agent's cgroup (the leaky flood runs with the processes' OOM score lowered to -999 by root: the guard does not rely on it)",
         stopped
         and peak > OLD_FILE_MAX_4GB
         and peak < limit
@@ -2117,11 +2138,13 @@ def fd_flood(lab: Rig, reader: ReaderAccess, label: str, kinds: str) -> None:
         and sampler.worst < 10.0
         and sampler.min_headroom_mib >= 300
         and not sampler.oom_outside
-        and (not by_control or sampler.oom_kills == 0)
         and reader_ok.returncode == 0
         and reader_ok.stdout.startswith("git version")
         and all(whole_and_running(lab).values()),
         kinds=kinds,
+        oom_score_of_the_flood=next(
+            (x.split()[1] for x in done.stdout.splitlines() if x.startswith("SCORE ")), "1000"
+        ),
         file_max=limit,
         opened_by_the_agent=opened,
         children_stopped_by=stopped_by,
@@ -2154,27 +2177,39 @@ def last_flood(text: str) -> list[list[int]]:
     return []
 
 
-LOWERINGS = ("0", "-1", "-1000", "500", "999")
+LOWERINGS = ("999", "500", "0", "-1", "-500", "-999", "-1000")
+# What Sysbox 0.7.1 on kernel 6.18 lets root of the container do (2026-11-03): lower the score of its own
+# processes to -999. Only -1000 (never kill) is refused.
+LOWEST_ALLOWED = -999
 
 
-def oom_facts_hold(facts: Json) -> bool:
+def oom_start_holds(facts: Json) -> bool:
     """What a process of a container (started by an exec, as the engine is) finds of its OOM score:
-    1000 for itself, its child and the container's init; every lowering refused and the score still
-    1000; raising it to 1000 allowed (the control: the file is writable, only lowering is not)."""
+    1000 for itself, its child and the container's init, as a process of root with the control that
+    raising it to 1000 is allowed."""
     return (
         facts.get("self") == "1000"
         and facts.get("child") == "1000"
         and facts.get("init") == "1000"
         and facts.get("uid") == 0
-        and facts.get("cap_sys_resource") is False
-        and all(
-            str(facts.get("writes", {}).get(value, "")).startswith("error:")
-            and str(facts["writes"][value]).endswith("-> 1000")
-            for value in LOWERINGS
-        )
-        and facts.get("after_lowering") == "1000"
         and facts.get("raise_to_1000") == "written -> 1000"
     )
+
+
+def oom_lowering(facts: Json) -> str:
+    """How far root of the container lowers its own score: "none" when every lowering is refused,
+    "to -999" when exactly those down to -999 work and -1000 does not, else "other"."""
+    writes = facts.get("writes", {})
+
+    def denied(value: str) -> bool:
+        return str(writes.get(value, "")).startswith("error:")
+
+    allowed = [v for v in LOWERINGS if int(v) < 1000 and not denied(v)]
+    if not allowed:
+        return "none"
+    if allowed == [v for v in LOWERINGS if LOWEST_ALLOWED <= int(v) < 1000] and denied("-1000"):
+        return "to -999"
+    return "other"
 
 
 def vm_scores_hold(view: Json, needle: str) -> bool:
@@ -2197,10 +2232,20 @@ def section_oom_score(lab: Rig) -> None:
     facts = lab.in_agent({"sections": ["oom"]}).get("oom", {})
     checks.say(
         "oom",
-        "agent_processes_have_oom_score_1000_and_root_cannot_lower_it",
-        "in an exec in the agent's container: oom_score_adj 1000 for the process, its child and init; writing 0, -1, -1000, 500 and 999 fails (EACCES or EPERM) and leaves 1000; no CAP_SYS_RESOURCE; writing 1000 works",
-        oom_facts_hold(facts),
-        **facts,
+        "agent_processes_start_at_oom_score_1000",
+        "in an exec in the agent's container (as the engine is started): oom_score_adj 1000 for the process, its child and the container's init",
+        oom_start_holds(facts),
+        facts=facts,
+    )
+    lowering = oom_lowering(facts)
+    checks.say(
+        "oom",
+        "root_can_lower_its_oom_score_no_further_than_minus_999",
+        "known limit, pinned: root of the container lowers the score of its own processes to -999 and no further (-1000 is refused), so the score is a preference of the kernel's OOM killer and not a bound on the agent: Control's guard is what keeps the VM's memory (the floods below run with the score lowered). A kernel or Sysbox that refuses every lowering is better and also passes",
+        lowering in ("none", "to -999"),
+        lowering=lowering,
+        writes=facts.get("writes"),
+        cap_sys_resource=facts.get("cap_sys_resource"),
     )
     # The engine as `start_engine` starts it, and a plain exec beside it; both stay for the VM's view.
     lab.agent.start_engine([PYTHON, "-I", "-c", "import time; time.sleep(900)  # standin"], {})

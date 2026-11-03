@@ -542,8 +542,9 @@ def _oom_write(value: str) -> str:
 
 def section_oom(_config: Json) -> Json:
     """The OOM score of this process (an exec of the daemon, as the engine is), of its children and
-    of the container's init, and whether root of the container can lower it. Raising it is always
-    allowed (the control); lowering it takes `CAP_SYS_RESOURCE` of the VM's user namespace."""
+    of the container's init, and how far root of the container can lower it. Raising it is always
+    allowed (the control). Measured: under Sysbox root lowers it to -999 (not -1000), so the score
+    is a preference for the kernel's OOM killer and not a bound on the agent."""
     child = subprocess.run(
         ["/bin/sh", "-c", "cat /proc/self/oom_score_adj"],
         capture_output=True,
@@ -551,7 +552,9 @@ def section_oom(_config: Json) -> Json:
         timeout=10,
     ).stdout.strip()
     own = _read("/proc/self/oom_score_adj").strip()
-    writes = {value: _oom_write(value) for value in ("0", "-1", "-1000", "500", "999")}
+    writes = {
+        value: _oom_write(value) for value in ("999", "500", "0", "-1", "-500", "-999", "-1000")
+    }
     after_lowering = _read("/proc/self/oom_score_adj").strip()
     raised = _oom_write("1000")
     return {
