@@ -111,7 +111,13 @@ class EnvironmentSetup:
     notes: tuple[str, ...]
 
 
-def _block(run: SetupRun, output: str, *, ok: bool) -> dict[str, Any]:
+def setup_block(run: SetupRun, output: str, *, ok: bool, closing: str = "") -> dict[str, Any]:
+    """The `ImplementerSetupResult`. `closing` is the runner's own last line of the output (`[setup]
+    ...`): a script that ended well but whose result could not be kept has no exit status that says
+    so, and the page shows nothing but the exit status and the output."""
+    if closing:
+        room = max(0, OUTPUT_CHARS - len(closing) - 1)
+        output = (output[-room:] + "\n" if room and output else "") + closing
     return {
         "ok": ok,
         "exitCode": run.exit_code,
@@ -119,6 +125,10 @@ def _block(run: SetupRun, output: str, *, ok: bool) -> dict[str, Any]:
         "durationSeconds": max(0, math.ceil(run.script_seconds)),
         "output": output,
     }
+
+
+def _closing_line(text: str, secrets: tuple[str, ...]) -> str:
+    return clean_output(f"[setup] {text}".encode(), secrets).strip()
 
 
 def _megabytes(size: int | None) -> str:
@@ -165,9 +175,11 @@ def run_environment_setup(
         f"{run.script_seconds:.0f} s"
         + (f", the image was saved in {run.save_seconds:.0f} s" if run.ok else "")
     ]
+    notes.extend(f"setup: {note}" for note in run.notes)
     if run.ok:
         notes[0] += f" ({_megabytes(run.image_bytes)})"
         return _after_success(run, output, workspace, notes)
+    closing = ""
     if run.outcome == OUTCOME_SCRIPT_FAILED:
         detail = run.detail or f"the setup script ended with exit status {run.exit_code}"
     elif run.outcome == OUTCOME_TIMED_OUT:
@@ -178,8 +190,12 @@ def run_environment_setup(
             "the setup script finished, but the disk of the VM is too full to keep its result: "
             + run.detail
         )
+        closing = _closing_line(
+            f"the VM had no room to save the setup result: {run.detail}", secrets
+        )
     elif run.outcome == OUTCOME_NOT_SAVED:
         detail = f"the setup script finished, but its result could not be kept: {run.detail}"
+        closing = _closing_line(f"the setup result could not be saved: {run.detail}", secrets)
     else:
         # The Setup container could not be had: the runner's, not the script's.
         return EnvironmentSetup(
@@ -190,7 +206,7 @@ def run_environment_setup(
         notes.append(f"the VM's disk had {free // (1024 * 1024)} MB left after the script")
     return EnvironmentSetup(
         None,
-        _block(run, output, ok=False),
+        setup_block(run, output, ok=False, closing=closing),
         JobError(ErrorCode.ENVIRONMENT_SETUP_FAILED, detail),
         tuple(notes),
     )
@@ -206,7 +222,7 @@ def _after_success(
         # could not be kept): the failure is ours, with the free code of a turn that did not start.
         return EnvironmentSetup(
             None,
-            _block(run, output, ok=True),
+            setup_block(run, output, ok=True),
             JobError(ErrorCode.SETUP_FAILED, error.detail),
             tuple(notes),
         )
@@ -228,7 +244,7 @@ def _after_success(
             f"setup: {workspace.excluded_count} file(s) or folder(s) the script added are in the "
             "agent's tree and are not part of its changes (not committed unless added by name)"
         )
-    return EnvironmentSetup(run.image, _block(run, output, ok=True), None, tuple(notes))
+    return EnvironmentSetup(run.image, setup_block(run, output, ok=True), None, tuple(notes))
 
 
 def log_output(setup: EnvironmentSetup) -> str:

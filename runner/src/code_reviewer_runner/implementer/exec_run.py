@@ -11,7 +11,7 @@ these commands and reads what they print; nothing in the container opens a conne
 import contextlib
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 
 from .docker_api import AttachedStreams, DockerApi, DockerError
 from .git_process import Outcome
@@ -69,7 +69,7 @@ def run_exec(
     *,
     env: Mapping[str, str] | None = None,
     workdir: str | None = None,
-    stdin: bytes | None = None,
+    stdin: bytes | Iterable[bytes] | None = None,
     timeout: float,
     consume: Callable[[bytes], None] | None = None,
     name: str = "command",
@@ -81,7 +81,7 @@ def run_exec(
     With `consume`, the standard output goes to it chunk by chunk and none is kept (the caller
     controls how much it reads; a `consume` that raises ends the command's connection, and the
     exception goes to the caller). Without, up to `KEEP_BYTES` of it are returned. The command's
-    standard error is dropped."""
+    standard error is dropped. `stdin` is bytes or an iterable of them."""
     try:
         exec_id = api.create_exec(container, exec_document(argv, env=env, workdir=workdir))
         streams = api.attach_exec(exec_id)
@@ -98,8 +98,14 @@ def run_exec(
     kept = bytearray()
     try:
         with contextlib.suppress(OSError):
-            if stdin:
-                streams.write(stdin)
+            if isinstance(stdin, bytes):
+                if stdin:
+                    streams.write(stdin)
+            elif stdin is not None:
+                # Written as it is produced; a producer that raises ends the command's connection
+                # without the end of its input, and the exception goes to the caller.
+                for part in stdin:
+                    streams.write(part)
             streams.close_write()
         for chunk in streams.chunks():
             if consume is not None:

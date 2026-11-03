@@ -157,7 +157,9 @@ class AgentPlace(EngineRuntime, Protocol):
     """The agent's container: made before the engine starts, killed with everything in it (`stop`)
     and taken away after the push (`remove`)."""
 
-    def create(self) -> None: ...
+    def create(self) -> tuple[str, ...]:
+        """Make the container; the notes for the report (a check that did not hold)."""
+        ...
 
     def remove(self) -> None: ...
 
@@ -365,7 +367,8 @@ class ImplementerSession:
         try:
             model = self._start_model()
             place = self._place_factory()
-            place.create()
+            for note in place.create():
+                self._note(note)
             agent = self._agent(model, place)
             agent.start(ENGINE_PORT)
             self._session_id = agent.session_id
@@ -489,7 +492,10 @@ class ImplementerSession:
             command=self.command,
             directory=AGENT_REPO,
             make_config=make_config,
-            instructions=(INSTRUCTIONS_FILE, instructions_text()),
+            instructions=(
+                INSTRUCTIONS_FILE,
+                instructions_text(with_setup=self.job.implementer.environment is not None),
+            ),
             environment=implementer_environment(home=AGENT_HOME, scratch_dir=AGENT_TMP),
             model=entry.model_id,
             provider_id=entry.provider_id,

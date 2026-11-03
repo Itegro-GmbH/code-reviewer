@@ -219,8 +219,8 @@ class FakePlace:
     events: list[str] = field(default_factory=lambda: [])
     removals: list[tuple[str, ...]] = field(default_factory=lambda: [])
 
-    def create(self) -> None:
-        return None
+    def create(self) -> tuple[str, ...]:
+        return ()
 
     def write_files(self, files: Mapping[str, tuple[bytes, int]]) -> None:
         return None
@@ -562,6 +562,16 @@ def test_a_dirty_tree_is_committed_by_the_system_and_pushed(play: Any) -> None:
     assert turn.result["ok"] is True
     assert turn.git.events.count("commit_all") == 1
     assert turn.git.pushes == [SECOND]
+
+
+# #818-PROMPT-04
+def test_a_turn_without_an_environment_is_not_told_what_a_setup_left(play: Any) -> None:
+    turn = play(commits_then_ends())
+
+    assert turn.agent is not None
+    _, text = turn.agent.options["instructions"]
+    assert "Rules of this workplace" in text
+    assert "environment's setup left" not in text and "git add -f" not in text
 
 
 # #765-T04

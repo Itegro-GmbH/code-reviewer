@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -858,34 +859,48 @@ describe("the Sandbox-Launcher", () => {
     );
     const run = (directory: string) =>
       spawnSync("sh", ["-c", script], { env: { IPV6_DIR: directory } });
+    const interfaces = ["all", "default", "lo", "eth0", "docker0"];
+    const value = (root: string, name: string) =>
+      readFileSync(join(root, name, "disable_ipv6"), "utf8").trim();
 
-    it("writes 1 to the files of all, default and every existing interface, and reads them back", () => {
+    it("writes 1 to the default for new interfaces, reads it back, and leaves all, lo, eth0 and every other interface alone", () => {
       const root = mkdtempSync(join(tmpdir(), "ipv6-off-"));
       try {
-        for (const name of ["all", "default", "lo", "eth0", "docker0"]) {
+        for (const name of interfaces) {
           mkdirSync(join(root, name));
           writeFileSync(join(root, name, "disable_ipv6"), "0\n");
         }
         expect(run(root).status).toBe(0);
-        for (const name of ["all", "default", "lo", "eth0", "docker0"])
-          expect(
-            readFileSync(join(root, name, "disable_ipv6"), "utf8").trim(),
-          ).toBe("1");
+        expect(value(root, "default")).toBe("1");
+        for (const name of interfaces.filter((name) => name !== "default"))
+          expect(value(root, name)).toBe("0");
       } finally {
         rmSync(root, { recursive: true });
       }
     });
 
-    it("is the same as off for a kernel with no IPv6 (no directory)", () => {
+    it("is the same as off for a kernel with no IPv6 (no file)", () => {
       expect(run(join(tmpdir(), "ipv6-off-absent")).status).toBe(0);
     });
 
-    it("fails when a file cannot be written", () => {
+    it("fails when the file cannot be written", () => {
       const root = mkdtempSync(join(tmpdir(), "ipv6-off-"));
       try {
-        mkdirSync(join(root, "all"));
+        mkdirSync(join(root, "default"));
         // A directory where the file should be: the write fails, so the step does.
-        mkdirSync(join(root, "all", "disable_ipv6"));
+        mkdirSync(join(root, "default", "disable_ipv6"));
+        expect(run(root).status).not.toBe(0);
+      } finally {
+        rmSync(root, { recursive: true });
+      }
+    });
+
+    it("fails when the value read back is not 1, though the write was taken", () => {
+      const root = mkdtempSync(join(tmpdir(), "ipv6-off-"));
+      try {
+        mkdirSync(join(root, "default"));
+        // The write goes to /dev/null and succeeds; the read back is empty.
+        symlinkSync("/dev/null", join(root, "default", "disable_ipv6"));
         expect(run(root).status).not.toBe(0);
       } finally {
         rmSync(root, { recursive: true });
@@ -1347,8 +1362,8 @@ describe("the Sandbox-Launcher", () => {
     expect(service.starts).toHaveLength(0);
   });
 
-  // #760-T10: the constant 10 s was never exercised; a hung step has to end the launch, not wait for the VM's timeout
-  it("ends a hung step of the work volume after 10 seconds, not before, with work_volume_failed and the VM stopped", async () => {
+  // #760-T10: the constant 9 s was never exercised; a hung step has to end the launch, not wait for the VM's timeout
+  it("ends a hung step of the work volume after 9 seconds, not before, with work_volume_failed and the VM stopped", async () => {
     service.hangOn("work-volume-mount");
     const launcher = build();
     const ended = launcher
@@ -1359,7 +1374,7 @@ describe("the Sandbox-Launcher", () => {
       );
     await settle();
 
-    await clock.advance(9_999);
+    await clock.advance(8_999);
     expect(service.stops).toStrictEqual([]);
     await clock.advance(1);
     const error = (await ended) as LaunchError;
@@ -1373,14 +1388,14 @@ describe("the Sandbox-Launcher", () => {
   });
 
   // #760-T10
-  it("gives every step of the work volume its own 10 seconds and passes the same limit to the platform", async () => {
+  it("gives every step of the work volume its own 9 seconds and passes the same limit to the platform", async () => {
     await launch(build(), spec({ kind: "implementer" }));
 
     const steps = service.execs.filter((call) =>
       call.label.startsWith("work-volume"),
     );
     expect(steps).toHaveLength(8);
-    for (const call of steps) expect(call.timeoutMs).toBe(10_000);
+    for (const call of steps) expect(call.timeoutMs).toBe(9_000);
   });
 
   // #760-T10: the steps are part of the implementer's launch, which the VM's own timeout has to cover
@@ -1403,11 +1418,11 @@ describe("the Sandbox-Launcher", () => {
       }),
     );
 
-    expect(WORK_VOLUME_STEPS_SECONDS).toBe(80);
+    expect(WORK_VOLUME_STEPS_SECONDS).toBe(72);
     expect(SYSBOX_PREPARE_SECONDS).toBe(40);
-    expect(RUN_DIRECTORY_STEPS_SECONDS).toBe(6);
-    expect(IPV6_OFF_STEPS_SECONDS).toBe(2);
-    expect(IMPLEMENTER_LAUNCH_EXTRA_SECONDS).toBe(128);
+    expect(RUN_DIRECTORY_STEPS_SECONDS).toBe(9);
+    expect(IPV6_OFF_STEPS_SECONDS).toBe(3);
+    expect(IMPLEMENTER_LAUNCH_EXTRA_SECONDS).toBe(124);
     const [implementer, diff] = service.creates;
     expect(implementer?.timeoutMs).toBe(
       (3600 + VM_TIMEOUT_MARGIN_SECONDS + IMPLEMENTER_LAUNCH_EXTRA_SECONDS) *

@@ -871,18 +871,42 @@ def test_the_model_bridge_gets_an_inet_drop_of_its_own_and_a_kernel_without_one_
 ) -> None:
     from code_reviewer_runner.implementer import host_rules
 
-    container(rig).create()
+    notes = container(rig).create()
     inet = [c for c in rig.engine.containers.values() if c.name == host_rules.HELPER_NAME][-1]
     assert inet.document["Cmd"] == [host_rules.inet_rules("agent", "br-000000000000")]
-    assert inet.document["Entrypoint"] == [host_rules.NFT]
+    assert notes == ()
+    # Through a shell that tells a kernel with no `inet` family from one that refused the table.
+    assert inet.document["Entrypoint"] == ["/bin/sh", "-c", host_rules.INET_SCRIPT, "inet-rules"]
+    assert host_rules.NFT in host_rules.INET_SCRIPT
     # The Worker's image (it has `nft`), the image of the Control container, not the agent's.
     assert inet.document["Image"] != "code-reviewer-agent:golden"
 
 
 # #818-IPV6-04
-def test_a_kernel_without_the_inet_family_does_not_end_the_turn(rig: Rig) -> None:
+def test_a_kernel_without_the_inet_family_does_not_end_the_turn_and_needs_no_note(
+    rig: Rig, caplog: pytest.LogCaptureFixture
+) -> None:
+    from code_reviewer_runner.implementer import host_rules
+
+    rig.engine.inet_exit = host_rules.INET_NO_FAMILY_EXIT
+    with caplog.at_level("INFO", logger=host_rules.__name__):
+        notes = container(rig).create()
+    assert notes == ()
+    assert "the kernel has no inet family" in caplog.text
+    assert "is not in place" not in caplog.text
+
+
+# #818-IPV6-05
+def test_a_kernel_with_the_inet_family_that_refuses_the_table_is_a_note_not_a_failure(
+    rig: Rig, caplog: pytest.LogCaptureFixture
+) -> None:
+    from code_reviewer_runner.implementer import host_rules
+
     rig.engine.inet_exit = 1
-    container(rig).create()
+    with caplog.at_level("WARNING", logger=host_rules.__name__):
+        notes = container(rig).create()
+    assert notes == (host_rules.inet_failure_note("model"),)
+    assert "the inet table of the agent bridge is not in place" in caplog.text
 
 
 # #818-T61

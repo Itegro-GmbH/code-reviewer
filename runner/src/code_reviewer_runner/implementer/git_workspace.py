@@ -56,7 +56,7 @@ import shutil
 import stat
 import time
 import uuid
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -83,6 +83,7 @@ from .history import (
     parse_name_status,
 )
 from .push_policy import select_branches
+from .ref_drop import RefDeletions, RefListingFailed
 
 LEFTOVER_MESSAGE = "Implementer: uncommitted changes of the turn"
 # The final push asks the lease again every this often, for up to `confirm_seconds` (#765).
@@ -228,6 +229,13 @@ class RepoAccess(Protocol):
         self, args: Sequence[str], consume: Callable[[bytes], None], *, timeout: float
     ) -> Outcome:
         """`run` for output that is read as a stream and not kept."""
+        ...
+
+    def update_refs(
+        self, options: Sequence[str], commands: Iterable[bytes], *, timeout: float
+    ) -> Outcome:
+        """`git <options> update-ref --stdin -z` in the repository (where it is read-write) with
+        `commands` as its standard input, written as they are produced."""
         ...
 
 
@@ -691,54 +699,34 @@ class GitWorkspace:
         git(["reset", "-q", "--mixed", start], "the repository cannot be put back to its start")
         if base != task:
             git(["update-ref", f"refs/heads/{base}", start], "the base branch cannot be put back")
-        branches, tags = self._refs_of_the_script({task, base})
-        self.dropped_refs = len(branches) + len(tags)
-        for kind, names in (("branch", branches), ("tag", tags)):
-            flag = ["branch", "-D"] if kind == "branch" else ["tag", "-d"]
-            for first in range(0, len(names), REF_BATCH):
-                git(
-                    [*flag, "--", *names[first : first + REF_BATCH]],
-                    f"the {kind}s the script made could not be removed",
-                )
-
-    def _refs_of_the_script(self, keep: set[str]) -> tuple[list[str], list[str]]:
-        """The short names of the local branches (but `keep`) and the tags there are, read in the
-        reader, streamed and capped. A name that is not text cannot be named in a command; it stays
-        (the final push refuses such a name)."""
-        listed = bytearray()
-        too_long = False
-
-        def take(chunk: bytes) -> None:
-            nonlocal too_long
-            listed.extend(chunk)
-            if len(listed) > EXCLUDE_MAX_BYTES:
-                too_long = True
-                raise StopReading
-
-        done = self._reader_stream(
-            ["for-each-ref", "--format=%(refname)%00", "refs/heads/", "refs/tags/"],
-            take,
-            timeout=self._timeout,
+        deletions = RefDeletions(
+            lambda consume: self._access.stream(
+                ["for-each-ref", "--format=%(refname)%00", "refs/heads/", "refs/tags/"],
+                consume,
+                timeout=left(),
+            ),
+            {task, base},
         )
-        if too_long or (done.returncode != 0 and not listed):
+        # `update-ref` takes a branch a linked worktree of the script has checked out, `branch -D`
+        # does not; the listing is streamed into it, so no count or length of names is limited.
+        try:
+            removed = self._access.update_refs(
+                [arg for setting in _LEFTOVER_OPTIONS for arg in ("-c", setting)],
+                deletions,
+                timeout=left(),
+            )
+        except RefListingFailed as error:
             raise fail(
                 ErrorCode.SETUP_FAILED,
-                "the branches and tags the script made cannot be listed ("
-                + ("there are too many" if too_long else self._agent_detail(done))
-                + ")",
+                f"the branches and tags the script made cannot be listed ({error})",
+            ) from error
+        if removed.returncode != 0:
+            raise fail(
+                ErrorCode.SETUP_FAILED,
+                "the branches and tags the script made could not be removed: "
+                + self._agent_detail(removed),
             )
-        branches: list[str] = []
-        tags: list[str] = []
-        for raw_name in bytes(listed).split(b"\0"):
-            try:
-                ref = raw_name.decode("utf-8").strip("\n")
-            except UnicodeDecodeError:
-                continue
-            if ref.startswith("refs/heads/") and ref.removeprefix("refs/heads/") not in keep:
-                branches.append(ref.removeprefix("refs/heads/"))
-            elif ref.startswith("refs/tags/"):
-                tags.append(ref.removeprefix("refs/tags/"))
-        return branches, tags
+        self.dropped_refs = deletions.count
 
     def _exclude_what_the_script_added(self, left: Callable[[], float]) -> None:
         """Put what the script added, and git does not ignore, on the local ignore list: the
@@ -1235,9 +1223,6 @@ class GitWorkspace:
 
 # What `settle_after_setup` keeps of the untracked entries a script left: 10,000 of them and 1 MiB
 # of their names.
-# How many branch or tag names one `git branch -D` / `git tag -d` takes when the script's are
-# dropped.
-REF_BATCH = 100
 EXCLUDE_MAX_ENTRIES = 10_000
 EXCLUDE_MAX_BYTES = 1024 * 1024
 _PATTERN_SPECIALS = re.compile(rb"([\\*?\[\]])")

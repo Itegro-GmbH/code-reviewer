@@ -6,7 +6,7 @@ runs git in the repository on the machine, the way the reader does in its contai
 and "root" are the same user here."""
 
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 
 from code_reviewer_runner.implementer.git_process import TRUSTED_PATH, GitProcess, Outcome
@@ -68,6 +68,29 @@ class LocalAccess:
         with exclude.open("ab") as handle:
             handle.write(data)
         return Outcome(0, "", "")
+
+    def update_refs(
+        self, options: Sequence[str], commands: Iterable[bytes], *, timeout: float
+    ) -> Outcome:
+        child = subprocess.Popen(
+            [self.git, *options, "update-ref", "--stdin", "-z"],
+            cwd=self.repo,
+            env=self._env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert child.stdin is not None  # stdin=PIPE
+        try:
+            for part in commands:
+                child.stdin.write(part)
+            child.stdin.close()
+        except BaseException:
+            child.kill()
+            child.wait()
+            raise
+        stdout, stderr = child.communicate(timeout=timeout)
+        return Outcome(child.returncode, stdout.decode(), stderr.decode())
 
     def run(self, args: Sequence[str], *, timeout: float, write: bool = False) -> Outcome:
         return self._process.run(args, env=self._env, cwd=self.repo, timeout=timeout)

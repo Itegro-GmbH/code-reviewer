@@ -686,6 +686,40 @@ describe("the environment on the detail page of an implementer run (#818)", () =
     expect(fine.container.textContent).not.toContain("ran out of time");
   });
 
+  // #818-T30b
+  it("says a script that exited 0 but whose result could not be kept finished, and shows why from the end of the output", () => {
+    renderDetail(
+      detail({
+        status: "failed",
+        errorCode: "environment_setup_failed",
+        errorCodeKnown: true,
+        implementer: task({
+          reported: true,
+          environment: environment({
+            setup: {
+              outcome: "failed",
+              exitCode: 0,
+              durationSeconds: 31,
+              output:
+                "installing\n[setup] the VM had no room to save the setup result: the VM's disk has 100 MB left and the result of the script needs about 1280 MB",
+            },
+          }),
+        }),
+      }),
+    );
+
+    const section = screen
+      .getByRole("heading", { name: "Setup script" })
+      .closest("[role=region]") as HTMLElement;
+    expect(section.textContent).toContain(
+      "The script finished, but its result could not be kept after 31 s",
+    );
+    expect(section.textContent).not.toContain("failed with exit status");
+    expect(
+      section.querySelector("[data-slot=run-setup-output]")?.textContent,
+    ).toContain("[setup] the VM had no room to save the setup result");
+  });
+
   // #818-T30
   it("shows an empty output as such instead of an empty box", () => {
     renderDetail(

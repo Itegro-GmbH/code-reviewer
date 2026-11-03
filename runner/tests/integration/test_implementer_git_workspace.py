@@ -13,6 +13,7 @@ tests/privileged/test_implementer_git_users.py.
 
 import os
 import stat
+import subprocess
 import threading
 from pathlib import Path
 
@@ -571,6 +572,53 @@ def test_many_branches_and_tags_of_the_script_are_all_dropped(rig: Rig) -> None:
     assert set(_heads(rig, workspace)) == {f"refs/heads/{BRANCH}", "refs/heads/main"}
     assert _git(rig, workspace, "tag", "--list").strip() == ""
     assert workspace.dropped_refs == 230 * 2
+
+
+# #818-T70b
+def test_a_branch_a_linked_worktree_of_the_script_has_checked_out_is_dropped_too(
+    rig: Rig, tmp_path: Path
+) -> None:
+    """`git branch -D` refuses a branch checked out in another worktree and the turn died
+    `setup_failed`; the script's branches go with `update-ref`, wherever they are checked out."""
+    workspace = rig.prepared()
+    start = workspace.start_commit
+    _git(rig, workspace, "worktree", "add", "-q", "-b", "tmp", str(tmp_path / "linked"))
+
+    workspace.settle_after_setup()
+
+    assert _heads(rig, workspace) == {
+        f"refs/heads/{BRANCH}": start,
+        "refs/heads/main": start,
+    }
+    assert workspace.dropped_refs == 1
+    assert workspace.commits_since_start() == []
+
+
+# #818-T70c
+def test_more_refs_than_a_listing_of_a_mebibyte_are_dropped_streamed(rig: Rig) -> None:
+    """1,200 branches with names of 1,000 bytes (a path of nested folders in the ref store) are a
+    listing of 1.2 MB: the old cap of 1 MiB ended the turn with `setup_failed`."""
+    workspace = rig.prepared()
+    start = workspace.start_commit
+    folders = "/".join(f"{letter}" * 200 for letter in "abcd")
+    count = 1200
+    commands = "".join(
+        f"create refs/heads/{folders}/{number:04d}{'x' * 192}\0{start}\0" for number in range(count)
+    )
+    created = subprocess.run(
+        [rig.git, "update-ref", "--stdin", "-z"],
+        cwd=workspace.repo,
+        input=commands.encode(),
+        capture_output=True,
+        check=False,
+    )
+    assert created.returncode == 0, created.stderr
+    assert len(_git(rig, workspace, "for-each-ref", "--format=%(refname)", "refs/heads")) > 1024**2
+
+    workspace.settle_after_setup()
+
+    assert set(_heads(rig, workspace)) == {f"refs/heads/{BRANCH}", "refs/heads/main"}
+    assert workspace.dropped_refs == count
 
 
 # #818-T64

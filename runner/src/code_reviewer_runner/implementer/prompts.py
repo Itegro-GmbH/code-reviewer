@@ -35,10 +35,7 @@ the local branches of this repository to GitHub, as it is: what you want to keep
 committed on a branch. Only 50 branches are pushed, the task's branch first and then the others \
 in alphabetical order, and a branch whose name has a space, a control character or one of \
 ~ ^ : ? * [ \\, has "..", starts with - or +, or is longer than 255 bytes is not pushed either. \
-Work committed on a detached HEAD is saved on a new branch named after the task's branch. \
-Files and folders that the environment's setup left in the repository before you started \
-(dependencies, caches) are kept out of git as whole folders: git add -A skips them, and what you \
-create inside such a folder is not committed either unless you add it by name with git add -f.
+Work committed on a detached HEAD is saved on a new branch named after the task's branch.
 
 When the repository has tests, run them before you finish.
 
@@ -50,15 +47,23 @@ registry is not reachable), and nothing outside this container can be contacted 
 Do not try to find or use a credential.
 """
 
+# Only for a turn whose environment has a setup script: what it left in the repository.
+_SETUP_LEFTOVERS = """\
+Files and folders that the environment's setup left in the repository before you started \
+(dependencies, caches) are kept out of git as whole folders: git add -A skips them, and what you \
+create inside such a folder is not committed either unless you add it by name with git add -f.
+"""
+
 _CLOSING = """\
 When the task is done, end your turn with a short plain-text summary of what you did and what, if \
 anything, is left open.
 """
 
 
-def instructions_text() -> str:
-    """The runner's addition to the stock prompt."""
-    return _COMMON + _CLOSING
+def instructions_text(*, with_setup: bool = False) -> str:
+    """The runner's addition to the stock prompt. `with_setup` is a turn whose environment has a
+    setup script: only then there is something the setup left in the repository to tell about."""
+    return _COMMON + (f"\n{_SETUP_LEFTOVERS}" if with_setup else "") + _CLOSING
 
 
 # The one extra message of a turn whose working tree is still dirty (`session.py`). The words

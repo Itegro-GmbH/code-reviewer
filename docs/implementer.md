@@ -495,14 +495,15 @@ Step 6 (the attack test) should repeat this class of probe for the neighbours it
 
 **IPv6, switched off in the VM and a second wall (#818, 2026-11-03).** Defensive configuration on top of the missing bridge address, with nothing probed
 for it. (1) The Launcher's step `ipv6-off` (`IPV6_OFF_COMMANDS`, the Implementer's VM only, before `vm-prepare.sh` starts the daemon) writes 1 to
-`disable_ipv6` of `all`, `default` and every existing interface and reads each back; a launch whose VM cannot do that ends with the retryable
-`docker_not_ready`. A bridge the daemon makes afterwards has no IPv6 at all. (2) For a kernel that has the `inet` family, Control installs one
+`net.ipv6.conf.default.disable_ipv6` and reads it back (a kernel with no such file has no IPv6, which is the same as off); a launch whose VM cannot do that ends with the retryable
+`docker_not_ready`. `default` is what a bridge the daemon makes afterwards (and the interface of every container on it) takes, so those have no IPv6 at all. `all`, `lo` and `eth0`
+are not touched: the platform reaches the VM through them, and they add nothing for the bridges of the containers. (2) For a kernel that has the `inet` family, Control installs one
 more table in the host's namespace beside each `ip` one (`host_rules.close_bridge_inet`, tables `implementer_ipv6_setup` and
 `implementer_ipv6_agent`, hooked before Docker's rules at priority -10, only drops): no IPv6 packet from the Setup bridge or the model bridge to the VM
 itself (`input`) and none through the VM to a private range (`forward`: `::`, `::1`, `::ffff:0:0/96`, `64:ff9b::/96`, `fc00::/7`, `fe80::/10`, `ff00::/8`).
-The platform's kernel has no `inet` family (measured, above), so there the table is tried, a log line says it is not in place, and the turn goes on: the
-sysctls and the missing address are what closes IPv6 on that kernel. A Setup or an agent never fails for the table. The lane (L07) reads the state back where
-the kernel supports it: IPv6 off in the container's namespace before the probe switches it on, no IPv6 address on the bridge, and the `inet` table with
+The platform's kernel has no `inet` family (measured, above), so there the table is tried (the helper tells that case from a refusal by its exit status: `nft` says "Operation not supported"), a log line says the kernel has no family, and the turn goes on. On a kernel that has the family and refused the table, the turn goes on as well and the report has a note (`inet_failure_note`). The
+sysctls and the missing address are what closes IPv6 on a kernel without the table. A Setup or an agent never fails for the table. The lane (L07) reads the state back where
+the kernel supports it: IPv6 off on the container's `eth0` (which takes `default`) before the probe switches it on, no IPv6 address on the bridge, and the `inet` table with
 its two drops.
 
 **What this breaks until step 7 (the network door).** `npm install`, `pnpm install`, `pip install`, `apt-get`, `cargo`, `go get` and `docker pull`
@@ -561,11 +562,11 @@ installs inside, its script can flush (and one `nft flush ruleset` in it changes
 
 **Time.** The script has 15 minutes at most (`contracts/environment-sizes.v1.json`). The whole step is part of the turn's 60 minutes: the
 agent's own deadline is counted from the start of the job, so the minutes of the step are gone from it. Around the script the step may
-take, at its ceilings, 20 s for each of the three host helpers, 60 s until the container's Docker is ready, 30 s to write the script,
+take, at its ceilings, 20 s for each of the four host helpers (the bridge's IPv6, the `ip` table, its read back and the `inet` table), 60 s until the container's Docker is ready, 30 s to write the script,
 45 s for the kill of a script that has to be stopped (the kill, the wait for its exec, the kill of the clean-up: 15 s each), 30 s for the end
 script, 120 s for the container's Docker to stop, 40 s for the stop, 30 s for the question about the disk, 300 s for the commit and 120 s for
-the removal, 835 s together (`SETUP_OVERHEAD_SECONDS`); a test holds the sum. The script is held to what the limit leaves after the grace
-for the end of the turn (270 s), those 835 s and **at least 10 minutes for the agent** (`MIN_AGENT_SECONDS`); with the normal 3600 s that is the 15 minutes. A
+the removal, 855 s together (`SETUP_OVERHEAD_SECONDS`); a test holds the sum. The script is held to what the limit leaves after the grace
+for the end of the turn (270 s), those 855 s and **at least 10 minutes for the agent** (`MIN_AGENT_SECONDS`); with the normal 3600 s that is the 15 minutes. A
 limit that leaves less than a minute for the script ends the turn here, free ("the time limit of the turn leaves no room for the setup
 script"). A script that runs out of its time is killed with its container and ends the turn.
 
@@ -597,13 +598,19 @@ it. What it did to the repository is the **base** the agent starts from, not a c
    repository ignores already (`node_modules`, a virtual environment, build output) needs nothing. A name with a line end cannot be written as a
    pattern and is left as it is; more than 10,000 entries (or 1 MiB of names) ends the turn rather than half of them being kept.
 
+Before both, the script's **history** is undone (`_return_to_start`): HEAD goes back to the task's branch, the task's branch and the base branch to the start commit, and every other
+branch and every tag is deleted, whatever worktree has it checked out (`git update-ref --stdin -z`, fed by a streamed listing of the refs, so no number of refs and no length of names
+is a limit; `branch -D` would refuse a branch a linked worktree of the script has checked out and end the turn). The commits stay in the object store and their files in the tree.
+
 This is a rule about where the agent starts, not about what the script may do. If it turns out to be wrong, it is one function. A script that left the
-repository unreadable (it removed `.git`) ends the turn with `environment_setup_failed`.
+repository unreadable (it removed `.git`) ends the turn with `setup_failed` (free: the runner could not read what the script left, and the script's output is not shown).
 
 **When it fails.** A script that exits non-zero, runs past its time limit, fills the disk, is killed for the memory of the container (the
 log says so: "killed for its memory"), or leaves a container whose result cannot be committed (the disk) ends the turn `environment_setup_failed`
 **before the model door exists**: nothing was handed a key, nothing was used, the turn is free, and the Runs page shows the exit status, the
-seconds, whether it timed out and the end of the output. A Setup container that could not be had (the daemon refused a step, the network rules
+seconds, whether it timed out and the end of the output. A script that exited 0 and whose result could not be kept (the VM's disk had no room for the commit, or the daemon could not save the image)
+has the exit status 0 and the runner's own last line in the output (`[setup] the VM had no room to save the setup result: the VM's disk has X MB left and the result of the script needs about Y MB`);
+the page says "The script finished, but its result could not be kept" and shows that line. The room check is skipped, with a note in the report, when the VM's free space or the size of the container's file system cannot be had. A Setup container that could not be had (the daemon refused a step, the network rules
 did not go in, the container was not what was asked for) is `setup_failed`, free as well, with the reason word in the log: it is the runner's, not
 the script's. A SIGTERM during the script kills the container and ends the turn `runner_shutdown` as for the agent.
 
@@ -633,7 +640,7 @@ provider of `fakes/wire`) in which the agent, **with no internet**, runs a Playw
 
 | | Measured |
 |---|---|
-| Setup container, from the call to the script running (network, three helpers, container, ready) | 1 s |
+| Setup container, from the call to the script running (network, four helpers, container, ready) | 1 s |
 | Script (npm, Chromium 100.9 MiB, its apt packages, a pull of 422 MB) | 24 s |
 | Saving the result: the container's Docker stops by itself in about a second, **`docker commit` 61 s** (3.9 GB of image) | 62 s |
 | Removing the Setup container (with its inner Docker) | 0.3 s |
@@ -751,7 +758,7 @@ never beyond the time that is left of the final push | Runner, container spec |
 | Base branches offered | 100 names, default first; a base beyond that can be typed | Route |
 | Result | 200 commits and 500 files (of the task's branch), 50 branches, 8,192 characters of summary, the whole report under 4 MB (Vercel cuts a body at 4.5 MB) | Contract and runner |
 | VM and containers | 2 vCPU and 4 GB for the VM; the Control container 768 MB without swap and 2048 processes, `/work` mounted `nosuid,nodev`; the model door 256 MB; the two readers 256 MB each; the agent's container the rest after 512 MB for the OS and the daemons (2,048 MB at 2 vCPU, section "The agent's container" for the other sizes), no swap. The Dispatcher refuses a size that leaves the VM no room for Control, the door, the readers and the OS (`sandbox_config_invalid`); a size that leaves the agent less than 1,024 MB (1 vCPU) is `sandbox_size_unsupported`, free, from the Worker, and from the Launcher for a job that names it. A task whose environment names a size (2, 4, 6 or 8 vCPU) gets that VM and, at that size, 2,048, 6,144, 10,240 or 14,336 MB for the agent ("Environments"); Control stays at 768 MB | Dispatcher (`DISPATCHER_WORKER_CONFIG` can override the default size), runner |
-| Setup script | 64 KB of text, 15 minutes, the whole step (start, script, saving the image) at most 835 seconds more, all of it inside the 3600 seconds of the turn, and the agent keeps at least 10 minutes; the end of its output, 8,192 characters, reaches the Runs page | Contract, runner (`environment_setup.py`) |
+| Setup script | 64 KB of text, 15 minutes, the whole step (start, script, saving the image) at most 855 seconds more, all of it inside the 3600 seconds of the turn, and the agent keeps at least 10 minutes; the end of its output, 8,192 characters, reaches the Runs page | Contract, runner (`environment_setup.py`) |
 | Parallel work | `RUNNER_DISPATCH_MAX_RUNNING` (2) for all kinds together, and one running turn per session | App and Dispatcher |
 
 **Billing.** Turns are billed at the Dynamic rate for now: the billing code treats the kind as `dynamic` (`projectKindOf`),

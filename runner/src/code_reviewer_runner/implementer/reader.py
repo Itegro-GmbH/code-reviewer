@@ -53,7 +53,7 @@ the place where that decision costs nothing.
 import logging
 import socket
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, cast
 
@@ -291,6 +291,25 @@ class ReaderAccess:
             workdir=READER_REPO,
             timeout=timeout,
             name="append to the exclude file",
+        )
+
+    def update_refs(
+        self, options: Sequence[str], commands: Iterable[bytes], *, timeout: float
+    ) -> Outcome:
+        """`git update-ref --stdin -z` in the reader that writes, the commands streamed to its
+        standard input (#818: the refs a setup script made are removed this way)."""
+        container = self._ensure(True)
+        if container is None:
+            return Outcome(255, "", "the reader cannot run", unanswered=True)
+        return run_exec(
+            self._api,
+            container,
+            reader_argv([*options, "update-ref", "--stdin", "-z"]),
+            env=self._environment,
+            stdin=commands,
+            workdir=READER_REPO,
+            timeout=timeout,
+            name="git update-ref",
         )
 
     def stream(

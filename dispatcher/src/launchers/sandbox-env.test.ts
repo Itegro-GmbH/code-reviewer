@@ -464,12 +464,16 @@ describe("the Sandbox-Launcher's configuration from the environment", () => {
   });
 
   // #760-T10
-  it("fits the steps of an implementer launch in the launch deadline of the core, with the Worker's hand-over", () => {
-    expect(
+  it("fits the steps of an implementer launch in the launch deadline of the core, with the Worker's hand-over and a margin of 5 seconds", () => {
+    const steps =
       SANDBOX_HANDOVER_SECONDS +
-        LAUNCH_STEPS_SECONDS +
-        IMPLEMENTER_LAUNCH_EXTRA_SECONDS,
-    ).toBeLessThanOrEqual(loadSettings(BASE).core.launchDeadlineSeconds);
+      LAUNCH_STEPS_SECONDS +
+      IMPLEMENTER_LAUNCH_EXTRA_SECONDS;
+    // 20 + 150 + 124 = 294 of 300: the run-directory steps (3 x 3 s) and the IPv6 step (3 s) have their 3 s because the eight
+    // steps of the work volume have 9 s each. A step that grows must take its seconds from another ceiling.
+    expect(steps).toBeLessThanOrEqual(
+      loadSettings(BASE).core.launchDeadlineSeconds - 5,
+    );
   });
 
   // #765-D1, D2: the probe that `POST /probe` runs is built from the environment of the deployment.

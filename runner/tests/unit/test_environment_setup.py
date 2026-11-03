@@ -361,6 +361,15 @@ def test_a_commit_the_disk_cannot_hold_is_the_environments_failure_and_names_the
     done = step(rig, workspace)
     assert done.error is not None and done.error.code is ErrorCode.ENVIRONMENT_SETUP_FAILED
     assert "could not be kept" in done.error.detail
+    # The Runs page shows the exit status and the output and nothing else: the last line of the
+    # output says what happened to a script that exited 0.
+    assert done.block is not None and done.block["ok"] is False and done.block["exitCode"] == 0
+    assert (
+        done.block["output"]
+        .splitlines()[-1]
+        .startswith("[setup] the setup result could not be saved")
+    )
+    assert "no space left" in done.block["output"].splitlines()[-1]
 
 
 # #818-DISK-05
@@ -374,8 +383,31 @@ def test_a_disk_with_no_room_for_the_commit_ends_the_turn_free_and_says_how_much
     assert "too full to keep its result" in done.error.detail
     assert "100 MB left" in done.error.detail and "needs about" in done.error.detail
     assert done.image is None and rig.engine.committed == []
-    assert done.block is not None and done.block["ok"] is False
+    assert done.block is not None and done.block["ok"] is False and done.block["exitCode"] == 0
     assert any("100 MB left" in note for note in done.notes)
+    last = done.block["output"].splitlines()[-1]
+    assert last.startswith("[setup] the VM had no room to save the setup result: ")
+    assert "100 MB left" in last and "needs about" in last
+
+
+# #818-DISK-06
+def test_the_closing_line_is_kept_whole_when_the_scripts_output_fills_the_block() -> None:
+    run = sc.SetupRun(
+        outcome=sc.OUTCOME_NO_ROOM,
+        exit_code=0,
+        output=b"",
+        output_bytes=0,
+        image=None,
+        detail="d",
+        start_seconds=0.0,
+        script_seconds=3.0,
+        save_seconds=0.0,
+    )
+    closing = "[setup] the VM had no room to save the setup result: 1 MB free, 2 MB needed"
+    block = es.setup_block(run, "x" * es.OUTPUT_CHARS, ok=False, closing=closing)
+    assert len(block["output"]) == es.OUTPUT_CHARS
+    assert block["output"].endswith("\n" + closing)
+    assert es.setup_block(run, "", ok=False, closing=closing)["output"] == closing
 
 
 # -- the whole job ---------------------------------------------------------------------------------

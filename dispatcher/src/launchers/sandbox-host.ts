@@ -77,12 +77,13 @@ export const RUN_DIRECTORY_COMMANDS = [
   },
 ] as const;
 /** Each is a `mkdir` or a `mount`: a few milliseconds. The three together stay a small part of the launch deadline of the core (a test pins the sum). */
-export const RUN_DIRECTORY_STEP_TIMEOUT_MS = 2_000;
+export const RUN_DIRECTORY_STEP_TIMEOUT_MS = 3_000;
 /**
- * IPv6 off for the whole VM, before the daemon starts (the Implementer's VM only): every container of it is then born without
- * IPv6, and root in a container cannot switch it on in its own namespace and find the bridge's link-local address behind which
- * the VM's control port listens (`runner/.../implementer/host_rules.py`). The files of `all` and `default` and of every
- * existing interface are written and read back; a kernel with no IPv6 has no such directory, which is the same as off. The
+ * IPv6 off for the containers the daemon makes later (the Implementer's VM only): the kernel's default for new interfaces,
+ * `net.ipv6.conf.default.disable_ipv6`, is 1 before the daemon starts, so no bridge it creates has an IPv6 address and root in a
+ * container cannot switch it on and find the bridge's link-local address behind which the VM's control port listens
+ * (`runner/.../implementer/host_rules.py`). Only `default` is written (and read back): `all`, `lo` and `eth0` stay as the platform
+ * has them, since the platform reaches the VM through them. A kernel with no IPv6 has no such file, which is the same as off. The
  * daemon's own `ipv6: false` (`daemonConfigJson`) stays; this is the VM's side of it.
  */
 export const IPV6_OFF_COMMANDS = [
@@ -91,17 +92,16 @@ export const IPV6_OFF_COMMANDS = [
     cmd: "sh",
     args: [
       "-c",
-      'd=/proc/sys/net/ipv6/conf; [ -d "$d" ] || exit 0; ' +
-        'for f in "$d"/*/disable_ipv6; do echo 1 > "$f" || exit 1; done; ' +
-        'for f in "$d"/*/disable_ipv6; do [ "$(cat "$f")" = 1 ] || exit 1; done',
+      'f=/proc/sys/net/ipv6/conf/default/disable_ipv6; [ -e "$f" ] || exit 0; ' +
+        'echo 1 > "$f" || exit 1; [ "$(cat "$f")" = 1 ] || exit 1',
     ],
   },
 ] as const;
-export const IPV6_OFF_STEP_TIMEOUT_MS = 2_000;
+export const IPV6_OFF_STEP_TIMEOUT_MS = 3_000;
 const IMAGE_CHECK_TIMEOUT_MS = 30_000;
 const KILL_TIMEOUT_MS = 15_000;
-/** Each step of the work volume is a `mkdir`, a `mount` or one `docker volume create`: a second or so, never half a minute. */
-export const WORK_VOLUME_STEP_TIMEOUT_MS = 10_000;
+/** Each step of the work volume is a `mkdir`, a `mount` or one `docker volume create`: a second or so, never half a minute. 9 s leaves the seconds the run-directory and IPv6 steps need within the core's launch deadline (a test pins the sum and its margin). */
+export const WORK_VOLUME_STEP_TIMEOUT_MS = 9_000;
 
 export type SandboxDockerHostOptions = {
   vm: SandboxVm;

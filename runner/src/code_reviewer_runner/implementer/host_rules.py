@@ -50,9 +50,11 @@ class HelperFailed(Exception):
     """A helper container ended with a status other than 0 (or could not run). The reason is a
     word and a number, never output."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, code: int | None = None) -> None:
         super().__init__(reason)
         self.reason = reason
+        # The helper's exit status when it ran and ended with one.
+        self.code = code
 
 
 def bridge_name(candidate: str) -> str:
@@ -131,7 +133,7 @@ def run_helper(
         except DockerError as error:
             _log.warning("a host helper could not be removed (%s)", error.status)
     if code != 0:
-        raise HelperFailed(f"the helper ended with exit code {code}")
+        raise HelperFailed(f"the helper ended with exit code {code}", code)
 
 
 def ipv6_script(bridge: str) -> str:
@@ -195,15 +197,45 @@ def inet_rules(role: str, bridge: str) -> str:
     )
 
 
-def close_bridge_inet(api: DockerApi, image: str, network: str, role: str) -> bool:
-    """Install the `inet` drop of `role` for the bridge of `network`; whether the kernel took it.
-    A failure is a log line and `False`: the kernel of the platform has no `inet` family, and the
-    sysctls and the missing address close IPv6 there. The image must have `nft`."""
+# The `nft` call of the `inet` table, in a shell, to tell a kernel with no `inet` family (the
+# platform's: `nft` says "Operation not supported", measured) from one that has it and refused:
+# exit status 3 for the first, 1 for the second. Only the status decides whether a note is made.
+INET_NO_FAMILY_EXIT: Final = 3
+INET_SCRIPT: Final = (
+    f'out=$({NFT} "$1" 2>&1) && exit 0; case "$out" in *"not supported"*) exit '
+    f"{INET_NO_FAMILY_EXIT};; esac; exit 1"
+)
+INET_INSTALLED: Final = "installed"
+INET_NO_FAMILY: Final = "no_family"
+INET_FAILED: Final = "failed"
+
+
+def close_bridge_inet(api: DockerApi, image: str, network: str, role: str) -> str:
+    """Install the `inet` drop of `role` for the bridge of `network`: `INET_INSTALLED`, or
+    `INET_NO_FAMILY` when the kernel has no `inet` family (the platform's has none, and the
+    sysctls and the missing address close IPv6 there; a log line), or `INET_FAILED` when a kernel
+    that has the family refused the table (a warning; the caller makes a note in the report). None
+    of them stops the turn. The image must have `nft` and a shell."""
     try:
         run_helper(
-            api, image, [NFT], [inet_rules(role, bridge_of(api, network))], f"{role}-ipv6-rules"
+            api,
+            image,
+            ["/bin/sh", "-c", INET_SCRIPT, "inet-rules"],
+            [inet_rules(role, bridge_of(api, network))],
+            f"{role}-ipv6-rules",
         )
     except HelperFailed as failed:
+        if failed.code == INET_NO_FAMILY_EXIT:
+            _log.info("the kernel has no inet family, so the %s bridge has no inet table", role)
+            return INET_NO_FAMILY
         _log.warning("the inet table of the %s bridge is not in place (%s)", role, failed.reason)
-        return False
-    return True
+        return INET_FAILED
+    return INET_INSTALLED
+
+
+def inet_failure_note(role: str) -> str:
+    """The note of a kernel that has the `inet` family and refused the table."""
+    return (
+        f"the inet table that drops IPv6 from the {role} bridge could not be installed on a "
+        "kernel that has the family; IPv6 is closed by the sysctls and the missing address only"
+    )

@@ -33,7 +33,7 @@ from fakes.docker_engine.server import (
 from code_reviewer_runner.implementer import host_rules
 from code_reviewer_runner.implementer import setup_container as sc
 from code_reviewer_runner.implementer.agent_container import READY_FILE, WRITE_FILE_SCRIPT
-from code_reviewer_runner.implementer.docker_api import DockerApi
+from code_reviewer_runner.implementer.docker_api import DockerApi, DockerError
 from code_reviewer_runner.implementer.door_launcher import PRIVATE_RANGES
 from code_reviewer_runner.implementer.setup_container import (
     OUTCOME_NOT_SAVED,
@@ -242,7 +242,8 @@ def test_the_vms_side_of_the_bridge_is_closed_before_the_setup_container_exists(
     # image.
     assert inet.document["Cmd"] == [host_rules.inet_rules("setup", sc.SETUP_BRIDGE)]
     assert inet.document["Image"] == IMAGE_ID
-    assert inet.document["Entrypoint"] == [host_rules.NFT]
+    assert inet.document["Entrypoint"] == ["/bin/sh", "-c", host_rules.INET_SCRIPT, "inet-rules"]
+    assert host_rules.NFT in host_rules.INET_SCRIPT
     for helper in helpers:
         host = helper.document["HostConfig"]
         assert host["NetworkMode"] == "host"
@@ -282,12 +283,25 @@ def test_a_setup_whose_bridge_could_not_be_closed_to_ipv6_is_never_started(rig: 
 
 
 # #818-IPV6-01
-def test_a_kernel_without_the_inet_family_does_not_stop_the_setup(rig: Rig) -> None:
+def test_a_kernel_without_the_inet_family_does_not_stop_the_setup_and_needs_no_note(
+    rig: Rig,
+) -> None:
     """The platform's kernel has no `inet` netfilter (measured): the table is tried, its absence is
     not a failure, and the container starts behind the `ip` table and the missing bridge address."""
+    rig.engine.inet_exit = host_rules.INET_NO_FAMILY_EXIT
+    done = run(rig)
+    assert done.outcome == OUTCOME_OK
+    assert not any("inet table" in note for note in done.notes)
+
+
+# #818-IPV6-01b
+def test_a_kernel_with_the_inet_family_that_refuses_the_table_is_a_note_of_the_run(
+    rig: Rig,
+) -> None:
     rig.engine.inet_exit = 1
     done = run(rig)
     assert done.outcome == OUTCOME_OK
+    assert host_rules.inet_failure_note("Setup") in done.notes
 
 
 # #818-IPV6-02
@@ -480,11 +494,33 @@ def test_a_disk_with_room_for_twice_the_layer_and_a_headroom_is_committed(rig: R
 
 
 # #818-DISK-03
-def test_a_free_space_or_a_size_that_cannot_be_had_does_not_stop_the_commit(rig: Rig) -> None:
-    assert run(rig, free_bytes=lambda: None).outcome == OUTCOME_OK
-    # No `SizeRw` in the answer: the headroom alone is what is needed.
-    assert run(rig, free_bytes=lambda: sc.COMMIT_HEADROOM_BYTES).outcome == OUTCOME_OK
+def test_a_free_space_or_a_size_that_cannot_be_had_does_not_stop_the_commit_and_is_a_note(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    unread = run(rig, free_bytes=lambda: None)
+    assert unread.outcome == OUTCOME_OK
+    assert any("free space" in note and "not checked" in note for note in unread.notes)
+    # No `SizeRw` in the answer: the headroom alone is what is needed, and the note says so.
+    unsized = run(rig, free_bytes=lambda: sc.COMMIT_HEADROOM_BYTES)
+    assert unsized.outcome == OUTCOME_OK
+    assert any("did not say how big" in note for note in unsized.notes)
     assert run(rig, free_bytes=lambda: sc.COMMIT_HEADROOM_BYTES - 1).outcome == sc.OUTCOME_NO_ROOM
+
+    # The walk of the layer ran past its time (or the daemon refused): not a reason to refuse.
+    def walk_timed_out(self: DockerApi, ref: str, *, timeout: float) -> int | None:
+        raise DockerError(0, "timed out")
+
+    monkeypatch.setattr(DockerApi, "container_rw_bytes", walk_timed_out)
+    walked = run(rig, free_bytes=lambda: 1)
+    assert walked.outcome == OUTCOME_OK
+    assert any("could not be had" in note and "not checked" in note for note in walked.notes)
+
+
+# #818-DISK-03b
+def test_a_commit_with_room_made_a_check_and_has_no_note_about_it(rig: Rig) -> None:
+    rig.engine.inspect_override[sc.SETUP_CONTAINER_NAME] = layer_of(1024**2)
+    done = run(rig, free_bytes=lambda: 10 * 1024**3)
+    assert done.outcome == OUTCOME_OK and done.notes == ()
 
 
 # #818-DISK-04
@@ -497,7 +533,7 @@ def test_the_commit_budget_holds_four_gigabytes_on_a_disk_four_times_slower_than
 # #818-OVERHEAD-01
 def test_the_overhead_counts_the_kill_and_the_join_of_the_container_and_the_room_check() -> None:
     parts = (
-        sc.RULES_SECONDS * 3
+        sc.RULES_SECONDS * 4
         + sc.READY_SECONDS
         + sc.SCRIPT_WRITE_SECONDS
         + sc.FINISH_EXEC_SECONDS

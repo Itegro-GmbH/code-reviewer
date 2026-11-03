@@ -63,7 +63,15 @@ from .agent_container import (
 from .docker_api import DockerApi, DockerError
 from .door_launcher import PRIVATE_RANGES
 from .exec_run import run_exec
-from .host_rules import NFT, HelperFailed, close_bridge_inet, close_bridge_ipv6, run_helper
+from .host_rules import (
+    INET_FAILED,
+    NFT,
+    HelperFailed,
+    close_bridge_inet,
+    close_bridge_ipv6,
+    inet_failure_note,
+    run_helper,
+)
 from .reader import REPO_SUBPATH, work_volume_of
 
 _log = logging.getLogger(__name__)
@@ -169,8 +177,11 @@ KILL_SECONDS: Final = 15.0
 # joined, and the clean-up kills it once more before it removes it (each call to the daemon has
 # `KILL_SECONDS`).
 KILL_STEPS_SECONDS: Final = KILL_SECONDS * 3
+# The host helpers of the Setup network (`_close_the_network`): the bridge's IPv6, the `ip` table,
+# its read back and the `inet` table. Each has `RULES_SECONDS`.
+HOST_HELPERS: Final = 4
 SETUP_OVERHEAD_SECONDS: Final = (
-    RULES_SECONDS * 3
+    RULES_SECONDS * HOST_HELPERS
     + READY_SECONDS
     + SCRIPT_WRITE_SECONDS
     + KILL_STEPS_SECONDS
@@ -295,6 +306,8 @@ class SetupRun:
     save_seconds: float
     # The size of the committed image in bytes (None when it was not asked for or not made).
     image_bytes: int | None = None
+    # Facts for the log: a check that could not be made (the room for the commit), never a failure.
+    notes: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -349,6 +362,7 @@ class SetupContainer:
         self._container: str | None = None
         self._network: str | None = None
         self._ended = threading.Event()
+        self._notes: list[str] = []
 
     # -- the whole run -----------------------------------------------------------------------------
 
@@ -416,6 +430,7 @@ class SetupContainer:
                 script_seconds=finished - started,
                 save_seconds=saved - finished,
                 image_bytes=size,
+                notes=tuple(self._notes),
             )
         except BaseException:
             self._clean()
@@ -442,6 +457,7 @@ class SetupContainer:
             start_seconds=started - begun,
             script_seconds=finished - started,
             save_seconds=0.0,
+            notes=tuple(self._notes),
         )
 
     # -- the start ---------------------------------------------------------------------------------
@@ -495,8 +511,10 @@ class SetupContainer:
                 api, worker_image, [NFT], [CHECK_RULES], "setup-rules-check", seconds=RULES_SECONDS
             )
             # The `inet` table beside the `ip` one: IPv6 from the bridge, for a kernel that has the
-            # family. Not required (`close_bridge_inet`).
-            close_bridge_inet(api, worker_image, SETUP_NETWORK_NAME, "setup")
+            # family. Not required (`close_bridge_inet`), but a kernel that has the family and
+            # refused the table is a note.
+            if close_bridge_inet(api, worker_image, SETUP_NETWORK_NAME, "setup") == INET_FAILED:
+                self._notes.append(inet_failure_note("Setup"))
         except HelperFailed as failed:
             raise _Unavailable(
                 f"setup_unavailable: the network rules could not be installed ({failed.reason})"
@@ -704,14 +722,27 @@ class SetupContainer:
         filled would fail it half way, after minutes, with the daemon's own words. Asked once the
         container has stopped (the inner Docker's data is in its layer by then): the layer's size,
         twice, and a headroom. A size or a free space that cannot be had is not a reason to
-        refuse."""
+        refuse, but it is a note in the report."""
         free = free_bytes()
         if free is None:
+            self._notes.append(
+                "the free space of the VM's disk could not be read, so the room for the commit "
+                "was not checked"
+            )
             return
         try:
             layer = self._api.container_rw_bytes(container, timeout=ROOM_SECONDS)
-        except DockerError:
+        except DockerError as error:
+            self._notes.append(
+                f"the size of the container's file system could not be had ({error.status}), so "
+                "the room for the commit was not checked"
+            )
             return
+        if layer is None:
+            self._notes.append(
+                "the daemon did not say how big the container's file system is, so the room for "
+                "the commit was checked against its headroom only"
+            )
         needed = COMMIT_ROOM_FACTOR * (layer or 0) + COMMIT_HEADROOM_BYTES
         if free >= needed:
             return

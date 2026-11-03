@@ -209,6 +209,13 @@ def test_a_script_that_fills_the_containers_root_beyond_the_disk_ends_with_no_ro
         assert step.error is not None and step.error.code is ErrorCode.ENVIRONMENT_SETUP_FAILED
         assert "too full to keep its result" in step.error.detail, step.error.detail
         assert "MB left" in step.error.detail and "needs about" in step.error.detail
+        # The Runs page shows the exit status and the end of the output: the script exited 0, and
+        # the last line of the output says what the runner found.
+        block = step.block
+        assert block is not None and block["ok"] is False and block["exitCode"] == 0
+        closing = block["output"].splitlines()[-1]
+        assert closing.startswith("[setup] the VM had no room to save the setup result: "), closing
+        assert "MB left" in closing and "needs about" in closing, closing
         assert step.image is None
         assert docker("image", "inspect", IMAGE, check=False).returncode != 0
     nothing_of_the_setup_is_left()
@@ -305,8 +312,7 @@ def test_the_setup_container_cannot_reach_the_vms_services_over_ipv4_or_ipv6(
     # What root in the container can do about IPv6: switch it on and look for the bridge's
     # link-local address, as the measured attack did.
     ipv6 = f"""
-echo "ipv6 off in this namespace: all=$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6)" \
-  "eth0=$(cat /proc/sys/net/ipv6/conf/eth0/disable_ipv6)"
+echo "ipv6 off in this namespace: eth0=$(cat /proc/sys/net/ipv6/conf/eth0/disable_ipv6)"
 sysctl -qw net.ipv6.conf.all.disable_ipv6=0 net.ipv6.conf.eth0.disable_ipv6=0 || true
 sleep 3; ping -6 -c1 -W1 ff02::1%eth0 >/dev/null 2>&1 || true
 for address in $(ip -6 neigh show dev eth0 | awk '/^fe80/ {{print $1}}'); do
@@ -338,8 +344,9 @@ echo "neighbours: $(ip -6 neigh show dev eth0 | grep -c '^fe80')"
             assert "OPEN" not in shown, shown
             # No link-local neighbour on the bridge, so nothing to connect to over IPv6.
             assert "neighbours: 0" in shown, shown
-            # IPv6 was off on the container's interface before its root tried to switch it on
-            # (`all` is the namespace's default and says nothing about the interface).
+            # IPv6 was off on the container's interface before its root tried to switch it on:
+            # a new interface takes `default` (the VM's `ipv6-off` step writes that one, and only
+            # that one), and the bridge Docker made has no IPv6 of its own either.
             assert "eth0=1" in shown, shown
             # The `inet` table beside the `ip` one, for a kernel that has the family: read back,
             # its two drops (IPv6 from the Setup bridge to the VM, and to a private range).

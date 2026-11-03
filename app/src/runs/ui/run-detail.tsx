@@ -189,7 +189,10 @@ function TaskSetup({ task }: { task: ImplementerDetailView }) {
         ? "The script ran out of time"
         : setup.exitCode === null
           ? "The script was stopped"
-          : `The script failed with exit status ${String(setup.exitCode)}`;
+          : setup.exitCode === 0
+            ? // Exit status 0 and still not ok: the script finished, but its result could not be kept. The last line of the output says why.
+              "The script finished, but its result could not be kept"
+            : `The script failed with exit status ${String(setup.exitCode)}`;
   return (
     <Section title="Setup script">
       <p data-slot="run-setup-outcome" className="text-sm">
