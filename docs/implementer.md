@@ -594,6 +594,55 @@ untouched** by any of it: the mirror is on its own 8 GiB file system, and a scri
 "No space left on device" (the lane proves it with a small stand-in disk), the step reads how much of the disk is left after the script and
 says so when it is under 1 GiB.
 
+**Measured on a real VM, round of #818 (2026-11-03, 2 vCPU, 4 GB, a `spike-` VM from a snapshot built from the branch; its images are from commit
+`1bfda743`, the Dockerfile and the boot scripts have not changed since, the code under test is the head, run on the VM with `uv`; `sysbox: proven`).**
+
+*The whole step with a real environment.* The script: `npm install playwright@1.49.1`, `npx playwright install --with-deps chromium`, `docker pull
+postgres:17-alpine` in the container's own Docker, a file in `/opt` and one in the repository. Then a turn (the real OpenCode, the real door, the scripted
+provider of `fakes/wire`) in which the agent, **with no internet**, runs a Playwright test and starts the postgres image the script pulled.
+
+| | Measured |
+|---|---|
+| Setup container, from the call to the script running (network, three helpers, container, ready) | 1 s |
+| Script (npm, Chromium 100.9 MiB, its apt packages, a pull of 422 MB) | 24 s |
+| Saving the result: the container's Docker stops by itself in about a second, **`docker commit` 61 s** (3.9 GB of image) | 62 s |
+| Removing the Setup container (with its inner Docker) | 0.3 s |
+| The agent's container from the committed image, to ready (Sysbox copies the inner images into its Docker) | 1.7 to 2.0 s (1.5 to 1.8 s from the golden image, step 4) |
+| The turn, all of it (setup 87 s, the agent's turn 15 s) | 102 s |
+| The committed image | **3.92 GB on disk, 1.07 GB of content**, against 1.54 GB and 397 MB for the golden agent image: Chromium and its libraries 862 MB (`~/.cache/ms-playwright`), postgres 422 MB, the rest the apt packages |
+| The VM's disk | 15.4 GB used before, 18.3 GB after the agent ran: the images the script made cost about 2.9 GB, in the committed image and the agent's own copy of the inner images |
+
+In the agent, the file the script left in the container's file system was there (`cat /opt/setup-marker`); `1.1.1.1:443` and a name lookup both failed
+("Network is unreachable"); the Playwright script launched headless Chromium and printed the title and the heading of a page it set; `docker image ls`
+listed `postgres:17-alpine`, `docker run` started it and `psql -c 'select 6*7'` answered 42; the agent's commit arrived. The commit is the long part and
+grows with the image (about 64 MB/s here); its ceiling of 300 s holds an image of roughly 19 GB.
+
+*What the Setup container reaches*, through the production code (`lane_environment` with a Control stand-in on the default bridge, a model network with
+the door's relay at `10.213.77.2` and on the default bridge, and the VM's own control service on port 23456). From the container and, for the last block,
+from a container of its own Docker:
+
+| Target | Before the rules (the control) | With the rules |
+|---|---|---|
+| `1.1.1.1:443`, `example.com:443` by name, `example.com:80`, `github.com:22`, `8.8.8.8:53`, `1.1.1.1:8443`, a name lookup | open | **open** |
+| The VM's control port by the VM's address (`169.254.0.2:23456`) | **open** | blocked |
+| The VM's control port by the Setup bridge's gateway (`10.213.78.1:23456`) | **open** | blocked |
+| The VM's control port by `docker0`'s gateway (`172.17.0.1:23456`), `169.254.0.1:23456` and `:80` (the platform) | blocked | blocked |
+| Control's stand-in (`172.17.0.2`), the door's stand-in on the model network (`10.213.77.2`) and on the default bridge (`172.17.0.3`) | blocked | blocked |
+| `10.0.0.1`, `192.168.0.1`, `172.16.0.1`, `100.64.0.1` | blocked | blocked |
+| The same from an inner container of the Setup's Docker (`alpine`, pulled through the internet) | n/a | the internet open, the rest blocked |
+| IPv6: root switches it on, pings `ff02::1`, looks for the bridge's neighbour | the host's `fe80::...%eth0` **answers on 23456** | no neighbour on the bridge; the connect times out |
+| `nft flush ruleset`, `iptables -F` in the container (after `apt-get install nftables` over the internet) | n/a | nothing changes: the rules are on the VM's side |
+
+The platform's own network already refuses a good part of the private ranges (the "before" column shows it); what the rules add is the VM itself,
+which the Setup bridge reaches by default, and the bridge-to-bridge routes. Under `runc` (the lane in CI) the same probes give the same answers.
+The same test lane on the VM: all 25 tests of `runner/tests/lane` under `sysbox-runc` (243 s), the 8 of the environment under `runc` as well.
+
+*The failures.* A script that exited 3 ended the turn `environment_setup_failed` with its two output lines and no model side (no door, no model
+network); a script that slept past its time was killed at the limit (`timedOut`, null status); one that filled the work volume's disk failed with "No
+space left on device" and the mirror on the reserve disk was whole; a stop during the script removed the container and left nothing; an `apt-get
+install` without an `apt-get update` first exited 100 and ended the turn the same way (the "script that tried to undo the rules" of the table
+first ran into it).
+
 ## Environments
 
 An environment is a start configuration for a task: a **name**, a **size** and a **setup script**. They are kept per workspace on
