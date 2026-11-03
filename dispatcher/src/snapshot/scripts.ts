@@ -476,7 +476,14 @@ const SYSBOX_PROBE_PORT = 38417;
  * It prints one `SYSBOX_PROBE ok <check>` or `SYSBOX_PROBE fail <reason>` per check and `SYSBOX_PROBE_DONE` last, and ends 0
  * whatever it found: the pipeline reads the lines. Reasons: the names of `sysbox-prepare.sh`, `sysbox_probe_image_unavailable`
  * (the pull failed: the proof did not run), `sysbox_container_failed`, `sysbox_inner_docker_failed`,
- * `sysbox_inner_container_failed`, `sysbox_network_check_inconclusive`, `sysbox_network_not_isolated`.
+ * `sysbox_inner_container_failed`, `sysbox_volume_failed`, `sysbox_volume_not_mapped`, `sysbox_network_check_inconclusive`,
+ * `sysbox_network_not_isolated`.
+ *
+ * It also proves what the Implementer's work volume needs: the agent's container mounts a **Subpath** of a named volume
+ * (`volume-subpath=repo`), as Control mounts it, and must read what the VM's root put there and write there; what it writes
+ * must belong to the VM's root (the id mapping of the mount works: Control's and the reader's view of the files agree);
+ * and a second Sysbox container with no capability and the same Subpath read-only (the reader) must read the agent's file and
+ * must not be able to write.
  */
 export function sysboxProbeScript(config: PipelineConfig): string {
   const image = shellQuote(config.agentImageTag);
@@ -484,12 +491,14 @@ export function sysboxProbeScript(config: PipelineConfig): string {
 image=${image}
 port=${SYSBOX_PROBE_PORT}
 box=sbxp-box
+vol=sbxp-work
 iso=sbxp-isolated
 ctl=sbxp-control
 listener=
 report() { printf 'SYSBOX_PROBE %s\\n' "$*"; }
 cleanup() {
   docker rm -f "$box" > /dev/null 2>&1
+  docker volume rm -f "$vol" > /dev/null 2>&1
   docker network rm "$iso" "$ctl" > /dev/null 2>&1
   if [ -n "$listener" ]; then kill "$listener" > /dev/null 2>&1; fi
 }
@@ -515,8 +524,16 @@ if ! docker network create --internal -o com.docker.network.bridge.gateway_mode_
   finish
 fi
 
-# The agent's container as the Implementer starts it: the image's own init, which starts the inner Docker and says so.
-if ! docker run --detach --runtime=sysbox-runc --network "$iso" --name "$box" "$image" > /dev/null 2>&1; then
+# The work volume as Control makes it: a named volume with a directory \`repo\` that the VM's root made and filled.
+if ! docker volume create "$vol" > /dev/null 2>&1 ||
+   ! docker run --rm --entrypoint sh --mount type=volume,source="$vol",target=/v "$image" -c 'mkdir -p /v/repo && echo control > /v/repo/from-control' > /dev/null 2>&1; then
+  report fail sysbox_volume_failed
+  finish
+fi
+
+# The agent's container as the Implementer starts it: the image's own init, which starts the inner Docker and says so, and the
+# Subpath of the volume at the place the agent works.
+if ! docker run --detach --runtime=sysbox-runc --network "$iso" --name "$box" --mount type=volume,source="$vol",target=/work/repo,volume-subpath=repo "$image" > /dev/null 2>&1; then
   report fail sysbox_container_failed
   finish
 fi
@@ -537,6 +554,23 @@ case "$inner" in
   *"tini version"*) report ok inner_container ;;
   *) report fail sysbox_inner_container_failed ;;
 esac
+
+# The Subpath volume under the id mapping: the agent (root of the container) reads the file the VM's root made and writes one;
+# the VM's root sees the written file as its own; a reader with no capability, read-only, reads both and cannot write.
+if docker exec "$box" sh -c 'cat /work/repo/from-control > /dev/null && echo agent > /work/repo/from-agent && cat /work/repo/from-agent > /dev/null' > /dev/null 2>&1; then
+  owner=$(docker run --rm --entrypoint sh --mount type=volume,source="$vol",target=/v "$image" -c 'stat -c %u /v/repo/from-agent' 2> /dev/null)
+  if [ "$owner" = 0 ]; then
+    if docker run --rm --runtime=sysbox-runc --network none --cap-drop ALL --entrypoint sh --mount type=volume,source="$vol",target=/repo,volume-subpath=repo,readonly "$image" -c 'cat /repo/from-control /repo/from-agent > /dev/null && ! touch /repo/reader-wrote 2> /dev/null' > /dev/null 2>&1; then
+      report ok volume_mapped
+    else
+      report fail sysbox_volume_not_mapped
+    fi
+  else
+    report fail sysbox_volume_not_mapped
+  fi
+else
+  report fail sysbox_volume_failed
+fi
 
 # The control: a listener on the VM, reached from a plain --internal network through its bridge address.
 python3 -c 'import socket, time

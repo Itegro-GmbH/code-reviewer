@@ -385,7 +385,8 @@ describe("the Sysbox proof of the check VM", () => {
   it("reports a container that does not start and a daemon in it that does not answer", () => {
     const started = runProof({
       prepare: "exit 0",
-      docker: 'if [ "$1" = run ]; then exit 1; fi; exit 0',
+      docker:
+        'if [ "$1" = run ] && [ "$2" = --detach ]; then exit 1; fi; exit 0',
     });
     expect(started.lines).toContain(
       "SYSBOX_PROBE fail sysbox_container_failed",
@@ -414,6 +415,12 @@ describe("the Sysbox proof of the check VM", () => {
       outsideNc?: number;
       outsidePing?: number;
       aliveCalls?: number;
+      /** What the agent's container gets of the Subpath volume: 0 = it reads and writes. */
+      volumeBox?: number;
+      /** The owner the VM's root sees on the file the agent wrote. */
+      volumeOwner?: number;
+      /** The reader (no capability, read-only): 0 = it read both files and could not write. */
+      volumeReader?: number;
     } = {},
   ) {
     const o = {
@@ -424,6 +431,9 @@ describe("the Sysbox proof of the check VM", () => {
       outsideNc: 0,
       outsidePing: 0,
       aliveCalls: 99,
+      volumeBox: 0,
+      volumeOwner: 0,
+      volumeReader: 0,
       ...options,
     };
     return `
@@ -433,6 +443,9 @@ case "$1" in
     if [ "$2" = --detach ]; then exit 0; fi
     for last; do :; done
     case "$last" in
+      *"mkdir -p /v/repo"*) exit 0 ;;
+      *"stat -c"*) echo ${o.volumeOwner}; exit 0 ;;
+      *"reader-wrote"*) exit ${o.volumeReader} ;;
       *1.1.1.1*) exit ${o.outsideNc} ;;
       *ping*) exit ${o.outsidePing} ;;
       *) exit ${o.vmControl} ;;
@@ -447,6 +460,7 @@ case "$1" in
       docker | test) exit 0 ;;
       sh)
         case "$5" in
+          *"/work/repo/from-control"*) exit ${o.volumeBox} ;;
           *"docker import"*) echo "tini version 0.19.0 - git.de40ad0"; exit 0 ;;
           *1.1.1.1*) exit ${o.boxOutsideNc} ;;
           *ping*) exit ${o.boxPing} ;;
@@ -468,11 +482,44 @@ exit 0`;
       "SYSBOX_PROBE ok boot",
       "SYSBOX_PROBE ok inner_docker",
       "SYSBOX_PROBE ok inner_container",
+      "SYSBOX_PROBE ok volume_mapped",
       "SYSBOX_PROBE ok network_control",
       "SYSBOX_PROBE ok outside_control",
       "SYSBOX_PROBE ok network_isolated",
       "SYSBOX_PROBE_DONE",
     ]);
+  });
+
+  // #745-T02: the Subpath volume is part of the proof, so that the id mapping the work volume needs is proven too
+  it.each([
+    [
+      "the agent cannot use the Subpath volume",
+      { volumeBox: 1 },
+      "sysbox_volume_failed",
+    ],
+    [
+      "the files the agent wrote do not belong to the VM's root",
+      { volumeOwner: 165536 },
+      "sysbox_volume_not_mapped",
+    ],
+    [
+      "the reader cannot read them or can write",
+      { volumeReader: 1 },
+      "sysbox_volume_not_mapped",
+    ],
+  ])("fails with a reason of its own when %s", (_name, options, reason) => {
+    const lines = isolation(options);
+    expect(lines).toContain(`SYSBOX_PROBE fail ${reason}`);
+    expect(lines).not.toContain("SYSBOX_PROBE ok volume_mapped");
+    expect(lines.at(-1)).toBe("SYSBOX_PROBE_DONE");
+  });
+
+  it("mounts a Subpath of a named volume into the agent's container and a read-only one without capabilities into a second", () => {
+    const script = sysboxProbeScript(config);
+    expect(script).toContain(
+      '--mount type=volume,source="$vol",target=/work/repo,volume-subpath=repo',
+    );
+    expect(script).toMatch(/--cap-drop ALL[^\n]*volume-subpath=repo,readonly/);
   });
 
   it.each([
