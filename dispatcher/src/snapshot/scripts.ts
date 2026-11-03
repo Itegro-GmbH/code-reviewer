@@ -19,12 +19,14 @@ export const STEPS = {
   startDaemon: "start_daemon",
   buildImage: "build_image",
   inspectImage: "inspect_image",
+  inspectAgentImage: "inspect_agent_image",
   cleanBuilder: "clean_builder",
   checkNoContainers: "check_no_containers",
   stopDaemon: "stop_daemon",
   scanFilesystem: "scan_filesystem",
   startDaemonCheck: "start_daemon_check",
   inspectRestoredImage: "inspect_restored_image",
+  inspectRestoredAgentImage: "inspect_restored_agent_image",
   probe: "probe",
   sysboxProbe: "sysbox_probe",
 } as const;
@@ -180,12 +182,23 @@ if ! DOCKER_BUILDKIT=1 docker build --file ${shellQuote(config.dockerfile)} --ta
   tail -n 40 ${PATHS.buildLog} >&2
   exit 1
 fi
+# The Implementer's agent image: the same Dockerfile, its other target. The stages both need are in the build cache.
+if ! DOCKER_BUILDKIT=1 docker build --file ${shellQuote(config.dockerfile)} --target ${shellQuote(config.agentTarget)} --tag ${shellQuote(config.agentImageTag)} . >> ${PATHS.buildLog} 2>&1; then
+  tail -n 40 ${PATHS.buildLog} >&2
+  exit 1
+fi
 `;
 }
 
 export function inspectImageScript(config: PipelineConfig): string {
   return `${STRICT}
 docker image inspect --format '{{.Id}}' ${shellQuote(config.imageTag)}
+`;
+}
+
+export function inspectAgentImageScript(config: PipelineConfig): string {
+  return `${STRICT}
+docker image inspect --format '{{.Id}}' ${shellQuote(config.agentImageTag)}
 `;
 }
 
@@ -463,20 +476,32 @@ const SYSBOX_PROBE_PORT = 38417;
  * It prints one `SYSBOX_PROBE ok <check>` or `SYSBOX_PROBE fail <reason>` per check and `SYSBOX_PROBE_DONE` last, and ends 0
  * whatever it found: the pipeline reads the lines. Reasons: the names of `sysbox-prepare.sh`, `sysbox_probe_image_unavailable`
  * (the pull failed: the proof did not run), `sysbox_container_failed`, `sysbox_inner_docker_failed`,
- * `sysbox_inner_container_failed`, `sysbox_network_check_inconclusive`, `sysbox_network_not_isolated`.
+ * `sysbox_inner_container_failed`, `sysbox_volume_failed`, `sysbox_volume_not_mapped`, `sysbox_reader_not_contained`, `sysbox_network_check_inconclusive`,
+ * `sysbox_network_not_isolated`.
+ *
+ * It also proves what the Implementer's work volume needs: the agent's container mounts a **Subpath** of a named volume
+ * (`volume-subpath=repo`), as Control mounts it, and must read what the VM's root put there and write there; what it writes
+ * must belong to the VM's root (the id mapping of the mount works: Control's and the reader's view of the files agree);
+ * and the readers must be contained: the Worker image's \`reader_proof\` makes the two readers of production (\`reader_document\`,
+ * read-only and read-write, over the same Subpath) and runs in them the commands production runs; the read-only one reads the
+ * agent's file and can neither write nor remount, no command holds more than \`DAC_OVERRIDE\`, and the root file system stays read-only
+ * (\`sysbox_reader_not_contained\` otherwise). Sysbox ignores \`--cap-drop\`, so a hand-written reader would prove nothing.
  */
 export function sysboxProbeScript(config: PipelineConfig): string {
-  const image = shellQuote(config.sysboxProbeImage);
+  const image = shellQuote(config.agentImageTag);
+  const workerImage = shellQuote(config.imageTag);
   return `set -uo pipefail
 image=${image}
 port=${SYSBOX_PROBE_PORT}
 box=sbxp-box
+vol=sbxp-work
 iso=sbxp-isolated
 ctl=sbxp-control
 listener=
 report() { printf 'SYSBOX_PROBE %s\\n' "$*"; }
 cleanup() {
   docker rm -f "$box" > /dev/null 2>&1
+  docker volume rm -f "$vol" > /dev/null 2>&1
   docker network rm "$iso" "$ctl" > /dev/null 2>&1
   if [ -n "$listener" ]; then kill "$listener" > /dev/null 2>&1; fi
 }
@@ -490,7 +515,8 @@ if ! boot_error=$(${PATHS.sysboxPrepareInstalled} 2>&1 > /dev/null); then
 fi
 report ok boot
 
-if ! timeout 120 docker pull --quiet "$image" > /dev/null 2>&1; then
+# The image the Implementer ships is in the snapshot: nothing is pulled, so the proof does not depend on a registry.
+if ! docker image inspect "$image" > /dev/null 2>&1; then
   report fail sysbox_probe_image_unavailable
   finish
 fi
@@ -501,14 +527,22 @@ if ! docker network create --internal -o com.docker.network.bridge.gateway_mode_
   finish
 fi
 
-if ! docker run --detach --runtime=sysbox-runc --network "$iso" --name "$box" --entrypoint sh "$image" \
-     -c 'exec dockerd --host=unix:///var/run/docker.sock --tls=false --ipv6=false --ip6tables=false' > /dev/null 2>&1; then
+# The work volume as Control makes it: a named volume with a directory \`repo\` that the VM's root made and filled.
+if ! docker volume create "$vol" > /dev/null 2>&1 ||
+   ! docker run --rm --entrypoint sh --mount type=volume,source="$vol",target=/v "$image" -c 'mkdir -p /v/repo && echo control > /v/repo/from-control' > /dev/null 2>&1; then
+  report fail sysbox_volume_failed
+  finish
+fi
+
+# The agent's container as the Implementer starts it: the image's own init, which starts the inner Docker and says so, and the
+# Subpath of the volume at the place the agent works.
+if ! docker run --detach --runtime=sysbox-runc --network "$iso" --name "$box" --mount type=volume,source="$vol",target=/work/repo,volume-subpath=repo "$image" > /dev/null 2>&1; then
   report fail sysbox_container_failed
   finish
 fi
 ready=
 for _ in $(seq 1 300); do
-  if docker exec "$box" docker info > /dev/null 2>&1; then ready=1; break; fi
+  if docker exec "$box" test -e /run/agent-ready > /dev/null 2>&1 && docker exec "$box" docker info > /dev/null 2>&1; then ready=1; break; fi
   sleep 0.2
 done
 if [ -z "$ready" ]; then
@@ -517,12 +551,35 @@ if [ -z "$ready" ]; then
 fi
 report ok inner_docker
 
-# The inner container's image is made from two files of the container itself: nothing is pulled a second time.
-inner=$(docker exec "$box" sh -c 'tar -C / -cf - bin/busybox lib/ld-musl-x86_64.so.1 | docker import - sbxp-inner > /dev/null && docker run --rm sbxp-inner /bin/busybox echo sysbox-inner-ok' 2> /dev/null)
-if [ "$inner" != "sysbox-inner-ok" ]; then
-  report fail sysbox_inner_container_failed
+# The inner container's image is made from one static file of the container itself: nothing is pulled.
+inner=$(docker exec "$box" sh -c 'tar -C / -cf - usr/local/bin/docker-init | docker import - sbxp-inner > /dev/null && docker run --rm --entrypoint /usr/local/bin/docker-init sbxp-inner --version' 2> /dev/null)
+case "$inner" in
+  *"tini version"*) report ok inner_container ;;
+  *) report fail sysbox_inner_container_failed ;;
+esac
+
+# The Subpath volume under the id mapping: the agent (root of the container) reads the file the VM's root made and writes one;
+# the VM's root sees the written file as its own; a reader with no capability, read-only, reads both and cannot write.
+if docker exec "$box" sh -c 'cat /work/repo/from-control > /dev/null && echo agent > /work/repo/from-agent && cat /work/repo/from-agent > /dev/null' > /dev/null 2>&1; then
+  owner=$(docker run --rm --entrypoint sh --mount type=volume,source="$vol",target=/v "$image" -c 'stat -c %u /v/repo/from-agent' 2> /dev/null)
+  if [ "$owner" = 0 ]; then
+    report ok volume_mapped
+    # The reader is the one the Worker makes: its image runs \`reader_proof\`, which sends the daemon the reader's own document over
+    # this volume (both readers, read-only and read-write) and runs in them the commands production runs.
+    reader_image=$(docker image inspect --format '{{.Id}}' ${workerImage} 2> /dev/null)
+    reader_lines=$(timeout 120 docker run --rm --user 0:0 --entrypoint /opt/venv/bin/python --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock ${workerImage} -I -m code_reviewer_runner.implementer.reader_proof --image "$reader_image" --volume "$vol" --runtime=sysbox-runc 2> /dev/null)
+    if printf '%s\n' "$reader_lines" | grep -qx 'READER_PROOF ok reader_contained' &&
+       printf '%s\n' "$reader_lines" | grep -qx 'READER_PROOF done' &&
+       ! printf '%s\n' "$reader_lines" | grep -q '^READER_PROOF fail '; then
+      report ok reader
+    else
+      report fail sysbox_reader_not_contained
+    fi
+  else
+    report fail sysbox_volume_not_mapped
+  fi
 else
-  report ok inner_container
+  report fail sysbox_volume_failed
 fi
 
 # The control: a listener on the VM, reached from a plain --internal network through its bridge address.

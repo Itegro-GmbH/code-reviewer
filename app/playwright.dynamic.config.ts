@@ -104,16 +104,6 @@ export default defineConfig({
       testMatch: /prepare-factory\.e2e\.ts$/,
       dependencies: ["prepare"],
     },
-    // The Implementer's journeys (#767): the factory app, the same Dispatcher process type serving both apps, the Worker
-    // with the Implementer's profile, git and the pinned OpenCode as the engine user. After the hosted journey, so that
-    // the two never run a Dispatcher next to each other (one port, one engine user), and after the guard's positive
-    // controls, whose counters it reads at its end.
-    {
-      name: "implementer",
-      use: { ...browser, baseURL: factoryEnv.appUrl },
-      testMatch: /hosted-implementer\.e2e\.ts$/,
-      dependencies: ["prepare-factory", "guard", "hosted"],
-    },
   ],
   webServer: [
     {

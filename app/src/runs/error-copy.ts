@@ -197,6 +197,10 @@ export const errorCopy = (
     "No worker that answered can run tasks yet, so this task did not start.",
   implementer_config_invalid:
     "The settings of this task could not be used, so it did not start.",
+  sandbox_unproven:
+    "The environment for tasks has not been proven safe on this platform version yet, so the task did not start and was not billed.",
+  sandbox_size_unsupported:
+    "The chosen size leaves too little memory for the agent's own container, so the task did not start and was not billed. Choose a larger size.",
   unknown: "The run failed for a reason this version does not know.",
 });
 

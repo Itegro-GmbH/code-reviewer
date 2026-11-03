@@ -327,17 +327,17 @@ yours.
   under **LLM key** (`/admin/llm`, section 3.5), also encrypted in the database. The `GITHUB_*` and `LLM_API_KEY`
   variables the code still reads are not used by a hosted instance, which never sets them (section 3.1).
 
-**The golden snapshot keys.** Three keys of `/dispatcher` belong to the pipeline: `SANDBOX_SNAPSHOT_ID`,
-`SANDBOX_IMAGE_DIGEST` and `SANDBOX_SNAPSHOT_COMMIT` (the commit the snapshot was built from). **Do not create them,
+**The golden snapshot keys.** Four keys of `/dispatcher` belong to the pipeline: `SANDBOX_SNAPSHOT_ID`,
+`SANDBOX_IMAGE_DIGEST`, `SANDBOX_SNAPSHOT_COMMIT` (the commit the snapshot was built from) and `SANDBOX_SYSBOX_PROOF` (the verdict of the snapshot's Sysbox proof, the fourth member of the pair). **Do not create them,
 and do not give them a placeholder.** Absent is the supported state ("no launcher, nothing is claimed"); a placeholder
 that is not an id makes the Dispatcher refuse to start (`SANDBOX_SNAPSHOT_ID` set without a valid
 `SANDBOX_IMAGE_DIGEST`, or the other way round, is a `ConfigError` when the function initialises), in every deployment
 that does not get the pipeline's own values. The first deployment writes the keys (the write creates what is missing, so
-the identity needs *create* as well as *edit* on exactly these three names: a 403 on that first write means the role
+the identity needs *create* as well as *edit* on exactly these four names: a 403 on that first write means the role
 lacks it), and from then on **do not edit them by hand**: the pipeline writes them, and only after a promotion. They
 are not secrets, and they must reach Vercel as ordinary variables, **not as Sensitive ones**: `vercel pull` does not
 return a Sensitive variable, and a blank pair makes every deployment rebuild the snapshot (safe, but slow and wasteful).
-After the first run, check once that the three keys exist in Infisical and in the Vercel project, and that Vercel does
+After the first run, check once that the four keys exist in Infisical and in the Vercel project, and that Vercel does
 not show them as Sensitive. The pipeline works from the pair its live Dispatcher deployment carries (section 5.1); the
 keys are what Secret Sync and a deployment made by hand see.
 
@@ -347,14 +347,24 @@ Its role is exactly this, and nothing more (create a custom role and add the ide
 | Permission (Infisical project role) | Environment | Secret path | Secret names | Why |
 |---|---|---|---|---|
 | Secrets: describe and read value | `prod` | `/ci` | any | The jobs load the keys of `/ci` |
-| Secrets: describe, create and edit | `prod` | `/dispatcher` | `SANDBOX_SNAPSHOT_ID`, `SANDBOX_IMAGE_DIGEST`, `SANDBOX_SNAPSHOT_COMMIT` | The persist job and the rollback write the pair |
+| Secrets: describe, create and edit | `prod` | `/dispatcher` | `SANDBOX_SNAPSHOT_ID`, `SANDBOX_IMAGE_DIGEST`, `SANDBOX_SNAPSHOT_COMMIT`, `SANDBOX_SYSBOX_PROOF` | The persist job and the rollback write the pair |
 | Read the project (to find it by its slug) | the project | | | The write path looks the project id up from `INFISICAL_PROJECT_SLUG` |
 
 - **No** read of `/app` or `/dispatcher`, no other environment, no delete, no folder, project or identity
   administration. The secret path conditions are `$eq` `/ci` and `$eq` `/dispatcher`.
-- **The condition on the three secret names (`$in` the three names) is recommended hardening**: it makes the write
+- **Grant the fourth name, `SANDBOX_SYSBOX_PROOF`, before the first release that carries the Implementer's Sysbox gate (#745,
+  step 4).** Until then the role may have had three names. The persist job writes the verdict first (cleared to `unproven`) and
+  *creates* the key on that first write, so the identity needs *create* and *edit* on it exactly as on the other three, and the
+  grant is the owner's to make in Infisical, before the release is merged, not after. If it is missing: the release's
+  promotion has already happened when `persist` is refused (403 `infisical_write_failed`), so production runs the new
+  snapshot and the new Dispatcher while the run is **red**; `cleanup` runs only after `persist` succeeded or was skipped, so it
+  is **skipped** and the superseded snapshots stay (they cost money and count against the platform's limits); and every later
+  release repeats the same refusal at `persist`, because it tries the same first write again: they all stay red until the
+  permission is granted, after which *Re-run failed jobs* of the latest run writes the pair and lets the cleanup run.
+  Nothing live breaks meanwhile: the staged Dispatcher deployment carries its pair, the verdict included, as its own variables.
+- **The condition on the four secret names (`$in` the four names) is recommended hardening**: it makes the write
   path unable to touch any other key of `/dispatcher` even if the code that calls it were changed. The pipeline does not
-  depend on it (the code fixes the three names itself), so a role without it works.
+  depend on it (the code fixes the four names itself), so a role without it works.
 - The same identity reads `/ci` in the read-only jobs and writes in two places; the repository's structure tests pin
   that only the `persist` job of `deploy-production.yml` and the `rollback` job of `rollback-production.yml` use the
   write path (`.github/actions/infisical-write-snapshot-pair`), and that every other job only loads keys of `/ci`.
@@ -493,6 +503,7 @@ A refusal at start names the variable, never its value (`ConfigError`: `required
 | `DISPATCHER_OPERATOR_TOKEN` | optional | **yes** | The credential of `POST /probe` (the deploy canary) and `POST /apps/check`. At least 32 characters, different from every other secret. **Unset, `POST /probe` is still opened by `RUNNER_TOKEN`** (the rollout fallback, only while `reviewer` is the only App) and `POST /apps/check` refuses everyone. **Required with `DISPATCHER_APPS`**: the Dispatcher does not start without it. Set, no App's own credential opens either route: an App must not be able to start canary VMs, which cost money. Put it in `/ci` and `/dispatcher` together (`dispatcher/README.md`, "Rollout of the operator token"): the canary uses it when `/ci` has it. |
 | `SANDBOX_SNAPSHOT_ID` | yes | no | The golden snapshot: `snapshotId` of its record. **The deployment pipeline sets it** (section 5.1): the Dispatcher deployment of every run carries the pair it uses as its own run-time variables, and the pipeline writes the pair to Infisical after the promotion. **Unset, the Dispatcher has no Launcher and claims nothing** (every wake-up is answered `200 ignored` with `not_capable`). Set with `SANDBOX_IMAGE_DIGEST` or not at all. |
 | `SANDBOX_IMAGE_DIGEST` | with the snapshot | no | The Worker image id in that snapshot (`imageDigest` of the same record), `sha256:` and 64 hex characters. The Launcher refuses a VM whose image has another id. The pipeline sets the two together, and writes `SANDBOX_SNAPSHOT_COMMIT` (the commit the snapshot was built from; the Dispatcher does not read it) next to them. |
+| `SANDBOX_SYSBOX_PROOF` | with the snapshot | no | The golden snapshot's Sysbox verdict (`sysbox` of its record): `proven` or `unproven`, the fourth member of the pair. **The deployment pipeline sets it** with the snapshot id (section 5.1). Only `proven` lets an Implementer turn start; anything else, unset included, ends it with the free `sandbox_unproven`. Reviews never read it, whatever it holds. **Do not set it by hand**: a `proven` that stays behind a newer snapshot would let the Implementer start on a snapshot nobody proved |
 | `DISPATCHER_ENGINES` | optional | no | `pr-agent`, `opencode` or both (default both). `implementer` is added to the default when an App of `DISPATCHER_APPS` names the kind, and naming it here never gives it to `reviewer` (#759). The Launcher advertises `implementer` when it is in this list, and then `POST /probe` requires the canary report to name it (the canary VM runs a second probe in the Implementer's profile, #765); without it in the list nothing changes. `pr-agent` for a Diff-only deployment: it has no `POST /probe` and no canary VM. A Dynamic job is accepted whenever `opencode` is in this list and the snapshot pair is set: the Dispatcher runs no capability probe on a dispatch (section 8). |
 | `DISPATCHER_JOB_TIMEOUT_SECONDS` | optional | no | How long a Worker of Diff or Dynamic may live, 60 to 21600, default **1200**. The Implementer (#759) has its own timeout in `DISPATCHER_WORKER_CONFIG` (default 3600). The function has to outlive only the launch (at most 300 s): the Dispatcher does not supervise the Worker after the hand-over (#487), so the function limit no longer bounds the job; the VM's own timeout (this plus `SANDBOX_VM_TIMEOUT_MARGIN_SECONDS`) and the reaper (section 5.5) do. |
 | `DISPATCHER_WORKER_CONFIG` | optional | no | JSON `{"diff": {...}, "dynamic": {...}, "implementer": {...}}` (`implementer` also takes `timeoutSeconds`, 60 to 21600, default 3600): the VM size (`launcher.vcpus`) and the container memory (`container.memory.limit` / `reservation`) per Worker kind. Section 6. A wrong value fails when the function initialises (the variable is named in the log), not at the first job. |
@@ -536,7 +547,7 @@ its `RUNNER_WEBHOOK_SECRET` as `DISPATCHER_APP_<ID>_SIGNING_SECRET`, its `RUNNER
 |---|---|---|
 | environment `production` (secrets) | `INFISICAL_CLIENT_ID`, `INFISICAL_CLIENT_SECRET`, `INFISICAL_DOMAIN`, `INFISICAL_PROJECT_SLUG` | The sign-in to Infisical (section 2.1). Secrets, not variables |
 | Infisical `prod` `/ci` | `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, `VERCEL_APP_PROJECT_ID`, `VERCEL_DISPATCHER_PROJECT_ID`, the two bypass secrets, `DATABASE_URL_MIGRATE`, `RUNNER_TOKEN` | What the workflows need (section 2.1). The golden snapshot build reads `VERCEL_TOKEN`, `VERCEL_TEAM_ID` and `VERCEL_DISPATCHER_PROJECT_ID`; the Dispatcher's project is the one the snapshot has to be in |
-| Infisical `prod` `/dispatcher` | `SANDBOX_SNAPSHOT_ID`, `SANDBOX_IMAGE_DIGEST`, `SANDBOX_SNAPSHOT_COMMIT` | Written by the pipeline after a promotion, with the same machine identity (section 2.1 has its role). Not secrets |
+| Infisical `prod` `/dispatcher` | `SANDBOX_SNAPSHOT_ID`, `SANDBOX_IMAGE_DIGEST`, `SANDBOX_SNAPSHOT_COMMIT`, `SANDBOX_SYSBOX_PROOF` | Written by the pipeline after a promotion, with the same machine identity (section 2.1 has its role). Not secrets |
 | retired | the environments `hosted-snapshot` and `hosted-canary`, the variables `DISPATCHER_CANARY_HOSTS` and `GOLDEN_SNAPSHOT_ENABLED` | Replaced by the above. The canary no longer keeps a list of hosts: the Vercel API says whether a staged host is the Dispatcher project's |
 
 **What the build sees.** `vercel build` (which runs `next build`, the bundler and every plugin of the two projects) runs
@@ -730,8 +741,8 @@ Actions, *Deploy production*, *Run workflow* on `main` (or merge to `main`). Wit
 golden snapshot (about two minutes plus the image build), then stages and checks and promotes everything in the order of
 section 5.6. It takes a good deal longer than a normal release; the log of each job says what it is doing.
 
-**Check:** every job is green; the `persist` and `cleanup` jobs ran (they write the pair to Infisical, and the three
-`SANDBOX_SNAPSHOT_*` keys of `/dispatcher` now hold values). `https://<app>/api/health` answers `200 {"status":"ok"}`;
+**Check:** every job is green; the `persist` and `cleanup` jobs ran (they write the pair to Infisical, and the four
+`SANDBOX_SNAPSHOT_*` and `SANDBOX_SYSBOX_PROOF` keys of `/dispatcher` now hold values). `https://<app>/api/health` answers `200 {"status":"ok"}`;
 `503` with `SCHEMA_BEHIND` means the migration did not reach this database, `503` without a code that the database is not
 reachable with `DATABASE_URL`. `https://<dispatcher>/health` answers `200 {"status":"ok"}`. The settings of the
 Dispatcher are read when the function initialises, so a bad value shows as failing requests and a log line that names the
@@ -886,7 +897,7 @@ snapshot it has:
 3. **Stage** (`stage-dispatcher`). First `snapshot:ops exists` checks that the snapshot is there (a re-run of failed jobs
    after the snapshot was removed stops here with `snapshot_missing`, not in a canary VM that cannot start). The staged
    Dispatcher deployment then gets the pair of this run as its **own run-time variables** (`vercel deploy --env
-   SANDBOX_SNAPSHOT_ID=... --env SANDBOX_IMAGE_DIGEST=...`) and as meta. The project's variables, Infisical and the live
+   SANDBOX_SNAPSHOT_ID=... --env SANDBOX_IMAGE_DIGEST=... --env SANDBOX_SYSBOX_PROOF=...`) and as meta. The project's variables, Infisical and the live
    deployment are not touched, so production keeps using the old pair until the promotion. This is the one mechanism of
    the pipeline that depends on how the platform treats `--env` next to the project's own variables (section 8); the
    canary does not trust it, it checks.
@@ -902,9 +913,10 @@ snapshot it has:
    with the machine identity's write path (section 2.1), after the same freshness check (a pair of an older run must not
    overwrite a newer one; if `main` moved on, the next run finds the live pair and writes it). Secret Sync then carries it
    to the project's variables for deployments made by hand and for the next `vercel pull`. Written also when nothing was
-   rebuilt but the variables are behind the live pair (a repair, below). The three keys are written one after the other:
-   a failure after the first leaves a mixed trio (a new id with an old image id, say), which a deployment made by hand
-   would refuse to start with and which the next run repairs.
+   rebuilt but the variables are behind the live pair (a repair, below). The four keys are written one after the other,
+   the verdict twice (cleared to `unproven` first, set last): a failure in between leaves a mixed set (a new id with an
+   old image id, say), which a deployment made by hand would refuse to start with and which the next run repairs, and
+   never a `proven` next to a snapshot nobody proved.
 7. **Clean up** (`cleanup`), **after every promotion of the Dispatcher** (and after persist, when persist had something
    to do). Every golden snapshot is removed except: the new one (or the one in use, when nothing was rebuilt), the
    previous one (the one production ran before this run: the rollback target, the previous Dispatcher deployment, still
@@ -1308,7 +1320,10 @@ It is dormant in every release, and code-review.com is not touched at any step. 
 works (the same steps with their checks, who does them and what undoes each are in [`factory-bring-up.md`](factory-bring-up.md),
 "Switching on the Implementer"):
 
-1. **Release the code to `main`.** The pipeline migrates the second database first, runs `health-factory` with the old set
+1. **Release the code to `main`, after the owner has granted the machine identity *create* and *edit* on
+   `SANDBOX_SYSBOX_PROOF` of `/dispatcher`** (section 2.1; the key is new with the Sysbox gate of step 4 of the sandbox, so the
+   role of an existing deployment does not have it). Without it the release goes live and then fails at `persist` (red), the
+   `cleanup` is skipped and the next releases fail the same way until the permission exists. The pipeline migrates the second database first, runs `health-factory` with the old set
    (`dynamic-review,review`) and the canary on the rebuilt snapshot, and promotes. Nothing live changes.
 2. **`DISPATCHER_APPS`**, only after step 1 is live. Infisical `prod`, folder `/dispatcher`: in the factory entry set `kinds`
    to `["diff","dynamic","implementer"]`. Optional: an `implementer` entry of `DISPATCHER_WORKER_CONFIG` (sizes and

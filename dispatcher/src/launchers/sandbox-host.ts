@@ -35,6 +35,49 @@ const VM_PREPARE_TIMEOUT_MS = 60_000;
 export const SYSBOX_PREPARE_TIMEOUT_MS = 40_000;
 /** The event of the log line of a failed `sysbox-prepare.sh`, next to the launch error code `sysbox_not_ready`. */
 export const SYSBOX_PREPARE_FAILED_EVENT = "sysbox_prepare_failed";
+/**
+ * The directories Docker keeps its runtime state in (the pipes of every `exec`, the shims of the containers), put on memory for
+ * the Implementer's VM before the daemon starts. The VM's `/run` is a directory of its one XFS disk, and the pipes of an exec are
+ * files in it: with the disk full by the agent's doing, no command could be run in a container (measured: "failed to open stdout
+ * fifo ... no space left on device"), neither the runner's look at the repository nor its tunnel to the agent. On memory, they
+ * work on a full disk. So is the temporary directory of the daemon and of the runtime that runs an exec (`runc-process...` in
+ * `/tmp`, measured): the daemon is started with `TMPDIR` in the second directory, which is therefore open to everybody
+ * (sticky, as `/tmp` is) and is the VM's, not the container's.
+ */
+export const DOCKER_TMPDIR = "/run/containerd";
+export const RUN_DIRECTORY_COMMANDS = [
+  {
+    label: "run-directories",
+    cmd: "mkdir",
+    args: ["-p", "--", "/run/docker", "/run/containerd"],
+  },
+  {
+    label: "run-directory-docker",
+    cmd: "mount",
+    args: [
+      "-t",
+      "tmpfs",
+      "-o",
+      "size=64m,mode=0711,nosuid,nodev",
+      "tmpfs",
+      "/run/docker",
+    ],
+  },
+  {
+    label: "run-directory-containerd",
+    cmd: "mount",
+    args: [
+      "-t",
+      "tmpfs",
+      "-o",
+      "size=64m,mode=1777,nosuid,nodev",
+      "tmpfs",
+      "/run/containerd",
+    ],
+  },
+] as const;
+/** Each is a `mkdir` or a `mount`: a few milliseconds. The three together stay a small part of the launch deadline of the core (a test pins the sum). */
+export const RUN_DIRECTORY_STEP_TIMEOUT_MS = 3_000;
 const IMAGE_CHECK_TIMEOUT_MS = 30_000;
 const KILL_TIMEOUT_MS = 15_000;
 /** Each step of the work volume is a `mkdir`, a `mount` or one `docker volume create`: a second or so, never half a minute. */
@@ -95,6 +138,7 @@ export class SandboxDockerHost implements ContainerHost {
    */
   readonly handover: Promise<void>;
   readonly #options: SandboxDockerHostOptions;
+  #memoryRunDirectories = false;
   #settle!: { resolve: () => void; reject: (error: unknown) => void };
   #settled = false;
 
@@ -106,14 +150,48 @@ export class SandboxDockerHost implements ContainerHost {
     this.handover.catch(() => undefined);
   }
 
+  /**
+   * Puts the runtime directories of Docker on memory (`RUN_DIRECTORY_COMMANDS`), before `prepare()` starts the daemon. For the
+   * Implementer's VM only: a review's VM stays as it was. A step that fails ends the launch with the retryable
+   * `docker_not_ready`; the log names the step and the exit status, never the text.
+   */
+  async prepareRunDirectories(signal: AbortSignal): Promise<void> {
+    const { vm } = this.#options;
+    this.#memoryRunDirectories = true;
+    for (const command of RUN_DIRECTORY_COMMANDS) {
+      const done = await vm.exec(
+        {
+          label: command.label,
+          cmd: command.cmd,
+          args: command.args,
+          sudo: true,
+          timeoutMs: RUN_DIRECTORY_STEP_TIMEOUT_MS,
+        },
+        signal,
+      );
+      if (done.exitCode === 0) continue;
+      this.#options.logger.warn("run_directory_failed", {
+        ...this.#options.logFields,
+        sandbox: vm.name,
+        step: command.label,
+        code: "docker_not_ready",
+        exitCode: done.exitCode,
+      });
+      throw new LaunchError("docker_not_ready", { retryable: true });
+    }
+  }
+
   /** Starts the daemon and proves the image in the VM is the one the Dispatcher is configured with. */
   async prepare(signal: AbortSignal): Promise<void> {
     const { vm } = this.#options;
+    // On memory (`prepareRunDirectories`), the daemon is started with its temporary directory there too.
     const prepared = await vm.exec(
       {
         label: "vm-prepare",
-        cmd: VM_PREPARE_PATH,
-        args: [],
+        cmd: this.#memoryRunDirectories ? "env" : VM_PREPARE_PATH,
+        args: this.#memoryRunDirectories
+          ? [`TMPDIR=${DOCKER_TMPDIR}`, VM_PREPARE_PATH]
+          : [],
         sudo: true,
         timeoutMs: VM_PREPARE_TIMEOUT_MS,
       },

@@ -53,29 +53,36 @@ installs a repository's dependencies and runs its tests (read-only root, `noexec
 volume). The Sandbox launcher picks the container spec by the job kind: Diff and Dynamic keep `WorkerContainerSpec`
 unchanged; `implementer` gets `ImplementerContainerSpec` (`contracts/worker-container.v1.json`), which is the same spec with
 exactly six fields changed: one **work volume** at `/work`, **the VM's Docker socket** (`/var/run/docker.sock` bind-mounted read-only at
-`/run/docker.sock`, #745: the Worker is the Control container of the turn and starts the model door, the container that holds the model key; it makes the Worker
-effectively root on the VM, accepted because the agent never reaches it, `docs/implementer.md`, "The model door"), **memory** 3 GB (reservation 2.5 GB, no swap; the VM has 4 GB, and 256 MB of
-it are the door's), **2048 processes**, the four **environment names** `RUNNER_IMPLEMENTER_WORK_DIR` (`/work`), `RUNNER_IMPLEMENTER_NETWORK`
-(`registries`), `RUNNER_IMPLEMENTER_EGRESS_PORT` (`10182`) and `RUNNER_IMPLEMENTER_MODEL_DOOR` (`docker`), and a `forbiddenKeys` list without `dockerSocket`. The floor is the same: root filesystem read-only, every tmpfs
+`/run/docker.sock`, #745: the Worker is the Control container of the turn and starts the model door, the agent's container and the reader; it makes the Worker
+effectively root on the VM, accepted because the agent never reaches it, `docs/implementer.md`, "The model door"), **memory** 768 MB (reservation 512 MB, no swap; the rest of the VM
+is the OS's 512 MB, the door's 256 MB, the two readers' 256 MB each and the agent's container, whose limit the Launcher computes and hands over as `RUNNER_IMPLEMENTER_AGENT_MEMORY_MB`: 2,048 MB at 2 vCPU), **2048 processes**, the four **environment names** `RUNNER_IMPLEMENTER_WORK_DIR` (`/work`),
+`RUNNER_IMPLEMENTER_MODEL_DOOR` (`docker`), `RUNNER_IMPLEMENTER_SANDBOX_PROOF` (the snapshot's Sysbox verdict, `SANDBOX_SYSBOX_PROOF`: `proven` or `unproven`, and `unproven` when none was given; only `proven` lets the turn start) and `RUNNER_IMPLEMENTER_AGENT_MEMORY_MB`, and a `forbiddenKeys` list without `dockerSocket`. The floor is the same: root filesystem read-only, every tmpfs
 `noexec`, no privileged, no host bind, device or namespace (the Docker socket is the one exception, in this profile only), `no-new-privileges`, the same capabilities. The
 work volume is the only writable path that may run a program; a bind or any other volume has no key in the schema.
-Before the volume the launcher runs `sysbox-prepare.sh` in the VM as root (label `sysbox-prepare`, 40 s, the Implementer's VM only: Diff and
-Dynamic launch as before): it makes the VM able to run a Sysbox container, the sandbox of the next steps of `plans/implementer-sandbox.md`, and a failure ends the
+Before anything else on the Implementer's VM (Diff and Dynamic launch as before) the launcher puts the directories Docker keeps its runtime in on memory, in three
+steps (`run-directories`, `run-directory-docker`, `run-directory-containerd`, 3 s each): a `tmpfs` on `/run/docker` and one on `/run/containerd`, and `vm-prepare.sh` then runs with
+`TMPDIR=/run/containerd` (`env TMPDIR=... vm-prepare.sh`, so that the daemon and the runtime it starts keep their temporary files there). The VM's `/run` and `/tmp` are directories of its one XFS disk,
+and an exec needs files there (the pipes of the command, `runc-process...`): with the disk full by the agent's doing no command could be run in a container, neither the runner's look at the
+repository nor its tunnel to the agent (measured on a VM: "failed to open stdout fifo ... no space left on device", "OCI runtime exec failed: open /tmp/runc-process...: no space left on device").
+On memory they work on a full disk (`docs/implementer.md`, "The disk"). A step that fails ends the launch with the retryable `docker_not_ready`. After `vm-prepare.sh` the launcher runs `sysbox-prepare.sh` in the VM as root
+(label `sysbox-prepare`, 40 s, the Implementer's VM only): it makes the VM able to run a Sysbox container, the sandbox of the next steps of `plans/implementer-sandbox.md`, and a failure ends the
 launch with the retryable `sysbox_not_ready` (`docs/golden-snapshot.md`, "Sysbox"). Docker cannot give a named volume mount options, so before `docker run`
-the launcher makes the volume in the job's VM as root, in five steps (`work-volume-dir`, `-mount`, `-options`, `-check`, `-create`): a directory below
-`/var/lib/code-reviewer-work`, a mount of its own on it with `rw,nosuid,nodev` (no `noexec`), a read of `/proc/self/mountinfo`
-that must show exactly those options on that mount (a platform that ignored them would run the agent on a mount that honours
-the setuid bit, and nothing else would show it), and a Docker named volume `code-reviewer-work-<job id>` bound to it. The tools
-are `mkdir`, `mount` and `cat` of the base image (Ubuntu: `mount` is a required package), so the snapshot needs nothing added.
-Each step has 10 s; the five add 50 s and the Sysbox boot 40 s (`SYSBOX_PREPARE_SECONDS`) to the lifetime of an implementer VM
-(`IMPLEMENTER_LAUNCH_EXTRA_SECONDS`, 90 s with the volume steps `WORK_VOLUME_STEPS_SECONDS`), and
-`LAUNCH_STEPS_SECONDS` for Diff and Dynamic is unchanged. The mount and the volume belong to the VM, which is stopped after every failure and by the App's stop call; nothing is
+the launcher makes the volume in the job's VM as root, in eight steps (`work-volume-dir`, `-reserve-image`, `-reserve-fs`, `-reserve-mount`, `-mount`, `-options`, `-check`, `-create`): a directory below
+`/var/lib/code-reviewer-work` with a directory `reserve` in it; the **reserve disk**, a file of 8 GiB (an eighth of the 64 GB disk every VM size has; `fallocate`, so that its blocks are taken now and
+not when written) formatted as ext4 and mounted over a loop device on `reserve` (`nosuid,nodev`); a recursive bind of the directory onto itself with `rw,nosuid,nodev` (no `noexec`); a read of `/proc/self/mountinfo`
+that must show exactly those options on that mount and on the reserve (a platform that ignored them would run the agent on a mount that honours
+the setuid bit, and nothing else would show it); and a Docker named volume `code-reviewer-work-<job id>` bound to it with `rbind`, so that Control sees the reserve below `/work`. The agent's container mounts the Subpath `repo` of the volume
+and sees nothing of the reserve. The tools are `mkdir`, `fallocate`, `mkfs.ext4`, `mount` and `cat` of the base image, so the snapshot needs nothing added.
+Each step has 10 s; the eight add 80 s, the Sysbox boot 40 s (`SYSBOX_PREPARE_SECONDS`) and the three run-directory steps 9 s to the lifetime of an implementer VM
+(`IMPLEMENTER_LAUNCH_EXTRA_SECONDS`, 129 s with the volume steps `WORK_VOLUME_STEPS_SECONDS`), and
+`LAUNCH_STEPS_SECONDS` for Diff and Dynamic is unchanged (a test holds the sum under the launch deadline of the core). The mounts and the volume belong to the VM, which is stopped after every failure and by the App's stop call; nothing is
 removed separately and nothing outlives the job. A failed, hung or unverified step stops the VM (`work_volume_failed`, retryable). The VM is
 2 vCPU / 4 GB by default (`SANDBOX_KIND_DEFAULTS.implementer`); `DISPATCHER_WORKER_CONFIG.implementer` overrides the vCPUs and
-the container memory value by value, and a limit the VM cannot hold beside the OS is refused as `sandbox_config_invalid` at
+the container memory value by value, and a limit the VM cannot hold beside the OS, the door and the reader is refused as `sandbox_config_invalid` at
 every launch of the kind. At start a deployment that serves the kind only logs `worker_config_invalid` for such a value and
 starts, and Diff and Dynamic do not read the entry. For a deployment that serves the kind the same value fails the canary (its VM is sized by it): see below. The operator's Dynamic variables (`RUNNER_DYNAMIC_*`) are not
-given to an implementer container. The platform gives a VM a 64 GB disk, which is the room of the work volume.
+given to an implementer container. The platform gives a VM a 64 GB disk (measured at 1, 2 and 8 vCPU: the same XFS file system, 61 GB free on a fresh VM, no quotas), which is the room of the agent, of the work volume
+and of the reserve disk.
 
 "Runner" is retired as a concept: the former runner process conflated the Dispatcher
 (claim, cap) and the Worker host (heartbeat, supervise, deliver). Its identifiers (`RUNNER_*` variables, image and

@@ -18,16 +18,16 @@ from code_reviewer_runner.dynamic_review.budget import (
     Reservation,
     UnitCosts,
 )
-from code_reviewer_runner.dynamic_review.netguard import IsolationError
-from code_reviewer_runner.dynamic_review.static_isolation import ImplementerNetwork
 from code_reviewer_runner.dynamic_review.tool_part_audit import ToolPartAudit
-from code_reviewer_runner.implementer.egress_config import EgressSettings
+from code_reviewer_runner.implementer.agent_container import KILL_SECONDS, STOP_SECONDS
 from code_reviewer_runner.implementer.git_workspace import (
     DIRTY_TIMEOUT,
     REPORT_READ_TIMEOUT,
     RESCUE_STEP_TIMEOUT,
 )
 from code_reviewer_runner.implementer.job_run import SIGTERM_BACKSTOP_SECONDS
+from code_reviewer_runner.implementer.limits import agent_limits
+from code_reviewer_runner.implementer.reader import RESET_SECONDS as READER_RESET_SECONDS
 from code_reviewer_runner.implementer.session import (
     COST_LIMIT_DETAIL,
     DEADLINE_DETAIL,
@@ -39,7 +39,6 @@ from code_reviewer_runner.implementer.session import (
     STOP_PUSH_SECONDS,
     TOKEN_CAP_DETAIL,
     ImplementerSession,
-    agent_limits,
     classify,
     deadline_seconds,
 )
@@ -171,10 +170,10 @@ def test_a_single_result_cannot_pass_the_cumulative_bound_either() -> None:
 @pytest.mark.parametrize(
     ("limit", "elapsed", "left"),
     [
-        (3600, 0.0, 3420.0),  # the last three minutes are kept back
-        (3600, 100.0, 3320.0),  # and what the job spent before the turn
+        (3600, 0.0, 3330.0),  # the last four and a half minutes are kept back
+        (3600, 100.0, 3230.0),  # and what the job spent before the turn
         (60, 0.0, 40.0),  # a short limit keeps a third
-        (14_400, 0.0, 14_220.0),
+        (14_400, 0.0, 14_130.0),
         (120, 30.0, 50.0),
     ],
 )
@@ -182,7 +181,7 @@ def test_the_clock_of_the_turn_keeps_the_grace_back(
     limit: int, elapsed: float, left: float
 ) -> None:
     assert deadline_seconds(limit, elapsed) == pytest.approx(left)
-    assert GRACE_SECONDS == 180.0
+    assert GRACE_SECONDS == 270.0
 
 
 # -- the codes ----------------------------------------------------------------------------------
@@ -243,7 +242,7 @@ def test_what_ends_a_turn_has_a_stable_code_whether_or_not_the_model_was_used(
 @pytest.mark.parametrize(
     "error",
     [
-        IsolationError("the engine ports are not the ones the network rules allow"),
+        JobError(ErrorCode.SETUP_FAILED, "agent_container_unavailable: the daemon refused a step"),
         JobError(ErrorCode.SETUP_FAILED, "git status failed"),
     ],
 )
@@ -385,7 +384,7 @@ def session_that_ended(ledger: BudgetLedger, failed: ErrorCode | None) -> Implem
         job,
         workspace=None,  # type: ignore[arg-type]  # not read by _stopped_by
         command=["opencode"],
-        egress=EgressSettings(ImplementerNetwork.NONE, None),
+        place=lambda: None,  # type: ignore[arg-type,return-value]
         environment={},
     )
     # The turn's model as `_stopped_by` reads it: the ledger and what the proxy kept of the outage.
@@ -434,14 +433,30 @@ def test_the_session_names_the_outage_the_proxy_kept(failure: ErrorCode) -> None
     assert ended_with(session_that_ended(ledger, failure), ENGINE_GAVE_UP) is failure
 
 
-# The one final push has to fit the end of the turn, at a normal end and at a stop.
+# The one final push has to fit the end of the turn, at a normal end and at a stop, with room:
+# every step is counted at its ceiling and they never all take it, but a daemon that hangs makes
+# several of them take it at once.
 def test_the_end_of_a_turn_fits_the_grace_and_a_stop_fits_the_sigterm_backstop() -> None:
+    # The container is killed (the kill call, then the wait until the daemon says it is gone) before
+    # anything is read; its removal comes after the push and is in no sum.
+    assert ENGINE_STOP_SECONDS == KILL_SECONDS + STOP_SECONDS == 25.0
     reads = 2 * REPORT_READ_TIMEOUT
     rescue = 3 * RESCUE_STEP_TIMEOUT  # symbolic-ref, for-each-ref, switch; at a stop too
+    # The readers are made quiet after the kill and, when the system committed the leftover, again
+    # after the commit (its filters ran in a reader that can write).
+    quiet = READER_RESET_SECONDS
     normal = (
-        ENGINE_STOP_SECONDS + rescue + DIRTY_TIMEOUT + LEFTOVER_SECONDS + FINAL_PUSH_SECONDS + reads
+        ENGINE_STOP_SECONDS
+        + quiet
+        + rescue
+        + DIRTY_TIMEOUT
+        + LEFTOVER_SECONDS
+        + quiet
+        + FINAL_PUSH_SECONDS
+        + reads
     )
-    stop = ENGINE_STOP_SECONDS + rescue + STOP_PUSH_SECONDS + reads
+    stop = ENGINE_STOP_SECONDS + quiet + rescue + STOP_PUSH_SECONDS + reads
 
-    assert normal <= GRACE_SECONDS
-    assert stop <= SIGTERM_BACKSTOP_SECONDS
+    assert normal == 214.0 and stop == 79.0
+    assert normal <= 0.85 * GRACE_SECONDS
+    assert stop <= 0.75 * SIGTERM_BACKSTOP_SECONDS

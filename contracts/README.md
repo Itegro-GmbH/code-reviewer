@@ -172,14 +172,13 @@ one instruction, and one turn is one `jobs` row of the kind `implementer`. It ex
   commit), `commits` (at most 200), `filesChanged` (at most 500), `summary` (at most 8 192 characters, plain text) and
   `opencode {sessionId, version}` or null. Checks, open questions and an export of the work are additive later.
 - New stable error codes: `branch_exists`, `base_branch_not_found`, `clone_failed`, `setup_failed`, `agent_gave_up`,
-  `push_rejected`, `branch_violation`, `time_limit_reached`, `git_write_not_granted`, `implementer_engine_unavailable` and
-  `implementer_config_invalid` (`branch_exists` and `branch_violation` are no longer produced: git is free in the workspace and
+  `push_rejected`, `branch_violation`, `time_limit_reached`, `git_write_not_granted`, `implementer_engine_unavailable`, `implementer_config_invalid`, `sandbox_unproven` and `sandbox_size_unsupported` (the last two
+  end a turn before it starts, free, #745 step 4; `branch_exists` and `branch_violation` are no longer produced: git is free in the workspace and
   a branch the remote refuses is a rejected entry of `branches`; the words stay for old runs). `cost_limit_reached` (#666) already existed and is the cost limit of a turn too. The app
   has one sentence for each in `app/src/runs/error-copy.ts`.
-- The names of the environment variables the Worker container of an implementer job gets (`KnownImplementerEnvironmentName`,
-  `ImplementerNetworkMode`): `RUNNER_IMPLEMENTER_WORK_DIR` (always `/work`), `RUNNER_IMPLEMENTER_EGRESS_PORT` (the loopback port
-  of the registries proxy), `RUNNER_IMPLEMENTER_NETWORK` (`registries` or `none`) and `RUNNER_IMPLEMENTER_MODEL_DOOR` (`docker`: the container
-  starts the model door through the VM's Docker, #745). The Dispatcher sets them; the container
+- The names of the environment variables the Worker container of an implementer job gets (`KnownImplementerEnvironmentName`): `RUNNER_IMPLEMENTER_WORK_DIR` (always `/work`), `RUNNER_IMPLEMENTER_MODEL_DOOR` (`docker`: the container
+  starts the model door, the agent's container and the reader through the VM's Docker, #745), `RUNNER_IMPLEMENTER_SANDBOX_PROOF` (the
+  snapshot's Sysbox verdict) and `RUNNER_IMPLEMENTER_AGENT_MEMORY_MB` (the limit of the agent's container). The Dispatcher sets them; the container
   profile that carries them is `ImplementerContainerSpec` of `worker-container.v1.json` (#760), which since #745 also carries the VM's Docker socket (`DockerSocket`)
   and is the one spec that does.
 - Examples: `examples/implementer/RunnerJobInput.json`, `RunnerResult.json` and `SplitClaimResponse.json`.
@@ -240,8 +239,8 @@ echoed) and `POST /probe`'s answers are checked against `ProbeReport` in `dispat
   answer agree with the schemas, and runs every signing vector against its own receiver and the reference verifier.
 - **The Implementer's container profile** (#760). `ImplementerContainerSpec` (`examples/worker-container/ImplementerContainerSpec.json`,
   `IMPLEMENTER_CONTAINER_SPEC` in the Dispatcher) is `WorkerContainerSpec` with exactly four fields changed: `workVolume` (new:
-  `/work`, `rw,nosuid,nodev`, a Docker named volume created per job), `memory` (`3g`/`2560m`), `pids.limit` (2048) and
-  `allowedEnvironment` plus the three `RUNNER_IMPLEMENTER_*` names. The floor is the same for every profile, and a bind or
+  `/work`, `rw,nosuid,nodev`, a Docker named volume created per job), `memory` (`768m`/`512m`), `pids.limit` (2048) and
+  `allowedEnvironment` plus the four `RUNNER_IMPLEMENTER_*` names. The floor is the same for every profile, and a bind or
   an arbitrary volume still has no key. The Sandbox launcher chooses the profile by the job kind.
 - **The hardened container spec and its renderer** (#325). `examples/worker-container/WorkerContainerSpec.json`
   is the spec, the one definition of the container. The Dispatcher ships the same values as

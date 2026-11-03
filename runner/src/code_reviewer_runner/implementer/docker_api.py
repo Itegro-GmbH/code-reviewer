@@ -102,32 +102,37 @@ class AttachedStreams:
         data, self._pending = self._pending[:count], self._pending[count:]
         return data
 
-    def lines(self) -> Iterator[bytes]:
-        """The lines of the container's stdout, without their end, until the container's streams
-        end (it exited or the connection broke). Its stderr is kept (`stderr_tail`)."""
-        carry = b""
+    def chunks(self) -> Iterator[bytes]:
+        """The bytes of the container's (or exec's) stdout as they arrive, until its streams end
+        (it exited or the connection broke). Its stderr is kept (`stderr_tail`)."""
         while True:
             header = self._read(_FRAME_HEADER)
             if header is None:
-                break
+                return
             kind, size = header[0], int.from_bytes(header[4:8], "big")
             if size > _MAX_FRAME_BYTES:
-                break
+                return
             payload = self._read(size) if size else b""
             if payload is None:
-                break
+                return
             if kind == _STDERR:
                 self._stderr += payload
                 del self._stderr[:-4096]
                 continue
-            if kind != _STDOUT:
-                continue
+            if kind == _STDOUT and payload:
+                yield payload
+
+    def lines(self) -> Iterator[bytes]:
+        """The lines of the container's stdout, without their end, until the container's streams
+        end (it exited or the connection broke)."""
+        carry = b""
+        for payload in self.chunks():
             carry += payload
             while (end := carry.find(b"\n")) >= 0:
                 line, carry = carry[:end], carry[end + 1 :]
                 yield line
             if len(carry) > _MAX_FRAME_BYTES:
-                break
+                return
 
 
 class DockerApi:
@@ -202,8 +207,8 @@ class DockerApi:
     def create_container(self, document: dict[str, Any], name: str) -> str:
         return _identifier(self.request("POST", f"/containers/create?name={name}", document))
 
-    def start_container(self, container: str) -> None:
-        self.request("POST", f"/containers/{container}/start", ok=(204, 304))
+    def start_container(self, container: str, *, timeout: float | None = None) -> None:
+        self.request("POST", f"/containers/{container}/start", ok=(204, 304), timeout=timeout)
 
     def wait_container(self, container: str, *, timeout: float) -> int:
         """Wait for a container to end: its exit code, or `DockerError` when it does not in time."""
@@ -215,24 +220,34 @@ class DockerApi:
             raise DockerError(0, "the daemon's answer has no exit code")
         return code
 
-    def remove_container(self, container: str) -> None:
-        self.request("DELETE", f"/containers/{container}?force=1&v=1", ok=(200, 204, 404))
+    def remove_container(self, container: str, *, timeout: float | None = None) -> None:
+        self.request(
+            "DELETE", f"/containers/{container}?force=1&v=1", ok=(200, 204, 404), timeout=timeout
+        )
 
     # -- the standard streams -------------------------------------------------------------------
 
     def attach(self, container: str) -> AttachedStreams:
         """Attach to the standard streams of a container that was created (and may not have been
         started yet): the connection is upgraded to a raw stream of frames."""
+        return self._hijack(
+            f"/containers/{container}/attach?stream=1&stdin=1&stdout=1&stderr=1", None
+        )
+
+    def _hijack(self, target: str, body: object | None) -> AttachedStreams:
+        payload = b"" if body is None else json.dumps(body).encode()
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(self._timeout)
         try:
             sock.connect(self._path)
             sock.sendall(
                 (
-                    f"POST /containers/{container}/attach?stream=1&stdin=1&stdout=1&stderr=1 "
-                    "HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n"
-                    "Content-Length: 0\r\n\r\n"
+                    f"POST {target} HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\n"
+                    "Upgrade: tcp\r\n"
+                    + ("Content-Type: application/json\r\n" if payload else "")
+                    + f"Content-Length: {len(payload)}\r\n\r\n"
                 ).encode()
+                + payload
             )
             head = b""
             while b"\r\n\r\n" not in head:
@@ -248,12 +263,49 @@ class DockerApi:
             raise
         status_line, _, rest = head.partition(b"\r\n")
         status = int(status_line.split(b" ")[1]) if status_line.count(b" ") >= 1 else 0
-        _, _, body = rest.partition(b"\r\n\r\n")
+        _, _, remainder = rest.partition(b"\r\n\r\n")
         if status not in (101, 200):
             sock.close()
             raise DockerError(status, "the daemon refused to attach")
         sock.settimeout(None)
-        return AttachedStreams(sock, body)
+        return AttachedStreams(sock, remainder)
+
+    # -- the agent container (#745, step 4) -------------------------------------------------------
+
+    def kill_container(self, container: str, *, timeout: float | None = None) -> None:
+        """SIGKILL the container's init, and with it every process in it. A container that is not
+        running (409) or gone (404) is what was wanted."""
+        self.request(
+            "POST", f"/containers/{container}/kill?signal=KILL", ok=(204, 404, 409), timeout=timeout
+        )
+
+    def inspect_image(self, reference: str) -> dict[str, Any]:
+        answer = as_object(self.request("GET", f"/images/{reference}/json"))
+        if answer is None:
+            raise DockerError(0, "the daemon's answer is not an image")
+        return answer
+
+    def runtimes(self) -> set[str]:
+        """The names of the runtimes the daemon has (`sysbox-runc` among them when Sysbox is up)."""
+        info = as_object(self.request("GET", "/info"))
+        runtimes = None if info is None else as_object(info.get("Runtimes"))
+        return set() if runtimes is None else set(runtimes)
+
+    def create_exec(self, container: str, document: dict[str, Any]) -> str:
+        return _identifier(self.request("POST", f"/containers/{container}/exec", document))
+
+    def start_exec_detached(self, exec_id: str) -> None:
+        self.request("POST", f"/exec/{exec_id}/start", {"Detach": True, "Tty": False})
+
+    def attach_exec(self, exec_id: str) -> AttachedStreams:
+        """Start an exec and attach to its streams: its stdin and its (multiplexed) output."""
+        return self._hijack(f"/exec/{exec_id}/start", {"Detach": False, "Tty": False})
+
+    def inspect_exec(self, exec_id: str) -> dict[str, Any]:
+        answer = as_object(self.request("GET", f"/exec/{exec_id}/json"))
+        if answer is None:
+            raise DockerError(0, "the daemon's answer is not an exec")
+        return answer
 
 
 def _message_of(data: bytes) -> str:

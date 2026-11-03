@@ -157,20 +157,20 @@ describe("the Sandbox-Launcher in local mode", () => {
         environment: {
           HOME: "/home/runner",
           RUNNER_DIFF_JOB_USER: "10001:10001",
-          RUNNER_IMPLEMENTER_EGRESS_PORT: "10182",
+          RUNNER_IMPLEMENTER_AGENT_MEMORY_MB: "2048",
           RUNNER_IMPLEMENTER_MODEL_DOOR: "docker",
-          RUNNER_IMPLEMENTER_NETWORK: "registries",
+          RUNNER_IMPLEMENTER_SANDBOX_PROOF: "unproven",
           RUNNER_IMPLEMENTER_WORK_DIR: "/work",
           RUNNER_JOB_TIMEOUT_SECONDS: "1200",
         },
         command: [ENTRY_MODE_WORKER_ONCE],
-        overrides: { memory: { limit: "3g", reservation: "2560m" } },
+        overrides: { memory: { limit: "768m", reservation: "512m" } },
         additions: SANDBOX_LAUNCHER_ADDITIONS,
       }),
     );
     // The daemon's client was asked for the volume before the container ran.
     expect(await readFile(join(records, "commands.log"), "utf8")).toContain(
-      `volume create --driver local --opt type=none --opt device=/var/lib/code-reviewer-work/code-reviewer-work-${JOB_A} --opt o=bind code-reviewer-work-${JOB_A}`,
+      `volume create --driver local --opt type=none --opt device=/var/lib/code-reviewer-work/code-reviewer-work-${JOB_A} --opt o=rbind code-reviewer-work-${JOB_A}`,
     );
     // Local mode has no mounts of its own: the host steps succeed without a trace in the "VM" directory.
     expect(

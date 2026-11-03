@@ -248,6 +248,8 @@ export const RUNNER_ERROR_CODES = [
   "git_write_not_granted",
   "implementer_engine_unavailable",
   "implementer_config_invalid",
+  "sandbox_unproven",
+  "sandbox_size_unsupported",
 ] as const;
 export type RunnerErrorCode = (typeof RUNNER_ERROR_CODES)[number];
 
@@ -324,16 +326,12 @@ export type ReviewKind = (typeof RUNNER_REVIEW_KINDS)[number];
  */
 export const IMPLEMENTER_ENVIRONMENT_NAMES = [
   "RUNNER_IMPLEMENTER_WORK_DIR",
-  "RUNNER_IMPLEMENTER_EGRESS_PORT",
-  "RUNNER_IMPLEMENTER_NETWORK",
   "RUNNER_IMPLEMENTER_MODEL_DOOR",
+  "RUNNER_IMPLEMENTER_SANDBOX_PROOF",
+  "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB",
 ] as const;
 export type ImplementerEnvironmentName =
   (typeof IMPLEMENTER_ENVIRONMENT_NAMES)[number];
-
-/** #746: what the Worker of an implementer job can reach besides the model proxy and its repository (`ImplementerNetworkMode`). */
-export const IMPLEMENTER_NETWORK_MODES = ["registries", "none"] as const;
-export type ImplementerNetworkMode = (typeof IMPLEMENTER_NETWORK_MODES)[number];
 
 /** #746: the directory of the work volume (`RUNNER_IMPLEMENTER_WORK_DIR`). */
 export const IMPLEMENTER_WORK_DIR = "/work";

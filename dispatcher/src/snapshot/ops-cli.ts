@@ -198,6 +198,7 @@ async function runDecide(
           `snapshot-id=${decision.pair.snapshotId}`,
           `image-digest=${decision.pair.imageDigest}`,
           `commit=${decision.pair.commit}`,
+          `sysbox=${decision.pair.sysbox}`,
         ]),
     ...(decision.previousSnapshotId === undefined
       ? []
@@ -245,6 +246,7 @@ async function runPersist(
       env.PAIR_SNAPSHOT_ID,
       env.PAIR_IMAGE_DIGEST,
       env.PAIR_COMMIT,
+      env.PAIR_SYSBOX,
     );
     if (pair === undefined)
       throw new Usage("PAIR_SNAPSHOT_ID, PAIR_IMAGE_DIGEST and PAIR_COMMIT");

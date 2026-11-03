@@ -18,7 +18,6 @@ import {
 } from "../test-support/runner-contract.ts";
 import {
   IMPLEMENTER_ENVIRONMENT_NAMES,
-  IMPLEMENTER_NETWORK_MODES,
   RUNNER_ERROR_CODES,
   RUNNER_REVIEW_KINDS,
 } from "./contract.ts";
@@ -44,6 +43,8 @@ const NEW_ERROR_CODES = [
   "git_write_not_granted",
   "implementer_engine_unavailable",
   "implementer_config_invalid",
+  "sandbox_unproven",
+  "sandbox_size_unsupported",
 ] as const;
 
 type Document = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any -- a JSON document edited by key in a test
@@ -454,20 +455,13 @@ describe("the lists of the implementer kind", () => {
 
     expect([...IMPLEMENTER_ENVIRONMENT_NAMES]).toStrictEqual([
       "RUNNER_IMPLEMENTER_WORK_DIR",
-      "RUNNER_IMPLEMENTER_EGRESS_PORT",
-      "RUNNER_IMPLEMENTER_NETWORK",
       "RUNNER_IMPLEMENTER_MODEL_DOOR",
+      "RUNNER_IMPLEMENTER_SANDBOX_PROOF",
+      "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB",
     ]);
     expect([...IMPLEMENTER_ENVIRONMENT_NAMES].sort()).toStrictEqual(
       [...(defs.KnownImplementerEnvironmentName?.enum ?? [])].sort(),
     );
-    expect([...IMPLEMENTER_NETWORK_MODES].sort()).toStrictEqual(
-      [...(defs.ImplementerNetworkMode?.enum ?? [])].sort(),
-    );
-    expect([...IMPLEMENTER_NETWORK_MODES].sort()).toStrictEqual([
-      "none",
-      "registries",
-    ]);
   });
 });
 

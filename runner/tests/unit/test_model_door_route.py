@@ -16,25 +16,14 @@ import pytest
 from door_support import implementer_job_text, model_access
 
 from code_reviewer_runner.dynamic_review.budget import LimitError
-from code_reviewer_runner.dynamic_review.engine_user import EngineLaunch
 from code_reviewer_runner.dynamic_review.model_door_route import (
     MODEL_DOOR_ADDRESS,
-    MODEL_DOOR_MODE,
     MODEL_DOOR_VARIABLE,
 )
 from code_reviewer_runner.dynamic_review.netguard import (
-    EgressMode,
-    IsolationError,
-    NetworkConfinement,
     ruleset,
-    table_name,
 )
 from code_reviewer_runner.dynamic_review.self_check import SelfCheckFailed, SelfCheckReason
-from code_reviewer_runner.dynamic_review.static_isolation import (
-    ImplementerNetwork,
-    SlotPorts,
-    slot_ports,
-)
 from code_reviewer_runner.implementer.door.protocol import DoorFailure, DoorStatus
 from code_reviewer_runner.implementer.door_ledger import DoorLedger
 from code_reviewer_runner.implementer.door_model import build_door_ledger
@@ -60,111 +49,34 @@ DOOR = (MODEL_DOOR_ADDRESS, 10180)
 # -- the rules ------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("mode", list(EgressMode))
-# #745-T10
-def test_the_door_is_one_more_accepted_destination_on_any_interface(mode: EgressMode) -> None:
-    without = ruleset(UID, 10180, 10181, mode, egress_port=10182).splitlines()
-    with_door = ruleset(UID, 10180, 10181, mode, egress_port=10182, door=DOOR).splitlines()
+# #745 step 4: the engine user of Control reaches no door. The agent is in a container of its own,
+# and the
+# rules of this container name the loopback proxy and the engine only.
+def test_the_rules_of_the_engine_user_name_no_door_and_no_egress_proxy() -> None:
+    script = ruleset(UID, 10180, 10181)
 
-    family = "inet" if mode is EgressMode.FULL else "ip"
-    added = (
-        f"add rule {family} {table_name(UID)} output meta skuid {UID} "
-        f"ip daddr {MODEL_DOOR_ADDRESS} tcp dport 10180 accept"
-    )
-    assert [line for line in with_door if line not in without] == [added]
-    assert with_door[-2] == added and with_door[-1] == without[-1], "before the final refusal"
-    assert "oifname" not in added, "the door is on a network, not on loopback"
-
-
-# #745-T10
-def test_without_a_door_the_rules_are_what_they_always_were() -> None:
-    assert ruleset(UID, 10180, 10181, door=None) == ruleset(UID, 10180, 10181)
-
-
-@pytest.mark.parametrize(
-    "door",
-    [("10.213.77", 10180), ("10.213.77.256", 10180), ("door.local", 10180), ("1.2.3.4", 0)],
-)
-# #745-T10
-def test_a_door_that_is_not_an_address_and_a_port_is_refused(door: tuple[str, int]) -> None:
-    with pytest.raises(IsolationError):
-        ruleset(UID, 10180, 10181, door=door)
-
-
-# #745-T10
-def test_the_confinement_installs_the_door_only_when_given_one() -> None:
-    scripts: list[str] = []
-
-    NetworkConfinement(UID, run=scripts.append).apply(10180, 10181, 10182, door=DOOR)
-    NetworkConfinement(UID, run=scripts.append).apply(10180, 10181, 10182)
-
-    assert scripts == [
-        ruleset(UID, 10180, 10181, egress_port=10182, door=DOOR),
-        ruleset(UID, 10180, 10181, egress_port=10182),
+    assert MODEL_DOOR_ADDRESS not in script
+    assert "10182" not in script
+    accepted = [
+        line for line in script.splitlines() if line.startswith("add rule") and "accept" in line
     ]
-
-
-# #745-T10
-def test_the_slot_has_a_door_only_where_the_dispatcher_says_so() -> None:
-    assert slot_ports({}).door is None
-    assert slot_ports({MODEL_DOOR_VARIABLE: ""}).door is None
-    assert slot_ports({MODEL_DOOR_VARIABLE: MODEL_DOOR_MODE}).door == DOOR
-    assert slot_ports(
-        {MODEL_DOOR_VARIABLE: MODEL_DOOR_MODE, "RUNNER_DYNAMIC_PROXY_PORT": "20001"}
-    ).door == (
-        MODEL_DOOR_ADDRESS,
-        20001,
-    )
-    with pytest.raises(IsolationError):
-        slot_ports({MODEL_DOOR_VARIABLE: "yes"})
-
-
-# #745-T10
-def test_the_probe_of_a_door_container_asks_for_the_door_not_for_loopback(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    asked: list[tuple[Any, ...]] = []
-
-    def verify(*arguments: Any, **options: Any) -> None:
-        asked.append((arguments, options))
-
-    from code_reviewer_runner.dynamic_review import engine_user
-
-    monkeypatch.setattr(engine_user, "verify_confinement", verify)
-    monkeypatch.setattr(engine_user, "require_startup_capabilities_gone", lambda: None)
-    for door, expected in ((DOOR, {"allowed_host": MODEL_DOOR_ADDRESS}), (None, {})):
-        asked.clear()
-        launch = EngineLaunch(
-            uid=UID,
-            gid=UID,
-            home=str(tmp_path),
-            tmpdir=str(tmp_path),
-            config_dir=tmp_path,
-            egress_port=10182,
-            door=door,
-        )
-        monkeypatch.setattr(launch, "sweep", lambda: True)
-
-        launch.confine(10180, 10181)
-
-        assert asked == [((UID, UID, 10180, 10182), expected)]
+    assert len(accepted) == 3, "the engine's answers, the proxy and the engine's own server"
 
 
 # -- the self-check -------------------------------------------------------------------------------
 
 
-def _check(ports: SlotPorts, *, answers: bool, engine_reaches_docker: bool = False) -> None:
+def _check(*, docker: bool = True, answers: bool, engine_reaches_docker: bool = False) -> None:
     check_implementer_runner(
         work_dir=Path("/work"),
         user=(UID, UID),
-        ports=ports,
-        network=ImplementerNetwork.REGISTRIES,
+        docker=docker,
         seams=ImplementerSeams(
             which=lambda name, path: f"/usr/bin/{name}",
-            prepare_work_dir=lambda directory, uid, gid: None,
-            runs_scripts_as=lambda directory, uid, gid: True,
             is_directory=lambda path: True,
             docker_answers=lambda: answers,
+            sysbox_registered=lambda: True,
+            agent_image_present=lambda: True,
             engine_reaches_docker=lambda uid, gid: engine_reaches_docker,
         ),
     )
@@ -172,18 +84,21 @@ def _check(ports: SlotPorts, *, answers: bool, engine_reaches_docker: bool = Fal
 
 # #745-T11
 def test_a_container_that_starts_the_door_needs_the_docker_of_the_vm() -> None:
-    _check(SlotPorts(10180, 10181, 10182, DOOR), answers=True)
+    _check(answers=True)
 
     with pytest.raises(SelfCheckFailed) as failure:
-        _check(SlotPorts(10180, 10181, 10182, DOOR), answers=False)
+        _check(answers=False)
 
     assert failure.value.reason is SelfCheckReason.IMPLEMENTER_DOCKER_UNAVAILABLE
     assert failure.value.reason.value == "implementer_docker_unavailable"
 
 
 # #745-T11
-def test_a_container_without_a_door_never_asks_the_daemon() -> None:
-    _check(SlotPorts(10180, 10181, 10182), answers=False, engine_reaches_docker=True)
+def test_a_container_without_the_docker_of_the_vm_is_not_an_implementer_container() -> None:
+    with pytest.raises(SelfCheckFailed) as failure:
+        _check(docker=False, answers=True)
+
+    assert failure.value.reason is SelfCheckReason.IMPLEMENTER_DOCKER_UNAVAILABLE
 
 
 # #745-T11
@@ -191,15 +106,10 @@ def test_a_container_whose_engine_user_can_open_the_docker_socket_does_not_adver
     # Control is root on the VM through that socket: if the agent's user can open it, nothing else
     # of the door holds. The refusal is checked at every start, not only by the VM check.
     with pytest.raises(SelfCheckFailed) as failure:
-        _check(SlotPorts(10180, 10181, 10182, DOOR), answers=True, engine_reaches_docker=True)
+        _check(answers=True, engine_reaches_docker=True)
 
     assert failure.value.reason is SelfCheckReason.IMPLEMENTER_DOCKER_SOCKET_OPEN
     assert failure.value.reason.value == "implementer_docker_socket_open"
-
-
-# #745-T11
-def test_a_container_without_a_door_does_not_look_at_the_socket_of_the_engine_user() -> None:
-    _check(SlotPorts(10180, 10181, 10182), answers=True, engine_reaches_docker=True)
 
 
 @pytest.fixture
@@ -237,6 +147,43 @@ def test_the_probe_as_the_engine_user_sees_a_socket_that_refuses_it(listening_so
     listening_socket.chmod(0o000)
 
     assert engine_user_can_open(os.getuid(), os.getgid(), listening_socket) is False
+
+
+# #823-F3
+def test_a_socket_nobody_listens_on_is_not_a_refusal(tmp_path: Path) -> None:
+    import os
+
+    # A stale file answers the connect with "connection refused": that says nothing of the user's
+    # rights, and only a permission or a missing path is a refusal.
+    stale = tmp_path / "stale.sock"
+    stale.write_text("not a socket")
+
+    assert engine_user_can_open(os.getuid(), os.getgid(), stale) is True
+
+
+# #823-F3
+def test_a_probe_that_times_out_is_not_a_refusal(tmp_path: Path) -> None:
+    import contextlib
+    import os
+    import socket
+
+    # A listener whose backlog is full leaves the next connect waiting: a timeout, or any other
+    # error that is not "permission denied", must not count as a refusal.
+    path = tmp_path / "busy.sock"
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(path))
+    server.listen(0)
+    fillers = [socket.socket(socket.AF_UNIX) for _ in range(3)]
+    try:
+        for filler in fillers:
+            filler.setblocking(False)
+            with contextlib.suppress(OSError):
+                filler.connect(str(path))
+        assert engine_user_can_open(os.getuid(), os.getgid(), path, probe_seconds=0.3) is True
+    finally:
+        for filler in fillers:
+            filler.close()
+        server.close()
 
 
 # #745-T11

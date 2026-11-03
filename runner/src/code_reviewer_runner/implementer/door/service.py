@@ -258,6 +258,9 @@ class _Reporter:
         self._stdout = stdout
         self._lock = threading.Lock()
         self._open = False
+        # Set by the final status: a call that is still being answered cannot speak after it (its
+        # serial number would be higher, and Control would take it for the last word).
+        self._closed = False
         self._last: tuple[object, ...] | None = None
 
     def ready(self) -> None:
@@ -267,13 +270,20 @@ class _Reporter:
 
     def report(self, *, final: bool = False) -> None:
         with self._lock:
-            if not self._open:
+            if not self._open or self._closed:
                 return
             status = self._door.status(final=final)
             marker = _significant(status)
-            if final or marker != self._last:
-                self._last = marker
+            if not final and marker == self._last:
+                return
+            self._last = marker
+            self._closed = final
+            try:
                 _emit(self._stdout, status_line(status))
+            except (OSError, ValueError):
+                # Control is gone (a broken pipe, a closed stream): the door ends with its stdin,
+                # and a failed line must not change what the caller of the ledger sees.
+                _log.warning("the model door could not write its status")
 
 
 def _read_stop(stdin: TextIO, stop: threading.Event) -> None:

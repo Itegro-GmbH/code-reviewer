@@ -7,6 +7,11 @@ look and what a pass is: on GitHub, in Runs, in the cost, in the Vercel Sandbox 
 the result goes into that issue as a copy of the table with the numbers and the verdict of each row, and nothing in it names a
 secret. What the Implementer does is in [`implementer.md`](implementer.md).
 
+**Out of date in two places (#745, step 4).** The agent now runs in a container of its own under Sysbox with no network but the model
+door, so the checks that expect the engine user's rules and the registries proxy (Task B lines 1, 4 to 9, row S11's `uid=10101` and row S15) describe the
+container of before and are rewritten with the live test of step 8; what step 4 measured on real VMs instead is in the section "The agent's container" of
+[`implementer.md`](implementer.md).
+
 ## Before you start
 
 - The release with the Implementer is live and the steps of the rollout are done: Dispatcher kind, capability set, the

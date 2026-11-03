@@ -123,6 +123,7 @@ describe("the production deployment workflow", () => {
       ["snapshot-id", "snapshot-id"],
       ["image-digest", "image-digest"],
       ["snapshot-commit", "commit"],
+      ["sysbox-proof", "sysbox"],
     ] as const)
       expect(dispatcher.with?.[name]).toBe(
         `\${{ needs.snapshot-build.outputs.${output} || needs.snapshot-decide.outputs.${output} }}`,
@@ -713,6 +714,7 @@ describe("the shell of the pipeline", () => {
       SNAPSHOT_ID: "",
       IMAGE_DIGEST: "",
       SNAPSHOT_COMMIT: "",
+      SYSBOX_PROOF: "",
     };
     const vercel = (document: string) => ({
       vercel: `printf '%s\\n' '${document}'`,
@@ -747,6 +749,7 @@ describe("the shell of the pipeline", () => {
           SNAPSHOT_ID: "snap_example01",
           IMAGE_DIGEST: DIGEST,
           SNAPSHOT_COMMIT: COMMIT,
+          SYSBOX_PROOF: "proven",
         },
         stubs: vercel(GOOD),
       });
@@ -754,16 +757,38 @@ describe("the shell of the pipeline", () => {
       expect(run.status).toBe(0);
       const call = run.calls.find((c) => c.startsWith("vercel deploy")) ?? "";
       expect(call).toContain("--env SANDBOX_SNAPSHOT_ID=snap_example01");
+      // #745-T02: the verdict is set with the snapshot id, as a variable and as meta, in the same deployment.
+      expect(call).toContain("--env SANDBOX_SYSBOX_PROOF=proven");
+      expect(call).toContain("--meta sandboxSysboxProof=proven");
       expect(call).toContain(`--env SANDBOX_IMAGE_DIGEST=${DIGEST}`);
       expect(call).toContain("--meta sandboxSnapshotId=snap_example01");
       expect(call).toContain(`--meta sandboxImageDigest=${DIGEST}`);
       expect(call).toContain(`--meta sandboxSnapshotCommit=${COMMIT}`);
-      expect(call.match(/--env /g)).toHaveLength(2);
+      expect(call.match(/--env /g)).toHaveLength(3);
     });
 
     // #403-T13
     it.each([
       ["only an id", { SNAPSHOT_ID: "snap_example01" }],
+      // #745-T02: a verdict is part of the pair; neither a pair without one nor one without the pair is deployed
+      [
+        "a pair without a verdict",
+        {
+          SNAPSHOT_ID: "snap_example01",
+          IMAGE_DIGEST: DIGEST,
+          SNAPSHOT_COMMIT: COMMIT,
+        },
+      ],
+      [
+        "a verdict that is neither proven nor unproven",
+        {
+          SNAPSHOT_ID: "snap_example01",
+          IMAGE_DIGEST: DIGEST,
+          SNAPSHOT_COMMIT: COMMIT,
+          SYSBOX_PROOF: "unrecorded",
+        },
+      ],
+      ["a verdict without the pair", { SYSBOX_PROOF: "proven" }],
       [
         "a digest that is not an image id",
         {
@@ -1038,6 +1063,7 @@ describe("the shell of the stage that carries a pair", () => {
       SNAPSHOT_ID: "",
       IMAGE_DIGEST: "",
       SNAPSHOT_COMMIT: "",
+      SYSBOX_PROOF: "",
     };
     const vercel = (document: string, status = 0) => ({
       vercel: `printf '%s\\n' '${document}'\nexit ${String(status)}`,
@@ -1094,6 +1120,7 @@ describe("the shell of the stage that carries a pair", () => {
           SNAPSHOT_ID: "snap_example01",
           IMAGE_DIGEST: DIGEST,
           SNAPSHOT_COMMIT: COMMIT,
+          SYSBOX_PROOF: "unproven",
         },
         stubs: vercel(doc()),
       });

@@ -110,20 +110,19 @@ _CLONE_URL = re.compile(r"https://[^\s@]{1,2040}")
 # `KnownImplementerEnvironmentName` of the contract; a test compares them). The Dispatcher sets
 # them.
 IMPLEMENTER_WORK_DIR_VARIABLE = "RUNNER_IMPLEMENTER_WORK_DIR"
-IMPLEMENTER_EGRESS_PORT_VARIABLE = "RUNNER_IMPLEMENTER_EGRESS_PORT"
-IMPLEMENTER_NETWORK_VARIABLE = "RUNNER_IMPLEMENTER_NETWORK"
-# #745, step 3: `docker` when the container carries the VM's Docker socket and starts the model
-# door.
+# #745, step 3: `docker` when the container carries the VM's Docker socket, which it starts the
+# model door, the agent's container (step 4) and the reader with.
 IMPLEMENTER_MODEL_DOOR_VARIABLE = "RUNNER_IMPLEMENTER_MODEL_DOOR"
+# #745, step 4: the golden snapshot's Sysbox verdict and the memory of the agent's container.
+IMPLEMENTER_SANDBOX_PROOF_VARIABLE = "RUNNER_IMPLEMENTER_SANDBOX_PROOF"
+IMPLEMENTER_AGENT_MEMORY_VARIABLE = "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB"
 IMPLEMENTER_ENVIRONMENT_NAMES: tuple[str, ...] = (
     IMPLEMENTER_WORK_DIR_VARIABLE,
-    IMPLEMENTER_EGRESS_PORT_VARIABLE,
-    IMPLEMENTER_NETWORK_VARIABLE,
     IMPLEMENTER_MODEL_DOOR_VARIABLE,
+    IMPLEMENTER_SANDBOX_PROOF_VARIABLE,
+    IMPLEMENTER_AGENT_MEMORY_VARIABLE,
 )
 IMPLEMENTER_WORK_DIR = "/work"
-# What the Worker of an implementer job can reach besides the model proxy and its repository.
-IMPLEMENTER_NETWORK_MODES: tuple[str, ...] = ("registries", "none")
 _GIT_FIELDS = {"provider", "baseUrl", "token", "botLogin"}
 _LLM_FIELDS = {
     "provider",

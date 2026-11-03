@@ -9,6 +9,11 @@ export const GoldenRecordSchema = z.strictObject({
   snapshotId: z.string().min(3).max(128),
   /** The id of the Worker image inside the snapshot: the Launcher compares it with `docker image inspect`. */
   imageDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  /** The id of the Implementer's agent image inside the snapshot (plan implementer-sandbox, step 4); older records have none. */
+  agentImageDigest: z
+    .string()
+    .regex(/^sha256:[0-9a-f]{64}$/)
+    .optional(),
   builtAt: z.iso.datetime(),
   region: z.literal("fra1"),
   target: z.string(),

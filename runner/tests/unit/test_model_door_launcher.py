@@ -36,7 +36,6 @@ from code_reviewer_runner.dynamic_review.job_model_entry import (
     native_provider_config,
 )
 from code_reviewer_runner.dynamic_review.model_door_route import (
-    MODEL_CONTROL_ADDRESS,
     MODEL_DOOR_ADDRESS,
     MODEL_DOOR_MODE,
     MODEL_DOOR_VARIABLE,
@@ -60,12 +59,9 @@ from code_reviewer_runner.implementer.door_launcher import (
     start_door,
 )
 from code_reviewer_runner.implementer.door_state import DoorState
-from code_reviewer_runner.implementer.egress_config import EgressSettings
 from code_reviewer_runner.implementer.session import ImplementerSession, SessionSeams, classify
 from code_reviewer_runner.job import JobError, parse_implementer_input
 from code_reviewer_runner.result import ErrorCode
-
-from code_reviewer_runner.dynamic_review.static_isolation import ImplementerNetwork  # isort: skip
 
 
 class Rig:
@@ -194,7 +190,7 @@ def test_the_door_container_is_hardened_by_what_it_is_made_of(rig: Rig) -> None:
 
 
 # #745-T05
-def test_the_model_network_has_no_exit_and_a_fixed_range_and_the_agent_side_joins_it(
+def test_the_model_network_has_no_exit_and_a_fixed_range_and_control_is_not_on_it(
     rig: Rig,
 ) -> None:
     door = rig.start()
@@ -207,7 +203,11 @@ def test_the_model_network_has_no_exit_and_a_fixed_range_and_the_agent_side_join
     assert document["IPAM"]["Config"][0]["Subnet"] == MODEL_NETWORK_SUBNET
     assert document["Name"] == MODEL_NETWORK_NAME
     members = network["members"]
-    assert members[OWN_ID]["IPAMConfig"]["IPv4Address"] == MODEL_CONTROL_ADDRESS
+    # #745 step 4: Control talks to the door over its standard streams and to the agent through the
+    # daemon.
+    # It has no address on this network, so nothing on it has an address of Control's to connect to.
+    assert OWN_ID not in members
+    assert set(members) == {rig.engine.container(DOOR_CONTAINER_NAME).identifier}
     door_id = rig.engine.container(DOOR_CONTAINER_NAME).identifier
     assert members[door_id]["IPAMConfig"]["IPv4Address"] == MODEL_DOOR_ADDRESS
     door.stop()
@@ -528,7 +528,6 @@ def _running_over(lines: Any) -> RunningDoor:
         DoorState(),
         container="door",
         network=None,
-        own="",
         port=10180,
         seams=DoorSeams(),
     )
@@ -567,7 +566,7 @@ def door_session(rig: Rig, *, max_cost: float | None = 2.5) -> ImplementerSessio
         job,
         workspace=cast("Any", None),  # not read by the model's start and end
         command=["opencode"],
-        egress=EgressSettings(ImplementerNetwork.NONE, None),
+        place=lambda: cast("Any", None),
         environment={MODEL_DOOR_VARIABLE: MODEL_DOOR_MODE},
         seams=SessionSeams(door=rig.seams),
     )
@@ -699,30 +698,6 @@ def test_a_door_that_will_not_start_is_the_free_setup_failure_of_the_session(rig
     assert session._error is not None  # pyright: ignore[reportPrivateUsage]
     assert session._error[0] is ErrorCode.SETUP_FAILED  # pyright: ignore[reportPrivateUsage]
     assert "model_door_unavailable" in session._error[1]  # pyright: ignore[reportPrivateUsage]
-
-
-# #745-T09
-def test_without_the_variable_the_proxy_stays_in_the_worker_as_before(rig: Rig) -> None:
-    job = parse_implementer_input(implementer_job_text())
-    session = ImplementerSession(
-        job,
-        workspace=cast("Any", None),
-        command=["opencode"],
-        egress=EgressSettings(ImplementerNetwork.NONE, None),
-        environment={},
-        seams=SessionSeams(upstream_for=lambda _url: cast("Any", object()), door=rig.seams),
-    )
-
-    model = session._start_model()  # pyright: ignore[reportPrivateUsage]
-
-    assert model.door is None and model.server is not None
-    assert url_of(model).startswith("http://127.0.0.1:")
-    assert rig.engine.calls == [], "the daemon was not asked for anything"
-    model.stop()
-
-
-def url_of(model: Any) -> str:
-    return cast("str", model.url)
 
 
 # -- the client of the daemon ---------------------------------------------------------------------

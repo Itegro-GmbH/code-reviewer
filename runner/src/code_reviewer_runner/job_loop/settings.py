@@ -21,13 +21,12 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from code_reviewer_runner.capabilities import ENGINE_DIFF
-from code_reviewer_runner.dynamic_review.netguard import EgressMode, IsolationError
-from code_reviewer_runner.dynamic_review.static_isolation import (
-    ImplementerNetwork,
-    SlotPorts,
-    implementer_network,
-    slot_ports,
+from code_reviewer_runner.dynamic_review.model_door_route import (
+    MODEL_DOOR_MODE,
+    MODEL_DOOR_VARIABLE,
 )
+from code_reviewer_runner.dynamic_review.netguard import EgressMode, IsolationError
+from code_reviewer_runner.dynamic_review.static_isolation import SlotPorts, slot_ports
 from code_reviewer_runner.dynamic_review.supervisor import (
     DEFAULT_ENGINE_ID,
     ENGINE_GID_VARIABLE,
@@ -76,7 +75,10 @@ class WorkerSettings:
     # The work volume of an Implementer container (`RUNNER_IMPLEMENTER_WORK_DIR`, #765); None in
     # every other container, which never advertises `implementer`.
     implementer_work_dir: Path | None = None
-    implementer_network: ImplementerNetwork = ImplementerNetwork.NONE
+    # The container carries the VM's Docker socket (`RUNNER_IMPLEMENTER_MODEL_DOOR=docker`, set by
+    # the Dispatcher for the Implementer's profile): Control starts the model door, the agent's
+    # container and the reader through it (#745).
+    implementer_docker: bool = False
 
 
 def _number(
@@ -159,11 +161,11 @@ def _implementer_work_dir(environment: Mapping[str, str]) -> Path | None:
     return Path(path)
 
 
-def _implementer_network(environment: Mapping[str, str]) -> ImplementerNetwork:
-    try:
-        return implementer_network(environment)
-    except IsolationError as error:
-        raise SettingsError(error.detail) from None
+def _implementer_docker(environment: Mapping[str, str]) -> bool:
+    raw = environment.get(MODEL_DOOR_VARIABLE, "").strip()
+    if raw and raw != MODEL_DOOR_MODE:
+        raise SettingsError(f"{MODEL_DOOR_VARIABLE} must be {MODEL_DOOR_MODE}")
+    return raw == MODEL_DOOR_MODE
 
 
 def _identifier(environment: Mapping[str, str], name: str) -> int:
@@ -185,7 +187,7 @@ def worker_settings_from_environment(environment: Mapping[str, str]) -> WorkerSe
         dynamic_engine_user=_dynamic_engine_user(environment, diff_job_user),
         dynamic_ports=_dynamic_ports(environment, diff_job_user),
         implementer_work_dir=_implementer_work_dir(environment),
-        implementer_network=_implementer_network(environment),
+        implementer_docker=_implementer_docker(environment),
         job_timeout=_number(
             environment,
             "RUNNER_JOB_TIMEOUT_SECONDS",

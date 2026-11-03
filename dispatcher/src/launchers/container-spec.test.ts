@@ -105,9 +105,9 @@ describe("the implementer profile the launcher ships", () => {
     expect(IMPLEMENTER_CONTAINER_SPEC.allowedEnvironment).toStrictEqual([
       ...WORKER_CONTAINER_SPEC.allowedEnvironment,
       "RUNNER_IMPLEMENTER_WORK_DIR",
-      "RUNNER_IMPLEMENTER_EGRESS_PORT",
-      "RUNNER_IMPLEMENTER_NETWORK",
       "RUNNER_IMPLEMENTER_MODEL_DOOR",
+      "RUNNER_IMPLEMENTER_SANDBOX_PROOF",
+      "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB",
     ]);
   });
 

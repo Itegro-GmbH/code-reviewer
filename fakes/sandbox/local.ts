@@ -71,10 +71,16 @@ type LocalVmState = {
 const PREPARE = "/usr/local/sbin/vm-prepare.sh";
 // Like the cgroup fix: local mode has no kernel of its own to prepare for Sysbox.
 const SYSBOX_PREPARE = "/usr/local/sbin/sysbox-prepare.sh";
-// The steps of the Implementer's work volume that change the VM itself (#760): a directory and a mount. Local mode has
-// no VM of its own (like the cgroup fix and the daemon start, they succeed without doing anything); the `docker volume
-// create` that follows them is a docker command and goes to the daemon, or the stand-in, like any other.
-const HOST_STEPS: ReadonlySet<string> = new Set(["mkdir", "mount"]);
+// The steps of the Implementer's launch that change the VM itself (#760, #745): a directory, a mount, the reserve disk's image
+// and its file system. Local mode has no VM of its own (like the cgroup fix and the daemon start, they succeed without doing
+// anything); the `docker volume create` that follows them is a docker command and goes to the daemon, or the stand-in, like
+// any other.
+const HOST_STEPS: ReadonlySet<string> = new Set([
+  "mkdir",
+  "mount",
+  "fallocate",
+  "mkfs.ext4",
+]);
 const MOUNTINFO = "/proc/self/mountinfo";
 
 function abortError(): Error {
@@ -243,7 +249,12 @@ export class LocalSandboxService {
           (resolve, reject) => {
             if (state.stopped) return reject(new Error("The VM is stopped."));
             if (signal?.aborted) return reject(abortError());
-            if (request.cmd === PREPARE || request.cmd === SYSBOX_PREPARE)
+            // The Implementer's VM starts the daemon through `env TMPDIR=... vm-prepare.sh` (#745).
+            if (
+              request.cmd === PREPARE ||
+              request.cmd === SYSBOX_PREPARE ||
+              (request.cmd === "env" && request.args.includes(PREPARE))
+            )
               return resolve({ exitCode: 0, stdout: "", stderr: "" });
             if (HOST_STEPS.has(request.cmd)) {
               state.hostSteps.push({ cmd: request.cmd, args: request.args });

@@ -4,49 +4,62 @@
 
 What the system does, and what the agent can and cannot:
 
-* The runner (root) clones the base branch, `--depth 1`, into a bare **mirror** only it can enter
-  (`/work/mirror.git`). The provider token is in the environment of that one git process and nowhere
-  else: not in argv, a config file, a URL, the mirror or anything the agent's user can read.
-* The agent works in `/work/repo`, a local clone of the mirror owned by the agent's user. It has no
-  remote and no credential, and it may do anything with git there: commit, amend, rebase, reset,
-  create and switch branches, tag. Nothing is installed in its repository and nothing watches it.
-* **The one push.** When the turn ends, the runner lists the local branches of the agent's
-  repository, fetches each into a scratch ref of the mirror (`refs/runner/in/<n>`) and pushes it
-  from the mirror to `refs/heads/<name>` with the token, **without force**, one refspec and one
-  command per branch (`push_all`). No check of who committed, what descends from what, or which
-  branch (`push_policy.select_branches` is the one place a rule would go). A branch the provider
-  refuses is reported as rejected with a reason; the others are not held back. Nothing is ever
-  deleted on the provider and no tag or note is pushed. There is no push during the turn: the agent
-  may rewrite history, so a VM that dies mid-turn loses the work.
-* **How the runner (root) stays safe from the agent's repository.** Root never runs git with the
-  agent's repository as working directory or git directory, so the hooks, `core.fsmonitor`,
-  filters, aliases and `safe.directory` that repository holds are never read by a root process. The
-  list of branches is made by `git for-each-ref` run as the agent's user in its repository, read
-  as a stream and capped (`LIST_MAX_BYTES`), and the mirror reads the branches through `git
-  upload-pack`, named on the command line (`--upload-pack`) and run by `setpriv` as the agent's user
-  with `no_new_privs`: the config of the agent's repository is read by those processes with the
-  agent's own rights and by nothing else. What comes back is an object stream that the mirror's git
-  checks (`fsckObjects`) and stores; the mirror is bare (nothing is checked out, no filter or hook
-  runs) and its config is the runner's. The names of the branches are the only thing taken from the
-  listing, and each is validated (`push_policy`) before it is put in a refspec; the tip of a branch
-  is read from the mirror, never from what the listing printed. `git status`, the rescue of a
-  detached HEAD and the leftover commit run as the agent's user. Those commands and the upload-pack
-  of a fetch can leave a process of that user behind (the repository's config can start one), so
-  the runner ends every process of that user once more right before each `git push` (`sweep`); a
-  sweep that fails is counted and noted, and the push goes on, because that user cannot read the
-  environment of a root process.
+* The runner (Control, root) clones the base branch, `--depth 1`, into a bare **mirror** only it can
+  enter (`/work/reserve/mirror.git`, on the **reserve disk**: a pre-allocated file system of its
+  own below the work volume, which the agent's container does not mount and the agent cannot
+  fill, so the final push has room however full the VM's disk is). The provider token is in the
+  environment of that one git process and nowhere else: not in argv, a config file, a URL, the
+  mirror or anything the agent can reach.
+* The agent works in `/work/repo` of **its own container** (`agent_container.py`): the Subpath
+  `repo` of the work volume, a local clone of the mirror with no remote and no credential. It may do
+  anything with git there: commit, amend, rebase, reset, create and switch branches, tag. Nothing is
+  installed in its repository and nothing watches it. It sees nothing of the mirror.
+* **The one push.** When the turn ends, Control lists the local branches of the agent's repository,
+  fetches each into a scratch ref of the mirror (`refs/runner/in/<n>`) and pushes it from the mirror
+  to `refs/heads/<name>` with the token, **without force**, one refspec and one command per branch
+  (`push_all`). No check of who committed, what descends from what, or which branch
+  (`push_policy.select_branches` is the one place a rule would go). A branch the provider refuses is
+  reported as rejected with a reason; the others are not held back. Nothing is ever deleted on the
+  provider and no tag or note is pushed. There is no push during the turn: the agent may rewrite
+  history, so a VM that dies mid-turn loses the work.
+* **How Control stays safe from the agent's repository.** Control never runs git with that
+  repository as working directory or git directory, and never opens a path in it: everything that
+  looks inside runs in the **reader** (`reader.py`), a container under the Sysbox runtime with the
+  repository and no network, no token and no other mount, and whatever the repository's config
+  makes git run, it runs there, where it cannot reach the VM. The repository is read-only for
+  every look; only the steps that change it (the set-up before the agent exists, the rescue of a
+  detached HEAD and the leftover commit after the agent's container is gone) run in the second
+  reader that has it read-write. The list of branches is made by `git for-each-ref` in the reader,
+  read as a stream and
+  capped (`LIST_MAX_BYTES`); the mirror reads the branches through `git upload-pack` in the reader,
+  piped to Control's `git fetch` (`exec_pipe.py`). What comes back is an object stream that the
+  mirror's git checks (`fsckObjects`) and stores; the mirror is bare (nothing is checked out, no
+  filter or hook runs) and its config is the runner's. The names of the branches are the only thing
+  taken from the listing, and each is validated (`push_policy`) before it is put in a refspec; the
+  tip of a branch is read from the mirror, never from what the listing printed. **Room first:**
+  before any branch is taken over the mirror's file system is asked for its free bytes and inodes
+  (`MIN_FREE_BYTES`, `MIN_FREE_INODES`); too little and no fetch is started, every branch is
+  reported rejected as `out_of_space`, and a fetch that fails with the disk gone says the same
+  instead of `unreadable`. **When each runs:**
+  the look at the status of the tree (`dirty`) runs **while the agent's container is still alive**,
+  because its answer decides whether the agent gets one more message; it is a read in the read-only
+  reader, and an agent that changes the tree under it only changes that answer. The rescue of a
+  detached HEAD and the leftover commit run in the reader that writes, **after** the agent's
+  container is killed and confirmed gone (nothing is committed or rescued otherwise), and the
+  listing and the fetch of the final push follow. The one thing Control does in the repository's
+  directory is making it (`git clone` of its own mirror, before the agent exists).
 """
 
 import os
 import re
-import shlex
 import shutil
 import stat
 import time
 import uuid
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol
 from urllib.parse import urlsplit
 
 from ..job import JobError
@@ -57,7 +70,6 @@ from .git_process import (
     GitProcess,
     Outcome,
     fail,
-    spawn_options,
     token_environment,
 )
 from .history import (
@@ -73,18 +85,6 @@ from .history import (
 from .push_policy import select_branches
 
 LEFTOVER_MESSAGE = "Implementer: uncommitted changes of the turn"
-# The files of a repository that the pinned engine loads from its working directory whatever the
-# flags say (#764): its v2 configuration service reads `.opencode/` (plugins, tools, commands,
-# agents, `opencode.json`) and `opencode.json(c)` at the root of the project unconditionally, and
-# `OPENCODE_DISABLE_PROJECT_CONFIG` only guards the older service. Nothing executable or
-# configurable may come from the repository (owner rule), so the agent's working tree is a sparse
-# checkout without them: they stay in every commit and are never on disk.
-ENGINE_INPUTS = (".opencode", "opencode.json", "opencode.jsonc")
-# Pathspecs that leave exactly those names out of a command of the leftover handling: git refuses to
-# add a path outside the sparse definition (exit 1), and a change of a tracked one is invisible to
-# it. They are not the agent's to change in this run, so they never count as a change and never
-# block the commit of the rest.
-_NOT_THE_AGENTS = tuple(f":(exclude,top){name}" for name in ENGINE_INPUTS)
 # The final push asks the lease again every this often, for up to `confirm_seconds` (#765).
 CONFIRM_PAUSE_SECONDS = 2.0
 CONFIRM_SECONDS = 30.0
@@ -104,13 +104,30 @@ FETCH_TIMEOUT = 60.0
 PUSH_TIMEOUT = 120.0
 # The wait before the one new try of a push the provider could not take.
 TRANSIENT_PAUSE_SECONDS = 3.0
+# The room the mirror's file system must have left before the final push takes a branch over: the
+# objects of the agent's commits (a few megabytes for a normal turn, the size of what it committed
+# for a large one) and the pack git writes while it checks them.
+MIN_FREE_BYTES = 256 * 1024 * 1024
+MIN_FREE_INODES = 10_000
+# The mirror's directory below the work directory. In production it is a mount of its own, a
+# pre-allocated file system the agent cannot fill (`reserve disk`, `container.ts`).
+RESERVE_DIRECTORY = "reserve"
 # The scratch refs of the mirror: the agent's branches are fetched here, numbered, so that no name
 # the agent chose ever becomes a local ref of the runner.
 SCRATCH_PREFIX = "refs/runner/in/"
 # The mirror is the runner's alone: no git in it may start a `gc --auto` or `maintenance run
 # --auto` that outlives it (they detach into the background, and survive the group kill of a
 # timeout).
-_MIRROR_OPTIONS = ("-c", "gc.auto=0", "-c", "maintenance.auto=false")
+# `core.bigFileThreshold` as in the reader: big blobs are stored whole, so packing them for the push
+# stays within Control's memory. The objects and their names are the same either way.
+_MIRROR_OPTIONS = (
+    "-c",
+    "gc.auto=0",
+    "-c",
+    "maintenance.auto=false",
+    "-c",
+    "core.bigFileThreshold=1m",
+)
 _PLAIN_FETCH = ("--no-tags", "--no-write-fetch-head")
 # Only the leftover commit of the system: the agent's hooks do not run for it.
 _LEFTOVER_OPTIONS = ("core.hooksPath=/dev/null", "commit.gpgsign=false")
@@ -125,6 +142,8 @@ REASON_PROVIDER_UNAVAILABLE = "provider_unavailable"
 REASON_UNREADABLE = "unreadable"
 REASON_NOT_A_COMMIT = "not_a_commit"
 REASON_OUT_OF_TIME = "out_of_time"
+# The mirror's disk has too little room left to take a branch over (or ran out while it was).
+REASON_OUT_OF_SPACE = "out_of_space"
 # A git command of ours was killed at its time limit: nothing is known of what it did.
 REASON_TIMED_OUT = "timed_out"
 # GitHub answered the push with an error that is neither a refusal of the access nor a hiccup.
@@ -156,11 +175,55 @@ _SHA = re.compile(r"[0-9a-f]{40}")
 
 
 @dataclass(frozen=True)
-class AgentUser:
-    """The unprivileged user the agent and its git processes run as (the engine user)."""
+class DiskSpace:
+    """What is left on a file system for the runner: bytes and inodes (a full inode table stops
+    git as a full disk does)."""
 
-    uid: int
-    gid: int
+    free_bytes: int
+    free_inodes: int
+
+
+def disk_space(path: Path) -> DiskSpace:
+    status = os.statvfs(path)
+    return DiskSpace(status.f_bavail * status.f_frsize, status.f_favail)
+
+
+class RepoAccess(Protocol):
+    """How git looks into the agent's repository: in the reader, a container with the repository
+    and nothing else (`reader.ReaderAccess`). A test brings a local one."""
+
+    @property
+    def repo_source(self) -> str:
+        """What Control's `git fetch` names as the source repository."""
+        ...
+
+    def upload_pack(self) -> str:
+        """The command Control's `git fetch --upload-pack=` runs to read the agent's branches."""
+        ...
+
+    def warm(self) -> bool:
+        """Make everything a look needs before the agent runs, so that nothing has to be created
+        later, when the VM's disk may be full (a container needs room to be made). False when it
+        cannot be had."""
+        ...
+
+    def reset(self, *, seconds: float) -> bool:
+        """Kill every process that exists in the places git runs and start them again, so that
+        nothing a repository's filter or hook left behind is alive. False when that could not be
+        done for all of them."""
+        ...
+
+    def run(self, args: Sequence[str], *, timeout: float, write: bool = False) -> Outcome:
+        """One git command in the repository; never raises on a failed command. A command that
+        changes the repository says `write`: it runs where the repository is read-write, and only
+        those do."""
+        ...
+
+    def stream(
+        self, args: Sequence[str], consume: Callable[[bytes], None], *, timeout: float
+    ) -> Outcome:
+        """`run` for output that is read as a stream and not kept."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -183,10 +246,9 @@ class WorkspaceSpec:
 
 @dataclass(frozen=True)
 class WorkspaceLayout:
-    """Where things are. `work_dir` is the work volume, `run_dir` is under /run (the runner's own
-    files), `agent_home` is the agent's own home."""
+    """Where things are. `work_dir` is the work volume (Control's view of it), `run_dir` is under
+    /run (the runner's own files)."""
 
-    agent_home: Path
     work_dir: Path = Path("/work")
     run_dir: Path = Path("/run/code-reviewer")
 
@@ -226,7 +288,6 @@ class PushReport:
     list_problem: str | None = None
     invalid: int = 0
     overflow: int = 0
-    sweeps_failed: int = 0
     # Whether the task's branch is among the local branches. A branch that is gone is not a branch
     # that is verifiably empty.
     form_listed: bool = True
@@ -284,7 +345,6 @@ class _Progress:
     list_problem: str | None = None
     invalid: int = 0
     overflow: int = 0
-    sweeps_failed: int = 0
     form_listed: bool = True
     # The scratch ref the form's branch was taken over into (None: it was not).
     form_ref: str | None = None
@@ -297,20 +357,18 @@ class GitWorkspace:
         self,
         spec: WorkspaceSpec,
         layout: WorkspaceLayout,
-        agent: AgentUser,
         identity: GitIdentity,
+        access: RepoAccess,
         *,
         git: str = "git",
         path: str = TRUSTED_PATH,
         schemes: Collection[str] = ("https",),
         timeout: float = DEFAULT_TIMEOUT,
         before_push: Callable[[], None] | None = None,
-        sweep: Callable[[], bool] | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        space: Callable[[Path], DiskSpace] = disk_space,
     ) -> None:
-        if agent.uid == 0 or agent.gid == 0:
-            raise _invalid("the agent must not run as root")
         _checked_url(spec.clone_url, schemes)
         executable = shutil.which(git, path=path)
         if executable is None:
@@ -320,22 +378,19 @@ class GitWorkspace:
         # raises to refuse. The job asks the lease here, so that nothing is pushed for a job that is
         # not ours (#765).
         self._before_push = before_push
-        # Ends every process of the agent's user and says whether none is left. The git commands
-        # that run as that user (the status, the leftover commit, the upload-pack of a fetch) can
-        # start a daemon through the repository's config, so it is asked again right before each
-        # `git push`.
-        self._sweep = sweep
         self.layout = layout
-        self.agent = agent
         self.identity = identity
+        self._access = access
         self.git = executable
         self._schemes = tuple(sorted(schemes))
         self._timeout = timeout
         self._clock = clock
         self._sleep = sleep
+        self._space = space
         self._path = ":".join(dict.fromkeys([str(Path(executable).parent), *path.split(":")]))
         self._process = GitProcess(executable, self._path, layout.run_dir, spec.token)
-        self.mirror = layout.work_dir / "mirror.git"
+        self.reserve = layout.work_dir / RESERVE_DIRECTORY
+        self.mirror = self.reserve / "mirror.git"
         self.repo = layout.work_dir / "repo"
         self._start: str | None = None
         self._names_checked = False
@@ -349,22 +404,6 @@ class GitWorkspace:
             raise fail(ErrorCode.SETUP_FAILED, "the base branch is not cloned yet")
         return self._start
 
-    def agent_environment(self) -> dict[str, str]:
-        """The environment of every process of the agent: the identity set, git's own config files
-        out of play and no credential of any kind. The agent's engine and its tools get this one."""
-        home = str(self.layout.agent_home)
-        return {
-            "PATH": self._path,
-            "HOME": home,
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_CONFIG_GLOBAL": "/dev/null",
-            "GIT_TERMINAL_PROMPT": "0",
-            "GIT_AUTHOR_NAME": self.identity.name,
-            "GIT_AUTHOR_EMAIL": self.identity.email,
-            "GIT_COMMITTER_NAME": self.identity.name,
-            "GIT_COMMITTER_EMAIL": self.identity.email,
-        }
-
     # -- the steps of a turn's set-up ------------------------------------------------------------
 
     def prepare(self) -> None:
@@ -374,6 +413,8 @@ class GitWorkspace:
         self._check_names()
         self.clone_mirror()
         self.create_agent_repository()
+        if not self._access.warm():
+            raise fail(ErrorCode.SETUP_FAILED, "reader_unavailable: the reader cannot be made")
 
     def clone_mirror(self) -> None:
         """Fetch the base branch, depth 1, into the new bare mirror. The token is in this one
@@ -417,8 +458,9 @@ class GitWorkspace:
 
     def create_agent_repository(self) -> None:
         """The agent's repository: a local clone of the mirror (no hard links, so nothing is shared
-        with it), handed to the agent's user, without a remote, with the identity and the new branch
-        at the base tip. The same path every turn."""
+        with it), without a remote, with the identity and the new branch at the base tip. Made by
+        Control from its own mirror before the agent exists; the steps that read or write inside it
+        run in the reader. The same path every turn."""
         start = self.start_commit
         base = self.spec.base_branch
         cloned = self._root(
@@ -442,32 +484,30 @@ class GitWorkspace:
                 ErrorCode.SETUP_FAILED,
                 "the agent repository cannot be cloned: " + self._detail(cloned),
             )
-        _hand_over(self.repo, self.agent)
         setup = (
             ["remote", "remove", "origin"],
             ["config", "user.name", self.identity.name],
             ["config", "user.email", self.identity.email],
             ["config", "commit.gpgsign", "false"],
-            # What the engine would load from the working tree stays out (see `ENGINE_INPUTS`).
-            ["sparse-checkout", "set", "--no-cone", "/*", *(f"!/{name}" for name in ENGINE_INPUTS)],
             ["checkout", "-q", "-b", self.spec.branch],
         )
         for arguments in setup:
-            done = self._as_agent(arguments)
+            done = self._access.run(arguments, timeout=self._timeout, write=True)
             if done.returncode != 0:
                 raise fail(
                     ErrorCode.SETUP_FAILED,
                     f"git {arguments[0]} failed in the agent repository: "
                     + self._agent_detail(done),
                 )
-        head = self._as_agent(["rev-parse", "HEAD"])
+        head = self._access.run(["rev-parse", "HEAD"], timeout=self._timeout)
         if head.stdout.strip() != start:
             raise fail(ErrorCode.SETUP_FAILED, "the agent repository is not at the base tip")
 
-    # -- the leftover (as the agent's user) -------------------------------------------------------
+    # -- the leftover (in the reader) -------------------------------------------------------
 
     def dirty(self) -> bool:
-        """Whether the working tree has changes, untracked files included. Runs as the agent. Only
+        """Whether the working tree has changes, untracked files included. Runs in the read-only
+        reader, while the agent may still be running (it decides on the extra message). Only
         the first byte of what `git status` prints is looked at: the output is the agent's (a tree
         with a million untracked files prints megabytes) and the answer is whether it has any. A
         status that fails says nothing about the tree: False (`commit_all` is not tried)."""
@@ -478,15 +518,13 @@ class GitWorkspace:
                 seen.append(True)
                 raise StopReading
 
-        done = self._agent_stream(
+        done = self._reader_stream(
             [
                 "--no-optional-locks",
                 "status",
                 "--porcelain=v1",
                 "-z",
                 "--untracked-files=all",
-                "--",
-                *_NOT_THE_AGENTS,
             ],
             first,
             timeout=DIRTY_TIMEOUT,
@@ -494,7 +532,7 @@ class GitWorkspace:
         return bool(seen) and done.returncode == 0
 
     def commit_all(self, message: str = LEFTOVER_MESSAGE, *, seconds: float = 60.0) -> str | None:
-        """Commit everything with the fixed message, as the agent's user. The agent's own hooks do
+        """Commit everything with the fixed message, in the reader. The agent's own hooks do
         not run. Returns the new tip, or None when there was nothing to commit. A HEAD that is on no
         branch (the agent checked out a commit) first gets a branch of its own, so that the commit
         is not lost. Raises `JobError` (`setup_failed`) when git fails; the caller notes it and goes
@@ -504,9 +542,11 @@ class GitWorkspace:
 
         def run(arguments: list[str]) -> Outcome:
             remaining = max(1.0, deadline - self._clock())
-            return self._as_agent([*options, *arguments], timeout=min(self._timeout, remaining))
+            return self._access.run(
+                [*options, *arguments], timeout=min(self._timeout, remaining), write=True
+            )
 
-        added = run(["add", "-A", "--", *_NOT_THE_AGENTS])
+        added = run(["add", "-A"])
         if added.returncode != 0:
             raise fail(ErrorCode.SETUP_FAILED, "git add failed: " + self._agent_detail(added))
         staged = run(["diff", "--cached", "--quiet"])
@@ -533,12 +573,6 @@ class GitWorkspace:
                 ErrorCode.SETUP_FAILED, "the new commit cannot be read: " + self._agent_detail(head)
             )
         return head.stdout.strip()
-
-    def engine_inputs_present(self) -> list[str]:
-        """Which of the names the engine loads (`ENGINE_INPUTS`) exist in the agent's working tree:
-        the agent created or changed them, and none of it is kept. A look at the names with `lstat`
-        (nothing is followed or opened), which is safe in a directory the agent owns."""
-        return [name for name in ENGINE_INPUTS if os.path.lexists(self.repo / name)]
 
     # -- the final push ---------------------------------------------------------------------------
 
@@ -573,6 +607,12 @@ class GitWorkspace:
         self._progress.overflow = selection.overflow
         for name, reason in selection.excluded:
             self._progress.branches.append(BranchPush(name, None, False, reason))
+        if not self._has_room():
+            # Nothing is fetched: a fetch with no room fails half way and leaves the mirror full of
+            # what it could not finish. Every branch says why it did not arrive.
+            for name in selection.names:
+                self._progress.branches.append(BranchPush(name, None, False, REASON_OUT_OF_SPACE))
+            return self.push_report()
         for index, name in enumerate(selection.names):
             if self._clock() >= deadline:
                 self._progress.branches.append(BranchPush(name, None, False, REASON_OUT_OF_TIME))
@@ -590,7 +630,6 @@ class GitWorkspace:
             list_problem=progress.list_problem,
             invalid=progress.invalid,
             overflow=progress.overflow,
-            sweeps_failed=progress.sweeps_failed,
             form_listed=progress.form_listed,
         )
 
@@ -638,6 +677,18 @@ class GitWorkspace:
         )
         return parse_name_status(bytes(reader.data)) if done.returncode == 0 else []
 
+    def volume_free_bytes(self) -> int | None:
+        """What the VM's disk (the work volume) has left, for the note at the end of the turn; None
+        when it cannot be asked."""
+        try:
+            return self._space(self.layout.work_dir).free_bytes
+        except OSError:
+            return None
+
+    def reserve_free_bytes(self) -> int:
+        """What the mirror's file system has left (the reserve disk in production)."""
+        return self._space(self.mirror).free_bytes
+
     def check_lease(self) -> None:
         """One question to the job host while the agent works: raises `lease_lost` (or whatever the
         gate raises) when the job is no longer ours, so that the turn ends and the model is not paid
@@ -668,10 +719,10 @@ class GitWorkspace:
 
     def _local_branches(self) -> list[tuple[str, str]] | None:
         """The local branches of the agent's repository as (name, tip as listed), or None when it
-        cannot be read (`list_problem` says why). `git for-each-ref` run **as the agent's user** in
-        its repository, so that its config is read with the agent's rights and by nothing else, and
-        **streamed and capped** at `LIST_MAX_BYTES`: the runner holds no more than that of a list
-        the agent controls, and git is ended when the cap is passed. The names are judged by
+        cannot be read (`list_problem` says why). `git for-each-ref` run **in the reader**, so that
+        the repository's config is read there and nowhere else, and **streamed and capped** at
+        `LIST_MAX_BYTES`: the runner holds no more than that of a list the agent controls, and the
+        read is ended when the cap is passed. The names are judged by
         `push_policy`. The listed tip is only a hint that saves a fetch (a branch still at the
         start commit has nothing to push); what is pushed is read from the mirror."""
         data = bytearray()
@@ -682,7 +733,7 @@ class GitWorkspace:
                 raise _ListingTooLarge
 
         try:
-            done = self._agent_stream(
+            done = self._reader_stream(
                 ["for-each-ref", "--format=%(objectname) %(refname)", "refs/heads/"],
                 consume,
                 timeout=min(self._timeout, LIST_TIMEOUT),
@@ -702,21 +753,23 @@ class GitWorkspace:
                 branches.append((ref.removeprefix("refs/heads/"), tip))
         return branches
 
-    def sweep_engine_user(self) -> bool:
-        """End every process of the agent's user; True when none is left (always True where there is
-        no dedicated user)."""
-        return True if self._sweep is None else self._sweep()
+    def quiet_readers(self, *, seconds: float) -> bool:
+        """Kill what runs in the readers and start them again. Runs once the agent's container is
+        gone and again after the leftover commit: a filter of the agent's repository can leave a
+        process behind (`setsid`), and in a reader with the repository read-write it could change
+        the repository under the commit or the fetch of the push."""
+        return self._access.reset(seconds=seconds)
 
     def rescue_detached_head(self) -> str | None:
         """Work committed on a detached HEAD is on no branch, so the final push would not see it.
         When HEAD is detached and no local branch contains it, a branch
         `<task branch>-leftover-<id>` is made at HEAD and checked out, and its name is returned;
-        otherwise None. Runs as the agent's user; a failure is raised (`setup_failed`) for the
+        otherwise None. Runs in the reader; a failure is raised (`setup_failed`) for the
         caller to note."""
-        attached = self._as_agent(["symbolic-ref", "-q", "HEAD"], timeout=RESCUE_STEP_TIMEOUT)
+        attached = self._reader(["symbolic-ref", "-q", "HEAD"], timeout=RESCUE_STEP_TIMEOUT)
         if attached.returncode != 1:
             return None
-        containing = self._as_agent(
+        containing = self._reader(
             [
                 "for-each-ref",
                 "--count=1",
@@ -734,7 +787,7 @@ class GitWorkspace:
         if containing.stdout.strip():
             return None
         name = f"{self.spec.branch}-leftover-{uuid.uuid4().hex[:8]}"
-        moved = self._as_agent(["switch", "-q", "-c", name], timeout=RESCUE_STEP_TIMEOUT)
+        moved = self._reader(["switch", "-q", "-c", name], timeout=RESCUE_STEP_TIMEOUT, write=True)
         if moved.returncode != 0:
             raise fail(ErrorCode.SETUP_FAILED, "git switch failed: " + self._agent_detail(moved))
         return name
@@ -755,12 +808,6 @@ class GitWorkspace:
             self._progress.form_head = tip
             self._progress.form_ref = scratch
         self._ask_lease(deadline, confirm_seconds, confirm_pause)
-        # Nothing of the agent's user runs when the token goes out. The fetch above ran an
-        # upload-pack as that user, and a repository's config can make it leave a daemon behind. A
-        # sweep that fails does not hold the push back (that user cannot read a root process's
-        # environment, which the privileged tests prove) but is counted and noted.
-        if not self.sweep_engine_user():
-            self._progress.sweeps_failed += 1
         reason = self._push(scratch, name, deadline)
         self._record(name, tip, reason)
 
@@ -783,13 +830,15 @@ class GitWorkspace:
                 "protocol.version=2",
                 "fetch",
                 *_PLAIN_FETCH,
-                f"--upload-pack={self._upload_pack()}",
-                str(self.repo),
+                f"--upload-pack={self._access.upload_pack()}",
+                self._access.repo_source,
                 f"+refs/heads/{name}:{scratch}",
             ],
             timeout=self._left(FETCH_TIMEOUT, deadline),
         )
         if fetched.returncode != 0:
+            if not self._has_room():
+                return None, REASON_OUT_OF_SPACE
             return None, REASON_TIMED_OUT if fetched.unanswered else REASON_UNREADABLE
         raw_id = self._mirror(["rev-parse", "-q", "--verify", scratch])
         commit = self._mirror(["rev-parse", "-q", "--verify", f"{scratch}^{{commit}}"])
@@ -851,6 +900,15 @@ class GitWorkspace:
             return REASON_PROVIDER_ERROR
         return REASON_PROVIDER_UNAVAILABLE
 
+    def _has_room(self) -> bool:
+        """Whether the mirror's file system has the room the final push needs. A file system that
+        cannot be asked is not a reason to refuse: the fetch will say if it fails."""
+        try:
+            space = self._space(self.mirror)
+        except OSError:
+            return True
+        return space.free_bytes >= MIN_FREE_BYTES and space.free_inodes >= MIN_FREE_INODES
+
     def _left(self, cap: float, deadline: float) -> float:
         return max(1.0, min(cap, self._timeout, deadline - self._clock()))
 
@@ -870,7 +928,7 @@ class GitWorkspace:
         self._names_checked = True
 
     def _prepare_directories(self) -> None:
-        for directory in (self.layout.work_dir, self.layout.run_dir):
+        for directory in (self.layout.work_dir, self.layout.run_dir, self.reserve):
             _own_directory(directory)
         for existing in (self.mirror, self.repo):
             if existing.exists() or existing.is_symlink():
@@ -887,31 +945,6 @@ class GitWorkspace:
             for name in files:
                 if name.endswith(".lock"):
                     Path(directory, name).unlink(missing_ok=True)
-
-    def _drops_privileges(self) -> bool:
-        return bool(spawn_options(self.agent.uid, self.agent.gid))
-
-    def _setpriv(self) -> str | None:
-        return shutil.which("setpriv", path=TRUSTED_PATH)
-
-    def _upload_pack(self) -> str:
-        """The command git runs on the far side of a local fetch or listing. It reads the agent's
-        repository, so it runs as the agent's user, without new privileges: that repository's
-        config is read with the agent's rights."""
-        command = [self.git, "upload-pack"]
-        if self._drops_privileges():
-            setpriv = self._setpriv()
-            if setpriv is None:
-                raise fail(ErrorCode.SETUP_FAILED, "setpriv is not installed")
-            command = [
-                setpriv,
-                f"--reuid={self.agent.uid}",
-                f"--regid={self.agent.gid}",
-                "--clear-groups",
-                "--no-new-privs",
-                *command,
-            ]
-        return " ".join(shlex.quote(part) for part in command)
 
     def _root(
         self,
@@ -952,29 +985,20 @@ class GitWorkspace:
             timeout=min(self._timeout, REPORT_READ_TIMEOUT),
         )
 
-    def _as_agent(self, args: list[str], *, timeout: float | None = None) -> Outcome:
-        return self._process.run(
-            args,
-            env=self.agent_environment(),
-            cwd=self.repo,
-            spawn=spawn_options(self.agent.uid, self.agent.gid),
-            timeout=timeout or self._timeout,
-        )
-
-    def _agent_stream(
-        self, args: list[str], consume: Callable[[bytes], None], *, timeout: float | None = None
+    def _reader(
+        self, args: Sequence[str], *, timeout: float | None = None, write: bool = False
     ) -> Outcome:
-        """`_as_agent` for output that is read as a stream and only partly kept. A reader that has
-        what it keeps (`StopReading`) ends git, and the command counts as answered."""
+        """A git command in the agent's repository, run in a reader (never here); `write` for a
+        command that changes it."""
+        return self._access.run(args, timeout=timeout or self._timeout, write=write)
+
+    def _reader_stream(
+        self, args: Sequence[str], consume: Callable[[bytes], None], *, timeout: float | None = None
+    ) -> Outcome:
+        """`_reader` for output that is read as a stream and only partly kept. A reader that has
+        what it keeps (`StopReading`) ends the read, and the command counts as answered."""
         try:
-            return self._process.stream(
-                args,
-                env=self.agent_environment(),
-                cwd=self.repo,
-                spawn=spawn_options(self.agent.uid, self.agent.gid),
-                consume=consume,
-                timeout=timeout or self._timeout,
-            )
+            return self._access.stream(args, consume, timeout=timeout or self._timeout)
         except StopReading:
             return Outcome(0, "", "")
 
@@ -1015,11 +1039,3 @@ def _own_directory(path: Path) -> None:
         os.fchmod(descriptor, 0o755)
     finally:
         os.close(descriptor)
-
-
-def _hand_over(root: Path, agent: AgentUser) -> None:
-    """Make the freshly cloned tree the agent's, without following a link."""
-    os.lchown(root, agent.uid, agent.gid)
-    for directory, names, files in os.walk(root, followlinks=False):
-        for name in [*names, *files]:
-            os.lchown(os.path.join(directory, name), agent.uid, agent.gid)

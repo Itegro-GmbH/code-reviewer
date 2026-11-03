@@ -21,11 +21,18 @@ from engine_shards import SHARDS, split_by_shard
 # so this must be set here, before any test module is imported.
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
-_LEVELS = ("unit", "integration", "contract", "engine", "privileged")
+_LEVELS = ("unit", "integration", "contract", "engine", "privileged", "lane")
 _TESTS_ROOT = Path(__file__).parent
 # Seconds per test, by level (pytest-timeout). Integration and contract tests start processes
 # and servers; engine tests run the real PR-Agent; privileged tests start the real engine user.
-_TIMEOUTS = {"unit": 10, "integration": 60, "contract": 60, "engine": 180, "privileged": 180}
+_TIMEOUTS = {
+    "unit": 10,
+    "integration": 60,
+    "contract": 60,
+    "engine": 180,
+    "privileged": 180,
+    "lane": 900,
+}
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

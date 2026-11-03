@@ -141,9 +141,9 @@ export const DOCKER_SOCKET_SOURCE = "/var/run/docker.sock";
 export const DOCKER_SOCKET_TARGET = "/run/docker.sock";
 const IMPLEMENTER_ENVIRONMENT_NAMES = [
   "RUNNER_IMPLEMENTER_WORK_DIR",
-  "RUNNER_IMPLEMENTER_EGRESS_PORT",
-  "RUNNER_IMPLEMENTER_NETWORK",
   "RUNNER_IMPLEMENTER_MODEL_DOOR",
+  "RUNNER_IMPLEMENTER_SANDBOX_PROOF",
+  "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB",
 ] as const;
 
 const SIZE = /^[0-9]+[mg]$/;
@@ -628,7 +628,14 @@ export interface HostCommand {
 }
 
 /** How many steps `workVolumeCommands` has: the Launcher budgets time for each (`WORK_VOLUME_STEPS_SECONDS`). */
-export const WORK_VOLUME_STEP_COUNT = 5;
+export const WORK_VOLUME_STEP_COUNT = 8;
+
+/**
+ * The size of the reserve disk of a work volume: an eighth of the 64 GB disk every VM size has (measured on 1, 2 and 8 vCPU,
+ * `docs/implementer.md`, "The disk"). It is allocated, not sparse, when the volume is made, so nothing the agent writes can
+ * take it. Control's mirror lives on it and nothing else.
+ */
+export const RESERVE_DISK_GIB = 8;
 
 /**
  * Whether `mountinfo` (the text of `/proc/self/mountinfo`) shows a mount at `directory` that has all of `options` and no
@@ -661,6 +668,14 @@ export function mountHasOptions(
  * mount that honours the setuid bit and nothing else would show it. A mount
  * made in the VM lives and dies with the VM, and so does the volume: no step leaves anything behind. `root` is a
  * plain absolute directory of the VM; the volume gets a directory below it named like itself.
+ *
+ * **The reserve disk (#745, the agent can fill the VM's disk).** The VM's disk is one XFS file system without quotas, so a
+ * limit on what the agent writes (the repository, the layers of its container, the images of its own Docker) cannot be had.
+ * What can be had is a place the agent cannot fill: below the volume, at `reserve`, a file system of its own (a
+ * pre-allocated image, `RESERVE_DISK_GIB`, formatted and mounted over a loop device, `nosuid,nodev`) that holds Control's
+ * mirror and nothing else. The agent's container mounts the Subpath `repo` of the volume and sees none of it. The volume is
+ * made with `rbind`, so Control sees the mount below it. Whatever the agent writes to the VM's disk, the blocks of the
+ * mirror are already taken.
  */
 export function workVolumeCommands(
   spec: unknown,
@@ -675,6 +690,8 @@ export function workVolumeCommands(
   checkOption(options.name, VOLUME_NAME, "the work volume");
   checkOption(options.root, HOST_ROOT, "the work volume root");
   const directory = `${options.root}/${options.name}`;
+  const reserveDirectory = `${directory}/reserve`;
+  const reserveImage = `${options.root}/${options.name}.reserve.img`;
   const step = (
     label: string,
     cmd: string,
@@ -686,8 +703,36 @@ export function workVolumeCommands(
     sudo: true,
   });
   return [
-    step("work-volume-dir", "mkdir", "-p", "--", directory),
-    step("work-volume-mount", "mount", "--bind", directory, directory),
+    step("work-volume-dir", "mkdir", "-p", "--", reserveDirectory),
+    step(
+      "work-volume-reserve-image",
+      "fallocate",
+      "-l",
+      `${String(RESERVE_DISK_GIB)}G`,
+      reserveImage,
+    ),
+    step(
+      "work-volume-reserve-fs",
+      "mkfs.ext4",
+      "-q",
+      "-F",
+      "-m",
+      "0",
+      "-O",
+      "^has_journal",
+      "-E",
+      "lazy_itable_init=1,nodiscard",
+      reserveImage,
+    ),
+    step(
+      "work-volume-reserve-mount",
+      "mount",
+      "-o",
+      "loop,nosuid,nodev",
+      reserveImage,
+      reserveDirectory,
+    ),
+    step("work-volume-mount", "mount", "--rbind", directory, directory),
     step(
       "work-volume-options",
       "mount",
@@ -698,7 +743,9 @@ export function workVolumeCommands(
     {
       ...step("work-volume-check", "cat", "/proc/self/mountinfo"),
       check: (mountinfo) =>
-        mountHasOptions(mountinfo, directory, spec.workVolume.options),
+        mountHasOptions(mountinfo, directory, spec.workVolume.options) &&
+        // The reserve disk is a mount of its own below the volume, read-write and without the setuid bit or devices.
+        mountHasOptions(mountinfo, reserveDirectory, ["rw", "nosuid", "nodev"]),
     },
     step(
       "work-volume-create",
@@ -712,7 +759,7 @@ export function workVolumeCommands(
       "--opt",
       `device=${directory}`,
       "--opt",
-      "o=bind",
+      "o=rbind",
       options.name,
     ),
   ];

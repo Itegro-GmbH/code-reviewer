@@ -50,8 +50,9 @@ PROFILE = {
     "RUNNER_DYNAMIC_MAX_COST_USD": "0.50",
     "RUNNER_DYNAMIC_CAPABILITIES": '{"tool_choice_required": true}',
     "RUNNER_IMPLEMENTER_WORK_DIR": "/work",
-    "RUNNER_IMPLEMENTER_NETWORK": "registries",
-    "RUNNER_IMPLEMENTER_EGRESS_PORT": "10182",
+    "RUNNER_IMPLEMENTER_MODEL_DOOR": "docker",
+    "RUNNER_IMPLEMENTER_SANDBOX_PROOF": "proven",
+    "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB": "2560",
 }
 HEAD = "9" * 40
 
@@ -177,12 +178,14 @@ def test_a_turn_starts_as_the_root_supervisor_with_what_only_it_needs() -> None:
         assert spec.lease_check is not None
         assert spec.stdout_keep_bytes == IMPLEMENTER_STDOUT_KEEP_BYTES > 4_500_000
         # A stopped turn has the time to end its engine and push (#765-R5b).
-        assert spec.terminate_grace == IMPLEMENTER_TERMINATE_GRACE_SECONDS == 60.0
+        assert spec.terminate_grace == IMPLEMENTER_TERMINATE_GRACE_SECONDS == 120.0
         assert spec.env[ENGINES_VARIABLE] == ",".join(ALL_THREE)
         assert spec.env[OPENCODE_COMMAND_VARIABLE] == "/usr/local/bin/opencode"
         assert spec.env[RIPGREP_PATH_VARIABLE] == "/usr/local/bin/rg"
         assert spec.env["RUNNER_IMPLEMENTER_WORK_DIR"] == "/work"
-        assert spec.env["RUNNER_IMPLEMENTER_EGRESS_PORT"] == "10182"
+        assert spec.env["RUNNER_IMPLEMENTER_MODEL_DOOR"] == "docker"
+        assert spec.env["RUNNER_IMPLEMENTER_SANDBOX_PROOF"] == "proven"
+        assert spec.env["RUNNER_IMPLEMENTER_AGENT_MEMORY_MB"] == "2560"
         assert spec.env["RUNNER_DYNAMIC_ENGINE_UID"] == "10101"
         # The Dynamic Review's own settings and the operator's other variables stay out.
         assert "RUNNER_DYNAMIC_MAX_COST_USD" not in spec.env
@@ -489,7 +492,8 @@ def test_the_lease_budgets_fit_the_grace_of_the_end_and_of_the_stop() -> None:
     assert normal == 25.0 and stop == 10.0 and host_module.LEASE_CHECK_BUDGET_SECONDS > 10.0
     # Asked again inside the window, the last push of a normal end takes one question past it.
     assert CONFIRM_SECONDS + normal < GRACE_SECONDS
-    # A stop: the question and its window inside half the minute; the rest: engine, push.
+    # A stop: the question and its window inside half the two minutes; the rest is the engine,
+    # the readers and the push.
     assert STOP_CONFIRM_SECONDS + stop <= host_module.IMPLEMENTER_TERMINATE_GRACE_SECONDS / 2
 
 

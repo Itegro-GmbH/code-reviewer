@@ -79,13 +79,14 @@ class SelfCheckReason(StrEnum):
     # Why `implementer` is not advertised on top of a passing Dynamic check (#765,
     # `implementer/startup.py`). They are in the verdict next to the others.
     IMPLEMENTER_GIT_MISSING = "implementer_git_missing"
-    IMPLEMENTER_SETPRIV_MISSING = "implementer_setpriv_missing"
-    IMPLEMENTER_EGRESS_RULES_MISSING = "implementer_egress_rules_missing"
     IMPLEMENTER_WORK_DIR_MISSING = "implementer_work_dir_missing"
-    IMPLEMENTER_WORK_DIR_NOT_PREPARED = "implementer_work_dir_not_prepared"
-    IMPLEMENTER_WORK_DIR_NOT_EXEC = "implementer_work_dir_not_exec"
-    # The container may start a model door (#745, step 3) and the VM's Docker does not answer.
+    # The container starts the model door, the agent's container and the reader through the VM's
+    # Docker (#745) and that Docker does not answer ...
     IMPLEMENTER_DOCKER_UNAVAILABLE = "implementer_docker_unavailable"
+    # ... has no `sysbox-runc` runtime, or the agent image of the golden snapshot is not in the VM
+    # (#745, step 4).
+    IMPLEMENTER_SYSBOX_MISSING = "implementer_sysbox_missing"
+    IMPLEMENTER_AGENT_IMAGE_MISSING = "implementer_agent_image_missing"
     # ... and the engine user can open the VM's Docker socket, which is root on the VM (#745).
     IMPLEMENTER_DOCKER_SOCKET_OPEN = "implementer_docker_socket_open"
 
@@ -158,19 +159,14 @@ def root_filesystem_read_only(root: Path = Path("/")) -> bool:
         return False
 
 
-def startup_probe(uid: int, gid: int, proxy_port: int, *extra_ports: int) -> None:
-    """Run the network probe as the engine user against listeners of ours on the proxy port and,
-    in an Implementer container, on the egress proxy's port (#763).
+def startup_probe(uid: int, gid: int, proxy_port: int) -> None:
+    """Run the network probe as the engine user against a listener of ours on the proxy port.
 
-    No job exists at startup, so the supervisor itself plays the model proxy (and the egress
-    proxy) for the probe's "allowed" connections. A port somebody else holds fails the probe: the
-    slot is not clean.
+    No job exists at startup, so the supervisor itself plays the model proxy for the probe's
+    "allowed" connection. A port somebody else holds fails the probe: the slot is not clean.
     """
     with contextlib.ExitStack() as stack:
-        for port, taken in (
-            (proxy_port, "the model proxy port of the slot is not free"),
-            *((port, "the egress proxy port of the slot is not free") for port in extra_ports),
-        ):
+        for port, taken in ((proxy_port, "the model proxy port of the slot is not free"),):
             listener = stack.enter_context(socket.socket())
             # A connection that only waits out its time on the port (the proxy of a job that just
             # ended) does not make the port taken; a live listener of somebody else still fails
@@ -181,7 +177,7 @@ def startup_probe(uid: int, gid: int, proxy_port: int, *extra_ports: int) -> Non
                 listener.listen(1)
             except OSError:
                 raise IsolationError(taken) from None
-        verify_confinement(uid, gid, proxy_port, *extra_ports)
+        verify_confinement(uid, gid, proxy_port)
 
 
 def version_as_user(executable: Path, uid: int, gid: int) -> str:
@@ -444,7 +440,7 @@ def check_dynamic_runner(
             "the engine does not report the pinned version as the engine user",
         )
     try:
-        probe(uid, gid, ports.proxy, *ports.extra)
+        probe(uid, gid, ports.proxy)
     except IsolationError:
         raise SelfCheckFailed(
             SelfCheckReason.NETWORK_PROBE_FAILED,

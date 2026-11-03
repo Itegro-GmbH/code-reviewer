@@ -18,13 +18,11 @@ from code_reviewer_runner.dynamic_review.job_model_entry import (
     native_provider_config,
 )
 from code_reviewer_runner.dynamic_review.passthrough.families import WireFamily, spec_of
-from code_reviewer_runner.dynamic_review.static_isolation import ImplementerNetwork
 from code_reviewer_runner.implementer.config import (
     IMPLEMENTER_AGENT,
     build_engine_config,
     implementer_environment,
 )
-from code_reviewer_runner.implementer.egress_config import EgressSettings
 from code_reviewer_runner.job import parse_implementer_input
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -171,22 +169,8 @@ def test_the_provider_block_is_asserted_like_the_native_dynamic_one() -> None:
 
 # -- the environment of the engine and of its tools -------------------------------------------
 
-GIT_AND_IDENTITY = {
-    "PATH": "/usr/local/bin:/usr/bin:/bin",
-    "HOME": "/home/engine",
-    "GIT_CONFIG_NOSYSTEM": "1",
-    "GIT_CONFIG_GLOBAL": "/dev/null",
-    "GIT_TERMINAL_PROMPT": "0",
-    "GIT_AUTHOR_NAME": "Code Review Implementer",
-    "GIT_AUTHOR_EMAIL": "implementer@example.invalid",
-    "GIT_COMMITTER_NAME": "Code Review Implementer",
-    "GIT_COMMITTER_EMAIL": "implementer@example.invalid",
-}
 EXPECTED_NAMES = {
-    # the flags of the engine, the same as for Dynamic
-    "OPENCODE_DISABLE_PROJECT_CONFIG",
-    "OPENCODE_DISABLE_CLAUDE_CODE",
-    "OPENCODE_DISABLE_EXTERNAL_SKILLS",
+    # the flags of the engine that keep it from waiting for a network it does not have
     "OPENCODE_PURE",
     "OPENCODE_DISABLE_DEFAULT_PLUGINS",
     "OPENCODE_DISABLE_MODELS_FETCH",
@@ -198,7 +182,7 @@ EXPECTED_NAMES = {
     "OPENCODE_DISABLE_SHARE",
     "OPENCODE_DISABLE_TELEMETRY",
     "DO_NOT_TRACK",
-    # the private home
+    # the agent's own place
     "HOME",
     "XDG_CONFIG_HOME",
     "XDG_DATA_HOME",
@@ -207,34 +191,27 @@ EXPECTED_NAMES = {
     "TMPDIR",
     "CI",
     "NO_COLOR",
-    "PATH",
-    # git: the config switches and the identity (GitWorkspace.agent_environment)
-    "GIT_CONFIG_NOSYSTEM",
-    "GIT_CONFIG_GLOBAL",
     "GIT_TERMINAL_PROMPT",
-    "GIT_AUTHOR_NAME",
-    "GIT_AUTHOR_EMAIL",
-    "GIT_COMMITTER_NAME",
-    "GIT_COMMITTER_EMAIL",
-}
-EGRESS_NAMES = {
-    "HTTPS_PROXY",
-    "https_proxy",
-    "npm_config_proxy",
-    "npm_config_https_proxy",
-    "PIP_PROXY",
+    "PATH",
 }
 
 
-def make_environment(network: ImplementerNetwork = ImplementerNetwork.REGISTRIES) -> dict[str, str]:
-    settings = EgressSettings(network, 41002 if network is ImplementerNetwork.REGISTRIES else None)
-    return implementer_environment(
-        GIT_AND_IDENTITY,
-        home="/home/engine",
-        scratch_dir="/tmp/engine",
-        tools_dir="/opt/tools",
-        egress=settings,
-    )
+def make_environment() -> dict[str, str]:
+    return implementer_environment(home="/root", scratch_dir="/tmp")
+
+
+# #745 step 4: the repository's own OpenCode files apply; nothing here switches them off.
+def test_the_engine_environment_does_not_switch_off_the_repositorys_configuration_or_skills() -> (
+    None
+):
+    environment = make_environment()
+
+    for flag in (
+        "OPENCODE_DISABLE_PROJECT_CONFIG",
+        "OPENCODE_DISABLE_CLAUDE_CODE",
+        "OPENCODE_DISABLE_EXTERNAL_SKILLS",
+    ):
+        assert flag not in environment
 
 
 # #764-R2
@@ -253,47 +230,27 @@ def test_the_instruction_file_must_be_an_absolute_path_the_runner_wrote() -> Non
 
 # #764-T02
 def test_the_engine_environment_has_exactly_the_named_variables() -> None:
-    assert set(make_environment()) == EXPECTED_NAMES | EGRESS_NAMES
+    assert set(make_environment()) == EXPECTED_NAMES
 
 
-# #764-T02
-def test_with_network_none_nothing_network_related_is_set() -> None:
-    environment = make_environment(ImplementerNetwork.NONE)
-
-    assert set(environment) == EXPECTED_NAMES
-    assert not {name for name in environment if "proxy" in name.lower()}
-
-
-# #764-T02
-def test_the_path_leads_with_the_verified_tools_and_keeps_the_git_of_the_workspace() -> None:
+# #745 step 4: there is no proxy to point the tools at and no credential to give them.
+def test_the_engine_environment_names_no_proxy_and_no_credential() -> None:
     environment = make_environment()
 
-    assert environment["PATH"] == "/opt/tools:/usr/local/bin:/usr/bin:/bin"
-    assert environment["HOME"] == "/home/engine"
-    assert environment["XDG_DATA_HOME"] == "/home/engine/.local/share"
-    assert environment["HTTPS_PROXY"] == "http://127.0.0.1:41002"
-    assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert not {name for name in environment if "proxy" in name.lower()}
+    assert not {
+        name
+        for name in environment
+        if any(word in name.upper() for word in ("TOKEN", "KEY", "SECRET", "PASSWORD", "GITHUB"))
+    }
     assert "REVIEW_PROXY_URL" not in environment, "no variable of the review engine"
 
 
 # #764-T02
-def test_an_inherited_proxy_or_secret_variable_of_the_caller_does_not_pass() -> None:
-    hostile = {
-        **GIT_AND_IDENTITY,
-        "NO_PROXY": "*",
-        "ALL_PROXY": "http://evil",
-        "GITHUB_TOKEN": "ghs_x",
-        "OPENROUTER_API_KEY": "sk-or-v1-x",
-    }
+def test_the_agents_home_and_path_are_the_roots() -> None:
+    environment = make_environment()
 
-    environment = implementer_environment(
-        hostile,
-        home="/home/engine",
-        scratch_dir="/tmp/engine",
-        tools_dir=None,
-        egress=EgressSettings(ImplementerNetwork.REGISTRIES, 41002),
-    )
-
-    assert "NO_PROXY" not in environment and "ALL_PROXY" not in environment
-    assert "GITHUB_TOKEN" not in environment and "OPENROUTER_API_KEY" not in environment
-    assert environment["PATH"] == "/usr/local/bin:/usr/bin:/bin"
+    assert environment["HOME"] == "/root"
+    assert environment["XDG_DATA_HOME"] == "/root/.local/share"
+    assert environment["TMPDIR"] == "/tmp"
+    assert environment["PATH"] == "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

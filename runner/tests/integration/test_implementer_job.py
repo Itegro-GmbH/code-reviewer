@@ -1,14 +1,20 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""A whole Implementer job through the runner's entry point, in process (#765).
+"""A whole Implementer job through the runner's entry point, in process (#765): the glue, not the
+agent.
 
 `runner.main` reads the job from stdin and prints one result line; everything between is the
-production code: the entry point, the job glue, the session, the push ticker, the push loop and the
-`push()` of the git workspace with the lease gate in front of it. Only two things are doubles: the
-engine (`FakeAgent` stands in for the OpenCode process, which the engine lane proves) and the git
-commands behind `push()` (`FakeGit` records the push instead of running git; the real git paths are
-the tests of #762). The lease answers come over a real socket pair, the way the job host gives them,
-and a SIGTERM is a real signal to this process.
+production code: the entry point, the job glue, the session, the lease gate, the push loop and the
+leftover handling of the git workspace. Three things are doubles, and each is proven somewhere
+else: the engine and the agent's container (`FakeAgent` and `FakePlace` stand in for OpenCode in
+its container; `tests/lane` runs the real agent image with the pinned OpenCode, the real reader and
+the real door code on a real Docker daemon, and a VM with Sysbox runs the same), the model door
+(`FakeDoor`, a door with nothing behind it; the door's own tests are in `tests/unit`), and the git
+commands behind the push (`FakeGit` records the push instead of running git; the real git paths
+are the tests of #762). The lease answers come over a real socket pair, the way the job host gives
+them, and a SIGTERM is a real signal to this process. So this file holds the cases that need a
+scripted engine to be forced (a lease lost at a given moment, a stop in the middle of a turn, a
+container that is not confirmed gone); it is not the proof that a turn works end to end.
 """
 
 import io
@@ -18,7 +24,7 @@ import signal
 import socket
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from functools import partial
@@ -36,12 +42,10 @@ from code_reviewer_runner.capabilities import (
     ENGINES_VARIABLE,
 )
 from code_reviewer_runner.dynamic_review.budget import BudgetLedger, UnitCosts
-from code_reviewer_runner.dynamic_review.static_isolation import ImplementerNetwork
 from code_reviewer_runner.implementer import session as session_module
 from code_reviewer_runner.implementer.agent import AgentTurn
-from code_reviewer_runner.implementer.egress_config import EgressSettings
+from code_reviewer_runner.implementer.door_state import DoorState
 from code_reviewer_runner.implementer.git_workspace import (
-    AgentUser,
     BranchPush,
     GitIdentity,
     GitWorkspace,
@@ -57,7 +61,8 @@ from code_reviewer_runner.implementer.job_run import (
     TurnSetup,
     run_implementer_job,
 )
-from code_reviewer_runner.implementer.session import SessionSeams, agent_limits
+from code_reviewer_runner.implementer.limits import agent_limits
+from code_reviewer_runner.implementer.session import SessionSeams
 from code_reviewer_runner.job import JobError
 from code_reviewer_runner.job_loop.host import IMPLEMENTER_TERMINATE_GRACE_SECONDS
 from code_reviewer_runner.job_loop.settings import WorkerSettings
@@ -102,9 +107,9 @@ class FakeGit(GitWorkspace):
             WorkspaceSpec(
                 "https://github.com/acme/widgets.git", TOKEN, "main", "implementer/a1b2c3"
             ),
-            WorkspaceLayout(agent_home=base / "home", work_dir=base / "work", run_dir=base / "run"),
-            AgentUser(os.geteuid() or 1, os.getegid() or 1),
+            WorkspaceLayout(work_dir=base / "work", run_dir=base / "run"),
             GitIdentity("code-reviewer Implementer", "i@example.invalid"),
+            cast("Any", None),  # the reader: every command that would use it is replaced below
             before_push=before_push,
         )
         self._start: str | None = START
@@ -122,9 +127,11 @@ class FakeGit(GitWorkspace):
         # The task's branch was looked at and not taken over: (reason, head or None).
         self.form_rejected: tuple[str, str | None] | None = None
         self.rescue_name: str | None = None
+        self.readers_quiet = True
         self.dropped: tuple[int, int] = (0, 0)
         self.form_gone = False
-        self.sweeps = 0
+        # What the volume of the VM has left, as the workspace would say (None: it cannot say).
+        self.volume_free: int | None = None
         self._prepare_error: JobError | None = None
 
     def fail_prepare(self, error: JobError) -> None:
@@ -142,6 +149,9 @@ class FakeGit(GitWorkspace):
         self.tip = sha
         self.commits = [*self.commits, CommitInfo(sha, subject)]
         self.files = [FileChange("src/a.ts", ChangeKind.ADDED)]
+
+    def volume_free_bytes(self) -> int | None:
+        return self.volume_free
 
     def dirty(self) -> bool:
         if self.dirty_error is not None:
@@ -164,13 +174,9 @@ class FakeGit(GitWorkspace):
         self.events.append("rescue")
         return self.rescue_name
 
-    def sweep_engine_user(self) -> bool:
-        self.events.append("sweep")
-        self.sweeps += 1
-        return True
-
-    def engine_inputs_present(self) -> list[str]:
-        return []
+    def quiet_readers(self, *, seconds: float) -> bool:
+        self.events.append("quiet")
+        return self.readers_quiet
 
     def push_all(
         self, *, seconds: float, confirm_seconds: float = 0.0, confirm_pause: float = 0.0
@@ -192,7 +198,6 @@ class FakeGit(GitWorkspace):
             mine.form_head = self.tip
             mine.form_ref = "refs/runner/in/0"
             self._ask_lease(deadline, confirm_seconds, confirm_pause)
-            self.sweep_engine_user()
             self.events.append("push")
             self.pushes.append(self.tip)
             mine.branches.append(BranchPush(self.spec.branch, self.tip, True, None))
@@ -204,6 +209,54 @@ class FakeGit(GitWorkspace):
             self.pushes.append(sha)
             mine.branches.append(BranchPush(name, sha, True, None))
         return self.push_report()
+
+
+@dataclass
+class FakePlace:
+    """The agent's container of the test: it exists and goes away, and holds nothing. `remove`
+    notes the events of the turn as they were when it was asked to."""
+
+    events: list[str] = field(default_factory=lambda: [])
+    removals: list[tuple[str, ...]] = field(default_factory=lambda: [])
+
+    def create(self) -> None:
+        return None
+
+    def write_files(self, files: Mapping[str, tuple[bytes, int]]) -> None:
+        return None
+
+    def start_engine(self, argv: list[str], environment: Mapping[str, str]) -> str:
+        return "http://127.0.0.1:4096"
+
+    def engine_running(self) -> bool:
+        return True
+
+    def settle(self, seconds: float) -> None:
+        return None
+
+    def engine_end_note(self) -> str | None:
+        return None
+
+    def stop(self) -> bool:
+        return True
+
+    def remove(self) -> None:
+        self.removals.append(tuple(self.events))
+
+
+def fake_door(**options: Any) -> "FakeDoor":
+    return FakeDoor()
+
+
+class FakeDoor:
+    """The model door of the test: what `RunningDoor` offers the session, with nothing behind it."""
+
+    def __init__(self) -> None:
+        self.state = DoorState()
+        self.url = "http://10.213.77.2:10180"
+
+    def stop(self) -> None:
+        return None
 
 
 @dataclass
@@ -223,7 +276,7 @@ class FakeAgent:
     def ledger(self) -> Any:
         return self.options["ledger"]
 
-    def start(self) -> None:
+    def start(self, port: int = 0) -> None:
         self.events.append("agent.start")
         self.session_id = "ses_fake"
 
@@ -244,7 +297,7 @@ class FakeAgent:
         return AgentTurn(text=self.script(self, check), note="end")
 
     def stop(self, *, quick: bool = False) -> bool:
-        self.events.append("stop(quick)" if quick else "stop")
+        self.events.append("stop")
         self.stopped.append(quick)
         return self.ends_clean
 
@@ -285,6 +338,8 @@ class Turn:
     output: str
     events: list[str]
     hard_stops: list[int]
+    # The events of the turn at the time the agent's container was asked to be removed, per request.
+    removals: list[tuple[str, ...]] = field(default_factory=lambda: [])
 
     @property
     def lines(self) -> list[str]:
@@ -323,6 +378,8 @@ def environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
             monkeypatch.delenv(name)
     monkeypatch.setenv(ENGINES_VARIABLE, f"{ENGINE_DIFF},{ENGINE_DYNAMIC},{ENGINE_IMPLEMENTER}")
     monkeypatch.setenv("RUNNER_JOB_TIMEOUT_SECONDS", "600")
+    monkeypatch.setenv("RUNNER_IMPLEMENTER_SANDBOX_PROOF", "proven")
+    monkeypatch.setenv("RUNNER_IMPLEMENTER_AGENT_MEMORY_MB", "2560")
     yield
 
 
@@ -348,6 +405,7 @@ def play(
         ends_clean: bool = True,
     ) -> Turn:
         events: list[str] = []
+        removals: list[tuple[str, ...]] = []
         made: list[FakeGit] = []
         agents: list[FakeAgent] = []
         hard_stops: list[int] = []
@@ -370,9 +428,7 @@ def play(
             if configure is not None:
                 configure(git)
             made.append(git)
-            return TurnSetup(
-                git, None, ("opencode",), None, EgressSettings(ImplementerNetwork.NONE, None)
-            )
+            return TurnSetup(git, lambda: FakePlace(events, removals), ("opencode",))
 
         def agent_factory(**options: Any) -> FakeAgent:
             agent = FakeAgent(script, events, made[0], options, ends_clean=ends_clean)
@@ -380,10 +436,10 @@ def play(
             return agent
 
         monkeypatch.setattr(session_module, "ImplementerAgent", agent_factory)
+        monkeypatch.setattr(session_module, "start_door", fake_door)
         seams = JobSeams(
             setup=setup,
             session_seams=SessionSeams(
-                upstream_for=lambda _url: cast("Any", object()),
                 confirm_seconds=confirm_seconds,
                 confirm_pause=0.05,
                 lease_poll_seconds=0.05,
@@ -404,7 +460,14 @@ def play(
         code = runner.main([], stdin=io.StringIO(job_text(cost_limit=cost_limit)), stdout=output)
         git = made[0] if made else FakeGit(tmp_path, None)
         return Turn(
-            git, agents[0] if agents else None, lease, code, output.getvalue(), events, hard_stops
+            git,
+            agents[0] if agents else None,
+            lease,
+            code,
+            output.getvalue(),
+            events,
+            hard_stops,
+            removals,
         )
 
     yield run
@@ -453,8 +516,17 @@ def test_a_job_in_and_a_valid_result_out_with_the_commit_pushed_once(play: Any) 
     assert result["implementer"]["opencode"]["sessionId"] == "ses_fake"
     assert result["usage"]["aiCalls"] >= 1
     assert turn.git.pushes == [TIP]
-    assert turn.events == ["agent.start", "turn", "stop", "rescue", "sweep", "push"]
+    assert turn.events == ["agent.start", "turn", "stop", "quiet", "rescue", "push"]
     assert turn.git.prepared
+
+
+# #745-T22: the container is killed before anything is read and removed after the push
+def test_the_agents_container_is_removed_after_the_push_not_before(play: Any) -> None:
+    turn = play(commits_then_ends())
+
+    assert wait_for(lambda: bool(turn.removals)), "the container is taken away in the end"
+    assert turn.removals[0][-1] == "push" and "stop" in turn.removals[0]
+    assert turn.events[:3] == ["agent.start", "turn", "stop"]
 
 
 # #765-T04: the result is the last thing a turn does, and it is written exactly once.
@@ -639,8 +711,7 @@ def test_a_bug_after_the_model_was_used_is_never_the_free_runner_error(
 ) -> None:
     def setup(job: Any, env: Any, gate: Callable[[], None]) -> TurnSetup:
         git = FakeGit(tmp_path, gate)
-        egress = EgressSettings(ImplementerNetwork.NONE, None)
-        return TurnSetup(git, None, ("opencode",), None, egress)
+        return TurnSetup(git, FakePlace, ("opencode",))
 
     seams = JobSeams(setup=setup, session=SpentSession)
     monkeypatch.setattr(runner, "run_implementer_job", partial(run_implementer_job, seams=seams))
@@ -927,7 +998,7 @@ def test_sigterm_ends_the_engine_pushes_what_is_committed_and_reports_runner_shu
     assert turn.git.pushes == [TIP]
     # The engine first (quickly: seconds, not minutes), then the push, nothing in between: the
     # leftover is not committed on a stop.
-    assert turn.events == ["agent.start", "turn", "stop(quick)", "rescue", "sweep", "push"]
+    assert turn.events == ["agent.start", "turn", "stop", "quiet", "rescue", "push"]
     assert result["implementer"]["pushed"] is True
     assert result["implementer"]["headCommit"] == TIP
     assert valid_result(result)
@@ -1100,10 +1171,37 @@ def test_work_saved_from_a_detached_head_is_in_the_summary_and_the_notes(play: A
     turn = play(commits_then_ends(), configure=configure)
 
     assert "implementer/a1b2c3-leftover-1234abcd" in turn.result["implementer"]["summary"]
-    assert turn.events[:4] == ["agent.start", "turn", "stop", "rescue"]
+    assert turn.events[:5] == ["agent.start", "turn", "stop", "quiet", "rescue"]
 
 
-def test_the_agents_user_is_swept_again_after_the_leftover_and_before_the_push(play: Any) -> None:
+# #745-T27: a disk that is full is said, not hidden
+def test_a_branch_that_found_no_room_is_named_and_the_disk_is_said_to_be_full(play: Any) -> None:
+    def configure(git: FakeGit) -> None:
+        git.other_branches = {"experiment/big": "b" * 40}
+        git.rejected = {"experiment/big": "out_of_space"}
+        git.volume_free = 10 * 1024**2
+
+    turn = play(commits_then_ends(), configure=configure)
+
+    log = turn.result["logTail"]
+    assert "experiment/big: rejected (out_of_space)" in log
+    assert "the disk of the workspace had no room" in log
+    assert "the VM's disk had 10 MB left at the end" in log
+    assert turn.result["implementer"]["pushed"] is True, "the work that arrived is still reported"
+
+
+def test_a_disk_with_room_adds_no_note(play: Any) -> None:
+    def configure(git: FakeGit) -> None:
+        git.volume_free = 50 * 1024**3
+
+    turn = play(commits_then_ends(), configure=configure)
+
+    assert "disk" not in turn.result["logTail"]
+
+
+def test_the_leftover_is_committed_after_the_agents_container_is_gone_and_before_the_push(
+    play: Any,
+) -> None:
     turn = play(commits_then_ends(), dirty=True)
 
     assert turn.events == [
@@ -1111,14 +1209,35 @@ def test_the_agents_user_is_swept_again_after_the_leftover_and_before_the_push(p
         "turn",
         "turn",
         "stop",
+        "quiet",
         "rescue",
         "commit_all",
-        "sweep",
+        "quiet",
         "push",
     ]
 
 
-def test_when_the_agents_processes_could_not_all_be_ended_nothing_is_committed_as_that_user(
+# #745: a process a filter left in a reader must not live on into the commit or the push
+def test_a_clean_tree_needs_one_quiet_and_none_for_a_commit_that_is_not_made(
+    play: Any,
+) -> None:
+    turn = play(commits_then_ends(), dirty=False)
+
+    assert turn.events.count("quiet") == 1 and "commit_all" not in turn.events
+    assert turn.events.index("quiet") < turn.events.index("rescue")
+
+
+def test_readers_that_cannot_be_made_quiet_are_said_and_the_end_goes_on(play: Any) -> None:
+    def configure(git: Any) -> None:
+        git.readers_quiet = False
+
+    turn = play(commits_then_ends(), dirty=True, configure=configure)
+
+    assert "could not be made quiet" in turn.result["logTail"]
+    assert turn.git.pushes, "the push is still tried; it fails closed on a reader it cannot use"
+
+
+def test_when_the_agents_container_is_not_confirmed_gone_nothing_is_committed(
     play: Any,
 ) -> None:
     def script(agent: FakeAgent, check: Callable[[], None]) -> str:

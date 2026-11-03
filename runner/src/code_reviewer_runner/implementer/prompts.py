@@ -4,9 +4,9 @@
 
 The agent keeps the stock prompt of OpenCode for its model (the engine's own tool guidance and
 style); what the runner adds is this text, handed to the engine as an instruction file the runner
-writes into its own trusted directory (`config.build_engine_config`, `instructions`). Two variants
-exist, one per network setting; nothing of the repository, the job or the model is interpolated into
-either, and the person's instruction travels as the user message and nowhere else.
+writes into its own trusted directory (`config.build_engine_config`, `instructions`). Nothing of the
+repository, the job or the model is interpolated into it, and the person's instruction travels as
+the user message and nowhere else.
 
 The text states what the system does with the repository, and the few facts the stock text gets
 wrong for this place (it says to commit only when asked; nobody can answer a question here). It
@@ -14,8 +14,6 @@ steers nothing else about the approach: no plan, no step count, no order of work
 decision: the cost limit is the only brake). The extra message is the one turn the runner may add
 when the working tree is dirty after the agent ended its turn.
 """
-
-from code_reviewer_runner.dynamic_review.static_isolation import ImplementerNetwork
 
 _COMMON = """\
 # Rules of this workplace
@@ -41,25 +39,12 @@ Work committed on a detached HEAD is saved on a new branch named after the task'
 
 When the repository has tests, run them before you finish.
 
-The files opencode.json and opencode.jsonc and the directory .opencode at the root of the \
-repository are not available in this run and cannot be changed: they are not in your working \
-tree, and anything you create under those names is not kept (git add -A refuses while such a path \
-exists, so do not create one). If the task needs a change there, leave it and say so in your \
-closing summary.
-
-"""
-
-_REGISTRIES = """\
-The only network access is to package registries, through a proxy that is already configured for \
-your tools. There is no other network access, no web search and no credential of any kind; do not \
-try to find or use one.
-
-"""
-
-_NO_NETWORK = """\
-There is no network access at all, no web search and no credential of any kind: what is not \
-installed already cannot be installed. Do not try to find or use a credential.
-
+You are root in your own container, with a Docker daemon of your own (docker run and docker build \
+work; start a database or any service you need for the tests), and you may install what you need \
+with the tools that are there. Your container has no connection to the internet and \
+no credential of any kind: what is not installed already cannot be downloaded (a package \
+registry is not reachable), and nothing outside this container can be contacted except the model. \
+Do not try to find or use a credential.
 """
 
 _CLOSING = """\
@@ -68,10 +53,9 @@ anything, is left open.
 """
 
 
-def instructions_text(network: ImplementerNetwork) -> str:
-    """The runner's addition to the stock prompt, for the network setting of the container."""
-    reach = _NO_NETWORK if network is ImplementerNetwork.NONE else _REGISTRIES
-    return _COMMON + reach + _CLOSING
+def instructions_text() -> str:
+    """The runner's addition to the stock prompt."""
+    return _COMMON + _CLOSING
 
 
 # The one extra message of a turn whose working tree is still dirty (`session.py`). The words

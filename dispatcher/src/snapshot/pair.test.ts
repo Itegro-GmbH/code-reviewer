@@ -5,6 +5,7 @@ import {
   IMAGE_INPUT_PATHS,
   parseDotenv,
   pairFrom,
+  pairFromValues,
   pairToEnv,
   pairToMeta,
   pairsEqual,
@@ -18,18 +19,43 @@ const GOOD = {
   snapshotId: "snap_example01",
   imageDigest: DIGEST,
   commit: COMMIT,
+  sysbox: "proven" as const,
 };
 
 describe("the snapshot pair", () => {
   // #403-T13
-  it("takes the three values from the variables of the Dispatcher project", () => {
+  it("takes the four values from the variables of the Dispatcher project", () => {
     expect(
       pairFrom({
         SANDBOX_SNAPSHOT_ID: "snap_example01",
         SANDBOX_IMAGE_DIGEST: DIGEST,
         SANDBOX_SNAPSHOT_COMMIT: COMMIT,
+        SANDBOX_SYSBOX_PROOF: "proven",
       }),
     ).toEqual(GOOD);
+  });
+
+  // #745-T01
+  it.each([
+    ["no verdict", undefined],
+    ["an empty verdict", ""],
+    ["a verdict that is not one", "Proven"],
+    ["a verdict that holds more", "proven "],
+    ["a stale word of the old gate", "unrecorded"],
+  ])("reads %s as unproven, never as proven", (_name, verdict) => {
+    expect(
+      pairFromValues("snap_example01", DIGEST, COMMIT, verdict)?.sysbox,
+    ).toBe("unproven");
+  });
+
+  // #745-T01
+  it("reads exactly `proven` as proven and `unproven` as unproven", () => {
+    expect(
+      pairFromValues("snap_example01", DIGEST, COMMIT, "proven")?.sysbox,
+    ).toBe("proven");
+    expect(
+      pairFromValues("snap_example01", DIGEST, COMMIT, "unproven")?.sysbox,
+    ).toBe("unproven");
   });
 
   // #403-T13
@@ -91,11 +117,13 @@ describe("the snapshot pair", () => {
       SANDBOX_SNAPSHOT_ID: "snap_example01",
       SANDBOX_IMAGE_DIGEST: DIGEST,
       SANDBOX_SNAPSHOT_COMMIT: COMMIT,
+      SANDBOX_SYSBOX_PROOF: "proven",
     });
     expect(pairToMeta(GOOD)).toEqual({
       sandboxSnapshotId: "snap_example01",
       sandboxImageDigest: DIGEST,
       sandboxSnapshotCommit: COMMIT,
+      sandboxSysboxProof: "proven",
     });
   });
 
@@ -105,6 +133,8 @@ describe("the snapshot pair", () => {
     expect(pairsEqual(GOOD, { ...GOOD, snapshotId: "snap_example02" })).toBe(
       false,
     );
+    // A verdict is part of the pair: the same snapshot with another verdict is another pair.
+    expect(pairsEqual(GOOD, { ...GOOD, sysbox: "unproven" })).toBe(false);
     expect(pairsEqual(GOOD, undefined)).toBe(false);
   });
 });

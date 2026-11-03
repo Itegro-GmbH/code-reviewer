@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { FakeSandboxService } from "../../../fakes/vercel-sandbox/service.ts";
 import { createLogger } from "../core/logger.ts";
 import {
+  AGENT_IMAGE_ID,
   IMAGE_ID,
   MANIFEST_HASH,
   MANIFEST_OK,
@@ -77,6 +78,7 @@ describe("the golden snapshot pipeline", () => {
       `exec:${STEPS.startDaemon}`,
       `exec:${STEPS.buildImage}`,
       `exec:${STEPS.inspectImage}`,
+      `exec:${STEPS.inspectAgentImage}`,
       `exec:${STEPS.cleanBuilder}`,
       `exec:${STEPS.checkNoContainers}`,
       `exec:${STEPS.stopDaemon}`,
@@ -85,6 +87,7 @@ describe("the golden snapshot pipeline", () => {
       `exec:${STEPS.scanFilesystem}`,
       `exec:${STEPS.startDaemonCheck}`,
       `exec:${STEPS.inspectRestoredImage}`,
+      `exec:${STEPS.inspectRestoredAgentImage}`,
       `exec:${STEPS.probe}`,
       `exec:${STEPS.sysboxProbe}`,
       `destroy:${check}`,
@@ -99,6 +102,7 @@ describe("the golden snapshot pipeline", () => {
       version: 1,
       snapshotId: [...fake.snapshots.keys()][0],
       imageDigest: IMAGE_ID,
+      agentImageDigest: AGENT_IMAGE_ID,
       builtAt: "2026-10-15T18:00:00.000Z",
       region: "fra1",
       target: "sandbox",
@@ -380,6 +384,7 @@ describe("the golden snapshot pipeline", () => {
     const fake = new FakeSandboxService({ snapshotRegions: ["iad1"] });
     fake.onExec(STEPS.recordBaseManifest, { stdout: MANIFEST_OK });
     fake.onExec(STEPS.inspectImage, { stdout: `${IMAGE_ID}\n` });
+    fake.onExec(STEPS.inspectAgentImage, { stdout: `${AGENT_IMAGE_ID}\n` });
     const error = await failure(run(fake).result);
     expect(error.code).toBe("snapshot_region_mismatch");
     expectNothingPublished(fake);
@@ -873,9 +878,13 @@ describe("retention in the pipeline", () => {
     const fake = new RefusingList();
     fake.onExec(STEPS.recordBaseManifest, { stdout: MANIFEST_OK });
     fake.onExec(STEPS.inspectImage, { stdout: `${IMAGE_ID}\n` });
+    fake.onExec(STEPS.inspectAgentImage, { stdout: `${AGENT_IMAGE_ID}\n` });
     fake.onExec(STEPS.checkNoContainers, { stdout: "" });
     fake.onExec(STEPS.scanFilesystem, { stdout: "SCAN_DONE\n" });
     fake.onExec(STEPS.inspectRestoredImage, { stdout: `${IMAGE_ID}\n` });
+    fake.onExec(STEPS.inspectRestoredAgentImage, {
+      stdout: `${AGENT_IMAGE_ID}\n`,
+    });
     fake.onExec(STEPS.probe, { stdout: PROBE_OK });
     fake.onExec(STEPS.sysboxProbe, { stdout: SYSBOX_PROBE_OK });
     const old = fake.seedBuilder(

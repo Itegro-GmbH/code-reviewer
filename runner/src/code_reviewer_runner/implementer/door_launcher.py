@@ -13,7 +13,8 @@ another user, from step 4 another container). This module is how Control hands t
 1. It reads its own container from the daemon (the image to start the door from: the door is the
    Worker image with another entry point, so there is one image in the snapshot and one to
    verify) and makes the **model network**: `--internal` with `gateway_mode_ipv4=isolated`, so
-   that it has no exit and no route to the VM. Control joins it at a fixed address.
+   that it has no exit and no route to the VM. Control does not join it (the agent's container does,
+   step 4): it talks to the door over the door's standard streams.
 2. It makes the door's container from constants (`door_document`): non-root, read-only root file
    system, every capability dropped, `no-new-privileges`, a small memory and process limit, no
    mount, no published port, no environment, no secret of any kind in its definition. Its network
@@ -41,7 +42,6 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from code_reviewer_runner.dynamic_review.model_door_route import (
-    MODEL_CONTROL_ADDRESS,
     MODEL_DOOR_ADDRESS,
     MODEL_NETWORK_GATEWAY,
     MODEL_NETWORK_NAME,
@@ -95,7 +95,7 @@ BRIDGE_NETWORK: Final = "bridge"
 #
 # * loopback (the embedded DNS) is open;
 # * replies are open: the door answers the agent's connections to the model port, and that is all
-#   it does on the model network. A new connection into it, Control's address included, is
+#   it does on the model network. A new connection into it, the agent's address included, is
 #   dropped before anything else can accept it (DNS and 443 below);
 # * DNS (port 53, the resolver of the VM is on a private address) is open to every other
 #   address, as it was; narrowing it belongs to the network door (step 7);
@@ -272,7 +272,6 @@ class RunningDoor:
         *,
         container: str,
         network: str | None,
-        own: str,
         port: int,
         seams: DoorSeams,
     ) -> None:
@@ -281,7 +280,6 @@ class RunningDoor:
         self.state = state
         self._container = container
         self._network = network
-        self._own = own
         self._seams = seams
         self._stopping = threading.Event()
         self._closed = False
@@ -350,18 +348,17 @@ class RunningDoor:
         self._streams.close()
 
     def _remove(self) -> None:
-        _remove_quietly(self._api, self._container, self._network, self._own)
+        _remove_quietly(self._api, self._container, self._network)
 
 
-def _remove_quietly(api: DockerApi, container: str | None, network: str | None, own: str) -> None:
-    """Remove the door's container, leave the network and remove it, each on its own: the VM is
-    thrown away after the turn, so a step that fails costs nothing and stops nothing."""
+def _remove_quietly(api: DockerApi, container: str | None, network: str | None) -> None:
+    """Remove the door's container and the network, each on its own: the VM is thrown away after
+    the turn, so a step that fails costs nothing and stops nothing. The agent's container, which
+    sits on the network, has been removed before (a network with a member is not removed)."""
     steps: list[Callable[[], None]] = []
     if container is not None:
         steps.append(lambda: api.remove_container(container))
     if network is not None:
-        if own:
-            steps.append(lambda: api.disconnect_network(network, own))
         steps.append(lambda: api.remove_network(network))
     for step in steps:
         try:
@@ -386,20 +383,12 @@ def start_door(
     network: str | None = None
     container: str | None = None
     streams: AttachedStreams | None = None
-    own = ""
     try:
         me = api.inspect_container(seams.hostname())
-        image, own = str(me.get("Image", "")), str(me.get("Id", ""))
-        if not image or not own:
+        image = str(me.get("Image", ""))
+        if not image or not me.get("Id"):
             raise _unavailable("the daemon does not know this container")
         network = api.create_network(network_document())
-        api.connect_network(
-            network,
-            {
-                "Container": own,
-                "EndpointConfig": {"IPAMConfig": {"IPv4Address": MODEL_CONTROL_ADDRESS}},
-            },
-        )
         container = api.create_container(door_document(image), DOOR_CONTAINER_NAME)
         api.connect_network(
             network,
@@ -411,7 +400,7 @@ def start_door(
         streams = api.attach(container)
         state = DoorState()
         running = RunningDoor(
-            api, streams, state, container=container, network=network, own=own, port=port,
+            api, streams, state, container=container, network=network, port=port,
             seams=seams,
         )  # fmt: skip
         running.begin()
@@ -428,20 +417,20 @@ def start_door(
         with contextlib.suppress(OSError):
             streams.write(document)
     except DockerError as error:
-        _cleanup(api, container, network, own, streams)
+        _cleanup(api, container, network, streams)
         raise _unavailable(f"the daemon refused a step ({error.status})") from None
     except JobError:
-        _cleanup(api, container, network, own, streams)
+        _cleanup(api, container, network, streams)
         raise
     except Exception:
         # Anything else (an answer the client cannot read is a `ValueError`) leaves the same
         # things behind and ends the same way: nothing is kept for a door that was not started.
-        _cleanup(api, container, network, own, streams)
+        _cleanup(api, container, network, streams)
         raise _unavailable(
             "a step of the start failed in a way the daemon did not explain"
         ) from None
     except BaseException:
-        _cleanup(api, container, network, own, streams)
+        _cleanup(api, container, network, streams)
         raise
     state.wait_ready(seams.ready_seconds)
     refusal = state.refusal
@@ -488,9 +477,8 @@ def _cleanup(
     api: DockerApi,
     container: str | None,
     network: str | None,
-    own: str,
     streams: AttachedStreams | None,
 ) -> None:
     if streams is not None:
         streams.close()
-    _remove_quietly(api, container, network, own)
+    _remove_quietly(api, container, network)

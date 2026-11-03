@@ -116,7 +116,7 @@ describe("rendering the hardened container spec", () => {
     ]);
     expect(args).toContain("--read-only");
     expect(valuesOf(args, "--pids-limit")).toEqual(["512"]);
-    expect(valuesOf(args, "--stop-timeout")).toEqual(["90"]);
+    expect(valuesOf(args, "--stop-timeout")).toEqual(["150"]);
     expect(valuesOf(args, "--network")).toEqual(["bridge"]);
     expect(args.slice(-2)).toEqual([IMAGE, ENTRY_MODE_WORKER_ONCE]);
   });

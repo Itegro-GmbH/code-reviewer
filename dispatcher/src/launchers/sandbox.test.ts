@@ -23,9 +23,17 @@ import {
   SANDBOX_REGION,
   SANDBOX_KIND_DEFAULTS,
   IMPLEMENTER_LAUNCH_EXTRA_SECONDS,
+  RUN_DIRECTORY_STEPS_SECONDS,
   SYSBOX_PREPARE_SECONDS,
   WORK_VOLUME_STEPS_SECONDS,
   minimumVmTimeoutMargin,
+  agentMemoryMb,
+  IMPLEMENTER_VM_HEADROOM_MB,
+  MODEL_DOOR_MEMORY_MB,
+  READER_COUNT,
+  READER_MEMORY_MB,
+  SANDBOX_MEMORY_PER_VCPU_MB,
+  implementerEnvironment,
   planForKind,
   validateKindConfig,
   VM_TIMEOUT_MARGIN_SECONDS,
@@ -663,9 +671,10 @@ describe("the Sandbox-Launcher", () => {
     expect(service.creates).toStrictEqual([]);
   });
 
-  // #745-T15: the model door is a second container of an implementer turn, and the VM holds it beside the Worker.
-  it("keeps room for the model door beside the Worker of an implementer turn, and for no door beside a review's", async () => {
-    // 2 vCPU are 4096 MB: 256 for the OS and dockerd, 256 for the door. 3600m fits a review but not a turn.
+  // #745-T15: the model door and the two readers are more containers of an implementer turn, and the VM holds them beside the Worker.
+  it("keeps room for the model door and the two readers beside the Worker of an implementer turn, and for none beside a review's", async () => {
+    // 2 vCPU are 4096 MB: a review keeps 256 for the OS and dockerd; a turn keeps 512 for them and the Sysbox daemons, 256 for
+    // the door and 512 for the two readers. 3600m fits a review but not a turn; 2816m is the most a turn takes.
     const config = {
       launcher: { vcpus: 2 },
       container: { memory: { limit: "3600m", reservation: "3g" } },
@@ -678,9 +687,15 @@ describe("the Sandbox-Launcher", () => {
     expect(() =>
       validateKindConfig("implementer", {
         launcher: { vcpus: 2 },
-        container: { memory: { limit: "3584m", reservation: "3g" } },
+        container: { memory: { limit: "2816m", reservation: "2g" } },
       }),
     ).not.toThrow();
+    expect(() =>
+      validateKindConfig("implementer", {
+        launcher: { vcpus: 2 },
+        container: { memory: { limit: "2817m", reservation: "2g" } },
+      }),
+    ).toThrow(LaunchError);
   });
 
   // #329-T11
@@ -729,6 +744,90 @@ describe("the Sandbox-Launcher", () => {
     ).toStrictEqual(["pr-agent"]);
   });
 
+  // #745-T29: with the VM's disk full Docker can still run a command in a container (the pipes of an exec are files below
+  // /run), so those directories are memory, made before the daemon starts, on an implementer's VM only
+  it("puts the directories Docker keeps its runtime in on memory before the daemon starts, for an implementer's VM and no other", async () => {
+    await launch(build(), spec({ kind: "implementer" }));
+    await launch(
+      build(),
+      spec({ kind: "diff", jobId: "00000000-0000-4000-8000-000000000002" }),
+    );
+
+    const first = service.execs.filter(
+      (call) => call.vm === service.creates[0]?.name,
+    );
+    expect(
+      first.slice(0, 4).map((call) => [call.label, call.cmd, ...call.args]),
+    ).toStrictEqual([
+      [
+        "run-directories",
+        "mkdir",
+        "-p",
+        "--",
+        "/run/docker",
+        "/run/containerd",
+      ],
+      [
+        "run-directory-docker",
+        "mount",
+        "-t",
+        "tmpfs",
+        "-o",
+        "size=64m,mode=0711,nosuid,nodev",
+        "tmpfs",
+        "/run/docker",
+      ],
+      [
+        "run-directory-containerd",
+        "mount",
+        "-t",
+        "tmpfs",
+        "-o",
+        "size=64m,mode=1777,nosuid,nodev",
+        "tmpfs",
+        "/run/containerd",
+      ],
+      // The daemon starts with its temporary directory on memory too (`runc exec` writes a file there).
+      [
+        "vm-prepare",
+        "env",
+        "TMPDIR=/run/containerd",
+        "/usr/local/sbin/vm-prepare.sh",
+      ],
+    ]);
+    for (const call of first.slice(0, 3)) expect(call.sudo).toBe(true);
+    const second = service.execs.filter(
+      (call) => call.vm === service.creates[1]?.name,
+    );
+    expect(second.some((call) => call.label.startsWith("run-director"))).toBe(
+      false,
+    );
+  });
+
+  // #745-T29
+  it.each([
+    "run-directories",
+    "run-directory-docker",
+    "run-directory-containerd",
+  ])(
+    "stops the VM with the retryable docker_not_ready when %s fails, and runs nothing after it",
+    async (label) => {
+      service.onExec(label, { exitCode: 32, stderr: "mount: nope" });
+
+      const error = failure(
+        await launch(build(), spec({ kind: "implementer" })),
+      );
+
+      expect(error.code).toBe("docker_not_ready");
+      expect(error.retryable).toBe(true);
+      expect(service.stops).toStrictEqual([service.creates[0]?.name]);
+      expect(service.execs.some((call) => call.label === "vm-prepare")).toBe(
+        false,
+      );
+      expect(service.starts).toHaveLength(0);
+    },
+  );
+
   // #760-T05
   it("makes the work volume of an implementer job after the host is prepared (Sysbox included) and before docker run, all on the job's VM", async () => {
     const result = await launch(build(), spec({ kind: "implementer" }));
@@ -737,10 +836,16 @@ describe("the Sandbox-Launcher", () => {
     const name = service.creates[0]?.name ?? "";
     expect(service.events).toStrictEqual([
       `create:${name}`,
+      "exec:run-directories",
+      "exec:run-directory-docker",
+      "exec:run-directory-containerd",
       "exec:vm-prepare",
       "exec:image-id",
       "exec:sysbox-prepare",
       "exec:work-volume-dir",
+      "exec:work-volume-reserve-image",
+      "exec:work-volume-reserve-fs",
+      "exec:work-volume-reserve-mount",
       "exec:work-volume-mount",
       "exec:work-volume-options",
       "exec:work-volume-check",
@@ -770,14 +875,14 @@ describe("the Sandbox-Launcher", () => {
   });
 
   // #760-T02
-  it("starts an implementer job in the implementer profile: 2 vCPU, a 3 GB container, 2048 processes, the work volume, the Docker socket and the four names", async () => {
+  it("starts an implementer job in the implementer profile: 2 vCPU, a 768 MB container, 2048 processes, the work volume, the Docker socket and the names", async () => {
     await launch(build(), spec({ kind: "implementer" }));
 
     const args = dockerRun()?.args ?? [];
     expect(service.creates[0]?.vcpus).toBe(2);
-    expect(valuesOf(args, "--memory")).toStrictEqual(["3g"]);
-    expect(valuesOf(args, "--memory-reservation")).toStrictEqual(["2560m"]);
-    expect(valuesOf(args, "--memory-swap")).toStrictEqual(["3g"]);
+    expect(valuesOf(args, "--memory")).toStrictEqual(["768m"]);
+    expect(valuesOf(args, "--memory-reservation")).toStrictEqual(["512m"]);
+    expect(valuesOf(args, "--memory-swap")).toStrictEqual(["768m"]);
     expect(valuesOf(args, "--pids-limit")).toStrictEqual(["2048"]);
     expect(valuesOf(args, "--mount")).toStrictEqual([
       `type=volume,source=code-reviewer-work-${JOB_ID},target=/work`,
@@ -789,9 +894,9 @@ describe("the Sandbox-Launcher", () => {
     expect(valuesOf(args, "--env")).toStrictEqual([
       "HOME=/home/runner",
       "RUNNER_DIFF_JOB_USER=10001:10001",
-      "RUNNER_IMPLEMENTER_EGRESS_PORT=10182",
+      "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB=2048",
       "RUNNER_IMPLEMENTER_MODEL_DOOR=docker",
-      "RUNNER_IMPLEMENTER_NETWORK=registries",
+      "RUNNER_IMPLEMENTER_SANDBOX_PROOF=unproven",
       "RUNNER_IMPLEMENTER_WORK_DIR=/work",
       "RUNNER_JOB_TIMEOUT_SECONDS=1200",
     ]);
@@ -857,7 +962,7 @@ describe("the Sandbox-Launcher", () => {
       spec({
         kind: "implementer",
         jobId: "00000000-0000-4000-8000-000000000002",
-        config: { container: { memory: { limit: "3500m" } } },
+        config: { container: { memory: { limit: "2800m" } } },
       }),
     );
 
@@ -869,14 +974,14 @@ describe("the Sandbox-Launcher", () => {
     ]);
     // The limit alone: the default reservation stays, and the swap follows the limit.
     expect(valuesOf(service.starts[1]?.args ?? [], "--memory")).toStrictEqual([
-      "3500m",
+      "2800m",
     ]);
     expect(
       valuesOf(service.starts[1]?.args ?? [], "--memory-swap"),
-    ).toStrictEqual(["3500m"]);
+    ).toStrictEqual(["2800m"]);
     expect(
       valuesOf(service.starts[1]?.args ?? [], "--memory-reservation"),
-    ).toStrictEqual(["2560m"]);
+    ).toStrictEqual(["512m"]);
   });
 
   // #760-T04
@@ -916,12 +1021,82 @@ describe("the Sandbox-Launcher", () => {
     expect(() => validateKindConfig("implementer", {})).not.toThrow();
     expect(planForKind("implementer", {})).toMatchObject({
       vcpus: 2,
-      overrides: { memory: { limit: "3g", reservation: "2560m" } },
+      overrides: { memory: { limit: "768m", reservation: "512m" } },
+      agentMemoryMb: 2048,
     });
     expect(SANDBOX_KIND_DEFAULTS.implementer).toStrictEqual({
       vcpus: 2,
-      memory: { limit: "3g", reservation: "2560m" },
+      memory: { limit: "768m", reservation: "512m" },
     });
+  });
+
+  // #745 step 4: what is left of the VM for the agent's container, at each size the platform has. Every limit is counted in
+  // full, and there are two readers: OS and daemons 512, Control 768, the door 256, the two readers 512 (2048 MB), 2048 MB per
+  // vCPU. At 1 vCPU nothing is left, and the Worker refuses the size (`sandbox_size_unsupported`).
+  it.each<[number, number]>([
+    [1, 0],
+    [2, 2048],
+    [4, 6144],
+    [6, 10240],
+    [8, 14336],
+  ])(
+    "leaves the agent's container %i vCPU: %i MB after the OS, Control, the door and the two readers",
+    (vcpus, megabytes) => {
+      expect(
+        planForKind("implementer", { launcher: { vcpus } }).agentMemoryMb,
+      ).toBe(megabytes);
+      expect(agentMemoryMb(vcpus, 768)).toBe(megabytes);
+    },
+  );
+
+  // #745 step 4: the limits of a VM add up to the VM, at every size
+  it.each([2, 4, 6, 8])(
+    "has the limits of all its containers and the OS add up to no more than the VM at %i vCPU",
+    (vcpus) => {
+      const plan = planForKind("implementer", { launcher: { vcpus } });
+      expect(
+        IMPLEMENTER_VM_HEADROOM_MB +
+          768 +
+          MODEL_DOOR_MEMORY_MB +
+          READER_COUNT * READER_MEMORY_MB +
+          plan.agentMemoryMb,
+      ).toBe(vcpus * SANDBOX_MEMORY_PER_VCPU_MB);
+    },
+  );
+
+  // #745 step 4: a Control container that would not fit beside the door and the reader is refused at start
+  it("refuses a Control container that leaves no room for the door and the reader", () => {
+    expect(() =>
+      validateKindConfig("implementer", {
+        launcher: { vcpus: 1 },
+        container: { memory: { limit: "1100m", reservation: "512m" } },
+      }),
+    ).toThrow();
+  });
+
+  // #745 step 4: reviews are never given the names of the sandbox.
+  it("hands the snapshot's Sysbox verdict to an implementer job and to no other kind", async () => {
+    await launch(
+      build({ sysboxProof: "proven" }),
+      spec({ kind: "implementer" }),
+    );
+    expect(valuesOf(dockerRun()?.args ?? [], "--env")).toContain(
+      "RUNNER_IMPLEMENTER_SANDBOX_PROOF=proven",
+    );
+  });
+
+  // #745-T02: no verdict is no proof
+  it("passes the verdict as it is, and a launch that was given none as unproven", async () => {
+    expect(
+      implementerEnvironment(planForKind("implementer", {}), "unproven"),
+    ).toStrictEqual({
+      RUNNER_IMPLEMENTER_SANDBOX_PROOF: "unproven",
+      RUNNER_IMPLEMENTER_AGENT_MEMORY_MB: "2048",
+    });
+    await launch(build({}), spec({ kind: "implementer" }));
+    expect(valuesOf(dockerRun()?.args ?? [], "--env")).toContain(
+      "RUNNER_IMPLEMENTER_SANDBOX_PROOF=unproven",
+    );
   });
 
   describe("the Sysbox boot of the Implementer's VM", () => {
@@ -1019,10 +1194,16 @@ describe("the Sandbox-Launcher", () => {
     expect(service.running()).toStrictEqual([]);
     expect(service.starts).toHaveLength(0);
     expect(service.execs.map((call) => call.label)).toStrictEqual([
+      "run-directories",
+      "run-directory-docker",
+      "run-directory-containerd",
       "vm-prepare",
       "image-id",
       "sysbox-prepare",
       "work-volume-dir",
+      "work-volume-reserve-image",
+      "work-volume-reserve-fs",
+      "work-volume-reserve-mount",
       "work-volume-mount",
       "work-volume-options",
       "work-volume-check",
@@ -1035,6 +1216,9 @@ describe("the Sandbox-Launcher", () => {
   // #760-T05
   it.each([
     "work-volume-dir",
+    "work-volume-reserve-image",
+    "work-volume-reserve-fs",
+    "work-volume-reserve-mount",
     "work-volume-mount",
     "work-volume-options",
     "work-volume-check",
@@ -1128,7 +1312,7 @@ describe("the Sandbox-Launcher", () => {
     const steps = service.execs.filter((call) =>
       call.label.startsWith("work-volume"),
     );
-    expect(steps).toHaveLength(5);
+    expect(steps).toHaveLength(8);
     for (const call of steps) expect(call.timeoutMs).toBe(10_000);
   });
 
@@ -1152,9 +1336,10 @@ describe("the Sandbox-Launcher", () => {
       }),
     );
 
-    expect(WORK_VOLUME_STEPS_SECONDS).toBe(50);
+    expect(WORK_VOLUME_STEPS_SECONDS).toBe(80);
     expect(SYSBOX_PREPARE_SECONDS).toBe(40);
-    expect(IMPLEMENTER_LAUNCH_EXTRA_SECONDS).toBe(90);
+    expect(RUN_DIRECTORY_STEPS_SECONDS).toBe(9);
+    expect(IMPLEMENTER_LAUNCH_EXTRA_SECONDS).toBe(129);
     const [implementer, diff] = service.creates;
     expect(implementer?.timeoutMs).toBe(
       (3600 + VM_TIMEOUT_MARGIN_SECONDS + IMPLEMENTER_LAUNCH_EXTRA_SECONDS) *

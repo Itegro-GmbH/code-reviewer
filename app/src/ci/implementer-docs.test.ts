@@ -397,8 +397,8 @@ describe("the documents match the merged runner job and canary (#765)", () => {
 
   // #768-T01
   it("states the stop, the lease and the free codes as the runner has them", () => {
-    expect(text).toContain("a grace of 60 seconds");
-    expect(text).toContain("stop timeout is 90 seconds");
+    expect(text).toContain("a grace of 120 seconds");
+    expect(text).toContain("stop timeout is 150 seconds");
     expect(text).toContain("`runner_shutdown`");
     expect(text).toContain("never run twice");
     expect(text).toContain("#799");
@@ -406,10 +406,10 @@ describe("the documents match the merged runner job and canary (#765)", () => {
       "IMPLEMENTER_MAX_ATTEMPTS = 1",
     );
     expect(readText("dispatcher/src/launchers/container-spec.ts")).toContain(
-      "stopTimeoutSeconds: 90",
+      "stopTimeoutSeconds: 150",
     );
     const readme = flat(readText("runner/README.md"));
-    expect(readme).toContain("grace of 60 s after SIGTERM");
+    expect(readme).toContain("grace of 120 s after SIGTERM");
     expect(readme).toContain("neither `maxCostUsd` nor `operatorMaxCostUsd`");
   });
 
@@ -478,7 +478,6 @@ describe("the operator guide states what the owner decided", () => {
       "a VM that dies before the end of the turn loses the work",
     ],
     ["no Go registry", "no Go module proxy"],
-    ["the egress rule", "allowlist of package registries"],
     ["the accepted exfiltration", "npm publish"],
     ["the issue that closes it", "#784"],
     ["the brake", "no step limit"],
@@ -553,9 +552,7 @@ describe("the operator guide states what the owner decided", () => {
       "`workflows_not_allowed`",
       "Root never runs git with the agent's repository",
       "`--upload-pack`",
-      "`no_new_privs`",
       "`branchesDropped`",
-      "once more right before each `git push`",
       "capped at 4 MiB",
       "`<the task's branch>-leftover-<id>`",
     ])
@@ -572,8 +569,9 @@ describe("the operator guide states what the owner decided", () => {
     const workspace = readText(
       "runner/src/code_reviewer_runner/implementer/git_workspace.py",
     );
-    expect(workspace).toContain('"--no-new-privs"');
-    expect(workspace).toContain('f"--upload-pack={self._upload_pack()}"');
+    expect(workspace).toContain(
+      'f"--upload-pack={self._access.upload_pack()}"',
+    );
     expect(workspace).toContain(
       '["push", "--porcelain", self.spec.clone_url, f"{scratch}:refs/heads/{name}"]',
     );
@@ -592,6 +590,7 @@ describe("the operator guide states what the owner decided", () => {
       "unreadable",
       "not_a_commit",
       "out_of_time",
+      "out_of_space",
       "excluded",
     ])
       expect(rules, reason).toContain(`\`${reason}\``);
@@ -627,19 +626,6 @@ describe("the operator guide states what the owner decided", () => {
   });
 
   // #768-T01
-  it("lists the registries of the allowlist as the runner has them", () => {
-    const policy = readText(
-      "runner/src/code_reviewer_runner/implementer/egress_policy.py",
-    );
-    const block = policy.slice(policy.indexOf("DEFAULT_ALLOWLIST"));
-    const hosts = [...block.matchAll(/"([a-z0-9.-]+\.[a-z]+)"/g)].map(
-      (match) => match[1] as string,
-    );
-    expect(hosts.length).toBeGreaterThan(0);
-    for (const host of hosts) expect(guide, host).toContain(`\`${host}\``);
-  });
-
-  // #768-T01
   it("states the limits the code has", () => {
     const claim = readText("app/src/runner-api/claim.ts");
     expect(claim).toContain("IMPLEMENTER_TIME_LIMIT_SECONDS = 3600");
@@ -648,8 +634,8 @@ describe("the operator guide states what the owner decided", () => {
     expect(text).toContain("20,000 characters");
     expect(
       readText("runner/src/code_reviewer_runner/implementer/session.py"),
-    ).toContain("GRACE_SECONDS = 180.0");
-    expect(text).toContain("180 seconds");
+    ).toContain("GRACE_SECONDS = 270.0");
+    expect(text).toContain("270 seconds");
   });
 });
 
@@ -731,10 +717,6 @@ describe("the live smoke test", () => {
       "does not appear to be a git repository",
     ])
       expect(text, error).toContain(error);
-    // The proxy's refusal is the code's.
-    expect(
-      readText("runner/src/code_reviewer_runner/implementer/egress_proxy.py"),
-    ).toContain("403");
   });
 
   // #768-T03

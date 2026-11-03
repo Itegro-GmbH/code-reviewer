@@ -49,7 +49,7 @@ export const WORKER_CONTAINER_SPEC: WorkerContainerSpec = {
   ],
   memory: { limit: "2g", reservation: "1536m", swap: "2g" },
   pids: { limit: 512 },
-  stopTimeoutSeconds: 90,
+  stopTimeoutSeconds: 150,
   network: { mode: "bridge" },
   allowedEnvironment: [
     "HOME",
@@ -74,20 +74,20 @@ export const WORKER_CONTAINER_SPEC: WorkerContainerSpec = {
   overridable: ["memory.limit", "memory.reservation", "memory.swap"],
 };
 
-// The profile of the Implementer (#760, contracts/worker-container.v1.json, `ImplementerContainerSpec`): the spec above
-// with exactly six fields changed (the four of #760, the VM's Docker socket and the matching `forbiddenKeys`, #745), so
-// that the hardening floor cannot differ between the two. The agent builds and
-// tests a repository, which the floor alone cannot host (a read-only root, `noexec` tmpfs of 512 MB, 2 GB, 512
-// processes): one Docker named volume at /work, on the VM's disk and the only writable path that may run a program,
-// room for `pnpm install` and a test run (3 GB; the VM has 4 GB), and 2048 processes. The four names are what the
-// Dispatcher tells the Worker about its work directory, its network and its model door (runner-api.v1.json,
-// `ImplementerEnvironmentName`).
+// The profile of the Implementer's Control container (#760, contracts/worker-container.v1.json, `ImplementerContainerSpec`):
+// the spec above with exactly six fields changed (the four of #760, the VM's Docker socket and the matching `forbiddenKeys`,
+// #745), so that the hardening floor cannot differ between the two. Control keeps the git token, makes the clone and the
+// push, and starts the model door, the agent's container and the reader through the VM's Docker (#745, steps 3 and 4); the
+// agent itself runs in a container of its own, so the profile no longer has to hold a build: one Docker named volume at
+// /work, on the VM's disk and the only writable path (the mirror, and the agent's repository, which Control makes but never
+// opens as trusted), and the memory of a runner that clones and pushes (768 MB; the rest of the VM is the agent's, see
+// `agentMemoryMb` in sandbox.ts). The names are what the Dispatcher tells the Worker about its work directory, its Docker
+// and the sandbox (runner-api.v1.json, `ImplementerEnvironmentName`).
 //
-// The Docker socket of the VM (#745, step 3): the Worker is the Control container of the turn and starts the model door,
-// the container that holds the model key, through the VM's Docker. That makes it effectively root on the VM. It is
-// accepted because the agent never reaches it (the socket is root's inside the container and the agent is another user;
-// from step 4 the agent is another container), and the runner puts nothing of a job or of the agent's output into a
-// request to the socket (runner/src/code_reviewer_runner/implementer/docker_api.py). Diff and Dynamic have no such mount.
+// The Docker socket of the VM: Control is effectively root on the VM with it. That is accepted because the agent never
+// reaches it: the agent's container has no socket, no bind and no network but the model network, and the runner puts nothing
+// of a job or of the agent's output into a request to the socket
+// (runner/src/code_reviewer_runner/implementer/docker_api.py). Diff and Dynamic have no such mount.
 // The file of the contract equals this one; container-spec.test.ts fails when they differ.
 export const IMPLEMENTER_CONTAINER_SPEC: ImplementerContainerSpec = {
   ...WORKER_CONTAINER_SPEC,
@@ -100,14 +100,14 @@ export const IMPLEMENTER_CONTAINER_SPEC: ImplementerContainerSpec = {
     source: "/var/run/docker.sock",
     target: "/run/docker.sock",
   },
-  memory: { limit: "3g", reservation: "2560m", swap: "3g" },
+  memory: { limit: "768m", reservation: "512m", swap: "768m" },
   pids: { limit: 2048 },
   allowedEnvironment: [
     ...WORKER_CONTAINER_SPEC.allowedEnvironment,
     "RUNNER_IMPLEMENTER_WORK_DIR",
-    "RUNNER_IMPLEMENTER_EGRESS_PORT",
-    "RUNNER_IMPLEMENTER_NETWORK",
     "RUNNER_IMPLEMENTER_MODEL_DOOR",
+    "RUNNER_IMPLEMENTER_SANDBOX_PROOF",
+    "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB",
   ],
   forbiddenKeys: WORKER_CONTAINER_SPEC.forbiddenKeys.filter(
     (key) => key !== "dockerSocket",

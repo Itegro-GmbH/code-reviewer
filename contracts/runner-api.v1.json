@@ -335,7 +335,9 @@
         "time_limit_reached",
         "git_write_not_granted",
         "implementer_engine_unavailable",
-        "implementer_config_invalid"
+        "implementer_config_invalid",
+        "sandbox_unproven",
+        "sandbox_size_unsupported"
       ]
     },
     "JobEnv": {
@@ -593,19 +595,14 @@
       "then": { "properties": { "headCommit": { "type": "string" } } }
     },
     "KnownImplementerEnvironmentName": {
-      "description": "#746: the names of the environment variables the Worker container of an implementer job gets, agreed here and used by later changes (the container profile and the runner). They hold no secret. `RUNNER_IMPLEMENTER_WORK_DIR`: the directory of the work volume, always `/work`. `RUNNER_IMPLEMENTER_EGRESS_PORT`: the loopback port of the registries proxy, a decimal port number; present when the network is `registries`. `RUNNER_IMPLEMENTER_NETWORK`: one of ImplementerNetworkMode. `RUNNER_IMPLEMENTER_MODEL_DOOR` (#745): `docker` when the container carries the VM's Docker socket and starts the model door, the container that holds the model key; unset, the model proxy runs in the Worker. The Dispatcher sets them, never the app and never a job; the runner trusts these and nothing a job says about its own network.",
+      "description": "#746: the names of the environment variables the Worker container of an implementer job gets, agreed here and used by later changes (the container profile and the runner). They hold no secret. `RUNNER_IMPLEMENTER_WORK_DIR`: the directory of the work volume, always `/work`. `RUNNER_IMPLEMENTER_MODEL_DOOR` (#745): `docker` when the container carries the VM's Docker socket, through which it starts the model door, the agent's container and the reader; unset, the container is not an Implementer's. `RUNNER_IMPLEMENTER_SANDBOX_PROOF` (#745, step 4): `proven` or `unproven`, the golden snapshot's Sysbox verdict (the fourth member of the snapshot pair; a deployment that was never told one passes `unproven`); anything but `proven` ends a turn `sandbox_unproven`, free. `RUNNER_IMPLEMENTER_AGENT_MEMORY_MB`: the memory limit of the agent's container in MB, computed from the VM's size; `0` ends a turn `sandbox_size_unsupported`, free. The Dispatcher sets them, never the app and never a job.",
       "type": "string",
       "enum": [
         "RUNNER_IMPLEMENTER_WORK_DIR",
-        "RUNNER_IMPLEMENTER_EGRESS_PORT",
-        "RUNNER_IMPLEMENTER_NETWORK",
-        "RUNNER_IMPLEMENTER_MODEL_DOOR"
+        "RUNNER_IMPLEMENTER_MODEL_DOOR",
+        "RUNNER_IMPLEMENTER_SANDBOX_PROOF",
+        "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB"
       ]
-    },
-    "ImplementerNetworkMode": {
-      "description": "#746: what the Worker of an implementer job can reach besides the model proxy and the git remote of its repository. `registries`: the package registries named by the deployment, through the loopback proxy of `RUNNER_IMPLEMENTER_EGRESS_PORT` (a default-deny proxy that allows only those hosts). `none`: nothing else.",
-      "type": "string",
-      "enum": ["registries", "none"]
     },
     "ClaimResponse": {
       "description": "200 from POST /api/runners/v1/claim. 204 without a body means there is nothing to do. Cache-Control is always no-store.",

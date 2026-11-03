@@ -10,6 +10,7 @@ import { STEPS } from "../snapshot/scripts.ts";
 
 export const IMAGE_ID = `sha256:${"a".repeat(64)}`;
 export const OTHER_IMAGE_ID = `sha256:${"b".repeat(64)}`;
+export const AGENT_IMAGE_ID = `sha256:${"d".repeat(64)}`;
 export const PROBE_OK =
   '{"version":1,"engines":["pr-agent","opencode"],"reasons":[]}\n';
 export const MANIFEST_HASH = "c".repeat(64);
@@ -25,9 +26,13 @@ export function happyFake(): FakeSandboxService {
   const fake = new FakeSandboxService();
   fake.onExec(STEPS.recordBaseManifest, { stdout: MANIFEST_OK });
   fake.onExec(STEPS.inspectImage, { stdout: `${IMAGE_ID}\n` });
+  fake.onExec(STEPS.inspectAgentImage, { stdout: `${AGENT_IMAGE_ID}\n` });
   fake.onExec(STEPS.checkNoContainers, { stdout: "" });
   fake.onExec(STEPS.scanFilesystem, { stdout: "SCAN_DONE\n" });
   fake.onExec(STEPS.inspectRestoredImage, { stdout: `${IMAGE_ID}\n` });
+  fake.onExec(STEPS.inspectRestoredAgentImage, {
+    stdout: `${AGENT_IMAGE_ID}\n`,
+  });
   fake.onExec(STEPS.probe, { stdout: PROBE_OK });
   fake.onExec(STEPS.sysboxProbe, { stdout: SYSBOX_PROBE_OK });
   return fake;

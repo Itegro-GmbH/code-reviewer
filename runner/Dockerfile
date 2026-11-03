@@ -7,7 +7,8 @@
 # context: the repository root, because the image also carries LICENSE, NOTICE and
 # THIRD_PARTY_LICENSES.md from there (runner/Dockerfile.dockerignore keeps everything else out):
 #   docker build -f runner/Dockerfile --target sandbox -t code-reviewer-runner-sandbox .
-# `sandbox` is the only target and the last stage, so a plain build gives it. It carries both engines:
+# `sandbox` is the default target, the last stage, so a plain build gives it (the second target, `agent`, is the
+# Implementer's agent container, built into the same snapshot: see its stage). It carries both engines:
 # PR-Agent (Diff) and the pinned stock OpenCode (about 186 MB, Dynamic), `nft`, a pinned `rg` and the
 # dedicated engine user 10101, and the toolchain of the Implementer's agent (#761): git built from its pinned
 # source, Node.js and pnpm from pinned releases, uv, a compiler, jq and unzip. Nothing enables anything by itself: the Sandbox-Launcher starts the container with its
@@ -18,6 +19,8 @@
 # The uv version should match the one CI uses on the host (.github/workflows/ci.yml, setup-uv).
 ARG PYTHON_IMAGE=python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.13.0@sha256:cdc6093146eb3ff6a40107b38f008b789e050e77ad87865e381d9917da55a168
+# docker:29.9.2-dind (the index, all architectures): the source of the agent image's Docker binaries.
+ARG DOCKER_IMAGE=docker.io/library/docker@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977
 
 FROM ${UV_IMAGE} AS uv
 
@@ -97,6 +100,57 @@ RUN make -j2 prefix=/usr/local sysconfdir=/etc INSTALL_SYMLINKS=1 \
         NO_GETTEXT=1 NO_PERL=1 NO_PYTHON=1 NO_TCLTK=1 NO_EXPAT=1 NO_LIBPCRE2=1 NO_OPENSSL=1 all strip \
     && make prefix=/usr/local sysconfdir=/etc INSTALL_SYMLINKS=1 \
         NO_GETTEXT=1 NO_PERL=1 NO_PYTHON=1 NO_TCLTK=1 NO_EXPAT=1 NO_LIBPCRE2=1 NO_OPENSSL=1 DESTDIR=/out install
+
+# ---- docker-bins: the Docker engine binaries of the pinned docker:dind image (#745, step 4) ----
+# The agent's container runs its own Docker. The binaries (static Go programs) are taken from the official
+# image by digest, nothing is downloaded at build time besides it. The digest is the index of
+# docker:29.9.2-dind, the one the golden snapshot pipeline used for the Sysbox proof until the proof moved to the
+# agent image itself.
+FROM ${DOCKER_IMAGE} AS docker-bins
+
+# ---- agent: the image of the Implementer's agent container (#745, step 4) ----
+# OpenCode (the pinned, verified binary of the engine-tools stage), its own Docker (dockerd, the CLI, buildx, compose,
+# runc, containerd's shim) and the tools of an engineer: git 2.53, Node.js and pnpm, uv, Python (the base image), a
+# compiler, make, jq, unzip, nc and ping. Root, no secret, no credential, no key; it is started by the Control
+# container through the Engine API under the Sysbox runtime (runner/src/code_reviewer_runner/implementer/agent_container.py).
+# It is also the base of the Setup container of step 5 (root, `docker commit`). It carries none of the runner:
+# no venv, no PR-Agent, no license of the product beyond the ones the toolchain brings. It is not the default target
+# (`sandbox`, the last stage, is): `docker build --target agent`.
+FROM ${PYTHON_IMAGE} AS agent
+LABEL org.opencontainers.image.source="https://github.com/Itegro-GmbH/code-reviewer" \
+      org.opencontainers.image.licenses="LicenseRef-Proprietary" \
+      org.opencontainers.image.title="Code Reviewer Implementer agent"
+USER 0:0
+# Debian's signed packages, NOT version-pinned (like nftables in the sandbox stage). iptables is the nf_tables flavour
+# (Debian's default), which is what the inner Docker needs under Sysbox (measured with the dind image's own).
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        tini iptables ca-certificates procps xz-utils pigz iproute2 netcat-openbsd iputils-ping \
+        openssh-client less gcc g++ make libc6-dev jq unzip libcurl3-gnutls \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=docker-bins --chown=0:0 /usr/local/bin/docker /usr/local/bin/dockerd /usr/local/bin/docker-init \
+    /usr/local/bin/docker-proxy /usr/local/bin/runc /usr/local/bin/ctr /usr/local/bin/containerd-shim-runc-v2 \
+    /usr/local/bin/modprobe /usr/local/bin/
+COPY --from=docker-bins --chown=0:0 /usr/local/libexec/docker/cli-plugins/ /usr/local/libexec/docker/cli-plugins/
+COPY --from=engine-tools --chown=0:0 --chmod=0755 /engine-tools/ /usr/local/bin/
+COPY --from=git-build --chown=0:0 /out/usr/local/ /usr/local/
+COPY --from=toolchain-fetch --chown=0:0 /toolchain/node /opt/node
+COPY --from=toolchain-fetch --chown=0:0 /toolchain/pnpm /opt/pnpm
+COPY --from=uv --chown=0:0 /uv /uvx /usr/local/bin/
+COPY --chown=0:0 --chmod=0755 runner/docker/agent-init.sh /usr/local/bin/agent-init
+RUN ln -s /opt/node/bin/node /usr/local/bin/node \
+    && ln -s /opt/node/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s /opt/node/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && ln -s /opt/pnpm/bin/pnpm.cjs /usr/local/bin/pnpm \
+    && mkdir -p /etc/code-reviewer /work/repo /root
+# GPG_KEY and PYTHON_SHA256 come from the Python base image (the release signing key's id and a checksum): public values,
+# emptied so that no variable of the agent's environment is named like a credential.
+ENV PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    HOME=/root \
+    GPG_KEY="" \
+    PYTHON_SHA256=""
+WORKDIR /work/repo
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/agent-init"]
 
 # ---- runtime-base: Python, the venv and nothing else (no uv, no compiler, no sources) ----
 FROM ${PYTHON_IMAGE} AS runtime-base

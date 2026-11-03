@@ -369,10 +369,10 @@ describe("the Sysbox proof of the check VM", () => {
     expect(lines[0]).toBe("SYSBOX_PROBE fail sysbox_boot_failed");
   });
 
-  it("says the proof did not run, not that Sysbox is broken, when its image cannot be pulled", () => {
+  it("says the proof did not run, not that Sysbox is broken, when the agent image is not in the snapshot", () => {
     const { lines } = runProof({
       prepare: "exit 0",
-      docker: 'if [ "$1" = pull ]; then exit 1; fi; exit 0',
+      docker: 'if [ "$1" = image ]; then exit 1; fi; exit 0',
     });
 
     expect(lines).toEqual([
@@ -385,7 +385,8 @@ describe("the Sysbox proof of the check VM", () => {
   it("reports a container that does not start and a daemon in it that does not answer", () => {
     const started = runProof({
       prepare: "exit 0",
-      docker: 'if [ "$1" = run ]; then exit 1; fi; exit 0',
+      docker:
+        'if [ "$1" = run ] && [ "$2" = --detach ]; then exit 1; fi; exit 0',
     });
     expect(started.lines).toContain(
       "SYSBOX_PROBE fail sysbox_container_failed",
@@ -414,6 +415,12 @@ describe("the Sysbox proof of the check VM", () => {
       outsideNc?: number;
       outsidePing?: number;
       aliveCalls?: number;
+      /** What the agent's container gets of the Subpath volume: 0 = it reads and writes. */
+      volumeBox?: number;
+      /** The owner the VM's root sees on the file the agent wrote. */
+      volumeOwner?: number;
+      /** The proof of the reader (`reader_proof`, run in the Worker image): 0 = every check ok, 1 = one failed, 2 = no answer. */
+      readerProof?: number;
     } = {},
   ) {
     const o = {
@@ -424,6 +431,9 @@ describe("the Sysbox proof of the check VM", () => {
       outsideNc: 0,
       outsidePing: 0,
       aliveCalls: 99,
+      volumeBox: 0,
+      volumeOwner: 0,
+      readerProof: 0,
       ...options,
     };
     return `
@@ -433,6 +443,14 @@ case "$1" in
     if [ "$2" = --detach ]; then exit 0; fi
     for last; do :; done
     case "$last" in
+      *"mkdir -p /v/repo"*) exit 0 ;;
+      *"stat -c"*) echo ${o.volumeOwner}; exit 0 ;;
+      *"--runtime=sysbox-runc"*)
+        case ${o.readerProof} in
+          0) echo "READER_PROOF ok reader_contained"; echo "READER_PROOF done" ;;
+          1) echo "READER_PROOF fail reader_remount"; echo "READER_PROOF done" ;;
+        esac
+        exit 0 ;;
       *1.1.1.1*) exit ${o.outsideNc} ;;
       *ping*) exit ${o.outsidePing} ;;
       *) exit ${o.vmControl} ;;
@@ -444,10 +462,11 @@ case "$1" in
         echo $((calls + 1)) > "$0.alive"
         if [ "$calls" -lt ${o.aliveCalls} ]; then exit 0; fi
         exit 1 ;;
-      docker) exit 0 ;;
+      docker | test) exit 0 ;;
       sh)
         case "$5" in
-          *"docker import"*) echo sysbox-inner-ok; exit 0 ;;
+          *"/work/repo/from-control"*) exit ${o.volumeBox} ;;
+          *"docker import"*) echo "tini version 0.19.0 - git.de40ad0"; exit 0 ;;
           *1.1.1.1*) exit ${o.boxOutsideNc} ;;
           *ping*) exit ${o.boxPing} ;;
           *) exit ${o.boxLoopNc} ;;
@@ -468,11 +487,59 @@ exit 0`;
       "SYSBOX_PROBE ok boot",
       "SYSBOX_PROBE ok inner_docker",
       "SYSBOX_PROBE ok inner_container",
+      "SYSBOX_PROBE ok volume_mapped",
+      "SYSBOX_PROBE ok reader",
       "SYSBOX_PROBE ok network_control",
       "SYSBOX_PROBE ok outside_control",
       "SYSBOX_PROBE ok network_isolated",
       "SYSBOX_PROBE_DONE",
     ]);
+  });
+
+  // #745-T02: the Subpath volume is part of the proof, so that the id mapping the work volume needs is proven too
+  it.each([
+    [
+      "the agent cannot use the Subpath volume",
+      { volumeBox: 1 },
+      "sysbox_volume_failed",
+    ],
+    [
+      "the files the agent wrote do not belong to the VM's root",
+      { volumeOwner: 165536 },
+      "sysbox_volume_not_mapped",
+    ],
+    [
+      "the reader the Worker makes can be written or remounted",
+      { readerProof: 1 },
+      "sysbox_reader_not_contained",
+    ],
+    [
+      "the proof of the reader gives no answer",
+      { readerProof: 2 },
+      "sysbox_reader_not_contained",
+    ],
+  ])("fails with a reason of its own when %s", (_name, options, reason) => {
+    const lines = isolation(options);
+    expect(lines).toContain(`SYSBOX_PROBE fail ${reason}`);
+    // The mapping can be right and the reader still not contained; the other reasons stop before the reader is looked at.
+    if (reason === "sysbox_reader_not_contained")
+      expect(lines).not.toContain("SYSBOX_PROBE ok reader");
+    else expect(lines).not.toContain("SYSBOX_PROBE ok volume_mapped");
+    expect(lines.at(-1)).toBe("SYSBOX_PROBE_DONE");
+  });
+
+  // #745: the reader of the proof is the one production makes, not a copy of its flags
+  it("mounts a Subpath of a named volume into the agent's container and has the Worker image prove the reader it makes", () => {
+    const script = sysboxProbeScript(config);
+    expect(script).toContain(
+      '--mount type=volume,source="$vol",target=/work/repo,volume-subpath=repo',
+    );
+    expect(script).toContain("code_reviewer_runner.implementer.reader_proof");
+    expect(script).toContain("/var/run/docker.sock");
+    expect(script).toContain(config.imageTag);
+    // No reader of its own: `--cap-drop` is ignored by Sysbox, and a copy of the flags is not the spec that ships.
+    expect(script).not.toMatch(/--cap-drop/);
+    expect(script).not.toContain("reader-wrote");
   });
 
   it.each([
@@ -516,14 +583,16 @@ exit 0`;
     );
   });
 
-  it("runs the container with the Sysbox runtime on the network with no exit, by the digest of the configured image", () => {
+  it("runs the agent image, as the Implementer starts it, with the Sysbox runtime on the network with no exit", () => {
     const script = sysboxProbeScript(config);
 
     expect(script).toContain(
       "docker network create --internal -o com.docker.network.bridge.gateway_mode_ipv4=isolated",
     );
     expect(script).toContain("--runtime=sysbox-runc");
-    expect(script).toContain(shellQuote(config.sysboxProbeImage));
+    expect(script).toContain(shellQuote(config.agentImageTag));
+    // Nothing is pulled: the image is the one in the snapshot.
+    expect(script).not.toContain("docker pull");
     // The control network is a plain --internal one; without it a "blocked" would prove nothing.
     expect(script).toContain('docker network create --internal "$ctl"');
     expect(script).toContain("sysbox_network_check_inconclusive");
@@ -534,7 +603,7 @@ exit 0`;
     const script = sysboxProbeScript(config);
     expect(script.indexOf(PATHS.sysboxPrepareInstalled)).toBeGreaterThan(-1);
     expect(script.indexOf(PATHS.sysboxPrepareInstalled)).toBeLessThan(
-      script.indexOf("docker pull"),
+      script.indexOf("docker image inspect"),
     );
   });
 

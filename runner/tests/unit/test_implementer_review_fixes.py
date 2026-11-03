@@ -148,7 +148,7 @@ def session_with(max_seconds: float | None) -> ImplementerSession:
         job(),
         workspace=None,  # type: ignore[arg-type]  # the deadline reads none of it
         command=("opencode",),
-        egress=None,  # type: ignore[arg-type]
+        place=lambda: None,  # type: ignore[arg-type,return-value]
         environment={},
         started=0.0,
         seams=SessionSeams(clock=lambda: 100.0),
@@ -158,12 +158,13 @@ def session_with(max_seconds: float | None) -> ImplementerSession:
 
 # #765-R5c
 def test_the_turn_is_held_to_the_smaller_of_its_limit_and_the_process_timeout() -> None:
-    # 3600 s limit: 180 s kept back, 100 s spent.
-    assert session_with(None)._deadline_seconds() == 3600 - 180 - 100  # pyright: ignore[reportPrivateUsage]
-    # A timeout of 600 s leaves 600 - 180 - 100 for the agent, so the last push still happens.
-    assert session_with(600)._deadline_seconds() == 600 - 180 - 100  # pyright: ignore[reportPrivateUsage]
+    # 3600 s limit: 270 s kept back, 100 s spent.
+    assert session_with(None)._deadline_seconds() == 3600 - 270 - 100  # pyright: ignore[reportPrivateUsage]
+    # A timeout of 600 s keeps a third back (200 s) and leaves 600 - 200 - 100 for the agent, so the
+    # last push still happens.
+    assert session_with(600)._deadline_seconds() == 600 - 200 - 100  # pyright: ignore[reportPrivateUsage]
     # A timeout above the limit changes nothing.
-    assert session_with(7200)._deadline_seconds() == 3600 - 180 - 100  # pyright: ignore[reportPrivateUsage]
+    assert session_with(7200)._deadline_seconds() == 3600 - 270 - 100  # pyright: ignore[reportPrivateUsage]
 
 
 # -- R6: the scrub of the printed line ------------------------------------------------------------

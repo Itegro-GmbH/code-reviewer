@@ -44,6 +44,8 @@ NEW_ERROR_CODES = (
     "git_write_not_granted",
     "implementer_engine_unavailable",
     "implementer_config_invalid",
+    "sandbox_unproven",
+    "sandbox_size_unsupported",
 )
 
 
@@ -337,15 +339,12 @@ def test_the_names_the_worker_container_gets_are_the_names_of_the_file() -> None
 
     assert runner_job.IMPLEMENTER_ENVIRONMENT_NAMES == (
         "RUNNER_IMPLEMENTER_WORK_DIR",
-        "RUNNER_IMPLEMENTER_EGRESS_PORT",
-        "RUNNER_IMPLEMENTER_NETWORK",
         "RUNNER_IMPLEMENTER_MODEL_DOOR",
+        "RUNNER_IMPLEMENTER_SANDBOX_PROOF",
+        "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB",
     )
     assert sorted(runner_job.IMPLEMENTER_ENVIRONMENT_NAMES) == sorted(
         defs["KnownImplementerEnvironmentName"]["enum"]
-    )
-    assert sorted(runner_job.IMPLEMENTER_NETWORK_MODES) == sorted(
-        defs["ImplementerNetworkMode"]["enum"]
     )
     assert runner_job.IMPLEMENTER_WORK_DIR == "/work"
 

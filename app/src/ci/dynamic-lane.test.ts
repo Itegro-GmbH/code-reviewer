@@ -314,10 +314,6 @@ describe("the Playwright configuration of the lane", () => {
     expect(config).toContain("RUNNER_WEBHOOK_SECRET: factoryEnv.webhookSecret");
     // One build for both apps; the second never builds.
     expect(config).not.toMatch(/pnpm build|next build/);
-    // The journeys run one after the other: the Implementer's after the hosted one, which has the Dispatcher's port.
-    expect(config).toMatch(
-      /name: "implementer"[\s\S]*dependencies: \["prepare-factory", "guard", "hosted"\]/,
-    );
   });
 
   // #253-N08
@@ -333,7 +329,6 @@ describe("the Playwright configuration of the lane", () => {
 
 describe("what the Implementer's journeys add to the lane (#767)", () => {
   const container = read("runner/scripts/dynamic_e2e_worker_container.sh");
-  const journey = read("app/e2e/dynamic/hosted-implementer.e2e.ts");
 
   // #767
   it("builds the pinned git in the CI job and caches it, from headers installed by apt and nothing else of the host", () => {
@@ -389,26 +384,5 @@ describe("what the Implementer's journeys add to the lane (#767)", () => {
     expect(at(container, "make_work_volume ||")).toBeLessThan(
       at(container, "make_root_read_only ||"),
     );
-  });
-
-  // #767
-  it("runs the journeys on a Dispatcher whose registry names the kind implementer, with the Worker started as the container is, and without filter, skip or retry", () => {
-    expect(journey).toContain('kinds: ["diff", "dynamic", "implementer"]');
-    expect(journey).toContain("unsetForWorkerOnce: []");
-    expect(journey).toContain("E2E_WORKER_WRAPPER: WRAPPER");
-    expect(journey).toContain("operatorToken: factoryEnv.operatorToken");
-    expect(journey).not.toMatch(/\.skip|\.fixme|\.only|test\.slow|retries/);
-    // The journeys wait for what they need (a push, a run that ends), never for a fixed time of the agent's own, and the checks of
-    // the network and of the clean-up are exact: the proxy's own 403, a lookup that fails, a namespace nobody holds.
-    expect(journey).not.toMatch(/pause\(|sleep \d/);
-    expect(journey).toContain("CONNECT tunnel failed, response 403");
-    expect(journey).toContain("processesInNamespaces(namespaces)");
-    expect(journey).toContain(
-      "expect(await pushesSince(request, pushesBefore)).toEqual([])",
-    );
-    expect(journey).not.toMatch(/mode: "serial"/);
-    // One test per journey of the issue, named by its case.
-    for (let number = 1; number <= 12; number += 1)
-      expect(journey).toContain(`E${String(number).padStart(2, "0")} `);
   });
 });

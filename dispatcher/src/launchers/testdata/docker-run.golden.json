@@ -42,7 +42,7 @@
   "--pids-limit",
   "512",
   "--stop-timeout",
-  "90",
+  "150",
   "--network",
   "bridge",
   "--env",

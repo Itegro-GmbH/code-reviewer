@@ -9,19 +9,29 @@ calls `announce` after every change a call makes to the ledger (reserve, settle,
 failure), outside the ledger's lock, so the door reports the state while the call is still being
 answered. The poll stays as the safety net for what is not a call (the clock, a deadline)."""
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
 from code_reviewer_runner.dynamic_review.budget import BudgetLedger, LimitError, Reservation
+
+_log = logging.getLogger(__name__)
 
 
 class AnnouncingLedger(BudgetLedger):
     announce: Callable[[], None] | None = None
 
     def _announced(self) -> None:
+        """Say so, and never let the saying change what the call does: the callers run this from a
+        `finally`, so an exception here (the pipe to Control is gone) would replace the
+        `LimitError` of a refused call, or leave a reservation open that its caller never got."""
         announce = self.announce
-        if announce is not None:
+        if announce is None:
+            return
+        try:
             announce()
+        except Exception:
+            _log.warning("the model door could not announce its ledger")
 
     def reserve_call(self, *args: Any, **kwargs: Any) -> Reservation:
         try:

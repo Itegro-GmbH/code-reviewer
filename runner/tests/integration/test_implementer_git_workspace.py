@@ -128,24 +128,7 @@ def test_the_agent_repository_has_the_new_branch_at_the_base_tip_and_no_remote(r
     assert raw("config", "user.email", cwd=repo, git=rig.git) == IDENTITY.email
     assert repo.stat().st_uid == os.geteuid()
     assert (repo / "README.md").read_text() == "# demo\n"
-    assert not (repo.parent / "mirror.git" / "refs" / "heads" / BRANCH).exists()
-
-
-# #762-T02
-def test_the_agent_environment_has_the_identity_and_no_credential_and_no_guard(rig: Rig) -> None:
-    workspace = rig.prepared()
-
-    environment = workspace.agent_environment()
-
-    assert environment["HOME"] == str(rig.layout.agent_home)
-    assert environment["GIT_AUTHOR_NAME"] == IDENTITY.name
-    assert environment["GIT_COMMITTER_EMAIL"] == IDENTITY.email
-    assert all(TOKEN not in value for value in environment.values())
-    assert "GIT_CONFIG_COUNT" not in environment
-    assert not any("GUARD" in name or name == "GIT_CONFIG_SYSTEM" for name in environment)
-    assert not (rig.base / "run" / "guard.conf").exists()
-    assert not (rig.base / "run" / "system.gitconfig").exists()
-    assert not (rig.base / "run" / "spool").exists()
+    assert not (repo.parent / "reserve" / "mirror.git" / "refs" / "heads" / BRANCH).exists()
 
 
 def test_nothing_is_installed_in_the_agents_repository(rig: Rig) -> None:
@@ -263,7 +246,6 @@ def test_the_agent_has_no_way_to_push(rig: Rig) -> None:
 
     assert plain.returncode != 0 and named.returncode != 0
     assert rig.origin.tip(BRANCH) is None
-    assert all(TOKEN not in value for value in workspace.agent_environment().values())
 
 
 # #762-T08
@@ -422,145 +404,3 @@ def test_a_plain_directory_of_the_runner_is_accepted_and_made_enterable(rig: Rig
     rig.workspace().clone_mirror()
 
     assert stat.S_IMODE(directory.stat().st_mode) == 0o755
-
-
-# -- what the engine would load from the working tree is not on disk (#764) ----------------------
-
-HOSTILE = {
-    ".opencode/plugin/evil.js": "export default async () => ({})\n",
-    "opencode.json": '{"plugin": ["./evil.js"]}\n',
-    "opencode.jsonc": "{}\n",
-    "src/keep.txt": "kept\n",
-}
-
-
-def seed_hostile(rig: Rig) -> None:
-    seed = rig.origin.seed
-    for name, text in HOSTILE.items():
-        (seed / name).parent.mkdir(parents=True, exist_ok=True)
-        (seed / name).write_text(text)
-    raw("add", "-A", cwd=seed, git=rig.git)
-    raw("commit", "-qm", "hostile", cwd=seed, git=rig.git)
-    raw("push", "-q", "origin", "main", cwd=seed, git=rig.git)
-
-
-# #764-R6
-def test_the_files_the_engine_loads_from_its_directory_are_not_in_the_working_tree(
-    rig: Rig,
-) -> None:
-    seed_hostile(rig)
-
-    workspace = rig.prepared()
-
-    assert not (workspace.repo / ".opencode").exists()
-    assert not (workspace.repo / "opencode.json").exists()
-    assert not (workspace.repo / "opencode.jsonc").exists()
-    assert (workspace.repo / "src" / "keep.txt").read_text() == "kept\n"
-    assert workspace.dirty() is False, "a missing file of the sparse checkout is not a change"
-
-
-# #764-R6
-def test_a_commit_of_the_agent_keeps_them_in_the_tree_and_the_push_does_not_delete_them(
-    rig: Rig,
-) -> None:
-    seed_hostile(rig)
-    workspace = rig.prepared()
-    (workspace.repo / "new.txt").write_text("x\n")
-    assert agent_git(workspace, "add", "-A").returncode == 0
-    assert agent_git(workspace, "commit", "-qm", "new").returncode == 0
-
-    report = workspace.push_all(seconds=120.0)
-
-    tree = raw(
-        "ls-tree", "-r", "--name-only", report.form_head or "", cwd=workspace.mirror, git=rig.git
-    )
-    assert set(HOSTILE) | {"new.txt", "README.md", "src/app.py"} <= set(tree.splitlines())
-    assert [change.path for change in workspace.changed_files()] == ["new.txt"]
-
-
-# #764-R6
-def test_a_name_that_is_a_link_or_a_file_instead_of_a_directory_is_left_out_too(
-    rig: Rig,
-) -> None:
-    seed = rig.origin.seed
-    (seed / ".opencode").symlink_to("/etc")
-    raw("add", "-A", cwd=seed, git=rig.git)
-    raw("commit", "-qm", "link", cwd=seed, git=rig.git)
-    raw("push", "-q", "origin", "main", cwd=seed, git=rig.git)
-
-    workspace = rig.prepared()
-
-    assert not (workspace.repo / ".opencode").exists()
-    assert not (workspace.repo / ".opencode").is_symlink()
-
-
-# -- the three names the engine loads are not the agent's to change (#764, second review) ---------
-
-
-def commit_all_changes(workspace: GitWorkspace) -> str | None:
-    return workspace.commit_all("Add the work")
-
-
-def tree_of(rig: Rig, workspace: GitWorkspace) -> list[str]:
-    head = raw("rev-parse", "HEAD", cwd=workspace.repo, git=rig.git)
-    return raw("ls-tree", "-r", "--name-only", head, cwd=workspace.repo, git=rig.git).splitlines()
-
-
-# #764-R11
-@pytest.mark.parametrize("name", ["opencode.json", "opencode.jsonc", ".opencode/plugin/x.js"])
-def test_a_new_file_the_engine_loads_is_no_change_and_blocks_no_commit(rig: Rig, name: str) -> None:
-    workspace = rig.prepared()
-    (workspace.repo / name).parent.mkdir(parents=True, exist_ok=True)
-    (workspace.repo / name).write_text("{}\n")
-
-    assert workspace.dirty() is False, "these names never count as a change"
-    assert commit_all_changes(workspace) is None, "and there is nothing to commit"
-    assert workspace.engine_inputs_present() == [name.split("/")[0]]
-
-
-# #764-R11
-def test_the_rest_of_the_work_is_committed_whatever_is_beside_it(rig: Rig) -> None:
-    seed_hostile(rig)  # a tracked opencode.json, opencode.jsonc and .opencode/plugin/evil.js
-    workspace = rig.prepared()
-    (workspace.repo / "opencode.json").write_text('{"changed": true}\n')  # an edit of a tracked one
-    (workspace.repo / ".opencode").mkdir()
-    (workspace.repo / ".opencode" / "new.md").write_text("new\n")
-    (workspace.repo / "src" / "keep.txt").write_text("the real work\n")
-    (workspace.repo / "docs").mkdir()
-    (workspace.repo / "docs" / "opencode.json").write_text("{}\n")  # nested: an ordinary file
-    assert workspace.dirty() is True
-
-    sha = commit_all_changes(workspace)
-
-    assert sha is not None
-    workspace.push_all(seconds=120.0)
-    changed = {change.path for change in workspace.changed_files()}
-    assert changed == {"src/keep.txt", "docs/opencode.json"}
-    tree = tree_of(rig, workspace)
-    assert "opencode.json" in tree and ".opencode/plugin/evil.js" in tree, "the tracked ones stay"
-    assert ".opencode/new.md" not in tree
-    head_json = raw("show", "HEAD:opencode.json", cwd=workspace.repo, git=rig.git)
-    assert "changed" not in head_json, "an edit of a tracked one is not in the commit"
-    assert workspace.engine_inputs_present() == [".opencode", "opencode.json"]
-    assert workspace.dirty() is False, "after the commit only the ignored names are left"
-
-
-# #764-R11
-def test_an_edit_of_a_tracked_file_the_engine_loads_alone_is_no_change(rig: Rig) -> None:
-    seed_hostile(rig)
-    workspace = rig.prepared()
-    (workspace.repo / "opencode.json").write_text('{"changed": true}\n')
-
-    assert workspace.dirty() is False
-    assert commit_all_changes(workspace) is None
-    assert workspace.engine_inputs_present() == ["opencode.json"]
-
-
-# #764-R11
-def test_nothing_is_reported_when_the_agent_did_not_touch_them(rig: Rig) -> None:
-    seed_hostile(rig)
-    workspace = rig.prepared()
-    (workspace.repo / "a.txt").write_text("x\n")
-
-    assert workspace.engine_inputs_present() == []
-    assert commit_all_changes(workspace) is not None

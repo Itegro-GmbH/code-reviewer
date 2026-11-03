@@ -39,15 +39,16 @@ dev = [
 minversion = "8.0"
 testpaths = ["tests"]
 # Network guard: only loopback is reachable. Unix sockets stay allowed (asyncio needs them).
-# engine tests (the real PR-Agent against loopback fakes) and privileged tests (root, the dedicated
-# engine user, nft) are deselected unless asked for with -m engine / -m privileged.
+# engine tests (the real PR-Agent against loopback fakes), privileged tests (root, the dedicated
+# engine user, nft) and lane tests (a whole Implementer turn on a real Docker daemon) are deselected
+# unless asked for with -m engine / -m privileged / -m lane.
 addopts = [
     "--strict-markers",
     "--disable-socket",
     "--allow-unix-socket",
     "--allow-hosts=127.0.0.1,::1,localhost",
     "-m",
-    "not engine and not privileged",
+    "not engine and not privileged and not lane",
 ]
 filterwarnings = [
     # pytest-socket warns about every blocked connection; the tests assert the block themselves.
@@ -62,6 +63,7 @@ markers = [
     "engine: real PR-Agent against the loopback fakes (deselected by default)",
     "smoke: the few engine tests that prove the runner end to end (run with -m \"engine and smoke\", #713)",
     "privileged: root with the production capabilities, the dedicated engine user and nft (deselected by default)",
+    "lane: a whole Implementer turn on a real Docker daemon, as root, with the images (deselected by default, #745)",
 ]
 
 [tool.ruff]

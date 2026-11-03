@@ -30,6 +30,7 @@ import {
   checkNoContainersScript,
   cleanBuilderScript,
   daemonConfigJson,
+  inspectAgentImageScript,
   inspectImageScript,
   installDockerScript,
   installHostScriptsScript,
@@ -269,6 +270,12 @@ class Run {
       STEPS.inspectImage,
       "image_build_failed",
     );
+    const agentImageDigest = await this.imageId(
+      builder,
+      STEPS.inspectAgentImage,
+      "image_build_failed",
+      inspectAgentImageScript,
+    );
     await this.exec(
       builder,
       STEPS.cleanBuilder,
@@ -312,12 +319,19 @@ class Run {
     );
 
     const snapshotId = await this.takeSnapshot(builder);
-    await this.verifySnapshot(snapshotId, stamp, imageDigest, manifestSha256);
+    await this.verifySnapshot(
+      snapshotId,
+      stamp,
+      imageDigest,
+      agentImageDigest,
+      manifestSha256,
+    );
 
     const record = GoldenRecordSchema.safeParse({
       version: 1,
       snapshotId,
       imageDigest,
+      agentImageDigest,
       builtAt: builtAt.toISOString(),
       region: config.region,
       target: config.target,
@@ -361,6 +375,7 @@ class Run {
     snapshotId: string,
     stamp: string,
     imageDigest: string,
+    agentImageDigest: string,
     manifestSha256: string,
   ): Promise<void> {
     const { config } = this;
@@ -406,6 +421,18 @@ class Run {
       throw new SnapshotPipelineError(
         "image_digest_mismatch",
         STEPS.inspectRestoredImage,
+      );
+    // The Implementer's agent image travels in the snapshot too, and must be the one that was built.
+    const restoredAgent = await this.imageId(
+      check,
+      STEPS.inspectRestoredAgentImage,
+      "image_digest_invalid",
+      inspectAgentImageScript,
+    );
+    if (restoredAgent !== agentImageDigest)
+      throw new SnapshotPipelineError(
+        "image_digest_mismatch",
+        STEPS.inspectRestoredAgentImage,
       );
 
     const probe = await this.exec(
@@ -666,14 +693,11 @@ class Run {
     vm: SandboxVm,
     label: string,
     code: SnapshotErrorCode,
+    script: (config: PipelineConfig) => string = inspectImageScript,
   ): Promise<string> {
-    const result = await this.exec(
-      vm,
-      label,
-      inspectImageScript(this.config),
-      code,
-      { sudo: true },
-    );
+    const result = await this.exec(vm, label, script(this.config), code, {
+      sudo: true,
+    });
     const id = result.stdout.trim();
     if (!IMAGE_ID.test(id))
       throw new SnapshotPipelineError("image_digest_invalid", label);

@@ -2,7 +2,8 @@
 
 // What `/proc/self/mountinfo` of a VM would say after the mounts the Sandbox-Launcher asked for (#760), for the doubles
 // of the Sandbox platform: they run no mount, so the file is derived from the commands they were given. Only the
-// two forms the Launcher uses are understood: `mount --bind <dir> <dir>` adds a mount of the plain options, and
+// forms the Launcher uses are understood: `mount --bind|--rbind <dir> <dir>` adds a mount of the plain options,
+// `mount -o loop,<options> <image> <dir>` adds the mount of a reserve disk with those options (read-write), and
 // `mount -o remount,bind,<options> <dir>` sets the options of that mount. Anything else changes nothing. Test use only.
 
 type Command = { cmd: string; args: readonly string[] };
@@ -12,11 +13,19 @@ export function mountinfoAfter(commands: readonly Command[]): string {
   const mounts = new Map<string, string>();
   for (const { cmd, args } of commands) {
     if (cmd !== "mount") continue;
-    if (args[0] === "--bind" && args[1] !== undefined && args[1] === args[2]) {
+    if (
+      (args[0] === "--bind" || args[0] === "--rbind") &&
+      args[1] !== undefined &&
+      args[1] === args[2]
+    ) {
       mounts.set(args[1], "rw,relatime");
       continue;
     }
     const remount = args[0] === "-o" ? args[1] : undefined;
+    if (remount?.startsWith("loop,") === true && args[3] !== undefined) {
+      mounts.set(args[3], `rw,${remount.slice("loop,".length)},relatime`);
+      continue;
+    }
     const directory = args[2];
     if (
       remount?.startsWith("remount,bind,") === true &&

@@ -11,11 +11,13 @@ const PAIR: SnapshotPair = {
   snapshotId: "snap_old01",
   imageDigest: `sha256:${"a".repeat(64)}`,
   commit: OLD_COMMIT,
+  sysbox: "proven",
 };
 const NEW: SnapshotPair = {
   snapshotId: "snap_new01",
   imageDigest: `sha256:${"b".repeat(64)}`,
   commit: SHA,
+  sysbox: "proven",
 };
 const VERCEL = {
   VERCEL_TOKEN: "vercel-token-not-a-real-one-0123456789",
@@ -32,7 +34,7 @@ const INFISICAL = {
 function envFile(pair: SnapshotPair | undefined): string {
   return pair === undefined
     ? 'OTHER="x"\n'
-    : `SANDBOX_SNAPSHOT_ID="${pair.snapshotId}"\nSANDBOX_IMAGE_DIGEST="${pair.imageDigest}"\nSANDBOX_SNAPSHOT_COMMIT="${pair.commit}"\n`;
+    : `SANDBOX_SNAPSHOT_ID="${pair.snapshotId}"\nSANDBOX_IMAGE_DIGEST="${pair.imageDigest}"\nSANDBOX_SNAPSHOT_COMMIT="${pair.commit}"\nSANDBOX_SYSBOX_PROOF="${pair.sysbox}"\n`;
 }
 
 type Harness = ReturnType<typeof harness>;
@@ -150,6 +152,7 @@ describe("snapshot:ops decide", () => {
     expect(output).toContain(`snapshot-id=${PAIR.snapshotId}\n`);
     expect(output).toContain(`image-digest=${PAIR.imageDigest}\n`);
     expect(output).toContain(`commit=${PAIR.commit}\n`);
+    expect(output).toContain(`sysbox=${PAIR.sysbox}\n`);
     expect(output).toContain("repair=false\n");
     // The ids go to the outputs file only (they are not secrets, and GitHub drops an output that holds a masked value).
     expect(text(h)).not.toContain(PAIR.snapshotId);
@@ -276,6 +279,7 @@ describe("snapshot:ops persist", () => {
     PAIR_SNAPSHOT_ID: NEW.snapshotId,
     PAIR_IMAGE_DIGEST: NEW.imageDigest,
     PAIR_COMMIT: NEW.commit,
+    PAIR_SYSBOX: NEW.sysbox,
   };
 
   // #403-T15
@@ -289,7 +293,13 @@ describe("snapshot:ops persist", () => {
     );
     expect(
       writes.map((r) => (r.body as { secretValue: string }).secretValue),
-    ).toEqual([NEW.snapshotId, NEW.imageDigest, NEW.commit]);
+    ).toEqual([
+      "unproven",
+      NEW.snapshotId,
+      NEW.imageDigest,
+      NEW.commit,
+      NEW.sysbox,
+    ]);
     // Every line the command prints is a code.
     expect(text(h)).not.toContain(NEW.snapshotId);
     expect(text(h)).not.toContain(NEW.imageDigest);
@@ -316,7 +326,42 @@ describe("snapshot:ops persist", () => {
     );
     expect(
       writes.map((r) => (r.body as { secretValue: string }).secretValue),
-    ).toEqual([PAIR.snapshotId, PAIR.imageDigest, PAIR.commit]);
+    ).toEqual([
+      "unproven",
+      PAIR.snapshotId,
+      PAIR.imageDigest,
+      PAIR.commit,
+      PAIR.sysbox,
+    ]);
+  });
+
+  // #745-T02
+  it("writes a verdict of unproven for a deployment that carries none, so that no proven stays behind", async () => {
+    const h = harness({ live: PAIR });
+    // The deployment predates the fourth member: its meta has the snapshot, the image and the commit only.
+    const fetchWithOldMeta = h.deps.fetch;
+    const deps: typeof h.deps = {
+      ...h.deps,
+      fetch: async (input, init) => {
+        const answer = await fetchWithOldMeta(input, init);
+        const url = new URL(new Request(input, init).url);
+        if (url.pathname !== "/v13/deployments/dpl_oldexample01") return answer;
+        const body = (await answer.json()) as { meta: Record<string, string> };
+        delete body.meta.sandboxSysboxProof;
+        return Response.json(body);
+      },
+    };
+
+    expect(
+      await runOps(["persist", "--from-deployment", "dpl_oldexample01"], deps),
+    ).toBe(0);
+
+    const writes = h.requests.filter((r) =>
+      r.url.pathname.startsWith("/api/v4/secrets/"),
+    );
+    expect(
+      writes.map((r) => (r.body as { secretValue: string }).secretValue),
+    ).toEqual(["unproven", PAIR.snapshotId, PAIR.imageDigest, PAIR.commit]);
   });
 
   // #403-T15
