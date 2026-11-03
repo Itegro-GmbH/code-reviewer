@@ -483,6 +483,16 @@ server; the containers it starts through its own Docker are behind it and reach 
 container that used to confine the agent's user, and the allowlist proxy of package registries (`registry.npmjs.org`,
 `pypi.org`, `index.crates.io` and the others), are gone.
 
+**IPv6 link-local, a hole found and closed in #818 (2026-11-03).** The probes of step 4 were IPv4. Root in the agent's container can switch IPv6 on in
+its own namespace (Docker leaves it off there, a sysctl of that namespace), ping `ff02::1`, find the model bridge's link-local address and
+**connect to port 23456 of the VM over it**: the VM's control service listens on `*`, the isolated gateway mode and the `nft` table of the door are
+IPv4, and the VM's kernel has no `ip6` netfilter to put a rule in. Measured on a `spike-` VM: `OPEN fe80::...%eth0 23456` from the agent-style
+container on an `internal`, `isolated` network, `ConnectionRefused` for ports 22 and 80 (so the address was a real host). The fix is the
+same as for the Setup network (`host_rules.close_bridge_ipv6`, called by `AgentContainer.create` before the container is made): no IPv6 address
+on the VM's side of the bridge, so there is no host to find on that segment; measured after it, the same probe times out and a container that
+joins later finds no neighbour. The VM does not forward IPv6 (`net.ipv6.conf.all.forwarding = 0`) and the agent has no IPv6 route out.
+Step 6 (the attack test) should repeat this class of probe for the neighbours it can find on the segment.
+
 **What this breaks until step 7 (the network door).** `npm install`, `pnpm install`, `pip install`, `apt-get`, `cargo`, `go get` and `docker pull`
 all need a registry and now fail ("lookup registry-1.docker.io ... server misbehaving", measured). Whatever a task needs must already
 be in the image: the toolchain of the agent image is there, and an environment's setup script (section "The environment's setup script":
