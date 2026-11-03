@@ -570,15 +570,22 @@ browsers the script installed and the images its Docker pulled are in the image.
 starts from the committed image by its id (`AgentSeams.image`). The repository volume is not part of the commit: the files the script left in
 `/work/repo` are in the volume, which the agent mounts as before. There is no cache of the result: every turn runs its script.
 
-**The repository after the script (the rule for tracked files).** The script ran in the repository's folder and may have changed anything in
-it. What it added (untracked files: `node_modules`, a virtual environment, build output, a file it wrote) stays in the agent's working
-tree: that is what a setup is for. **A change to a file that git tracks is undone before the agent starts** (`GitWorkspace.restore_tracked`:
-`git reset --hard` in the reader, after `git status` counted them), and the log says how many files were put back and names the first five.
-The reason is the end of the turn: it commits what is left and pushes all branches, so a lockfile an install rewrote or a configuration a
-script patched would arrive on the branch as the agent's work, and the agent would not know which of its changes were its own. The agent
-starts from the commit it was promised. This is the one rule about what the script did, and it is a rule about where the agent starts, not
-about what the script may do; if it turns out to be wrong, `restore_tracked` is the one place. A script that left the repository unreadable
-(it removed `.git`) ends the turn with `environment_setup_failed`.
+**The repository after the script (what is the base of the turn).** The script ran in the repository's folder and may have changed anything in
+it. What it did to the repository is the **base** the agent starts from, not a change the agent made, and two rules follow
+(`GitWorkspace.settle_after_setup`, in the reader, one place for both):
+
+1. **A change to a file that git tracks is undone** (`git reset --hard` after `git status` counted them; the log says how many files and names the first
+   five). The turn ends by committing and pushing whatever the tree holds, so a lockfile an install rewrote or a configuration a script patched
+   would arrive on the branch as the agent's work.
+2. **A file or folder the script added, and the repository does not ignore, stays in the working tree and goes on the repository's local ignore
+   list** (`.git/info/exclude`: git's own, never committed, never pushed; the top-level entries, anchored and escaped, a folder counting once). The
+   agent sees and uses it, but it is no change of the agent: the tree is not dirty because of it (so no extra message), the system's commit of what is
+   left does not take it, and the agent's `git add -A` does not either; an agent that wants one in a commit adds it by name with `git add -f`. What the
+   repository ignores already (`node_modules`, a virtual environment, build output) needs nothing. A name with a line end cannot be written as a
+   pattern and is left as it is; more than 10,000 entries (or 1 MiB of names) ends the turn rather than half of them being kept.
+
+This is a rule about where the agent starts, not about what the script may do. If it turns out to be wrong, it is one function. A script that left the
+repository unreadable (it removed `.git`) ends the turn with `environment_setup_failed`.
 
 **When it fails.** A script that exits non-zero, runs past its time limit, fills the disk, is killed for the memory of the container (the
 log says so: "killed for its memory"), or leaves a container whose result cannot be committed (the disk) ends the turn `environment_setup_failed`

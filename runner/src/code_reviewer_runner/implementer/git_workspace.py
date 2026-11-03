@@ -214,6 +214,10 @@ class RepoAccess(Protocol):
         done for all of them."""
         ...
 
+    def append_exclude(self, data: bytes, *, timeout: float) -> Outcome:
+        """Append lines to the repository's local ignore file (`.git/info/exclude`)."""
+        ...
+
     def run(self, args: Sequence[str], *, timeout: float, write: bool = False) -> Outcome:
         """One git command in the repository; never raises on a failed command. A command that
         changes the repository says `write`: it runs where the repository is read-write, and only
@@ -396,8 +400,10 @@ class GitWorkspace:
         self._start: str | None = None
         self._names_checked = False
         self._progress = _Progress()
-        # How many tracked files `restore_tracked` found changed (0 before it ran).
+        # How many tracked files `settle_after_setup` found changed, and how many entries it put on
+        # the local ignore list (0 before it ran).
         self.restored_count = 0
+        self.excluded_count = 0
 
     # -- what the caller needs -------------------------------------------------------------------
 
@@ -579,19 +585,30 @@ class GitWorkspace:
 
     # -- after the environment's script (in the reader) ---------------------------------------
 
-    def restore_tracked(self, *, seconds: float = 120.0) -> list[str]:
-        """After a successful setup script (#818): put every tracked file back to what HEAD says,
-        in the working tree and the index, and leave the rest of the tree as the script made it.
-        What the script installed in the repository's folder (`node_modules`, a virtual
-        environment, build output, a file it wrote) is untracked and stays; a change it made to a
-        tracked file (a lockfile an install rewrote, a patched configuration) does not stay, because
-        the end of the turn commits and pushes whatever the tree holds and a change nobody asked for
-        would arrive on the branch. The agent starts from the commit it was promised.
+    def settle_after_setup(self, *, seconds: float = 120.0) -> list[str]:
+        """After a successful setup script (#818): the repository is what the agent starts from, and
+        what the script did to it is the **base** of the turn, not a change the agent made.
 
-        Returns the paths that were restored, at most five (the count is in the log line of the
-        caller through `len`), cleaned of control characters. Raises `JobError` (`setup_failed`)
-        when the repository cannot be read afterwards: a script that broke it ends the turn,
-        free."""
+        * A change to a file git **tracks** is undone, in the working tree and the index
+          (`git reset --hard`, after `git status` counted them): the turn ends by committing and
+          pushing whatever the tree holds, and a lockfile an install rewrote or a configuration a
+          script patched would arrive on the branch as the agent's work.
+        * A file the script **added** and git does not ignore is kept in the working tree and put on
+          the repository's local ignore list (`.git/info/exclude`, never committed, never pushed):
+          the agent sees and uses it, but it is not "a change of the agent", so the tree is not
+          dirty
+          because of it (no extra message), the system's commit of what is left does not take it,
+          and
+          the agent's own `git add -A` does not either. What the repository itself ignores
+          (`node_modules`, a virtual environment, build output) needs nothing. An agent that wants
+          one
+          of them in a commit adds it by name with `git add -f`.
+
+        Returns the paths of the tracked files that were restored, at most five (the count is
+        `restored_count`), cleaned of control characters. Raises `JobError` (`setup_failed`) when
+        the
+        repository cannot be read afterwards, or the lists cannot be kept: a script that broke it
+        ends the turn, free."""
         deadline = self._clock() + seconds
         names: list[str] = []
         entries = 0
@@ -610,21 +627,20 @@ class GitWorkspace:
             if len(carry) > 65536:
                 raise StopReading
 
-        remaining = max(1.0, deadline - self._clock())
+        def left() -> float:
+            return min(self._timeout, max(1.0, deadline - self._clock()))
+
         status = self._reader_stream(
             ["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=no"],
             take,
-            timeout=min(self._timeout, remaining),
+            timeout=left(),
         )
         if status.returncode != 0:
             raise fail(ErrorCode.SETUP_FAILED, "the repository cannot be read after the script")
         if entries:
             options = [arg for setting in _LEFTOVER_OPTIONS for arg in ("-c", setting)]
-            remaining = max(1.0, deadline - self._clock())
             restored = self._access.run(
-                [*options, "reset", "--hard", "-q"],
-                timeout=min(self._timeout, remaining),
-                write=True,
+                [*options, "reset", "--hard", "-q"], timeout=left(), write=True
             )
             if restored.returncode != 0:
                 raise fail(
@@ -635,7 +651,62 @@ class GitWorkspace:
         if head.returncode != 0 or not head.stdout.strip():
             raise fail(ErrorCode.SETUP_FAILED, "the repository has no HEAD after the script")
         self.restored_count = entries
+        self._exclude_what_the_script_added(left)
         return names
+
+    def _exclude_what_the_script_added(self, left: Callable[[], float]) -> None:
+        """Put what the script added, and git does not ignore, on the local ignore list: the
+        top-level entries (a folder with its whole content counts as one), anchored, with git's
+        special characters escaped. A name with a line end cannot be written as a pattern and stays
+        as it is; a tree with more entries than `EXCLUDE_MAX_ENTRIES` or more text than
+        `EXCLUDE_MAX_BYTES` ends the turn rather than half of it being kept."""
+        listed = bytearray()
+        too_long = False
+
+        def take(chunk: bytes) -> None:
+            nonlocal too_long
+            listed.extend(chunk)
+            if len(listed) > EXCLUDE_MAX_BYTES:
+                too_long = True
+                raise StopReading
+
+        done = self._reader_stream(
+            [
+                "--no-optional-locks",
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "--directory",
+                "--no-empty-directory",
+                "-z",
+            ],
+            take,
+            timeout=left(),
+        )
+        if too_long or (done.returncode != 0 and not listed):
+            raise fail(
+                ErrorCode.SETUP_FAILED,
+                "the files the script added cannot be listed ("
+                + ("there are too many" if too_long else self._agent_detail(done))
+                + ")",
+            )
+        patterns = exclude_patterns(bytes(listed))
+        if len(patterns) > EXCLUDE_MAX_ENTRIES:
+            raise fail(
+                ErrorCode.SETUP_FAILED,
+                f"the script left more than {EXCLUDE_MAX_ENTRIES} untracked folders and files in "
+                "the repository's top folders",
+            )
+        self.excluded_count = len(patterns)
+        if not patterns:
+            return
+        written = self._access.append_exclude(b"\n".join(patterns) + b"\n", timeout=left())
+        if written.returncode != 0 or written.unanswered:
+            raise fail(
+                ErrorCode.SETUP_FAILED,
+                "what the script added could not be kept out of the commits: "
+                + self._agent_detail(written),
+            )
 
     # -- the final push ---------------------------------------------------------------------------
 
@@ -1074,6 +1145,30 @@ class GitWorkspace:
         does not travel (`fatal: unexpected line in ./packed-refs: <that line>`), only the
         status."""
         return f"status {outcome.returncode}"
+
+
+# What `settle_after_setup` keeps of the untracked entries a script left: 10,000 of them and 1 MiB
+# of
+# their names.
+EXCLUDE_MAX_ENTRIES = 10_000
+EXCLUDE_MAX_BYTES = 1024 * 1024
+_PATTERN_SPECIALS = re.compile(rb"([\\*?\[\]])")
+
+
+def exclude_patterns(listing: bytes) -> list[bytes]:
+    """`git ls-files --others --directory -z` as lines of an ignore file: each name anchored at the
+    top (`/name`), the characters git reads in a pattern escaped, a leading `#` or `!` and a
+    trailing
+    space protected. A name with a line end has no such line and is left out."""
+    patterns: list[bytes] = []
+    for name in listing.split(b"\0"):
+        if not name or b"\n" in name:
+            continue
+        escaped = _PATTERN_SPECIALS.sub(rb"\\\1", name)
+        if escaped.endswith(b" "):
+            escaped = escaped[:-1] + b"\\ "
+        patterns.append(b"/" + escaped)
+    return patterns
 
 
 def _plain(text: str) -> str:

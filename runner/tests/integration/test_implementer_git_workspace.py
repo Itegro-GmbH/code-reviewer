@@ -404,3 +404,114 @@ def test_a_plain_directory_of_the_runner_is_accepted_and_made_enterable(rig: Rig
     rig.workspace().clone_mirror()
 
     assert stat.S_IMODE(directory.stat().st_mode) == 0o755
+
+
+# -- the repository after an environment's setup script (#818) ----------------------------------
+
+
+def after_a_script(rig: Rig):
+    """A prepared workspace whose repository a script has worked in: a tracked file changed, a
+    file added that git does not ignore, one it does, and a folder."""
+    workspace = rig.prepared()
+    repo = workspace.repo
+    (repo / ".gitignore").write_text("node_modules/\n")
+    raw("add", ".gitignore", cwd=repo, git=rig.git)
+    raw("commit", "-qm", "ignore", cwd=repo, git=rig.git)
+    (repo / "README.md").write_text("changed by the script\n")
+    (repo / "generated.txt").write_text("made by the script\n")
+    (repo / "venv").mkdir()
+    (repo / "venv" / "bin.txt").write_text("x\n")
+    (repo / "node_modules").mkdir()
+    (repo / "node_modules" / "pkg.js").write_text("x\n")
+    return workspace
+
+
+# #818-T60
+def test_the_tracked_files_a_script_changed_are_put_back(rig: Rig) -> None:
+    workspace = after_a_script(rig)
+
+    restored = workspace.settle_after_setup()
+
+    assert restored == ["README.md"] and workspace.restored_count == 1
+    assert (workspace.repo / "README.md").read_text() == "# demo\n"
+    assert raw("diff", "--stat", "HEAD", cwd=workspace.repo, git=rig.git) == ""
+
+
+# #818-T61
+def test_what_the_script_added_stays_in_the_tree_and_is_no_change_of_the_agent(rig: Rig) -> None:
+    workspace = after_a_script(rig)
+
+    workspace.settle_after_setup()
+
+    repo = workspace.repo
+    assert (repo / "generated.txt").read_text() == "made by the script\n"
+    assert (repo / "venv" / "bin.txt").exists() and (repo / "node_modules" / "pkg.js").exists()
+    assert workspace.dirty() is False, "the agent has changed nothing"
+    assert raw("status", "--porcelain", cwd=repo, git=rig.git) == ""
+    assert workspace.commit_all() is None, "the system's commit takes none of it"
+    assert workspace.excluded_count == 2  # generated.txt and venv/ (node_modules/ is ignored)
+
+
+# #818-T62
+def test_the_agents_own_new_file_is_a_change_and_a_script_file_can_be_added_by_name(
+    rig: Rig,
+) -> None:
+    workspace = after_a_script(rig)
+    workspace.settle_after_setup()
+    repo = workspace.repo
+
+    (repo / "mine.txt").write_text("the agent's\n")
+    assert workspace.dirty() is True
+    sha = workspace.commit_all()
+    committed = raw("show", "--name-only", "--format=", sha or "", cwd=repo, git=rig.git)
+    assert committed.split() == ["mine.txt"]
+    # The agent can still choose to commit a file the script made, by name.
+    raw("add", "-f", "generated.txt", cwd=repo, git=rig.git)
+    assert raw("diff", "--cached", "--name-only", cwd=repo, git=rig.git) == "generated.txt"
+
+
+# #818-T63
+def test_names_git_reads_in_a_pattern_are_kept_out_all_the_same(rig: Rig) -> None:
+    workspace = rig.prepared()
+    repo = workspace.repo
+    odd = ["#hash.txt", "!bang.txt", "star*.txt", "q?.txt", "[br].txt", "back\\slash.txt", "tail "]
+    for name in odd:
+        (repo / name).write_text("x\n")
+
+    workspace.settle_after_setup()
+
+    assert workspace.dirty() is False
+    assert workspace.commit_all() is None
+    assert workspace.excluded_count == len(odd)
+
+
+# #818-T64
+def test_a_clean_repository_is_left_alone_and_nothing_is_written(rig: Rig) -> None:
+    workspace = rig.prepared()
+
+    assert workspace.settle_after_setup() == []
+
+    assert workspace.restored_count == 0 and workspace.excluded_count == 0
+    exclude = workspace.repo / ".git" / "info" / "exclude"
+    assert "generated" not in (exclude.read_text() if exclude.exists() else "")
+
+
+# #818-T65
+def test_a_repository_the_script_broke_ends_the_step_with_setup_failed(rig: Rig) -> None:
+    import shutil
+
+    workspace = rig.prepared()
+    shutil.rmtree(workspace.repo / ".git")
+
+    with pytest.raises(JobError) as refused:
+        workspace.settle_after_setup()
+    assert refused.value.code is ErrorCode.SETUP_FAILED
+
+
+# #818-T66
+def test_the_patterns_are_anchored_escaped_and_leave_out_a_name_with_a_line_end() -> None:
+    from code_reviewer_runner.implementer.git_workspace import exclude_patterns
+
+    listing = b"a.txt\0dir/\0we*ird[1]\0two\nlines\0trail \0\0"
+
+    assert exclude_patterns(listing) == [b"/a.txt", b"/dir/", b"/we\\*ird\\[1\\]", b"/trail\\ "]

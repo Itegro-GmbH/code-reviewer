@@ -158,11 +158,12 @@ class Workspace:
 
     def __init__(self) -> None:
         self.restored_count = 0
+        self.excluded_count = 0
         self.restore_error: JobError | None = None
         self.names: list[str] = []
         self.free: int | None = 50 * 1024**3
 
-    def restore_tracked(self) -> list[str]:
+    def settle_after_setup(self) -> list[str]:
         if self.restore_error is not None:
             raise self.restore_error
         return self.names
@@ -253,6 +254,15 @@ def test_the_tracked_files_a_script_changed_are_put_back_and_the_log_says_so(rig
     done = step(rig, workspace)
     note = next(note for note in done.notes if "tracked file" in note)
     assert "3 tracked file(s)" in note and "package-lock.json" in note and "1 more" in note
+
+
+# #818-T41b
+def test_what_the_script_added_is_said_to_be_part_of_the_base(rig: Rig) -> None:
+    workspace = Workspace()
+    workspace.excluded_count = 2
+    done = step(rig, workspace)
+    note = next(note for note in done.notes if "script added" in note)
+    assert "2 file(s) or folder(s)" in note and "not part of its changes" in note
 
 
 # #818-T42

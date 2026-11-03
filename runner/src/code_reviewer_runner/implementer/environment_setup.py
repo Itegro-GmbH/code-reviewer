@@ -9,30 +9,27 @@ model door exists: a script that fails ends the turn here, free, and the model k
 handed to anything. The agent's container starts from the image this step made.
 
 **The time.** The script has `SETUP_SCRIPT_SECONDS` (15 minutes,
-`contracts/environment-sizes.v1.json`)
-at most, and the whole step (start, script, saving the image) is part of the turn's time limit: the
-agent's own deadline is counted from the start of the job, so the minutes of the step are gone from
-it
-(`session.deadline_seconds`). The script is also held to what the limit leaves: the grace for the
-end
-of the turn, the parts of the step around the script (`SETUP_OVERHEAD_SECONDS`) and at least
-`MIN_AGENT_SECONDS` for the agent; a limit that leaves less than `MIN_SCRIPT_SECONDS` for the script
-ends the turn here, free, saying so.
+`contracts/environment-sizes.v1.json`) at most, and the whole step (start, script, saving the
+image) is part of the turn's time limit: the agent's own deadline is counted from the start of the
+job, so the minutes of the step are gone from it (`session.deadline_seconds`). The script is also
+held to what the limit leaves: the grace for the end of the turn, the parts of the step around the
+script (`SETUP_OVERHEAD_SECONDS`) and at least `MIN_AGENT_SECONDS` for the agent; a limit that
+leaves less than `MIN_SCRIPT_SECONDS` for the script ends the turn here, free, saying so.
 
 **The repository afterwards.** The script ran in the repository's folder and may have changed
-anything in it. What it added (untracked files, `node_modules`, a virtual environment, build
-output) stays: that is what a setup is for. A change to a **tracked** file is undone
-(`GitWorkspace.restore_tracked`), because the turn ends by committing and pushing whatever the tree
-holds, and a lockfile an install rewrote would arrive on the branch as the agent's work. The log
-says
-how many files were put back and names the first few. This is the one rule about what the script
-did; it is a rule about where the agent starts, not about what the script may do.
+anything in it. What it did is the base of the turn, not a change of the agent
+(`GitWorkspace.settle_after_setup`): a change to a **tracked** file is undone, because the turn ends
+by committing and pushing whatever the tree holds and a lockfile an install rewrote would arrive on
+the branch as the agent's work; a file or folder the script **added** stays in the tree and goes on
+the repository's local ignore list, so that it is neither "dirty" nor committed unless the agent
+adds it by name. The log says how many were put back or kept out and names the first few. This is
+the one rule about what the script did; it is a rule about where the agent starts, not about what
+the script may do.
 
 **What the page gets.** The `setup` block of the result (`ImplementerSetupResult`): ok, the exit
 status (None when the script did not end by itself), whether it ran out of time, the seconds, and
 the end of its output (stdout and stderr together) with the job's secrets removed, control
-characters
-taken out, at most 8,192 characters.
+characters taken out, at most 8,192 characters.
 """
 
 import math
@@ -183,7 +180,7 @@ def _after_success(
     run: SetupRun, output: str, workspace: GitWorkspace, notes: list[str]
 ) -> EnvironmentSetup:
     try:
-        restored = workspace.restore_tracked()
+        restored = workspace.settle_after_setup()
     except JobError as error:
         block = _block(run, output, ok=False)
         return EnvironmentSetup(
@@ -198,6 +195,11 @@ def _after_success(
         notes.append(
             f"setup: {workspace.restored_count} tracked file(s) the script changed were put back "
             f"to the base commit ({listed}{f', and {more} more' if more > 0 else ''})"
+        )
+    if workspace.excluded_count:
+        notes.append(
+            f"setup: {workspace.excluded_count} file(s) or folder(s) the script added are in the "
+            "agent's tree and are not part of its changes (not committed unless added by name)"
         )
     return EnvironmentSetup(run.image, _block(run, output, ok=True), None, tuple(notes))
 

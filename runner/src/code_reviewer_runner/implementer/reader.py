@@ -136,6 +136,10 @@ READER_GIT_OPTIONS: Final = (
 )
 
 
+# What `append_exclude` runs: the directory and the file are git's own, the text comes on stdin.
+APPEND_EXCLUDE_SCRIPT: Final = "umask 022 && mkdir -p .git/info && cat >> .git/info/exclude"
+
+
 def reader_argv(args: Sequence[str]) -> list[str]:
     """The command of every look into the repository: git with its options, under the one
     capability a reader keeps."""
@@ -268,6 +272,25 @@ class ReaderAccess:
             workdir=READER_REPO,
             timeout=timeout,
             name=f"git {args[0] if args else ''}",
+        )
+
+    def append_exclude(self, data: bytes, *, timeout: float) -> Outcome:
+        """Append lines to the repository's `info/exclude` (git's local ignore file, never
+        committed), in the reader that writes. For the step after an environment's script (#818):
+        what it left untracked is the base of the turn, not a change of the agent. The text is the
+        standard input of a constant script, under the same one capability as every command of a
+        reader."""
+        container = self._ensure(True)
+        if container is None:
+            return Outcome(255, "", "the reader cannot run", unanswered=True)
+        return run_exec(
+            self._api,
+            container,
+            [*READER_DROP_CAPABILITIES, "/bin/sh", "-c", APPEND_EXCLUDE_SCRIPT, "append"],
+            stdin=data,
+            workdir=READER_REPO,
+            timeout=timeout,
+            name="append to the exclude file",
         )
 
     def stream(

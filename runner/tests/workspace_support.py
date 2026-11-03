@@ -62,6 +62,13 @@ class LocalAccess:
     def reset(self, *, seconds: float) -> bool:
         return True
 
+    def append_exclude(self, data: bytes, *, timeout: float) -> Outcome:
+        exclude = self.repo / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with exclude.open("ab") as handle:
+            handle.write(data)
+        return Outcome(0, "", "")
+
     def run(self, args: Sequence[str], *, timeout: float, write: bool = False) -> Outcome:
         return self._process.run(args, env=self._env, cwd=self.repo, timeout=timeout)
 
