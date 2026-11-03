@@ -715,7 +715,7 @@ The first wall is the door and its table. The second is outside the VM, so that 
 ### Measured on a real VM (2026-11-03, `spike-net-door-1`, 2 vCPU, 4 GB, from the golden snapshot of 17:28 with this branch's runner source over the Worker image)
 
 The Control container, the door and the agent's container were started by the real code (`AgentContainer.create`, `start_network_door`, Sysbox runtime, the production model network), a `list` environment with `registry.npmjs.org`, `*.npmjs.org`,
-`pypi.org`, `files.pythonhosted.org` and the Docker Hub names; the policy was changed with the platform's own call (the MCP tool `update_session_network_policy`, the same API the SDK's `updateNetworkPolicy` calls) with the policy that `policyFor` builds.
+`pypi.org`, `files.pythonhosted.org` and the Docker Hub names; the policy was changed with the platform's own call (the platform connector's call that sets a running session's network policy, the same API the SDK's `updateNetworkPolicy` calls) with the policy that `policyFor` builds.
 What was **not** run here: the Dispatcher's `POST /network` route and the call from Control to it (a deployed Dispatcher is needed); they are covered by unit tests, the lane covers the door, and the policy semantics below were measured with the platform directly.
 
 | Check | Result |
