@@ -259,6 +259,30 @@ def test_the_inner_docker_has_to_say_ready_and_a_container_that_never_does_is_gi
     slow.stop()
 
 
+# #745-T20: the lane without Sysbox starts the real image under runc with an entrypoint of its own
+def test_the_runtime_and_the_entrypoint_are_seams_and_production_leaves_them_alone(
+    rig: Rig,
+) -> None:
+    default = agent_document(AGENT_IMAGE_ID, WORK_VOLUME, 1024)
+    assert default["HostConfig"]["Runtime"] == "sysbox-runc"
+    assert default["Entrypoint"] == ["/usr/bin/tini", "--", "/usr/local/bin/agent-init"]
+    assert AgentSeams().runtime == "sysbox-runc" and AgentSeams().entrypoint is None
+
+    lane = agent_document(
+        AGENT_IMAGE_ID, WORK_VOLUME, 1024, runtime="runc", entrypoint=["/bin/sh", "-c", "sleep 1"]
+    )
+    assert lane["HostConfig"]["Runtime"] == "runc"
+    assert lane["Entrypoint"] == ["/bin/sh", "-c", "sleep 1"]
+
+    rig.engine.runtimes.pop("sysbox-runc")
+    AgentContainer(
+        1024, rig.seams(runtime="runc", entrypoint=["/usr/bin/tini", "--", "/bin/sh"])
+    ).create()
+    made = rig.engine.container(AGENT_CONTAINER_NAME)
+    assert made.document["HostConfig"]["Runtime"] == "runc"
+    assert made.document["Entrypoint"] == ["/usr/bin/tini", "--", "/bin/sh"]
+
+
 # -- driving it only outward --------------------------------------------------------------------
 
 

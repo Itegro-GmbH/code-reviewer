@@ -41,7 +41,7 @@ import logging
 import socket
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, cast
 
@@ -120,12 +120,20 @@ while True:
 """
 
 
-def agent_document(image: str, work_volume: str, memory_bytes: int) -> dict[str, Any]:
+def agent_document(
+    image: str,
+    work_volume: str,
+    memory_bytes: int,
+    *,
+    runtime: str = AGENT_RUNTIME,
+    entrypoint: Sequence[str] | None = None,
+) -> dict[str, Any]:
     """The agent's container. Constants, the image id and the volume name the daemon gave, and the
-    memory limit the Dispatcher computed for the size of the VM."""
+    memory limit the Dispatcher computed for the size of the VM. The runtime is Sysbox and the
+    entrypoint the image's init; only the test lane without Sysbox names others (`AgentSeams`)."""
     return {
         "Image": image,
-        "Entrypoint": AGENT_ENTRYPOINT,
+        "Entrypoint": list(AGENT_ENTRYPOINT if entrypoint is None else entrypoint),
         "Cmd": [],
         "User": "0:0",
         "Env": [],
@@ -138,7 +146,7 @@ def agent_document(image: str, work_volume: str, memory_bytes: int) -> dict[str,
             }
         },
         "HostConfig": {
-            "Runtime": AGENT_RUNTIME,
+            "Runtime": runtime,
             "NetworkMode": MODEL_NETWORK_NAME,
             "Privileged": False,
             "Memory": memory_bytes,
@@ -269,6 +277,11 @@ class AgentSeams:
     clock: Callable[[], float] = time.monotonic
     ready_seconds: float = READY_SECONDS
     image: str = AGENT_IMAGE_REFERENCE
+    # The runtime of the container: Sysbox in production. The test lane on a machine without Sysbox
+    # (CI) starts the real image under `runc` with an entrypoint that skips the inner Docker, which
+    # has to write `READY_FILE` itself. Production never sets either.
+    runtime: str = AGENT_RUNTIME
+    entrypoint: Sequence[str] | None = None
 
 
 def unavailable(reason: str) -> JobError:
@@ -303,15 +316,22 @@ class AgentContainer:
         `JobError` (`setup_failed`, free) when it cannot be had; whatever was made is removed."""
         api = self._api
         try:
-            if "sysbox-runc" not in api.runtimes():
-                raise unavailable("the daemon has no sysbox-runc runtime")
+            if self._seams.runtime not in api.runtimes():
+                raise unavailable(f"the daemon has no {self._seams.runtime} runtime")
             image = str(api.inspect_image(self._seams.image).get("Id", ""))
             own = api.inspect_container(self._seams.hostname())
             volume = work_volume_of(own)
             if not image:
                 raise unavailable("the agent image is not in this VM")
             container = api.create_container(
-                agent_document(image, volume, self._memory_bytes), AGENT_CONTAINER_NAME
+                agent_document(
+                    image,
+                    volume,
+                    self._memory_bytes,
+                    runtime=self._seams.runtime,
+                    entrypoint=self._seams.entrypoint,
+                ),
+                AGENT_CONTAINER_NAME,
             )
             self._container = container
             api.start_container(container)
@@ -354,7 +374,7 @@ class AgentContainer:
         problems: list[str] = []
         if host.get("Privileged"):
             problems.append("privileged")
-        if host.get("Runtime") != AGENT_RUNTIME:
+        if host.get("Runtime") != self._seams.runtime:
             problems.append("runtime")
         if (
             host.get("Binds")
