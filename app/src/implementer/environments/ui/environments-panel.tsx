@@ -390,7 +390,9 @@ function EnvironmentForm({
       <fieldset data-field="vcpus" className="flex flex-col gap-2">
         <legend className="mb-2 text-sm font-semibold">{PAGE_COPY.size}</legend>
         {item !== undefined && !isEnvironmentVcpus(item.vcpus) ? (
-          <p className="text-sm text-destructive">{PAGE_COPY.sizeUnsupported}</p>
+          <p className="text-sm text-destructive">
+            {PAGE_COPY.sizeUnsupported}
+          </p>
         ) : null}
         <RadioGroup
           value={String(vcpus)}

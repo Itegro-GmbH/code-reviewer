@@ -1668,7 +1668,9 @@ describe("the environment picker (#818)", () => {
     await user.click(startButton());
 
     expect(
-      await screen.findByText(/no longer offered \(1 vCPU leaves the agent no memory\)/i),
+      await screen.findByText(
+        /no longer offered \(1 vCPU leaves the agent no memory\)/i,
+      ),
     ).toBeTruthy();
     expect(control("Environment").getAttribute("aria-invalid")).toBe("true");
     expect(api.startTask.mock.calls[0]?.[0]).toMatchObject({

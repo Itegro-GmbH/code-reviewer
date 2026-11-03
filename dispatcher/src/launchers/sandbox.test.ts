@@ -1664,9 +1664,9 @@ describe("the size of a job (#818)", () => {
       expect(environment).toContain(
         `RUNNER_IMPLEMENTER_AGENT_MEMORY_MB=${agentMb}`,
       );
-      expect(planForKind("implementer", { launcher: { vcpus } }).agentMemoryMb).toBe(
-        agentMb,
-      );
+      expect(
+        planForKind("implementer", { launcher: { vcpus } }).agentMemoryMb,
+      ).toBe(agentMb);
     },
   );
 

@@ -68,7 +68,9 @@ describe("the sizes and limits of an environment", () => {
   // #818-T02
   it("offer only the sizes that leave the agent enough memory, and 1 vCPU is not one of them", () => {
     for (const vcpus of ENVIRONMENT_VCPUS)
-      expect(AGENT_MEMORY_MB[vcpus]).toBeGreaterThanOrEqual(MIN_AGENT_MEMORY_MB);
+      expect(AGENT_MEMORY_MB[vcpus]).toBeGreaterThanOrEqual(
+        MIN_AGENT_MEMORY_MB,
+      );
     expect(AGENT_MEMORY_MB[1]).toBeLessThan(MIN_AGENT_MEMORY_MB);
     expect(isEnvironmentVcpus(1)).toBe(false);
     expect(isEnvironmentVcpus(3)).toBe(false);

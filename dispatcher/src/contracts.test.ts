@@ -364,14 +364,23 @@ describe("the sizes of an Implementer environment (contracts/environment-sizes.v
       minAgentMemoryMb: number;
       agentMemoryMb: Record<string, number>;
     }>("environment-sizes.v1.json");
-    const { agentMemoryMb, IMPLEMENTER_MIN_AGENT_MEMORY_MB, SANDBOX_KIND_DEFAULTS } =
-      await import("./launchers/sandbox.ts");
-    const control = Number.parseInt(SANDBOX_KIND_DEFAULTS.implementer.memory.limit);
+    const {
+      agentMemoryMb,
+      IMPLEMENTER_MIN_AGENT_MEMORY_MB,
+      SANDBOX_KIND_DEFAULTS,
+    } = await import("./launchers/sandbox.ts");
+    const control = Number.parseInt(
+      SANDBOX_KIND_DEFAULTS.implementer.memory.limit,
+    );
     for (const vcpus of sizes.vcpus)
-      expect(sizes.agentMemoryMb[String(vcpus)]).toBe(agentMemoryMb(vcpus, control));
+      expect(sizes.agentMemoryMb[String(vcpus)]).toBe(
+        agentMemoryMb(vcpus, control),
+      );
     expect(sizes.minAgentMemoryMb).toBe(IMPLEMENTER_MIN_AGENT_MEMORY_MB);
     expect(sizes.environmentVcpus).toEqual(
-      sizes.vcpus.filter((vcpus) => agentMemoryMb(vcpus, control) >= sizes.minAgentMemoryMb),
+      sizes.vcpus.filter(
+        (vcpus) => agentMemoryMb(vcpus, control) >= sizes.minAgentMemoryMb,
+      ),
     );
   });
 });

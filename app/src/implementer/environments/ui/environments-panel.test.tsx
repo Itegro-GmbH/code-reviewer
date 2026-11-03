@@ -367,7 +367,9 @@ describe("what the page says about the script (#819 review)", () => {
   it("says plainly that setup scripts run when a task starts, for a person who manages and for one who does not", async () => {
     for (const canManage of [true, false]) {
       show(fakeApi().api, canManage);
-      const note = await screen.findByText(/setup scripts run when a task starts/i);
+      const note = await screen.findByText(
+        /setup scripts run when a task starts/i,
+      );
       expect(note.textContent).toMatch(/as root/);
       expect(note.textContent).toMatch(/no secrets/);
       expect(screen.queryByText(/do not run yet/i)).toBeNull();
@@ -406,9 +408,13 @@ describe("an environment with a size that is no longer offered (1 vCPU)", () => 
   it("is listed as it is, with a sentence that a task started with it is refused", async () => {
     show(fakeApi([NODE, OLD]).api, true);
 
-    const old = (await screen.findByText("One core")).closest("li") as HTMLElement;
+    const old = (await screen.findByText("One core")).closest(
+      "li",
+    ) as HTMLElement;
     expect(within(old).getByText(/1 vCPU\. No longer offered/)).toBeTruthy();
-    expect(within(old).getByText(/refused until you choose another size/)).toBeTruthy();
+    expect(
+      within(old).getByText(/refused until you choose another size/),
+    ).toBeTruthy();
     const node = screen.getByText("Node 22").closest("li") as HTMLElement;
     expect(within(node).queryByText(/No longer offered/)).toBeNull();
   });
@@ -417,7 +423,9 @@ describe("an environment with a size that is no longer offered (1 vCPU)", () => 
   it("opens for editing with no size chosen and a note, and saves only when a size is chosen", async () => {
     const { api, updated } = fakeApi([OLD]);
     show(api, true);
-    const old = (await screen.findByText("One core")).closest("li") as HTMLElement;
+    const old = (await screen.findByText("One core")).closest(
+      "li",
+    ) as HTMLElement;
     await userEvent.click(within(old).getByRole("button", { name: /edit/i }));
 
     expect(screen.getByText(/1 vCPU leaves the agent no memory/)).toBeTruthy();
@@ -426,7 +434,9 @@ describe("an environment with a size that is no longer offered (1 vCPU)", () => 
 
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(updated).toEqual([]);
-    expect(await screen.findByText(describeFieldIssue("vcpus", "invalid"))).toBeTruthy();
+    expect(
+      await screen.findByText(describeFieldIssue("vcpus", "invalid")),
+    ).toBeTruthy();
 
     await userEvent.click(screen.getByRole("radio", { name: /^4 vCPU/ }));
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
@@ -567,9 +577,7 @@ describe("the size group (#819 review)", () => {
         .split(" ")
         .map((id) => document.getElementById(id)?.textContent ?? "");
 
-    expect(describedBy()).toEqual([
-      expect.stringContaining("2 GB per vCPU"),
-    ]);
+    expect(describedBy()).toEqual([expect.stringContaining("2 GB per vCPU")]);
     expect(group.getAttribute("aria-invalid")).not.toBe("true");
 
     await userEvent.type(screen.getByLabelText("Name"), "x");
