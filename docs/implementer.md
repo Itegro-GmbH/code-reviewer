@@ -609,7 +609,7 @@ provider of `fakes/wire`) in which the agent, **with no internet**, runs a Playw
 | Removing the Setup container (with its inner Docker) | 0.3 s |
 | The agent's container from the committed image, to ready (Sysbox copies the inner images into its Docker) | 1.7 to 2.0 s (1.5 to 1.8 s from the golden image, step 4) |
 | The turn, all of it (setup 87 s, the agent's turn 15 s) | 102 s |
-| The committed image | **3.92 GB on disk, 1.07 GB of content**, against 1.54 GB and 397 MB for the golden agent image: Chromium and its libraries 862 MB (`~/.cache/ms-playwright`), postgres 422 MB, the rest the apt packages |
+| The committed image | **3.92 GB on disk, 1.07 GB of content**, against 1.54 GB and 397 MB for the golden agent image: Chromium and its libraries 862 MB (`~/.cache/ms-playwright`), postgres 422 MB, the rest the apt packages of `--with-deps`, the npm tree and the copy of the inner Docker's data |
 | The VM's disk | 15.4 GB used before, 18.3 GB after the agent ran: the images the script made cost about 2.9 GB, in the committed image and the agent's own copy of the inner images |
 
 In the agent, the file the script left in the container's file system was there (`cat /opt/setup-marker`); `1.1.1.1:443` and a name lookup both failed
