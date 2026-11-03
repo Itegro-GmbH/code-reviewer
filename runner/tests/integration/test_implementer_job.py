@@ -123,6 +123,8 @@ class FakeGit(GitWorkspace):
         self.rescue_name: str | None = None
         self.dropped: tuple[int, int] = (0, 0)
         self.form_gone = False
+        # What the volume of the VM has left, as the workspace would say (None: it cannot say).
+        self.volume_free: int | None = None
         self._prepare_error: JobError | None = None
 
     def fail_prepare(self, error: JobError) -> None:
@@ -140,6 +142,9 @@ class FakeGit(GitWorkspace):
         self.tip = sha
         self.commits = [*self.commits, CommitInfo(sha, subject)]
         self.files = [FileChange("src/a.ts", ChangeKind.ADDED)]
+
+    def volume_free_bytes(self) -> int | None:
+        return self.volume_free
 
     def dirty(self) -> bool:
         if self.dirty_error is not None:
@@ -1156,6 +1161,31 @@ def test_work_saved_from_a_detached_head_is_in_the_summary_and_the_notes(play: A
 
     assert "implementer/a1b2c3-leftover-1234abcd" in turn.result["implementer"]["summary"]
     assert turn.events[:4] == ["agent.start", "turn", "stop", "rescue"]
+
+
+# #745-T27: a disk that is full is said, not hidden
+def test_a_branch_that_found_no_room_is_named_and_the_disk_is_said_to_be_full(play: Any) -> None:
+    def configure(git: FakeGit) -> None:
+        git.other_branches = {"experiment/big": "b" * 40}
+        git.rejected = {"experiment/big": "out_of_space"}
+        git.volume_free = 10 * 1024**2
+
+    turn = play(commits_then_ends(), configure=configure)
+
+    log = turn.result["logTail"]
+    assert "experiment/big: rejected (out_of_space)" in log
+    assert "the disk of the workspace had no room" in log
+    assert "the VM's disk had 10 MB left at the end" in log
+    assert turn.result["implementer"]["pushed"] is True, "the work that arrived is still reported"
+
+
+def test_a_disk_with_room_adds_no_note(play: Any) -> None:
+    def configure(git: FakeGit) -> None:
+        git.volume_free = 50 * 1024**3
+
+    turn = play(commits_then_ends(), configure=configure)
+
+    assert "disk" not in turn.result["logTail"]
 
 
 def test_the_leftover_is_committed_after_the_agents_container_is_gone_and_before_the_push(

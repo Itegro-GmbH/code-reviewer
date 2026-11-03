@@ -8,6 +8,7 @@ import {
   WORK_VOLUME_PATH,
   applyOverrides,
   renderDockerRunArguments,
+  RESERVE_DISK_GIB,
   workVolumeCommands,
   workVolumeName,
   type ContainerErrorCode,
@@ -399,16 +400,34 @@ describe("the commands that make the work volume", () => {
 
     expect(commands.map((command) => command.label)).toStrictEqual([
       "work-volume-dir",
+      "work-volume-reserve-image",
+      "work-volume-reserve-fs",
+      "work-volume-reserve-mount",
       "work-volume-mount",
       "work-volume-options",
       "work-volume-check",
       "work-volume-create",
     ]);
+    const image = `${ROOT}/${VOLUME}.reserve.img`;
     expect(
       commands.map((command) => [command.cmd, ...command.args]),
     ).toStrictEqual([
-      ["mkdir", "-p", "--", directory],
-      ["mount", "--bind", directory, directory],
+      ["mkdir", "-p", "--", `${directory}/reserve`],
+      ["fallocate", "-l", "8G", image],
+      [
+        "mkfs.ext4",
+        "-q",
+        "-F",
+        "-m",
+        "0",
+        "-O",
+        "^has_journal",
+        "-E",
+        "lazy_itable_init=1,nodiscard",
+        image,
+      ],
+      ["mount", "-o", "loop,nosuid,nodev", image, `${directory}/reserve`],
+      ["mount", "--rbind", directory, directory],
       ["mount", "-o", "remount,bind,rw,nosuid,nodev", directory],
       ["cat", "/proc/self/mountinfo"],
       [
@@ -422,11 +441,13 @@ describe("the commands that make the work volume", () => {
         "--opt",
         `device=${directory}`,
         "--opt",
-        "o=bind",
+        "o=rbind",
         VOLUME,
       ],
     ]);
     for (const command of commands) expect(command.sudo).toBe(true);
+    // #745: the reserve disk is allocated (fallocate, not a sparse file) and is no sixteenth of the VM's disk or less
+    expect(RESERVE_DISK_GIB).toBe(8);
     // Programs may run on the volume: no noexec anywhere, and no shell.
     expect(JSON.stringify(commands)).not.toContain("noexec");
     expect(commands.map((command) => command.cmd)).not.toContain("sh");
@@ -446,11 +467,29 @@ describe("the commands that make the work volume", () => {
     const line = (options: string, mountPoint = directory) =>
       `101 22 8:1 ${directory} ${mountPoint} ${options} shared:1 - ext4 /dev/sda1 rw,nosuid,nodev`;
     const root = "22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw";
+    // The reserve disk below the volume: a mount of its own, as `rbind` shows it.
+    const reserve = (options = "rw,nosuid,nodev,relatime") =>
+      line(options, `${directory}/reserve`);
 
-    it("accepts the mount the remount made: read-write, nosuid, nodev", () => {
-      expect(check()(`${root}\n${line("rw,nosuid,nodev,relatime")}\n`)).toBe(
-        true,
-      );
+    it("accepts the mount the remount made: read-write, nosuid, nodev, with the reserve disk below it", () => {
+      expect(
+        check()(`${root}\n${line("rw,nosuid,nodev,relatime")}\n${reserve()}\n`),
+      ).toBe(true);
+    });
+
+    // #745: the reserve disk is what keeps Control's mirror safe from a full disk, so it has to be there and be plain
+    it.each([
+      ["missing", ""],
+      ["without nosuid", `${reserve("rw,nodev,relatime")}\n`],
+      ["without nodev", `${reserve("rw,nosuid,relatime")}\n`],
+      ["read-only", `${reserve("ro,nosuid,nodev,relatime")}\n`],
+      ["noexec", `${reserve("rw,nosuid,nodev,noexec,relatime")}\n`],
+    ])("refuses a volume whose reserve disk is %s", (_what, reserveLines) => {
+      expect(
+        check()(
+          `${root}\n${line("rw,nosuid,nodev,relatime")}\n${reserveLines}`,
+        ),
+      ).toBe(false);
     });
 
     it.each([
@@ -484,7 +523,7 @@ describe("the commands that make the work volume", () => {
       ).toBe(false);
       expect(
         check()(
-          `${line("rw,relatime")}\n${line("rw,nosuid,nodev,relatime")}\n`,
+          `${line("rw,relatime")}\n${line("rw,nosuid,nodev,relatime")}\n${reserve()}\n`,
         ),
       ).toBe(true);
     });

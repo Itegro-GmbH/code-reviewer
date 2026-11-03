@@ -5,8 +5,11 @@
 What the system does, and what the agent can and cannot:
 
 * The runner (Control, root) clones the base branch, `--depth 1`, into a bare **mirror** only it can
-  enter (`/work/mirror.git`). The provider token is in the environment of that one git process and
-  nowhere else: not in argv, a config file, a URL, the mirror or anything the agent can reach.
+  enter (`/work/reserve/mirror.git`, on the **reserve disk**: a pre-allocated file system of its
+  own below the work volume, which the agent's container does not mount and the agent cannot
+  fill, so the final push has room however full the VM's disk is). The provider token is in the
+  environment of that one git process and nowhere else: not in argv, a config file, a URL, the
+  mirror or anything the agent can reach.
 * The agent works in `/work/repo` of **its own container** (`agent_container.py`): the Subpath
   `repo` of the work volume, a local clone of the mirror with no remote and no credential. It may do
   anything with git there: commit, amend, rebase, reset, create and switch branches, tag. Nothing is
@@ -33,7 +36,11 @@ What the system does, and what the agent can and cannot:
   mirror's git checks (`fsckObjects`) and stores; the mirror is bare (nothing is checked out, no
   filter or hook runs) and its config is the runner's. The names of the branches are the only thing
   taken from the listing, and each is validated (`push_policy`) before it is put in a refspec; the
-  tip of a branch is read from the mirror, never from what the listing printed. **When each runs:**
+  tip of a branch is read from the mirror, never from what the listing printed. **Room first:**
+  before any branch is taken over the mirror's file system is asked for its free bytes and inodes
+  (`MIN_FREE_BYTES`, `MIN_FREE_INODES`); too little and no fetch is started, every branch is
+  reported rejected as `out_of_space`, and a fetch that fails with the disk gone says the same
+  instead of `unreadable`. **When each runs:**
   the look at the status of the tree (`dirty`) runs **while the agent's container is still alive**,
   because its answer decides whether the agent gets one more message; it is a read in the read-only
   reader, and an agent that changes the tree under it only changes that answer. The rescue of a
@@ -97,6 +104,14 @@ FETCH_TIMEOUT = 60.0
 PUSH_TIMEOUT = 120.0
 # The wait before the one new try of a push the provider could not take.
 TRANSIENT_PAUSE_SECONDS = 3.0
+# The room the mirror's file system must have left before the final push takes a branch over: the
+# objects of the agent's commits (a few megabytes for a normal turn, the size of what it committed
+# for a large one) and the pack git writes while it checks them.
+MIN_FREE_BYTES = 256 * 1024 * 1024
+MIN_FREE_INODES = 10_000
+# The mirror's directory below the work directory. In production it is a mount of its own, a
+# pre-allocated file system the agent cannot fill (`reserve disk`, `container.ts`).
+RESERVE_DIRECTORY = "reserve"
 # The scratch refs of the mirror: the agent's branches are fetched here, numbered, so that no name
 # the agent chose ever becomes a local ref of the runner.
 SCRATCH_PREFIX = "refs/runner/in/"
@@ -118,6 +133,8 @@ REASON_PROVIDER_UNAVAILABLE = "provider_unavailable"
 REASON_UNREADABLE = "unreadable"
 REASON_NOT_A_COMMIT = "not_a_commit"
 REASON_OUT_OF_TIME = "out_of_time"
+# The mirror's disk has too little room left to take a branch over (or ran out while it was).
+REASON_OUT_OF_SPACE = "out_of_space"
 # A git command of ours was killed at its time limit: nothing is known of what it did.
 REASON_TIMED_OUT = "timed_out"
 # GitHub answered the push with an error that is neither a refusal of the access nor a hiccup.
@@ -148,6 +165,20 @@ _ACCESS_STATUSES = frozenset({401, 403, 404})
 _SHA = re.compile(r"[0-9a-f]{40}")
 
 
+@dataclass(frozen=True)
+class DiskSpace:
+    """What is left on a file system for the runner: bytes and inodes (a full inode table stops
+    git as a full disk does)."""
+
+    free_bytes: int
+    free_inodes: int
+
+
+def disk_space(path: Path) -> DiskSpace:
+    status = os.statvfs(path)
+    return DiskSpace(status.f_bavail * status.f_frsize, status.f_favail)
+
+
 class RepoAccess(Protocol):
     """How git looks into the agent's repository: in the reader, a container with the repository
     and nothing else (`reader.ReaderAccess`). A test brings a local one."""
@@ -159,6 +190,12 @@ class RepoAccess(Protocol):
 
     def upload_pack(self) -> str:
         """The command Control's `git fetch --upload-pack=` runs to read the agent's branches."""
+        ...
+
+    def warm(self) -> bool:
+        """Make everything a look needs before the agent runs, so that nothing has to be created
+        later, when the VM's disk may be full (a container needs room to be made). False when it
+        cannot be had."""
         ...
 
     def run(self, args: Sequence[str], *, timeout: float, write: bool = False) -> Outcome:
@@ -315,6 +352,7 @@ class GitWorkspace:
         before_push: Callable[[], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        space: Callable[[Path], DiskSpace] = disk_space,
     ) -> None:
         _checked_url(spec.clone_url, schemes)
         executable = shutil.which(git, path=path)
@@ -333,9 +371,11 @@ class GitWorkspace:
         self._timeout = timeout
         self._clock = clock
         self._sleep = sleep
+        self._space = space
         self._path = ":".join(dict.fromkeys([str(Path(executable).parent), *path.split(":")]))
         self._process = GitProcess(executable, self._path, layout.run_dir, spec.token)
-        self.mirror = layout.work_dir / "mirror.git"
+        self.reserve = layout.work_dir / RESERVE_DIRECTORY
+        self.mirror = self.reserve / "mirror.git"
         self.repo = layout.work_dir / "repo"
         self._start: str | None = None
         self._names_checked = False
@@ -358,6 +398,8 @@ class GitWorkspace:
         self._check_names()
         self.clone_mirror()
         self.create_agent_repository()
+        if not self._access.warm():
+            raise fail(ErrorCode.SETUP_FAILED, "reader_unavailable: the reader cannot be made")
 
     def clone_mirror(self) -> None:
         """Fetch the base branch, depth 1, into the new bare mirror. The token is in this one
@@ -550,6 +592,12 @@ class GitWorkspace:
         self._progress.overflow = selection.overflow
         for name, reason in selection.excluded:
             self._progress.branches.append(BranchPush(name, None, False, reason))
+        if not self._has_room():
+            # Nothing is fetched: a fetch with no room fails half way and leaves the mirror full of
+            # what it could not finish. Every branch says why it did not arrive.
+            for name in selection.names:
+                self._progress.branches.append(BranchPush(name, None, False, REASON_OUT_OF_SPACE))
+            return self.push_report()
         for index, name in enumerate(selection.names):
             if self._clock() >= deadline:
                 self._progress.branches.append(BranchPush(name, None, False, REASON_OUT_OF_TIME))
@@ -613,6 +661,14 @@ class GitWorkspace:
             reader.feed,
         )
         return parse_name_status(bytes(reader.data)) if done.returncode == 0 else []
+
+    def volume_free_bytes(self) -> int | None:
+        """What the VM's disk (the work volume) has left, for the note at the end of the turn; None
+        when it cannot be asked."""
+        try:
+            return self._space(self.layout.work_dir).free_bytes
+        except OSError:
+            return None
 
     def check_lease(self) -> None:
         """One question to the job host while the agent works: raises `lease_lost` (or whatever the
@@ -755,6 +811,8 @@ class GitWorkspace:
             timeout=self._left(FETCH_TIMEOUT, deadline),
         )
         if fetched.returncode != 0:
+            if not self._has_room():
+                return None, REASON_OUT_OF_SPACE
             return None, REASON_TIMED_OUT if fetched.unanswered else REASON_UNREADABLE
         raw_id = self._mirror(["rev-parse", "-q", "--verify", scratch])
         commit = self._mirror(["rev-parse", "-q", "--verify", f"{scratch}^{{commit}}"])
@@ -816,6 +874,15 @@ class GitWorkspace:
             return REASON_PROVIDER_ERROR
         return REASON_PROVIDER_UNAVAILABLE
 
+    def _has_room(self) -> bool:
+        """Whether the mirror's file system has the room the final push needs. A file system that
+        cannot be asked is not a reason to refuse: the fetch will say if it fails."""
+        try:
+            space = self._space(self.mirror)
+        except OSError:
+            return True
+        return space.free_bytes >= MIN_FREE_BYTES and space.free_inodes >= MIN_FREE_INODES
+
     def _left(self, cap: float, deadline: float) -> float:
         return max(1.0, min(cap, self._timeout, deadline - self._clock()))
 
@@ -835,7 +902,7 @@ class GitWorkspace:
         self._names_checked = True
 
     def _prepare_directories(self) -> None:
-        for directory in (self.layout.work_dir, self.layout.run_dir):
+        for directory in (self.layout.work_dir, self.layout.run_dir, self.reserve):
             _own_directory(directory)
         for existing in (self.mirror, self.repo):
             if existing.exists() or existing.is_symlink():

@@ -754,6 +754,9 @@ describe("the Sandbox-Launcher", () => {
       "exec:image-id",
       "exec:sysbox-prepare",
       "exec:work-volume-dir",
+      "exec:work-volume-reserve-image",
+      "exec:work-volume-reserve-fs",
+      "exec:work-volume-reserve-mount",
       "exec:work-volume-mount",
       "exec:work-volume-options",
       "exec:work-volume-check",
@@ -1105,6 +1108,9 @@ describe("the Sandbox-Launcher", () => {
       "image-id",
       "sysbox-prepare",
       "work-volume-dir",
+      "work-volume-reserve-image",
+      "work-volume-reserve-fs",
+      "work-volume-reserve-mount",
       "work-volume-mount",
       "work-volume-options",
       "work-volume-check",
@@ -1117,6 +1123,9 @@ describe("the Sandbox-Launcher", () => {
   // #760-T05
   it.each([
     "work-volume-dir",
+    "work-volume-reserve-image",
+    "work-volume-reserve-fs",
+    "work-volume-reserve-mount",
     "work-volume-mount",
     "work-volume-options",
     "work-volume-check",
@@ -1210,7 +1219,7 @@ describe("the Sandbox-Launcher", () => {
     const steps = service.execs.filter((call) =>
       call.label.startsWith("work-volume"),
     );
-    expect(steps).toHaveLength(5);
+    expect(steps).toHaveLength(8);
     for (const call of steps) expect(call.timeoutMs).toBe(10_000);
   });
 
@@ -1234,9 +1243,9 @@ describe("the Sandbox-Launcher", () => {
       }),
     );
 
-    expect(WORK_VOLUME_STEPS_SECONDS).toBe(50);
+    expect(WORK_VOLUME_STEPS_SECONDS).toBe(80);
     expect(SYSBOX_PREPARE_SECONDS).toBe(40);
-    expect(IMPLEMENTER_LAUNCH_EXTRA_SECONDS).toBe(90);
+    expect(IMPLEMENTER_LAUNCH_EXTRA_SECONDS).toBe(120);
     const [implementer, diff] = service.creates;
     expect(implementer?.timeoutMs).toBe(
       (3600 + VM_TIMEOUT_MARGIN_SECONDS + IMPLEMENTER_LAUNCH_EXTRA_SECONDS) *

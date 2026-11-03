@@ -11,10 +11,12 @@ from pathlib import Path
 
 from code_reviewer_runner.implementer.git_process import TRUSTED_PATH, GitProcess, Outcome
 from code_reviewer_runner.implementer.git_workspace import (
+    DiskSpace,
     GitIdentity,
     GitWorkspace,
     WorkspaceLayout,
     WorkspaceSpec,
+    disk_space,
 )
 from git_support import TOKEN, Origin, raw
 
@@ -54,6 +56,9 @@ class LocalAccess:
     def upload_pack(self) -> str:
         return f"{self.git} upload-pack"
 
+    def warm(self) -> bool:
+        return True
+
     def run(self, args: Sequence[str], *, timeout: float, write: bool = False) -> Outcome:
         return self._process.run(args, env=self._env, cwd=self.repo, timeout=timeout)
 
@@ -85,6 +90,7 @@ class Rig:
         git: str | None = None,
         token: str = TOKEN,
         timeout: float = 600.0,
+        space: Callable[[Path], DiskSpace] | None = None,
     ) -> GitWorkspace:
         spec = WorkspaceSpec(
             clone_url=url or self.origin.url, token=token, base_branch=base_branch, branch=branch
@@ -97,10 +103,16 @@ class Rig:
             git=git or self.git,
             schemes=schemes,
             timeout=timeout,
+            space=space or disk_space,
         )
 
-    def prepared(self, base_branch: str = "main", branch: str = BRANCH) -> GitWorkspace:
-        workspace = self.workspace(base_branch=base_branch, branch=branch)
+    def prepared(
+        self,
+        base_branch: str = "main",
+        branch: str = BRANCH,
+        space: Callable[[Path], DiskSpace] | None = None,
+    ) -> GitWorkspace:
+        workspace = self.workspace(base_branch=base_branch, branch=branch, space=space)
         workspace.prepare()
         return workspace
 

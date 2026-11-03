@@ -11,6 +11,7 @@ import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  RESERVE_DISK_GIB,
   renderDockerRunArguments,
   workVolumeCommands,
   workVolumeName,
@@ -58,7 +59,9 @@ afterEach(() => {
   };
   quietly("docker", ["rm", "--force", `${volume}-container`]);
   quietly("docker", ["volume", "rm", "--force", volume]);
-  quietly("sudo", ["-n", "umount", `${root}/${volume}`]);
+  // The volume is a recursive bind with the reserve disk mounted below it: both go, the loop device with them.
+  quietly("sudo", ["-n", "umount", "-R", `${root}/${volume}`]);
+  quietly("sudo", ["-n", "umount", "-R", `${root}/${volume}/reserve`]);
   quietly("sudo", ["-n", "rm", "-rf", root]);
 });
 
@@ -70,6 +73,11 @@ const SCRIPT = [
   "cp /bin/true /tmp/program 2>/dev/null; /tmp/program 2>/dev/null && echo TMP_EXEC_OK || echo TMP_NO_EXEC",
   "echo PIDS_MAX $(cat /sys/fs/cgroup/pids.max)",
   "echo MEMORY_MAX $(cat /sys/fs/cgroup/memory.max)",
+  // #745: the reserve disk below the volume is a file system of its own that the container sees and can write.
+  "grep ' /work/reserve ' /proc/self/mountinfo | sed 's/^/RESERVE_MOUNT /'",
+  "echo RESERVE_SIZE $(df -B1 --output=size /work/reserve | tail -n 1 | tr -d ' ')",
+  "dd if=/dev/zero of=/work/reserve/probe bs=1M count=16 2>/dev/null && echo RESERVE_WRITABLE",
+  "echo WORK_DEVICE $(stat -c %d /work) RESERVE_DEVICE $(stat -c %d /work/reserve)",
 ].join("; ");
 
 describe("the Implementer's container profile on a real daemon", () => {
@@ -113,6 +121,18 @@ describe("the Implementer's container profile on a real daemon", () => {
     expect(output).toContain("ROOT_READ_ONLY");
     expect(output).toContain("TMP_NO_EXEC");
     expect(output).toContain("PIDS_MAX 2048");
+    // #745: the reserve disk is its own mount (nosuid, nodev, no noexec), of about RESERVE_DISK_GIB, and writable.
+    const reserve = /^RESERVE_MOUNT .*$/m.exec(output)?.[0] ?? "";
+    expect(reserve).toMatch(/ rw[ ,]/);
+    expect(reserve).toContain("nosuid");
+    expect(reserve).toContain("nodev");
+    expect(reserve).toContain("ext4");
+    expect(output).toContain("RESERVE_WRITABLE");
+    const size = Number(/RESERVE_SIZE (\d+)/.exec(output)?.[1]);
+    expect(size).toBeGreaterThan(RESERVE_DISK_GIB * 0.9 * 1024 ** 3);
+    expect(size).toBeLessThanOrEqual(RESERVE_DISK_GIB * 1024 ** 3);
+    const devices = /WORK_DEVICE (\d+) RESERVE_DEVICE (\d+)/.exec(output);
+    expect(devices?.[1]).not.toBe(devices?.[2]);
     // The profile's own limit ("768m"), so that the test follows the profile and not a copy of its number.
     const limit = /^(\d+)m$/.exec(IMPLEMENTER_CONTAINER_SPEC.memory.limit);
     expect(limit).not.toBeNull();

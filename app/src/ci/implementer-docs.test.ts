@@ -590,6 +590,7 @@ describe("the operator guide states what the owner decided", () => {
       "unreadable",
       "not_a_commit",
       "out_of_time",
+      "out_of_space",
       "excluded",
     ])
       expect(rules, reason).toContain(`\`${reason}\``);

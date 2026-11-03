@@ -373,6 +373,8 @@ const BRANCH_REASONS: Readonly<Record<string, string>> = {
   unreadable: "The branch could not be read from the workspace.",
   not_a_commit: "The branch does not point at a commit.",
   out_of_time: "There was no time left to push this branch.",
+  out_of_space:
+    "The disk of the workspace had no room left to take this branch over, so it was not pushed.",
   excluded: "This branch is not pushed.",
 };
 

@@ -123,6 +123,7 @@ gave up, a stop with the lease still held), and never after a lost lease, the ru
 | `unreadable` | The branch could not be taken over from the agent's repository (a broken repository, objects git refuses) |
 | `not_a_commit` | The branch points at a tree or a tag, not a commit |
 | `out_of_time` | The time for the final push ran out before this branch |
+| `out_of_space` | The disk the runner takes branches over to (the reserve disk, section "The disk") had too little room left, or ran out while this one was taken over; nothing was fetched when the room was short beforehand |
 | `excluded` | The branch is in `PUSH_EXCLUDED_BRANCHES` (below) |
 
 A branch whose tip is the base commit is not listed. At most 50 branches are reported, the task's branch first and then the

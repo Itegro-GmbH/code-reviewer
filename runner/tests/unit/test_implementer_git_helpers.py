@@ -70,7 +70,7 @@ def test_only_an_https_address_without_credentials_is_accepted_by_default(
 def test_an_https_address_is_accepted(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
 
-    assert workspace.mirror == tmp_path / "work" / "mirror.git"
+    assert workspace.mirror == tmp_path / "work" / "reserve" / "mirror.git"
     assert workspace.repo == tmp_path / "work" / "repo"
 
 

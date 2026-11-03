@@ -72,6 +72,7 @@ from .git_workspace import (
     CONFIRM_PAUSE_SECONDS,
     CONFIRM_SECONDS,
     LIST_TOO_LARGE,
+    REASON_OUT_OF_SPACE,
     GitWorkspace,
     PushReport,
 )
@@ -105,6 +106,8 @@ STOP_PUSH_SECONDS = 25.0
 # How often the watch asks the job host whether the job is still ours while the agent works (a
 # lost lease ends the turn at once; nothing is pushed in the meantime).
 LEASE_POLL_SECONDS = 30.0
+# Below this much free space on the VM's disk at the end, the outcome says so.
+LOW_DISK_BYTES = 1024 * 1024 * 1024
 # The extra message for a dirty tree is only worth sending when this much of the clock is left.
 MIN_EXTRA_TURN_SECONDS = 20.0
 # The name of the instruction file the runner writes for the engine.
@@ -565,11 +568,25 @@ class ImplementerSession:
         except Exception as error:
             self._stopped_by(error)
         self._note_branches(self.workspace.push_report())
+        self._note_disk()
+
+    def _note_disk(self) -> None:
+        """Say so when the VM's disk is nearly full at the end: the agent filled it, or the work is
+        large. The work that is on the reserve disk is not affected; what the agent wrote since the
+        disk was full may be."""
+        free = self.workspace.volume_free_bytes()
+        if free is not None and free < LOW_DISK_BYTES:
+            self._note(f"the VM's disk had {free // (1024 * 1024)} MB left at the end")
 
     def _note_branches(self, report: PushReport) -> None:
         for branch in report.branches:
             outcome = "pushed" if branch.pushed else f"rejected ({branch.reason})"
             self._note(f"branch {branch.name}: {outcome}")
+        if any(branch.reason == REASON_OUT_OF_SPACE for branch in report.branches):
+            self._note(
+                "the disk of the workspace had no room left to take every branch over, "
+                "so what is listed as out_of_space did not arrive"
+            )
         if not report.listed:
             if report.list_problem == LIST_TOO_LARGE:
                 self._note(

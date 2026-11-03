@@ -513,6 +513,29 @@ def test_a_read_runs_in_the_read_only_reader_and_a_write_in_a_second_one_made_wh
     assert reading.removed and writing.removed
 
 
+# #745-T23: nothing has to be created at the end, when the VM's disk may be full
+def test_both_readers_are_made_before_the_agent_runs(rig: Rig) -> None:
+    access = ReaderAccess(None, ReaderSeams(rig.api, lambda: HOSTNAME))
+
+    assert access.warm() is True
+
+    names = {c.name for c in rig.engine.containers.values()}
+    assert {READER_CONTAINER_NAME, READER_WRITER_CONTAINER_NAME} <= names
+    count = len(rig.engine.containers)
+    access.run(["status"], timeout=5.0)
+    access.run(["add", "-A"], timeout=5.0, write=True)
+    assert len(rig.engine.containers) == count, "no container is made by a command"
+    access.close()
+
+
+# #745-T23
+def test_a_reader_that_cannot_be_made_fails_the_warm_up_so_the_turn_ends_free(rig: Rig) -> None:
+    rig.engine.refuse["/containers/create"] = 500
+    access = ReaderAccess(None, ReaderSeams(rig.api, lambda: HOSTNAME))
+
+    assert access.warm() is False
+
+
 # #745-T23
 def test_the_reader_is_made_under_the_runtime_the_seam_names(rig: Rig) -> None:
     access = ReaderAccess(None, ReaderSeams(rig.api, lambda: HOSTNAME, runtime="runc"))

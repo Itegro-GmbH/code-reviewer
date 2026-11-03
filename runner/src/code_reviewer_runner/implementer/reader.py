@@ -208,6 +208,11 @@ class ReaderAccess:
     def upload_pack(self) -> str:
         return f"{self._seams.python} -I -m {UPLOAD_PACK_MODULE}"
 
+    def warm(self) -> bool:
+        """Make both readers now, before the agent runs: the final push must not need a container
+        to be created on a disk the agent may have filled."""
+        return self._ensure(False) is not None and self._ensure(True) is not None
+
     def run(self, args: Sequence[str], *, timeout: float, write: bool = False) -> Outcome:
         container = self._ensure(write)
         if container is None:

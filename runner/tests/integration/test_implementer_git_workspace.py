@@ -128,7 +128,7 @@ def test_the_agent_repository_has_the_new_branch_at_the_base_tip_and_no_remote(r
     assert raw("config", "user.email", cwd=repo, git=rig.git) == IDENTITY.email
     assert repo.stat().st_uid == os.geteuid()
     assert (repo / "README.md").read_text() == "# demo\n"
-    assert not (repo.parent / "mirror.git" / "refs" / "heads" / BRANCH).exists()
+    assert not (repo.parent / "reserve" / "mirror.git" / "refs" / "heads" / BRANCH).exists()
 
 
 def test_nothing_is_installed_in_the_agents_repository(rig: Rig) -> None:

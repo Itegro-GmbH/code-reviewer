@@ -22,6 +22,7 @@ from code_reviewer_runner.implementer.git_process import Outcome
 from code_reviewer_runner.implementer.git_workspace import (
     REASON_NOT_A_COMMIT,
     REASON_NOT_FAST_FORWARD,
+    REASON_OUT_OF_SPACE,
     REASON_OUT_OF_TIME,
     REASON_PROVIDER_ERROR,
     REASON_PROVIDER_REFUSED,
@@ -30,6 +31,7 @@ from code_reviewer_runner.implementer.git_workspace import (
     REASON_TIMED_OUT,
     REASON_UNREADABLE,
     REASON_WORKFLOWS,
+    DiskSpace,
     GitWorkspace,
     LeaseNotConfirmed,
     PushReport,
@@ -76,6 +78,76 @@ def make_branch(workspace: GitWorkspace, name: str, file: str, start: str | None
     tip = commit(workspace, file)
     assert agent_git(workspace, "checkout", "-q", here).returncode == 0
     return tip
+
+
+# -- the mirror has a place of its own and the fetch looks for room first -------------------------
+
+
+def test_the_mirror_lives_on_the_reserve_directory_the_agent_never_sees(rig: Rig) -> None:
+    workspace = rig.prepared()
+
+    assert workspace.mirror == rig.layout.work_dir / "reserve" / "mirror.git"
+    assert workspace.mirror.is_dir() and not (workspace.repo / "reserve").exists()
+
+
+def test_a_mirror_without_room_takes_nothing_over_and_every_branch_says_so(rig: Rig) -> None:
+    space: list[DiskSpace] = [DiskSpace(free_bytes=10 * 1024**3, free_inodes=10**6)]
+    workspace = rig.prepared(space=lambda path: space[0])
+    commit(workspace, "a.txt")
+    make_branch(workspace, "experiment/two", "b.txt", start=workspace.start_commit)
+    space[0] = DiskSpace(free_bytes=1024, free_inodes=10**6)  # the disk filled up meanwhile
+
+    report = push(workspace)
+
+    assert report.listed and not report.pushed_any
+    assert {(entry.name, entry.reason) for entry in report.branches} == {
+        (BRANCH, REASON_OUT_OF_SPACE),
+        ("experiment/two", REASON_OUT_OF_SPACE),
+    }
+    assert rig.origin.tip(BRANCH) is None, "nothing reached the provider"
+    assert not (workspace.mirror / "refs" / "runner").exists(), "nothing was taken over"
+
+
+def test_inodes_count_as_room_too(rig: Rig) -> None:
+    workspace = rig.prepared(space=lambda path: DiskSpace(free_bytes=10 * 1024**3, free_inodes=5))
+    commit(workspace, "a.txt")
+
+    report = push(workspace)
+
+    assert branch(report, BRANCH).reason == REASON_OUT_OF_SPACE
+
+
+def test_a_fetch_that_fails_with_the_disk_gone_is_out_of_space_and_not_unreadable(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    free = [10 * 1024**3]
+    workspace = rig.prepared(space=lambda path: DiskSpace(free_bytes=free[0], free_inodes=10**6))
+    commit(workspace, "a.txt")
+    real = GitWorkspace._mirror  # pyright: ignore[reportPrivateUsage]
+
+    def mirror(self: GitWorkspace, args: list[str], **options: Any) -> Outcome:
+        done = real(self, args, **options)
+        if "fetch" in args:
+            free[0] = 1024  # the disk filled while the fetch ran
+            return Outcome(128, "", "fatal: write error: No space left on device")
+        return done
+
+    monkeypatch.setattr(GitWorkspace, "_mirror", mirror)
+
+    report = push(workspace)
+
+    assert branch(report, BRANCH).reason == REASON_OUT_OF_SPACE
+
+
+def test_with_room_the_check_changes_nothing(rig: Rig) -> None:
+    workspace = rig.prepared(
+        space=lambda path: DiskSpace(free_bytes=10 * 1024**3, free_inodes=10**6)
+    )
+    tip = commit(workspace, "a.txt")
+
+    report = push(workspace)
+
+    assert rig.origin.tip(BRANCH) == tip and branch(report, BRANCH).pushed
 
 
 # -- every local branch is pushed, git is free ----------------------------------------------------
@@ -943,7 +1015,7 @@ def test_a_fetch_killed_at_the_timeout_rejects_that_branch_and_leaves_no_lock_or
     monkeypatch.setattr(git_workspace, "FETCH_TIMEOUT", 2.0)
     flag = tmp_path / "hang"
     marker = f"{secrets.randbelow(9000) + 1000}.{secrets.randbelow(900) + 100}"
-    mirror = rig.base / "work" / "mirror.git"
+    mirror = rig.base / "work" / "reserve" / "mirror.git"
     wrapper = hanging_git(tmp_path, rig.git, mirror, flag, marker)
     workspace = rig.workspace(git=wrapper, timeout=3)
     workspace.prepare()
