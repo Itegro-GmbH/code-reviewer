@@ -712,6 +712,27 @@ The first wall is the door and its table. The second is outside the VM, so that 
 
 **Wildcards.** The platform's policy takes `*.suffix` in its `allow` list, and the entries are passed on as they are. The platform's wildcard may be wider than the door's (the door never lets the suffix's own name through, the platform may), which is harmless: the door decides for the agent, the policy decides for the VM.
 
+### Measured on a real VM (2026-11-03, `spike-net-door-1`, 2 vCPU, 4 GB, from the golden snapshot of 17:28 with this branch's runner source over the Worker image)
+
+The Control container, the door and the agent's container were started by the real code (`AgentContainer.create`, `start_network_door`, Sysbox runtime, the production model network), a `list` environment with `registry.npmjs.org`, `*.npmjs.org`,
+`pypi.org`, `files.pythonhosted.org` and the Docker Hub names; the policy was changed with the platform's own call (the MCP tool `update_session_network_policy`, the same API the SDK's `updateNetworkPolicy` calls) with the policy that `policyFor` builds.
+What was **not** run here: the Dispatcher's `POST /network` route and the call from Control to it (a deployed Dispatcher is needed); they are covered by unit tests, the lane covers the door, and the policy semantics below were measured with the platform directly.
+
+| Check | Result |
+| --- | --- |
+| Start: volume, Control, door (incl. its egress table), agent container with its inner Docker | 4.5 s in all; the door was ready in under 2 s |
+| `list`: `npm install left-pad` through the door | 1.2 s, installed |
+| `list`: `pip install six` through the door | 2.1 s, installed |
+| `list`: `docker pull hello-world` in the agent (the inner `dockerd` takes the proxy from the container's environment) | went through the door; Docker Hub's blob host `production.cloudfront.docker.com` was **not on the list** and got the door's `403 not_listed` (list `*.docker.com` or `*.cloudfront.docker.com` for Docker Hub); with `open` the pull worked |
+| `list`: `https://example.com` and `http://example.com` through the door | `403 Forbidden` (`not_listed`), `Tunnel connection failed: 403` |
+| Direct egress from the agent (`1.1.1.1:443`, `142.250.185.78:443`, the model network's gateway, the metadata address) | all blocked; the same probe from a plain container on the VM connects; the agent has no name server (`gaierror`); `172.17.0.1` answered "refused" because it is the address of the agent's own inner `docker0` |
+| The door's size | 17.4 MiB of its 96 MiB, 8 processes after the traffic above; 27.8 MiB and 204 processes with 100 tunnels open at once (CI lane, `runc`); `OomScoreAdj` -500 as asked |
+| The door's log (`list`) | 15 allowed, 3 refused, 270,792 bytes in, 47,755 out; entries per host: `registry.npmjs.org` 6, `pypi.org` 3, `files.pythonhosted.org` 2, `registry-1.docker.io` 3, `auth.docker.io` 1; refused `example.com` 2, `production.cloudfront.docker.com` 1; no path, no body |
+| `open`: `example.com` (https and http), `github.com`, `docker pull` | all worked; `http://10.0.0.5` and `http://169.254.169.254/...` were `403` (`private_address` / `ip_literal`); direct egress still blocked |
+| `off`: proxy variables in the agent | none (0); no door container; `1.1.1.1:443`, the door's address and the model door's port all blocked; `npm install` failed with `EAI_AGAIN` |
+| **The switch of the VM's network policy** (second wall) | an open connection (a TLS connection to `github.com` that sent a request each second) **was reset (`ConnectionResetError`) at the moment the policy changed**, as the plan said. After it: from the VM itself `example.com`, `google.com`, `pythonhosted.org` and `dispatcher.code-review.com` (not listed here) were unreachable, `github.com`, `registry.npmjs.org`, `pypi.org` and `code-review.com` answered; **Control (a new connection to `api.github.com`) was reachable at once**, no reconnect needed beyond the new connection; the agent's `npm install` and `pip install` through the door still worked and `example.com` was still `403` at the door |
+| **Wildcards of the platform's policy** | `*.npmjs.org` let `docs.npmjs.org` and `www.npmjs.org` through and **not `npmjs.org`**: the platform's `*.suffix` matches the names below it and not the name itself, the same as the door's rule, so the policy can express suffixes and no special case is needed |
+
 **The second wall is a fence, not a filter of what the agent says.** Both walls know host names; neither looks inside a tunnel. See "What is accepted" for what that leaves.
 
 ## The environment's setup script
