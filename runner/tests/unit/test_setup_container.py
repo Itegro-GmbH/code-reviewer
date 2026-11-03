@@ -69,6 +69,14 @@ class Rig:
         # ends with it), "no-docker" (nothing runs in it but its init) or "hangs".
         self.finish_mode = "no-docker"
         self.execs: list[tuple[list[str], dict[str, str], str | None]] = []
+        # The VM's memory as `MemoryGuard` reads it: plenty, until a test says otherwise.
+        self.meminfo = directory / "meminfo"
+        self.set_left(6_000_000)
+
+    def set_left(self, kib: int) -> None:
+        self.meminfo.write_text(
+            f"MemTotal: 8000000 kB\nMemFree: {kib} kB\nActive(file): 1 kB\nInactive(file): 1 kB\n"
+        )
 
     def api(self) -> DockerApi:
         return DockerApi(str(self.socket), timeout=5.0)
@@ -80,6 +88,7 @@ class Rig:
             "ready_seconds": 5.0,
             "finish_seconds": 5.0,
             "commit_seconds": 5.0,
+            "meminfo": str(self.meminfo),
         }
         base.update(options)
         return SetupSeams(**base)
@@ -159,6 +168,9 @@ def test_the_setup_container_is_the_agent_image_under_sysbox_with_the_repository
     assert host["Privileged"] is False
     assert host["NetworkMode"] == sc.SETUP_NETWORK_NAME
     assert host["Memory"] == host["MemorySwap"] == 2048 * 1024 * 1024
+    assert host["OomScoreAdj"] == 1000, (
+        "the VM's OOM killer takes the Setup container before Control"
+    )
     assert host["Dns"] == list(sc.SETUP_DNS)
     assert [m["Target"] for m in host["Mounts"]] == ["/work/repo"]
     assert host["Mounts"][0]["VolumeOptions"]["Subpath"] == "repo"
@@ -401,6 +413,21 @@ def test_a_container_killed_under_the_script_is_the_scripts_and_says_why(rig: Ri
     done = run(rig, seconds=30)
     assert done.outcome == OUTCOME_SCRIPT_FAILED
     assert "killed for its memory" in done.detail
+
+
+# #745-S6-07
+def test_a_vm_running_out_of_memory_ends_the_script_and_says_so(rig: Rig) -> None:
+    rig.script_waits = True
+
+    def squeeze() -> None:
+        rig.script_started.wait(30)
+        rig.set_left(300_000)  # 293 MiB of 7.6 GiB: below the floor
+
+    threading.Thread(target=squeeze, daemon=True).start()
+    done = run(rig, seconds=30)
+    assert done.outcome == OUTCOME_SCRIPT_FAILED
+    assert "because the VM was running out of memory" in done.detail
+    assert all(c.removed for c in rig.engine.containers.values())
 
 
 # -- the result ------------------------------------------------------------------------------------

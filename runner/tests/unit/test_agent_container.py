@@ -73,8 +73,17 @@ class Rig:
         self.engine.exec_behaviour = self.behave
         self.relay_port: int | None = None
         self._tries = 0
+        # The VM's memory as `MemoryGuard` reads it: plenty, until a test says otherwise.
+        self.meminfo = directory / "meminfo"
+        self.set_available(6_000_000)
         # The model network the door's start made before the agent's container exists.
         DockerApi(str(self.socket), timeout=5.0).create_network(network_document())
+
+    def set_available(self, kib: int) -> None:
+        self.meminfo.write_text(
+            f"MemTotal: 8000000 kB\nMemFree: {kib} kB\nMemAvailable: 7000000 kB\n"
+            "Active(file): 1 kB\nInactive(file): 1 kB\n"
+        )
 
     def api(self) -> DockerApi:
         return DockerApi(str(self.socket), timeout=5.0)
@@ -84,6 +93,7 @@ class Rig:
             "api": self.api,
             "hostname": lambda: HOSTNAME,
             "ready_seconds": 5.0,
+            "meminfo": str(self.meminfo),
         }
         base.update(options)
         return AgentSeams(**base)
@@ -160,6 +170,8 @@ def test_the_agent_container_is_a_sysbox_container_on_the_model_network_with_the
         }
     ], "the repository (the Subpath of the work volume), so the mirror is out of its reach"
     assert host["Memory"] == host["MemorySwap"] == 2560 * 1024 * 1024
+    # The VM's OOM killer takes the agent's processes before anything of Control's (#745, step 6).
+    assert host["OomScoreAdj"] == 1000
     assert not host.get("Binds") and not host.get("Devices") and not host.get("CapAdd")
     assert made.document["User"] == "0:0" and made.document["Env"] == []
     place.stop()
@@ -398,6 +410,38 @@ def test_a_container_killed_for_its_memory_is_named_with_its_exit_code(rig: Rig)
     assert "killed for its memory" in lost.sentence() and "(exit code 137)" in lost.sentence()
     assert place.engine_end_note() == lost.sentence()
     assert not place.engine_running()
+
+
+# #745-S6-07
+def test_the_vm_running_out_of_memory_ends_the_agent_and_says_so(rig: Rig) -> None:
+    place = container(rig)
+    place.create()
+    place.start_engine(["opencode"], {})
+    assert place.lost is None
+
+    rig.set_available(300_000)  # 293 MiB of 7.6 GiB: below the floor (8%)
+
+    assert wait_for(lambda: place.lost is not None)
+    lost = place.lost
+    assert lost is not None and lost.vm_memory and lost.unexpected
+    assert "because the VM was running out of memory" in lost.sentence()
+    made = rig.engine.container(AGENT_CONTAINER_NAME)
+    assert made.exit_code == 137, "the container was killed"
+    assert place.engine_end_note() == lost.sentence()
+
+
+# #745-S6-07
+def test_a_vm_with_room_leaves_the_agent_alone_and_a_stop_is_not_a_memory_kill(rig: Rig) -> None:
+    place = container(rig)
+    place.create()
+    place.start_engine(["opencode"], {})
+
+    time.sleep(0.5)  # five looks of the guard
+    assert place.lost is None
+    assert place.stop() is True
+    rig.set_available(1000)  # too late to matter: the turn is over
+    time.sleep(0.3)
+    assert place.lost is None
 
 
 # #745-T22

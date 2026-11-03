@@ -656,12 +656,15 @@ def section_listen(config: Json) -> Json:
 def section_http(config: Json) -> Json:
     """`http`: [{"l": label, "h": host, "p": port, "raw": request text}] -> the status line and
     the first bytes of the answer, for requests written by hand (so that a method, a target or a
-    Host the library would not send can be sent)."""
+    Host the library would not send can be sent). `connected` says whether the connection was made
+    at all: an `error` before it is a door that is not there, not a door that refuses."""
     answers: Json = {}
     for item in cast("list[Json]", config["http"]):
         label = str(item["l"])
+        connected = False
         try:
             probe = socket.create_connection((str(item["h"]), int(item["p"])), timeout=5.0)
+            connected = True
             probe.settimeout(15.0)
             probe.sendall(str(item["raw"]).encode("latin-1"))
             data = b""
@@ -673,9 +676,9 @@ def section_http(config: Json) -> Json:
             probe.close()
             text = data.decode("latin-1")
             status = text.split(" ", 2)[1] if text.startswith("HTTP/") else "none"
-            answers[label] = {"status": status, "head": text[:240]}
+            answers[label] = {"status": status, "head": text[:240], "connected": connected}
         except OSError as error:
-            answers[label] = {"status": "error", "why": _describe(error)}
+            answers[label] = {"status": "error", "why": _describe(error), "connected": connected}
     return answers
 
 

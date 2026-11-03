@@ -543,13 +543,16 @@ def plant_worktrees_and_modules(repo: Path) -> None:
     (repo / ".git" / "commondir").write_text("/\n")
 
 
-# Each hostile layout, and whether the repository can still be read afterwards (a FIFO where git
-# reads its config blocks the read: the outcome is then a named failure inside the time limits).
+# Each hostile layout, and whether the repository can still be read afterwards (measured on a
+# VM, 2026-11-03). A HEAD that points nowhere is an unborn branch to git and the branches are
+# listed and pushed all the same; garbage in packed-refs, a `commondir` and a FIFO where git
+# reads its config or HEAD make the listing fail, which is the named outcome `unreadable` (the
+# FIFOs after the limit of 20 s of the listing, the others at once).
 HOSTILE_LAYOUTS = [
     ("alternates_to_the_readers_files", plant_alternates, True),
     ("symlinked_refs_to_files_of_the_reader", plant_symlink_refs, True),
     ("garbage_packed_refs", plant_packed_refs_garbage, False),
-    ("garbage_head", plant_garbage_head, False),
+    ("garbage_head", plant_garbage_head, True),
     ("worktree_and_commondir_pointers", plant_worktrees_and_modules, False),
     ("fifo_as_config", plant_fifo_as_config, False),
     ("fifo_as_head", plant_fifo_as_head, False),
@@ -557,6 +560,8 @@ HOSTILE_LAYOUTS = [
 
 
 # #745-S6-03
+# A regression that waits for a FIFO fails here, not at the job's limit.
+@pytest.mark.timeout(120)
 @pytest.mark.parametrize(
     ("planter", "readable"),
     [pytest.param(p, r, id=i) for i, p, r in HOSTILE_LAYOUTS],
@@ -583,8 +588,11 @@ def test_a_hostile_git_directory_ends_the_end_of_the_turn_inside_its_limits_and_
             assert report.listed and lane.origin.tip(BRANCH) is not None, (committed, report)
             assert "before.txt" in names
         else:
-            # An unreadable repository is a named outcome: not listed (with a reason), or no branch.
-            assert (not report.listed and report.list_problem) or not report.pushed_any or names
+            # An unreadable repository is the named outcome `unreadable`: nothing was listed, so no
+            # branch was pushed and nothing arrived.
+            assert not report.listed and report.list_problem == "unreadable", report
+            assert not report.pushed_any and not report.branches, report
+            assert lane.origin.tip(BRANCH) is None and names == [], (committed, names)
         # No process of the hostile command is left behind once the readers were made quiet (the
         # last list of the push may be blocked in the reader that was made quiet before it): only
         # the init, its sleep and the command that counts.
@@ -594,6 +602,8 @@ def test_a_hostile_git_directory_ends_the_end_of_the_turn_inside_its_limits_and_
 
 
 # #745-S6-04
+# A regression that waits for the huge file fails here, not at the job's limit.
+@pytest.mark.timeout(120)
 def test_a_file_too_big_to_hash_in_the_time_is_a_failed_commit_and_the_earlier_work_still_arrives(
     tmp_path: Path,
 ) -> None:
@@ -651,8 +661,22 @@ def test_branch_names_that_would_be_options_or_commands_are_dropped_and_nothing_
         # Names that are legal in git ("x;touch" and "$(touch)" are) arrive as the plain argument
         # they are; a name that is an option or holds a space or a line end is dropped.
         sent = set(lane.origin.branches())
-        assert not [n for n in sent if "/-" in n or "/+" in n or " " in n or "\n" in n or "\t" in n]
-        assert "refs/heads/fine-branch" in sent or "fine-branch" in sent, sent
+        legal = {
+            "refs/heads/fine-branch",
+            "refs/heads/x;touch${IFS}pwned-by-name",
+            "refs/heads/$(touch${IFS}pwned-by-name)",
+        }
+        # The legal ones arrive, under exactly the name they have (the doc's claim).
+        assert legal <= sent, sorted(legal - sent)
+        # None of the others arrives, under its own name or as the pieces a line end would split
+        # it into (`for-each-ref` prints one name per line).
+        dropped = {
+            f"refs/heads/{piece}"
+            for name in hostile
+            if f"refs/heads/{name}" not in legal
+            for piece in name.split("\n")
+        }
+        assert not (dropped & sent), sorted(dropped & sent)
         # The commands those names spell would have created this file, in the repository (the
         # reader's working directory) or where the tests run.
         assert not (lane.workspace.repo / "pwned-by-name").exists()

@@ -31,6 +31,7 @@ import json
 import os
 import secrets
 import shutil
+import signal
 import socket
 import sys
 import threading
@@ -68,8 +69,10 @@ from code_reviewer_runner.implementer.setup_container import (
     SETUP_ADDRESS,
     SETUP_CONTAINER_NAME,
     SETUP_NETWORK_GATEWAY,
+    SETUP_NETWORK_NAME,
     SetupContainer,
 )
+from code_reviewer_runner.implementer.vm_memory import read_memory
 
 Json = dict[str, Any]
 SKIP_ABUSE = "--skip-abuse" in sys.argv[1:]
@@ -188,7 +191,7 @@ def last_json(stdout: str, marker: str = "PROBE_RESULT ") -> Json:
     return {"error": "no result: " + stdout[-200:]}
 
 
-class Lab:
+class Rig:
     """What the checks stand on: the daemon, the made-up door, the agent's container."""
 
     def __init__(self, checks: Checks) -> None:
@@ -338,7 +341,7 @@ def vm_targets(host: Json, own: set[str]) -> list[Json]:
     ]
 
 
-def section_boundary_of_the_container(lab: Lab) -> None:
+def section_boundary_of_the_container(lab: Rig) -> None:
     """The agent's container as the daemon made it: what is not in it, and what it has."""
     checks, api = lab.checks, lab.api
     document = api.inspect_container(AGENT_CONTAINER_NAME)
@@ -427,7 +430,7 @@ def section_boundary_of_the_container(lab: Lab) -> None:
 STATUS_FIELDS = ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb", "NoNewPrivs")
 
 
-def reader_status(lab: Lab, name: str, *, production: bool) -> Json:
+def reader_status(lab: Rig, name: str, *, production: bool) -> Json:
     """`/proc/self/status` of a command in a reader: the way the runner starts every command
     (`setpriv`), or a plain exec (which holds what the runtime gives the container's root)."""
     argv = ["/bin/cat", "/proc/self/status"]
@@ -442,7 +445,7 @@ def reader_status(lab: Lab, name: str, *, production: bool) -> Json:
     return fields
 
 
-def section_readers(lab: Lab) -> None:
+def section_readers(lab: Rig) -> None:
     checks = lab.checks
     for name in (READER_CONTAINER_NAME, READER_WRITER_CONTAINER_NAME):
         status = reader_status(lab, name, production=True)
@@ -491,7 +494,7 @@ def section_readers(lab: Lab) -> None:
         )
 
 
-def section_agent_identity(lab: Lab) -> None:
+def section_agent_identity(lab: Rig) -> None:
     checks = lab.checks
     facts = lab.in_agent(
         {
@@ -615,7 +618,7 @@ def section_agent_identity(lab: Lab) -> None:
     )
 
 
-def section_proc_and_sys_extras(lab: Lab, facts: Json, ids: Json) -> None:
+def section_proc_and_sys_extras(lab: Rig, facts: Json, ids: Json) -> None:
     checks = lab.checks
     syscalls = facts["syscalls"]
     checks.say(
@@ -646,7 +649,7 @@ def section_proc_and_sys_extras(lab: Lab, facts: Json, ids: Json) -> None:
     )
 
 
-def section_proc_and_sys(lab: Lab) -> None:
+def section_proc_and_sys(lab: Rig) -> None:
     checks = lab.checks
     host_before = lab.host["core_pattern"]
     ids = lab.in_agent({"sections": ["ids"]})["ids"]
@@ -767,7 +770,7 @@ LISTENER = (
 )
 
 
-def start_neighbour(lab: Lab) -> str:
+def start_neighbour(lab: Rig) -> str:
     """A plain container on the VM's default bridge, next to Control, that listens: what the agent
     must not reach even though it would answer."""
     container = lab.api.create_container(
@@ -800,12 +803,12 @@ def start_neighbour(lab: Lab) -> str:
     return address
 
 
-def own_addresses(lab: Lab, name: str) -> dict[str, str]:
+def own_addresses(lab: Rig, name: str) -> dict[str, str]:
     networks = lab.api.inspect_container(name)["NetworkSettings"]["Networks"]
     return {n: v["IPAddress"] for n, v in networks.items() if v.get("IPAddress")}
 
 
-def fixed_targets(lab: Lab, neighbour: str, control: str) -> list[Json]:
+def fixed_targets(lab: Rig, neighbour: str, control: str) -> list[Json]:
     """The addresses that are ours on this VM, each with the ports something would be on."""
     targets: list[Json] = []
 
@@ -839,7 +842,7 @@ def fixed_targets(lab: Lab, neighbour: str, control: str) -> list[Json]:
     return targets
 
 
-def section_agent_network(lab: Lab) -> None:
+def section_agent_network(lab: Rig) -> None:
     checks = lab.checks
     neighbour = start_neighbour(lab)
     control = own_addresses(lab, socket.gethostname()).get("bridge", "")
@@ -927,7 +930,7 @@ def section_agent_network(lab: Lab) -> None:
         "network",
         "agent_cannot_reach_the_internet",
         "1.1.1.1:443, 8.8.8.8:443, 9.9.9.9:80, 1.1.1.1:53 are not reachable",
-        not any(reached(v) for v in through.values()),
+        len(through) == len(INTERNET) and not any(reached(v) for v in through.values()),
         **through,
     )
     dns = got["dns"]
@@ -1021,7 +1024,7 @@ def section_agent_network(lab: Lab) -> None:
     lab.control_address = control
 
 
-def section_ipv6(lab: Lab) -> None:
+def section_ipv6(lab: Rig) -> None:
     checks = lab.checks
     host = lab.host
     on_bridges = [row for row in host["inet6"] if row["interface"] not in ("lo", "eth0")]
@@ -1072,7 +1075,7 @@ def section_ipv6(lab: Lab) -> None:
     )
 
 
-def section_sockets_and_volume(lab: Lab) -> None:
+def section_sockets_and_volume(lab: Rig) -> None:
     checks = lab.checks
     got = lab.in_agent(
         {
@@ -1169,7 +1172,7 @@ def section_sockets_and_volume(lab: Lab) -> None:
     )
 
 
-def section_inner_docker(lab: Lab) -> None:
+def section_inner_docker(lab: Rig) -> None:
     """The agent's own Docker is the agent's; the containers it starts, even privileged, host
     network, with the agent's root file system mounted, are still inside the Sysbox boundary."""
     checks = lab.checks
@@ -1271,7 +1274,7 @@ def section_inner_docker(lab: Lab) -> None:
         )
 
 
-def section_door(lab: Lab) -> None:
+def section_door(lab: Rig) -> None:
     checks = lab.checks
     api, door = lab.api, lab.door
     assert door is not None
@@ -1384,18 +1387,29 @@ def section_door(lab: Lab) -> None:
     answers = lab.in_agent({"sections": ["http"], "http": send})["http"]
     time.sleep(0.5)
     status = door.state.status
+    # A refusal is an answer of the door: a 4xx/5xx, or a connection the door took and closed on the
+    # request. A connect that fails ("error" before `connected`) is a door that is not there, and
+    # counts for nothing.
     ok_refusals = {
         k: v["status"]
         for k, v in answers.items()
-        if v["status"] == "error" or (v["status"].isdigit() and int(v["status"]) >= 400)
+        if v.get("connected")
+        and (
+            v["status"] in ("none", "error") or (v["status"].isdigit() and int(v["status"]) >= 400)
+        )
     }
+    door_up = whole_and_running(lab)
     checks.say(
         "door",
         "door_refuses_what_is_not_exactly_the_pinned_call",
-        "a wrong capability, another model, an absolute URL, '..', another path, another method, CONNECT and a request for the metadata address are all refused (4xx/5xx/closed) at the door",
-        len(ok_refusals) == len(refused)
+        "a wrong capability, another model, an absolute URL, '..', another path, another method, CONNECT and a request for the metadata address are all refused (4xx/5xx or closed after the connection was made) by a door that is up",
+        len(answers) == len(refused)
+        and len(ok_refusals) == len(refused)
+        and all(door_up.values())
         and (status is None or (not status.model_used and status.upstream_error is None)),
+        door_up=door_up,
         statuses={k: v["status"] for k, v in answers.items()},
+        connected={k: bool(v.get("connected")) for k, v in answers.items()},
         model_used=None if status is None else status.model_used,
         upstream_error=None if status is None else status.upstream_error,
     )
@@ -1448,7 +1462,7 @@ exit 7
 """
 
 
-def section_setup_container(lab: Lab) -> None:
+def section_setup_container(lab: Rig) -> None:
     """The Setup container, root with the full internet and no secret: it may reach the internet and
     nothing of ours."""
     checks = lab.checks
@@ -1534,7 +1548,9 @@ def section_setup_container(lab: Lab) -> None:
     def run() -> None:
         box["run"] = SetupContainer(MEMORY_MB).run(script, script_seconds=170.0)
 
-    thread = threading.Thread(target=run)
+    # A daemon: a Ctrl-C in the middle of this section must not wait for the Setup run (`main` removes the
+    # container, which ends the run's calls).
+    thread = threading.Thread(target=run, daemon=True)
     thread.start()
     listening = False
     for _ in range(300):
@@ -1579,9 +1595,10 @@ def section_setup_container(lab: Lab) -> None:
         checks.say(
             "setup",
             "setup_container_ran",
-            "the probe ran in the Setup container",
+            "the probe ran in the Setup container (and its run ended inside 240 s)",
             False,
             listening=listening,
+            still_running=thread.is_alive(),
         )
         return
     got = last_json(run_result.output.decode("utf-8", "replace"))
@@ -1607,23 +1624,25 @@ def section_setup_container(lab: Lab) -> None:
         resolve=got["resolve"],
     )
     vm_hits = {k: v for k, v in net.items() if k.startswith("vm:") and reached(v)}
+    vm_attempts = sum(1 for k in net if k.startswith("vm:"))
     checks.say(
         "setup",
         "setup_container_cannot_reach_the_vms_services_or_control_port",
-        f"no address of the VM (eth0, docker0, the setup bridge's own gateway) answers on any port, {CONTROL_PORT} included",
-        not vm_hits,
-        attempts=sum(1 for k in net if k.startswith("vm:")),
+        f"no address of the VM (eth0, docker0, the setup bridge's own gateway) answers on any port, {CONTROL_PORT} included: all {len(setup_vm)} attempts were made",
+        not vm_hits and len(setup_vm) > 0 and vm_attempts >= len(setup_vm),
+        attempts=vm_attempts,
         reached=vm_hits,
     )
     other_hits = {
         k: v for k, v in net.items() if not k.startswith(("vm:", "internet:")) and reached(v)
     }
+    other_attempts = sum(1 for k in net if not k.startswith(("vm:", "internet:")))
     checks.say(
         "setup",
         "setup_container_cannot_reach_the_agent_the_door_control_or_neighbours",
-        "the agent's listener, the door, the model gateway, Control (any port), a container on the default bridge, the metadata address, the platform and private neighbours are all silent",
-        not other_hits,
-        attempts=sum(1 for k in net if not k.startswith(("vm:", "internet:"))),
+        f"the agent's listener, the door, the model gateway, Control (any port), a container on the default bridge, the metadata address, the platform and private neighbours are all silent: all {len(others)} attempts were made",
+        not other_hits and len(others) > 0 and other_attempts >= len(others),
+        attempts=other_attempts,
         reached=other_hits,
     )
     checks.say(
@@ -1706,26 +1725,54 @@ for pid in pids:
 print("BURNED", len(pids), flush=True)
 """
 FDS = """
-import os, sys, time
-count = 3
-pids = []
-for _ in range(count):
+import ctypes, errno, json, mmap, os, resource, signal, socket, struct, sys, time
+libc = ctypes.CDLL(None, use_errno=True)
+hold, procs, cap = float(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
+kinds = sys.argv[4].split(",")
+def call(fd):
+    if fd < 0:
+        raise OSError(ctypes.get_errno(), "call")
+    return (fd,)
+def pair():
+    first, second = socket.socketpair()
+    return (first.detach(), second.detach())
+MAKERS = {
+    "null": lambda: (os.open("/dev/null", os.O_RDONLY),),
+    "timerfd": lambda: call(libc.timerfd_create(1, 0)),
+    "epoll": lambda: call(libc.epoll_create1(0)),
+    "eventfd": lambda: call(libc.eventfd(0, 0)),
+    "socketpair": pair,
+}
+shared = mmap.mmap(-1, 16 * procs)
+children = []
+for index in range(procs):
     pid = os.fork()
     if pid == 0:
         opened = 0
-        reason = 0
+        reason = -1
         try:
-            while opened < 800000:
-                os.open("/dev/null", os.O_RDONLY)
-                opened += 1
+            hard = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
+            resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+            makers = [MAKERS[kind] for kind in kinds]
+            cycles = 0
+            while opened < cap:
+                for make in makers:
+                    opened += len(make())
+                cycles += 1
+                if cycles % 256 == 0:
+                    struct.pack_into("qq", shared, 16 * index, opened, -1)
         except OSError as error:
-            reason = error.errno
-        print("OPENED", opened, reason, flush=True)
-        time.sleep(float(sys.argv[1]))
+            reason = error.errno or 0
+        struct.pack_into("qq", shared, 16 * index, opened, reason)
+        time.sleep(hold)
         os._exit(0)
-    pids.append(pid)
-for pid in pids:
-    os.waitpid(pid, 0)
+    children.append(pid)
+report = []
+for index, pid in enumerate(children):
+    _, status = os.waitpid(pid, 0)
+    opened, reason = struct.unpack_from("qq", shared, 16 * index)
+    report.append([opened, reason, os.WTERMSIG(status) if os.WIFSIGNALED(status) else 0])
+print("FLOOD", json.dumps({"children": report}), flush=True)
 """
 FILL = """
 import os, sys
@@ -1749,6 +1796,9 @@ class Sampler:
         self.latencies: list[float] = []
         self.failures = 0
         self.min_available_mib = 10**9
+        # What is really left: free memory and the page cache of files. `MemAvailable` counts the structures
+        # of open files as reclaimable, and an open file is not (it said 2.2 GB when the VM ran out).
+        self.min_headroom_mib = 10**9
         self.most_files_open = 0
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -1775,6 +1825,9 @@ class Sampler:
                 self.most_files_open = max(
                     self.most_files_open, int(Path("/proc/sys/fs/file-nr").read_text().split()[0])
                 )
+            left = read_memory()
+            if left is not None:
+                self.min_headroom_mib = min(self.min_headroom_mib, left[0] // MIB)
             for line in Path("/proc/meminfo").read_text().splitlines():
                 if line.startswith("MemAvailable"):
                     self.min_available_mib = min(
@@ -1787,7 +1840,7 @@ class Sampler:
         return round(max(self.latencies or [0.0]), 2)
 
 
-def whole_and_running(lab: Lab) -> dict[str, bool]:
+def whole_and_running(lab: Rig) -> dict[str, bool]:
     """The things Control stands on are all still up."""
     running: dict[str, bool] = {}
     for name in (
@@ -1802,7 +1855,7 @@ def whole_and_running(lab: Lab) -> dict[str, bool]:
     return running
 
 
-def fresh_agent(lab: Lab) -> None:
+def fresh_agent(lab: Rig) -> None:
     lab.agent.stop()
     lab.agent.remove()
     time.sleep(1.0)
@@ -1810,7 +1863,128 @@ def fresh_agent(lab: Lab) -> None:
     lab.agent.create()
 
 
-def section_abuse(lab: Lab, reader: ReaderAccess) -> None:
+# The kernel's default table of open files on a VM with 4 GB (what `fs.file-max` was before the
+# Launcher raised it): the flood must get past it, or it proved nothing about the new limit.
+OLD_FILE_MAX_4GB = 437_305
+FLOOD_MIXED = "timerfd,epoll,eventfd,socketpair,null"
+# The objects with the most memory the cgroup of the opener does not count (a context allocated
+# without accounting, about as large as the accounted file next to it).
+FLOOD_LEAKY = "timerfd,epoll"
+FLOOD_CAP = 4_000_000
+EMFILE, ENFILE, ENOMEM = 24, 23, 12
+
+
+def fd_flood(lab: Rig, reader: ReaderAccess, label: str, kinds: str) -> None:
+    """Twelve root processes of the agent open objects of these kinds as fast as they can, until
+    each one is stopped (EMFILE of its own table, ENOMEM, or a kill by the memory cgroup's OOM
+    killer), and hold what they have for a few seconds. The table of open files is one for the
+    whole VM, a file costs memory and some kinds cost memory the cgroup of the opener does not
+    count. Expected: the agent is what stops (its processes end with EMFILE or ENOMEM or are
+    killed, the table never fills, which would be ENFILE for Control as well), and Control, the
+    door and the readers never notice."""
+    checks = lab.checks
+    limit = int(Path("/proc/sys/fs/file-max").read_text())
+    # Enough processes that their own tables (1,048,576 entries each) cannot hold what the memory limit
+    # would allow: about 450 bytes of the limit per object of the leakiest kinds.
+    processes = max(12, MEMORY_MB * MIB // (450 * 1_048_576) * 2 + 2)
+    before = vm_oom_kills()
+    began = time.monotonic()
+    with Sampler() as sampler:
+        done = run_exec(
+            lab.api,
+            AGENT_CONTAINER_NAME,
+            [PYTHON, "-I", "-c", FDS, "8", str(processes), str(FLOOD_CAP), kinds],
+            timeout=180.0,
+            name="fds",
+        )
+        reader_ok = reader.run(["--version"], timeout=20.0)
+    children = last_flood(done.stdout)
+    # A container that was killed is gone a moment after the command in it ended.
+    lab.agent.settle(10.0)
+    state = lab.api.inspect_container(AGENT_CONTAINER_NAME)["State"]
+    opened = sum(c[0] for c in children)
+    stopped_by = sorted(
+        {
+            "EMFILE"
+            if c[1] == EMFILE
+            else "ENFILE"
+            if c[1] == ENFILE
+            else "ENOMEM"
+            if c[1] == ENOMEM
+            else f"signal {c[2]}"
+            if c[2]
+            else f"errno {c[1]}"
+            for c in children
+        }
+    )
+    # The agent was what stopped, in a way that is its own: its processes ended on their own table or on
+    # the memory limit (EMFILE, ENOMEM, a kill), or the memory cgroup killed the program that held them
+    # and said so. Never ENFILE (the VM's table was full, for Control as well) and never a process that
+    # simply finished its cap.
+    own_end = bool(children) and all(
+        c[1] in (EMFILE, ENOMEM) or c[2] == signal.SIGKILL for c in children
+    )
+    end = lab.agent.end
+    by_control = end is not None and end.vm_memory
+    stopped = own_end or (not children and (state.get("OOMKilled") is True or by_control))
+    peak = sampler.most_files_open
+    checks.say(
+        "abuse",
+        "open_file_flood_in_the_agent_does_not_starve_control"
+        if label == "mixed"
+        else "open_file_flood_of_the_leakiest_objects_does_not_starve_control",
+        f"twelve root processes open {kinds} until EMFILE, ENOMEM or the memory limit stops them (past the old table of {OLD_FILE_MAX_4GB}, table now {limit}): the table never fills, Control's calls and a command in a reader never fail, door and readers stay up, the VM keeps at least 300 MiB of free memory and file cache",
+        stopped
+        and peak > OLD_FILE_MAX_4GB
+        and peak < limit
+        and sampler.failures == 0
+        and sampler.worst < 10.0
+        and sampler.min_headroom_mib >= 300
+        and reader_ok.returncode == 0
+        and reader_ok.stdout.startswith("git version")
+        and all(whole_and_running(lab).values()),
+        kinds=kinds,
+        file_max=limit,
+        opened_by_the_agent=opened,
+        children_stopped_by=stopped_by,
+        most_files_open_system_wide=peak,
+        vm_min_available_mib=sampler.min_available_mib,
+        vm_min_headroom_mib=sampler.min_headroom_mib,
+        vm_oom_kills=vm_oom_kills() - before,
+        worst_latency_s=sampler.worst,
+        failures=sampler.failures,
+        agent_oom_killed=state.get("OOMKilled"),
+        agent_killed_by_control_for_vm_memory=by_control,
+        agent_running=state.get("Running"),
+        exec_outcome=[
+            done.returncode,
+            done.unanswered,
+            done.stdout[-80:],
+            round(time.monotonic() - began, 1),
+        ],
+        reader_after=reader_ok.stdout.strip()[:30] or reader_ok.returncode,
+    )
+
+
+def last_flood(text: str) -> list[list[int]]:
+    """The per-process lines of the flood: [opened, errno, signal]; empty when the program that held
+    them was killed before it could say."""
+    for line in reversed(text.splitlines()):
+        if line.startswith("FLOOD "):
+            with contextlib.suppress(ValueError):
+                return cast("list[list[int]]", json.loads(line[6:])["children"])
+    return []
+
+
+def vm_oom_kills() -> int:
+    """How many processes the kernel's OOM killer has killed since boot, in a cgroup or in the VM."""
+    for line in Path("/proc/vmstat").read_text().splitlines():
+        if line.startswith("oom_kill "):
+            return int(line.split()[1])
+    return 0
+
+
+def section_abuse(lab: Rig, reader: ReaderAccess) -> None:
     checks = lab.checks
     # -- memory ------------------------------------------------------------------------------
     with Sampler() as sampler:
@@ -1903,34 +2077,9 @@ def section_abuse(lab: Lab, reader: ReaderAccess) -> None:
         failures=sampler.failures,
     )
     # -- open files (the system-wide table is one for all containers) --------------------------
-    limit = int(Path("/proc/sys/fs/file-max").read_text())
-    with Sampler() as sampler:
-        done = run_exec(
-            lab.api,
-            AGENT_CONTAINER_NAME,
-            [PYTHON, "-I", "-c", FDS, "10"],
-            timeout=120.0,
-            name="fds",
-        )
-        fd_out = done.stdout
-        reader_ok = reader.run(["--version"], timeout=20.0)
-    opened = [int(line.split()[1]) for line in fd_out.splitlines() if line.startswith("OPENED")]
-    checks.say(
-        "abuse",
-        "open_file_flood_in_the_agent_does_not_starve_control",
-        f"the agent opens files as fast as it can (system-wide table: {limit}): Control's calls and a command in a reader keep working, or the table is nowhere near full",
-        sampler.failures == 0
-        and reader_ok.returncode == 0
-        and reader_ok.stdout.startswith("git version")
-        and all(whole_and_running(lab).values()),
-        file_max=limit,
-        opened_by_the_agent=opened,
-        most_files_open_system_wide=sampler.most_files_open,
-        worst_latency_s=sampler.worst,
-        failures=sampler.failures,
-        reader_after=reader_ok.stdout.strip()[:30] or reader_ok.returncode,
-    )
-    fresh_agent(lab)
+    for label, kinds in (("mixed", FLOOD_MIXED), ("leaky", FLOOD_LEAKY)):
+        fd_flood(lab, reader, label, kinds)
+        fresh_agent(lab)
     # -- disk --------------------------------------------------------------------------------
     before = os.statvfs("/work")
     reserve_before = os.statvfs("/work/reserve")
@@ -1998,7 +2147,7 @@ def section_abuse(lab: Lab, reader: ReaderAccess) -> None:
 
 def main() -> int:
     checks = Checks()
-    lab = Lab(checks)
+    lab = Rig(checks)
     started = time.monotonic()
     reader = ReaderAccess()
     shutil.rmtree("/work/repo/planted", ignore_errors=True)
@@ -2034,6 +2183,11 @@ def main() -> int:
                 lab.door.stop()
         with contextlib.suppress(Exception):
             reader.close()
+        # The Setup container and its network, when a Ctrl-C (or a failure) left them behind.
+        with contextlib.suppress(Exception):
+            lab.api.remove_container(SETUP_CONTAINER_NAME)
+        with contextlib.suppress(Exception):
+            lab.api.remove_network(SETUP_NETWORK_NAME)
         _ = (threading, MODEL_AGENT_ADDRESS, MODEL_DOOR_ADDRESS, MODEL_NETWORK_GATEWAY)
         _ = (SETUP_ADDRESS, SETUP_CONTAINER_NAME, SETUP_NETWORK_GATEWAY, SetupContainer)
         _ = (INTERNET, PUBLIC_V6, LISTEN_PORT, SETUP_LISTEN_PORT, SKIP_ABUSE)

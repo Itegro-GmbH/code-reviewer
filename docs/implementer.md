@@ -318,7 +318,7 @@ exits is outside (`implementer/agent_container.py`):
 | Network | The **model network**, internal, `gateway_mode_ipv4=isolated`, range `10.213.77.0/29`: the agent at `10.213.77.4`, the door at `10.213.77.2`, and nothing else. No exit, no route to the VM or its control port `23456`, no name server, no neighbour; Control is not on it. The containers the agent starts through its own Docker reach the door too (through the agent) and nothing else. |
 | Repository | The `repo` directory of the work volume, mounted as `/work/repo` (the volume's `Subpath`): the agent sees the repository and nothing of the mirror. The mount is idmapped by Sysbox, so the files the agent's root writes belong to the VM's root (measured), and its container uid 0 is host uid 165536 for processes only. |
 | Memory | The VM's memory (2,048 MB per vCPU) less the limits of everything else on it, each counted in full: the OS and the Sysbox daemons (512 MB), Control (768 MB), the door (256 MB) and **both readers** (256 MB each, 512 MB: they exist from the start of the turn, and an earlier sum counted one) are 2,048 MB. No swap: **0 MB at 1 vCPU (refused), 2,048 at 2, 6,144 at 4, 10,240 at 6 and 14,336 at 8** (an earlier sum left the agent 2,560 at 2 vCPU and did not count the reader: the limits of all containers and the OS came to more than the 4,096 MB of the VM; the sum before this round, 2,304, still counted one reader). Less than 1,024 MB is `sandbox_size_unsupported`, so 1 vCPU stays refused. A test holds that the limits add up to the VM at every size. Why these figures: "The memory of the readers and the OS" below. |
-| Limits | 16,384 processes. The time limit and the cost limit are Control's and the door's. The VM's table of open files is made too big for the agent to fill before its memory limit stops it (`sysbox-prepare.sh`, section "The attack test (step 6)"). |
+| Limits | 16,384 processes. The time limit and the cost limit are Control's and the door's. The VM's table of open files is made too big for the agent to fill (`sysbox-prepare.sh`); the agent's and the Setup container's processes have the highest OOM score, and Control kills the container when the VM has less than 512 MiB or 8% of its memory left (`vm_memory.py`). Section "The attack test (step 6)". |
 | Docker options | Constants only. No job, repository name, branch or output of the agent is in any request to the daemon: they are JSON bodies made from the runner's constants and identifiers the daemon gave, and the exec commands have fixed arguments. After the container is made, Control reads it back from the daemon and refuses to start the engine if it shows a privileged container, a bind, a device, another runtime, another network or a mount besides the repository. |
 
 **How Control drives it, only outward.** Control starts OpenCode with an exec, writes the engine's configuration with an exec that
@@ -457,8 +457,8 @@ bill, Control, the VM's services or the outside beyond the door**, not something
   and the agent's container as the daemon made it, and the hostile repository of the next section. On a VM it runs under `sysbox-runc` as well.
 
 **Result, 2026-11-03** (2 vCPU, 4 GB, kernel 6.18.56, Sysbox 0.7.1; snapshot built from the branch; the check on a VM restored from it and prepared the
-way the Launcher prepares one): 72 of 72 checks hold after the two fixes below; the 17 tests of the hostile-reader file pass under `sysbox-runc` and the whole lane under `runc`.
-The 4 vCPU size ran the same script with 6,144 MB for the agent.
+way the Launcher prepares one): 73 of 73 checks hold after the fixes below; the 17 tests of the hostile-reader file pass under `sysbox-runc` and the whole lane under `runc`.
+The 4 vCPU size (8.4 GB, 6,144 MB for the agent) ran the same script on a `spike-` VM of its own: 73 of 73. Both ran the round of 2026-11-03 that follows the review of the first one.
 
 | Area | What is proven |
 |---|---|
@@ -471,7 +471,7 @@ The 4 vCPU size ran the same script with 6,144 MB for the agent.
 | Containers of the agent's own Docker | From a container on the inner bridge, and from a `--privileged --network host --pid host -v /:/host` container: only the door answers, root is still the mapped uid, no VM socket, no host device, the sysctl writes still refuse |
 | Door | The made-up key is in no environment, command line or readable file of the agent (its processes, `/etc`, `/opt`, the volume) and in no `docker inspect` or `top`. Another capability, another model, an absolute URL, `..`, another path, another method, `CONNECT` and a request for the metadata address are refused at the door and the ledger does not move (nothing reached the provider). A request with another `Host` header is answered by the pinned provider (`401` for the made-up key), never by the host it names. The door's only listening socket (besides Docker's own resolver on loopback) is its port |
 | Setup container | The internet (several ports, names resolve, ping) and nothing of ours: the VM's addresses and ports (control port included), the agent's listener, the door, Control, a neighbour, the platform, private ranges; the agent cannot reach the Setup container or its gateway either. Same seal as the agent: no VM socket, mapped root, no host device, no key, no kernel parameter writable; with IPv6 on, no neighbour is found |
-| Abuse | A memory hog dies at 1,984 MB of its 2,048 (`OOMKilled`), the VM never goes below 2.4 GB available. A flood of threads stops at `pids.max` (16,367 started), and the container is killed in 0.5 s. A burn of sixteen processes leaves Control its share (a fixed piece of work took 0.23 s against 0.12 s idle). Three processes opening files end at the cap of the check (2.4 million open at once) after the fix below. The agent fills the VM's disk (50 GB in 16 to 20 s): a command in a reader still runs, the reserve disk takes 256 MB, the agent is killed in 0.4 s, the door and readers stay up and the disk is free again when the container is removed. During all of them one call to the daemon and one command in a reader every half second never failed and never took more than 0.6 s |
+| Abuse | A memory hog dies at 1,984 MB of its 2,048 (`OOMKilled`; at 4 vCPU 6,016 of 6,144), the VM never goes below 2.6 GB available (1.8 GB at 4 vCPU). A flood of threads stops at `pids.max` (16,367 and 16,365 started), and the container is killed in 0.5 s. A burn of sixteen processes leaves Control its share (a fixed piece of work took 0.15 s against 0.11 s idle; 0.12 against 0.105 at 4 vCPU). Floods of open objects: twelve (2 vCPU) or twenty-eight (4 vCPU) root processes open timers, epolls, eventfds, socket pairs and `/dev/null`, and in a second flood only timers and epolls, until something stops them; both are past the old table of 437,305 (1.9 and 4.8 million files open at once at 2 vCPU, 5.7 and 11.1 million at 4 vCPU), the agent is what stops (memory cgroup, or Control's guard in the leaky case), the table never fills, no call of Control fails and none takes more than 0.13 s, and the VM keeps at least 625 MiB of free memory and file cache (details under finding 2). The agent fills the VM's disk (50 GB in 10 to 14 s): a command in a reader still runs, the reserve disk takes 256 MB, the agent is killed in 0.4 s, the door and readers stay up and the disk is free again when the container is removed. During all of them one call to the daemon and one command in a reader every half second never failed |
 
 A note on the one address that looked like a finding: the agent's own Docker puts a bridge on `172.17.0.1/16`, which is the VM's `docker0` address, so a connect to
 it from the agent or from the Setup container ends in the container's own kernel (`refused`) and says nothing about the VM. The checks leave that address out
@@ -485,7 +485,10 @@ refs, garbage in `packed-refs` and `HEAD`, a linked worktree and a `commondir` t
 (`--upload-pack=...`, `-fexec`, `+force`, a name with a space, a tab or a line end, `x;touch`, `$(touch)`: none is run, the unusual legal ones arrive as the
 plain argument they are), a file of one terabyte (the leftover commit is a named failure inside its time, the commit the agent made arrives), and a FIFO where git
 reads its configuration or `HEAD`. None of them leaks a file of the reader, none leaves a process in a reader after the readers were made quiet, and the whole
-end of the turn takes at most about 31 s for the two FIFOs and 13 s for the terabyte file.
+end of the turn takes at most about 31 s for the two FIFOs and 13 s for the terabyte file (each of these tests has a time limit of 120 s, so that a regression fails and does not hang the job).
+What the test asserts per layout was measured: alternates to `/proc` and `/etc`, symlinked refs and a `HEAD` that points nowhere still list the branches and push the commit; garbage in `packed-refs`, a `commondir` and a FIFO as configuration or as `HEAD` end in the one named outcome
+`unreadable` (nothing listed, nothing pushed, nothing arrives), after 1 to 2 s and, for the FIFOs, after the 20 s of the listing.
+The branch names: the legal odd ones (`x;touch${IFS}...`, `$(touch${IFS}...)`) arrive under exactly their own name, every other one is dropped, and no command runs.
 
 **Findings, and what was done.**
 
@@ -495,10 +498,45 @@ end of the turn takes at most about 31 s for the two FIFOs and 13 s for the tera
    inside a call that had 8 seconds); the final push never came, and the work was lost with the VM. The agent could do this on purpose and could do it by accident.
    `AttachedStreams.close()` now shuts the connection down before it closes it (`tests/unit/test_exec_run.py`, red before the fix; the lane's FIFO and terabyte
    tests). Nothing else of the design changes: the budget of the end of the turn counts each step at its ceiling, and that is now true.
-2. **The agent could fill the VM's table of open files (fixed, takes effect with the next snapshot).** `fs.file-max` was 437,305 on a 4 GB VM. Three root
-   processes opened 436,815 files in a few seconds with a tenth of the agent's memory limit, and a call of Control failed. `sysbox-prepare.sh` now sets
-   `fs.file-max` to 2,147,483,647, so the memory limit of the agent's container, which counts the files, is what stops it (measured after: 2.4 million files
-   open, no failure of Control). `docker/sandbox/sysbox-prepare.sh` is an input of the golden snapshot, so the next release builds a new one.
+2. **The agent could fill the VM's table of open files, and some of its objects cost memory its cgroup does not count (fixed in three parts; `sysbox-prepare.sh` takes effect with the next snapshot).**
+   *The table.* `fs.file-max` was 437,305 on a 4 GB VM. Three root processes opened 436,815 files in a few seconds with a tenth of the agent's memory limit, and a call
+   of Control failed (a process without `CAP_SYS_ADMIN` of the VM gets `ENFILE` when the table is full, which is Control, the door and the git of every reader). `sysbox-prepare.sh`
+   sets `fs.file-max` to 2,147,483,647, so that the memory limit of the agent's container, which counts the files, is what stops it.
+   *What an object costs* (kernel 6.18.56, measured as root on the VM, 300,000 objects of a kind, bytes per object):
+
+   | Kind | In the container's cgroup | Outside it |
+   |---|---|---|
+   | `/dev/null` | 255 | 4 |
+   | timerfd, epoll | 455 | 263 |
+   | eventfd | 455 | 71 |
+   | pipe (two files) | 2,566 | 30 |
+   | socket pair (two files) | 4,910 | 119 |
+
+   So the table is not full before the cgroup's limit is (8.4 million `/dev/null` files at 2,048 MB, 25 million at 6,144 MB), but a flood of timers or epolls leaves 260 bytes each outside
+   the cgroup. Measured with the fix of the table alone and nothing else (28 processes at 4 vCPU, 12 at 2 vCPU): **at 2 vCPU** the leaky flood ends at the cgroup's limit with 4.9 million
+   files and 612 MiB of free memory and file cache left, which is enough; **at 4 vCPU** it took 1 GB of memory a second and **the VM stopped within 12 seconds** (the platform lists it
+   as `stopped`, the `exec` connection ends with an EOF). With only the OOM score of the agent raised to 1,000 (below) the VM stood still for 50 seconds and then the kernel's OOM killer
+   ran (a global one, with 7.8 GB of slab) and chose the agent's inner `dockerd`, no process of Control. Nothing was measured of this at 6 and 8 vCPU.
+   *The fix.* (1) The agent's and the Setup container's containers get `OomScoreAdj` 1,000 (`AGENT_OOM_SCORE_ADJ`): whatever the kernel's OOM killer has to choose, it chooses there first, and
+   root of a user namespace cannot lower it. (2) `vm_memory.MemoryGuard` in Control looks ten times a second at the memory the VM has left, **free memory plus the page cache of files, not
+   `MemAvailable`** (the kernel counts the `struct file` of every open file as reclaimable slab: `MemAvailable` said 2.2 GB when the OOM killer ran), and kills the agent's container,
+   or the Setup container, when less than 512 MiB or 8% of the VM's memory is left. The turn then ends as a turn whose container died ("the container was killed because the VM was
+   running out of memory"). Measured with both, the same floods:
+
+   | | Flood | Files open at once | Stopped by | Least free memory and file cache | Control's worst call | Failures |
+   |---|---|---|---|---|---|---|
+   | 2 vCPU | mixed | 1.85 million | memory cgroup | 1,618 MiB | 0.11 s | 0 |
+   | 2 vCPU | timers and epolls | 4.84 million | Control's guard | 625 MiB (floor 512) | 0.13 s | 0 |
+   | 4 vCPU | mixed | 5.68 million | memory cgroup | 1,655 MiB | 0.13 s | 0 |
+   | 4 vCPU | timers and epolls | 11.14 million | Control's guard | 649 MiB (floor 672) | 0.10 s | 0 |
+
+   Door and readers stayed up, a command in a reader worked afterwards, the kernel's OOM killer did not run in the VM in the leaky floods.
+   *Why not a bounded table.* Any bound the agent can reach is `ENFILE` for Control, and nothing would stop the agent (a root process opens a million files in seconds, 16,384 processes are
+   allowed). A bound it cannot reach before its cgroup limit has to exceed 8.4 million files at 2 vCPU and 25 million at 4 vCPU, where the leaky objects leave 1.2 GB and 3.7 GB outside
+   the cgroup: no value does both on a VM whose agent has 75% of the memory. So the table stays big, and the memory the cgroup cannot count is watched by Control.
+   *Not measured:* the guard in the Setup container (unit test only), 6 and 8 vCPU, a consumer faster than 1 GB a second (the floor would have to go up), the kernel 6.8 numbers of the
+   review (only 6.18 was measured). `docker/sandbox/sysbox-prepare.sh` is an input of the golden snapshot, so the next release builds a new one; the guard and the OOM score are in
+   the Worker image.
 3. **The door's image has git and a shell (not changed).** The plan's table says "no git, no shell". The image is the Worker image, which has both (a shell, git 2.53).
    The running door is one Python process with one listening port, its container is non-root, read-only, without capabilities and without a network but the
    provider, and nothing the agent can reach starts a process in it, so this opens nothing today. A door image of its own (the Python runtime and nothing else) would

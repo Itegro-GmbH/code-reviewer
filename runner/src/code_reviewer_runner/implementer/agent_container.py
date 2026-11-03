@@ -63,6 +63,7 @@ from .host_rules import (
     inet_failure_note,
 )
 from .reader import REPO_SUBPATH, work_volume_of
+from .vm_memory import MEMINFO, MemoryGuard
 
 _log = logging.getLogger(__name__)
 
@@ -77,6 +78,15 @@ AGENT_TMP: Final = "/tmp"
 # OpenCode's port, on the container's loopback.
 ENGINE_PORT: Final = 4096
 AGENT_PIDS_LIMIT: Final = 16384
+# The most the kernel's OOM killer can be told to prefer (-1000..1000). Some memory the kernel
+# spends on a process is not charged to its memory cgroup (about 260 bytes of the 720 of a timer
+# or epoll object, measured on the VM's kernel 6.18), so a flood of them can take the whole VM's
+# memory before the container's limit is reached. The VM's own OOM killer then picks its victim by
+# this score: the agent's (and the Setup container's) processes first, never Control, the door,
+# the readers or the daemons. The agent's root is in a user namespace and cannot lower the value
+# (that takes CAP_SYS_RESOURCE in the VM's). `vm_memory.MemoryGuard` acts before the kernel has
+# to.
+AGENT_OOM_SCORE_ADJ: Final = 1000
 AGENT_ENTRYPOINT: Final = ["/usr/bin/tini", "--", "/usr/local/bin/agent-init"]
 # The file the image's init writes once the inner Docker answers.
 READY_FILE: Final = "/run/agent-ready"
@@ -162,6 +172,7 @@ def agent_document(
             "Memory": memory_bytes,
             "MemorySwap": memory_bytes,
             "PidsLimit": AGENT_PIDS_LIMIT,
+            "OomScoreAdj": AGENT_OOM_SCORE_ADJ,
             "RestartPolicy": {"Name": "no"},
             "PublishAllPorts": False,
             "Mounts": [
@@ -185,9 +196,14 @@ class AgentEnd:
     exit_code: int | None
     out_of_memory: bool
     unexpected: bool
+    # Control killed it because the VM was running out of memory (`MemoryGuard`), which the
+    # container's own limit does not always prevent.
+    vm_memory: bool = False
 
     def sentence(self) -> str:
-        if self.out_of_memory:
+        if self.vm_memory:
+            how = "the container was killed because the VM was running out of memory"
+        elif self.out_of_memory:
             how = "the container was killed for its memory"
         elif self.exit_code == 137:
             how = "the container was killed (a signal: most likely the memory limit or a crash)"
@@ -295,6 +311,8 @@ class AgentSeams:
     # has to write `READY_FILE` itself. Production never sets either.
     runtime: str = AGENT_RUNTIME
     entrypoint: Sequence[str] | None = None
+    # The file the VM's available memory is read from (`MemoryGuard`).
+    meminfo: str = MEMINFO
 
 
 def unavailable(reason: str) -> JobError:
@@ -316,6 +334,7 @@ class AgentContainer:
         self._tunnel: Tunnel | None = None
         self._engine_exec: str | None = None
         self._end: AgentEnd | None = None
+        self._guard: MemoryGuard | None = None
         self._ended = threading.Event()
         self._stopping = threading.Event()
         self._lock = threading.Lock()
@@ -367,6 +386,8 @@ class AgentContainer:
             self._container = container
             api.start_container(container)
             threading.Thread(target=self._watch_end, args=(container,), daemon=True).start()
+            self._guard = MemoryGuard(self._vm_memory_low, path=self._seams.meminfo)
+            self._guard.start()
             self._wait_ready(container)
             self._seal_check(container)
             return tuple(notes)
@@ -447,8 +468,18 @@ class AgentContainer:
             pass
         with self._lock:
             if self._end is None:
-                self._end = AgentEnd(code, oom, unexpected=not self._stopping.is_set())
+                self._end = AgentEnd(
+                    code,
+                    oom,
+                    unexpected=not self._stopping.is_set(),
+                    vm_memory=self._guard is not None and self._guard.tripped_at is not None,
+                )
         self._ended.set()
+
+    def _vm_memory_low(self, available: int) -> None:
+        """The VM is about to run out of memory (`MemoryGuard`): the agent goes."""
+        _ = available
+        self._kill()
 
     @property
     def end(self) -> AgentEnd | None:
@@ -555,6 +586,8 @@ class AgentContainer:
         True when the container is known to be gone: the repository can be read. The container is
         killed, not removed (`remove()` does that after the push). Safe to call twice."""
         self._stopping.set()
+        if self._guard is not None:
+            self._guard.close()
         if self._tunnel is not None:
             self._tunnel.close()
             self._tunnel = None

@@ -80,12 +80,17 @@ if [ -f "$sysctl_conf" ]; then
   sysctl -q -e -p "$sysctl_conf" >/dev/null 2>&1 || fail 23 sysbox_sysctl_failed "$sysctl_conf"
 fi
 
-# 4b. The kernel's table of open files is one for the whole VM: 437,305 entries on a 4 GB VM (measured). A file costs the
-# container that opens it about 300 bytes of its own memory, so a root process that does nothing but open files filled the table
-# at 437,305 (136,290 + 184,692 + 115,833 in three processes, step 6, 2026-11-03) with a tenth of its memory limit, and the
-# calls of Control and of the platform's own agent on the VM began to fail with ENFILE. With a table that cannot fill before the
-# memory limit of the agent's container (the most it can have, at 8 vCPU, is 14 GB, 47 million files), the memory cgroup is what
-# stops it, and it stops only the agent.
+# 4b. The kernel's table of open files is one for the whole VM: 437,305 entries on a 4 GB VM (measured). Three root processes of
+# the agent filled it with 436,815 files (step 6, 2026-11-03) at a tenth of the container's memory limit, and the calls of Control
+# and of the platform's own agent began to fail with ENFILE (only a process with CAP_SYS_ADMIN of the VM is exempt). A file costs
+# the container that opens it 255 to 455 bytes of its memory cgroup (kernel 6.18, measured), so a table that cannot fill before the
+# container's limit (8.4 million files at 2 GB, 25 million at 6 GB, 59 million at 14 GB) leaves the memory limit to stop the agent.
+# That is why the table is made this big and not bounded: any bound the agent can reach (a root process opens a million files in a
+# few seconds, sixteen thousand processes are allowed) is ENFILE for Control. The cost is a gap the cgroup does not see: timer,
+# epoll and eventfd objects leave about 260 bytes each outside the container's memory cgroup, so a flood of them can use the VM's
+# memory before the limit is reached (on a 4 vCPU VM it stopped the VM dead). That is closed elsewhere, not here: the agent's and
+# the Setup container's processes have the highest OOM score (`AGENT_OOM_SCORE_ADJ`), and Control kills the container before the
+# VM is out of memory (`vm_memory.py`). Both are measured in docs/implementer.md, "The attack test (step 6)".
 file_max="${SYSBOX_PREPARE_FILE_MAX:-2147483647}"
 sysctl -q -w "fs.file-max=$file_max" >/dev/null 2>&1 || fail 23 sysbox_sysctl_failed "fs.file-max"
 
