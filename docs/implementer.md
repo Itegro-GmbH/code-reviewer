@@ -318,7 +318,7 @@ exits is outside (`implementer/agent_container.py`):
 | Network | The **model network**, internal, `gateway_mode_ipv4=isolated`, range `10.213.77.0/29`: the agent at `10.213.77.4`, the door at `10.213.77.2`, and nothing else. No exit, no route to the VM or its control port `23456`, no name server, no neighbour; Control is not on it. The containers the agent starts through its own Docker reach the door too (through the agent) and nothing else. |
 | Repository | The `repo` directory of the work volume, mounted as `/work/repo` (the volume's `Subpath`): the agent sees the repository and nothing of the mirror. The mount is idmapped by Sysbox, so the files the agent's root writes belong to the VM's root (measured), and its container uid 0 is host uid 165536 for processes only. |
 | Memory | The VM's memory (2,048 MB per vCPU) less the limits of everything else on it, each counted in full: the OS and the Sysbox daemons (512 MB), Control (768 MB), the door (256 MB) and **both readers** (256 MB each, 512 MB: they exist from the start of the turn, and an earlier sum counted one) are 2,048 MB. No swap: **0 MB at 1 vCPU (refused), 2,048 at 2, 6,144 at 4, 10,240 at 6 and 14,336 at 8** (an earlier sum left the agent 2,560 at 2 vCPU and did not count the reader: the limits of all containers and the OS came to more than the 4,096 MB of the VM; the sum before this round, 2,304, still counted one reader). Less than 1,024 MB is `sandbox_size_unsupported`, so 1 vCPU stays refused. A test holds that the limits add up to the VM at every size. Why these figures: "The memory of the readers and the OS" below. |
-| Limits | 16,384 processes. The time limit and the cost limit are Control's and the door's. |
+| Limits | 16,384 processes. The time limit and the cost limit are Control's and the door's. The VM's table of open files is made too big for the agent to fill before its memory limit stops it (`sysbox-prepare.sh`, section "The attack test (step 6)"). |
 | Docker options | Constants only. No job, repository name, branch or output of the agent is in any request to the daemon: they are JSON bodies made from the runner's constants and identifiers the daemon gave, and the exec commands have fixed arguments. After the container is made, Control reads it back from the daemon and refuses to start the engine if it shows a privileged container, a bind, a device, another runtime, another network or a mount besides the repository. |
 
 **How Control drives it, only outward.** Control starts OpenCode with an exec, writes the engine's configuration with an exec that
@@ -436,6 +436,85 @@ Three places, each with its own limits, and the last one only a VM with Sysbox c
 * **A VM with Sysbox** proves those, and the lane runs there too (`LANE_RUNTIME=sysbox-runc`): the same tests, the image's own init with the inner Docker, the production network (`--internal`, isolated gateway) and the reader under Sysbox. The golden snapshot's proof
   (`docs/golden-snapshot.md`) checks the Subpath volume, the id mapping and the network on every build. Results of the run on a `spike-` VM are under "Measured on real VMs" in "The agent's container".
 
+## The attack test (step 6)
+
+Step 6 of the plan attacks the sandbox from inside, on a real `spike-` VM, as an untrusted workload would, and keeps what it found as a check that
+can be run again. The owner's rule decides what counts: inside its container the agent is free, so **a finding is something that reaches the key, the
+bill, Control, the VM's services or the outside beyond the door**, not something the agent does to its own container.
+
+**What runs, and where.**
+
+* `runner/scripts/sandbox_boundary_check.py` is run as the Control container of the Implementer's profile on a VM with Sysbox (the flags the Launcher renders,
+  the Docker socket, the work volume; the script and `boundary_probe.py` mounted read-only at `/driver`, as `model_door_check.py` is). It starts what a turn
+  starts with the production code (the model door with a made-up key, both readers, the agent's container, the Setup container with a script of its own) and
+  prints one JSON line per check and a table. Each check names the **expected denial** and asserts it, and every denial has its control (the same attempt
+  reaching what it may reach: the door, the internet from the Setup container, a listener on the default bridge, a link-local address that IPv6 really got).
+  `--skip-abuse` leaves out the checks that stress the VM, `--offline` the one call that reaches the real provider. No secret is printed.
+* `runner/scripts/boundary_probe.py` is the program that runs **inside** the agent's container, the Setup container and a container of the agent's own Docker.
+  It uses the standard library only, makes plain `connect()` calls with short timeouts to addresses of this VM, and prints facts; the expectations are the
+  checker's.
+* The lane (`runner/tests/lane/test_reader_hostile.py`, CI job `implementer-lane`) proves what a Docker daemon without Sysbox can: the readers' capabilities
+  and the agent's container as the daemon made it, and the hostile repository of the next section. On a VM it runs under `sysbox-runc` as well.
+
+**Result, 2026-11-03** (2 vCPU, 4 GB, kernel 6.18.56, Sysbox 0.7.1; snapshot built from the branch; the check on a VM restored from it and prepared the
+way the Launcher prepares one): 72 of 72 checks hold after the two fixes below; the lane's 18 tests pass under `sysbox-runc` and the whole lane under `runc`.
+The 4 vCPU size ran the same script with 6,144 MB for the agent.
+
+| Area | What is proven |
+|---|---|
+| Containers | Agent: not privileged, no bind, device, host pid, ipc or user namespace, one mount (`/work/repo`), the model network only, `sysbox-runc`, memory and pids as sized, the limits of all containers leave the OS its room. Root maps to host uid 165536 (`0 165536 65536`), every process of the container has that uid on the VM, the agent sees only its own processes, and the capabilities it holds exist in its user namespace only (`clock_settime`, `init_module`, `kexec_load`, `bpf`, `swapoff` all `EPERM`). Readers: `sysbox-runc`, no network, read-only root, `DAC_OVERRIDE` only, `no-new-privileges`, one mount. A command the runner starts in a reader has `CapEff` and `CapBnd` `0x2`, no ambient or inheritable capability, `NoNewPrivs 1` (a plain exec holds all 41, which is why `setpriv` starts every command) |
+| `/proc`, `/sys`, devices, cgroup | `/proc/kcore` and `/proc/sysrq-trigger` refuse, `/proc/keys` is empty, `/dev/mem`, `kmem` and `port` are absent, no block device or `kvm`, `mknod` of any of them is `EPERM`. `core_pattern`, `modprobe`, `panic_on_oom`, `randomize_va_space`, `uevent_helper` refuse a write. `kernel.panic`, `printk` and `sysrq` accept one (Sysbox emulates them) and **none of the three changes on the VM**. The agent cannot raise its own `memory.max`, `memory.swap.max` or `pids.max` (`EACCES`) |
+| Volume | `/work` holds only `repo`: no reserve disk, no mirror, no `/var/lib/code-reviewer-work`. The agent may leave symlinks (to `/`, `..`, `/work`), a setuid file, a FIFO and a file with a uid it chooses; Control sees the first three as uid 0 and the mount is `nosuid,nodev`; a device node and a hard link out of the volume fail (`EPERM`, `EXDEV`) |
+| Sockets | Every unix socket the agent or the Setup container can see that answers as a Docker daemon is its own inner daemon, never the VM's (compared by daemon id) |
+| Network, agent | Of the door's address only its port connects (ports 1 to 1024 and 10100 to 10200 scanned). **Nothing else of ours answers**, not even with a reset: every address of the VM on every bridge with every port it listens on and the usual ones (the control port 23456 among them), the model gateway, Control and a listening neighbour on the default bridge, the door's other address, the Setup bridge and a listener of a running Setup container, the metadata address, the platform's `169.254.0.1`, private neighbours, and the internet. No outside DNS (a UDP query to `1.1.1.1` and `8.8.8.8` gets nothing, the embedded resolver answers `SERVFAIL`), no ping. After root adds a default route and host routes through the model gateway, and again after root has taken the inner `docker0` address away (see below), still only the door answers |
+| IPv6 | `default.disable_ipv6 = 1`, no IPv6 address on `docker0`, any `br-*` bridge or veth, no forwarding. The agent starts with no IPv6 address on `eth0`; when root switches IPv6 on (control: `eth0` gets a link-local address) `ff02::1` finds no neighbour and no connect to a neighbour's port succeeds; two public IPv6 addresses are not reached |
+| Containers of the agent's own Docker | From a container on the inner bridge, and from a `--privileged --network host --pid host -v /:/host` container: only the door answers, root is still the mapped uid, no VM socket, no host device, the sysctl writes still refuse |
+| Door | The made-up key is in no environment, command line or readable file of the agent (its processes, `/etc`, `/opt`, the volume) and in no `docker inspect` or `top`. Another capability, another model, an absolute URL, `..`, another path, another method, `CONNECT` and a request for the metadata address are refused at the door and the ledger does not move (nothing reached the provider). A request with another `Host` header is answered by the pinned provider (`401` for the made-up key), never by the host it names. The door's only listening socket (besides Docker's own resolver on loopback) is its port |
+| Setup container | The internet (several ports, names resolve, ping) and nothing of ours: the VM's addresses and ports (control port included), the agent's listener, the door, Control, a neighbour, the platform, private ranges; the agent cannot reach the Setup container or its gateway either. Same seal as the agent: no VM socket, mapped root, no host device, no key, no kernel parameter writable; with IPv6 on, no neighbour is found |
+| Abuse | A memory hog dies at 1,984 MB of its 2,048 (`OOMKilled`), the VM never goes below 2.4 GB available. A flood of threads stops at `pids.max` (16,367 started), and the container is killed in 0.5 s. A burn of sixteen processes leaves Control its share (a fixed piece of work took 0.23 s against 0.12 s idle). Three processes opening files end at the cap of the check (2.4 million open at once) after the fix below. The agent fills the VM's disk (50 GB in 16 to 20 s): a command in a reader still runs, the reserve disk takes 256 MB, the agent is killed in 0.4 s, the door and readers stay up and the disk is free again when the container is removed. During all of them one call to the daemon and one command in a reader every half second never failed and never took more than 0.6 s |
+
+A note on the one address that looked like a finding: the agent's own Docker puts a bridge on `172.17.0.1/16`, which is the VM's `docker0` address, so a connect to
+it from the agent or from the Setup container ends in the container's own kernel (`refused`) and says nothing about the VM. The checks leave that address out
+and then attack it for real: root flushes the inner bridge, adds a default route through the model gateway and tries the VM's gateway, Control and a neighbour on
+the default bridge. Nothing answers.
+
+**The hostile repository (lane).** The agent controls every byte of its repository and the end of the turn reads it, so the lane plants what git reads and
+checks the end: `core.worktree` pointed at `/` (the leftover commit fails and nothing of the reader's file system is in what arrived), symlinks to `/etc/passwd`,
+`/`, `..` and to a file as `.gitignore` and `.gitattributes` (committed as links, never followed), alternates to `/proc` and `/etc`, symbolic and symlinked
+refs, garbage in `packed-refs` and `HEAD`, a linked worktree and a `commondir` that name files of the reader, branch names that would be options or commands
+(`--upload-pack=...`, `-fexec`, `+force`, a name with a space, a tab or a line end, `x;touch`, `$(touch)`: none is run, the unusual legal ones arrive as the
+plain argument they are), a file of one terabyte (the leftover commit is a named failure inside its time, the commit the agent made arrives), and a FIFO where git
+reads its configuration or `HEAD`. None of them leaks a file of the reader, none leaves a process in a reader after the readers were made quiet, and the whole
+end of the turn takes at most about 31 s for the two FIFOs and 13 s for the terabyte file.
+
+**Findings, and what was done.**
+
+1. **A silent command held the runner for ever (fixed).** `run_exec` ends a command that has run out of time by closing its connection from a timer thread. On
+   Linux, `close()` does not wake a thread that is already waiting in `recv()`, so the time limit did not hold for a command that prints nothing and does not end.
+   A `.git/config` that is a FIFO, a clean filter that sleeps, or a file of a terabyte made the leftover commit wait for ever (measured: 8 minutes and counting
+   inside a call that had 8 seconds); the final push never came, and the work was lost with the VM. The agent could do this on purpose and could do it by accident.
+   `AttachedStreams.close()` now shuts the connection down before it closes it (`tests/unit/test_exec_run.py`, red before the fix; the lane's FIFO and terabyte
+   tests). Nothing else of the design changes: the budget of the end of the turn counts each step at its ceiling, and that is now true.
+2. **The agent could fill the VM's table of open files (fixed, takes effect with the next snapshot).** `fs.file-max` was 437,305 on a 4 GB VM. Three root
+   processes opened 436,815 files in a few seconds with a tenth of the agent's memory limit, and a call of Control failed. `sysbox-prepare.sh` now sets
+   `fs.file-max` to 2,147,483,647, so the memory limit of the agent's container, which counts the files, is what stops it (measured after: 2.4 million files
+   open, no failure of Control). `docker/sandbox/sysbox-prepare.sh` is an input of the golden snapshot, so the next release builds a new one.
+3. **The door's image has git and a shell (not changed).** The plan's table says "no git, no shell". The image is the Worker image, which has both (a shell, git 2.53).
+   The running door is one Python process with one listening port, its container is non-root, read-only, without capabilities and without a network but the
+   provider, and nothing the agent can reach starts a process in it, so this opens nothing today. A door image of its own (the Python runtime and nothing else) would
+   make the table true; it is a size and build question for the owner.
+4. **`/dev/net/tun` is not in the agent's container (information).** The boot step makes it world-writable on the VM, but Sysbox does not put it into the container, so a
+   task that needs a tunnel device will not find one. Not a security matter.
+5. **The agent can make files with any uid below 65,536 in the volume (information).** The volume is mounted with the user ids shifted, so a file the agent's root makes is
+   the VM's root's, and a `chown` to another uid shows as that uid. The mount is `nosuid,nodev` and Control never opens a path in the volume, so nothing runs.
+6. **Not a finding, a reading aid.** A `core.worktree` of `/` fails the leftover commit (the agent's own last change is not committed, with a named note);
+   `kernel.panic`, `printk` and `sysrq` take a write inside the container and stay as they are on the VM (Sysbox's emulation).
+
+**What it does not prove.** A flaw of the shared kernel or of Sysbox itself (its `sysbox-fs`, which answers for `/proc` and `/sys`, is a large surface), a flaw of
+the Docker daemon, or a side channel is not looked for: no VM stands around the container, which the owner accepts for internal use ("What is accepted"). The check runs
+the sizes of 2 and 4 vCPU; the memory the agent gets at 6 and 8 vCPU follows the same sum (`contracts/environment-sizes.v1.json`, held by tests). It tests the
+network as the platform leaves it today (the VM's Vercel network policy is open until step 7).
+
 ## The disk
 
 The agent is root in a container with its own Docker and no rule inside it, so it can fill the VM's disk: with the repository, with the
@@ -491,7 +570,7 @@ container on an `internal`, `isolated` network, `ConnectionRefused` for ports 22
 same as for the Setup network (`host_rules.close_bridge_ipv6`, called by `AgentContainer.create` before the container is made): no IPv6 address
 on the VM's side of the bridge, so there is no host to find on that segment; measured after it, the same probe times out and a container that
 joins later finds no neighbour. The VM does not forward IPv6 (`net.ipv6.conf.all.forwarding = 0`) and the agent has no IPv6 route out.
-Step 6 (the attack test) should repeat this class of probe for the neighbours it can find on the segment.
+Step 6 repeated this class of probe, from the agent and from the Setup container, against every address of the VM (section "The attack test (step 6)").
 
 **IPv6, switched off in the VM and a second wall (#818, 2026-11-03).** Defensive configuration on top of the missing bridge address, with nothing probed
 for it. (1) The Launcher's step `ipv6-off` (`IPV6_OFF_COMMANDS`, the Implementer's VM only, before `vm-prepare.sh` starts the daemon) writes 1 to
@@ -818,8 +897,8 @@ that were pushed first. A Worker that is stopped while it works (`runner_shutdow
   `push_rejected`. Change workflow files by hand ([`github-app.md`](github-app.md)).
 - Opening or merging a pull request, a second turn on the same branch, a task on an existing branch, forks, other platforms
   than GitHub.
-- **Attacks from inside** (a targeted escape from the container, tampering with the Sysbox daemons, the kernel): step 6 of the plan
-  tests them on a real VM. This step proved the connectivity (below) and nothing more.
+- **A targeted escape from the kernel or the Sysbox daemons.** Step 6 attacked the boundaries the runner builds (section "The attack test (step 6)"); it
+  did not look for a flaw in the kernel, Sysbox or Docker themselves.
 
 ## What is accepted, and until when
 
@@ -831,7 +910,7 @@ These are decisions of the owner, not oversights.
 - **The agent shares the VM's kernel.** Sysbox makes root of its container an unprivileged user and gives it its own Docker without
   `--privileged`, but there is no virtual machine around it (no KVM on the platform). A kernel flaw that Sysbox does not stop is an
   escape to the VM, where the key and the token are in other containers. Acceptable for our own repositories, not for strangers' (the
-  plan's table of exits); step 6 attacks it on purpose. Sysbox officially supports Ubuntu up to 24.04 and the platform runs 26.04; the
+  plan's table of exits); step 6 attacked what stands around it (section "The attack test (step 6)") and not the kernel itself. Sysbox officially supports Ubuntu up to 24.04 and the platform runs 26.04; the
   snapshot's proof is what notices a platform that breaks it.
 
 - **Git is free, and every local branch is pushed.** No rule inside the workspace, none at the push: the agent can move any

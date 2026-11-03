@@ -20,8 +20,10 @@ outside address is the one connection each to a few public IPs the networks are 
 It prints one JSON line per check (`{"area", "check", "expected", "ok", "observed"}`) and, last, a
 table. No value that is secret is printed: the key of the door is made up for the run.
 
-`--skip-abuse` leaves out the checks that stress the VM (a memory hog, a process flood, the VM's
-disk filled). The exit status is 0 when every check holds.
+`--skip-abuse` leaves out the checks that stress the VM (a memory hog, a process flood, an open-file
+flood, a processor burn, the VM's disk filled). `--offline` leaves out the one call that reaches the
+real provider (a request with another Host header, which the provider answers with a 401 for the
+made-up key). The exit status is 0 when every check holds.
 """
 
 import contextlib
@@ -1688,6 +1690,21 @@ except RuntimeError as error:
 print("STARTED", started, reason, flush=True)
 time.sleep(int(sys.argv[1]))
 """
+BURN = """
+import os, sys, time
+end = time.time() + float(sys.argv[1])
+pids = []
+for _ in range(int(sys.argv[2])):
+    pid = os.fork()
+    if pid == 0:
+        while time.time() < end:
+            sum(range(10000))
+        os._exit(0)
+    pids.append(pid)
+for pid in pids:
+    os.waitpid(pid, 0)
+print("BURNED", len(pids), flush=True)
+"""
 FDS = """
 import os, sys, time
 count = 3
@@ -1858,6 +1875,33 @@ def section_abuse(lab: Lab, reader: ReaderAccess) -> None:
         output=flood_out[-120:],
     )
     fresh_agent(lab)
+
+    # -- processor ---------------------------------------------------------------------------
+    def work() -> float:
+        """A fixed amount of computing in Control: the seconds it takes."""
+        began = time.monotonic()
+        sum(range(6_000_000))
+        return time.monotonic() - began
+
+    idle = min(work() for _ in range(3))
+    started = threading.Thread(
+        target=lambda: lab.agent_run([PYTHON, "-I", "-c", BURN, "12", "16"], timeout=90.0)
+    )
+    with Sampler() as sampler:
+        started.start()
+        time.sleep(3.0)
+        busy = max(work() for _ in range(3))
+        started.join(60.0)
+    checks.say(
+        "abuse",
+        "cpu_burn_in_the_agent_leaves_control_its_share",
+        "with sixteen busy processes in the agent a fixed piece of work in Control takes less than six times as long as on an idle VM, and none of Control's calls fails",
+        busy < 6 * idle + 0.5 and sampler.failures == 0 and sampler.worst < 10.0,
+        idle_seconds=round(idle, 3),
+        busy_seconds=round(busy, 3),
+        worst_latency_s=sampler.worst,
+        failures=sampler.failures,
+    )
     # -- open files (the system-wide table is one for all containers) --------------------------
     limit = int(Path("/proc/sys/fs/file-max").read_text())
     with Sampler() as sampler:
