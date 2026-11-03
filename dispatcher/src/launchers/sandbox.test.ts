@@ -1,5 +1,15 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
+import { spawnSync } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { FakeSandboxService } from "../../../fakes/sandbox/service.ts";
 import { createDispatcherCore } from "../core/dispatcher.ts";
@@ -16,13 +26,14 @@ import { ManualClock, settle } from "../test-support/manual-clock.ts";
 import { DEFAULT_CONFIG } from "../snapshot/config.ts";
 import { PATHS } from "../snapshot/scripts.ts";
 import { WORKER_CONTAINER_SPEC } from "./container-spec.ts";
-import { VM_PREPARE_PATH } from "./sandbox-host.ts";
+import { IPV6_OFF_COMMANDS, VM_PREPARE_PATH } from "./sandbox-host.ts";
 import {
   SANDBOX_HANDOVER_SECONDS,
   SANDBOX_IMAGE_REFERENCE,
   SANDBOX_REGION,
   SANDBOX_KIND_DEFAULTS,
   IMPLEMENTER_LAUNCH_EXTRA_SECONDS,
+  IPV6_OFF_STEPS_SECONDS,
   RUN_DIRECTORY_STEPS_SECONDS,
   SYSBOX_PREPARE_SECONDS,
   WORK_VOLUME_STEPS_SECONDS,
@@ -760,7 +771,7 @@ describe("the Sandbox-Launcher", () => {
       (call) => call.vm === service.creates[0]?.name,
     );
     expect(
-      first.slice(0, 4).map((call) => [call.label, call.cmd, ...call.args]),
+      first.slice(0, 5).map((call) => [call.label, call.cmd, ...call.args]),
     ).toStrictEqual([
       [
         "run-directories",
@@ -790,6 +801,13 @@ describe("the Sandbox-Launcher", () => {
         "tmpfs",
         "/run/containerd",
       ],
+      // IPv6 is off in the whole kernel before the daemon exists: the VM's side of every bridge is born without it.
+      [
+        "ipv6-off",
+        "sh",
+        "-c",
+        expect.stringContaining("/proc/sys/net/ipv6/conf"),
+      ],
       // The daemon starts with its temporary directory on memory too (`runc exec` writes a file there).
       [
         "vm-prepare",
@@ -798,7 +816,7 @@ describe("the Sandbox-Launcher", () => {
         "/usr/local/sbin/vm-prepare.sh",
       ],
     ]);
-    for (const call of first.slice(0, 3)) expect(call.sudo).toBe(true);
+    for (const call of first.slice(0, 4)) expect(call.sudo).toBe(true);
     const second = service.execs.filter(
       (call) => call.vm === service.creates[1]?.name,
     );
@@ -812,6 +830,7 @@ describe("the Sandbox-Launcher", () => {
     "run-directories",
     "run-directory-docker",
     "run-directory-containerd",
+    "ipv6-off",
   ])(
     "stops the VM with the retryable docker_not_ready when %s fails, and runs nothing after it",
     async (label) => {
@@ -831,6 +850,49 @@ describe("the Sandbox-Launcher", () => {
     },
   );
 
+  // #818-IPV6: the step is a script over the kernel's files, run here over a directory of the same shape
+  describe("the ipv6-off step", () => {
+    const script = IPV6_OFF_COMMANDS[0].args[1].replaceAll(
+      "/proc/sys/net/ipv6/conf",
+      "$IPV6_DIR",
+    );
+    const run = (directory: string) =>
+      spawnSync("sh", ["-c", script], { env: { IPV6_DIR: directory } });
+
+    it("writes 1 to the files of all, default and every existing interface, and reads them back", () => {
+      const root = mkdtempSync(join(tmpdir(), "ipv6-off-"));
+      try {
+        for (const name of ["all", "default", "lo", "eth0", "docker0"]) {
+          mkdirSync(join(root, name));
+          writeFileSync(join(root, name, "disable_ipv6"), "0\n");
+        }
+        expect(run(root).status).toBe(0);
+        for (const name of ["all", "default", "lo", "eth0", "docker0"])
+          expect(
+            readFileSync(join(root, name, "disable_ipv6"), "utf8").trim(),
+          ).toBe("1");
+      } finally {
+        rmSync(root, { recursive: true });
+      }
+    });
+
+    it("is the same as off for a kernel with no IPv6 (no directory)", () => {
+      expect(run(join(tmpdir(), "ipv6-off-absent")).status).toBe(0);
+    });
+
+    it("fails when a file cannot be written", () => {
+      const root = mkdtempSync(join(tmpdir(), "ipv6-off-"));
+      try {
+        mkdirSync(join(root, "all"));
+        // A directory where the file should be: the write fails, so the step does.
+        mkdirSync(join(root, "all", "disable_ipv6"));
+        expect(run(root).status).not.toBe(0);
+      } finally {
+        rmSync(root, { recursive: true });
+      }
+    });
+  });
+
   // #760-T05
   it("makes the work volume of an implementer job after the host is prepared (Sysbox included) and before docker run, all on the job's VM", async () => {
     const result = await launch(build(), spec({ kind: "implementer" }));
@@ -842,6 +904,7 @@ describe("the Sandbox-Launcher", () => {
       "exec:run-directories",
       "exec:run-directory-docker",
       "exec:run-directory-containerd",
+      "exec:ipv6-off",
       "exec:vm-prepare",
       "exec:image-id",
       "exec:sysbox-prepare",
@@ -1200,6 +1263,7 @@ describe("the Sandbox-Launcher", () => {
       "run-directories",
       "run-directory-docker",
       "run-directory-containerd",
+      "ipv6-off",
       "vm-prepare",
       "image-id",
       "sysbox-prepare",
@@ -1341,8 +1405,9 @@ describe("the Sandbox-Launcher", () => {
 
     expect(WORK_VOLUME_STEPS_SECONDS).toBe(80);
     expect(SYSBOX_PREPARE_SECONDS).toBe(40);
-    expect(RUN_DIRECTORY_STEPS_SECONDS).toBe(9);
-    expect(IMPLEMENTER_LAUNCH_EXTRA_SECONDS).toBe(129);
+    expect(RUN_DIRECTORY_STEPS_SECONDS).toBe(6);
+    expect(IPV6_OFF_STEPS_SECONDS).toBe(2);
+    expect(IMPLEMENTER_LAUNCH_EXTRA_SECONDS).toBe(128);
     const [implementer, diff] = service.creates;
     expect(implementer?.timeoutMs).toBe(
       (3600 + VM_TIMEOUT_MARGIN_SECONDS + IMPLEMENTER_LAUNCH_EXTRA_SECONDS) *

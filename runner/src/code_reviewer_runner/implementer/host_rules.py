@@ -20,6 +20,12 @@ its veth, it cannot reach):
   (measured: the same probe times out; a container that joins afterwards finds no neighbour). The
   VM does not forward IPv6 (`net.ipv6.conf.all.forwarding = 0`).
 
+* **An `inet` table that drops IPv6 from a container's bridge** (`close_bridge_inet`), for the
+  kernel that has the family: the second wall behind the VM's sysctls (the Launcher switches IPv6
+  off before the daemon starts) and the missing address. The platform's kernel has no `inet` family
+  (measured 2026-11-03, `Operation not supported`), so the table is tried and its absence is a log
+  line, not a failure: nothing depends on it there.
+
 The commands are constants, with the bridge's name as the one value: a name the daemon gave, or one
 of ours, held to the characters of an interface name (`bridge_name`).
 """
@@ -35,6 +41,7 @@ _log = logging.getLogger(__name__)
 HELPER_NAME: Final = "code-reviewer-host-helper"
 HELPER_ROLE_LABEL: Final = "code-reviewer.role"
 HELPER_SECONDS: Final = 20.0
+NFT: Final = "/usr/sbin/nft"
 _INTERFACE_NAME = re.compile(r"[A-Za-z0-9_-]{1,15}")
 BRIDGE_OPTION: Final = "com.docker.network.bridge.name"
 
@@ -138,3 +145,60 @@ def close_bridge_ipv6(api: DockerApi, image: str, network: str) -> None:
     image must have `ip` (the agent image does; the Worker image does not). Raises
     `HelperFailed`."""
     run_helper(api, image, ["/bin/sh", "-c"], [ipv6_script(bridge_of(api, network))], "bridge-ipv6")
+
+
+INET_TABLE: Final = "implementer_ipv6"
+# What an IPv6 packet of a container must not be sent to: the unspecified and loopback addresses,
+# IPv4 inside IPv6, the NAT64 prefix, unique local, link-local and multicast (the VM, its
+# neighbours, the platform).
+IPV6_PRIVATE_RANGES: Final = (
+    "::/128",
+    "::1/128",
+    "::ffff:0:0/96",
+    "64:ff9b::/96",
+    "fc00::/7",
+    "fe80::/10",
+    "ff00::/8",
+)
+
+
+def inet_table(role: str) -> str:
+    """The table of one role (`setup`, `agent`): a word, so a name is never built from a value."""
+    if re.fullmatch(r"[a-z]{1,16}", role) is None:
+        raise HelperFailed("the role has no usable name")
+    return f"{INET_TABLE}_{role}"
+
+
+def inet_rules(role: str, bridge: str) -> str:
+    """An `inet` table in the host's namespace, hooked before Docker's own rules: no IPv6 packet
+    from the bridge to the VM itself, none through the VM to a private range. Only drops, like the
+    `ip` tables beside it. `flush` makes a second install the same as the first."""
+    table = inet_table(role)
+    name = bridge_name(bridge)
+    return "; ".join(
+        [
+            f"add table inet {table}",
+            f"flush table inet {table}",
+            f"add chain inet {table} input "
+            "{ type filter hook input priority -10 ; policy accept ; }",
+            f'add rule inet {table} input iifname "{name}" meta nfproto ipv6 drop',
+            f"add chain inet {table} forward "
+            "{ type filter hook forward priority -10 ; policy accept ; }",
+            f'add rule inet {table} forward iifname "{name}" '
+            f"ip6 daddr {{ {', '.join(IPV6_PRIVATE_RANGES)} }} drop",
+        ]
+    )
+
+
+def close_bridge_inet(api: DockerApi, image: str, network: str, role: str) -> bool:
+    """Install the `inet` drop of `role` for the bridge of `network`; whether the kernel took it.
+    A failure is a log line and `False`: the kernel of the platform has no `inet` family, and the
+    sysctls and the missing address close IPv6 there. The image must have `nft`."""
+    try:
+        run_helper(
+            api, image, [NFT], [inet_rules(role, bridge_of(api, network))], f"{role}-ipv6-rules"
+        )
+    except HelperFailed as failed:
+        _log.warning("the inet table of the %s bridge is not in place (%s)", role, failed.reason)
+        return False
+    return True

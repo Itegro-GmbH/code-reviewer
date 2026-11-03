@@ -35,7 +35,16 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 # The roles of the helpers that run once and end (door rules, Setup rules, a bridge's IPv6).
-ONE_SHOT_ROLES = frozenset({"model-door-rules", "setup-rules", "setup-rules-check", "bridge-ipv6"})
+ONE_SHOT_ROLES = frozenset(
+    {
+        "model-door-rules",
+        "setup-rules",
+        "setup-rules-check",
+        "bridge-ipv6",
+        "setup-ipv6-rules",
+        "agent-ipv6-rules",
+    }
+)
 IMAGE_ID = "sha256:" + "ab" * 32
 AGENT_IMAGE_ID = "sha256:" + "cd" * 32
 WORK_VOLUME = "code-reviewer-work-job-1"
@@ -123,6 +132,8 @@ class FakeDockerEngine:
         # The exit code of the one-shot container that installs the door's network rules.
         self.rules_exit = 0
         self.ipv6_exit = 0
+        # The `inet` tables beside the `ip` ones: a kernel without the family refuses them.
+        self.inet_exit = 0
         # `docker stop` of a container: the exit status it ends with, and whether it never ends.
         self.stop_exit = 0
         self.stop_hangs = False
@@ -227,7 +238,7 @@ class FakeDockerEngine:
         parts = path.strip("/").split("/")
         if path == "/_ping":
             self._reply(connection, 200 if self.answers_ping else 500)
-        elif method == "GET" and parts[0] == "containers" and parts[-1] == "json":
+        elif method == "GET" and parts[0] == "containers" and parts[-1].split("?")[0] == "json":
             self._inspect(connection, parts[1])
         elif method == "POST" and path == "/networks/create":
             self._create_network(connection, body)
@@ -399,7 +410,12 @@ class FakeDockerEngine:
         if nft or role in ONE_SHOT_ROLES:
             # A one-shot container of the network rules or of the bridge's IPv6: it ends at once.
             # Its exit code is set before the start is answered, so that a `wait` sees it.
-            container.exit_code = self.ipv6_exit if role == "bridge-ipv6" else self.rules_exit
+            if role == "bridge-ipv6":
+                container.exit_code = self.ipv6_exit
+            elif role.endswith("-ipv6-rules"):
+                container.exit_code = self.inet_exit
+            else:
+                container.exit_code = self.rules_exit
             self._reply(connection, 204)
             return
         self._reply(connection, 204)

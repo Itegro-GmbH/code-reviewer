@@ -45,6 +45,8 @@ import {
   WORKER_CONTAINER_SPEC,
 } from "./container-spec.ts";
 import {
+  IPV6_OFF_COMMANDS,
+  IPV6_OFF_STEP_TIMEOUT_MS,
   RUN_DIRECTORY_COMMANDS,
   RUN_DIRECTORY_STEP_TIMEOUT_MS,
   SYSBOX_PREPARE_TIMEOUT_MS,
@@ -88,11 +90,15 @@ export const WORK_VOLUME_STEPS_SECONDS =
 /** The three steps that put Docker's runtime directories on memory, before `vm-prepare.sh` on the Implementer's VM. */
 export const RUN_DIRECTORY_STEPS_SECONDS =
   (RUN_DIRECTORY_COMMANDS.length * RUN_DIRECTORY_STEP_TIMEOUT_MS) / 1000;
+/** The step that switches IPv6 off in the Implementer's VM, before the daemon starts. */
+export const IPV6_OFF_STEPS_SECONDS =
+  (IPV6_OFF_COMMANDS.length * IPV6_OFF_STEP_TIMEOUT_MS) / 1000;
 /** The Implementer's VM runs `sysbox-prepare.sh` too (at most its timeout); like the volume steps it is not part of Diff's or Dynamic's launch. */
 export const SYSBOX_PREPARE_SECONDS = SYSBOX_PREPARE_TIMEOUT_MS / 1000;
 /** Everything an implementer launch takes beyond a review's: the Sysbox boot and the steps of the work volume. */
 export const IMPLEMENTER_LAUNCH_EXTRA_SECONDS =
   RUN_DIRECTORY_STEPS_SECONDS +
+  IPV6_OFF_STEPS_SECONDS +
   SYSBOX_PREPARE_SECONDS +
   WORK_VOLUME_STEPS_SECONDS;
 /** How long the container must run for the Worker to count as having taken over (sandbox-host.ts). */
@@ -594,6 +600,7 @@ export function createSandboxLauncher(
       try {
         if (spec.kind === "implementer")
           await host.prepareRunDirectories(signal);
+        if (spec.kind === "implementer") await host.disableIpv6(signal);
         await host.prepare(signal);
         // Only the Implementer: the boot steps of Sysbox change the VM as a whole, and a review's VM stays as it was.
         if (spec.kind === "implementer") await host.prepareSysbox(signal);

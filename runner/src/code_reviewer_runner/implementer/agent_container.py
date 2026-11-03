@@ -55,7 +55,7 @@ from code_reviewer_runner.result import ErrorCode
 
 from .docker_api import AttachedStreams, DockerApi, DockerError
 from .exec_run import exec_document, run_exec
-from .host_rules import HelperFailed, close_bridge_ipv6
+from .host_rules import HelperFailed, close_bridge_inet, close_bridge_ipv6
 from .reader import REPO_SUBPATH, work_volume_of
 
 _log = logging.getLogger(__name__)
@@ -339,6 +339,11 @@ class AgentContainer:
                 raise unavailable(
                     f"the model network could not be closed to IPv6 ({failed.reason})"
                 ) from None
+            # Beside it, for a kernel that has the `inet` family, a drop of IPv6 from that bridge
+            # (`nft` is in the Worker's image, which is the image of this container). Not required.
+            control_image = str(own.get("Image", ""))
+            if control_image:
+                close_bridge_inet(api, control_image, MODEL_NETWORK_NAME, "agent")
             container = api.create_container(
                 agent_document(
                     image,

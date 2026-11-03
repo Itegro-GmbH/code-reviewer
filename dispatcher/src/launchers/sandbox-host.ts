@@ -77,7 +77,27 @@ export const RUN_DIRECTORY_COMMANDS = [
   },
 ] as const;
 /** Each is a `mkdir` or a `mount`: a few milliseconds. The three together stay a small part of the launch deadline of the core (a test pins the sum). */
-export const RUN_DIRECTORY_STEP_TIMEOUT_MS = 3_000;
+export const RUN_DIRECTORY_STEP_TIMEOUT_MS = 2_000;
+/**
+ * IPv6 off for the whole VM, before the daemon starts (the Implementer's VM only): every container of it is then born without
+ * IPv6, and root in a container cannot switch it on in its own namespace and find the bridge's link-local address behind which
+ * the VM's control port listens (`runner/.../implementer/host_rules.py`). The files of `all` and `default` and of every
+ * existing interface are written and read back; a kernel with no IPv6 has no such directory, which is the same as off. The
+ * daemon's own `ipv6: false` (`daemonConfigJson`) stays; this is the VM's side of it.
+ */
+export const IPV6_OFF_COMMANDS = [
+  {
+    label: "ipv6-off",
+    cmd: "sh",
+    args: [
+      "-c",
+      'd=/proc/sys/net/ipv6/conf; [ -d "$d" ] || exit 0; ' +
+        'for f in "$d"/*/disable_ipv6; do echo 1 > "$f" || exit 1; done; ' +
+        'for f in "$d"/*/disable_ipv6; do [ "$(cat "$f")" = 1 ] || exit 1; done',
+    ],
+  },
+] as const;
+export const IPV6_OFF_STEP_TIMEOUT_MS = 2_000;
 const IMAGE_CHECK_TIMEOUT_MS = 30_000;
 const KILL_TIMEOUT_MS = 15_000;
 /** Each step of the work volume is a `mkdir`, a `mount` or one `docker volume create`: a second or so, never half a minute. */
@@ -171,6 +191,35 @@ export class SandboxDockerHost implements ContainerHost {
       );
       if (done.exitCode === 0) continue;
       this.#options.logger.warn("run_directory_failed", {
+        ...this.#options.logFields,
+        sandbox: vm.name,
+        step: command.label,
+        code: "docker_not_ready",
+        exitCode: done.exitCode,
+      });
+      throw new LaunchError("docker_not_ready", { retryable: true });
+    }
+  }
+
+  /**
+   * Switches IPv6 off in the VM's kernel (`IPV6_OFF_COMMANDS`), before `prepare()` starts the daemon. For the Implementer's VM
+   * only. A step that fails ends the launch with the retryable `docker_not_ready`; the log names the step and the exit status.
+   */
+  async disableIpv6(signal: AbortSignal): Promise<void> {
+    const { vm } = this.#options;
+    for (const command of IPV6_OFF_COMMANDS) {
+      const done = await vm.exec(
+        {
+          label: command.label,
+          cmd: command.cmd,
+          args: command.args,
+          sudo: true,
+          timeoutMs: IPV6_OFF_STEP_TIMEOUT_MS,
+        },
+        signal,
+      );
+      if (done.exitCode === 0) continue;
+      this.#options.logger.warn("ipv6_off_failed", {
         ...this.#options.logFields,
         sandbox: vm.name,
         step: command.label,
