@@ -92,9 +92,9 @@ _log = logging.getLogger(__name__)
 # and the final push (the plan: the last three minutes; four and a half since the readers are made
 # quiet twice and the container's end got its measured ceilings). A short limit keeps a third of it.
 GRACE_SECONDS = 270.0
-# How the grace is spent at a normal end, every step at its ceiling: the end of the agent's container
-# (`ENGINE_STOP_SECONDS`: the kill call and the wait until the daemon says it is gone; its removal
-# comes after the push, `remove()`, and is in no sum), the first reset of the readers
+# How the grace is spent at a normal end, every step at its ceiling: the end of the agent's
+# container (`ENGINE_STOP_SECONDS`: the kill call and the wait until the daemon says it is gone;
+# its removal comes after the push, `remove()`, and is in no sum), the first reset of the readers
 # (`READER_RESET_SECONDS`), the rescue of a detached HEAD (three git commands of
 # `RESCUE_STEP_TIMEOUT`), the look at the tree (`DIRTY_TIMEOUT`), the leftover commit of the system,
 # the second reset of the readers (the commit ran the repository's filters in a reader that can
@@ -402,7 +402,7 @@ class ImplementerSession:
         Two limits, both on purpose. It happens only on a normal return of `run()`: a turn that
         raises, or a process that is stopped (SIGTERM) before it gets here, leaves the killed
         container for the VM to take with it. And the thread is a daemon: the process may exit
-        before the removal ends. Both are fine because **one VM runs one turn** (the Launcher makes a
+        before the removal ends. Both are fine because one VM runs one turn (the Launcher makes a
         VM per job and deletes it after the result); they would not be if a VM ran a second turn,
         which would find the name of the old container taken (`AGENT_CONTAINER_NAME`)."""
         if place is None:

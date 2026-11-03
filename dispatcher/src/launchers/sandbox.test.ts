@@ -30,6 +30,7 @@ import {
   agentMemoryMb,
   IMPLEMENTER_VM_HEADROOM_MB,
   MODEL_DOOR_MEMORY_MB,
+  READER_COUNT,
   READER_MEMORY_MB,
   SANDBOX_MEMORY_PER_VCPU_MB,
   implementerEnvironment,
@@ -670,10 +671,10 @@ describe("the Sandbox-Launcher", () => {
     expect(service.creates).toStrictEqual([]);
   });
 
-  // #745-T15: the model door and the reader are more containers of an implementer turn, and the VM holds them beside the Worker.
-  it("keeps room for the model door and the reader beside the Worker of an implementer turn, and for none beside a review's", async () => {
+  // #745-T15: the model door and the two readers are more containers of an implementer turn, and the VM holds them beside the Worker.
+  it("keeps room for the model door and the two readers beside the Worker of an implementer turn, and for none beside a review's", async () => {
     // 2 vCPU are 4096 MB: a review keeps 256 for the OS and dockerd; a turn keeps 512 for them and the Sysbox daemons, 256 for
-    // the door and 256 for the reader. 3600m fits a review but not a turn; 3072m is the most a turn takes.
+    // the door and 512 for the two readers. 3600m fits a review but not a turn; 2816m is the most a turn takes.
     const config = {
       launcher: { vcpus: 2 },
       container: { memory: { limit: "3600m", reservation: "3g" } },
@@ -686,13 +687,13 @@ describe("the Sandbox-Launcher", () => {
     expect(() =>
       validateKindConfig("implementer", {
         launcher: { vcpus: 2 },
-        container: { memory: { limit: "3072m", reservation: "3g" } },
+        container: { memory: { limit: "2816m", reservation: "2g" } },
       }),
     ).not.toThrow();
     expect(() =>
       validateKindConfig("implementer", {
         launcher: { vcpus: 2 },
-        container: { memory: { limit: "3073m", reservation: "3g" } },
+        container: { memory: { limit: "2817m", reservation: "2g" } },
       }),
     ).toThrow(LaunchError);
   });
@@ -893,7 +894,7 @@ describe("the Sandbox-Launcher", () => {
     expect(valuesOf(args, "--env")).toStrictEqual([
       "HOME=/home/runner",
       "RUNNER_DIFF_JOB_USER=10001:10001",
-      "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB=2304",
+      "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB=2048",
       "RUNNER_IMPLEMENTER_MODEL_DOOR=docker",
       "RUNNER_IMPLEMENTER_SANDBOX_PROOF=unproven",
       "RUNNER_IMPLEMENTER_WORK_DIR=/work",
@@ -961,7 +962,7 @@ describe("the Sandbox-Launcher", () => {
       spec({
         kind: "implementer",
         jobId: "00000000-0000-4000-8000-000000000002",
-        config: { container: { memory: { limit: "3000m" } } },
+        config: { container: { memory: { limit: "2800m" } } },
       }),
     );
 
@@ -973,11 +974,11 @@ describe("the Sandbox-Launcher", () => {
     ]);
     // The limit alone: the default reservation stays, and the swap follows the limit.
     expect(valuesOf(service.starts[1]?.args ?? [], "--memory")).toStrictEqual([
-      "3000m",
+      "2800m",
     ]);
     expect(
       valuesOf(service.starts[1]?.args ?? [], "--memory-swap"),
-    ).toStrictEqual(["3000m"]);
+    ).toStrictEqual(["2800m"]);
     expect(
       valuesOf(service.starts[1]?.args ?? [], "--memory-reservation"),
     ).toStrictEqual(["512m"]);
@@ -1021,7 +1022,7 @@ describe("the Sandbox-Launcher", () => {
     expect(planForKind("implementer", {})).toMatchObject({
       vcpus: 2,
       overrides: { memory: { limit: "768m", reservation: "512m" } },
-      agentMemoryMb: 2304,
+      agentMemoryMb: 2048,
     });
     expect(SANDBOX_KIND_DEFAULTS.implementer).toStrictEqual({
       vcpus: 2,
@@ -1030,15 +1031,16 @@ describe("the Sandbox-Launcher", () => {
   });
 
   // #745 step 4: what is left of the VM for the agent's container, at each size the platform has. Every limit is counted in
-  // full, the reader's too: OS and daemons 512, Control 768, the door 256, the reader 256 (1792 MB), 2048 MB per vCPU.
+  // full, and there are two readers: OS and daemons 512, Control 768, the door 256, the two readers 512 (2048 MB), 2048 MB per
+  // vCPU. At 1 vCPU nothing is left, and the Worker refuses the size (`sandbox_size_unsupported`).
   it.each<[number, number]>([
-    [1, 256],
-    [2, 2304],
-    [4, 6400],
-    [6, 10496],
-    [8, 14592],
+    [1, 0],
+    [2, 2048],
+    [4, 6144],
+    [6, 10240],
+    [8, 14336],
   ])(
-    "leaves the agent's container %i vCPU: %i MB after the OS, Control, the door and the reader",
+    "leaves the agent's container %i vCPU: %i MB after the OS, Control, the door and the two readers",
     (vcpus, megabytes) => {
       expect(
         planForKind("implementer", { launcher: { vcpus } }).agentMemoryMb,
@@ -1056,7 +1058,7 @@ describe("the Sandbox-Launcher", () => {
         IMPLEMENTER_VM_HEADROOM_MB +
           768 +
           MODEL_DOOR_MEMORY_MB +
-          READER_MEMORY_MB +
+          READER_COUNT * READER_MEMORY_MB +
           plan.agentMemoryMb,
       ).toBe(vcpus * SANDBOX_MEMORY_PER_VCPU_MB);
     },
@@ -1089,7 +1091,7 @@ describe("the Sandbox-Launcher", () => {
       implementerEnvironment(planForKind("implementer", {}), "unproven"),
     ).toStrictEqual({
       RUNNER_IMPLEMENTER_SANDBOX_PROOF: "unproven",
-      RUNNER_IMPLEMENTER_AGENT_MEMORY_MB: "2304",
+      RUNNER_IMPLEMENTER_AGENT_MEMORY_MB: "2048",
     });
     await launch(build({}), spec({ kind: "implementer" }));
     expect(valuesOf(dockerRun()?.args ?? [], "--env")).toContain(

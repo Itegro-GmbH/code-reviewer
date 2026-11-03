@@ -218,13 +218,19 @@ A control that fails, a missing tool, no way out from the VM or a container that
 This is a connectivity check, not the attack test of step 6. Run for real on 2026-11-02 against a snapshot built from the branch, it took 4.6 s and the record said `proven`.
 It prints `SYSBOX_PROBE ok <check>` or `SYSBOX_PROBE fail <reason>` per check and `SYSBOX_PROBE_DONE` last. Reasons: the names of the boot script,
 `sysbox_probe_image_unavailable` (the agent image is not in the snapshot: the proof did not run), `sysbox_network_create_failed`, `sysbox_container_failed`,
-`sysbox_inner_docker_failed`, `sysbox_inner_container_failed`, `sysbox_volume_failed`, `sysbox_volume_not_mapped`, `sysbox_network_check_inconclusive`, `sysbox_network_not_isolated`.
+`sysbox_inner_docker_failed`, `sysbox_inner_container_failed`, `sysbox_volume_failed`, `sysbox_volume_not_mapped`, `sysbox_reader_not_contained`, `sysbox_network_check_inconclusive`, `sysbox_network_not_isolated`.
 
 **The proof mounts a Subpath volume.** The agent's work volume is a Subpath (`repo`) of a named volume, and the id mapping of a Sysbox container is what makes the files of the VM's root and
 the files the agent's root writes the same files. So the proof makes a named volume with a directory `repo` and a file in it (the VM's root, a plain container), starts the agent container with
 `--mount type=volume,source=<volume>,target=/work/repo,volume-subpath=repo`, and requires: the agent reads that file and writes one (`sysbox_volume_failed` otherwise), the VM's root sees the file the
-agent wrote as owned by uid 0 (the mapping works), and a second Sysbox container with no capability and the same Subpath read-only (the shape of the reader) reads both files and cannot write
-(`sysbox_volume_not_mapped` otherwise).
+agent wrote as owned by uid 0 (the mapping works; `sysbox_volume_not_mapped` otherwise).
+
+**The proof of the reader is the reader that ships.** An earlier version started a container of its own (`docker run --cap-drop ALL`, the Subpath read-only) and asked it to read and fail to write. That was
+not the spec that production starts, and **Sysbox ignores `--cap-drop`** (measured: with it the init and every exec still hold all 41 capabilities of the user namespace), so the flag proved nothing. Now the proof runs
+`python -I -m code_reviewer_runner.implementer.reader_proof` in the Worker image of the snapshot, with the Docker socket, over the proof's volume: it sends the daemon the two documents
+`reader_document` makes (the read-only reader and the one that writes, the id of the Worker image, `sysbox-runc`) and runs in them the commands production runs (`READER_DROP_CAPABILITIES` + the probe). It requires,
+per reader: `CapEff` of a command is `DAC_OVERRIDE` and nothing else, the root file system cannot be remounted or written; for the read-only one: it reads both files, it cannot write and a `mount -o remount,rw` of its
+volume is refused, and so is a remount from a command that holds every capability the container's root has; for the other one: it writes. Any miss is `sysbox_reader_not_contained` (unproven). Run on a VM it takes about 2 s.
 
 **A Sysbox failure never holds back the snapshot.** The snapshot is shared by every kind of job and reviews do not use Sysbox; a failed proof
 that withdrew it would stop the release of code-review.com for a feature only the Implementer will use, the problem #797 describes for the Dispatcher's canary.

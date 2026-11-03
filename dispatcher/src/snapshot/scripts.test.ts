@@ -534,9 +534,7 @@ exit 0`;
     expect(script).toContain(
       '--mount type=volume,source="$vol",target=/work/repo,volume-subpath=repo',
     );
-    expect(script).toContain(
-      "code_reviewer_runner.implementer.reader_proof",
-    );
+    expect(script).toContain("code_reviewer_runner.implementer.reader_proof");
     expect(script).toContain("/var/run/docker.sock");
     expect(script).toContain(config.imageTag);
     // No reader of its own: `--cap-drop` is ignored by Sysbox, and a copy of the flags is not the spec that ships.

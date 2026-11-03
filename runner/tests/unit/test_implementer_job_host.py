@@ -492,7 +492,8 @@ def test_the_lease_budgets_fit_the_grace_of_the_end_and_of_the_stop() -> None:
     assert normal == 25.0 and stop == 10.0 and host_module.LEASE_CHECK_BUDGET_SECONDS > 10.0
     # Asked again inside the window, the last push of a normal end takes one question past it.
     assert CONFIRM_SECONDS + normal < GRACE_SECONDS
-    # A stop: the question and its window inside half the two minutes; the rest: engine, readers, push.
+    # A stop: the question and its window inside half the two minutes; the rest is the engine,
+    # the readers and the push.
     assert STOP_CONFIRM_SECONDS + stop <= host_module.IMPLEMENTER_TERMINATE_GRACE_SECONDS / 2
 
 

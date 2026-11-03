@@ -157,7 +157,7 @@ describe("the Sandbox-Launcher in local mode", () => {
         environment: {
           HOME: "/home/runner",
           RUNNER_DIFF_JOB_USER: "10001:10001",
-          RUNNER_IMPLEMENTER_AGENT_MEMORY_MB: "2304",
+          RUNNER_IMPLEMENTER_AGENT_MEMORY_MB: "2048",
           RUNNER_IMPLEMENTER_MODEL_DOOR: "docker",
           RUNNER_IMPLEMENTER_SANDBOX_PROOF: "unproven",
           RUNNER_IMPLEMENTER_WORK_DIR: "/work",

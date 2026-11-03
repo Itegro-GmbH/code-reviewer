@@ -572,7 +572,7 @@ def lane_turn(
     disk_megabytes: int | None = None,
     origin_base: Path | None = None,
     judge: Callable[[Mapping[str, str], Mapping[str, Any]], Refusal | None] | None = None,
-    memory_mb: int = 2304,
+    memory_mb: int = 2048,
 ) -> Generator[Turned]:
     """Run one whole turn to its result against a model that follows `script(repo)` (the path of
     the repository in the agent's container)."""

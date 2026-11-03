@@ -82,9 +82,9 @@ READY_SECONDS: Final = 60.0
 # the container is gone. The removal is a third, **after the push** (`remove()`), because a Sysbox
 # container with its inner Docker can take long to remove and nothing has to wait for it: killed is
 # enough to read the repository.
-# The kill call took 0.4 s idle and 2.0 s with two inner containers of a 1.5 GB image, 3.9 s with eight
-# (measured on a VM, 2 vCPU): it grows with what runs in the agent's own Docker, so its ceiling is
-# well above what a stack of a few services costs. The wait after it took 0.02 s.
+# The kill call took 0.4 s idle, 2.0 s with two inner containers of a 1.5 GB image and 2.0 to 3.9 s
+# with eight to twenty (measured on VMs, 2 vCPU): it grows with what runs in the agent's own Docker,
+# so its ceiling is well above what a stack of services costs. The wait after it took 0.02 s.
 KILL_SECONDS: Final = 15.0
 STOP_SECONDS: Final = 10.0
 REMOVE_SECONDS: Final = 15.0

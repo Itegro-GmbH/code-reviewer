@@ -26,8 +26,8 @@ from code_reviewer_runner.implementer.git_workspace import (
     RESCUE_STEP_TIMEOUT,
 )
 from code_reviewer_runner.implementer.job_run import SIGTERM_BACKSTOP_SECONDS
-from code_reviewer_runner.implementer.reader import RESET_SECONDS as READER_RESET_SECONDS
 from code_reviewer_runner.implementer.limits import agent_limits
+from code_reviewer_runner.implementer.reader import RESET_SECONDS as READER_RESET_SECONDS
 from code_reviewer_runner.implementer.session import (
     COST_LIMIT_DETAIL,
     DEADLINE_DETAIL,
@@ -433,7 +433,7 @@ def test_the_session_names_the_outage_the_proxy_kept(failure: ErrorCode) -> None
     assert ended_with(session_that_ended(ledger, failure), ENGINE_GAVE_UP) is failure
 
 
-# The one final push has to fit the end of the turn, at a normal end and at a stop, with room to spare:
+# The one final push has to fit the end of the turn, at a normal end and at a stop, with room:
 # every step is counted at its ceiling and they never all take it, but a daemon that hangs makes
 # several of them take it at once.
 def test_the_end_of_a_turn_fits_the_grace_and_a_stop_fits_the_sigterm_backstop() -> None:
