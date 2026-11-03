@@ -848,7 +848,10 @@ def test_the_vms_side_of_the_model_network_has_no_ipv6_address_before_the_agent_
 
     container(rig).create()
     helpers = [c for c in rig.engine.containers.values() if c.name == host_rules.HELPER_NAME]
-    assert [h.document["Labels"]["code-reviewer.role"] for h in helpers] == ["bridge-ipv6"]
+    assert [h.document["Labels"]["code-reviewer.role"] for h in helpers] == [
+        "bridge-ipv6",
+        "agent-ipv6-rules",
+    ]
     helper = helpers[0]
     assert helper.document["Cmd"] == [
         "ip link set dev br-000000000000 addrgenmode none && ip -6 addr flush dev br-000000000000"
@@ -860,6 +863,26 @@ def test_the_vms_side_of_the_model_network_has_no_ipv6_address_before_the_agent_
     created = [t for m, t, _ in rig.engine.calls if m == "POST" and "containers/create" in t]
     assert created[0].endswith(host_rules.HELPER_NAME)
     assert created[-1].endswith(AGENT_CONTAINER_NAME)
+
+
+# #818-IPV6-03
+def test_the_model_bridge_gets_an_inet_drop_of_its_own_and_a_kernel_without_one_is_no_failure(
+    rig: Rig,
+) -> None:
+    from code_reviewer_runner.implementer import host_rules
+
+    container(rig).create()
+    inet = [c for c in rig.engine.containers.values() if c.name == host_rules.HELPER_NAME][-1]
+    assert inet.document["Cmd"] == [host_rules.inet_rules("agent", "br-000000000000")]
+    assert inet.document["Entrypoint"] == [host_rules.NFT]
+    # The Worker's image (it has `nft`), the image of the Control container, not the agent's.
+    assert inet.document["Image"] != "code-reviewer-agent:golden"
+
+
+# #818-IPV6-04
+def test_a_kernel_without_the_inet_family_does_not_end_the_turn(rig: Rig) -> None:
+    rig.engine.inet_exit = 1
+    container(rig).create()
 
 
 # #818-T61

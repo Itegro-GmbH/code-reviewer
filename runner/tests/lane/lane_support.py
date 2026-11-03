@@ -221,16 +221,31 @@ def remove_fixed() -> None:
     docker("network", "rm", SETUP_NETWORK_NAME, check=False)
 
 
-def remove_setup_leftovers(config: LaneConfig) -> None:
-    """The image a Setup container was committed to, and the firewall table in the host's
-    namespace that its network got (the table only names the Setup bridge; it is removed so that
-    the machine is as the lane found it)."""
-    docker("image", "rm", f"{SETUP_IMAGE_REPOSITORY}:{SETUP_IMAGE_TAG}", check=False)
-    docker(
+def host_nft(config: LaneConfig, command: str) -> subprocess.CompletedProcess[str]:
+    """One `nft` command in the host's network namespace, from the Worker's image, as Control's
+    own helper runs it (`NET_ADMIN` and nothing else)."""
+    return docker(
         "run", "--rm", "--user", "0:0", "--network", "host", "--cap-drop", "ALL",
         "--cap-add", "NET_ADMIN", "--entrypoint", "/usr/sbin/nft", config.worker_image,
-        "delete table ip setup_egress", check=False,
+        command, check=False,
     )  # fmt: skip
+
+
+def inet_family_supported(config: LaneConfig) -> bool:
+    """Whether this machine's kernel has the `inet` family (the platform's VM does not): a table is
+    added and removed again."""
+    made = host_nft(config, "add table inet lane_family_support")
+    host_nft(config, "delete table inet lane_family_support")
+    return made.returncode == 0
+
+
+def remove_setup_leftovers(config: LaneConfig) -> None:
+    """The image a Setup container was committed to, and the firewall tables in the host's
+    namespace that its network and the model network got (they only name the bridges; they are
+    removed so that the machine is as the lane found it)."""
+    docker("image", "rm", f"{SETUP_IMAGE_REPOSITORY}:{SETUP_IMAGE_TAG}", check=False)
+    for table in ("ip setup_egress", "inet implementer_ipv6_setup", "inet implementer_ipv6_agent"):
+        host_nft(config, f"delete table {table}")
 
 
 def remove_leftovers() -> None:

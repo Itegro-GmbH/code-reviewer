@@ -23,6 +23,8 @@ from lane_support import (
     bridge_gateway,
     commit,
     docker,
+    host_nft,
+    inet_family_supported,
     lane_config,
     lane_environment,
     lane_turn,
@@ -36,6 +38,7 @@ from code_reviewer_runner.implementer.agent_container import AGENT_CONTAINER_NAM
 from code_reviewer_runner.implementer.session import ShutdownRequested
 from code_reviewer_runner.implementer.setup_container import (
     SETUP_ADDRESS,
+    SETUP_BRIDGE,
     SETUP_CONTAINER_NAME,
     SETUP_IMAGE_REPOSITORY,
     SETUP_IMAGE_TAG,
@@ -192,6 +195,29 @@ def test_a_script_that_fills_the_disk_fails_and_the_reserve_is_untouched(tmp_pat
     nothing_of_the_setup_is_left()
 
 
+# #818-L09
+def test_a_script_that_fills_the_containers_root_beyond_the_disk_ends_with_no_room_for_the_commit(
+    tmp_path: Path,
+) -> None:
+    """The result of the script is a gigabyte in the container's own file system, the stand-in for
+    the VM's disk has two: a commit needs twice the layer and a headroom. Control says so before
+    `docker commit`, and nothing is committed. With a small result on the same disk it is."""
+    big = "dd if=/dev/zero of=/opt/fill.bin bs=1M count=1024\n"
+    for name in ("big", "small"):
+        (tmp_path / name).mkdir()
+    with lane_environment(tmp_path / "big", big, disk_megabytes=2048) as (_, step):
+        assert step.error is not None and step.error.code is ErrorCode.ENVIRONMENT_SETUP_FAILED
+        assert "too full to keep its result" in step.error.detail, step.error.detail
+        assert "MB left" in step.error.detail and "needs about" in step.error.detail
+        assert step.image is None
+        assert docker("image", "inspect", IMAGE, check=False).returncode != 0
+    nothing_of_the_setup_is_left()
+    small = "echo small > /opt/small.txt\n"
+    with lane_environment(tmp_path / "small", small, disk_megabytes=2048) as (_, step):
+        assert step.error is None and step.image is not None, (step.error, step.notes)
+    nothing_of_the_setup_is_left()
+
+
 # #818-L05
 def test_a_stop_of_the_runner_ends_the_script_and_removes_the_container(tmp_path: Path) -> None:
     stop = threading.Event()
@@ -279,6 +305,8 @@ def test_the_setup_container_cannot_reach_the_vms_services_over_ipv4_or_ipv6(
     # What root in the container can do about IPv6: switch it on and look for the bridge's
     # link-local address, as the measured attack did.
     ipv6 = f"""
+echo "ipv6 off in this namespace: all=$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6)" \
+  "eth0=$(cat /proc/sys/net/ipv6/conf/eth0/disable_ipv6)"
 sysctl -qw net.ipv6.conf.all.disable_ipv6=0 net.ipv6.conf.eth0.disable_ipv6=0 || true
 sleep 3; ping -6 -c1 -W1 ff02::1%eth0 >/dev/null 2>&1 || true
 for address in $(ip -6 neigh show dev eth0 | awk '/^fe80/ {{print $1}}'); do
@@ -310,6 +338,16 @@ echo "neighbours: $(ip -6 neigh show dev eth0 | grep -c '^fe80')"
             assert "OPEN" not in shown, shown
             # No link-local neighbour on the bridge, so nothing to connect to over IPv6.
             assert "neighbours: 0" in shown, shown
+            # IPv6 was off in the container's namespace before its root switched it on.
+            assert "ipv6 off in this namespace: all=1 eth0=1" in shown, shown
+            # The `inet` table beside the `ip` one, for a kernel that has the family: read back,
+            # its two drops (IPv6 from the Setup bridge to the VM, and to a private range).
+            if inet_family_supported(config):
+                table = host_nft(config, "list table inet implementer_ipv6_setup")
+                assert table.returncode == 0, table.stderr
+                assert f'iifname "{SETUP_BRIDGE}" meta nfproto ipv6 drop' in table.stdout
+                assert f'iifname "{SETUP_BRIDGE}" ip6 daddr' in table.stdout
+                assert "fe80::/10" in table.stdout and "fc00::/7" in table.stdout
     finally:
         server.close()
     nothing_of_the_setup_is_left()

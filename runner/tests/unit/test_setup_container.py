@@ -61,8 +61,9 @@ class Rig:
         self.script_text = ""
         self.script_output = "installing\n"
         self.script_waits = False
-        # Set when the script's exec begins: tests that stop the run or the container while the script
-        # runs wait for this, not for a time (a slow host starts the container later than any timer).
+        # Set when the script's exec begins: tests that stop the run or the container while the
+        # script runs wait for this, not for a time (a slow host starts the container later than
+        # any timer).
         self.script_started = threading.Event()
         # What the end script finds: "stops" (the container's Docker stops and the container
         # ends with it), "no-docker" (nothing runs in it but its init) or "hangs".
@@ -125,8 +126,9 @@ def rig() -> Iterator[Rig]:
 
 def run(made: Rig, script: str = "echo hi\n", seconds: float = 5.0, **options: Any) -> sc.SetupRun:
     stop = options.pop("should_stop", lambda: False)
+    free = options.pop("free_bytes", lambda: None)
     return SetupContainer(2048, made.seams(**options)).run(
-        script, script_seconds=seconds, should_stop=stop
+        script, script_seconds=seconds, should_stop=stop, free_bytes=free
     )
 
 
@@ -224,8 +226,8 @@ def test_the_vms_side_of_the_bridge_is_closed_before_the_setup_container_exists(
     assert done.outcome == OUTCOME_OK
     helpers = [c for c in rig.engine.containers.values() if c.name == host_rules.HELPER_NAME]
     roles = [c.document["Labels"]["code-reviewer.role"] for c in helpers]
-    assert roles == ["bridge-ipv6", "setup-rules", "setup-rules-check"]
-    ipv6, rules, check = helpers
+    assert roles == ["bridge-ipv6", "setup-rules", "setup-rules-check", "setup-ipv6-rules"]
+    ipv6, rules, check, inet = helpers
     assert ipv6.document["Cmd"] == [
         f"ip link set dev {sc.SETUP_BRIDGE} addrgenmode none "
         f"&& ip -6 addr flush dev {sc.SETUP_BRIDGE}"
@@ -236,6 +238,11 @@ def test_the_vms_side_of_the_bridge_is_closed_before_the_setup_container_exists(
     assert (
         ipv6.document["Image"] == sc.AGENT_IMAGE_REFERENCE and rules.document["Image"] == IMAGE_ID
     )
+    # The `inet` table beside the `ip` one: only drops, from the Setup bridge, in the Worker's
+    # image.
+    assert inet.document["Cmd"] == [host_rules.inet_rules("setup", sc.SETUP_BRIDGE)]
+    assert inet.document["Image"] == IMAGE_ID
+    assert inet.document["Entrypoint"] == [host_rules.NFT]
     for helper in helpers:
         host = helper.document["HostConfig"]
         assert host["NetworkMode"] == "host"
@@ -272,6 +279,33 @@ def test_a_setup_whose_bridge_could_not_be_closed_to_ipv6_is_never_started(rig: 
     assert not any(
         t == "/containers/create?name=" + sc.SETUP_CONTAINER_NAME for _, t, _ in rig.engine.calls
     )
+
+
+# #818-IPV6-01
+def test_a_kernel_without_the_inet_family_does_not_stop_the_setup(rig: Rig) -> None:
+    """The platform's kernel has no `inet` netfilter (measured): the table is tried, its absence is
+    not a failure, and the container starts behind the `ip` table and the missing bridge address."""
+    rig.engine.inet_exit = 1
+    done = run(rig)
+    assert done.outcome == OUTCOME_OK
+
+
+# #818-IPV6-02
+def test_the_inet_table_drops_ipv6_from_the_bridge_to_the_vm_and_to_private_ranges() -> None:
+    rules = host_rules.inet_rules("setup", sc.SETUP_BRIDGE)
+    assert f"add table inet {host_rules.INET_TABLE}_setup" in rules
+    assert rules.count("flush table inet") == 1, "a second install is the same as the first"
+    # Nothing but drops, and every rule is about the one bridge.
+    assert "accept" not in rules.replace("policy accept", "")
+    assert f'input iifname "{sc.SETUP_BRIDGE}" meta nfproto ipv6 drop' in rules
+    assert f'forward iifname "{sc.SETUP_BRIDGE}" ip6 daddr' in rules
+    for private in ("::1/128", "::ffff:0:0/96", "fc00::/7", "fe80::/10", "ff00::/8"):
+        assert private in rules
+    # A role and a bridge are words, never values.
+    with pytest.raises(host_rules.HelperFailed):
+        host_rules.inet_rules("setup; flush ruleset", sc.SETUP_BRIDGE)
+    with pytest.raises(host_rules.HelperFailed):
+        host_rules.inet_rules("setup", 'br0" drop; add rule')
 
 
 # -- the script ------------------------------------------------------------------------------------
@@ -415,6 +449,67 @@ def test_a_commit_the_disk_cannot_hold_is_told_as_such(rig: Rig) -> None:
     assert done.outcome == OUTCOME_NOT_SAVED and "no space left" in done.detail
     assert done.image is None
     assert all(c.removed for c in rig.engine.containers.values())
+
+
+def layer_of(size: int) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    return lambda answer: {**answer, "SizeRw": size}
+
+
+# #818-DISK-01
+def test_a_disk_without_room_for_the_commit_is_its_own_outcome_and_nothing_is_committed(
+    rig: Rig,
+) -> None:
+    """The script filled the disk of the VM (the container's layer is 3 GiB, 1 GiB is left): the
+    commit would fail minutes in with the daemon's own words. Control says so before it starts."""
+    rig.engine.inspect_override[sc.SETUP_CONTAINER_NAME] = layer_of(3 * 1024**3)
+    done = run(rig, free_bytes=lambda: 1024**3)
+    assert done.outcome == sc.OUTCOME_NO_ROOM and done.image is None
+    assert "1024 MB left" in done.detail and "7168 MB" in done.detail
+    assert "3072 MB" in done.detail
+    assert rig.engine.committed == []
+    assert all(c.removed for c in rig.engine.containers.values())
+    assert rig.engine.networks == {}
+
+
+# #818-DISK-02
+def test_a_disk_with_room_for_twice_the_layer_and_a_headroom_is_committed(rig: Rig) -> None:
+    rig.engine.inspect_override[sc.SETUP_CONTAINER_NAME] = layer_of(3 * 1024**3)
+    needed = 2 * 3 * 1024**3 + sc.COMMIT_HEADROOM_BYTES
+    done = run(rig, free_bytes=lambda: needed)
+    assert done.outcome == OUTCOME_OK and len(rig.engine.committed) == 1
+
+
+# #818-DISK-03
+def test_a_free_space_or_a_size_that_cannot_be_had_does_not_stop_the_commit(rig: Rig) -> None:
+    assert run(rig, free_bytes=lambda: None).outcome == OUTCOME_OK
+    # No `SizeRw` in the answer: the headroom alone is what is needed.
+    assert run(rig, free_bytes=lambda: sc.COMMIT_HEADROOM_BYTES).outcome == OUTCOME_OK
+    assert run(rig, free_bytes=lambda: sc.COMMIT_HEADROOM_BYTES - 1).outcome == sc.OUTCOME_NO_ROOM
+
+
+# #818-DISK-04
+def test_the_commit_budget_holds_four_gigabytes_on_a_disk_four_times_slower_than_measured() -> None:
+    slowest = sc.COMMIT_MEASURED_BYTES_PER_SECOND / sc.COMMIT_SLOWDOWN
+    assert sc.COMMIT_REFERENCE_BYTES / slowest <= sc.COMMIT_SECONDS
+    assert SetupSeams().commit_seconds == sc.COMMIT_SECONDS
+
+
+# #818-OVERHEAD-01
+def test_the_overhead_counts_the_kill_and_the_join_of_the_container_and_the_room_check() -> None:
+    parts = (
+        sc.RULES_SECONDS * 3
+        + sc.READY_SECONDS
+        + sc.SCRIPT_WRITE_SECONDS
+        + sc.FINISH_EXEC_SECONDS
+        + sc.DOCKER_STOP_SECONDS
+        + sc.STOP_WAIT_SECONDS
+        + sc.ROOM_SECONDS
+        + sc.COMMIT_SECONDS
+        + sc.REMOVE_SECONDS
+    )
+    # A script that has to be killed: the kill, the wait for its exec, and the kill of the clean-up.
+    assert sc.KILL_STEPS_SECONDS == 3 * sc.KILL_SECONDS
+    assert parts + 3 * sc.KILL_SECONDS == sc.SETUP_OVERHEAD_SECONDS
 
 
 # #818-T17

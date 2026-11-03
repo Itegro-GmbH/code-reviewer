@@ -404,8 +404,8 @@ class GitWorkspace:
         # the local ignore list (0 before it ran).
         self.restored_count = 0
         self.excluded_count = 0
-        # How many commits and how many branches and tags the script made, which `settle_after_setup`
-        # took away (0 before it ran).
+        # How many commits and how many branches and tags the script made, which
+        # `settle_after_setup` took away (0 before it ran).
         self.script_commits = 0
         self.dropped_refs = 0
 
@@ -680,13 +680,14 @@ class GitWorkspace:
                 raise fail(ErrorCode.SETUP_FAILED, f"{what}: " + self._agent_detail(done))
             return done
 
-        counted = self._access.run(
-            ["rev-list", "--count", "--all", "--not", start], timeout=left()
-        )
+        counted = self._access.run(["rev-list", "--count", "--all", "--not", start], timeout=left())
         if counted.returncode != 0 or not counted.stdout.strip().isdigit():
             raise fail(ErrorCode.SETUP_FAILED, "the repository cannot be read after the script")
         self.script_commits = int(counted.stdout.strip())
-        git(["symbolic-ref", "HEAD", f"refs/heads/{task}"], "the task's branch cannot be checked out")
+        git(
+            ["symbolic-ref", "HEAD", f"refs/heads/{task}"],
+            "the task's branch cannot be checked out",
+        )
         git(["reset", "-q", "--mixed", start], "the repository cannot be put back to its start")
         if base != task:
             git(["update-ref", f"refs/heads/{base}", start], "the base branch cannot be put back")
@@ -1234,7 +1235,8 @@ class GitWorkspace:
 
 # What `settle_after_setup` keeps of the untracked entries a script left: 10,000 of them and 1 MiB
 # of their names.
-# How many branch or tag names one `git branch -D` / `git tag -d` takes when the script's are dropped.
+# How many branch or tag names one `git branch -D` / `git tag -d` takes when the script's are
+# dropped.
 REF_BATCH = 100
 EXCLUDE_MAX_ENTRIES = 10_000
 EXCLUDE_MAX_BYTES = 1024 * 1024

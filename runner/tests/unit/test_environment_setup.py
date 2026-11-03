@@ -182,7 +182,8 @@ class Rig:
         self.script_exit = 0
         self.script_output = "added 300 packages\n"
         self.waits = False
-        # Set when the script's exec begins, so that a stop is asked for while it runs and not at a time.
+        # Set when the script's exec begins, so that a stop is asked for while it runs and not at
+        # a time.
         self.script_started = threading.Event()
 
     def api(self) -> DockerApi:
@@ -354,12 +355,26 @@ def test_a_container_that_cannot_be_had_is_the_runners_failure_not_the_scripts(r
 def test_a_commit_the_disk_cannot_hold_is_the_environments_failure_and_names_the_disk(
     rig: Rig,
 ) -> None:
+    # The disk had room when it was asked and filled up under the commit.
     rig.engine.commit_fails = True
+    workspace = Workspace()
+    done = step(rig, workspace)
+    assert done.error is not None and done.error.code is ErrorCode.ENVIRONMENT_SETUP_FAILED
+    assert "could not be kept" in done.error.detail
+
+
+# #818-DISK-05
+def test_a_disk_with_no_room_for_the_commit_ends_the_turn_free_and_says_how_much_is_missing(
+    rig: Rig,
+) -> None:
     workspace = Workspace()
     workspace.free = 100 * 1024 * 1024
     done = step(rig, workspace)
     assert done.error is not None and done.error.code is ErrorCode.ENVIRONMENT_SETUP_FAILED
-    assert "could not be kept" in done.error.detail
+    assert "too full to keep its result" in done.error.detail
+    assert "100 MB left" in done.error.detail and "needs about" in done.error.detail
+    assert done.image is None and rig.engine.committed == []
+    assert done.block is not None and done.block["ok"] is False
     assert any("100 MB left" in note for note in done.notes)
 
 

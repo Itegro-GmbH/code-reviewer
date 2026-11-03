@@ -56,6 +56,7 @@ from code_reviewer_runner.result import ErrorCode
 from .git_workspace import GitWorkspace
 from .session import ShutdownRequested, deadline_seconds
 from .setup_container import (
+    OUTCOME_NO_ROOM,
     OUTCOME_NOT_SAVED,
     OUTCOME_SCRIPT_FAILED,
     OUTCOME_STOPPED,
@@ -151,7 +152,10 @@ def run_environment_setup(
             (),
         )
     run = SetupContainer(memory_mb, seams).run(
-        environment.setup_script, script_seconds=seconds, should_stop=should_stop
+        environment.setup_script,
+        script_seconds=seconds,
+        should_stop=should_stop,
+        free_bytes=workspace.volume_free_bytes,
     )
     if run.outcome == OUTCOME_STOPPED:
         raise ShutdownRequested
@@ -168,6 +172,12 @@ def run_environment_setup(
         detail = run.detail or f"the setup script ended with exit status {run.exit_code}"
     elif run.outcome == OUTCOME_TIMED_OUT:
         detail = f"the setup script ran past its time limit of {seconds / 60:.0f} minutes"
+    elif run.outcome == OUTCOME_NO_ROOM:
+        # The customer's script left more than the VM's disk can keep as an image: theirs, free.
+        detail = (
+            "the setup script finished, but the disk of the VM is too full to keep its result: "
+            + run.detail
+        )
     elif run.outcome == OUTCOME_NOT_SAVED:
         detail = f"the setup script finished, but its result could not be kept: {run.detail}"
     else:
@@ -195,7 +205,10 @@ def _after_success(
         # The script ended well; Control could not read the repository afterwards (or the lists
         # could not be kept): the failure is ours, with the free code of a turn that did not start.
         return EnvironmentSetup(
-            None, _block(run, output, ok=True), JobError(ErrorCode.SETUP_FAILED, error.detail), tuple(notes)
+            None,
+            _block(run, output, ok=True),
+            JobError(ErrorCode.SETUP_FAILED, error.detail),
+            tuple(notes),
         )
     if workspace.restored_count:
         listed = ", ".join(restored)

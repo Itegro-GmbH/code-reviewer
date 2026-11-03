@@ -63,7 +63,7 @@ from .agent_container import (
 from .docker_api import DockerApi, DockerError
 from .door_launcher import PRIVATE_RANGES
 from .exec_run import run_exec
-from .host_rules import HelperFailed, close_bridge_ipv6, run_helper
+from .host_rules import NFT, HelperFailed, close_bridge_inet, close_bridge_ipv6, run_helper
 from .reader import REPO_SUBPATH, work_volume_of
 
 _log = logging.getLogger(__name__)
@@ -140,7 +140,6 @@ EGRESS_RULES: Final = "; ".join(
 )
 CHECK_RULES: Final = f"list table ip {EGRESS_TABLE}"
 RULES_SECONDS: Final = 20.0
-NFT: Final = "/usr/sbin/nft"
 
 # How long each part may take. The script's own limit comes from the caller (it is counted in the
 # turn's time budget); these are the parts around it, and `SETUP_OVERHEAD_SECONDS` is their sum:
@@ -151,21 +150,40 @@ FINISH_EXEC_SECONDS: Final = 30.0
 DOCKER_STOP_SECONDS: Final = 120.0
 STOP_GRACE_SECONDS: Final = 20
 STOP_WAIT_SECONDS: Final = 40.0
+# The commit. Measured on a platform VM (2 vCPU, 2026-11-03): 3.9 GB of image in 61 s, which is
+# 64 MB/s. The budget is a commit of 4 GB (`COMMIT_REFERENCE_BYTES`) on a disk four times slower
+# than that (a VM whose disk is busy with the agent's Docker): 250 s, rounded up to 300 s.
+COMMIT_MEASURED_BYTES_PER_SECOND: Final = 64 * 1000**2
+COMMIT_REFERENCE_BYTES: Final = 4 * 1000**3
+COMMIT_SLOWDOWN: Final = 4
 COMMIT_SECONDS: Final = 300.0
+# What a commit needs on the VM's disk besides the container's writable layer, which it writes
+# twice (the layer as a tar and the copy the daemon unpacks), and the question about that size.
+COMMIT_ROOM_FACTOR: Final = 2
+COMMIT_HEADROOM_BYTES: Final = 1024**3
+ROOM_SECONDS: Final = 30.0
 REMOVE_SECONDS: Final = 120.0
+SCRIPT_WRITE_SECONDS: Final = 30.0
+KILL_SECONDS: Final = 15.0
+# After a script that did not end by itself the container is killed, the exec that ran it is
+# joined, and the clean-up kills it once more before it removes it (each call to the daemon has
+# `KILL_SECONDS`).
+KILL_STEPS_SECONDS: Final = KILL_SECONDS * 3
 SETUP_OVERHEAD_SECONDS: Final = (
     RULES_SECONDS * 3
     + READY_SECONDS
+    + SCRIPT_WRITE_SECONDS
+    + KILL_STEPS_SECONDS
     + FINISH_EXEC_SECONDS
     + DOCKER_STOP_SECONDS
     + STOP_WAIT_SECONDS
+    + ROOM_SECONDS
     + COMMIT_SECONDS
     + REMOVE_SECONDS
 )
 # The most of the script's output that is kept: its end.
 OUTPUT_KEEP_BYTES: Final = 64 * 1024
 WATCH_SECONDS: Final = 0.25
-KILL_SECONDS: Final = 15.0
 
 OUTCOME_OK: Final = "ok"
 OUTCOME_SCRIPT_FAILED: Final = "script_failed"
@@ -173,6 +191,8 @@ OUTCOME_TIMED_OUT: Final = "timed_out"
 OUTCOME_STOPPED: Final = "stopped"
 OUTCOME_UNAVAILABLE: Final = "unavailable"
 OUTCOME_NOT_SAVED: Final = "not_saved"
+# The script ended well and the VM's disk has too little room for the commit of its result.
+OUTCOME_NO_ROOM: Final = "no_room"
 
 
 def network_document() -> dict[str, Any]:
@@ -313,6 +333,11 @@ class _Unavailable(Exception):
     """A step before the script that could not be done; the word is the reason."""
 
 
+class _NoRoom(Exception):
+    """The VM's disk has too little room for the commit; the message says how much and how much is
+    needed."""
+
+
 class SetupContainer:
     """One run of the Setup container. `run` does everything and always ends with the container and
     the network removed; it does not raise for a script that failed."""
@@ -333,7 +358,10 @@ class SetupContainer:
         *,
         script_seconds: float,
         should_stop: Callable[[], bool] = lambda: False,
+        free_bytes: Callable[[], int | None] = lambda: None,
     ) -> SetupRun:
+        """`free_bytes` is what the VM's disk has left (None: it cannot be asked, and the commit is
+        tried all the same)."""
         clock = self._seams.clock
         begun = clock()
         tail = Tail()
@@ -357,7 +385,12 @@ class SetupContainer:
                 self._clean()
                 return self._ended_run(outcome, why, tail, begun, started, finished, code=code)
             try:
-                image = self._save(container)
+                image = self._save(container, free_bytes)
+            except _NoRoom as reason:
+                self._clean()
+                return self._ended_run(
+                    OUTCOME_NO_ROOM, str(reason), tail, begun, started, finished, code=code
+                )
             except _Unavailable as reason:
                 self._clean()
                 return self._ended_run(
@@ -461,6 +494,9 @@ class SetupContainer:
             run_helper(
                 api, worker_image, [NFT], [CHECK_RULES], "setup-rules-check", seconds=RULES_SECONDS
             )
+            # The `inet` table beside the `ip` one: IPv6 from the bridge, for a kernel that has the
+            # family. Not required (`close_bridge_inet`).
+            close_bridge_inet(api, worker_image, SETUP_NETWORK_NAME, "setup")
         except HelperFailed as failed:
             raise _Unavailable(
                 f"setup_unavailable: the network rules could not be installed ({failed.reason})"
@@ -634,10 +670,11 @@ class SetupContainer:
 
     # -- the result --------------------------------------------------------------------------------
 
-    def _save(self, container: str) -> str:
+    def _save(self, container: str, free_bytes: Callable[[], int | None]) -> str:
         """Stop the container's Docker, then the container, and commit its file system. Under
         Sysbox the stop of the inner Docker is what ends the container, and the end of the
-        container is what writes the inner Docker's images into the file system the commit reads."""
+        container is what writes the inner Docker's images into the file system the commit reads.
+        Raises `_NoRoom` before the commit when the VM's disk could not hold it."""
         api = self._api
         finished = run_exec(
             api,
@@ -657,8 +694,31 @@ class SetupContainer:
             )
         if not self._ended.wait(STOP_WAIT_SECONDS):
             raise _Unavailable("the container did not stop, so its file system is not kept")
+        self._check_room(container, free_bytes)
         return api.commit_container(
             container, SETUP_IMAGE_REPOSITORY, SETUP_IMAGE_TAG, timeout=self._seams.commit_seconds
+        )
+
+    def _check_room(self, container: str, free_bytes: Callable[[], int | None]) -> None:
+        """The commit writes the container's file system into the VM's disk; a disk the script
+        filled would fail it half way, after minutes, with the daemon's own words. Asked once the
+        container has stopped (the inner Docker's data is in its layer by then): the layer's size,
+        twice, and a headroom. A size or a free space that cannot be had is not a reason to
+        refuse."""
+        free = free_bytes()
+        if free is None:
+            return
+        try:
+            layer = self._api.container_rw_bytes(container, timeout=ROOM_SECONDS)
+        except DockerError:
+            return
+        needed = COMMIT_ROOM_FACTOR * (layer or 0) + COMMIT_HEADROOM_BYTES
+        if free >= needed:
+            return
+        mb = 1024 * 1024
+        raise _NoRoom(
+            f"the VM's disk has {free // mb} MB left and the result of the script needs about "
+            f"{needed // mb} MB (the container's file system is {(layer or 0) // mb} MB)"
         )
 
     # -- the end -----------------------------------------------------------------------------------

@@ -190,6 +190,15 @@ class DockerApi:
             raise DockerError(0, "the daemon's answer is not a container")
         return answer
 
+    def container_rw_bytes(self, ref: str, *, timeout: float) -> int | None:
+        """The size of a container's writable layer, what a commit has to write (`size=true` makes
+        the daemon walk the layer, so it takes a moment); None when the daemon does not say."""
+        answer = as_object(
+            self.request("GET", f"/containers/{ref}/json?size=true", timeout=timeout)
+        )
+        size = None if answer is None else answer.get("SizeRw")
+        return size if isinstance(size, int) and not isinstance(size, bool) else None
+
     def create_network(self, document: dict[str, Any]) -> str:
         return _identifier(self.request("POST", "/networks/create", document))
 

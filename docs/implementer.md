@@ -493,6 +493,18 @@ on the VM's side of the bridge, so there is no host to find on that segment; mea
 joins later finds no neighbour. The VM does not forward IPv6 (`net.ipv6.conf.all.forwarding = 0`) and the agent has no IPv6 route out.
 Step 6 (the attack test) should repeat this class of probe for the neighbours it can find on the segment.
 
+**IPv6, switched off in the VM and a second wall (#818, 2026-11-03).** Defensive configuration on top of the missing bridge address, with nothing probed
+for it. (1) The Launcher's step `ipv6-off` (`IPV6_OFF_COMMANDS`, the Implementer's VM only, before `vm-prepare.sh` starts the daemon) writes 1 to
+`disable_ipv6` of `all`, `default` and every existing interface and reads each back; a launch whose VM cannot do that ends with the retryable
+`docker_not_ready`. A bridge the daemon makes afterwards has no IPv6 at all. (2) For a kernel that has the `inet` family, Control installs one
+more table in the host's namespace beside each `ip` one (`host_rules.close_bridge_inet`, tables `implementer_ipv6_setup` and
+`implementer_ipv6_agent`, hooked before Docker's rules at priority -10, only drops): no IPv6 packet from the Setup bridge or the model bridge to the VM
+itself (`input`) and none through the VM to a private range (`forward`: `::`, `::1`, `::ffff:0:0/96`, `64:ff9b::/96`, `fc00::/7`, `fe80::/10`, `ff00::/8`).
+The platform's kernel has no `inet` family (measured, above), so there the table is tried, a log line says it is not in place, and the turn goes on: the
+sysctls and the missing address are what closes IPv6 on that kernel. A Setup or an agent never fails for the table. The lane (L07) reads the state back where
+the kernel supports it: IPv6 off in the container's namespace before the probe switches it on, no IPv6 address on the bridge, and the `inet` table with
+its two drops.
+
 **What this breaks until step 7 (the network door).** `npm install`, `pnpm install`, `pip install`, `apt-get`, `cargo`, `go get` and `docker pull`
 all need a registry and now fail ("lookup registry-1.docker.io ... server misbehaving", measured). Whatever a task needs must already
 be in the image: the toolchain of the agent image is there, and an environment's setup script (section "The environment's setup script":
@@ -549,10 +561,11 @@ installs inside, its script can flush (and one `nft flush ruleset` in it changes
 
 **Time.** The script has 15 minutes at most (`contracts/environment-sizes.v1.json`). The whole step is part of the turn's 60 minutes: the
 agent's own deadline is counted from the start of the job, so the minutes of the step are gone from it. Around the script the step may
-take, at its ceilings, 20 s for each of the three host helpers, 60 s until the container's Docker is ready, 30 s for the end script,
-120 s for the container's Docker to stop, 40 s for the stop, 300 s for the commit and 120 s for the removal, 730 s together
-(`SETUP_OVERHEAD_SECONDS`); a test holds the sum. The script is held to what the limit leaves after the grace for the end of the turn
-(270 s), those 730 s and **at least 10 minutes for the agent** (`MIN_AGENT_SECONDS`); with the normal 3600 s that is the 15 minutes. A
+take, at its ceilings, 20 s for each of the three host helpers, 60 s until the container's Docker is ready, 30 s to write the script,
+45 s for the kill of a script that has to be stopped (the kill, the wait for its exec, the kill of the clean-up: 15 s each), 30 s for the end
+script, 120 s for the container's Docker to stop, 40 s for the stop, 30 s for the question about the disk, 300 s for the commit and 120 s for
+the removal, 835 s together (`SETUP_OVERHEAD_SECONDS`); a test holds the sum. The script is held to what the limit leaves after the grace
+for the end of the turn (270 s), those 835 s and **at least 10 minutes for the agent** (`MIN_AGENT_SECONDS`); with the normal 3600 s that is the 15 minutes. A
 limit that leaves less than a minute for the script ends the turn here, free ("the time limit of the turn leaves no room for the setup
 script"). A script that runs out of its time is killed with its container and ends the turn.
 
@@ -580,7 +593,7 @@ it. What it did to the repository is the **base** the agent starts from, not a c
 2. **A file or folder the script added, and the repository does not ignore, stays in the working tree and goes on the repository's local ignore
    list** (`.git/info/exclude`: git's own, never committed, never pushed; the top-level entries, anchored and escaped, a folder counting once). The
    agent sees and uses it, but it is no change of the agent: the tree is not dirty because of it (so no extra message), the system's commit of what is
-   left does not take it, and the agent's `git add -A` does not either; an agent that wants one in a commit adds it by name with `git add -f`. What the
+   left does not take it, and the agent's `git add -A` does not either (the agent's prompt says so in one sentence, `prompts.py`); an agent that wants one in a commit adds it by name with `git add -f`. What the
    repository ignores already (`node_modules`, a virtual environment, build output) needs nothing. A name with a line end cannot be written as a
    pattern and is left as it is; more than 10,000 entries (or 1 MiB of names) ends the turn rather than half of them being kept.
 
@@ -600,6 +613,16 @@ Playwright environment below) and, while the agent runs from it, the agent's own
 untouched** by any of it: the mirror is on its own 8 GiB file system, and a script that fills the work volume or the VM's disk fails with
 "No space left on device" (the lane proves it with a small stand-in disk), the step reads how much of the disk is left after the script and
 says so when it is under 1 GiB.
+
+**A disk too full for the commit.** A script can end well and leave a container whose file system the VM's disk cannot keep as an image. Once the
+container has stopped (the inner Docker's data is in its layer by then) and before `docker commit`, Control asks the daemon for the size of the
+container's writable layer (`SizeRw`) and for the free room of the VM's disk, and needs **twice the layer and 1 GiB** (`COMMIT_ROOM_FACTOR`,
+`COMMIT_HEADROOM_BYTES`: the layer as a tar and the copy the daemon unpacks). With less, the run ends with its own outcome `no_room` and the turn
+with `environment_setup_failed`, free, saying "the disk of the VM is too full to keep its result: the VM's disk has N MB left and the result of
+the script needs about M MB (the container's file system is K MB)", instead of a commit that fails minutes in with the daemon's words. A size or a free
+space that cannot be had is not a reason to refuse: the commit is tried. The commit has `COMMIT_SECONDS` = 300 s: measured 3.9 GB in 61 s (64 MB/s),
+and 4 GB on a disk four times slower is 250 s (`COMMIT_MEASURED_BYTES_PER_SECOND`, `COMMIT_SLOWDOWN`; a test holds it). The lane (L09) fills the
+container's root beyond a small stand-in disk and expects `no_room`.
 
 **Measured on a real VM, round of #818 (2026-11-03, 2 vCPU, 4 GB, a `spike-` VM from a snapshot built from the branch; its images are from commit
 `1bfda743`, the Dockerfile and the boot scripts have not changed since, the code under test is the head, run on the VM with `uv`; `sysbox: proven`).**
@@ -728,7 +751,7 @@ never beyond the time that is left of the final push | Runner, container spec |
 | Base branches offered | 100 names, default first; a base beyond that can be typed | Route |
 | Result | 200 commits and 500 files (of the task's branch), 50 branches, 8,192 characters of summary, the whole report under 4 MB (Vercel cuts a body at 4.5 MB) | Contract and runner |
 | VM and containers | 2 vCPU and 4 GB for the VM; the Control container 768 MB without swap and 2048 processes, `/work` mounted `nosuid,nodev`; the model door 256 MB; the two readers 256 MB each; the agent's container the rest after 512 MB for the OS and the daemons (2,048 MB at 2 vCPU, section "The agent's container" for the other sizes), no swap. The Dispatcher refuses a size that leaves the VM no room for Control, the door, the readers and the OS (`sandbox_config_invalid`); a size that leaves the agent less than 1,024 MB (1 vCPU) is `sandbox_size_unsupported`, free, from the Worker, and from the Launcher for a job that names it. A task whose environment names a size (2, 4, 6 or 8 vCPU) gets that VM and, at that size, 2,048, 6,144, 10,240 or 14,336 MB for the agent ("Environments"); Control stays at 768 MB | Dispatcher (`DISPATCHER_WORKER_CONFIG` can override the default size), runner |
-| Setup script | 64 KB of text, 15 minutes, the whole step (start, script, saving the image) at most 730 seconds more, all of it inside the 3600 seconds of the turn, and the agent keeps at least 10 minutes; the end of its output, 8,192 characters, reaches the Runs page | Contract, runner (`environment_setup.py`) |
+| Setup script | 64 KB of text, 15 minutes, the whole step (start, script, saving the image) at most 835 seconds more, all of it inside the 3600 seconds of the turn, and the agent keeps at least 10 minutes; the end of its output, 8,192 characters, reaches the Runs page | Contract, runner (`environment_setup.py`) |
 | Parallel work | `RUNNER_DISPATCH_MAX_RUNNING` (2) for all kinds together, and one running turn per session | App and Dispatcher |
 
 **Billing.** Turns are billed at the Dynamic rate for now: the billing code treats the kind as `dynamic` (`projectKindOf`),
