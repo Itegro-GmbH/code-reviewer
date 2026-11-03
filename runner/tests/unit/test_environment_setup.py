@@ -159,6 +159,8 @@ class Workspace:
     def __init__(self) -> None:
         self.restored_count = 0
         self.excluded_count = 0
+        self.script_commits = 0
+        self.dropped_refs = 0
         self.restore_error: JobError | None = None
         self.names: list[str] = []
         self.free: int | None = 50 * 1024**3
@@ -268,14 +270,29 @@ def test_what_the_script_added_is_said_to_be_part_of_the_base(rig: Rig) -> None:
     assert "2 file(s) or folder(s)" in note and "not part of its changes" in note
 
 
+# #818-T41c
+def test_the_history_the_script_made_is_said_to_be_undone(rig: Rig) -> None:
+    workspace = Workspace()
+    workspace.script_commits = 2
+    workspace.dropped_refs = 3
+    done = step(rig, workspace)
+    note = next(note for note in done.notes if "history was undone" in note)
+    assert "2 commit(s)" in note and "3 branch(es) or tag(s)" in note
+
+
 # #818-T42
-def test_a_script_that_leaves_an_unreadable_repository_ends_the_turn_free(rig: Rig) -> None:
+def test_a_repository_the_runner_cannot_read_after_the_script_is_the_runners_failure(
+    rig: Rig,
+) -> None:
     workspace = Workspace()
     workspace.restore_error = JobError(ErrorCode.SETUP_FAILED, "the repository has no HEAD")
     done = step(rig, workspace)
     assert done.image is None
-    assert done.error is not None and done.error.code is ErrorCode.ENVIRONMENT_SETUP_FAILED
-    assert done.block is not None and done.block["ok"] is False
+    # Control could not read the repository: that is not the script's failure (the script ended
+    # with status 0, and the page shows it as it ran), and the code is the free one of ours.
+    assert done.error is not None and done.error.code is ErrorCode.SETUP_FAILED
+    assert done.error.detail == "the repository has no HEAD"
+    assert done.block is not None and done.block["ok"] is True and done.block["exitCode"] == 0
 
 
 # #818-T43

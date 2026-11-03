@@ -35,7 +35,10 @@ the local branches of this repository to GitHub, as it is: what you want to keep
 committed on a branch. Only 50 branches are pushed, the task's branch first and then the others \
 in alphabetical order, and a branch whose name has a space, a control character or one of \
 ~ ^ : ? * [ \\, has "..", starts with - or +, or is longer than 255 bytes is not pushed either. \
-Work committed on a detached HEAD is saved on a new branch named after the task's branch.
+Work committed on a detached HEAD is saved on a new branch named after the task's branch. \
+Files and folders that the environment's setup left in the repository before you started \
+(dependencies, caches) are kept out of git as whole folders: git add -A skips them, and what you \
+create inside such a folder is not committed either unless you add it by name with git add -f.
 
 When the repository has tests, run them before you finish.
 

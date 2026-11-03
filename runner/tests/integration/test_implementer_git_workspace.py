@@ -415,8 +415,6 @@ def after_a_script(rig: Rig):
     workspace = rig.prepared()
     repo = workspace.repo
     (repo / ".gitignore").write_text("node_modules/\n")
-    raw("add", ".gitignore", cwd=repo, git=rig.git)
-    raw("commit", "-qm", "ignore", cwd=repo, git=rig.git)
     (repo / "README.md").write_text("changed by the script\n")
     (repo / "generated.txt").write_text("made by the script\n")
     (repo / "venv").mkdir()
@@ -449,7 +447,8 @@ def test_what_the_script_added_stays_in_the_tree_and_is_no_change_of_the_agent(r
     assert workspace.dirty() is False, "the agent has changed nothing"
     assert raw("status", "--porcelain", cwd=repo, git=rig.git) == ""
     assert workspace.commit_all() is None, "the system's commit takes none of it"
-    assert workspace.excluded_count == 2  # generated.txt and venv/ (node_modules/ is ignored)
+    # generated.txt, venv/ and .gitignore itself (node_modules/ is ignored by it)
+    assert workspace.excluded_count == 3
 
 
 # #818-T62
@@ -483,6 +482,95 @@ def test_names_git_reads_in_a_pattern_are_kept_out_all_the_same(rig: Rig) -> Non
     assert workspace.dirty() is False
     assert workspace.commit_all() is None
     assert workspace.excluded_count == len(odd)
+
+
+def _git(rig: Rig, workspace: GitWorkspace, *args: str) -> str:
+    return raw(*args, cwd=workspace.repo, git=rig.git)
+
+
+def _heads(rig: Rig, workspace: GitWorkspace) -> dict[str, str]:
+    listed = _git(rig, workspace, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads")
+    return {line.split()[0]: line.split()[1] for line in listed.splitlines()}
+
+
+# #818-T67
+def test_a_commit_of_the_script_is_undone_and_its_files_stay_as_the_base(rig: Rig) -> None:
+    workspace = rig.prepared()
+    repo, start = workspace.repo, workspace.start_commit
+    (repo / "README.md").write_text("changed and committed by the script\n")
+    (repo / "made.txt").write_text("added and committed by the script\n")
+    _git(rig, workspace, "add", "-A")
+    _git(rig, workspace, "commit", "-qm", "script commit")
+    _git(rig, workspace, "commit", "-q", "--allow-empty", "-m", "second")
+
+    workspace.settle_after_setup()
+
+    assert _git(rig, workspace, "rev-parse", "HEAD").strip() == start
+    assert _heads(rig, workspace)[f"refs/heads/{BRANCH}"] == start
+    assert workspace.script_commits == 2
+    # The tracked file is back, the added one is a plain file of the tree and not a change.
+    assert (repo / "README.md").read_text() == "# demo\n"
+    assert (repo / "made.txt").exists()
+    assert workspace.dirty() is False and workspace.commit_all() is None
+    assert workspace.commits_since_start() == []
+
+
+# #818-T68
+def test_a_branch_a_tag_and_a_commit_on_the_base_branch_of_the_script_do_not_survive(
+    rig: Rig,
+) -> None:
+    workspace = rig.prepared()
+    start = workspace.start_commit
+    _git(rig, workspace, "checkout", "-q", "-b", "script-branch")
+    _git(rig, workspace, "commit", "-q", "--allow-empty", "-m", "on a branch")
+    _git(rig, workspace, "tag", "v1")
+    _git(rig, workspace, "tag", "-a", "-m", "annotated", "v2")
+    _git(rig, workspace, "checkout", "-q", "main")
+    _git(rig, workspace, "commit", "-q", "--allow-empty", "-m", "on the base branch")
+    _git(rig, workspace, "checkout", "-q", "--detach")
+    _git(rig, workspace, "commit", "-q", "--allow-empty", "-m", "detached")
+
+    workspace.settle_after_setup()
+
+    assert _git(rig, workspace, "symbolic-ref", "HEAD").strip() == f"refs/heads/{BRANCH}"
+    assert _heads(rig, workspace) == {
+        f"refs/heads/{BRANCH}": start,
+        "refs/heads/main": start,
+    }
+    assert _git(rig, workspace, "tag", "--list").strip() == ""
+    assert workspace.dropped_refs == 3  # script-branch, v1, v2
+    # What the final push would take over: nothing.
+    assert workspace.commits_since_start() == []
+
+
+# #818-T69
+def test_a_script_that_deleted_the_task_branch_or_left_an_unborn_head_gets_it_back(
+    rig: Rig,
+) -> None:
+    workspace = rig.prepared()
+    start = workspace.start_commit
+    _git(rig, workspace, "checkout", "-q", "--orphan", "fresh")
+    _git(rig, workspace, "branch", "-D", BRANCH)
+
+    workspace.settle_after_setup()
+
+    assert _git(rig, workspace, "symbolic-ref", "HEAD").strip() == f"refs/heads/{BRANCH}"
+    assert _heads(rig, workspace)[f"refs/heads/{BRANCH}"] == start
+    assert (workspace.repo / "README.md").read_text() == "# demo\n"
+
+
+# #818-T70
+def test_many_branches_and_tags_of_the_script_are_all_dropped(rig: Rig) -> None:
+    workspace = rig.prepared()
+    for number in range(230):
+        _git(rig, workspace, "branch", f"b{number}")
+        _git(rig, workspace, "tag", f"t{number}")
+
+    workspace.settle_after_setup()
+
+    assert set(_heads(rig, workspace)) == {f"refs/heads/{BRANCH}", "refs/heads/main"}
+    assert _git(rig, workspace, "tag", "--list").strip() == ""
+    assert workspace.dropped_refs == 230 * 2
 
 
 # #818-T64

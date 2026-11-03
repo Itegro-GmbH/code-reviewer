@@ -26,6 +26,11 @@ REQUIRED = [
     "a branch whose name has a space, a control character or one of ~ ^ : ? * [ \\",
     "is longer than 255 bytes is not pushed either",
     "Work committed on a detached HEAD is saved on a new branch",
+    # what the environment's setup left: whole folders are kept out of git
+    "Files and folders that the environment's setup left in the repository before you started",
+    "are kept out of git as whole folders",
+    "what you create inside such a folder is not committed either unless you add it by name "
+    "with git add -f",
     # nobody can answer
     "Nobody can answer a question here",
     "decide on the most reasonable reading of the task and go on",

@@ -404,6 +404,10 @@ class GitWorkspace:
         # the local ignore list (0 before it ran).
         self.restored_count = 0
         self.excluded_count = 0
+        # How many commits and how many branches and tags the script made, which `settle_after_setup`
+        # took away (0 before it ran).
+        self.script_commits = 0
+        self.dropped_refs = 0
 
     # -- what the caller needs -------------------------------------------------------------------
 
@@ -589,17 +593,26 @@ class GitWorkspace:
         """After a successful setup script (#818): the repository is what the agent starts from, and
         what the script did to it is the **base** of the turn, not a change the agent made.
 
+        * **Its history is undone** (`_return_to_start`): the script may have run `git commit`,
+          `git checkout -b`, `git tag` or `git reset`, and the turn ends by pushing every local
+          branch, so a commit of the script would arrive on GitHub as the agent's work. HEAD goes
+          back to the task's branch at `start_commit`, the base branch to `start_commit`, and every
+          other branch and tag is deleted. The files of a commit the script made are not lost
+          with the commit (see the next two points: a changed tracked file is put back, an added
+          one stays as the script left it). Reflogs and objects stay in the repository.
         * A change to a file git **tracks** is undone, in the working tree and the index
           (`git reset --hard`, after `git status` counted them): the turn ends by committing and
-          pushing whatever the tree holds, and a lockfile an install rewrote or a configuration a
+          pushing whatever the tree holds and a lockfile an install rewrote or a configuration a
           script patched would arrive on the branch as the agent's work.
-        * A file the script **added** and git does not ignore is kept in the working tree and put on
-          the repository's local ignore list (`.git/info/exclude`, never committed, never pushed):
-          the agent sees and uses it, but it is not "a change of the agent", so the tree is not
-          dirty because of it (no extra message), the system's commit of what is left does not
-          take it, and the agent's own `git add -A` does not either. What the repository itself
-          ignores (`node_modules`, a virtual environment, build output) needs nothing. An agent
-          that wants one of them in a commit adds it by name with `git add -f`.
+        * A file the script **added** (also one it committed: the commit is gone and the file is
+          plain again) and git does not ignore is kept in the working tree and put on the
+          repository's local ignore list (`.git/info/exclude`, never committed, never pushed): the
+          agent sees and uses it, but it is not "a change of the agent", so the tree is not dirty
+          because of it (no extra message), the system's commit of what is left does not take it,
+          and the agent's own `git add -A` does not either. **A folder goes on the list whole**
+          (`node_modules`, a cache, a virtual environment belong there): a file the agent adds
+          inside such a folder later is not committed unless it adds it by name with `git add -f`.
+          What the repository itself ignores needs nothing.
 
         Returns the paths of the tracked files that were restored, at most five (the count is
         `restored_count`), cleaned of control characters. Raises `JobError` (`setup_failed`) when
@@ -626,6 +639,7 @@ class GitWorkspace:
         def left() -> float:
             return min(self._timeout, max(1.0, deadline - self._clock()))
 
+        self._return_to_start(left)
         status = self._reader_stream(
             ["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=no"],
             take,
@@ -649,6 +663,81 @@ class GitWorkspace:
         self.restored_count = entries
         self._exclude_what_the_script_added(left)
         return names
+
+    def _return_to_start(self, left: Callable[[], float]) -> None:
+        """The history of the script is undone: HEAD on the task's branch, the task's branch and the
+        base branch at `start_commit`, every other branch and every tag deleted. The index is
+        reset to the start (mixed): the working tree is not touched, so what the script committed
+        is now a change of the tree like any other (`settle_after_setup` deals with it)."""
+        start = self.start_commit
+        task = self.spec.branch
+        base = self.spec.base_branch
+        options = [arg for setting in _LEFTOVER_OPTIONS for arg in ("-c", setting)]
+
+        def git(args: list[str], what: str) -> Outcome:
+            done = self._access.run([*options, *args], timeout=left(), write=True)
+            if done.returncode != 0:
+                raise fail(ErrorCode.SETUP_FAILED, f"{what}: " + self._agent_detail(done))
+            return done
+
+        counted = self._access.run(
+            ["rev-list", "--count", "--all", "--not", start], timeout=left()
+        )
+        if counted.returncode != 0 or not counted.stdout.strip().isdigit():
+            raise fail(ErrorCode.SETUP_FAILED, "the repository cannot be read after the script")
+        self.script_commits = int(counted.stdout.strip())
+        git(["symbolic-ref", "HEAD", f"refs/heads/{task}"], "the task's branch cannot be checked out")
+        git(["reset", "-q", "--mixed", start], "the repository cannot be put back to its start")
+        if base != task:
+            git(["update-ref", f"refs/heads/{base}", start], "the base branch cannot be put back")
+        branches, tags = self._refs_of_the_script({task, base})
+        self.dropped_refs = len(branches) + len(tags)
+        for kind, names in (("branch", branches), ("tag", tags)):
+            flag = ["branch", "-D"] if kind == "branch" else ["tag", "-d"]
+            for first in range(0, len(names), REF_BATCH):
+                git(
+                    [*flag, "--", *names[first : first + REF_BATCH]],
+                    f"the {kind}s the script made could not be removed",
+                )
+
+    def _refs_of_the_script(self, keep: set[str]) -> tuple[list[str], list[str]]:
+        """The short names of the local branches (but `keep`) and the tags there are, read in the
+        reader, streamed and capped. A name that is not text cannot be named in a command; it stays
+        (the final push refuses such a name)."""
+        listed = bytearray()
+        too_long = False
+
+        def take(chunk: bytes) -> None:
+            nonlocal too_long
+            listed.extend(chunk)
+            if len(listed) > EXCLUDE_MAX_BYTES:
+                too_long = True
+                raise StopReading
+
+        done = self._reader_stream(
+            ["for-each-ref", "--format=%(refname)%00", "refs/heads/", "refs/tags/"],
+            take,
+            timeout=self._timeout,
+        )
+        if too_long or (done.returncode != 0 and not listed):
+            raise fail(
+                ErrorCode.SETUP_FAILED,
+                "the branches and tags the script made cannot be listed ("
+                + ("there are too many" if too_long else self._agent_detail(done))
+                + ")",
+            )
+        branches: list[str] = []
+        tags: list[str] = []
+        for raw_name in bytes(listed).split(b"\0"):
+            try:
+                ref = raw_name.decode("utf-8").strip("\n")
+            except UnicodeDecodeError:
+                continue
+            if ref.startswith("refs/heads/") and ref.removeprefix("refs/heads/") not in keep:
+                branches.append(ref.removeprefix("refs/heads/"))
+            elif ref.startswith("refs/tags/"):
+                tags.append(ref.removeprefix("refs/tags/"))
+        return branches, tags
 
     def _exclude_what_the_script_added(self, left: Callable[[], float]) -> None:
         """Put what the script added, and git does not ignore, on the local ignore list: the
@@ -1145,6 +1234,8 @@ class GitWorkspace:
 
 # What `settle_after_setup` keeps of the untracked entries a script left: 10,000 of them and 1 MiB
 # of their names.
+# How many branch or tag names one `git branch -D` / `git tag -d` takes when the script's are dropped.
+REF_BATCH = 100
 EXCLUDE_MAX_ENTRIES = 10_000
 EXCLUDE_MAX_BYTES = 1024 * 1024
 _PATTERN_SPECIALS = re.compile(rb"([\\*?\[\]])")

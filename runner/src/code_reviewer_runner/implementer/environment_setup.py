@@ -17,14 +17,25 @@ script (`SETUP_OVERHEAD_SECONDS`) and at least `MIN_AGENT_SECONDS` for the agent
 leaves less than `MIN_SCRIPT_SECONDS` for the script ends the turn here, free, saying so.
 
 **The repository afterwards.** The script ran in the repository's folder and may have changed
-anything in it. What it did is the base of the turn, not a change of the agent
-(`GitWorkspace.settle_after_setup`): a change to a **tracked** file is undone, because the turn ends
-by committing and pushing whatever the tree holds and a lockfile an install rewrote would arrive on
-the branch as the agent's work; a file or folder the script **added** stays in the tree and goes on
-the repository's local ignore list, so that it is neither "dirty" nor committed unless the agent
-adds it by name. The log says how many were put back or kept out and names the first few. This is
-the one rule about what the script did; it is a rule about where the agent starts, not about what
-the script may do.
+anything in it, `.git` included. What it did is the base of the turn, not a change of the agent
+(`GitWorkspace.settle_after_setup`), and the turn ends by pushing every local branch, so:
+
+* its **history is undone**: a `git commit`, `git checkout -b`, `git tag` or `git reset` of the
+  script does not count as the agent's work and is not pushed. HEAD goes back to the task's branch
+  at the base commit the turn started from, the base branch goes back to it, every other branch
+  and every tag is deleted. The log says how many commits and branches or tags that was;
+* a change to a **tracked** file is undone (also one the script committed: the commit is gone, the
+  file is restored), because a lockfile an install rewrote would arrive on the branch as the
+  agent's work;
+* a file or folder the script **added** (also one it committed) stays in the tree and goes on the
+  repository's local ignore list (`.git/info/exclude`), **a folder as a whole**, so that it is
+  neither "dirty" nor committed. A file the agent later adds inside such a folder is not committed
+  either unless it adds it by name (`git add -f`); the agent's instructions say so. The log says
+  how many were kept out and names the first few.
+
+This is the one rule about what the script did; it is a rule about where the agent starts, not
+about what the script may do. If Control cannot read the repository afterwards, the turn ends
+`setup_failed` (ours, free), not `environment_setup_failed`.
 
 **What the page gets.** The `setup` block of the result (`ImplementerSetupResult`): ok, the exit
 status (None when the script did not end by itself), whether it ran out of time, the seconds, and
@@ -181,12 +192,10 @@ def _after_success(
     try:
         restored = workspace.settle_after_setup()
     except JobError as error:
-        block = _block(run, output, ok=False)
+        # The script ended well; Control could not read the repository afterwards (or the lists
+        # could not be kept): the failure is ours, with the free code of a turn that did not start.
         return EnvironmentSetup(
-            None,
-            block,
-            JobError(ErrorCode.ENVIRONMENT_SETUP_FAILED, error.detail),
-            tuple(notes),
+            None, _block(run, output, ok=True), JobError(ErrorCode.SETUP_FAILED, error.detail), tuple(notes)
         )
     if workspace.restored_count:
         listed = ", ".join(restored)
@@ -194,6 +203,12 @@ def _after_success(
         notes.append(
             f"setup: {workspace.restored_count} tracked file(s) the script changed were put back "
             f"to the base commit ({listed}{f', and {more} more' if more > 0 else ''})"
+        )
+    if workspace.script_commits or workspace.dropped_refs:
+        notes.append(
+            f"setup: the script's history was undone ({workspace.script_commits} commit(s) it made "
+            f"are not part of the turn, {workspace.dropped_refs} branch(es) or tag(s) it made were "
+            "deleted); its files stay in the tree"
         )
     if workspace.excluded_count:
         notes.append(
