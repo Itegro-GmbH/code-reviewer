@@ -48,7 +48,7 @@ from code_reviewer_runner.implementer.setup_container import (
     setup_document,
 )
 
-TOKEN = "ghs_0123456789abcdefghijklmnopqrstuvwxyzABCD"
+TOKEN = "ghs_dummy-token-0123456789"
 KEY = "sk-real-key-0123456789abcdef"
 
 
