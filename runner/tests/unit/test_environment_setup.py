@@ -488,3 +488,38 @@ def test_the_early_report_is_one_the_app_reads_with_no_commit() -> None:
     result, _, _ = job_run(failing_step())
     assert result.implementer is not None
     assert json.loads(json.dumps(result.implementer))["setup"]["timedOut"] is False
+
+
+# #818-T56
+def test_the_production_setup_starts_the_agent_from_the_image_of_the_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from code_reviewer_runner.implementer import job_run
+    from code_reviewer_runner.implementer.agent_container import AgentContainer
+
+    class Quiet:
+        def __init__(self, *args: Any, **options: Any) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(job_run, "ReaderAccess", Quiet)
+    monkeypatch.setattr(job_run, "GitWorkspace", Quiet)
+    job = parse_implementer_input(job_text({"name": "E", "setupScript": SCRIPT}))
+
+    setup = job_run.production_setup(
+        job, {"RUNNER_IMPLEMENTER_AGENT_MEMORY_MB": "6144"}, lambda: None
+    )
+
+    assert setup.environment is not None
+    plain = setup.place()
+    assert isinstance(plain, AgentContainer)
+    assert plain._seams.image == "code-reviewer-agent:golden"  # pyright: ignore[reportPrivateUsage]
+    # The container of the step's image: the committed one by id, the helper's from the golden one.
+    made = setup.environment.place("sha256:" + "ee" * 32)()
+    assert isinstance(made, AgentContainer)
+    seams = made._seams  # pyright: ignore[reportPrivateUsage]
+    assert seams.image == "sha256:" + "ee" * 32
+    assert seams.helper_image == "code-reviewer-agent:golden"
+    assert made._memory_bytes == 6144 * 1024 * 1024  # pyright: ignore[reportPrivateUsage]

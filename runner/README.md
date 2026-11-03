@@ -636,6 +636,7 @@ and the enum agree. Callers branch on the code, never on the text.
 | `implementer_config_invalid` | An implementer job (#746): the options of the turn cannot be used |
 | `sandbox_unproven` | An implementer job (#745, step 4): the golden snapshot's Sysbox is not proven (`RUNNER_IMPLEMENTER_SANDBOX_PROOF`), so the agent's container does not start; free, before the clone |
 | `sandbox_size_unsupported` | An implementer job (#745, step 4): the VM leaves the agent's container less than 1,024 MB (`RUNNER_IMPLEMENTER_AGENT_MEMORY_MB`); free, before the clone |
+| `environment_setup_failed` | An implementer job whose environment has a setup script (#818): the script exited with a status other than 0, ran out of its time, was killed for the memory of its container, filled the disk, or left a result that could not be saved as the agent's image. It runs in the Setup container before the model door exists, so nothing was used: free. The `setup` block of the report has the exit status, the seconds and the end of the output (`implementer/environment_setup.py`) |
 | `runner_shutdown` | A turn of the Implementer was told to stop (SIGTERM, #765): its engine was ended and what is committed was pushed, if the lease was still held; the job host gives the job back to the queue under this code |
 | `timeout` | The command did not finish within `RUNNER_JOB_TIMEOUT_SECONDS` (also reported by the Worker for a process it had to end) |
 | `unknown` | Something failed that no rule recognises |
@@ -1251,6 +1252,13 @@ The tests need git first on `PATH`; any version will do. What a hostile reposito
 needs a Docker daemon and the two images.
 
 ## The Implementer's agent session (#764)
+
+**The environment's setup script (#818).** `implementer/environment_setup.py` is the step of a turn between the prepared workspace and the session: it runs
+the script of `implementer.environment` in the Setup container (`setup_container.py`: the agent's image under Sysbox, no secret, its own network that
+`host_rules.py` closes on the VM's side, the script as a file run by `bash -e`) and makes the agent's image of what it left (`docker commit`). A failed
+script ends the turn `environment_setup_failed` before the model door exists; the tracked files it changed are put back (`GitWorkspace.restore_tracked`);
+the end of its output is the `setup` block of the report. `job_run.py` runs the step and starts the agent's container from the committed image;
+a turn without an environment is exactly as before. `docs/implementer.md`, "The environment's setup script", has the rules and the measurements.
 
 `implementer/session.py` runs one turn; `agent.py` is its engine, `config.py` and `prompts.py` what the runner tells the engine. The engine
 (`opencode serve`) runs in the agent's container (`agent_container.py`); Control reaches it through a loopback listener that opens one
