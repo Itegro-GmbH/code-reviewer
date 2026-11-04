@@ -579,6 +579,28 @@ migrations are pending, they run in one batch (one transaction), so this migrati
 well, not only the writers of the two leaf tables. A batch that gives up rolls back, and with it that `SHARE` lock. The window is bounded, and a database that ran #771's
 migration in an earlier deployment does not have it.
 
+### Implementer turn steps (#745)
+
+`20261104100000_create_implementer_turn_steps` (the live view of the Implementer) adds one table and one index of its own; no existing table changes.
+
+- `implementer_turn_steps` (`repositories/implementer-steps-repository.ts`, scoped): what the agent thought and did, one row for each part of the engine's messages,
+  keyed by `(job_id, part_id)`. `kind` is `reasoning`, `text`, `tool` or `step`; `payload` is the record without `kind`, `partId` and `seq` as JSON text (the schema is text and
+  integers only, see "Portable schema conventions"); `bytes` is its size. **A tool's output is never stored**: a tool record carries name, status, title, input and error. `seq` is
+  the highest the runner has sent for the part (a retry or an older record that comes late does not overwrite it: `recordSteps` keeps the higher one, in the statement too, so two
+  batches at the same moment cannot undo each other); `ordinal` is the lowest `seq` the part had in the batch that created it, which never changes afterwards: the order the page shows the parts in.
+  The index `(job_id, seq)` serves "what changed after `seq`".
+- `recordSteps(jobId, leaseToken, records)` proves the claim in the transaction that stores the rows (a running turn of the Implementer of this workspace with this lease
+  token, the job row locked `FOR NO KEY UPDATE`) and **does not extend the lease**. It bounds a turn on its own: `MAX_STEPS_PER_TURN` parts and `MAX_STEP_BYTES_PER_TURN` of payload;
+  a record past a bound is dropped and counted. The lock on the job row makes the batches of one turn take turns, so the totals are read after the batch before has committed and
+  the caps hold with any number of senders. It does not block the foreign keys of the step rows and conflicts with the update of the job by a heartbeat, a result or the reaper,
+  which therefore wait for a batch (a few milliseconds) and the other way round. The transaction takes no gate and the job row is its only lock before the inserts (the runner's transitions take the Dynamic gate first, and a transaction that never asks for the gate cannot close a circle through it); the
+  step rows are touched by no other path but the erasure of a workspace, which locks the jobs first, so no circle of waiting can form.
+- The composite key `(job_id, workspace_id)` to `jobs` keeps the workspaces apart in the database, like the other Implementer tables. The erasure of a workspace deletes the steps
+  before the turns and the jobs. The steps are kept as long as the job (no sweep, owner's decision of 2026-11-04).
+- **Live database.** Expand only: the table is created first (waiting only for `workspaces`, which holds nothing of `jobs`), the index, then the link to `jobs` as an `alter table`
+  last, with `lock_timeout` 5 s for its own statements (`create-implementer-turn-steps.integration.test.ts` holds a writer open and checks that the batch gives up and can be
+  run again).
+
 ### A database that ran the removed billing migrations
 
 Three migrations of an earlier billing design existed on `development` for a few days and are deleted (#491):

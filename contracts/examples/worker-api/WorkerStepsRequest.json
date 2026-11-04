@@ -1,0 +1,23 @@
+{
+  "records": [
+    {
+      "kind": "tool",
+      "partId": "prt_0000000002",
+      "seq": 2,
+      "startedAt": 1793793602500,
+      "tool": "bash",
+      "status": "running",
+      "title": "Run the config tests",
+      "input": "{\"command\":\"npm test -- config\"}"
+    },
+    {
+      "kind": "text",
+      "partId": "prt_0000000004",
+      "seq": 3,
+      "startedAt": 1793793604000,
+      "endedAt": 1793793605000,
+      "text": "The loader now waits for the file.",
+      "bytes": 34
+    }
+  ]
+}

@@ -61,7 +61,10 @@ const FORMAT_CHARACTERS = /\p{Cf}/gu;
  * its joiners). What this does not catch: a secret written in any other disguise (reversed, spelled in pieces, with look-alike
  * letters, in an encoding other than the ones `redactText` knows).
  */
-function redactBlockText(text: string, secrets: readonly string[]): string {
+export function redactBlockText(
+  text: string,
+  secrets: readonly string[],
+): string {
   const visible = text.replace(FORMAT_CHARACTERS, "");
   const cleaned = redactText(visible, secrets);
   return cleaned === visible ? text : cleaned;

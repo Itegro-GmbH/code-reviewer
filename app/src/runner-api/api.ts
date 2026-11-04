@@ -35,12 +35,15 @@ import { describeError } from "./logger.ts";
 import { parseClaimRequest, parseJobId, parseRunnerId } from "./requests.ts";
 import { handleComplete, handleHeartbeat, type ReportDeps } from "./report.ts";
 import { errorResponse, jsonResponse, unauthorized } from "./responses.ts";
+import { storeSteps, type StepsDeps } from "./steps.ts";
+import { parseStepsRequest } from "./steps-request.ts";
 import { bearerTokenOf, tokensMatch } from "./token-auth.ts";
 
 export type RunnerApiDeps = ClaimDeps &
   ReportDeps &
   ReleaseDeps &
   VmStartDeps &
+  StepsDeps &
   JobStateDeps & {
     /** #322: the build of the app, reported by the version call. */
     appVersion: string;
@@ -61,6 +64,8 @@ export type RunnerApi = {
   release(request: Request, jobId: string): Promise<Response>;
   /** #493: a Dispatcher reports that it created the VM of a claim. */
   vmStart(request: Request, jobId: string): Promise<Response>;
+  /** #745: the steps of a running turn of the Implementer (the live view); proves the claim, does not extend the lease. */
+  steps(request: Request, jobId: string): Promise<Response>;
   /** #322: what this app is and can do. */
   version(request: Request): Promise<Response>;
   /** #364: the status of a job, for a Dispatcher that looks for the VMs of jobs that ended. */
@@ -204,6 +209,41 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
         return await handleVmStart(deps, jobId, who.runnerId, body.value);
       } catch (error) {
         return unexpected("vm start", error);
+      }
+    },
+
+    async steps(request, jobId) {
+      try {
+        const who = identify(request);
+        if (!who.ok) return who.response;
+        if (!parseJobId(jobId))
+          return errorResponse(400, "RUNNER_REQUEST_INVALID", {
+            fields: [{ field: "jobId", code: "invalid" }],
+          });
+        const body = await readJsonBody(request);
+        if (!body.ok) return body.response;
+        const parsed = parseStepsRequest(body.value);
+        if (!parsed.ok)
+          return errorResponse(400, "RUNNER_REQUEST_INVALID", {
+            fields: parsed.fields,
+          });
+        const job = await deps.queue.get(jobId);
+        if (job === undefined)
+          return errorResponse(404, "RUNNER_JOB_NOT_FOUND");
+        const stored = await storeSteps(deps, {
+          job,
+          leaseToken: parsed.value.leaseToken,
+          parsed: parsed.value,
+          who: `runner=${who.runnerId}`,
+          extraSecrets: [],
+        });
+        if ("response" in stored) return stored.response;
+        deps.logger.info(
+          `[runner-api] steps runner=${who.runnerId} job=${jobId} refused: lease lost`,
+        );
+        return errorResponse(409, "RUNNER_LEASE_LOST");
+      } catch (error) {
+        return unexpected("steps", error);
       }
     },
 

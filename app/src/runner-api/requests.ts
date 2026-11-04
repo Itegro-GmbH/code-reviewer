@@ -89,11 +89,11 @@ export function parseRunnerId(header: string | null): Parsed<string> {
 type Record_ = Record<string, unknown>;
 
 /** The length JSON Schema counts: characters (code points), not UTF-16 units. */
-function lengthOf(value: string): number {
+export function lengthOf(value: string): number {
   return [...value].length;
 }
 
-function isRecord(value: unknown): value is Record_ {
+export function isRecord(value: unknown): value is Record_ {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
