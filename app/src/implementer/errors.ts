@@ -43,6 +43,8 @@ export const IMPLEMENTER_ERROR_CODES = [
    * anything is written, so nothing is started and nothing is charged; the person changes the size in Environments. 422.
    */
   "IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED",
+  /** The profile named by the body is not one of this workspace (another workspace's looks the same), is archived, or has no such version. 404. */
+  "IMPLEMENTER_PROFILE_NOT_FOUND",
   /** The model is not one the claim would run (`reason` says why). 422. */
   "IMPLEMENTER_MODEL_NOT_ALLOWED",
   /** The cost limit is above the operator's maximum per turn; the answer carries `maximumCents`. 422. */
@@ -70,6 +72,7 @@ export const IMPLEMENTER_ERROR_STATUS: Record<
   IMPLEMENTER_REQUEST_REUSED: 409,
   IMPLEMENTER_ENVIRONMENT_NOT_FOUND: 404,
   IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED: 422,
+  IMPLEMENTER_PROFILE_NOT_FOUND: 404,
   IMPLEMENTER_MODEL_NOT_ALLOWED: 422,
   EXCEEDS_OPERATOR_MAXIMUM: 422,
   IMPLEMENTER_GITHUB_UNAVAILABLE: 503,
@@ -85,8 +88,15 @@ export type ImplementerIssue = {
     | "model"
     | "costLimitCents"
     | "environmentId"
+    | "profile"
     | "clientRequestId";
-  code: "required" | "invalid" | "too_long" | BranchNameIssue;
+  /** `not_with_profile`: a model or a cost limit next to a profile, whose version brings both. */
+  code:
+    | "required"
+    | "invalid"
+    | "too_long"
+    | "not_with_profile"
+    | BranchNameIssue;
 };
 
 /** Why a model is not allowed. The picker never lists such a model; a submit that names one is refused with the reason. */

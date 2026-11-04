@@ -6,6 +6,7 @@
 import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import { BRANCH_NAME, CLIENT_REQUEST_ID } from "../jobs/job-input.ts";
 import { REVIEW_SETTING_LIMITS } from "../review-settings/settings.ts";
+import { parseProfileRef } from "../workflows/resolver.ts";
 import { checkBranchName } from "./branch-name.ts";
 import type { ImplementerIssue } from "./errors.ts";
 
@@ -19,11 +20,14 @@ export type StartInput = {
   baseBranch: string;
   branch: string;
   instruction: string;
-  model: ModelChoice;
-  /** The customer's limit for the turn in whole US cents; null when none was asked for. */
+  /** The model; null when a profile is named (#843): the profile's version brings the model and the cost limit. */
+  model: ModelChoice | null;
+  /** The customer's limit for the turn in whole US cents; null when none was asked for (or a profile brings it). */
   costLimitCents: number | null;
   /** The environment of the workspace to start the task with (#818); null for none: the standard. */
   environmentId: string | null;
+  /** The profile of the workspace to run the task with (#843): its name and a version, or null for the newest; null for none. */
+  profile: { name: string; version: number | null } | null;
   clientRequestId: string;
 };
 
@@ -119,13 +123,32 @@ export function validateStartInput(body: unknown): StartInputCheck {
   else if (CONTROL.test(instruction) || LONE_SURROGATE.test(instruction))
     refuse("instruction", "invalid");
 
+  // A profile (#843) brings the model and the cost limit of its version: the body then names neither.
+  let profile: StartInput["profile"] = null;
+  const profileRef = fields.profile ?? null;
+  if (profileRef !== null) {
+    if (typeof profileRef !== "string") refuse("profile", "invalid");
+    else if (profileRef === "") refuse("profile", "required");
+    else {
+      const parsedRef = parseProfileRef(profileRef);
+      if (parsedRef === undefined) refuse("profile", "invalid");
+      else
+        profile = { name: parsedRef.name, version: parsedRef.version ?? null };
+    }
+  }
+
   const model = readModel(fields.model);
-  if (fields.model === undefined || fields.model === null)
+  if (profileRef !== null) {
+    if (fields.model !== undefined && fields.model !== null)
+      refuse("model", "not_with_profile");
+  } else if (fields.model === undefined || fields.model === null)
     refuse("model", "required");
   else if (model === undefined) refuse("model", "invalid");
 
   const cost = fields.costLimitCents ?? null;
-  if (
+  if (profileRef !== null && cost !== null)
+    refuse("costLimitCents", "not_with_profile");
+  else if (
     cost !== null &&
     (typeof cost !== "number" ||
       !Number.isSafeInteger(cost) ||
@@ -162,9 +185,10 @@ export function validateStartInput(body: unknown): StartInputCheck {
       baseBranch: baseBranch as string,
       branch: branch as string,
       instruction: instruction as string,
-      model: model as ModelChoice,
+      model: profileRef === null ? (model as ModelChoice) : null,
       costLimitCents: cost as number | null,
       environmentId: environmentId as string | null,
+      profile,
       clientRequestId: requestId as string,
     },
   };

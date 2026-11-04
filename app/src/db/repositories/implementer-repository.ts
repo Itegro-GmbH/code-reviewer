@@ -60,6 +60,21 @@ export type TurnEnvironment = {
   network?: NetworkRule;
 };
 
+/**
+ * The profile version a turn started with, copied when the turn was written (#843). The id and the version say which one it was;
+ * nothing points at it. The model and the cost limit of the version are the turn's own `modelChoice` and `costLimitCents`. A turn
+ * without one runs with the platform's own defaults, as every turn did before profiles.
+ */
+export type TurnProfile = {
+  id: string;
+  name: string;
+  version: number;
+  /** The system-level text the agent is given; empty for none. */
+  instructions: string;
+  /** Whether Control pushes the branches the agent made when the turn ends. */
+  canPush: boolean;
+};
+
 export type StoredImplementerTurn = {
   id: string;
   sessionId: string;
@@ -76,6 +91,8 @@ export type StoredImplementerTurn = {
   createdAt: string;
   /** The environment the person chose; null for a task without one (the standard). */
   environment: TurnEnvironment | null;
+  /** The profile version the task ran with; null for a task without one (the platform's defaults). */
+  profile: TurnProfile | null;
 };
 
 /** What is known when a task is accepted. */
@@ -90,6 +107,8 @@ export type NewImplementerTask = {
   createdBy: string;
   /** A copy of the environment chosen at submit (#818); left out or null for none. */
   environment?: TurnEnvironment | null;
+  /** A copy of the profile version chosen at submit (#843); left out or null for none. */
+  profile?: TurnProfile | null;
 };
 
 /**
@@ -201,6 +220,20 @@ function turnFrom(
               row.environment_network_mode,
               row.environment_network_hosts,
             ),
+          },
+    profile:
+      row.profile_id === null ||
+      row.profile_name === null ||
+      row.profile_version === null ||
+      row.profile_instructions === null ||
+      row.profile_can_push === null
+        ? null
+        : {
+            id: row.profile_id,
+            name: row.profile_name,
+            version: row.profile_version,
+            instructions: row.profile_instructions,
+            canPush: row.profile_can_push,
           },
   };
 }
@@ -330,6 +363,11 @@ export function createImplementerRepository(
               task.environment === null || task.environment === undefined
                 ? null
                 : hostsToText((task.environment.network ?? NETWORK_OFF).hosts),
+            profile_id: task.profile?.id ?? null,
+            profile_name: task.profile?.name ?? null,
+            profile_version: task.profile?.version ?? null,
+            profile_instructions: task.profile?.instructions ?? null,
+            profile_can_push: task.profile?.canPush ?? null,
           })
           .returningAll()
           .executeTakeFirstOrThrow();
