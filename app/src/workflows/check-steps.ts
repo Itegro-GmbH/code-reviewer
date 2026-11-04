@@ -662,12 +662,19 @@ function checkAction(
       field.target === undefined ? undefined : { input, roots: field.target };
     checkInput(node[input], field.type, at, c, reachOf(env, at, state), target);
   }
-  if (spec.atLeastOneOf?.every((input) => node[input] === undefined))
+  // A list of no entries holds nothing: `add: [], remove: []` is as good as neither.
+  if (
+    spec.atLeastOneOf?.every(
+      (input) =>
+        node[input] === undefined ||
+        (Array.isArray(node[input]) && node[input].length === 0),
+    )
+  )
     c.report(
       issue(
         path,
         "missing_field",
-        `${spec.name} needs at least one of ${listNames(spec.atLeastOneOf)}.`,
+        `${spec.name} needs at least one of ${listNames(spec.atLeastOneOf)}, with an entry in it.`,
         spec.atLeastOneOf,
       ),
     );

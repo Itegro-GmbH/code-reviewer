@@ -8,6 +8,8 @@
 export type ValueType =
   | { kind: "string" }
   | { kind: "number" }
+  /** A whole number: what a number that names something (an issue) must be, so the validator can guarantee it. */
+  | { kind: "integer" }
   | { kind: "boolean" }
   | { kind: "enum"; values: readonly string[] }
   | { kind: "list"; items: ValueType }
@@ -21,6 +23,7 @@ export type ObjectType = Extract<ValueType, { kind: "object" }>;
 
 export const STRING: ValueType = { kind: "string" };
 export const NUMBER: ValueType = { kind: "number" };
+export const INTEGER: ValueType = { kind: "integer" };
 export const BOOLEAN: ValueType = { kind: "boolean" };
 export const UNKNOWN: ValueType = { kind: "unknown" };
 
@@ -53,6 +56,7 @@ export function describeType(type: ValueType): string {
   switch (type.kind) {
     case "string":
     case "number":
+    case "integer":
     case "boolean":
       return type.kind;
     case "enum":
@@ -98,6 +102,8 @@ export function isAssignable(
         ? actual.kind === "string" || actual.kind === "enum"
         : actual.kind !== "object";
     case "number":
+      return actual.kind === "number" || actual.kind === "integer";
+    case "integer":
     case "boolean":
       return actual.kind === expected.kind;
     case "enum":
@@ -133,6 +139,8 @@ export function valueFits(value: unknown, type: ValueType): boolean {
       return typeof value === "string";
     case "number":
       return typeof value === "number" && Number.isFinite(value);
+    case "integer":
+      return typeof value === "number" && Number.isSafeInteger(value);
     case "boolean":
       return typeof value === "boolean";
     case "enum":

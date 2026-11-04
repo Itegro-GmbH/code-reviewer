@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import { BUILT_IN_CONNECTORS } from "../../src/workflows/connectors.ts";
 import { isFormIssue } from "../../src/workflows/issues.ts";
 import {
+  ISSUE_NUMBER_MAX,
   LOOP_ROUNDS_MAX,
   NAME_MAX_LENGTH,
   RESULT_ENUM_VALUES_MAX,
@@ -122,6 +123,11 @@ describe("the workflow contract", () => {
     const enumDef = ((resultDefs.StringSchema as Json).properties as Json)
       .enum as Json;
     expect(enumDef.maxItems).toBe(RESULT_ENUM_VALUES_MAX);
+    expect((defs.IssueInput as Json).oneOf).toContainEqual({
+      type: "integer",
+      minimum: 1,
+      maximum: ISSUE_NUMBER_MAX,
+    });
   });
 
   // #833-M1-T127
@@ -798,7 +804,7 @@ function nestedDocument(): Json {
             connector: "github.issue.labels",
             issue: 3,
             add: ["a"],
-            remove: "{{trigger.issue.labels}}",
+            remove: ["agent working"],
           },
         ],
       },

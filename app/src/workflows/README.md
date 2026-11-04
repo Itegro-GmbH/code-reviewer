@@ -44,14 +44,17 @@ deleted: hidden from the list, no new version, free name, versions kept.
   certain to exist afterwards. After a **loop**: the body's own steps with the last round's values (a body runs at least once and a round runs to its
   end; the budget is checked between rounds). `previous.*`: direct steps of the innermost loop body only, from round two.
 - **A loop's own result** is `exit` and `rounds`; the plan's `{{fix.findings}}` is `{{review.findings}}` in version 1.
-- **`environment` is a name** (names are unique in a workspace, case ignored), or a reference to a text. `trigger.repo.defaultEnvironment` of the plan's
-  example does not exist: nothing maps a repository to an environment yet.
+- **`environment` is a name**, a literal only (names are unique in a workspace, case ignored): a reference is `target_from_untrusted_value`.
+  `trigger.repo.defaultEnvironment` of the plan's example does not exist: nothing maps a repository to an environment yet.
 - **One repository per run.** The run's repository is `trigger.repo` (issue trigger) or the input `repo` a manual trigger must declare; no node names another one.
   More than one repository per run is a later, additive extension.
-- **Targets** (`issue`, `head`, `base`, the labels, the `environment`) take a literal or one whole reference to the trigger or to an agent step's `branch`, never a
-  value an agent reported (`check-values.ts`, `connectors.ts`): an agent's result is data, not a command.
+- **Targets** (`issue`, `head`, `base`, the labels, the `environment`) take a literal or one whole reference to a value the platform or the caller vouches for,
+  and which one depends on the input (`TargetRoot` in `connectors.ts`: `issue`: `trigger.issue[.number]` or a manual `input.*`; labels: a manual `input.*`; `base`:
+  `trigger.repo.defaultBranch` or a manual `input.*`; `head`: an agent step's `branch`). Never a value an agent reported, and never the title, body or labels of the
+  issue, which whoever opened it wrote (`check-values.ts`): data, not a command. An issue number is a safe integer from 1 to 2^31-1, as a literal and as a default; a
+  manual input used as one must be `integer`, and the engine checks it again at run time.
 - **`json.ts`** holds the one `isRecord` and `jsonTypeName`, and the length of a text in characters (code points), which is how the JSON Schema counts. A message
-  repeats at most 64 characters of what the user wrote (`shown` in `issues.ts`).
+  repeats at most 64 characters of what the user wrote (`shown` in `issues.ts`), and so do a path and a name in `available`.
 - **The operator's maximum budget** is `BUDGET_OPERATOR_MAX_USD` (100) in `limits.ts`, passed into the validator; there is no operator setting for it yet.
 - **Saving**: the name of the workflow is the `name` of the document, and every save is a new version, an identical document too. The stored text is the JSON that
   was validated. `who saved a version` is kept as text, without a foreign key (history survives the merge that retires an imported operator).

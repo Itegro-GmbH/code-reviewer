@@ -187,7 +187,7 @@ describe("a target input", () => {
   });
 
   // #833-M1-T287
-  it("takes a literal or a field of the trigger as the base, and refuses the branch of an agent", () => {
+  it("takes a literal, the default branch of the repository or an input of the caller as the base, and refuses the rest", () => {
     expect(codes(pullRequest({ base: "develop" }))).toEqual([]);
     expect(
       codes(pullRequest({ base: "{{trigger.repo.defaultBranch}}" })),
@@ -196,6 +196,9 @@ describe("a target input", () => {
       "{{implement.branch}}",
       "{{implement.summary}}",
       "release/{{trigger.repo.defaultBranch}}",
+      "{{trigger.issue.title}}",
+      "{{trigger.issue.body}}",
+      "{{trigger.repo.name}}",
     ])
       expect(codes(pullRequest({ base }))).toEqual([
         [`${PR}/base`, "target_from_untrusted_value"],
@@ -214,7 +217,12 @@ describe("a target input", () => {
 
   // #833-M1-T289
   it("takes the issue as a positive whole number, the issue of the trigger or its number", () => {
-    for (const issue of [7, "{{trigger.issue}}", "{{trigger.issue.number}}"])
+    for (const issue of [
+      7,
+      2147483647,
+      "{{trigger.issue}}",
+      "{{trigger.issue.number}}",
+    ])
       expect(codes(labels({ issue }))).toEqual([]);
   });
 
@@ -224,6 +232,9 @@ describe("a target input", () => {
     [-4.5, "invalid_value"],
     [1.5, "invalid_value"],
     [-1, "invalid_value"],
+    [2147483648, "invalid_value"],
+    [9007199254740993, "invalid_value"],
+    [1e21, "invalid_value"],
     ["7", "wrong_type"],
     [true, "wrong_type"],
     [[7], "wrong_type"],
@@ -237,6 +248,9 @@ describe("a target input", () => {
   it.each([
     ["a result of an agent", "{{implement.summary}}"],
     ["an action output", "{{start.labels}}"],
+    ["the title of the issue", "{{trigger.issue.title}}"],
+    ["the labels of the issue", "{{trigger.issue.labels}}"],
+    ["the body of the issue", "{{trigger.issue.body}}"],
   ])("refuses as the issue: %s", (_name, issue) => {
     expect(codes(labels({ issue }))).toEqual([
       [`${LABELS}/issue`, "target_from_untrusted_value"],
@@ -244,25 +258,67 @@ describe("a target input", () => {
   });
 
   // #833-M1-T292
-  it("refuses an issue that is not a number or the issue object, however it is referred to", () => {
+  it("refuses an issue that is text around a reference", () => {
     expect(codes(labels({ issue: "#{{trigger.issue.number}}" }))).toEqual([
       [`${LABELS}/issue`, "wrong_type"],
-    ]);
-    expect(codes(labels({ issue: "{{trigger.issue.title}}" }))).toEqual([
-      [`${LABELS}/issue`, "reference_type_mismatch"],
-    ]);
-    expect(codes(labels({ issue: "{{trigger.issue.labels}}" }))).toEqual([
-      [`${LABELS}/issue`, "reference_type_mismatch"],
     ]);
   });
 
   // #833-M1-T293
-  it("takes labels as a list of literals and references to the trigger, or one reference to a list of the trigger", () => {
-    expect(codes(labels({ add: ["bug", "{{trigger.issue.title}}"] }))).toEqual(
+  it("takes labels as a list of literals, or one reference to a list of the caller of a manual trigger", () => {
+    expect(codes(labels({ add: ["bug", "agent working"] }))).toEqual([]);
+    expect(codes(labels({ remove: ["x"] }))).toEqual([]);
+    const fields = {
+      name: { type: "string" },
+      names: { type: "array", items: { type: "string" } },
+    };
+    const label = (extra: Json): Json =>
+      manual(fields, { connector: "github.issue.labels", issue: 1, ...extra }, [
+        "name",
+        "names",
+      ]);
+    expect(codes(label({ add: ["{{trigger.input.name}}", "bug"] }))).toEqual(
       [],
     );
-    expect(codes(labels({ add: "{{trigger.issue.labels}}" }))).toEqual([]);
-    expect(codes(labels({ remove: ["x"] }))).toEqual([]);
+    expect(codes(label({ remove: "{{trigger.input.names}}" }))).toEqual([]);
+  });
+
+  // #833-M1-T293a
+  it.each([
+    ["add", ["{{trigger.issue.title}}"], `${LABELS}/add/0`],
+    ["remove", ["{{trigger.issue.title}}"], `${LABELS}/remove/0`],
+    ["add", ["{{trigger.issue.body}}"], `${LABELS}/add/0`],
+    ["add", "{{trigger.issue.labels}}", `${LABELS}/add`],
+    ["remove", "{{trigger.issue.labels}}", `${LABELS}/remove`],
+    ["add", ["{{trigger.repo.name}}"], `${LABELS}/add/0`],
+    ["add", ["{{implement.branch}}"], `${LABELS}/add/0`],
+  ])(
+    "refuses a label from the free text of whoever opened the issue, or from the issue at all: %s %j",
+    (input, value, path) => {
+      expect(codes(labels({ [input]: value }))).toEqual([
+        [path, "target_from_untrusted_value"],
+      ]);
+    },
+  );
+
+  // #833-M1-T293b
+  it("names the roots an input takes in the message", () => {
+    const [labelsMessage] = messages(
+      labels({ add: ["{{trigger.issue.title}}"] }),
+    );
+    expect(labelsMessage).toMatch(/'add'/);
+    expect(labelsMessage).toMatch(/trigger\.input/);
+    expect(labelsMessage).not.toMatch(/trigger\.issue\.\*/);
+    const [issueMessage] = messages(
+      labels({ issue: "{{trigger.issue.title}}" }),
+    );
+    expect(issueMessage).toMatch(/trigger\.issue\.number/);
+    expect(issueMessage).toMatch(/trigger\.input/);
+    const [baseMessage] = messages(
+      pullRequest({ base: "{{trigger.issue.body}}" }),
+    );
+    expect(baseMessage).toMatch(/trigger\.repo\.defaultBranch/);
+    expect(baseMessage).toMatch(/trigger\.input/);
   });
 
   // #833-M1-T294
@@ -283,29 +339,62 @@ describe("a target input", () => {
       [`${LABELS}/add/0`, "wrong_type"],
     ]);
     expect(codes(labels({ add: ["{{trigger.issue.number}}"] }))).toEqual([
-      [`${LABELS}/add/0`, "reference_type_mismatch"],
-    ]);
-    expect(codes(labels({ add: ["{{trigger.issue.labels}}"] }))).toEqual([
-      [`${LABELS}/add/0`, "reference_type_mismatch"],
-    ]);
-    expect(codes(labels({ add: "{{trigger.issue.number}}" }))).toEqual([
-      [`${LABELS}/add`, "reference_type_mismatch"],
+      [`${LABELS}/add/0`, "target_from_untrusted_value"],
     ]);
     expect(codes(pullRequest({ base: "{{trigger.issue.number}}" }))).toEqual([
-      [`${PR}/base`, "reference_type_mismatch"],
+      [`${PR}/base`, "target_from_untrusted_value"],
     ]);
     expect(codes(pullRequest({ base: "{{trigger.issue.labels}}" }))).toEqual([
-      [`${PR}/base`, "reference_type_mismatch"],
+      [`${PR}/base`, "target_from_untrusted_value"],
     ]);
     expect(codes(pullRequest({ head: 7 }))).toEqual([
       [`${PR}/head`, "wrong_type"],
     ]);
+    const fields = {
+      count: { type: "integer" },
+      names: { type: "array", items: { type: "string" } },
+    };
+    expect(
+      codes(
+        manual(
+          fields,
+          {
+            connector: "github.issue.labels",
+            issue: 1,
+            add: ["{{trigger.input.count}}"],
+          },
+          ["count", "names"],
+        ),
+      ),
+    ).toEqual([["/steps/1/add/0", "reference_type_mismatch"]]);
+    expect(
+      codes(
+        manual(
+          fields,
+          {
+            connector: "github.issue.labels",
+            issue: 1,
+            add: ["{{trigger.input.names}}"],
+          },
+          ["count", "names"],
+        ),
+      ),
+    ).toEqual([["/steps/1/add/0", "reference_type_mismatch"]]);
+  });
+
+  // #833-M1-T295a
+  it("refuses a labels action that adds and removes nothing", () => {
+    expect(codes(labels({ add: [], remove: [] }))).toEqual([
+      [LABELS, "missing_field"],
+    ]);
+    expect(codes(labels({ add: [] }))).toEqual([[LABELS, "missing_field"]]);
+    expect(codes(labels({ add: [], remove: ["x"] }))).toEqual([]);
   });
 
   // #833-M1-T296
   it("takes what the caller of a manual trigger hands in, by its type", () => {
     const fields = {
-      issueNo: { type: "number" },
+      issueNo: { type: "integer" },
       branchName: { type: "string" },
       names: { type: "array", items: { type: "string" } },
     };
@@ -352,6 +441,56 @@ describe("a target input", () => {
         ),
       ),
     ).toEqual([]);
+  });
+
+  // #833-M1-T296a
+  it("needs an input of type integer for the issue: a number is not enough, because the validator cannot guarantee a whole one", () => {
+    const issueFrom = (type: string): Json =>
+      manual({ n: { type } }, { issue: "{{trigger.input.n}}", body: "x" }, [
+        "n",
+      ]);
+
+    expect(codes(issueFrom("integer"))).toEqual([]);
+    expect(codes(issueFrom("number"))).toEqual([
+      ["/steps/1/issue", "reference_type_mismatch"],
+    ]);
+    expect(messages(issueFrom("number"))[0]).toMatch(/integer/);
+  });
+
+  // #833-M1-T296b
+  it.each([
+    ["{{trigger.issue.number | default -3}}", "invalid_value"],
+    ["{{trigger.issue.number | default 1.5}}", "default_type_mismatch"],
+    ["{{trigger.issue.number | default 0}}", "invalid_value"],
+    ["{{trigger.issue.number | default 2147483648}}", "invalid_value"],
+    ['{{trigger.issue.number | default "7"}}', "default_type_mismatch"],
+    ["{{trigger.issue.number | default 7}}", undefined],
+  ])(
+    "holds the default of a reference in %s to the rule of a literal",
+    (issue, code) => {
+      expect(codes(labels({ issue }))).toEqual(
+        code === undefined ? [] : [[`${LABELS}/issue`, code]],
+      );
+    },
+  );
+
+  // #833-M1-T296c
+  it("holds the default of an input of the caller to the rule of a literal", () => {
+    const issueFrom = (fallback: string): Json =>
+      manual(
+        { n: { type: "integer" } },
+        { issue: `{{trigger.input.n | default ${fallback}}}`, body: "x" },
+      );
+
+    expect(codes(issueFrom("5"))).toEqual([]);
+    for (const [fallback, code] of [
+      ["0", "invalid_value"],
+      ["-1", "invalid_value"],
+      ["2147483648", "invalid_value"],
+      ["2.5", "default_type_mismatch"],
+      ["1e21", "default_type_mismatch"],
+    ] as const)
+      expect(codes(issueFrom(fallback))).toEqual([["/steps/1/issue", code]]);
   });
 
   // #833-M1-T297

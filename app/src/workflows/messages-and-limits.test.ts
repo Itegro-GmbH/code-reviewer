@@ -333,12 +333,26 @@ describe("a text where something other than a text is wanted", () => {
 
   // #833-M1-T339
   it("takes a reference with a default that holds braces", () => {
-    expect(
-      codes(labels({ add: '{{trigger.issue.labels | default {"a":{}}}}' })),
-    ).toEqual([["/steps/3/add", "default_type_mismatch"]]);
-    expect(
-      codes(labels({ add: "{{trigger.issue.labels | default []}}" })),
-    ).toEqual([]);
+    const names = (add: string): Json =>
+      change(tiny(), (d) => {
+        const input = (d.trigger as Json).input as Json;
+        (input.properties as Json).names = {
+          type: "array",
+          items: { type: "string" },
+        };
+        steps(d).push({
+          id: "tag",
+          kind: "action",
+          connector: "github.issue.labels",
+          issue: 1,
+          add,
+        });
+      });
+
+    expect(codes(names('{{trigger.input.names | default {"a":{}}}}'))).toEqual([
+      ["/steps/1/add", "default_type_mismatch"],
+    ]);
+    expect(codes(names("{{trigger.input.names | default []}}"))).toEqual([]);
   });
 });
 

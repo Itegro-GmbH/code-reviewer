@@ -4,7 +4,7 @@
 import type { ResultSchema } from "./result-schema.ts";
 import { objectTypeOf } from "./result-schema.ts";
 import {
-  NUMBER,
+  INTEGER,
   STRING,
   listOf,
   objectOf,
@@ -21,7 +21,7 @@ export const TRIGGER_FIELDS: Record<TriggerKind, readonly string[]> = {
 };
 
 const ISSUE = objectOf({
-  number: NUMBER,
+  number: INTEGER,
   title: STRING,
   body: STRING,
   url: STRING,

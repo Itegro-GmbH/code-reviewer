@@ -79,7 +79,7 @@ holds one to the other.
 | `kind` | Fields | What the steps can read |
 | --- | --- | --- |
 | `manual` | `input` (needed): a [result schema](#result-schemas) that declares what the caller hands in. It must declare **`repo`**, a required text (`owner/name`): the repository the run works on (`repo_required`) | `{{trigger.input.<field>}}`, so `{{trigger.input.repo}}` |
-| `github.issueLabeled` | `label` (needed, not only spaces): the label that starts the workflow | `{{trigger.issue.number}}`, `.title`, `.body`, `.url`, `.labels` (a list), and `{{trigger.repo.fullName}}`, `.owner`, `.name`, `.defaultBranch` |
+| `github.issueLabeled` | `label` (needed, not only spaces): the label that starts the workflow | `{{trigger.issue.number}}` (an integer), `.title`, `.body`, `.url`, `.labels` (a list; title, body and labels are free text from whoever opened the issue: read in texts, never a [target](#one-repository-per-run-and-targets)), and `{{trigger.repo.fullName}}`, `.owner`, `.name`, `.defaultBranch` |
 
 Other triggers (a schedule, Jira) come later. Who may set the label is decided by GitHub, not by the workflow.
 
@@ -90,21 +90,31 @@ no action names a repository (a `repo` field is `unknown_field`); they all work 
 extension.
 
 The inputs that decide **what the workflow acts on** are *targets*: `issue`, `head`, `base`, the labels `add` and `remove` of an action, and
-the `environment` of an agent step. An agent's result is data, never a command, so a target takes only
+the `environment` of an agent step. An agent's result is data, never a command, and so is what whoever opened the issue wrote (its title, body
+and labels): anyone who can open an issue could steer a run through them. So a target takes only
 
 - a **literal** (`"develop"`, `7`), or
-- **exactly one reference**, nothing around it, that starts with `trigger.` (the event: `{{trigger.issue}}`, `{{trigger.repo.defaultBranch}}`,
-  `{{trigger.input.issueNo}}` of a manual trigger), or is the **branch of an agent step** (`{{implement.branch}}`, a fact the platform made).
+- **exactly one reference**, nothing around it, to one of the few values the platform or the caller vouches for. Which ones depends on the input:
 
-`head` takes a literal or the branch of an agent step that may push, and nothing from the trigger. `base` takes a literal or a reference to the
-trigger, not a branch. `environment` takes a literal only: the name of an environment of the workspace, no reference at all. Everything else
-(a result field of an agent, a field of an action or a loop, `previous.…`, text around a reference) is refused with
-`target_from_untrusted_value`; the message names what the input takes. Free-text inputs (`title`, `body`, `instruction`) take any reference, an
-agent's result included: a list becomes lines of text there.
+| Input | A literal | A reference to |
+| --- | --- | --- |
+| `issue` | a positive whole number, 1 to 2147483647 | `{{trigger.issue}}` or `{{trigger.issue.number}}` (the issue that started the run), or an input of a manual trigger declared `integer` (`{{trigger.input.issueNo}}`) |
+| `add`, `remove` | label names | an input of a manual trigger: `{{trigger.input.label}}` as an entry, or `{{trigger.input.labels}}` as the whole list |
+| `base` | a branch name | `{{trigger.repo.defaultBranch}}`, or an input of a manual trigger (`{{trigger.input.base}}`) |
+| `head` | a branch name | `{{<agent step>.branch}}`, the branch of an agent step that may push (a fact the platform made) |
+| `environment` | the name of an environment | nothing: a literal only |
+
+Everything else (a result field of an agent, a field of an action or a loop, `previous.…`, `trigger.issue.title`, `.body` or `.labels`, text
+around a reference) is refused with `target_from_untrusted_value`; the message names what the input takes. Free-text inputs (`title`, `body`,
+`instruction`) take any reference, an agent's result and the title of the issue included: a list becomes lines of text there. A manual
+trigger's input is what the caller of the run (a person or an AI with the right to run workflows) hands in, so it is taken like a literal.
 
 Targets are also **identifiers**: a reference that stands for a branch, a label or a name must be a text or a choice of names, never a number,
-true/false or a list turned into text (`reference_type_mismatch`), and an `issue` is a positive whole number or a reference to the issue of
-the trigger (`{{trigger.issue}}`, `{{trigger.issue.number}}`) or to a number the caller hands in.
+true/false or a list turned into text (`reference_type_mismatch`). An `issue` is a whole number, so a manual input used as one must be declared
+`integer` (a `number` may have a fraction, which the validator cannot rule out). The **default** of a reference (`{{trigger.input.issueNo | default 7}}`)
+is held to the rule of a literal: `default 0`, `default -3` or `default 2147483648` is `invalid_value`, `default 1.5` is `default_type_mismatch`.
+The bounds of an input the caller hands in are not known to the validator (an `integer` may be `0` or `-5`), so **the engine checks the number
+again when it runs**.
 
 ### The agent step (`"kind": "agent"`)
 
@@ -134,9 +144,9 @@ command; consequences (a comment, a pull request) happen only here. The inputs s
 
 | `connector` | Inputs (`*` needed) | Yields |
 | --- | --- | --- |
-| `github.pullRequest.open` | `head`\* (a branch: a literal or `{{<agent>.branch}}`), `title`\*, `base` (a branch: a literal or a reference to the trigger; the default branch if left out), `body`, `draft` (true/false) | `number`, `url` |
-| `github.issue.comment` | `issue`\* (a positive whole number, or a reference to the issue of the trigger), `body`\* | `url` |
-| `github.issue.labels` | `issue`\*, `add` (a list of labels), `remove` (a list), at least one of `add` and `remove` | `labels` (the labels the issue has now) |
+| `github.pullRequest.open` | `head`\* (a branch: a literal or `{{<agent>.branch}}`), `title`\*, `base` (a branch: a literal, `{{trigger.repo.defaultBranch}}` or a manual input; the default branch if left out), `body`, `draft` (true/false) | `number`, `url` |
+| `github.issue.comment` | `issue`\* (a positive whole number, `{{trigger.issue}}` or `{{trigger.issue.number}}`, or a manual input declared `integer`), `body`\* | `url` |
+| `github.issue.labels` | `issue`\*, `add` (a list of labels), `remove` (a list), at least one **entry** in `add` and `remove` together (`add: [], remove: []` is `missing_field`) | `labels` (the labels the issue has now) |
 
 The action works on the repository of the run. `head`, `base`, `issue`, `add` and `remove` are [targets](#one-repository-per-run-and-targets). With
 the trigger `github.issueLabeled` an action may **not add the label that starts the workflow** (case ignored): the workflow would start itself
@@ -190,7 +200,7 @@ The scope follows the structure of the document:
 
 ### Types
 
-Every value has a type from the result schema subset (text, number, true/false, a choice of names, list, object). A reference is held to what
+Every value has a type from the result schema subset (text, number, whole number (`integer`, also a number), true/false, a choice of names, list, object). A reference is held to what
 its place wants: a number where a number is wanted, a list of texts where `add` wants one. A text is accepted anywhere a text is wanted
 (any scalar and any list has a text form), an object only where an object with at least the needed fields is wanted. A mismatch is
 `reference_type_mismatch`; a literal of the wrong JSON type is `wrong_type`.
@@ -212,8 +222,8 @@ be gives `condition_value_not_in_enum` (with the names it can be). Conditions ne
 ## Result schemas
 
 The `result` of an agent step (and the `input` of a manual trigger) is a small subset of JSON Schema, [`contracts/result-schema.v1.json`](../contracts/result-schema.v1.json):
-the root is an object; a field is a `string` (optionally with `enum`, a list of the allowed names), `number`, `boolean`, `array` (with
-`items`) or `object` (with `properties`). `required` lists the fields that must be there; objects are closed; `description` helps the agent.
+the root is an object; a field is a `string` (optionally with `enum`, a list of the allowed names), `number`, `integer`, `boolean`, `array` (with
+`items`) or `object` (with `properties`); `integer` is a whole number, within the range a computer holds exactly (±9007199254740991), and the type of a number that names something (an issue). `required` lists the fields that must be there; objects are closed; `description` helps the agent.
 
 ```json
 {
@@ -456,7 +466,7 @@ Beyond the form:
 | `result_field_reserved` | A result field named like a platform fact (`costUsd`, `branch`, `commits`). | Rename it. |
 | `required_field_unknown` | `required` of a result schema names a field that is not in `properties`. | Fix the name or add the property. |
 | `repo_required` | A manual trigger without `input` that declares `repo` as a required text: the run has no repository. | Declare `repo` in `properties` and `required` of the trigger's `input`. |
-| `target_from_untrusted_value` | An input that decides a target (`issue`, `head`, `base`, `add`, `remove`, `environment`) holds more than a literal or one reference to the trigger or to the branch of an agent step. | Use a literal, or exactly one reference the message names. |
+| `target_from_untrusted_value` | An input that decides a target (`issue`, `head`, `base`, `add`, `remove`, `environment`) holds more than a literal or one reference of the kind the input takes (see the table under "targets": a field of the trigger such as the title or the body of the issue is not one). | Use a literal, or exactly one reference the message names. |
 | `label_retriggers_workflow` | An action adds the label that starts the workflow. | Remove the label instead, or add another one. |
 | `too_many_steps` | More than 50 steps. | Split the workflow. |
 | `nesting_too_deep` | `if`/`loop` too deep, a loop in a loop in a loop, conditions or a result schema nested too deep. | Flatten it. |

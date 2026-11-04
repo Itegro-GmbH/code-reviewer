@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Itegro-GmbH/code-reviewer/contracts/result-schema.v1.json",
   "title": "Code Reviewer result schema, version 1",
-  "description": "The small subset of JSON Schema in which an agent step of a workflow says what its result looks like (#833, agent workflows, app/src/workflows/result-schema.ts). A result is an object whose fields are strings (optionally one of a list of names), numbers, booleans, lists and objects. Required fields and length caps are the only constraints; every object is closed. The agent's finish tool (a later milestone) is made from the same schema and checks what the agent hands in against it. Limits the schema cannot state (levels of nesting: 4, fields in all: 100, a `required` name that is not a property) are the validator's, and are listed in docs/workflows.md. A string without `maxLength` is held to 10000 characters, a list without `maxItems` to 100 entries.",
+  "description": "The small subset of JSON Schema in which an agent step of a workflow says what its result looks like (#833, agent workflows, app/src/workflows/result-schema.ts). A result is an object whose fields are strings (optionally one of a list of names), numbers, whole numbers (`integer`), booleans, lists and objects. Required fields and length caps are the only constraints; every object is closed. The agent's finish tool (a later milestone) is made from the same schema and checks what the agent hands in against it. Limits the schema cannot state (levels of nesting: 4, fields in all: 100, a `required` name that is not a property) are the validator's, and are listed in docs/workflows.md. A string without `maxLength` is held to 10000 characters, a list without `maxItems` to 100 entries.",
   "version": 1,
   "$defs": {
     "ResultSchema": {
@@ -17,6 +17,9 @@
         },
         {
           "$ref": "#/$defs/NumberSchema"
+        },
+        {
+          "$ref": "#/$defs/IntegerSchema"
         },
         {
           "$ref": "#/$defs/BooleanSchema"
@@ -69,6 +72,20 @@
       "properties": {
         "type": {
           "const": "number"
+        },
+        "description": {
+          "$ref": "#/$defs/Description"
+        }
+      }
+    },
+    "IntegerSchema": {
+      "description": "A whole number. What names something (an issue) is one: the validator then knows it is whole, and a result is held to a number a computer holds exactly (an integer within the safe range).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "const": "integer"
         },
         "description": {
           "$ref": "#/$defs/Description"

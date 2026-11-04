@@ -30,6 +30,7 @@ import {
 import { isRecord, jsonTypeName, textLength } from "./json.ts";
 import {
   BOOLEAN,
+  INTEGER,
   NUMBER,
   STRING,
   listOf,
@@ -45,6 +46,7 @@ export type StringNode = {
   enum?: string[];
 };
 export type NumberNode = { type: "number"; description?: string };
+export type IntegerNode = { type: "integer"; description?: string };
 export type BooleanNode = { type: "boolean"; description?: string };
 export type ArrayNode = {
   type: "array";
@@ -60,14 +62,22 @@ export type ObjectNode = {
   additionalProperties?: false;
 };
 export type SchemaNode =
-  StringNode | NumberNode | BooleanNode | ArrayNode | ObjectNode;
+  StringNode | NumberNode | IntegerNode | BooleanNode | ArrayNode | ObjectNode;
 /** The root of a result schema is always an object. */
 export type ResultSchema = ObjectNode;
 
-const NODE_TYPES = ["string", "number", "boolean", "array", "object"] as const;
+const NODE_TYPES = [
+  "string",
+  "number",
+  "integer",
+  "boolean",
+  "array",
+  "object",
+] as const;
 const KEYS: Record<(typeof NODE_TYPES)[number], readonly string[]> = {
   string: ["type", "description", "maxLength", "enum"],
   number: ["type", "description"],
+  integer: ["type", "description"],
   boolean: ["type", "description"],
   array: ["type", "description", "items", "maxItems"],
   object: [
@@ -452,6 +462,8 @@ function typeOfNode(node: SchemaNode): ValueType {
         : { kind: "enum", values: node.enum };
     case "number":
       return NUMBER;
+    case "integer":
+      return INTEGER;
     case "boolean":
       return BOOLEAN;
     case "array":
@@ -523,6 +535,16 @@ export function checkResultValue(
               path,
               "wrong_type",
               `Expected a number, got ${jsonTypeName(at)}.`,
+            ),
+          );
+        return;
+      case "integer":
+        if (typeof at !== "number" || !Number.isSafeInteger(at))
+          issues.push(
+            issue(
+              path,
+              "wrong_type",
+              `Expected a whole number, got ${jsonTypeName(at)}.`,
             ),
           );
         return;

@@ -152,7 +152,7 @@ describe("the plan's example, broken in one place at a time", () => {
     [
       "an issue given as its title",
       (d) => ((agentSteps(d)[0] as Json).issue = "{{trigger.issue.title}}"),
-      [["/steps/0/issue", "reference_type_mismatch"]],
+      [["/steps/0/issue", "target_from_untrusted_value"]],
     ],
     [
       "a result field that is a platform fact",
@@ -915,10 +915,10 @@ describe("the action", () => {
     expect(issue("{{trigger.issue}}")).toEqual([]);
     expect(issue("{{trigger.issue.number}}")).toEqual([]);
     expect(issue("{{trigger.issue.title}}")).toEqual([
-      ["/steps/1/issue", "reference_type_mismatch"],
+      ["/steps/1/issue", "target_from_untrusted_value"],
     ]);
     expect(issue("{{trigger.repo}}")).toEqual([
-      ["/steps/1/issue", "reference_type_mismatch"],
+      ["/steps/1/issue", "target_from_untrusted_value"],
     ]);
   });
 

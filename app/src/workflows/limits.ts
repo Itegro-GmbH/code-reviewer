@@ -32,6 +32,8 @@ export const ERRORS_COLLECT_MAX = ERRORS_MAX + 50;
 export const NAMES_LISTED_MAX = 20;
 /** How deep braces may nest in the default of a reference: `{{a.b | default {"k": {"j": 1}}}}` is two deep. */
 export const DEFAULT_BRACE_DEPTH_MAX = 3;
+/** The largest issue number a workflow may name (a signed 32-bit integer, what GitHub's numbers fit in for a long time to come). */
+export const ISSUE_NUMBER_MAX = 2 ** 31 - 1;
 
 /** Result schemas (`contracts/result-schema.v1.json`). */
 export const RESULT_DEPTH_MAX = 4;

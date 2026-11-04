@@ -54,7 +54,7 @@ describe("validateResultSchema", () => {
   it("names the types that exist when one does not", () => {
     const { issues } = validateResultSchema({
       type: "object",
-      properties: { tags: { type: "list" }, n: { type: "integer" } },
+      properties: { tags: { type: "list" }, n: { type: "float" } },
     });
 
     expect(issues.map((i) => i.path)).toEqual([
@@ -64,6 +64,7 @@ describe("validateResultSchema", () => {
     expect(issues[1]?.available).toEqual([
       "string",
       "number",
+      "integer",
       "boolean",
       "array",
       "object",
@@ -325,5 +326,38 @@ describe("checkResultValue", () => {
     expect(checkResultValue(schema, null)).toEqual([
       expect.objectContaining({ path: "", code: "wrong_type" }),
     ]);
+  });
+});
+
+describe("the type integer", () => {
+  const schema: ResultSchema = {
+    type: "object",
+    required: ["n"],
+    properties: { n: { type: "integer", description: "A count." } },
+  };
+
+  // #833-M1-T16
+  it("is a field type of its own, with a description and nothing else", () => {
+    expect(validateResultSchema(schema).issues).toEqual([]);
+    expect(
+      codes({
+        type: "object",
+        properties: { n: { type: "integer", maximum: 5 } },
+      }),
+    ).toEqual([["/properties/n/maximum", "unknown_field"]]);
+    expect(objectTypeOf(schema).fields.n).toEqual({
+      type: { kind: "integer" },
+      required: true,
+    });
+  });
+
+  // #833-M1-T17
+  it("holds a result to a whole number a computer holds exactly", () => {
+    expect(checkResultValue(schema, { n: 7 })).toEqual([]);
+    expect(checkResultValue(schema, { n: -3 })).toEqual([]);
+    for (const n of [1.5, "7", 9007199254740993, 1e21, null])
+      expect(checkResultValue(schema, { n }).map((i) => i.code)).toEqual([
+        "wrong_type",
+      ]);
   });
 });
