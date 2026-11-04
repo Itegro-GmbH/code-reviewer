@@ -7,8 +7,12 @@ import type { WorkflowResolver } from "./resolver.ts";
 
 export const FAKE_RESOLVER: WorkflowResolver = {
   profiles: () => [
-    { name: "implementer", versions: [1, 2], canPush: true },
-    { name: "reviewer", versions: [1], canPush: false },
+    {
+      name: "implementer",
+      versions: [1, 2],
+      facts: { 1: { canPush: true }, 2: { canPush: true } },
+    },
+    { name: "reviewer", versions: [1], facts: { 1: { canPush: false } } },
   ],
   environments: () => [{ name: "node" }, { name: "Python" }],
   connectors: () => BUILT_IN_CONNECTORS,

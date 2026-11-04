@@ -19,6 +19,12 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
     // #745, step 7: the environment's network rule, copied with it; null for every turn that exists (it reads `off`).
     "environment_network_mode",
     "environment_network_hosts",
+    // #843: the profile version a task ran with; null for every turn that exists (no profile: the platform's defaults).
+    "profile_id",
+    "profile_name",
+    "profile_version",
+    "profile_instructions",
+    "profile_can_push",
   ],
   // #745, step 7: the environment's network rule; every environment that exists reads `off` and no hosts (`DEFAULTS_OF_COLUMNS`).
   implementer_environments: ["network_mode", "network_hosts"],
