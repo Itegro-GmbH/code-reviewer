@@ -5,8 +5,8 @@
 // Worker API (`POST /api/workers/v1/jobs/:id/steps`, the credential in the header), which differ only in how they know the caller.
 //
 // Best effort on the sender's side and strict on ours:
-//  - the call proves the claim and nothing else; it does NOT extend the lease (only the heartbeat does), so a runner that sends
-//    steps and no heartbeat still loses the job;
+//  - the call proves the claim and nothing else (a cheap look first, the proof in the transaction that stores); it does NOT extend
+//    the lease (only the heartbeat does), so a runner that sends steps and no heartbeat still loses the job;
 //  - only a turn of the Implementer takes steps: a job of another kind is refused (400), as it is for the implementer block of a
 //    result;
 //  - every text is cleaned as the result's texts are: control characters out, the secrets the app knows (the workspace key, the
@@ -99,6 +99,12 @@ export async function storeSteps(
       }),
     };
   }
+  // A cheap look before the reads that clean the texts (the secrets of the workspace, the keys of the claim, the models): a caller
+  // that does not hold the running claim costs one read. It decides nothing: the repository proves the claim again in the
+  // transaction that stores the rows.
+  const holding = await deps.queue.holding(job.id, leaseToken);
+  if (holding === undefined || holding.status !== "running")
+    return { lost: true };
   const remembered = await deps.claimedKeys.modelsOf(job.id);
   const managed = await deps.managedModels(job);
   const models = [...new Set([...remembered, ...managed.models])];
