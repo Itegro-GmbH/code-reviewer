@@ -189,6 +189,9 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     class: "implementer",
   },
   { route: "/api/w/[workspace]/implementer/tasks", class: "implementer" },
+  // The steps of a running turn, sent by its runner or Worker for the live view (#745); only a factory runs turns.
+  { route: "/api/runners/v1/jobs/[id]/steps", class: "implementer" },
+  { route: "/api/workers/v1/jobs/[id]/steps", class: "implementer" },
   // The page of the form (#756).
   { route: "/w/[workspace]/implementer", class: "implementer" },
   // The environments of the Implementer, a size and a setup script (#818): the routes and their page, in the navigation between

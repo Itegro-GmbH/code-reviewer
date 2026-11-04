@@ -1099,6 +1099,25 @@ export interface ImplementerTurnsTable {
 }
 
 /**
+ * One part of a turn's messages as the live view shows it (#745): a reasoning, an answer text, a tool call or the end of a model
+ * call, keyed by `(job_id, part_id)`. `seq` is the highest the runner has sent for the part, `ordinal` the one of its first
+ * record (the order of the page), `payload` the record without `kind`, `partId` and `seq` (never a tool's output), `bytes` its size.
+ */
+export interface ImplementerTurnStepsTable {
+  job_id: string;
+  part_id: string;
+  workspace_id: string;
+  seq: number;
+  ordinal: number;
+  kind: string;
+  /** JSON text of the record without `kind`, `partId` and `seq`. */
+  payload: string;
+  bytes: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
  * A start configuration for an Implementer task (#818): a size and a setup script, kept per workspace. A task copies size and
  * script at its start, so nothing points at this row: editing or deleting it touches no turn. `setup_script` is literal text,
  * stored as it was written (no trimming, no normalised line ends), at most 64 KB of UTF-8.
@@ -1179,6 +1198,7 @@ export interface Database {
   job_vm_runs: JobVmRunsTable;
   implementer_sessions: ImplementerSessionsTable;
   implementer_turns: ImplementerTurnsTable;
+  implementer_turn_steps: ImplementerTurnStepsTable;
   implementer_environments: ImplementerEnvironmentsTable;
   workflows: WorkflowsTable;
   workflow_versions: WorkflowVersionsTable;

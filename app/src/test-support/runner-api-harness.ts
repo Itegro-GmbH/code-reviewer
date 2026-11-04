@@ -11,6 +11,7 @@ import { managedModelsOf } from "../runner-api/managed-models.ts";
 import { createUsageRecordsRepository } from "../db/repositories/usage-records-repository.ts";
 import { createJobsRepository } from "../db/repositories/jobs-repository.ts";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
+import { createImplementerStepsRepository } from "../db/repositories/implementer-steps-repository.ts";
 import { createCapabilitySet } from "../capabilities/capability.ts";
 import { createJobQueue } from "../jobs/job-queue.ts";
 import type { EnqueueImplementerTurnInput } from "../jobs/job-types.ts";
@@ -541,6 +542,12 @@ export async function startRunnerApiHarness(
       providerPins:
         options.providerPins ?? createProviderPins(() => reviewSettings),
       claimedKeys,
+      steps: (workspaceId) =>
+        createImplementerStepsRepository(
+          fixture.db,
+          workspaceId,
+          fixture.clock.now,
+        ),
       revokeWriteTokens: writeTokens.revokeAllOf,
       revokeUndelivered: writeTokens.revokeUndelivered,
       pinnedAddresses:
@@ -782,6 +789,17 @@ export async function startRunnerApiHarness(
       request,
     );
 
+  /** #745: the steps call of the runner API; `body` is sent as JSON, or as it is if it is a string. */
+  const steps = (jobId: string, body: unknown, request: RequestOptions = {}) =>
+    api.steps(
+      new Request(`${url}/jobs/${jobId}/steps`, {
+        method: "POST",
+        headers: headers(request, { "content-type": "application/json" }),
+        body: typeof body === "string" ? body : JSON.stringify(body),
+      }),
+      jobId,
+    );
+
   /** Every row of the jobs table, for "nothing changed" assertions. */
   const snapshotJobs = () =>
     fixture.db.selectFrom("jobs").selectAll().orderBy("id").execute();
@@ -851,6 +869,18 @@ export async function startRunnerApiHarness(
             "content-type": "application/json",
           }),
           body,
+        }),
+        jobId,
+      ),
+    /** #745: the steps call of the Worker API; `body` is sent as JSON, or as it is if it is a string. */
+    steps: (jobId: string, credential: string | null, body: unknown) =>
+      workerApi.steps(
+        new Request(`${workerUrl}/jobs/${jobId}/steps`, {
+          method: "POST",
+          headers: workerHeaders(credential, {
+            "content-type": "application/json",
+          }),
+          body: typeof body === "string" ? body : JSON.stringify(body),
         }),
         jobId,
       ),
@@ -1040,6 +1070,7 @@ export async function startRunnerApiHarness(
     jobState,
     version,
     heartbeat,
+    steps,
     complete,
     post,
     snapshotJobs,

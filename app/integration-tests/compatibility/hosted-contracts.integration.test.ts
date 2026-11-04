@@ -87,6 +87,8 @@ describe("the examples", () => {
       "WorkerJobDetailsResponse",
       "WorkerResultRequest",
       "WorkerResultResponse",
+      "WorkerStepsRequest",
+      "WorkerStepsResponse",
     ]);
     expect(names("examples/dispatch-webhook")).toStrictEqual([
       "DispatchAccepted",

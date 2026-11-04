@@ -38,6 +38,15 @@ other way round, so a change to the format has to change the file and both sides
   and the removed tools' env families — is still accepted; the error code rules of a result). The implementer kind has its
   own file, `test_implementer_contract.py` (#746).
 
+## The steps of the live view (#745)
+
+`StepRecord`, `StepsRequest` and `StepsResponse` in `runner-api.v1.json` (and `WorkerStepsRequest`, `WorkerStepsResponse` in `worker-api.v1.json`) describe the batch of records a
+running turn of the Implementer sends for the live view (`POST /api/runners/v1/jobs/{id}/steps`, `POST /api/workers/v1/jobs/{id}/steps`; `app/src/runner-api/README.md`, "The steps of
+a turn of the Implementer"). The app lists the feature `implementer_steps` in `KnownAppFeature`; there is no claim feature, because the call adds nothing to the job input.
+`examples/StepsRequest.json`, `examples/StepsResponse.json` and the two under `examples/worker-api/` are validated by both suites; the app also holds its hand-written reading of a
+body to the schema's verdict on a set of good and bad bodies (`app/src/runner-api/steps-contract.test.ts`), and the runner holds the records its converter makes to the schema, at the
+size of its caps (`runner/tests/contract/test_steps_contract.py`). A record of a kind not in `KnownStepKind` is dropped, not refused, and only its common fields (`kind`, `partId`, `seq`, `startedAt`, `endedAt`) are checked (`KnownStepFields` bounds the rest for the known kinds); a field the schema does not know is ignored.
+
 ## The job model entry contract
 
 `job-model-entry.v1.json` (#548) is written by the app (`app/src/models-dev/job-entry.ts`) and read by the runner

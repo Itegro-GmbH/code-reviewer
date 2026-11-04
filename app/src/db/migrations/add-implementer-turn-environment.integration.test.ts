@@ -36,6 +36,8 @@ async function rowsOfEveryTable(
     // Tables of later migrations (#833) are empty and are no change to an existing row.
     if (table.name === "workflows" || table.name === "workflow_versions")
       continue;
+    // A later migration's table (#745): it does not exist before this migration is applied, and it is empty after.
+    if (table.name === "implementer_turn_steps") continue;
     const { rows } =
       await sql<unknown>`select * from ${sql.table(table.name)} order by 1`.execute(
         db,

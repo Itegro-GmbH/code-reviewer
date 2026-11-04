@@ -37,6 +37,7 @@ the engine's report and untrusted data; a shape it does not know is skipped, nev
 """
 
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Final, cast
@@ -58,6 +59,10 @@ MAX_ERROR_BYTES: Final = 4 * 1024
 MAX_TITLE_BYTES: Final = 512
 MAX_NAME_CHARS: Final = 128
 MAX_ID_CHARS: Final = 256
+# The ids the engine makes (`prt_...`). The app keys a part by it and refuses any other spelling
+# (`StepRecord.partId` in `contracts/runner-api.v1.json`), so a part with another id is not
+# reported: one odd id would otherwise make the app refuse the whole batch it travels in.
+_PART_ID: Final = re.compile(r"[A-Za-z0-9_.:@-]{1,256}")
 MAX_RECORDS: Final = 5_000
 MAX_TEXT_TOTAL_BYTES: Final = 2 * 1024 * 1024
 MAX_SHORT_RECORDS: Final = 10_000
@@ -147,7 +152,7 @@ class StepConverter:
             return None
         part = as_object(properties.get("part"))
         part_id = None if part is None else part.get("id")
-        if part is None or not isinstance(part_id, str) or not 0 < len(part_id) <= MAX_ID_CHARS:
+        if part is None or not isinstance(part_id, str) or _PART_ID.fullmatch(part_id) is None:
             return None
         unfinished = part_id in self._unfinished
         record = self._record(part, part_id, _ms(properties.get("time")))

@@ -10,7 +10,7 @@
 // What goes and what stays (the reasons are in src/workspaces/README.md, "Deleting a workspace"):
 // - goes: the members, invitations, connections (the GitHub installation is released), repositories, projects, jobs with
 //   everything that hangs off a job (queue entries, comments, check runs, dispatches, claimed keys, VM runs, usage
-//   records, refusal notices), the settings, the stored keys, the entitlements, the hand-over tokens, the link requests,
+//   records, refusal notices, the steps of the Implementer's turns), the settings, the stored keys, the entitlements, the hand-over tokens, the link requests,
 //   the billing limit and notification state, and the billing profile's personal fields (legal name, address, VAT id);
 // - stays: the `workspaces` row itself, anonymised and marked with `deleted_at`, the billing journal (append-only, the
 //   database refuses a delete, and it carries what accountants need: amounts, minutes, provider references), the
@@ -178,8 +178,10 @@ export function createWorkspaceErasureRepository(
         .deleteFrom("job_comments")
         .where("job_id", "in", ownJobs())
         .execute();
-      // The Implementer's turns point at jobs and sessions, its sessions at repositories (#751): turns first.
+      // The Implementer's turns point at jobs and sessions, its sessions at repositories (#751): turns first. The steps of a turn
+      // (#745, live view) point at jobs only and go before them.
       for (const table of [
+        "implementer_turn_steps",
         "implementer_turns",
         "implementer_sessions",
         "implementer_environments",

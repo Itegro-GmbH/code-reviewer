@@ -28,6 +28,7 @@ const SCOPED = [
   "installation-link-requests-repository.ts",
   "implementer-environments-repository.ts",
   "implementer-repository.ts",
+  "implementer-steps-repository.ts",
   "integrations-repository.ts",
   "invitations-repository.ts",
   "job-check-runs-repository.ts",

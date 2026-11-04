@@ -37,6 +37,8 @@ import {
   type ReportDeps,
 } from "./report.ts";
 import { parseJobId, parseWorkerResultRequest } from "./requests.ts";
+import { storeSteps, type StepsDeps } from "./steps.ts";
+import { parseWorkerStepsRequest } from "./steps-request.ts";
 import {
   errorResponse,
   jsonResponse,
@@ -48,7 +50,8 @@ import { handleFetch } from "./worker-fetch.ts";
 export const WORKER_RELEASE_CODES = [RUNNER_SHUTDOWN_CODE, "launch_failed"];
 
 export type WorkerApiDeps = ClaimDeps &
-  ReportDeps & {
+  ReportDeps &
+  Pick<StepsDeps, "steps"> & {
     queue: Pick<RunnerQueue, "holding" | "countFetch" | "noteSupersede">;
   };
 
@@ -56,6 +59,8 @@ export type WorkerApi = {
   details(request: Request, jobId: string): Promise<Response>;
   heartbeat(request: Request, jobId: string): Promise<Response>;
   result(request: Request, jobId: string): Promise<Response>;
+  /** #745: the steps of the running turn of the Implementer (the live view); proves the claim, does not extend the lease. */
+  steps(request: Request, jobId: string): Promise<Response>;
 };
 
 /** Who is asking: the job the credential belongs to, and what the queue fences the claim on. */
@@ -156,6 +161,40 @@ export function createWorkerApi(deps: WorkerApiDeps): WorkerApi {
         );
       } catch (error) {
         return unexpected("heartbeat", error);
+      }
+    },
+
+    async steps(request, jobId) {
+      try {
+        const who = await identify(request, jobId);
+        if (!who.ok) return who.response;
+        const body = await readJsonBody(request);
+        if (!body.ok) return body.response;
+        const parsed = parseWorkerStepsRequest(body.value);
+        if (!parsed.ok)
+          return errorResponse(400, "RUNNER_REQUEST_INVALID", {
+            fields: parsed.fields,
+          });
+        if (who.job.status !== "running") return ended();
+        const stored = await storeSteps(deps, {
+          job: who.job,
+          leaseToken: who.leaseToken,
+          parsed: parsed.value,
+          who: "worker",
+          // What this Worker itself holds must not end up in a stored step either.
+          extraSecrets: [who.credential],
+        });
+        if ("response" in stored) return stored.response;
+        // The job ended between the check and the write, or the claim was lost.
+        const now = await deps.queue.holding(who.job.id, who.leaseToken);
+        deps.logger.info(`[worker-api] steps job=${who.job.id} refused`);
+        return now === undefined
+          ? workerUnauthorized()
+          : now.status === "running"
+            ? errorResponse(409, "RUNNER_LEASE_LOST")
+            : ended();
+      } catch (error) {
+        return unexpected("steps", error);
       }
     },
 
