@@ -36,16 +36,20 @@ from code_reviewer_runner.implementer.session import (
     GRACE_SECONDS,
     LEFTOVER_SECONDS,
     MAX_RETURNED_BYTES,
+    STEPS_FLUSH_SECONDS,
     STOP_PUSH_SECONDS,
+    STOP_STEPS_FLUSH_SECONDS,
     TOKEN_CAP_DETAIL,
     ImplementerSession,
     classify,
     deadline_seconds,
 )
+from code_reviewer_runner.implementer.step_pump import ANSWER_MARGIN_SECONDS
 from code_reviewer_runner.implementer.turn_result import MAX_SUMMARY_CHARS, clip_summary
 from code_reviewer_runner.job import JobError, parse_implementer_input
 from code_reviewer_runner.redaction import REDACTED
 from code_reviewer_runner.result import ErrorCode
+from code_reviewer_runner.step_wire import MAX_FLUSH_SECONDS
 
 EXAMPLE = (
     Path(__file__).resolve().parents[3]
@@ -435,7 +439,9 @@ def test_the_session_names_the_outage_the_proxy_kept(failure: ErrorCode) -> None
 
 # The one final push has to fit the end of the turn, at a normal end and at a stop, with room:
 # every step is counted at its ceiling and they never all take it, but a daemon that hangs makes
-# several of them take it at once.
+# several of them take it at once. The last flush of the live view (#745) is one of the steps: it
+# is bounded in all of its parts (the final drain, the host's wait and the answer), so its ceiling
+# is the seconds it is given.
 def test_the_end_of_a_turn_fits_the_grace_and_a_stop_fits_the_sigterm_backstop() -> None:
     # The container is killed (the kill call, then the wait until the daemon says it is gone) before
     # anything is read; its removal comes after the push and is in no sum.
@@ -454,9 +460,21 @@ def test_the_end_of_a_turn_fits_the_grace_and_a_stop_fits_the_sigterm_backstop()
         + quiet
         + FINAL_PUSH_SECONDS
         + reads
+        + STEPS_FLUSH_SECONDS
     )
-    stop = ENGINE_STOP_SECONDS + quiet + rescue + STOP_PUSH_SECONDS + reads
+    stop = (
+        ENGINE_STOP_SECONDS + quiet + rescue + STOP_PUSH_SECONDS + reads + STOP_STEPS_FLUSH_SECONDS
+    )
 
-    assert normal == 214.0 and stop == 79.0
+    assert normal == 222.0 and stop == 84.0
     assert normal <= 0.85 * GRACE_SECONDS
     assert stop <= 0.75 * SIGTERM_BACKSTOP_SECONDS
+
+
+# #745-L25
+def test_the_last_flush_of_the_live_view_asks_the_host_for_no_more_than_it_honours() -> None:
+    # The process keeps a margin of its seconds to read the host's answer and asks the host to wait
+    # for the rest; the host honours up to `MAX_FLUSH_SECONDS`.
+    for seconds in (STEPS_FLUSH_SECONDS, STOP_STEPS_FLUSH_SECONDS):
+        assert 0 < seconds - ANSWER_MARGIN_SECONDS <= MAX_FLUSH_SECONDS
+    assert STOP_STEPS_FLUSH_SECONDS < STEPS_FLUSH_SECONDS

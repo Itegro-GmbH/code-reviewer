@@ -11,6 +11,7 @@ import json
 import re
 import socket
 import threading
+import time
 from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,7 +19,8 @@ from typing import Any
 
 EXAMPLES = Path(__file__).resolve().parents[3] / "contracts" / "examples" / "worker-api"
 CREDENTIAL = "crj_" + "Q" * 43
-_ROUTE = re.compile(r"/api/workers/v1/jobs/([^/?]+)(/heartbeat|/result)?(\?.*)?")
+_ROUTE = re.compile(r"/api/workers/v1/jobs/([^/?]+)(/heartbeat|/result|/steps)?(\?.*)?")
+_VERSION = re.compile(r"/api/runners/v1/version(\?.*)?")
 
 
 def example(name: str) -> Any:
@@ -38,6 +40,10 @@ class FakeWorkerApp:
         self.completions: list[dict[str, Any]] = []
         self.superseded: set[str] = set()
         self.complete_status = "succeeded"
+        # The features the version call lists (None: the call is not served, as before #745).
+        self.features: list[str] | None = None
+        # Seconds the steps call waits before it answers (a slow or hung app).
+        self.steps_delay = 0.0
         self._scripted: dict[str, list[Scripted]] = defaultdict(list)
         self._lock = threading.Lock()
         self._server: ThreadingHTTPServer | None = None
@@ -88,13 +94,23 @@ class FakeWorkerApp:
     def _handle(
         self, method: str, path: str, headers: dict[str, str], raw: bytes
     ) -> tuple[int, dict[str, str], Any]:
+        if _ROUTE.fullmatch(path) is not None and path.split("?")[0].endswith("/steps"):
+            time.sleep(self.steps_delay)
         with self._lock:
+            if self.features is not None and _VERSION.fullmatch(path) is not None:
+                self.requests.append({"kind": "version", "headers": headers})
+                return 200, {}, {"version": 1, "features": self.features}
             match = _ROUTE.fullmatch(path)
             if match is None:
                 self.requests.append({"kind": "other", "path": path, "headers": headers})
                 return 404, {}, None
             job_id = match.group(1)
-            kind = {None: "fetch", "/heartbeat": "heartbeat", "/result": "result"}[match.group(2)]
+            kind = {
+                None: "fetch",
+                "/heartbeat": "heartbeat",
+                "/result": "result",
+                "/steps": "steps",
+            }[match.group(2)]
             body: Any = json.loads(raw) if raw else None
             self.requests.append(
                 {"kind": kind, "job": job_id, "method": method, "headers": headers, "body": body}
@@ -111,6 +127,12 @@ class FakeWorkerApp:
                 if job_id in self.superseded:
                     answer["job"]["superseded"] = True
                 return 200, {}, answer
+            if kind == "steps":
+                return (
+                    200,
+                    {},
+                    {"version": 1, "stored": len(body["records"]), "stale": 0, "dropped": 0},
+                )
             self.completions.append({"job": job_id, "result": body["result"]})
             answer = _with_job_id(example("WorkerResultResponse"), job_id)
             answer["job"]["status"] = self.complete_status
