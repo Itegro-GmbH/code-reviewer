@@ -50,7 +50,7 @@ import tempfile
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -192,7 +192,9 @@ def strict_history(_headers: Mapping[str, str], body: Mapping[str, Any]) -> Refu
             continue
         answered = {str(b.get("tool_use_id")) for b in blocks if b.get("type") == "tool_result"}
         if answered != pending:
-            return refuse(f"the tool_result ids of message {index} do not match the tool_use before")
+            return refuse(
+                f"the tool_result ids of message {index} do not match the tool_use before"
+            )
         pending = set()
     if pending:
         return refuse("the last message has a tool_use that nothing answers")
@@ -214,8 +216,8 @@ class Provider:
         """What each request was: path, model, tools offered, message count, the auth headers."""
         found: list[dict[str, Any]] = []
         for record in self.fake.records:
-            body = record.body if isinstance(record.body, dict) else {}
-            document = cast("dict[str, Any]", body)
+            body: Any = record.body
+            document = cast("dict[str, Any]", body) if isinstance(body, dict) else {}
             tools = cast("list[dict[str, Any]]", document.get("tools") or [])
             found.append(
                 {
@@ -245,7 +247,7 @@ def provider(
     model: str = MODEL,
     judge: Any = strict_history,
     bearer: bool = False,
-) -> Iterator[Provider]:
+) -> Generator[Provider]:
     """The scripted fake, listening on every address of the VM (the stock fake listens on loopback
     only; this is the spike's own subclass of its server, `fakes/` is not changed)."""
     real_server = upstream_module.ThreadingHTTPServer
@@ -256,13 +258,22 @@ def provider(
 
     with mock.patch.object(upstream_module, "ThreadingHTTPServer", Everywhere):
         fake = ScriptedUpstream(
-            "messages", script, model, real_key=FAKE_OAUTH if bearer else FAKE_KEY, judge=judge, also_models=[SMALL_MODEL]
+            "messages",
+            script,
+            model,
+            real_key=FAKE_OAUTH if bearer else FAKE_KEY,
+            judge=judge,
+            also_models=[SMALL_MODEL],
         )
     # `bearer`: the fake takes the key as `authorization: Bearer <key>` (what a subscription login
     # sends) instead of `x-api-key`. The key it expects is then the made-up token.
-    with mock.patch.dict(upstream_module.AUTH_HEADER, {"messages": "authorization"} if bearer else {}):
-        with fake:
-            yield Provider(fake, host)
+    with (
+        mock.patch.dict(
+            upstream_module.AUTH_HEADER, {"messages": "authorization"} if bearer else {}
+        ),
+        fake,
+    ):
+        yield Provider(fake, host)
 
 
 # -- the image of Claude Code ----------------------------------------------------------------------
@@ -450,7 +461,12 @@ def claude(
     started = time.monotonic()
     try:
         done = subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout, check=False, stdin=subprocess.DEVNULL
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            stdin=subprocess.DEVNULL,
         )
         code, stdout, stderr = done.returncode, done.stdout, done.stderr
     except subprocess.TimeoutExpired as expired:
@@ -472,7 +488,9 @@ def claude(
     run = Run(name, code, seconds, events, stderr, other, prov.calls(), prov.requests_text())
     (out / f"{name}.provider-calls.json").write_text(json.dumps(run.calls, indent=1))
     if prov.fake.records:
-        (out / f"{name}.first-request.json").write_text(json.dumps(prov.fake.records[0].body, indent=1))
+        (out / f"{name}.first-request.json").write_text(
+            json.dumps(prov.fake.records[0].body, indent=1)
+        )
     return run
 
 
@@ -569,7 +587,9 @@ class ClaudeEvents:
             self._blocks[identifier] += 1
             part_id = f"{identifier}.{self._blocks[identifier]}"
             if block.get("type") in ("thinking", "text"):
-                text = block.get("thinking") if block.get("type") == "thinking" else block.get("text")
+                text = (
+                    block.get("thinking") if block.get("type") == "thinking" else block.get("text")
+                )
                 found.append(
                     self._part(
                         {
@@ -588,7 +608,9 @@ class ClaudeEvents:
                 found.append(self._tool_part(call, "running", at, None))
         return found
 
-    def _tool_part(self, call: str, status: str, at: int | None, error: str | None) -> dict[str, Any]:
+    def _tool_part(
+        self, call: str, status: str, at: int | None, error: str | None
+    ) -> dict[str, Any]:
         name, arguments, started, message = self._tools[call]
         state: dict[str, Any] = {
             "status": status,
@@ -598,7 +620,14 @@ class ClaudeEvents:
         if error is not None:
             state["error"] = error
         return self._part(
-            {"id": call, "type": "tool", "tool": name, "callID": call, "messageID": message, "state": state},
+            {
+                "id": call,
+                "type": "tool",
+                "tool": name,
+                "callID": call,
+                "messageID": message,
+                "state": state,
+            },
             at,
         )
 
@@ -614,7 +643,9 @@ class ClaudeEvents:
             if isinstance(text, list):
                 text = " ".join(str(b.get("text", "")) for b in cast("list[dict[str, Any]]", text))
             found.append(
-                self._tool_part(call, "error" if failed else "completed", at, str(text) if failed else None)
+                self._tool_part(
+                    call, "error" if failed else "completed", at, str(text) if failed else None
+                )
             )
         return found
 
@@ -682,10 +713,17 @@ def script_events() -> list[Turn]:
     """Reads a file (with a thought first), runs a command beside a second read in one step
     (parallel tool use), edits the file, ends with text."""
     return [
-        Turn(thinking="I should read the notes first.", tool="Read", args={"file_path": "/work/notes.txt"}),
+        Turn(
+            thinking="I should read the notes first.",
+            tool="Read",
+            args={"file_path": "/work/notes.txt"},
+        ),
         Turn(
             tool="Bash",
-            args={"command": "wc -l /work/notes.txt && echo SPIKE-BASH-OK", "description": "count lines"},
+            args={
+                "command": "wc -l /work/notes.txt && echo SPIKE-BASH-OK",
+                "description": "count lines",
+            },
             also=(("Read", {"file_path": "/work/notes.txt", "limit": 1}),),
         ),
         Turn(
@@ -710,7 +748,9 @@ def tool_results(run: Run) -> list[dict[str, Any]]:
             if block.get("type") == "tool_result":
                 text: Any = block.get("content")
                 if isinstance(text, list):
-                    text = " ".join(str(b.get("text", "")) for b in cast("list[dict[str, Any]]", text))
+                    text = " ".join(
+                        str(b.get("text", "")) for b in cast("list[dict[str, Any]]", text)
+                    )
                 found.append(
                     {
                         "tool": names.get(str(block.get("tool_use_id"))),
@@ -738,7 +778,9 @@ def s1_events(out: Path, gateway: str) -> None:
     init = first_init[0] if first_init else {}
     REPORT.say(
         "s1_events_turn_ends",
-        run.returncode == 0 and run.result.get("subtype") == "success" and ANSWER_ONE in str(run.result.get("result")),
+        run.returncode == 0
+        and run.result.get("subtype") == "success"
+        and ANSWER_ONE in str(run.result.get("result")),
         returncode=run.returncode,
         seconds=run.seconds,
         stderr=run.stderr[-200:],
@@ -748,14 +790,28 @@ def s1_events(out: Path, gateway: str) -> None:
         "s1_event_types",
         types=dict(Counter(f"{e.get('type')}/{e.get('subtype')}" for e in run.events)),
         stream_events=dict(
-            Counter(str(cast("dict[str, Any]", e.get("event") or {}).get("type")) for e in run.of_type("stream_event"))
+            Counter(
+                str(cast("dict[str, Any]", e.get("event") or {}).get("type"))
+                for e in run.of_type("stream_event")
+            )
         ),
         init={
             k: init.get(k)
-            for k in ("cwd", "session_id", "model", "permissionMode", "apiKeySource", "claude_code_version", "mcp_servers", "tools")
+            for k in (
+                "cwd",
+                "session_id",
+                "model",
+                "permissionMode",
+                "apiKeySource",
+                "claude_code_version",
+                "mcp_servers",
+                "tools",
+            )
         },
         init_keys=sorted(init),
-        assistant_event_shape=shape(run.of_type("assistant")[0]) if run.of_type("assistant") else None,
+        assistant_event_shape=shape(run.of_type("assistant")[0])
+        if run.of_type("assistant")
+        else None,
         user_event_shape=shape(run.of_type("user")[0]) if run.of_type("user") else None,
         result_keys=sorted(run.result),
         result_usage_keys=sorted(cast("dict[str, Any]", run.result.get("usage") or {})),
@@ -763,7 +819,11 @@ def s1_events(out: Path, gateway: str) -> None:
     )
     records = step_records(run.events)
     by_kind = Counter(r.kind for r in records)
-    tools = {r.part_id: [x.status for x in records if x.part_id == r.part_id] for r in records if r.kind == "tool"}
+    tools = {
+        r.part_id: [x.status for x in records if x.part_id == r.part_id]
+        for r in records
+        if r.kind == "tool"
+    }
     steps = [r for r in records if r.kind == "step"]
     usage = cast("dict[str, Any]", run.result.get("usage") or {})
     summed_in = sum((r.tokens or {}).get("input", 0) for r in steps)
@@ -799,7 +859,9 @@ def s1_events(out: Path, gateway: str) -> None:
         isinstance(reported, float) and abs(reported - expected) < 1e-9,
         total_cost_usd=reported,
         expected_from_list_prices=round(expected, 9),
-        per_call_cost_in_events=any("cost" in json.dumps(e.get("message", {})) for e in run.of_type("assistant")),
+        per_call_cost_in_events=any(
+            "cost" in json.dumps(e.get("message", {})) for e in run.of_type("assistant")
+        ),
         model_usage=short(run.result.get("modelUsage")),
         api_ms=run.result.get("duration_api_ms"),
         duration_ms=run.result.get("duration_ms"),
@@ -808,7 +870,8 @@ def s1_events(out: Path, gateway: str) -> None:
     REPORT.fact(
         "s1_provider_traffic",
         calls=[
-            {k: c[k] for k in ("path", "model", "tools", "messages", "stream", "x_api_key")} for c in run.calls
+            {k: c[k] for k in ("path", "model", "tools", "messages", "stream", "x_api_key")}
+            for c in run.calls
         ],
         anthropic_beta=run.calls[0]["anthropic_beta"] if run.calls else None,
         user_agent=run.calls[0]["user_agent"] if run.calls else None,
@@ -830,7 +893,11 @@ SUBMIT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "summary": {"type": "string", "description": "What was done, in one paragraph."},
-        "files": {"type": "array", "items": {"type": "string"}, "description": "Paths that were changed."},
+        "files": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Paths that were changed.",
+        },
     },
     "required": ["summary"],
     "additionalProperties": False,
@@ -850,7 +917,9 @@ def validate_result(value: Any) -> str | None:
     if not isinstance(summary, str) or not summary:
         return 'field "summary" is required and must be a non-empty string'
     files = document.get("files")
-    if files is not None and (not isinstance(files, list) or any(not isinstance(f, str) for f in cast("list[Any]", files))):
+    if files is not None and (
+        not isinstance(files, list) or any(not isinstance(f, str) for f in cast("list[Any]", files))
+    ):
         return 'field "files" must be an array of strings'
     return None
 
@@ -872,7 +941,9 @@ class HttpMcp:
             def log_message(self, format: str, *args: Any) -> None:
                 return
 
-            def _send(self, status: int, document: Any = None, extra: Mapping[str, str] | None = None) -> None:
+            def _send(
+                self, status: int, document: Any = None, extra: Mapping[str, str] | None = None
+            ) -> None:
                 payload = b"" if document is None else json.dumps(document).encode()
                 self.send_response(status)
                 if payload:
@@ -912,11 +983,17 @@ class HttpMcp:
                     self._send(202)
                     return
                 result = outer.handle(message)
-                self._send(200, {"jsonrpc": "2.0", "id": identifier, **result}, {"Mcp-Session-Id": "spike-session"})
+                self._send(
+                    200,
+                    {"jsonrpc": "2.0", "id": identifier, **result},
+                    {"Mcp-Session-Id": "spike-session"},
+                )
 
         self._server = ThreadingHTTPServer(("0.0.0.0", 0), Handler)
         self._server.daemon_threads = True
-        self._thread = threading.Thread(target=self._server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+        self._thread = threading.Thread(
+            target=self._server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+        )
 
     @property
     def url(self) -> str:
@@ -949,7 +1026,12 @@ class HttpMcp:
             arguments = params.get("arguments")
             problem = validate_result(arguments)
             if problem:
-                return {"result": {"isError": True, "content": [{"type": "text", "text": f"Rejected: {problem}"}]}}
+                return {
+                    "result": {
+                        "isError": True,
+                        "content": [{"type": "text", "text": f"Rejected: {problem}"}],
+                    }
+                }
             self.submitted.append(cast("dict[str, Any]", arguments))
             return {"result": {"content": [{"type": "text", "text": "Result accepted."}]}}
         return {"error": {"code": -32601, "message": "no such method"}}
@@ -971,8 +1053,20 @@ def script_finish(tool: str, command: bool = False) -> list[Turn]:
     if command:
         return [
             read_notes(),
-            Turn(tool="Bash", args={"command": f"echo '{json.dumps(bad)}' | factory-submit", "description": "submit"}),
-            Turn(tool="Bash", args={"command": f"echo '{json.dumps(good)}' | factory-submit", "description": "submit"}),
+            Turn(
+                tool="Bash",
+                args={
+                    "command": f"echo '{json.dumps(bad)}' | factory-submit",
+                    "description": "submit",
+                },
+            ),
+            Turn(
+                tool="Bash",
+                args={
+                    "command": f"echo '{json.dumps(good)}' | factory-submit",
+                    "description": "submit",
+                },
+            ),
             Turn(text="SPIKE-FINISHED"),
         ]
     return [
@@ -987,16 +1081,26 @@ def s1_finish_tool(out: Path, gateway: str) -> None:
     """(b) A local MCP server with `submit_result` and a JSON-schema input: stdio in the container,
     and HTTP on the runner's side. (c) `factory-submit` on PATH, through the Bash tool."""
     tool = "mcp__factory__submit_result"
-    stdio_config = json.dumps({"mcpServers": {"factory": {"command": "node", "args": ["/opt/spike/mcp-stdio.js"]}}})
+    stdio_config = json.dumps(
+        {"mcpServers": {"factory": {"command": "node", "args": ["/opt/spike/mcp-stdio.js"]}}}
+    )
     with HttpMcp(gateway) as http:
         http_config = json.dumps(
             {
                 "mcpServers": {
-                    "factory": {"type": "http", "url": http.url, "headers": {"Authorization": f"Bearer {CAPABILITY}"}}
+                    "factory": {
+                        "type": "http",
+                        "url": http.url,
+                        "headers": {"Authorization": f"Bearer {CAPABILITY}"},
+                    }
                 }
             }
         )
-        for kind, config in (("stdio", stdio_config), ("http", http_config), ("stdio-search-off", stdio_config)):
+        for kind, config in (
+            ("stdio", stdio_config),
+            ("http", http_config),
+            ("stdio-search-off", stdio_config),
+        ):
             work = seed_work(out / f"work-mcp-{kind}")
             results = out / f"out-mcp-{kind}"
             shutil.rmtree(results, ignore_errors=True)
@@ -1010,17 +1114,26 @@ def s1_finish_tool(out: Path, gateway: str) -> None:
                     prompt=ONE,
                     flags=[*BYPASS, "--mcp-config", config, "--strict-mcp-config"],
                     mounts=[f"{work}:/work", f"{results}:/out"],
-                    env={"IS_SANDBOX": "1", **({"ENABLE_TOOL_SEARCH": "false"} if kind.endswith("off") else {})},
+                    env={
+                        "IS_SANDBOX": "1",
+                        **({"ENABLE_TOOL_SEARCH": "false"} if kind.endswith("off") else {}),
+                    },
                 )
                 body = json.loads(run.requests_text)
             init = run.of_type("system", "init")
             listed = [
                 t
-                for t in cast("list[dict[str, Any]]", cast("dict[str, Any]", body[0]).get("tools") or [])
+                for t in cast(
+                    "list[dict[str, Any]]", cast("dict[str, Any]", body[0]).get("tools") or []
+                )
                 if "submit_result" in str(t.get("name"))
             ]
             answers = [r for r in tool_results(run) if r["tool"] == tool]
-            submitted = (results / "submitted-stdio.json").exists() if kind.startswith("stdio") else bool(http.submitted)
+            submitted = (
+                (results / "submitted-stdio.json").exists()
+                if kind.startswith("stdio")
+                else bool(http.submitted)
+            )
             first_request = json.dumps(body[0])
             REPORT.say(
                 f"s1_mcp_{kind}_finish_tool_is_listed_and_called",
@@ -1032,17 +1145,28 @@ def s1_finish_tool(out: Path, gateway: str) -> None:
                 returncode=run.returncode,
                 stderr=run.stderr[-300:],
                 mcp_servers=init[0].get("mcp_servers") if init else None,
-                tool_in_init=tool in (init[0].get("tools") if init else []),
+                tool_in_init=tool in cast("list[str]", init[0].get("tools") if init else []),
                 tool_in_first_request=[short(t, 300) for t in listed],
                 name_mentions_in_first_request=first_request.count("submit_result"),
-                mention_context=[first_request[m - 80 : m + 60] for m in [first_request.find("submit_result")] if m >= 0],
+                mention_context=[
+                    first_request[m - 80 : m + 60]
+                    for m in [first_request.find("submit_result")]
+                    if m >= 0
+                ],
                 tool_names_in_first_request=sorted(
-                    str(t.get("name")) for t in cast("list[dict[str, Any]]", cast("dict[str, Any]", body[0]).get("tools") or [])
+                    str(t.get("name"))
+                    for t in cast(
+                        "list[dict[str, Any]]", cast("dict[str, Any]", body[0]).get("tools") or []
+                    )
                 ),
                 answers=answers,
                 denials=run.result.get("permission_denials"),
                 second_request_carries_the_error=("Rejected:" in run.requests_text),
-                server_log=[x[:200] for x in (results / "mcp-stdio.log").read_text().splitlines()[:6]] if kind.startswith("stdio") and (results / "mcp-stdio.log").exists() else http.log[:8],
+                server_log=[
+                    x[:200] for x in (results / "mcp-stdio.log").read_text().splitlines()[:6]
+                ]
+                if kind.startswith("stdio") and (results / "mcp-stdio.log").exists()
+                else http.log[:8],
                 seconds=run.seconds,
             )
             http.log.clear()
@@ -1108,13 +1232,21 @@ def s1_resume(out: Path, gateway: str) -> None:
     session.mkdir()
     mounts = [f"{work}:/work", f"{session}:/root/.claude"]
     with provider([read_notes(), Turn(text=A1)], gateway) as prov:
-        one = claude("resume-1", prov, out, prompt=R1, flags=BYPASS, mounts=mounts, env={"IS_SANDBOX": "1"})
+        one = claude(
+            "resume-1", prov, out, prompt=R1, flags=BYPASS, mounts=mounts, env={"IS_SANDBOX": "1"}
+        )
     sid = one.session_id
     after_one = tree(session)
     gone = docker("ps", "-a", "--filter", "name=spike-resume-1", "-q").stdout.strip() == ""
     with provider([Turn(text=A2)], gateway) as prov:
         two = claude(
-            "resume-2", prov, out, prompt=R2, flags=[*BYPASS, "--resume", sid], mounts=mounts, env={"IS_SANDBOX": "1"}
+            "resume-2",
+            prov,
+            out,
+            prompt=R2,
+            flags=[*BYPASS, "--resume", sid],
+            mounts=mounts,
+            env={"IS_SANDBOX": "1"},
         )
         text = two.requests_text
         first = cast("dict[str, Any]", json.loads(text)[0]) if prov.fake.records else {}
@@ -1126,7 +1258,10 @@ def s1_resume(out: Path, gateway: str) -> None:
     }
     REPORT.say(
         "s1_resume_continues_the_first_turns_history_in_a_new_container",
-        gone and two.returncode == 0 and all(carries.values()) and A2 in str(two.result.get("result")),
+        gone
+        and two.returncode == 0
+        and all(carries.values())
+        and A2 in str(two.result.get("result")),
         first_container_gone=gone,
         carries=carries,
         session_id_first=sid,
@@ -1146,8 +1281,13 @@ def s1_resume(out: Path, gateway: str) -> None:
     empty.mkdir()
     with provider([Turn(text=A2)], gateway) as prov:
         lost = claude(
-            "resume-empty", prov, out, prompt=R2, flags=[*BYPASS, "--resume", sid],
-            mounts=[f"{work}:/work", f"{empty}:/root/.claude"], env={"IS_SANDBOX": "1"},
+            "resume-empty",
+            prov,
+            out,
+            prompt=R2,
+            flags=[*BYPASS, "--resume", sid],
+            mounts=[f"{work}:/work", f"{empty}:/root/.claude"],
+            env={"IS_SANDBOX": "1"},
         )
     REPORT.fact(
         "s1_resume_with_an_empty_volume",
@@ -1162,8 +1302,14 @@ def s1_resume(out: Path, gateway: str) -> None:
     shutil.copytree(work, other)
     with provider([Turn(text=A2)], gateway) as prov:
         moved = claude(
-            "resume-other-dir", prov, out, prompt=R2, flags=[*BYPASS, "--resume", sid],
-            mounts=[f"{other}:/other", f"{session}:/root/.claude"], workdir="/other", env={"IS_SANDBOX": "1"},
+            "resume-other-dir",
+            prov,
+            out,
+            prompt=R2,
+            flags=[*BYPASS, "--resume", sid],
+            mounts=[f"{other}:/other", f"{session}:/root/.claude"],
+            workdir="/other",
+            env={"IS_SANDBOX": "1"},
         )
     REPORT.fact(
         "s1_resume_from_another_working_directory",
@@ -1180,13 +1326,21 @@ def s1_resume(out: Path, gateway: str) -> None:
     config.mkdir()
     with provider([read_notes(), Turn(text=A1)], gateway) as prov:
         c1 = claude(
-            "resume-config-dir-1", prov, out, prompt=R1, flags=[*BYPASS, "--session-id", chosen],
+            "resume-config-dir-1",
+            prov,
+            out,
+            prompt=R1,
+            flags=[*BYPASS, "--session-id", chosen],
             mounts=[f"{work}:/work", f"{config}:/session"],
             env={"IS_SANDBOX": "1", "CLAUDE_CONFIG_DIR": "/session"},
         )
     with provider([Turn(text=A2)], gateway) as prov:
         c2 = claude(
-            "resume-config-dir-2", prov, out, prompt=R2, flags=[*BYPASS, "--resume", chosen],
+            "resume-config-dir-2",
+            prov,
+            out,
+            prompt=R2,
+            flags=[*BYPASS, "--resume", chosen],
             mounts=[f"{work}:/work", f"{config}:/session"],
             env={"IS_SANDBOX": "1", "CLAUDE_CONFIG_DIR": "/session"},
         )
@@ -1209,10 +1363,22 @@ def script_permissions() -> list[Turn]:
     command that writes outside it."""
     return [
         read_notes(),
-        Turn(tool="Bash", args={"command": "echo allowed > /work/bash-out.txt", "description": "write in cwd"}),
-        Turn(tool="Edit", args={"file_path": "/work/notes.txt", "old_string": "hello", "new_string": "HELLO"}),
+        Turn(
+            tool="Bash",
+            args={"command": "echo allowed > /work/bash-out.txt", "description": "write in cwd"},
+        ),
+        Turn(
+            tool="Edit",
+            args={"file_path": "/work/notes.txt", "old_string": "hello", "new_string": "HELLO"},
+        ),
         Turn(tool="Write", args={"file_path": "/tmp/outside.txt", "content": "outside\n"}),
-        Turn(tool="Bash", args={"command": "touch /etc/spike-outside && echo SPIKE-OUTSIDE-OK", "description": "touch outside"}),
+        Turn(
+            tool="Bash",
+            args={
+                "command": "touch /etc/spike-outside && echo SPIKE-OUTSIDE-OK",
+                "description": "touch outside",
+            },
+        ),
         Turn(text="SPIKE-PERMISSIONS-DONE"),
     ]
 
@@ -1227,7 +1393,12 @@ def s1_permissions(out: Path, gateway: str) -> None:
         ("dontAsk", ["--permission-mode", "dontAsk"], {}, None),
         ("bypassPermissions-root", ["--permission-mode", "bypassPermissions"], {}, None),
         ("dangerously-skip-root", ["--dangerously-skip-permissions"], {}, None),
-        ("dangerously-skip-root-IS_SANDBOX", ["--dangerously-skip-permissions"], {"IS_SANDBOX": "1"}, None),
+        (
+            "dangerously-skip-root-IS_SANDBOX",
+            ["--dangerously-skip-permissions"],
+            {"IS_SANDBOX": "1"},
+            None,
+        ),
         ("bypassPermissions-root-IS_SANDBOX", BYPASS, {"IS_SANDBOX": "1"}, None),
         (
             "settings-defaultMode-root",
@@ -1235,13 +1406,28 @@ def s1_permissions(out: Path, gateway: str) -> None:
             {},
             None,
         ),
-        ("dangerously-skip-user-1000", ["--dangerously-skip-permissions"], {"HOME": "/home/node"}, "1000:1000"),
+        (
+            "dangerously-skip-user-1000",
+            ["--dangerously-skip-permissions"],
+            {"HOME": "/home/node"},
+            "1000:1000",
+        ),
     ]
     table: dict[str, Any] = {}
     for name, flags, env, user in variants:
         work = seed_work(out / f"work-perm-{name}")
         with provider(script_permissions(), gateway) as prov:
-            run = claude(f"perm-{name}", prov, out, prompt=ONE, flags=flags, mounts=[f"{work}:/work"], env=env, user=user, timeout=90)
+            run = claude(
+                f"perm-{name}",
+                prov,
+                out,
+                prompt=ONE,
+                flags=flags,
+                mounts=[f"{work}:/work"],
+                env=env,
+                user=user,
+                timeout=90,
+            )
         init = run.of_type("system", "init")
         results = tool_results(run)
         table[name] = {
@@ -1257,14 +1443,37 @@ def s1_permissions(out: Path, gateway: str) -> None:
         }
         REPORT.fact(f"s1_permissions_{name}", **table[name])
     ran_all = [n for n, v in table.items() if v["tools_run"] == ["ok"] * 5]
-    REPORT.say("s1_permissions_some_mode_runs_everything_unattended", bool(ran_all), modes_that_run_all_five_calls=ran_all)
+    REPORT.say(
+        "s1_permissions_some_mode_runs_everything_unattended",
+        bool(ran_all),
+        modes_that_run_all_five_calls=ran_all,
+    )
     helps = docker("run", "--rm", CLAUDE_IMAGE, "claude", "--help").stdout
     (out / "claude-help.txt").write_text(helps)
     wanted_flags = [
-        "--permission-mode", "--dangerously-skip-permissions", "--allowedTools", "--disallowedTools", "--mcp-config",
-        "--strict-mcp-config", "--resume", "--session-id", "--fork-session", "--input-format", "--include-partial-messages",
-        "--max-turns", "--max-budget-usd", "--append-system-prompt", "--settings", "--setting-sources", "--add-dir", "--bare",
-        "--model", "--fallback-model", "--no-session-persistence", "--verbose", "--output-format",
+        "--permission-mode",
+        "--dangerously-skip-permissions",
+        "--allowedTools",
+        "--disallowedTools",
+        "--mcp-config",
+        "--strict-mcp-config",
+        "--resume",
+        "--session-id",
+        "--fork-session",
+        "--input-format",
+        "--include-partial-messages",
+        "--max-turns",
+        "--max-budget-usd",
+        "--append-system-prompt",
+        "--settings",
+        "--setting-sources",
+        "--add-dir",
+        "--bare",
+        "--model",
+        "--fallback-model",
+        "--no-session-persistence",
+        "--verbose",
+        "--output-format",
     ]
     REPORT.fact("s1_cli_flags", present={f: f in helps for f in wanted_flags})
 
@@ -1301,8 +1510,18 @@ def s1_auth(out: Path, gateway: str) -> None:
     variants: list[dict[str, Any]] = [
         {"name": "api-key", "api_key": FAKE_KEY, "env": {}, "bearer": False},
         {"name": "nothing", "api_key": None, "env": {}, "bearer": False},
-        {"name": "oauth-token-env", "api_key": None, "env": {"CLAUDE_CODE_OAUTH_TOKEN": FAKE_OAUTH}, "bearer": True},
-        {"name": "auth-token-env", "api_key": None, "env": {"ANTHROPIC_AUTH_TOKEN": FAKE_OAUTH}, "bearer": True},
+        {
+            "name": "oauth-token-env",
+            "api_key": None,
+            "env": {"CLAUDE_CODE_OAUTH_TOKEN": FAKE_OAUTH},
+            "bearer": True,
+        },
+        {
+            "name": "auth-token-env",
+            "api_key": None,
+            "env": {"ANTHROPIC_AUTH_TOKEN": FAKE_OAUTH},
+            "bearer": True,
+        },
         {
             "name": "api-key-and-oauth-token",
             "api_key": FAKE_KEY,
@@ -1310,7 +1529,14 @@ def s1_auth(out: Path, gateway: str) -> None:
             "bearer": False,
         },
         {"name": "credentials-file", "api_key": None, "env": {}, "bearer": True, "file": 365 * day},
-        {"name": "credentials-file-expired", "api_key": None, "env": {}, "bearer": True, "file": -day, "timeout": 100},
+        {
+            "name": "credentials-file-expired",
+            "api_key": None,
+            "env": {},
+            "bearer": True,
+            "file": -day,
+            "timeout": 100,
+        },
         {
             "name": "api-key-helper",
             "api_key": None,
@@ -1329,9 +1555,15 @@ def s1_auth(out: Path, gateway: str) -> None:
             credentials_file(home, expires_in_ms=int(variant["file"]))
         with provider(one_turn, gateway, bearer=bool(variant["bearer"])) as prov:
             run = claude(
-                f"auth-{name}", prov, out, prompt="say ok", flags=[*BYPASS, *variant.get("flags", [])],
-                mounts=[f"{work}:/work", f"{home}:/root/.claude"], env={"IS_SANDBOX": "1", **variant["env"]},
-                api_key=variant["api_key"], timeout=float(variant.get("timeout", 60)),
+                f"auth-{name}",
+                prov,
+                out,
+                prompt="say ok",
+                flags=[*BYPASS, *variant.get("flags", [])],
+                mounts=[f"{work}:/work", f"{home}:/root/.claude"],
+                env={"IS_SANDBOX": "1", **variant["env"]},
+                api_key=variant["api_key"],
+                timeout=float(variant.get("timeout", 60)),
             )
             seen = [
                 {
@@ -1354,31 +1586,65 @@ def s1_auth(out: Path, gateway: str) -> None:
             result_text=short(run.result.get("result"), 140),
             total_cost_usd=run.result.get("total_cost_usd"),
             cost_basis={
-                k: v.get("costBasis") for k, v in cast("dict[str, dict[str, Any]]", run.result.get("modelUsage") or {}).items()
+                k: v.get("costBasis")
+                for k, v in cast(
+                    "dict[str, dict[str, Any]]", run.result.get("modelUsage") or {}
+                ).items()
             },
             stderr=short(run.stderr.strip(), 300) or None,
-            files_in_the_config_dir=sorted(str(p.relative_to(home)) for p in home.rglob("*") if p.is_file())[:12],
-            token_stored_in_files=mentions(home, FAKE_OAUTH[-20:]) if "file" not in variant else "n/a (the file is the input)",
+            files_in_the_config_dir=sorted(
+                str(p.relative_to(home)) for p in home.rglob("*") if p.is_file()
+            )[:12],
+            token_stored_in_files=mentions(home, FAKE_OAUTH[-20:])
+            if "file" not in variant
+            else "n/a (the file is the input)",
         )
     # What the CLI says about the login without a network (a made-up token, a made-up key).
-    for label, env in (("oauth-token", {"CLAUDE_CODE_OAUTH_TOKEN": FAKE_OAUTH}), ("api-key", {"ANTHROPIC_API_KEY": FAKE_KEY})):
+    for label, env in (
+        ("oauth-token", {"CLAUDE_CODE_OAUTH_TOKEN": FAKE_OAUTH}),
+        ("api-key", {"ANTHROPIC_API_KEY": FAKE_KEY}),
+    ):
         status = docker(
-            "run", "--rm", "--network", NETWORK, *[x for k, v in env.items() for x in ("-e", f"{k}={v}")],
-            CLAUDE_IMAGE, "claude", "auth", "status", timeout=60,
+            "run",
+            "--rm",
+            "--network",
+            NETWORK,
+            *[x for k, v in env.items() for x in ("-e", f"{k}={v}")],
+            CLAUDE_IMAGE,
+            "claude",
+            "auth",
+            "status",
+            timeout=60,
         )
-        REPORT.fact(f"s1_auth_status_with_{label}", rc=status.returncode, text=short((status.stdout + status.stderr).strip(), 400))
+        REPORT.fact(
+            f"s1_auth_status_with_{label}",
+            rc=status.returncode,
+            text=short((status.stdout + status.stderr).strip(), 400),
+        )
     # What the CLI itself offers around the login.
     for argv in (["claude", "auth", "--help"], ["claude", "setup-token", "--help"]):
         helped = docker("run", "--rm", CLAUDE_IMAGE, *argv, timeout=60)
-        REPORT.fact(f"s1_cli_{'_'.join(argv[1:-1])}", rc=helped.returncode, text=short((helped.stdout + helped.stderr).strip(), 600))
+        REPORT.fact(
+            f"s1_cli_{'_'.join(argv[1:-1])}",
+            rc=helped.returncode,
+            text=short((helped.stdout + helped.stderr).strip(), 600),
+        )
 
 
 def s1_cost(out: Path, gateway: str) -> None:
     """(g) What `result` reports for a model nobody priced, and what `--max-budget-usd` does."""
     work = seed_work(out / "work-cost")
     with provider(script_events(), gateway, model=UNKNOWN_MODEL) as prov:
-        run = claude("cost-unknown-model", prov, out, prompt=ONE, flags=BYPASS, mounts=[f"{work}:/work"],
-                     env={"IS_SANDBOX": "1"}, model=UNKNOWN_MODEL)
+        run = claude(
+            "cost-unknown-model",
+            prov,
+            out,
+            prompt=ONE,
+            flags=BYPASS,
+            mounts=[f"{work}:/work"],
+            env={"IS_SANDBOX": "1"},
+            model=UNKNOWN_MODEL,
+        )
     REPORT.fact(
         "s1_cost_of_a_model_without_a_price",
         rc=run.returncode,
@@ -1388,8 +1654,15 @@ def s1_cost(out: Path, gateway: str) -> None:
     )
     work = seed_work(out / "work-budget")
     with provider(script_events(), gateway) as prov:
-        run = claude("cost-budget", prov, out, prompt=ONE, flags=[*BYPASS, "--max-budget-usd", "0.01"],
-                     mounts=[f"{work}:/work"], env={"IS_SANDBOX": "1"})
+        run = claude(
+            "cost-budget",
+            prov,
+            out,
+            prompt=ONE,
+            flags=[*BYPASS, "--max-budget-usd", "0.01"],
+            mounts=[f"{work}:/work"],
+            env={"IS_SANDBOX": "1"},
+        )
     REPORT.fact(
         "s1_max_budget_usd_stops_the_turn",
         rc=run.returncode,
@@ -1414,21 +1687,52 @@ def stream_input(out: Path, gateway: str) -> None:
         container = "spike-stream-input"
         docker("rm", "-f", container)
         argv = [
-            "docker", "run", "--rm", "-i", "--name", container, "--network", NETWORK, "-w", "/work",
-            "-e", f"ANTHROPIC_BASE_URL={prov.url}", "-e", f"ANTHROPIC_API_KEY={FAKE_KEY}", "-e", "IS_SANDBOX=1",
-            "-e", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", "-v", f"{work}:/work", CLAUDE_IMAGE,
-            "claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
-            "--model", MODEL, *BYPASS,
+            "docker",
+            "run",
+            "--rm",
+            "-i",
+            "--name",
+            container,
+            "--network",
+            NETWORK,
+            "-w",
+            "/work",
+            "-e",
+            f"ANTHROPIC_BASE_URL={prov.url}",
+            "-e",
+            f"ANTHROPIC_API_KEY={FAKE_KEY}",
+            "-e",
+            "IS_SANDBOX=1",
+            "-e",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+            "-v",
+            f"{work}:/work",
+            CLAUDE_IMAGE,
+            "claude",
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--model",
+            MODEL,
+            *BYPASS,
         ]
         started = time.monotonic()
-        process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        process = subprocess.Popen(
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
         assert process.stdin is not None and process.stdout is not None
         results: list[dict[str, Any]] = []
         stamps: list[float] = []
 
         def send(text: str) -> None:
             assert process.stdin is not None
-            message = {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": text}]}}
+            message = {
+                "type": "user",
+                "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+            }
             process.stdin.write(json.dumps(message) + "\n")
             process.stdin.flush()
 
@@ -1471,10 +1775,27 @@ def resources(out: Path, gateway: str) -> None:
         docker("rm", "-f", container)
         started = time.monotonic()
         done = docker(
-            "run", "--rm", "--name", container, "--network", NETWORK, "-w", "/work",
-            "-e", f"ANTHROPIC_BASE_URL={prov.url}", "-e", f"ANTHROPIC_API_KEY={FAKE_KEY}", "-e", "IS_SANDBOX=1",
-            "-e", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", "-v", f"{work}:/work", CLAUDE_IMAGE,
-            "sh", "-c",
+            "run",
+            "--rm",
+            "--name",
+            container,
+            "--network",
+            NETWORK,
+            "-w",
+            "/work",
+            "-e",
+            f"ANTHROPIC_BASE_URL={prov.url}",
+            "-e",
+            f"ANTHROPIC_API_KEY={FAKE_KEY}",
+            "-e",
+            "IS_SANDBOX=1",
+            "-e",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+            "-v",
+            f"{work}:/work",
+            CLAUDE_IMAGE,
+            "sh",
+            "-c",
             f"claude -p {ONE!r} --model {MODEL} --permission-mode bypassPermissions >/dev/null 2>&1; "
             "cat /sys/fs/cgroup/memory.peak",
         )
@@ -1496,26 +1817,34 @@ POSTGRES = "postgres:17-alpine"
 # Sysbox as the golden snapshot pins it (`dispatcher/src/snapshot/config.ts`).
 SYSBOX_VERSION = "0.7.1"
 SYSBOX_SHA256 = "9d6d5484f980d0a17f86c492c1262015c2afb66280bdb97215b79fde6a0261c5"
-SYSBOX_URL = (
-    f"https://github.com/nestybox/sysbox/releases/download/v{SYSBOX_VERSION}/sysbox-ce_{SYSBOX_VERSION}.linux_amd64.deb"
-)
+SYSBOX_URL = f"https://github.com/nestybox/sysbox/releases/download/v{SYSBOX_VERSION}/sysbox-ce_{SYSBOX_VERSION}.linux_amd64.deb"
 ROOTLESS_SOCKET = "unix:///run/user/1000/docker.sock"
 
 
-def timed_docker(*args: str, timeout: float = 300.0) -> tuple[subprocess.CompletedProcess[str], float]:
+def timed_docker(
+    *args: str, timeout: float = 300.0
+) -> tuple[subprocess.CompletedProcess[str], float]:
     started = time.monotonic()
     done = docker(*args, timeout=timeout)
     return done, round(time.monotonic() - started, 2)
 
 
-def inner(container: str, command: str, *, host: str | None = None, timeout: float = 300.0) -> tuple[subprocess.CompletedProcess[str], float]:
+def inner(
+    container: str, command: str, *, host: str | None = None, timeout: float = 300.0
+) -> tuple[subprocess.CompletedProcess[str], float]:
     """A command in the agent's container, with its Docker client pointed at the agent's own daemon."""
     prefix = f"export DOCKER_HOST={host}; " if host else ""
     return timed_docker("exec", container, "sh", "-c", prefix + command, timeout=timeout)
 
 
 def exercise(
-    name: str, run_args: Sequence[str], image: str, *, host: str | None = None, ready_seconds: float = 60.0, pull_first: bool = True
+    name: str,
+    run_args: Sequence[str],
+    image: str,
+    *,
+    host: str | None = None,
+    ready_seconds: float = 60.0,
+    pull_first: bool = True,
 ) -> dict[str, Any]:
     """Start the agent's container as `run_args` says, wait until its own Docker answers, and run
     postgres in it. Everything is measured; nothing is assumed."""
@@ -1535,7 +1864,13 @@ def exercise(
     while time.monotonic() < deadline:
         if docker("inspect", "-f", "{{.State.Running}}", container).stdout.strip() != "true":
             break
-        probe = docker("exec", container, "sh", "-c", (f"DOCKER_HOST={host} " if host else "") + "docker info --format '{{.ServerVersion}}'")
+        probe = docker(
+            "exec",
+            container,
+            "sh",
+            "-c",
+            (f"DOCKER_HOST={host} " if host else "") + "docker info --format '{{.ServerVersion}}'",
+        )
         if probe.returncode == 0:
             ready = round(time.monotonic() - started, 2)
             facts["inner_server_version"] = probe.stdout.strip()
@@ -1543,7 +1878,8 @@ def exercise(
         time.sleep(0.25)
     facts["inner_docker_ready_seconds"] = ready
     inspected = docker(
-        "inspect", "-f",
+        "inspect",
+        "-f",
         "{{json .HostConfig.Privileged}} {{json .HostConfig.CapAdd}} {{json .HostConfig.SecurityOpt}} {{json .HostConfig.Devices}} {{.HostConfig.Runtime}} {{.Config.User}}",
         container,
     )
@@ -1551,7 +1887,10 @@ def exercise(
     maps = docker("exec", container, "sh", "-c", "id -u; cat /proc/self/uid_map")
     facts["uid_and_uid_map"] = " | ".join(maps.stdout.split("\n")[:3]).strip()
     attempt = docker(
-        "exec", container, "sh", "-c",
+        "exec",
+        container,
+        "sh",
+        "-c",
         "ls /dev/vdb >/dev/null 2>&1 && mkdir -p /h && mount /dev/vdb /h 2>&1 && cat /h/etc/hostname 2>&1 || echo 'cannot reach the host disk'",
     )
     facts["host_disk_from_the_agent"] = short(attempt.stdout.strip().replace("\n", " / "), 160)
@@ -1568,13 +1907,23 @@ def exercise(
         if pulled.returncode != 0:
             facts["inner_pull_error"] = short((pulled.stderr + pulled.stdout).strip(), 300)
     began = time.monotonic()
-    run, _ = inner(container, f"docker run -d --name pg -e POSTGRES_PASSWORD=x {POSTGRES}", host=host, timeout=300)
+    run, _ = inner(
+        container,
+        f"docker run -d --name pg -e POSTGRES_PASSWORD=x {POSTGRES}",
+        host=host,
+        timeout=300,
+    )
     facts["inner_docker_run_ok"] = run.returncode == 0
     if run.returncode != 0:
         facts["inner_run_error"] = short((run.stderr + run.stdout).strip(), 400)
     else:
         for _ in range(240):
-            ok, _ = inner(container, "docker exec pg pg_isready -U postgres -q && docker exec pg psql -U postgres -tAc 'select 6*7'", host=host, timeout=30)
+            ok, _ = inner(
+                container,
+                "docker exec pg pg_isready -U postgres -q && docker exec pg psql -U postgres -tAc 'select 6*7'",
+                host=host,
+                timeout=30,
+            )
             if ok.returncode == 0 and ok.stdout.strip().endswith("42"):
                 facts["inner_postgres_answers_seconds"] = round(time.monotonic() - began, 2)
                 break
@@ -1582,7 +1931,9 @@ def exercise(
         else:
             facts["inner_postgres_answers_seconds"] = None
     peak = docker("exec", container, "cat", "/sys/fs/cgroup/memory.peak")
-    facts["outer_container_memory_peak_mib"] = round(int(peak.stdout.strip() or 0) / 1048576, 1) if peak.returncode == 0 else None
+    facts["outer_container_memory_peak_mib"] = (
+        round(int(peak.stdout.strip() or 0) / 1048576, 1) if peak.returncode == 0 else None
+    )
     facts["total_seconds_to_a_running_postgres"] = round(time.monotonic() - started, 2)
     docker("rm", "-f", container)
     return facts
@@ -1592,7 +1943,13 @@ def pull_dind(out: Path) -> None:
     for image in (DIND_IMAGE, DIND_ROOTLESS_IMAGE, POSTGRES, "alpine:3.22"):
         done, seconds = timed_docker("pull", "-q", image, timeout=600)
         size = docker("image", "inspect", image, "--format", "{{.Size}}").stdout.strip()
-        REPORT.fact("s2_image", image=image, pull_seconds=seconds, rc=done.returncode, size_bytes=int(size or 0))
+        REPORT.fact(
+            "s2_image",
+            image=image,
+            pull_seconds=seconds,
+            rc=done.returncode,
+            size_bytes=int(size or 0),
+        )
 
 
 def s2_none(out: Path) -> None:
@@ -1603,8 +1960,19 @@ def s2_none(out: Path) -> None:
     started = time.monotonic()
     docker("run", "-d", "--name", container, "alpine:3.22", "sleep", "600", check=True)
     created = round(time.monotonic() - started, 2)
-    probe = docker("exec", container, "sh", "-c", "docker run --rm hello-world 2>&1; ls /var/run/docker.sock 2>&1; echo rc=$?")
-    inspected = docker("inspect", "-f", "{{json .HostConfig.Privileged}} {{json .HostConfig.CapAdd}} {{json .HostConfig.SecurityOpt}} {{.HostConfig.Runtime}}", container)
+    probe = docker(
+        "exec",
+        container,
+        "sh",
+        "-c",
+        "docker run --rm hello-world 2>&1; ls /var/run/docker.sock 2>&1; echo rc=$?",
+    )
+    inspected = docker(
+        "inspect",
+        "-f",
+        "{{json .HostConfig.Privileged}} {{json .HostConfig.CapAdd}} {{json .HostConfig.SecurityOpt}} {{.HostConfig.Runtime}}",
+        container,
+    )
     docker("rm", "-f", container)
     REPORT.fact(
         "s2_none_plain_container",
@@ -1617,8 +1985,21 @@ def s2_none(out: Path) -> None:
     docker("network", "rm", network)
     docker("network", "create", network, check=True)
     began = time.monotonic()
-    docker("run", "-d", "--name", "spike-service-pg", "--network", network, "-e", "POSTGRES_PASSWORD=x", POSTGRES, check=True)
-    docker("run", "-d", "--name", container, "--network", network, POSTGRES, "sleep", "600", check=True)
+    docker(
+        "run",
+        "-d",
+        "--name",
+        "spike-service-pg",
+        "--network",
+        network,
+        "-e",
+        "POSTGRES_PASSWORD=x",
+        POSTGRES,
+        check=True,
+    )
+    docker(
+        "run", "-d", "--name", container, "--network", network, POSTGRES, "sleep", "600", check=True
+    )
     answered: float | None = None
     for _ in range(240):
         ok = docker("exec", container, "sh", "-c", "pg_isready -h spike-service-pg -U postgres -q")
@@ -1628,7 +2009,12 @@ def s2_none(out: Path) -> None:
         time.sleep(0.25)
     docker("rm", "-f", container, "spike-service-pg")
     docker("network", "rm", network)
-    REPORT.say("s2_none_a_service_container_beside_the_agent", answered is not None, postgres_answers_from_the_agent_seconds=answered, image_already_pulled=True)
+    REPORT.say(
+        "s2_none_a_service_container_beside_the_agent",
+        answered is not None,
+        postgres_answers_from_the_agent_seconds=answered,
+        image_already_pulled=True,
+    )
 
 
 PLATFORM_TUN_MODE = 0o600
@@ -1641,7 +2027,9 @@ def open_tun_device() -> None:
     the fact says so."""
     before = os.stat("/dev/net/tun").st_mode & 0o777
     os.chmod("/dev/net/tun", 0o666)
-    REPORT.fact("s2_tun_device", mode_on_this_platform=oct(before), mode_for_the_measurements="0o666")
+    REPORT.fact(
+        "s2_tun_device", mode_on_this_platform=oct(before), mode_for_the_measurements="0o666"
+    )
 
 
 def s2_privileged() -> None:
@@ -1663,38 +2051,53 @@ def s2_rootless() -> None:
         ("tun-device-only", tun),
         ("tun-and-seccomp-unconfined", [*tun, *seccomp]),
         ("tun-seccomp-and-systempaths-unconfined", [*tun, *seccomp, *systempaths]),
-        ("tun-seccomp-apparmor-and-systempaths-unconfined", [*tun, *seccomp, *apparmor, *systempaths]),
+        (
+            "tun-seccomp-apparmor-and-systempaths-unconfined",
+            [*tun, *seccomp, *apparmor, *systempaths],
+        ),
         ("privileged", ["--privileged"]),
     ]
     results: list[dict[str, Any]] = []
     for name, flags in variants:
-        facts = exercise(f"rootless-{name}", flags, DIND_ROOTLESS_IMAGE, host=ROOTLESS_SOCKET, ready_seconds=45)
+        facts = exercise(
+            f"rootless-{name}", flags, DIND_ROOTLESS_IMAGE, host=ROOTLESS_SOCKET, ready_seconds=45
+        )
         results.append(facts)
         REPORT.fact("s2_rootless_dind", variant=name, **facts)
     working = [r["option"] for r in results if r.get("inner_postgres_answers_seconds") is not None]
-    REPORT.say("s2_rootless_dind_some_variant_runs_postgres", bool(working), variants_that_work=working)
+    REPORT.say(
+        "s2_rootless_dind_some_variant_runs_postgres", bool(working), variants_that_work=working
+    )
 
 
 def sysbox_state() -> dict[str, Any]:
     return {
-        "installed": sh("dpkg-query -W -f='${Version}' sysbox-ce 2>/dev/null").stdout.strip() or None,
+        "installed": sh("dpkg-query -W -f='${Version}' sysbox-ce 2>/dev/null").stdout.strip()
+        or None,
         "mgr_running": sh("pgrep -x sysbox-mgr").returncode == 0,
         "fs_running": sh("pgrep -x sysbox-fs").returncode == 0,
         "kcore_masked": "/proc/kcore" in Path("/proc/self/mountinfo").read_text(),
-        "tun_mode": oct(os.stat("/dev/net/tun").st_mode & 0o777) if Path("/dev/net/tun").exists() else None,
+        "tun_mode": oct(os.stat("/dev/net/tun").st_mode & 0o777)
+        if Path("/dev/net/tun").exists()
+        else None,
     }
 
 
 def install_sysbox() -> dict[str, Any]:
     """(1) The Sysbox package as the golden snapshot installs it, on this distribution: download,
     checksum, install without systemd, and what the package says it needs."""
-    facts: dict[str, Any] = {"os": sh("grep PRETTY_NAME /etc/os-release").stdout.strip(), "kernel": os.uname().release}
+    facts: dict[str, Any] = {
+        "os": sh("grep PRETTY_NAME /etc/os-release").stdout.strip(),
+        "kernel": os.uname().release,
+    }
     if sysbox_state()["installed"]:
         facts["already_installed"] = True
         return facts
     deb = Path("/tmp/spike-sysbox.deb")
     started = time.monotonic()
-    got = sh(f"curl --fail --silent --show-error --location --retry 3 --max-time 180 --output {deb} {SYSBOX_URL}")
+    got = sh(
+        f"curl --fail --silent --show-error --location --retry 3 --max-time 180 --output {deb} {SYSBOX_URL}"
+    )
     facts["download_seconds"] = round(time.monotonic() - started, 2)
     facts["download_ok"] = got.returncode == 0
     if got.returncode != 0:
@@ -1703,9 +2106,13 @@ def install_sysbox() -> dict[str, Any]:
     facts["deb_bytes"] = deb.stat().st_size
     digest = sh(f"sha256sum {deb}").stdout.split()[0]
     facts["sha256_is_the_pinned_one"] = digest == SYSBOX_SHA256
-    control = sh(f"dpkg -I {deb} | grep -E '^ (Depends|Recommends|Conflicts|Provides|Description)' | cut -c1-300").stdout
+    control = sh(
+        f"dpkg -I {deb} | grep -E '^ (Depends|Recommends|Conflicts|Provides|Description)' | cut -c1-300"
+    ).stdout
     facts["package_control"] = control.strip().splitlines()
-    scripts = sh(f"rm -rf /tmp/spike-deb && mkdir /tmp/spike-deb && dpkg -e {deb} /tmp/spike-deb && ls /tmp/spike-deb && grep -hE 'systemctl|docker|restart|reboot|modprobe|useradd|subuid' /tmp/spike-deb/postinst /tmp/spike-deb/preinst /tmp/spike-deb/prerm 2>/dev/null | head -40").stdout
+    scripts = sh(
+        f"rm -rf /tmp/spike-deb && mkdir /tmp/spike-deb && dpkg -e {deb} /tmp/spike-deb && ls /tmp/spike-deb && grep -hE 'systemctl|docker|restart|reboot|modprobe|useradd|subuid' /tmp/spike-deb/postinst /tmp/spike-deb/preinst /tmp/spike-deb/prerm 2>/dev/null | head -40"
+    ).stdout
     facts["maintainer_scripts_touch"] = scripts.strip().splitlines()[:40]
     began = time.monotonic()
     installed = sh(
@@ -1716,10 +2123,18 @@ def install_sysbox() -> dict[str, Any]:
     facts["install_seconds"] = round(time.monotonic() - began, 2)
     facts["install_output_tail"] = short(installed.stdout.strip(), 400)
     facts["installed_version"] = sysbox_state()["installed"]
-    facts["sysbox_runc_version"] = sh("sysbox-runc --version | head -3").stdout.strip().replace("\n", " / ")
-    units = sh("dpkg -L sysbox-ce | grep -E 'systemd|\\.service$|/usr/bin/sysbox'").stdout.strip().splitlines()
+    facts["sysbox_runc_version"] = (
+        sh("sysbox-runc --version | head -3").stdout.strip().replace("\n", " / ")
+    )
+    units = (
+        sh("dpkg -L sysbox-ce | grep -E 'systemd|\\.service$|/usr/bin/sysbox'")
+        .stdout.strip()
+        .splitlines()
+    )
     facts["files_of_interest"] = units[:14]
-    facts["disk_bytes_installed"] = int(sh("dpkg-query -W -f='${Installed-Size}' sysbox-ce").stdout.strip() or 0) * 1024
+    facts["disk_bytes_installed"] = (
+        int(sh("dpkg-query -W -f='${Installed-Size}' sysbox-ce").stdout.strip() or 0) * 1024
+    )
     return facts
 
 
@@ -1734,15 +2149,21 @@ def register_runtime() -> None:
         "log-opts": {"max-size": "10m", "max-file": "2"},
     }
     Path("/etc/docker/daemon.json").write_text(json.dumps(config, indent=2) + "\n")
-    sh("pkill -x dockerd; for i in $(seq 1 100); do pgrep -x dockerd >/dev/null || break; sleep 0.1; done")
+    sh(
+        "pkill -x dockerd; for i in $(seq 1 100); do pgrep -x dockerd >/dev/null || break; sleep 0.1; done"
+    )
     prepared = sh(str(REPO / "docker" / "sandbox" / "vm-prepare.sh"))
     if prepared.returncode != 0:
         raise SystemExit(f"vm-prepare failed after the restart: {prepared.stderr[-300:]}")
 
 
 def sysbox_attempt() -> tuple[bool, str]:
-    done = docker("run", "--rm", "--runtime=sysbox-runc", "alpine:3.22", "echo", "sysbox-ok", timeout=90)
-    return done.returncode == 0 and "sysbox-ok" in done.stdout, short((done.stderr + done.stdout).strip().replace("\n", " / ")[-300:], 300)
+    done = docker(
+        "run", "--rm", "--runtime=sysbox-runc", "alpine:3.22", "echo", "sysbox-ok", timeout=90
+    )
+    return done.returncode == 0 and "sysbox-ok" in done.stdout, short(
+        (done.stderr + done.stdout).strip().replace("\n", " / ")[-300:], 300
+    )
 
 
 def s2_sysbox_plain(out: Path) -> bool:
@@ -1753,7 +2174,11 @@ def s2_sysbox_plain(out: Path) -> bool:
     register_runtime()
     state = sysbox_state()
     if state["mgr_running"] or not state["kcore_masked"]:
-        REPORT.fact("s2_sysbox_ablation_skipped", reason="the VM was prepared already (a rerun)", state=state)
+        REPORT.fact(
+            "s2_sysbox_ablation_skipped",
+            reason="the VM was prepared already (a rerun)",
+            state=state,
+        )
         return sysbox_attempt()[0]
     if Path("/dev/net/tun").exists():
         os.chmod("/dev/net/tun", PLATFORM_TUN_MODE)  # back to what the platform ships
@@ -1768,9 +2193,12 @@ def s2_sysbox_plain(out: Path) -> bool:
         ("plus /dev/net/tun mode 0666 (the platform has 0600)", "chmod 0666 /dev/net/tun"),
         (
             "plus unmounting the platform's /proc/kcore and /proc/keys",
-            "for n in /proc/kcore /proc/keys; do grep -q \" $n \" /proc/self/mountinfo && umount $n || true; done",
+            'for n in /proc/kcore /proc/keys; do grep -q " $n " /proc/self/mountinfo && umount $n || true; done',
         ),
-        ("plus the sysctl file of the package", "sysctl -q -e -p /lib/sysctl.d/99-sysbox-sysctl.conf"),
+        (
+            "plus the sysctl file of the package",
+            "sysctl -q -e -p /lib/sysctl.d/99-sysbox-sysctl.conf",
+        ),
     ]
     first_working: str | None = None
     for label, command in steps:
@@ -1779,14 +2207,22 @@ def s2_sysbox_plain(out: Path) -> bool:
         REPORT.fact("s2_sysbox_ablation", step=label, container_runs=ok, result=text)
         if ok and first_working is None:
             first_working = label
-    REPORT.say("s2_sysbox_runs_a_container_after_some_steps", first_working is not None, first_step_that_works=first_working)
+    REPORT.say(
+        "s2_sysbox_runs_a_container_after_some_steps",
+        first_working is not None,
+        first_step_that_works=first_working,
+    )
     return first_working is not None
 
 
 def s2_sysbox(out: Path) -> None:
     """The hosted setup, as `sysbox-prepare.sh` makes it, and the same exercise as the others."""
     prepared = sh(str(REPO / "docker" / "sandbox" / "sysbox-prepare.sh"), timeout=120)
-    REPORT.say("s2_sysbox_prepare_script_exits_zero", prepared.returncode == 0, stderr=prepared.stderr[-300:])
+    REPORT.say(
+        "s2_sysbox_prepare_script_exits_zero",
+        prepared.returncode == 0,
+        stderr=prepared.stderr[-300:],
+    )
     facts = exercise("sysbox", ["--runtime=sysbox-runc"], DIND_IMAGE)
     REPORT.fact("s2_sysbox_dind", **facts)
     again = exercise("sysbox-2", ["--runtime=sysbox-runc"], DIND_IMAGE, pull_first=False)
@@ -1810,7 +2246,10 @@ def main() -> int:
     def wanted(name: str, group: str) -> bool:
         return arguments.what in (group, "all") and (not only or name in only)
 
-    if arguments.what in ("build", "s1", "all") and docker("image", "inspect", CLAUDE_IMAGE).returncode != 0:
+    if (
+        arguments.what in ("build", "s1", "all")
+        and docker("image", "inspect", CLAUDE_IMAGE).returncode != 0
+    ):
         build_claude_image(out)
     try:
         if wanted("events", "s1"):
