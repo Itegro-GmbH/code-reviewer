@@ -47,7 +47,10 @@ from typing import Any, Final, cast
 
 from code_reviewer_runner.dynamic_review.model_door_route import (
     MODEL_AGENT_ADDRESS,
+    MODEL_DOOR_ADDRESS,
     MODEL_NETWORK_NAME,
+    NETWORK_DOOR_ADDRESS,
+    NETWORK_DOOR_PORT,
 )
 from code_reviewer_runner.job import JobError
 from code_reviewer_runner.job_loop.jsonvalues import as_object
@@ -62,6 +65,7 @@ from .host_rules import (
     close_bridge_ipv6,
     inet_failure_note,
 )
+from .network_rule import MODE_OFF, OFF, NetworkRule
 from .reader import REPO_SUBPATH, work_volume_of
 from .vm_memory import MEMINFO, REASON_VM_MEMORY, MemoryGuard
 
@@ -141,6 +145,34 @@ while True:
 """
 
 
+# The proxy variables of a container whose environment has a network door (#745, step 7). The
+# image's init starts the inner `dockerd` from the container's environment, so `docker pull` goes
+# through the door as well; every exec of the container (the engine, its tools, the agent's own
+# shells) gets them too. The door is the one address with a route out; the model door, loopback and
+# the names of the machine itself are not to be proxied. Node 24 reads the proxy variables for its
+# own `fetch` only when told to (`NODE_USE_ENV_PROXY`), which is the standard way for it.
+NETWORK_DOOR_URL: Final = f"http://{NETWORK_DOOR_ADDRESS}:{NETWORK_DOOR_PORT}"
+NO_PROXY: Final = ",".join(
+    ("localhost", "127.0.0.1", "::1", MODEL_DOOR_ADDRESS, NETWORK_DOOR_ADDRESS)
+)
+
+
+def proxy_environment(rule: NetworkRule) -> dict[str, str]:
+    """The variables that point the agent's tools at the network door; none for `off`, where there
+    is no door and the container has no variable of any kind."""
+    if rule.mode == MODE_OFF:
+        return {}
+    return {
+        "HTTP_PROXY": NETWORK_DOOR_URL,
+        "HTTPS_PROXY": NETWORK_DOOR_URL,
+        "http_proxy": NETWORK_DOOR_URL,
+        "https_proxy": NETWORK_DOOR_URL,
+        "NO_PROXY": NO_PROXY,
+        "no_proxy": NO_PROXY,
+        "NODE_USE_ENV_PROXY": "1",
+    }
+
+
 def agent_document(
     image: str,
     work_volume: str,
@@ -148,6 +180,7 @@ def agent_document(
     *,
     runtime: str = AGENT_RUNTIME,
     entrypoint: Sequence[str] | None = None,
+    rule: NetworkRule = OFF,
 ) -> dict[str, Any]:
     """The agent's container. Constants, the image id and the volume name the daemon gave, and the
     memory limit the Dispatcher computed for the size of the VM. The runtime is Sysbox and the
@@ -157,7 +190,7 @@ def agent_document(
         "Entrypoint": list(AGENT_ENTRYPOINT if entrypoint is None else entrypoint),
         "Cmd": [],
         "User": "0:0",
-        "Env": [],
+        "Env": [f"{name}={value}" for name, value in proxy_environment(rule).items()],
         "Hostname": "agent",
         "WorkingDir": AGENT_REPO,
         "Labels": {AGENT_ROLE_LABEL: "agent"},
@@ -330,9 +363,15 @@ class AgentContainer:
     `start_engine()` starts OpenCode and returns the address Control reaches it at, `stop()` ends
     everything, the container included."""
 
-    def __init__(self, memory_mb: int, seams: AgentSeams = AgentSeams()) -> None:  # noqa: B008
+    def __init__(
+        self,
+        memory_mb: int,
+        seams: AgentSeams = AgentSeams(),  # noqa: B008
+        rule: NetworkRule = OFF,
+    ) -> None:
         self._api = seams.api()
         self._seams = seams
+        self._rule = rule
         self._memory_bytes = memory_mb * 1024 * 1024
         self._container: str | None = None
         self._tunnel: Tunnel | None = None
@@ -384,6 +423,7 @@ class AgentContainer:
                     self._memory_bytes,
                     runtime=self._seams.runtime,
                     entrypoint=self._seams.entrypoint,
+                    rule=self._rule,
                 ),
                 AGENT_CONTAINER_NAME,
             )

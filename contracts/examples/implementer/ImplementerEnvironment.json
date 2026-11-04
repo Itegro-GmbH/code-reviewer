@@ -1,4 +1,11 @@
 {
   "name": "Node 22",
-  "setupScript": "corepack enable\npnpm install --frozen-lockfile\n"
+  "setupScript": "corepack enable\npnpm install --frozen-lockfile\n",
+  "network": {
+    "mode": "list",
+    "hosts": [
+      "registry.npmjs.org",
+      "*.pythonhosted.org"
+    ]
+  }
 }

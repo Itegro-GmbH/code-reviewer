@@ -94,6 +94,18 @@ function redactImplementer(
       ...file,
       path: redactBlockText(file.path, secrets),
     })),
+    // #745, step 7: the hosts are what the agent asked the network door for, text the agent chose.
+    ...(block.network === undefined
+      ? {}
+      : {
+          network: {
+            ...block.network,
+            connections: block.network.connections.map((connection) => ({
+              ...connection,
+              host: redactBlockText(connection.host, secrets),
+            })),
+          },
+        }),
   };
 }
 

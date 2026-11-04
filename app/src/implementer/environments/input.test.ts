@@ -27,7 +27,12 @@ describe("the body of an environment", () => {
       }),
     ).toEqual({
       ok: true,
-      value: { name: "Node 22", vcpus: 6, setupScript: script },
+      value: {
+        name: "Node 22",
+        vcpus: 6,
+        setupScript: script,
+        network: { mode: "off", hosts: [] },
+      },
     });
   });
 
@@ -35,7 +40,12 @@ describe("the body of an environment", () => {
   it("takes a missing script as no script", () => {
     expect(validateEnvironmentInput({ name: "Bare", vcpus: 2 })).toEqual({
       ok: true,
-      value: { name: "Bare", vcpus: 2, setupScript: "" },
+      value: {
+        name: "Bare",
+        vcpus: 2,
+        setupScript: "",
+        network: { mode: "off", hosts: [] },
+      },
     });
   });
 
@@ -159,7 +169,66 @@ describe("the body of an environment", () => {
     });
     expect(checked).toEqual({
       ok: true,
-      value: { name: "Node 22", vcpus: 4, setupScript: "npm ci\n" },
+      value: {
+        name: "Node 22",
+        vcpus: 4,
+        setupScript: "npm ci\n",
+        network: { mode: "off", hosts: [] },
+      },
     });
+  });
+
+  // #745-T41
+  it("takes a rule for the agent's network with the rest of the body", () => {
+    const checked = validateEnvironmentInput({
+      ...GOOD,
+      network: {
+        mode: "list",
+        hosts: ["Registry.npmjs.org", "*.pythonhosted.org"],
+      },
+    });
+    expect(checked).toMatchObject({
+      ok: true,
+      value: {
+        network: {
+          mode: "list",
+          hosts: ["registry.npmjs.org", "*.pythonhosted.org"],
+        },
+      },
+    });
+  });
+
+  // #745-T41
+  it.each([
+    [
+      { mode: "closed", hosts: [] },
+      { field: "network", code: "invalid" },
+    ],
+    ["open", { field: "network", code: "invalid" }],
+    [
+      { mode: "list", hosts: [] },
+      { field: "networkHosts", code: "required" },
+    ],
+    [
+      { mode: "list", hosts: ["10.0.0.1"] },
+      { field: "networkHosts", code: "invalid" },
+    ],
+    [
+      { mode: "off", hosts: ["a.example.com"] },
+      { field: "networkHosts", code: "invalid" },
+    ],
+  ])("refuses the rule %j", (network, issue) => {
+    expect(issuesOf({ ...GOOD, network })).toEqual([issue]);
+  });
+
+  // #745-T41
+  it("reports every broken field at once, the rule among them", () => {
+    expect(
+      issuesOf({ name: "", vcpus: 3, network: { mode: "list", hosts: [] } }),
+    ).toEqual([
+      { field: "name", code: "required" },
+      { field: "vcpus", code: "invalid" },
+      { field: "networkHosts", code: "required" },
+    ]);
   });
 });

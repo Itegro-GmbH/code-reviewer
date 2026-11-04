@@ -80,6 +80,8 @@ select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
 "src/code_reviewer_runner/dynamic_review/prompt_core.py" = ["E501"]
 # The attack test's table: the expected denial of each check is one sentence on one line (#745, step 6).
 "scripts/sandbox_boundary_check.py" = ["E501"]
+# The network door's lane: the embedded server and client programs and the sentences that say what each check proves (#745, step 7).
+"tests/lane/test_network_door.py" = ["E501"]
 
 [tool.pyright]
 include = ["src", "tests", "scripts", "../fakes"]

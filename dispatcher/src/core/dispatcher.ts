@@ -614,6 +614,13 @@ export function createDispatcherCore(deps: CoreDependencies): DispatcherCore {
         ...(job.reviewKind === "implementer" && job.vcpus !== undefined
           ? { vcpus: job.vcpus }
           : {}),
+        // #745, step 7: the same for the rule of the agent's network; a review never carries one.
+        ...(job.reviewKind === "implementer" && job.network !== undefined
+          ? { network: job.network }
+          : {}),
+        ...(job.reviewKind === "implementer" && job.modelHost !== undefined
+          ? { modelHost: job.modelHost }
+          : {}),
         onVmCreated,
       },
       guard.signal,

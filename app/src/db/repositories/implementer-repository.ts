@@ -9,6 +9,12 @@
 import "server-only";
 import type { Kysely, Selectable } from "kysely";
 import { sql } from "kysely";
+import {
+  hostsToText,
+  NETWORK_OFF,
+  ruleOf,
+  type NetworkRule,
+} from "../../network-rule/network.ts";
 import { formatTimestamp } from "../codecs.ts";
 import { ImplementerStoreError } from "../implementer-errors.ts";
 import {
@@ -50,6 +56,8 @@ export type TurnEnvironment = {
   name: string;
   vcpus: number;
   setupScript: string;
+  /** #745, step 7: the rule for the agent's network, as the environment had it. Left out: `off`. */
+  network?: NetworkRule;
 };
 
 export type StoredImplementerTurn = {
@@ -189,6 +197,10 @@ function turnFrom(
             name: row.environment_name,
             vcpus: row.environment_vcpus,
             setupScript: row.environment_setup_script,
+            network: ruleOf(
+              row.environment_network_mode,
+              row.environment_network_hosts,
+            ),
           },
   };
 }
@@ -309,6 +321,15 @@ export function createImplementerRepository(
             environment_name: task.environment?.name ?? null,
             environment_vcpus: task.environment?.vcpus ?? null,
             environment_setup_script: task.environment?.setupScript ?? null,
+            // Both or neither; a task without an environment has neither, and one without a rule has `off`.
+            environment_network_mode:
+              task.environment === null || task.environment === undefined
+                ? null
+                : (task.environment.network ?? NETWORK_OFF).mode,
+            environment_network_hosts:
+              task.environment === null || task.environment === undefined
+                ? null
+                : hostsToText((task.environment.network ?? NETWORK_OFF).hosts),
           })
           .returningAll()
           .executeTakeFirstOrThrow();

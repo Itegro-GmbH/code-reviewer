@@ -60,6 +60,7 @@ from code_reviewer_runner.dynamic_review.passthrough.destination import (
     key_destination,
 )
 from code_reviewer_runner.dynamic_review.prompts import MAX_SKILL_BYTES as MAX_DYNAMIC_SKILL_BYTES
+from code_reviewer_runner.implementer.network_rule import OFF, NetworkRule, RuleError, parse_rule
 from code_reviewer_runner.llm_providers import (
     LlmProviderSpec,
     provider_for,
@@ -97,7 +98,7 @@ _IMPLEMENTER_FIELDS = {
     "capabilities",
     "environment",
 }
-_IMPLEMENTER_ENVIRONMENT_FIELDS = {"name", "setupScript"}
+_IMPLEMENTER_ENVIRONMENT_FIELDS = {"name", "setupScript", "network"}
 # The bounds of the contract (`contracts/environment-sizes.v1.json`): a script is text of at most
 # 64 KB.
 MAX_SETUP_SCRIPT_BYTES = 64 * 1024
@@ -122,11 +123,15 @@ IMPLEMENTER_MODEL_DOOR_VARIABLE = "RUNNER_IMPLEMENTER_MODEL_DOOR"
 # #745, step 4: the golden snapshot's Sysbox verdict and the memory of the agent's container.
 IMPLEMENTER_SANDBOX_PROOF_VARIABLE = "RUNNER_IMPLEMENTER_SANDBOX_PROOF"
 IMPLEMENTER_AGENT_MEMORY_VARIABLE = "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB"
+# #745, step 7: the Dispatcher's way to narrow the VM's network policy once the setup is done
+# (`implementer/network_switch.py`). Unset, the policy is not changed and the report says so.
+IMPLEMENTER_NETWORK_SWITCH_VARIABLE = "RUNNER_IMPLEMENTER_NETWORK_SWITCH"
 IMPLEMENTER_ENVIRONMENT_NAMES: tuple[str, ...] = (
     IMPLEMENTER_WORK_DIR_VARIABLE,
     IMPLEMENTER_MODEL_DOOR_VARIABLE,
     IMPLEMENTER_SANDBOX_PROOF_VARIABLE,
     IMPLEMENTER_AGENT_MEMORY_VARIABLE,
+    IMPLEMENTER_NETWORK_SWITCH_VARIABLE,
 )
 IMPLEMENTER_WORK_DIR = "/work"
 _GIT_FIELDS = {"provider", "baseUrl", "token", "botLogin"}
@@ -302,11 +307,18 @@ class ImplementerLimits:
 class ImplementerEnvironment:
     """The environment a turn was started with (#818, `ImplementerEnvironment` of the contract): the
     setup script that runs once in the repository's folder, in a container of its own, before the
-    model is called. Present only when the environment has a script. The script is data written by a
-    member of the workspace; it holds no secret and is never read as a command of the app."""
+    model is called, and (#745, step 7) the rule for the agent's network. Present only when the
+    environment has a script or a rule other than `off`. The script is data written by a member of
+    the workspace; it holds no secret and is never read as a command of the app. No script is the
+    empty string."""
 
     name: str
-    setup_script: str
+    setup_script: str = ""
+    network: NetworkRule = OFF
+
+    @property
+    def has_script(self) -> bool:
+        return self.setup_script != ""
 
 
 @dataclass(frozen=True)
@@ -975,19 +987,23 @@ def _implementer_spec(data: dict[str, Any], git: GitAccess) -> ImplementerSpec:
 
 def _implementer_environment(spec: dict[str, Any]) -> ImplementerEnvironment | None:
     """The `implementer.environment` object (#818). Closed. A script of only white space is no
-    script: the Worker would have nothing to run, so the app does not send one."""
+    script: the Worker would have nothing to run, so the app does not send one. `network` is the
+    environment's rule for the agent's network (#745, step 7); absent is `off`."""
     if "environment" not in spec:
         return None
     given = _object(spec["environment"], "implementer.environment")
     _check_fields(given, _IMPLEMENTER_ENVIRONMENT_FIELDS, "implementer.environment.")
-    name, script = given.get("name"), given.get("setupScript")
+    name, script = given.get("name"), given.get("setupScript", "")
     if not isinstance(name, str) or not 1 <= len(name) <= MAX_ENVIRONMENT_NAME_CHARS:
         raise _invalid(
             "implementer.environment.name must be a string of 1 to "
             f"{MAX_ENVIRONMENT_NAME_CHARS} characters"
         )
-    if not isinstance(script, str) or not script.strip():
+    if "setupScript" not in given and "network" not in given:
+        raise _invalid("implementer.environment must carry a setupScript or a network rule")
+    if "setupScript" in given and (not isinstance(script, str) or not script.strip()):
         raise _invalid("implementer.environment.setupScript must be a non-empty string")
+    assert isinstance(script, str)
     try:
         too_long = len(script.encode("utf-8")) > MAX_SETUP_SCRIPT_BYTES
     except UnicodeEncodeError:  # half of a character: not text
@@ -997,7 +1013,13 @@ def _implementer_environment(spec: dict[str, Any]) -> ImplementerEnvironment | N
             "implementer.environment.setupScript must be text of at most "
             f"{MAX_SETUP_SCRIPT_BYTES} bytes without a NUL"
         )
-    return ImplementerEnvironment(name=name, setup_script=script)
+    rule = OFF
+    if "network" in given:
+        try:
+            rule = parse_rule(given["network"], "implementer.environment.network")
+        except RuleError as error:
+            raise _invalid(str(error)) from None
+    return ImplementerEnvironment(name=name, setup_script=script, network=rule)
 
 
 def _implementer_input(job: dict[str, Any]) -> ImplementerInput:

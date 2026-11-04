@@ -315,9 +315,9 @@ exits is outside (`implementer/agent_container.py`):
 |---|---|
 | Image | `code-reviewer-agent:golden`, the second target (`agent`) of `runner/Dockerfile`, built into the golden snapshot next to the Worker image. OpenCode (the pinned, verified binary), the Docker binaries of the digest-pinned `docker:29.9.2-dind` image (dockerd, the CLI, buildx, compose, runc), git 2.53, Node.js 24 and pnpm, uv, Python 3.13, `gcc`, `g++`, `make`, `jq`, `unzip`, `nc`, `ping`. Root, no secret, no credential, no key: it carries no environment variable named like one. It is also the base the Setup container of step 5 starts from (`docker commit`). |
 | Size | The image is 1.54 GB on the snapshot's disk (398 MB compressed), next to the Worker image (1.9 GB). The snapshot build takes about 3 minutes longer (the build of the second target is mostly cached); a VM restored from it has the same 64 GB disk and starts as fast, because a job VM does not read the layers it does not run. The Worker image and the path of reviews are untouched. |
-| Network | The **model network**, internal, `gateway_mode_ipv4=isolated`, range `10.213.77.0/29`: the agent at `10.213.77.4`, the door at `10.213.77.2`, and nothing else. No exit, no route to the VM or its control port `23456`, no name server, no neighbour; Control is not on it. The containers the agent starts through its own Docker reach the door too (through the agent) and nothing else. |
+| Network | The **model network**, internal, `gateway_mode_ipv4=isolated`, range `10.213.77.0/29`: the agent at `10.213.77.4`, the model door at `10.213.77.2`, the network door at `10.213.77.3` (only for a rule other than `off`), and nothing else. No exit, no route to the VM or its control port `23456`, no name server, no neighbour; Control is not on it. The containers the agent starts through its own Docker reach the doors too (through the agent) and nothing else. What the agent reaches through the network door is the environment's rule (section "The network door (step 7)"). |
 | Repository | The `repo` directory of the work volume, mounted as `/work/repo` (the volume's `Subpath`): the agent sees the repository and nothing of the mirror. The mount is idmapped by Sysbox, so the files the agent's root writes belong to the VM's root (measured), and its container uid 0 is host uid 165536 for processes only. |
-| Memory | The VM's memory (2,048 MB per vCPU) less the limits of everything else on it, each counted in full: the OS and the Sysbox daemons (512 MB), Control (768 MB), the door (256 MB) and **both readers** (256 MB each, 512 MB: they exist from the start of the turn, and an earlier sum counted one), **and less the part of the memory guard's floor above 512 MB** (below). No swap: **0 MB at 1 vCPU (refused), 2,048 at 2, 6,000 at 4, 9,768 at 6 and 13,537 at 8**. The guard kills the agent's container when the VM has less than max(512 MiB, 8% of its memory) left (512, 656, 984 and 1,311 MB at 2, 4, 6 and 8 vCPU); until fix round 3 of step 6 the sum did not know the floor, so at 6 and 8 vCPU an agent that stayed inside its own limit left the VM less than the guard's floor and was killed for it (the figures were 10,240 and 14,336, and 6,144 at 4 vCPU). The 512 MB of the OS's room is the floor of 2 vCPU, so nothing is taken off there. `contracts/environment-sizes.v1.json` holds the floor (`memoryGuard`) and the figures; the Dispatcher computes `agentMemoryMb` from the same two numbers the runner's `vm_memory.py` uses, and a test of each holds them to the file. Less than 1,024 MB is `sandbox_size_unsupported`, so 1 vCPU stays refused. A test holds that the limits of the agent, Control, the door and the readers leave the VM at least the guard's floor at every size. Why these figures: "The memory of the readers and the OS" below. |
+| Memory | The VM's memory (2,048 MB per vCPU) less the limits of everything else on it, each counted in full: the OS and the Sysbox daemons (512 MB), Control (768 MB), the model door (256 MB), the network door (96 MB, counted for every turn, `off` included) and **both readers** (256 MB each, 512 MB: they exist from the start of the turn, and an earlier sum counted one), **and less the part of the memory guard's floor above 512 MB** (below). No swap: **0 MB at 1 vCPU (refused), 1,952 at 2, 5,904 at 4, 9,672 at 6 and 13,441 at 8** (96 MB less than before the network door: 2,048, 6,000, 9,768 and 13,537). The guard kills the agent's container when the VM has less than max(512 MiB, 8% of its memory) left (512, 656, 984 and 1,311 MB at 2, 4, 6 and 8 vCPU); until fix round 3 of step 6 the sum did not know the floor, so at 6 and 8 vCPU an agent that stayed inside its own limit left the VM less than the guard's floor and was killed for it (the figures were 10,240 and 14,336, and 6,144 at 4 vCPU). The 512 MB of the OS's room is the floor of 2 vCPU, so nothing is taken off there. `contracts/environment-sizes.v1.json` holds the floor (`memoryGuard`) and the figures; the Dispatcher computes `agentMemoryMb` from the same two numbers the runner's `vm_memory.py` uses, and a test of each holds them to the file. Less than 1,024 MB is `sandbox_size_unsupported`, so 1 vCPU stays refused. A test holds that the limits of the agent, Control, the doors and the readers leave the VM at least the guard's floor at every size. Why these figures: "The memory of the readers and the OS" below. |
 | Limits | 16,384 processes. The time limit and the cost limit are Control's and the door's. The VM's table of open files is made too big for the agent to fill (`sysbox-prepare.sh`); the agent's and the Setup container's processes start with the highest OOM score (1,000: proven in an exec, from the VM's pid view, and for the engine started the way `start_engine` starts it), which root of the container can lower to -999 but not to -1,000, so Control's guard is what holds the VM's memory: it kills the container, repeatedly until it is gone, when the VM has less than 512 MiB or 8% of its memory left (`vm_memory.py`). Section "The attack test (step 6)". |
 | Docker options | Constants only. No job, repository name, branch or output of the agent is in any request to the daemon: they are JSON bodies made from the runner's constants and identifiers the daemon gave, and the exec commands have fixed arguments. After the container is made, Control reads it back from the daemon and refuses to start the engine if it shows a privileged container, a bind, a device, another runtime, another network or a mount besides the repository. |
 
@@ -430,6 +430,13 @@ Three places, each with its own limits, and the last one only a VM with Sysbox c
   agent looks for a secret and finds none; none is on the volume or in the definition of a container), E12 (a text-only agent gave up), E15 (a hostile repository against the real reader), and E16 (an agent that fills its disk). E08, E10 and `test_implementer_git_users.py` belonged to the old topology (a proxy
   and an engine user in the Control container) and are gone. The seams are `AgentSeams.runtime`, `.entrypoint` and `.helper_image`, `SetupSeams` (the same, for the Setup container) and `ReaderSeams.runtime` and `.python`; production never sets them.
   **The environment's setup script** (#818, `test_implementer_environment.py`, L01 to L08): a script that leaves a file in the container and a file in the repository and changes a tracked one, and the agent that starts from the committed image and sees the first two and not the third (under Sysbox also an image the script made in its own Docker, without the internet, in the agent's Docker); a script that fails, one that runs out of time, one that fills the disk (Control's reserve is untouched) and a stop of the runner during the script, each ending before any model side exists; the Setup container with no secret in its environment, its pid 1, its mounts or its image; the host-side rules (a service on all addresses of the machine, over IPv4 and over IPv6 with the container's IPv6 switched on, is not reached, and a plain container on the default bridge reaches it); a turn without an environment, which makes no Setup container, network or image. What needs the internet or the platform's network (the script reaches the internet, the VM's control port and the platform's addresses are closed) is in "Measured on a real VM, round of #818".
+  **The network door** (#745 step 7, `test_network_door.py`, L10 to L16): the real door container made by `start_network_door` from the Worker's image and an agent-image container on the model network
+  with the environment the real agent gets. CI has no internet, so the names of the list resolve, through the door's `/etc/hosts`, to servers of ours (plain HTTP and a real TLS tunnel) on a second Docker network that the
+  door treats as public (`CiNetwork`; `NETDOOR_TEST_PUBLIC_CIDR`, honoured only inside `10.213.99.0/24`, set by the lane's seam and never by `door_document`, which has no environment of its own). It proves that a listed name is reached over plain HTTP and
+  over a TLS tunnel, a suffix entry covers the names below it and not itself, and that an unlisted name, an IP literal, a port other than 80 and 443, a name with a private address and a name with a private and a public one are each refused with the door's own word and the server sees nothing; that the agent cannot connect to the
+  server directly (while a plain container on the server's network can, so the failure means something) and has no name server; that the door's own egress table lets ports 80 and 443 through and drops the private ranges and the model network; that the log of the door holds the counts and the bytes and
+  nothing of a path or a body; and that the container is what the launcher describes (read back from the daemon: user, read-only root, no capability, no mount, no variable but the lane's own, the networks). The rule `off` has no door: a unit test holds that the session starts nothing and that the agent's container has no proxy variable
+  (`test_implementer_network.py`).
   **CI has no Sysbox**, so the lane runs the containers under `runc`, with an entry point in place of the image's init that skips the inner `dockerd` (it says it is ready), on a bridge network with an exit. It therefore proves the flow of the turn, the reader, the reserve
   disk and the volume, the leftovers and the secrets; it does **not** prove the Sysbox wall (the `open_by_handle_at` refusal there is the missing capability of runc, not the user namespace), the id mapping of the volume, the
   isolated network or the agent's own Docker.
@@ -642,13 +649,91 @@ sysctls and the missing address are what closes IPv6 on a kernel without the tab
 the kernel supports it: IPv6 off on the container's `eth0` (which takes `default`) before the probe switches it on, no IPv6 address on the bridge, and the `inet` table with
 its two drops.
 
-**What this breaks until step 7 (the network door).** `npm install`, `pnpm install`, `pip install`, `apt-get`, `cargo`, `go get` and `docker pull`
-all need a registry and now fail ("lookup registry-1.docker.io ... server misbehaving", measured). Whatever a task needs must already
+**Without a network door (the rule `off`, the default), `npm install`, `pnpm install`, `pip install`, `apt-get`, `cargo`, `go get` and `docker pull`
+all need a registry and fail** ("lookup registry-1.docker.io ... server misbehaving", measured). Whatever such a task needs must already
 be in the image: the toolchain of the agent image is there, and an environment's setup script (section "The environment's setup script":
 full internet, no secrets, its result becomes the agent image with `docker commit`) installs the rest. A task without an environment, or with a
-repository whose dependencies the script does not install, can read and edit but not build or test.
+repository whose dependencies the script does not install, can read and edit but not build or test. **Since step 7 an environment can give the agent a
+network back**, on its owner's terms, through the network door (next section).
 
 There is no Go module proxy and there never was one.
+
+## The network door (step 7)
+
+An environment has a **network** setting (#745, step 7 of `plans/implementer-sandbox.md`), chosen by its owner on the environments page. It
+decides what the agent can reach once the setup script is done:
+
+| Setting | What the agent has | Door |
+| --- | --- | --- |
+| `off` (the default; every existing environment, and a task without an environment) | No network at all, as in steps 4 to 6 | None: no container is started |
+| `list` | The host names the owner wrote, and only those. Each is exact (`registry.npmjs.org`) or a suffix (`*.pythonhosted.org`: every name below it, not `pythonhosted.org` itself, so list both if both are needed). At most 100; each at least two labels (`*.com` is not a rule), no IP address, no port, no path. Stored in one form: lower case, punycode, no trailing dot | Yes |
+| `open` | Any public name | Yes |
+
+**The rule is the one closed list of the sandbox, because the door is an exit.** The owner's rule: inside the sandbox the agent is free, and
+only money, the key and exits are guarded; the list of hosts is the owner's decision about an exit and nothing else in the engine is listed. Only a member who may
+manage environments (Owners and Admins, `manage_implementer_environments`) can change the setting. The rule is copied into the turn when a task starts, like the size
+and the script (`implementer_turns.environment_network_*`, no foreign key), so editing or deleting the environment later touches no task. The migration
+(`20261103100000_add_environment_network`) is expand only: two columns with a constant default on the environments (`network_mode` `off`, `network_hosts` empty) and two
+nullable ones on the turns; every environment that existed reads `off`, every turn that existed reads null, which reads `off`. The API takes `network: { mode, hosts }` in the body of `POST` and `PUT`
+(a body without it is `off`: a `PUT` replaces the whole environment); a bad value is `ENVIRONMENT_REQUEST_INVALID` with an issue on the field `network` (the mode or the shape) or `networkHosts` (`invalid`: an entry that is
+not a host name or a suffix; `required`: a list with no host; `too_long`: more than 100), never with the value in it. The form shows the setting as three radio buttons and a field for the hosts, one on each line; the picker of the task form says in its list which environments give the agent a network;
+the Runs page shows the rule the task ran with and what the door reported.
+
+**What the door is** (`implementer/netdoor/`, started by `implementer/netdoor_launcher.py`): an HTTP and HTTPS **forward proxy in a container of its own**, built like the model
+door. The Worker's image with another entry point (`python -m code_reviewer_runner.implementer.netdoor`), non-root, read-only root file system, every capability dropped, `no-new-privileges`, 96 MB of
+memory without swap, 400 processes, a 16 MB `noexec` `/tmp`, no mount, no published port, IPv6 off, an `OomScoreAdj` of -500 (the VM's OOM killer takes the agent, whose score is 1,000, first), and **no environment variable and no secret of any kind**: it holds the owner's rule and nothing else.
+It sits on the model network at **`10.213.77.3:3128`** and on the VM's default bridge (its only way out). Control starts it over the Docker Engine API right after the model door (whose network it joins), installs its egress rules with the same
+one-shot `NET_ADMIN` container, and only then writes the rule to its stdin. The door answers on stdout (`ready`, the log of its connections once a second when it changed, a last one when it stops) and **never calls Control**. A door that cannot be started ends the turn `setup_failed`, free, before the agent exists (`network_door_unavailable` in the log): an environment that asked for a network does not run without one. A door that dies during the turn leaves the agent with no network and a note in the report; the turn goes on, because nothing it held was a key.
+
+**What it decides, per request, by the host name of the request:**
+
+* `CONNECT host:port` is an **HTTPS tunnel**; the door never looks inside (no certificate of ours, no interception). Plain HTTP (`METHOD http://host[:port]/path`) is forwarded to the port the URL names, 80 when it names none, if that port is one of the two the door allows (any other port is `port_not_allowed`), with the request line rewritten to its origin form, `Host` set from the same authority the decision was made on, `Connection: close` forced, and the rest of the traffic relayed unread, so one connection is one destination. Anything else (a request in origin form, `https://` as a URL, a user name in the authority, a malformed line, a method that is not an HTTP token) is a 400.
+* The order, the same in every mode: an **IP literal** is refused (`ip_literal`: IPv4 in any spelling a resolver reads, `127.1`, `0x7f.1`, `2130706433`, IPv6 in brackets); a name that is no DNS name is refused (`bad_request`); a **port other than 443 and 80** is refused (`port_not_allowed`); the rule must list the name (`list`; `open` lists everything; `not_listed`); only now is the name looked up, so **a name the rule does not list is never sent to a resolver**; **every IPv4 address it has must be public** (`private_address`: private, loopback, link-local, the metadata address, shared (CGNAT), special-purpose, documentation, multicast and reserved ranges, `netdoor/addresses.py`), and a name with one public and one private address is refused as a whole; the door then **connects to an address it checked**, never to the name again, so a resolver that answers differently the second time (DNS rebinding) changes nothing. IPv6 is not looked up: the door has none.
+* A refusal is a `403` with `X-Network-Door: <word>` and one plain sentence in the body, so that a failed `npm install` says why. A connection that cannot be made is a `502` (`upstream_failed`); more than 128 connections at once get a `503`.
+* Case, a trailing dot and Unicode do not get round the list: the name is brought to lower case ASCII (punycode) before it is compared, the entries are in the same form.
+
+**The door's own egress** is closed in its network namespace, as the model door's is, by a one-shot container with `NET_ADMIN` and nothing else before it is told anything (`netdoor_launcher.egress_rules`, table `netdoor_egress`): loopback and replies are open; a new connection into the model network is dropped (the door answers the agent and opens none towards it); DNS (port 53) is open; every private, link-local, shared and special range is dropped (the VM, its neighbours, other containers, the platform's services); **ports 80 and 443 are open to the rest of the internet and nothing else is**. A door whose rules did not go in is taken away and never told the rule.
+
+**What the agent has** (`agent_container.proxy_environment`): `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, `https_proxy` (all `http://10.213.77.3:3128`), `NO_PROXY` and `no_proxy` (`localhost`, `127.0.0.1`, `::1`, the model door and the network door itself) and `NODE_USE_ENV_PROXY=1`, as **environment variables of the agent's container** (none for `off`: the container has no variable then). The image's init starts the inner `dockerd` from the container's environment, so **`docker pull` goes through the door**; every exec of the container, the engine's tools and the agent's own shells inherit them, and `npm`, `pnpm`, `pip`, `uv`, `apt`, `cargo`, `go` and `git` read the proxy from those variables, so no configuration file is written in the agent's home. The agent has no name server: the door resolves. **Containers the agent starts through its own Docker are not given the variables** (a service name between two of them would be sent to the door); they reach the door by its address, `http://10.213.77.3:3128` (a name does not resolve there), when a command in them needs the network, for example `docker run -e HTTPS_PROXY=http://10.213.77.3:3128 ...` or `docker build --build-arg HTTPS_PROXY=...`. The setup script is unchanged: it runs before all of this, on its own network, with full internet access.
+
+**Memory.** The door counts 96 MB for every turn, `off` included (the memory the page shows does not depend on the rule), so the agent's container has 96 MB less than before at every size: 1,952, 5,904, 9,672 and 13,441 MB at 2, 4, 6 and 8 vCPU (`contracts/environment-sizes.v1.json`, the Dispatcher's `agentMemoryMb`, the app's `AGENT_MEMORY_MB` and the Runs page's `AGENT_MEMORY_GB` are held to it by tests).
+
+**The report.** For every turn that got as far as the network, whatever its rule (`off` included, and also when the second wall is not in place: `vmPolicy: not_configured` and a note), the turn's result carries `implementer.network` (`ImplementerNetworkReport`): the rule's mode, whether a door ran, what the second wall did (`vmPolicy`), the totals (connections allowed and refused, bytes each way) and at most 100 entries, one for each host, port and outcome with its count and bytes, refusals first, and the number of entries that did not fit. **No body, no header and no path is kept anywhere** (a test holds that the log of the door has none of them); the host is the text the agent asked for, cleaned to printable ASCII and shown as text.
+
+### The second wall: the VM's network policy
+
+The first wall is the door and its table. The second is outside the VM, so that a flaw inside it does not undo it: after the setup, the VM's **Vercel network policy** is narrowed to GitHub (`github.com`, `api.github.com`: the final push), the model provider, the App, the Dispatcher's own host, and the environment's list; nothing more for `off`. For `open` it is left as it is (the platform's `allow-all`). The setup runs under the open policy, as before.
+
+**Who changes it, and why not Control.** The policy is a setting of the VM changed with the platform's API and a credential of the team, which must never be in a VM. The Dispatcher has the credential but holds nothing after the hand-over (#487) and cannot wait for a setup script of up to 15 minutes. So the Dispatcher gives the Control container, in its environment (`RUNNER_IMPLEMENTER_NETWORK_SWITCH`), a document with the address of its **`POST /network`**, the VM's name, the app, the rule and the model provider's host it read in the claim (`job.network` and `job.modelHost` of the App's answer, for every Implementer job: a task without an environment is `off`; the App takes the host from the turn's model entry), the time the token stops working (the VM's lifetime from its creation, which is derived from the job's time limit, plus a minute), and a **token**: an HMAC-SHA256 over the app, the VM, the rule, the provider's host and the expiry, keyed by a key derived from the app's signing secret for this purpose only. **Control makes the call after the setup and before the agent exists** (`session._start_network`, `network_switch.py`), with the values of the document; it refuses to start when the model it is about to use is not on the provider's host the Dispatcher signed. The Dispatcher checks the token and its expiry (the current key and the previous one while keys rotate), builds the policy itself (`network/rule.ts` `policyFor`), and sets it through the SDK (`updateNetworkPolicy`, the port's `SandboxFleet.setNetworkPolicy`). Control cannot choose another VM, rule or provider host, and a copy of the token narrows the VM it was made for, to the same rule, until the VM is gone.
+
+**The switch ends the connections that are open, the call that asks for it among them.** So the answer may never arrive. Control asks again, up to eight times two seconds apart, until it gets `{"status":"applied"}`; the Dispatcher's own host is in the narrowed policy, so the next call gets through, and the call is idempotent. A `4xx` is not asked again. A call that never gets through ends the turn `setup_failed`, free, before the agent exists. A Dispatcher with no public address (`DISPATCHER_PUBLIC_URL`, else the platform's `VERCEL_PROJECT_PRODUCTION_URL`), or one whose claim answer names no provider host (an App of the release before), hands out no switch, and the Worker then says in the report and in a note that the policy was not changed (`vmPolicy: not_configured`, for every rule, `off` too); the first wall is the only wall. `DISPATCHER_PUBLIC_URL` is an origin: a path in it is refused when the Dispatcher starts, because the route is served at the root.
+
+**What the Dispatcher accepts.** The route takes a JSON body of at most 64 KB; the VM's name must be `cr-implementer-<job id>-<suffix>`; the model host a plain host name (no wildcard, no address); the rule the contract's; and the token must be the HMAC. Every refusal of one status has the same words, so a caller cannot tell which check failed. Nothing logs a token or a body.
+
+**Wildcards.** The platform's policy takes `*.suffix` in its `allow` list, and the entries are passed on as they are. The platform's wildcard may be wider than the door's (the door never lets the suffix's own name through, the platform may), which is harmless: the door decides for the agent, the policy decides for the VM.
+
+### Measured on a real VM (2026-11-03, `spike-net-door-1`, 2 vCPU, 4 GB, from the golden snapshot of 17:28 with this branch's runner source over the Worker image)
+
+The Control container, the door and the agent's container were started by the real code (`AgentContainer.create`, `start_network_door`, Sysbox runtime, the production model network), a `list` environment with `registry.npmjs.org`, `*.npmjs.org`,
+`pypi.org`, `files.pythonhosted.org` and the Docker Hub names; the policy was changed with the platform's own call (the platform connector's call that sets a running session's network policy, the same API the SDK's `updateNetworkPolicy` calls) with the policy that `policyFor` builds.
+What was **not** run here: the Dispatcher's `POST /network` route and the call from Control to it (a deployed Dispatcher is needed); they are covered by unit tests, the lane covers the door, and the policy semantics below were measured with the platform directly.
+
+| Check | Result |
+| --- | --- |
+| Start: volume, Control, door (incl. its egress table), agent container with its inner Docker | 4.5 s in all (the door included) |
+| `list`: `npm install left-pad` through the door | 1.2 s, installed |
+| `list`: `pip install six` through the door | 2.1 s, installed |
+| `list`: `docker pull hello-world` in the agent (the inner `dockerd` takes the proxy from the container's environment) | went through the door; Docker Hub's blob host `production.cloudfront.docker.com` was **not on the list** and got the door's `403 not_listed` (list `*.docker.com` or `*.cloudfront.docker.com` for Docker Hub); with `open` the pull worked |
+| `list`: `https://example.com` and `http://example.com` through the door | `403 Forbidden` (`not_listed`), `Tunnel connection failed: 403` |
+| Direct egress from the agent (`1.1.1.1:443`, `142.250.185.78:443`, the model network's gateway, the metadata address) | all blocked; the same probe from a plain container on the VM connects; the agent has no name server (`gaierror`); `172.17.0.1` answered "refused" because it is the address of the agent's own inner `docker0` |
+| The door's size | 17.4 MiB of its 96 MiB, 8 processes after the traffic above; 27.8 MiB and 204 processes with 100 tunnels open at once (CI lane, `runc`); `OomScoreAdj` -500 as asked |
+| The door's log (`list`) | 15 allowed, 3 refused, 270,792 bytes in, 47,755 out; entries per host: `registry.npmjs.org` 6, `pypi.org` 3, `files.pythonhosted.org` 2, `registry-1.docker.io` 3, `auth.docker.io` 1; refused `example.com` 2, `production.cloudfront.docker.com` 1; no path, no body |
+| `open`: `example.com` (https and http), `github.com`, `docker pull` | all worked; `http://10.0.0.5` and `http://169.254.169.254/...` were `403` (`private_address` / `ip_literal`); direct egress still blocked |
+| `off`: proxy variables in the agent | none (0); no door container; `1.1.1.1:443`, the door's address and the model door's port all blocked; `npm install` failed with `EAI_AGAIN` |
+| **The switch of the VM's network policy** (second wall) | an open connection (a TLS connection to `github.com` that sent a request each second) **was reset (`ConnectionResetError`) at the moment the policy changed**, as the plan said. After it: from the VM itself `example.com`, `google.com` and `pythonhosted.org` (not listed) were unreachable (`dispatcher.code-review.com`, listed but a name that does not exist, did not answer either), `github.com`, `registry.npmjs.org`, `pypi.org` and `code-review.com` answered; **Control (a new connection to `api.github.com`) was reachable at once**, no reconnect needed beyond the new connection; the agent's `npm install` and `pip install` through the door still worked and `example.com` was still `403` at the door |
+| **Wildcards of the platform's policy** | `*.npmjs.org` let `docs.npmjs.org` and `www.npmjs.org` through and **not `npmjs.org`**: the platform's `*.suffix` matches the names below it and not the name itself, the same as the door's rule, so the policy can express suffixes and no special case is needed |
+
+**The second wall is a fence, not a filter of what the agent says.** Both walls know host names; neither looks inside a tunnel. See "What is accepted" for what that leaves.
 
 ## The environment's setup script
 
@@ -818,16 +903,16 @@ first ran into it).
 
 ## Environments
 
-An environment is a start configuration for a task: a **name**, a **size** and a **setup script**. They are kept per workspace on
+An environment is a start configuration for a task: a **name**, a **size**, a **setup script** and (step 7) a **network** setting. They are kept per workspace on
 the page `/w/<slug>/environments` (navigation entry "Environments", between Implementer and Runs; only in a deployment with the
 capability `implementer`, anywhere else the path is a 404 like an unknown one).
 
 - **Who:** every member sees the list and the scripts, because every member may use one. Owners and Admins create, change and
   delete (`manage_implementer_environments`). A workspace holds at most 50.
 - **Sizes** are 2, 4, 6 and 8 vCPU. The VM has 2 GB per vCPU and the system around the agent takes 2 GB of it (the OS and the Sysbox daemons
-  512 MB, Control 768 MB, the model door 256 MB, the two readers 512 MB) and the memory guard's floor above 512 MB (144, 472 and 799 MB at 4, 6
-  and 8 vCPU, `memoryGuardFloorMb`), so the **agent's container gets 2.0, 5.8, 9.5 and 13.2 GB** (2,048, 6,000, 9,768 and 13,537 MB): the page shows
-  that figure rounded down to a tenth ("4 vCPU, 5.8 GB memory"), the memory `sandbox.ts` computes (`agentMemoryMb`). **1 vCPU is not offered**: it is a size of
+  512 MB, Control 768 MB, the model door 256 MB, the network door 96 MB, the two readers 512 MB) and the memory guard's floor above 512 MB (144, 472 and 799 MB at 4, 6
+  and 8 vCPU, `memoryGuardFloorMb`), so the **agent's container gets 1.9, 5.7, 9.4 and 13.1 GB** (1,952, 5,904, 9,672 and 13,441 MB): the page shows
+  that figure rounded down to a tenth ("4 vCPU, 5.7 GB memory"), the memory `sandbox.ts` computes (`agentMemoryMb`). **1 vCPU is not offered**: it is a size of
   the platform (reviews run on it) and leaves the agent's container nothing. An environment that still has it (a row made before this
   change; the table has no default for the column and the form's default was 2, so such a row exists only where a member chose 1) is
   listed as it is, with its 1 vCPU and a sentence that a task started with it is refused until another size is chosen; the form opens with no
@@ -840,9 +925,10 @@ capability `implementer`, anywhere else the path is a 404 like an unknown one).
   field and the page says so. **It runs when a task starts** (section "The environment's setup script"), and the page says what it
   gets: root, full internet, no secrets, a container of its own, `bash -e`, 15 minutes, the tracked files put back, and an agent that has no
   internet afterwards.
+- **The network** is `off` (the default), a list of hosts or `open`: what the agent can reach once the script is done (section "The network door (step 7)"). Only Owners and Admins can change it, like every other field. The form says that network access can be used to send out anything the agent can read.
 - **Names** are unique within a workspace, whatever the case.
 - **The form** has an optional picker "Environment". It lists the standard first and then the environments with their size and memory,
-  and says "setup script" next to those that have one. A task that names none is the task of before.
+  and says "setup script" next to those that have one and "network: listed hosts" or "network: any host" next to those that give the agent a network. A task that names none is the task of before.
 - **The task keeps its own copy.** When the task is sent, its turn copies the environment's name, size and script
   (`implementer_turns.environment_*`, no foreign key). Changing or deleting the environment later touches no running or past task, and
   sending the same request again after the environment was deleted still gives the first task back. The Runs page shows which environment
@@ -868,8 +954,9 @@ and from nothing else, and the **script** from the job the Worker fetches:
 4. **Precedence** of the size of an Implementer VM: the turn's environment, then `DISPATCHER_WORKER_CONFIG.implementer.launcher.vcpus`, then
    the default of the kind (2). **The memory of the Control container does not follow the size** (768 MB at every size; the operator's
    `container.memory` for the kind applies at every size): the size is the agent's, which gets what the VM has left (`RUNNER_IMPLEMENTER_AGENT_MEMORY_MB`,
-   2,048 at 2 vCPU, 6,000 at 4, 9,768 at 6 and 13,537 at 8). An operator who configures `launcher.vcpus: 1` for the kind still gets the
-   Worker's free `sandbox_size_unsupported` at the start of every turn.
+   1,952 at 2 vCPU, 5,904 at 4, 9,672 at 6 and 13,441 at 8). An operator who configures `launcher.vcpus: 1` for the kind gets
+   `sandbox_config_invalid` (the network door's 96 MB took the last room Control's default 768 MB had at 1 vCPU; it was the Worker's free `sandbox_size_unsupported`
+   before, which a job that names the size still gets from the Launcher).
 5. The Dispatcher reports the VM's size with the VM (`vcpus` in `VmStartRequest`) for an Implementer job only (an App of the release before
    refuses a field it does not know, and a refused report only costs the measuring of the minutes), and the App keeps it in
    `job_vm_runs.vcpus`, so that minutes can be priced per size later. Billing is off in the factory; nothing is charged by size today.
@@ -877,6 +964,12 @@ and from nothing else, and the **script** from the job the Worker fetches:
    feature `implementer_environment`**: for any other, a task whose environment has a script is refused at the claim
    (`implementer_engine_unavailable`, free) rather than run without it on a base the person did not choose. The result carries
    `implementer.setup` (`ok`, `exitCode`, `timedOut`, `durationSeconds`, `output`) when a script ran.
+7. **The network rule** (step 7) goes two ways. To the Dispatcher, in the same claim answer as the size: `job.network` (`{mode, hosts}`) for **every** Implementer job
+   (a task without an environment, or an environment without a rule, is `off`) and `job.modelHost` (the provider's host, when it is a plain host name) and for no other kind, so that it can hand the Control container the token of the second wall
+   (section "The network door (step 7)"). To the Worker, in `implementer.environment.network` next to the script (an environment now carries a script, a rule, or both; one with
+   neither is no environment), **only if the Worker names the claim feature `implementer_network`**: for any other, a task whose rule is not `off` is refused at the claim
+   (`implementer_engine_unavailable`, free). A rule of `off` is not sent (a Worker without the feature does the same). The Dispatcher believes `job.network` for the kind
+   `implementer` only, and a rule that is not the contract's is an answer it cannot read: nothing is launched.
 
 What does not depend on the size: the work volume is a directory of the VM's disk (64 GB on the Pro plan, whatever the vCPUs), the reserve disk
 (8 GiB), `pids` of the Control container, the steps of the volume, and a VM lives `timeoutSeconds` plus the margin whatever its size.
@@ -894,7 +987,7 @@ never beyond the time that is left of the final push | Runner, container spec |
 | Branch name | At most 200 characters, each part between slashes at most 240 bytes, git's rules, not the base branch | Form and route |
 | Base branches offered | 100 names, default first; a base beyond that can be typed | Route |
 | Result | 200 commits and 500 files (of the task's branch), 50 branches, 8,192 characters of summary, the whole report under 4 MB (Vercel cuts a body at 4.5 MB) | Contract and runner |
-| VM and containers | 2 vCPU and 4 GB for the VM; the Control container 768 MB without swap and 2048 processes, `/work` mounted `nosuid,nodev`; the model door 256 MB; the two readers 256 MB each; the agent's container the rest after 512 MB for the OS and the daemons (2,048 MB at 2 vCPU, section "The agent's container" for the other sizes), no swap. The Dispatcher refuses a size that leaves the VM no room for Control, the door, the readers and the OS (`sandbox_config_invalid`); a size that leaves the agent less than 1,024 MB (1 vCPU) is `sandbox_size_unsupported`, free, from the Worker, and from the Launcher for a job that names it. A task whose environment names a size (2, 4, 6 or 8 vCPU) gets that VM and, at that size, 2,048, 6,000, 9,768 or 13,537 MB for the agent ("Environments"); Control stays at 768 MB | Dispatcher (`DISPATCHER_WORKER_CONFIG` can override the default size), runner |
+| VM and containers | 2 vCPU and 4 GB for the VM; the Control container 768 MB without swap and 2048 processes, `/work` mounted `nosuid,nodev`; the model door 256 MB; the network door 96 MB; the two readers 256 MB each; the agent's container the rest after 512 MB for the OS and the daemons (1,952 MB at 2 vCPU, section "The agent's container" for the other sizes), no swap. The Dispatcher refuses a size that leaves the VM no room for Control, the door, the readers and the OS (`sandbox_config_invalid`); a size that leaves the agent less than 1,024 MB (1 vCPU) is `sandbox_size_unsupported`, free, from the Worker, and from the Launcher for a job that names it. A task whose environment names a size (2, 4, 6 or 8 vCPU) gets that VM and, at that size, 2,048, 6,000, 9,768 or 13,537 MB for the agent ("Environments"); Control stays at 768 MB | Dispatcher (`DISPATCHER_WORKER_CONFIG` can override the default size), runner |
 | Setup script | 64 KB of text, 15 minutes, the whole step (start, script, saving the image) at most 855 seconds more, all of it inside the 3600 seconds of the turn, and the agent keeps at least 10 minutes; the end of its output, 8,192 characters, reaches the Runs page | Contract, runner (`environment_setup.py`) |
 | Parallel work | `RUNNER_DISPATCH_MAX_RUNNING` (2) for all kinds together, and one running turn per session | App and Dispatcher |
 
@@ -979,12 +1072,19 @@ These are decisions of the owner, not oversights.
 - **A branch created meanwhile.** If someone creates the task's branch after the submit check and before the end of the turn,
   and it points at an ancestor of the agent's tip, GitHub fast-forwards it: the task lands on a branch it did not create, with
   that person's earlier history under it. Any other history is a rejected branch (`non_fast_forward`).
-- **Exfiltration through a registry: gone for now, back with step 7.** The agent has no network in this step, so it cannot reach a registry.
-  The network door will give it one again (a rule per environment: off, a list, open). The old risk then returns: the egress rule looks at the
-  name of the tunnel and nothing inside it, and `registry.npmjs.org` accepts uploads, so an agent that holds an npm token (from the repository, or
-  from prompt-injection text) can `npm publish` any file it can read. It is accepted for **internal use, on own repositories** only. **#784 must
-  be closed before external users** or a repository that is not ours: a read-only caching registry mirror (GET of metadata and tarballs only) or
-  an intercepting proxy with a method allowlist, so that the agent has no tunnel to a public registry at all.
+- **Exfiltration through a registry: back with the network door (step 7) for `list` and `open`; `off`, the default, has none.** An environment whose
+  rule is `list` or `open` gives the agent a network again, and the old risk returns with it, stated plainly: both walls look at the **host name** of the
+  tunnel and nothing inside it, and `registry.npmjs.org` and `pypi.org` accept uploads, so an agent that holds an npm token (from the repository, or from
+  prompt-injection text) can `npm publish` any file it can read, and with `open` it can send it to any host that takes a `POST`. The form says so where the rule is
+  chosen. It is accepted for **internal use, on own repositories** only, and for the owner's decision on each environment. **#784 stays open and must be closed
+  before external users** or a repository that is not ours: a read-only caching registry mirror (GET of metadata and tarballs only) or an intercepting proxy with a
+  method allowlist, so that the agent has no tunnel to a public registry at all. The door does not read what goes through a tunnel (no interception, no certificate
+  of ours), so the list cannot say "download, never upload". Nothing the agent sends is kept, in the report or anywhere.
+- **The model provider's host in the second wall is the App's word, signed by the Dispatcher** (review of #830: it used to be the Worker's). The policy is built from the signed rule, the signed
+  provider host, GitHub's two hosts, the App's and its own; a taken-over Control cannot add a host, and the token expires with the VM.
+- **IPv6 does not go through the door.** The door looks up IPv4 only (its table is an `ip` table and its container has IPv6 off), so a host that has only an AAAA record is not
+  reachable through it.
+- **A door that dies takes the agent's network with it** for the rest of the turn, with a note in the report; the turn goes on.
 - **Any member may start a task.** See "What it is". Move to Admin and up before outside users.
 - **No registry and no `.github/workflows` pushes.**
 - **Turns are billed at the Dynamic rate** until the Implementer has a rate of its own.
@@ -999,7 +1099,7 @@ Open issues at the time of this change (2026-11-02):
 - **#745**, the epic of the first vertical slice, and **#768**, the operator guide and the live smoke test: the smoke test
   ([`implementer-smoke-test.md`](implementer-smoke-test.md)) is the first run of the whole path on the platform and has not
   been run for this git model.
-- **#784**: read-only registry access, before external users (above).
+- **#784**: read-only registry access, before external users (above). The network door (step 7) brings the risk back for `list` and `open`; it is **not** closed by it.
 - **The Sysbox verdict in the deploy** is written and read (the fourth member of the pair), and `unrecorded` is gone: the first release
   after it has no verdict anywhere, so the Implementer is refused (`sandbox_unproven`) until that release has built a snapshot and
   promoted it (the changed image inputs rebuild it by themselves). **Before the first release that carries this change the owner must

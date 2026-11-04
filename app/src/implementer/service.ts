@@ -368,6 +368,7 @@ export function createImplementerService(
           name: found.name,
           vcpus: found.vcpus,
           setupScript: found.setupScript,
+          network: found.network,
         };
       }
 

@@ -376,7 +376,10 @@ class FakeDockerEngine:
         self._reply(connection, 201, {"Id": identifier})
 
     def _join(self, connection: socket.socket, network: str, action: str, body: Any) -> None:
-        entry = self.networks.get(network)
+        # The real daemon takes a network's name as well as its identifier.
+        entry = self.networks.get(network) or next(
+            (n for n in self.networks.values() if n["Name"] == network), None
+        )
         if entry is None:
             self._reply(connection, 404, {"message": "no such network"})
             return

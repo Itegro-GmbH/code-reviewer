@@ -342,6 +342,7 @@ def test_the_names_the_worker_container_gets_are_the_names_of_the_file() -> None
         "RUNNER_IMPLEMENTER_MODEL_DOOR",
         "RUNNER_IMPLEMENTER_SANDBOX_PROOF",
         "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB",
+        "RUNNER_IMPLEMENTER_NETWORK_SWITCH",
     )
     assert sorted(runner_job.IMPLEMENTER_ENVIRONMENT_NAMES) == sorted(
         defs["KnownImplementerEnvironmentName"]["enum"]

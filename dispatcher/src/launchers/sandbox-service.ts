@@ -8,6 +8,8 @@
 // Commands are argument vectors, never shell text: nothing here is parsed by a shell, so a value cannot
 // become a command. The per-job credential is not part of any request except the stdin of the Worker process.
 
+import type { NetworkPolicy } from "../network/rule.ts";
+
 /** Why the platform refused or failed a call, in the terms the Launcher classifies. */
 export const SANDBOX_FAILURE_KINDS = [
   "rate_limited",
@@ -133,6 +135,12 @@ export interface SandboxFleet {
    * answer in time throws `unavailable`.
    */
   delete(name: string): Promise<"deleted" | "kept">;
+  /**
+   * Sets the network policy of a running VM by name (#745, step 7: the second wall of the network door, called from `POST /network`).
+   * The platform ends the connections that are open when the policy changes. Throws `SandboxServiceError` for a failure of the
+   * platform, `not_ready` for a VM it does not have or that is no longer running.
+   */
+  setNetworkPolicy(name: string, policy: NetworkPolicy): Promise<void>;
 }
 
 /** The platform's words for a VM that has ended for good: the only ones the reaper deletes (#802). */

@@ -53,6 +53,7 @@ import {
   SandboxDockerHost,
   WORK_VOLUME_STEP_TIMEOUT_MS,
 } from "./sandbox-host.ts";
+import type { NetworkRule } from "../network/rule.ts";
 import {
   SandboxServiceError,
   type SandboxFailureKind,
@@ -122,6 +123,15 @@ export const IMPLEMENTER_VM_HEADROOM_MB = 512;
  */
 export const MODEL_DOOR_MEMORY_MB = 256;
 /**
+ * The memory limit of the network door, the third container of an implementer turn (#745, step 7; `NETDOOR_MEMORY_MB` of
+ * runner/src/code_reviewer_runner/implementer/netdoor_launcher.py). It exists only for a rule other than `off`, but it is counted for
+ * every turn: the size the person chose and the memory the page shows do not depend on the rule, and the sum of the limits never
+ * exceeds the VM.
+ */
+export const NETWORK_DOOR_MEMORY_MB = 96;
+/** Seconds added to the VM's lifetime for the expiry of the switch token (another instance's clock may be a little behind). */
+export const NETWORK_SWITCH_CLOCK_MARGIN_SECONDS = 60;
+/**
  * The memory limit of one reader, a container in which Control looks at the agent's repository (`READER_MEMORY_BYTES` of
  * runner/src/code_reviewer_runner/implementer/reader.py). There are **two** of them (`READER_COUNT`): the one every look uses, which
  * runs while the agent runs (the look at the tree), and the one that writes (the set-up, the rescue of a detached HEAD and the
@@ -151,7 +161,7 @@ export function memoryGuardFloorMb(vcpus: number): number {
 
 /**
  * What is left of an implementer VM for the agent's container (#745, step 4): the VM's memory (2 GB per vCPU) less the OS and the
- * daemons, Control (its container's limit), the model door and the two readers, **and less the part of the guard's floor above the
+ * daemons, Control (its container's limit), the model door, the network door and the two readers, **and less the part of the guard's floor above the
  * 512 MiB that the OS's room already holds**. The guard kills the agent when the VM has less than `memoryGuardFloorMb` left; at 4, 6
  * and 8 vCPU that is 656, 984 and 1,311 MB, and an agent inside its own limit must not be able to bring the VM below it. Every figure
  * is in the table of "The agent's container" in docs/implementer.md, with the measurements behind the limits. The Worker refuses a
@@ -166,6 +176,7 @@ export function agentMemoryMb(vcpus: number, controlMb: number): number {
       (memoryGuardFloorMb(vcpus) - MEMORY_GUARD_MIN_FLOOR_MB) -
       controlMb -
       MODEL_DOOR_MEMORY_MB -
+      NETWORK_DOOR_MEMORY_MB -
       READER_COUNT * READER_MEMORY_MB,
   );
 }
@@ -269,6 +280,21 @@ export type SandboxLauncherOptions = {
    * `RUNNER_DYNAMIC_CAPABILITIES` and `RUNNER_DYNAMIC_MAX_COST_USD`. Non-secret; names of the container spec's allow-list.
    */
   dynamicEnvironment?: Readonly<Record<string, string>>;
+  /**
+   * #745, step 7: the document that goes to the Control container of an Implementer VM so that it can narrow the VM's network
+   * policy (`RUNNER_IMPLEMENTER_NETWORK_SWITCH`), made from the app, the VM's name and the rule of the claim. Undefined: the
+   * deployment has no way to be called back (no public address), and the Worker reports that the policy was not changed.
+   */
+  networkSwitch?: (input: {
+    appId: string;
+    vm: string;
+    rule: NetworkRule;
+    /** The model provider's host the App named in the claim answer. */
+    modelHost: string;
+    /** Unix time in seconds at which the VM is gone for certain (its lifetime from now, with a margin): the token's expiry. */
+    expires: number;
+  }) => string | undefined;
+
   /** Where the VM keeps the work volumes of the Implementer (`WORK_VOLUME_ROOT`); another directory only for a test. */
   workVolumeRoot?: string;
 };
@@ -322,7 +348,9 @@ function planOf(spec: LaunchSpec): Plan {
     // turn also holds the model door and the two readers beside its Worker.
     const implementer = spec.kind === "implementer";
     const doorMb = implementer
-      ? MODEL_DOOR_MEMORY_MB + READER_COUNT * READER_MEMORY_MB
+      ? MODEL_DOOR_MEMORY_MB +
+        NETWORK_DOOR_MEMORY_MB +
+        READER_COUNT * READER_MEMORY_MB
       : 0;
     const headroomMb = implementer
       ? IMPLEMENTER_VM_HEADROOM_MB
@@ -372,6 +400,7 @@ function environmentOf(
   dynamicEnvironment: Readonly<Record<string, string>> | undefined,
   plan: Plan,
   sysboxProof: SysboxProof,
+  networkSwitch?: string,
 ): Readonly<Record<string, string>> {
   if (kind === "dynamic")
     return { ...CONTAINER_ENVIRONMENT, ...dynamicEnvironment };
@@ -380,6 +409,10 @@ function environmentOf(
       ...CONTAINER_ENVIRONMENT,
       ...IMPLEMENTER_ENVIRONMENT,
       ...implementerEnvironment(plan, sysboxProof),
+      // #745, step 7: how the Control container narrows this VM's network policy once the setup is done. Absent, it does not.
+      ...(networkSwitch === undefined
+        ? {}
+        : { RUNNER_IMPLEMENTER_NETWORK_SWITCH: networkSwitch }),
     };
   return CONTAINER_ENVIRONMENT;
 }
@@ -495,6 +528,20 @@ export function createSandboxLauncher(
       spec.timeoutSeconds +
       vmTimeoutMarginSeconds +
       (spec.kind === "implementer" ? IMPLEMENTER_LAUNCH_EXTRA_SECONDS : 0)
+    );
+  }
+
+  /**
+   * When the token of the network switch stops working: the VM lives at most `vmLifetimeSeconds` from its creation, which is
+   * before this, and the margin covers the clock of another instance of the Dispatcher answering the call. The longest turn,
+   * its setup included, is inside the lifetime (it is made from the job's own time limit), so the token never expires under a
+   * turn that is still allowed to run.
+   */
+  function switchExpiry(spec: LaunchSpec): number {
+    return (
+      Math.floor((options.now ?? (() => new Date()))().getTime() / 1000) +
+      vmLifetimeSeconds(spec) +
+      NETWORK_SWITCH_CLOCK_MARGIN_SECONDS
     );
   }
 
@@ -651,6 +698,17 @@ export function createSandboxLauncher(
             options.dynamicEnvironment,
             plan,
             options.sysboxProof ?? "unproven",
+            spec.kind === "implementer" &&
+              spec.network !== undefined &&
+              spec.modelHost !== undefined
+              ? options.networkSwitch?.({
+                  appId: spec.appId,
+                  vm: name,
+                  rule: spec.network,
+                  modelHost: spec.modelHost,
+                  expires: switchExpiry(spec),
+                })
+              : undefined,
           ),
           additions: SANDBOX_LAUNCHER_ADDITIONS,
         });

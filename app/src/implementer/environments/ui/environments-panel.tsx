@@ -38,6 +38,10 @@ import {
   SETUP_SCRIPT_MAX_BYTES,
   memoryGbOf,
 } from "../limits.ts";
+import {
+  NETWORK_MODES,
+  type NetworkMode,
+} from "../../../network-rule/network.ts";
 import type { EnvironmentList, EnvironmentView } from "../service.ts";
 import {
   browserEnvironmentApi,
@@ -254,6 +258,25 @@ function Environments({
                   </div>
                 ) : null}
               </div>
+              <div className="text-sm text-muted-foreground">
+                <p>
+                  {item.network.mode === "off"
+                    ? PAGE_COPY.networkShownOff
+                    : item.network.mode === "open"
+                      ? PAGE_COPY.networkShownOpen
+                      : PAGE_COPY.networkShownList}
+                </p>
+                {item.network.mode === "list" ? (
+                  <ul
+                    aria-label={`${PAGE_COPY.networkHosts}: ${item.name}`}
+                    className="mt-1 flex flex-wrap gap-x-4 gap-y-1 font-mono"
+                  >
+                    {item.network.hosts.map((host) => (
+                      <li key={host}>{host}</li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
               {item.setupScript === "" ? (
                 <p className="text-sm text-muted-foreground">
                   {PAGE_COPY.noScript}
@@ -316,11 +339,16 @@ function EnvironmentForm({
   const [name, setName] = useState(item?.name ?? "");
   const [vcpus, setVcpus] = useState<number>(item?.vcpus ?? DEFAULT_VCPUS);
   const [script, setScript] = useState(item?.setupScript ?? "");
+  const [mode, setMode] = useState<NetworkMode>(item?.network.mode ?? "off");
+  const [hostsText, setHostsText] = useState(
+    (item?.network.hosts ?? []).join("\n"),
+  );
   const [errors, setErrors] = useState<FieldErrors>({});
   const [problem, setProblem] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const scriptBytes = new TextEncoder().encode(script).length;
   const sizeMessageId = useId();
+  const networkMessageId = useId();
 
   function showIssues(issues: readonly { field: string; code: string }[]) {
     const next: FieldErrors = {};
@@ -328,7 +356,9 @@ function EnvironmentForm({
       if (
         issue.field === "name" ||
         issue.field === "vcpus" ||
-        issue.field === "setupScript"
+        issue.field === "setupScript" ||
+        issue.field === "network" ||
+        issue.field === "networkHosts"
       )
         next[issue.field] = describeFieldIssue(issue.field, issue.code);
     setErrors(next);
@@ -338,7 +368,16 @@ function EnvironmentForm({
   async function submit(event: FormEvent) {
     event.preventDefault();
     setProblem(null);
-    const body: EnvironmentBody = { name, vcpus, setupScript: script };
+    const body: EnvironmentBody = {
+      name,
+      vcpus,
+      setupScript: script,
+      network: {
+        mode,
+        // One host on each line; the server brings each to its form and refuses the line that is not a host name.
+        hosts: mode === "list" ? hostsText.split("\n") : [],
+      },
+    };
     const checked = validateEnvironmentInput(body);
     if (!checked.ok) {
       showIssues(checked.issues);
@@ -445,6 +484,67 @@ function EnvironmentForm({
           />
         )}
       </FormField>
+
+      <fieldset data-field="network" className="flex flex-col gap-2">
+        <legend className="mb-2 text-sm font-semibold">
+          {PAGE_COPY.network}
+        </legend>
+        <RadioGroup
+          value={mode}
+          onValueChange={(value) => setMode(value as NetworkMode)}
+          aria-invalid={errors.network !== undefined}
+          aria-describedby={networkMessageId}
+          className="grid-cols-1"
+        >
+          {NETWORK_MODES.map((option) => (
+            <label key={option} className="flex items-center gap-3 text-sm">
+              <RadioGroupItem
+                value={option}
+                aria-label={PAGE_COPY.networkModeLabels[option]}
+              />
+              <span aria-hidden="true">
+                {PAGE_COPY.networkModeLabels[option]}
+              </span>
+            </label>
+          ))}
+        </RadioGroup>
+        {errors.network !== undefined ? (
+          <p id={networkMessageId} className="text-sm text-destructive">
+            {errors.network}
+          </p>
+        ) : (
+          <p id={networkMessageId} className="text-sm text-muted-foreground">
+            {PAGE_COPY.networkHint}
+          </p>
+        )}
+        {mode !== "off" ? (
+          <p className="text-sm text-muted-foreground">
+            {PAGE_COPY.networkRisk}
+          </p>
+        ) : null}
+      </fieldset>
+
+      {mode === "list" ? (
+        <FormField
+          name="networkHosts"
+          label={PAGE_COPY.networkHosts}
+          hint={PAGE_COPY.networkHostsHint}
+          error={errors.networkHosts}
+        >
+          {(control) => (
+            <Textarea
+              {...control}
+              value={hostsText}
+              spellCheck={false}
+              autoCapitalize="off"
+              autoCorrect="off"
+              placeholder={"registry.npmjs.org\n*.pythonhosted.org"}
+              className="min-h-28 font-mono text-sm"
+              onChange={(event) => setHostsText(event.target.value)}
+            />
+          )}
+        </FormField>
+      ) : null}
 
       {problem !== null ? (
         <Alert variant="destructive">

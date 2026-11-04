@@ -16,6 +16,7 @@ import type {
   ReleaseRequest,
   VmStartRequest,
   FindingPriority,
+  ImplementerNetworkReport,
   ImplementerResult,
   ImplementerSetupResult,
   ReviewFindings,
@@ -870,6 +871,172 @@ function parseImplementerSetup(
   };
 }
 
+const NETWORK_MODES = ["off", "list", "open"] as const;
+const NETWORK_VM_POLICIES = [
+  "narrowed",
+  "unchanged",
+  "not_configured",
+] as const;
+const MAX_NETWORK_HOST_CHARS = 253;
+/** The word of the door for a refusal (`^[a-z][a-z_]*$`, at most 40 characters), the same shape as the reason of a branch. */
+const MAX_NETWORK_REASON_CHARS = 40;
+const NETWORK_REASON = /^[a-z][a-z_]*$/;
+
+/**
+ * The network block of an implementer block (#745, step 7, `ImplementerNetworkReport`): closed, every field required, the counts
+ * whole numbers from 0, at most `IMPLEMENTER_RESULT_LIMITS.networkConnections` entries. The host is text the agent asked the door
+ * for, so it loses its control characters like every text of the block.
+ */
+function parseImplementerNetwork(
+  check: Checker,
+  value: unknown,
+  field: string,
+): ImplementerNetworkReport | undefined {
+  if (!isRecord(value)) return check.fail(field, "invalid");
+  const before = check.fields.length;
+  refuseUnknownKeys(
+    check,
+    value,
+    [
+      "mode",
+      "door",
+      "vmPolicy",
+      "allowed",
+      "refused",
+      "bytesIn",
+      "bytesOut",
+      "dropped",
+      "connections",
+    ],
+    `${field}.`,
+  );
+  const mode = value.mode;
+  const modeOk =
+    typeof mode === "string" &&
+    (NETWORK_MODES as readonly string[]).includes(mode);
+  if (!modeOk)
+    check.fail(`${field}.mode`, mode === undefined ? "required" : "invalid");
+  const door = value.door;
+  if (typeof door !== "boolean")
+    check.fail(`${field}.door`, door === undefined ? "required" : "invalid");
+  const vmPolicy = value.vmPolicy;
+  const vmPolicyOk =
+    typeof vmPolicy === "string" &&
+    (NETWORK_VM_POLICIES as readonly string[]).includes(vmPolicy);
+  if (!vmPolicyOk)
+    check.fail(
+      `${field}.vmPolicy`,
+      vmPolicy === undefined ? "required" : "invalid",
+    );
+  const allowed = check.integer(value, "allowed", `${field}.allowed`);
+  const refused = check.integer(value, "refused", `${field}.refused`);
+  const bytesIn = check.integer(value, "bytesIn", `${field}.bytesIn`);
+  const bytesOut = check.integer(value, "bytesOut", `${field}.bytesOut`);
+  const dropped = check.integer(value, "dropped", `${field}.dropped`);
+  const connections = parseNetworkConnections(
+    check,
+    value.connections,
+    `${field}.connections`,
+  );
+  if (
+    check.fields.length > before ||
+    !modeOk ||
+    typeof door !== "boolean" ||
+    !vmPolicyOk ||
+    allowed === undefined ||
+    refused === undefined ||
+    bytesIn === undefined ||
+    bytesOut === undefined ||
+    dropped === undefined ||
+    connections === undefined
+  )
+    return undefined;
+  return {
+    mode: mode as ImplementerNetworkReport["mode"],
+    door,
+    vmPolicy: vmPolicy as ImplementerNetworkReport["vmPolicy"],
+    allowed,
+    refused,
+    bytesIn,
+    bytesOut,
+    dropped,
+    connections,
+  };
+}
+
+function parseNetworkConnections(
+  check: Checker,
+  value: unknown,
+  field: string,
+): ImplementerNetworkReport["connections"] | undefined {
+  if (value === undefined) return check.fail(field, "required");
+  if (!Array.isArray(value)) return check.fail(field, "invalid");
+  if (value.length > IMPLEMENTER_RESULT_LIMITS.networkConnections)
+    return check.fail(field, "too_long");
+  const before = check.fields.length;
+  const connections: ImplementerNetworkReport["connections"] = [];
+  value.forEach((entry: unknown, index) => {
+    const where = `${field}[${String(index)}]`;
+    if (!isRecord(entry)) {
+      check.fail(where, "invalid");
+      return;
+    }
+    refuseUnknownKeys(
+      check,
+      entry,
+      ["host", "port", "outcome", "reason", "count", "bytesIn", "bytesOut"],
+      `${where}.`,
+    );
+    const host = check.string(entry, "host", `${where}.host`, {
+      max: MAX_NETWORK_HOST_CHARS,
+      stripControls: true,
+    });
+    const port = check.integer(entry, "port", `${where}.port`, 65535);
+    const outcome = entry.outcome;
+    const outcomeOk = outcome === "allowed" || outcome === "refused";
+    if (!outcomeOk)
+      check.fail(
+        `${where}.outcome`,
+        outcome === undefined ? "required" : "invalid",
+      );
+    const reason = entry.reason;
+    const reasonOk =
+      reason === null ||
+      (typeof reason === "string" &&
+        reason.length <= MAX_NETWORK_REASON_CHARS &&
+        NETWORK_REASON.test(reason));
+    if (!reasonOk)
+      check.fail(
+        `${where}.reason`,
+        reason === undefined ? "required" : "invalid",
+      );
+    const count = check.integer(entry, "count", `${where}.count`);
+    if (count === 0) check.fail(`${where}.count`, "invalid");
+    const bytesIn = check.integer(entry, "bytesIn", `${where}.bytesIn`);
+    const bytesOut = check.integer(entry, "bytesOut", `${where}.bytesOut`);
+    if (
+      host !== undefined &&
+      port !== undefined &&
+      outcomeOk &&
+      reasonOk &&
+      count !== undefined &&
+      count > 0 &&
+      bytesIn !== undefined &&
+      bytesOut !== undefined
+    )
+      connections.push({
+        host,
+        port,
+        outcome,
+        reason: reason as string | null,
+        count,
+        bytesIn,
+        bytesOut,
+      });
+  });
+  return check.fields.length > before ? undefined : connections;
+}
+
 /**
  * The implementer block of a result (#754, `ImplementerResult` in the contract): closed, every field required, the bounds of the
  * schema. Absent is "no block" (a failure before the runner had a repository, and every job that is not a turn); `null` is not
@@ -900,6 +1067,7 @@ function parseImplementerResult(
       "summary",
       "opencode",
       "setup",
+      "network",
     ],
     prefix,
   );
@@ -952,6 +1120,10 @@ function parseImplementerResult(
     value.setup === undefined
       ? undefined
       : parseImplementerSetup(check, value.setup, `${prefix}setup`);
+  const network =
+    value.network === undefined
+      ? undefined
+      : parseImplementerNetwork(check, value.network, `${prefix}network`);
   if (typeof pushed === "boolean" && headCommit !== undefined) {
     if (pushed && headCommit === null) check.fail(`${prefix}pushed`, "invalid");
     const last = commits?.at(-1);
@@ -969,7 +1141,8 @@ function parseImplementerResult(
     filesChanged === undefined ||
     summary === undefined ||
     opencode === undefined ||
-    (value.setup !== undefined && setup === undefined)
+    (value.setup !== undefined && setup === undefined) ||
+    (value.network !== undefined && network === undefined)
   )
     return undefined;
   return {
@@ -984,6 +1157,7 @@ function parseImplementerResult(
     summary,
     opencode,
     ...(setup === undefined ? {} : { setup }),
+    ...(network === undefined ? {} : { network }),
   };
 }
 
