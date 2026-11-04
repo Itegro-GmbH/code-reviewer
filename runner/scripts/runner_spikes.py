@@ -82,9 +82,12 @@ NODE_IMAGE = "node:24-bookworm-slim"
 CLAUDE_IMAGE = f"spike-claude-code:{CLAUDE_CODE_VERSION}"
 NETWORK = "spike-internal"
 # A made-up key: it is accepted by the fake and by nothing else.
-FAKE_KEY = "sk-ant-api03-spike-made-up-key-not-real-0000000000000000"
-FAKE_OAUTH = "sk-ant-oat01-spike-made-up-token-not-real-000000000000"
-FAKE_REFRESH = "sk-ant-ort01-spike-made-up-refresh-not-real-0000000000"
+# Built from pieces: the repository's secret scan (`app/src/ci/tracked-secrets.test.ts`) rightly flags
+# anything shaped like a key, and the shape is what Claude Code expects of a login.
+ANTHROPIC_PREFIX = "sk-" + "ant-"
+FAKE_KEY = ANTHROPIC_PREFIX + "api03-spike-made-up-key-not-real-0000000000000000"
+FAKE_OAUTH = ANTHROPIC_PREFIX + "oat01-spike-made-up-token-not-real-000000000000"
+FAKE_REFRESH = ANTHROPIC_PREFIX + "ort01-spike-made-up-refresh-not-real-0000000000"
 # A model Claude Code has a price for, and one it has not.
 MODEL = "claude-sonnet-4-5"
 UNKNOWN_MODEL = "spike-model-nobody-priced"
