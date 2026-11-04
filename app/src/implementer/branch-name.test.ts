@@ -66,6 +66,9 @@ const INVALID: [string, BranchNameIssue][] = [
   ["c1\u0085control", "forbidden_character"],
   ["c1\u0080control", "forbidden_character"],
   ["c1\u009fcontrol", "forbidden_character"],
+  // A lone surrogate half is not UTF-8: the runner refuses the job (`implementer.branch` ... valid UTF-8), the encoder here would only replace it.
+  ["lone\ud800half", "forbidden_character"],
+  ["lone\udc00half", "forbidden_character"],
   ["ä".repeat(90) + "/" + "ä".repeat(90), "too_many_bytes"],
   ["branch.lock", "lock_suffix"],
   ["dir.lock/branch", "component_lock_suffix"],
