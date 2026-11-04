@@ -153,11 +153,11 @@ on. The watch still asks the lease every 30 seconds while the agent works, so a 
 the model.
 
 **Time.** The runner keeps the last 270 seconds (four and a half minutes) of the time limit for the end. Every step is counted at its ceiling, and the sum at a normal end is
-214 seconds: the end of the agent's container 25 s (the kill call 15 s at most, then the wait until the daemon says it is gone 10 s at most; the container is removed only
+222 seconds: the end of the agent's container 25 s (the kill call 15 s at most, then the wait until the daemon says it is gone 10 s at most; the container is removed only
 after the push, on a thread of its own, because removing a Sysbox container with its inner Docker can take long and nothing waits for it, which is right while one VM runs one turn), the first
 reset of the readers 10 s (below), the rescue of a detached HEAD (three git commands of 3 s at most), the look at the tree (10 s at most), the commit of what is left (40 s), the second reset
-of the readers 10 s, the final push (100 s) and the two reads of the report (5 s each). A stop (SIGTERM) commits nothing (it still saves a detached HEAD on a branch), resets the readers once, and
-the process leaves itself 115 seconds, of which the sum is 79 and the final push gets 25. A test holds both sums and the slack (a fifth of the grace, a quarter of the 115 s), with the real
+of the readers 10 s, the final push (100 s), the two reads of the report (5 s each) and the last flush of the live view (8 s, section "Step records"). A stop (SIGTERM) commits nothing (it still saves a detached HEAD on a branch), resets the readers once, and
+the process leaves itself 115 seconds, of which the sum is 84 (the last flush gets 5 s there) and the final push gets 25. A test holds both sums and the slack (a fifth of the grace, a quarter of the 115 s), with the real
 constants. **Why the ceilings are what they are.** Measured on a VM (2 vCPU): the kill call of the agent's container took 0.4 s idle, 2.0 s with two inner containers of a 1.5 GB image and 3.9 s
 with eight, and the wait after it 0.02 s, so the kill gets 15 s and the wait 10 s (an earlier round had 5 and 5, which a stack of a dozen inner services would have outgrown). The
 steps do not take their ceilings together except when the Docker daemon hangs, and then the push fails anyway and the report says what was and was not done; the slack is for the steps that
@@ -403,9 +403,10 @@ a plain container on the VM with the same tools reaches the host listener, `1.1.
 
 While a turn runs, Control converts the events of the engine's stream into **step records**, one per part: what the agent
 thinks (`reasoning`), what it answers (`text`), each tool call (`tool`) and the tokens and cost of each model call (`step`)
-(`implementer/step_records.py`). The first slice only builds them; they go into a bounded in-memory queue
-(`implementer/step_feed.py`) and nothing leaves the process yet. The endpoint, the transport and the Runs page come in
-later pull requests of #745.
+(`implementer/step_records.py`). They go into a bounded in-memory queue (`implementer/step_feed.py`), a pump of the job process
+takes them out every two seconds (`implementer/step_pump.py`), the job host sends them to the app
+(`job_loop/step_sender.py`, section "How the records get to the app" below), and the app stores them (`POST
+/api/workers/v1/jobs/{id}/steps`). The Runs page comes in a later pull request of #745.
 
 - **What is kept.** A record has the part id, a counter, the start and end time and its text. A tool part is reported again when it
   changes (running, then completed or error) with the same part id and a higher counter. Reasoning and answer text are kept
@@ -432,6 +433,40 @@ later pull requests of #745.
   an event it cannot convert, a full queue or a bug is counted and dropped. It never ends a turn, never delays the push and
   never touches the ledger. What it lost (events it could not convert, records pushed out of a full queue) is one line in the
   turn's notes at the end of the turn.
+
+### How the records get to the app
+
+The job process holds neither the lease token nor the Worker's credential, so it does not call the app. The job host (the Worker's
+own process, which holds the credential and beats the heart) hands the process **one more descriptor**, a second socket pair
+beside the lease question (`RUNNER_STEPS_FD`, `step_wire.py`), and sends what comes over it with the Worker API
+(`HttpWorkerApi.steps`, the per-job credential). Only a turn of the Implementer gets the descriptor, and only when the app lists
+`implementer_steps` in `GET /api/runners/v1/version`; otherwise the process has no channel, makes no feeder, queues nothing and
+sends nothing, with no error and no note. (The Worker is the only runner that runs the Implementer, so there is no second path.)
+
+- **Batches.** The pump drains the queue every 2 s into batches of at most 50 records and at most 48 KiB, **measured on the escaped
+  JSON body as it is sent** (a control character is six bytes there, an emoji twelve; the app reads up to 64 KiB). A record that
+  is larger than a batch by itself has its longest texts halved until it fits, with a `[cut to fit]` mark; one that cannot be made
+  to fit is dropped and counted.
+- **Never on the turn's path.** The pump has a thread of its own and bounded writes (1 s; a host that does not read costs one
+  write timeout, then the channel is given up). The sender is a task of the host's event loop beside the heartbeat; its call runs on
+  a daemon thread of its own with a 5 s timeout, one at a time, never on the executor of the heartbeat and the result. A dead or
+  slow app costs the sender its patience and nothing else: the turn, the heartbeat, the lease question, the push and the result
+  never wait for it.
+- **Failure.** A 409, 404 or 401 (the app does not hold the job for this Worker) stops the sender for good and the host closes its
+  end; the pump notices, closes the feeder and gives up the queue. Any other failure backs off (2 s, doubling to 30 s) and the same
+  batch is posted again (the call is idempotent: the app keeps the highest `seq` of a part). A batch the app refuses for good (another
+  4xx) is dropped and counted. The host keeps at most about a minute of backlog (60 s of age, 40 batches), the oldest dropped first.
+- **The last flush.** After the final push, so the push never waits for it, and before the result is made, the process hands over
+  what is left and asks the host to say when everything it holds is sent, for at most 8 s (5 s at a stop; the sums above). A finished run then shows all its
+  steps. The host answers with the number of records it received and could not send.
+- **Notes, counted once.** A record is in exactly one of four places: pushed out of a full queue (the feeder: "dropped N step records
+  that were not taken in time"), lost between the pump and the host or left in the queue at the end, lost by the host, or sent. The
+  last three are one line, "the live view could not send N step records to the app"; a host that does not answer the flush is "could
+  not confirm that its last step records arrived". The first note cannot fire on a healthy turn: the pump drains faster than the
+  queue fills, and a feeder whose channel is gone takes nothing more and counts nothing.
+- **The network.** The calls go to the same app URL as the heartbeat and the result (`appUrl` of the Worker's start document), from
+  the Worker in the VM. The second wall (step 7) narrows the VM's policy to GitHub, the model provider, the App's host (`appHost`,
+  the host of the Dispatcher's configured App URL) and the Dispatcher; the steps calls need no host of their own.
 
 ## The memory of the readers and the OS
 
