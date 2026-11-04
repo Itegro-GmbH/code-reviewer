@@ -312,6 +312,23 @@ def test_a_leftover_commit_on_a_detached_head_gets_a_branch_of_its_own(rig: Rig)
     assert branch.returncode == 0 and branch.stdout.startswith(f"{BRANCH}-leftover-")
 
 
+# #837: the branch the leftover commit made is the one the turn ended on.
+def test_a_leftover_commit_on_a_detached_head_that_a_branch_contains_is_the_branch_checked_out(
+    rig: Rig,
+) -> None:
+    workspace = rig.prepared()
+    assert agent_git(workspace, "checkout", "-q", "--detach").returncode == 0
+    assert agent_git(workspace, "branch", "--contains", "HEAD").stdout.strip() != ""
+    (workspace.repo / "new.txt").write_text("n\n")
+    assert workspace.checked_out is None
+
+    assert workspace.commit_all() is not None
+
+    branch = agent_git(workspace, "symbolic-ref", "--short", "HEAD").stdout.strip()
+    assert branch.startswith(f"{BRANCH}-leftover-")
+    assert workspace.checked_out == branch
+
+
 def test_a_leftover_commit_goes_to_the_branch_the_agent_is_on(rig: Rig) -> None:
     workspace = rig.prepared()
     assert agent_git(workspace, "checkout", "-q", "-b", "elsewhere").returncode == 0

@@ -99,7 +99,7 @@ class TurnResult:
             "filesChanged": [{"path": f.path, "status": f.kind.value} for f in self.files_changed],
             "summary": self.summary,
             "opencode": opencode,
-            "checkedOut": self.checked_out,
+            **({} if self.checked_out is None else {"checkedOut": self.checked_out}),
             **({} if self.setup is None else {"setup": self.setup}),
             **({} if self.network is None else {"network": self.network}),
         }

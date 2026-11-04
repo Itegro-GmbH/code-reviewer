@@ -1163,6 +1163,29 @@ def test_a_branch_name_the_runner_would_not_push_is_not_named_as_checked_out(rig
     assert workspace.checked_out is None
 
 
+# #837: `strip()` would take a trailing no-break space off the name and report another branch.
+def test_a_branch_name_with_a_trailing_no_break_space_is_not_named_as_checked_out(
+    rig: Rig,
+) -> None:
+    workspace = rig.prepared()
+    assert agent_git(workspace, "checkout", "-q", "-b", "nb\u00a0").returncode == 0
+    commit(workspace, "a.txt")
+
+    assert workspace.rescue_detached_head() is None
+    assert workspace.checked_out is None
+
+
+# #837: a HEAD that names a tag is no branch, whatever the ref looks like once the prefix is cut.
+def test_a_head_that_points_at_a_tag_is_not_named_as_a_branch(rig: Rig) -> None:
+    workspace = rig.prepared()
+    commit(workspace, "a.txt")
+    assert agent_git(workspace, "tag", "v1").returncode == 0
+    assert agent_git(workspace, "symbolic-ref", "HEAD", "refs/tags/v1").returncode == 0
+
+    assert workspace.rescue_detached_head() is None
+    assert workspace.checked_out is None
+
+
 # -- the agent's list of branches is read as the agent's user and with a bound ----------------
 
 

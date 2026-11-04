@@ -1009,8 +1009,14 @@ class GitWorkspace:
 
     def _remember_checked_out(self, ref: str) -> None:
         """The branch a `symbolic-ref HEAD` answered, when it is a name the runner would push (the
-        name is the agent's: anything else is left unknown, never shown)."""
-        name = ref.strip().removeprefix("refs/heads/")
+        name is the agent's: anything else is left unknown, never shown). Only the line feed of the
+        answer is cut: `strip()` would take a no-break space off a name, and a HEAD on a tag is
+        no branch."""
+        ref = ref.removesuffix("\n")
+        if not ref.startswith("refs/heads/"):
+            self.checked_out = None
+            return
+        name = ref.removeprefix("refs/heads/")
         self.checked_out = None if branch_name_problem(name) is not None else name
 
     def _push_one(
