@@ -1522,3 +1522,116 @@ describe("the network rule of a turn (#745)", () => {
     expect(input.reviewKind).toBe("implementer");
   });
 });
+
+// #843: the profile a turn started with. The model and the cost limit of the version are the turn's own (chosen when the task was
+// started) and reach the Worker as they always did; the instructions and the push right travel in `implementer.profile`, only to a
+// Worker that names the feature that reads them.
+describe("the profile of a turn (#843)", () => {
+  const WITH_PROFILE = `${WORKER_FEATURES},implementer_profile`;
+  const PROFILE = {
+    id: "profile-1",
+    name: "reviewer",
+    version: 3,
+    instructions: "Review only.\nDo not edit files.",
+    canPush: false,
+  };
+
+  // #843-T190
+  it("gives the Worker the instructions and the push right of the profile's version, exactly as stored, in an input the contract accepts", async () => {
+    const h = await start();
+    await h.turn({ profile: PROFILE });
+
+    const { input } = await fetched(h, WITH_PROFILE);
+
+    expect(contract.check("RunnerJobInput", input)).toStrictEqual({
+      valid: true,
+      errors: "",
+    });
+    expect(input).toMatchObject({
+      implementer: {
+        profile: {
+          name: "reviewer",
+          version: 3,
+          instructions: "Review only.\nDo not edit files.",
+          canPush: false,
+        },
+      },
+    });
+    // Nothing else of the profile: its id is the app's business.
+    expect(JSON.stringify(input)).not.toContain("profile-1");
+  });
+
+  // #843-T191
+  it("leaves the instructions out when the version has none, and still says whether it may push", async () => {
+    const h = await start();
+    await h.turn({ profile: { ...PROFILE, instructions: "", canPush: true } });
+
+    const { input } = await fetched(h, WITH_PROFILE);
+
+    expect(contract.check("RunnerJobInput", input).valid).toBe(true);
+    expect(
+      (input as { implementer: { profile: object } }).implementer.profile,
+    ).toEqual({ name: "reviewer", version: 3, canPush: true });
+  });
+
+  // #843-T192
+  it("carries no profile for a turn without one, whatever the Worker names: the platform's defaults, as before", async () => {
+    const h = await start();
+    await h.turn();
+
+    const { input } = await fetched(h, WITH_PROFILE);
+
+    expect(JSON.stringify(input)).not.toContain('"profile"');
+    expect(contract.check("RunnerJobInput", input).valid).toBe(true);
+  });
+
+  // #843-T193
+  it("ends a turn with a profile, free and before any credential or token exists, when the Worker does not read profiles", async () => {
+    const h = await start();
+    const { jobId } = await h.turn({ profile: PROFILE });
+    const split = await h.claimedSplit(DISPATCHER);
+
+    await h.worker.details(
+      split.job.id,
+      split.job.credential,
+      WORKER_FEATURES,
+      undefined,
+      BOTH.join(","),
+    );
+
+    expect(await h.queue.get(jobId)).toMatchObject({
+      status: "failed",
+      errorCode: "implementer_engine_unavailable",
+    });
+    expect(h.fake.issuedInstallationTokens()).toEqual([]);
+  });
+
+  // #843-T194
+  it("runs the model and the cost limit of the turn, which are the version's", async () => {
+    const h = await start();
+    await createInstanceSettingsRepository(h.db, h.clock.now).set(
+      "review_max_cost_cents",
+      300,
+      null,
+    );
+    await h.turn({ profile: PROFILE, costLimitCents: 150 });
+
+    const { input } = await fetched(h, WITH_PROFILE);
+
+    expect(input.llm).toMatchObject({ maxCostUsd: 1.5, operatorMaxCostUsd: 3 });
+  });
+
+  // #843-T195
+  it("does not read the profile table: the turn's own copy is what runs, though no profile row exists", async () => {
+    const h = await start();
+    await h.turn({ profile: PROFILE });
+    const rows = await h.db.selectFrom("profiles").selectAll().execute();
+
+    const { input } = await fetched(h, WITH_PROFILE);
+
+    expect(rows).toEqual([]);
+    expect(input).toMatchObject({
+      implementer: { profile: { name: "reviewer", version: 3 } },
+    });
+  });
+});

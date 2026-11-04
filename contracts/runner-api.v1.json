@@ -507,7 +507,20 @@
         "cost": { "$ref": "#/$defs/DynamicCostPolicy" },
         "modelEntry": { "$ref": "#/$defs/DynamicModelEntry" },
         "capabilities": { "$ref": "#/$defs/DynamicModelCapabilities" },
-        "environment": { "$ref": "#/$defs/ImplementerEnvironment" }
+        "environment": { "$ref": "#/$defs/ImplementerEnvironment" },
+        "profile": { "$ref": "#/$defs/ImplementerProfile" }
+      }
+    },
+    "ImplementerProfile": {
+      "description": "#843: the profile version a turn was started with, as the turn copied it when it started. Present only for a turn started with a profile and a caller that named the claim feature `implementer_profile`; a turn without a profile carries nothing and runs with the platform's own defaults, exactly as every turn did before profiles. The model and the cost limit of the version are not here: they are the turn's own `modelEntry`, `cost` and `llm.maxCostUsd`, chosen from the version by the app. `instructions`, when present, is the system-level text the agent is given: the runner appends it to the instruction file it writes for the engine (after its own rules, so the text is the same for every turn of one version and the model provider's prompt cache hits), as literal data written by a member of the workspace; it is left out when the version has none. `canPush` says whether Control pushes the branches the agent made when the turn ends: when false the runner pushes nothing, lists no branch, reports no head commit and no commits, and the turn is a success without a push (a profile that only reads). The agent never has a remote or a credential, whatever `canPush` says. `name` and `version` are for the run's log line only.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "canPush"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
+        "version": { "type": "integer", "minimum": 1 },
+        "instructions": { "type": "string", "minLength": 1, "maxLength": 20000 },
+        "canPush": { "type": "boolean" }
       }
     },
     "ImplementerEnvironment": {

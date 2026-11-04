@@ -124,7 +124,9 @@ describe("the profile snapshot of a turn", () => {
     );
 
     // There is no foreign key; the id is only kept to say which profile it was.
-    const { rows } = await sql<{ n: number }>`select count(*)::int as n from pg_constraint c
+    const { rows } = await sql<{
+      n: number;
+    }>`select count(*)::int as n from pg_constraint c
       join pg_class t on t.oid = c.conrelid
       where t.relname = 'implementer_turns' and c.contype = 'f' and c.confrelid::regclass::text like 'profile%'`.execute(
       db,

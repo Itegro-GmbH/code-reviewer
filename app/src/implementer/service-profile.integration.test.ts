@@ -54,7 +54,10 @@ function withProfile(
   return { ...rest, profile };
 }
 
-async function turnOf(app: Awaited<ReturnType<typeof setup>>, sessionId: string) {
+async function turnOf(
+  app: Awaited<ReturnType<typeof setup>>,
+  sessionId: string,
+) {
   return app.h.db
     .selectFrom("implementer_turns")
     .selectAll()
@@ -286,9 +289,7 @@ describe("a task with a profile", () => {
     const otherProfile = await failureOf(
       app.service.startTask(USER, withProfile(app, "writer")),
     );
-    const noProfile = await failureOf(
-      app.service.startTask(USER, app.body()),
-    );
+    const noProfile = await failureOf(app.service.startTask(USER, app.body()));
 
     expect(again).toEqual({ ...first, created: false });
     expect(pinnedSame).toEqual({ ...first, created: false });

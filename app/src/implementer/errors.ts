@@ -92,11 +92,7 @@ export type ImplementerIssue = {
     | "clientRequestId";
   /** `not_with_profile`: a model or a cost limit next to a profile, whose version brings both. */
   code:
-    | "required"
-    | "invalid"
-    | "too_long"
-    | "not_with_profile"
-    | BranchNameIssue;
+    "required" | "invalid" | "too_long" | "not_with_profile" | BranchNameIssue;
 };
 
 /** Why a model is not allowed. The picker never lists such a model; a submit that names one is refused with the reason. */
