@@ -18,10 +18,14 @@ export const BUDGET_OPERATOR_MAX_USD = 100;
 /** A serialized document may not be larger than this (UTF-8 bytes). */
 export const DOCUMENT_MAX_BYTES = 256 * 1024;
 export const NAME_MAX_LENGTH = 100;
+/** The label that starts a workflow. */
+export const LABEL_MAX_LENGTH = 100;
 export const ID_MAX_LENGTH = 64;
 export const DESCRIPTION_MAX_LENGTH = 1000;
 export const TEMPLATE_MAX_LENGTH = 20_000;
 export const CONDITION_DEPTH_MAX = 4;
+/** The most problems one answer lists; a document with more is `truncated`. */
+export const ERRORS_MAX = 200;
 /** How deep braces may nest in the default of a reference: `{{a.b | default {"k": {"j": 1}}}}` is two deep. */
 export const DEFAULT_BRACE_DEPTH_MAX = 3;
 
@@ -42,4 +46,4 @@ export const LIST_MAX_ITEMS_LIMIT = 1000;
 
 /** Per workspace. */
 export const WORKFLOWS_PER_WORKSPACE_MAX = 100;
-export const VERSIONS_PER_WORKFLOW_MAX = 200;
+export const VERSIONS_PER_WORKFLOW_MAX = 500;

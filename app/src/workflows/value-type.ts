@@ -74,18 +74,29 @@ export function describeType(type: ValueType): string {
 
 /**
  * Whether a value of type `actual` may be used where `expected` is wanted.
- * - A string wanted takes any scalar and any list: they have a text form (`renderValue`). An object has none.
+ * - A string wanted takes any scalar and any list: they have a text form (`renderValue`). An object has none. With `exact`
+ *   (an identifier: an issue, a branch, a label, a name) it takes a string or a choice of names only, no number, true/false or list.
  * - An object wanted takes an object that has at least its required fields, each of a fitting type: more fields do no harm.
  */
-export function isAssignable(actual: ValueType, expected: ValueType): boolean {
+export function isAssignable(
+  actual: ValueType,
+  expected: ValueType,
+  exact = false,
+): boolean {
   if (actual.kind === "unknown" || expected.kind === "unknown") return true;
   if (expected.kind === "oneOf")
-    return expected.options.some((option) => isAssignable(actual, option));
+    return expected.options.some((option) =>
+      isAssignable(actual, option, exact),
+    );
   if (actual.kind === "oneOf")
-    return actual.options.every((option) => isAssignable(option, expected));
+    return actual.options.every((option) =>
+      isAssignable(option, expected, exact),
+    );
   switch (expected.kind) {
     case "string":
-      return actual.kind !== "object";
+      return exact
+        ? actual.kind === "string" || actual.kind === "enum"
+        : actual.kind !== "object";
     case "number":
     case "boolean":
       return actual.kind === expected.kind;
@@ -96,7 +107,8 @@ export function isAssignable(actual: ValueType, expected: ValueType): boolean {
       );
     case "list":
       return (
-        actual.kind === "list" && isAssignable(actual.items, expected.items)
+        actual.kind === "list" &&
+        isAssignable(actual.items, expected.items, exact)
       );
     case "object": {
       if (actual.kind !== "object") return false;
@@ -106,7 +118,7 @@ export function isAssignable(actual: ValueType, expected: ValueType): boolean {
           : undefined;
         if (have === undefined) return !field.required;
         if (field.required && !have.required) return false;
-        return isAssignable(have.type, field.type);
+        return isAssignable(have.type, field.type, exact);
       });
     }
   }

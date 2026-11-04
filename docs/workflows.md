@@ -19,10 +19,12 @@ at a step that ran before on every path, the types of the values that flow, the 
 
 1. Write the document.
 2. `POST /api/w/<slug>/workflows/validate` with the document as the body. The answer is `200` with `{"valid": false, "errors": [...]}` or
-   `{"valid": true, "errors": [], "budgetUsd": 20, "steps": 6}`. Nothing is stored.
+   `{"valid": true, "errors": [], "truncated": false, "budgetUsd": 20, "steps": 6}`. Nothing is stored.
 3. Read **every** error. Each has a `path` (a JSON pointer into your document), a `code` (stable: branch on it), a `message` (the cause in a
    sentence) and, where a name was wrong, `available`: the names that exist at that point (steps in reach, fields of a step, profiles,
-   environments, connectors). The list is complete and sorted by path, so fix them all, then validate again.
+   environments, connectors). The list is sorted by path, so fix them all, then validate again. It holds **200 errors at most**: when
+   `truncated` is `true` there are more (the first ones by path are there); fix these and validate again. A message repeats at most the
+   first 64 characters of what you wrote.
 4. When it is valid, `POST /api/w/<slug>/workflows` saves it as version 1, or `PUT /api/w/<slug>/workflows/<id>` saves the next version.
    Saving runs the same validator and refuses an invalid document with the same list (`422`, `WORKFLOW_INVALID`).
 
@@ -32,6 +34,7 @@ An answer you will see while fixing:
 {
   "valid": false,
   "steps": 3,
+  "truncated": false,
   "errors": [
     {
       "path": "/steps/1/body/0/profile",
@@ -54,13 +57,14 @@ An answer you will see while fixing:
 | Field | Needed | What |
 | --- | --- | --- |
 | `version` | yes | `1`. |
-| `name` | yes | 1 to 100 characters. Unique in the workspace (case is ignored). |
+| `name` | yes | 1 to 100 characters, not only spaces. Unique among the workflows of the workspace that are not archived (case is ignored). |
 | `description` | no | Up to 1000 characters. |
 | `trigger` | yes | What starts the workflow. |
 | `budgetUsd` | no | What the workflow may spend over all its steps, in USD. 20 when left out. Not above the operator's maximum (100 today). |
 | `steps` | yes | A list of steps, 1 to 50 in all (counted through branches and loop bodies). |
 
-Every object is **closed**: a field the format does not name is an error (`unknown_field`, with the names that exist).
+Every object is **closed**: a field the format does not name is an error (`unknown_field`, with the names that exist). Lengths are counted in
+characters (an emoji is one), as the JSON Schema counts them.
 
 ## Five kinds of node
 
@@ -71,10 +75,33 @@ holds one to the other.
 
 | `kind` | Fields | What the steps can read |
 | --- | --- | --- |
-| `manual` | `input`: a [result schema](#result-schemas) that declares what the caller hands in (optional) | `{{trigger.input.<field>}}` |
-| `github.issueLabeled` | `label` (needed): the label that starts the workflow | `{{trigger.issue.number}}`, `.title`, `.body`, `.url`, `.labels` (a list), and `{{trigger.repo.fullName}}`, `.owner`, `.name`, `.defaultBranch` |
+| `manual` | `input` (needed): a [result schema](#result-schemas) that declares what the caller hands in. It must declare **`repo`**, a required text (`owner/name`): the repository the run works on (`repo_required`) | `{{trigger.input.<field>}}`, so `{{trigger.input.repo}}` |
+| `github.issueLabeled` | `label` (needed, not only spaces): the label that starts the workflow | `{{trigger.issue.number}}`, `.title`, `.body`, `.url`, `.labels` (a list), and `{{trigger.repo.fullName}}`, `.owner`, `.name`, `.defaultBranch` |
 
 Other triggers (a schedule, Jira) come later. Who may set the label is decided by GitHub, not by the workflow.
+
+### One repository per run, and targets
+
+**A run works on one repository** in version 1: `trigger.repo` of an issue trigger, the input `repo` of a manual one. No agent step and
+no action names a repository (a `repo` field is `unknown_field`); they all work on the run's. Several repositories in one run are a later
+extension.
+
+The inputs that decide **what the workflow acts on** are *targets*: `issue`, `head`, `base`, the labels `add` and `remove` of an action, and
+the `environment` of an agent step. An agent's result is data, never a command, so a target takes only
+
+- a **literal** (`"develop"`, `7`), or
+- **exactly one reference**, nothing around it, that starts with `trigger.` (the event: `{{trigger.issue}}`, `{{trigger.repo.defaultBranch}}`,
+  `{{trigger.input.issueNo}}` of a manual trigger), or is the **branch of an agent step** (`{{implement.branch}}`, a fact the platform made).
+
+`head` takes a literal or the branch of an agent step that may push, and nothing from the trigger. `base` takes a literal or a reference to the
+trigger, not a branch. `environment` takes a literal only: the name of an environment of the workspace, no reference at all. Everything else
+(a result field of an agent, a field of an action or a loop, `previous.…`, text around a reference) is refused with
+`target_from_untrusted_value`; the message names what the input takes. Free-text inputs (`title`, `body`, `instruction`) take any reference, an
+agent's result included: a list becomes lines of text there.
+
+Targets are also **identifiers**: a reference that stands for a branch, a label or a name must be a text or a choice of names, never a number,
+true/false or a list turned into text (`reference_type_mismatch`), and an `issue` is a positive whole number or a reference to the issue of
+the trigger (`{{trigger.issue}}`, `{{trigger.issue.number}}`) or to a number the caller hands in.
 
 ### The agent step (`"kind": "agent"`)
 
@@ -84,16 +111,18 @@ A run of an agent step gets a **profile** and an **environment**, separately: wh
 | --- | --- | --- |
 | `id` | yes | The name other steps use to refer to it: a letter, then letters, digits, `_` or `-` (64 at most). `trigger` and `previous` are taken. Unique in the whole document, also inside branches and loops. |
 | `profile` | yes | `name` (the newest version) or `name@version` (a pinned version). Until profiles are data (next milestone) the only profile is **`implementer`**, version 1: today's Implementer, which may push. The validator lists the names that exist (`profile_unknown`, `profile_version_unknown`). |
-| `environment` | yes | The name of an environment of the workspace (the Environments page; case is ignored), or a reference to a text that holds one (`{{trigger.input.env}}`), which is checked for its type and only found at run time. |
+| `environment` | yes | The name of an environment of the workspace (the Environments page; case is ignored), as a literal: a [target](#one-repository-per-run-and-targets), so no reference (`target_from_untrusted_value`). |
 | `instruction` | yes | The task: a text, or `{"first": "...", "next": "..."}` in a loop body (`first` in round one, `next` from round two on, where `previous.*` exists). |
-| `session` | no | `"new"` (the default) or `{"continue": "<step id>"}`: go on in the session of an agent step that ran before on every path, or of **this step itself** inside a loop (round two continues round one). |
+| `session` | no | `"new"` (the default) or `{"continue": "<step id>"}`: go on in the session of an agent step that ran before on every path with **the same profile name and the same environment**, or of **this step itself** when it is a direct step of a loop body (round two continues round one; not inside an `if` of the body, where the step may not have run). |
 | `result` | no | What the agent's result looks like, a [result schema](#result-schemas). The agent gets a finish tool made from it. Without one the step yields the facts only (and, later, the default schema of its profile). |
 | `description` | no | A note. |
 
 **What an agent step yields**, for `{{<id>.<field>}}`: the fields of its `result`, and the **facts** the platform knows without the agent
-reporting them: `costUsd` (always), and `branch` and `commits` (a list of commit ids) **only if the profile may push**. A step run with a
-profile that may not push has no branch and no commits, and a reference to them is refused (`reference_fact_unavailable`). Result fields
-named `costUsd`, `branch` or `commits` are refused (`result_field_reserved`).
+reporting them: `costUsd` (always), and `branch` and `commits` (a list of commit ids) **only if the profile may push**. For a profile that
+may push, `branch` is **always there**: the platform creates the branch when the turn starts, so it exists even when the agent made no commit
+(`commits` is then an empty list). A step run with a profile that may not push has no branch and no commits, and a reference to them is
+refused (`reference_fact_unavailable`). Result fields named `costUsd`, `branch` or `commits` are refused (`result_field_reserved`). A `result`
+that fails its own check binds its fields as unknown: you get the errors of the schema, not one for every use of a field.
 
 ### The action (`"kind": "action"`)
 
@@ -102,12 +131,13 @@ command; consequences (a comment, a pull request) happen only here. The inputs s
 
 | `connector` | Inputs (`*` needed) | Yields |
 | --- | --- | --- |
-| `github.pullRequest.open` | `head`\* (a branch), `title`\*, `base` (the default branch if left out), `body`, `draft` (true/false), `repo` | `number`, `url` |
-| `github.issue.comment` | `issue`\* (the issue object of the trigger, or its number), `body`\*, `repo` | `url` |
-| `github.issue.labels` | `issue`\*, `add` (a list of labels), `remove` (a list), at least one of `add` and `remove`; `repo` | `labels` (the labels the issue has now) |
+| `github.pullRequest.open` | `head`\* (a branch: a literal or `{{<agent>.branch}}`), `title`\*, `base` (a branch: a literal or a reference to the trigger; the default branch if left out), `body`, `draft` (true/false) | `number`, `url` |
+| `github.issue.comment` | `issue`\* (a positive whole number, or a reference to the issue of the trigger), `body`\* | `url` |
+| `github.issue.labels` | `issue`\*, `add` (a list of labels), `remove` (a list), at least one of `add` and `remove` | `labels` (the labels the issue has now) |
 
-`repo` is `owner/name`. With the trigger `github.issueLabeled` it may be left out (the repository of the issue); with `manual` it is needed
-(`repo_required`). A connector that does not exist is refused (`unknown_connector`). Nothing here executes yet.
+The action works on the repository of the run. `head`, `base`, `issue`, `add` and `remove` are [targets](#one-repository-per-run-and-targets). With
+the trigger `github.issueLabeled` an action may **not add the label that starts the workflow** (case ignored): the workflow would start itself
+again (`label_retriggers_workflow`); removing it is fine. A connector that does not exist is refused (`unknown_connector`). Nothing here executes yet.
 
 ### Control: `if` and `loop`
 
@@ -130,9 +160,12 @@ A text may hold `{{step.field}}`: the value of a field of an earlier step, or of
 
 - `{{step.field | default <JSON>}}` gives a value for a field that may be missing: `{{previous.review.findings | default []}}`,
   `{{work.notes | default "none"}}`. The default must fit the field's type (`default_type_mismatch`).
-- `\{{` is a literal `{{` (in JSON: `"\\{{"`).
-- A text that is **exactly one reference** keeps the type of the value (an action input that wants a list or an issue object takes
-  `"{{trigger.issue}}"`). In any other text, references become text: a string as it is, a number or true/false as `3` or `true`, a list **one
+- The default is a JSON value of any shape; it may hold braces (`{{a.o | default {}}}`) and strings with `}}` (`{{a.t | default "}}"}}`). A
+  reference ends at the first `}}` that is not inside a JSON string and does not close a `{` of the default; braces nest 3 deep at most.
+- `\{{` is a literal `{{` (in JSON: `"\\{{"`). A text with escapes only is a literal; it is compared without the backslash.
+- A text that is **exactly one reference** (no space, no text around it) keeps the type of the value (an action input that wants a list or an
+  issue number takes `"{{trigger.issue}}"`). Where a number, true/false or a list is wanted, a text that is not exactly one reference is
+  `wrong_type`, also `"{{a}} {{b}}"` and a `{{` that is never closed. In any other text, references become text: a string as it is, a number or true/false as `3` or `true`, a list **one
   entry per line starting with `- `** (an entry that is an object as one line of JSON, an empty list as nothing). An **object** has no text form inside a text:
   refer to one of its fields (`reference_type_mismatch`, with the field names).
 
@@ -149,7 +182,7 @@ The scope follows the structure of the document:
 4. `previous.<step>.<field>` is the value a **direct step of the innermost loop body** had in the round **before**. It exists from round two.
    So it may be used in `instruction.next`, or anywhere with a `| default`; in `instruction.first` or any other place without a default it
    is refused (`previous_without_default`), outside a loop it is refused (`previous_outside_loop`), and a step inside an `if` of the body is not
-   named (`previous_unknown_step`: it may not have run).
+   named (`previous_unknown_step`: it may not have run). `previous.` names the steps of the **innermost** loop only; a step of an outer loop is used without it.
 5. A field that is **not required** in a result schema may be missing, so referring to it needs a default (`reference_optional_field`).
 
 ### Types
@@ -391,7 +424,7 @@ Beyond the form:
 | --- | --- | --- |
 | `kind_not_supported` | `forEach`, `approval` or `workflow`: reserved, not available in version 1. | Build it from `agent`, `action`, `if`, `loop`. |
 | `duplicate_id` | Two steps with one id. | Give each step its own id. |
-| `template_syntax` | A `{{ }}` that is not a reference, a default that is no JSON, or a `{{` never closed. | Fix the text; write `\\{{` for a literal `{{`. |
+| `template_syntax` | A `{{ }}` that is not a reference, a default that is no JSON (or nests braces more than 3 deep), or a `{{` never closed. | Fix the text; write `\\{{` for a literal `{{`. |
 | `reference_unknown_step` | A reference starts with a name that is no step. | Use one of `available` (the steps in reach). |
 | `reference_to_later_step` | The step comes later, is the step itself, or contains it. | Move the use after the step, or use another step. |
 | `reference_not_in_scope` | The step ran earlier but not on every path to here (inside a branch). | Use it inside its branch, or restructure. |
@@ -402,17 +435,19 @@ Beyond the form:
 | `default_type_mismatch` | The default does not fit the field's type. | Give a default of that type. |
 | `previous_outside_loop` | `previous.` outside a loop body. | Use it inside a loop. |
 | `previous_without_default` | `previous.` where round one has no value. | Use it in `instruction.next`, or add a default. |
-| `previous_unknown_step` | `previous.<id>` names no step of the body that always runs. | Use one of `available`. |
+| `previous_unknown_step` | `previous.<id>` names no step of the innermost loop body that always runs (the message says whether it belongs to an outer loop, sits in an `if`, or is no step of the body). | Use one of `available`, or the step without `previous.`. |
 | `condition_operand_type` | An operand of the wrong type, or two that cannot be compared. | Compare like with like; `empty` takes a list or a text. |
 | `condition_value_not_in_enum` | A text compared with a choice of names that can never hold it. | Use one of `available`. |
 | `instruction_next_outside_loop` | `instruction.next` in a step that is not in a loop. | Use a plain text, or put the step in a loop. |
-| `session_target_invalid` | `session.continue` names no agent step that ran before on every path (or itself outside a loop). | Use one of `available`. |
+| `session_target_invalid` | `session.continue` names no agent step that ran before on every path, or one with another profile name or environment, or the step itself where it is not a direct step of a loop body. | Use one of `available`, with the same profile and environment. |
 | `profile_unknown` | No such profile. | Use one of `available`. |
 | `profile_version_unknown` | The profile has no such version. | Use one of `available`, or leave the version out. |
 | `environment_unknown` | No such environment in the workspace. | Use one of `available`, or create it on the Environments page. |
 | `result_field_reserved` | A result field named like a platform fact (`costUsd`, `branch`, `commits`). | Rename it. |
 | `required_field_unknown` | `required` of a result schema names a field that is not in `properties`. | Fix the name or add the property. |
-| `repo_required` | A GitHub action with no repository (the trigger has none). | Add `"repo": "owner/name"`. |
+| `repo_required` | A manual trigger without `input` that declares `repo` as a required text: the run has no repository. | Declare `repo` in `properties` and `required` of the trigger's `input`. |
+| `target_from_untrusted_value` | An input that decides a target (`issue`, `head`, `base`, `add`, `remove`, `environment`) holds more than a literal or one reference to the trigger or to the branch of an agent step. | Use a literal, or exactly one reference the message names. |
+| `label_retriggers_workflow` | An action adds the label that starts the workflow. | Remove the label instead, or add another one. |
 | `too_many_steps` | More than 50 steps. | Split the workflow. |
 | `nesting_too_deep` | `if`/`loop` too deep, a loop in a loop in a loop, conditions or a result schema nested too deep. | Flatten it. |
 | `result_schema_too_large` | A result schema with more than 100 fields in all. | Make it smaller. |

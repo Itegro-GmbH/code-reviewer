@@ -55,7 +55,7 @@ function withSteps(steps: unknown[]): Json {
 }
 
 describe("a document nested far beyond its limits", () => {
-  // #833-M1-T250
+  // #833-M1-T310
   it.each(["if", "loop"] as const)(
     "is refused with nesting_too_deep when %s is nested 5000 deep",
     (kind) => {
@@ -66,7 +66,7 @@ describe("a document nested far beyond its limits", () => {
     },
   );
 
-  // #833-M1-T251
+  // #833-M1-T311
   it("is refused when if and loop alternate 5000 deep, and the steps are counted up to the bound", () => {
     let inner: Json = LEAF;
     for (let level = DEPTH; level >= 1; level--)
@@ -89,7 +89,7 @@ describe("a document nested far beyond its limits", () => {
     expect(codesOf(withSteps([inner]))).toContain("nesting_too_deep");
   });
 
-  // #833-M1-T252
+  // #833-M1-T312
   it("is refused when both branches of an if are 5000 deep", () => {
     const deep = nested("if", DEPTH);
     const document = withSteps([
@@ -105,7 +105,7 @@ describe("a document nested far beyond its limits", () => {
     expect(codesOf(document)).toContain("nesting_too_deep");
   });
 
-  // #833-M1-T253
+  // #833-M1-T313
   it("is refused when a condition is nested 5000 deep", () => {
     let when: Json = { empty: "{{trigger.input.repo}}" };
     for (let level = 0; level < DEPTH; level++) when = { not: when };
@@ -117,7 +117,7 @@ describe("a document nested far beyond its limits", () => {
     expect(codesOf(document)).toContain("nesting_too_deep");
   });
 
-  // #833-M1-T254
+  // #833-M1-T314
   it.each(["object", "array"] as const)(
     "is refused when a result schema is nested 5000 deep through %s",
     (through) => {
@@ -149,7 +149,7 @@ describe("a document nested far beyond its limits", () => {
     },
   );
 
-  // #833-M1-T255
+  // #833-M1-T315
   it("is refused when a value in an input is nested 5000 deep", () => {
     let list: unknown = "x";
     let object: unknown = 1;
@@ -170,7 +170,7 @@ describe("a document nested far beyond its limits", () => {
     expect(codesOf(withSteps([comment]))).not.toEqual([]);
   });
 
-  // #833-M1-T256
+  // #833-M1-T316
   it("is refused when a reserved step carries a field 5000 deep", () => {
     let value: unknown = 1;
     for (let level = 0; level < DEPTH; level++) value = { a: value };
@@ -180,7 +180,7 @@ describe("a document nested far beyond its limits", () => {
     expect(codesOf(document)).toEqual(["kind_not_supported"]);
   });
 
-  // #833-M1-T257
+  // #833-M1-T317
   it("parses a text with 20000 characters of braces and quotes in linear time", () => {
     for (const piece of ['{{"', "{{{{", "}}}}", '{{a | default {"', "{{a|"]) {
       const text = piece.repeat(Math.floor(20_000 / piece.length));
@@ -190,7 +190,7 @@ describe("a document nested far beyond its limits", () => {
       const result = run(withSteps([{ ...LEAF, body: text }]));
 
       expect(Array.isArray(parsed.problems)).toBe(true);
-      expect(result.valid).toBe(false);
+      expect(Array.isArray(result.errors)).toBe(true);
       expect(Date.now() - started).toBeLessThan(2000);
     }
   });

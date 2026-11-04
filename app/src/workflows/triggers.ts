@@ -48,8 +48,3 @@ export function triggerOutput(
     fields: { input: { type: fields, required: true } },
   };
 }
-
-/** Whether `trigger.repo` exists, so a GitHub action may leave `repo` out. */
-export function triggerNamesRepository(kind: TriggerKind): boolean {
-  return kind === "github.issueLabeled";
-}

@@ -5,17 +5,20 @@
 import {
   checkCondition,
   checkInput,
+  checkLiteral,
   checkText,
-  jsonTypeName,
+  type TargetCheck,
 } from "./check-values.ts";
 import { COST_FACT, FACT_NAMES, FACT_TYPES, PUSH_FACTS } from "./facts.ts";
+import { isRecord, jsonTypeName, textLength } from "./json.ts";
 import {
+  DESCRIPTION_MAX_LENGTH,
   ID_MAX_LENGTH,
   LOOP_NESTING_MAX,
   LOOP_ROUNDS_MAX,
   NESTING_DEPTH_MAX,
 } from "./limits.ts";
-import { issue, listNames, pointer } from "./issues.ts";
+import { issue, listNames, pointer, shown } from "./issues.ts";
 import {
   parseProfileRef,
   type ProfileInfo,
@@ -26,7 +29,8 @@ import {
   validateResultSchema,
   type ResultSchema,
 } from "./result-schema.ts";
-import type { ConnectorSpec } from "./connectors.ts";
+import { GITHUB_ISSUE_LABELS, type ConnectorSpec } from "./connectors.ts";
+import { literalText, parseTemplate } from "./template.ts";
 import type {
   Binding,
   Env,
@@ -40,25 +44,31 @@ import { enumOf, NUMBER, objectOf, type FieldType } from "./value-type.ts";
 export const SUPPORTED_KINDS = ["agent", "action", "if", "loop"] as const;
 /** Named in the format so a document can use them later; version 1 refuses them. */
 export const RESERVED_KINDS = ["forEach", "approval", "workflow"] as const;
-export const ID_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+export const ID_PATTERN = new RegExp(
+  `^[A-Za-z][A-Za-z0-9_-]{0,${ID_MAX_LENGTH - 1}}$`,
+);
 const RESERVED_IDS = ["trigger", "previous"] as const;
+
+function isStepId(id: string): boolean {
+  return (
+    ID_PATTERN.test(id) && !(RESERVED_IDS as readonly string[]).includes(id)
+  );
+}
 const COMMON_KEYS = ["id", "kind", "description"] as const;
 
 export type Checker = ScopeContext & {
   resolver: WorkflowResolver;
-  /** Whether the trigger names a repository (`trigger.repo`), so an action may leave `repo` out. */
-  triggerHasRepo: boolean;
+  /** The label that starts the workflow, when the trigger has one and it is well formed. */
+  triggerLabel?: string;
 };
 
 export type StepState = {
   depth: number;
   loopDepth: number;
   branches: StepInfo["branches"];
+  /** The list being checked is the body of a loop, not a branch of an `if` inside one. */
+  inLoopBody: boolean;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function keysOf(
   node: Record<string, unknown>,
@@ -72,7 +82,7 @@ function keysOf(
         issue(
           pointer(path, key),
           "unknown_field",
-          `'${key}' is not a field of this node. Fields: ${listNames(allowed)}.`,
+          `${shown(key)} is not a field of this node. Fields: ${listNames(allowed)}.`,
           allowed,
         ),
       );
@@ -103,7 +113,7 @@ function stringField(
       issue(
         pointer(path, key),
         "wrong_type",
-        `'${key}' must be a text, not ${jsonTypeName(value)}. ${hint}`,
+        `${shown(key)} must be a text, not ${jsonTypeName(value)}. ${hint}`,
       ),
     );
     return undefined;
@@ -124,12 +134,12 @@ function descriptionField(
     c,
     false,
   );
-  if (text !== undefined && text.length > 1000)
+  if (text !== undefined && textLength(text) > DESCRIPTION_MAX_LENGTH)
     c.report(
       issue(
         pointer(path, "description"),
         "limit_exceeded",
-        "description may have 1000 characters at most.",
+        `description may have ${DESCRIPTION_MAX_LENGTH} characters at most.`,
       ),
     );
 }
@@ -145,6 +155,22 @@ function findProfile(
   if (parsed === undefined) return undefined;
   const info = resolver.profiles().find((p) => p.name === parsed.name);
   return info === undefined ? undefined : { info, version: parsed.version };
+}
+
+/** The profile name and the environment (lower case, a literal only) an agent step is written with: what makes two steps share a session. */
+function setupOf(node: Record<string, unknown>): NonNullable<Binding["agent"]> {
+  const environment =
+    typeof node.environment === "string"
+      ? literalText(parseTemplate(node.environment))?.toLowerCase()
+      : undefined;
+  const profile =
+    typeof node.profile === "string"
+      ? parseProfileRef(node.profile)?.name
+      : undefined;
+  return {
+    ...(profile === undefined ? {} : { profile }),
+    ...(environment === undefined ? {} : { environment }),
+  };
 }
 
 /** What an agent step yields: its declared result, and the facts. Silent: the checks report. */
@@ -163,6 +189,7 @@ export function agentBinding(
   const schema: ResultSchema | undefined =
     declared ??
     (node.result === undefined ? found?.info.defaultResult : undefined);
+
   const entries: [string, FieldType][] =
     schema === undefined
       ? []
@@ -176,12 +203,17 @@ export function agentBinding(
       { type: FACT_TYPES[name] as FieldType["type"], required: true },
     ]);
   const fields: Record<string, FieldType> = Object.fromEntries(entries);
-  const reason = `The profile '${String(node.profile)}' may not push, so '${id}' yields no branch and no commits. Use a profile that may push, or reference the result of the step.`;
+  const reason = `The profile ${shown(String(node.profile))} may not push, so ${shown(id)} yields no branch and no commits. Use a profile that may push, or reference the result of the step.`;
   return {
     id,
     kind: "agent",
     type: { kind: "object", fields },
     unavailable: canPush ? {} : { branch: reason, commits: reason },
+    // A result that failed its check is reported where it is written; its fields are unknown, not missing.
+    ...(node.result !== undefined && declared === undefined
+      ? { open: true }
+      : {}),
+    agent: setupOf(node),
   };
 }
 
@@ -273,7 +305,7 @@ function checkProfile(
       issue(
         where,
         "invalid_value",
-        `'${ref}' is not a profile reference. Write a name, or name@version, like "implementer@1".`,
+        `${shown(ref)} is not a profile reference. Write a name, or name@version, like "implementer@1".`,
       ),
     );
     return;
@@ -285,7 +317,7 @@ function checkProfile(
       issue(
         where,
         "profile_unknown",
-        `There is no profile '${parsed.name}'. Profiles: ${listNames(names)}.`,
+        `There is no profile ${shown(parsed.name)}. Profiles: ${listNames(names)}.`,
         names,
       ),
     );
@@ -319,32 +351,21 @@ function checkEnvironment(
   );
   if (name === undefined) return;
   const where = pointer(path, "environment");
-  const checked = checkText(name, c, { ...use, path: where });
-  if (!checked.ok) return;
-  if (checked.whole !== undefined) {
-    if (
-      checked.whole.kind !== "string" &&
-      checked.whole.kind !== "enum" &&
-      checked.whole.kind !== "unknown"
-    )
-      c.report(
-        issue(
-          where,
-          "reference_type_mismatch",
-          "The environment must be a text (a name); this reference is not one.",
-        ),
-      );
-    return;
-  }
-  // A name with a reference in it is only known when the workflow runs.
-  if (name.includes("{{")) return;
+  const literal = checkLiteral(
+    name,
+    c,
+    { ...use, path: where },
+    "'environment' decides where the agent works, so in version 1 it is a literal: the name of an environment of the workspace. A reference to the trigger or to a result is not taken.",
+    "target_from_untrusted_value",
+  );
+  if (literal === undefined) return;
   const names = c.resolver.environments().map((e) => e.name);
-  if (!names.some((known) => known.toLowerCase() === name.toLowerCase()))
+  if (!names.some((known) => known.toLowerCase() === literal.toLowerCase()))
     c.report(
       issue(
         where,
         "environment_unknown",
-        `There is no environment '${name}' in this workspace. Environments: ${listNames(names)}.`,
+        `There is no environment ${shown(literal)} in this workspace. Environments: ${listNames(names)}.`,
         names,
       ),
     );
@@ -427,6 +448,7 @@ function checkSession(
   path: string,
   c: Checker,
   env: Env,
+  state: StepState,
 ): void {
   const value = node.session;
   if (value === undefined || value === "new") return;
@@ -463,34 +485,63 @@ function checkSession(
     );
     return;
   }
-  const inLoop = env.loops.length > 0;
+  if (!isStepId(target)) {
+    c.report(
+      issue(
+        at,
+        "invalid_value",
+        `${shown(target)} is not a step id: a letter, then letters, digits, '_' or '-' (${ID_MAX_LENGTH} at most); 'trigger' and 'previous' are taken.`,
+      ),
+    );
+    return;
+  }
   const own = node.id;
+  // A step continues its own session only as a direct step of a loop body: a step inside an `if` of the body may not have run in
+  // the round before, so there may be no session to go on with.
+  const ownSession = state.inLoopBody && typeof own === "string";
   const agents = [...env.scope.values()]
     .filter((b) => b.kind === "agent")
     .map((b) => b.id);
-  const available =
-    inLoop && typeof own === "string" ? [...agents, own] : agents;
+  const available = ownSession ? [...agents, own] : agents;
   if (target === own) {
-    if (!inLoop)
+    if (!ownSession)
       c.report(
         issue(
           at,
           "session_target_invalid",
-          "A step can continue its own session only inside a loop, where the round before had one. Outside a loop there is none.",
+          "A step can continue its own session only as a direct step of a loop body, where the round before ran it. Outside a loop, or inside an if of the body, there may be none.",
           available,
         ),
       );
     return;
   }
-  if (env.scope.get(target)?.kind !== "agent")
+  const found = env.scope.get(target);
+  if (found?.kind !== "agent") {
     c.report(
       issue(
         at,
         "session_target_invalid",
-        `'${target}' is not an agent step that ran before this one on every path. Sessions of agent steps in reach: ${listNames(available)}.`,
+        `${shown(target)} is not an agent step that ran before this one on every path. Sessions of agent steps in reach: ${listNames(available)}.`,
         available,
       ),
     );
+    return;
+  }
+  // A session belongs to one profile in one environment: it holds the files and the conversation of that setup.
+  const mine = setupOf(node);
+  const theirs = found.agent ?? {};
+  for (const [what, a, b] of [
+    ["profile", mine.profile, theirs.profile],
+    ["environment", mine.environment, theirs.environment],
+  ] as const)
+    if (a !== undefined && b !== undefined && a !== b)
+      c.report(
+        issue(
+          at,
+          "session_target_invalid",
+          `${shown(target)} runs with the ${what} ${shown(b)}, this step with ${shown(a)}. A session can only go on with the same profile and the same environment.`,
+        ),
+      );
 }
 
 function checkAgent(
@@ -510,7 +561,7 @@ function checkAgent(
     reachOf(env, pointer(path, "environment"), state),
   );
   checkInstruction(node, path, c, env, state);
-  checkSession(node, path, c, env);
+  checkSession(node, path, c, env, state);
   if (node.result === undefined) return;
   const where = pointer(path, "result");
   const checked = validateResultSchema(node.result, where);
@@ -525,7 +576,7 @@ function checkAgent(
         issue(
           pointer(where, "properties", name),
           "result_field_reserved",
-          `'${name}' is filled in by the platform for every agent step. Name the field of the result differently.`,
+          `${shown(name)} is filled in by the platform for every agent step. Name the field of the result differently.`,
           FACT_NAMES,
         ),
       );
@@ -557,7 +608,7 @@ function checkAction(
       issue(
         pointer(path, "connector"),
         "unknown_connector",
-        `There is no connector '${name}'. Connectors: ${listNames(names)}.`,
+        `There is no connector ${shown(name)}. Connectors: ${listNames(names)}.`,
         names,
       ),
     );
@@ -581,22 +632,9 @@ function checkAction(
         );
       continue;
     }
-    if (
-      input === "repo" &&
-      typeof node.repo === "string" &&
-      !node.repo.includes("{{") &&
-      !/^[\w.-]+\/[\w.-]+$/.test(node.repo)
-    ) {
-      c.report(
-        issue(
-          at,
-          "invalid_value",
-          'repo is written owner/name, like "acme/api".',
-        ),
-      );
-      continue;
-    }
-    checkInput(node[input], field.type, at, c, reachOf(env, at, state));
+    const target: TargetCheck | undefined =
+      field.target === undefined ? undefined : { input, roots: field.target };
+    checkInput(node[input], field.type, at, c, reachOf(env, at, state), target);
   }
   if (spec.atLeastOneOf?.every((input) => node[input] === undefined))
     c.report(
@@ -607,14 +645,29 @@ function checkAction(
         spec.atLeastOneOf,
       ),
     );
-  if (spec.needsRepo && node.repo === undefined && !c.triggerHasRepo)
-    c.report(
-      issue(
-        path,
-        "repo_required",
-        `${spec.name} works on a repository, and the trigger does not provide one (trigger.repo). Name it with "repo": "owner/name".`,
-      ),
-    );
+  if (spec.name === GITHUB_ISSUE_LABELS.name) checkNoRetrigger(node, path, c);
+}
+
+/** Adding the label that starts the workflow would start it again, and again. */
+function checkNoRetrigger(
+  node: Record<string, unknown>,
+  path: string,
+  c: Checker,
+): void {
+  const label = c.triggerLabel?.trim().toLowerCase();
+  if (label === undefined || !Array.isArray(node.add)) return;
+  node.add.forEach((entry: unknown, position) => {
+    if (typeof entry !== "string") return;
+    const literal = literalText(parseTemplate(entry))?.trim().toLowerCase();
+    if (literal === label)
+      c.report(
+        issue(
+          pointer(path, "add", position),
+          "label_retriggers_workflow",
+          `Adding the label ${shown(literal)} puts the label that starts this workflow on the issue again, and the workflow would start again. Remove it instead, or add another label.`,
+        ),
+      );
+  });
 }
 
 function describeInput(type: FieldType["type"]): string {
@@ -634,6 +687,22 @@ function nestingTooDeep(path: string, state: StepState, c: Checker): boolean {
       path,
       "nesting_too_deep",
       `if and loop can be nested ${NESTING_DEPTH_MAX} levels deep at most.`,
+    ),
+  );
+  return true;
+}
+
+function loopNestingTooDeep(
+  path: string,
+  state: StepState,
+  c: Checker,
+): boolean {
+  if (state.loopDepth + 1 <= LOOP_NESTING_MAX) return false;
+  c.report(
+    issue(
+      path,
+      "nesting_too_deep",
+      `A loop can be inside ${LOOP_NESTING_MAX - 1} other loop at most.`,
     ),
   );
   return true;
@@ -659,6 +728,7 @@ function checkBranch(
     depth: state.depth + 1,
     loopDepth: state.loopDepth,
     branches: [...state.branches, { ifId: node.id as string, branch: key }],
+    inLoopBody: false,
   });
 }
 
@@ -722,16 +792,7 @@ function checkLoop(
       ),
     );
   const tooDeep =
-    nestingTooDeep(path, state, c) ||
-    (state.loopDepth + 1 > LOOP_NESTING_MAX &&
-      (c.report(
-        issue(
-          path,
-          "nesting_too_deep",
-          `A loop can be inside ${LOOP_NESTING_MAX - 1} other loop at most.`,
-        ),
-      ),
-      true));
+    nestingTooDeep(path, state, c) || loopNestingTooDeep(path, state, c);
   const body = node.body;
   const bodyAt = pointer(path, "body");
   let own: Binding[] = [];
@@ -745,12 +806,17 @@ function checkLoop(
         const preview = previewBinding(child, c.resolver);
         if (preview !== undefined) previous.set(preview.id, preview);
       }
-    const frame: LoopFrame = { id: node.id as string, previous };
+    const frame: LoopFrame = {
+      id: node.id as string,
+      bodyPath: bodyAt,
+      previous,
+    };
     bodyEnv = { scope: new Map(env.scope), loops: [...env.loops, frame] };
     own = checkSteps(body, bodyAt, c, bodyEnv, {
       depth: state.depth + 1,
       loopDepth: state.loopDepth + 1,
       branches: state.branches,
+      inLoopBody: true,
     });
   }
   const untilAt = pointer(path, "until");
@@ -811,10 +877,7 @@ export function checkSteps(
       return;
     }
     const id = node.id;
-    const validId =
-      typeof id === "string" &&
-      ID_PATTERN.test(id) &&
-      !(RESERVED_IDS as readonly string[]).includes(id);
+    const validId = typeof id === "string" && isStepId(id);
     if (id === undefined)
       missing(at, "id", 'a name for the step, like "implement".', c);
     else if (typeof id !== "string")
@@ -824,7 +887,7 @@ export function checkSteps(
         issue(
           pointer(at, "id"),
           "invalid_value",
-          `'${id.slice(0, ID_MAX_LENGTH)}' is not a usable id: start with a letter, then letters, digits, '_' or '-' (64 at most); 'trigger' and 'previous' are taken.`,
+          `${shown(id)} is not a usable id: start with a letter, then letters, digits, '_' or '-' (${ID_MAX_LENGTH} at most); 'trigger' and 'previous' are taken.`,
         ),
       );
     const kind = node.kind;
@@ -840,7 +903,7 @@ export function checkSteps(
         issue(
           pointer(at, "kind"),
           "kind_not_supported",
-          `The kind '${kind}' is reserved for a later version and cannot be used in version 1. Available: ${listNames([...SUPPORTED_KINDS])}.`,
+          `The kind ${shown(kind)} is reserved for a later version and cannot be used in version 1. Available: ${listNames([...SUPPORTED_KINDS])}.`,
           SUPPORTED_KINDS,
         ),
       );
@@ -861,7 +924,7 @@ export function checkSteps(
         issue(
           pointer(at, "kind"),
           "unknown_kind",
-          `${typeof kind === "string" ? `'${kind}' is not a node kind` : "'kind' must be a text"}. Available: ${listNames([...SUPPORTED_KINDS])} (reserved: ${listNames([...RESERVED_KINDS])}).`,
+          `${typeof kind === "string" ? `${shown(kind)} is not a node kind` : "'kind' must be a text"}. Available: ${listNames([...SUPPORTED_KINDS])} (reserved: ${listNames([...RESERVED_KINDS])}).`,
           SUPPORTED_KINDS,
         ),
       );

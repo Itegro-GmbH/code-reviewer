@@ -30,7 +30,6 @@ const COMMENT = {
   id: "say",
   kind: "action",
   connector: "github.issue.comment",
-  repo: "acme/api",
   issue: 7,
   body: "x",
 };
@@ -92,7 +91,6 @@ describe("the plan's example, broken in one place at a time", () => {
         agentSteps(d).push({
           ...COMMENT,
           id: "after",
-          repo: undefined,
           body: "{{pr.url}}",
         }),
       [["/steps/3/body", "reference_not_in_scope"]],
@@ -382,7 +380,14 @@ describe("the trigger", () => {
     ).toEqual([["/trigger/input", "unknown_field"]]);
     expect(
       codes(
-        change(tiny(), (d) => (d.trigger = { kind: "manual", label: "x" })),
+        change(
+          tiny(),
+          (d) =>
+            (d.trigger = {
+              ...(d.trigger as Json),
+              label: "x",
+            }),
+        ),
       ),
     ).toEqual([["/trigger/label", "unknown_field"]]);
   });
@@ -397,14 +402,20 @@ describe("the trigger", () => {
       });
     const schema = {
       type: "object",
-      required: ["task"],
-      properties: { task: { type: "string" }, n: { type: "number" } },
+      required: ["repo", "task"],
+      properties: {
+        repo: { type: "string" },
+        task: { type: "string" },
+        n: { type: "number" },
+      },
     };
 
     expect(codes(manual(schema))).toEqual([
       ["/steps/0/instruction", "reference_optional_field"],
     ]);
-    expect(codes(manual({ ...schema, required: ["task", "n"] }))).toEqual([]);
+    expect(
+      codes(manual({ ...schema, required: ["repo", "task", "n"] })),
+    ).toEqual([]);
     expect(codes(manual({ type: "list" }))).toEqual([
       ["/trigger/input/type", "invalid_value"],
     ]);
@@ -621,27 +632,6 @@ describe("the agent step", () => {
     expect(first((s) => (s.environment = "python"))).toEqual([]);
   });
 
-  // #833-M1-T55
-  it("takes the environment from a reference to a text, and refuses a number", () => {
-    const doc = (reference: string) =>
-      change(tiny(), (d) => {
-        d.trigger = {
-          kind: "manual",
-          input: {
-            type: "object",
-            required: ["env", "n"],
-            properties: { env: { type: "string" }, n: { type: "number" } },
-          },
-        };
-        (agentSteps(d)[0] as Json).environment = reference;
-      });
-
-    expect(codes(doc("{{trigger.input.env}}"))).toEqual([]);
-    expect(codes(doc("{{trigger.input.n}}"))).toEqual([
-      ["/steps/0/environment", "reference_type_mismatch"],
-    ]);
-  });
-
   // #833-M1-T56
   it("takes the instruction as a text or as first and next", () => {
     expect(first((s) => (s.instruction = 5))).toEqual([
@@ -804,15 +794,7 @@ describe("the action", () => {
       expect.objectContaining({
         path: "/steps/1/labels",
         code: "unknown_field",
-        available: [
-          "id",
-          "kind",
-          "description",
-          "connector",
-          "repo",
-          "issue",
-          "body",
-        ],
+        available: ["id", "kind", "description", "connector", "issue", "body"],
       }),
     ]);
   });
@@ -825,7 +807,6 @@ describe("the action", () => {
           id: "x",
           kind: "action",
           connector: "github.issue.comment",
-          repo: "a/b",
         }),
       ),
     ).toEqual([
@@ -838,31 +819,10 @@ describe("the action", () => {
           id: "x",
           kind: "action",
           connector: "github.issue.labels",
-          repo: "a/b",
           issue: 1,
         }),
       ),
     ).toEqual([["/steps/1", "missing_field"]]);
-  });
-
-  // #833-M1-T66
-  it("needs a repository where the trigger names none, and takes it from the trigger where it does", () => {
-    const noRepo = {
-      id: "x",
-      kind: "action",
-      connector: "github.issue.comment",
-      issue: 1,
-      body: "b",
-    };
-    expect(codes(withStep(noRepo))).toEqual([["/steps/1", "repo_required"]]);
-    const labeled = change(
-      tiny(),
-      (d) => (d.trigger = { kind: "github.issueLabeled", label: "go" }),
-    );
-    expect(codes(withStep(noRepo, labeled))).toEqual([]);
-    expect(codes(withStep({ ...noRepo, repo: "not a repo" }))).toEqual([
-      ["/steps/1/repo", "invalid_value"],
-    ]);
   });
 
   // #833-M1-T67
@@ -876,10 +836,9 @@ describe("the action", () => {
     expect(codes(withStep({ ...COMMENT, issue: "seven" }))).toEqual([
       ["/steps/1/issue", "wrong_type"],
     ]);
-    expect(codes(withStep({ ...COMMENT, issue: { number: 7 } }))).toEqual([]);
-    expect(codes(withStep({ ...COMMENT, issue: { id: 7 } }))).toEqual([
-      ["/steps/1/issue/id", "unknown_field"],
-      ["/steps/1/issue/number", "missing_field"],
+    expect(codes(withStep({ ...COMMENT, issue: 7 }))).toEqual([]);
+    expect(codes(withStep({ ...COMMENT, issue: { number: 7 } }))).toEqual([
+      ["/steps/1/issue", "wrong_type"],
     ]);
     expect(
       codes(
@@ -887,7 +846,6 @@ describe("the action", () => {
           id: "x",
           kind: "action",
           connector: "github.issue.labels",
-          repo: "a/b",
           issue: 1,
           add: "bug",
         }),
@@ -899,7 +857,6 @@ describe("the action", () => {
           id: "x",
           kind: "action",
           connector: "github.issue.labels",
-          repo: "a/b",
           issue: 1,
           add: [1],
         }),
@@ -915,7 +872,6 @@ describe("the action", () => {
           id: "x",
           kind: "action",
           connector: "github.pullRequest.open",
-          repo: "a/b",
           head: "h",
           title: "t",
           ...extra,
@@ -974,7 +930,6 @@ describe("the action", () => {
           id: "pr",
           kind: "action",
           connector: "github.pullRequest.open",
-          repo: "a/b",
           head: "h",
           title: "t",
         },
@@ -1013,7 +968,6 @@ describe("references", () => {
         id: "after",
         kind: "action",
         connector: "github.pullRequest.open",
-        repo: "a/b",
         head: "h",
         title: "t",
       });
@@ -1208,38 +1162,52 @@ describe("references", () => {
 
     expect(codes(doc)).toEqual([["/steps/0/profile", "profile_unknown"]]);
   });
+
+  // #833-M1-T325
+  it("binds the fields of a result schema that failed its check as unknown, and reports the schema only", () => {
+    const doc = change(tiny(), (d) => {
+      (agentSteps(d)[0] as Json).result = {
+        type: "object",
+        required: ["ghost"],
+        properties: { summary: { type: "string" } },
+      };
+      agentSteps(d).push(
+        comment("{{work.summary}} {{work.other.deep}} {{work.branch}}"),
+      );
+    });
+
+    expect(codes(doc)).toEqual([
+      ["/steps/0/result/required/0", "required_field_unknown"],
+    ]);
+  });
+
+  // #833-M1-T326
+  it("keeps the facts of such a step: a profile that may not push still has no branch", () => {
+    const doc = change(tiny(), (d) => {
+      const step = agentSteps(d)[0] as Json;
+      step.profile = "reviewer";
+      step.result = { type: "object", properties: {} };
+      agentSteps(d).push(comment("{{work.anything}} {{work.branch}}"));
+    });
+
+    expect(codes(doc)).toEqual([
+      ["/steps/0/result/properties", "invalid_value"],
+      ["/steps/1/body", "reference_fact_unavailable"],
+    ]);
+  });
 });
 
 describe("names that every object has", () => {
   // #833-M1-T250
   it.each(["__proto__", "constructor", "toString", "hasOwnProperty"])(
-    "does not take %s for a field of a step, of an object literal or of a result",
+    "does not take %s for a field of a step or of a result",
     (name) => {
-      const labeled = change(
-        tiny(),
-        (d) => (d.trigger = { kind: "github.issueLabeled", label: "go" }),
-      );
-
       expect(codes(withStep(comment(`{{work.${name}}}`)))).toEqual([
         ["/steps/1/body", "reference_unknown_field"],
       ]);
       expect(codes(withStep(comment(`{{${name}.x}}`)))).toEqual([
         ["/steps/1/body", "reference_unknown_step"],
       ]);
-      expect(
-        codes(
-          withStep(
-            {
-              id: "x",
-              kind: "action",
-              connector: "github.issue.comment",
-              body: "b",
-              issue: { number: 1, [name]: 2 },
-            },
-            labeled,
-          ),
-        ),
-      ).toEqual([[`/steps/1/issue/${name}`, "unknown_field"]]);
     },
   );
 
@@ -1263,7 +1231,7 @@ describe("names that every object has", () => {
   // #833-M1-T252
   it("takes a document that carries __proto__ as a key as an unknown field", () => {
     const doc = JSON.parse(
-      '{"__proto__": {"x": 1}, "version": 1, "name": "n", "trigger": {"kind": "manual"}, "steps": [{"id": "a", "kind": "action", "connector": "github.issue.comment", "repo": "a/b", "issue": 1, "body": "b"}]}',
+      '{"__proto__": {"x": 1}, "version": 1, "name": "n", "trigger": {"kind": "manual", "input": {"type": "object", "required": ["repo"], "properties": {"repo": {"type": "string"}}}}, "steps": [{"id": "a", "kind": "action", "connector": "github.issue.comment", "issue": 1, "body": "b"}]}',
     ) as unknown;
 
     expect(codes(doc)).toEqual([["/__proto__", "unknown_field"]]);
@@ -1312,7 +1280,6 @@ describe("facts the agent does not report", () => {
           id: "pr",
           kind: "action",
           connector: "github.pullRequest.open",
-          repo: "a/b",
           head,
           title: "t",
         },
@@ -1626,6 +1593,7 @@ describe("loops", () => {
         ),
       ),
     ).toEqual([]);
+    // `check` runs another profile than `write`: a session cannot go over to it.
     expect(
       codes(
         withStep(
@@ -1635,7 +1603,119 @@ describe("loops", () => {
           ),
         ),
       ),
-    ).toEqual([]);
+    ).toEqual([["/steps/1/body/1/session/continue", "session_target_invalid"]]);
+  });
+
+  describe("session.continue", () => {
+    const agent = (id: string, extra: Json = {}): Json => ({
+      id,
+      kind: "agent",
+      profile: "implementer",
+      environment: "node",
+      instruction: "go",
+      ...extra,
+    });
+    const inLoop = (body: Json[]): Json =>
+      withStep({
+        id: "again",
+        kind: "loop",
+        maxRounds: 2,
+        body,
+        until: { empty: "{{trigger.input.repo}}" },
+      });
+    const gate = (then: Json[]): Json => ({
+      id: "gate",
+      kind: "if",
+      when: { notEmpty: "{{trigger.input.repo}}" },
+      then,
+    });
+
+    // #833-M1-T320
+    it("goes on in its own session only as a direct step of a loop body", () => {
+      expect(
+        codes(inLoop([agent("a", { session: { continue: "a" } })])),
+      ).toEqual([]);
+      expect(
+        codes(inLoop([gate([agent("a", { session: { continue: "a" } })])])),
+      ).toEqual([
+        ["/steps/1/body/0/then/0/session/continue", "session_target_invalid"],
+      ]);
+      expect(
+        codes(withStep(gate([agent("a", { session: { continue: "a" } })]))),
+      ).toEqual([
+        ["/steps/1/then/0/session/continue", "session_target_invalid"],
+      ]);
+    });
+
+    // #833-M1-T321
+    it("goes on in a loop inside an if, where the step is still a direct step of the body", () => {
+      const loopInIf = gate([
+        {
+          id: "again",
+          kind: "loop",
+          maxRounds: 2,
+          body: [agent("a", { session: { continue: "a" } })],
+          until: { empty: "{{trigger.input.repo}}" },
+        },
+      ]);
+
+      expect(codes(withStep(loopInIf))).toEqual([]);
+    });
+
+    // #833-M1-T322
+    it("goes on in the session of another step only with the same profile", () => {
+      expect(
+        codes(
+          withStep(
+            agent("b", { profile: "reviewer", session: { continue: "work" } }),
+          ),
+        ),
+      ).toEqual([["/steps/1/session/continue", "session_target_invalid"]]);
+      expect(
+        codes(
+          withStep(
+            agent("b", {
+              profile: "implementer@2",
+              session: { continue: "work" },
+            }),
+          ),
+        ),
+      ).toEqual([]);
+    });
+
+    // #833-M1-T323
+    it("goes on in the session of another step only in the same environment, whatever its case", () => {
+      const result = run(
+        withStep(
+          agent("b", { environment: "Python", session: { continue: "work" } }),
+        ),
+      );
+
+      expect(result.errors).toEqual([
+        expect.objectContaining({
+          path: "/steps/1/session/continue",
+          code: "session_target_invalid",
+          message: expect.stringContaining("environment"),
+        }),
+      ]);
+      expect(
+        codes(
+          withStep(
+            agent("b", { environment: "NODE", session: { continue: "work" } }),
+          ),
+        ),
+      ).toEqual([]);
+    });
+
+    // #833-M1-T324
+    it("refuses an id that is no step id, as the schema does", () => {
+      expect(
+        codes(withStep(agent("b", { session: { continue: "1a" } }))),
+      ).toEqual([["/steps/1/session/continue", "invalid_value"]]);
+      expect(
+        codes(withStep(agent("b", { session: { continue: "trigger" } }))),
+      ).toEqual([["/steps/1/session/continue", "invalid_value"]]);
+    });
   });
 
   // #833-M1-T102

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Itegro-GmbH/code-reviewer/contracts/workflow.v1.json",
   "title": "Code Reviewer workflow, version 1",
-  "description": "A workflow is a JSON document (#833, agent workflows, app/src/workflows/, docs/workflows.md): a trigger and a list of steps that run in order. Five kinds of node: the trigger, the agent step, the action, the control nodes `if` and `loop`, and (reserved) the workflow as a step. Nodes talk to each other only through values: a text may hold `{{step.field}}` references to what an earlier step yielded. The schema states the form, closed everywhere: a key it does not name is refused. What it cannot state is checked by the validator, which also gives every problem a JSON pointer, a stable code, the cause and the names that were available: that every reference points at a step that ran before on every path, the types of the values that flow, the ids, limits, and that profiles and environments exist. A reader ignores nothing: unknown fields are errors. `forEach`, `approval` and `workflow` are named here so a document can use them later; version 1 refuses them (code `kind_not_supported`). Written by the app (src/workflows/); the version is in the path and in `version`.",
+  "description": "A workflow is a JSON document (#833, agent workflows, app/src/workflows/, docs/workflows.md): a trigger and a list of steps that run in order. Five kinds of node: the trigger, the agent step, the action, the control nodes `if` and `loop`, and (reserved) the workflow as a step. Nodes talk to each other only through values: a text may hold `{{step.field}}` references to what an earlier step yielded. The schema states the form, closed everywhere: a key it does not name is refused. What it cannot state is checked by the validator, which also gives every problem a JSON pointer, a stable code, the cause and the names that were available: that every reference points at a step that ran before on every path, the types of the values that flow, the ids, limits, and that profiles and environments exist. A run works on ONE repository: the one of its trigger (`trigger.repo` of an issue trigger, the input `repo` of a manual one), so a node names none. The inputs that decide a TARGET (the issue, the branches, the labels, the environment) take a literal or one whole reference to the trigger or to the branch of an agent step, never a value an agent reported: the validator holds them to it (`target_from_untrusted_value`). A reader ignores nothing: unknown fields are errors. `forEach`, `approval` and `workflow` are named here so a document can use them later; version 1 refuses them (code `kind_not_supported`). Written by the app (src/workflows/); the version is in the path and in `version`.",
   "version": 1,
   "$defs": {
     "Workflow": {
@@ -16,7 +16,9 @@
         "name": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 100
+          "maxLength": 100,
+          "pattern": "\\S",
+          "description": "Not only spaces."
         },
         "description": {
           "$ref": "#/$defs/Description"
@@ -51,10 +53,10 @@
       "maxLength": 20000
     },
     "Reference": {
-      "description": "A text that is one reference and nothing else, where a number, true/false, a list or an object is wanted: the value keeps its type.",
+      "description": "A text that is exactly one reference and nothing else (no text and no space around it), where a number, true/false or a list is wanted: the value keeps its type. The `default` of a reference may hold braces nested three deep and JSON strings that hold `}}`. The pattern is `REFERENCE_PATTERN` of src/workflows/template.ts.",
       "type": "string",
       "maxLength": 20000,
-      "pattern": "^\\s*\\{\\{[\\s\\S]*\\}\\}\\s*$"
+      "pattern": "^\\{\\{(?:[^{}\"]|\"(?:[^\"\\\\]|\\\\[\\s\\S])*\"|\\{(?:[^{}\"]|\"(?:[^\"\\\\]|\\\\[\\s\\S])*\"|\\{(?:[^{}\"]|\"(?:[^\"\\\\]|\\\\[\\s\\S])*\"|\\{(?:[^{}\"]|\"(?:[^\"\\\\]|\\\\[\\s\\S])*\")*\\})*\\})*\\})*\\}\\}$"
     },
     "StepId": {
       "type": "string",
@@ -74,7 +76,7 @@
       ]
     },
     "ManualTrigger": {
-      "description": "Started by hand through the API. `input` declares what the caller hands in; steps read it as `{{trigger.input.<field>}}`.",
+      "description": "Started by hand through the API. `input` declares what the caller hands in; steps read it as `{{trigger.input.<field>}}`. A run works on one repository, so the validator needs `input` to declare `repo`, a required text (owner/name): the schema cannot say it (`repo_required`).",
       "type": "object",
       "additionalProperties": false,
       "required": ["kind"],
@@ -99,7 +101,8 @@
         "label": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 100
+          "maxLength": 100,
+          "pattern": "\\S"
         }
       }
     },
@@ -142,8 +145,9 @@
           "pattern": "^[a-z0-9][a-z0-9_-]{0,63}(?:@[1-9][0-9]{0,5})?$"
         },
         "environment": {
-          "description": "The name of an environment of the workspace, or a reference to a text that holds one.",
-          "$ref": "#/$defs/Template"
+          "description": "The name of an environment of the workspace, as a literal: it decides where the agent works, so version 1 takes no reference (`target_from_untrusted_value`, checked by the validator).",
+          "type": "string",
+          "maxLength": 20000
         },
         "instruction": {
           "description": "The task. A loop body may give `first` (round one) and `next` (later rounds, where `{{previous.<step>.<field>}}` is available).",
@@ -220,14 +224,12 @@
         "connector": {
           "const": "github.pullRequest.open"
         },
-        "repo": {
-          "description": "owner/name; left out where the trigger names the repository.",
-          "$ref": "#/$defs/RepoInput"
-        },
         "head": {
+          "description": "A branch: a literal, or exactly one reference to the branch of an agent step that may push (`{{implement.branch}}`). The validator refuses anything else.",
           "$ref": "#/$defs/Template"
         },
         "base": {
+          "description": "A branch: a literal, or exactly one reference to the trigger. The default branch of the repository when left out.",
           "$ref": "#/$defs/Template"
         },
         "title": {
@@ -265,9 +267,6 @@
         "connector": {
           "const": "github.issue.comment"
         },
-        "repo": {
-          "$ref": "#/$defs/RepoInput"
-        },
         "issue": {
           "$ref": "#/$defs/IssueInput"
         },
@@ -293,9 +292,6 @@
         "connector": {
           "const": "github.issue.labels"
         },
-        "repo": {
-          "$ref": "#/$defs/RepoInput"
-        },
         "issue": {
           "$ref": "#/$defs/IssueInput"
         },
@@ -315,35 +311,15 @@
         }
       ]
     },
-    "RepoInput": {
-      "type": "string",
-      "maxLength": 20000,
-      "pattern": "^(?:[\\w.-]+/[\\w.-]+|[\\s\\S]*\\{\\{[\\s\\S]*)$"
-    },
     "IssueInput": {
+      "description": "A positive whole number, or exactly one reference to the issue of the trigger (`{{trigger.issue}}`, `{{trigger.issue.number}}`) or to a number the caller of a manual trigger hands in.",
       "oneOf": [
         {
-          "type": "number"
+          "type": "integer",
+          "minimum": 1
         },
         {
           "$ref": "#/$defs/Reference"
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["number"],
-          "properties": {
-            "number": {
-              "oneOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "$ref": "#/$defs/Reference"
-                }
-              ]
-            }
-          }
         }
       ]
     },
@@ -358,7 +334,8 @@
             "$ref": "#/$defs/Template"
           }
         }
-      ]
+      ],
+      "description": "Label names: a list of literals and references to the trigger (one reference per entry), or exactly one reference to a list of the trigger. An agent's result is data and is not taken (`target_from_untrusted_value`). An action may not add the label that starts the workflow (`label_retriggers_workflow`)."
     },
     "IfStep": {
       "type": "object",

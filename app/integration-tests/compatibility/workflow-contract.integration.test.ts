@@ -4,7 +4,8 @@
 // examples are valid, the JSON Schema and the validator in src/workflows/ agree on the FORM of a document (the schema refuses a
 // document exactly when the validator reports a form issue), and the numbers and names the app keeps in TypeScript equal those in
 // the files. What the schema cannot say (references, types, ids, limits across the document, the names of profiles and
-// environments) is the validator's and is proven in src/workflows/validate.test.ts.
+// environments) is the validator's and is proven in src/workflows/validate.test.ts. A seeded random mutation of the example and of a
+// document that nests `if` and `loop` holds the two together on documents nobody wrote by hand.
 import { describe, expect, it } from "vitest";
 import { BUILT_IN_CONNECTORS } from "../../src/workflows/connectors.ts";
 import { isFormIssue } from "../../src/workflows/issues.ts";
@@ -16,6 +17,7 @@ import {
 } from "../../src/workflows/limits.ts";
 import { validateResultSchema } from "../../src/workflows/result-schema.ts";
 import { createResolver } from "../../src/workflows/resolver.ts";
+import { REFERENCE_PATTERN } from "../../src/workflows/template.ts";
 import { TRIGGER_KINDS } from "../../src/workflows/triggers.ts";
 import { validateWorkflow } from "../../src/workflows/validate.ts";
 import {
@@ -122,6 +124,13 @@ describe("the workflow contract", () => {
     expect(enumDef.maxItems).toBe(RESULT_ENUM_VALUES_MAX);
   });
 
+  // #833-M1-T127
+  it("states the pattern of a whole reference that the validator uses", () => {
+    const defs = readContract("workflow.v1.json").$defs as Record<string, Json>;
+
+    expect((defs.Reference as Json).pattern).toBe(REFERENCE_PATTERN);
+  });
+
   // #833-M1-T123
   it("names the reserved kinds, which the schema accepts and the validator refuses", () => {
     const document = example("examples/workflow", "Workflow");
@@ -218,9 +227,77 @@ const WORKFLOW_CASES: Case[] = [
     (d) => (first(d).issue = { id: 3 }),
   ],
   ["an issue that is a number", (d) => (first(d).issue = 7)],
+  ["an issue that is zero", (d) => (first(d).issue = 0)],
+  ["an issue that is not whole", (d) => (first(d).issue = -4.5)],
   ["an issue object with a number", (d) => (first(d).issue = { number: 7 })],
-  ["a repo that is not owner/name", (d) => (first(d).repo = "nope")],
-  ["a repo that is owner/name", (d) => (first(d).repo = "acme/api")],
+  [
+    "an issue that is two references",
+    (d) => (first(d).issue = "{{trigger.issue}} {{trigger.issue}}"),
+  ],
+  [
+    "an issue that is a reference never closed",
+    (d) => (first(d).issue = "{{trigger.issue"),
+  ],
+  [
+    "an issue with a space around the reference",
+    (d) => (first(d).issue = " {{trigger.issue}}"),
+  ],
+  [
+    "an issue with a default that holds braces",
+    (d) => (first(d).issue = "{{trigger.issue | default {}}}"),
+  ],
+  [
+    "labels that are two references",
+    (d) => (first(d).add = "{{trigger.issue.labels}} {{trigger.issue.labels}}"),
+  ],
+  ["a name of only spaces", (d) => (d.name = "   ")],
+  ["a name of 100 emoji", (d) => (d.name = "\u{1F600}".repeat(100))],
+  ["a name of 101 emoji", (d) => (d.name = "\u{1F600}".repeat(101))],
+  [
+    "a description of 1000 emoji",
+    (d) => (d.description = "\u{1F600}".repeat(1000)),
+  ],
+  [
+    "a description of 1001 emoji",
+    (d) => (d.description = "\u{1F600}".repeat(1001)),
+  ],
+  [
+    "a label of only spaces",
+    (d) => (d.trigger = { kind: "github.issueLabeled", label: " " }),
+  ],
+  [
+    "a label of 101 emoji",
+    (d) =>
+      (d.trigger = {
+        kind: "github.issueLabeled",
+        label: "\u{1F600}".repeat(101),
+      }),
+  ],
+  [
+    "a text of 20001 emoji",
+    (d) => (implement(d).instruction = "\u{1F600}".repeat(20001)),
+  ],
+  [
+    "a text of 20000 emoji",
+    (d) => (implement(d).instruction = "\u{1F600}".repeat(20000)),
+  ],
+  [
+    "a session that continues a step id",
+    (d) => (implement(d).session = { continue: "review" }),
+  ],
+  [
+    "a session that continues a bad id",
+    (d) => (implement(d).session = { continue: "1a" }),
+  ],
+  [
+    "a session that continues trigger",
+    (d) => (implement(d).session = { continue: "trigger" }),
+  ],
+  [
+    "a repo on an action, which version 1 does not have",
+    (d) => (first(d).repo = "acme/api"),
+  ],
+  ["a repo on an agent step", (d) => (implement(d).repo = "acme/api")],
   ["an agent without a profile", (d) => delete implement(d).profile],
   [
     "an agent with a profile in capitals",
@@ -499,4 +576,290 @@ describe("the JSON Schema and the validator agree on a result schema", () => {
 
     expect(schemaValid).toBe(formIssues.length === 0);
   });
+});
+
+/** A small deterministic generator (mulberry32): the same seed gives the same mutations on every machine. */
+function random(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const REPLACEMENTS: unknown[] = [
+  null,
+  true,
+  false,
+  0,
+  1,
+  -1,
+  1.5,
+  7,
+  11,
+  1e9,
+  "",
+  " ",
+  "x",
+  "node",
+  "implementer",
+  "implementer@1",
+  "reviewer",
+  "ready for agent",
+  "agent",
+  "if",
+  "loop",
+  "action",
+  "trigger",
+  "previous",
+  "1a",
+  "A_b-1",
+  "{{a}}",
+  "{{a}} {{b}}",
+  "{{",
+  "{{a",
+  " {{trigger.issue}}",
+  "{{trigger.issue}} ",
+  "{{trigger.issue}}",
+  "{{trigger.issue.number}}",
+  "{{trigger.issue.labels}}",
+  "{{implement.branch}}",
+  "{{trigger.repo.fullName | default {}}}",
+  '{{trigger.issue.title | default "}}"}}',
+  "\\{{x}}",
+  "a\u0000b",
+  "x".repeat(20001),
+  "\u{1F600}".repeat(100),
+  "\u{1F600}".repeat(101),
+  "\u{1F600}".repeat(1001),
+  "\u{1F600}".repeat(20001),
+  [],
+  [1],
+  ["a"],
+  ["{{trigger.issue.title}}"],
+  {},
+  { a: 1 },
+  { number: 1 },
+  { first: "a", next: "b" },
+  { continue: "implement" },
+  { empty: "{{review.findings}}" },
+  { type: "string" },
+  { type: "object", properties: { a: { type: "string" } } },
+];
+const KEYS = ["extra", "repo", "model", "id", "kind", "type", "items", "enum"];
+
+type Where = Array<string | number>;
+
+function paths(value: unknown, at: Where, out: Where[]): void {
+  if (Array.isArray(value))
+    value.forEach((item, index) => {
+      out.push([...at, index]);
+      paths(item, [...at, index], out);
+    });
+  else if (typeof value === "object" && value !== null)
+    for (const [key, item] of Object.entries(value)) {
+      out.push([...at, key]);
+      paths(item, [...at, key], out);
+    }
+}
+
+function parentOf(root: unknown, at: Where): Record<string | number, unknown> {
+  let node = root as Record<string | number, unknown>;
+  for (const step of at.slice(0, -1))
+    node = node[step] as Record<string | number, unknown>;
+  return node;
+}
+
+/** One random change somewhere in the document. Returns what it did, for the report. */
+function mutate(root: Json, next: () => number): string {
+  const all: Where[] = [];
+  paths(root, [], all);
+  const at = all[Math.floor(next() * all.length)] as Where;
+  const last = at[at.length - 1] as string | number;
+  const parent = parentOf(root, at);
+  const pick = <T>(list: readonly T[]): T =>
+    list[Math.floor(next() * list.length)] as T;
+  const kind = Math.floor(next() * 7);
+  const label = `${at.join("/")}`;
+  if (kind <= 2) {
+    const value = structuredClone(pick(REPLACEMENTS));
+    parent[last] = value;
+    return `${label} = ${JSON.stringify(value)?.slice(0, 60)}`;
+  }
+  if (kind === 3) {
+    if (Array.isArray(parent)) parent.splice(last as number, 1);
+    else delete parent[last];
+    return `delete ${label}`;
+  }
+  if (kind === 4) {
+    const target = parent[last];
+    if (
+      typeof target === "object" &&
+      target !== null &&
+      !Array.isArray(target)
+    ) {
+      (target as Json)[pick(KEYS)] = structuredClone(pick(REPLACEMENTS));
+      return `add a key in ${label}`;
+    }
+    parent[last] = [target];
+    return `wrap ${label} in a list`;
+  }
+  if (kind === 5) {
+    if (Array.isArray(parent)) {
+      parent.push(structuredClone(parent[last as number]));
+      return `repeat ${label}`;
+    }
+    const key = pick(KEYS);
+    parent[key] = parent[last];
+    delete parent[last];
+    return `rename ${label} to ${key}`;
+  }
+  parent[last] = { x: parent[last] };
+  return `wrap ${label} in an object`;
+}
+
+/** A document with `if` in `loop` in `if`, and a loop in the else branch, that validates clean. */
+function nestedDocument(): Json {
+  const agent = (id: string, extra: Json = {}): Json => ({
+    id,
+    kind: "agent",
+    profile: "implementer",
+    environment: "node",
+    instruction: "go",
+    result: {
+      type: "object",
+      required: ["done"],
+      properties: { done: { type: "boolean" } },
+    },
+    ...extra,
+  });
+  return {
+    version: 1,
+    name: "Nested",
+    trigger: { kind: "github.issueLabeled", label: "go" },
+    steps: [
+      {
+        id: "outer",
+        kind: "if",
+        when: { notEmpty: "{{trigger.issue.title}}" },
+        then: [
+          {
+            id: "again",
+            kind: "loop",
+            maxRounds: 3,
+            body: [
+              agent("a", {
+                session: { continue: "a" },
+                instruction: {
+                  first: "{{trigger.issue.body}}",
+                  next: "{{previous.b.done}}",
+                },
+              }),
+              {
+                id: "gate",
+                kind: "if",
+                when: { equals: ["{{a.done}}", true] },
+                then: [
+                  {
+                    id: "say",
+                    kind: "action",
+                    connector: "github.issue.comment",
+                    issue: "{{trigger.issue}}",
+                    body: "{{a.branch}}",
+                  },
+                ],
+                else: [
+                  {
+                    id: "inner",
+                    kind: "loop",
+                    maxRounds: 2,
+                    body: [agent("c", { session: { continue: "c" } })],
+                    until: {
+                      all: [
+                        { not: { empty: "{{trigger.issue.title}}" } },
+                        { any: [{ equals: ["{{c.done}}", true] }] },
+                      ],
+                    },
+                  },
+                ],
+              },
+              agent("b", { session: { continue: "a" } }),
+            ],
+            until: { equals: ["{{b.done}}", true] },
+          },
+        ],
+        else: [
+          {
+            id: "tag",
+            kind: "action",
+            connector: "github.issue.labels",
+            issue: 3,
+            add: ["a"],
+            remove: "{{trigger.issue.labels}}",
+          },
+        ],
+      },
+      {
+        id: "pr",
+        kind: "action",
+        connector: "github.pullRequest.open",
+        head: "agent/fix",
+        title: "{{trigger.issue.title}}",
+        draft: true,
+      },
+    ],
+  };
+}
+
+describe("the JSON Schema and the validator agree on random changes of a workflow", () => {
+  const BASES: Array<[string, () => Json]> = [
+    ["the example", () => example("examples/workflow", "Workflow")],
+    ["a document with if and loop nested", nestedDocument],
+  ];
+  const MUTATIONS_PER_BASE = 2500;
+
+  // #833-M1-T128
+  it.each(BASES)("starts from a document that is clean: %s", (_name, make) => {
+    expect(workflowContract.check("Workflow", make()).valid).toBe(true);
+    expect(validateWorkflow(make(), resolver).errors).toEqual([]);
+  });
+
+  // #833-M1-T129
+  it.each(BASES)(
+    "holds for %s after one to three random changes",
+    (name, make) => {
+      const next = random(name.length * 7919 + 20261104);
+      const disagreements: string[] = [];
+      let refused = 0;
+
+      for (let round = 0; round < MUTATIONS_PER_BASE; round++) {
+        const document = make();
+        const done: string[] = [];
+        const changes = 1 + Math.floor(next() * 3);
+        for (let i = 0; i < changes; i++) done.push(mutate(document, next));
+        let verdict: ReturnType<typeof verdicts>;
+        try {
+          verdict = verdicts(document);
+        } catch (error) {
+          disagreements.push(
+            `${done.join("; ")}: the validator threw ${String(error)}`,
+          );
+          continue;
+        }
+        if (!verdict.schemaValid) refused += 1;
+        if (verdict.schemaValid !== (verdict.formIssues.length === 0))
+          disagreements.push(
+            `${done.join("; ")}: schema ${verdict.schemaValid ? "accepts" : "refuses"}, form issues ${JSON.stringify(verdict.formIssues.map((i) => `${i.path} ${i.code}`))}`,
+          );
+      }
+
+      expect(disagreements.slice(0, 15)).toEqual([]);
+      // The changes are not all harmless and not all fatal.
+      expect(refused).toBeGreaterThan(MUTATIONS_PER_BASE * 0.3);
+      expect(refused).toBeLessThan(MUTATIONS_PER_BASE * 0.97);
+    },
+  );
 });

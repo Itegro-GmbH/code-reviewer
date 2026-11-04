@@ -2,7 +2,12 @@
 
 // The connectors an action node can name in format v1 (#833): per connector the inputs it takes and the output it yields, as value
 // types. Nothing here executes anything; the engine (M3) runs the action and the validator only holds the workflow to these
-// shapes. `contracts/workflow.v1.json` lists the same connectors and inputs; `schema-agreement.test.ts` holds the two together.
+// shapes. `contracts/workflow.v1.json` lists the same connectors and inputs; `integration-tests/compatibility/
+// workflow-contract.integration.test.ts` holds the two together.
+//
+// A run works on ONE repository, the one of its trigger (`trigger.repo` of an issue trigger, the input `repo` of a manual one), so an
+// action names none. The inputs that decide a TARGET (which issue, which branches, which labels) are marked: they take a literal or
+// one reference to a value the platform or the trigger vouches for, never a value an agent reported (`check-values.ts`).
 import {
   BOOLEAN,
   NUMBER,
@@ -13,7 +18,15 @@ import {
   type ValueType,
 } from "./value-type.ts";
 
-export type InputSpec = { type: ValueType; required: boolean };
+/** Where a reference in a target input may start. `trigger`: `{{trigger.…}}`. `branch`: `{{<agent step>.branch}}`, the branch the platform made. */
+export type TargetRoot = "trigger" | "branch";
+
+export type InputSpec = {
+  type: ValueType;
+  required: boolean;
+  /** Set on the inputs that decide a target: the roots a reference in it may start with. A literal is always fine. */
+  target?: readonly TargetRoot[];
+};
 
 export type ConnectorSpec = {
   name: string;
@@ -22,28 +35,23 @@ export type ConnectorSpec = {
   inputs: Readonly<Record<string, InputSpec>>;
   /** What later nodes can refer to: `{{<action id>.<field>}}`. */
   output: ObjectType;
-  /** The action works on a repository: `repo` is optional only where the trigger names one (`trigger.repo`). */
-  needsRepo: boolean;
   /** At least one of these inputs must be given. */
   atLeastOneOf?: readonly string[];
 };
 
-/** An issue is given as the issue object of the trigger or as its number. */
+/** An issue is given as a positive whole number or as a reference to the issue object of the trigger or to a number. */
 const ISSUE: ValueType = {
   kind: "oneOf",
   options: [objectOf({ number: NUMBER }), NUMBER],
 };
 
-const REPO: InputSpec = { type: STRING, required: false };
-
+const ANYWHERE_VOUCHED: readonly TargetRoot[] = ["trigger", "branch"];
 export const GITHUB_PULL_REQUEST_OPEN: ConnectorSpec = {
   name: "github.pullRequest.open",
   description: "Opens a pull request from a branch.",
-  needsRepo: true,
   inputs: {
-    repo: REPO,
-    head: { type: STRING, required: true },
-    base: { type: STRING, required: false },
+    head: { type: STRING, required: true, target: ["branch"] },
+    base: { type: STRING, required: false, target: ["trigger"] },
     title: { type: STRING, required: true },
     body: { type: STRING, required: false },
     draft: { type: BOOLEAN, required: false },
@@ -54,10 +62,8 @@ export const GITHUB_PULL_REQUEST_OPEN: ConnectorSpec = {
 export const GITHUB_ISSUE_COMMENT: ConnectorSpec = {
   name: "github.issue.comment",
   description: "Writes a comment on an issue or pull request.",
-  needsRepo: true,
   inputs: {
-    repo: REPO,
-    issue: { type: ISSUE, required: true },
+    issue: { type: ISSUE, required: true, target: ANYWHERE_VOUCHED },
     body: { type: STRING, required: true },
   },
   output: objectOf({ url: STRING }),
@@ -66,12 +72,10 @@ export const GITHUB_ISSUE_COMMENT: ConnectorSpec = {
 export const GITHUB_ISSUE_LABELS: ConnectorSpec = {
   name: "github.issue.labels",
   description: "Adds and removes labels on an issue or pull request.",
-  needsRepo: true,
   inputs: {
-    repo: REPO,
-    issue: { type: ISSUE, required: true },
-    add: { type: listOf(STRING), required: false },
-    remove: { type: listOf(STRING), required: false },
+    issue: { type: ISSUE, required: true, target: ANYWHERE_VOUCHED },
+    add: { type: listOf(STRING), required: false, target: ANYWHERE_VOUCHED },
+    remove: { type: listOf(STRING), required: false, target: ANYWHERE_VOUCHED },
   },
   output: objectOf({ labels: listOf(STRING) }),
   atLeastOneOf: ["add", "remove"],

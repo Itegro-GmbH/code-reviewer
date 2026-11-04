@@ -2,26 +2,23 @@
 
 // The values a node carries and the texts in them (#833): templates with references, the inputs of an action held to the types the
 // connector declares, and the conditions of `if` and `until`. Reports issues; it does not stop at the first.
+import type { TargetRoot } from "./connectors.ts";
+import { isRecord, jsonTypeName, textLength } from "./json.ts";
 import { CONDITION_DEPTH_MAX, TEMPLATE_MAX_LENGTH } from "./limits.ts";
-import { issue, listNames, pointer } from "./issues.ts";
+import { issue, listNames, pointer, shown } from "./issues.ts";
 import { resolveReference, type ScopeContext, type Use } from "./scope.ts";
-import { isWholeReference, parseTemplate } from "./template.ts";
+import {
+  isWholeReference,
+  literalText,
+  parseTemplate,
+  REFERENCE_PATTERN,
+  type ParsedTemplate,
+  type Reference,
+} from "./template.ts";
 import { describeType, isAssignable, type ValueType } from "./value-type.ts";
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-export function jsonTypeName(value: unknown): string {
-  if (value === null) return "null";
-  if (Array.isArray(value)) return "a list";
-  if (isRecord(value)) return "an object";
-  return typeof value === "string"
-    ? "a text"
-    : typeof value === "number"
-      ? "a number"
-      : "true/false";
-}
+/** Whether a text is exactly one `{{ … }}` and nothing else: the `pattern` of `Reference` in the contract. */
+const WHOLE_REFERENCE = new RegExp(REFERENCE_PATTERN, "u");
 
 /**
  * Checks the references of a text. Returns the type of the value when the whole text is one reference (the value keeps its type),
@@ -31,21 +28,10 @@ export function checkText(
   text: string,
   context: ScopeContext,
   use: Use,
-): { whole?: ValueType; ok: boolean } {
-  if (text.length > TEMPLATE_MAX_LENGTH) {
-    context.report(
-      issue(
-        use.path,
-        "limit_exceeded",
-        `A text may have ${TEMPLATE_MAX_LENGTH} characters at most; this one has ${text.length}.`,
-      ),
-    );
-    return { ok: false };
-  }
-  const parsed = parseTemplate(text);
-  for (const problem of parsed.problems)
-    context.report(issue(use.path, "template_syntax", problem));
-  if (parsed.problems.length > 0) return { ok: false };
+): { whole?: ValueType; ok: boolean; literal?: string } {
+  if (tooLong(text, context, use)) return { ok: false };
+  const parsed = parseChecked(text, context, use);
+  if (parsed === undefined) return { ok: false };
   const whole = isWholeReference(parsed);
   for (const part of parsed.parts) {
     if (!("ref" in part)) continue;
@@ -56,12 +42,43 @@ export function checkText(
         issue(
           use.path,
           "reference_type_mismatch",
-          `{{${part.ref.raw}}} is ${describeType(resolved.type)}, which has no text form inside a text. Use one of its fields.`,
+          `{{${clipRef(part.ref.raw)}}} is ${describeType(resolved.type)}, which has no text form inside a text. Use one of its fields.`,
           Object.keys(resolved.type.fields),
         ),
       );
   }
-  return { ok: true };
+  const literal = literalText(parsed);
+  return literal === undefined ? { ok: true } : { ok: true, literal };
+}
+
+function clipRef(raw: string): string {
+  return shown(raw).slice(1, -1);
+}
+
+/** Reports a text over the limit. */
+function tooLong(text: string, context: ScopeContext, use: Use): boolean {
+  const length = textLength(text);
+  if (length <= TEMPLATE_MAX_LENGTH) return false;
+  context.report(
+    issue(
+      use.path,
+      "limit_exceeded",
+      `A text may have ${TEMPLATE_MAX_LENGTH} characters at most; this one has ${length}.`,
+    ),
+  );
+  return true;
+}
+
+/** Parses a text; reports a text that is not well formed and returns nothing then. */
+function parseChecked(
+  text: string,
+  context: ScopeContext,
+  use: Use,
+): ParsedTemplate | undefined {
+  const parsed = parseTemplate(text);
+  for (const problem of parsed.problems)
+    context.report(issue(use.path, "template_syntax", problem));
+  return parsed.problems.length > 0 ? undefined : parsed;
 }
 
 function optionsOf(expected: ValueType): ValueType[] {
@@ -75,8 +92,54 @@ function textFits(expected: ValueType): boolean {
 }
 
 /**
- * Holds a value written in a node (a text with references, a number, a list, an object) to the type the field expects. A text that
- * is exactly one reference takes the type of what it refers to; any other text is text.
+ * An input that decides a TARGET (an issue, a branch, a label): the name of the input and where a reference in it may start. A
+ * literal is always fine; so is exactly one reference rooted as `roots` says. Anything else is `target_from_untrusted_value`:
+ * what an agent reported is data, and data does not choose what the platform acts on.
+ */
+export type TargetCheck = { input: string; roots: readonly TargetRoot[] };
+
+const ROOT_WORDS: Record<TargetRoot, string> = {
+  trigger:
+    "a field of the event, {{trigger.…}} (trigger.issue.*, trigger.repo.*, trigger.input.*)",
+  branch: "the branch of an agent step that may push, {{<step id>.branch}}",
+};
+
+function refuseTarget(
+  target: TargetCheck,
+  path: string,
+  context: ScopeContext,
+): void {
+  context.report(
+    issue(
+      path,
+      "target_from_untrusted_value",
+      `'${target.input}' decides what the workflow acts on, so it takes a literal or exactly one reference to ${target.roots.map((root) => ROOT_WORDS[root]).join(" or ")}. Text around a reference, a value an agent reported, a field of an action or loop and 'previous.…' are refused: an agent's result is data, not a command.`,
+    ),
+  );
+}
+
+/** Whether a reference is one a target input takes: `unresolved` when its step is not in reach, which the resolver reports. */
+function targetVerdict(
+  ref: { path: string[] },
+  target: TargetCheck,
+  use: Use,
+): "ok" | "refused" | "unresolved" {
+  const [root, field, ...more] = ref.path as [string, ...string[]];
+  if (root === "trigger")
+    return target.roots.includes("trigger") ? "ok" : "refused";
+  if (root === "previous") return "refused";
+  const binding = use.env.scope.get(root);
+  if (binding === undefined) return "unresolved";
+  const branchOfAgent =
+    binding.kind === "agent" && field === "branch" && more.length === 0;
+  return branchOfAgent && target.roots.includes("branch") ? "ok" : "refused";
+}
+
+/**
+ * Holds a value written in a node (a text with references, a number, a list) to the type the field expects. A text that is exactly
+ * one reference takes the type of what it refers to; any other text is text. Where something other than a text is expected, only a
+ * whole reference is a text that fits: `"{{a}} {{b}}"` is not one. A target input is also held to `target` and its identifiers to
+ * strings and choices of names, never a number, true/false or list turned into text.
  */
 export function checkInput(
   value: unknown,
@@ -84,31 +147,19 @@ export function checkInput(
   path: string,
   context: ScopeContext,
   use: Omit<Use, "path">,
+  target?: TargetCheck,
 ): void {
   const here: Use = { ...use, path };
-  const mismatch = (): void =>
+  const mismatch = (hint = ""): void =>
     context.report(
       issue(
         path,
         "wrong_type",
-        `Expected ${describeType(expected)}, got ${jsonTypeName(value)}.`,
+        `Expected ${describeType(expected)}, got ${jsonTypeName(value)}.${hint}`,
       ),
     );
   if (typeof value === "string") {
-    const checked = checkText(value, context, here);
-    if (!checked.ok) return;
-    if (checked.whole !== undefined) {
-      if (!isAssignable(checked.whole, expected))
-        context.report(
-          issue(
-            path,
-            "reference_type_mismatch",
-            `Expected ${describeType(expected)}, but ${value.trim()} is ${describeType(checked.whole)}.`,
-          ),
-        );
-      return;
-    }
-    if (!textFits(expected)) mismatch();
+    checkString(value, expected, here, context, target, mismatch);
     return;
   }
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -118,6 +169,14 @@ export function checkInput(
       )
     )
       mismatch();
+    else if (target !== undefined && !(Number.isInteger(value) && value >= 1))
+      context.report(
+        issue(
+          path,
+          "invalid_value",
+          `'${target.input}' is a positive whole number (1, 2, 3 …).`,
+        ),
+      );
     return;
   }
   if (typeof value === "boolean") {
@@ -136,38 +195,93 @@ export function checkInput(
       return;
     }
     value.forEach((item: unknown, index) =>
-      checkInput(item, list.items, pointer(path, index), context, use),
+      checkInput(item, list.items, pointer(path, index), context, use, target),
     );
     return;
   }
-  if (isRecord(value)) {
-    const object = optionsOf(expected).find((o) => o.kind === "object");
-    if (object === undefined || object.kind !== "object") {
-      mismatch();
-      return;
-    }
-    const names = Object.keys(object.fields);
-    for (const key of Object.keys(value))
-      if (!Object.hasOwn(object.fields, key))
-        context.report(
-          issue(
-            pointer(path, key),
-            "unknown_field",
-            `'${key}' is not a field here. Fields: ${listNames(names)}.`,
-            names,
-          ),
-        );
-    for (const [name, field] of Object.entries(object.fields)) {
-      if (Object.hasOwn(value, name))
-        checkInput(value[name], field.type, pointer(path, name), context, use);
-      else if (field.required)
-        context.report(
-          issue(pointer(path, name), "missing_field", `'${name}' is required.`),
-        );
-    }
+  mismatch();
+}
+
+/**
+ * A text that must be a literal: no reference in it, `\{{` undone. Reports what is wrong with it (too long, not well formed, or a
+ * reference, said by `refusal`) and returns nothing then.
+ */
+export function checkLiteral(
+  text: string,
+  context: ScopeContext,
+  use: Use,
+  refusal: string,
+  code: "target_from_untrusted_value",
+): string | undefined {
+  if (tooLong(text, context, use)) return undefined;
+  const parsed = parseChecked(text, context, use);
+  if (parsed === undefined) return undefined;
+  const literal = literalText(parsed);
+  if (literal === undefined) context.report(issue(use.path, code, refusal));
+  return literal;
+}
+
+const WHOLE_REFERENCE_HINT =
+  ' Write exactly one reference, like "{{trigger.issue}}", and nothing around it.';
+
+function checkString(
+  value: string,
+  expected: ValueType,
+  here: Use,
+  context: ScopeContext,
+  target: TargetCheck | undefined,
+  mismatch: (hint?: string) => void,
+): void {
+  if (tooLong(value, context, here)) return;
+  if (!textFits(expected) && !WHOLE_REFERENCE.test(value)) {
+    mismatch(WHOLE_REFERENCE_HINT);
     return;
   }
-  mismatch();
+  if (target === undefined) {
+    const checked = checkText(value, context, here);
+    if (checked.ok && checked.whole !== undefined)
+      checkWhole(checked.whole, value, expected, here, context, false);
+    return;
+  }
+  const parsed = parseChecked(value, context, here);
+  if (parsed === undefined || literalText(parsed) !== undefined) return;
+  if (!isWholeReference(parsed)) {
+    refuseTarget(target, here.path, context);
+    return;
+  }
+  const ref = (parsed.parts[0] as { ref: Reference }).ref;
+  const verdict = targetVerdict(ref, target, here);
+  if (verdict === "refused") {
+    refuseTarget(target, here.path, context);
+    return;
+  }
+  checkWhole(
+    resolveReference(ref, context, here).type,
+    value,
+    expected,
+    here,
+    context,
+    true,
+  );
+}
+
+/** A reference that is the whole text must be a value of the expected type. */
+function checkWhole(
+  actual: ValueType,
+  text: string,
+  expected: ValueType,
+  here: Use,
+  context: ScopeContext,
+  exact: boolean,
+): void {
+  if (isAssignable(actual, expected, exact)) return;
+  context.report(
+    issue(
+      here.path,
+      "reference_type_mismatch",
+      `Expected ${describeType(expected)}, but ${shown(text)} is ${describeType(actual)}.${exact ? " An identifier is a text; a number, true/false or a list is not turned into one." : ""}`,
+    ),
+  );
 }
 
 const CONDITION_KEYS = [
@@ -204,7 +318,9 @@ function operand(
   const checked = checkText(value, context, { ...use, path });
   if (!checked.ok) return undefined;
   if (checked.whole !== undefined) return { type: checked.whole };
-  return { type: { kind: "string" }, literal: value };
+  return checked.literal === undefined
+    ? { type: { kind: "string" } }
+    : { type: { kind: "string" }, literal: checked.literal };
 }
 
 function scalarKind(type: ValueType): string | undefined {
@@ -256,7 +372,7 @@ function checkComparison(
           issue(
             pointer(path, index),
             "condition_value_not_in_enum",
-            `'${other.literal}' can never be equal to the other operand, which is one of ${listNames(one.type.values)}.`,
+            `${shown(other.literal)} can never be equal to the other operand, which is one of ${listNames(one.type.values)}.`,
             one.type.values,
           ),
         );
@@ -292,7 +408,7 @@ export function checkCondition(
         issue(
           pointer(path, key),
           "unknown_field",
-          `'${key}' is not a condition operator.`,
+          `${shown(key)} is not a condition operator.`,
           CONDITION_KEYS,
         ),
       );

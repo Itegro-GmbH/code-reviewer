@@ -18,7 +18,16 @@ import {
   STRING_MAX_LENGTH_DEFAULT,
   STRING_MAX_LENGTH_LIMIT,
 } from "./limits.ts";
-import { issue, listNames, pointer, sortIssues, type Issue } from "./issues.ts";
+import {
+  clip,
+  issue,
+  listNames,
+  pointer,
+  shown,
+  sortIssues,
+  type Issue,
+} from "./issues.ts";
+import { isRecord, jsonTypeName, textLength } from "./json.ts";
 import {
   BOOLEAN,
   NUMBER,
@@ -70,16 +79,6 @@ const KEYS: Record<(typeof NODE_TYPES)[number], readonly string[]> = {
   ],
 };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function jsonType(value: unknown): string {
-  if (value === null) return "null";
-  if (Array.isArray(value)) return "array";
-  return typeof value;
-}
-
 type Walk = { issues: Issue[]; fields: number };
 
 function description(
@@ -94,15 +93,15 @@ function description(
       issue(
         pointer(path, "description"),
         "wrong_type",
-        `description must be a string, not ${jsonType(text)}.`,
+        `description must be a string, not ${jsonTypeName(text)}.`,
       ),
     );
-  else if (text.length > RESULT_DESCRIPTION_MAX_LENGTH)
+  else if (textLength(text) > RESULT_DESCRIPTION_MAX_LENGTH)
     walk.issues.push(
       issue(
         pointer(path, "description"),
         "limit_exceeded",
-        `description is ${text.length} characters; at most ${RESULT_DESCRIPTION_MAX_LENGTH}.`,
+        `description is ${textLength(text)} characters; at most ${RESULT_DESCRIPTION_MAX_LENGTH}.`,
       ),
     );
 }
@@ -165,10 +164,13 @@ function enumeration(
         issue(
           at,
           "wrong_type",
-          `An enum value must be a string, not ${jsonType(value)}.`,
+          `An enum value must be a string, not ${jsonTypeName(value)}.`,
         ),
       );
-    else if (value.length === 0 || value.length > RESULT_ENUM_VALUE_MAX_LENGTH)
+    else if (
+      value.length === 0 ||
+      textLength(value) > RESULT_ENUM_VALUE_MAX_LENGTH
+    )
       walk.issues.push(
         issue(
           at,
@@ -181,7 +183,7 @@ function enumeration(
         issue(
           at,
           "invalid_value",
-          `The enum value '${value}' is listed twice.`,
+          `The enum value ${shown(value)} is listed twice.`,
         ),
       );
     else seen.add(value);
@@ -209,7 +211,7 @@ function properties(
       issue(
         where,
         "wrong_type",
-        `properties must be an object, not ${jsonType(props)}.`,
+        `properties must be an object, not ${jsonTypeName(props)}.`,
       ),
     );
   } else {
@@ -266,13 +268,17 @@ function properties(
         issue(
           at,
           "required_field_unknown",
-          `'${name}' is required but is not one of the properties.`,
-          known,
+          `${shown(name)} is required but is not one of the properties.`,
+          known.map(clip),
         ),
       );
     else if (seen.has(name))
       walk.issues.push(
-        issue(at, "invalid_value", `'${name}' is listed twice in required.`),
+        issue(
+          at,
+          "invalid_value",
+          `${shown(name)} is listed twice in required.`,
+        ),
       );
     else seen.add(name);
   });
@@ -289,7 +295,7 @@ function schemaNode(
       issue(
         path,
         "wrong_type",
-        `A field schema must be an object like {"type": "string"}, not ${jsonType(value)}.`,
+        `A field schema must be an object like {"type": "string"}, not ${jsonTypeName(value)}.`,
       ),
     );
     return;
@@ -314,7 +320,7 @@ function schemaNode(
       issue(
         pointer(path, "type"),
         "invalid_value",
-        `'type' is ${typeof type === "string" ? `'${type}'` : jsonType(type)}, which the format does not have. Lists are 'array', and a choice of names is a 'string' with 'enum'.`,
+        `'type' is ${typeof type === "string" ? shown(type) : jsonTypeName(type)}, which the format does not have. Lists are 'array', and a choice of names is a 'string' with 'enum'.`,
         NODE_TYPES,
       ),
     );
@@ -327,7 +333,7 @@ function schemaNode(
         issue(
           pointer(path, key),
           "unknown_field",
-          `'${key}' is not a keyword of a ${kind} schema.`,
+          `${shown(key)} is not a keyword of a ${kind} schema.`,
           KEYS[kind],
         ),
       );
@@ -397,7 +403,7 @@ export function validateResultSchema(
         issue(
           base,
           "wrong_type",
-          `A result schema is an object like {"type": "object", "properties": {...}}, not ${jsonType(value)}.`,
+          `A result schema is an object like {"type": "object", "properties": {...}}, not ${jsonTypeName(value)}.`,
         ),
       ],
     };
@@ -482,18 +488,18 @@ export function checkResultValue(
             issue(
               path,
               "wrong_type",
-              `Expected a string, got ${jsonType(at)}.`,
+              `Expected a string, got ${jsonTypeName(at)}.`,
             ),
           );
           return;
         }
         const max = node.maxLength ?? STRING_MAX_LENGTH_DEFAULT;
-        if (at.length > max)
+        if (textLength(at) > max)
           issues.push(
             issue(
               path,
               "limit_exceeded",
-              `The text is ${at.length} characters; at most ${max}.`,
+              `The text is ${textLength(at)} characters; at most ${max}.`,
             ),
           );
         if (node.enum !== undefined && !node.enum.includes(at))
@@ -513,7 +519,7 @@ export function checkResultValue(
             issue(
               path,
               "wrong_type",
-              `Expected a number, got ${jsonType(at)}.`,
+              `Expected a number, got ${jsonTypeName(at)}.`,
             ),
           );
         return;
@@ -523,14 +529,18 @@ export function checkResultValue(
             issue(
               path,
               "wrong_type",
-              `Expected true or false, got ${jsonType(at)}.`,
+              `Expected true or false, got ${jsonTypeName(at)}.`,
             ),
           );
         return;
       case "array": {
         if (!Array.isArray(at)) {
           issues.push(
-            issue(path, "wrong_type", `Expected a list, got ${jsonType(at)}.`),
+            issue(
+              path,
+              "wrong_type",
+              `Expected a list, got ${jsonTypeName(at)}.`,
+            ),
           );
           return;
         }
@@ -554,7 +564,7 @@ export function checkResultValue(
             issue(
               path,
               "wrong_type",
-              `Expected an object, got ${jsonType(at)}.`,
+              `Expected an object, got ${jsonTypeName(at)}.`,
             ),
           );
           return;
@@ -566,7 +576,7 @@ export function checkResultValue(
               issue(
                 pointer(path, key),
                 "unknown_field",
-                `'${key}' is not a field of the result.`,
+                `${shown(key)} is not a field of the result.`,
                 names,
               ),
             );
@@ -579,7 +589,7 @@ export function checkResultValue(
               issue(
                 pointer(path, name),
                 "missing_field",
-                `The required field '${name}' is missing.`,
+                `The required field ${shown(name)} is missing.`,
               ),
             );
         }

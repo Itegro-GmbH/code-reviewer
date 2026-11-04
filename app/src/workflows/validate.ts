@@ -5,22 +5,31 @@
 // it on every path, the types of the values that flow, the limits, and the profile, environment and connector names against a
 // resolver. It never throws on a document and never stops at the first problem; the list is sorted by path.
 import { checkSteps, type Checker, type StepState } from "./check-steps.ts";
-import { jsonTypeName } from "./check-values.ts";
+import { isRecord, jsonTypeName, textLength } from "./json.ts";
 import {
   BUDGET_DEFAULT_USD,
   BUDGET_OPERATOR_MAX_USD,
+  DESCRIPTION_MAX_LENGTH,
+  ERRORS_MAX,
+  LABEL_MAX_LENGTH,
   NAME_MAX_LENGTH,
   NESTING_DEPTH_MAX,
   STEPS_MAX,
 } from "./limits.ts";
-import { issue, listNames, pointer, sortIssues, type Issue } from "./issues.ts";
+import {
+  issue,
+  listNames,
+  pointer,
+  shown,
+  sortIssues,
+  type Issue,
+} from "./issues.ts";
 import type { WorkflowResolver } from "./resolver.ts";
 import { validateResultSchema, type ResultSchema } from "./result-schema.ts";
 import type { Binding, Env, StepInfo } from "./scope.ts";
 import {
   TRIGGER_FIELDS,
   TRIGGER_KINDS,
-  triggerNamesRepository,
   triggerOutput,
   type TriggerKind,
 } from "./triggers.ts";
@@ -32,8 +41,10 @@ export type ValidateOptions = {
 
 export type ValidationResult = {
   valid: boolean;
-  /** Every problem, sorted by path. Empty when `valid`. */
+  /** The problems, sorted by path, `ERRORS_MAX` at most. Empty when `valid`. */
   errors: Issue[];
+  /** There are more problems than `errors` lists: the first ones by path are there, fix them and validate again. */
+  truncated: boolean;
   /** The budget the workflow runs with: its own, or the default when it names none. Set when `valid`. */
   budgetUsd?: number;
   /** How many steps the document has, counted through branches and loop bodies. */
@@ -48,10 +59,6 @@ const DOCUMENT_KEYS = [
   "budgetUsd",
   "steps",
 ];
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /**
  * Every step of the document by id, in document order, with where it sits; duplicate ids are reported. It goes no deeper than
@@ -80,7 +87,7 @@ function indexSteps(
           issue(
             pointer(at, "id"),
             "duplicate_id",
-            `The id '${id}' is already used by the step at ${first.path}. Every step needs its own id, also inside branches and loops.`,
+            `The id ${shown(id)} is already used by the step at ${first.path}. Every step needs its own id, also inside branches and loops.`,
           ),
         );
       else index.set(id, { id, path: at, kind: String(node.kind), branches });
@@ -117,10 +124,50 @@ function indexSteps(
   return count;
 }
 
+/**
+ * A run works on one repository. An issue trigger brings it (`trigger.repo`); a manual one must declare it as the input `repo`, a
+ * required text, which the caller hands in.
+ */
+function checkRepositoryInput(schema: ResultSchema, issues: Issue[]): void {
+  const where = "/trigger/input";
+  const repo = Object.hasOwn(schema.properties, "repo")
+    ? schema.properties.repo
+    : undefined;
+  if (repo === undefined)
+    issues.push(
+      issue(
+        where,
+        "repo_required",
+        "A run works on one repository. Declare the input 'repo' (a text, owner/name) in properties and in required: the caller names the repository.",
+      ),
+    );
+  else if (repo.type !== "string")
+    issues.push(
+      issue(
+        pointer(where, "properties", "repo"),
+        "repo_required",
+        "The input 'repo' is the repository the run works on, owner/name: its type is string.",
+      ),
+    );
+  else if (!(schema.required ?? []).includes("repo"))
+    issues.push(
+      issue(
+        where,
+        "repo_required",
+        "The input 'repo' is the repository the run works on and must be in required.",
+      ),
+    );
+}
+
 function checkTrigger(
   value: unknown,
   issues: Issue[],
-): { kind?: TriggerKind; input?: ResultSchema; inputInvalid?: boolean } {
+): {
+  kind?: TriggerKind;
+  input?: ResultSchema;
+  inputInvalid?: boolean;
+  label?: string;
+} {
   const path = "/trigger";
   if (value === undefined) {
     issues.push(
@@ -162,7 +209,7 @@ function checkTrigger(
       issue(
         pointer(path, "kind"),
         "unknown_trigger_kind",
-        `${typeof kind === "string" ? `There is no trigger '${kind}'` : "'kind' must be a text"}. Triggers: ${listNames([...TRIGGER_KINDS])}.`,
+        `${typeof kind === "string" ? `There is no trigger ${shown(kind)}` : "'kind' must be a text"}. Triggers: ${listNames([...TRIGGER_KINDS])}.`,
         TRIGGER_KINDS,
       ),
     );
@@ -176,7 +223,7 @@ function checkTrigger(
         issue(
           pointer(path, key),
           "unknown_field",
-          `'${key}' is not a field of the trigger '${trigger}'. Fields: ${listNames(allowed)}.`,
+          `${shown(key)} is not a field of the trigger '${trigger}'. Fields: ${listNames(allowed)}.`,
           allowed,
         ),
       );
@@ -194,19 +241,35 @@ function checkTrigger(
       issues.push(
         issue(pointer(path, "label"), "wrong_type", "'label' is a text."),
       );
-    else if (label.length < 1 || label.length > 100)
+    else if (
+      textLength(label) < 1 ||
+      textLength(label) > LABEL_MAX_LENGTH ||
+      label.trim() === ""
+    )
       issues.push(
         issue(
           pointer(path, "label"),
           "invalid_value",
-          "'label' has 1 to 100 characters.",
+          `'label' has 1 to ${LABEL_MAX_LENGTH} characters and is not only spaces.`,
         ),
       );
+    else return { kind: trigger, label };
     return { kind: trigger };
   }
-  if (value.input === undefined) return { kind: trigger };
+  if (value.input === undefined) {
+    issues.push(
+      issue(
+        path,
+        "repo_required",
+        "A manual trigger needs 'input', a result schema for what the caller hands in. It must declare 'repo' (a required text, owner/name): the repository the run works on.",
+      ),
+    );
+    return { kind: trigger };
+  }
   const checked = validateResultSchema(value.input, pointer(path, "input"));
   issues.push(...checked.issues);
+  if (checked.schema !== undefined)
+    checkRepositoryInput(checked.schema, issues);
   return {
     kind: trigger,
     input: checked.schema,
@@ -269,6 +332,7 @@ export function validateWorkflow(
     return {
       valid: false,
       steps: 0,
+      truncated: false,
       errors: [
         issue(
           "",
@@ -286,7 +350,7 @@ export function validateWorkflow(
         issue(
           pointer("", key),
           "unknown_field",
-          `'${key}' is not a field of a workflow. Fields: ${listNames(DOCUMENT_KEYS)}.`,
+          `${shown(key)} is not a field of a workflow. Fields: ${listNames(DOCUMENT_KEYS)}.`,
           DOCUMENT_KEYS,
         ),
       );
@@ -316,12 +380,12 @@ export function validateWorkflow(
     );
   else if (typeof name !== "string")
     issues.push(issue("/name", "wrong_type", "'name' is a text."));
-  else if (name.trim().length < 1 || name.length > NAME_MAX_LENGTH)
+  else if (name.trim() === "" || textLength(name) > NAME_MAX_LENGTH)
     issues.push(
       issue(
         "/name",
         "invalid_value",
-        `'name' has 1 to ${NAME_MAX_LENGTH} characters.`,
+        `'name' has 1 to ${NAME_MAX_LENGTH} characters and is not only spaces.`,
       ),
     );
   if (document.description !== undefined) {
@@ -329,12 +393,12 @@ export function validateWorkflow(
       issues.push(
         issue("/description", "wrong_type", "'description' is a text."),
       );
-    else if (document.description.length > 1000)
+    else if (textLength(document.description) > DESCRIPTION_MAX_LENGTH)
       issues.push(
         issue(
           "/description",
           "limit_exceeded",
-          "'description' may have 1000 characters at most.",
+          `'description' may have ${DESCRIPTION_MAX_LENGTH} characters at most.`,
         ),
       );
   }
@@ -350,11 +414,13 @@ export function validateWorkflow(
       ),
     );
 
-  const checker: Checker = { resolver, index, report, triggerHasRepo: false };
   const trigger = checkTrigger(document.trigger, issues);
-  // A trigger that failed its own check gives no repository to ask for: one mistake is reported once.
-  checker.triggerHasRepo =
-    trigger.kind === undefined || triggerNamesRepository(trigger.kind);
+  const checker: Checker = {
+    resolver,
+    index,
+    report,
+    ...(trigger.label === undefined ? {} : { triggerLabel: trigger.label }),
+  };
   const budget = checkBudget(
     document.budgetUsd,
     options.maxBudgetUsd ?? BUDGET_OPERATOR_MAX_USD,
@@ -380,14 +446,21 @@ export function validateWorkflow(
       scope: new Map([["trigger", triggerBinding]]),
       loops: [],
     };
-    const state: StepState = { depth: 0, loopDepth: 0, branches: [] };
+    const state: StepState = {
+      depth: 0,
+      loopDepth: 0,
+      branches: [],
+      inLoopBody: false,
+    };
     checkSteps(document.steps, "/steps", checker, env, state);
   }
 
-  const errors = sortIssues(issues);
+  const found = sortIssues(issues);
+  const errors = found.slice(0, ERRORS_MAX);
   return {
-    valid: errors.length === 0,
+    valid: found.length === 0,
     errors,
+    truncated: found.length > errors.length,
     steps: stepCount,
     ...(errors.length === 0 && budget !== undefined
       ? { budgetUsd: budget }

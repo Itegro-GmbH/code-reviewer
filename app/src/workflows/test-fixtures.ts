@@ -111,12 +111,19 @@ export function issueToPr(): Json {
   };
 }
 
-/** A small valid workflow to break one thing at a time. */
+/** A small valid workflow to break one thing at a time. A manual trigger declares the repository the run works on: `repo`. */
 export function tiny(): Json {
   return {
     version: 1,
     name: "Tiny",
-    trigger: { kind: "manual" },
+    trigger: {
+      kind: "manual",
+      input: {
+        type: "object",
+        required: ["repo"],
+        properties: { repo: { type: "string" } },
+      },
+    },
     steps: [
       {
         id: "work",

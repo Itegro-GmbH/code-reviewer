@@ -114,9 +114,9 @@ describe("a default that holds braces and quotes", () => {
     const parsed = parseTemplate('x {{a.o | default {}}} y {{b.c}} "}}"');
 
     expect(parsed.problems).toEqual([]);
-    expect(parsed.parts.map((part) => ("text" in part ? part.text : "ref"))).toEqual(
-      ["x ", "ref", " y ", "ref", ' "}}"'],
-    );
+    expect(
+      parsed.parts.map((part) => ("text" in part ? part.text : "ref")),
+    ).toEqual(["x ", "ref", " y ", "ref", ' "}}"']);
   });
 
   // #833-M1-T273

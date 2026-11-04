@@ -36,7 +36,7 @@ function setup(overrides: Partial<WorkflowService> = {}) {
   const service: WorkflowService = {
     validate: async (body) => (
       calls.push(`validate ${JSON.stringify(body)}`),
-      { valid: true, errors: [], steps: 1, budgetUsd: 20 }
+      { valid: true, errors: [], truncated: false, steps: 1, budgetUsd: 20 }
     ),
     list: async () => (calls.push("list"), { workflows: [VIEW], maximum: 100 }),
     get: async (id, version) => (calls.push(`get ${id} ${version}`), VIEW),
@@ -140,13 +140,23 @@ describe("the workflow handlers", () => {
   it("validates without storing, and a document with problems is an answer, not an error", async () => {
     const errors = [issue("/steps/0/id", "missing_field", "'id' is required")];
     const { handlers, json } = setup({
-      validate: async () => ({ valid: false, errors, steps: 1 }),
+      validate: async () => ({
+        valid: false,
+        errors,
+        truncated: false,
+        steps: 1,
+      }),
     });
 
     const response = await handlers.validate(json("POST", {}));
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ valid: false, errors, steps: 1 });
+    expect(await response.json()).toEqual({
+      valid: false,
+      errors,
+      truncated: false,
+      steps: 1,
+    });
   });
 
   // #833-M1-T186

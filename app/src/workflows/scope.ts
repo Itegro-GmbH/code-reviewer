@@ -9,7 +9,14 @@
 //    (`{{id.taken}}`): ids are unique in the document, so no step is produced by both branches and nothing a branch made is
 //    certain to exist, and its values stay inside the branch;
 //  - `previous.<step>.<field>` is the value a direct step of the innermost loop body had in the round before: it exists from round two.
-import { comparePaths, issue, listNames, type Issue } from "./issues.ts";
+import {
+  clip,
+  comparePaths,
+  issue,
+  listNames,
+  shown,
+  type Issue,
+} from "./issues.ts";
 import {
   describeType,
   valueFits,
@@ -29,10 +36,16 @@ export type Binding = {
   type: ObjectType | { kind: "unknown" };
   /** Fields the platform does not provide for this step, with the reason (a profile that may not push has no branch). */
   unavailable: Readonly<Record<string, string>>;
+  /** The result schema of the step failed its own check, which is reported where it is written: any other name is unknown, not an error. */
+  open?: boolean;
+  /** Of an agent step: the profile name and the environment (lower case) it is written with, for the steps that continue its session. */
+  agent?: { profile?: string; environment?: string };
 };
 
 export type LoopFrame = {
   id: string;
+  /** Pointer of the body of the loop. */
+  bodyPath: string;
   /** The direct steps of the body that yield values: what `previous.` can name. */
   previous: ReadonlyMap<string, Binding>;
 };
@@ -135,7 +148,7 @@ function descend(
         context,
         use,
         "reference_unknown_field",
-        `'${trail.join(".")}' is ${describeType(current)} and has no field '${name}'.`,
+        `${shown(trail.join("."))} is ${describeType(current)} and has no field ${shown(name)}.`,
         [],
       );
     const field: FieldType | undefined = Object.hasOwn(current.fields, name)
@@ -154,12 +167,13 @@ function descend(
           reason,
           Object.keys(current.fields),
         );
+      if (position === 0 && binding.open === true) return { type: UNKNOWN };
       const known = Object.keys(current.fields);
       return fail(
         context,
         use,
         "reference_unknown_field",
-        `'${trail.join(".")}' has no field '${name}'. Its fields: ${listNames(known)}.`,
+        `${shown(trail.join("."))} has no field ${shown(name)}. Its fields: ${listNames(known)}.`,
         known,
       );
     }
@@ -168,7 +182,7 @@ function descend(
         context,
         use,
         "reference_optional_field",
-        `'${[...trail, name].join(".")}' is not a required field of the result, so it may be missing. Make it required in the result schema, or give a default: {{${ref.raw} | default "…"}}.`,
+        `${shown([...trail, name].join("."))} is not a required field of the result, so it may be missing. Make it required in the result schema, or give a default: {{${clip(ref.raw)} | default "…"}}.`,
       );
     trail.push(name);
     current = field.type;
@@ -178,10 +192,28 @@ function descend(
       issue(
         use.path,
         "default_type_mismatch",
-        `The default of '${ref.path.join(".")}' does not fit its value, which is ${describeType(current)}.`,
+        `The default of ${shown(ref.path.join("."))} does not fit its value, which is ${describeType(current)}.`,
       ),
     );
   return { type: current };
+}
+
+/** Why `previous.<stepId>` names nothing: it belongs to an outer loop, sits inside an `if` of the body, or is no step of the body. */
+function notPreviousMessage(
+  stepId: string,
+  frame: LoopFrame,
+  use: Use,
+  context: ScopeContext,
+): string {
+  const outer = use.env.loops.find(
+    (other) => other !== frame && other.previous.has(stepId),
+  );
+  if (outer !== undefined)
+    return `${shown(stepId)} is a step of the outer loop '${outer.id}'. 'previous.' names the steps of the innermost loop only, '${frame.id}'; use ${shown(stepId)} without 'previous.' if it ran before this loop.`;
+  const info = context.index.get(stepId);
+  if (info !== undefined && isPrefix(frame.bodyPath, info.path))
+    return `${shown(stepId)} sits inside an if (or a loop) of the body of '${frame.id}' and may not have run in the round before. 'previous.' names the steps that always run: the direct steps of the body.`;
+  return `${shown(stepId)} is no step of the body of the loop '${frame.id}'. 'previous.' names its direct steps.`;
 }
 
 /** The type of what `ref` points at, or an issue reported and `unknown` returned (so a mistake is reported once). */
@@ -206,7 +238,7 @@ export function resolveReference(
         context,
         use,
         "previous_without_default",
-        `In round one there is no previous round, so '${ref.raw}' has no value. Use it in the 'next' instruction of the step, or give a default: {{${ref.raw} | default "…"}}.`,
+        `In round one there is no previous round, so ${shown(ref.raw)} has no value. Use it in the 'next' instruction of the step, or give a default: {{${clip(ref.raw)} | default "…"}}.`,
       );
     const [stepId, ...fieldPath] = rest;
     if (stepId === undefined)
@@ -223,7 +255,7 @@ export function resolveReference(
         context,
         use,
         "previous_unknown_step",
-        `'${stepId}' is no step that always runs in the body of the loop '${frame.id}'. A step inside an if of the body may not have run; use its if-free steps.`,
+        notPreviousMessage(stepId, frame, use, context),
         [...frame.previous.keys()],
       );
     return descend(binding, fieldPath, ref, context, use);
@@ -246,7 +278,7 @@ export function resolveReference(
     context,
     use,
     "reference_unknown_step",
-    `'${root}' is not a step of this workflow. In reach here: ${listNames(reach)}.`,
+    `${shown(root)} is not a step of this workflow. In reach here: ${listNames(reach)}.`,
     reach,
   );
 }

@@ -8,6 +8,7 @@
 // `{{a.o | default {}}}` and `{{a.o | default "}}"}}` are one reference each. `REFERENCE_PATTERN` states the same thing as a regular
 // expression, braces nested `DEFAULT_BRACE_DEPTH_MAX` deep: it is the `pattern` of `Reference` in `contracts/workflow.v1.json`, where a
 // text must be exactly one reference, and the validator uses it for the same question.
+import { clip } from "./issues.ts";
 import { DEFAULT_BRACE_DEPTH_MAX } from "./limits.ts";
 
 export type Reference = {
@@ -51,16 +52,16 @@ function parseReference(inner: string): Reference | string {
   const pathText = (pipe === -1 ? raw : raw.slice(0, pipe)).trim();
   const path = pathText.split(".");
   if (!path.every((segment) => NAME.test(segment)))
-    return `'${pathText}' is not a reference: write names joined by dots, like step.field (letters, digits, '_' and '-'; no indexes).`;
+    return `'${clip(pathText)}' is not a reference: write names joined by dots, like step.field (letters, digits, '_' and '-'; no indexes).`;
   if (pipe === -1) return { path, raw };
   const tail = raw.slice(pipe + 1).trim();
   if (!/^default(\s|$)/.test(tail))
-    return `After '|' only 'default <JSON value>' is understood, not '${tail.slice(0, 30)}'.`;
+    return `After '|' only 'default <JSON value>' is understood, not '${clip(tail.slice(0, 30))}'.`;
   const literal = tail.slice("default".length).trim();
   try {
     return { path, raw, default: { value: JSON.parse(literal) as unknown } };
   } catch {
-    return `The default of '${pathText}' must be a JSON value (a "text", a number, true, false, [] or {}), not '${literal.slice(0, 30)}'.`;
+    return `The default of '${clip(pathText)}' must be a JSON value (a "text", a number, true, false, [] or {}), not '${clip(literal.slice(0, 30))}'.`;
   }
 }
 

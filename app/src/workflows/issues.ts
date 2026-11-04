@@ -73,8 +73,12 @@ export const SEMANTIC_ISSUE_CODES = [
   "environment_unknown",
   /** The result of the step names a field the platform fills in itself. */
   "result_field_reserved",
-  /** An action needs a repository and neither the trigger nor the action names one. */
+  /** The run has no repository: a manual trigger must declare the input `repo` (a required text). */
   "repo_required",
+  /** An input that decides a target (an issue, a branch, a label, the environment) holds a value that is not a literal or one reference to the trigger or to the branch of an agent step. */
+  "target_from_untrusted_value",
+  /** A step adds the label that starts the workflow, which would start it again. */
+  "label_retriggers_workflow",
   /** A `required` entry of a result schema that names no property (the schema language cannot say it). */
   "required_field_unknown",
   /** More steps than a document may hold. */
@@ -118,6 +122,23 @@ export function issue(
   return available === undefined
     ? { path, code, message }
     : { path, code, message, available: [...available] };
+}
+
+/** Longest piece of a user's text a message repeats: the length of a name. */
+export const ECHO_MAX_LENGTH = 64;
+
+/** A user's text for a message, cut to the length of a name, in quotes: `'abc…'`. A message never repeats a whole value. */
+export function shown(text: string): string {
+  return `'${clip(text)}'`;
+}
+
+/** A user's text cut to the length of a name, marked when it was cut (no quotes: for lists of names). */
+export function clip(text: string): string {
+  const characters = Array.from(text.slice(0, ECHO_MAX_LENGTH * 2));
+  return characters.length > ECHO_MAX_LENGTH ||
+    text.length > ECHO_MAX_LENGTH * 2
+    ? `${characters.slice(0, ECHO_MAX_LENGTH).join("")}…`
+    : text;
 }
 
 /** A pointer segment: `~` and `/` are escaped (RFC 6901). */
@@ -164,5 +185,5 @@ export function sortIssues(issues: readonly Issue[]): Issue[] {
 /** Names as a sentence: `a, b or c`. */
 export function listNames(names: readonly string[]): string {
   if (names.length === 0) return "none";
-  return names.map((name) => `'${name}'`).join(", ");
+  return names.map(shown).join(", ");
 }
