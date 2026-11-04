@@ -965,3 +965,39 @@ def test_the_short_report_of_a_refused_result_carries_no_network_block() -> None
 
     assert "network" not in verdict["implementer"]
     assert verdict["implementer"]["headCommit"] == "2" * 40
+
+
+# -- the branch checked out at the end of a turn (#837, review of #850) ---------------------------
+
+
+def _reported_turn(block: dict[str, Any], redactor: Redactor = REDACTOR) -> dict[str, Any]:
+    printed = _populated(ok=True).to_json()
+    printed["implementer"] = block
+    return result_from_outcome(
+        outcome(stdout=(json.dumps(printed) + "\n").encode()), redactor, 777, implementer=True
+    )
+
+
+# The agent names its branches: a branch named after a secret must not reach the app in the clear.
+def test_the_branch_checked_out_is_redacted_like_the_names_of_the_branches() -> None:
+    result = _reported_turn(_turn_block(checkedOut=f"work/{TOKEN}"))
+
+    assert TOKEN not in json.dumps(result)
+    assert result["implementer"]["checkedOut"] == "work/[REDACTED]"
+
+
+# Redaction can make a name longer; a name over the bound would cost the whole report.
+def test_a_branch_checked_out_that_redaction_made_too_long_is_cut_and_the_report_kept() -> None:
+    redactor = Redactor(["k"])
+    name = "k" * 200
+
+    result = _reported_turn(_turn_block(checkedOut=name), redactor)
+
+    assert result["implementer"]["headCommit"] == "2" * 40
+    assert result["implementer"]["checkedOut"] == ("[REDACTED]" * 200)[:255]
+
+
+def test_a_branch_checked_out_of_null_stays_null_through_the_host() -> None:
+    result = _reported_turn(_turn_block(checkedOut=None))
+
+    assert result["implementer"]["checkedOut"] is None

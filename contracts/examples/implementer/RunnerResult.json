@@ -52,6 +52,7 @@
       "sessionId": "ses_01HZXEXAMPLE0123456789",
       "version": "1.4.2"
     },
+    "checkedOut": "implementer/a1b2c3",
     "network": {
       "mode": "list",
       "door": true,

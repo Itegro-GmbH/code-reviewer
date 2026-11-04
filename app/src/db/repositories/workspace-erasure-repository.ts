@@ -185,6 +185,9 @@ export function createWorkspaceErasureRepository(
         "implementer_turns",
         "implementer_sessions",
         "implementer_environments",
+        // The versions point at their workflow: versions first (#833).
+        "workflow_versions",
+        "workflows",
         "job_check_runs",
         "job_vm_runs",
         "usage_records",

@@ -1137,6 +1137,45 @@ describe("the implementer block of a result (#754)", () => {
     });
   });
 
+  describe("the branch that was checked out (#837)", () => {
+    const parsed = (checkedOut: unknown) =>
+      parseCompleteRequest(bodyWith({ ...block(), checkedOut }));
+
+    it("keeps a name or null as sent, and leaves the field out when the runner sent none", () => {
+      const named = parsed("feature/x");
+      const none = parsed(null);
+      const absent = parseCompleteRequest(bodyWith(block()));
+
+      expect(named.ok && named.value.result.implementer?.checkedOut).toBe(
+        "feature/x",
+      );
+      expect(none.ok && none.value.result.implementer?.checkedOut).toBeNull();
+      expect(
+        absent.ok && "checkedOut" in (absent.value.result.implementer ?? {}),
+      ).toBe(false);
+    });
+
+    it("removes control characters from the name, as it does from a branch's", () => {
+      const done = parsed("a\u0000b");
+
+      expect(done.ok && done.value.result.implementer?.checkedOut).toBe("ab");
+    });
+
+    it.each<[string, unknown]>([
+      ["an empty name", ""],
+      ["a name of 256 characters", "x".repeat(256)],
+      ["a number", 3],
+      ["an object", { name: "feature/x" }],
+    ])("refuses %s", (_, value) => {
+      const done = parsed(value);
+
+      expect(done.ok).toBe(false);
+      expect(!done.ok && done.fields.map((entry) => entry.field)).toContain(
+        "result.implementer.checkedOut",
+      );
+    });
+  });
+
   // #754-T03
   it("leaves the field out of a result that has none, and accepts a turn that made no commit", () => {
     const none = parseCompleteRequest({

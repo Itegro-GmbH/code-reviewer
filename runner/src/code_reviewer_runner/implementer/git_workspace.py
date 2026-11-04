@@ -89,7 +89,7 @@ from .history import (
     parse_commits,
     parse_name_status,
 )
-from .push_policy import select_branches
+from .push_policy import branch_name_problem, select_branches
 from .ref_drop import RefDeletions, RefListingFailed
 
 LEFTOVER_MESSAGE = "Implementer: uncommitted changes of the turn"
@@ -452,6 +452,10 @@ class GitWorkspace:
         # `settle_after_setup` took away (0 before it ran).
         self.script_commits = 0
         self.dropped_refs = 0
+        # The local branch HEAD is on when the agent's work is read after the turn (#837), set by
+        # `rescue_detached_head` and `commit_all`: None while it was not read, and for a HEAD that
+        # is detached (and saved on a branch some other way, or not at all).
+        self.checked_out: str | None = None
 
     # -- what the caller needs -------------------------------------------------------------------
 
@@ -738,13 +742,13 @@ class GitWorkspace:
         if staged.returncode != 1:
             raise fail(ErrorCode.SETUP_FAILED, "git diff failed: " + self._agent_detail(staged))
         if run(["symbolic-ref", "-q", "HEAD"]).returncode == 1:
-            moved = run(
-                ["switch", "-q", "-c", f"{self.spec.branch}-leftover-{uuid.uuid4().hex[:8]}"]
-            )
+            leftover = f"{self.spec.branch}-leftover-{uuid.uuid4().hex[:8]}"
+            moved = run(["switch", "-q", "-c", leftover])
             if moved.returncode != 0:
                 raise fail(
                     ErrorCode.SETUP_FAILED, "git switch failed: " + self._agent_detail(moved)
                 )
+            self.checked_out = leftover
         committed = run(["commit", "-q", "--no-verify", "-m", message])
         if committed.returncode != 0:
             raise fail(
@@ -1147,6 +1151,8 @@ class GitWorkspace:
         otherwise None. Runs in the reader; a failure is raised (`setup_failed`) for the
         caller to note."""
         attached = self._reader(["symbolic-ref", "-q", "HEAD"], timeout=RESCUE_STEP_TIMEOUT)
+        if attached.returncode == 0:
+            self._remember_checked_out(attached.stdout)
         if attached.returncode != 1:
             return None
         containing = self._reader(
@@ -1170,7 +1176,20 @@ class GitWorkspace:
         moved = self._reader(["switch", "-q", "-c", name], timeout=RESCUE_STEP_TIMEOUT, write=True)
         if moved.returncode != 0:
             raise fail(ErrorCode.SETUP_FAILED, "git switch failed: " + self._agent_detail(moved))
+        self.checked_out = name
         return name
+
+    def _remember_checked_out(self, ref: str) -> None:
+        """The branch a `symbolic-ref HEAD` answered, when it is a name the runner would push (the
+        name is the agent's: anything else is left unknown, never shown). Only the line feed of the
+        answer is cut: `strip()` would take a no-break space off a name, and a HEAD on a tag is
+        no branch."""
+        ref = ref.removesuffix("\n")
+        if not ref.startswith("refs/heads/"):
+            self.checked_out = None
+            return
+        name = ref.removeprefix("refs/heads/")
+        self.checked_out = None if branch_name_problem(name) is not None else name
 
     def _push_one(
         self, index: int, name: str, deadline: float, confirm_seconds: float, confirm_pause: float

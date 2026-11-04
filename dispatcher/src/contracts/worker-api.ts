@@ -934,6 +934,7 @@ export interface ImplementerResult {
   } | null;
   setup?: ImplementerSetupResult;
   network?: ImplementerNetworkReport;
+  checkedOut?: string | null;
 }
 /**
  * #818: what the setup script of a turn did, in `ImplementerResult.setup`; present when a script ran, absent otherwise. `ok` is whether it ended with exit status 0 within its time limit. `exitCode` is its exit status, null when it did not end by itself (the time limit, `timedOut`, or a signal). `output` is the end of what it wrote to stdout and stderr together, at most 8192 characters, with every secret known to the runner removed like every log line. A failed script ends the turn with the error code `environment_setup_failed` before the model is called.

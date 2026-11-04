@@ -44,6 +44,8 @@ async function rowsOfEveryTable(
       table.name === "billing_notifications" ||
       table.name === "implementer_sessions" ||
       table.name === "implementer_environments" ||
+      table.name === "workflows" ||
+      table.name === "workflow_versions" ||
       table.name === "implementer_turn_steps" ||
       table.name === "implementer_turns" ||
       table.name === "job_vm_runs" ||

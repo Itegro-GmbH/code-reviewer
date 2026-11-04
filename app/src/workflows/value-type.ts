@@ -1,0 +1,173 @@
+// SPDX-License-Identifier: LicenseRef-Proprietary
+
+// The types of values that flow between the nodes of a workflow (#833): what a step yields, what an action input takes. They are
+// the types of the result schema subset (`result-schema.ts`) and nothing more, so a node can only describe itself in the terms the
+// schema has. `unknown` is the type of a value whose node already failed the check: it fits everywhere, so one mistake is
+// reported once and not again at every use.
+import { listNames } from "./issues.ts";
+
+export type ValueType =
+  | { kind: "string" }
+  | { kind: "number" }
+  /** A whole number: what a number that names something (an issue) must be, so the validator can guarantee it. */
+  | { kind: "integer" }
+  | { kind: "boolean" }
+  | { kind: "enum"; values: readonly string[] }
+  | { kind: "list"; items: ValueType }
+  | { kind: "object"; fields: Readonly<Record<string, FieldType>> }
+  /** Only as an expected type: any of these. */
+  | { kind: "oneOf"; options: readonly ValueType[] }
+  | { kind: "unknown" };
+
+export type FieldType = { type: ValueType; required: boolean };
+export type ObjectType = Extract<ValueType, { kind: "object" }>;
+
+export const STRING: ValueType = { kind: "string" };
+export const NUMBER: ValueType = { kind: "number" };
+export const INTEGER: ValueType = { kind: "integer" };
+export const BOOLEAN: ValueType = { kind: "boolean" };
+export const UNKNOWN: ValueType = { kind: "unknown" };
+
+export function listOf(items: ValueType): ValueType {
+  return { kind: "list", items };
+}
+
+export function enumOf(...values: string[]): ValueType {
+  return { kind: "enum", values };
+}
+
+/** An object type; every field is required unless it is listed in `optional`. */
+export function objectOf(
+  fields: Record<string, ValueType>,
+  optional: readonly string[] = [],
+): ObjectType {
+  return {
+    kind: "object",
+    fields: Object.fromEntries(
+      Object.entries(fields).map(([name, type]) => [
+        name,
+        { type, required: !optional.includes(name) },
+      ]),
+    ),
+  };
+}
+
+/**
+ * For a message: `string`, `list of number`, `one of 'bug', 'risk'`, `object with fields 'a', 'b'`. The names of an enum or an object
+ * are listed like any names in an answer (`listNames`): a few, each cut to the length of a name, and the rest counted.
+ */
+export function describeType(type: ValueType): string {
+  switch (type.kind) {
+    case "string":
+    case "number":
+    case "integer":
+    case "boolean":
+      return type.kind;
+    case "enum":
+      return `one of ${listNames(type.values)}`;
+    case "list":
+      return `list of ${describeType(type.items)}`;
+    case "object": {
+      const names = Object.keys(type.fields);
+      return names.length === 0
+        ? "object without fields"
+        : `object with fields ${listNames(names)}`;
+    }
+    case "oneOf":
+      return type.options.map(describeType).join(" or ");
+    case "unknown":
+      return "a value";
+  }
+}
+
+/**
+ * Whether a value of type `actual` may be used where `expected` is wanted.
+ * - A string wanted takes any scalar and any list: they have a text form (`renderValue`). An object has none. With `exact`
+ *   (an identifier: an issue, a branch, a label, a name) it takes a string or a choice of names only, no number, true/false or list.
+ * - An object wanted takes an object that has at least its required fields, each of a fitting type: more fields do no harm.
+ */
+export function isAssignable(
+  actual: ValueType,
+  expected: ValueType,
+  exact = false,
+): boolean {
+  if (actual.kind === "unknown" || expected.kind === "unknown") return true;
+  if (expected.kind === "oneOf")
+    return expected.options.some((option) =>
+      isAssignable(actual, option, exact),
+    );
+  if (actual.kind === "oneOf")
+    return actual.options.every((option) =>
+      isAssignable(option, expected, exact),
+    );
+  switch (expected.kind) {
+    case "string":
+      return exact
+        ? actual.kind === "string" || actual.kind === "enum"
+        : actual.kind !== "object";
+    case "number":
+      return actual.kind === "number" || actual.kind === "integer";
+    case "integer":
+    case "boolean":
+      return actual.kind === expected.kind;
+    case "enum":
+      return (
+        actual.kind === "enum" &&
+        actual.values.every((value) => expected.values.includes(value))
+      );
+    case "list":
+      return (
+        actual.kind === "list" &&
+        isAssignable(actual.items, expected.items, exact)
+      );
+    case "object": {
+      if (actual.kind !== "object") return false;
+      return Object.entries(expected.fields).every(([name, field]) => {
+        const have = Object.hasOwn(actual.fields, name)
+          ? actual.fields[name]
+          : undefined;
+        if (have === undefined) return !field.required;
+        if (field.required && !have.required) return false;
+        return isAssignable(have.type, field.type, exact);
+      });
+    }
+  }
+}
+
+/** Whether a value that is written out (not a reference) is a member of the type, for the defaults of references. */
+export function valueFits(value: unknown, type: ValueType): boolean {
+  switch (type.kind) {
+    case "unknown":
+      return true;
+    case "string":
+      return typeof value === "string";
+    case "number":
+      return typeof value === "number" && Number.isFinite(value);
+    case "integer":
+      return typeof value === "number" && Number.isSafeInteger(value);
+    case "boolean":
+      return typeof value === "boolean";
+    case "enum":
+      return typeof value === "string" && type.values.includes(value);
+    case "list":
+      return (
+        Array.isArray(value) &&
+        value.every((item: unknown) => valueFits(item, type.items))
+      );
+    case "oneOf":
+      return type.options.some((option) => valueFits(value, option));
+    case "object": {
+      if (typeof value !== "object" || value === null || Array.isArray(value))
+        return false;
+      const record = value as Record<string, unknown>;
+      return (
+        Object.keys(record).every((key) => Object.hasOwn(type.fields, key)) &&
+        Object.entries(type.fields).every(([name, field]) =>
+          Object.hasOwn(record, name)
+            ? valueFits(record[name], field.type)
+            : !field.required,
+        )
+      );
+    }
+  }
+}

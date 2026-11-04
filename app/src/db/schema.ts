@@ -1140,6 +1140,36 @@ export interface ImplementerEnvironmentsTable {
   updated_at: string;
 }
 
+/**
+ * A workflow of a workspace (#833): a name and which saved version is the current one. The document itself is in
+ * `workflow_versions`; a save adds a version and moves `current_version`.
+ */
+export interface WorkflowsTable {
+  id: string;
+  workspace_id: string;
+  /** Unique within the workspace, whatever the case. The `name` of the current version's document. */
+  name: string;
+  current_version: number;
+  created_by: string;
+  /** ISO 8601 UTC. */
+  created_at: string;
+  updated_at: string;
+  /** Set when the workflow was archived: hidden from the list, takes no new version, its name is free. */
+  archived_at: string | null;
+}
+
+/** One saved version of a workflow's document (#833). Immutable: the database refuses an update. */
+export interface WorkflowVersionsTable {
+  workflow_id: string;
+  version: number;
+  /** The workspace of the workflow, repeated so that every query filters by it. */
+  workspace_id: string;
+  /** The JSON text of the document as it was validated and saved, at most 256 KB of UTF-8. */
+  document: string;
+  created_by: string;
+  created_at: string;
+}
+
 export interface Database {
   app_meta: AppMetaTable;
   users: UsersTable;
@@ -1172,6 +1202,8 @@ export interface Database {
   implementer_turns: ImplementerTurnsTable;
   implementer_turn_steps: ImplementerTurnStepsTable;
   implementer_environments: ImplementerEnvironmentsTable;
+  workflows: WorkflowsTable;
+  workflow_versions: WorkflowVersionsTable;
   plan_handoff_tokens: PlanHandoffTokensTable;
   model_catalog_entries: ModelCatalogEntriesTable;
   models_dev_providers: ModelsDevProvidersTable;

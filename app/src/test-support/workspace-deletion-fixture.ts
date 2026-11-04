@@ -8,6 +8,7 @@ import { createBillingNotificationsRepository } from "../db/repositories/billing
 import { createBillingProfilesRepository } from "../db/repositories/billing-profiles-repository.ts";
 import { createBillingTopUpIntentsRepository } from "../db/repositories/billing-topup-intents-repository.ts";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
+import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
 import { createInstallationLinkRequestsRepository } from "../db/repositories/installation-link-requests-repository.ts";
 import { createIntegrationsRepository } from "../db/repositories/integrations-repository.ts";
@@ -157,6 +158,26 @@ export async function seedWorkspaceForDeletion(
       createdBy: `owner-${tag}`,
     },
     50,
+  );
+  // #833-M1-T161: a workflow with two versions, which the erasure removes with the rest.
+  const workflows = createWorkflowsRepository(db, workspaceId);
+  const workflow = await workflows.create(
+    {
+      name: `Workflow ${tag}`,
+      document: `{"tag":"${tag}"}`,
+      createdBy: `owner-${tag}`,
+    },
+    100,
+  );
+  if (!workflow.ok) throw new Error("seeding failed");
+  await workflows.saveVersion(
+    workflow.workflow.id,
+    {
+      name: `Workflow ${tag}`,
+      document: `{"tag":"${tag}","v":2}`,
+      createdBy: `owner-${tag}`,
+    },
+    200,
   );
   await db
     .insertInto("job_dispatches")

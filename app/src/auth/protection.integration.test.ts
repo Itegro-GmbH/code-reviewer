@@ -183,6 +183,10 @@ const PROTECTED_DATA_ROUTES = [
   // The environments of the Implementer (#818).
   "/api/w/[workspace]/environments",
   "/api/w/[workspace]/environments/[environmentId]",
+  // The agent workflows (#833).
+  "/api/w/[workspace]/workflows",
+  "/api/w/[workspace]/workflows/[workflowId]",
+  "/api/w/[workspace]/workflows/validate",
   // The routes behind the Implementer form (#755).
   "/api/w/[workspace]/implementer/models",
   "/api/w/[workspace]/implementer/repositories",
