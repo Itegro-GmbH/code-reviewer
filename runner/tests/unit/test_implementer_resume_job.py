@@ -199,6 +199,34 @@ def test_a_lone_surrogate_in_the_base_or_the_session_branch_is_refused_by_the_pa
     assert f"implementer.{field}" in refused.value.detail
 
 
+# #838-T07b
+@pytest.mark.parametrize(
+    "name",
+    ["a~b", "a..b", "feature/x.lock", "+plus", "a@{u}b", "a\x01b", "a\x85b", "a" * 256, "ä" * 128],
+)
+def test_a_session_branch_that_could_never_be_pushed_is_refused_on_every_turn(name: str) -> None:
+    for resume in (None, _resume(branches=[], checkout=None)):
+        job = _job(resume)
+        job["implementer"]["branch"] = name
+
+        with pytest.raises(runner_job.JobError) as refused:
+            _parse(job)
+
+        assert refused.value.code is ErrorCode.INVALID_JOB
+        assert "implementer.branch" in refused.value.detail
+
+
+# #838-T07c
+@pytest.mark.parametrize(
+    "name", ["implementer/a1b2c3", "feature/ä-ö", "a+b", "x" * 255, "ä" * 127, "🙂/emoji"]
+)
+def test_a_session_branch_the_push_takes_is_accepted(name: str) -> None:
+    job = _job(None)
+    job["implementer"]["branch"] = name
+
+    assert _parse(job).implementer.branch == name
+
+
 # #838-T08
 def test_the_production_setup_hands_the_resume_to_the_workspace(
     monkeypatch: pytest.MonkeyPatch,

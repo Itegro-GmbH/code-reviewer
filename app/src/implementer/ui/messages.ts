@@ -108,6 +108,9 @@ const BRANCH_COPY: Record<BranchNameIssue, string> = {
   double_dot: "A branch name cannot contain two dots in a row.",
   reflog_syntax: "A branch name cannot contain the characters @{.",
   leading_dash: "A branch name cannot start with a dash.",
+  leading_plus: "A branch name cannot start with a plus sign.",
+  too_many_bytes:
+    "A branch name can have at most 255 bytes (letters outside the basic Latin alphabet take two to four). Shorten it.",
   slash_placement:
     "A branch name cannot start or end with a slash, or contain two slashes in a row.",
   component_leading_dot:

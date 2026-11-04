@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // The rules of a new branch name (#755): `git check-ref-format --branch`, plus the ones of this product (not the base branch,
-// at most 200 characters). Pure.
+// at most 200 characters), and the ones of the final push of the Worker (#838: no leading `+`, at most 255 bytes). Pure.
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -33,6 +33,8 @@ const VALID: string[] = [
   "ä".repeat(BRANCH_COMPONENT_MAX_BYTES / 2),
   "d/" + "€".repeat(BRANCH_COMPONENT_MAX_BYTES / 3) + "/e",
   "{braces}",
+  "ä".repeat(60) + "/" + "ä".repeat(66),
+  "x".repeat(BRANCH_NAME_MAX_LENGTH - 3) + "/+x",
   "tilde-at-end-ok-1",
 ];
 
@@ -57,6 +59,14 @@ const INVALID: [string, BranchNameIssue][] = [
   ["@{", "reflog_syntax"],
   ["-leading", "leading_dash"],
   ["--force", "leading_dash"],
+  // #838: the final push of the Worker takes no name that starts with `+` (a forced refspec), or that has a control character of
+  // the C1 block, or more than 255 bytes: the form says why, the job is not refused by the Worker after the person submitted it.
+  ["+force", "leading_plus"],
+  ["+", "leading_plus"],
+  ["c1\u0085control", "forbidden_character"],
+  ["c1\u0080control", "forbidden_character"],
+  ["c1\u009fcontrol", "forbidden_character"],
+  ["ä".repeat(90) + "/" + "ä".repeat(90), "too_many_bytes"],
   ["branch.lock", "lock_suffix"],
   ["dir.lock/branch", "component_lock_suffix"],
   ["/leading-slash", "slash_placement"],
@@ -137,9 +147,12 @@ describe("the rules of a new branch name", () => {
       ...INVALID.filter(
         ([name, issue]) =>
           name.length <= 255 &&
-          // Rules of this product that `git check-ref-format` does not have: the bytes of a part (a file name limit, not syntax)
-          // and the white space beyond ASCII (git takes NBSP; the queue and the form do not).
+          // Rules of this product that `git check-ref-format` does not have: the bytes of a part (a file name limit, not syntax),
+          // the bytes of the whole name and a leading `+` (rules of the final push of the Worker, #838), and the white space
+          // beyond ASCII (git takes NBSP; the queue and the form do not).
           issue !== "component_too_long" &&
+          issue !== "too_many_bytes" &&
+          issue !== "leading_plus" &&
           !(issue === "forbidden_character" && /[\u0080-\uffff]/.test(name)),
       ).map(([name]) => ({
         name,

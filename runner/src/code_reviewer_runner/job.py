@@ -1019,7 +1019,7 @@ def _implementer_spec(data: dict[str, Any], git: GitAccess) -> ImplementerSpec:
     entry = _job_model_entry(spec)
     assert cost is not None and entry is not None  # both keys are present, so both parse or raise
     base_branch = _branch_name(spec.get("baseBranch"), "implementer.baseBranch")
-    branch = _branch_name(spec.get("branch"), "implementer.branch")
+    branch = _pushable_branch_name(spec.get("branch"), "implementer.branch")
     if branch == base_branch:
         raise _invalid("implementer.branch must differ from implementer.baseBranch")
     return ImplementerSpec(
