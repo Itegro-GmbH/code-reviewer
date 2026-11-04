@@ -324,6 +324,8 @@ describe("the implementer kind in the contracts the Dispatcher speaks (#746)", (
         "ImplementerSetupResult",
         "examples/implementer/ImplementerSetupResult.json",
       ],
+      // #838
+      ["ImplementerResume", "examples/implementer/ImplementerResume.json"],
     ] as const) {
       const check = validator("runner-api", definition);
       expect(
@@ -335,6 +337,7 @@ describe("the implementer kind in the contracts the Dispatcher speaks (#746)", (
       readdirSync(join(CONTRACTS, "examples", "implementer")).sort(),
     ).toStrictEqual([
       "ImplementerEnvironment.json",
+      "ImplementerResume.json",
       "ImplementerSetupResult.json",
       "RunnerJobInput.json",
       "RunnerResult.json",

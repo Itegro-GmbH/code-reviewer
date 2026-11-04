@@ -259,6 +259,105 @@ describe("the implementer job input", () => {
   });
 });
 
+describe("the resume of a follow-up turn (#838)", () => {
+  const SHA = "1".repeat(40);
+
+  function withResume(resume: unknown): Document {
+    const input = example("RunnerJobInput");
+    input.implementer.resume = resume;
+    return input;
+  }
+
+  // #838-T70
+  it("has a valid example, alone and inside the job input", () => {
+    const resume = example("ImplementerResume");
+
+    expect(contract.check("ImplementerResume", resume)).toStrictEqual({
+      valid: true,
+      errors: "",
+    });
+    expect(accepts("RunnerJobInput", withResume(resume))).toBe(true);
+  });
+
+  // #838-T71
+  it("is optional: a first turn carries none", () => {
+    expect(example("RunnerJobInput").implementer.resume).toBeUndefined();
+    expect(accepts("RunnerJobInput", example("RunnerJobInput"))).toBe(true);
+  });
+
+  // #838-T72
+  it("is closed and needs its three fields", () => {
+    for (const key of ["turn", "branches", "checkout"]) {
+      const resume = example("ImplementerResume");
+      delete resume[key];
+      expect(accepts("ImplementerResume", resume), key).toBe(false);
+    }
+    for (const edit of [
+      (resume: Document) => (resume.somethingNew = true),
+      (resume: Document) => (resume.branches[0].somethingNew = true),
+    ]) {
+      const resume = example("ImplementerResume");
+      edit(resume);
+      expect(accepts("ImplementerResume", resume)).toBe(false);
+    }
+  });
+
+  // #838-T73
+  it("bounds the turn, the branches, their names and their tips", () => {
+    const refused: Array<(resume: Document) => void> = [
+      (resume) => (resume.turn = 1),
+      (resume) => (resume.turn = 2.5),
+      (resume) => (resume.turn = 100_001),
+      (resume) => (resume.branches = { name: "x", head: SHA }),
+      (resume) =>
+        (resume.branches = Array.from({ length: 21 }, (_, index) => ({
+          name: `feature/${index}`,
+          head: SHA,
+        }))),
+      (resume) => (resume.branches[0].name = "-delete"),
+      (resume) => (resume.branches[0].name = "has space"),
+      (resume) => delete resume.branches[0].head,
+      (resume) => (resume.branches[0].head = "main"),
+      (resume) => (resume.branches[0].head = "A".repeat(40)),
+      (resume) => (resume.branches[0].head = "abc1234"),
+      (resume) => (resume.checkout = "-delete"),
+      (resume) => (resume.checkout = 3),
+    ];
+    for (const edit of refused) {
+      const resume = example("ImplementerResume");
+      edit(resume);
+      expect(accepts("ImplementerResume", resume), String(edit)).toBe(false);
+    }
+    const largest = example("ImplementerResume");
+    largest.branches = Array.from({ length: 20 }, (_, index) => ({
+      name: `feature/${index}`,
+      head: SHA,
+    }));
+    largest.checkout = null;
+    expect(accepts("ImplementerResume", largest)).toBe(true);
+    expect(
+      accepts("ImplementerResume", {
+        ...largest,
+        branches: [],
+        checkout: null,
+      }),
+    ).toBe(true);
+  });
+
+  // #838-T74
+  it("is part of the implementer block only", () => {
+    const diff = {
+      prUrl: "https://github.com/acme/widgets/pull/7",
+      command: "review",
+      git: { provider: "github", baseUrl: "u", token: "t", botLogin: "b" },
+      llm: { provider: "openrouter", model: "m", apiKey: "k" },
+      env: {},
+      resume: example("ImplementerResume"),
+    };
+    expect(accepts("RunnerJobInput", diff)).toBe(false);
+  });
+});
+
 describe("the implementer result", () => {
   // #746-T02
   it("has a valid example", () => {
