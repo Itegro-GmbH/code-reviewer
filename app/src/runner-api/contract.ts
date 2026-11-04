@@ -685,6 +685,8 @@ export const IMPLEMENTER_RESULT_LIMITS = {
   filesChanged: 500,
   summaryChars: 8192,
   branches: 50,
+  /** #745, step 7: the entries of `network.connections`. */
+  networkConnections: 100,
 } as const;
 
 /**
@@ -704,6 +706,7 @@ export const IMPLEMENTER_MAX_BODY_BYTES =
       IMPLEMENTER_RESULT_LIMITS.summaryChars +
       IMPLEMENTER_RESULT_LIMITS.branches * (255 + 160) +
       IMPLEMENTER_SETUP_OUTPUT_CHARS +
+      IMPLEMENTER_RESULT_LIMITS.networkConnections * (253 + 160) +
       (8192 + 2000));
 
 /** What became of one local branch of the agent's repository at the end of a turn (`branches` of `ImplementerResult`). */
@@ -725,6 +728,31 @@ export type ImplementerSetupResult = {
   output: string;
 };
 
+/**
+ * #745, step 7: what the network door did in a turn (`ImplementerNetworkReport` in the contract): the mode of the rule, whether a
+ * door ran, what the second wall (the VM's network policy) did, and the connections the door saw, one entry for each distinct
+ * host, port and outcome. `reason` is a word of the door for a refusal, null for an allowed connection.
+ */
+export type ImplementerNetworkReport = {
+  mode: "off" | "list" | "open";
+  door: boolean;
+  vmPolicy: "narrowed" | "unchanged" | "not_configured";
+  allowed: number;
+  refused: number;
+  bytesIn: number;
+  bytesOut: number;
+  dropped: number;
+  connections: {
+    host: string;
+    port: number;
+    outcome: "allowed" | "refused";
+    reason: string | null;
+    count: number;
+    bytesIn: number;
+    bytesOut: number;
+  }[];
+};
+
 /** #746: `ImplementerResult` in the contract: facts the runner measured in the repository, and a plain-text summary. */
 export type ImplementerResult = {
   baseCommit: string;
@@ -743,6 +771,8 @@ export type ImplementerResult = {
   opencode: { sessionId: string; version: string } | null;
   /** #818: present when a setup script ran. */
   setup?: ImplementerSetupResult;
+  /** #745, step 7: present when the turn had a network door or the VM's network policy was changed. */
+  network?: ImplementerNetworkReport;
 };
 
 export type CompleteRequest = { leaseToken: string; result: RunnerResult };

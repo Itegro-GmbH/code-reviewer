@@ -22,6 +22,7 @@ import {
   RUNNER_REVIEW_KINDS,
 } from "./contract.ts";
 import { checkJob } from "./claim.ts";
+import { parseCompleteRequest, parseWorkerResultRequest } from "./requests.ts";
 import type { CheckOptions } from "./claim.ts";
 import { refusalForKind } from "./kind-guard.ts";
 import type { ClaimDeps } from "./claim.ts";
@@ -415,6 +416,141 @@ describe("the implementer result", () => {
     const result = example("RunnerResult");
     Object.assign(result.implementer, { headCommit: null, pushed: true });
     expect(accepts("RunnerResult", result)).toBe(false);
+  });
+});
+
+// #745, step 7 (the review of #830): the schema and the parser are two hand-written readings of one contract, and the parser once
+// refused every result that carried `implementer.network` while the schema and the example were green. Here the example, and the
+// edits of it, go through the app's real parser and must get the verdict of the schema, in the body of a Runner and of a Worker.
+describe("the implementer result through the app's parser", () => {
+  const LEASE = "lease-token-example";
+
+  function verdicts(result: unknown): {
+    schema: boolean;
+    complete: boolean;
+    worker: boolean;
+  } {
+    return {
+      schema: accepts("RunnerResult", result),
+      complete: parseCompleteRequest({ leaseToken: LEASE, result }).ok,
+      worker: parseWorkerResultRequest({ result }).ok,
+    };
+  }
+
+  it("takes the example, network block included, and keeps it intact", () => {
+    const result = example("RunnerResult");
+    expect(result.implementer.network).toBeDefined();
+    expect(verdicts(result)).toStrictEqual({
+      schema: true,
+      complete: true,
+      worker: true,
+    });
+    const complete = parseCompleteRequest({ leaseToken: LEASE, result });
+    const worker = parseWorkerResultRequest({ result });
+    expect(complete.ok && complete.value.result.implementer?.network).toEqual(
+      result.implementer.network,
+    );
+    expect(worker.ok && worker.value.result.implementer?.network).toEqual(
+      result.implementer.network,
+    );
+  });
+
+  it("takes a block for the rule off with a narrowed policy, and one without a network block", () => {
+    const off = example("RunnerResult");
+    off.implementer.network = {
+      mode: "off",
+      door: false,
+      vmPolicy: "narrowed",
+      allowed: 0,
+      refused: 0,
+      bytesIn: 0,
+      bytesOut: 0,
+      dropped: 0,
+      connections: [],
+    };
+    const notConfigured = structuredClone(off);
+    notConfigured.implementer.network.vmPolicy = "not_configured";
+    const without = example("RunnerResult");
+    delete without.implementer.network;
+    for (const result of [off, notConfigured, without]) {
+      expect(verdicts(result)).toStrictEqual({
+        schema: true,
+        complete: true,
+        worker: true,
+      });
+    }
+    const parsed = parseWorkerResultRequest({ result: off });
+    expect(parsed.ok && parsed.value.result.implementer?.network).toEqual(
+      off.implementer.network,
+    );
+    const bare = parseWorkerResultRequest({ result: without });
+    expect(bare.ok && "network" in (bare.value.result.implementer ?? {})).toBe(
+      false,
+    );
+  });
+
+  it("agrees with the schema on every edit of the network block", () => {
+    const edits: [string, (network: Document) => void][] = [
+      ["an unknown key", (n) => (n.somethingNew = 1)],
+      ["an unknown key in a connection", (n) => (n.connections[0].extra = 1)],
+      ["a missing key", (n) => delete n.dropped],
+      ["a missing key in a connection", (n) => delete n.connections[0].reason],
+      ["a null block", (n) => Object.keys(n).forEach((k) => delete n[k])],
+      ["an unknown mode", (n) => (n.mode = "closed")],
+      ["an unknown policy", (n) => (n.vmPolicy = "wide")],
+      ["a door that is not a boolean", (n) => (n.door = "yes")],
+      ["a negative count", (n) => (n.refused = -1)],
+      ["a fractional count", (n) => (n.allowed = 1.5)],
+      ["a negative byte count", (n) => (n.connections[0].bytesIn = -1)],
+      ["a zero count of a connection", (n) => (n.connections[0].count = 0)],
+      ["a port over 65535", (n) => (n.connections[0].port = 65536)],
+      [
+        "a host of 254 characters",
+        (n) => (n.connections[0].host = "a".repeat(254)),
+      ],
+      [
+        "a reason with a capital",
+        (n) => (n.connections[1].reason = "Not_listed"),
+      ],
+      [
+        "a reason with a digit",
+        (n) => (n.connections[1].reason = "not_listed2"),
+      ],
+      [
+        "a reason of 41 characters",
+        (n) => (n.connections[1].reason = "a".repeat(41)),
+      ],
+      [
+        "an outcome that is not known",
+        (n) => (n.connections[0].outcome = "maybe"),
+      ],
+      [
+        "101 connections",
+        (n) =>
+          (n.connections = Array.from({ length: 101 }, () => n.connections[0])),
+      ],
+      [
+        "100 connections",
+        (n) =>
+          (n.connections = Array.from({ length: 100 }, () => n.connections[0])),
+      ],
+      [
+        "a host of 253 characters",
+        (n) => (n.connections[0].host = "a".repeat(253)),
+      ],
+      [
+        "a reason of 40 characters",
+        (n) => (n.connections[1].reason = "a".repeat(40)),
+      ],
+    ];
+    for (const [name, edit] of edits) {
+      const result = example("RunnerResult");
+      edit(result.implementer.network);
+      if (name === "a null block") result.implementer.network = null;
+      const seen = verdicts(result);
+      expect(seen.complete, name).toBe(seen.schema);
+      expect(seen.worker, name).toBe(seen.schema);
+    }
   });
 });
 

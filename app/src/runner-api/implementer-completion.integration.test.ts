@@ -8,7 +8,10 @@
 import { describe, expect, it } from "vitest";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
 import { createUsageRecordsRepository } from "../db/repositories/usage-records-repository.ts";
+import { getProductIdentity } from "../product-identity/current.ts";
+import { toRunDetailView } from "../runs/run-view.ts";
 import { sha } from "../test-support/jobs.ts";
+import { readExamples } from "../test-support/runner-contract.ts";
 import { RUNNER_MAX_BODY_BYTES } from "./contract.ts";
 import {
   TEST_RUNNER_TOKEN,
@@ -16,7 +19,8 @@ import {
   startRunnerApiHarness,
 } from "../test-support/runner-api-harness.ts";
 import { addUser } from "../test-support/workspace-deletion-fixture.ts";
-import type { ImplementerResult } from "./contract.ts";
+import type { Job } from "../jobs/job-types.ts";
+import type { ImplementerResult, RunnerResult } from "./contract.ts";
 
 const IMPLEMENTER = ["implementer"] as const;
 const HEAD = sha("b");
@@ -625,6 +629,112 @@ describe("a turn given back by a runner that is shut down (#754)", () => {
       headCommit: null,
       summary: null,
     });
+  });
+});
+
+// #745, step 7 (the review of #830): the result the contract's own example gives, with its network block, goes through both
+// reporting doors, is stored with the block intact and is shown by the Runs view. A parser that refuses the block (it once did,
+// with the schema and the example green) makes the report 400 and the turn is lost.
+describe("the network block of a turn's result (#745)", () => {
+  function exampleResult(): RunnerResult {
+    const found = readExamples("examples/implementer").find(
+      (entry) => entry.definition === "RunnerResult",
+    );
+    if (found === undefined) throw new Error("no example RunnerResult");
+    return structuredClone(found.document) as RunnerResult;
+  }
+  const detailOf = (job: Job) =>
+    toRunDetailView(
+      getProductIdentity(),
+      job,
+      "acme/widgets",
+      new Date(job.updatedAt),
+      undefined,
+      false,
+      {
+        branch: "implementer/b1",
+        baseBranch: "main",
+        instruction: "Add a health endpoint.",
+        repositoryUrl: "https://github.com/acme/widgets",
+        environment: {
+          name: "Node 22",
+          vcpus: 4,
+          network: { mode: "list", hosts: ["registry.npmjs.org"] },
+        },
+      },
+    );
+
+  it("is stored as it was sent on the runner API and shown on the Runs page", async () => {
+    const { h, running } = await start();
+    const turn = await running();
+
+    const answer = await h.complete(
+      turn.job.id,
+      turn.leaseToken,
+      exampleResult(),
+    );
+
+    expect(answer.status).toBe(200);
+    const job = await h.queue.get(turn.job.id);
+    expect(job?.result).toMatchObject({
+      implementer: { network: exampleResult().implementer?.network },
+    });
+    expect(
+      detailOf(job!).implementer?.environment?.network.report,
+    ).toMatchObject({
+      vmPolicy: "narrowed",
+      allowed: 3,
+      refused: 1,
+      connections: [
+        { host: "registry.npmjs.org", outcome: "allowed", count: 3 },
+        { host: "example.com", outcome: "refused", reason: "not_listed" },
+      ],
+    });
+  });
+
+  it("is stored as it was sent on the Worker API too, also for the rule off with a narrowed policy", async () => {
+    const { h } = await start();
+    h.clock.advance(1);
+    const enqueued = await h.queue.enqueueImplementerTurn({
+      repositoryId: h.repositoryId,
+      baseBranch: "main",
+      baseSha: sha("a"),
+      branch: "implementer/network-worker",
+      instruction: "Add a health endpoint.",
+      modelChoice: { entryId: "entry-1" },
+      costLimitCents: null,
+      createdBy: "user-1",
+      actorLogin: "octocat",
+      clientRequestId: "request-network-worker",
+    });
+    const claimed = await h.queue.claimNext("runner-a", IMPLEMENTER, {
+      workerCredential: true,
+    });
+    if (claimed === null || claimed.credential === undefined)
+      throw new Error("the turn was not claimed");
+    const result = exampleResult();
+    const off = {
+      mode: "off" as const,
+      door: false,
+      vmPolicy: "narrowed" as const,
+      allowed: 0,
+      refused: 0,
+      bytesIn: 0,
+      bytesOut: 0,
+      dropped: 0,
+      connections: [],
+    };
+    result.implementer = { ...result.implementer!, network: off };
+
+    const answer = await h.worker.result(
+      enqueued.job.id,
+      claimed.credential,
+      result,
+    );
+
+    expect(answer.status).toBe(200);
+    const job = await h.queue.get(enqueued.job.id);
+    expect(job?.result).toMatchObject({ implementer: { network: off } });
   });
 });
 

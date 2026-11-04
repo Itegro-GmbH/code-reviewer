@@ -232,6 +232,44 @@ describe("the implementer block of a result (#754)", () => {
     expect(cleaned?.filesChanged[2]?.path).toBe("src/plain.ts");
   });
 
+  // #745, step 7: a host is what the agent asked the network door for.
+  it("removes a secret from a host of the network block and keeps the counts and the other hosts", () => {
+    const connection = {
+      port: 443,
+      outcome: "refused" as const,
+      reason: "not_listed",
+      count: 2,
+      bytesIn: 0,
+      bytesOut: 0,
+    };
+    const network = {
+      mode: "list" as const,
+      door: true,
+      vmPolicy: "narrowed" as const,
+      allowed: 0,
+      refused: 2,
+      bytesIn: 0,
+      bytesOut: 0,
+      dropped: 0,
+      connections: [
+        { ...connection, host: `${LLM_KEY}.example.com` },
+        { ...connection, host: "example.org" },
+      ],
+    };
+
+    const cleaned = redactResult(
+      { ...result, implementer: { ...block, network } },
+      [LLM_KEY],
+    ).implementer?.network;
+
+    expect(cleaned?.connections.map((entry) => entry.host)).toEqual([
+      `${REDACTED}.example.com`,
+      "example.org",
+    ]);
+    expect(cleaned).toMatchObject({ refused: 2, mode: "list", door: true });
+    expect(cleaned?.connections[0]).toMatchObject({ count: 2, port: 443 });
+  });
+
   // #754-T04
   it("leaves a result without the block without one", () => {
     const bare: RunnerResult = { ...result };
