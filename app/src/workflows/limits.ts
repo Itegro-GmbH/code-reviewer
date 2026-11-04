@@ -22,6 +22,8 @@ export const ID_MAX_LENGTH = 64;
 export const DESCRIPTION_MAX_LENGTH = 1000;
 export const TEMPLATE_MAX_LENGTH = 20_000;
 export const CONDITION_DEPTH_MAX = 4;
+/** How deep braces may nest in the default of a reference: `{{a.b | default {"k": {"j": 1}}}}` is two deep. */
+export const DEFAULT_BRACE_DEPTH_MAX = 3;
 
 /** Result schemas (`contracts/result-schema.v1.json`). */
 export const RESULT_DEPTH_MAX = 4;
