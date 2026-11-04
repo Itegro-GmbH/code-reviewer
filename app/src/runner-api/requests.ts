@@ -1068,6 +1068,7 @@ function parseImplementerResult(
       "opencode",
       "setup",
       "network",
+      "checkedOut",
     ],
     prefix,
   );
@@ -1124,6 +1125,15 @@ function parseImplementerResult(
     value.network === undefined
       ? undefined
       : parseImplementerNetwork(check, value.network, `${prefix}network`);
+  // #837: the branch HEAD was on at the end; a name as the ones of `branches` are, or null (detached, or not read).
+  const checkedOut =
+    value.checkedOut === undefined || value.checkedOut === null
+      ? null
+      : check.string(value, "checkedOut", `${prefix}checkedOut`, {
+          min: 1,
+          max: MAX_BRANCH_NAME_CHARS,
+          stripControls: true,
+        });
   if (typeof pushed === "boolean" && headCommit !== undefined) {
     if (pushed && headCommit === null) check.fail(`${prefix}pushed`, "invalid");
     const last = commits?.at(-1);
@@ -1142,7 +1152,8 @@ function parseImplementerResult(
     summary === undefined ||
     opencode === undefined ||
     (value.setup !== undefined && setup === undefined) ||
-    (value.network !== undefined && network === undefined)
+    (value.network !== undefined && network === undefined) ||
+    checkedOut === undefined
   )
     return undefined;
   return {
@@ -1158,6 +1169,8 @@ function parseImplementerResult(
     opencode,
     ...(setup === undefined ? {} : { setup }),
     ...(network === undefined ? {} : { network }),
+    // Kept only when the runner sent it, as `branches` is.
+    ...(value.checkedOut === undefined ? {} : { checkedOut }),
   };
 }
 

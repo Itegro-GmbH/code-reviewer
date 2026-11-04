@@ -218,6 +218,17 @@ def test_the_counts_of_the_branches_that_were_left_out_are_optional_and_accepted
     assert _accepts("RunnerResult", _result())  # the example has none: still valid
 
 
+# #837
+def test_the_branch_that_was_checked_out_is_optional_and_a_name_or_null() -> None:
+    named = _result()
+    assert named["implementer"]["checkedOut"] == "implementer/a1b2c3"
+    assert _accepts("RunnerResult", named)
+    named["implementer"]["checkedOut"] = None
+    assert _accepts("RunnerResult", named)
+    del named["implementer"]["checkedOut"]  # a runner of the release before
+    assert _accepts("RunnerResult", named)
+
+
 def _result_set(path: tuple[str, ...], value: Any) -> Callable[[Document], None]:
     def edit(result: Document) -> None:
         target = result["implementer"]
@@ -267,6 +278,9 @@ RESULT_REFUSALS: dict[str, Callable[[Document], None]] = {
         ("branchesDropped",), {"invalid": 0, "overflow": 1.5}
     ),
     "dropped counts that are null": _result_set(("branchesDropped",), None),
+    "a checked out branch without a name": _result_set(("checkedOut",), ""),
+    "a checked out branch name of 256 characters": _result_set(("checkedOut",), "x" * 256),
+    "a checked out branch that is a number": _result_set(("checkedOut",), 3),
 }
 
 

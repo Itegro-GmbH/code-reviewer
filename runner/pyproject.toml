@@ -90,3 +90,8 @@ typeCheckingMode = "strict"
 extraPaths = ["src", "..", "tests/engine"]
 venvPath = "."
 venv = ".venv"
+
+# The follow-up spike (#837) drives the lane's helpers from a script, as the lane's tests do.
+[[tool.pyright.executionEnvironments]]
+root = "scripts"
+extraPaths = ["src", "..", "tests", "tests/engine", "tests/lane"]

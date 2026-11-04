@@ -54,6 +54,7 @@ _BLOCK_KEYS = frozenset(
         "opencode",
         "setup",
         "network",
+        "checkedOut",
     }
 )
 MAX_BRANCHES = 50
@@ -61,7 +62,7 @@ MAX_BRANCH_NAME_CHARS = 255
 MAX_REASON_CHARS = 40
 _REASON = re.compile(r"[a-z][a-z_]*")
 # Not required: a block without the count (an older shape) is still one the app reads.
-_OPTIONAL_KEYS = frozenset({"branchesDropped", "setup", "network"})
+_OPTIONAL_KEYS = frozenset({"branchesDropped", "setup", "network", "checkedOut"})
 MAX_SETUP_OUTPUT_CHARS = 8192
 _SETUP_KEYS = frozenset({"ok", "exitCode", "timedOut", "durationSeconds", "output"})
 MAX_DROPPED = 1_000_000_000
@@ -229,6 +230,11 @@ def _branch_ok(value: object) -> bool:
     )
 
 
+def _checked_out_ok(value: object) -> bool:
+    """`checkedOut` (#837): the name of a branch, or null; judged as a name of `branches` is."""
+    return value is None or _is_string(value, MAX_BRANCH_NAME_CHARS, minimum=1)
+
+
 def _sha_or_none(value: object, *, allow_none: bool) -> bool:
     if value is None:
         return allow_none
@@ -246,6 +252,8 @@ def valid_block(value: object) -> dict[str, Any] | None:
     if "setup" in block and not _setup_ok(block["setup"]):
         return None
     if "network" in block and not _network_ok(block["network"]):
+        return None
+    if "checkedOut" in block and not _checked_out_ok(block["checkedOut"]):
         return None
     base, head, pushed = block["baseCommit"], block["headCommit"], block["pushed"]
     commits, files, branches = block["commits"], block["filesChanged"], block["branches"]
@@ -292,6 +300,8 @@ def clip_texts(block: Mapping[str, Any]) -> dict[str, Any]:
             {**branch, "name": branch["name"][:MAX_BRANCH_NAME_CHARS]}
             for branch in clipped["branches"]
         ]
+        if isinstance(clipped.get("checkedOut"), str):
+            clipped["checkedOut"] = clipped["checkedOut"][:MAX_BRANCH_NAME_CHARS]
         clipped["commits"] = [
             {**commit, "subject": commit["subject"][:MAX_SUBJECT_CHARS]}
             for commit in clipped["commits"]
