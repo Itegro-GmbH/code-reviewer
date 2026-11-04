@@ -6,7 +6,9 @@ The agent keeps the stock prompt of OpenCode for its model (the engine's own too
 style); what the runner adds is this text, handed to the engine as an instruction file the runner
 writes into its own trusted directory (`config.build_engine_config`, `instructions`). Nothing of the
 repository, the job or the model is interpolated into it, and the person's instruction travels as
-the user message and nowhere else.
+the user message and nowhere else. The one addition is the profile version a turn was started with
+(#843): whether it may push, and its own text, which a member of the workspace wrote and which
+comes last, exactly as written.
 
 The text states what the system does with the repository, and the few facts the stock text gets
 wrong for this place (it says to commit only when asked; nobody can answer a question here). It
@@ -15,7 +17,7 @@ decision: the cost limit is the only brake). The extra message is the one turn t
 when the working tree is dirty after the agent ended its turn.
 """
 
-_COMMON = """\
+_RULES_BEFORE_PUSH = """\
 # Rules of this workplace
 
 You are an engineer carrying out the task the user gives you in the repository of the current \
@@ -30,13 +32,27 @@ other advice about git you have been given, including "only commit when explicit
 commit your work at normal intervals, with meaningful commit messages (git add, git commit), and \
 do not leave finished work uncommitted. Git is yours to use as you like inside this workspace: \
 amend, rebase, reset, create and switch branches. The repository has no remote and you have no \
-credential, so do not try to push. When your turn ends, the system pushes everything that is on \
+credential, so do not try to push. """
+
+# What happens to the work when the turn ends: the system pushes every local branch.
+_PUSH = """\
+When your turn ends, the system pushes everything that is on \
 the local branches of this repository to GitHub, as it is: what you want to keep has to be \
 committed on a branch. Only 50 branches are pushed, the task's branch first and then the others \
 in alphabetical order, and a branch whose name has a space, a control character or one of \
 ~ ^ : ? * [ \\, has "..", starts with - or +, or is longer than 255 bytes is not pushed either. \
 Work committed on a detached HEAD is saved on a new branch named after the task's branch.
+"""
 
+# The same for a profile without the right to push (#843): nothing leaves the container. The
+# sentence before it, "do not try to push", holds for every turn.
+_NO_PUSH = """\
+This profile may not push: when your turn ends the system pushes nothing. Nothing you commit \
+leaves this container, so what the person gets from you is your closing answer. Put what you \
+found in it.
+"""
+
+_RULES_AFTER_PUSH = """
 When the repository has tests, run them before you finish.
 
 You are root in your own container, with a Docker daemon of your own (docker run and docker build \
@@ -54,16 +70,35 @@ Files and folders that the environment's setup left in the repository before you
 create inside such a folder is not committed either unless you add it by name with git add -f.
 """
 
+# Before the text of a profile version: where the rules of the system end and its own text begins.
+_PROFILE_HEADING = "# Instructions of this profile"
+
 _CLOSING = """\
 When the task is done, end your turn with a short plain-text summary of what you did and what, if \
 anything, is left open.
 """
 
 
-def instructions_text(*, with_setup: bool = False) -> str:
+def instructions_text(
+    *, with_setup: bool = False, can_push: bool = True, profile_instructions: str = ""
+) -> str:
     """The runner's addition to the stock prompt. `with_setup` is a turn whose environment has a
-    setup script: only then there is something the setup left in the repository to tell about."""
-    return _COMMON + (f"\n{_SETUP_LEFTOVERS}" if with_setup else "") + _CLOSING
+    setup script: only then there is something the setup left in the repository to tell about.
+    `can_push` and `profile_instructions` are the profile version's (#843): a profile that may not
+    push is told that nothing leaves the container, and the version's own text comes last, exactly
+    as written. The text is a function of these three values alone, so every turn of one profile
+    version gets the same prompt and the model provider's prompt cache hits. A turn without a
+    profile, and a profile that may push and has no text, get the text of before profiles."""
+    text = (
+        _RULES_BEFORE_PUSH
+        + (_PUSH if can_push else _NO_PUSH)
+        + _RULES_AFTER_PUSH
+        + (f"\n{_SETUP_LEFTOVERS}" if with_setup else "")
+        + _CLOSING
+    )
+    if profile_instructions == "":
+        return text
+    return f"{text}\n{_PROFILE_HEADING}\n\n{profile_instructions}"
 
 
 # The one extra message of a turn whose working tree is still dirty (`session.py`). The words

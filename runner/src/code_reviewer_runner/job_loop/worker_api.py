@@ -62,6 +62,8 @@ WORKER_FEATURES: tuple[str, ...] = (
     "implementer_environment",
     # #745, step 7: the Worker reads `implementer.environment.network` and starts the door for it.
     "implementer_network",
+    # #843: the Worker reads `implementer.profile` (the version's instructions and push right).
+    "implementer_profile",
 )
 # The feature of `GET /api/runners/v1/version` that says the Worker API exists.
 FEATURE_WORKER_API = "worker_api"

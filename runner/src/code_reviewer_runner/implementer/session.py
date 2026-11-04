@@ -79,6 +79,7 @@ from .git_workspace import (
     CONFIRM_SECONDS,
     LIST_TOO_LARGE,
     REASON_OUT_OF_SPACE,
+    BranchPush,
     GitWorkspace,
     PushReport,
 )
@@ -345,6 +346,10 @@ class ImplementerSession:
         steps: StepPump | None = None,
     ) -> None:
         self.job = job
+        # #843: the profile version the turn started with. A turn without one pushes, as before.
+        profile = job.implementer.profile
+        self._can_push = profile is None or profile.can_push
+        self._profile_instructions = "" if profile is None else profile.instructions
         self.workspace = workspace
         self.command = tuple(command)
         self._place_factory = place
@@ -630,7 +635,11 @@ class ImplementerSession:
             make_config=make_config,
             instructions=(
                 INSTRUCTIONS_FILE,
-                instructions_text(with_setup=self._has_script()),
+                instructions_text(
+                    with_setup=self._has_script(),
+                    can_push=self._can_push,
+                    profile_instructions=self._profile_instructions,
+                ),
             ),
             environment=implementer_environment(home=AGENT_HOME, scratch_dir=AGENT_TMP),
             model=entry.model_id,
@@ -691,6 +700,12 @@ class ImplementerSession:
         A failure of the push is the turn's error only when nothing ended the turn before; a
         leftover that cannot be committed is a note (the branches that are committed are pushed
         all the same)."""
+        if not self._can_push:
+            # #843: a profile without the right to push. Nothing leaves the container, so nothing
+            # is rescued, committed, listed or pushed, and the repository is not read after the agent.
+            self._note("this profile may not push: nothing was pushed")
+            self._note_disk()
+            return
         quick = self._ends_quickly()
         if not self._engine_ended:
             self._unchecked = True
@@ -773,6 +788,11 @@ class ImplementerSession:
 
     def _result(self) -> TurnResult:
         workspace = self.workspace
+        if not self._can_push:
+            # #843: no branch, no head, no commits and no files: nothing was pushed, so there is
+            # nothing Control vouches for. A turn that ended well is a success whether the agent
+            # changed anything or not.
+            return self._turn_result(self._error, None, False, (), (0, 0), (), ())
         report = workspace.push_report()
         commits: list[CommitInfo] = workspace.commits_since_start()
         files: list[FileChange] = workspace.changed_files()
@@ -804,6 +824,27 @@ class ImplementerSession:
             # is work that did not arrive, and a branch that is gone is not verifiably empty. Not a
             # success, whatever else was pushed.
             error = (ErrorCode.PUSH_REJECTED, "the work could not be pushed")
+        return self._turn_result(
+            error,
+            head,
+            pushed,
+            report.branches,
+            (report.invalid, report.overflow),
+            tuple(commits),
+            tuple(files),
+        )
+
+    def _turn_result(
+        self,
+        error: tuple[ErrorCode, str] | None,
+        head: str | None,
+        pushed: bool,
+        branches: tuple[BranchPush, ...],
+        dropped: tuple[int, int],
+        commits: tuple[CommitInfo, ...],
+        files: tuple[FileChange, ...],
+    ) -> TurnResult:
+        workspace = self.workspace
         usage = self._usage()
         summary = clip_summary(
             self._summary,
@@ -816,10 +857,10 @@ class ImplementerSession:
             base_commit=workspace.start_commit,
             head_commit=head,
             pushed=pushed,
-            branches=report.branches,
-            branches_dropped=(report.invalid, report.overflow),
-            commits=tuple(commits),
-            files_changed=tuple(files),
+            branches=branches,
+            branches_dropped=dropped,
+            commits=commits,
+            files_changed=files,
             summary=summary,
             opencode_session_id=self._session_id,
             opencode_version=PINNED_ENGINE_VERSION,

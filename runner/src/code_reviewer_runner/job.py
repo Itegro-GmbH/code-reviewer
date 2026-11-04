@@ -97,8 +97,13 @@ _IMPLEMENTER_FIELDS = {
     "modelEntry",
     "capabilities",
     "environment",
+    "profile",
 }
 _IMPLEMENTER_ENVIRONMENT_FIELDS = {"name", "setupScript", "network"}
+# The profile version a turn was started with (#843, `ImplementerProfile` of the contract).
+_IMPLEMENTER_PROFILE_FIELDS = {"name", "version", "instructions", "canPush"}
+_PROFILE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+MAX_PROFILE_INSTRUCTION_CHARS = 20_000
 # The bounds of the contract (`contracts/environment-sizes.v1.json`): a script is text of at most
 # 64 KB.
 MAX_SETUP_SCRIPT_BYTES = 64 * 1024
@@ -322,6 +327,20 @@ class ImplementerEnvironment:
 
 
 @dataclass(frozen=True)
+class ImplementerProfile:
+    """The profile version a turn was started with (#843, `ImplementerProfile` of the contract),
+    as the app copied it when the turn started. `instructions` is the system-level text written by
+    a member of the workspace: data for the agent's prompt, never a command of the app. `can_push`
+    says whether Control pushes the branches the agent made when the turn ends. A turn without a
+    profile has none and runs with the platform's own defaults, as every turn did before."""
+
+    name: str
+    version: int
+    can_push: bool
+    instructions: str = ""
+
+
+@dataclass(frozen=True)
 class ImplementerSpec:
     """What an implementer job asks for (#746, `ImplementerJob` of the contract). Closed.
 
@@ -338,6 +357,7 @@ class ImplementerSpec:
     model_entry: JobModelEntry
     capabilities: JobCapabilities | None = None
     environment: ImplementerEnvironment | None = None
+    profile: ImplementerProfile | None = None
 
 
 class JobError(Exception):
@@ -982,6 +1002,7 @@ def _implementer_spec(data: dict[str, Any], git: GitAccess) -> ImplementerSpec:
         model_entry=entry,
         capabilities=_job_capabilities(spec),
         environment=_implementer_environment(spec),
+        profile=_implementer_profile(spec),
     )
 
 
@@ -1020,6 +1041,36 @@ def _implementer_environment(spec: dict[str, Any]) -> ImplementerEnvironment | N
         except RuleError as error:
             raise _invalid(str(error)) from None
     return ImplementerEnvironment(name=name, setup_script=script, network=rule)
+
+
+def _implementer_profile(spec: dict[str, Any]) -> ImplementerProfile | None:
+    """The `implementer.profile` object (#843). Closed; every refusal names the field and never a
+    value (the instructions are a member's text and are not echoed)."""
+    if "profile" not in spec:
+        return None
+    given = _object(spec["profile"], "implementer.profile")
+    _check_fields(given, _IMPLEMENTER_PROFILE_FIELDS, "implementer.profile.")
+    name = given.get("name")
+    if not isinstance(name, str) or _PROFILE_NAME.fullmatch(name) is None:
+        raise _invalid("implementer.profile.name must be a lower case profile name")
+    version = given.get("version")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise _invalid("implementer.profile.version must be an integer of 1 or more")
+    can_push = given.get("canPush")
+    if not isinstance(can_push, bool):
+        raise _invalid("implementer.profile.canPush must be true or false")
+    instructions = ""
+    if "instructions" in given:
+        text = given["instructions"]
+        if not isinstance(text, str) or not 1 <= len(text) <= MAX_PROFILE_INSTRUCTION_CHARS:
+            raise _invalid(
+                "implementer.profile.instructions must be a string of 1 to "
+                f"{MAX_PROFILE_INSTRUCTION_CHARS} characters"
+            )
+        instructions = text
+    return ImplementerProfile(
+        name=name, version=version, can_push=can_push, instructions=instructions
+    )
 
 
 def _implementer_input(job: dict[str, Any]) -> ImplementerInput:
