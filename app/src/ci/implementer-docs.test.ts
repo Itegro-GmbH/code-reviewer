@@ -359,6 +359,21 @@ describe("the documents match the merged runner job and canary (#765)", () => {
     const open = flat(section(guide, "## Open points"));
     for (const issue of ["#745", "#768", "#784", "#797", "#799"])
       expect(open, issue).toContain(issue);
+    // #767 (the privileged lane's journey) is merged: it is no open point anywhere.
+    expect(open).not.toContain("#767");
+    expect(
+      flat(section(bringUp, "## Switching on the Implementer (the rollout)")),
+    ).not.toContain("#767");
+  });
+
+  // #745
+  it("tells the operator that a DISPATCHER_ENGINES list must name the implementer engine", () => {
+    const rollout = flat(
+      section(bringUp, "## Switching on the Implementer (the rollout)"),
+    );
+    expect(rollout).toContain("`DISPATCHER_ENGINES`");
+    expect(rollout).toContain("pr-agent,opencode,implementer");
+    expect(rollout).toContain("`no_capable_runner`");
   });
 
   // #768-T01
