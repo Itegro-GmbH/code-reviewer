@@ -82,6 +82,8 @@ select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
 "scripts/sandbox_boundary_check.py" = ["E501"]
 # The network door's lane: the embedded server and client programs and the sentences that say what each check proves (#745, step 7).
 "tests/lane/test_network_door.py" = ["E501"]
+# The spikes of the Factory-Runner (#853): the embedded programs (the MCP server, the command) and the sentences that say what a check proves.
+"scripts/runner_spikes.py" = ["E501"]
 
 [tool.pyright]
 include = ["src", "tests", "scripts", "../fakes"]
