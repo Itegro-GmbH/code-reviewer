@@ -127,6 +127,7 @@ describe("the migrations of both epics", () => {
       "20261102150000_add_implementer_turn_environment",
       "20261103100000_add_environment_network",
       "20261104100000_create_implementer_turn_steps",
+      "20261104140000_create_workflows",
     ]);
   });
 
@@ -208,6 +209,8 @@ describe("starting the database", () => {
       "users",
       "verifications",
       "webhook_deliveries",
+      "workflow_versions",
+      "workflows",
       "workspace_entitlements",
       "workspace_members",
       "workspace_secrets",

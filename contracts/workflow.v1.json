@@ -1,0 +1,530 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Itegro-GmbH/code-reviewer/contracts/workflow.v1.json",
+  "title": "Code Reviewer workflow, version 1",
+  "description": "A workflow is a JSON document (#833, agent workflows, app/src/workflows/, docs/workflows.md): a trigger and a list of steps that run in order. Five kinds of node: the trigger, the agent step, the action, the control nodes `if` and `loop`, and (reserved) the workflow as a step. Nodes talk to each other only through values: a text may hold `{{step.field}}` references to what an earlier step yielded. The schema states the form, closed everywhere: a key it does not name is refused. What it cannot state is checked by the validator, which also gives every problem a JSON pointer, a stable code, the cause and the names that were available: that every reference points at a step that ran before on every path, the types of the values that flow, the ids, limits, and that profiles and environments exist. A run works on ONE repository: the one of its trigger (`trigger.repo` of an issue trigger, the input `repo` of a manual one), so a node names none. The inputs that decide a TARGET (the issue, the branches, the labels, the environment) take a literal or one whole reference to a value the platform or the caller vouches for (the issue number, the default branch, an input of a manual trigger, the branch of an agent step), never a value an agent reported and never the title, body or labels of the issue, which whoever opened it wrote: the validator holds them to it (`target_from_untrusted_value`). A reader ignores nothing: unknown fields are errors. `forEach`, `approval` and `workflow` are named here so a document can use them later; version 1 refuses them (code `kind_not_supported`). Written by the app (src/workflows/); the version is in the path and in `version`.",
+  "version": 1,
+  "$defs": {
+    "Workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "name", "trigger", "steps"],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "\\S",
+          "description": "Not only spaces."
+        },
+        "description": {
+          "$ref": "#/$defs/Description"
+        },
+        "trigger": {
+          "$ref": "#/$defs/Trigger"
+        },
+        "budgetUsd": {
+          "description": "What the workflow may spend in USD over all its steps; 20 when left out, and not above the operator's maximum (the validator).",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "steps": {
+          "$ref": "#/$defs/Steps"
+        }
+      }
+    },
+    "Steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/Step"
+      }
+    },
+    "Description": {
+      "type": "string",
+      "maxLength": 1000
+    },
+    "Template": {
+      "description": "A text; `{{step.field}}` in it is replaced by the value of that field when the step runs. `{{step.field | default <JSON>}}` gives a value for a field that may be missing. `\\{{` is a literal `{{`.",
+      "type": "string",
+      "maxLength": 20000
+    },
+    "Reference": {
+      "description": "A text that is exactly one reference and nothing else (no text and no space around it), where a number, true/false or a list is wanted: the value keeps its type. The `default` of a reference may hold braces nested three deep and JSON strings that hold `}}`. The pattern is `REFERENCE_PATTERN` of src/workflows/template.ts.",
+      "type": "string",
+      "maxLength": 20000,
+      "pattern": "^\\{\\{(?:[^{}\"]|\"(?:[^\"\\\\]|\\\\[\\s\\S])*\"|\\{(?:[^{}\"]|\"(?:[^\"\\\\]|\\\\[\\s\\S])*\"|\\{(?:[^{}\"]|\"(?:[^\"\\\\]|\\\\[\\s\\S])*\"|\\{(?:[^{}\"]|\"(?:[^\"\\\\]|\\\\[\\s\\S])*\")*\\})*\\})*\\})*\\}\\}$"
+    },
+    "StepId": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$",
+      "not": {
+        "enum": ["trigger", "previous"]
+      }
+    },
+    "Trigger": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ManualTrigger"
+        },
+        {
+          "$ref": "#/$defs/IssueLabeledTrigger"
+        }
+      ]
+    },
+    "ManualTrigger": {
+      "description": "Started by hand through the API. `input` declares what the caller hands in; steps read it as `{{trigger.input.<field>}}`. A run works on one repository, so the validator needs `input` to declare `repo`, a required text (owner/name): the schema cannot say it (`repo_required`).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "const": "manual"
+        },
+        "input": {
+          "$ref": "result-schema.v1.json#/$defs/ResultSchema"
+        }
+      }
+    },
+    "IssueLabeledTrigger": {
+      "description": "Started when the label is put on an issue of a repository of the workspace. Steps read `{{trigger.issue.number}}`, `.title`, `.body`, `.url`, `.labels` and `{{trigger.repo.fullName}}`, `.owner`, `.name`, `.defaultBranch`.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "label"],
+      "properties": {
+        "kind": {
+          "const": "github.issueLabeled"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "\\S"
+        }
+      }
+    },
+    "Step": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/AgentStep"
+        },
+        {
+          "$ref": "#/$defs/ActionStep"
+        },
+        {
+          "$ref": "#/$defs/IfStep"
+        },
+        {
+          "$ref": "#/$defs/LoopStep"
+        },
+        {
+          "$ref": "#/$defs/ReservedStep"
+        }
+      ]
+    },
+    "AgentStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "profile", "environment", "instruction"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/StepId"
+        },
+        "description": {
+          "$ref": "#/$defs/Description"
+        },
+        "kind": {
+          "const": "agent"
+        },
+        "profile": {
+          "description": "A profile, `name` for the newest version or `name@version` to pin one.",
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}(?:@[1-9][0-9]{0,5})?$"
+        },
+        "environment": {
+          "description": "The name of an environment of the workspace, as a literal: it decides where the agent works, so version 1 takes no reference (`target_from_untrusted_value`, checked by the validator).",
+          "type": "string",
+          "maxLength": 20000
+        },
+        "instruction": {
+          "description": "The task. A loop body may give `first` (round one) and `next` (later rounds, where `{{previous.<step>.<field>}}` is available).",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Template"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["first", "next"],
+              "properties": {
+                "first": {
+                  "$ref": "#/$defs/Template"
+                },
+                "next": {
+                  "$ref": "#/$defs/Template"
+                }
+              }
+            }
+          ]
+        },
+        "session": {
+          "description": "`new` (default) or the session of an earlier agent step, or of this step itself in the round before.",
+          "oneOf": [
+            {
+              "const": "new"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["continue"],
+              "properties": {
+                "continue": {
+                  "$ref": "#/$defs/StepId"
+                }
+              }
+            }
+          ]
+        },
+        "result": {
+          "description": "What the agent's result looks like; the finish tool is made from it. Without one the step yields the facts only (and the result schema of the profile, once profiles bring one).",
+          "$ref": "result-schema.v1.json#/$defs/ResultSchema"
+        }
+      }
+    },
+    "ActionStep": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/PullRequestOpenAction"
+        },
+        {
+          "$ref": "#/$defs/IssueCommentAction"
+        },
+        {
+          "$ref": "#/$defs/IssueLabelsAction"
+        }
+      ]
+    },
+    "PullRequestOpenAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "connector", "head", "title"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/StepId"
+        },
+        "description": {
+          "$ref": "#/$defs/Description"
+        },
+        "kind": {
+          "const": "action"
+        },
+        "connector": {
+          "const": "github.pullRequest.open"
+        },
+        "head": {
+          "description": "A branch: a literal, or exactly one reference to the branch of an agent step that may push (`{{implement.branch}}`). The validator refuses anything else.",
+          "$ref": "#/$defs/Template"
+        },
+        "base": {
+          "description": "A branch: a literal, or exactly one reference to `{{trigger.repo.defaultBranch}}` or to an input of a manual trigger (`{{trigger.input.<name>}}`). The default branch of the repository when left out. The validator refuses anything else.",
+          "$ref": "#/$defs/Template"
+        },
+        "title": {
+          "$ref": "#/$defs/Template"
+        },
+        "body": {
+          "$ref": "#/$defs/Template"
+        },
+        "draft": {
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "$ref": "#/$defs/Reference"
+            }
+          ]
+        }
+      }
+    },
+    "IssueCommentAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "connector", "issue", "body"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/StepId"
+        },
+        "description": {
+          "$ref": "#/$defs/Description"
+        },
+        "kind": {
+          "const": "action"
+        },
+        "connector": {
+          "const": "github.issue.comment"
+        },
+        "issue": {
+          "$ref": "#/$defs/IssueInput"
+        },
+        "body": {
+          "$ref": "#/$defs/Template"
+        }
+      }
+    },
+    "IssueLabelsAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "connector", "issue"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/StepId"
+        },
+        "description": {
+          "$ref": "#/$defs/Description"
+        },
+        "kind": {
+          "const": "action"
+        },
+        "connector": {
+          "const": "github.issue.labels"
+        },
+        "issue": {
+          "$ref": "#/$defs/IssueInput"
+        },
+        "add": {
+          "$ref": "#/$defs/LabelsInput"
+        },
+        "remove": {
+          "$ref": "#/$defs/LabelsInput"
+        }
+      },
+      "anyOf": [
+        {
+          "required": ["add"],
+          "properties": {
+            "add": {
+              "not": {
+                "type": "array",
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "required": ["remove"],
+          "properties": {
+            "remove": {
+              "not": {
+                "type": "array",
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "IssueInput": {
+      "description": "A positive whole number up to 2147483647, or exactly one reference to the issue of the trigger (`{{trigger.issue}}`, `{{trigger.issue.number}}`) or to an input of a manual trigger that is declared `integer`. The default of a reference is held to the same rule. The validator refuses the title, body and labels of the issue, and the engine checks the number again when it runs.",
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        {
+          "$ref": "#/$defs/Reference"
+        }
+      ]
+    },
+    "LabelsInput": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Reference"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Template"
+          }
+        }
+      ],
+      "description": "Label names: a list of literals and references to inputs of a manual trigger (`{{trigger.input.<name>}}`, one reference per entry), or exactly one reference to a list input. The title, body and labels of the issue, and an agent's result, are data and are not taken (`target_from_untrusted_value`). An action may not add the label that starts the workflow (`label_retriggers_workflow`)."
+    },
+    "IfStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "when", "then"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/StepId"
+        },
+        "description": {
+          "$ref": "#/$defs/Description"
+        },
+        "kind": {
+          "const": "if"
+        },
+        "when": {
+          "$ref": "#/$defs/Condition"
+        },
+        "then": {
+          "$ref": "#/$defs/Steps"
+        },
+        "else": {
+          "$ref": "#/$defs/Steps"
+        }
+      }
+    },
+    "LoopStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "maxRounds", "body", "until"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/StepId"
+        },
+        "description": {
+          "$ref": "#/$defs/Description"
+        },
+        "kind": {
+          "const": "loop"
+        },
+        "maxRounds": {
+          "description": "At most this many rounds, 1 to 10. The loop ends earlier when `until` holds (exit `until`) or when the workflow budget is used up between two rounds (exit `budget`). Afterwards `{{<loop id>.exit}}` is `until`, `maxRounds` or `budget` and `{{<loop id>.rounds}}` the number of rounds that ran; the steps of the body keep the values of the last round.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "body": {
+          "$ref": "#/$defs/Steps"
+        },
+        "until": {
+          "$ref": "#/$defs/Condition"
+        }
+      }
+    },
+    "ReservedStep": {
+      "description": "Reserved: `forEach`, `approval` and a workflow as a step are named so a document can use them in a later version. Version 1 refuses them (`kind_not_supported`); their other fields are not defined yet.",
+      "type": "object",
+      "required": ["id", "kind"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/StepId"
+        },
+        "kind": {
+          "enum": ["forEach", "approval", "workflow"]
+        }
+      }
+    },
+    "Operand": {
+      "description": "A reference like \"{{review.findings}}\", a text, a number or true/false.",
+      "oneOf": [
+        {
+          "type": "string",
+          "maxLength": 20000
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        }
+      ]
+    },
+    "Condition": {
+      "description": "Exactly one operator. `empty`/`notEmpty` ask whether a list or text is empty; `equals`/`notEquals` compare two texts, numbers or true/false values; `all`, `any`, `not` combine. Nested four levels deep at most (the validator).",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["empty"],
+          "properties": {
+            "empty": {
+              "$ref": "#/$defs/Operand"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["notEmpty"],
+          "properties": {
+            "notEmpty": {
+              "$ref": "#/$defs/Operand"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["equals"],
+          "properties": {
+            "equals": {
+              "$ref": "#/$defs/Operands"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["notEquals"],
+          "properties": {
+            "notEquals": {
+              "$ref": "#/$defs/Operands"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["all"],
+          "properties": {
+            "all": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/Condition"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["any"],
+          "properties": {
+            "any": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/Condition"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["not"],
+          "properties": {
+            "not": {
+              "$ref": "#/$defs/Condition"
+            }
+          }
+        }
+      ]
+    },
+    "Operands": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "$ref": "#/$defs/Operand"
+      }
+    }
+  }
+}
