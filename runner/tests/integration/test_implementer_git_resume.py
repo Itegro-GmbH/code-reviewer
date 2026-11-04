@@ -192,15 +192,17 @@ def test_every_branch_of_the_session_and_the_base_are_fetched_fifty_deep(rig: Ri
 
     workspace = rig.prepared(resume=resume_of(*tips.items(), checkout=BRANCH))
 
-    def depth(ref: str) -> str:
-        return raw("rev-list", "--count", ref, cwd=workspace.mirror, git=rig.git)
+    def depth(ref: str, where: Path = workspace.mirror) -> int:
+        return int(raw("rev-list", "--count", ref, cwd=where, git=rig.git))
 
-    assert depth(f"refs/heads/{BRANCH}") == "50"
-    assert depth("refs/heads/feature/x") == "50"
-    assert depth("refs/heads/main") == "50"
-    # The agent has the same history: 50 commits to look back at, no more.
-    assert raw("rev-list", "--count", BRANCH, cwd=workspace.repo, git=rig.git) == "50"
-    assert raw("rev-list", "--count", "main", cwd=workspace.repo, git=rig.git) == "50"
+    # At least 50: git counts the depth from every tip, so a commit another tip reaches within 50
+    # commits is there as well (these branches share the history of the base).
+    assert depth(f"refs/heads/{BRANCH}") >= 50
+    assert depth("refs/heads/feature/x") >= 50
+    assert depth("refs/heads/main") >= 50
+    # The agent has the same history.
+    assert depth(BRANCH, workspace.repo) >= 50
+    assert depth("main", workspace.repo) >= 50
 
 
 # #838-T20c
