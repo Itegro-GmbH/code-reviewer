@@ -14,6 +14,10 @@ code, the real agent image, reader and workspace). The model is the strict scrip
 `fakes/wire` behind a made-up key; it refuses a request whose history is not well formed (a
 `tool_result` without its `tool_use`, a first message that is not the user's), so a conversation
 that the engine replays wrongly fails here. No real model, no real key, no network beyond the VM.
+The script removes containers by fixed names and unmounts and deletes directories as root, so it
+refuses any host whose name does not start with `spike-` unless
+`FOLLOW_UP_SPIKE_I_AM_ON_A_SPIKE_VM=1` is set (`spike_guard.py`); without `--out` it works in a
+fresh temporary directory.
 It prints one JSON line per check (`{"check": ..., "ok": ...}`) and per measured fact
 (`{"fact": ...}`), no secret. Each phase is a whole turn through `ImplementerSession.run()`:
 
@@ -50,7 +54,7 @@ import http.client
 import json
 import os
 import shutil
-import subprocess
+import socket
 import sys
 import threading
 import time
@@ -87,6 +91,7 @@ from lane_support import (
     write_file,
 )
 from opencode_native import REAL_KEY
+from spike_guard import fresh_out_dir, refuse_unless_spike_vm
 
 from code_reviewer_runner.implementer import agent as agent_module
 from code_reviewer_runner.implementer.agent import ImplementerAgent
@@ -1353,7 +1358,7 @@ def phase_bulk_import(bulk: Phase, bulk_origin: Path, scratch: Path, window: int
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out", default="/tmp/follow-up-spike")
+    parser.add_argument("--out", help="work directory; default: a fresh one in the temp directory")
     parser.add_argument("--bulk-steps", type=int, default=300)
     parser.add_argument(
         "--bulk-cli", action="store_true", help="also run the CLI's export on the bulk transcript"
@@ -1362,10 +1367,11 @@ def main() -> int:
     parser.add_argument("--skip", default="", help="comma list of: two, abort, bulk")
     arguments = parser.parse_args()
     skip = set(arguments.skip.split(","))
+    refuse_unless_spike_vm(socket.gethostname(), os.environ)
     config = lane_config()
     preflight(config)
     remove_leftovers()
-    out = Path(arguments.out)
+    out = Path(arguments.out) if arguments.out else fresh_out_dir()
     for name in ("one", "two", "blank", "abort", "bulk", "bulk-import"):
         # A run that died may have left its work directory mounted (`lane_support.unmount`).
         unmount(out / name / "work")
@@ -1373,7 +1379,6 @@ def main() -> int:
         shutil.rmtree(out / name, ignore_errors=True)
     out.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
-    one: Phase | None = None
     try:
         one, one_origin = phase_one(config, out / "one")
         (out / "turn-one-export.json.gz").write_bytes(gzip.compress(one.snapshot_raw))
@@ -1396,7 +1401,6 @@ def main() -> int:
     finally:
         remove_leftovers()
     REPORT.say("total", REPORT.ok, seconds=round(time.monotonic() - started, 1), uid=os.geteuid())
-    _ = (one, subprocess)
     return 0 if REPORT.ok else 1
 
 
