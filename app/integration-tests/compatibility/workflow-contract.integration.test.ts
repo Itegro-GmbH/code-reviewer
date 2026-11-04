@@ -234,6 +234,16 @@ const WORKFLOW_CASES: Case[] = [
   ],
   ["an issue that is a number", (d) => (first(d).issue = 7)],
   ["an issue that is zero", (d) => (first(d).issue = 0)],
+  ["an issue that is the largest number", (d) => (first(d).issue = 2147483647)],
+  ["an issue above the largest number", (d) => (first(d).issue = 2147483648)],
+  [
+    "label lists that are both empty",
+    (d) => {
+      first(d).add = [];
+      first(d).remove = [];
+    },
+  ],
+  ["an empty list of labels to add only", (d) => (first(d).add = [])],
   ["an issue that is not whole", (d) => (first(d).issue = -4.5)],
   ["an issue object with a number", (d) => (first(d).issue = { number: 7 })],
   [
@@ -440,6 +450,10 @@ const RESULT_CASES: Case[] = [
     "a required entry that is not a property",
     (d) => (findings(d).required = ["ghost"]),
   ],
+  [
+    "a required entry that is not a property, listed twice",
+    (d) => (findings(d).required = ["ghost", "ghost"]),
+  ],
   ["required that is not a list", (d) => (findings(d).required = "type")],
   [
     "an empty enum",
@@ -480,6 +494,34 @@ const RESULT_CASES: Case[] = [
   [
     "a boolean field",
     (d) => ((findings(d).properties as Json).fatal = { type: "boolean" }),
+  ],
+  [
+    "an integer field",
+    (d) => ((findings(d).properties as Json).count = { type: "integer" }),
+  ],
+  [
+    "an integer field with a description",
+    (d) =>
+      ((findings(d).properties as Json).count = {
+        type: "integer",
+        description: "How many.",
+      }),
+  ],
+  [
+    "an integer field with a maxLength",
+    (d) =>
+      ((findings(d).properties as Json).count = {
+        type: "integer",
+        maxLength: 3,
+      }),
+  ],
+  [
+    "an integer field with an enum",
+    (d) =>
+      ((findings(d).properties as Json).count = {
+        type: "integer",
+        enum: ["1"],
+      }),
   ],
   [
     "a description that is too long",
@@ -607,6 +649,7 @@ const REPLACEMENTS: unknown[] = [
   7,
   11,
   1e9,
+  2147483648,
   "",
   " ",
   "x",
@@ -653,6 +696,7 @@ const REPLACEMENTS: unknown[] = [
   { continue: "implement" },
   { empty: "{{review.findings}}" },
   { type: "string" },
+  { type: "integer" },
   { type: "object", properties: { a: { type: "string" } } },
 ];
 const KEYS = ["extra", "repo", "model", "id", "kind", "type", "items", "enum"];

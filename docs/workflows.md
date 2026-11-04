@@ -112,7 +112,8 @@ trigger's input is what the caller of the run (a person or an AI with the right 
 Targets are also **identifiers**: a reference that stands for a branch, a label or a name must be a text or a choice of names, never a number,
 true/false or a list turned into text (`reference_type_mismatch`). An `issue` is a whole number, so a manual input used as one must be declared
 `integer` (a `number` may have a fraction, which the validator cannot rule out). The **default** of a reference (`{{trigger.input.issueNo | default 7}}`)
-is held to the rule of a literal: `default 0`, `default -3` or `default 2147483648` is `invalid_value`, `default 1.5` is `default_type_mismatch`.
+is held to the rule of a literal: `default 0`, `default -3` or `default 2147483648` is `invalid_value`, `default 1.5` is `default_type_mismatch`. The same
+holds for the `number` in the default of an object input (`default {"number": -5}`).
 The bounds of an input the caller hands in are not known to the validator (an `integer` may be `0` or `-5`), so **the engine checks the number
 again when it runs**.
 
@@ -436,6 +437,9 @@ What the engine, which runs a workflow later, must keep to; the validator and th
   `implementer@2`, because the session belongs to the profile *name* (and the environment), not to its version. This is kept on purpose.
 - **The engine checks the targets again** (an issue number is a positive whole number up to 2147483647, a label or a branch a text) when it
   runs: what the validator checks is what the document says, and an input of a manual trigger is only known then.
+- **The engine never expands a template inside a default value.** The default of a reference is a JSON value written out, taken as it is:
+  `{{a.t | default "{{b.x}}"}}` yields the text `{{b.x}}`, not the value of `b.x`, and the validator does not look for references in it
+  either. A default that must hold a value of a step is not possible; give the field a value in the step that makes it, or branch with `if`.
 
 ## Error codes
 
