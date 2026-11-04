@@ -64,7 +64,7 @@ native path; the two registry providers (Anthropic, OpenRouter) are not offered.
    enter. It makes the agent's repository in `/work/repo` as a local clone of that mirror, and the reader (a container of its
    own, section "How Control reads the agent's repository") gives it no remote, no credential, the system identity and a new
    branch at the base tip. Nothing else is put into that repository: no hook, no guard, no spool. A follow-up turn (the job
-   carries `resume`) starts from the branches the earlier turns left on GitHub instead (section "A follow-up turn: the workspace with several branches").
+   carries `resume`) starts from the branches the earlier turns left on GitHub instead, each 50 commits deep (section "A follow-up turn: the workspace with several branches").
 5. **Set up** (only when the task's environment has a script). The runner starts the **Setup container** from the agent's image, runs the
    script in it with full internet access, and commits the container as the agent's image; a script that fails ends the turn here, free,
    before the model door exists (section "The environment's setup script"). Without a script nothing happens and nothing changes.
@@ -231,11 +231,16 @@ app does not send a `resume` yet (the follow-up API is a later step of #745); th
 
 The workspace (`GitWorkspace`) prepares such a turn like this:
 
-- **Names.** Every branch name of `resume` passes the check a first turn's names pass (`git check-ref-format`, not `HEAD`, no leading dash) before anything is fetched; a name git does not accept ends the
-  turn `implementer_config_invalid`, free. The parser already refused a repeat, more than 20 branches, a tip that is not 40 lower-case hex digits and a `checkout` that is neither one of the branches
-  nor the session branch (`invalid_job`).
-- **Fetch.** The base branch, one deep, as on a first turn; then each branch of `resume`, **one fetch per branch**, into the mirror as `refs/heads/<name>`: the session branch 50 deep
-  (`SESSION_BRANCH_DEPTH`), every other branch one deep. The token is in the environment of those git processes and nowhere else, as for the base. The tip is read from the mirror, never from the job.
+- **Names.** The parser refuses (`invalid_job`) a repeat, more than 20 branches, a tip that is not 40 lower-case hex digits, a `checkout` that is neither one of the branches nor the session branch, and a
+  branch name of `resume` that the final push would refuse (`branch_name_problem` of `push_policy`: the stricter rule, so a name that could never be pushed is not taken at all). A lone surrogate (which JSON allows) in
+  `baseBranch`, `branch` or a name of `resume` is refused the same way. Before anything is fetched the workspace checks every name once more as a first turn's names are checked (`git check-ref-format`, not `HEAD`,
+  no leading dash, no control character); a name git does not accept ends the turn `implementer_config_invalid`, free. The same code ends the turn when one name is the directory of another (the session branch
+  `a` and a branch `a/b`, or the base `main` and `main/x`): both cannot be refs, and the session branch is made at the base tip when the provider never had it.
+- **Fetch.** The base branch, then each branch of `resume`, **one fetch per branch**, into the mirror as `refs/heads/<name>`, **all `RESUME_DEPTH` (50) deep**; the session branch is fetched **last** (a
+  `--depth` fetch of another branch that is an ancestor of it would otherwise make that ancestor a shallow root and cut the session branch's history). The agent has no remote to deepen from, and with less
+  history a base branch that moved since the earlier turn could not be merged, rebased or diffed against (`merge-base` finds nothing, "refusing to merge unrelated histories"). **The limit that remains:** a merge
+  base further back than 50 commits is not found. A first turn keeps the base branch one deep. Each fetch is bounded by `FETCH_TIMEOUT` (60 s) and all of them together by `RESUME_FETCH_SECONDS` (300 s); a
+  turn that is not set up by then ends `clone_failed` (free). The token is in the environment of those git processes and nowhere else, as for the base. The tip is read from the mirror, never from the job.
 - **What moved.** The tip the provider has now is the start of the turn, whatever the job said: a branch that is not at the tip the earlier turn pushed is taken as it is and recorded
   (`resume_moved`: name, the tip that was, the tip that is) so that the agent can be told. A branch the provider no longer has is left out and recorded (`resume_missing`); the checkout falls back to the session
   branch when that is the one that is gone. A session branch that is in `resume` and gone ends the turn `clone_failed` (free): the app checks it before it starts a turn, so this is a race.
@@ -244,7 +249,8 @@ The workspace (`GitWorkspace`) prepares such a turn like this:
   branch the agent was on checked out. `resume` with no branches starts from the base like a first turn.
 - **One start tip per branch** (`start_tips`). `start_commit` is the start tip of the session branch (the base tip on a first turn), so `baseCommit`, `commits` and `filesChanged` of the report cover what this turn did to the
   session branch. The final push judges every branch against its own start tip: a branch of the session that the agent did not touch is not fetched, not pushed and not reported; a branch the agent made is left alone while it is still at
-  some start tip (it holds no commit of its own). The push is as before: every local branch, no force.
+  some start tip (it holds no commit of its own). The push is as before: every local branch, no force. In the result of a follow-up turn `pushed` and `headCommit` describe the session branch only; the other
+  branches the turn pushed are in `branches` (the follow-up that reads them is a later step of #745).
 - **After the setup script** the history of the script is undone branch by branch: HEAD back on the branch the agent starts on, every branch of the turn at its start tip, every other branch and tag deleted.
 
 ## The model door
