@@ -413,6 +413,10 @@ later pull requests of #745.
 - **What is cut.** Text 16 KiB, a tool input (as JSON text) 4 KiB, an error 4 KiB, a title 512 bytes; always on a character
   boundary, with a `[N bytes cut]` mark and the true size. A turn keeps at most 5,000 records and 2 MiB of text; after that only
   the tool calls go on, as name and status, and the turn is marked as shortened.
+- **Reasoning text.** No model variant is chosen, so the provider's defaults apply: models that return their reasoning over the
+  OpenAI-compatible API show it, Google models show summaries. For OpenAI reasoning models on the Responses API the runner
+  asks for a summary (`reasoningSummary: auto` in the agent's options, `implementer/config.py`), which costs nothing extra and does
+  not change the reasoning effort. Anthropic models think only with a variant, so they show nothing. Dynamic Review is not changed.
 - **Tool output is not recorded.** The live view shows the call, never what the repository answered. It stays in the engine's session.
 - **Secrets.** Every text is redacted with the job's secrets and the door's bearer before it is put in a record, and before it is
   cut. What the redactor cannot know is the repository itself: a `.env` the agent printed is in the agent's text or input if

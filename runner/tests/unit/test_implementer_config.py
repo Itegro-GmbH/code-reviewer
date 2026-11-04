@@ -7,6 +7,7 @@ say in either. The golden configuration below is the whole of what the pinned en
 """
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -254,3 +255,55 @@ def test_the_agents_home_and_path_are_the_roots() -> None:
     assert environment["XDG_DATA_HOME"] == "/root/.local/share"
     assert environment["TMPDIR"] == "/tmp"
     assert environment["PATH"] == "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+# -- the reasoning summary for the live view (#745) ----------------------------------------------
+
+
+def config_of(
+    npm: str, family: WireFamily, *, reasoning: bool = True, model: str = "o4-mini"
+) -> Any:
+    entry = parse_implementer_input(EXAMPLE.read_text(encoding="utf-8")).implementer.model_entry
+    changed = replace(
+        entry,
+        npm=npm,
+        family=family.value,
+        model_id=model,
+        model={**entry.model, "reasoning": reasoning},
+        provider_id="openai",
+    )
+    return make_config(
+        provider=native_provider_config(
+            changed,
+            base_url=spec_of(family).proxy_base_url(PROXY_URL),
+            api_key=CAPABILITY,
+        ),
+        model_reference=native_model_reference(changed),
+        family=family,
+    )["agent"][IMPLEMENTER_AGENT]
+
+
+# #745-L13
+def test_a_reasoning_model_of_the_openai_sdk_is_asked_for_a_summary_and_for_nothing_else() -> None:
+    agent = config_of("@ai-sdk/openai", WireFamily.OPENAI_RESPONSES)
+
+    assert agent["options"] == {"reasoningSummary": "auto"}
+    assert "variant" not in agent, "no variant: the reasoning effort is the engine's default"
+
+
+# #745-L13
+@pytest.mark.parametrize(
+    ("npm", "family", "reasoning"),
+    [
+        ("@ai-sdk/openai", WireFamily.OPENAI_RESPONSES, False),  # nothing to summarise
+        ("@ai-sdk/xai", WireFamily.OPENAI_RESPONSES, True),
+        ("@ai-sdk/anthropic", WireFamily.ANTHROPIC_MESSAGES, True),
+        ("@ai-sdk/google", WireFamily.GOOGLE, True),
+        ("@openrouter/ai-sdk-provider", WireFamily.OPENAI_CHAT, True),
+        ("@ai-sdk/openai-compatible", WireFamily.OPENAI_CHAT, True),
+    ],
+)
+def test_no_other_model_gets_options(npm: str, family: WireFamily, reasoning: bool) -> None:
+    agent = config_of(npm, family, reasoning=reasoning)
+
+    assert "options" not in agent
