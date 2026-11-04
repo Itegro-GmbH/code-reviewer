@@ -62,6 +62,10 @@ type WorkerHeartbeat =
   typeof import("../../src/app/api/workers/v1/jobs/[id]/heartbeat/route.ts");
 type WorkerResult =
   typeof import("../../src/app/api/workers/v1/jobs/[id]/result/route.ts");
+type Steps =
+  typeof import("../../src/app/api/runners/v1/jobs/[id]/steps/route.ts");
+type WorkerSteps =
+  typeof import("../../src/app/api/workers/v1/jobs/[id]/steps/route.ts");
 
 const fakes: FakeGithub[] = [];
 
@@ -117,6 +121,10 @@ async function startRoutes() {
       (await import("../../src/app/api/workers/v1/jobs/[id]/heartbeat/route.ts")) as WorkerHeartbeat,
     workerResult:
       (await import("../../src/app/api/workers/v1/jobs/[id]/result/route.ts")) as WorkerResult,
+    steps:
+      (await import("../../src/app/api/runners/v1/jobs/[id]/steps/route.ts")) as Steps,
+    workerSteps:
+      (await import("../../src/app/api/workers/v1/jobs/[id]/steps/route.ts")) as WorkerSteps,
   };
 }
 
@@ -238,6 +246,7 @@ describe("the runner API route files", () => {
         "pool_cap",
         "release",
         "vm_lifecycle",
+        "implementer_steps",
       ],
     });
     const anonymous = await routes.version.GET(
@@ -368,6 +377,47 @@ describe("the runner API route files", () => {
     expect(
       await getDatabase().selectFrom("jobs").select("status").execute(),
     ).toStrictEqual([{ status: "succeeded" }]);
+  });
+
+  // #745-T50
+  it("answers the steps call of both doors in the usual form: a claim is needed on each, and a diff job takes no steps", async () => {
+    const routes = await startRoutes();
+    await queueJobThroughWebhook(routes);
+    const claim = await routes.claim.POST(runnerRequest("claim", undefined));
+    const { job } = await claim.json();
+    const context = { params: Promise.resolve({ id: job.id }) };
+    const records = [
+      { kind: "text", partId: "prt_1", seq: 1, text: "Thinking" },
+    ];
+
+    const noToken = await routes.steps.POST(
+      runnerRequest(
+        `jobs/${job.id}/steps`,
+        { leaseToken: job.leaseToken, records },
+        {},
+      ),
+      context,
+    );
+    const diffJob = await routes.steps.POST(
+      runnerRequest(`jobs/${job.id}/steps`, {
+        leaseToken: job.leaseToken,
+        records,
+      }),
+      context,
+    );
+    const workerNoCredential = await routes.workerSteps.POST(
+      new Request(`https://app.test/api/workers/v1/jobs/${job.id}/steps`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ records }),
+      }),
+      context,
+    );
+
+    expect(noToken.status).toBe(401);
+    expect(diffJob.status).toBe(400);
+    expect(diffJob.headers.get("cache-control")).toBe("no-store");
+    expect(workerNoCredential.status).toBe(401);
   });
 
   // #320-T01
