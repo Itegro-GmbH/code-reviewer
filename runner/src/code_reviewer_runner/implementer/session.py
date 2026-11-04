@@ -99,6 +99,9 @@ from .network_rule import MODE_OFF, MODE_OPEN, OFF, NetworkRule
 from .network_switch import Post, model_host_of, narrow_policy, parse_switch, urllib_post
 from .prompts import LEFTOVER_PROMPT, instructions_text
 from .reader import RESET_SECONDS as READER_RESET_SECONDS
+from .step_pump import FLUSH_SECONDS as STEPS_FLUSH_SECONDS
+from .step_pump import STOP_FLUSH_SECONDS as STOP_STEPS_FLUSH_SECONDS
+from .step_pump import StepPump
 from .turn_result import TurnResult, clip_summary
 
 _log = logging.getLogger(__name__)
@@ -113,14 +116,16 @@ GRACE_SECONDS = 270.0
 # (`READER_RESET_SECONDS`), the rescue of a detached HEAD (three git commands of
 # `RESCUE_STEP_TIMEOUT`), the look at the tree (`DIRTY_TIMEOUT`), the leftover commit of the system,
 # the second reset of the readers (the commit ran the repository's filters in a reader that can
-# write), the final push and the two reads of the report (`REPORT_READ_TIMEOUT` each). The sum is
-# 214 s of the 270; a test holds it, and holds the slack (a fifth of the grace).
+# write), the final push, the two reads of the report (`REPORT_READ_TIMEOUT` each) and the last
+# flush of the live view (`STEPS_FLUSH_SECONDS`, #745: after the push, before the result, bounded in
+# all of its parts). The sum is 222 s of the 270; a test holds it, and holds the slack.
 LEFTOVER_SECONDS = 40.0
 FINAL_PUSH_SECONDS = 100.0
 ENGINE_STOP_SECONDS = KILL_SECONDS + STOP_SECONDS
 # A stop (SIGTERM) leaves the process `SIGTERM_BACKSTOP_SECONDS` in all (`job_run.py`): the engine
 # comes out of it, then the reset of the readers, the rescue of a detached HEAD, the final push (no
-# leftover is committed, so no second reset) and the two reads of the report: 79 s of the 115.
+# leftover is committed, so no second reset), the two reads of the report and the shorter last
+# flush of the live view (`STOP_STEPS_FLUSH_SECONDS`): 84 s of the 115.
 STOP_PUSH_SECONDS = 25.0
 # How often the watch asks the job host whether the job is still ours while the agent works (a
 # lost lease ends the turn at once; nothing is pushed in the meantime).
@@ -161,6 +166,9 @@ class SessionSeams:
     leftover_seconds: float = LEFTOVER_SECONDS
     reader_reset_seconds: float = READER_RESET_SECONDS
     lease_poll_seconds: float = LEASE_POLL_SECONDS
+    # The last flush of the live view (#745), at a normal end and at a stop.
+    steps_flush_seconds: float = STEPS_FLUSH_SECONDS
+    stop_steps_flush_seconds: float = STOP_STEPS_FLUSH_SECONDS
     startup_seconds: float | None = None
     clock: Callable[[], float] = time.monotonic
     # How the model door is started and what it talks to (#745, step 3); the defaults are the VM's
@@ -334,6 +342,7 @@ class ImplementerSession:
         seams: SessionSeams = SessionSeams(),  # noqa: B008 - frozen, shared on purpose
         should_stop: Callable[[], bool] = lambda: False,
         max_seconds: float | None = None,
+        steps: StepPump | None = None,
     ) -> None:
         self.job = job
         self.workspace = workspace
@@ -347,6 +356,8 @@ class ImplementerSession:
         self._should_stop = should_stop
         # The hard timeout of the process: the turn is never given more (`_deadline_seconds`).
         self._max_seconds = max_seconds
+        # The channel the step records of the turn leave over (#745): None records nothing.
+        self._steps = steps
         self._notes: list[str] = []
         self._summary = ""
         self._error: tuple[ErrorCode, str] | None = None
@@ -398,6 +409,7 @@ class ImplementerSession:
             agent = self._agent(model, place)
             agent.start(ENGINE_PORT)
             self._session_id = agent.session_id
+            self._start_steps(agent)
             self._work(agent)
         except Exception as error:
             self._stopped_by(error)
@@ -430,9 +442,35 @@ class ImplementerSession:
             self._stop_network()
             if model is not None:
                 model.stop()
+            # The last flush of the live view, after the push and before the result: it hands over
+            # what is left, is bounded in time and best effort, so the push never waits for it.
+            self._finish_steps()
         result = self._result()
         self._remove_place(place)
         return result
+
+    def _start_steps(self, agent: ImplementerAgent) -> None:
+        """Begin to send the step records of the open session. Best effort: a fault here is the
+        live view's, never the turn's."""
+        feeder = getattr(agent, "steps", None)
+        if self._steps is None or feeder is None:
+            return
+        with contextlib.suppress(Exception):
+            self._steps.start(feeder)
+
+    def _finish_steps(self) -> None:
+        """The last flush, so that a finished run shows all its steps: it runs at every end, a stop
+        included (with less time), and leaves a line in the notes for what could not be sent."""
+        if self._steps is None:
+            return
+        seconds = (
+            self.seams.stop_steps_flush_seconds
+            if self._should_stop()
+            else self.seams.steps_flush_seconds
+        )
+        with contextlib.suppress(Exception):
+            for note in self._steps.finish(seconds):
+                self._note(note)
 
     def _remove_place(self, place: AgentPlace | None) -> None:
         """Take the killed container away, after the push and the reads: nothing waits for it (the
@@ -598,7 +636,8 @@ class ImplementerSession:
             model=entry.model_id,
             provider_id=entry.provider_id,
             transport=self.seams.transport,
-            redactor=Redactor(self.secrets()),
+            # Without a channel nothing is recorded, so nothing is queued to be "not taken in time".
+            redactor=Redactor(self.secrets()) if self._steps is not None else None,
             **options,
         )
 

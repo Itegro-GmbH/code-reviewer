@@ -79,6 +79,7 @@ from code_reviewer_runner.job_loop.process import (
     ProcessOutcome,
     ProcessSpec,
     RunningProcess,
+    StepsHandler,
 )
 from code_reviewer_runner.job_loop.reporting import (
     NO_RESULT_REASON,
@@ -91,6 +92,7 @@ from code_reviewer_runner.job_loop.reporting import (
     result_from_outcome,
     stopped_result,
 )
+from code_reviewer_runner.job_loop.step_sender import StepsApi, StepSender
 from code_reviewer_runner.lease_check import LeaseState
 from code_reviewer_runner.pr_agent_config import PASSTHROUGH_VARIABLES
 from code_reviewer_runner.result import ErrorCode
@@ -403,6 +405,16 @@ class JobHost:
                 env[RIPGREP_PATH_VARIABLE] = self._settings.dynamic_ripgrep
         return env
 
+    def _steps_handler(self, claimed: ClaimedJob, kind: ReviewKind) -> StepsHandler | None:
+        """The sender of the step records of an Implementer turn, or None: any other kind of job,
+        an API that has no steps call, and an app that did not list `implementer_steps` get no
+        channel, and then nothing is recorded or sent."""
+        if kind is not ReviewKind.IMPLEMENTER:
+            return None
+        if not isinstance(self._api, StepsApi) or not self._api.supports_steps:
+            return None
+        return StepSender(self._api, claimed.id, clock=self._clock, log=self._log).serve
+
     def _ms_since(self, started: float) -> int:
         return int((self._clock.monotonic() - started) * 1000)
 
@@ -457,6 +469,9 @@ class JobHost:
                     if _supervises_an_engine(kind)
                     else None
                 ),
+                # #745: the step records of an Implementer turn, for the live view, when the app
+                # has the call. The process has no credential: this end posts them.
+                steps=self._steps_handler(claimed, kind),
                 terminate_grace=(
                     IMPLEMENTER_TERMINATE_GRACE_SECONDS if kind is ReviewKind.IMPLEMENTER else None
                 ),
