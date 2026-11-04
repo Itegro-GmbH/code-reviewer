@@ -111,6 +111,10 @@ export class FakeSandboxService {
   readonly stops: string[] = [];
   /** Every name `delete` was called with, in order. */
   readonly deletes: string[] = [];
+  /** Every `setNetworkPolicy` call (#745, step 7), in order: the VM's name and the policy it was given. */
+  readonly policies: Array<{ name: string; policy: unknown }> = [];
+  /** A failure for the next `setNetworkPolicy` calls: set to make the platform refuse them. */
+  policyError: Error | undefined;
   readonly vms = new Map<string, FakeVmRecord>();
   private readonly processes: FakeProcessRecord[] = [];
   private readonly rules: Rule[] = [];
@@ -423,6 +427,16 @@ export class FakeSandboxService {
       return "kept";
     this.vms.delete(name);
     return "deleted";
+  }
+
+  /** Sets the network policy of a VM that is running (#745, step 7); a VM that is not is refused, like the adapter's `not_ready`. */
+  async setNetworkPolicy(name: string, policy: unknown): Promise<void> {
+    this.events.push(`policy:${name}`);
+    if (this.policyError !== undefined) throw this.policyError;
+    const record = this.vms.get(name);
+    if (record === undefined || record.state !== "running")
+      throw new Error("not_ready");
+    this.policies.push({ name, policy });
   }
 
   // ---- internals -------------------------------------------------------------------------------

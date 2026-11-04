@@ -53,6 +53,7 @@ _BLOCK_KEYS = frozenset(
         "summary",
         "opencode",
         "setup",
+        "network",
     }
 )
 MAX_BRANCHES = 50
@@ -60,10 +61,28 @@ MAX_BRANCH_NAME_CHARS = 255
 MAX_REASON_CHARS = 40
 _REASON = re.compile(r"[a-z][a-z_]*")
 # Not required: a block without the count (an older shape) is still one the app reads.
-_OPTIONAL_KEYS = frozenset({"branchesDropped", "setup"})
+_OPTIONAL_KEYS = frozenset({"branchesDropped", "setup", "network"})
 MAX_SETUP_OUTPUT_CHARS = 8192
 _SETUP_KEYS = frozenset({"ok", "exitCode", "timedOut", "durationSeconds", "output"})
 MAX_DROPPED = 1_000_000_000
+# #745, step 7: `ImplementerNetworkReport`. The numbers are counts and bytes of one turn.
+_NETWORK_KEYS = frozenset(
+    {
+        "mode",
+        "door",
+        "vmPolicy",
+        "allowed",
+        "refused",
+        "bytesIn",
+        "bytesOut",
+        "dropped",
+        "connections",
+    }
+)
+_CONNECTION_KEYS = frozenset({"host", "port", "outcome", "reason", "count", "bytesIn", "bytesOut"})
+MAX_NETWORK_CONNECTIONS = 100
+MAX_NETWORK_HOST_CHARS = 253
+MAX_COUNT = 10**15
 _STATUSES = frozenset(kind.value for kind in ChangeKind)
 
 
@@ -144,6 +163,53 @@ def _setup_ok(value: object) -> bool:
     )
 
 
+def _count_ok(value: object, *, minimum: int = 0, maximum: int = MAX_COUNT) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and minimum <= value <= maximum
+
+
+def _connection_ok(value: object) -> bool:
+    connection = as_object(value)
+    if connection is None or frozenset(connection) != _CONNECTION_KEYS:
+        return False
+    reason = connection["reason"]
+    return (
+        _is_string(connection["host"], MAX_NETWORK_HOST_CHARS)
+        and _count_ok(connection["port"], maximum=65535)
+        and connection["outcome"] in ("allowed", "refused")
+        and (
+            reason is None
+            or (
+                isinstance(reason, str)
+                and _REASON.fullmatch(reason) is not None
+                and len(reason) <= MAX_REASON_CHARS
+            )
+        )
+        and _count_ok(connection["count"], minimum=1)
+        and _count_ok(connection["bytesIn"])
+        and _count_ok(connection["bytesOut"])
+    )
+
+
+def _network_ok(value: object) -> bool:
+    """The `network` block (#745, step 7, `ImplementerNetworkReport`): closed, all fields in."""
+    network = as_object(value)
+    if network is None or frozenset(network) != _NETWORK_KEYS:
+        return False
+    connections = network["connections"]
+    return (
+        network["mode"] in ("off", "list", "open")
+        and isinstance(network["door"], bool)
+        and network["vmPolicy"] in ("narrowed", "unchanged", "not_configured")
+        and all(
+            _count_ok(network[name])
+            for name in ("allowed", "refused", "bytesIn", "bytesOut", "dropped")
+        )
+        and isinstance(connections, list)
+        and len(cast("list[object]", connections)) <= MAX_NETWORK_CONNECTIONS
+        and all(_connection_ok(entry) for entry in cast("list[object]", connections))
+    )
+
+
 def _branch_ok(value: object) -> bool:
     branch = as_object(value)
     if branch is None or set(branch) != {"name", "head", "result", "reason"}:
@@ -178,6 +244,8 @@ def valid_block(value: object) -> dict[str, Any] | None:
     if "branchesDropped" in block and not _dropped_ok(block["branchesDropped"]):
         return None
     if "setup" in block and not _setup_ok(block["setup"]):
+        return None
+    if "network" in block and not _network_ok(block["network"]):
         return None
     base, head, pushed = block["baseCommit"], block["headCommit"], block["pushed"]
     commits, files, branches = block["commits"], block["filesChanged"], block["branches"]

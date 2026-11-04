@@ -52,6 +52,10 @@ export const CLAIM_FEATURES = [
   // #818: the runner reads `implementer.environment` and runs its setup script before the model. Sent only to a caller that named
   // it; a turn whose environment has a script is refused (`implementer_engine_unavailable`, free) for a caller that did not.
   "implementer_environment",
+  // #745, step 7: the runner reads `implementer.environment.network` and starts the network door for it. Sent only to a caller that
+  // named it; a turn whose environment has a rule other than `off` is refused (`implementer_engine_unavailable`, free) for a
+  // caller that did not.
+  "implementer_network",
 ] as const;
 export type ClaimFeature = (typeof CLAIM_FEATURES)[number];
 
@@ -99,6 +103,7 @@ export const APP_FEATURES = [
   "pool_cap",
   "release",
   "vm_lifecycle",
+  "implementer_steps",
 ] as const;
 export type AppFeature = (typeof APP_FEATURES)[number];
 
@@ -338,6 +343,7 @@ export const IMPLEMENTER_ENVIRONMENT_NAMES = [
   "RUNNER_IMPLEMENTER_MODEL_DOOR",
   "RUNNER_IMPLEMENTER_SANDBOX_PROOF",
   "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB",
+  "RUNNER_IMPLEMENTER_NETWORK_SWITCH",
 ] as const;
 export type ImplementerEnvironmentName =
   (typeof IMPLEMENTER_ENVIRONMENT_NAMES)[number];
@@ -507,6 +513,13 @@ export type SplitClaimResponse = {
     heartbeatIntervalSeconds: number;
     /** #818: the VM size the turn's environment asks for; only for a turn that has an environment. */
     vcpus?: number;
+    /** #745, step 7: the rule for the agent's network; for every turn of the Implementer, for no other job. */
+    network?: { mode: "off" | "list" | "open"; hosts: string[] };
+    /**
+     * #745, step 7: the host name of the turn's model provider, for the Dispatcher that signs it into the token of the network
+     * switch (the Worker cannot choose it). Only for a turn of the Implementer whose provider has a plain host name.
+     */
+    modelHost?: string;
   };
 };
 
@@ -680,6 +693,8 @@ export const IMPLEMENTER_RESULT_LIMITS = {
   filesChanged: 500,
   summaryChars: 8192,
   branches: 50,
+  /** #745, step 7: the entries of `network.connections`. */
+  networkConnections: 100,
 } as const;
 
 /**
@@ -699,6 +714,7 @@ export const IMPLEMENTER_MAX_BODY_BYTES =
       IMPLEMENTER_RESULT_LIMITS.summaryChars +
       IMPLEMENTER_RESULT_LIMITS.branches * (255 + 160) +
       IMPLEMENTER_SETUP_OUTPUT_CHARS +
+      IMPLEMENTER_RESULT_LIMITS.networkConnections * (253 + 160) +
       (8192 + 2000));
 
 /** What became of one local branch of the agent's repository at the end of a turn (`branches` of `ImplementerResult`). */
@@ -720,6 +736,31 @@ export type ImplementerSetupResult = {
   output: string;
 };
 
+/**
+ * #745, step 7: what the network door did in a turn (`ImplementerNetworkReport` in the contract): the mode of the rule, whether a
+ * door ran, what the second wall (the VM's network policy) did, and the connections the door saw, one entry for each distinct
+ * host, port and outcome. `reason` is a word of the door for a refusal, null for an allowed connection.
+ */
+export type ImplementerNetworkReport = {
+  mode: "off" | "list" | "open";
+  door: boolean;
+  vmPolicy: "narrowed" | "unchanged" | "not_configured";
+  allowed: number;
+  refused: number;
+  bytesIn: number;
+  bytesOut: number;
+  dropped: number;
+  connections: {
+    host: string;
+    port: number;
+    outcome: "allowed" | "refused";
+    reason: string | null;
+    count: number;
+    bytesIn: number;
+    bytesOut: number;
+  }[];
+};
+
 /** #746: `ImplementerResult` in the contract: facts the runner measured in the repository, and a plain-text summary. */
 export type ImplementerResult = {
   baseCommit: string;
@@ -738,6 +779,8 @@ export type ImplementerResult = {
   opencode: { sessionId: string; version: string } | null;
   /** #818: present when a setup script ran. */
   setup?: ImplementerSetupResult;
+  /** #745, step 7: present when the turn had a network door or the VM's network policy was changed. */
+  network?: ImplementerNetworkReport;
 };
 
 export type CompleteRequest = { leaseToken: string; result: RunnerResult };
@@ -753,4 +796,80 @@ export type CompleteResponse = {
     status: "succeeded" | "failed" | "queued" | "superseded";
   };
   alreadyCompleted: boolean;
+};
+
+/**
+ * #745: the kinds of record of the live view (`KnownStepKind` in the contract): a finished `reasoning` part, a finished assistant
+ * `text` part, a `tool` call (name, status, title, input, error; never its output) and a `step` (the tokens and cost of one model
+ * call). A record of a kind not listed is not stored and is counted as `dropped`: a newer runner may send more kinds.
+ */
+export const STEP_KINDS = ["reasoning", "text", "tool", "step"] as const;
+export type StepKind = (typeof STEP_KINDS)[number];
+
+/**
+ * #745: the bounds of a steps request and of one record (`StepsRequest` and `StepRecord` in the contract). The lengths are in
+ * characters, as JSON Schema counts them; the runner cuts its texts at 16 KiB, 4 KiB and 512 bytes and adds a mark of a few
+ * characters (`[N bytes cut]`), which `*Chars` leaves room for. The size of a batch is the sender's to keep (the runner sends at most
+ * 48 KiB of body, which is within `RUNNER_MAX_BODY_BYTES` with the lease token around it); the app only refuses what is over the
+ * body limit.
+ */
+export const STEPS_LIMITS = {
+  records: 50,
+  partIdChars: 256,
+  seq: 2_147_483_647,
+  textChars: 16 * 1024 + 64,
+  inputChars: 4 * 1024 + 64,
+  errorChars: 4 * 1024 + 64,
+  titleChars: 512 + 64,
+  toolChars: 128,
+  statusChars: 32,
+  reasonChars: 64,
+  epochMs: 1e15,
+  count: 1e12,
+  cost: 1e9,
+} as const;
+
+/** #745: the tokens of a `step` record, as the runner counts them. */
+export type StepTokens = {
+  input: number;
+  output: number;
+  reasoning: number;
+  cacheRead: number;
+  cacheWrite: number;
+};
+
+/**
+ * #745: `StepRecord` in the contract. `startedAt` and `endedAt` are epoch milliseconds of the sandbox's clock. `bytes` is the true
+ * size of the text the record shows when the runner cut it. Fields a reader does not know are ignored.
+ */
+export type StepRecord = {
+  kind: string;
+  partId: string;
+  seq: number;
+  startedAt?: number;
+  endedAt?: number;
+  text?: string;
+  bytes?: number;
+  tool?: string;
+  status?: string;
+  title?: string;
+  input?: string;
+  error?: string;
+  reason?: string;
+  tokens?: StepTokens;
+  cost?: number;
+};
+
+/** #745: `POST /api/runners/v1/jobs/{id}/steps` (`StepsRequest`): the lease token of the claim and a batch of records. */
+export type StepsRequest = { leaseToken: string; records: StepRecord[] };
+
+/** #745: `POST /api/workers/v1/jobs/{id}/steps` (`WorkerStepsRequest`): the credential identifies the job. */
+export type WorkerStepsRequest = { records: StepRecord[] };
+
+/** #745: 200 from the steps call (`StepsResponse`). Counts of the records of the batch; the lease is not extended. */
+export type StepsResponse = {
+  version: typeof RUNNER_API_VERSION;
+  stored: number;
+  stale: number;
+  dropped: number;
 };

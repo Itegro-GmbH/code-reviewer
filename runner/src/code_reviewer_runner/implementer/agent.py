@@ -39,12 +39,14 @@ from code_reviewer_runner.dynamic_review.adapter import (
     turn_end_note,
 )
 from code_reviewer_runner.dynamic_review.budget import BudgetLedger
-from code_reviewer_runner.dynamic_review.engine_events import EventReader
+from code_reviewer_runner.dynamic_review.engine_events import EventFeeder, EventReader
 from code_reviewer_runner.dynamic_review.tool_part_audit import ToolPartAudit
 from code_reviewer_runner.job_loop.jsonvalues import as_object
+from code_reviewer_runner.redaction import Redactor
 from code_reviewer_runner.result import ErrorCode
 
 from .config import IMPLEMENTER_AGENT, SESSION_TITLE
+from .step_feed import StepFeeder
 
 _log = logging.getLogger(__name__)
 
@@ -114,6 +116,7 @@ class ImplementerAgent:
         startup_seconds: float = STARTUP_SECONDS,
         events_connect_seconds: float = EVENTS_CONNECT_SECONDS,
         transport: Transport = _http_request,
+        redactor: Redactor | None = None,
     ) -> None:
         self.ledger = ledger
         self.command = tuple(command)
@@ -135,6 +138,11 @@ class ImplementerAgent:
         self._transport = transport
         self._client: EngineClient | None = None
         self._events: EventReader | None = None
+        self._feeder_errors = 0
+        # The step records of the turn (#745), made when the session is open: only with a redactor,
+        # so no record exists that was not redacted.
+        self._redactor = redactor
+        self.steps: StepFeeder | None = None
         # How long each message call took, in seconds on the ledger's clock.
         self.turn_seconds: list[float] = []
 
@@ -186,9 +194,14 @@ class ImplementerAgent:
     def _open_audit(self, client: EngineClient, session_id: str) -> None:
         """The audit of the engine's tool parts runs on its event stream beside the turns: it
         counts tool calls and result bytes into the ledger (the call trace, the per-result and
-        the cumulative bound)."""
+        the cumulative bound). The step feeder rides on the same stream after it and is best effort
+        (`step_feed.py`); the audit stays first and fails closed."""
         audit = ToolPartAudit(self.ledger, session_id, export_root=self.directory)
-        events = EventReader(client.open_events, audit, self.ledger)
+        feeders: list[EventFeeder] = [audit]
+        if self._redactor is not None:
+            self.steps = StepFeeder(session_id, self._redactor)
+            feeders.append(self.steps)
+        events = EventReader(client.open_events, feeders, self.ledger)
         events.start(self._events_connect_seconds)
         self._events = events
 
@@ -201,8 +214,24 @@ class ImplementerAgent:
         agent can change the repository from here on."""
         if self._events is not None:
             self._events.stop()
+            self._feeder_errors = self._events.feeder_errors
             self._events = None
         return self._runtime.stop()
+
+    def step_notes(self) -> tuple[str, ...]:
+        """What the live view lost in the turn (#745), for the turn's notes: events the step
+        feeder could not convert and records it pushed out of its full queue. Empty when nothing
+        was lost. Read after `stop()`, when the counts are final."""
+        errors = self._feeder_errors if self._events is None else self._events.feeder_errors
+        dropped = 0 if self.steps is None else self.steps.dropped
+        notes: list[str] = []
+        if errors:
+            notes.append(f"the live view could not convert {errors} engine events")
+        if dropped:
+            notes.append(
+                f"the live view dropped {dropped} step records that were not taken in time"
+            )
+        return tuple(notes)
 
     @property
     def running(self) -> bool:

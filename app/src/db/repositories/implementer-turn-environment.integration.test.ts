@@ -54,6 +54,7 @@ describe("the environment snapshot of a turn", () => {
       name: "Node 22",
       vcpus: 6,
       setupScript: "  pnpm install\r\n",
+      network: { mode: "off", hosts: [] },
     };
     expect(turn.environment).toEqual(expected);
     const read = await createImplementerRepository(
@@ -130,6 +131,7 @@ describe("the environment snapshot of a turn", () => {
       name: "Node 22",
       vcpus: 6,
       setupScript: "  pnpm install\r\n",
+      network: { mode: "off", hosts: [] },
     });
   });
 

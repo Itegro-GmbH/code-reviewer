@@ -17,6 +17,7 @@ import { createJobsRepository } from "../db/repositories/jobs-repository.ts";
 import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
 import { createPinnedAddressReader } from "../review-settings/pinned-addresses.ts";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
+import { createImplementerStepsRepository } from "../db/repositories/implementer-steps-repository.ts";
 import { createJobVmRunsRepository } from "../db/repositories/job-vm-runs-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { getDatabase } from "../db/startup.ts";
@@ -146,6 +147,8 @@ function sharedDeps(): WorkerApiDeps {
     // #588: a selection of a catalog provider made before pins existed is pinned by its first claim, in the job's own workspace.
     providerPins: createProviderPins(reviewSettingsServiceFor),
     claimedKeys,
+    // #745: the steps of a running turn, scoped to the job's own workspace.
+    steps: (workspaceId) => createImplementerStepsRepository(db, workspaceId),
     // #753: the write token of a turn of the Implementer ends with the turn (and with a fetch that failed after it was made).
     revokeWriteTokens: writeTokens.revokeAllOf,
     revokeUndelivered: writeTokens.revokeUndelivered,

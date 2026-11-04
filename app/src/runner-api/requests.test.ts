@@ -1464,3 +1464,167 @@ describe("the setup block of an implementer result (#818)", () => {
       ).toContain("result.implementer.setup");
   });
 });
+
+// #745, step 7: the network block of a turn's result (`result.implementer.network`, `ImplementerNetworkReport` in the contract).
+// Read like the rest of the block: closed, bounded, control characters stripped from the host.
+describe("the network block of an implementer result (#745)", () => {
+  const SHA_A = "a".repeat(40);
+  const report = (overrides: Record<string, unknown> = {}) => ({
+    mode: "list",
+    door: true,
+    vmPolicy: "narrowed",
+    allowed: 1,
+    refused: 1,
+    bytesIn: 10,
+    bytesOut: 2,
+    dropped: 0,
+    connections: [
+      {
+        host: "registry.npmjs.org",
+        port: 443,
+        outcome: "allowed",
+        reason: null,
+        count: 1,
+        bytesIn: 10,
+        bytesOut: 2,
+      },
+      {
+        host: "example.com",
+        port: 443,
+        outcome: "refused",
+        reason: "not_listed",
+        count: 1,
+        bytesIn: 0,
+        bytesOut: 0,
+      },
+    ],
+    ...overrides,
+  });
+  const block = (network?: unknown) => ({
+    baseCommit: SHA_A,
+    headCommit: null,
+    pushed: false,
+    commits: [],
+    filesChanged: [],
+    summary: "",
+    opencode: null,
+    ...(network === undefined ? {} : { network }),
+  });
+  const bodyWith = (implementer: unknown) => ({
+    leaseToken: TOKEN,
+    result: { ...GOOD_RESULT, implementer },
+  });
+
+  it("keeps a valid block as it was sent, in a complete and in a Worker result", () => {
+    const complete = parseCompleteRequest(bodyWith(block(report())));
+    const worker = parseWorkerResultRequest({
+      result: { ...GOOD_RESULT, implementer: block(report()) },
+    });
+
+    expect(complete.ok && complete.value.result.implementer?.network).toEqual(
+      report(),
+    );
+    expect(worker.ok && worker.value.result.implementer?.network).toEqual(
+      report(),
+    );
+  });
+
+  it("leaves the key out of a result that has no block", () => {
+    const parsed = parseCompleteRequest(bodyWith(block()));
+
+    expect(
+      parsed.ok && "network" in (parsed.value.result.implementer ?? {}),
+    ).toBe(false);
+  });
+
+  it("strips control characters from a host", () => {
+    const parsed = parseCompleteRequest(
+      bodyWith(
+        block(
+          report({
+            connections: [
+              { ...report().connections[0], host: "ex\u0000am\u001fple.com" },
+            ],
+          }),
+        ),
+      ),
+    );
+
+    expect(
+      parsed.ok &&
+        parsed.value.result.implementer?.network?.connections[0]?.host,
+    ).toBe("example.com");
+  });
+
+  it.each([
+    ["null", null, "network"],
+    ["not an object", "list", "network"],
+    ["an unknown key", { extra: 1 }, "network.extra"],
+    ["a missing mode", { mode: undefined }, "network.mode"],
+    ["an unknown mode", { mode: "closed" }, "network.mode"],
+    ["an unknown policy", { vmPolicy: "wide" }, "network.vmPolicy"],
+    ["a door that is not a boolean", { door: 1 }, "network.door"],
+    ["a negative count", { refused: -1 }, "network.refused"],
+    ["a count that is a fraction", { allowed: 0.5 }, "network.allowed"],
+    [
+      "connections that are not a list",
+      { connections: {} },
+      "network.connections",
+    ],
+    [
+      "more than 100 connections",
+      {
+        connections: Array.from({ length: 101 }, () => report().connections[0]),
+      },
+      "network.connections",
+    ],
+    [
+      "a connection with an unknown key",
+      { connections: [{ ...report().connections[0], extra: 1 }] },
+      "network.connections[0].extra",
+    ],
+    [
+      "a host of 254 characters",
+      { connections: [{ ...report().connections[0], host: "a".repeat(254) }] },
+      "network.connections[0].host",
+    ],
+    [
+      "a port above 65535",
+      { connections: [{ ...report().connections[0], port: 65536 }] },
+      "network.connections[0].port",
+    ],
+    [
+      "a count of 0",
+      { connections: [{ ...report().connections[0], count: 0 }] },
+      "network.connections[0].count",
+    ],
+    [
+      "an outcome that is not known",
+      { connections: [{ ...report().connections[0], outcome: "maybe" }] },
+      "network.connections[0].outcome",
+    ],
+    [
+      "a reason that is not a word",
+      { connections: [{ ...report().connections[0], reason: "Not Listed" }] },
+      "network.connections[0].reason",
+    ],
+    [
+      "a reason of 41 characters",
+      { connections: [{ ...report().connections[0], reason: "a".repeat(41) }] },
+      "network.connections[0].reason",
+    ],
+    [
+      "a missing reason",
+      { connections: [{ ...report().connections[0], reason: undefined }] },
+      "network.connections[0].reason",
+    ],
+  ])("refuses %s", (_name, change, field) => {
+    const network =
+      change === null || typeof change === "string" ? change : report(change);
+    const parsed = parseCompleteRequest(bodyWith(block(network as never)));
+
+    expect(fieldsOf(parsed).map((entry) => entry.field)).toContain(
+      `result.implementer.${field}`,
+    );
+  });
+});

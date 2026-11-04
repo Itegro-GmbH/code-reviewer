@@ -10,11 +10,14 @@ import {
   isEnvironmentVcpus,
 } from "./limits.ts";
 import type { EnvironmentIssue } from "./errors.ts";
+import { checkNetwork, type NetworkRule } from "../../network-rule/network.ts";
 
 export type EnvironmentInput = {
   name: string;
   vcpus: number;
   setupScript: string;
+  /** #745, step 7: the rule for the agent's network; `off` when the body names none. */
+  network: NetworkRule;
 };
 
 export type EnvironmentInputCheck =
@@ -58,6 +61,9 @@ export function validateEnvironmentInput(body: unknown): EnvironmentInputCheck {
   else if (new TextEncoder().encode(script).length > SETUP_SCRIPT_MAX_BYTES)
     refuse("setupScript", "too_long");
 
+  const network = checkNetwork(fields.network);
+  if (!network.ok) refuse(network.field, network.code);
+
   if (issues.length > 0) return { ok: false, issues };
   // The checks above narrowed the fields; the casts only restate what they proved.
   return {
@@ -66,6 +72,7 @@ export function validateEnvironmentInput(body: unknown): EnvironmentInputCheck {
       name: name as string,
       vcpus: vcpus as number,
       setupScript: script as string,
+      network: (network as { ok: true; rule: NetworkRule }).rule,
     },
   };
 }

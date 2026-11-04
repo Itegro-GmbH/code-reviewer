@@ -120,6 +120,10 @@ describe("the route classification", () => {
       "/projects/[[...rest]]": "review",
       "/api/health": "core",
       "/favicon.ico": "core",
+      // #745: the steps of a running turn belong to the capability, on both doors.
+      "/api/w/[workspace]/runs/[id]/steps": "implementer",
+      "/api/runners/v1/jobs/[id]/steps": "implementer",
+      "/api/workers/v1/jobs/[id]/steps": "implementer",
       // #755-T14: the routes behind the Implementer form belong to the capability, none of them is core.
       "/api/w/[workspace]/implementer/repositories": "implementer",
       "/api/w/[workspace]/implementer/repositories/[repositoryId]/branches":

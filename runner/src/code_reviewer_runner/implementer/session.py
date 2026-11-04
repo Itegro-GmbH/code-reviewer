@@ -27,6 +27,7 @@ Nothing steers the agent: the cost limit (the door refuses the next call) and th
 only brakes.
 """
 
+import contextlib
 import logging
 import threading
 import time
@@ -53,7 +54,12 @@ from code_reviewer_runner.dynamic_review.job_model_entry import (
 from code_reviewer_runner.dynamic_review.model_door_route import MODEL_DOOR_ADDRESS
 from code_reviewer_runner.dynamic_review.passthrough.families import WireFamily, spec_of
 from code_reviewer_runner.dynamic_review.static_isolation import slot_ports
-from code_reviewer_runner.job import ImplementerInput, JobError
+from code_reviewer_runner.job import (
+    IMPLEMENTER_NETWORK_SWITCH_VARIABLE,
+    ImplementerInput,
+    JobError,
+)
+from code_reviewer_runner.redaction import Redactor
 from code_reviewer_runner.result import ErrorCode, Usage
 
 from .agent import AgentTurn, EngineRuntime, ImplementerAgent
@@ -82,8 +88,20 @@ from .history import CommitInfo, FileChange
 from .limits import MAX_AGENT_REQUEST_BYTES as MAX_AGENT_REQUEST_BYTES
 from .limits import MAX_RETURNED_BYTES as MAX_RETURNED_BYTES
 from .limits import MAX_TOOL_RESULT_BYTES as MAX_TOOL_RESULT_BYTES
+from .netdoor_launcher import NetDoorSeams, RunningNetDoor, start_network_door
+from .network_report import (
+    VM_POLICY_NARROWED,
+    VM_POLICY_NOT_CONFIGURED,
+    VM_POLICY_UNCHANGED,
+    network_report,
+)
+from .network_rule import MODE_OFF, MODE_OPEN, OFF, NetworkRule
+from .network_switch import Post, model_host_of, narrow_policy, parse_switch, urllib_post
 from .prompts import LEFTOVER_PROMPT, instructions_text
 from .reader import RESET_SECONDS as READER_RESET_SECONDS
+from .step_pump import FLUSH_SECONDS as STEPS_FLUSH_SECONDS
+from .step_pump import STOP_FLUSH_SECONDS as STOP_STEPS_FLUSH_SECONDS
+from .step_pump import StepPump
 from .turn_result import TurnResult, clip_summary
 
 _log = logging.getLogger(__name__)
@@ -98,14 +116,16 @@ GRACE_SECONDS = 270.0
 # (`READER_RESET_SECONDS`), the rescue of a detached HEAD (three git commands of
 # `RESCUE_STEP_TIMEOUT`), the look at the tree (`DIRTY_TIMEOUT`), the leftover commit of the system,
 # the second reset of the readers (the commit ran the repository's filters in a reader that can
-# write), the final push and the two reads of the report (`REPORT_READ_TIMEOUT` each). The sum is
-# 214 s of the 270; a test holds it, and holds the slack (a fifth of the grace).
+# write), the final push, the two reads of the report (`REPORT_READ_TIMEOUT` each) and the last
+# flush of the live view (`STEPS_FLUSH_SECONDS`, #745: after the push, before the result, bounded in
+# all of its parts). The sum is 222 s of the 270; a test holds it, and holds the slack.
 LEFTOVER_SECONDS = 40.0
 FINAL_PUSH_SECONDS = 100.0
 ENGINE_STOP_SECONDS = KILL_SECONDS + STOP_SECONDS
 # A stop (SIGTERM) leaves the process `SIGTERM_BACKSTOP_SECONDS` in all (`job_run.py`): the engine
 # comes out of it, then the reset of the readers, the rescue of a detached HEAD, the final push (no
-# leftover is committed, so no second reset) and the two reads of the report: 79 s of the 115.
+# leftover is committed, so no second reset), the two reads of the report and the shorter last
+# flush of the live view (`STOP_STEPS_FLUSH_SECONDS`): 84 s of the 115.
 STOP_PUSH_SECONDS = 25.0
 # How often the watch asks the job host whether the job is still ours while the agent works (a
 # lost lease ends the turn at once; nothing is pushed in the meantime).
@@ -146,11 +166,18 @@ class SessionSeams:
     leftover_seconds: float = LEFTOVER_SECONDS
     reader_reset_seconds: float = READER_RESET_SECONDS
     lease_poll_seconds: float = LEASE_POLL_SECONDS
+    # The last flush of the live view (#745), at a normal end and at a stop.
+    steps_flush_seconds: float = STEPS_FLUSH_SECONDS
+    stop_steps_flush_seconds: float = STOP_STEPS_FLUSH_SECONDS
     startup_seconds: float | None = None
     clock: Callable[[], float] = time.monotonic
     # How the model door is started and what it talks to (#745, step 3); the defaults are the VM's
     # Docker. A test brings a daemon of its own.
     door: DoorSeams = field(default_factory=DoorSeams)
+    # The network door and the call that narrows the VM's network policy (#745, step 7).
+    netdoor: NetDoorSeams = field(default_factory=NetDoorSeams)
+    switch_post: Post = urllib_post
+    switch_pause_seconds: float = 2.0
 
 
 class AgentPlace(EngineRuntime, Protocol):
@@ -315,6 +342,7 @@ class ImplementerSession:
         seams: SessionSeams = SessionSeams(),  # noqa: B008 - frozen, shared on purpose
         should_stop: Callable[[], bool] = lambda: False,
         max_seconds: float | None = None,
+        steps: StepPump | None = None,
     ) -> None:
         self.job = job
         self.workspace = workspace
@@ -328,6 +356,8 @@ class ImplementerSession:
         self._should_stop = should_stop
         # The hard timeout of the process: the turn is never given more (`_deadline_seconds`).
         self._max_seconds = max_seconds
+        # The channel the step records of the turn leave over (#745): None records nothing.
+        self._steps = steps
         self._notes: list[str] = []
         self._summary = ""
         self._error: tuple[ErrorCode, str] | None = None
@@ -342,6 +372,12 @@ class ImplementerSession:
         self._unchecked = False
         # The thread that removes the agent's container after the push (None before it).
         self._removal: threading.Thread | None = None
+        # #745, step 7: the network door (None for `off`) and what the second wall did.
+        self._netdoor: RunningNetDoor | None = None
+        self._net_log: dict[str, Any] | None = None
+        self._vm_policy = VM_POLICY_NOT_CONFIGURED
+        # Whether the turn got as far as the network (one that failed before says nothing of it).
+        self._network_reached = False
 
     @property
     def ledger(self) -> BudgetLedger | None:
@@ -366,12 +402,14 @@ class ImplementerSession:
         place: AgentPlace | None = None
         try:
             model = self._start_model()
+            self._start_network(model)
             place = self._place_factory()
             for note in place.create():
                 self._note(note)
             agent = self._agent(model, place)
             agent.start(ENGINE_PORT)
             self._session_id = agent.session_id
+            self._start_steps(agent)
             self._work(agent)
         except Exception as error:
             self._stopped_by(error)
@@ -386,17 +424,53 @@ class ImplementerSession:
             self._engine_ended = ended
             if not ended:
                 self._note("the agent's container could not be confirmed gone")
+            # No connection can come any more: the network door says its last word. It goes before
+            # the model door, whose network it is a member of.
+            self._stop_network()
             if model is not None:
                 # No call can come any more: the door says its last word, the cost is final.
                 model.stop()
+            if agent is not None:
+                # What the live view lost, after both doors are closed: best effort, so a fault in
+                # it never replaces the turn's outcome.
+                with contextlib.suppress(Exception):
+                    for note in agent.step_notes():
+                        self._note(note)
         try:
             self._finish()
         finally:
+            self._stop_network()
             if model is not None:
                 model.stop()
+            # The last flush of the live view, after the push and before the result: it hands over
+            # what is left, is bounded in time and best effort, so the push never waits for it.
+            self._finish_steps()
         result = self._result()
         self._remove_place(place)
         return result
+
+    def _start_steps(self, agent: ImplementerAgent) -> None:
+        """Begin to send the step records of the open session. Best effort: a fault here is the
+        live view's, never the turn's."""
+        feeder = getattr(agent, "steps", None)
+        if self._steps is None or feeder is None:
+            return
+        with contextlib.suppress(Exception):
+            self._steps.start(feeder)
+
+    def _finish_steps(self) -> None:
+        """The last flush, so that a finished run shows all its steps: it runs at every end, a stop
+        included (with less time), and leaves a line in the notes for what could not be sent."""
+        if self._steps is None:
+            return
+        seconds = (
+            self.seams.stop_steps_flush_seconds
+            if self._should_stop()
+            else self.seams.steps_flush_seconds
+        )
+        with contextlib.suppress(Exception):
+            for note in self._steps.finish(seconds):
+                self._note(note)
 
     def _remove_place(self, place: AgentPlace | None) -> None:
         """Take the killed container away, after the push and the reads: nothing waits for it (the
@@ -419,6 +493,68 @@ class ImplementerSession:
 
         self._removal = threading.Thread(target=remove, daemon=True)
         self._removal.start()
+
+    # -- the network ----------------------------------------------------------
+
+    @property
+    def rule(self) -> NetworkRule:
+        """The environment's rule for the agent's network; a task without one is `off`."""
+        environment = self.job.implementer.environment
+        return OFF if environment is None else environment.network
+
+    def _has_script(self) -> bool:
+        environment = self.job.implementer.environment
+        return environment is not None and environment.has_script
+
+    def _start_network(self, model: TurnModel) -> None:
+        """The environment's rule (#745, step 7), in force before the agent exists: the network
+        door for `list` and `open` (none for `off`), then the second wall, the VM's network policy,
+        narrowed to GitHub, the model provider, the app and the rule. `open` leaves the policy as
+        it is. The switch ends the connections that are open, so nothing the agent could have is
+        in flight yet. A door or a switch that fails ends the turn `setup_failed`, free."""
+        self._network_reached = True
+        rule = self.rule
+        if rule.mode != MODE_OFF:
+            self._netdoor = start_network_door(
+                rule, deadline_seconds=self._deadline_seconds(), seams=self.seams.netdoor
+            )
+        switch = parse_switch(self.environment.get(IMPLEMENTER_NETWORK_SWITCH_VARIABLE))
+        if rule.mode == MODE_OPEN:
+            self._vm_policy = VM_POLICY_UNCHANGED
+        elif switch is None:
+            # For every mode, `off` included: a second wall that is not there is said.
+            self._note("the VM's network policy was not changed: this runner has no way to do it")
+        else:
+            narrow_policy(
+                switch,
+                rule,
+                model_host_of(model.entry.upstream_base_url),
+                post=self.seams.switch_post,
+                pause_seconds=self.seams.switch_pause_seconds,
+            )
+            self._vm_policy = VM_POLICY_NARROWED
+
+    def _stop_network(self) -> None:
+        """End the network door and keep its log. Safe to call twice."""
+        door, self._netdoor = self._netdoor, None
+        if door is None:
+            return
+        if door.end is not None and door.end.unexpected:
+            self._note("the network door ended during the turn; the agent had no network after it")
+        self._net_log = door.stop()
+
+    def _network_block(self) -> dict[str, Any] | None:
+        """`ImplementerNetworkReport`: one for every turn that got as far as the network, whatever
+        its mode and whatever the second wall did (`vmPolicy` says, `not_configured` included)."""
+        rule = self.rule
+        if not self._network_reached:
+            return None
+        return network_report(
+            rule,
+            self._net_log,
+            door=rule.mode != MODE_OFF,
+            vm_policy=self._vm_policy,
+        )
 
     def _start_model(self) -> TurnModel:
         """The model door (#745, step 3): the key, the model pin and the cost limit go to a
@@ -494,12 +630,14 @@ class ImplementerSession:
             make_config=make_config,
             instructions=(
                 INSTRUCTIONS_FILE,
-                instructions_text(with_setup=self.job.implementer.environment is not None),
+                instructions_text(with_setup=self._has_script()),
             ),
             environment=implementer_environment(home=AGENT_HOME, scratch_dir=AGENT_TMP),
             model=entry.model_id,
             provider_id=entry.provider_id,
             transport=self.seams.transport,
+            # Without a channel nothing is recorded, so nothing is queued to be "not taken in time".
+            redactor=Redactor(self.secrets()) if self._steps is not None else None,
             **options,
         )
 
@@ -687,6 +825,7 @@ class ImplementerSession:
             opencode_version=PINNED_ENGINE_VERSION,
             usage=usage,
             notes=tuple(self._notes),
+            network=self._network_block(),
         )
 
     def _usage(self) -> Usage:

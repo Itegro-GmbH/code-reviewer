@@ -19,12 +19,14 @@ What a caller has to tell apart is the same small set as in the runner API (`api
 """
 
 import asyncio
+import contextlib
 import json
 import re
+import threading
 import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from code_reviewer_runner import __version__
 from code_reviewer_runner.job_loop.api import CompleteReply, HeartbeatReply, parse_heartbeat
@@ -43,6 +45,7 @@ from code_reviewer_runner.job_loop.http import (
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 from code_reviewer_runner.job_loop.worker_errors import WorkerFailure, WorkerSetupError
 from code_reviewer_runner.llm_providers import registered_provider_ids
+from code_reviewer_runner.step_wire import FEATURE_IMPLEMENTER_STEPS
 
 _JOB_ID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 # A heartbeat interval above this would let the 2 minute lease run out between two beats.
@@ -57,9 +60,15 @@ WORKER_FEATURES: tuple[str, ...] = (
     "operator_cost_limit",
     # #818: the Worker reads `implementer.environment` and runs its setup script before the model.
     "implementer_environment",
+    # #745, step 7: the Worker reads `implementer.environment.network` and starts the door for it.
+    "implementer_network",
 )
 # The feature of `GET /api/runners/v1/version` that says the Worker API exists.
 FEATURE_WORKER_API = "worker_api"
+# One steps request (#745): short, because the live view must never hold anything up. It bounds each
+# socket operation, not the call (nor the name lookup), so the sender bounds a call by its own clock
+# as well (`step_sender.REQUEST_SECONDS`).
+STEPS_REQUEST_TIMEOUT_SECONDS = 5.0
 
 
 class CredentialInvalid(LeaseLost):
@@ -101,6 +110,10 @@ class HttpWorkerApi:
         self._credential = credential
         self._timeout = request_timeout
         self._opener = build_opener()
+        # The features the app listed in the version answer (empty: none or not asked).
+        self._features: frozenset[str] = frozenset()
+        # The thread of the steps call in flight, if any (see `steps`).
+        self._steps_thread: threading.Thread | None = None
 
     # -- the checks and the three calls -------------------------------------------------------
 
@@ -122,6 +135,10 @@ class HttpWorkerApi:
             return
         body = as_object(parse_json(reply)) if reply.status == 200 else None
         features = body.get("features") if body and body.get("version") == 1 else None
+        if isinstance(features, list):
+            self._features = frozenset(
+                name for name in cast("list[object]", features) if isinstance(name, str)
+            )
         if isinstance(features, list) and FEATURE_WORKER_API not in features:
             raise WorkerSetupError(
                 WorkerFailure.APP_UNSUPPORTED, "the app does not list the Worker API (worker_api)"
@@ -174,6 +191,48 @@ class HttpWorkerApi:
             already_completed=bool(body and body.get("alreadyCompleted") is True),
         )
 
+    @property
+    def supports_steps(self) -> bool:
+        """True when the app listed `implementer_steps` (#745): it has the steps call. An app that
+        did not answer the version call, or does not list it, gets none."""
+        return FEATURE_IMPLEMENTER_STEPS in self._features
+
+    async def steps(self, job_id: str, body: bytes) -> None:
+        """Post one batch of step records (`body` is the request body, see `step_wire.py`).
+
+        The call runs on a daemon thread of its own, one at a time: a hung app costs this thread
+        and nothing else (the shared executor of the heartbeat and the result is never used), the
+        thread cannot hold the process back at its end, and a second call does not pile up behind
+        a first that is still waiting: it is `ApiUnavailable` until that one is over.
+        """
+        path = f"/api/workers/v1/jobs/{self._safe_id(job_id)}/steps"
+        running = self._steps_thread
+        if running is not None and running.is_alive():
+            raise ApiUnavailable("an earlier steps call has not ended")
+        loop = asyncio.get_running_loop()
+        done: asyncio.Future[Reply] = loop.create_future()
+
+        def settle(setter: Any, value: Any) -> None:
+            if not done.done():
+                setter(value)
+
+        def call() -> None:
+            try:
+                reply = self._send_bytes("POST", path, body, STEPS_REQUEST_TIMEOUT_SECONDS)
+            except BaseException as error:
+                outcome = (done.set_exception, error)
+            else:
+                outcome = (done.set_result, reply)
+            # A closed loop (RuntimeError) means nobody waits for the answer.
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(settle, *outcome)
+
+        self._steps_thread = threading.Thread(target=call, name="steps-call", daemon=True)
+        self._steps_thread.start()
+        reply = await done
+        if reply.status != 200:
+            raise self._failure(reply)
+
     # -- internals ----------------------------------------------------------------------------
 
     @staticmethod
@@ -184,6 +243,9 @@ class HttpWorkerApi:
 
     def _send(self, method: str, path: str, body: Mapping[str, Any] | None) -> Reply:
         data = json.dumps(body, separators=(",", ":")).encode("ascii") if body is not None else None
+        return self._send_bytes(method, path, data, self._timeout)
+
+    def _send_bytes(self, method: str, path: str, data: bytes | None, timeout: float) -> Reply:
         request = urllib.request.Request(
             f"{self._base_url}{path}",
             data=data,
@@ -195,7 +257,7 @@ class HttpWorkerApi:
                 "User-Agent": f"code-reviewer-worker/{__version__}",
             },
         )
-        return send(self._opener, request, self._timeout)
+        return send(self._opener, request, timeout)
 
     @staticmethod
     def _failure(reply: Reply) -> ApiError:

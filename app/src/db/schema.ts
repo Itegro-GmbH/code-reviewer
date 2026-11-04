@@ -1082,6 +1082,39 @@ export interface ImplementerTurnsTable {
     string | null | undefined,
     string | null
   >;
+  /**
+   * The environment's rule for the agent's network, copied with it (#745, step 7): both null (a task written before the rule, or without
+   * an environment: it reads `off`) or both set. `hosts` is one host name on each line.
+   */
+  environment_network_mode: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  environment_network_hosts: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+}
+
+/**
+ * One part of a turn's messages as the live view shows it (#745): a reasoning, an answer text, a tool call or the end of a model
+ * call, keyed by `(job_id, part_id)`. `seq` is the highest the runner has sent for the part, `ordinal` the one of its first
+ * record (the order of the page), `payload` the record without `kind`, `partId` and `seq` (never a tool's output), `bytes` its size.
+ */
+export interface ImplementerTurnStepsTable {
+  job_id: string;
+  part_id: string;
+  workspace_id: string;
+  seq: number;
+  ordinal: number;
+  kind: string;
+  /** JSON text of the record without `kind`, `partId` and `seq`. */
+  payload: string;
+  bytes: number;
+  created_at: string;
+  updated_at: string;
 }
 
 /**
@@ -1097,6 +1130,10 @@ export interface ImplementerEnvironmentsTable {
   /** A size of `contracts/environment-sizes.v1.json`; the app checks the list, the database only that it is positive. */
   vcpus: number;
   setup_script: string;
+  /** `off`, `list` or `open` (#745, step 7): the rule for the agent's network. Existing environments read `off`. */
+  network_mode: ColumnType<string, string | undefined, string>;
+  /** The host names of a list, one on each line, in the form the door compares them in; empty unless the mode is `list`. */
+  network_hosts: ColumnType<string, string | undefined, string>;
   created_by: string;
   /** ISO 8601 UTC. */
   created_at: string;
@@ -1133,6 +1170,7 @@ export interface Database {
   job_vm_runs: JobVmRunsTable;
   implementer_sessions: ImplementerSessionsTable;
   implementer_turns: ImplementerTurnsTable;
+  implementer_turn_steps: ImplementerTurnStepsTable;
   implementer_environments: ImplementerEnvironmentsTable;
   plan_handoff_tokens: PlanHandoffTokensTable;
   model_catalog_entries: ModelCatalogEntriesTable;

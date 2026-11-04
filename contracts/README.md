@@ -36,6 +36,15 @@ other way round, so a change to the format has to change the file and both sides
   and the removed tools' env families — is still accepted; the error code rules of a result). The implementer kind has its
   own file, `test_implementer_contract.py` (#746).
 
+## The steps of the live view (#745)
+
+`StepRecord`, `StepsRequest` and `StepsResponse` in `runner-api.v1.json` (and `WorkerStepsRequest`, `WorkerStepsResponse` in `worker-api.v1.json`) describe the batch of records a
+running turn of the Implementer sends for the live view (`POST /api/runners/v1/jobs/{id}/steps`, `POST /api/workers/v1/jobs/{id}/steps`; `app/src/runner-api/README.md`, "The steps of
+a turn of the Implementer"). The app lists the feature `implementer_steps` in `KnownAppFeature`; there is no claim feature, because the call adds nothing to the job input.
+`examples/StepsRequest.json`, `examples/StepsResponse.json` and the two under `examples/worker-api/` are validated by both suites; the app also holds its hand-written reading of a
+body to the schema's verdict on a set of good and bad bodies (`app/src/runner-api/steps-contract.test.ts`), and the runner holds the records its converter makes to the schema, at the
+size of its caps (`runner/tests/contract/test_steps_contract.py`). A record of a kind not in `KnownStepKind` is dropped, not refused, and only its common fields (`kind`, `partId`, `seq`, `startedAt`, `endedAt`) are checked (`KnownStepFields` bounds the rest for the known kinds); a field the schema does not know is ignored.
+
 ## The job model entry contract
 
 `job-model-entry.v1.json` (#548) is written by the app (`app/src/models-dev/job-entry.ts`) and read by the runner
@@ -179,7 +188,7 @@ one instruction, and one turn is one `jobs` row of the kind `implementer`. It ex
   has one sentence for each in `app/src/runs/error-copy.ts`.
 - The names of the environment variables the Worker container of an implementer job gets (`KnownImplementerEnvironmentName`): `RUNNER_IMPLEMENTER_WORK_DIR` (always `/work`), `RUNNER_IMPLEMENTER_MODEL_DOOR` (`docker`: the container
   starts the model door, the agent's container and the reader through the VM's Docker, #745), `RUNNER_IMPLEMENTER_SANDBOX_PROOF` (the
-  snapshot's Sysbox verdict) and `RUNNER_IMPLEMENTER_AGENT_MEMORY_MB` (the limit of the agent's container). The Dispatcher sets them; the container
+  snapshot's Sysbox verdict) and `RUNNER_IMPLEMENTER_AGENT_MEMORY_MB` (the limit of the agent's container) and `RUNNER_IMPLEMENTER_NETWORK_SWITCH` (#745 step 7: the document by which the container asks the Dispatcher to narrow the VM's network policy: the rule and the provider's host the Dispatcher signed, and the time the token stops working). The Dispatcher sets them; the container
   profile that carries them is `ImplementerContainerSpec` of `worker-container.v1.json` (#760), which since #745 also carries the VM's Docker socket (`DockerSocket`)
   and is the one spec that does.
 - Examples: `examples/implementer/RunnerJobInput.json`, `RunnerResult.json` and `SplitClaimResponse.json`.

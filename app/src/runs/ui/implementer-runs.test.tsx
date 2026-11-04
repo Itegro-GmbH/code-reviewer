@@ -17,7 +17,15 @@ import { RunsList } from "./runs-list.tsx";
 
 afterEach(cleanup);
 
-const api = { list: vi.fn(), detail: vi.fn() } as unknown as RunsApi;
+const api = {
+  list: vi.fn(),
+  detail: vi.fn(),
+  // The steps of a running task (#745): none have been reported.
+  steps: vi.fn(async () => ({
+    ok: true,
+    data: { steps: [], cursor: 0, hasMore: false },
+  })),
+} as unknown as RunsApi;
 const NONE_DROPPED = { invalid: 0, overflow: 0 };
 const SHA = "b".repeat(40);
 
@@ -595,6 +603,7 @@ describe("the environment on the detail page of an implementer run (#818)", () =
     vcpus: 6,
     memoryGb: 12,
     setup: null,
+    network: { mode: "off", hosts: [], report: null },
     ...overrides,
   });
 
@@ -739,5 +748,108 @@ describe("the environment on the detail page of an implementer run (#818)", () =
     );
 
     expect(screen.getByText("The script wrote no output.")).toBeTruthy();
+  });
+});
+
+// #745, step 7: what the page says of the network of a task.
+describe("the network on the detail page of an implementer run (#745)", () => {
+  const withReport = (
+    overrides: Partial<
+      NonNullable<ImplementerDetailView["environment"]>["network"]
+    > = {},
+  ): NonNullable<ImplementerDetailView["environment"]> => ({
+    name: "Node 22",
+    vcpus: 4,
+    memoryGb: 5.7,
+    setup: null,
+    network: {
+      mode: "list",
+      hosts: ["registry.npmjs.org", "*.pythonhosted.org"],
+      report: {
+        vmPolicy: "narrowed",
+        allowed: 3,
+        refused: 1,
+        bytesIn: 4096,
+        bytesOut: 512,
+        dropped: 0,
+        connections: [
+          {
+            host: "example.com <b>x</b>",
+            port: 443,
+            outcome: "refused",
+            reason: "not_listed",
+            count: 1,
+            bytesIn: 0,
+            bytesOut: 0,
+          },
+          {
+            host: "registry.npmjs.org",
+            port: 443,
+            outcome: "allowed",
+            reason: null,
+            count: 3,
+            bytesIn: 4096,
+            bytesOut: 512,
+          },
+        ],
+      },
+      ...overrides,
+    },
+  });
+
+  // #745-T44
+  it("shows the rule, the totals and each connection with its result, as text", () => {
+    renderDetail(
+      detail({
+        implementer: task({ reported: true, environment: withReport() }),
+      }),
+    );
+
+    const section = screen
+      .getByRole("heading", { name: "Network" })
+      .closest("[role=region]") as HTMLElement;
+    expect(section.textContent).toContain(
+      "Only the hosts of the environment's list.",
+    );
+    expect(section.textContent).toContain("registry.npmjs.org");
+    expect(section.textContent).toContain("*.pythonhosted.org");
+    expect(section.textContent).toContain("3 allowed, 1 refused");
+    expect(section.textContent).toContain("4.0 KB received");
+    expect(section.textContent).toContain("narrowed to GitHub");
+    const table = section.querySelector("[data-slot=run-network-connections]");
+    expect(table?.textContent).toContain("refused (not_listed)");
+    expect(table?.textContent).toContain("example.com <b>x</b>");
+    expect(table?.querySelector("b")).toBeNull();
+  });
+
+  // #745-T44
+  it("says nothing about the network of a task whose rule was off and which reported none", () => {
+    renderDetail(
+      detail({
+        implementer: task({
+          reported: true,
+          environment: withReport({ mode: "off", hosts: [], report: null }),
+        }),
+      }),
+    );
+
+    expect(screen.queryByRole("heading", { name: "Network" })).toBeNull();
+  });
+
+  // #745-T44
+  it("says the runner reported nothing for a rule that was on", () => {
+    renderDetail(
+      detail({
+        implementer: task({
+          reported: true,
+          environment: withReport({ mode: "open", hosts: [], report: null }),
+        }),
+      }),
+    );
+
+    expect(screen.getByText("Any public host.")).toBeTruthy();
+    expect(
+      screen.getByText("The runner reported no connections."),
+    ).toBeTruthy();
   });
 });

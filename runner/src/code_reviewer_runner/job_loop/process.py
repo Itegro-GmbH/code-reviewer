@@ -35,6 +35,7 @@ from code_reviewer_runner.lease_check import (
     LeaseState,
 )
 from code_reviewer_runner.process_group import end_group, has_exited
+from code_reviewer_runner.step_wire import MAX_LINE_BYTES, STEPS_FD_VARIABLE
 from code_reviewer_runner.supersede import SUPERSEDE_SIGNAL
 
 # The result line of a job is small (a log tail of 4 KB and a few numbers). Anything above this
@@ -45,6 +46,9 @@ STDERR_KEEP_BYTES = 64 * 1024
 _READ_CHUNK = 64 * 1024
 # After the leader has exited, a helper that keeps a pipe open must not hold the job up.
 _DRAIN_SECONDS = 2.0
+# What serves the steps channel: it reads the process's lines from the reader and answers on the
+# writer (`step_sender.StepSender.serve`).
+StepsHandler = Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]]
 # How often the leader is looked at (without reaping it) while the job runs.
 _EXIT_POLL_SECONDS = 0.02
 
@@ -84,6 +88,10 @@ class ProcessSpec:
     # #260: the loop's answer to "is this job still ours?". When set, the process is handed one
     # descriptor (`RUNNER_LEASE_CHECK_FD`) it can ask over; it holds no lease token itself.
     lease_check: Callable[[], Awaitable[LeaseState]] | None = None
+    # #745: the host's end of the steps channel. When set, the process is handed a second
+    # descriptor (`RUNNER_STEPS_FD`) to send the step records of its turn over; it holds no
+    # credential for the app. None: the process gets no such descriptor and records nothing.
+    steps: StepsHandler | None = None
     # How much of the end of its stdout is kept. The result line of an Implementer turn carries
     # its commits and files and can be megabytes; every other job prints a line of a few KB.
     stdout_keep_bytes: int = STDOUT_KEEP_BYTES
@@ -176,6 +184,24 @@ class _LeaseChannel:
             self.writer.close()
 
 
+@dataclass(frozen=True)
+class _StepsChannel:
+    """The host's end of the descriptor pair a process sends its step records over (#745)."""
+
+    reader: asyncio.StreamReader
+    writer: asyncio.StreamWriter
+    handler: StepsHandler
+
+    async def serve(self) -> None:
+        # Best effort: a fault of the live view is never the job's.
+        with contextlib.suppress(Exception):
+            await self.handler(self.reader, self.writer)
+
+    def close(self) -> None:
+        with contextlib.suppress(Exception):
+            self.writer.close()
+
+
 class _SubprocessJob:
     def __init__(
         self,
@@ -186,10 +212,12 @@ class _SubprocessJob:
         terminate_grace: float,
         lease: _LeaseChannel | None = None,
         stdout_keep_bytes: int = STDOUT_KEEP_BYTES,
+        steps: _StepsChannel | None = None,
     ) -> None:
         self._process = process
         self._pipes = pipes
         self._lease = lease
+        self._steps = steps
         self._workdir = workdir
         self._terminate_grace = terminate_grace
         # Whoever ends the group holds it, so one cannot signal after the other has reaped.
@@ -202,6 +230,7 @@ class _SubprocessJob:
             asyncio.create_task(self._read(pipes.stderr, self._stderr)),
         ]
         self._lease_server = asyncio.create_task(lease.serve()) if lease is not None else None
+        self._steps_server = asyncio.create_task(steps.serve()) if steps is not None else None
         self._collected = asyncio.create_task(self._collect())
 
     @property
@@ -245,6 +274,10 @@ class _SubprocessJob:
                 self._lease_server.cancel()
                 await asyncio.gather(self._lease_server, return_exceptions=True)
                 self._lease.close()
+            if self._steps_server is not None and self._steps is not None:
+                self._steps_server.cancel()
+                await asyncio.gather(self._steps_server, return_exceptions=True)
+                self._steps.close()
             self._pipes.close()
             shutil.rmtree(self._workdir, ignore_errors=True)
         exit_code = self._process.returncode
@@ -293,6 +326,9 @@ class SubprocessLauncher:
         # The two ends of the lease question (#260): the process gets one, the loop keeps the other.
         ends = socket.socketpair() if spec.lease_check is not None else None
         lease: _LeaseChannel | None = None
+        # The two ends of the steps channel (#745), only for a process whose host sends steps.
+        step_ends = socket.socketpair() if spec.steps is not None else None
+        steps: _StepsChannel | None = None
         try:
             if uid is not None and gid is not None:
                 os.chown(workdir, uid, gid)
@@ -300,6 +336,9 @@ class SubprocessLauncher:
             if ends is not None:
                 pass_fds = (ends[1].fileno(),)
                 environment[LEASE_CHECK_FD_VARIABLE] = str(ends[1].fileno())
+            if step_ends is not None:
+                pass_fds = (*pass_fds, step_ends[1].fileno())
+                environment[STEPS_FD_VARIABLE] = str(step_ends[1].fileno())
             # `SIGUSR1` (a run that was superseded) ends a process that has no handler yet. It is
             # blocked in this thread while the process is made: the mask survives the exec, a
             # signal that comes early stays pending, and the process unblocks it once its handler
@@ -326,6 +365,12 @@ class SubprocessLauncher:
                 ends[1].close()  # the process holds its end now
                 reader, writer = await asyncio.open_connection(sock=ends[0])
                 lease = _LeaseChannel(reader, writer, spec.lease_check)
+            if step_ends is not None and spec.steps is not None:
+                step_ends[1].close()  # the process holds its end now
+                step_reader, step_writer = await asyncio.open_connection(
+                    sock=step_ends[0], limit=2 * MAX_LINE_BYTES
+                )
+                steps = _StepsChannel(step_reader, step_writer, spec.steps)
         except BaseException:
             try:
                 if process is not None:
@@ -333,7 +378,7 @@ class SubprocessLauncher:
             finally:
                 # Also when the start is cancelled a second time while the group is being ended.
                 shutil.rmtree(workdir, ignore_errors=True)
-                for end in ends or ():
+                for end in (*(ends or ()), *(step_ends or ())):
                     end.close()
             raise
         return _SubprocessJob(
@@ -344,6 +389,7 @@ class SubprocessLauncher:
             self._terminate_grace if spec.terminate_grace is None else spec.terminate_grace,
             lease,
             stdout_keep_bytes=spec.stdout_keep_bytes,
+            steps=steps,
         )
 
 

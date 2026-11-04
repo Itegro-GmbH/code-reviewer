@@ -50,6 +50,8 @@ const PUBLIC_ROUTES = [
   "/api/runners/v1/claim",
   "/api/runners/v1/jobs/[id]/heartbeat",
   "/api/runners/v1/jobs/[id]/complete",
+  // The steps of a running turn of the Implementer, with the same token and the lease token in the body (#745).
+  "/api/runners/v1/jobs/[id]/steps",
   // A Dispatcher gives a job back and reads the version with the same token (#322).
   "/api/runners/v1/jobs/[id]/release",
   // A Dispatcher reports the VM it created with the same token and the job credential in the body (#493).
@@ -61,6 +63,7 @@ const PUBLIC_ROUTES = [
   "/api/workers/v1/jobs/[id]",
   "/api/workers/v1/jobs/[id]/heartbeat",
   "/api/workers/v1/jobs/[id]/result",
+  "/api/workers/v1/jobs/[id]/steps",
   // The operator sends its own bearer token; the routes do not exist until it is set (src/operator-api/README.md).
   "/api/operator/v1/workspaces",
   "/api/operator/v1/workspaces/[id]/entitlements",
@@ -207,6 +210,7 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/review-settings",
   "/api/w/[workspace]/runs",
   "/api/w/[workspace]/runs/[id]",
+  "/api/w/[workspace]/runs/[id]/steps",
 ] as const;
 // Files the proxy matcher leaves out on purpose (src/proxy.ts), so no session rule applies to them.
 const OUTSIDE_THE_PROXY = [

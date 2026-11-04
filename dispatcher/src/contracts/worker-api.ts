@@ -69,6 +69,34 @@ export type RunnerJobInput = {
   env: JobEnv;
 };
 /**
+ * #818: the environment a turn was started with, as the turn copied it when it started: the setup script the runner runs once in the repository's folder after the clone and before the model is called, and (#745, step 7) the rule for the agent's network. Present only when the environment has a script or a network rule other than `off`, and the caller named the claim feature `implementer_environment` (and `implementer_network` for a rule); a turn with neither carries nothing (the size of the VM is the Dispatcher's business, it reaches the Worker as the VM it runs in). `setupScript`, when present, is literal text of at most 64 KB of UTF-8, written by a member of the workspace: it is data to run, never a command of the app, and it holds no secret by design (there is no field for one). `network`, when present, is the rule the network door enforces; absent means `off`. At least one of the two is present. `name` is for the run's log line only.
+ */
+export type ImplementerEnvironment = {
+  [k: string]: unknown;
+} & {
+  name: string;
+  setupScript?: string;
+  network?: ImplementerNetworkRule;
+};
+/**
+ * #745: one record of the live view, for one part of the engine's messages. A part is sent again when it changes (a tool: running, then completed) with the same `partId` and a higher `seq`; the app keeps the record with the highest `seq` of each part, so a retry or a record that arrives behind a newer one changes nothing. `kind` is any lower case word, and the app stores the kinds of `KnownStepKind` only. A reader ignores fields it does not know. For a kind the app does not know only `kind`, `partId`, `seq`, `startedAt` and `endedAt` are checked and the other fields are dropped unread, whatever they hold: a newer runner may send kinds of any shape, and one of them must not make the app refuse the batch beside it. For a kind it knows, `KnownStepFields` bounds the other fields. `startedAt` and `endedAt` are epoch milliseconds of the sandbox's clock. The texts are cut by the runner (`text` at 16 KiB, `input` and `error` at 4 KiB, `title` at 512 bytes) and `bytes` is the true size of the cut text; the app cleans them again (control characters, secrets, and on the operator's key the model and provider names) and stores the cost of a model call only for a job on the workspace's own key. Per kind, `text` is required for `reasoning` and `text`, `tool` and `status` for `tool`, `tokens` for `step`.
+ */
+export type StepRecord = {
+  kind: string;
+  partId: string;
+  seq: number;
+  startedAt?: number;
+  endedAt?: number;
+  [k: string]: unknown;
+} & {
+  kind: string;
+  partId: string;
+  seq: number;
+  startedAt?: number;
+  endedAt?: number;
+  [k: string]: unknown;
+};
+/**
  * What the runner prints when a job ends (the output of code-reviewer-run-job), plus an optional errorMessage. The runner has redacted secrets from logTail; the app removes anything that still looks like one before it stores the result.
  */
 export type RunnerResult = {
@@ -502,11 +530,14 @@ export interface ImplementerRepo {
   cloneUrl: string;
 }
 /**
- * #818: the environment a turn was started with, as the turn copied it when it started: the setup script the runner runs once in the repository's folder after the clone and before the model is called. Present only when the environment has a script and the caller named the claim feature `implementer_environment`; a turn without a script carries nothing (the size of the VM is the Dispatcher's business, it reaches the Worker as the VM it runs in). `setupScript` is literal text of at most 64 KB of UTF-8, written by a member of the workspace: it is data to run, never a command of the app, and it holds no secret by design (there is no field for one). `name` is for the run's log line only.
+ * #745, step 7: the rule for the agent's network, as the owner of the environment wrote it. `off`: the agent has no network and no network door is started. `list`: the agent reaches the host names in `hosts` through the network door and no others; an entry is a host name in its ASCII (punycode) lower-case form, either exact (`registry.npmjs.org`) or a suffix (`*.pythonhosted.org`, any name below `pythonhosted.org`, not the name itself), never an IP address, a port or a path; both have at least two labels (after the `*.` for a suffix) and a last label that starts with a letter, which no address does; at most 100 entries. `open`: the agent reaches any public name. In every mode the door refuses IP literals, names that resolve to a private, loopback, link-local, shared or metadata address, and ports other than 80 and 443. `hosts` is empty unless the mode is `list`, and not empty then.
  */
-export interface ImplementerEnvironment {
-  name: string;
-  setupScript: string;
+export interface ImplementerNetworkRule {
+  mode: "off" | "list" | "open";
+  /**
+   * @maxItems 100
+   */
+  hosts: string[];
 }
 /**
  * Extra options of the PR-Agent tools, as strings. The review tool's options (PR_REVIEWER__*) are used; a previous release's option families for the removed tools (PR_DESCRIPTION__*, PR_CODE_SUGGESTIONS__*, PR_QUESTIONS__*) are accepted for v1 compatibility and ignored. Nothing else is allowed here (credentials, endpoints and the model have their own fields).
@@ -544,6 +575,27 @@ export interface WorkerHeartbeatResponse {
     superseded?: boolean;
     [k: string]: unknown;
   };
+  [k: string]: unknown;
+}
+/**
+ * #745: the body of POST /api/workers/v1/jobs/{id}/steps: a batch of the records of the running turn of the Implementer (the live view), at most 50 in at most 48 KiB. The credential identifies the job and proves the claim, so the body holds no lease token. The same rules and answers as POST /api/runners/v1/jobs/{id}/steps (`StepsRequest` in runner-api.v1.json): the call does NOT extend the lease, 409 RUNNER_LEASE_LOST for a lost claim, 409 RUNNER_JOB_ENDED when the job is over, 400 RUNNER_REQUEST_INVALID for a job that is not a turn of the Implementer or a record that does not fit.
+ */
+export interface WorkerStepsRequest {
+  /**
+   * @minItems 1
+   * @maxItems 50
+   */
+  records: [StepRecord, ...StepRecord[]];
+  [k: string]: unknown;
+}
+/**
+ * #745: 200 from the Worker's steps call: `StepsResponse` of runner-api.v1.json.
+ */
+export interface StepsResponse {
+  version: 1;
+  stored: number;
+  stale: number;
+  dropped: number;
   [k: string]: unknown;
 }
 /**
@@ -613,6 +665,7 @@ export interface ImplementerResult {
     version: string;
   } | null;
   setup?: ImplementerSetupResult;
+  network?: ImplementerNetworkReport;
 }
 /**
  * #818: what the setup script of a turn did, in `ImplementerResult.setup`; present when a script ran, absent otherwise. `ok` is whether it ended with exit status 0 within its time limit. `exitCode` is its exit status, null when it did not end by itself (the time limit, `timedOut`, or a signal). `output` is the end of what it wrote to stdout and stderr together, at most 8192 characters, with every secret known to the runner removed like every log line. A failed script ends the turn with the error code `environment_setup_failed` before the model is called.
@@ -623,6 +676,31 @@ export interface ImplementerSetupResult {
   timedOut: boolean;
   durationSeconds: number;
   output: string;
+}
+/**
+ * #745, step 7: what the network door did in a turn, in `ImplementerResult.network`; present for every turn that got as far as the network, whatever its rule (so for the rule `off` too; `door` is false then), also when the second wall is not in place (`vmPolicy` says so), so that a missing wall is never left out of the report. `connections` are the connections the door saw, one entry for each distinct host, port and outcome, with their count and the bytes each way (the bytes the door relayed, both directions, counted at the end of a connection; nothing of their content is kept), at most 100 (`dropped` counts the entries that did not fit); `reason` is a word of the door for a refusal (`not_listed`, `ip_literal`, `private_address`, `port_not_allowed`, `unresolvable`, `bad_request`, `too_many_connections`, `upstream_failed`) and null for an allowed connection. `vmPolicy` says what the second wall did: `narrowed` (the VM's network policy was cut to GitHub, the model provider, the app and the rule), `unchanged` (the rule is `open`, so the policy was left as it was), `not_configured` (this runner was started without a way to change the policy, for example because the Dispatcher has no public address or the App named no provider host: the first wall alone held, and the turn's notes say so).
+ */
+export interface ImplementerNetworkReport {
+  mode: "off" | "list" | "open";
+  door: boolean;
+  vmPolicy: "narrowed" | "unchanged" | "not_configured";
+  allowed: number;
+  refused: number;
+  bytesIn: number;
+  bytesOut: number;
+  dropped: number;
+  /**
+   * @maxItems 100
+   */
+  connections: {
+    host: string;
+    port: number;
+    outcome: "allowed" | "refused";
+    reason: string | null;
+    count: number;
+    bytesIn: number;
+    bytesOut: number;
+  }[];
 }
 export interface RunnerUsage {
   model: string | null;

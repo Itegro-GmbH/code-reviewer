@@ -25,6 +25,7 @@ const VIEW: EnvironmentView = {
   memoryGb: 6,
   sizeSupported: true,
   setupScript: "npm ci",
+  network: { mode: "off", hosts: [] },
   createdAt: "2026-11-02T08:00:00.000Z",
   updatedAt: "2026-11-02T08:00:00.000Z",
 };
@@ -47,6 +48,7 @@ function setup(overrides: Partial<EnvironmentService> = {}) {
             memoryGb: 6,
             sizeSupported: true,
             hasScript: true,
+            networkMode: "off",
           },
         ],
         maximum: 50,
@@ -113,6 +115,7 @@ describe("the environment handlers", () => {
           memoryGb: 6,
           sizeSupported: true,
           hasScript: true,
+          networkMode: "off",
         },
       ],
       maximum: 50,

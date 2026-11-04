@@ -16,6 +16,7 @@ import type {
   ImplementerRowSource,
   RunRowSource,
 } from "../../runs/run-view.ts";
+import { ruleOf } from "../../network-rule/network.ts";
 import type { Database } from "../schema.ts";
 import type { WorkspaceId } from "../workspace-scope.ts";
 import {
@@ -72,6 +73,12 @@ export type RunsRepository = {
   /** One run by its id; undefined for an id nobody has. */
   get(id: string): Promise<StoredRun | undefined>;
   /**
+   * Whether the id is a run of the Implementer of this workspace, and whether it ran on the operator's key (#745, live view):
+   * undefined for any other id. Two indexed reads, for the poll of the steps of a run, which must not pay for everything `get`
+   * reads. `onManagedKey` is the one rule of `get`.
+   */
+  implementerRun(id: string): Promise<{ onManagedKey: boolean } | undefined>;
+  /**
    * The newest job of each of the repositories (by creation time); repositories without one are left
    * out. One lookup per repository, each answered by the index `jobs_repository_recent`.
    */
@@ -84,6 +91,22 @@ export type RunsRepository = {
     >[]
   >;
 };
+
+/**
+ * Whether a run ran on the operator's key: its usage record says so, or names a catalog entry or a tier. The one rule for every
+ * read of a run (`get`, `implementerRun`): what a member may see of a run on the operator's key is hidden by it.
+ */
+function isManagedKey(usage: {
+  keyMode: string | null;
+  catalogEntryId: string | null;
+  modelTier: string | null;
+}): boolean {
+  return (
+    usage.keyMode === "managed" ||
+    usage.catalogEntryId !== null ||
+    usage.modelTier !== null
+  );
+}
 
 export function createRunsRepository(
   db: Kysely<Database>,
@@ -212,6 +235,8 @@ export function createRunsRepository(
           "implementer_turns.instruction as turn_instruction",
           "implementer_turns.environment_name as turn_environment_name",
           "implementer_turns.environment_vcpus as turn_environment_vcpus",
+          "implementer_turns.environment_network_mode as turn_environment_network_mode",
+          "implementer_turns.environment_network_hosts as turn_environment_network_hosts",
           "usage_records.key_mode as key_mode",
           "usage_records.catalog_entry_id as catalog_entry_id",
           "usage_records.model_tier as model_tier",
@@ -233,13 +258,18 @@ export function createRunsRepository(
         turn_instruction: instruction,
         turn_environment_name: environmentName,
         turn_environment_vcpus: environmentVcpus,
+        turn_environment_network_mode: networkMode,
+        turn_environment_network_hosts: networkHosts,
         ...job
       } = row;
       return {
         job: toJob(job),
         project,
-        onManagedKey:
-          keyMode === "managed" || entryId !== null || modelTier !== null,
+        onManagedKey: isManagedKey({
+          keyMode,
+          catalogEntryId: entryId,
+          modelTier,
+        }),
         reviewComment,
         ...(branch === null || baseBranch === null || instruction === null
           ? {}
@@ -253,9 +283,40 @@ export function createRunsRepository(
                 environment:
                   environmentName === null || environmentVcpus === null
                     ? null
-                    : { name: environmentName, vcpus: environmentVcpus },
+                    : {
+                        name: environmentName,
+                        vcpus: environmentVcpus,
+                        network: ruleOf(networkMode, networkHosts),
+                      },
               },
             }),
+      };
+    },
+
+    async implementerRun(id) {
+      const row = await db
+        .selectFrom("jobs")
+        .leftJoin("usage_records", (join) =>
+          join
+            .onRef("usage_records.job_id", "=", "jobs.id")
+            .on("usage_records.workspace_id", "=", workspaceId),
+        )
+        .select([
+          "usage_records.key_mode as key_mode",
+          "usage_records.catalog_entry_id as catalog_entry_id",
+          "usage_records.model_tier as model_tier",
+        ])
+        .where("jobs.id", "=", id)
+        .where("jobs.workspace_id", "=", workspaceId)
+        .where("jobs.review_kind", "=", "implementer")
+        .executeTakeFirst();
+      if (row === undefined) return undefined;
+      return {
+        onManagedKey: isManagedKey({
+          keyMode: row.key_mode,
+          catalogEntryId: row.catalog_entry_id,
+          modelTier: row.model_tier,
+        }),
       };
     },
 

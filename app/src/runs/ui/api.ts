@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // The calls the runs pages make to the app's own routes while they poll: the list
-// (`GET /api/w/:workspace/runs`, src/runs/http.ts) and one run (`GET /api/w/:workspace/runs/:id`). The
+// (`GET /api/w/:workspace/runs`, src/runs/http.ts) one run (`GET /api/w/:workspace/runs/:id`) and the steps of a run of the Implementer (`.../runs/:id/steps`). The
 // workspace is the one of the page that makes the call. Browser side; no secrets.
 import { workspaceApiPath } from "../../workspaces/paths.ts";
 import {
@@ -9,6 +9,7 @@ import {
   type FetchLike,
   type RequestResult,
 } from "../../ui/json-request.ts";
+import type { StepsSnapshot } from "../steps-view.ts";
 import type {
   RunDetailSnapshot,
   RunsFilter,
@@ -20,6 +21,8 @@ export type { RunsFilter };
 export type RunsApi = {
   list(filter: RunsFilter): Promise<RequestResult<RunsSnapshot>>;
   detail(id: string): Promise<RequestResult<RunDetailSnapshot>>;
+  /** What the agent of a run of the Implementer did after the cursor `after` (#745, live view). */
+  steps(id: string, after: number): Promise<RequestResult<StepsSnapshot>>;
 };
 
 export function createRunsApi(
@@ -45,6 +48,12 @@ export function createRunsApi(
         fetchImpl,
         "GET",
         workspaceApiPath(workspaceSlug, `/runs/${encodeURIComponent(id)}`),
+      ),
+    steps: (id, after) =>
+      requestJson<StepsSnapshot>(
+        fetchImpl,
+        "GET",
+        `${workspaceApiPath(workspaceSlug, `/runs/${encodeURIComponent(id)}/steps`)}?after=${String(after)}`,
       ),
   };
 }

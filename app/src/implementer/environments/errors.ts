@@ -34,6 +34,10 @@ export const ENVIRONMENT_ISSUE_FIELDS = [
   "name",
   "vcpus",
   "setupScript",
+  /** #745, step 7: the rule for the agent's network (its mode, or the shape of the body's `network`). */
+  "network",
+  /** #745, step 7: the hosts of a list. */
+  "networkHosts",
 ] as const;
 export const ENVIRONMENT_ISSUE_CODES = [
   "required",

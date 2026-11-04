@@ -99,6 +99,7 @@ export function addressesOf(
         route.pattern.startsWith("/api/w/:workspace/billing/") ||
         route.pattern === "/api/w/:workspace/llm-key-mode" ||
         route.pattern.startsWith("/api/w/:workspace/implementer/") ||
+        route.pattern === "/api/w/:workspace/runs/:id/steps" ||
         route.pattern === "/w/:workspace/implementer" ||
         route.pattern === "/w/:workspace/environments" ||
         route.pattern.startsWith("/api/w/:workspace/environments") ||

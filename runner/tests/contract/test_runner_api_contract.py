@@ -44,6 +44,9 @@ BODIES = (
     # #493: the Dispatcher reports the VM it created (billable minutes).
     "VmStartRequest",
     "VmStartResponse",
+    # #745: the steps of a running turn of the Implementer (the live view).
+    "StepsRequest",
+    "StepsResponse",
 )
 
 Document = dict[str, Any]

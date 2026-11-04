@@ -10,6 +10,7 @@ import type {
 } from "../../db/repositories/implementer-environments-repository.ts";
 import { EnvironmentError } from "./errors.ts";
 import { validateEnvironmentInput } from "./input.ts";
+import type { NetworkMode, NetworkRule } from "../../network-rule/network.ts";
 import {
   ENVIRONMENTS_PER_WORKSPACE_MAX,
   isEnvironmentVcpus,
@@ -26,6 +27,8 @@ export type EnvironmentView = {
   /** Whether a task can be started with this size. False for a size that is no longer offered (1 vCPU): shown as it is, refused at submit. */
   sizeSupported: boolean;
   setupScript: string;
+  /** #745, step 7: the rule for the agent's network (`off` by default). */
+  network: NetworkRule;
   createdAt: string;
   updatedAt: string;
 };
@@ -44,6 +47,8 @@ export type EnvironmentPickerView = {
   memoryGb: number;
   sizeSupported: boolean;
   hasScript: boolean;
+  /** The mode of the network rule (the hosts are on the environment itself). */
+  networkMode: NetworkMode;
 };
 
 export type EnvironmentPickerList = {
@@ -71,6 +76,7 @@ function viewOf(environment: StoredEnvironment): EnvironmentView {
     memoryGb: memoryGbOf(environment.vcpus),
     sizeSupported: isEnvironmentVcpus(environment.vcpus),
     setupScript: environment.setupScript,
+    network: environment.network,
     createdAt: environment.createdAt,
     updatedAt: environment.updatedAt,
   };

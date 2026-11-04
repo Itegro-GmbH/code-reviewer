@@ -125,6 +125,8 @@ describe("the migrations of both epics", () => {
       "20261030190000_widen_review_kind_checks_for_implementer",
       "20261102140000_create_implementer_environments",
       "20261102150000_add_implementer_turn_environment",
+      "20261103100000_add_environment_network",
+      "20261104100000_create_implementer_turn_steps",
     ]);
   });
 
@@ -171,6 +173,7 @@ describe("starting the database", () => {
       "email_verification_tokens",
       "implementer_environments",
       "implementer_sessions",
+      "implementer_turn_steps",
       "implementer_turns",
       "installation_link_requests",
       "instance_settings",

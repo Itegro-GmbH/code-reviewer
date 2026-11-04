@@ -37,6 +37,7 @@ import { createBillingNotificationsRepository } from "./billing-notifications-re
 import { createBillingWorkspaceSettingsRepository } from "./billing-workspace-settings-repository.ts";
 import { createImplementerEnvironmentsRepository } from "./implementer-environments-repository.ts";
 import { createImplementerRepository } from "./implementer-repository.ts";
+import { createImplementerStepsRepository } from "./implementer-steps-repository.ts";
 
 const SHA = "b".repeat(40);
 const FAILED_SHA = "c".repeat(40);
@@ -65,6 +66,7 @@ function reposOf(db: Kysely<Database>, workspaceId: string) {
     limits: createBillingWorkspaceSettingsRepository(db, workspaceId),
     notifications: createBillingNotificationsRepository(db, workspaceId),
     implementer: createImplementerRepository(db, workspaceId),
+    steps: createImplementerStepsRepository(db, workspaceId),
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
     erasure: createWorkspaceErasureRepository(db, workspaceId),
   };
@@ -377,6 +379,41 @@ async function seed(
             return turnJob.job.id;
           },
         );
+  // The steps of that turn (#745, live view): the job is made a running turn of the Implementer with a lease, as the claim would
+  // leave it, and holds two parts, so the other workspace has steps to read, overwrite and extend.
+  if (started !== undefined) {
+    await db
+      .updateTable("jobs")
+      .set({
+        review_kind: "implementer",
+        status: "running",
+        lease_token: `lease-${tag}`,
+        claimed_at: "2026-10-12T08:00:00.000Z",
+        lease_expires_at: "2099-01-01T00:00:00.000Z",
+      })
+      .where("id", "=", started.turn.jobId)
+      .execute();
+    const stored = await repos.steps.recordSteps(
+      started.turn.jobId,
+      `lease-${tag}`,
+      [
+        {
+          partId: `prt_${tag}_1`,
+          seq: 1,
+          kind: "text",
+          payload: { text: `Thinking of ${tag}` },
+        },
+        {
+          partId: `prt_${tag}_2`,
+          seq: 2,
+          kind: "tool",
+          payload: { tool: "bash", status: "completed" },
+        },
+      ],
+    );
+    if (stored.status !== "ok" || stored.stored !== 2)
+      throw new Error("seeding failed");
+  }
   // An environment of the Implementer (#818) in every workspace, under the same name: the other workspace's is there to be read,
   // changed and deleted.
   const created = await repos.environments.create(
@@ -552,6 +589,13 @@ async function rowsOf(db: Kysely<Database>, workspaceId: string) {
       .selectAll()
       .where("workspace_id", "=", workspaceId)
       .orderBy("id")
+      .execute(),
+    implementerTurnSteps: await db
+      .selectFrom("implementer_turn_steps")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("job_id")
+      .orderBy("part_id")
       .execute(),
   };
 }
@@ -1725,6 +1769,31 @@ const CASES: Case[] = [
       ),
     expectAnswer: notFound("IMPLEMENTER_REPOSITORY_NOT_FOUND"),
   },
+  // implementer steps (#745): B's steps are not A's to read or write, not even with B's lease token
+  {
+    name: "steps.recordSteps",
+    run: (a, b) =>
+      a.steps.recordSteps(taskOf(b).turn.jobId, `lease-b`, [
+        {
+          partId: "prt_b_1",
+          seq: 99,
+          kind: "text",
+          payload: { text: "overwritten by A" },
+        },
+        {
+          partId: "prt_a_new",
+          seq: 100,
+          kind: "text",
+          payload: { text: "planted by A" },
+        },
+      ]),
+    expectAnswer: (answer) => expect(answer).toEqual({ status: "not_holder" }),
+  },
+  {
+    name: "steps.listAfter",
+    run: (a, b) => a.steps.listAfter(taskOf(b).turn.jobId, 0, 100),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
   // implementer environments (#818-T04): B's environments are not A's to read, change or delete
   {
     name: "environments.list",
@@ -1741,6 +1810,7 @@ const CASES: Case[] = [
           name: a.environment.name,
           vcpus: a.environment.vcpus,
           hasScript: true,
+          networkMode: "off",
         },
       ]),
   },
@@ -1787,6 +1857,12 @@ const CASES: Case[] = [
   {
     name: "runs.get",
     run: (a, b) => a.runs.get(b.job.id),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    // #745: the id of a run of the Implementer of workspace B is not one of A's.
+    name: "runs.implementerRun",
+    run: (a, b) => a.runs.implementerRun(taskOf(b).turn.jobId),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {

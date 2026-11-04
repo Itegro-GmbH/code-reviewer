@@ -684,6 +684,7 @@ describe("the version call", () => {
   it("names every feature this change adds", () => {
     expect([...APP_FEATURES].sort()).toStrictEqual([
       "claim_by_job_id",
+      "implementer_steps",
       "pool_cap",
       "release",
       "vm_lifecycle",

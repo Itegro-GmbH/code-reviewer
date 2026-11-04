@@ -34,9 +34,10 @@ const NODE: EnvironmentView = {
   id: "env-1",
   name: "Node 22",
   vcpus: 4,
-  memoryGb: 5.8,
+  memoryGb: 5.7,
   sizeSupported: true,
   setupScript: "pnpm install\n",
+  network: { mode: "off", hosts: [] },
   createdAt: "2026-11-02T08:00:00.000Z",
   updatedAt: "2026-11-02T08:00:00.000Z",
 };
@@ -111,7 +112,7 @@ describe("the list of environments", () => {
     expect(node).not.toBeNull();
     expect(within(node as HTMLElement).getByText(/4 vCPU/)).toBeTruthy();
     expect(
-      within(node as HTMLElement).getByText(/5\.8 GB memory/),
+      within(node as HTMLElement).getByText(/5\.7 GB memory/),
     ).toBeTruthy();
     expect(within(node as HTMLElement).getByText(/pnpm install/)).toBeTruthy();
     const bare = screen.getByText("Bare").closest("li") as HTMLElement;
@@ -174,7 +175,12 @@ describe("creating an environment", () => {
 
     await waitFor(() =>
       expect(created).toEqual([
-        { name: "Rust", vcpus: 8, setupScript: "  cargo fetch  " },
+        {
+          name: "Rust",
+          vcpus: 8,
+          setupScript: "  cargo fetch  ",
+          network: { mode: "off", hosts: [] },
+        },
       ]),
     );
     expect(await screen.findByText("The environment was saved.")).toBeTruthy();
@@ -190,17 +196,16 @@ describe("creating an environment", () => {
       screen.getByRole("button", { name: /new environment/i }),
     );
 
-    const radios = screen.getAllByRole("radio");
-    expect(
-      radios.map((radio) => radio.getAttribute("aria-label") ?? radio.id),
-    ).toHaveLength(4);
+    // The sizes are one group of radios, the network setting another.
+    const sizes = screen.getAllByRole("radio", { name: /vCPU/ });
+    expect(sizes).toHaveLength(4);
     // 1 vCPU is not offered: it leaves the agent no memory. The memory shown is the agent's.
     expect(screen.queryByRole("radio", { name: /^1 vCPU/ })).toBeNull();
     for (const [vcpus, gb] of [
-      [2, 2],
-      [4, 5.8],
-      [6, 9.5],
-      [8, 13.2],
+      [2, 1.9],
+      [4, 5.7],
+      [6, 9.4],
+      [8, 13.1],
     ] as const)
       expect(
         screen.getByRole("radio", {
@@ -307,7 +312,15 @@ describe("changing and deleting", () => {
 
     await waitFor(() =>
       expect(updated).toEqual([
-        ["env-1", { name: "Node 24", vcpus: 6, setupScript: "pnpm install\n" }],
+        [
+          "env-1",
+          {
+            name: "Node 24",
+            vcpus: 6,
+            setupScript: "pnpm install\n",
+            network: { mode: "off", hosts: [] },
+          },
+        ],
       ]),
     );
     expect(await screen.findByText("Node 24")).toBeTruthy();
@@ -433,7 +446,7 @@ describe("an environment with a size that is no longer offered (1 vCPU)", () => 
     await userEvent.click(within(old).getByRole("button", { name: /edit/i }));
 
     expect(screen.getByText(/1 vCPU leaves the agent no memory/)).toBeTruthy();
-    for (const radio of screen.getAllByRole("radio"))
+    for (const radio of screen.getAllByRole("radio", { name: /vCPU/ }))
       expect(radio.getAttribute("aria-checked")).toBe("false");
 
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
@@ -575,7 +588,7 @@ describe("the size group (#819 review)", () => {
     await userEvent.click(
       screen.getByRole("button", { name: /new environment/i }),
     );
-    const group = screen.getByRole("radiogroup");
+    const group = screen.getAllByRole("radiogroup")[0] as HTMLElement;
     const describedBy = () =>
       (group.getAttribute("aria-describedby") ?? "")
         .split(" ")
@@ -590,5 +603,208 @@ describe("the size group (#819 review)", () => {
     await screen.findByText(describeFieldIssue("vcpus", "invalid"));
     expect(describedBy()).toEqual([describeFieldIssue("vcpus", "invalid")]);
     expect(group.getAttribute("aria-invalid")).toBe("true");
+  });
+});
+
+// #745, step 7: the rule for the agent's network
+describe("the network setting of an environment (#745)", () => {
+  const LISTED: EnvironmentView = {
+    ...NODE,
+    id: "env-5",
+    name: "Listed",
+    network: {
+      mode: "list",
+      hosts: ["registry.npmjs.org", "*.pythonhosted.org"],
+    },
+  };
+  const OPENED: EnvironmentView = {
+    ...NODE,
+    id: "env-6",
+    name: "Opened",
+    network: { mode: "open", hosts: [] },
+  };
+
+  // #745-T42
+  it("shows the setting of each environment, and the hosts of a list", async () => {
+    show(fakeApi([NODE, LISTED, OPENED]).api, false);
+
+    const node = (await screen.findByText("Node 22")).closest(
+      "li",
+    ) as HTMLElement;
+    const listed = screen.getByText("Listed").closest("li") as HTMLElement;
+    const opened = screen.getByText("Opened").closest("li") as HTMLElement;
+    expect(within(node).getByText("Network: off")).toBeTruthy();
+    expect(within(listed).getByText("Network: only these hosts")).toBeTruthy();
+    expect(
+      within(listed)
+        .getAllByRole("listitem")
+        .map((item) => item.textContent),
+    ).toEqual(["registry.npmjs.org", "*.pythonhosted.org"]);
+    expect(within(opened).getByText("Network: any public host")).toBeTruthy();
+  });
+
+  // #745-T42
+  it("offers three settings, off is chosen, and the hosts field is there only for a list", async () => {
+    show(fakeApi([]).api, true);
+    await screen.findByText(/standard/);
+    await userEvent.click(
+      screen.getByRole("button", { name: /new environment/i }),
+    );
+
+    const off = screen.getByRole("radio", { name: /^Off: no network/ });
+    expect(off.getAttribute("aria-checked")).toBe("true");
+    expect(
+      screen.getByRole("radio", { name: /^Only the hosts listed/ }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("radio", { name: /^Any public host/ }),
+    ).toBeTruthy();
+    // The review of #830: said once, plainly, where the setting is chosen.
+    expect(
+      screen.getByText(
+        /applies to the agent.*setup script always has full internet access/,
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByLabelText("Allowed hosts")).toBeNull();
+    expect(
+      screen.queryByText(/send out anything the agent can read/),
+    ).toBeNull();
+
+    await userEvent.click(
+      screen.getByRole("radio", { name: /^Only the hosts listed/ }),
+    );
+    expect(screen.getByLabelText("Allowed hosts")).toBeTruthy();
+    expect(
+      screen.getByText(/send out anything the agent can read/),
+    ).toBeTruthy();
+
+    await userEvent.click(
+      screen.getByRole("radio", { name: /^Any public host/ }),
+    );
+    expect(screen.queryByLabelText("Allowed hosts")).toBeNull();
+    expect(
+      screen.getByText(/send out anything the agent can read/),
+    ).toBeTruthy();
+  });
+
+  // #745-T42
+  it("sends the hosts one to a line and shows what came back", async () => {
+    const { api, created } = fakeApi([]);
+    show(api, true);
+    await screen.findByText(/standard/);
+    await userEvent.click(
+      screen.getByRole("button", { name: /new environment/i }),
+    );
+    await userEvent.type(screen.getByLabelText("Name"), "Py");
+    await userEvent.click(
+      screen.getByRole("radio", { name: /^Only the hosts listed/ }),
+    );
+    await userEvent.type(
+      screen.getByLabelText("Allowed hosts"),
+      "pypi.org{enter}{enter}*.pythonhosted.org",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(created).toHaveLength(1));
+    expect(created[0]?.network).toEqual({
+      mode: "list",
+      hosts: ["pypi.org", "*.pythonhosted.org"],
+    });
+  });
+
+  // #745-T42
+  it("refuses a line that is not a host name before anything is sent, next to the field", async () => {
+    const { api, created } = fakeApi([]);
+    show(api, true);
+    await screen.findByText(/standard/);
+    await userEvent.click(
+      screen.getByRole("button", { name: /new environment/i }),
+    );
+    await userEvent.type(screen.getByLabelText("Name"), "Py");
+    await userEvent.click(
+      screen.getByRole("radio", { name: /^Only the hosts listed/ }),
+    );
+    await userEvent.type(
+      screen.getByLabelText("Allowed hosts"),
+      "pypi.org{enter}10.0.0.1",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(
+      await screen.findByText(describeFieldIssue("networkHosts", "invalid")),
+    ).toBeTruthy();
+    expect(created).toEqual([]);
+    expect(
+      (screen.getByLabelText("Allowed hosts") as HTMLTextAreaElement).value,
+    ).toBe("pypi.org\n10.0.0.1");
+  });
+
+  // #745-T42
+  it("refuses a list with no host", async () => {
+    const { api, created } = fakeApi([]);
+    show(api, true);
+    await screen.findByText(/standard/);
+    await userEvent.click(
+      screen.getByRole("button", { name: /new environment/i }),
+    );
+    await userEvent.type(screen.getByLabelText("Name"), "Py");
+    await userEvent.click(
+      screen.getByRole("radio", { name: /^Only the hosts listed/ }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(
+      await screen.findByText(describeFieldIssue("networkHosts", "required")),
+    ).toBeTruthy();
+    expect(created).toEqual([]);
+  });
+
+  // #745-T42
+  it("loads the setting of an environment into the form and sends the change", async () => {
+    const { api, updated } = fakeApi([LISTED]);
+    show(api, true);
+    await userEvent.click(
+      await screen.findByRole("button", { name: /edit listed/i }),
+    );
+
+    expect(
+      screen
+        .getByRole("radio", { name: /^Only the hosts listed/ })
+        .getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(
+      (screen.getByLabelText("Allowed hosts") as HTMLTextAreaElement).value,
+    ).toBe("registry.npmjs.org\n*.pythonhosted.org");
+    await userEvent.click(
+      screen.getByRole("radio", { name: /^Any public host/ }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(updated).toHaveLength(1));
+    expect(updated[0]?.[1].network).toEqual({ mode: "open", hosts: [] });
+  });
+
+  // #745-T42
+  it("shows the sentence of a refusal of the hosts the server made", async () => {
+    const create = vi.fn(async () =>
+      refused(400, "ENVIRONMENT_REQUEST_INVALID", {
+        issues: [{ field: "networkHosts", code: "invalid" }],
+      }),
+    );
+    show(fakeApi([], { create }).api, true);
+    await screen.findByText(/standard/);
+    await userEvent.click(
+      screen.getByRole("button", { name: /new environment/i }),
+    );
+    await userEvent.type(screen.getByLabelText("Name"), "Py");
+    await userEvent.click(
+      screen.getByRole("radio", { name: /^Only the hosts listed/ }),
+    );
+    await userEvent.type(screen.getByLabelText("Allowed hosts"), "pypi.org");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(
+      await screen.findByText(describeFieldIssue("networkHosts", "invalid")),
+    ).toBeTruthy();
   });
 });

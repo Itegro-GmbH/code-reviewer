@@ -280,3 +280,90 @@ def test_only_the_boolean_true_means_superseded(value: object) -> None:
     reply = Reply(200, {"content-type": "application/json"}, json.dumps(body).encode())
 
     assert parse_heartbeat(reply, JOB_ID).superseded is False
+
+
+# -- #745: the steps call -----------------------------------------------------------------------
+
+BATCH = b'{"records":[{"kind":"text","partId":"prt_1","seq":1,"text":"hi"}]}'
+
+
+# #745-L26
+def test_the_client_offers_steps_only_to_an_app_that_lists_the_feature(app: FakeWorkerApp) -> None:
+    api = client(app.url)
+    assert api.supports_steps is False, "before the version call nothing is known"
+
+    app.features = ["worker_api", "pool_cap"]
+    asyncio.run(api.check_app(JOB_ID))
+    assert api.supports_steps is False
+
+    app.features = ["worker_api", "implementer_steps"]
+    asyncio.run(api.check_app(JOB_ID))
+    assert api.supports_steps is True
+
+
+# #745-L26
+def test_an_app_that_does_not_answer_the_version_call_gets_no_steps(app: FakeWorkerApp) -> None:
+    api = client(app.url)  # the fake does not serve the version call: 404
+
+    asyncio.run(api.check_app(JOB_ID))
+
+    assert api.supports_steps is False
+
+
+# #745-L22
+def test_a_batch_is_posted_as_it_is_with_the_credential_and_nothing_else(
+    app: FakeWorkerApp,
+) -> None:
+    asyncio.run(client(app.url).steps(JOB_ID, BATCH))
+
+    (sent,) = [r for r in app.requests if r["kind"] == "steps"]
+    assert sent["body"] == json.loads(BATCH)
+    assert sent["headers"]["Authorization"] == f"Bearer {CREDENTIAL}"
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (409, LeaseLost),
+        (404, LeaseLost),
+        (401, CredentialInvalid),
+        (400, ApiRejected),
+        (413, ApiRejected),
+        (500, ApiUnavailable),
+        (429, ApiUnavailable),
+    ],
+)
+# #745-L27
+def test_the_answers_to_a_steps_call_are_told_apart_as_for_every_other_call(
+    app: FakeWorkerApp, status: int, expected: type[Exception]
+) -> None:
+    app.script("steps", Scripted(status, {"error": {"code": "X", "message": "m"}}))
+
+    with pytest.raises(expected):
+        asyncio.run(client(app.url).steps(JOB_ID, BATCH))
+
+
+# #745-L30
+def test_a_hung_steps_call_leaves_the_other_calls_free_and_is_not_piled_up(
+    app: FakeWorkerApp,
+) -> None:
+    app.steps_delay = 1.5
+    api = client(app.url)
+
+    async def scenario() -> tuple[float, float]:
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        first = asyncio.ensure_future(api.steps(JOB_ID, BATCH))
+        await asyncio.sleep(0.2)
+        beat_began = loop.time()
+        await api.heartbeat(JOB_ID, CREDENTIAL)  # not held up by the steps call in flight
+        beat = loop.time() - beat_began
+        with pytest.raises(ApiUnavailable):  # a second call does not queue behind the first
+            await api.steps(JOB_ID, BATCH)
+        await first
+        return beat, loop.time() - began
+
+    beat, whole = asyncio.run(scenario())
+
+    assert beat < 1.0
+    assert whole >= 1.4

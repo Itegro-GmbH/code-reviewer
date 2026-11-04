@@ -445,7 +445,7 @@ export function ImplementerForm({
     ...environmentList.map((candidate) => ({
       id: candidate.id,
       label: candidate.sizeSupported
-        ? `${candidate.name} (${candidate.vcpus} vCPU, ${candidate.memoryGb} GB memory${candidate.hasScript ? ", setup script" : ""})`
+        ? `${candidate.name} (${candidate.vcpus} vCPU, ${candidate.memoryGb} GB memory${candidate.hasScript ? ", setup script" : ""}${candidate.networkMode === "off" ? "" : candidate.networkMode === "open" ? ", network: any host" : ", network: listed hosts"})`
         : `${candidate.name} (${candidate.vcpus} vCPU, no longer offered)`,
     })),
   ];
@@ -622,9 +622,16 @@ export function ImplementerForm({
           <p className="-mt-3 text-sm text-destructive">
             {FORM_COPY.environmentSizeUnsupportedNote}
           </p>
-        ) : environment !== undefined && environment.hasScript ? (
+        ) : environment !== undefined &&
+          (environment.hasScript || environment.networkMode !== "off") ? (
           <p className="-mt-3 text-sm text-muted-foreground">
-            {FORM_COPY.environmentScriptNote}
+            {environment.hasScript ? FORM_COPY.environmentScriptNote : null}
+            {environment.hasScript ? " " : null}
+            {environment.networkMode === "off"
+              ? FORM_COPY.environmentNoNetworkNote
+              : environment.networkMode === "open"
+                ? FORM_COPY.environmentNetworkNoteOpen
+                : FORM_COPY.environmentNetworkNoteList}
           </p>
         ) : (
           <p className="-mt-3 text-sm text-muted-foreground">

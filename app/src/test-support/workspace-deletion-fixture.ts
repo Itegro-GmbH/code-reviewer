@@ -132,6 +132,22 @@ export async function seedWorkspaceForDeletion(
     },
     async () => finished.id,
   );
+  // #745: a step of that turn (the live view); it points at the job, so the erasure has to remove it before the jobs.
+  await db
+    .insertInto("implementer_turn_steps")
+    .values({
+      job_id: finished.id,
+      part_id: `prt_${tag}_1`,
+      workspace_id: workspaceId,
+      seq: 1,
+      ordinal: 1,
+      kind: "text",
+      payload: JSON.stringify({ text: `Step ${tag}` }),
+      bytes: 22,
+      created_at: "2026-10-10T23:52:00.000Z",
+      updated_at: "2026-10-10T23:52:00.000Z",
+    })
+    .execute();
   // #818-T05: an environment of the Implementer, which the erasure removes with the rest.
   await createImplementerEnvironmentsRepository(db, workspaceId).create(
     {

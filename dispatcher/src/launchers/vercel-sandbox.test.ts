@@ -34,6 +34,8 @@ type Calls = {
   stop: number;
   /** The options of every `delete` call (the argument list, so a call without options is `[]`). */
   delete: unknown[][];
+  /** The arguments of every `updateNetworkPolicy` call (#745, step 7). */
+  policy: unknown[][];
   command: { stdin: string[]; closed: number; waits: number };
   /** Whether the signal handed to the `get` or `delete` call is aborted. */
   signalsAborted(): boolean;
@@ -47,6 +49,8 @@ function standIn(
     getError?: unknown;
     stopError?: unknown;
     deleteError?: unknown;
+    /** #745, step 7: what `updateNetworkPolicy` fails with. */
+    policyError?: unknown;
     /** The status and persistence the looked-up VM reports. */
     status?: string;
     persistent?: boolean;
@@ -65,6 +69,7 @@ function standIn(
     run: [],
     stop: 0,
     delete: [],
+    policy: [],
     command: { stdin: [], closed: 0, waits: 0 },
     signalsAborted: () =>
       [...calls.get, ...calls.delete.flat()].some(
@@ -103,6 +108,12 @@ function standIn(
       return options.stopError === undefined
         ? Promise.resolve({})
         : Promise.reject(options.stopError);
+    },
+    updateNetworkPolicy(...args: unknown[]) {
+      calls.policy.push(args);
+      return options.policyError === undefined
+        ? Promise.resolve({})
+        : Promise.reject(options.policyError);
     },
     status: options.status ?? "stopped",
     persistent: options.persistent ?? false,
@@ -179,6 +190,44 @@ function apiError(
     ...(code === undefined ? {} : { json: { error: { code } } }),
   });
 }
+
+describe("the network policy of a VM (#745, step 7)", () => {
+  // #745-T35
+  it("looks the VM up by name and gives the platform the policy as it is", async () => {
+    const { sdk, calls } = standIn();
+    const service = createVercelSandboxService(() => Promise.resolve(sdk));
+
+    await service.setNetworkPolicy(CREATE.name, {
+      allow: ["github.com", "*.pythonhosted.org"],
+    });
+
+    expect(calls.get).toHaveLength(1);
+    expect(calls.get[0]).toMatchObject({ name: CREATE.name });
+    expect(calls.policy).toHaveLength(1);
+    expect(calls.policy[0]?.[0]).toStrictEqual({
+      allow: ["github.com", "*.pythonhosted.org"],
+    });
+  });
+
+  // #745-T35
+  it("says not_ready for a VM the platform does not have, and classifies any other failure", async () => {
+    await expect(
+      createVercelSandboxService(() =>
+        Promise.resolve(standIn({ getError: apiError(404) }).sdk),
+      ).setNetworkPolicy(CREATE.name, "deny-all"),
+    ).rejects.toMatchObject({ kind: "not_ready" });
+    await expect(
+      createVercelSandboxService(() =>
+        Promise.resolve(standIn({ policyError: apiError(500) }).sdk),
+      ).setNetworkPolicy(CREATE.name, "deny-all"),
+    ).rejects.toMatchObject({ kind: "unavailable" });
+    await expect(
+      createVercelSandboxService(() =>
+        Promise.resolve(standIn({ policyError: apiError(429) }).sdk),
+      ).setNetworkPolicy(CREATE.name, "deny-all"),
+    ).rejects.toMatchObject({ kind: "rate_limited" });
+  });
+});
 
 describe("the Vercel adapter of the Sandbox port", () => {
   // #329-T03
