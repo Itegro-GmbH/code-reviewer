@@ -1570,7 +1570,8 @@ describe("the profile of a turn (#843)", () => {
 
     expect(contract.check("RunnerJobInput", input).valid).toBe(true);
     expect(
-      (input as { implementer: { profile: object } }).implementer.profile,
+      (input as unknown as { implementer: { profile: object } }).implementer
+        .profile,
     ).toEqual({ name: "reviewer", version: 3, canPush: true });
   });
 
@@ -1619,6 +1620,42 @@ describe("the profile of a turn (#843)", () => {
     const { input } = await fetched(h, WITH_PROFILE);
 
     expect(input.llm).toMatchObject({ maxCostUsd: 1.5, operatorMaxCostUsd: 3 });
+  });
+
+  // #843-T196
+  it("accepts the result of a profile that may not push: nothing pushed, no head, no commits, and the turn succeeds with its summary", async () => {
+    const h = await start();
+    const { jobId } = await h.turn({ profile: PROFILE });
+    const { credential } = await fetched(h, WITH_PROFILE);
+    const block = {
+      baseCommit: sha("b"),
+      headCommit: null,
+      pushed: false,
+      branches: [],
+      branchesDropped: { invalid: 0, overflow: 0 },
+      commits: [],
+      filesChanged: [],
+      summary: "Found two problems: ...",
+      opencode: { sessionId: "ses_0001", version: "1.19.0" },
+    };
+
+    const response = await h.worker.result(
+      jobId,
+      credential,
+      goodResult({ implementer: block }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await h.queue.get(jobId)).toMatchObject({ status: "succeeded" });
+    const session = await h.db
+      .selectFrom("implementer_sessions")
+      .select(["status", "head_commit", "summary"])
+      .executeTakeFirstOrThrow();
+    expect(session).toEqual({
+      status: "idle",
+      head_commit: null,
+      summary: "Found two problems: ...",
+    });
   });
 
   // #843-T195

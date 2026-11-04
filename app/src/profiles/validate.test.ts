@@ -269,7 +269,7 @@ describe("a profile document", () => {
       "/model",
       "/name",
     ]);
-    for (const junk of [undefined, Symbol.iterator, () => 1, 10n])
+    for (const junk of [undefined, Symbol.iterator, () => 1, BigInt(10)])
       expect(() => validateProfile(junk)).not.toThrow();
   });
 

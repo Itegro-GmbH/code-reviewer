@@ -3,10 +3,10 @@
 // Fixtures for the tests of the workflow format (#833): a fake resolver with a profile that may push and one that may not, and the
 // plan's example workflow ("Issue to PR") written as format v1 has it.
 import { BUILT_IN_CONNECTORS } from "./connectors.ts";
-import type { WorkflowResolver } from "./resolver.ts";
+import type { ProfileInfo, WorkflowResolver } from "./resolver.ts";
 
 export const FAKE_RESOLVER: WorkflowResolver = {
-  profiles: () => [
+  profiles: (): readonly ProfileInfo[] => [
     {
       name: "implementer",
       versions: [1, 2],

@@ -71,7 +71,11 @@ async function startRoutes(
   const db = getDatabase();
   const workspaceId = await defaultWorkspaceId(db);
   const otherId = await addWorkspace(db, "other");
-  await createInstanceSettingsRepository(db).set("review_max_cost_cents", 500);
+  await createInstanceSettingsRepository(db).set(
+    "review_max_cost_cents",
+    500,
+    null,
+  );
   session.currentLookup.mockResolvedValue(
     await signedInMember(db, {
       workspaceId,
@@ -159,6 +163,7 @@ describe("the profile route files", () => {
     await createInstanceSettingsRepository(db).set(
       "review_max_cost_cents",
       100,
+      null,
     );
 
     const good = await validate({ ...REVIEWER, costLimitCents: 100 });
