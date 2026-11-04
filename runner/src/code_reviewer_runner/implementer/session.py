@@ -54,6 +54,7 @@ from code_reviewer_runner.dynamic_review.model_door_route import MODEL_DOOR_ADDR
 from code_reviewer_runner.dynamic_review.passthrough.families import WireFamily, spec_of
 from code_reviewer_runner.dynamic_review.static_isolation import slot_ports
 from code_reviewer_runner.job import ImplementerInput, JobError
+from code_reviewer_runner.redaction import Redactor
 from code_reviewer_runner.result import ErrorCode, Usage
 
 from .agent import AgentTurn, EngineRuntime, ImplementerAgent
@@ -500,6 +501,7 @@ class ImplementerSession:
             model=entry.model_id,
             provider_id=entry.provider_id,
             transport=self.seams.transport,
+            redactor=Redactor(self.secrets()),
             **options,
         )
 

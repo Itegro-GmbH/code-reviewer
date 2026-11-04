@@ -5,25 +5,32 @@
 The engine publishes what happens in its session as server-sent events on its own loopback API
 (`GET /event`, scoped to the export like every request). The adapter reads them on a thread of its
 own and hands each event to the audit (`tool_part_audit.py`), which counts tool calls, result bytes
-and files for the native path, where the proxy counts nothing of the kind.
+and files for the native path, where the proxy counts nothing of the kind. The audit is the first of
+the reader's feeders; any further feeder is best effort (#745, the Implementer's step records).
 
 The reader fails closed. An audit that is not running is not an audit: a stream that does not say
 it is connected, one that ends while the run goes on, a line it cannot hold and an event it cannot
 read are each the run's failure with a stable code, recorded in the ledger where the adapter's
 watch picks it up. The stream is the engine's report and untrusted data; nothing in it is
 evaluated, and only the numbers the audit derives are kept.
+
+A feeder after the audit is the opposite: whatever it raises is counted (`feeder_errors`) and
+dropped. It is never the run's failure, so it can never end a turn, and it sees an event only after
+the audit has.
 """
 
 import contextlib
 import json
+import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Final, Protocol
 
 from code_reviewer_runner.dynamic_review.budget import BudgetLedger, LimitError
-from code_reviewer_runner.dynamic_review.tool_part_audit import ToolPartAudit
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 from code_reviewer_runner.result import ErrorCode
+
+_log = logging.getLogger(__name__)
 
 # The most one event may hold: the sum of its `data:` lines, and so also any one line. A result is
 # at most 64 KiB, which JSON escaping can multiply by six, so no event of a run within its bounds
@@ -42,18 +49,31 @@ class EventStream(Protocol):
     def close(self) -> None: ...
 
 
+class EventFeeder(Protocol):
+    """What the reader hands each event to (the tool-part audit is one)."""
+
+    def feed(self, event: Mapping[str, Any]) -> None: ...
+
+
 class EventReader:
-    """One thread that reads the engine's events into the audit, until it is stopped."""
+    """One thread that reads the engine's events into its feeders, until it is stopped.
+
+    `feeders[0]` is the audit and fails closed; the others are best effort."""
 
     def __init__(
         self,
         open_stream: Callable[[], EventStream],
-        audit: ToolPartAudit,
+        feeders: Sequence[EventFeeder],
         ledger: BudgetLedger,
     ) -> None:
+        if not feeders:
+            raise ValueError("the reader needs the audit as its first feeder")
         self._open = open_stream
-        self._audit = audit
+        self._audit = feeders[0]
+        self._others = tuple(feeders[1:])
         self._ledger = ledger
+        # Events a feeder after the audit could not take (see the module's docstring).
+        self.feeder_errors = 0
         self._stream: EventStream | None = None
         self._connected = threading.Event()
         self._stopping = threading.Event()
@@ -145,3 +165,10 @@ class EventReader:
             self._connected.set()
             return
         self._audit.feed(event)
+        for feeder in self._others:
+            try:
+                feeder.feed(event)
+            except Exception:  # best effort by design: never the run's failure
+                if not self.feeder_errors:
+                    _log.warning("an event feeder failed; its events are dropped")
+                self.feeder_errors += 1

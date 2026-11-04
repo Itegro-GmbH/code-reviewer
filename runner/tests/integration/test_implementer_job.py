@@ -20,6 +20,7 @@ container that is not confirmed gone); it is not the proof that a turn works end
 import io
 import json
 import os
+import queue
 import signal
 import socket
 import threading
@@ -42,6 +43,8 @@ from code_reviewer_runner.capabilities import (
     ENGINES_VARIABLE,
 )
 from code_reviewer_runner.dynamic_review.budget import BudgetLedger, UnitCosts
+from code_reviewer_runner.dynamic_review.engine_events import EventReader
+from code_reviewer_runner.dynamic_review.tool_part_audit import ToolPartAudit
 from code_reviewer_runner.implementer import session as session_module
 from code_reviewer_runner.implementer.agent import AgentTurn
 from code_reviewer_runner.implementer.door_state import DoorState
@@ -63,10 +66,13 @@ from code_reviewer_runner.implementer.job_run import (
 )
 from code_reviewer_runner.implementer.limits import agent_limits
 from code_reviewer_runner.implementer.session import SessionSeams
+from code_reviewer_runner.implementer.step_feed import StepFeeder
+from code_reviewer_runner.implementer.step_records import StepConverter
 from code_reviewer_runner.job import JobError
 from code_reviewer_runner.job_loop.host import IMPLEMENTER_TERMINATE_GRACE_SECONDS
 from code_reviewer_runner.job_loop.settings import WorkerSettings
 from code_reviewer_runner.lease_check import LEASE_CHECK_FD_VARIABLE
+from code_reviewer_runner.redaction import Redactor
 from code_reviewer_runner.result import ErrorCode
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -1260,3 +1266,103 @@ def test_when_the_agents_container_is_not_confirmed_gone_nothing_is_committed(
     assert "commit_all" not in turn.events and "rescue" not in turn.events
     assert turn.git.pushes == [TIP], "what was committed is still pushed"
     assert "were not looked for" in turn.result["implementer"]["summary"]
+
+
+# -- the step records ride on the event stream and change nothing (#745) -------------------------
+
+
+class ScriptedEvents:
+    """The engine's event stream of the test: `send` queues an event for the reader's thread."""
+
+    def __init__(self) -> None:
+        self.lines: queue.Queue[bytes] = queue.Queue()
+
+    def send(self, event: dict[str, Any]) -> None:
+        self.lines.put(f"data: {json.dumps(event)}\n".encode())
+        self.lines.put(b"\n")
+
+    def readline(self, limit: int = -1, /) -> bytes:
+        return self.lines.get(timeout=5)
+
+    def close(self) -> None:
+        self.lines.put(b"")
+
+
+def tool_part_event(identity: str, status: str) -> dict[str, Any]:
+    state: dict[str, Any] = {"status": status, "input": {"command": "x"}, "time": {"start": 1}}
+    if status == "completed":
+        state.update({"output": "ok", "title": "x", "metadata": {}, "time": {"start": 1, "end": 2}})
+    part = {
+        "id": f"prt_{identity}",
+        "type": "tool",
+        "callID": identity,
+        "tool": "bash",
+        "state": state,
+    }
+    return {
+        "type": "message.part.updated",
+        "properties": {"sessionID": "ses_fake", "part": part, "time": 5},
+    }
+
+
+def plays_with_steps(steps: Callable[[], Any]) -> Callable[[FakeAgent, Callable[[], None]], str]:
+    """A turn whose events go through a real `EventReader` with the audit and `steps` after it."""
+
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        events = ScriptedEvents()
+        reader = EventReader(
+            lambda: events,
+            [ToolPartAudit(agent.ledger, "ses_fake", export_root="/work/repo"), steps()],
+            agent.ledger,
+        )
+        events.send({"type": "server.connected", "properties": {}})
+        reader.start(5.0)
+        for identity in ("call_1", "call_2"):
+            events.send(tool_part_event(identity, "running"))
+            events.send(tool_part_event(identity, "completed"))
+        assert wait_for(lambda: agent.ledger.tool_calls == 2)
+        reader.stop()
+        agent.use_the_model()
+        make_commit(agent, TIP)
+        return "Added the greeting."
+
+    return script
+
+
+def what_the_turn_did(turn: Turn) -> dict[str, Any]:
+    ledger = turn.agent.ledger if turn.agent else None
+    result = turn.result
+    return {
+        "exit": turn.exit_code,
+        "ok": result["ok"],
+        "errorCode": result["errorCode"],
+        "implementer": result["implementer"],
+        "usage": result["usage"],
+        "pushes": turn.git.pushes,
+        "events": turn.events,
+        "toolCalls": None if ledger is None else ledger.tool_calls,
+        "returnedBytes": None if ledger is None else ledger.returned_bytes,
+        "failure": None if ledger is None else ledger.failure,
+    }
+
+
+# #745-L11
+def test_a_step_feeder_that_throws_changes_neither_the_ledger_nor_the_outcome_nor_the_push(
+    play: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def make_steps() -> StepFeeder:
+        return StepFeeder("ses_fake", Redactor([TOKEN]))
+
+    baseline = play(plays_with_steps(make_steps))
+
+    def explode(self: StepConverter, event: Any) -> Any:
+        raise RuntimeError("a bug in the converter")
+
+    monkeypatch.setattr(StepConverter, "convert", explode)
+    broken = play(plays_with_steps(make_steps))
+
+    assert baseline.exit_code == 0 and broken.exit_code == 0, broken.output
+    assert what_the_turn_did(broken) == what_the_turn_did(baseline)
+    assert broken.git.pushes == [TIP]
+    assert what_the_turn_did(broken)["toolCalls"] == 2
+    assert what_the_turn_did(broken)["failure"] is None

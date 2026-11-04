@@ -399,6 +399,28 @@ Stop: the kill of the agent's container took 0.4 to 0.5 s idle and **3.5 s** wit
 the agent in a turn: the door's relay at `10.213.77.2` reached; the model network's gateway, the VM's docker0 gateway, the VM's control port `23456`, `1.1.1.1:443`, a name lookup (ping and `getent`) all blocked, and the agent's only routes are the model network and its own inner `docker0`;
 a plain container on the VM with the same tools reaches the host listener, `1.1.1.1:443` and resolves `example.com`. The reader attack and the full disk are under "The agent's container" and "The disk".
 
+## Step records (the live view, in progress)
+
+While a turn runs, Control converts the events of the engine's stream into **step records**, one per part: what the agent
+thinks (`reasoning`), what it answers (`text`), each tool call (`tool`) and the tokens and cost of each model call (`step`)
+(`implementer/step_records.py`). The first slice only builds them; they go into a bounded in-memory queue
+(`implementer/step_feed.py`) and nothing leaves the process yet. The endpoint, the transport and the Runs page come in
+later pull requests of #745.
+
+- **What is kept.** A record has the part id, a counter, the start and end time and its text. A tool part is reported again when it
+  changes (running, then completed or error) with the same part id and a higher counter. Reasoning and answer text are kept
+  when the part ends. Whether a model shows its reasoning depends on the provider; a part without text makes no record.
+- **What is cut.** Text 16 KiB, a tool input (as JSON text) 4 KiB, an error 4 KiB, a title 512 bytes; always on a character
+  boundary, with a `[N bytes cut]` mark and the true size. A turn keeps at most 5,000 records and 2 MiB of text; after that only
+  the tool calls go on, as name and status, and the turn is marked as shortened.
+- **Tool output is not recorded.** The live view shows the call, never what the repository answered. It stays in the engine's session.
+- **Secrets.** Every text is redacted with the job's secrets and the door's bearer before it is put in a record, and before it is
+  cut. What the redactor cannot know is the repository itself: a `.env` the agent printed is in the agent's text or input if
+  the agent wrote it there. A member who can see a run can read what the agent wrote down.
+- **Best effort.** The tool audit is the reader's first feeder and fails closed. The step feeder comes after it and fails open:
+  an event it cannot convert, a full queue or a bug is counted and dropped. It never ends a turn, never delays the push and
+  never touches the ledger.
+
 ## The memory of the readers and the OS
 
 Measured on `spike-` VMs (2 vCPU, 4 GB, 2026-11-03) with the reader exactly as production starts it (`sysbox-runc`, read-only root, `/tmp` tmpfs of 64 MB, `CapDrop ALL` + `DAC_OVERRIDE`, the Subpath of a named volume, `core.bigFileThreshold=1m`), over three repositories: **this repository with its history** (3,400 files, 28,000 objects, all its branches as local ones, 400 files changed); **3.7 GB of files** (thirty of 100 MB, one of 700 MB, all random, and 200,000 small files); **400,000 tiny files**. The commands are the ones of the end of a turn: `status` (the look at the tree), `add -A` and `commit` (the leftover commit, in the reader that writes), and the `git upload-pack` of the final fetch piped to a `git fetch` with `fsckObjects`.

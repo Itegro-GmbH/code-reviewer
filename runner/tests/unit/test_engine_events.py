@@ -86,7 +86,7 @@ def reader(stream: ScriptedStream) -> tuple[EventReader, BudgetLedger]:
         DynamicLimits(),
         unit_costs=UnitCosts(input_usd_per_mtok=Decimal(1), output_usd_per_mtok=Decimal(4)),
     )
-    return EventReader(lambda: stream, ToolPartAudit(ledger, SESSION), ledger), ledger
+    return EventReader(lambda: stream, [ToolPartAudit(ledger, SESSION)], ledger), ledger
 
 
 def wait_for(condition: Any, seconds: float = 5.0) -> None:
@@ -134,7 +134,7 @@ def test_a_stream_that_cannot_be_opened_fails_the_start() -> None:
         raise EngineError(ErrorCode.DYNAMIC_ENGINE_UNAVAILABLE, "the engine is not reachable")
 
     with pytest.raises(EngineError) as raised:
-        EventReader(refuse, ToolPartAudit(ledger, SESSION), ledger).start(0.1)
+        EventReader(refuse, [ToolPartAudit(ledger, SESSION)], ledger).start(0.1)
 
     assert raised.value.code is ErrorCode.DYNAMIC_ENGINE_UNAVAILABLE
 
@@ -252,3 +252,89 @@ def test_a_stream_that_goes_silent_is_the_failure_of_the_run() -> None:
     assert ledger.failure is not None
     assert ledger.failure.code is ErrorCode.DYNAMIC_ENGINE_UNAVAILABLE
     events.stop()
+
+
+# -- feeders after the audit (#745) ---------------------------------------------------------------
+
+
+class Recorder:
+    """A feeder that notes what it saw and raises on every event when `explode` is set."""
+
+    def __init__(self, explode: bool = False) -> None:
+        self.seen: list[dict[str, Any]] = []
+        self.explode = explode
+
+    def feed(self, event: Any) -> None:
+        self.seen.append(event)
+        if self.explode:
+            raise RuntimeError("a bug in a feeder")
+
+
+def with_feeders(stream: ScriptedStream, *others: Recorder) -> tuple[EventReader, BudgetLedger]:
+    ledger = BudgetLedger(
+        DynamicLimits(),
+        unit_costs=UnitCosts(input_usd_per_mtok=Decimal(1), output_usd_per_mtok=Decimal(4)),
+    )
+    audit = ToolPartAudit(ledger, SESSION)
+    return EventReader(lambda: stream, [audit, *others], ledger), ledger
+
+
+# #745-L10
+def test_a_feeder_after_the_audit_sees_every_event_after_the_audit() -> None:
+    stream = ScriptedStream()
+    watcher = Recorder()
+    events, ledger = with_feeders(stream, watcher)
+    stream.send(CONNECTED)
+    events.start(5.0)
+
+    stream.send(tool_done("c1", "hello"))
+    stream.send({"type": "session.idle", "properties": {"sessionID": SESSION}})
+    wait_for(lambda: len(watcher.seen) == 2)
+    events.stop()
+
+    assert ledger.tool_calls == 1 and ledger.failure is None
+    assert [event["type"] for event in watcher.seen] == ["message.part.updated", "session.idle"]
+
+
+# #745-L10
+def test_a_feeder_that_raises_is_counted_and_never_the_failure_of_the_run() -> None:
+    stream = ScriptedStream()
+    broken, healthy = Recorder(explode=True), Recorder()
+    events, ledger = with_feeders(stream, broken, healthy)
+    stream.send(CONNECTED)
+    events.start(5.0)
+
+    stream.send(tool_done("c1", "hello"))
+    stream.send(tool_done("c2", "world!"))
+    wait_for(lambda: len(healthy.seen) == 2)
+    events.stop()
+
+    assert events.feeder_errors == 2
+    assert len(broken.seen) == 2, "it is asked again for the next event, not given up on"
+    assert ledger.failure is None
+    assert ledger.tool_calls == 2 and ledger.returned_bytes == len(b"hello") + len(b"world!")
+
+
+# #745-L10
+def test_the_audit_still_fails_closed_with_a_feeder_after_it() -> None:
+    stream = ScriptedStream()
+    watcher = Recorder()
+    events, ledger = with_feeders(stream, watcher)
+    stream.send(CONNECTED)
+    events.start(5.0)
+
+    stream.send(tool_done("c1", "x" * (MAX_TOOL_RESULT_BYTES + 1)))
+    wait_for(lambda: ledger.failure is not None)
+    events.stop()
+
+    assert ledger.failure is not None
+    assert ledger.failure.code is ErrorCode.DYNAMIC_BUDGET_EXCEEDED
+    assert watcher.seen == [], "an event the audit refused is not passed on"
+
+
+# #745-L10
+def test_a_reader_without_the_audit_is_refused() -> None:
+    ledger = BudgetLedger(DynamicLimits(), unit_costs=UnitCosts(Decimal(1), Decimal(4)))
+
+    with pytest.raises(ValueError, match="audit"):
+        EventReader(lambda: ScriptedStream(), [], ledger)

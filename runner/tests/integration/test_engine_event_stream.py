@@ -101,7 +101,7 @@ def test_a_stream_that_stays_open_and_goes_silent_ends_the_run(
     with engine_that(speak=True) as (url, _):
         budget = ledger()
         events = EventReader(
-            EngineClient(url, "/export").open_events, ToolPartAudit(budget, "ses_1"), budget
+            EngineClient(url, "/export").open_events, [ToolPartAudit(budget, "ses_1")], budget
         )
         events.start(5.0)
         try:
@@ -120,7 +120,7 @@ def test_stopping_the_reader_frees_the_thread_waiting_on_a_quiet_stream() -> Non
         budget = ledger()
         before = {thread.ident for thread in threading.enumerate()}
         events = EventReader(
-            EngineClient(url, "/export").open_events, ToolPartAudit(budget, "ses_1"), budget
+            EngineClient(url, "/export").open_events, [ToolPartAudit(budget, "ses_1")], budget
         )
         events.start(5.0)
 
