@@ -51,6 +51,7 @@ describe("the workflows repository", () => {
         createdBy: "u-1",
         createdAt: "2026-11-04T08:00:00.000Z",
         updatedAt: "2026-11-04T08:00:00.000Z",
+        archivedAt: null,
       },
       saved: {
         workflowId: "wf-1",
@@ -208,6 +209,80 @@ describe("the workflows repository", () => {
       ok: false,
       reason: "version_limit_reached",
     });
+  });
+
+  // #833-M1-T350
+  it("archives a workflow: hidden from the list, readable with its versions, archived once however often it is asked", async () => {
+    const { a } = await setup();
+    await a.create({ ...NEW, name: "Keep" }, 100);
+    await a.create({ ...NEW, name: "Old" }, 100);
+    await a.saveVersion("wf-2", { ...NEW, name: "Old" }, 100);
+
+    const archived = await a.archive("wf-2");
+    const again = await a.archive("wf-2");
+
+    expect(archived).toEqual({
+      ok: true,
+      workflow: expect.objectContaining({
+        id: "wf-2",
+        archivedAt: expect.any(String),
+      }),
+    });
+    expect(again).toEqual(archived);
+    expect((await a.list()).map((workflow) => workflow.name)).toEqual(["Keep"]);
+    expect((await a.get("wf-2"))?.workflow.archivedAt).toBe(
+      archived.ok ? archived.workflow.archivedAt : undefined,
+    );
+    expect((await a.listVersions("wf-2")).map((v) => v.version)).toEqual([
+      2, 1,
+    ]);
+    expect((await a.getVersion("wf-2", 1))?.document).toBe(DOC);
+    expect((await a.get("wf-1"))?.workflow.archivedAt).toBeNull();
+  });
+
+  // #833-M1-T351
+  it("does not count an archived workflow, and gives its name back", async () => {
+    const { a } = await setup();
+    await a.create({ ...NEW, name: "Flow" }, 1);
+    await a.archive("wf-1");
+
+    const next = await a.create({ ...NEW, name: "flow" }, 1);
+
+    expect(next.ok).toBe(true);
+    expect(await a.create({ ...NEW, name: "third" }, 1)).toEqual({
+      ok: false,
+      reason: "limit_reached",
+    });
+    expect(await a.create({ ...NEW, name: "FLOW" }, 5)).toEqual({
+      ok: false,
+      reason: "name_taken",
+    });
+  });
+
+  // #833-M1-T352
+  it("saves no new version of an archived workflow, and a name taken by an archived one is free for a rename", async () => {
+    const { a } = await setup();
+    await a.create({ ...NEW, name: "One" }, 100);
+    await a.create({ ...NEW, name: "Two" }, 100);
+    await a.archive("wf-1");
+
+    expect(await a.saveVersion("wf-1", { ...NEW, name: "One" }, 100)).toEqual({
+      ok: false,
+      reason: "archived",
+    });
+    expect((await a.saveVersion("wf-2", { ...NEW, name: "one" }, 100)).ok).toBe(
+      true,
+    );
+  });
+
+  // #833-M1-T353
+  it("says not_found when it archives an id that is not there or belongs to another workspace", async () => {
+    const { a, b } = await setup();
+    await b.create({ ...NEW, name: "Theirs" }, 100);
+
+    expect(await a.archive("nope")).toEqual({ ok: false, reason: "not_found" });
+    expect(await a.archive("wf-1")).toEqual({ ok: false, reason: "not_found" });
+    expect((await b.get("wf-1"))?.workflow.archivedAt).toBeNull();
   });
 
   // #833-M1-T150

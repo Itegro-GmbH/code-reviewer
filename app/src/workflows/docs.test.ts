@@ -12,6 +12,12 @@ import {
   ISSUE_CODES,
   SEMANTIC_ISSUE_CODES,
 } from "./issues.ts";
+import {
+  ERRORS_MAX,
+  LOOP_ROUNDS_MAX,
+  VERSIONS_PER_WORKFLOW_MAX,
+  WORKFLOWS_PER_WORKSPACE_MAX,
+} from "./limits.ts";
 import { createResolver } from "./resolver.ts";
 import { TRIGGER_KINDS } from "./triggers.ts";
 import { validateWorkflow } from "./validate.ts";
@@ -93,6 +99,17 @@ describe("docs/workflows.md", () => {
       "`workflow`",
       "1 to 10",
       "20 when left out",
+    ])
+      expect(docs).toContain(text);
+  });
+
+  // #833-M1-T360
+  it("states the numbers the code keeps: workflows, versions, errors in an answer, rounds of a loop", () => {
+    for (const text of [
+      `${WORKFLOWS_PER_WORKSPACE_MAX} workflows`,
+      `${VERSIONS_PER_WORKFLOW_MAX} versions`,
+      `**${ERRORS_MAX} errors at most**`,
+      `from **1 to ${LOOP_ROUNDS_MAX}**`,
     ])
       expect(docs).toContain(text);
   });

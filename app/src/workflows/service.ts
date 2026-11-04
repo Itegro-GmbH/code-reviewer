@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// The service behind the workflow routes (#833): validate a document without storing it, and list, read, create and save new
-// versions of the workflows of ONE workspace. Who may call is the route's (`withWorkspace`); every rule about the data is here.
+// The service behind the workflow routes (#833): validate a document without storing it, and list, read, create, save new
+// versions of and archive the workflows of ONE workspace. Who may call is the route's (`withWorkspace`); every rule about the data is here.
 // Saving runs the validator first, with the environments of the workspace, and refuses an invalid document with the same list of
 // errors the validate call gives. The document is stored as the JSON text that was validated; every save is a new version.
 import type { ImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
@@ -14,6 +14,7 @@ import { WorkflowError } from "./errors.ts";
 import {
   BUDGET_OPERATOR_MAX_USD,
   DOCUMENT_MAX_BYTES,
+  ID_MAX_LENGTH,
   VERSIONS_PER_WORKFLOW_MAX,
   WORKFLOWS_PER_WORKSPACE_MAX,
 } from "./limits.ts";
@@ -27,6 +28,8 @@ export type WorkflowSummaryView = {
   version: number;
   createdAt: string;
   updatedAt: string;
+  /** When the workflow was archived: not listed, takes no new version, never started. `null` while it is not. */
+  archivedAt: string | null;
 };
 
 export type WorkflowList = {
@@ -59,6 +62,11 @@ export type WorkflowService = {
     body: unknown,
     expectedVersion?: number,
   ): Promise<WorkflowView>;
+  /**
+   * Archives a workflow: it leaves the list and the count of the workspace, takes no new version and is not started; its name is
+   * free again and its versions stay readable. Asked again, it answers the same.
+   */
+  archive(id: string): Promise<WorkflowView>;
 };
 
 export type WorkflowServiceDependencies = {
@@ -68,8 +76,6 @@ export type WorkflowServiceDependencies = {
   maxBudgetUsd?: number;
 };
 
-const ID_MAX_LENGTH = 128;
-
 function summaryOf(workflow: StoredWorkflow): WorkflowSummaryView {
   return {
     id: workflow.id,
@@ -77,6 +83,7 @@ function summaryOf(workflow: StoredWorkflow): WorkflowSummaryView {
     version: workflow.version,
     createdAt: workflow.createdAt,
     updatedAt: workflow.updatedAt,
+    archivedAt: workflow.archivedAt,
   };
 }
 
@@ -128,12 +135,11 @@ export function createWorkflowService({
     return { name: (body as { name: string }).name, text };
   }
 
+  const notFound = (): WorkflowError =>
+    new WorkflowError("WORKFLOW_NOT_FOUND", "There is no such workflow.");
+
   function checkId(id: string): void {
-    if (id.length === 0 || id.length > ID_MAX_LENGTH)
-      throw new WorkflowError(
-        "WORKFLOW_NOT_FOUND",
-        "There is no such workflow.",
-      );
+    if (id.length === 0 || id.length > ID_MAX_LENGTH) throw notFound();
   }
 
   return {
@@ -149,11 +155,7 @@ export function createWorkflowService({
     async get(id, version) {
       checkId(id);
       const found = await workflows.get(id);
-      if (found === undefined)
-        throw new WorkflowError(
-          "WORKFLOW_NOT_FOUND",
-          "There is no such workflow.",
-        );
+      if (found === undefined) throw notFound();
       if (version === undefined || version === found.current.version)
         return viewOf(found.workflow, found.current);
       const older = await workflows.getVersion(id, version);
@@ -186,6 +188,15 @@ export function createWorkflowService({
       return viewOf(created.workflow, created.saved);
     },
 
+    async archive(id) {
+      checkId(id);
+      const archived = await workflows.archive(id);
+      if (!archived.ok) throw notFound();
+      const found = await workflows.get(id);
+      if (found === undefined) throw notFound();
+      return viewOf(found.workflow, found.current);
+    },
+
     async update(user, id, body, expectedVersion) {
       checkId(id);
       const { name, text } = await acceptable(body);
@@ -202,9 +213,11 @@ export function createWorkflowService({
       if (saved.ok) return viewOf(saved.workflow, saved.saved);
       switch (saved.reason) {
         case "not_found":
+          throw notFound();
+        case "archived":
           throw new WorkflowError(
-            "WORKFLOW_NOT_FOUND",
-            "There is no such workflow.",
+            "WORKFLOW_ARCHIVED",
+            "The workflow is archived and takes no new version.",
           );
         case "name_taken":
           throw new WorkflowError(

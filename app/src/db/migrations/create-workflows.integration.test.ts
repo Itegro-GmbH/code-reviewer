@@ -120,7 +120,17 @@ describe("the workflows migration", () => {
 
     await expect(
       sql`insert into workflows (id, workspace_id, name, current_version, created_by, created_at, updated_at)
-        values ('f-2', 'w-1', 'flow', 1, 'u-1', ${T}, ${T})`.execute(db),
+        values ('f-1b', 'w-1', 'flow', 1, 'u-1', ${T}, ${T})`.execute(db),
+    ).rejects.toThrow(/workflows_workspace_name_unique/);
+    await sql`update workflows set archived_at = ${T} where id = 'f-1'`.execute(
+      db,
+    );
+    // An archived workflow gives its name back.
+    await sql`insert into workflows (id, workspace_id, name, current_version, created_by, created_at, updated_at)
+      values ('f-2', 'w-1', 'flow', 1, 'u-1', ${T}, ${T})`.execute(db);
+    await expect(
+      sql`insert into workflows (id, workspace_id, name, current_version, created_by, created_at, updated_at)
+        values ('f-2b', 'w-1', 'FLOW', 1, 'u-1', ${T}, ${T})`.execute(db),
     ).rejects.toThrow(/workflows_workspace_name_unique/);
     await expect(
       sql`insert into workflows (id, workspace_id, name, current_version, created_by, created_at, updated_at)

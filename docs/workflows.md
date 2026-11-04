@@ -395,11 +395,18 @@ code from the table below.
 | `POST /workflows/validate` | Checks the document against the format and the workspace's environments. Stores nothing. | `200` `{valid, errors, steps, budgetUsd?}` (also for an invalid document) |
 | `POST /workflows` | Validates and saves as **version 1**. | `201` `{workflow}`; `422` `WORKFLOW_INVALID` with `errors` |
 | `PUT /workflows/<id>` | Validates and saves as the **next version**; the name is taken from the document. `?expectedVersion=n` saves only if `n` is still current (a race gives `409` `WORKFLOW_VERSION_CONFLICT` with `current`). | `200` `{workflow}` |
-| `GET /workflows` | The workflows of the workspace by name. | `200` `{workflows: [{id, name, version, createdAt, updatedAt}], maximum}` |
-| `GET /workflows/<id>` | The workflow with its current version, or `?version=n`. | `200` `{workflow: {id, name, version, documentVersion, document, versions: [{version, savedAt}]}}` |
+| `GET /workflows` | The workflows of the workspace by name, **not the archived ones**. | `200` `{workflows: [{id, name, version, createdAt, updatedAt, archivedAt}], maximum}` |
+| `GET /workflows/<id>` | The workflow with its current version, or `?version=n`. An archived workflow is readable too. | `200` `{workflow: {id, name, version, archivedAt, documentVersion, document, versions: [{version, savedAt}]}}` |
+| `DELETE /workflows/<id>` | **Archives** the workflow (a soft delete). Asked again, it answers the same. | `200` `{workflow}` with `archivedAt` set; `404` `WORKFLOW_NOT_FOUND` |
 
-Every save is a **new, immutable version**; an identical document is saved again as a new version. A workspace holds 100 workflows, a workflow
-200 versions. Deleting is not offered yet.
+Every save is a **new, immutable version**: the database refuses to change a saved version (there is no UPDATE of a version; only the erasure
+of a whole workspace deletes rows). An identical document is saved again as a new version. A workspace holds 100 workflows that are not
+archived, a workflow 500 versions. Old versions are not pruned: a run will name the version it started with (milestone 3), so none may vanish
+under it. A workflow that reaches its 500 versions is archived and written again under its name.
+
+**Archiving** is the only delete in version 1. An archived workflow is hidden from the list, takes no new version (`409`
+`WORKFLOW_ARCHIVED`), is never started (the engine reads `archivedAt`), does not count against the 100, and **gives its name back**: a new
+workflow may use it. Its versions stay readable by id. There is no way back yet.
 
 ## Error codes
 
@@ -459,11 +466,12 @@ Beyond the form:
 | --- | --- | --- |
 | `WORKFLOW_REQUEST_INVALID` | 400 | The body is not JSON, or a query value is not a whole number. |
 | `WORKFLOW_CROSS_SITE_REQUEST` | 403 | The request comes from another site. |
-| `WORKFLOW_NOT_FOUND` | 404 | No such workflow in this workspace (another workspace's looks the same). |
+| `WORKFLOW_NOT_FOUND` | 404 | No such workflow in this workspace (another workspace's looks the same), also for an archive. |
 | `WORKFLOW_VERSION_NOT_FOUND` | 404 | The workflow has no such version. |
-| `WORKFLOW_NAME_TAKEN` | 409 | The workspace has a workflow of that name (case ignored). |
-| `WORKFLOW_LIMIT_REACHED` | 409 | The workspace holds 100 workflows (`maximum`). |
-| `WORKFLOW_VERSION_LIMIT_REACHED` | 409 | The workflow holds 200 versions (`maximum`). |
+| `WORKFLOW_NAME_TAKEN` | 409 | The workspace has a workflow of that name that is not archived (case ignored). |
+| `WORKFLOW_LIMIT_REACHED` | 409 | The workspace holds 100 workflows that are not archived (`maximum`). |
+| `WORKFLOW_VERSION_LIMIT_REACHED` | 409 | The workflow holds 500 versions (`maximum`). |
+| `WORKFLOW_ARCHIVED` | 409 | The workflow is archived and takes no new version. |
 | `WORKFLOW_VERSION_CONFLICT` | 409 | `expectedVersion` is not current any more (`current` says which is). |
 | `WORKFLOW_BODY_TOO_LARGE` | 413 | The body is over 256 KB. |
 | `WORKFLOW_CONTENT_TYPE_UNSUPPORTED` | 415 | The body is not `application/json`. |

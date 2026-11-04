@@ -1154,6 +1154,8 @@ export interface WorkflowsTable {
   /** ISO 8601 UTC. */
   created_at: string;
   updated_at: string;
+  /** Set when the workflow was archived: hidden from the list, takes no new version, its name is free. */
+  archived_at: string | null;
 }
 
 /** One saved version of a workflow's document (#833). Immutable: the database refuses an update. */

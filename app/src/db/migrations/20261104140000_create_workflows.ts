@@ -2,7 +2,8 @@
 
 // The workflows of a workspace (#833, agent workflows, milestone 1): a workflow is a JSON document with a name, saved per workspace.
 // Every save is a new, immutable version; `workflows` holds the name and which version is the current one, `workflow_versions`
-// holds the documents. The tables are new and empty and nothing else points at them yet (the engine of a later milestone will
+// holds the documents. A workflow is never deleted by the user: it is archived (`archived_at`), which hides it from the list, gives its
+// name back and counts it no more against the workspace's maximum; its versions stay. The tables are new and empty and nothing else points at them yet (the engine of a later milestone will
 // point at a version).
 //
 // Expand only, safe for the version that is still running (it never reads the tables) and for the live database:
@@ -40,6 +41,8 @@ export const migration: Migration = {
       )
       .addColumn("created_at", "text", (column) => column.notNull())
       .addColumn("updated_at", "text", (column) => column.notNull())
+      // ISO 8601 UTC, set when the workflow is archived.
+      .addColumn("archived_at", "text")
       .addCheckConstraint(
         "workflows_name_check",
         sql`char_length(name) between 1 and 100`,
@@ -50,9 +53,11 @@ export const migration: Migration = {
       )
       .execute();
 
-    // One name once per workspace, whatever its case.
+    // One name once per workspace among the workflows that are not archived, whatever its case.
     await sql`create unique index workflows_workspace_name_unique
-      on workflows (workspace_id, lower(name))`.execute(db);
+      on workflows (workspace_id, lower(name)) where archived_at is null`.execute(
+      db,
+    );
 
     await db.schema
       .createTable("workflow_versions")
@@ -81,7 +86,8 @@ export const migration: Migration = {
       )
       .execute();
 
-    // Versions are immutable: the database refuses an update of a saved version, so no code path can change history.
+    // Versions are immutable: the database refuses an update of a saved version, so no code path can change history. (Deleting is
+    // not refused: the erasure of a workspace removes its rows.)
     await sql`create function workflow_versions_immutable() returns trigger as $$
       begin
         raise exception 'workflow versions are immutable' using errcode = 'restrict_violation';

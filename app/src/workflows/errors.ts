@@ -28,6 +28,8 @@ export const WORKFLOW_ERROR_CODES = [
   "WORKFLOW_VERSION_LIMIT_REACHED",
   /** `expectedVersion` is not the current version: somebody saved in between. `current` says which is. */
   "WORKFLOW_VERSION_CONFLICT",
+  /** The workflow is archived and takes no new version. */
+  "WORKFLOW_ARCHIVED",
 ] as const;
 export type WorkflowErrorCode = (typeof WORKFLOW_ERROR_CODES)[number];
 
@@ -43,6 +45,7 @@ export const WORKFLOW_ERROR_STATUS: Record<WorkflowErrorCode, number> = {
   WORKFLOW_LIMIT_REACHED: 409,
   WORKFLOW_VERSION_LIMIT_REACHED: 409,
   WORKFLOW_VERSION_CONFLICT: 409,
+  WORKFLOW_ARCHIVED: 409,
 };
 
 export class WorkflowError extends Error {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // The handlers behind the workflow routes (#833): `GET/POST .../workflows`, `POST .../workflows/validate` and
-// `GET/PUT .../workflows/:id`, with their collaborators passed in so the route files only wire the real ones and tests wire fakes.
+// `GET/PUT/DELETE .../workflows/:id` (DELETE archives), with their collaborators passed in so the route files only wire the real ones and tests wire fakes.
 // Order: the user first (nothing is looked at before the caller is known), then where the request comes from, then, for a body, its
 // content type and size, then the service. Every answer is `Cache-Control: no-store`. The body of a write is the workflow document
 // itself. A refusal is `{ "error": <code> }` with a stable code from `errors.ts`; an invalid document adds `"errors"` (every
@@ -25,6 +25,7 @@ export type WorkflowRouteHandlers = {
   validate(request: Request): Promise<Response>;
   get(request: Request, workflowId: string): Promise<Response>;
   update(request: Request, workflowId: string): Promise<Response>;
+  archive(request: Request, workflowId: string): Promise<Response>;
 };
 
 const NO_STORE = { "cache-control": "no-store" };
@@ -145,6 +146,13 @@ export function createWorkflowRouteHandlers({
               numberParam(request, "expectedVersion"),
             ),
           },
+          { headers: NO_STORE },
+        ),
+      ),
+    archive: (request, workflowId) =>
+      answer(request, async () =>
+        Response.json(
+          { workflow: await service.archive(workflowId) },
           { headers: NO_STORE },
         ),
       ),

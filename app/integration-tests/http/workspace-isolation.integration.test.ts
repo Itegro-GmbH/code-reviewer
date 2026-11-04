@@ -58,6 +58,8 @@ vi.mock("next/server", async (importOriginal) => ({
 }));
 
 const fakes: FakeGithub[] = [];
+/** An environment every seeded workspace has, which the workflows of the matrix name. */
+const SHARED_ENVIRONMENT = "shared";
 const HEAD = "1f3a5c7e9b2d4f60a8c1e3b5d7f90a2c4e6b8d01";
 
 type Ids = {
@@ -446,13 +448,13 @@ const ENTRIES: Entry[] = [
     body: () => ({
       version: 1,
       name: "Created by the matrix",
-      // The environment is a reference, which is checked for its type and not for its existence: valid in any workspace.
+      // Both workspaces have an environment of this name, so the document is valid whichever workspace the request is for.
       trigger: {
         kind: "manual",
         input: {
           type: "object",
-          required: ["env"],
-          properties: { env: { type: "string" } },
+          required: ["repo"],
+          properties: { repo: { type: "string" } },
         },
       },
       steps: [
@@ -460,7 +462,7 @@ const ENTRIES: Entry[] = [
           id: "work",
           kind: "agent",
           profile: "implementer",
-          environment: "{{trigger.input.env}}",
+          environment: SHARED_ENVIRONMENT,
           instruction: "x",
         },
       ],
@@ -501,13 +503,13 @@ const ENTRIES: Entry[] = [
     body: () => ({
       version: 1,
       name: "Changed by the matrix",
-      // The environment is a reference, which is checked for its type and not for its existence: valid in any workspace.
+      // Both workspaces have an environment of this name, so the document is valid whichever workspace the request is for.
       trigger: {
         kind: "manual",
         input: {
           type: "object",
-          required: ["env"],
-          properties: { env: { type: "string" } },
+          required: ["repo"],
+          properties: { repo: { type: "string" } },
         },
       },
       steps: [
@@ -515,11 +517,22 @@ const ENTRIES: Entry[] = [
           id: "work",
           kind: "agent",
           profile: "implementer",
-          environment: "{{trigger.input.env}}",
+          environment: SHARED_ENVIRONMENT,
           instruction: "x",
         },
       ],
     }),
+    params: (ids) => ({ workflowId: ids.workflowId }),
+    file: "workflows/[workflowId]/route.ts",
+    implementer: true,
+  },
+  {
+    // #833-M1-T359: every member archives a workflow of their own workspace; the other workspace's is not reachable.
+    name: "DELETE workflows/[workflowId]",
+    route: "/api/w/[workspace]/workflows/[workflowId]",
+    method: "DELETE",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) => `/workflows/${ids.workflowId}`,
     params: (ids) => ({ workflowId: ids.workflowId }),
     file: "workflows/[workflowId]/route.ts",
     implementer: true,
@@ -871,6 +884,19 @@ async function seedWorkspace(
     50,
   );
   if (!environment.ok) throw new Error("seeding failed");
+  const shared = await createImplementerEnvironmentsRepository(
+    db,
+    workspace.id,
+  ).create(
+    {
+      name: SHARED_ENVIRONMENT,
+      vcpus: 4,
+      setupScript: "",
+      createdBy: names.owner,
+    },
+    50,
+  );
+  if (!shared.ok) throw new Error("seeding failed");
   // A workflow (#833): the other workspace's must not be reachable through this one's address, nor changed.
   const workflow = await createWorkflowsRepository(db, workspace.id).create(
     {

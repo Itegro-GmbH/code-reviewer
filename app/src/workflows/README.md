@@ -26,10 +26,11 @@ No database, no I/O: a document and a `WorkflowResolver` go in, a list of proble
 | `connectors.ts`, `triggers.ts`, `facts.ts`        | What the three actions take and yield, what each trigger hands over, the facts every agent step yields without the agent                                                                                        |
 | `resolver.ts`                                     | `WorkflowResolver`: which profiles, environments and connectors exist, as plain data                                                                                                                            |
 | `issues.ts`, `limits.ts`                          | The issue shape and its stable codes (form codes are the ones the JSON Schema states too), the bounds                                                                                                           |
-| `service.ts`, `http.ts`, `errors.ts`, `shared.ts` | The workspace service (validate, list, get, create, save a version), the handlers, the route codes, the wiring                                                                                                  |
+| `service.ts`, `http.ts`, `errors.ts`, `shared.ts` | The workspace service (validate, list, get, create, save a version, archive), the handlers, the route codes, the wiring                                                                                                  |
 
-The storage is `workflows` (name, current version) and `workflow_versions` (the document text of every version, immutable: the database refuses an
-update) in `src/db/repositories/workflows-repository.ts`, scoped to a workspace.
+The storage is `workflows` (name, current version, `archived_at`) and `workflow_versions` (the document text of every version; the database refuses an
+UPDATE, only the erasure of a workspace deletes) in `src/db/repositories/workflows-repository.ts`, scoped to a workspace. A workflow is archived, not
+deleted: hidden from the list, no new version, free name, versions kept.
 
 ## Decisions where the plan left room
 
@@ -45,8 +46,12 @@ update) in `src/db/repositories/workflows-repository.ts`, scoped to a workspace.
 - **A loop's own result** is `exit` and `rounds`; the plan's `{{fix.findings}}` is `{{review.findings}}` in version 1.
 - **`environment` is a name** (names are unique in a workspace, case ignored), or a reference to a text. `trigger.repo.defaultEnvironment` of the plan's
   example does not exist: nothing maps a repository to an environment yet.
-- **Which repository an agent step works on** is not in the format yet (the plan's example has none); the engine will take the trigger's. Adding a field later is
-  additive.
+- **One repository per run.** The run's repository is `trigger.repo` (issue trigger) or the input `repo` a manual trigger must declare; no node names another one.
+  More than one repository per run is a later, additive extension.
+- **Targets** (`issue`, `head`, `base`, the labels, the `environment`) take a literal or one whole reference to the trigger or to an agent step's `branch`, never a
+  value an agent reported (`check-values.ts`, `connectors.ts`): an agent's result is data, not a command.
+- **`json.ts`** holds the one `isRecord` and `jsonTypeName`, and the length of a text in characters (code points), which is how the JSON Schema counts. A message
+  repeats at most 64 characters of what the user wrote (`shown` in `issues.ts`).
 - **The operator's maximum budget** is `BUDGET_OPERATOR_MAX_USD` (100) in `limits.ts`, passed into the validator; there is no operator setting for it yet.
 - **Saving**: the name of the workflow is the `name` of the document, and every save is a new version, an identical document too. The stored text is the JSON that
   was validated. `who saved a version` is kept as text, without a foreign key (history survives the merge that retires an imported operator).

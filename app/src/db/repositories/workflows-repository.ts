@@ -2,7 +2,9 @@
 
 // Access to the workflows of ONE workspace (the tables `workflows` and `workflow_versions`; the factory takes the workspace id,
 // see ../workspace-scope.ts). A workflow is a name and a list of versions; every save adds a version and makes it the current one,
-// no version is ever changed. A row of another workspace is simply not there. The rules that need the database live here: a name
+// no version is ever changed (the database refuses an update; only the erasure of a workspace deletes). A workflow is never deleted
+// by the user but archived: hidden from the list, no new version, not counted against the maximum, its name free for a new workflow,
+// its versions kept. A row of another workspace is simply not there. The rules that need the database live here: a name
 // once per workspace whatever its case, a bounded count of workflows and of versions, and the next version number, all decided
 // under a lock on the workflow (or, for a new one, on the workspace row) so that two writers cannot both take the same place.
 // What the document says is the validator's (src/workflows/); the repository stores the text it is given.
@@ -22,6 +24,8 @@ export type StoredWorkflow = {
   createdBy: string;
   createdAt: string;
   updatedAt: string;
+  /** When the workflow was archived, `null` while it is not. */
+  archivedAt: string | null;
 };
 
 export type StoredWorkflowVersion = {
@@ -53,6 +57,7 @@ export type SaveOutcome =
       ok: false;
       reason:
         | "not_found"
+        | "archived"
         | "name_taken"
         | "version_conflict"
         | "version_limit_reached";
@@ -60,10 +65,13 @@ export type SaveOutcome =
       current?: number;
     };
 
+export type ArchiveOutcome =
+  { ok: true; workflow: StoredWorkflow } | { ok: false; reason: "not_found" };
+
 export type WorkflowsRepository = {
-  /** All workflows of the workspace by name (case ignored), without their documents. */
+  /** The workflows of the workspace that are not archived, by name (case ignored), without their documents. */
   list(): Promise<StoredWorkflow[]>;
-  /** The workflow with its current version. */
+  /** The workflow with its current version, also when it is archived (its versions stay readable). */
   get(
     id: string,
   ): Promise<
@@ -84,6 +92,8 @@ export type WorkflowsRepository = {
     input: NewVersion,
     maximumVersions: number,
   ): Promise<SaveOutcome>;
+  /** Archives a workflow. Asked again, it answers the same (the first time stays). */
+  archive(id: string): Promise<ArchiveOutcome>;
 };
 
 function workflowFrom(row: Selectable<WorkflowsTable>): StoredWorkflow {
@@ -95,6 +105,7 @@ function workflowFrom(row: Selectable<WorkflowsTable>): StoredWorkflow {
     createdBy: row.created_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    archivedAt: row.archived_at,
   };
 }
 
@@ -132,6 +143,7 @@ export function createWorkflowsRepository(
         .selectFrom("workflows")
         .selectAll()
         .where("workspace_id", "=", workspaceId)
+        .where("archived_at", "is", null)
         .orderBy((eb) => eb.fn("lower", ["name"]))
         .orderBy("id")
         .execute();
@@ -199,6 +211,7 @@ export function createWorkflowsRepository(
           .selectFrom("workflows")
           .select((eb) => eb.fn.countAll<string>().as("count"))
           .where("workspace_id", "=", workspaceId)
+          .where("archived_at", "is", null)
           .executeTakeFirstOrThrow();
         if (Number(count) >= maximum)
           return { ok: false, reason: "limit_reached" };
@@ -251,6 +264,8 @@ export function createWorkflowsRepository(
             .forUpdate()
             .executeTakeFirst();
           if (row === undefined) return { ok: false, reason: "not_found" };
+          if (row.archived_at !== null)
+            return { ok: false, reason: "archived" };
           if (
             input.expectedVersion !== undefined &&
             input.expectedVersion !== row.current_version
@@ -267,6 +282,7 @@ export function createWorkflowsRepository(
             .select("id")
             .where("workspace_id", "=", workspaceId)
             .where("id", "<>", id)
+            .where("archived_at", "is", null)
             .where((eb) =>
               eb(eb.fn("lower", ["name"]), "=", input.name.toLowerCase()),
             )
@@ -310,6 +326,30 @@ export function createWorkflowsRepository(
           return { ok: false, reason: "name_taken" };
         throw error;
       }
+    },
+
+    async archive(id) {
+      return inTransaction(async (trx): Promise<ArchiveOutcome> => {
+        const row = await trx
+          .selectFrom("workflows")
+          .selectAll()
+          .where("workspace_id", "=", workspaceId)
+          .where("id", "=", id)
+          .forUpdate()
+          .executeTakeFirst();
+        if (row === undefined) return { ok: false, reason: "not_found" };
+        if (row.archived_at !== null)
+          return { ok: true, workflow: workflowFrom(row) };
+        const timestamp = formatTimestamp(now());
+        const archived = await trx
+          .updateTable("workflows")
+          .set({ archived_at: timestamp, updated_at: timestamp })
+          .where("workspace_id", "=", workspaceId)
+          .where("id", "=", id)
+          .returningAll()
+          .executeTakeFirstOrThrow();
+        return { ok: true, workflow: workflowFrom(archived) };
+      });
     },
   };
 }

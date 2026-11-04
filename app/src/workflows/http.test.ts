@@ -23,12 +23,18 @@ const VIEW: WorkflowView = {
   version: 2,
   createdAt: "2026-11-04T08:00:00.000Z",
   updatedAt: "2026-11-04T09:00:00.000Z",
+  archivedAt: null,
   documentVersion: 2,
   document: { version: 1 },
   versions: [
     { version: 2, savedAt: "2026-11-04T09:00:00.000Z" },
     { version: 1, savedAt: "2026-11-04T08:00:00.000Z" },
   ],
+};
+
+const ARCHIVED: WorkflowView = {
+  ...VIEW,
+  archivedAt: "2026-11-04T10:00:00.000Z",
 };
 
 function setup(overrides: Partial<WorkflowService> = {}) {
@@ -48,6 +54,7 @@ function setup(overrides: Partial<WorkflowService> = {}) {
       calls.push(`update ${id} ${JSON.stringify(body)} ${expected}`),
       VIEW
     ),
+    archive: async (id) => (calls.push(`archive ${id}`), ARCHIVED),
     ...overrides,
   };
   const requireUser = vi.fn(async () => USER);
@@ -77,8 +84,9 @@ describe("the workflow handlers", () => {
     await handlers.validate(json("POST", {}));
     await handlers.create(json("POST", {}));
     await handlers.update(json("PUT", {}), "wf-1");
+    await handlers.archive(new Request(url, { method: "DELETE" }), "wf-1");
 
-    expect(requireUser).toHaveBeenCalledTimes(5);
+    expect(requireUser).toHaveBeenCalledTimes(6);
   });
 
   // #833-M1-T181
@@ -262,5 +270,61 @@ describe("the workflow handlers", () => {
     await expect(handlers.list(new Request(url))).rejects.toThrow(
       "database down",
     );
+  });
+});
+
+describe("archiving a workflow", () => {
+  // #833-M1-T357
+  it("archives through the service and answers with the workflow, no-store", async () => {
+    const { handlers, calls, url } = setup();
+
+    const response = await handlers.archive(
+      new Request(`${url}/wf-1`, { method: "DELETE" }),
+      "wf-1",
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({ workflow: ARCHIVED });
+    expect(calls).toEqual(["archive wf-1"]);
+  });
+
+  // #833-M1-T358
+  it("refuses a request from another site, and says WORKFLOW_ARCHIVED with its status when the service does", async () => {
+    const { handlers, calls, url } = setup({
+      update: async () => {
+        throw new WorkflowError(
+          "WORKFLOW_ARCHIVED",
+          "The workflow is archived.",
+        );
+      },
+    });
+
+    const foreign = await handlers.archive(
+      new Request(`${url}/wf-1`, {
+        method: "DELETE",
+        headers: {
+          origin: "https://evil.test",
+          "sec-fetch-site": "cross-site",
+        },
+      }),
+      "wf-1",
+    );
+    const update = await handlers.update(
+      new Request(`${url}/wf-1`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      }),
+      "wf-1",
+    );
+
+    expect(foreign.status).toBe(403);
+    expect(await foreign.json()).toMatchObject({
+      error: "WORKFLOW_CROSS_SITE_REQUEST",
+    });
+    expect(calls).toEqual([]);
+    expect(update.status).toBe(409);
+    expect(await update.json()).toMatchObject({ error: "WORKFLOW_ARCHIVED" });
   });
 });

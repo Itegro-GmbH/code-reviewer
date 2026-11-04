@@ -215,6 +215,39 @@ describe("the workflow service", () => {
     }
   });
 
+  // #833-M1-T354
+  it("archives a workflow: not listed, still readable with its versions, no new version, and its name is free", async () => {
+    const { a } = await setup();
+    const created = await a.create(USER, tiny());
+    await a.update(USER, created.id, tiny());
+
+    const archived = await a.archive(created.id);
+    const again = await a.archive(created.id);
+
+    expect(archived.archivedAt).toEqual(expect.any(String));
+    expect(again.archivedAt).toBe(archived.archivedAt);
+    expect((await a.list()).workflows).toEqual([]);
+    const read = await a.get(created.id);
+    expect(read.archivedAt).toBe(archived.archivedAt);
+    expect(read.versions.map((v) => v.version)).toEqual([2, 1]);
+    const refused = await failureOf(a.update(USER, created.id, tiny()));
+    expect(refused.code).toBe("WORKFLOW_ARCHIVED");
+    const fresh = await a.create(USER, tiny());
+    expect(fresh.id).not.toBe(created.id);
+    expect(fresh.version).toBe(1);
+    expect(fresh.archivedAt).toBeNull();
+  });
+
+  // #833-M1-T355
+  it("answers 'not found' when it archives an id that does not exist, is empty, is too long or is another workspace's", async () => {
+    const { a, b } = await setup();
+    const theirs = await b.create(USER, tiny());
+
+    for (const id of ["nope", "", "x".repeat(200), theirs.id])
+      expect((await failureOf(a.archive(id))).code).toBe("WORKFLOW_NOT_FOUND");
+    expect((await b.get(theirs.id)).archivedAt).toBeNull();
+  });
+
   // #833-M1-T209
   it("keeps the workflows of two workspaces apart", async () => {
     const { a, b } = await setup();

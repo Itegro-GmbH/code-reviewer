@@ -98,6 +98,13 @@ async function startRoutes(
     itemRoute.PUT(json("PUT", `${base(workspace)}/${id}${query}`, body), {
       params: Promise.resolve({ workspace, workflowId: id }),
     } as Parameters<typeof itemRoute.PUT>[1]);
+  const archive = (id: string, workspace = "default") =>
+    itemRoute.DELETE(
+      new Request(`${base(workspace)}/${id}`, { method: "DELETE" }),
+      {
+        params: Promise.resolve({ workspace, workflowId: id }),
+      } as Parameters<typeof itemRoute.DELETE>[1],
+    );
   const rows = () => db.selectFrom("workflows").selectAll().execute();
   const versions = () =>
     db.selectFrom("workflow_versions").selectAll().orderBy("version").execute();
@@ -131,6 +138,7 @@ async function startRoutes(
     validate,
     get,
     update,
+    archive,
     rows,
     versions,
     addEnvironment,
@@ -158,6 +166,7 @@ describe("the workflow route files", () => {
     expect(await good.json()).toEqual({
       valid: true,
       errors: [],
+      truncated: false,
       steps: 1,
       budgetUsd: 20,
     });
@@ -273,6 +282,7 @@ describe("the workflow route files", () => {
       list,
       get,
       update,
+      archive,
       validate,
       rows,
       versions,
@@ -305,6 +315,7 @@ describe("the workflow route files", () => {
     expect(read.status).toBe(404);
     expect(await read.json()).toMatchObject({ error: "WORKFLOW_NOT_FOUND" });
     expect((await update(id, tiny())).status).toBe(404);
+    expect((await archive(id)).status).toBe(404);
     // The signed in person is no member of "other": the workspace is not there for them.
     for (const response of [
       await list("other"),
@@ -312,10 +323,11 @@ describe("the workflow route files", () => {
       await validate(tiny(), "other"),
       await get(id, "", "other"),
       await update(id, tiny(), "", "other"),
+      await archive(id, "other"),
     ])
       expect(response.status).toBe(404);
     expect(await rows()).toMatchObject([
-      { id, name: "Theirs", current_version: 1 },
+      { id, name: "Theirs", current_version: 1, archived_at: null },
     ]);
     expect(await versions()).toHaveLength(1);
   });
@@ -371,7 +383,7 @@ describe("the workflow route files", () => {
 
     expect(Object.keys(listRoute).sort()).toEqual(["GET", "POST"]);
     expect(Object.keys(validateRoute).sort()).toEqual(["POST"]);
-    expect(Object.keys(itemRoute).sort()).toEqual(["GET", "PUT"]);
+    expect(Object.keys(itemRoute).sort()).toEqual(["DELETE", "GET", "PUT"]);
   });
 });
 
@@ -384,3 +396,41 @@ function change(
   (copy.steps as Array<Record<string, unknown>>)[0]![key] = value;
   return copy;
 }
+
+describe("archiving through the route file", () => {
+  // #833-M1-T359
+  it("lets a Member archive a workflow: gone from the list, readable with its versions, no new version, name free again", async () => {
+    const {
+      create,
+      update,
+      get,
+      list,
+      archive,
+      rows,
+      versions,
+      addEnvironment,
+    } = await startRoutes({ role: "member" });
+    await addEnvironment("node");
+    const created = await create(tiny());
+    const { workflow } = (await created.json()) as { workflow: { id: string } };
+
+    const archived = await archive(workflow.id);
+
+    expect(archived.status).toBe(200);
+    expect(archived.headers.get("cache-control")).toBe("no-store");
+    expect(await archived.json()).toMatchObject({
+      workflow: { id: workflow.id, archivedAt: expect.any(String) },
+    });
+    expect(await (await list()).json()).toMatchObject({ workflows: [] });
+    expect(await (await get(workflow.id)).json()).toMatchObject({
+      workflow: { archivedAt: expect.any(String), versions: [{ version: 1 }] },
+    });
+    const refused = await update(workflow.id, tiny());
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ error: "WORKFLOW_ARCHIVED" });
+    expect((await create(tiny())).status).toBe(201);
+    expect(await rows()).toHaveLength(2);
+    expect(await versions()).toHaveLength(2);
+    expect((await archive("missing")).status).toBe(404);
+  });
+});
