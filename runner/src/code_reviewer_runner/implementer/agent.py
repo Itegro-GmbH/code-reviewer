@@ -138,6 +138,7 @@ class ImplementerAgent:
         self._transport = transport
         self._client: EngineClient | None = None
         self._events: EventReader | None = None
+        self._feeder_errors = 0
         # The step records of the turn (#745), made when the session is open: only with a redactor,
         # so no record exists that was not redacted.
         self._redactor = redactor
@@ -213,8 +214,24 @@ class ImplementerAgent:
         agent can change the repository from here on."""
         if self._events is not None:
             self._events.stop()
+            self._feeder_errors = self._events.feeder_errors
             self._events = None
         return self._runtime.stop()
+
+    def step_notes(self) -> tuple[str, ...]:
+        """What the live view lost in the turn (#745), for the turn's notes: events the step
+        feeder could not convert and records it pushed out of its full queue. Empty when nothing
+        was lost. Read after `stop()`, when the counts are final."""
+        errors = self._feeder_errors if self._events is None else self._events.feeder_errors
+        dropped = 0 if self.steps is None else self.steps.dropped
+        notes: list[str] = []
+        if errors:
+            notes.append(f"the live view could not convert {errors} engine events")
+        if dropped:
+            notes.append(
+                f"the live view dropped {dropped} step records that were not taken in time"
+            )
+        return tuple(notes)
 
     @property
     def running(self) -> bool:

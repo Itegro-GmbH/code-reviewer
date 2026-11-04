@@ -412,35 +412,138 @@ def test_secrets_are_gone_from_every_text_of_every_kind() -> None:
     assert shown.count(REDACTED) >= 6
 
 
-# #745-L07
-def test_a_secret_across_the_cut_is_redacted_before_it_and_does_not_leave_its_front_half() -> None:
-    text = "a" * (MAX_TEXT_BYTES - 5) + SECRET + "b" * 5_000
-    pasted = "b" * 3_000_000 + TOKEN  # far past the cap: only its head is looked at, and cheaply
+def long_secret(length: int) -> str:
+    """A job secret of `length` characters that begins with a mark no other text here contains."""
+    return ("QZX9-" + "".join(f"{n:04x}" for n in range(length)))[:length]
 
-    one, two = as_json(
+
+def one_text(text: str, secret: str) -> dict[str, Any]:
+    (record,) = as_json(
         convert_all(
-            [
-                message("msg_a", "assistant"),
-                words("text", "prt_1", text, end=1),
-                words("text", "prt_2", pasted, end=1),
-            ]
+            [message("msg_a", "assistant"), words("text", "p", text, end=1)],
+            StepConverter(SESSION, Redactor([secret])),
         )
     )
-
-    assert SECRET[:6] not in one["text"] and one["bytes"] == len(text)
-    assert TOKEN not in two["text"] and two["bytes"] == len(pasted)
+    return record
 
 
 # #745-L07
-def test_a_secret_in_the_tail_of_a_text_cut_early_is_not_shown_in_part() -> None:
-    cap_and_margin = MAX_TEXT_BYTES + 1024
-    text = "q" * (cap_and_margin - 10) + SECRET  # the secret straddles the end of what is read
+def test_a_secret_that_begins_before_the_cap_is_redacted_whole_and_its_front_is_not_shown() -> None:
+    secret = long_secret(40)
+    text = (
+        "a" * (MAX_TEXT_BYTES - 20) + secret + "b" * 5_000
+    )  # 20 characters of it fall before the cap
+
+    record = one_text(text, secret)
+
+    assert "QZX9" not in record["text"], "cutting first and redacting after would show this"
+    assert record["bytes"] == len(text)
+    assert record["text"].startswith("a" * 100)
+
+
+# #745-L07
+def test_a_secret_longer_than_the_margin_that_begins_before_the_cap_does_not_show_its_front() -> (
+    None
+):
+    # Longer than the 1 KiB read past the cap: the redactor never sees it whole, so only what is
+    # held back from the end of what was read keeps the front of it out of the text.
+    secret = long_secret(3_000)
+    text = "a" * (MAX_TEXT_BYTES - 100) + secret + "b" * 2_000
+
+    record = one_text(text, secret)
+
+    assert "QZX9" not in record["text"], "without the held-back tail the first 100 characters show"
+    assert record["bytes"] == len(text)
+
+
+# #745-L07
+def test_a_token_in_a_text_of_megabytes_is_not_shown_at_the_cap_nor_just_after_it() -> None:
+    at_the_cap = "b" * (MAX_TEXT_BYTES - 10) + TOKEN  # 10 characters of it before the cap
+    pasted = at_the_cap + "b" * 465 + TOKEN + "b" * 3_000_000  # the other at cap + 500 bytes
+
+    record = one_text(pasted, SECRET)
+
+    assert TOKEN[:8] not in record["text"], "a cut before the redaction would show this"
+    assert record["bytes"] == len(pasted)
+    assert len(record["text"]) < MAX_TEXT_BYTES + 100
+
+
+# #745-L07
+def test_a_secret_with_quotes_backslashes_and_newlines_is_gone_from_the_input_of_a_tool() -> None:
+    pem = '-----BEGIN KEY-----\nabc"def\\ghi\n-----END KEY-----'
+    state = {
+        "status": "running",
+        "input": {
+            "command": f"printf '%s' '{pem}' > key.pem",
+            pem: "as a key",
+            "nested": [{"file": pem, "n": 3}, pem],
+        },
+        "time": {"start": 1},
+    }
 
     (record,) = as_json(
-        convert_all([message("msg_a", "assistant"), words("text", "p", text, end=1)])
+        convert_all([tool("prt_t", state)], StepConverter(SESSION, Redactor([pem])))
     )
 
-    assert SECRET[:5] not in record["text"]
+    for piece in ("BEGIN KEY", "abc", "ghi", "END KEY"):
+        assert piece not in record["input"], "redacting the JSON text misses the escaped form"
+    assert json.loads(record["input"])["nested"][0]["n"] == 3
+    assert record["input"].count(REDACTED) >= 3
+
+
+# #745-L07
+def test_the_status_and_the_reason_are_redacted_too() -> None:
+    subject = converter()
+    ended = subject.convert(tool("prt_t", {"status": SECRET, "input": {}, "time": {"start": 1}}))
+    finish = part(
+        {
+            "id": "prt_f",
+            "type": "step-finish",
+            "reason": SECRET,
+            "cost": 0,
+            "tokens": {},
+        }
+    )
+
+    reasoned = subject.convert(finish)
+
+    assert ended is not None and SECRET not in json.dumps(ended.as_json())
+    assert reasoned is not None and reasoned.reason == REDACTED
+
+
+# #745-L05
+def test_a_part_id_is_capped_at_256_characters() -> None:
+    subject = converter()
+
+    exact = subject.convert(tool("p" * 256, running()))
+    over = subject.convert(tool("p" * 257, running()))
+
+    assert exact is not None and exact.part_id == "p" * 256
+    assert over is None
+
+
+# #745-L02
+def test_a_tool_that_could_not_be_recorded_is_reported_when_it_comes_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subject = converter()
+    real = subject._tool_detail  # pyright: ignore[reportPrivateUsage]
+    calls = 0
+
+    def failing_once(record: StepRecord, state: Mapping[str, Any], *, failed: bool) -> StepRecord:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("a bug")
+        return real(record, state, failed=failed)
+
+    monkeypatch.setattr(subject, "_tool_detail", failing_once)
+
+    with pytest.raises(RuntimeError):
+        subject.convert(tool("prt_t", running()))
+    again = subject.convert(tool("prt_t", running()))
+
+    assert again is not None and again.status == "running", "the failed event left no mark"
 
 
 # -- the caps of a turn -------------------------------------------------------------------------
@@ -501,6 +604,27 @@ def test_the_tool_records_of_a_shortened_turn_are_bounded_too() -> None:
         made += subject.convert(tool(f"prt_t{i}", running())) is not None
 
     assert made == MAX_SHORT_RECORDS
+
+
+# #745-L08
+def test_a_tool_that_ends_after_the_short_budget_is_spent_still_reports_its_end() -> None:
+    subject = converter()
+    subject.convert(message("msg_a", "assistant"))
+    for i in range(MAX_RECORDS):
+        subject.convert(words("reasoning", f"prt_r{i}", "t", end=2))
+    for i in range(MAX_SHORT_RECORDS + 5):
+        subject.convert(tool(f"prt_t{i}", running()))  # the last five are over the budget
+
+    first = subject.convert(tool("prt_t0", completed()))
+    unseen = subject.convert(tool(f"prt_t{MAX_SHORT_RECORDS + 2}", completed()))
+    again = subject.convert(tool("prt_t0", completed()))
+    fresh = subject.convert(tool("prt_new", running()))
+
+    assert first is not None and first.as_json()["status"] == "completed"
+    assert "input" not in first.as_json() and "title" not in first.as_json()
+    assert unseen is not None and unseen.status == "completed"
+    assert again is None, "an end is reported once"
+    assert fresh is None, "a new call over the budget is still not reported"
 
 
 # #745-L08
@@ -608,6 +732,13 @@ class StreamClient:
         return self._stream
 
 
+class QuietRuntime:
+    """The agent's place, which only has to say it is gone."""
+
+    def stop(self) -> bool:
+        return True
+
+
 def an_agent(redactor: Redactor | None) -> ImplementerAgent:
     ledger = BudgetLedger(
         agent_limits(600.0, Decimal("5"), "cost_limit"),
@@ -615,7 +746,7 @@ def an_agent(redactor: Redactor | None) -> ImplementerAgent:
     )
     return ImplementerAgent(
         ledger=ledger,
-        runtime=cast("Any", None),
+        runtime=cast("Any", QuietRuntime()),
         command=["opencode"],
         directory="/work/repo",
         make_config=lambda path: {},
@@ -664,3 +795,56 @@ def test_without_a_redactor_there_are_no_step_records() -> None:
         assert agent.steps is None
     finally:
         agent._events.stop()  # pyright: ignore[reportPrivateUsage, reportOptionalMemberAccess]
+
+
+# #745-L12
+def test_the_agent_notes_what_the_step_feeder_dropped_at_the_end_of_the_turn() -> None:
+    agent = an_agent(Redactor([SECRET]))
+    events = [
+        message("msg_a", "assistant"),
+        *(words("reasoning", f"prt_r{i}", "t", end=2) for i in range(MAX_QUEUED_RECORDS + 7)),
+    ]
+
+    started(agent, events)
+    try:
+        assert agent.steps is not None
+        wait_for(lambda: agent.steps is not None and agent.steps.dropped == 7)
+    finally:
+        agent.stop()
+
+    assert agent.step_notes() == (
+        "the live view dropped 7 step records that were not taken in time",
+    )
+
+
+# #745-L12
+def test_the_agent_notes_events_the_step_feeder_could_not_convert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(self: StepFeeder, event: Mapping[str, Any]) -> None:
+        raise RuntimeError("a bug")
+
+    monkeypatch.setattr(StepFeeder, "feed", broken)
+    agent = an_agent(Redactor([SECRET]))
+
+    started(agent, a_turn())
+    try:
+        wait_for(lambda: agent.ledger.tool_calls == 1)
+    finally:
+        agent.stop()
+
+    (note,) = agent.step_notes()
+    assert note.startswith("the live view could not convert ") and "events" in note
+
+
+# #745-L12
+def test_a_turn_that_lost_nothing_has_no_step_notes() -> None:
+    agent = an_agent(Redactor([SECRET]))
+
+    started(agent, a_turn())
+    try:
+        wait_for(lambda: agent.ledger.tool_calls == 1)
+    finally:
+        agent.stop()
+
+    assert agent.step_notes() == ()

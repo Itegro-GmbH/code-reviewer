@@ -5,7 +5,8 @@
 It sits beside the tool-part audit on the engine's event stream (`EventReader`) and is the opposite
 of it: the audit fails closed, this is best effort and never in the money path. A record that does
 not fit is dropped and counted, an event that cannot be converted raises into the reader, which
-counts it and goes on (`EventReader` guards every feeder after the audit). Nothing here ends a turn,
+counts it and goes on (`EventReader` guards every feeder after the audit). Both counts are one line
+in the turn's notes at its end (`ImplementerAgent.step_notes`). Nothing here ends a turn,
 delays the push or touches the ledger.
 
 Nothing leaves the process yet: the queue is what the transport of the next step drains

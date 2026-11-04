@@ -20,10 +20,15 @@ repository answered; the output stays in the engine's own session.
 **Bounds.** Text of reasoning and answer parts is cut at 16 KiB, a tool input at 4 KiB, an error at
 4 KiB and a title at 512 bytes, always on a UTF-8 boundary, with a `[N bytes cut]` mark and the
 true size (`bytes`). A turn keeps at most 5,000 records and 2 MiB of text. After that only the
-tool calls go on, as name and status (at most 10,000 more records), and `shortened` is set.
+tool calls go on, as name and status (at most 10,000 more records), and `shortened` is set. A tool
+whose start was seen still reports its end (`completed` or `error`, once, name and status only)
+when the 10,000 are spent, so the page never shows a finished tool as running; those ends are
+bounded by the parts the converter tracks (`MAX_TRACKED_PARTS`).
 
 **Secrets.** Every text is redacted with the job's `Redactor` before it is put in a record, and the
-cut is made after it, so that a cut cannot leave the front half of a secret. The repository itself
+cut is made after it, so that a cut cannot leave the front half of a secret. The input of a tool
+is redacted value by value (and key by key) before it is written as JSON, because a secret with a
+quote, a backslash or a newline is not the same text once JSON has escaped it. The repository itself
 is the exposure the redactor cannot know (a committed `.env` the agent printed); the page shows
 plain text only and the docs say that a member can read what the agent read.
 
@@ -34,7 +39,7 @@ the engine's report and untrusted data; a shape it does not know is skipped, nev
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 from code_reviewer_runner.redaction import Redactor
@@ -64,6 +69,9 @@ MAX_TRACKED_MESSAGES: Final = 2_000
 # than a text of kilobytes; a secret that begins before the cut is whole within this margin.
 _MARGIN: Final = 1024
 _PENDING: Final = "pending"
+_ENDED: Final = ("completed", "error")
+# How deep the input of a tool is followed before it is replaced by a mark.
+_MAX_DEPTH: Final = 12
 
 
 @dataclass(frozen=True)
@@ -123,6 +131,8 @@ class StepConverter:
         self.shortened = False
         self._roles: dict[str, str] = {}
         self._tool_status: dict[str, str] = {}
+        # The tool parts whose last status is not an end: their end is reported past the budget.
+        self._unfinished: set[str] = set()
 
     def convert(self, event: Mapping[str, Any]) -> StepRecord | None:
         """The record this event makes, or None. Raises on nothing it was given except a bug."""
@@ -139,8 +149,11 @@ class StepConverter:
         part_id = None if part is None else part.get("id")
         if part is None or not isinstance(part_id, str) or not 0 < len(part_id) <= MAX_ID_CHARS:
             return None
+        unfinished = part_id in self._unfinished
         record = self._record(part, part_id, _ms(properties.get("time")))
-        return None if record is None else self._admit(record)
+        if record is None:
+            return None
+        return self._admit(record, closing=unfinished and record.status in _ENDED)
 
     # -- the parts ------------------------------------------------------------
 
@@ -183,11 +196,11 @@ class StepConverter:
         status = None if state is None else state.get("status")
         if state is None or not isinstance(status, str) or status == _PENDING:
             return None
-        if self._tool_status.get(part_id) == status:
+        known = status[:32]
+        if self._tool_status.get(part_id) == known:
             return None  # a running tool is reported again and again as its metadata changes
         if part_id not in self._tool_status and len(self._tool_status) >= MAX_TRACKED_PARTS:
             return None
-        self._tool_status[part_id] = status
         time = as_object(state.get("time"))
         name = self._redactor.redact(_text(part, "tool"))[:MAX_NAME_CHARS]
         record = StepRecord(
@@ -197,24 +210,54 @@ class StepConverter:
             started_at=None if time is None else _ms(time.get("start")),
             ended_at=None if time is None else _ms(time.get("end")),
             tool=name,
-            status=status[:32],
+            status=self._redactor.redact(status[:MAX_NAME_CHARS])[:32],
             weight=64 + len(name),
         )
-        if self.shortened:
-            return record
-        return self._tool_detail(record, state)
+        if not self.shortened:
+            record = self._tool_detail(record, state, failed=status == "error")
+        # Remembered only once the record exists: an event that failed to convert is reported
+        # again when it comes again, and is not taken for one already seen.
+        self._tool_status[part_id] = known
+        if status in _ENDED:
+            self._unfinished.discard(part_id)
+        else:
+            self._unfinished.add(part_id)
+        return record
 
-    def _tool_detail(self, record: StepRecord, state: Mapping[str, Any]) -> StepRecord:
+    def _tool_detail(
+        self, record: StepRecord, state: Mapping[str, Any], *, failed: bool
+    ) -> StepRecord:
         title, _, titled = self._cut(_text(state, "title"), MAX_TITLE_BYTES)
         arguments = json.dumps(
-            as_object(state.get("input")) or {}, ensure_ascii=False, separators=(",", ":")
+            self._plain(as_object(state.get("input")) or {}, 0),
+            ensure_ascii=False,
+            separators=(",", ":"),
         )
         shown, _, held = self._cut(arguments, MAX_INPUT_BYTES)
         error, weight = None, record.weight + titled + held
-        if record.status == "error":
+        if failed:
             error, _, errored = self._cut(_text(state, "error"), MAX_ERROR_BYTES)
             weight += errored
         return replace(record, title=title or None, input=shown, error=error, weight=weight)
+
+    def _plain(self, value: Any, depth: int) -> Any:
+        """`value` with every string (and every key) redacted, so that the JSON made of it holds
+        no secret in its escaped form. A string is looked at up to what the cut can show of it plus
+        the margin: the JSON of a longer one is cut before its end."""
+        if isinstance(value, str):
+            return self._redactor.redact(value[: MAX_INPUT_BYTES + _MARGIN])
+        if isinstance(value, Mapping):
+            if depth >= _MAX_DEPTH:
+                return "[too deep]"
+            return {
+                self._plain(key, depth): self._plain(item, depth + 1)
+                for key, item in cast("Mapping[Any, Any]", value).items()
+            }
+        if isinstance(value, list):
+            if depth >= _MAX_DEPTH:
+                return "[too deep]"
+            return [self._plain(item, depth + 1) for item in cast("list[Any]", value)]
+        return value
 
     def _step(self, part: Mapping[str, Any], part_id: str, at: int | None) -> StepRecord:
         tokens = as_object(part.get("tokens")) or {}
@@ -225,7 +268,7 @@ class StepConverter:
             part_id=part_id,
             seq=0,
             ended_at=at,
-            reason=_text(part, "reason")[:64] or None,
+            reason=self._redactor.redact(_text(part, "reason")[:MAX_NAME_CHARS])[:64] or None,
             tokens={
                 "input": _count(tokens.get("input")),
                 "output": _count(tokens.get("output")),
@@ -254,7 +297,9 @@ class StepConverter:
 
     # -- the bounds of the turn -----------------------------------------------
 
-    def _admit(self, record: StepRecord) -> StepRecord | None:
+    def _admit(self, record: StepRecord, *, closing: bool = False) -> StepRecord | None:
+        """`closing` is the end of a tool whose start was seen: it goes on past the budget of the
+        shortened turn, once, as name and status."""
         if not self.shortened and (
             self._full >= MAX_RECORDS or self._text_total + record.weight > MAX_TEXT_TOTAL_BYTES
         ):
@@ -262,7 +307,7 @@ class StepConverter:
             if record.kind == TOOL:
                 record = replace(record, title=None, input=None, error=None, weight=64)
         if self.shortened:
-            if record.kind != TOOL or self._short >= MAX_SHORT_RECORDS:
+            if record.kind != TOOL or (self._short >= MAX_SHORT_RECORDS and not closing):
                 return None
             self._short += 1
         else:

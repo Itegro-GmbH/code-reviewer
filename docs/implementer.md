@@ -412,14 +412,26 @@ later pull requests of #745.
   when the part ends. Whether a model shows its reasoning depends on the provider; a part without text makes no record.
 - **What is cut.** Text 16 KiB, a tool input (as JSON text) 4 KiB, an error 4 KiB, a title 512 bytes; always on a character
   boundary, with a `[N bytes cut]` mark and the true size. A turn keeps at most 5,000 records and 2 MiB of text; after that only
-  the tool calls go on, as name and status, and the turn is marked as shortened.
+  the tool calls go on, as name and status, and the turn is marked as shortened. That is at most 10,000 more records; the end
+  (`completed` or `error`) of a tool whose start was seen is still reported once after that, so the page never shows a tool that
+  finished as running forever.
+- **Reasoning text.** The runner chooses no model variant and sets no reasoning option, so the stock engine decides what a model
+  shows. Thinking is shown by: OpenAI `gpt-5` models (the engine asks for a reasoning summary for them by default, except
+  `gpt-5-pro` and `gpt-5-chat`), Google models (the engine asks for their thoughts by default) and OpenAI-compatible providers
+  that return `reasoning_content`. Anthropic models think only with a variant, so by default they show nothing. Forcing summaries
+  for other OpenAI models (the o-series, `gpt-5-pro`) was left out on purpose: an OpenAI organization that is not verified gets a
+  400 on `reasoning.summary` and the turn would fail.
+- **Sub-agents are not shown.** Only the session of the turn itself is converted; events of any other `sessionID` (a sub-agent
+  session) are dropped. The `task` tool is denied today, so there are none.
 - **Tool output is not recorded.** The live view shows the call, never what the repository answered. It stays in the engine's session.
 - **Secrets.** Every text is redacted with the job's secrets and the door's bearer before it is put in a record, and before it is
-  cut. What the redactor cannot know is the repository itself: a `.env` the agent printed is in the agent's text or input if
-  the agent wrote it there. A member who can see a run can read what the agent wrote down.
+  cut. The input of a tool is redacted value by value (and key by key) before it is turned into JSON, because a secret with a
+  quote, a backslash or a newline (a PEM key) no longer matches once JSON has escaped it. What the redactor cannot know is the
+  repository itself: a `.env` the agent printed is in the agent's text or input if the agent wrote it there. A member who can see a run can read what the agent wrote down.
 - **Best effort.** The tool audit is the reader's first feeder and fails closed. The step feeder comes after it and fails open:
   an event it cannot convert, a full queue or a bug is counted and dropped. It never ends a turn, never delays the push and
-  never touches the ledger.
+  never touches the ledger. What it lost (events it could not convert, records pushed out of a full queue) is one line in the
+  turn's notes at the end of the turn.
 
 ## The memory of the readers and the OS
 

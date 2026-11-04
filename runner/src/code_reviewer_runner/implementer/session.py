@@ -406,6 +406,8 @@ class ImplementerSession:
             ended = True
             if agent is not None:
                 ended = agent.stop()
+                for note in agent.step_notes():
+                    self._note(note)
             elif place is not None:
                 ended = place.stop()
             self._engine_ended = ended
