@@ -342,8 +342,9 @@ export function validateWorkflow(
 
   const checker: Checker = { resolver, index, report, triggerHasRepo: false };
   const trigger = checkTrigger(document.trigger, issues);
+  // A trigger that failed its own check gives no repository to ask for: one mistake is reported once.
   checker.triggerHasRepo =
-    trigger.kind !== undefined && triggerNamesRepository(trigger.kind);
+    trigger.kind === undefined || triggerNamesRepository(trigger.kind);
   const budget = checkBudget(
     document.budgetUsd,
     options.maxBudgetUsd ?? BUDGET_OPERATOR_MAX_USD,

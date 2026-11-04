@@ -75,6 +75,151 @@ describe("the plan's example", () => {
   });
 });
 
+describe("the plan's example, broken in one place at a time", () => {
+  const body = (d: Json): Json[] => (agentSteps(d)[1] as Json).body as Json[];
+  const thenSteps = (d: Json): Json[] => agentSteps(d)[2]?.then as Json[];
+  const elseSteps = (d: Json): Json[] => agentSteps(d)[2]?.else as Json[];
+
+  const VARIANTS: Array<[string, (d: Json) => void, string[][]]> = [
+    [
+      "a step in the then-branch used in the else-branch",
+      (d) => ((elseSteps(d)[0] as Json).body = "{{pr.url}}"),
+      [["/steps/2/else/0/body", "reference_not_in_scope"]],
+    ],
+    [
+      "a step in the then-branch used after the if",
+      (d) =>
+        agentSteps(d).push({
+          ...COMMENT,
+          id: "after",
+          repo: undefined,
+          body: "{{pr.url}}",
+        }),
+      [["/steps/3/body", "reference_not_in_scope"]],
+    ],
+    [
+      "previous.* in the first instruction of a loop",
+      (d) =>
+        ((body(d)[0] as Json).instruction = {
+          first: "{{previous.review.findings}}",
+          next: "n",
+        }),
+      [["/steps/1/body/0/instruction/first", "previous_without_default"]],
+    ],
+    [
+      "previous.* with a default in the first instruction",
+      (d) =>
+        ((body(d)[0] as Json).instruction = {
+          first: "{{previous.review.findings | default []}}",
+          next: "n",
+        }),
+      [],
+    ],
+    [
+      "a summary that is not required, used in the pull request",
+      (d) => delete ((body(d)[0] as Json).result as Json).required,
+      [["/steps/2/then/0/body", "reference_optional_field"]],
+    ],
+    [
+      "a loop without maxRounds",
+      (d) => delete (agentSteps(d)[1] as Json).maxRounds,
+      [["/steps/1/maxRounds", "missing_field"]],
+    ],
+    [
+      "an until that uses a step that comes later",
+      (d) =>
+        ((agentSteps(d)[1] as Json).until = {
+          equals: ["{{done.taken}}", "then"],
+        }),
+      [["/steps/1/until/equals/0", "reference_to_later_step"]],
+    ],
+    [
+      "a comparison of the loop's exit with a reason it never has",
+      (d) =>
+        ((agentSteps(d)[2] as Json).when = {
+          equals: ["{{fix.exit}}", "timeout"],
+        }),
+      [["/steps/2/when/equals/1", "condition_value_not_in_enum"]],
+    ],
+    [
+      "an agent without an environment",
+      (d) => delete (body(d)[1] as Json).environment,
+      [["/steps/1/body/1/environment", "missing_field"]],
+    ],
+    [
+      "an environment that does not exist",
+      (d) => ((body(d)[1] as Json).environment = "cobol"),
+      [["/steps/1/body/1/environment", "environment_unknown"]],
+    ],
+    [
+      "an issue given as its title",
+      (d) => ((agentSteps(d)[0] as Json).issue = "{{trigger.issue.title}}"),
+      [["/steps/0/issue", "reference_type_mismatch"]],
+    ],
+    [
+      "a result field that is a platform fact",
+      (d) =>
+        ((((body(d)[0] as Json).result as Json).properties as Json).branch = {
+          type: "string",
+        }),
+      [["/steps/1/body/0/result/properties/branch", "result_field_reserved"]],
+    ],
+    [
+      "a reserved kind",
+      (d) => ((agentSteps(d)[0] as Json).kind = "forEach"),
+      [["/steps/0/kind", "kind_not_supported"]],
+    ],
+    [
+      "two steps with the id pr",
+      (d) => ((elseSteps(d)[0] as Json).id = "pr"),
+      [["/steps/2/else/0/id", "duplicate_id"]],
+    ],
+    [
+      "a session that continues a step that comes later",
+      (d) => ((body(d)[0] as Json).session = { continue: "review" }),
+      [["/steps/1/body/0/session/continue", "session_target_invalid"]],
+    ],
+    [
+      "a reviewer that may not push, whose branch is used",
+      (d) => ((body(d)[1] as Json).instruction = "Review {{review.branch}}"),
+      [["/steps/1/body/1/instruction", "reference_to_later_step"]],
+    ],
+    [
+      "the pull request from the branch of the reviewer",
+      (d) => ((thenSteps(d)[0] as Json).head = "{{review.branch}}"),
+      [["/steps/2/then/0/head", "reference_fact_unavailable"]],
+    ],
+    [
+      "a pull request that names a base from a number",
+      (d) => ((thenSteps(d)[0] as Json).base = 3),
+      [["/steps/2/then/0/base", "wrong_type"]],
+    ],
+    [
+      "a comment with a field the connector does not have",
+      (d) => ((elseSteps(d)[0] as Json).labels = ["x"]),
+      [["/steps/2/else/0/labels", "unknown_field"]],
+    ],
+    [
+      "a trigger that is a schedule",
+      (d) => (d.trigger = { kind: "schedule", cron: "0 * * * *" }),
+      [["/trigger/kind", "unknown_trigger_kind"]],
+    ],
+    [
+      "a budget above the operator's maximum",
+      (d) => (d.budgetUsd = 500),
+      [["/budgetUsd", "budget_above_maximum"]],
+    ],
+  ];
+
+  // #833-M1-T253
+  it.each(VARIANTS)("%s", (_name, edit, expected) => {
+    const doc = issueToPr();
+    edit(doc);
+
+    expect(codes(doc)).toEqual(expected);
+  });
+});
+
 describe("the document", () => {
   // #833-M1-T32
   it("refuses what is no object", () => {
