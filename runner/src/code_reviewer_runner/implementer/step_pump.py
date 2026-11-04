@@ -150,6 +150,9 @@ class StepPump:
             for _ in range(limit):
                 if not self._open or (deadline is not None and self._clock() >= deadline):
                     return
+                if deadline is None and self._stop.is_set():
+                    # The end has begun: the flush takes over, the pump thread lets go of the lock.
+                    return
                 items = self._next_batch()
                 if items is None:
                     return
@@ -220,8 +223,9 @@ class StepPump:
     def _host_has_gone(self) -> bool:
         """True when the host closed its end (it stopped for good): it never writes unasked."""
         try:
-            readable, _, _ = select.select([self._channel], [], [], 0)
-            return bool(readable) and self._channel.recv(1, socket.MSG_PEEK) == b""
+            poller = select.poll()
+            poller.register(self._channel, select.POLLIN)
+            return bool(poller.poll(0)) and self._channel.recv(1, socket.MSG_PEEK) == b""
         except (OSError, ValueError):
             return True
 

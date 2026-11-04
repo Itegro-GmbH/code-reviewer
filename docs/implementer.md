@@ -449,7 +449,7 @@ sends nothing, with no error and no note. (The Worker is the only runner that ru
   to fit is dropped and counted.
 - **Never on the turn's path.** The pump has a thread of its own and bounded writes (1 s; a host that does not read costs one
   write timeout, then the channel is given up). The sender is a task of the host's event loop beside the heartbeat; its call runs on
-  a daemon thread of its own with a 5 s timeout, one at a time, never on the executor of the heartbeat and the result. A dead or
+  a daemon thread of its own (each socket operation 5 s; DNS is not bounded by it, so the sender waits 8 s at most for a call and then treats the app as unavailable), one at a time, never on the executor of the heartbeat and the result. A dead or
   slow app costs the sender its patience and nothing else: the turn, the heartbeat, the lease question, the push and the result
   never wait for it.
 - **Failure.** A 409, 404 or 401 (the app does not hold the job for this Worker) stops the sender for good and the host closes its

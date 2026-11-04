@@ -65,8 +65,9 @@ WORKER_FEATURES: tuple[str, ...] = (
 )
 # The feature of `GET /api/runners/v1/version` that says the Worker API exists.
 FEATURE_WORKER_API = "worker_api"
-# One steps request (#745): short, because the live view must never hold anything up. The sender
-# bounds a call by its own clock as well (`step_sender.REQUEST_SECONDS`).
+# One steps request (#745): short, because the live view must never hold anything up. It bounds each
+# socket operation, not the call (nor the name lookup), so the sender bounds a call by its own clock
+# as well (`step_sender.REQUEST_SECONDS`).
 STEPS_REQUEST_TIMEOUT_SECONDS = 5.0
 
 
