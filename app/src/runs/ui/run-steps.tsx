@@ -214,7 +214,7 @@ export function RunSteps({
   const [opened, setOpened] = useState(!settled);
   const [follow, setFollow] = useState(!settled);
   const [cap, setCap] = useState(RENDER_PARTS);
-  const { steps, loaded, failure } = useRunSteps({
+  const { steps, loaded, failure, retry } = useRunSteps({
     api,
     runId,
     enabled: opened,
@@ -259,11 +259,25 @@ export function RunSteps({
             </label>
           </div>
           {failure === null ? null : (
-            <p data-slot="run-steps-failed" className="text-sm text-warning">
-              {loaded && steps.length > 0
-                ? STEPS_COPY.failed
-                : STEPS_COPY.failedFirst}
-            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <p data-slot="run-steps-failed" className="text-sm text-warning">
+                {steps.length === 0
+                  ? STEPS_COPY.failedFirst
+                  : settled
+                    ? STEPS_COPY.failedSettled
+                    : STEPS_COPY.failed}
+              </p>
+              {settled ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={retry}
+                >
+                  {STEPS_COPY.retry}
+                </Button>
+              ) : null}
+            </div>
           )}
           {!loaded && failure === null ? (
             <p className="text-sm text-muted-foreground">

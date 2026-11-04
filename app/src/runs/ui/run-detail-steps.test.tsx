@@ -201,6 +201,44 @@ describe("What the agent did, on the detail page of a run", () => {
     expect(api.steps).toHaveBeenCalledTimes(1);
   });
 
+  // #745-T91b: a settled run has no next tick, so a request that fails while it loads is not tried again by itself
+  it("offers to try again when loading the steps of a run that is over fails partway", async () => {
+    const done = run({
+      status: "succeeded",
+      finishedAt: "2026-10-10T12:01:00.000Z",
+    });
+    const more: RequestResult<StepsSnapshot> = {
+      ok: true,
+      data: { steps: [step(1)], cursor: 1, hasMore: true },
+    };
+    const broken: RequestResult<StepsSnapshot> = {
+      ok: false,
+      status: 500,
+      code: "NETWORK_ERROR",
+      issues: [],
+    };
+    const api = apiAnswering([], [more, broken, page(step(2))]);
+    render(
+      <RunDetail workspaceSlug="acme" initial={snap(done, 0)} api={api} />,
+    );
+    await act(async () => {});
+    fireEvent.click(
+      screen.getByRole("button", { name: "Show what the agent did" }),
+    );
+    await act(async () => {});
+
+    expect(api.steps).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("Words 1")).toBeTruthy();
+    expect(screen.queryByText(/it keeps trying/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await act(async () => {});
+
+    expect(api.steps).toHaveBeenCalledTimes(3);
+    expect(screen.getByText("Words 2")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
   // #745-T92
   it("is not on the page of a run of another kind", async () => {
     const review = run({

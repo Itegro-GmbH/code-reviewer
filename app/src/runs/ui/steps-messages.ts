@@ -17,6 +17,9 @@ export const STEPS_COPY = {
   failed:
     "Updating the steps failed. This page shows the last steps it got; it keeps trying.",
   failedFirst: "The steps could not be loaded.",
+  failedSettled:
+    "Loading the steps failed partway. This page shows the steps it got.",
+  retry: "Try again",
   shortened:
     "The log was shortened: this turn made so many steps that only the name and status of later tool calls are kept.",
   underSecond: "under 1 s",

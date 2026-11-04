@@ -8,7 +8,7 @@
 //
 // The answers are merged by part id (`steps-merge.ts`); the cursor is kept in a ref, so a tick that comes while a request is out
 // waits for it and asks once more afterwards, never two at a time. A failed request keeps the steps on screen and sets `failure`;
-// the next tick asks again. A failure that cannot get better by asking again (the run is gone, the person is not a member any more)
+// the next tick asks again, and a settled run, which has no next tick, offers `retry`. A failure that cannot get better by asking again (the run is gone, the person is not a member any more)
 // stops the asking for good.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PERMANENT_FAILURE_CODES } from "../../ui/use-live-snapshot.ts";
@@ -28,6 +28,8 @@ export type RunSteps = {
   loaded: boolean;
   /** The code of the last failed request, or null. */
   failure: string | null;
+  /** Asks again now: for a settled run, which has no next tick (a no-op after a failure that cannot get better). */
+  retry: () => void;
 };
 
 export function useRunSteps({
@@ -105,5 +107,9 @@ export function useRunSteps({
     if (enabled) void pull();
   }, [enabled, tick, pull]);
 
-  return { steps, loaded, failure };
+  const retry = useCallback(() => {
+    void pull();
+  }, [pull]);
+
+  return { steps, loaded, failure, retry };
 }
