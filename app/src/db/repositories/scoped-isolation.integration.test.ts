@@ -37,6 +37,7 @@ import { createBillingNotificationsRepository } from "./billing-notifications-re
 import { createBillingWorkspaceSettingsRepository } from "./billing-workspace-settings-repository.ts";
 import { createImplementerEnvironmentsRepository } from "./implementer-environments-repository.ts";
 import { createWorkflowsRepository } from "./workflows-repository.ts";
+import { createProfilesRepository } from "./profiles-repository.ts";
 import { createImplementerRepository } from "./implementer-repository.ts";
 import { createImplementerStepsRepository } from "./implementer-steps-repository.ts";
 
@@ -70,6 +71,7 @@ function reposOf(db: Kysely<Database>, workspaceId: string) {
     steps: createImplementerStepsRepository(db, workspaceId),
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
     workflows: createWorkflowsRepository(db, workspaceId),
+    agentProfiles: createProfilesRepository(db, workspaceId),
     erasure: createWorkspaceErasureRepository(db, workspaceId),
   };
 }
@@ -448,9 +450,37 @@ async function seed(
     200,
   );
   if (!secondVersion.ok) throw new Error("seeding failed");
+  // A profile with a second version (#843) in every workspace, under the same name.
+  const profileContent = {
+    description: "",
+    model: { entryId: `entry-${tag}` },
+    instructions: `be ${tag}`,
+    costLimitCents: null,
+    canPush: true,
+    defaultResult: null,
+  };
+  const profile = await repos.agentProfiles.create(
+    {
+      name: "implementer",
+      content: profileContent,
+      createdBy: `user-${tag}`,
+    },
+    100,
+  );
+  if (!profile.ok) throw new Error("seeding failed");
+  const secondProfileVersion = await repos.agentProfiles.saveVersion(
+    profile.profile.id,
+    {
+      content: { ...profileContent, instructions: `be ${tag} again` },
+      createdBy: `user-${tag}`,
+    },
+    200,
+  );
+  if (!secondProfileVersion.ok) throw new Error("seeding failed");
   return {
     environment: created.environment,
     workflow: secondVersion.workflow,
+    agentProfile: secondProfileVersion.profile,
     implementer: started,
     topUpIntentId: topUpIntent.id,
     unpagedIntentId: unpagedIntent.id,
@@ -624,6 +654,19 @@ async function rowsOf(db: Kysely<Database>, workspaceId: string) {
       .selectAll()
       .where("workspace_id", "=", workspaceId)
       .orderBy("workflow_id")
+      .orderBy("version")
+      .execute(),
+    agentProfiles: await db
+      .selectFrom("profiles")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("id")
+      .execute(),
+    agentProfileVersions: await db
+      .selectFrom("profile_versions")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("profile_id")
       .orderBy("version")
       .execute(),
     implementerTurnSteps: await db
@@ -1924,6 +1967,93 @@ const CASES: Case[] = [
   {
     name: "workflows.archive",
     run: (a, b) => a.workflows.archive(b.workflow.id, 1000),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ ok: false, reason: "not_found" }),
+  },
+  // profiles (#843-T70): B's profiles and versions are not A's to read, find, start from or save over
+  {
+    name: "agentProfiles.list",
+    run: (a) => a.agentProfiles.list(),
+    expectAnswer: (answer, a) => expect(answer).toEqual([a.agentProfile]),
+  },
+  {
+    name: "agentProfiles.get",
+    run: (a, b) => a.agentProfiles.get(b.agentProfile.id),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "agentProfiles.getVersion",
+    run: (a, b) => a.agentProfiles.getVersion(b.agentProfile.id, 1),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "agentProfiles.listVersions",
+    run: (a, b) => a.agentProfiles.listVersions(b.agentProfile.id),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    // The same name exists in both workspaces: A finds its own, never B's version.
+    name: "agentProfiles.findByName",
+    run: (a, b) =>
+      a.agentProfiles.findByName("implementer", b.agentProfile.version),
+    expectAnswer: (answer, a) =>
+      expect(answer).toMatchObject({
+        profile: { id: a.agentProfile.id },
+        version: { content: { instructions: "be a again" } },
+      }),
+  },
+  {
+    name: "agentProfiles.versionFacts",
+    run: (a, b) =>
+      a.agentProfiles.versionFacts([
+        { profileId: b.agentProfile.id, version: 1 },
+      ]),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    name: "agentProfiles.create",
+    run: (a) =>
+      a.agentProfiles.create(
+        {
+          name: "another",
+          content: {
+            description: "",
+            model: { entryId: "e" },
+            instructions: "",
+            costLimitCents: null,
+            canPush: false,
+            defaultResult: null,
+          },
+          createdBy: "user-a",
+        },
+        100,
+      ),
+    expectAnswer: (answer) => expect(answer).toMatchObject({ ok: true }),
+  },
+  {
+    name: "agentProfiles.saveVersion",
+    run: (a, b) =>
+      a.agentProfiles.saveVersion(
+        b.agentProfile.id,
+        {
+          content: {
+            description: "",
+            model: { entryId: "e" },
+            instructions: "hijacked",
+            costLimitCents: null,
+            canPush: true,
+            defaultResult: null,
+          },
+          createdBy: "user-a",
+        },
+        200,
+      ),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ ok: false, reason: "not_found" }),
+  },
+  {
+    name: "agentProfiles.archive",
+    run: (a, b) => a.agentProfiles.archive(b.agentProfile.id, 1000),
     expectAnswer: (answer) =>
       expect(answer).toEqual({ ok: false, reason: "not_found" }),
   },

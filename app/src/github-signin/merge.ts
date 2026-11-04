@@ -73,6 +73,7 @@ export const USER_REFERENCES: ReadonlyArray<{
     handling: "move",
   },
   { table: "workflows", column: "created_by", handling: "move" },
+  { table: "profiles", column: "created_by", handling: "move" },
   { table: "invitations", column: "invited_by", handling: "move" },
   { table: "invitations", column: "accepted_by", handling: "move" },
   {
@@ -264,6 +265,12 @@ export async function mergeImportedUser(
     // Who made a workflow (#833). Who saved each version is history, kept as text and not moved (see the migration).
     await trx
       .updateTable("workflows")
+      .set({ created_by: actingUserId })
+      .where("created_by", "=", source.id)
+      .execute();
+    // Who made a profile (#843). Who saved each version is history, kept as text and not moved (see the migration).
+    await trx
+      .updateTable("profiles")
       .set({ created_by: actingUserId })
       .where("created_by", "=", source.id)
       .execute();

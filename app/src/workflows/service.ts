@@ -5,6 +5,7 @@
 // Saving runs the validator first, with the environments of the workspace, and refuses an invalid document with the same list of
 // errors the validate call gives. The document is stored as the JSON text that was validated; every save is a new version.
 import type { ImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
+import type { ProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import type {
   StoredWorkflow,
   StoredWorkflowVersion,
@@ -19,6 +20,7 @@ import {
   WORKFLOW_ID_MAX_LENGTH,
   WORKFLOWS_PER_WORKSPACE_MAX,
 } from "./limits.ts";
+import { profileInfosOf, profileRefsIn } from "./profile-refs.ts";
 import { createResolver } from "./resolver.ts";
 import { validateWorkflow, type ValidationResult } from "./validate.ts";
 
@@ -74,6 +76,8 @@ export type WorkflowService = {
 export type WorkflowServiceDependencies = {
   workflows: WorkflowsRepository;
   environments: ImplementerEnvironmentsRepository;
+  /** The profiles of the workspace (#843): the names and versions a step may run, and what a version is (may it push, its default result). */
+  profiles: Pick<ProfilesRepository, "list" | "versionFacts">;
   /** The most a workflow may be given to spend. Until the operator can set it: `BUDGET_OPERATOR_MAX_USD`. */
   maxBudgetUsd?: number;
   /** The most archived workflows a workspace may hold: `ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX`. */
@@ -94,14 +98,25 @@ function summaryOf(workflow: StoredWorkflow): WorkflowSummaryView {
 export function createWorkflowService({
   workflows,
   environments,
+  profiles,
   maxBudgetUsd = BUDGET_OPERATOR_MAX_USD,
   archivedMax = ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX,
 }: WorkflowServiceDependencies): WorkflowService {
   async function validateDocument(body: unknown): Promise<ValidationResult> {
     const known = await environments.listSummaries();
-    return validateWorkflow(body, createResolver({ environments: known }), {
-      maxBudgetUsd,
-    });
+    // The profiles of the workspace, with the facts of the versions the document runs and no others.
+    const live = (await profiles.list()).map((profile) => ({
+      id: profile.id,
+      name: profile.name,
+      version: profile.version,
+    }));
+    const { wanted, build } = profileInfosOf(live, profileRefsIn(body));
+    const facts = await profiles.versionFacts(wanted);
+    return validateWorkflow(
+      body,
+      createResolver({ environments: known, profiles: build(facts) }),
+      { maxBudgetUsd },
+    );
   }
 
   async function viewOf(

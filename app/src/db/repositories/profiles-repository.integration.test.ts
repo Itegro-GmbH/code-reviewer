@@ -301,7 +301,10 @@ describe("the profiles repository", () => {
   it("reads the facts of exactly the versions asked for", async () => {
     const { a } = await setup();
     await a.create(
-      { ...NEW, content: { ...CONTENT, canPush: false, defaultResult: SCHEMA } },
+      {
+        ...NEW,
+        content: { ...CONTENT, canPush: false, defaultResult: SCHEMA },
+      },
       100,
     );
     await a.saveVersion("pr-1", { content: CONTENT, createdBy: "u-1" }, 100);
@@ -331,9 +334,9 @@ describe("the profiles repository", () => {
     expect(await a.getVersion("pr-1", 1)).toBeUndefined();
     expect(await a.listVersions("pr-1")).toEqual([]);
     expect(await a.findByName("theirs")).toBeUndefined();
-    expect(
-      await a.versionFacts([{ profileId: "pr-1", version: 1 }]),
-    ).toEqual([]);
+    expect(await a.versionFacts([{ profileId: "pr-1", version: 1 }])).toEqual(
+      [],
+    );
     expect(
       await a.saveVersion("pr-1", { content: CONTENT, createdBy: "u-1" }, 100),
     ).toEqual({ ok: false, reason: "not_found" });

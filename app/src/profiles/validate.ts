@@ -195,7 +195,13 @@ export function validateProfile(body: unknown): ProfileCheck {
 
   let model: ModelChoice | undefined;
   if (body.model === undefined)
-    report(issue("", "missing_field", `The field "model" is required. ${MODEL_HINT}`));
+    report(
+      issue(
+        "",
+        "missing_field",
+        `The field "model" is required. ${MODEL_HINT}`,
+      ),
+    );
   else if (!isRecord(body.model))
     report(
       issue(
@@ -213,29 +219,29 @@ export function validateProfile(body: unknown): ProfileCheck {
   let costLimitCents: number | null | undefined = null;
   const cost = given("costLimitCents");
   if (cost !== undefined) {
-    if (typeof cost !== "number")
-      {report(
+    if (typeof cost !== "number") {
+      report(
         issue(
           "/costLimitCents",
           "wrong_type",
           `The cost limit is a whole number of US cents, not ${jsonTypeName(cost)}.`,
         ),
       );
-      costLimitCents = undefined;}
-    else if (
+      costLimitCents = undefined;
+    } else if (
       !Number.isSafeInteger(cost) ||
       cost < COST_LIMIT_CENTS.min ||
       cost > COST_LIMIT_CENTS.max
-    )
-      {report(
+    ) {
+      report(
         issue(
           "/costLimitCents",
           "invalid_value",
           `The cost limit is a whole number of US cents from ${COST_LIMIT_CENTS.min} to ${COST_LIMIT_CENTS.max}. Leave it out for the operator's maximum alone.`,
         ),
       );
-      costLimitCents = undefined;}
-    else costLimitCents = cost;
+      costLimitCents = undefined;
+    } else costLimitCents = cost;
   }
 
   const push = body.canPush;
@@ -279,7 +285,10 @@ export function validateProfile(body: unknown): ProfileCheck {
   return finish(errors, profile);
 }
 
-function finish(errors: Issue[], profile: ProfileDocument | undefined): ProfileCheck {
+function finish(
+  errors: Issue[],
+  profile: ProfileDocument | undefined,
+): ProfileCheck {
   const sorted = sortIssues(errors);
   return {
     valid: profile !== undefined,

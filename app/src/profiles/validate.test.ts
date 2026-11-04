@@ -177,19 +177,25 @@ describe("a profile document", () => {
   // #843-T10
   it("bounds the instructions and the description in characters", () => {
     expect(
-      validateProfile(profile({ instructions: "é".repeat(INSTRUCTIONS_MAX_LENGTH) }))
-        .valid,
+      validateProfile(
+        profile({ instructions: "é".repeat(INSTRUCTIONS_MAX_LENGTH) }),
+      ).valid,
     ).toBe(true);
     expect(
-      problems(profile({ instructions: "x".repeat(INSTRUCTIONS_MAX_LENGTH + 1) })),
+      problems(
+        profile({ instructions: "x".repeat(INSTRUCTIONS_MAX_LENGTH + 1) }),
+      ),
     ).toEqual([["/instructions", "limit_exceeded"]]);
     expect(
-      problems(profile({ description: "x".repeat(DESCRIPTION_MAX_LENGTH + 1) })),
+      problems(
+        profile({ description: "x".repeat(DESCRIPTION_MAX_LENGTH + 1) }),
+      ),
     ).toEqual([["/description", "limit_exceeded"]]);
     // Characters, not UTF-16 units: an emoji is one.
     expect(
-      validateProfile(profile({ description: "😀".repeat(DESCRIPTION_MAX_LENGTH) }))
-        .valid,
+      validateProfile(
+        profile({ description: "😀".repeat(DESCRIPTION_MAX_LENGTH) }),
+      ).valid,
     ).toBe(true);
     expect(problems(profile({ instructions: 4 }))).toEqual([
       ["/instructions", "wrong_type"],
@@ -198,9 +204,9 @@ describe("a profile document", () => {
 
   // #843-T11
   it("refuses control characters and lone surrogates in the texts, but not tabs and line breaks", () => {
-    expect(
-      validateProfile(profile({ instructions: "a\r\nb\tc" })).valid,
-    ).toBe(true);
+    expect(validateProfile(profile({ instructions: "a\r\nb\tc" })).valid).toBe(
+      true,
+    );
     for (const text of ["a\u0000b", "a\u001bb", "a\ud800b", "a\udc00b"]) {
       expect(problems(profile({ instructions: text }))).toEqual([
         ["/instructions", "invalid_value"],

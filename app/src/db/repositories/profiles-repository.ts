@@ -84,10 +84,7 @@ export type SaveOutcome =
   | {
       ok: false;
       reason:
-        | "not_found"
-        | "archived"
-        | "version_conflict"
-        | "version_limit_reached";
+        "not_found" | "archived" | "version_conflict" | "version_limit_reached";
       /** On `version_conflict`: the version that is current. */
       current?: number;
     };
@@ -360,13 +357,7 @@ export function createProfilesRepository(
         const saved = await trx
           .insertInto("profile_versions")
           .values(
-            versionValues(
-              row.id,
-              1,
-              input.content,
-              input.createdBy,
-              timestamp,
-            ),
+            versionValues(row.id, 1, input.content, input.createdBy, timestamp),
           )
           .returningAll()
           .executeTakeFirstOrThrow();
@@ -406,7 +397,13 @@ export function createProfilesRepository(
         const saved = await trx
           .insertInto("profile_versions")
           .values(
-            versionValues(id, version, input.content, input.createdBy, timestamp),
+            versionValues(
+              id,
+              version,
+              input.content,
+              input.createdBy,
+              timestamp,
+            ),
           )
           .returningAll()
           .executeTakeFirstOrThrow();
