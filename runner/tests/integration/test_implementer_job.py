@@ -74,6 +74,8 @@ from code_reviewer_runner.job_loop.settings import WorkerSettings
 from code_reviewer_runner.lease_check import LEASE_CHECK_FD_VARIABLE
 from code_reviewer_runner.redaction import Redactor
 from code_reviewer_runner.result import ErrorCode
+from code_reviewer_runner.step_wire import STEPS_FD_VARIABLE
+from step_support import HostEnd, say
 
 ROOT = Path(__file__).resolve().parents[3]
 EXAMPLE = ROOT / "contracts" / "examples" / "implementer" / "RunnerJobInput.json"
@@ -279,6 +281,8 @@ class FakeAgent:
     ends_clean: bool = True
     notes: tuple[str, ...] = ()
     notes_fail: bool = False
+    # The step feeder of the session, made at start and only with a redactor, as the real agent's.
+    steps: StepFeeder | None = None
 
     @property
     def ledger(self) -> Any:
@@ -287,6 +291,18 @@ class FakeAgent:
     def start(self, port: int = 0) -> None:
         self.events.append("agent.start")
         self.session_id = "ses_fake"
+        redactor = self.options.get("redactor")
+        if redactor is not None:
+            self.steps = StepFeeder("ses_fake", redactor)
+            self.steps.feed(
+                {
+                    "type": "message.updated",
+                    "properties": {
+                        "sessionID": "ses_fake",
+                        "info": {"id": "msg_a", "role": "assistant"},
+                    },
+                }
+            )
 
     def use_the_model(self) -> None:
         """One call that was billed: from now on the turn has cost money."""
@@ -416,6 +432,8 @@ def play(
         cost_limit: bool = True,
         confirm_seconds: float = 0.3,
         ends_clean: bool = True,
+        steps: HostEnd | None = None,
+        steps_flush_seconds: float = 2.0,
     ) -> Turn:
         events: list[str] = []
         removals: list[tuple[str, ...]] = []
@@ -428,6 +446,8 @@ def play(
             monkeypatch.setenv(LEASE_CHECK_FD_VARIABLE, str(lease.fd()))
         if engines is not None:
             monkeypatch.setenv(ENGINES_VARIABLE, engines)
+        if steps is not None:
+            monkeypatch.setenv(STEPS_FD_VARIABLE, str(steps.process_end.detach()))
 
         def setup(job: Any, env: Any, gate: Callable[[], None]) -> TurnSetup:
             if setup_error is not None:
@@ -456,6 +476,8 @@ def play(
                 confirm_seconds=confirm_seconds,
                 confirm_pause=0.05,
                 lease_poll_seconds=0.05,
+                steps_flush_seconds=steps_flush_seconds,
+                stop_steps_flush_seconds=steps_flush_seconds,
             ),
         )
         if session_error is not None:
@@ -486,6 +508,20 @@ def play(
     yield run
     for channel in channels:
         channel.close()
+
+
+def says_then_commits(count: int, sha: str = TIP) -> Callable[[FakeAgent, Callable[[], None]], str]:
+    """A turn whose engine reported `count` finished answers, then committed."""
+
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        agent.use_the_model()
+        if agent.steps is not None:  # a turn without a channel has no feeder
+            for number in range(count):
+                say(agent.steps, number, f"answer {number}")
+        make_commit(agent, sha)
+        return "Added the greeting."
+
+    return script
 
 
 def commits_then_ends(sha: str = TIP) -> Callable[[FakeAgent, Callable[[], None]], str]:
@@ -1402,3 +1438,115 @@ def test_a_step_feeder_that_throws_changes_neither_the_ledger_nor_the_outcome_no
     assert broken.git.pushes == [TIP]
     assert what_the_turn_did(broken)["toolCalls"] == 2
     assert what_the_turn_did(broken)["failure"] is None
+
+
+# -- the step records leave the process over the steps channel (#745, PR 3) -----------------------
+
+
+def sigterm_after_saying(
+    count: int,
+) -> Callable[[FakeAgent, Callable[[], None]], str]:
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        assert agent.steps is not None
+        for number in range(count):
+            say(agent.steps, number)
+        return sends_sigterm_after_committing(agent, check)
+
+    return script
+
+
+# #745-L22
+def test_the_records_reach_the_host_in_order_and_the_turn_did_exactly_what_it_did_without(
+    play: Any,
+) -> None:
+    without = play(says_then_commits(5))
+    host = HostEnd()
+
+    watched = play(says_then_commits(5), steps=host)
+
+    assert watched.exit_code == 0, watched.output
+    assert [record["text"] for record in host.records] == [f"answer {n}" for n in range(5)]
+    assert [record["seq"] for record in host.records] == [1, 2, 3, 4, 5]
+    assert len(host.flushes) == 1, "the last flush came once, before the result"
+    assert what_the_turn_did(watched) == what_the_turn_did(without)
+    assert watched.result["logTail"] == without.result["logTail"], "nothing was lost, no note"
+    host.close()
+
+
+# #745-L23
+def test_a_host_that_never_reads_costs_the_flush_budget_and_changes_nothing_else(
+    play: Any,
+) -> None:
+    without = play(says_then_commits(5))
+    host = HostEnd(reads=False)
+    began = time.monotonic()
+
+    watched = play(says_then_commits(5), steps=host, steps_flush_seconds=1.2)
+
+    assert time.monotonic() - began < 6
+    assert watched.exit_code == 0, watched.output
+    assert what_the_turn_did(watched) == what_the_turn_did(without)
+    assert "the live view could not" in watched.result["logTail"]
+    host.close()
+
+
+# #745-L25
+def test_a_host_that_does_not_answer_the_flush_changes_nothing_and_leaves_one_note(
+    play: Any,
+) -> None:
+    without = play(says_then_commits(3))
+    host = HostEnd(answers=False)
+
+    watched = play(says_then_commits(3), steps=host, steps_flush_seconds=1.2)
+
+    assert what_the_turn_did(watched) == what_the_turn_did(without)
+    assert "could not confirm that its last step records arrived" in watched.result["logTail"]
+    host.close()
+
+
+# #745-L25
+def test_what_the_host_could_not_send_is_one_line_in_the_notes_of_the_turn(play: Any) -> None:
+    host = HostEnd(unsent=4)
+
+    watched = play(says_then_commits(6), steps=host)
+
+    assert watched.exit_code == 0, watched.output
+    assert "the live view could not send 4 step records to the app" in watched.result["logTail"]
+    assert "not taken in time" not in watched.result["logTail"], "counted once, not twice"
+    host.close()
+
+
+# #745-L24
+def test_a_host_that_has_gone_changes_nothing_about_the_turn(play: Any) -> None:
+    without = play(says_then_commits(5))
+    host = HostEnd()
+    host.close()  # the host closed its end before the turn began
+
+    watched = play(says_then_commits(5), steps=host)
+
+    assert what_the_turn_did(watched) == what_the_turn_did(without)
+    assert watched.git.pushes == [TIP]
+
+
+# #745-L26
+def test_a_turn_without_a_channel_has_no_feeder_so_nothing_is_queued_or_lost(play: Any) -> None:
+    turn = play(commits_then_ends())
+
+    assert turn.agent is not None
+    assert turn.agent.options["redactor"] is None
+    assert turn.agent.steps is None
+    assert "live view" not in turn.result["logTail"]
+
+
+# #745-L25
+def test_a_stop_flushes_too_and_still_ends_runner_shutdown_with_the_commits_pushed(
+    play: Any,
+) -> None:
+    host = HostEnd()
+
+    turn = play(sigterm_after_saying(4), steps=host, dirty=True)
+
+    assert turn.result["errorCode"] == "runner_shutdown"
+    assert turn.git.pushes == [TIP]
+    assert len(host.records) == 4 and len(host.flushes) == 1
+    host.close()
