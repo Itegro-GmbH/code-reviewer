@@ -1487,6 +1487,312 @@ def resources(out: Path, gateway: str) -> None:
     )
 
 
+# -- S2: the agent's own Docker --------------------------------------------------------------------
+
+DIND_VERSION = "29.9.2"
+DIND_IMAGE = f"docker:{DIND_VERSION}-dind"
+DIND_ROOTLESS_IMAGE = f"docker:{DIND_VERSION}-dind-rootless"
+POSTGRES = "postgres:17-alpine"
+# Sysbox as the golden snapshot pins it (`dispatcher/src/snapshot/config.ts`).
+SYSBOX_VERSION = "0.7.1"
+SYSBOX_SHA256 = "9d6d5484f980d0a17f86c492c1262015c2afb66280bdb97215b79fde6a0261c5"
+SYSBOX_URL = (
+    f"https://github.com/nestybox/sysbox/releases/download/v{SYSBOX_VERSION}/sysbox-ce_{SYSBOX_VERSION}.linux_amd64.deb"
+)
+ROOTLESS_SOCKET = "unix:///run/user/1000/docker.sock"
+
+
+def timed_docker(*args: str, timeout: float = 300.0) -> tuple[subprocess.CompletedProcess[str], float]:
+    started = time.monotonic()
+    done = docker(*args, timeout=timeout)
+    return done, round(time.monotonic() - started, 2)
+
+
+def inner(container: str, command: str, *, host: str | None = None, timeout: float = 300.0) -> tuple[subprocess.CompletedProcess[str], float]:
+    """A command in the agent's container, with its Docker client pointed at the agent's own daemon."""
+    prefix = f"export DOCKER_HOST={host}; " if host else ""
+    return timed_docker("exec", container, "sh", "-c", prefix + command, timeout=timeout)
+
+
+def exercise(
+    name: str, run_args: Sequence[str], image: str, *, host: str | None = None, ready_seconds: float = 60.0, pull_first: bool = True
+) -> dict[str, Any]:
+    """Start the agent's container as `run_args` says, wait until its own Docker answers, and run
+    postgres in it. Everything is measured; nothing is assumed."""
+    container = f"spike-agent-{name}"[:60]
+    docker("rm", "-f", container)
+    facts: dict[str, Any] = {"option": name, "image": image, "run_args": list(run_args)}
+    started = time.monotonic()
+    # The image's own default (TLS on its TCP port): with `DOCKER_TLS_CERTDIR` empty its daemon
+    # binds an unprotected port and delays its start by 15 seconds on purpose (measured).
+    created = docker("run", "-d", "--name", container, *run_args, image, timeout=120)
+    facts["create_seconds"] = round(time.monotonic() - started, 2)
+    if created.returncode != 0:
+        facts.update(started=False, error=short(created.stderr.strip(), 400))
+        return facts
+    ready: float | None = None
+    deadline = time.monotonic() + ready_seconds
+    while time.monotonic() < deadline:
+        if docker("inspect", "-f", "{{.State.Running}}", container).stdout.strip() != "true":
+            break
+        probe = docker("exec", container, "sh", "-c", (f"DOCKER_HOST={host} " if host else "") + "docker info --format '{{.ServerVersion}}'")
+        if probe.returncode == 0:
+            ready = round(time.monotonic() - started, 2)
+            facts["inner_server_version"] = probe.stdout.strip()
+            break
+        time.sleep(0.25)
+    facts["inner_docker_ready_seconds"] = ready
+    inspected = docker(
+        "inspect", "-f",
+        "{{json .HostConfig.Privileged}} {{json .HostConfig.CapAdd}} {{json .HostConfig.SecurityOpt}} {{json .HostConfig.Devices}} {{.HostConfig.Runtime}} {{.Config.User}}",
+        container,
+    )
+    facts["host_config"] = inspected.stdout.strip()
+    maps = docker("exec", container, "sh", "-c", "id -u; cat /proc/self/uid_map")
+    facts["uid_and_uid_map"] = " | ".join(maps.stdout.split("\n")[:3]).strip()
+    attempt = docker(
+        "exec", container, "sh", "-c",
+        "ls /dev/vdb >/dev/null 2>&1 && mkdir -p /h && mount /dev/vdb /h 2>&1 && cat /h/etc/hostname 2>&1 || echo 'cannot reach the host disk'",
+    )
+    facts["host_disk_from_the_agent"] = short(attempt.stdout.strip().replace("\n", " / "), 160)
+    if ready is None:
+        logs = docker("logs", "--tail", "12", container)
+        facts.update(started=False, log_tail=short((logs.stdout + logs.stderr).strip()[-700:], 700))
+        docker("rm", "-f", container)
+        return facts
+    facts["started"] = True
+    if pull_first:
+        pulled, seconds = inner(container, f"docker pull -q {POSTGRES}", host=host, timeout=300)
+        facts["inner_pull_postgres_seconds"] = seconds
+        facts["inner_pull_ok"] = pulled.returncode == 0
+        if pulled.returncode != 0:
+            facts["inner_pull_error"] = short((pulled.stderr + pulled.stdout).strip(), 300)
+    began = time.monotonic()
+    run, _ = inner(container, f"docker run -d --name pg -e POSTGRES_PASSWORD=x {POSTGRES}", host=host, timeout=300)
+    facts["inner_docker_run_ok"] = run.returncode == 0
+    if run.returncode != 0:
+        facts["inner_run_error"] = short((run.stderr + run.stdout).strip(), 400)
+    else:
+        for _ in range(240):
+            ok, _ = inner(container, "docker exec pg pg_isready -U postgres -q && docker exec pg psql -U postgres -tAc 'select 6*7'", host=host, timeout=30)
+            if ok.returncode == 0 and ok.stdout.strip().endswith("42"):
+                facts["inner_postgres_answers_seconds"] = round(time.monotonic() - began, 2)
+                break
+            time.sleep(0.25)
+        else:
+            facts["inner_postgres_answers_seconds"] = None
+    peak = docker("exec", container, "cat", "/sys/fs/cgroup/memory.peak")
+    facts["outer_container_memory_peak_mib"] = round(int(peak.stdout.strip() or 0) / 1048576, 1) if peak.returncode == 0 else None
+    facts["total_seconds_to_a_running_postgres"] = round(time.monotonic() - started, 2)
+    docker("rm", "-f", container)
+    return facts
+
+
+def pull_dind(out: Path) -> None:
+    for image in (DIND_IMAGE, DIND_ROOTLESS_IMAGE, POSTGRES, "alpine:3.22"):
+        done, seconds = timed_docker("pull", "-q", image, timeout=600)
+        size = docker("image", "inspect", image, "--format", "{{.Size}}").stdout.strip()
+        REPORT.fact("s2_image", image=image, pull_seconds=seconds, rc=done.returncode, size_bytes=int(size or 0))
+
+
+def s2_none(out: Path) -> None:
+    """(3) No Docker in the agent. The agent's container has nothing of Docker; the runner can start
+    the services a task needs beside it, on the agent's network (a service container)."""
+    container = "spike-agent-none"
+    docker("rm", "-f", container)
+    started = time.monotonic()
+    docker("run", "-d", "--name", container, "alpine:3.22", "sleep", "600", check=True)
+    created = round(time.monotonic() - started, 2)
+    probe = docker("exec", container, "sh", "-c", "docker run --rm hello-world 2>&1; ls /var/run/docker.sock 2>&1; echo rc=$?")
+    inspected = docker("inspect", "-f", "{{json .HostConfig.Privileged}} {{json .HostConfig.CapAdd}} {{json .HostConfig.SecurityOpt}} {{.HostConfig.Runtime}}", container)
+    docker("rm", "-f", container)
+    REPORT.fact(
+        "s2_none_plain_container",
+        container_start_seconds=created,
+        docker_run_inside=short(probe.stdout.strip().replace("\n", " / "), 200),
+        host_config=inspected.stdout.strip(),
+    )
+    # A service container the runner starts: the agent reaches it by name on a network it shares.
+    network = "spike-services"
+    docker("network", "rm", network)
+    docker("network", "create", network, check=True)
+    began = time.monotonic()
+    docker("run", "-d", "--name", "spike-service-pg", "--network", network, "-e", "POSTGRES_PASSWORD=x", POSTGRES, check=True)
+    docker("run", "-d", "--name", container, "--network", network, POSTGRES, "sleep", "600", check=True)
+    answered: float | None = None
+    for _ in range(240):
+        ok = docker("exec", container, "sh", "-c", "pg_isready -h spike-service-pg -U postgres -q")
+        if ok.returncode == 0:
+            answered = round(time.monotonic() - began, 2)
+            break
+        time.sleep(0.25)
+    docker("rm", "-f", container, "spike-service-pg")
+    docker("network", "rm", network)
+    REPORT.say("s2_none_a_service_container_beside_the_agent", answered is not None, postgres_answers_from_the_agent_seconds=answered, image_already_pulled=True)
+
+
+PLATFORM_TUN_MODE = 0o600
+
+
+def open_tun_device() -> None:
+    """A regular Linux host has `/dev/net/tun` at mode 0666; this platform's image has 0600, which
+    an unprivileged user inside a container cannot open (rootless Docker's `slirp4netns` needs it).
+    The rootless and privileged options are measured with the device as a regular host has it, and
+    the fact says so."""
+    before = os.stat("/dev/net/tun").st_mode & 0o777
+    os.chmod("/dev/net/tun", 0o666)
+    REPORT.fact("s2_tun_device", mode_on_this_platform=oct(before), mode_for_the_measurements="0o666")
+
+
+def s2_privileged() -> None:
+    """Rootful Docker-in-Docker with `--privileged`: what it needs and what it gives away."""
+    facts = exercise("privileged", ["--privileged"], DIND_IMAGE)
+    REPORT.fact("s2_privileged_rootful_dind", **facts)
+
+
+def s2_rootless() -> None:
+    """(2) Rootless Docker-in-Docker in a container, with as little as can be taken away: what does
+    it need beside `--privileged`?"""
+    open_tun_device()
+    tun = ["--device", "/dev/net/tun"]
+    seccomp = ["--security-opt", "seccomp=unconfined"]
+    apparmor = ["--security-opt", "apparmor=unconfined"]
+    systempaths = ["--security-opt", "systempaths=unconfined"]
+    variants: list[tuple[str, list[str]]] = [
+        ("no-flags", []),
+        ("tun-device-only", tun),
+        ("tun-and-seccomp-unconfined", [*tun, *seccomp]),
+        ("tun-seccomp-and-systempaths-unconfined", [*tun, *seccomp, *systempaths]),
+        ("tun-seccomp-apparmor-and-systempaths-unconfined", [*tun, *seccomp, *apparmor, *systempaths]),
+        ("privileged", ["--privileged"]),
+    ]
+    results: list[dict[str, Any]] = []
+    for name, flags in variants:
+        facts = exercise(f"rootless-{name}", flags, DIND_ROOTLESS_IMAGE, host=ROOTLESS_SOCKET, ready_seconds=45)
+        results.append(facts)
+        REPORT.fact("s2_rootless_dind", variant=name, **facts)
+    working = [r["option"] for r in results if r.get("inner_postgres_answers_seconds") is not None]
+    REPORT.say("s2_rootless_dind_some_variant_runs_postgres", bool(working), variants_that_work=working)
+
+
+def sysbox_state() -> dict[str, Any]:
+    return {
+        "installed": sh("dpkg-query -W -f='${Version}' sysbox-ce 2>/dev/null").stdout.strip() or None,
+        "mgr_running": sh("pgrep -x sysbox-mgr").returncode == 0,
+        "fs_running": sh("pgrep -x sysbox-fs").returncode == 0,
+        "kcore_masked": "/proc/kcore" in Path("/proc/self/mountinfo").read_text(),
+        "tun_mode": oct(os.stat("/dev/net/tun").st_mode & 0o777) if Path("/dev/net/tun").exists() else None,
+    }
+
+
+def install_sysbox() -> dict[str, Any]:
+    """(1) The Sysbox package as the golden snapshot installs it, on this distribution: download,
+    checksum, install without systemd, and what the package says it needs."""
+    facts: dict[str, Any] = {"os": sh("grep PRETTY_NAME /etc/os-release").stdout.strip(), "kernel": os.uname().release}
+    if sysbox_state()["installed"]:
+        facts["already_installed"] = True
+        return facts
+    deb = Path("/tmp/spike-sysbox.deb")
+    started = time.monotonic()
+    got = sh(f"curl --fail --silent --show-error --location --retry 3 --max-time 180 --output {deb} {SYSBOX_URL}")
+    facts["download_seconds"] = round(time.monotonic() - started, 2)
+    facts["download_ok"] = got.returncode == 0
+    if got.returncode != 0:
+        facts["error"] = got.stderr[-300:]
+        return facts
+    facts["deb_bytes"] = deb.stat().st_size
+    digest = sh(f"sha256sum {deb}").stdout.split()[0]
+    facts["sha256_is_the_pinned_one"] = digest == SYSBOX_SHA256
+    control = sh(f"dpkg -I {deb} | grep -E '^ (Depends|Recommends|Conflicts|Provides|Description)' | cut -c1-300").stdout
+    facts["package_control"] = control.strip().splitlines()
+    scripts = sh(f"rm -rf /tmp/spike-deb && mkdir /tmp/spike-deb && dpkg -e {deb} /tmp/spike-deb && ls /tmp/spike-deb && grep -hE 'systemctl|docker|restart|reboot|modprobe|useradd|subuid' /tmp/spike-deb/postinst /tmp/spike-deb/preinst /tmp/spike-deb/prerm 2>/dev/null | head -40").stdout
+    facts["maintainer_scripts_touch"] = scripts.strip().splitlines()[:40]
+    began = time.monotonic()
+    installed = sh(
+        "export DEBIAN_FRONTEND=noninteractive; stub=$(mktemp -d); printf '#!/bin/sh\\nexit 0\\n' > $stub/systemctl; chmod 0755 $stub/systemctl; "
+        f"PATH=$stub:$PATH apt-get install -y -qq {deb} kmod 2>&1 | tail -5; rm -rf $stub",
+        timeout=600,
+    )
+    facts["install_seconds"] = round(time.monotonic() - began, 2)
+    facts["install_output_tail"] = short(installed.stdout.strip(), 400)
+    facts["installed_version"] = sysbox_state()["installed"]
+    facts["sysbox_runc_version"] = sh("sysbox-runc --version | head -3").stdout.strip().replace("\n", " / ")
+    units = sh("dpkg -L sysbox-ce | grep -E 'systemd|\\.service$|/usr/bin/sysbox'").stdout.strip().splitlines()
+    facts["files_of_interest"] = units[:14]
+    facts["disk_bytes_installed"] = int(sh("dpkg-query -W -f='${Installed-Size}' sysbox-ce").stdout.strip() or 0) * 1024
+    return facts
+
+
+def register_runtime() -> None:
+    """`/etc/docker/daemon.json` as the golden snapshot writes it (the runtime registered, `runc` still
+    the default) and a restart of the daemon, which a package on a systemd host does by itself."""
+    config = {
+        "ipv6": False,
+        "ip6tables": False,
+        "live-restore": False,
+        "runtimes": {"sysbox-runc": {"path": "/usr/bin/sysbox-runc"}},
+        "log-opts": {"max-size": "10m", "max-file": "2"},
+    }
+    Path("/etc/docker/daemon.json").write_text(json.dumps(config, indent=2) + "\n")
+    sh("pkill -x dockerd; for i in $(seq 1 100); do pgrep -x dockerd >/dev/null || break; sleep 0.1; done")
+    prepared = sh(str(REPO / "docker" / "sandbox" / "vm-prepare.sh"))
+    if prepared.returncode != 0:
+        raise SystemExit(f"vm-prepare failed after the restart: {prepared.stderr[-300:]}")
+
+
+def sysbox_attempt() -> tuple[bool, str]:
+    done = docker("run", "--rm", "--runtime=sysbox-runc", "alpine:3.22", "echo", "sysbox-ok", timeout=90)
+    return done.returncode == 0 and "sysbox-ok" in done.stdout, short((done.stderr + done.stdout).strip().replace("\n", " / ")[-300:], 300)
+
+
+def s2_sysbox_plain(out: Path) -> bool:
+    """(1) Sysbox without our boot steps, one step at a time: what the package alone gives, and which
+    of the steps of `docker/sandbox/sysbox-prepare.sh` this platform needs and why. Returns whether
+    a container ran at the end."""
+    REPORT.fact("s2_sysbox_install", **install_sysbox())
+    register_runtime()
+    state = sysbox_state()
+    if state["mgr_running"] or not state["kcore_masked"]:
+        REPORT.fact("s2_sysbox_ablation_skipped", reason="the VM was prepared already (a rerun)", state=state)
+        return sysbox_attempt()[0]
+    if Path("/dev/net/tun").exists():
+        os.chmod("/dev/net/tun", PLATFORM_TUN_MODE)  # back to what the platform ships
+    steps: list[tuple[str, str]] = [
+        ("package only (daemons not running)", "true"),
+        (
+            "plus sysbox-mgr and sysbox-fs (what systemd does on a normal host)",
+            "mkdir -p /var/log; nohup setsid sysbox-mgr > /var/log/sysbox-mgr.log 2>&1 & "
+            "for i in $(seq 1 100); do [ -S /run/sysbox/sysmgr.sock ] && break; sleep 0.1; done; "
+            "nohup setsid sysbox-fs > /var/log/sysbox-fs.log 2>&1 & for i in $(seq 1 100); do [ -S /run/sysbox/sysfs.sock ] && break; sleep 0.1; done",
+        ),
+        ("plus /dev/net/tun mode 0666 (the platform has 0600)", "chmod 0666 /dev/net/tun"),
+        (
+            "plus unmounting the platform's /proc/kcore and /proc/keys",
+            "for n in /proc/kcore /proc/keys; do grep -q \" $n \" /proc/self/mountinfo && umount $n || true; done",
+        ),
+        ("plus the sysctl file of the package", "sysctl -q -e -p /lib/sysctl.d/99-sysbox-sysctl.conf"),
+    ]
+    first_working: str | None = None
+    for label, command in steps:
+        sh(command)
+        ok, text = sysbox_attempt()
+        REPORT.fact("s2_sysbox_ablation", step=label, container_runs=ok, result=text)
+        if ok and first_working is None:
+            first_working = label
+    REPORT.say("s2_sysbox_runs_a_container_after_some_steps", first_working is not None, first_step_that_works=first_working)
+    return first_working is not None
+
+
+def s2_sysbox(out: Path) -> None:
+    """The hosted setup, as `sysbox-prepare.sh` makes it, and the same exercise as the others."""
+    prepared = sh(str(REPO / "docker" / "sandbox" / "sysbox-prepare.sh"), timeout=120)
+    REPORT.say("s2_sysbox_prepare_script_exits_zero", prepared.returncode == 0, stderr=prepared.stderr[-300:])
+    facts = exercise("sysbox", ["--runtime=sysbox-runc"], DIND_IMAGE)
+    REPORT.fact("s2_sysbox_dind", **facts)
+    again = exercise("sysbox-2", ["--runtime=sysbox-runc"], DIND_IMAGE, pull_first=False)
+    REPORT.fact("s2_sysbox_dind_second_start", **again)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("what", choices=["s1", "s2", "all", "build"])
@@ -1523,6 +1829,18 @@ def main() -> int:
             stream_input(out, gateway)
         if wanted("resources", "s1"):
             resources(out, gateway)
+        if arguments.what in ("s2", "all"):
+            pull_dind(out)
+            if wanted("none", "s2"):
+                s2_none(out)
+            if wanted("rootless", "s2"):
+                s2_rootless()
+            if wanted("privileged", "s2"):
+                s2_privileged()
+            if wanted("sysbox-plain", "s2"):
+                s2_sysbox_plain(out)
+            if wanted("sysbox", "s2"):
+                s2_sysbox(out)
     finally:
         remove_leftovers()
     _ = (Callable, threading, BaseHTTPRequestHandler, ThreadingHTTPServer, field)
