@@ -34,6 +34,7 @@ export function checkText(
   if (parsed === undefined) return { ok: false };
   const whole = isWholeReference(parsed);
   for (const part of parsed.parts) {
+    if (context.halted()) break;
     if (!("ref" in part)) continue;
     const resolved = resolveReference(part.ref, context, use);
     if (whole) return { whole: resolved.type, ok: true };
@@ -194,9 +195,10 @@ export function checkInput(
       mismatch();
       return;
     }
-    value.forEach((item: unknown, index) =>
-      checkInput(item, list.items, pointer(path, index), context, use, target),
-    );
+    for (const [index, item] of value.entries()) {
+      if (context.halted()) break;
+      checkInput(item, list.items, pointer(path, index), context, use, target);
+    }
     return;
   }
   mismatch();
@@ -470,7 +472,8 @@ export function checkCondition(
     );
     return;
   }
-  argument.forEach((item: unknown, index) =>
-    checkCondition(item, pointer(at, index), context, use, depth + 1),
-  );
+  for (const [index, item] of argument.entries()) {
+    if (context.halted()) break;
+    checkCondition(item, pointer(at, index), context, use, depth + 1);
+  }
 }

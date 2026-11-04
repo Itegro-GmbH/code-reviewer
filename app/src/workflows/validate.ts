@@ -17,6 +17,7 @@ import {
   STEPS_MAX,
 } from "./limits.ts";
 import {
+  IssueSink,
   issue,
   listNames,
   pointer,
@@ -34,6 +35,8 @@ import {
   type TriggerKind,
 } from "./triggers.ts";
 
+type Report = (found: Issue) => void;
+
 export type ValidateOptions = {
   /** The most a workflow may be given to spend, in USD: the operator's limit. */
   maxBudgetUsd?: number;
@@ -43,7 +46,7 @@ export type ValidationResult = {
   valid: boolean;
   /** The problems, sorted by path, `ERRORS_MAX` at most. Empty when `valid`. */
   errors: Issue[];
-  /** There are more problems than `errors` lists: the first ones by path are there, fix them and validate again. */
+  /** There are more problems than `errors` lists (the check stops once it has a few more than that): fix these and validate again. */
   truncated: boolean;
   /** The budget the workflow runs with: its own, or the default when it names none. Set when `valid`. */
   budgetUsd?: number;
@@ -128,13 +131,13 @@ function indexSteps(
  * A run works on one repository. An issue trigger brings it (`trigger.repo`); a manual one must declare it as the input `repo`, a
  * required text, which the caller hands in.
  */
-function checkRepositoryInput(schema: ResultSchema, issues: Issue[]): void {
+function checkRepositoryInput(schema: ResultSchema, report: Report): void {
   const where = "/trigger/input";
   const repo = Object.hasOwn(schema.properties, "repo")
     ? schema.properties.repo
     : undefined;
   if (repo === undefined)
-    issues.push(
+    report(
       issue(
         where,
         "repo_required",
@@ -142,7 +145,7 @@ function checkRepositoryInput(schema: ResultSchema, issues: Issue[]): void {
       ),
     );
   else if (repo.type !== "string")
-    issues.push(
+    report(
       issue(
         pointer(where, "properties", "repo"),
         "repo_required",
@@ -150,7 +153,7 @@ function checkRepositoryInput(schema: ResultSchema, issues: Issue[]): void {
       ),
     );
   else if (!(schema.required ?? []).includes("repo"))
-    issues.push(
+    report(
       issue(
         where,
         "repo_required",
@@ -161,7 +164,7 @@ function checkRepositoryInput(schema: ResultSchema, issues: Issue[]): void {
 
 function checkTrigger(
   value: unknown,
-  issues: Issue[],
+  report: Report,
 ): {
   kind?: TriggerKind;
   input?: ResultSchema;
@@ -170,7 +173,7 @@ function checkTrigger(
 } {
   const path = "/trigger";
   if (value === undefined) {
-    issues.push(
+    report(
       issue(
         path,
         "missing_field",
@@ -180,7 +183,7 @@ function checkTrigger(
     return {};
   }
   if (!isRecord(value)) {
-    issues.push(
+    report(
       issue(
         path,
         "wrong_type",
@@ -191,7 +194,7 @@ function checkTrigger(
   }
   const kind = value.kind;
   if (kind === undefined) {
-    issues.push(
+    report(
       issue(
         pointer(path, "kind"),
         "missing_field",
@@ -205,7 +208,7 @@ function checkTrigger(
     typeof kind !== "string" ||
     !(TRIGGER_KINDS as readonly string[]).includes(kind)
   ) {
-    issues.push(
+    report(
       issue(
         pointer(path, "kind"),
         "unknown_trigger_kind",
@@ -219,7 +222,7 @@ function checkTrigger(
   const allowed = ["kind", ...TRIGGER_FIELDS[trigger]];
   for (const key of Object.keys(value))
     if (!allowed.includes(key))
-      issues.push(
+      report(
         issue(
           pointer(path, key),
           "unknown_field",
@@ -230,7 +233,7 @@ function checkTrigger(
   if (trigger === "github.issueLabeled") {
     const label = value.label;
     if (label === undefined)
-      issues.push(
+      report(
         issue(
           pointer(path, "label"),
           "missing_field",
@@ -238,15 +241,13 @@ function checkTrigger(
         ),
       );
     else if (typeof label !== "string")
-      issues.push(
-        issue(pointer(path, "label"), "wrong_type", "'label' is a text."),
-      );
+      report(issue(pointer(path, "label"), "wrong_type", "'label' is a text."));
     else if (
       textLength(label) < 1 ||
       textLength(label) > LABEL_MAX_LENGTH ||
       label.trim() === ""
     )
-      issues.push(
+      report(
         issue(
           pointer(path, "label"),
           "invalid_value",
@@ -257,7 +258,7 @@ function checkTrigger(
     return { kind: trigger };
   }
   if (value.input === undefined) {
-    issues.push(
+    report(
       issue(
         path,
         "repo_required",
@@ -267,9 +268,9 @@ function checkTrigger(
     return { kind: trigger };
   }
   const checked = validateResultSchema(value.input, pointer(path, "input"));
-  issues.push(...checked.issues);
+  for (const found of checked.issues) report(found);
   if (checked.schema !== undefined)
-    checkRepositoryInput(checked.schema, issues);
+    checkRepositoryInput(checked.schema, report);
   return {
     kind: trigger,
     input: checked.schema,
@@ -280,24 +281,20 @@ function checkTrigger(
 function checkBudget(
   value: unknown,
   maximum: number,
-  issues: Issue[],
+  report: Report,
 ): number | undefined {
   const path = "/budgetUsd";
   if (value === undefined) return BUDGET_DEFAULT_USD;
   if (typeof value !== "number" || !Number.isFinite(value)) {
-    issues.push(
-      issue(path, "wrong_type", "'budgetUsd' is a number of US dollars."),
-    );
+    report(issue(path, "wrong_type", "'budgetUsd' is a number of US dollars."));
     return undefined;
   }
   if (value <= 0) {
-    issues.push(
-      issue(path, "invalid_value", "'budgetUsd' must be more than 0."),
-    );
+    report(issue(path, "invalid_value", "'budgetUsd' must be more than 0."));
     return undefined;
   }
   if (value > maximum) {
-    issues.push(
+    report(
       issue(
         path,
         "budget_above_maximum",
@@ -341,12 +338,12 @@ export function validateWorkflow(
         ),
       ],
     };
-  const issues: Issue[] = [];
-  const report = (found: Issue): void => void issues.push(found);
+  const sink = new IssueSink();
+  const report = sink.report;
 
   for (const key of Object.keys(document))
     if (!DOCUMENT_KEYS.includes(key))
-      issues.push(
+      report(
         issue(
           pointer("", key),
           "unknown_field",
@@ -356,11 +353,9 @@ export function validateWorkflow(
       );
 
   if (document.version === undefined)
-    issues.push(
-      issue("/version", "missing_field", "'version' is required: 1."),
-    );
+    report(issue("/version", "missing_field", "'version' is required: 1."));
   else if (document.version !== 1)
-    issues.push(
+    report(
       issue(
         "/version",
         "invalid_value",
@@ -371,7 +366,7 @@ export function validateWorkflow(
 
   const name = document.name;
   if (name === undefined)
-    issues.push(
+    report(
       issue(
         "/name",
         "missing_field",
@@ -379,9 +374,9 @@ export function validateWorkflow(
       ),
     );
   else if (typeof name !== "string")
-    issues.push(issue("/name", "wrong_type", "'name' is a text."));
+    report(issue("/name", "wrong_type", "'name' is a text."));
   else if (name.trim() === "" || textLength(name) > NAME_MAX_LENGTH)
-    issues.push(
+    report(
       issue(
         "/name",
         "invalid_value",
@@ -390,11 +385,9 @@ export function validateWorkflow(
     );
   if (document.description !== undefined) {
     if (typeof document.description !== "string")
-      issues.push(
-        issue("/description", "wrong_type", "'description' is a text."),
-      );
+      report(issue("/description", "wrong_type", "'description' is a text."));
     else if (textLength(document.description) > DESCRIPTION_MAX_LENGTH)
-      issues.push(
+      report(
         issue(
           "/description",
           "limit_exceeded",
@@ -403,10 +396,17 @@ export function validateWorkflow(
       );
   }
 
+  const trigger = checkTrigger(document.trigger, report);
+  const budget = checkBudget(
+    document.budgetUsd,
+    options.maxBudgetUsd ?? BUDGET_OPERATOR_MAX_USD,
+    report,
+  );
+
   const index = new Map<string, StepInfo>();
   const stepCount = indexSteps(document.steps, "/steps", [], index, report);
   if (stepCount > STEPS_MAX)
-    issues.push(
+    report(
       issue(
         "/steps",
         "too_many_steps",
@@ -414,21 +414,15 @@ export function validateWorkflow(
       ),
     );
 
-  const trigger = checkTrigger(document.trigger, issues);
   const checker: Checker = {
     resolver,
     index,
     report,
+    halted: sink.halted,
     ...(trigger.label === undefined ? {} : { triggerLabel: trigger.label }),
   };
-  const budget = checkBudget(
-    document.budgetUsd,
-    options.maxBudgetUsd ?? BUDGET_OPERATOR_MAX_USD,
-    issues,
-  );
-
   if (document.steps === undefined)
-    issues.push(
+    report(
       issue(
         "/steps",
         "missing_field",
@@ -455,12 +449,12 @@ export function validateWorkflow(
     checkSteps(document.steps, "/steps", checker, env, state);
   }
 
-  const found = sortIssues(issues);
+  const found = sortIssues(sink.issues);
   const errors = found.slice(0, ERRORS_MAX);
   return {
     valid: found.length === 0,
     errors,
-    truncated: found.length > errors.length,
+    truncated: sink.full || found.length > errors.length,
     steps: stepCount,
     ...(errors.length === 0 && budget !== undefined
       ? { budgetUsd: budget }

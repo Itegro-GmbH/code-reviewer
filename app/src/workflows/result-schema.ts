@@ -231,7 +231,8 @@ function properties(
     walk.fields += names.length;
     for (const name of names) {
       const at = pointer(where, name);
-      if (!RESULT_FIELD_NAME_PATTERN.test(name))
+      if (!RESULT_FIELD_NAME_PATTERN.test(name)) {
+        // What lies below a name that is refused is not looked at: fix the name first, the next answer reports the rest.
         walk.issues.push(
           issue(
             at,
@@ -239,6 +240,8 @@ function properties(
             "A field name starts with a letter or '_' and has letters, digits and '_' only (64 at most).",
           ),
         );
+        continue;
+      }
       schemaNode(props[name], at, depth + 1, walk);
     }
   }

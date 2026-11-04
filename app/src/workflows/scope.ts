@@ -17,6 +17,7 @@ import {
   shown,
   type Issue,
 } from "./issues.ts";
+import { NAMES_LISTED_MAX } from "./limits.ts";
 import {
   describeType,
   valueFits,
@@ -82,15 +83,40 @@ export type Resolution = { type: ValueType };
 export type ScopeContext = {
   index: ReadonlyMap<string, StepInfo>;
   report: (found: Issue) => void;
+  /** The check has all the problems an answer can hold: nothing more needs to be looked at. */
+  halted: () => boolean;
 };
 
 function isPrefix(shorter: string, longer: string): boolean {
   return longer === shorter || longer.startsWith(`${shorter}/`);
 }
 
-function namesInReach(env: Env, previous: boolean): string[] {
-  const names = [...env.scope.keys()];
-  return previous && env.loops.length > 0 ? [...names, "previous"] : names;
+/** The first `limit` of the values of an iterator, without walking the rest. */
+export function firstOf<T>(values: Iterable<T>, limit = NAMES_LISTED_MAX): T[] {
+  const taken: T[] = [];
+  if (limit <= 0) return taken;
+  for (const value of values) {
+    taken.push(value);
+    if (taken.length >= limit) break;
+  }
+  return taken;
+}
+
+/** A few of the names in reach (and how many there are): a scope may hold thousands of steps, and a list is made for each problem. */
+function namesInReach(
+  env: Env,
+  previous: boolean,
+): { names: string[]; total: number } {
+  const withPrevious = previous && env.loops.length > 0;
+  const total = env.scope.size + (withPrevious ? 1 : 0);
+  const names = firstOf(env.scope.keys());
+  return {
+    names:
+      withPrevious && names.length < NAMES_LISTED_MAX
+        ? [...names, "previous"]
+        : names,
+    total,
+  };
 }
 
 function fail(
@@ -231,7 +257,7 @@ export function resolveReference(
         use,
         "previous_outside_loop",
         "'previous' is the value a step of a loop had in the round before. It exists only inside a loop body.",
-        namesInReach(use.env, false),
+        namesInReach(use.env, false).names,
       );
     if (ref.default === undefined && !use.previousOk)
       return fail(
@@ -247,7 +273,7 @@ export function resolveReference(
         use,
         "previous_unknown_step",
         "Name a step of the loop body after 'previous.', like previous.review.findings.",
-        [...frame.previous.keys()],
+        firstOf(frame.previous.keys()),
       );
     const binding = frame.previous.get(stepId);
     if (binding === undefined)
@@ -256,7 +282,7 @@ export function resolveReference(
         use,
         "previous_unknown_step",
         notPreviousMessage(stepId, frame, use, context),
-        [...frame.previous.keys()],
+        firstOf(frame.previous.keys()),
       );
     return descend(binding, fieldPath, ref, context, use);
   }
@@ -270,7 +296,7 @@ export function resolveReference(
       use,
       why.code,
       why.message,
-      namesInReach(use.env, true),
+      namesInReach(use.env, true).names,
     );
   }
   const reach = namesInReach(use.env, true);
@@ -278,7 +304,7 @@ export function resolveReference(
     context,
     use,
     "reference_unknown_step",
-    `${shown(root)} is not a step of this workflow. In reach here: ${listNames(reach)}.`,
-    reach,
+    `${shown(root)} is not a step of this workflow. In reach here: ${listNames(reach.names, reach.total)}.`,
+    reach.names,
   );
 }

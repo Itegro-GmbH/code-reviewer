@@ -4,6 +4,8 @@
 // sentence and, where a choice was wrong, the names that were available at that point. Callers branch on `code`, never on the
 // message. The list is the same for `POST .../workflows/validate` and for a refused save.
 
+import { ERRORS_COLLECT_MAX, NAMES_LISTED_MAX } from "./limits.ts";
+
 /**
  * Codes the JSON Schema (`contracts/workflow.v1.json`, `contracts/result-schema.v1.json`) states too: the shape of the document.
  * `integration-tests/compatibility/workflow-contract.integration.test.ts` holds that a document is refused by the schema exactly when
@@ -114,6 +116,11 @@ export type Issue = {
   available?: string[];
 };
 
+/** The names for `available`: the first `NAMES_LISTED_MAX`, each cut to the length of a name. */
+function listed(names: readonly string[]): string[] {
+  return names.slice(0, NAMES_LISTED_MAX).map(clip);
+}
+
 export function issue(
   path: string,
   code: IssueCode,
@@ -122,10 +129,29 @@ export function issue(
 ): Issue {
   return available === undefined
     ? { path, code, message }
-    : { path, code, message, available: [...available] };
+    : { path, code, message, available: listed(available) };
 }
 
-/** Longest piece of a user's text a message repeats: the length of a name. */
+/**
+ * Collects the problems of one check, and says when it has enough: the check runs in document order and stops once it holds more
+ * than an answer lists (`ERRORS_COLLECT_MAX`), because everything after that is work for an answer that cannot show it. A document of
+ * 200 KB can hold hundreds of thousands of problems; each one costs a message.
+ */
+export class IssueSink {
+  readonly issues: Issue[] = [];
+  /** The cap was reached: there may be more problems than were collected. */
+  full = false;
+
+  readonly report = (found: Issue): void => {
+    if (this.full) return;
+    this.issues.push(found);
+    if (this.issues.length >= ERRORS_COLLECT_MAX) this.full = true;
+  };
+
+  readonly halted = (): boolean => this.full;
+}
+
+/** Longest piece of a user's text a message, a path or a list of names repeats: the length of a name. */
 export const ECHO_MAX_LENGTH = 64;
 
 /** A user's text for a message, cut to the length of a name, in quotes: `'abc…'`. A message never repeats a whole value. */
@@ -142,14 +168,17 @@ export function clip(text: string): string {
     : text;
 }
 
-/** A pointer segment: `~` and `/` are escaped (RFC 6901). */
+/**
+ * A pointer segment: `~` and `/` are escaped (RFC 6901). A segment longer than a name is cut and marked with an ellipsis: the
+ * pointer of such a key points near it, not at it.
+ */
 export function pointer(
   base: string,
   ...segments: (string | number)[]
 ): string {
   return segments.reduce<string>(
     (path, segment) =>
-      `${path}/${String(segment).replaceAll("~", "~0").replaceAll("/", "~1")}`,
+      `${path}/${clip(String(segment)).replaceAll("~", "~0").replaceAll("/", "~1")}`,
     base,
   );
 }
@@ -183,8 +212,18 @@ export function sortIssues(issues: readonly Issue[]): Issue[] {
   );
 }
 
-/** Names as a sentence: `a, b or c`. */
-export function listNames(names: readonly string[]): string {
-  if (names.length === 0) return "none";
-  return names.map(shown).join(", ");
+/**
+ * Names as a list for a message: `'a', 'b'`. At most `NAMES_LISTED_MAX` are named; the rest is counted (`and 12 more`). `total` is how
+ * many there are when `names` is only the first of them; `"more"` when it is not known (the list was cut after one name too many).
+ */
+export function listNames(
+  names: readonly string[],
+  total: number | "more" = names.length,
+): string {
+  if (total === 0 || names.length === 0) return "none";
+  const named = names.slice(0, NAMES_LISTED_MAX).map(shown).join(", ");
+  if (total === "more")
+    return names.length > NAMES_LISTED_MAX ? `${named} and more` : named;
+  const more = total - Math.min(names.length, NAMES_LISTED_MAX);
+  return more > 0 ? `${named} and ${more} more` : named;
 }

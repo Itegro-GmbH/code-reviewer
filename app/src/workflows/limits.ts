@@ -26,6 +26,10 @@ export const TEMPLATE_MAX_LENGTH = 20_000;
 export const CONDITION_DEPTH_MAX = 4;
 /** The most problems one answer lists; a document with more is `truncated`. */
 export const ERRORS_MAX = 200;
+/** The check stops once it holds this many problems: a few more than the answer lists, so the cut is not made on the first ones found. */
+export const ERRORS_COLLECT_MAX = ERRORS_MAX + 50;
+/** The most names a list in an answer holds (`available`, and the names a message lists); the message says how many more there are. */
+export const NAMES_LISTED_MAX = 20;
 /** How deep braces may nest in the default of a reference: `{{a.b | default {"k": {"j": 1}}}}` is two deep. */
 export const DEFAULT_BRACE_DEPTH_MAX = 3;
 

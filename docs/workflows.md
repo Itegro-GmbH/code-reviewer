@@ -22,9 +22,12 @@ at a step that ran before on every path, the types of the values that flow, the 
    `{"valid": true, "errors": [], "truncated": false, "budgetUsd": 20, "steps": 6}`. Nothing is stored.
 3. Read **every** error. Each has a `path` (a JSON pointer into your document), a `code` (stable: branch on it), a `message` (the cause in a
    sentence) and, where a name was wrong, `available`: the names that exist at that point (steps in reach, fields of a step, profiles,
-   environments, connectors). The list is sorted by path, so fix them all, then validate again. It holds **200 errors at most**: when
-   `truncated` is `true` there are more (the first ones by path are there); fix these and validate again. A message repeats at most the
-   first 64 characters of what you wrote.
+   environments, connectors). The list is sorted by path, so fix them all, then validate again. It holds **200 errors at most**: the check
+   runs in document order and stops once it has found a few more than that, so when `truncated` is `true` there are more (the ones found
+   first are there, not necessarily the first by path); fix these and validate again. A list of names (`available`, and the names in a
+   message) holds the first 20, and a message says how many more there are. A message, a path and a name in `available` repeat at most the
+   first 64 characters of what you wrote (a longer key is cut and ends in `…`, so its path points near it). Below a result-schema field
+   name that is refused nothing is checked: fix the name, validate again.
 4. When it is valid, `POST /api/w/<slug>/workflows` saves it as version 1, or `PUT /api/w/<slug>/workflows/<id>` saves the next version.
    Saving runs the same validator and refuses an invalid document with the same list (`422`, `WORKFLOW_INVALID`).
 

@@ -16,6 +16,7 @@ import {
   ID_MAX_LENGTH,
   LOOP_NESTING_MAX,
   LOOP_ROUNDS_MAX,
+  NAMES_LISTED_MAX,
   NESTING_DEPTH_MAX,
 } from "./limits.ts";
 import { issue, listNames, pointer, shown } from "./issues.ts";
@@ -31,13 +32,14 @@ import {
 } from "./result-schema.ts";
 import { GITHUB_ISSUE_LABELS, type ConnectorSpec } from "./connectors.ts";
 import { literalText, parseTemplate } from "./template.ts";
-import type {
-  Binding,
-  Env,
-  LoopFrame,
-  ScopeContext,
-  StepInfo,
-  Use,
+import {
+  firstOf,
+  type Binding,
+  type Env,
+  type LoopFrame,
+  type ScopeContext,
+  type StepInfo,
+  type Use,
 } from "./scope.ts";
 import { enumOf, NUMBER, objectOf, type FieldType } from "./value-type.ts";
 
@@ -443,6 +445,36 @@ function checkInstruction(
   }
 }
 
+/** The ids of the agent steps in reach, as many as a list in an answer holds (and one more, to tell there are more). */
+function agentsInReach(env: Env, own: string | undefined): string[] {
+  const agents = firstOf(
+    (function* () {
+      for (const binding of env.scope.values())
+        if (binding.kind === "agent") yield binding.id;
+    })(),
+    NAMES_LISTED_MAX + 1,
+  );
+  return own === undefined ? agents : [...agents, own];
+}
+
+function reportNoSession(
+  at: string,
+  cause: string,
+  env: Env,
+  own: string | undefined,
+  c: Checker,
+): void {
+  const available = agentsInReach(env, own);
+  c.report(
+    issue(
+      at,
+      "session_target_invalid",
+      `${cause} Sessions of agent steps in reach: ${listNames(available, "more")}.`,
+      available,
+    ),
+  );
+}
+
 function checkSession(
   node: Record<string, unknown>,
   path: string,
@@ -499,31 +531,25 @@ function checkSession(
   // A step continues its own session only as a direct step of a loop body: a step inside an `if` of the body may not have run in
   // the round before, so there may be no session to go on with.
   const ownSession = state.inLoopBody && typeof own === "string";
-  const agents = [...env.scope.values()]
-    .filter((b) => b.kind === "agent")
-    .map((b) => b.id);
-  const available = ownSession ? [...agents, own] : agents;
   if (target === own) {
     if (!ownSession)
-      c.report(
-        issue(
-          at,
-          "session_target_invalid",
-          "A step can continue its own session only as a direct step of a loop body, where the round before ran it. Outside a loop, or inside an if of the body, there may be none.",
-          available,
-        ),
+      reportNoSession(
+        at,
+        "A step can continue its own session only as a direct step of a loop body, where the round before ran it. Outside a loop, or inside an if of the body, there may be none.",
+        env,
+        undefined,
+        c,
       );
     return;
   }
   const found = env.scope.get(target);
   if (found?.kind !== "agent") {
-    c.report(
-      issue(
-        at,
-        "session_target_invalid",
-        `${shown(target)} is not an agent step that ran before this one on every path. Sessions of agent steps in reach: ${listNames(available)}.`,
-        available,
-      ),
+    reportNoSession(
+      at,
+      `${shown(target)} is not an agent step that ran before this one on every path.`,
+      env,
+      ownSession ? own : undefined,
+      c,
     );
     return;
   }
@@ -864,7 +890,8 @@ export function checkSteps(
     env.scope.set(binding.id, binding);
     made.push(binding);
   };
-  steps.forEach((node: unknown, index) => {
+  for (const [index, node] of steps.entries()) {
+    if (c.halted()) break;
     const at = pointer(path, index);
     if (!isRecord(node)) {
       c.report(
@@ -874,7 +901,7 @@ export function checkSteps(
           `A step is an object, not ${jsonTypeName(node)}.`,
         ),
       );
-      return;
+      continue;
     }
     const id = node.id;
     const validId = typeof id === "string" && isStepId(id);
@@ -893,7 +920,7 @@ export function checkSteps(
     const kind = node.kind;
     if (kind === undefined) {
       missing(at, "kind", `one of ${listNames([...SUPPORTED_KINDS])}.`, c);
-      return;
+      continue;
     }
     if (
       typeof kind === "string" &&
@@ -914,7 +941,7 @@ export function checkSteps(
           type: { kind: "unknown" },
           unavailable: {},
         });
-      return;
+      continue;
     }
     if (
       typeof kind !== "string" ||
@@ -935,7 +962,7 @@ export function checkSteps(
           type: { kind: "unknown" },
           unavailable: {},
         });
-      return;
+      continue;
     }
     const nodeId = validId ? id : undefined;
     const withId = nodeId === undefined ? undefined : { ...node, id: nodeId };
@@ -943,16 +970,16 @@ export function checkSteps(
       case "agent":
         checkAgent(node, at, c, env, state);
         if (withId !== undefined) bind(agentBinding(withId, c.resolver));
-        return;
+        continue;
       case "action":
         checkAction(node, at, c, env, state);
         if (withId !== undefined) bind(actionBinding(withId, c.resolver));
-        return;
+        continue;
       case "if":
         checkIf({ ...node, id: nodeId ?? `if@${at}` }, at, c, env, state);
         if (nodeId !== undefined)
           bind({ id: nodeId, kind: "if", type: IF_OUTPUT, unavailable: {} });
-        return;
+        continue;
       default: {
         const bodyOwn = checkLoop(
           { ...node, id: nodeId ?? `loop@${at}` },
@@ -972,6 +999,6 @@ export function checkSteps(
           });
       }
     }
-  });
+  }
   return made;
 }
