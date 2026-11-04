@@ -54,26 +54,6 @@ def permission_block() -> dict[str, str]:
     return permissions
 
 
-def reasoning_summary_options(provider: Mapping[str, Any], family: WireFamily) -> dict[str, Any]:
-    """The agent options that ask the provider for a summary of the model's reasoning, for the
-    live view (#745), where that costs nothing extra and changes nothing the model does.
-
-    OpenAI's Responses API returns a summary of the reasoning when `reasoningSummary` is set; the
-    summary is not billed and the reasoning effort stays whatever the engine's defaults are (no
-    variant is chosen). The stock engine sets it for `gpt-5` models already; this adds the other
-    reasoning models of the SDK. Anthropic and Google are not touched: the engine asks Google for
-    its thoughts by default, and Anthropic's thinking is off without a variant, which a summary
-    cannot turn on without a cost. Models of the OpenAI-compatible APIs show their reasoning text
-    or nothing, as the provider decides."""
-    if family is not WireFamily.OPENAI_RESPONSES:
-        return {}
-    ((_, block),) = provider.items()
-    if block.get("npm") != "@ai-sdk/openai":
-        return {}
-    ((_, model),) = block["models"].items()
-    return {"reasoningSummary": "auto"} if model.get("reasoning") is True else {}
-
-
 def build_engine_config(
     *,
     provider: Mapping[str, Any],
@@ -98,19 +78,17 @@ def build_engine_config(
     )
     if not instructions_path.startswith("/"):
         raise ValueError("the instruction file must be an absolute path the runner wrote")
-    agent: dict[str, Any] = {
-        "description": "Implementer: carries out one task in the repository",
-        "mode": "primary",
-        "model": model_reference,
-        # No `prompt`: the agent keeps the stock prompt of the engine for its model; the
-        # runner's addition is the instruction file below.
-    }
-    options = reasoning_summary_options(provider, family)
-    if options:
-        agent["options"] = options
     return {
         "permission": permission_block(),
-        "agent": {IMPLEMENTER_AGENT: agent},
+        "agent": {
+            IMPLEMENTER_AGENT: {
+                "description": "Implementer: carries out one task in the repository",
+                "mode": "primary",
+                "model": model_reference,
+                # No `prompt`: the agent keeps the stock prompt of the engine for its model; the
+                # runner's addition is the instruction file below.
+            }
+        },
         "provider": dict(provider),
         "enabled_providers": list(provider),
         # The one instruction file: the runner's own (`prompts.instructions_text`), written into the
