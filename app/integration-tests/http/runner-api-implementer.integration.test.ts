@@ -157,6 +157,8 @@ async function start(
     entryStatus?: "released" | "retired";
     /** A reader of the entry of the model; default a native entry. */
     nativeEntry?: boolean;
+    /** The provider address of the native entry; default the entry's own. */
+    upstreamBaseUrl?: string;
     /** The claim guard lets every job run (the connection is checked by the claim itself, as in a race with its removal). */
     openGuard?: boolean;
     /** Wraps what the API remembers about a job, for a test that makes one call of the ledger fail. */
@@ -228,7 +230,13 @@ async function start(
       entryFor: async () =>
         options.nativeEntry === false
           ? { ok: false, code: "model_not_in_catalog" }
-          : { ok: true, entry: ENTRY },
+          : {
+              ok: true,
+              entry:
+                options.upstreamBaseUrl === undefined
+                  ? ENTRY
+                  : { ...ENTRY, upstreamBaseUrl: options.upstreamBaseUrl },
+            },
       refOf: nativeRefOf,
       // The turn asks the Implementer's own rule (no provider is legacy); the harness's second provider is the native one.
       implementerRefOf: nativeRefOf,
@@ -1405,6 +1413,18 @@ describe("the network rule of a turn (#745)", () => {
     expect(bare.job.network).toEqual({ mode: "off", hosts: [] });
     expect(review.job).not.toHaveProperty("network");
     expect(review.job).not.toHaveProperty("modelHost");
+  });
+
+  // #745, review of #830: a provider without a plain host name has no host to sign, so the VM's policy could not be narrowed
+  it("ends the turn implementer_config_invalid, before any VM exists, when the provider has no plain host name", async () => {
+    const h = await start({ upstreamBaseUrl: "https://203.0.113.7/v1" });
+    const { jobId } = await h.turn({ environment: ENVIRONMENT });
+
+    expect(await endedAtClaim(h, jobId)).toMatchObject({
+      status: "failed",
+      errorCode: "implementer_config_invalid",
+      attempts: 0,
+    });
   });
 
   // #745-T47

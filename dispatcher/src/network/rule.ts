@@ -15,7 +15,7 @@ const LABEL = "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?";
 const LAST_LABEL = "[a-z]([a-z0-9-]{0,61}[a-z0-9])?";
 /** A host name in its ASCII lower-case form, exact or `*.suffix`, at least two labels (after the `*.` for a suffix). */
 export const HOST_ENTRY = new RegExp(`^(\\*\\.)?(${LABEL}\\.)+${LAST_LABEL}$`);
-/** A plain host name (no wildcard): the form of the model provider's host the Worker names. */
+/** A plain host name (no wildcard): the form of the model provider's host, which the App names in its claim answer and the token signs. */
 export const PLAIN_HOST = new RegExp(`^(${LABEL}\\.)+${LAST_LABEL}$`);
 
 export const NetworkRuleSchema = z
@@ -41,7 +41,7 @@ export type PolicyHosts = {
   appHost: string;
   /** This Dispatcher's own host: the switch call is repeated through it until it is answered. */
   dispatcherHost: string;
-  /** The model provider's host, as the Worker names it. */
+  /** The model provider's host, as the App named it and the token signs it. */
   modelHost: string;
 };
 

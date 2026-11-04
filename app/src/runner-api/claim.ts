@@ -1406,6 +1406,14 @@ async function prepare(
       : callerLlmProviders(llmProviders),
   });
   if (checked.kind !== "checked") return checked;
+  // #745, step 7: the provider's host is signed into the token that narrows the VM's network policy. A provider without a plain
+  // host name (an IP literal, say) has none to sign, and a turn must not run with that wall silently off.
+  if (
+    checked.implementer !== null &&
+    checked.modelEntry !== null &&
+    providerHostOf(checked.modelEntry.upstreamBaseUrl) === null
+  )
+    return refuse("implementer_config_invalid", "reason=provider_host");
 
   // #320: a Dispatcher gets the per-job credential and nothing of the job's input; the Worker fetches
   // that (and with it the git token and the model key) with the credential.

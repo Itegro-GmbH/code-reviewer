@@ -922,3 +922,46 @@ def test_a_log_of_one_character_does_not_stall_the_fit() -> None:
     fitted = fit_request(result)
 
     assert fitted["logTail"] == ""
+
+
+# -- the network block of a turn (#745, review of #830) -------------------------------------------
+
+
+def _turn_block(**overrides: Any) -> dict[str, Any]:
+    block: dict[str, Any] = {
+        "baseCommit": "1" * 40,
+        "headCommit": "2" * 40,
+        "pushed": True,
+        "branches": [{"name": "work/b", "head": "2" * 40, "result": "pushed", "reason": None}],
+        "commits": [{"sha": "2" * 40, "subject": "Add it"}],
+        "filesChanged": [{"path": "a.ts", "status": "added"}],
+        "summary": "Done.",
+        "opencode": {"sessionId": "ses_1", "version": "1.19.0"},
+    }
+    block.update(overrides)
+    return block
+
+
+# A network block the app would refuse is left out; the pushed turn keeps its verdict and report.
+def test_a_network_block_the_app_would_refuse_is_left_out_and_the_turn_keeps_its_report() -> None:
+    printed = _populated(ok=True).to_json()
+    printed["implementer"] = _turn_block(network={"mode": "nonsense"})
+
+    result = result_from_outcome(
+        outcome(stdout=(json.dumps(printed) + "\n").encode()), REDACTOR, 777, implementer=True
+    )
+
+    assert result["ok"] is True
+    assert result["implementer"] == _turn_block()
+
+
+# The verdict sent when the app refused the whole result carries no network block, so the block
+# cannot be the reason the verdict is refused too.
+def test_the_short_report_of_a_refused_result_carries_no_network_block() -> None:
+    printed = _populated(ok=True).to_json()
+    printed["implementer"] = _turn_block(network={"mode": "off"})
+
+    verdict = minimal(dict(printed, implementer=printed["implementer"]))
+
+    assert "network" not in verdict["implementer"]
+    assert verdict["implementer"]["headCommit"] == "2" * 40
