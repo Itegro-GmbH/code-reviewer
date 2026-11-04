@@ -1355,6 +1355,70 @@ def s1_resume(out: Path, gateway: str) -> None:
     )
 
 
+def s1_resume_after_kill(out: Path, gateway: str) -> None:
+    """The container of a turn is killed while a command runs (a stop, an abort, a lost VM): the
+    session on the volume holds a `tool_use` with no answer. Does `--resume` still send the strict
+    provider a history it accepts?"""
+    work = seed_work(out / "work-kill")
+    session = out / "session-kill"
+    shutil.rmtree(session, ignore_errors=True)
+    session.mkdir()
+    mounts = [f"{work}:/work", f"{session}:/root/.claude"]
+    script = [
+        Turn(
+            tool="Bash",
+            args={
+                "command": 'node -e "setTimeout(() => {}, 30000)"; echo never',
+                "description": "wait",
+            },
+        ),
+        Turn(text=A1),
+    ]
+    with provider(script, gateway) as prov:
+        timer = threading.Timer(1.5, lambda: docker("kill", "spike-kill-1"))
+        timer.start()
+        one = claude(
+            "kill-1", prov, out, prompt=R1, flags=BYPASS, mounts=mounts, env={"IS_SANDBOX": "1"}
+        )
+        timer.join()
+    with provider([Turn(text=A2)], gateway) as prov:
+        two = claude(
+            "kill-2",
+            prov,
+            out,
+            prompt=R2,
+            flags=[*BYPASS, "--resume", one.session_id],
+            mounts=mounts,
+            env={"IS_SANDBOX": "1"},
+        )
+        sent = (
+            cast("dict[str, Any]", json.loads(prov.requests_text())[0]) if prov.fake.records else {}
+        )
+    messages = cast("list[dict[str, Any]]", sent.get("messages") or [])
+    answers = [
+        str(b.get("content"))[:120]
+        for m in messages
+        for b in cast(
+            "list[dict[str, Any]]", m["content"] if isinstance(m.get("content"), list) else []
+        )
+        if b.get("type") == "tool_result"
+    ]
+    REPORT.say(
+        "s1_resume_after_the_container_was_killed_in_a_running_command",
+        one.returncode != 0 and two.returncode == 0 and A2 in str(two.result.get("result")),
+        killed_run_returncode=one.returncode,
+        killed_run_events=len(one.events),
+        killed_run_had_a_result=bool(one.result),
+        session_id=one.session_id,
+        resumed_returncode=two.returncode,
+        resumed_stderr=short(two.stderr.strip(), 300) or None,
+        messages_in_first_request=len(messages),
+        tool_results_in_first_request=answers,
+        the_strict_provider_accepted_the_history=bool(two.calls)
+        and two.result.get("is_error") is False,
+    )
+
+
 # -- S1 (e): the permission mode of an unattended run -------------------------------------------------
 
 
@@ -2286,6 +2350,8 @@ def main() -> int:
             s1_finish_tool(out, gateway)
         if wanted("resume", "s1"):
             s1_resume(out, gateway)
+        if wanted("kill", "s1"):
+            s1_resume_after_kill(out, gateway)
         if wanted("permissions", "s1"):
             s1_permissions(out, gateway)
         if wanted("auth", "s1"):
