@@ -320,7 +320,13 @@ function holdsBadIssueNumber(value: unknown, type: ValueType): boolean {
         !isIssueNumber(value)
       );
     case "oneOf": {
-      const fitting = type.options.filter((option) => valueFits(value, option));
+      // An option is picked by the shape of the value: an object with more fields than the option names
+      // fits no closed object option, and its number must still be looked at.
+      const fits = type.options.filter((option) => valueFits(value, option));
+      const fitting =
+        fits.length > 0 || !isRecord(value)
+          ? fits
+          : type.options.filter((option) => option.kind === "object");
       return (
         fitting.length > 0 &&
         fitting.every((option) => holdsBadIssueNumber(value, option))

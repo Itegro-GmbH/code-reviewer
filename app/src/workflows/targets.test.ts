@@ -522,6 +522,26 @@ describe("a target input", () => {
     );
   });
 
+  // #833-M1-T296e: a default with more fields than the number is held to the same rule
+  it("holds an object default with more fields than the number to the rule of a literal", () => {
+    const issueFrom = (fallback: string): Json =>
+      manual(
+        {
+          o: {
+            type: "object",
+            required: ["number"],
+            properties: { number: { type: "integer" }, t: { type: "string" } },
+          },
+        },
+        { issue: `{{trigger.input.o | default ${fallback}}}`, body: "x" },
+      );
+
+    expect(codes(issueFrom('{"number": 5, "t": "x"}'))).toEqual([]);
+    expect(codes(issueFrom('{"number": -5, "t": "x"}'))).toEqual([
+      ["/steps/1/issue", "invalid_value"],
+    ]);
+  });
+
   // #833-M1-T297
   it("accepts text of every kind and an agent's result in the free-text inputs", () => {
     expect(
