@@ -245,7 +245,7 @@ const AGENT_KEYS = [
   "result",
 ];
 
-function useOf(
+function reachOf(
   env: Env,
   nodePath: string,
   state: StepState,
@@ -370,7 +370,7 @@ function checkInstruction(
     return;
   }
   if (typeof value === "string") {
-    checkText(value, c, { ...useOf(env, where, state), path: where });
+    checkText(value, c, { ...reachOf(env, where, state), path: where });
     return;
   }
   if (!isRecord(value)) {
@@ -416,7 +416,10 @@ function checkInstruction(
           "'next' is the instruction for the later rounds of a loop; this step is not in a loop, so it would never be used. Use a plain text, or put the step in a loop.",
         ),
       );
-    checkText(text, c, { ...useOf(env, at, state, key === "next"), path: at });
+    checkText(text, c, {
+      ...reachOf(env, at, state, key === "next"),
+      path: at,
+    });
   }
 }
 
@@ -505,7 +508,7 @@ function checkAgent(
     node,
     path,
     c,
-    useOf(env, pointer(path, "environment"), state),
+    reachOf(env, pointer(path, "environment"), state),
   );
   checkInstruction(node, path, c, env, state);
   checkSession(node, path, c, env);
@@ -594,7 +597,7 @@ function checkAction(
       );
       continue;
     }
-    checkInput(node[input], field.type, at, c, useOf(env, at, state));
+    checkInput(node[input], field.type, at, c, reachOf(env, at, state));
   }
   if (spec.atLeastOneOf?.every((input) => node[input] === undefined))
     c.report(
@@ -676,7 +679,7 @@ function checkIf(
       node.when,
       pointer(path, "when"),
       c,
-      useOf(env, pointer(path, "when"), state),
+      reachOf(env, pointer(path, "when"), state),
     );
   if (deep) return;
   checkBranch(node, "then", path, c, env, state);
@@ -760,7 +763,7 @@ function checkLoop(
       c,
     );
   else if (bodyEnv !== undefined && Array.isArray(body) && body.length > 0)
-    checkCondition(node.until, untilAt, c, useOf(bodyEnv, untilAt, state));
+    checkCondition(node.until, untilAt, c, reachOf(bodyEnv, untilAt, state));
   return own;
 }
 

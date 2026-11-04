@@ -75,6 +75,8 @@ export const SEMANTIC_ISSUE_CODES = [
   "result_field_reserved",
   /** An action needs a repository and neither the trigger nor the action names one. */
   "repo_required",
+  /** A `required` entry of a result schema that names no property (the schema language cannot say it). */
+  "required_field_unknown",
   /** More steps than a document may hold. */
   "too_many_steps",
   /** `if` and `loop` nested deeper than allowed, or a result schema with more levels than allowed. */

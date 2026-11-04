@@ -135,7 +135,7 @@ describe("validateResultSchema", () => {
     expect(issues).toEqual([
       expect.objectContaining({
         path: "/required/1",
-        code: "invalid_value",
+        code: "required_field_unknown",
         available: ["a"],
       }),
     ]);

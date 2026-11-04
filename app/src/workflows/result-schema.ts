@@ -265,7 +265,7 @@ function properties(
       walk.issues.push(
         issue(
           at,
-          "invalid_value",
+          "required_field_unknown",
           `'${name}' is required but is not one of the properties.`,
           known,
         ),
