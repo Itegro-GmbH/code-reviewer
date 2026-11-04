@@ -27,7 +27,7 @@ import {
 } from "./issues.ts";
 import type { WorkflowResolver } from "./resolver.ts";
 import { validateResultSchema, type ResultSchema } from "./result-schema.ts";
-import type { Binding, Env, StepInfo } from "./scope.ts";
+import { Scope, type Binding, type Env, type StepInfo } from "./scope.ts";
 import {
   TRIGGER_FIELDS,
   TRIGGER_KINDS,
@@ -436,10 +436,9 @@ export function validateWorkflow(
       type: triggerType(trigger),
       unavailable: {},
     };
-    const env: Env = {
-      scope: new Map([["trigger", triggerBinding]]),
-      loops: [],
-    };
+    const scope = new Scope();
+    scope.set("trigger", triggerBinding);
+    const env: Env = { scope, loops: [] };
     const state: StepState = {
       depth: 0,
       loopDepth: 0,

@@ -493,6 +493,35 @@ describe("a target input", () => {
       expect(codes(issueFrom(fallback))).toEqual([["/steps/1/issue", code]]);
   });
 
+  // #833-M1-T296d
+  it("holds the default of an object input to the rule of a literal too: its number is the number of an issue", () => {
+    const issueFrom = (fallback: string): Json =>
+      manual(
+        {
+          o: {
+            type: "object",
+            required: ["number"],
+            properties: { number: { type: "integer" } },
+          },
+        },
+        { issue: `{{trigger.input.o | default ${fallback}}}`, body: "x" },
+      );
+
+    expect(codes(issueFrom('{"number": 5}'))).toEqual([]);
+    expect(codes(issueFrom('{"number": 2147483647}'))).toEqual([]);
+    for (const number of [-5, 0, 1099511627776, 2147483648])
+      expect(codes(issueFrom(`{"number": ${number}}`))).toEqual([
+        ["/steps/1/issue", "invalid_value"],
+      ]);
+    // What is not an object of the right shape is the business of the type check, and reported once.
+    expect(codes(issueFrom('{"number": 1.5}'))).toEqual([
+      ["/steps/1/issue", "default_type_mismatch"],
+    ]);
+    expect(messages(issueFrom('{"number": -5}'))[0]).toMatch(
+      /number of an issue/,
+    );
+  });
+
   // #833-M1-T297
   it("accepts text of every kind and an agent's result in the free-text inputs", () => {
     expect(

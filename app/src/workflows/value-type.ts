@@ -4,6 +4,7 @@
 // the types of the result schema subset (`result-schema.ts`) and nothing more, so a node can only describe itself in the terms the
 // schema has. `unknown` is the type of a value whose node already failed the check: it fits everywhere, so one mistake is
 // reported once and not again at every use.
+import { listNames } from "./issues.ts";
 
 export type ValueType =
   | { kind: "string" }
@@ -51,7 +52,10 @@ export function objectOf(
   };
 }
 
-/** For a message: `string`, `list of number`, `one of 'bug', 'risk'`, `object with fields a, b`. */
+/**
+ * For a message: `string`, `list of number`, `one of 'bug', 'risk'`, `object with fields 'a', 'b'`. The names of an enum or an object
+ * are listed like any names in an answer (`listNames`): a few, each cut to the length of a name, and the rest counted.
+ */
 export function describeType(type: ValueType): string {
   switch (type.kind) {
     case "string":
@@ -60,14 +64,14 @@ export function describeType(type: ValueType): string {
     case "boolean":
       return type.kind;
     case "enum":
-      return `one of ${type.values.map((value) => `'${value}'`).join(", ")}`;
+      return `one of ${listNames(type.values)}`;
     case "list":
       return `list of ${describeType(type.items)}`;
     case "object": {
       const names = Object.keys(type.fields);
       return names.length === 0
         ? "object without fields"
-        : `object with fields ${names.join(", ")}`;
+        : `object with fields ${listNames(names)}`;
     }
     case "oneOf":
       return type.options.map(describeType).join(" or ");

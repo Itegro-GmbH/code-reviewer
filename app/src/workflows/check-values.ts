@@ -19,7 +19,12 @@ import {
   type ParsedTemplate,
   type Reference,
 } from "./template.ts";
-import { describeType, isAssignable, type ValueType } from "./value-type.ts";
+import {
+  describeType,
+  isAssignable,
+  valueFits,
+  type ValueType,
+} from "./value-type.ts";
 
 /** Whether a text is exactly one `{{ … }}` and nothing else: the `pattern` of `Reference` in the contract. */
 const WHOLE_REFERENCE = new RegExp(REFERENCE_PATTERN, "u");
@@ -302,7 +307,40 @@ function checkString(
   checkTargetDefault(ref, expected, target, here, context);
 }
 
-/** A default is a value written out like a literal, so it is held to what a literal is: an issue number is a positive whole number up to `ISSUE_NUMBER_MAX`. */
+/**
+ * Whether a value written out holds an integer that is not the number of an issue, anywhere the type has one: in a number, and in
+ * the fields of an object. What does not have the shape of the type is not looked at: the type check reports it.
+ */
+function holdsBadIssueNumber(value: unknown, type: ValueType): boolean {
+  switch (type.kind) {
+    case "integer":
+      return (
+        typeof value === "number" &&
+        Number.isSafeInteger(value) &&
+        !isIssueNumber(value)
+      );
+    case "oneOf": {
+      const fitting = type.options.filter((option) => valueFits(value, option));
+      return (
+        fitting.length > 0 &&
+        fitting.every((option) => holdsBadIssueNumber(value, option))
+      );
+    }
+    case "object":
+      return (
+        isRecord(value) &&
+        Object.entries(type.fields).some(
+          ([name, field]) =>
+            Object.hasOwn(value, name) &&
+            holdsBadIssueNumber(value[name], field.type),
+        )
+      );
+    default:
+      return false;
+  }
+}
+
+/** A default is a value written out like a literal, so it is held to what a literal is: an issue number is a positive whole number up to `ISSUE_NUMBER_MAX`, also the `number` of an issue object. */
 function checkTargetDefault(
   ref: Reference,
   expected: ValueType,
@@ -310,17 +348,15 @@ function checkTargetDefault(
   here: Use,
   context: ScopeContext,
 ): void {
-  const fallback = ref.default?.value;
-  if (typeof fallback !== "number" || !Number.isSafeInteger(fallback)) return;
-  if (!optionsOf(expected).some((o) => o.kind === "integer")) return;
-  if (!isIssueNumber(fallback))
-    context.report(
-      issue(
-        here.path,
-        "invalid_value",
-        `The default of ${shown(ref.path.join("."))} is the number of an issue when the value is missing: '${target.input}' is ${ISSUE_NUMBER_WORDS}.`,
-      ),
-    );
+  if (ref.default === undefined) return;
+  if (!holdsBadIssueNumber(ref.default.value, expected)) return;
+  context.report(
+    issue(
+      here.path,
+      "invalid_value",
+      `The default of ${shown(ref.path.join("."))} is the number of an issue when the value is missing: '${target.input}' is ${ISSUE_NUMBER_WORDS}.`,
+    ),
+  );
 }
 
 /** A reference that is the whole text must be a value of the expected type. */

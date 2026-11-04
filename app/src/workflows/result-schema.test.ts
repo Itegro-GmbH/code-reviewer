@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 import { describe, expect, it } from "vitest";
+import { ECHO_MAX_LENGTH } from "./issues.ts";
+import {
+  ERRORS_COLLECT_MAX,
+  ERRORS_MAX,
+  NAMES_LISTED_MAX,
+  RESULT_PROPERTIES_MAX,
+} from "./limits.ts";
 import {
   checkResultValue,
   objectTypeOf,
@@ -140,6 +147,79 @@ describe("validateResultSchema", () => {
         available: ["a"],
       }),
     ]);
+  });
+
+  // #833-M1-T07a
+  it("reports a name listed twice in required also when it is no property: the schema says uniqueItems", () => {
+    const { issues } = validateResultSchema({
+      type: "object",
+      required: ["ghost", "ghost"],
+      properties: { a: { type: "string" } },
+    });
+
+    expect(issues.map((i) => [i.path, i.code])).toEqual([
+      ["/required/0", "required_field_unknown"],
+      ["/required/1", "invalid_value"],
+    ]);
+  });
+
+  // #833-M1-T07b
+  it("stops collecting problems at the cap and says so", () => {
+    const properties = Object.fromEntries(
+      Array.from({ length: 3000 }, (_, i) => [`p${i}`, 1]),
+    );
+
+    const cut = validateResultSchema({ type: "object", properties });
+    const whole = validateResultSchema({
+      type: "object",
+      properties: { a: { type: "string" } },
+      required: ["a", "b"],
+    });
+
+    expect(cut.issues.length).toBeLessThanOrEqual(ERRORS_COLLECT_MAX);
+    expect(cut.issues.length).toBeGreaterThan(ERRORS_MAX);
+    expect(cut.truncated).toBe(true);
+    expect(cut.schema).toBeUndefined();
+    expect(whole.truncated).toBe(false);
+  });
+
+  // #833-M1-T07c
+  it("does not look at required when the object has more fields than it may have", () => {
+    const properties = Object.fromEntries(
+      Array.from({ length: RESULT_PROPERTIES_MAX + 1 }, (_, i) => [
+        `p${i}`,
+        { type: "string" },
+      ]),
+    );
+
+    const { issues } = validateResultSchema({
+      type: "object",
+      properties,
+      required: ["ghost", 3],
+    });
+
+    expect(issues.map((i) => [i.path, i.code])).toEqual([
+      ["/properties", "limit_exceeded"],
+    ]);
+  });
+
+  // #833-M1-T07d
+  it("lists a few of the names a required entry could have been, each cut to the length of a name", () => {
+    const long = "n".repeat(60);
+    const properties = Object.fromEntries(
+      Array.from({ length: 30 }, (_, i) => [`${long}${i}`, { type: "string" }]),
+    );
+
+    const { issues } = validateResultSchema({
+      type: "object",
+      properties,
+      required: ["ghost"],
+    });
+
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.available).toHaveLength(NAMES_LISTED_MAX);
+    for (const name of issues[0]?.available ?? [])
+      expect(Array.from(name).length).toBeLessThanOrEqual(ECHO_MAX_LENGTH + 1);
   });
 
   // #833-M1-T08
@@ -326,6 +406,20 @@ describe("checkResultValue", () => {
     expect(checkResultValue(schema, null)).toEqual([
       expect.objectContaining({ path: "", code: "wrong_type" }),
     ]);
+  });
+
+  // #833-M1-T15a
+  it("lists no more problems than an answer holds, however many fields the value has", () => {
+    const value = Object.fromEntries(
+      Array.from({ length: 50_000 }, (_, i) => [`field${i}`, i]),
+    );
+    const started = performance.now();
+
+    const issues = checkResultValue(FINDINGS, value);
+
+    expect(issues.length).toBeLessThanOrEqual(ERRORS_COLLECT_MAX);
+    expect(issues.some((i) => i.code === "missing_field")).toBe(true);
+    expect(performance.now() - started).toBeLessThan(1500);
   });
 });
 

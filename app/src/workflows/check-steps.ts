@@ -756,7 +756,7 @@ function checkBranch(
       missing(path, "then", "the steps that run when the condition holds.", c);
     return;
   }
-  const branchEnv: Env = { scope: new Map(env.scope), loops: env.loops };
+  const branchEnv: Env = { scope: env.scope.child(), loops: env.loops };
   checkSteps(value, where, c, branchEnv, {
     depth: state.depth + 1,
     loopDepth: state.loopDepth,
@@ -844,7 +844,7 @@ function checkLoop(
       bodyPath: bodyAt,
       previous,
     };
-    bodyEnv = { scope: new Map(env.scope), loops: [...env.loops, frame] };
+    bodyEnv = { scope: env.scope.child(), loops: [...env.loops, frame] };
     own = checkSteps(body, bodyAt, c, bodyEnv, {
       depth: state.depth + 1,
       loopDepth: state.loopDepth + 1,

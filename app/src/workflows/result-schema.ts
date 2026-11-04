@@ -6,6 +6,7 @@
 // the same schema and checks what the agent hands in with `checkResultValue`, so the workflow only ever sees data of the declared
 // shape. Pure: no database, no I/O.
 import {
+  ERRORS_COLLECT_MAX,
   LIST_MAX_ITEMS_DEFAULT,
   LIST_MAX_ITEMS_LIMIT,
   RESULT_DEPTH_MAX,
@@ -19,7 +20,6 @@ import {
   STRING_MAX_LENGTH_LIMIT,
 } from "./limits.ts";
 import {
-  clip,
   issue,
   listNames,
   pointer,
@@ -89,7 +89,23 @@ const KEYS: Record<(typeof NODE_TYPES)[number], readonly string[]> = {
   ],
 };
 
-type Walk = { issues: Issue[]; fields: number };
+/**
+ * What the check of a schema has found. It stops at `ERRORS_COLLECT_MAX` problems, the cap of the check of a document: the
+ * problems of a schema end up in that check, so a list cut here fills it and the answer says `truncated`. Everything after the cap is
+ * work for an answer that cannot show it: a schema of 200 KB can hold hundreds of thousands of problems.
+ */
+class Walk {
+  readonly issues: Issue[] = [];
+  fields = 0;
+  /** The cap was reached: there may be more problems than were collected. */
+  full = false;
+
+  readonly add = (found: Issue): void => {
+    if (this.full) return;
+    this.issues.push(found);
+    if (this.issues.length >= ERRORS_COLLECT_MAX) this.full = true;
+  };
+}
 
 function description(
   node: Record<string, unknown>,
@@ -99,7 +115,7 @@ function description(
   const text = node.description;
   if (text === undefined) return;
   if (typeof text !== "string")
-    walk.issues.push(
+    walk.add(
       issue(
         pointer(path, "description"),
         "wrong_type",
@@ -107,7 +123,7 @@ function description(
       ),
     );
   else if (textLength(text) > RESULT_DESCRIPTION_MAX_LENGTH)
-    walk.issues.push(
+    walk.add(
       issue(
         pointer(path, "description"),
         "limit_exceeded",
@@ -127,17 +143,11 @@ function cap(
   if (value === undefined) return;
   const where = pointer(path, key);
   if (typeof value !== "number" || !Number.isInteger(value))
-    walk.issues.push(
-      issue(where, "wrong_type", `${key} must be a whole number.`),
-    );
+    walk.add(issue(where, "wrong_type", `${key} must be a whole number.`));
   else if (value < 1)
-    walk.issues.push(
-      issue(where, "invalid_value", `${key} must be at least 1.`),
-    );
+    walk.add(issue(where, "invalid_value", `${key} must be at least 1.`));
   else if (value > limit)
-    walk.issues.push(
-      issue(where, "limit_exceeded", `${key} may be at most ${limit}.`),
-    );
+    walk.add(issue(where, "limit_exceeded", `${key} may be at most ${limit}.`));
 }
 
 function enumeration(
@@ -149,17 +159,13 @@ function enumeration(
   if (values === undefined) return;
   const where = pointer(path, "enum");
   if (!Array.isArray(values)) {
-    walk.issues.push(
-      issue(where, "wrong_type", "enum must be a list of strings."),
-    );
+    walk.add(issue(where, "wrong_type", "enum must be a list of strings."));
     return;
   }
   if (values.length === 0)
-    walk.issues.push(
-      issue(where, "invalid_value", "enum needs at least one value."),
-    );
+    walk.add(issue(where, "invalid_value", "enum needs at least one value."));
   if (values.length > RESULT_ENUM_VALUES_MAX)
-    walk.issues.push(
+    walk.add(
       issue(
         where,
         "limit_exceeded",
@@ -168,9 +174,10 @@ function enumeration(
     );
   const seen = new Set<string>();
   values.forEach((value: unknown, index) => {
+    if (walk.full) return;
     const at = pointer(where, index);
     if (typeof value !== "string")
-      walk.issues.push(
+      walk.add(
         issue(
           at,
           "wrong_type",
@@ -181,7 +188,7 @@ function enumeration(
       value.length === 0 ||
       textLength(value) > RESULT_ENUM_VALUE_MAX_LENGTH
     )
-      walk.issues.push(
+      walk.add(
         issue(
           at,
           "invalid_value",
@@ -189,7 +196,7 @@ function enumeration(
         ),
       );
     else if (seen.has(value))
-      walk.issues.push(
+      walk.add(
         issue(
           at,
           "invalid_value",
@@ -208,8 +215,9 @@ function properties(
 ): void {
   const where = pointer(path, "properties");
   const props = node.properties;
+  const names = isRecord(props) ? Object.keys(props) : [];
   if (props === undefined) {
-    walk.issues.push(
+    walk.add(
       issue(
         where,
         "missing_field",
@@ -217,7 +225,7 @@ function properties(
       ),
     );
   } else if (!isRecord(props)) {
-    walk.issues.push(
+    walk.add(
       issue(
         where,
         "wrong_type",
@@ -225,13 +233,12 @@ function properties(
       ),
     );
   } else {
-    const names = Object.keys(props);
     if (names.length === 0)
-      walk.issues.push(
+      walk.add(
         issue(where, "invalid_value", "properties needs at least one field."),
       );
     if (names.length > RESULT_PROPERTIES_MAX)
-      walk.issues.push(
+      walk.add(
         issue(
           where,
           "limit_exceeded",
@@ -240,10 +247,11 @@ function properties(
       );
     walk.fields += names.length;
     for (const name of names) {
+      if (walk.full) return;
       const at = pointer(where, name);
       if (!RESULT_FIELD_NAME_PATTERN.test(name)) {
         // What lies below a name that is refused is not looked at: fix the name first, the next answer reports the rest.
-        walk.issues.push(
+        walk.add(
           issue(
             at,
             "invalid_value",
@@ -259,7 +267,7 @@ function properties(
   if (required === undefined) return;
   const requiredAt = pointer(path, "required");
   if (!Array.isArray(required)) {
-    walk.issues.push(
+    walk.add(
       issue(
         requiredAt,
         "wrong_type",
@@ -268,33 +276,38 @@ function properties(
     );
     return;
   }
-  const known = isRecord(props) ? Object.keys(props) : [];
+  // An object with too many fields is refused above; its `required` is looked at once the fields are fewer. Each entry is checked
+  // against the properties themselves (`hasOwn`), and the names for a message are the first few: nothing here copies all of them.
+  if (names.length > RESULT_PROPERTIES_MAX) return;
   const seen = new Set<string>();
-  required.forEach((name: unknown, index) => {
+  for (const [index, name] of required.entries()) {
+    if (walk.full) return;
     const at = pointer(requiredAt, index);
     if (typeof name !== "string")
-      walk.issues.push(
+      walk.add(
         issue(at, "wrong_type", "A required entry is a field name (a string)."),
       );
-    else if (!known.includes(name) && isRecord(props))
-      walk.issues.push(
-        issue(
-          at,
-          "required_field_unknown",
-          `${shown(name)} is required but is not one of the properties.`,
-          known.map(clip),
-        ),
-      );
     else if (seen.has(name))
-      walk.issues.push(
+      walk.add(
         issue(
           at,
           "invalid_value",
           `${shown(name)} is listed twice in required.`,
         ),
       );
-    else seen.add(name);
-  });
+    else {
+      seen.add(name);
+      if (isRecord(props) && !Object.hasOwn(props, name))
+        walk.add(
+          issue(
+            at,
+            "required_field_unknown",
+            `${shown(name)} is required but is not one of the properties.`,
+            names,
+          ),
+        );
+    }
+  }
 }
 
 function schemaNode(
@@ -303,8 +316,9 @@ function schemaNode(
   depth: number,
   walk: Walk,
 ): void {
+  if (walk.full) return;
   if (!isRecord(value)) {
-    walk.issues.push(
+    walk.add(
       issue(
         path,
         "wrong_type",
@@ -315,7 +329,7 @@ function schemaNode(
   }
   const type = value.type;
   if (type === undefined) {
-    walk.issues.push(
+    walk.add(
       issue(
         pointer(path, "type"),
         "missing_field",
@@ -329,7 +343,7 @@ function schemaNode(
     typeof type !== "string" ||
     !(NODE_TYPES as readonly string[]).includes(type)
   ) {
-    walk.issues.push(
+    walk.add(
       issue(
         pointer(path, "type"),
         "invalid_value",
@@ -341,8 +355,8 @@ function schemaNode(
   }
   const kind = type as (typeof NODE_TYPES)[number];
   for (const key of Object.keys(value))
-    if (!KEYS[kind].includes(key))
-      walk.issues.push(
+    if (!walk.full && !KEYS[kind].includes(key))
+      walk.add(
         issue(
           pointer(path, key),
           "unknown_field",
@@ -359,7 +373,7 @@ function schemaNode(
   if (kind === "array") {
     cap(value, "maxItems", LIST_MAX_ITEMS_LIMIT, path, walk);
     if (value.items === undefined)
-      walk.issues.push(
+      walk.add(
         issue(
           pointer(path, "items"),
           "missing_field",
@@ -368,7 +382,7 @@ function schemaNode(
       );
     else {
       if (depth + 1 > RESULT_DEPTH_MAX)
-        walk.issues.push(depthIssue(pointer(path, "items")));
+        walk.add(depthIssue(pointer(path, "items")));
       else schemaNode(value.items, pointer(path, "items"), depth + 1, walk);
     }
     return;
@@ -378,7 +392,7 @@ function schemaNode(
       value.additionalProperties !== undefined &&
       value.additionalProperties !== false
     )
-      walk.issues.push(
+      walk.add(
         issue(
           pointer(path, "additionalProperties"),
           "invalid_value",
@@ -386,7 +400,7 @@ function schemaNode(
         ),
       );
     if (depth > RESULT_DEPTH_MAX) {
-      walk.issues.push(depthIssue(path));
+      walk.add(depthIssue(path));
       return;
     }
     properties(value, path, depth, walk);
@@ -408,8 +422,8 @@ function depthIssue(path: string): Issue {
 export function validateResultSchema(
   value: unknown,
   base = "",
-): { issues: Issue[]; schema?: ResultSchema } {
-  const walk: Walk = { issues: [], fields: 0 };
+): { issues: Issue[]; schema?: ResultSchema; truncated: boolean } {
+  const walk = new Walk();
   if (!isRecord(value)) {
     return {
       issues: [
@@ -419,6 +433,7 @@ export function validateResultSchema(
           `A result schema is an object like {"type": "object", "properties": {...}}, not ${jsonTypeName(value)}.`,
         ),
       ],
+      truncated: false,
     };
   }
   if (value.type !== "object") {
@@ -437,11 +452,12 @@ export function validateResultSchema(
               ["object"],
             ),
       ],
+      truncated: false,
     };
   }
   schemaNode(value, base, 1, walk);
   if (walk.fields > RESULT_PROPERTIES_TOTAL_MAX)
-    walk.issues.push(
+    walk.add(
       issue(
         base,
         "result_schema_too_large",
@@ -450,8 +466,8 @@ export function validateResultSchema(
     );
   const issues = sortIssues(walk.issues);
   return issues.length === 0
-    ? { issues, schema: value as ResultSchema }
-    : { issues };
+    ? { issues, schema: value as ResultSchema, truncated: false }
+    : { issues, truncated: walk.full };
 }
 
 function typeOfNode(node: SchemaNode): ValueType {
@@ -495,7 +511,9 @@ export function checkResultValue(
   value: unknown,
 ): Issue[] {
   const issues: Issue[] = [];
+  const full = (): boolean => issues.length >= ERRORS_COLLECT_MAX;
   const check = (node: SchemaNode, at: unknown, path: string): void => {
+    if (full()) return;
     switch (node.type) {
       case "string": {
         if (typeof at !== "string") {
@@ -595,26 +613,31 @@ export function checkResultValue(
           return;
         }
         const names = Object.keys(node.properties);
-        for (const key of Object.keys(at))
-          if (!names.includes(key))
+        const required = new Set(node.required);
+        for (const name of names) {
+          const child = node.properties[name] as SchemaNode;
+          if (Object.hasOwn(at, name))
+            check(child, at[name], pointer(path, name));
+          else if (required.has(name))
+            issues.push(
+              issue(
+                pointer(path, name),
+                "missing_field",
+                `The required field ${shown(name)} is missing.`,
+              ),
+            );
+        }
+        // The value is untrusted and may hold any number of keys: the fields of the schema come first, and the unknown keys are
+        // listed only while the list is not full.
+        for (const key of Object.keys(at)) {
+          if (full()) return;
+          if (!Object.hasOwn(node.properties, key))
             issues.push(
               issue(
                 pointer(path, key),
                 "unknown_field",
                 `${shown(key)} is not a field of the result.`,
                 names,
-              ),
-            );
-        for (const name of names) {
-          const child = node.properties[name] as SchemaNode;
-          if (Object.hasOwn(at, name))
-            check(child, at[name], pointer(path, name));
-          else if ((node.required ?? []).includes(name))
-            issues.push(
-              issue(
-                pointer(path, name),
-                "missing_field",
-                `The required field ${shown(name)} is missing.`,
               ),
             );
         }

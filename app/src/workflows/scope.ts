@@ -51,8 +51,59 @@ export type LoopFrame = {
   previous: ReadonlyMap<string, Binding>;
 };
 
+/**
+ * The steps in reach at a place, by id. Entering an `if` branch or a loop body adds a layer over the scope around it instead of
+ * copying it: a document of thousands of steps and thousands of branches would copy thousands of entries thousands of times. A
+ * lookup walks the layers (at most the nesting depth), and a layer made later does not change the one under it.
+ */
+export class Scope {
+  private readonly own = new Map<string, Binding>();
+  private readonly parent: Scope | undefined;
+  private count: number;
+
+  constructor(parent?: Scope) {
+    this.parent = parent;
+    this.count = parent?.size ?? 0;
+  }
+
+  /** How many ids are in reach. */
+  get size(): number {
+    return this.count;
+  }
+
+  get(id: string): Binding | undefined {
+    return this.own.get(id) ?? this.parent?.get(id);
+  }
+
+  has(id: string): boolean {
+    return this.get(id) !== undefined;
+  }
+
+  set(id: string, binding: Binding): void {
+    if (!this.has(id)) this.count += 1;
+    this.own.set(id, binding);
+  }
+
+  /** A scope that sees everything this one does, and keeps what is set in it to itself. */
+  child(): Scope {
+    return new Scope(this);
+  }
+
+  /** The bindings, those of the outer layers first. Lazy: a caller that needs a few reads a few. */
+  *values(): Generator<Binding> {
+    if (this.parent !== undefined)
+      for (const binding of this.parent.values())
+        if (!this.own.has(binding.id)) yield binding;
+    yield* this.own.values();
+  }
+
+  *keys(): Generator<string> {
+    for (const binding of this.values()) yield binding.id;
+  }
+}
+
 export type Env = {
-  scope: Map<string, Binding>;
+  scope: Scope;
   /** Innermost last. */
   loops: LoopFrame[];
 };
