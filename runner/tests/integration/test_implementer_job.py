@@ -277,6 +277,7 @@ class FakeAgent:
     stopped: list[bool] = field(default_factory=lambda: [])
     texts: list[str] = field(default_factory=lambda: [])
     ends_clean: bool = True
+    notes: tuple[str, ...] = ()
 
     @property
     def ledger(self) -> Any:
@@ -306,6 +307,9 @@ class FakeAgent:
         self.events.append("stop")
         self.stopped.append(quick)
         return self.ends_clean
+
+    def step_notes(self) -> tuple[str, ...]:
+        return self.notes
 
 
 class LeaseChannel:
@@ -1269,6 +1273,20 @@ def test_when_the_agents_container_is_not_confirmed_gone_nothing_is_committed(
 
 
 # -- the step records ride on the event stream and change nothing (#745) -------------------------
+
+
+# #745-L12
+def test_what_the_live_view_lost_is_in_the_notes_of_the_turn(play: Any) -> None:
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        agent.use_the_model()
+        make_commit(agent, TIP)
+        agent.notes = ("the live view dropped 7 step records that were not taken in time",)
+        return "done"
+
+    turn = play(script)
+
+    assert turn.exit_code == 0, turn.output
+    assert "the live view dropped 7 step records" in turn.result["logTail"]
 
 
 class ScriptedEvents:
