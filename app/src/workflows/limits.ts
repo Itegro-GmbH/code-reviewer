@@ -50,6 +50,14 @@ export const STRING_MAX_LENGTH_LIMIT = 100_000;
 export const LIST_MAX_ITEMS_DEFAULT = 100;
 export const LIST_MAX_ITEMS_LIMIT = 1000;
 
+/** A workflow id as the routes take it (`/workflows/<id>`); longer is "not found". Its own bound, not that of a step id. */
+export const WORKFLOW_ID_MAX_LENGTH = 64;
+
 /** Per workspace. */
 export const WORKFLOWS_PER_WORKSPACE_MAX = 100;
+/**
+ * Per workspace: archived workflows stay (their versions are history), but not without bound. At the maximum an archive is refused
+ * (`WORKFLOW_ARCHIVE_LIMIT_REACHED`), so archiving and creating again cannot grow the rows for ever; creating and saving go on.
+ */
+export const ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX = 1000;
 export const VERSIONS_PER_WORKFLOW_MAX = 500;

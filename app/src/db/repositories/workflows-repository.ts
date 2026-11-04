@@ -4,7 +4,7 @@
 // see ../workspace-scope.ts). A workflow is a name and a list of versions; every save adds a version and makes it the current one,
 // no version is ever changed (the database refuses an update; only the erasure of a workspace deletes). A workflow is never deleted
 // by the user but archived: hidden from the list, no new version, not counted against the maximum, its name free for a new workflow,
-// its versions kept. A row of another workspace is simply not there. The rules that need the database live here: a name
+// its versions kept; a bounded number of them per workspace, so archiving and creating again cannot grow the rows for ever. A row of another workspace is simply not there. The rules that need the database live here: a name
 // once per workspace whatever its case, a bounded count of workflows and of versions, and the next version number, all decided
 // under a lock on the workflow (or, for a new one, on the workspace row) so that two writers cannot both take the same place.
 // What the document says is the validator's (src/workflows/); the repository stores the text it is given.
@@ -66,7 +66,8 @@ export type SaveOutcome =
     };
 
 export type ArchiveOutcome =
-  { ok: true; workflow: StoredWorkflow } | { ok: false; reason: "not_found" };
+  | { ok: true; workflow: StoredWorkflow }
+  | { ok: false; reason: "not_found" | "limit_reached" };
 
 export type WorkflowsRepository = {
   /** The workflows of the workspace that are not archived, by name (case ignored), without their documents. */
@@ -92,8 +93,11 @@ export type WorkflowsRepository = {
     input: NewVersion,
     maximumVersions: number,
   ): Promise<SaveOutcome>;
-  /** Archives a workflow. Asked again, it answers the same (the first time stays). */
-  archive(id: string): Promise<ArchiveOutcome>;
+  /**
+   * Archives a workflow. Asked again, it answers the same (the first time stays). `maximum` is how many archived workflows the
+   * workspace may hold, counted with this one: one more is `limit_reached`, and the workflow stays as it is.
+   */
+  archive(id: string, maximum: number): Promise<ArchiveOutcome>;
 };
 
 function workflowFrom(row: Selectable<WorkflowsTable>): StoredWorkflow {
@@ -328,8 +332,15 @@ export function createWorkflowsRepository(
       }
     },
 
-    async archive(id) {
+    async archive(id, maximum) {
       return inTransaction(async (trx): Promise<ArchiveOutcome> => {
+        // Archivers (and creators) of one workspace take turns, so two of them cannot both pass the count.
+        await trx
+          .selectFrom("workspaces")
+          .select("id")
+          .where("id", "=", workspaceId)
+          .forNoKeyUpdate()
+          .executeTakeFirst();
         const row = await trx
           .selectFrom("workflows")
           .selectAll()
@@ -340,6 +351,14 @@ export function createWorkflowsRepository(
         if (row === undefined) return { ok: false, reason: "not_found" };
         if (row.archived_at !== null)
           return { ok: true, workflow: workflowFrom(row) };
+        const { count } = await trx
+          .selectFrom("workflows")
+          .select((eb) => eb.fn.countAll<string>().as("count"))
+          .where("workspace_id", "=", workspaceId)
+          .where("archived_at", "is not", null)
+          .executeTakeFirstOrThrow();
+        if (Number(count) >= maximum)
+          return { ok: false, reason: "limit_reached" };
         const timestamp = formatTimestamp(now());
         const archived = await trx
           .updateTable("workflows")

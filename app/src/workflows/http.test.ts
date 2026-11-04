@@ -186,7 +186,25 @@ describe("the workflow handlers", () => {
       error: "WORKFLOW_INVALID",
       message: "invalid",
       errors,
+      truncated: false,
     });
+  });
+
+  // #833-M1-T373
+  it("says on WORKFLOW_INVALID whether the list of errors is cut", async () => {
+    const errors = [issue("/steps/0/profile", "profile_unknown", "no")];
+    const { handlers, json } = setup({
+      create: async () => {
+        throw new WorkflowError("WORKFLOW_INVALID", "invalid", {
+          errors,
+          truncated: true,
+        });
+      },
+    });
+
+    const response = await handlers.create(json("POST", {}));
+
+    expect(await response.json()).toMatchObject({ truncated: true });
   });
 
   // #833-M1-T187
@@ -195,6 +213,7 @@ describe("the workflow handlers", () => {
     ["WORKFLOW_NOT_FOUND", 404, {}],
     ["WORKFLOW_VERSION_NOT_FOUND", 404, {}],
     ["WORKFLOW_LIMIT_REACHED", 409, { maximum: 100 }],
+    ["WORKFLOW_ARCHIVE_LIMIT_REACHED", 409, { maximum: 1000 }],
     ["WORKFLOW_VERSION_LIMIT_REACHED", 409, { maximum: 200 }],
     ["WORKFLOW_VERSION_CONFLICT", 409, { current: 4 }],
   ] as const)(

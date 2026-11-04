@@ -61,7 +61,7 @@ function expectSmall(result: ValidationResult): void {
 }
 
 describe("the work is bounded by what the answer can hold", () => {
-  // #833-M1-T340
+  // #833-M1-T380
   it.each([
     ["valid steps", agentStep],
     ["steps that lack their fields", (id: string) => ({ id, kind: "agent" })],
@@ -75,7 +75,7 @@ describe("the work is bounded by what the answer can hold", () => {
     },
   );
 
-  // #833-M1-T341
+  // #833-M1-T381
   it("lists a few names of what is in reach, and says how many more there are", () => {
     const { result } = timed(manyStepsManyReferences(500, agentStep));
     const unknown = result.errors.filter(
@@ -90,7 +90,7 @@ describe("the work is bounded by what the answer can hold", () => {
     }
   });
 
-  // #833-M1-T342
+  // #833-M1-T382
   it("stops collecting at the cap and keeps the problems it found first", () => {
     const { result } = timed(manyStepsManyReferences(10, agentStep));
 
@@ -105,7 +105,7 @@ describe("a name in an answer is the length of a name", () => {
   const segments = (result: ValidationResult): string[] =>
     result.errors.flatMap((e) => e.path.split("/").slice(1));
 
-  // #833-M1-T343
+  // #833-M1-T383
   it("does not look below a field name that is refused, and cuts every name in a path", () => {
     const document = tiny();
     const children = Object.fromEntries(
@@ -133,7 +133,7 @@ describe("a name in an answer is the length of a name", () => {
     expect(JSON.stringify(result).length).toBeLessThan(30_000);
   });
 
-  // #833-M1-T344
+  // #833-M1-T384
   it("cuts a long id in the lists of session and previous steps", () => {
     const document = tiny();
     const long = "s".repeat(100_000);

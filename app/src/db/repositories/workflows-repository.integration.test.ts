@@ -218,8 +218,8 @@ describe("the workflows repository", () => {
     await a.create({ ...NEW, name: "Old" }, 100);
     await a.saveVersion("wf-2", { ...NEW, name: "Old" }, 100);
 
-    const archived = await a.archive("wf-2");
-    const again = await a.archive("wf-2");
+    const archived = await a.archive("wf-2", 100);
+    const again = await a.archive("wf-2", 100);
 
     expect(archived).toEqual({
       ok: true,
@@ -240,11 +240,32 @@ describe("the workflows repository", () => {
     expect((await a.get("wf-1"))?.workflow.archivedAt).toBeNull();
   });
 
+  // #833-M1-T370
+  it("archives no more than the maximum of archived workflows, answers the same for one that is archived, and leaves the live ones alone", async () => {
+    const { a, b } = await setup();
+    for (const name of ["One", "Two", "Three"])
+      await a.create({ ...NEW, name }, 100);
+
+    expect((await a.archive("wf-1", 2)).ok).toBe(true);
+    expect((await a.archive("wf-2", 2)).ok).toBe(true);
+    const refused = await a.archive("wf-3", 2);
+    const again = await a.archive("wf-1", 2);
+
+    expect(refused).toEqual({ ok: false, reason: "limit_reached" });
+    expect(again.ok).toBe(true);
+    expect((await a.get("wf-3"))?.workflow.archivedAt).toBeNull();
+    expect((await a.list()).map((workflow) => workflow.name)).toEqual([
+      "Three",
+    ]);
+    await b.create({ ...NEW, name: "Theirs" }, 100);
+    expect((await b.archive("wf-4", 2)).ok).toBe(true);
+  });
+
   // #833-M1-T351
   it("does not count an archived workflow, and gives its name back", async () => {
     const { a } = await setup();
     await a.create({ ...NEW, name: "Flow" }, 1);
-    await a.archive("wf-1");
+    await a.archive("wf-1", 100);
 
     const next = await a.create({ ...NEW, name: "flow" }, 1);
 
@@ -264,7 +285,7 @@ describe("the workflows repository", () => {
     const { a } = await setup();
     await a.create({ ...NEW, name: "One" }, 100);
     await a.create({ ...NEW, name: "Two" }, 100);
-    await a.archive("wf-1");
+    await a.archive("wf-1", 100);
 
     expect(await a.saveVersion("wf-1", { ...NEW, name: "One" }, 100)).toEqual({
       ok: false,
@@ -280,8 +301,14 @@ describe("the workflows repository", () => {
     const { a, b } = await setup();
     await b.create({ ...NEW, name: "Theirs" }, 100);
 
-    expect(await a.archive("nope")).toEqual({ ok: false, reason: "not_found" });
-    expect(await a.archive("wf-1")).toEqual({ ok: false, reason: "not_found" });
+    expect(await a.archive("nope", 100)).toEqual({
+      ok: false,
+      reason: "not_found",
+    });
+    expect(await a.archive("wf-1", 100)).toEqual({
+      ok: false,
+      reason: "not_found",
+    });
     expect((await b.get("wf-1"))?.workflow.archivedAt).toBeNull();
   });
 

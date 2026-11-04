@@ -13,6 +13,7 @@ import {
   SEMANTIC_ISSUE_CODES,
 } from "./issues.ts";
 import {
+  ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX,
   ERRORS_MAX,
   LOOP_ROUNDS_MAX,
   VERSIONS_PER_WORKFLOW_MAX,
@@ -107,6 +108,7 @@ describe("docs/workflows.md", () => {
   it("states the numbers the code keeps: workflows, versions, errors in an answer, rounds of a loop", () => {
     for (const text of [
       `${WORKFLOWS_PER_WORKSPACE_MAX} workflows`,
+      `${ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX} archived workflows`,
       `${VERSIONS_PER_WORKFLOW_MAX} versions`,
       `**${ERRORS_MAX} errors at most**`,
       `from **1 to ${LOOP_ROUNDS_MAX}**`,

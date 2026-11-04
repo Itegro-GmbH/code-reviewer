@@ -12,10 +12,11 @@ import type {
 } from "../db/repositories/workflows-repository.ts";
 import { WorkflowError } from "./errors.ts";
 import {
+  ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX,
   BUDGET_OPERATOR_MAX_USD,
   DOCUMENT_MAX_BYTES,
-  ID_MAX_LENGTH,
   VERSIONS_PER_WORKFLOW_MAX,
+  WORKFLOW_ID_MAX_LENGTH,
   WORKFLOWS_PER_WORKSPACE_MAX,
 } from "./limits.ts";
 import { createResolver } from "./resolver.ts";
@@ -64,7 +65,8 @@ export type WorkflowService = {
   ): Promise<WorkflowView>;
   /**
    * Archives a workflow: it leaves the list and the count of the workspace, takes no new version and is not started; its name is
-   * free again and its versions stay readable. Asked again, it answers the same.
+   * free again and its versions stay readable. Asked again, it answers the same. A workspace holds a bounded number of archived
+   * workflows: past it, an archive is `WORKFLOW_ARCHIVE_LIMIT_REACHED`.
    */
   archive(id: string): Promise<WorkflowView>;
 };
@@ -74,6 +76,8 @@ export type WorkflowServiceDependencies = {
   environments: ImplementerEnvironmentsRepository;
   /** The most a workflow may be given to spend. Until the operator can set it: `BUDGET_OPERATOR_MAX_USD`. */
   maxBudgetUsd?: number;
+  /** The most archived workflows a workspace may hold: `ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX`. */
+  archivedMax?: number;
 };
 
 function summaryOf(workflow: StoredWorkflow): WorkflowSummaryView {
@@ -91,6 +95,7 @@ export function createWorkflowService({
   workflows,
   environments,
   maxBudgetUsd = BUDGET_OPERATOR_MAX_USD,
+  archivedMax = ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX,
 }: WorkflowServiceDependencies): WorkflowService {
   async function validateDocument(body: unknown): Promise<ValidationResult> {
     const known = await environments.listSummaries();
@@ -124,7 +129,7 @@ export function createWorkflowService({
       throw new WorkflowError(
         "WORKFLOW_INVALID",
         "The workflow does not pass the validator.",
-        { errors: result.errors },
+        { errors: result.errors, truncated: result.truncated },
       );
     const text = JSON.stringify(body);
     if (Buffer.byteLength(text, "utf8") > DOCUMENT_MAX_BYTES)
@@ -139,7 +144,7 @@ export function createWorkflowService({
     new WorkflowError("WORKFLOW_NOT_FOUND", "There is no such workflow.");
 
   function checkId(id: string): void {
-    if (id.length === 0 || id.length > ID_MAX_LENGTH) throw notFound();
+    if (id.length === 0 || id.length > WORKFLOW_ID_MAX_LENGTH) throw notFound();
   }
 
   return {
@@ -190,8 +195,16 @@ export function createWorkflowService({
 
     async archive(id) {
       checkId(id);
-      const archived = await workflows.archive(id);
-      if (!archived.ok) throw notFound();
+      const archived = await workflows.archive(id, archivedMax);
+      if (!archived.ok) {
+        if (archived.reason === "limit_reached")
+          throw new WorkflowError(
+            "WORKFLOW_ARCHIVE_LIMIT_REACHED",
+            "The workspace holds the most archived workflows it may.",
+            { maximum: archivedMax },
+          );
+        throw notFound();
+      }
       const found = await workflows.get(id);
       if (found === undefined) throw notFound();
       return viewOf(found.workflow, found.current);

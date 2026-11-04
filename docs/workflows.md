@@ -405,21 +405,37 @@ code from the table below.
 
 | Route | What | Answer |
 | --- | --- | --- |
-| `POST /workflows/validate` | Checks the document against the format and the workspace's environments. Stores nothing. | `200` `{valid, errors, steps, budgetUsd?}` (also for an invalid document) |
-| `POST /workflows` | Validates and saves as **version 1**. | `201` `{workflow}`; `422` `WORKFLOW_INVALID` with `errors` |
+| `POST /workflows/validate` | Checks the document against the format and the workspace's environments. Stores nothing. | `200` `{valid, errors, truncated, steps, budgetUsd?}` (also for an invalid document) |
+| `POST /workflows` | Validates and saves as **version 1**. | `201` `{workflow}`; `422` `WORKFLOW_INVALID` with `errors` and `truncated` (as the validate call gives them) |
 | `PUT /workflows/<id>` | Validates and saves as the **next version**; the name is taken from the document. `?expectedVersion=n` saves only if `n` is still current (a race gives `409` `WORKFLOW_VERSION_CONFLICT` with `current`). | `200` `{workflow}` |
 | `GET /workflows` | The workflows of the workspace by name, **not the archived ones**. | `200` `{workflows: [{id, name, version, createdAt, updatedAt, archivedAt}], maximum}` |
 | `GET /workflows/<id>` | The workflow with its current version, or `?version=n`. An archived workflow is readable too. | `200` `{workflow: {id, name, version, archivedAt, documentVersion, document, versions: [{version, savedAt}]}}` |
-| `DELETE /workflows/<id>` | **Archives** the workflow (a soft delete). Asked again, it answers the same. | `200` `{workflow}` with `archivedAt` set; `404` `WORKFLOW_NOT_FOUND` |
+| `DELETE /workflows/<id>` | **Archives** the workflow (a soft delete). Asked again, it answers the same. | `200` `{workflow}` with `archivedAt` set; `404` `WORKFLOW_NOT_FOUND`; `409` `WORKFLOW_ARCHIVE_LIMIT_REACHED` |
 
 Every save is a **new, immutable version**: the database refuses to change a saved version (there is no UPDATE of a version; only the erasure
 of a whole workspace deletes rows). An identical document is saved again as a new version. A workspace holds 100 workflows that are not
-archived, a workflow 500 versions. Old versions are not pruned: a run will name the version it started with (milestone 3), so none may vanish
+archived and 1000 archived workflows, a workflow 500 versions. Old versions are not pruned: a run will name the version it started with (milestone 3), so none may vanish
 under it. A workflow that reaches its 500 versions is archived and written again under its name.
 
 **Archiving** is the only delete in version 1. An archived workflow is hidden from the list, takes no new version (`409`
 `WORKFLOW_ARCHIVED`), is never started (the engine reads `archivedAt`), does not count against the 100, and **gives its name back**: a new
-workflow may use it. Its versions stay readable by id. There is no way back yet.
+workflow may use it. Its versions stay readable by id. There is no way back yet. The archive is bounded so that archiving and creating again
+cannot grow the rows for ever: with 1000 archived workflows in a workspace one more **cannot be archived** (`409`
+`WORKFLOW_ARCHIVE_LIMIT_REACHED`, with `maximum`); creating, saving and reading go on. Every member may do everything in a workspace (no role is checked), so
+the count, not a role, is the bound; there is no way to remove archived workflows yet (a follow-up).
+
+### For the engine (milestone 3)
+
+What the engine, which runs a workflow later, must keep to; the validator and the routes already assume it.
+
+- **An archived workflow is never started**: the engine refuses it (it reads `archivedAt`), and a trigger lookup (which workflow does this
+  label start?) filters the archived ones out.
+- **Environments are matched by name, case ignored**, here and when a run starts (`PYTHON` finds `Python`); names are unique in a workspace
+  that way.
+- **A session may continue across versions of one profile**: `implementer@1` may continue the session of a step that ran as
+  `implementer@2`, because the session belongs to the profile *name* (and the environment), not to its version. This is kept on purpose.
+- **The engine checks the targets again** (an issue number is a positive whole number up to 2147483647, a label or a branch a text) when it
+  runs: what the validator checks is what the document says, and an input of a manual trigger is only known then.
 
 ## Error codes
 
@@ -483,11 +499,12 @@ Beyond the form:
 | `WORKFLOW_VERSION_NOT_FOUND` | 404 | The workflow has no such version. |
 | `WORKFLOW_NAME_TAKEN` | 409 | The workspace has a workflow of that name that is not archived (case ignored). |
 | `WORKFLOW_LIMIT_REACHED` | 409 | The workspace holds 100 workflows that are not archived (`maximum`). |
+| `WORKFLOW_ARCHIVE_LIMIT_REACHED` | 409 | The workspace holds 1000 archived workflows: one more cannot be archived (`maximum`). |
 | `WORKFLOW_VERSION_LIMIT_REACHED` | 409 | The workflow holds 500 versions (`maximum`). |
 | `WORKFLOW_ARCHIVED` | 409 | The workflow is archived and takes no new version. |
 | `WORKFLOW_VERSION_CONFLICT` | 409 | `expectedVersion` is not current any more (`current` says which is). |
 | `WORKFLOW_BODY_TOO_LARGE` | 413 | The body is over 256 KB. |
 | `WORKFLOW_CONTENT_TYPE_UNSUPPORTED` | 415 | The body is not `application/json`. |
-| `WORKFLOW_INVALID` | 422 | The document does not pass the validator; `errors` lists every problem. |
+| `WORKFLOW_INVALID` | 422 | The document does not pass the validator; `errors` lists the problems and `truncated` says whether there are more. |
 
 The routes of a workspace that is not yours, and in a deployment without the capability, are the 404 of a path that does not exist.

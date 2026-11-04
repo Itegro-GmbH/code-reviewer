@@ -25,7 +25,7 @@ async function setup() {
   const idB = await addWorkspace(db, "other");
   const serviceFor = (
     workspaceId: string,
-    options: { maxBudgetUsd?: number } = {},
+    options: { maxBudgetUsd?: number; archivedMax?: number } = {},
   ) =>
     createWorkflowService({
       workflows: createWorkflowsRepository(db, workspaceId),
@@ -236,6 +236,46 @@ describe("the workflow service", () => {
     expect(fresh.id).not.toBe(created.id);
     expect(fresh.version).toBe(1);
     expect(fresh.archivedAt).toBeNull();
+  });
+
+  // #833-M1-T371
+  it("holds the archived workflows to a maximum, so archiving and creating again cannot grow the rows without bound", async () => {
+    const { serviceFor, idA } = await setup();
+    const a = serviceFor(idA, { archivedMax: 2 });
+
+    for (let round = 0; round < 2; round++)
+      await a.archive((await a.create(USER, tiny())).id);
+    const third = await a.create(USER, tiny());
+    const refused = await failureOf(a.archive(third.id));
+
+    expect(refused.code).toBe("WORKFLOW_ARCHIVE_LIMIT_REACHED");
+    expect(refused.maximum).toBe(2);
+    expect((await a.get(third.id)).archivedAt).toBeNull();
+    // What is archived stays archived when it is asked again, and the live workflow still takes versions and a neighbour.
+    expect((await a.update(USER, third.id, tiny())).version).toBe(2);
+    expect((await a.create(USER, { ...tiny(), name: "Next" })).version).toBe(1);
+  });
+
+  // #833-M1-T372
+  it("says in a refused save that the list of errors is cut, as the validate call does", async () => {
+    const { a } = await setup();
+    const many = (count: number) => ({
+      ...tiny(),
+      steps: Array.from({ length: count }, (_, i) => ({
+        id: `s${i}`,
+        kind: "action",
+        connector: "nope",
+      })),
+    });
+
+    const long = await failureOf(a.create(USER, many(300)));
+    const short = await failureOf(a.create(USER, many(3)));
+
+    expect(long.code).toBe("WORKFLOW_INVALID");
+    expect(long.errors).toHaveLength(200);
+    expect(long.truncated).toBe(true);
+    expect(short.truncated).toBe(false);
+    expect((await a.validate(many(300))).truncated).toBe(true);
   });
 
   // #833-M1-T355

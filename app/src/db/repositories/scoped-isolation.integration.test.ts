@@ -1923,7 +1923,7 @@ const CASES: Case[] = [
   },
   {
     name: "workflows.archive",
-    run: (a, b) => a.workflows.archive(b.workflow.id),
+    run: (a, b) => a.workflows.archive(b.workflow.id, 1000),
     expectAnswer: (answer) =>
       expect(answer).toEqual({ ok: false, reason: "not_found" }),
   },

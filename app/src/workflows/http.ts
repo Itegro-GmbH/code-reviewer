@@ -36,6 +36,9 @@ function refusal(error: WorkflowError): Response {
       error: error.code,
       message: error.message,
       ...(error.errors.length > 0 ? { errors: error.errors } : {}),
+      ...(error.code === "WORKFLOW_INVALID"
+        ? { truncated: error.truncated ?? false }
+        : {}),
       ...(error.maximum === undefined ? {} : { maximum: error.maximum }),
       ...(error.current === undefined ? {} : { current: error.current }),
     },
