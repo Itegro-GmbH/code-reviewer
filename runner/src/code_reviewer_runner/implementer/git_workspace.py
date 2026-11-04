@@ -491,8 +491,8 @@ class GitWorkspace:
             raise fail(ErrorCode.SETUP_FAILED, "reader_unavailable: the reader cannot be made")
 
     def clone_mirror(self) -> None:
-        """Fetch the base branch, depth 1 (`RESUME_DEPTH` on a follow-up), into the new bare mirror. The token is in this one
-        process's environment."""
+        """Fetch the base branch, depth 1 (`RESUME_DEPTH` on a follow-up), into the new bare mirror.
+        The token is in this one process's environment."""
         self._check_names()
         self._prepare_directories()
         mirror = self.mirror
