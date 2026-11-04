@@ -10,6 +10,7 @@ import {
   BUDGET_DEFAULT_USD,
   BUDGET_OPERATOR_MAX_USD,
   NAME_MAX_LENGTH,
+  NESTING_DEPTH_MAX,
   STEPS_MAX,
 } from "./limits.ts";
 import { issue, listNames, pointer, sortIssues, type Issue } from "./issues.ts";
@@ -52,13 +53,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Every step of the document by id, in document order, with where it sits; duplicate ids are reported. */
+/**
+ * Every step of the document by id, in document order, with where it sits; duplicate ids are reported. It goes no deeper than
+ * `if` and `loop` may nest: what lies below is never checked, `checkSteps` reports `nesting_too_deep` at the node that goes over,
+ * and a walk without that bound would run out of stack on a document that is nothing but nesting.
+ */
 function indexSteps(
   steps: unknown,
   path: string,
   branches: StepInfo["branches"],
   index: Map<string, StepInfo>,
   report: (found: Issue) => void,
+  depth = 0,
 ): number {
   if (!Array.isArray(steps)) return 0;
   let count = 0;
@@ -79,6 +85,7 @@ function indexSteps(
         );
       else index.set(id, { id, path: at, kind: String(node.kind), branches });
     }
+    if (depth + 1 > NESTING_DEPTH_MAX) return;
     if (node.kind === "if") {
       count += indexSteps(
         node.then,
@@ -86,6 +93,7 @@ function indexSteps(
         [...branches, { ifId: String(id), branch: "then" }],
         index,
         report,
+        depth + 1,
       );
       count += indexSteps(
         node.else,
@@ -93,6 +101,7 @@ function indexSteps(
         [...branches, { ifId: String(id), branch: "else" }],
         index,
         report,
+        depth + 1,
       );
     } else if (node.kind === "loop") {
       count += indexSteps(
@@ -101,6 +110,7 @@ function indexSteps(
         branches,
         index,
         report,
+        depth + 1,
       );
     }
   });
