@@ -63,7 +63,8 @@ native path; the two registry providers (Anthropic, OpenRouter) are not offered.
 4. **Prepare.** The runner (root in the container) clones the base branch with depth 1 into a bare mirror that only it can
    enter. It makes the agent's repository in `/work/repo` as a local clone of that mirror, and the reader (a container of its
    own, section "How Control reads the agent's repository") gives it no remote, no credential, the system identity and a new
-   branch at the base tip. Nothing else is put into that repository: no hook, no guard, no spool.
+   branch at the base tip. Nothing else is put into that repository: no hook, no guard, no spool. A follow-up turn (the job
+   carries `resume`) starts from the branches the earlier turns left on GitHub instead (section "A follow-up turn: the workspace with several branches").
 5. **Set up** (only when the task's environment has a script). The runner starts the **Setup container** from the agent's image, runs the
    script in it with full internet access, and commits the container as the agent's image; a script that fails ends the turn here, free,
    before the model door exists (section "The environment's setup script"). Without a script nothing happens and nothing changes.
@@ -221,6 +222,30 @@ repository a task runs on. Workflow files are the exception, because the App has
 The commits that arrive carry whatever author and committer the agent chose; by default the system identity (the product's name
 and "Implementer"). Who started the task is not in the commits: it is in the run (the session's `created_by`, shown on the Runs
 page).
+
+### A follow-up turn: the workspace with several branches (#838, part of #745)
+
+A follow-up turn is a job whose `implementer` carries `resume` (`ImplementerResume` of the contract): the number of the turn, the branches the last turn pushed with the tip it pushed (the
+session branch first when it is among them, at most 20) and the branch the agent was on when that turn ended. Only a Worker that names the claim feature `implementer_resume` gets one. The
+app does not send a `resume` yet (the follow-up API is a later step of #745); this is the runner's side.
+
+The workspace (`GitWorkspace`) prepares such a turn like this:
+
+- **Names.** Every branch name of `resume` passes the check a first turn's names pass (`git check-ref-format`, not `HEAD`, no leading dash) before anything is fetched; a name git does not accept ends the
+  turn `implementer_config_invalid`, free. The parser already refused a repeat, more than 20 branches, a tip that is not 40 lower-case hex digits and a `checkout` that is neither one of the branches
+  nor the session branch (`invalid_job`).
+- **Fetch.** The base branch, one deep, as on a first turn; then each branch of `resume`, **one fetch per branch**, into the mirror as `refs/heads/<name>`: the session branch 50 deep
+  (`SESSION_BRANCH_DEPTH`), every other branch one deep. The token is in the environment of those git processes and nowhere else, as for the base. The tip is read from the mirror, never from the job.
+- **What moved.** The tip the provider has now is the start of the turn, whatever the job said: a branch that is not at the tip the earlier turn pushed is taken as it is and recorded
+  (`resume_moved`: name, the tip that was, the tip that is) so that the agent can be told. A branch the provider no longer has is left out and recorded (`resume_missing`); the checkout falls back to the session
+  branch when that is the one that is gone. A session branch that is in `resume` and gone ends the turn `clone_failed` (free): the app checks it before it starts a turn, so this is a race.
+- **The agent's repository.** Made as always from the mirror (a clone that is not `--single-branch`: the mirror holds the base branch and the branches of the session and nothing else under `refs/heads/`), then a
+  local branch for every fetched branch at the tip the mirror has (one `update-ref --stdin -z` in the reader), the session branch at the base tip when no earlier turn pushed it, no remote, and the
+  branch the agent was on checked out. `resume` with no branches starts from the base like a first turn.
+- **One start tip per branch** (`start_tips`). `start_commit` is the start tip of the session branch (the base tip on a first turn), so `baseCommit`, `commits` and `filesChanged` of the report cover what this turn did to the
+  session branch. The final push judges every branch against its own start tip: a branch of the session that the agent did not touch is not fetched, not pushed and not reported; a branch the agent made is left alone while it is still at
+  some start tip (it holds no commit of its own). The push is as before: every local branch, no force.
+- **After the setup script** the history of the script is undone branch by branch: HEAD back on the branch the agent starts on, every branch of the turn at its start tip, every other branch and tag deleted.
 
 ## The model door
 
@@ -931,7 +956,7 @@ it. What it did to the repository is the **base** the agent starts from, not a c
    repository ignores already (`node_modules`, a virtual environment, build output) needs nothing. A name with a line end cannot be written as a
    pattern and is left as it is; more than 10,000 entries (or 1 MiB of names) ends the turn rather than half of them being kept.
 
-Before both, the script's **history** is undone (`_return_to_start`): HEAD goes back to the task's branch, the task's branch and the base branch to the start commit, and every other
+Before both, the script's **history** is undone (`_return_to_start`): HEAD goes back to the branch the agent starts on, every branch of the turn (the base branch, the task's branch and, on a follow-up, each branch of the session) to its own start tip, and every other
 branch and every tag is deleted, whatever worktree has it checked out (`git update-ref --stdin -z`, fed by a streamed listing of the refs, so no number of refs and no length of names
 is a limit; `branch -D` would refuse a branch a linked worktree of the script has checked out and end the turn). The commits stay in the object store and their files in the tree.
 
