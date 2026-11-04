@@ -1117,6 +1117,7 @@ def test_committed_work_on_a_detached_head_is_saved_on_a_branch_and_pushed(rig: 
     saved = workspace.rescue_detached_head()
 
     assert saved is not None and saved.startswith(f"{BRANCH}-leftover-")
+    assert workspace.checked_out == saved
     assert head_of(workspace, f"refs/heads/{saved}") == detached
     report = push(workspace)
     assert rig.origin.tip(saved) == detached and branch(report, saved).pushed
@@ -1129,6 +1130,8 @@ def test_a_detached_head_that_a_branch_contains_needs_no_rescue(rig: Rig) -> Non
 
     assert workspace.rescue_detached_head() is None
     assert agent_git(workspace, "branch", "--list", "*leftover*").stdout.strip() == ""
+    # HEAD is on no branch: a follow-up turn has none to start on (#837).
+    assert workspace.checked_out is None
 
 
 def test_a_head_on_a_branch_needs_no_rescue(rig: Rig) -> None:
@@ -1136,6 +1139,28 @@ def test_a_head_on_a_branch_needs_no_rescue(rig: Rig) -> None:
     commit(workspace, "a.txt")
 
     assert workspace.rescue_detached_head() is None
+    assert workspace.checked_out == BRANCH
+
+
+# #837
+def test_the_branch_the_agent_switched_to_is_the_one_checked_out(rig: Rig) -> None:
+    workspace = rig.prepared()
+    assert agent_git(workspace, "checkout", "-q", "-b", "feature/x").returncode == 0
+    commit(workspace, "a.txt")
+
+    assert workspace.checked_out is None, "nothing was read yet"
+    assert workspace.rescue_detached_head() is None
+    assert workspace.checked_out == "feature/x"
+
+
+def test_a_branch_name_the_runner_would_not_push_is_not_named_as_checked_out(rig: Rig) -> None:
+    workspace = rig.prepared()
+    # Git takes a no-break space in a name; the runner's policy does not (`push_policy`).
+    assert agent_git(workspace, "checkout", "-q", "-b", "a\u00a0b").returncode == 0
+    commit(workspace, "a.txt")
+
+    assert workspace.rescue_detached_head() is None
+    assert workspace.checked_out is None
 
 
 # -- the agent's list of branches is read as the agent's user and with a bound ----------------

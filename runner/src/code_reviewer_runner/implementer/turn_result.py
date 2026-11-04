@@ -63,6 +63,9 @@ class TurnResult:
     setup: dict[str, Any] | None = None
     # #745, step 7: what the network door did (`ImplementerNetworkReport`); None: no rule but `off`.
     network: dict[str, Any] | None = None
+    # #837: the local branch HEAD was on when the agent's work was read, after the rescue of a
+    # detached HEAD (`GitWorkspace.checked_out`); None: detached and on no branch, or not read.
+    checked_out: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -96,6 +99,7 @@ class TurnResult:
             "filesChanged": [{"path": f.path, "status": f.kind.value} for f in self.files_changed],
             "summary": self.summary,
             "opencode": opencode,
+            "checkedOut": self.checked_out,
             **({} if self.setup is None else {"setup": self.setup}),
             **({} if self.network is None else {"network": self.network}),
         }

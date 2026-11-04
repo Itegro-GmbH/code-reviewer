@@ -397,6 +397,23 @@ describe("the implementer result", () => {
     }
   });
 
+  // #837
+  it("takes the branch that was checked out: optional, a name from 1 to 255 characters or null", () => {
+    const result = example("RunnerResult");
+    expect(result.implementer.checkedOut).toBe("implementer/a1b2c3");
+    expect(accepts("RunnerResult", result)).toBe(true);
+    result.implementer.checkedOut = null;
+    expect(accepts("RunnerResult", result)).toBe(true);
+    delete result.implementer.checkedOut;
+    expect(accepts("RunnerResult", result)).toBe(true);
+
+    for (const bad of ["", "x".repeat(256), 3, ["a"]]) {
+      const refused = example("RunnerResult");
+      refused.implementer.checkedOut = bad;
+      expect(accepts("RunnerResult", refused)).toBe(false);
+    }
+  });
+
   // #746-T02
   it("allows a failed turn with no head commit, a null session and nothing pushed", () => {
     const failed = example("RunnerResult");
