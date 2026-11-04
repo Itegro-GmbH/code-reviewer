@@ -148,7 +148,7 @@ export function checkInput(
     }
     const names = Object.keys(object.fields);
     for (const key of Object.keys(value))
-      if (!(key in object.fields))
+      if (!Object.hasOwn(object.fields, key))
         context.report(
           issue(
             pointer(path, key),
@@ -158,7 +158,7 @@ export function checkInput(
           ),
         );
     for (const [name, field] of Object.entries(object.fields)) {
-      if (name in value)
+      if (Object.hasOwn(value, name))
         checkInput(value[name], field.type, pointer(path, name), context, use);
       else if (field.required)
         context.report(

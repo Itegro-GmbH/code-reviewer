@@ -455,9 +455,13 @@ function typeOfNode(node: SchemaNode): ValueType {
 /** The type of a result: what the steps after the one that declared it can refer to. */
 export function objectTypeOf(node: ObjectNode): ObjectType {
   const required = new Set(node.required ?? []);
-  const fields: Record<string, FieldType> = {};
-  for (const [name, child] of Object.entries(node.properties))
-    fields[name] = { type: typeOfNode(child), required: required.has(name) };
+  // `fromEntries` defines each name as a property of its own, also `__proto__`; an assignment would change the prototype.
+  const fields: Record<string, FieldType> = Object.fromEntries(
+    Object.entries(node.properties).map(([name, child]) => [
+      name,
+      { type: typeOfNode(child), required: required.has(name) },
+    ]),
+  );
   return { kind: "object", fields };
 }
 
@@ -568,7 +572,8 @@ export function checkResultValue(
             );
         for (const name of names) {
           const child = node.properties[name] as SchemaNode;
-          if (name in at) check(child, at[name], pointer(path, name));
+          if (Object.hasOwn(at, name))
+            check(child, at[name], pointer(path, name));
           else if ((node.required ?? []).includes(name))
             issues.push(
               issue(

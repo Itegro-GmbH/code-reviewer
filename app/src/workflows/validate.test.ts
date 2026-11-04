@@ -1065,6 +1065,66 @@ describe("references", () => {
   });
 });
 
+describe("names that every object has", () => {
+  // #833-M1-T250
+  it.each(["__proto__", "constructor", "toString", "hasOwnProperty"])(
+    "does not take %s for a field of a step, of an object literal or of a result",
+    (name) => {
+      const labeled = change(
+        tiny(),
+        (d) => (d.trigger = { kind: "github.issueLabeled", label: "go" }),
+      );
+
+      expect(codes(withStep(comment(`{{work.${name}}}`)))).toEqual([
+        ["/steps/1/body", "reference_unknown_field"],
+      ]);
+      expect(codes(withStep(comment(`{{${name}.x}}`)))).toEqual([
+        ["/steps/1/body", "reference_unknown_step"],
+      ]);
+      expect(
+        codes(
+          withStep(
+            {
+              id: "x",
+              kind: "action",
+              connector: "github.issue.comment",
+              body: "b",
+              issue: { number: 1, [name]: 2 },
+            },
+            labeled,
+          ),
+        ),
+      ).toEqual([[`/steps/1/issue/${name}`, "unknown_field"]]);
+    },
+  );
+
+  // #833-M1-T251
+  it("lets a result field be called __proto__ without changing what a type is", () => {
+    const doc = change(tiny(), (d) => {
+      (agentSteps(d)[0] as Json).result = {
+        type: "object",
+        required: ["__proto__"],
+        properties: JSON.parse('{"__proto__": {"type": "string"}}'),
+      };
+    });
+    (doc.steps as Json[]).push(
+      comment("{{work.__proto__}} {{work.constructor}}"),
+    );
+
+    expect(codes(doc)).toEqual([["/steps/1/body", "reference_unknown_field"]]);
+    expect(({} as Record<string, unknown>).type).toBeUndefined();
+  });
+
+  // #833-M1-T252
+  it("takes a document that carries __proto__ as a key as an unknown field", () => {
+    const doc = JSON.parse(
+      '{"__proto__": {"x": 1}, "version": 1, "name": "n", "trigger": {"kind": "manual"}, "steps": [{"id": "a", "kind": "action", "connector": "github.issue.comment", "repo": "a/b", "issue": 1, "body": "b"}]}',
+    ) as unknown;
+
+    expect(codes(doc)).toEqual([["/__proto__", "unknown_field"]]);
+  });
+});
+
 describe("facts the agent does not report", () => {
   const reviewer = (base: Json = tiny()) =>
     change(base, (d) => ((agentSteps(d)[0] as Json).profile = "reviewer"));

@@ -101,7 +101,9 @@ export function isAssignable(actual: ValueType, expected: ValueType): boolean {
     case "object": {
       if (actual.kind !== "object") return false;
       return Object.entries(expected.fields).every(([name, field]) => {
-        const have = actual.fields[name];
+        const have = Object.hasOwn(actual.fields, name)
+          ? actual.fields[name]
+          : undefined;
         if (have === undefined) return !field.required;
         if (field.required && !have.required) return false;
         return isAssignable(have.type, field.type);
@@ -135,9 +137,9 @@ export function valueFits(value: unknown, type: ValueType): boolean {
         return false;
       const record = value as Record<string, unknown>;
       return (
-        Object.keys(record).every((key) => key in type.fields) &&
+        Object.keys(record).every((key) => Object.hasOwn(type.fields, key)) &&
         Object.entries(type.fields).every(([name, field]) =>
-          name in record
+          Object.hasOwn(record, name)
             ? valueFits(record[name], field.type)
             : !field.required,
         )

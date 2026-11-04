@@ -8,7 +8,7 @@ import {
   checkText,
   jsonTypeName,
 } from "./check-values.ts";
-import { FACT_NAMES, FACT_TYPES, PUSH_FACTS } from "./facts.ts";
+import { COST_FACT, FACT_NAMES, FACT_TYPES, PUSH_FACTS } from "./facts.ts";
 import {
   ID_MAX_LENGTH,
   LOOP_NESTING_MAX,
@@ -163,20 +163,19 @@ export function agentBinding(
   const schema: ResultSchema | undefined =
     declared ??
     (node.result === undefined ? found?.info.defaultResult : undefined);
-  const fields: Record<string, FieldType> = {};
-  if (schema !== undefined)
-    for (const [name, field] of Object.entries(objectTypeOf(schema).fields))
-      if (!FACT_NAMES.includes(name)) fields[name] = field;
-  fields.costUsd = {
-    type: FACT_TYPES.costUsd as FieldType["type"],
-    required: true,
-  };
-  if (canPush)
-    for (const name of PUSH_FACTS)
-      fields[name] = {
-        type: FACT_TYPES[name] as FieldType["type"],
-        required: true,
-      };
+  const entries: [string, FieldType][] =
+    schema === undefined
+      ? []
+      : Object.entries(objectTypeOf(schema).fields).filter(
+          ([name]) => !FACT_NAMES.includes(name),
+        );
+  const facts = canPush ? [COST_FACT, ...PUSH_FACTS] : [COST_FACT];
+  for (const name of facts)
+    entries.push([
+      name,
+      { type: FACT_TYPES[name] as FieldType["type"], required: true },
+    ]);
+  const fields: Record<string, FieldType> = Object.fromEntries(entries);
   const reason = `The profile '${String(node.profile)}' may not push, so '${id}' yields no branch and no commits. Use a profile that may push, or reference the result of the step.`;
   return {
     id,

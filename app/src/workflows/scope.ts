@@ -138,9 +138,14 @@ function descend(
         `'${trail.join(".")}' is ${describeType(current)} and has no field '${name}'.`,
         [],
       );
-    const field: FieldType | undefined = current.fields[name];
+    const field: FieldType | undefined = Object.hasOwn(current.fields, name)
+      ? current.fields[name]
+      : undefined;
     if (field === undefined) {
-      const reason = position === 0 ? binding.unavailable[name] : undefined;
+      const reason =
+        position === 0 && Object.hasOwn(binding.unavailable, name)
+          ? binding.unavailable[name]
+          : undefined;
       if (reason !== undefined)
         return fail(
           context,
