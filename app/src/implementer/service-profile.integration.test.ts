@@ -82,7 +82,7 @@ describe("a task with a profile", () => {
       profile_name: "reviewer",
       profile_version: 1,
       profile_instructions: "Review only.\nDo not edit files.",
-      profile_can_push: false,
+      profile_can_push: 0,
     });
   });
 
@@ -124,7 +124,7 @@ describe("a task with a profile", () => {
     expect(await turnOf(app, newest.sessionId)).toMatchObject({
       profile_version: 2,
       profile_instructions: "second",
-      profile_can_push: true,
+      profile_can_push: 1,
       cost_limit_cents: null,
       model_choice: JSON.stringify({ provider: "anthropic", model: "m2" }),
     });
@@ -254,7 +254,7 @@ describe("a task with a profile", () => {
     expect(await turnOf(app, started.sessionId)).toMatchObject({
       profile_version: 1,
       profile_instructions: "Review only.\nDo not edit files.",
-      profile_can_push: false,
+      profile_can_push: 0,
     });
   });
 

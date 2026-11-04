@@ -108,7 +108,7 @@ describe("the profile snapshot of a turn", () => {
     ).rejects.toThrow(/implementer_turns_profile_check/);
     await expect(
       sql`update implementer_turns set profile_id = 'p', profile_name = 'n', profile_version = 0,
-        profile_instructions = '', profile_can_push = true where id = ${turn.id}`.execute(
+        profile_instructions = '', profile_can_push = 1 where id = ${turn.id}`.execute(
         db,
       ),
     ).rejects.toThrow(/implementer_turns_profile_check/);

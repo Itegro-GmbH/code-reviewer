@@ -166,7 +166,7 @@ function contentFrom(row: Selectable<ProfileVersionsTable>): ProfileContent {
     model: decodeModelChoice(row.model_choice),
     instructions: row.instructions,
     costLimitCents: row.cost_limit_cents,
-    canPush: row.can_push,
+    canPush: row.can_push === 1,
     defaultResult: row.default_result,
   };
 }
@@ -209,7 +209,7 @@ export function createProfilesRepository(
     model_choice: encodeModelChoice(content.model),
     instructions: content.instructions,
     cost_limit_cents: content.costLimitCents,
-    can_push: content.canPush,
+    can_push: content.canPush ? 1 : 0,
     default_result: content.defaultResult,
     created_by: createdBy,
     created_at: timestamp,
@@ -315,7 +315,7 @@ export function createProfilesRepository(
       return rows.map((row) => ({
         profileId: row.profile_id,
         version: row.version,
-        canPush: row.can_push,
+        canPush: row.can_push === 1,
         defaultResult: row.default_result,
       }));
     },

@@ -33,7 +33,7 @@ export const migration: Migration = {
       "profile_name text",
       "profile_version integer",
       "profile_instructions text",
-      "profile_can_push boolean",
+      "profile_can_push integer",
     ])
       await sql
         .raw(`alter table implementer_turns add column ${column}`)
@@ -42,7 +42,7 @@ export const migration: Migration = {
     await sql`alter table implementer_turns add constraint implementer_turns_profile_check check (
         (profile_id is null and profile_name is null and profile_version is null and profile_instructions is null and profile_can_push is null)
         or (profile_id is not null and profile_name is not null and profile_version is not null and profile_version >= 1
-            and profile_instructions is not null and char_length(profile_instructions) <= 20000 and profile_can_push is not null)
+            and profile_instructions is not null and char_length(profile_instructions) <= 20000 and profile_can_push in (0, 1))
       )`.execute(db);
 
     await sql`select set_config('lock_timeout', ${before}, true)`.execute(db);

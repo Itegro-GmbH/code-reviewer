@@ -29,7 +29,13 @@ async function snapshot(
 ): Promise<Record<string, unknown[]>> {
   const result: Record<string, unknown[]> = {};
   for (const table of await db.introspection.getTables()) {
-    if (table.name === "workflows" || table.name === "workflow_versions")
+    // The workflow tables are this migration's; the profile tables (#843) are a later migration's and empty.
+    if (
+      table.name === "workflows" ||
+      table.name === "workflow_versions" ||
+      table.name === "profiles" ||
+      table.name === "profile_versions"
+    )
       continue;
     const { rows } =
       await sql<unknown>`select * from ${sql.table(table.name)} order by 1`.execute(
@@ -44,7 +50,8 @@ async function columns(db: Kysely<Database>): Promise<string[]> {
   const { rows } = await sql<{
     name: string;
   }>`select table_name || '.' || column_name as name from information_schema.columns
-    where table_schema = 'public' and table_name not in ('workflows', 'workflow_versions') order by 1`.execute(
+    where table_schema = 'public' and table_name not in ('workflows', 'workflow_versions', 'profiles', 'profile_versions')
+    and not (table_name = 'implementer_turns' and column_name like 'profile\_%') order by 1`.execute(
     db,
   );
   return rows.map((row) => row.name);

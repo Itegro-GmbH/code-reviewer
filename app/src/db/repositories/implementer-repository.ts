@@ -233,7 +233,7 @@ function turnFrom(
             name: row.profile_name,
             version: row.profile_version,
             instructions: row.profile_instructions,
-            canPush: row.profile_can_push,
+            canPush: row.profile_can_push === 1,
           },
   };
 }
@@ -367,7 +367,12 @@ export function createImplementerRepository(
             profile_name: task.profile?.name ?? null,
             profile_version: task.profile?.version ?? null,
             profile_instructions: task.profile?.instructions ?? null,
-            profile_can_push: task.profile?.canPush ?? null,
+            profile_can_push:
+              task.profile === undefined || task.profile === null
+                ? null
+                : task.profile.canPush
+                  ? 1
+                  : 0,
           })
           .returningAll()
           .executeTakeFirstOrThrow();

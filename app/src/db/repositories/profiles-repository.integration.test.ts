@@ -368,7 +368,7 @@ describe("the profiles repository", () => {
       ),
     ).rejects.toThrow(/immutable/);
     await expect(
-      sql`update profile_versions set can_push = false where profile_id = 'pr-1'`.execute(
+      sql`update profile_versions set can_push = 0 where profile_id = 'pr-1'`.execute(
         db,
       ),
     ).rejects.toThrow(/immutable/);

@@ -78,7 +78,8 @@ export const migration: Migration = {
       .addColumn("instructions", "text", (column) => column.notNull())
       // Whole US cents per turn; null: the operator's maximum alone.
       .addColumn("cost_limit_cents", "integer")
-      .addColumn("can_push", "boolean", (column) => column.notNull())
+      // 1 when a turn of this version may push, 0 when not (the app's columns hold no booleans).
+      .addColumn("can_push", "integer", (column) => column.notNull())
       // The JSON text of the result schema as it was validated, or null for none.
       .addColumn("default_result", "text")
       // Who saved this version, as the user id it had then. No foreign key: a version is history the database refuses to change, and
@@ -91,6 +92,10 @@ export const migration: Migration = {
         "version",
       ])
       .addCheckConstraint("profile_versions_version_check", sql`version >= 1`)
+      .addCheckConstraint(
+        "profile_versions_can_push_check",
+        sql`can_push in (0, 1)`,
+      )
       .addCheckConstraint(
         "profile_versions_description_check",
         sql`char_length(description) <= 1000`,

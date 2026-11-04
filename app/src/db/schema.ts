@@ -1121,10 +1121,11 @@ export interface ImplementerTurnsTable {
     string | null | undefined,
     string | null
   >;
+  /** 1 when the profile version may push, 0 when not. */
   profile_can_push: ColumnType<
-    boolean | null,
-    boolean | null | undefined,
-    boolean | null
+    number | null,
+    number | null | undefined,
+    number | null
   >;
 }
 
@@ -1231,7 +1232,8 @@ export interface ProfileVersionsTable {
   instructions: string;
   /** Whole US cents per turn; null: the operator's maximum alone. */
   cost_limit_cents: number | null;
-  can_push: boolean;
+  /** 1 when a turn of this version may push, 0 when not. */
+  can_push: number;
   /** JSON text of the default result schema, or null for none. */
   default_result: string | null;
   created_by: string;

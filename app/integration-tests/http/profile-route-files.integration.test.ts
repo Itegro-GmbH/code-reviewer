@@ -207,8 +207,8 @@ describe("the profile route files", () => {
       { id: profile.id, workspace_id: workspaceId, current_version: 2 },
     ]);
     expect(await versions()).toMatchObject([
-      { version: 1, instructions: "Review only.", can_push: false },
-      { version: 2, instructions: "second", can_push: true },
+      { version: 1, instructions: "Review only.", can_push: 0 },
+      { version: 2, instructions: "second", can_push: 1 },
     ]);
     expect(await (await list()).json()).toMatchObject({
       profiles: [{ id: profile.id, name: "reviewer", version: 2 }],
