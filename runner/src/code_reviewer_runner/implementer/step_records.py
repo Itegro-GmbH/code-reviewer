@@ -123,7 +123,7 @@ class StepConverter:
     def __init__(self, session_id: str, redactor: Redactor) -> None:
         self._session = session_id
         self._redactor = redactor
-        self._guard = max(redactor.longest, 64)
+        self._guard = max(redactor.longest, 256)
         self._seq = 0
         self._full = 0
         self._short = 0

@@ -278,6 +278,7 @@ class FakeAgent:
     texts: list[str] = field(default_factory=lambda: [])
     ends_clean: bool = True
     notes: tuple[str, ...] = ()
+    notes_fail: bool = False
 
     @property
     def ledger(self) -> Any:
@@ -309,6 +310,8 @@ class FakeAgent:
         return self.ends_clean
 
     def step_notes(self) -> tuple[str, ...]:
+        if self.notes_fail:
+            raise RuntimeError("a bug in the live view")
         return self.notes
 
 
@@ -1287,6 +1290,21 @@ def test_what_the_live_view_lost_is_in_the_notes_of_the_turn(play: Any) -> None:
 
     assert turn.exit_code == 0, turn.output
     assert "the live view dropped 7 step records" in turn.result["logTail"]
+
+
+# #745-L12: the notes of the live view are read in the cleanup of the turn; a bug there must not
+# replace the turn's outcome or keep the doors from closing.
+def test_a_live_view_that_fails_at_the_end_changes_nothing_of_the_turn(play: Any) -> None:
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        agent.use_the_model()
+        make_commit(agent, TIP)
+        agent.notes_fail = True
+        return "done"
+
+    turn = play(script)
+
+    assert turn.exit_code == 0, turn.output
+    assert turn.git.pushes == [TIP]
 
 
 class ScriptedEvents:
