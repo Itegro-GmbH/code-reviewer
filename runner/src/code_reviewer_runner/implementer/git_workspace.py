@@ -109,6 +109,9 @@ RESCUE_STEP_TIMEOUT = 3.0
 # number of refs; this holds about 40,000 branches and the rest is not read.
 LIST_MAX_BYTES = 4 * 1024 * 1024
 FETCH_TIMEOUT = 60.0
+# The most time all the fetches of a follow-up's branches (one per branch, one after the other, at
+# most 20) may take together; a turn that is not set up by then ends `clone_failed`, free.
+RESUME_FETCH_SECONDS = 300.0
 # How much history every branch of a follow-up turn gets (the base branch, the session branch and
 # the other branches): the agent has no remote to deepen from, and with less the base branch that
 # moved since the earlier turn cannot be merged, rebased or diffed against (`merge-base` finds
@@ -544,11 +547,12 @@ class GitWorkspace:
         resume = self.spec.resume
         assert resume is not None
         base = self.spec.base_branch
+        deadline = self._clock() + RESUME_FETCH_SECONDS
         # The session branch comes last: a `--depth` fetch of another branch that is an ancestor of
         # it would make that ancestor a shallow root and cut the session branch's history to what
         # lies between (the depth of the last fetch wins).
         for entry in sorted(resume.branches, key=lambda item: item.name == self.spec.branch):
-            tip = base_tip if entry.name == base else self._fetch_branch(entry.name)
+            tip = base_tip if entry.name == base else self._fetch_branch(entry.name, deadline)
             if tip is None:
                 if entry.name == self.spec.branch:
                     raise fail(ErrorCode.CLONE_FAILED, "the session branch is gone on the provider")
@@ -558,9 +562,14 @@ class GitWorkspace:
                 self._moved.append(BranchMoved(entry.name, entry.head, tip))
             self._starts[entry.name] = tip
 
-    def _fetch_branch(self, name: str) -> str | None:
+    def _fetch_branch(self, name: str, deadline: float) -> str | None:
         """One branch of a follow-up into the mirror, as `refs/heads/<name>`: its tip, or None when
-        the provider does not have it."""
+        the provider does not have it. The fetch gets `FETCH_TIMEOUT` at most and what is left of
+        the `deadline` of all of them."""
+        if self._clock() >= deadline:
+            raise fail(
+                ErrorCode.CLONE_FAILED, "the branches of the session cannot be fetched in time"
+            )
         fetched = self._mirror(
             [
                 "fetch",
@@ -571,6 +580,7 @@ class GitWorkspace:
             ],
             protocols=":".join(self._schemes),
             token=True,
+            timeout=self._left(FETCH_TIMEOUT, deadline),
         )
         if fetched.returncode != 0:
             if "couldn't find remote ref" in fetched.stderr:
@@ -1309,7 +1319,19 @@ class GitWorkspace:
             self._check_session_name(entry.name)
         if self.spec.resume is not None and self.spec.resume.checkout is not None:
             self._check_session_name(self.spec.resume.checkout)
+        self._check_no_ref_collision()
         self._names_checked = True
+
+    def _check_no_ref_collision(self) -> None:
+        """No branch may be a directory of another (`a` and `a/b` cannot both be refs): the session
+        branch is made at the base tip when the provider never had it, and with `a/b` of the session
+        beside it that fails in the agent's repository. The turn ends here, before anything is
+        fetched, with the stable reason of a branch name git cannot take."""
+        names = {self.spec.base_branch, self.spec.branch}
+        if self.spec.resume is not None:
+            names.update(entry.name for entry in self.spec.resume.branches)
+        if any(other.startswith(name + "/") for name in names for other in names):
+            raise _invalid("a branch of the session is the directory of another")
 
     def _check_session_name(self, name: str) -> None:
         """A name of a branch of the session is used in refspecs and ref names as the others are."""

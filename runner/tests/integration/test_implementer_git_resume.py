@@ -9,8 +9,12 @@ Everything runs against a bare repository on the file system standing in for Git
 the other tests of the git workspace do; the token path over HTTP has one test of its own.
 """
 
+import time
+from pathlib import Path
+
 import pytest
 
+from code_reviewer_runner.implementer import git_workspace
 from code_reviewer_runner.implementer.git_workspace import BranchMoved, GitWorkspace
 from code_reviewer_runner.job import ImplementerResume, JobError, ResumeBranch
 from code_reviewer_runner.result import ErrorCode
@@ -352,6 +356,28 @@ def test_the_session_branch_and_the_base_branch_still_must_differ(rig: Rig) -> N
     assert refused.value.code is ErrorCode.IMPLEMENTER_CONFIG_INVALID
 
 
+# #838-T32
+@pytest.mark.parametrize(
+    ("session", "listed"),
+    [
+        (BRANCH, f"{BRANCH}/sub"),
+        (f"{BRANCH}/sub", BRANCH),
+        ("feature", "feature/x"),
+    ],
+)
+def test_names_that_cannot_be_refs_side_by_side_end_the_turn_with_a_stable_reason_at_the_start(
+    rig: Rig, session: str, listed: str
+) -> None:
+    tip = rig.origin.commit_on(listed, "x.txt")
+    workspace = rig.workspace(branch=session, resume=resume_of((listed, tip), checkout=None))
+
+    with pytest.raises(JobError) as refused:
+        workspace.prepare()
+
+    assert refused.value.code is ErrorCode.IMPLEMENTER_CONFIG_INVALID
+    assert not workspace.mirror.exists()
+
+
 # -- one tip per branch --------------------------------------------------------------------------
 
 
@@ -517,3 +543,61 @@ def test_the_other_branches_are_fetched_with_the_token_in_the_environment_only(
     assert files_mentioning(rig.base / "work", "Authorization") == []
     config = (workspace.mirror / "config").read_text()
     assert "http://127.0.0.1" not in config
+
+
+# -- the time the fetches may take ---------------------------------------------------------------
+
+
+def slow_fetch_git(tmp_path: Path, real: str, seconds: str) -> str:
+    """A `git` that waits `seconds` before every fetch of a branch other than `main`. Returns its
+    path."""
+    directory = tmp_path / "wrapper"
+    directory.mkdir()
+    script = directory / "git"
+    script.write_text(
+        "#!/bin/sh\n"
+        'case " $* " in *" fetch "*)\n'
+        '  case " $* " in *refs/heads/main:*) ;; *) sleep ' + seconds + " ;; esac ;;\n"
+        "esac\n"
+        f'exec "{real}" "$@"\n'
+    )
+    script.chmod(0o755)
+    return str(script)
+
+
+# #838-T33
+def test_one_fetch_of_a_follow_up_is_bounded_by_the_fetch_timeout_not_by_the_default(
+    rig: Rig, three: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(git_workspace, "FETCH_TIMEOUT", 1.0)
+    wrapper = slow_fetch_git(tmp_path, rig.git, "20")
+    workspace = rig.workspace(git=wrapper, resume=resume_of_three(three, checkout=BRANCH))
+    started = time.monotonic()
+
+    with pytest.raises(JobError) as refused:
+        workspace.prepare()
+
+    assert refused.value.code is ErrorCode.CLONE_FAILED
+    assert time.monotonic() - started < 10
+
+
+# #838-T34
+def test_all_fetches_of_a_follow_up_together_are_bounded(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tips = {
+        f"feature/{number}": rig.origin.commit_on(f"feature/{number}", f"{number}.txt")
+        for number in range(5)
+    }
+    monkeypatch.setattr(git_workspace, "RESUME_FETCH_SECONDS", 2.0)
+    wrapper = slow_fetch_git(tmp_path, rig.git, "0.9")
+    workspace = rig.workspace(git=wrapper, resume=resume_of(*tips.items(), checkout=None))
+    started = time.monotonic()
+
+    with pytest.raises(JobError) as refused:
+        workspace.prepare()
+
+    assert refused.value.code is ErrorCode.CLONE_FAILED
+    assert "in time" in refused.value.detail
+    assert time.monotonic() - started < 4.5
+    assert not workspace.repo.exists()
