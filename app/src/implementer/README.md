@@ -36,7 +36,7 @@ comes from (`Sec-Fetch-Site` / `Origin`), the body of the POST for `application/
 - `GET /api/w/:workspace/implementer/repositories/:repositoryId/branches`: `{ defaultBranch, branches, truncated }`, the default
   branch first, at most 100 names (`getRepositoryFacts` and `listBranches`).
 - `GET /api/w/:workspace/implementer/models`: the options of the picker (below).
-- `POST /api/w/:workspace/implementer/tasks` with `{ repositoryId, baseBranch, branch, instruction, model, costLimitCents?,
+- `POST /api/w/:workspace/implementer/tasks` with `{ repositoryId, baseBranch, branch, instruction, model, costLimitCents?, environmentId?, profile?,
 clientRequestId }`: `201 { runId, sessionId }`, `200` with the same ids for a client request id that was accepted before (nothing
   is written then). `model` is `{ entryId }` (operator's key) or `{ provider, model }` (own key).
 
@@ -52,6 +52,7 @@ clientRequestId }`: `201 { runId, sessionId }`, `200` with the same ids for a cl
 | 409       | `IMPLEMENTER_REQUEST_REUSED` (+ `runId`)                              | The client request id made a task before and this body is not that task (another instruction, branch, base branch, repository, model or cost limit): nothing is written, `runId` is the first task's |
 | 409       | `IMPLEMENTER_BRANCH_EXISTS`                                           | The new branch exists on GitHub, or a session of the repository holds the name: **a new branch name is needed**                                                                                      |
 | 413 / 415 | `IMPLEMENTER_BODY_TOO_LARGE` / `IMPLEMENTER_CONTENT_TYPE_UNSUPPORTED` | A body over 64 KB; a body that is not `application/json`                                                                                                                                             |
+| 404       | `IMPLEMENTER_PROFILE_NOT_FOUND`                                       | The `profile` is not one of this workspace (another workspace's looks the same), is archived, or has no such version (#843)                                                                         |
 | 422       | `IMPLEMENTER_MODEL_NOT_ALLOWED` (+ `reason`)                          | The model is not one the claim would run (reasons in `errors.ts`)                                                                                                                                    |
 | 422       | `EXCEEDS_OPERATOR_MAXIMUM` (+ `maximumCents`)                         | The cost limit is above the operator's maximum per turn                                                                                                                                              |
 | 503       | `IMPLEMENTER_GITHUB_UNAVAILABLE`                                      | GitHub failed, timed out, was rate limited or answered with something unusable; nothing was written                                                                                                  |
@@ -80,9 +81,11 @@ In this order, each step ends the request on failure, and **nothing is written b
    a folder of a listed branch or the other way round (`foo` and `foo/bar`; `IMPLEMENTER_BRANCH_CONFLICT`, from
    `listBranches`). **What this cannot see:** a conflicting branch beyond the first 100 the platform lists, and the name of a
    task whose branch is not on GitHub yet. Git finds those at the push (`push_rejected`);
-6. the model is allowed (`models.check`, the rule of the picker);
-7. a cost limit is at most the operator's maximum (`review_max_cost_cents`); none asked for is stored as none, and the maximum
-   applies at the claim;
+6. with a `profile` (#843): the profile is read (`profiles.findByName`, the newest version or the one pinned) and its version brings the model and
+   the cost limit, in place of the body's (the body then names neither: `not_with_profile`); then the model is allowed (`models.check`, the rule of
+   the picker);
+7. a cost limit (the body's, or the profile version's) is at most the operator's maximum (`review_max_cost_cents`); none asked for is stored as
+   none, and the maximum applies at the claim;
 8. `queue.enqueueImplementerTurn`: session, turn and job in one transaction, then the Dispatcher is woken as for any job. A lost
    race on the branch name hits the unique index of the sessions and is `IMPLEMENTER_BRANCH_EXISTS`; two submits with one new
    branch give exactly one `201`.

@@ -702,7 +702,7 @@ class ImplementerSession:
         all the same)."""
         if not self._can_push:
             # #843: a profile without the right to push. Nothing leaves the container, so nothing
-            # is rescued, committed, listed or pushed, and the repository is not read after the agent.
+            # is rescued, committed, listed or pushed, and the repository is not read after it.
             self._note("this profile may not push: nothing was pushed")
             self._note_disk()
             return

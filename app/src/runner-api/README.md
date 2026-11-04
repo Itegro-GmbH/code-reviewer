@@ -339,6 +339,14 @@ when an environment was chosen; the Dispatcher launches the VM before any Worker
 script that is silently skipped would run the task on a base the person did not choose. The Worker reports what the script did in
 `result.implementer.setup`; a script that fails ends the turn with `environment_setup_failed` (free, `billing/outcome.ts`).
 
+**The profile of a turn (#843).** A task started with a profile holds a copy of the version it runs with (`implementer_turns.profile_*`: id, name,
+version, instructions, push right; the model and the cost limit are the turn's own columns, filled from the version when the task was written). The
+Worker's input carries `implementer.profile {name, version, instructions?, canPush}` (`instructions` left out when empty; the id stays in the app),
+**only to a caller that names the claim feature `implementer_profile`**: for any other the job ends `implementer_engine_unavailable` (free) before any
+credential exists, since a Worker that did not read it would push the work of a profile that may not push, and would run the agent without the
+instructions the person chose. A turn without a profile carries nothing and is the turn of before. What the runner does with it:
+[`docs/profiles.md`](../../../docs/profiles.md#the-push-right).
+
 A failure that may pass (GitHub down while the installation is read or the token is made) gives the job back with `Retry-After`.
 A turn is never run twice (`maxAttempts` 1), so it is put back in the queue only while **no input was ever handed to a Worker**: the
 write tokens are remembered before an input leaves, so a turn whose ledger is empty has handed out none (`noInputHandedOut`, asked

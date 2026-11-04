@@ -5,15 +5,15 @@ run in order. A GitHub issue gets a label, an agent implements it, another revie
 request is opened. Workflows are written by an AI through the API (there is no editor), checked by a strict validator, and saved per
 workspace with versions.
 
-**Status (milestone 1 of epic #833).** The format, the validator and the storage exist. **Nothing runs a workflow yet**: the engine,
-the profiles table and the finish tool come in the next milestones. A saved workflow is a checked document. The workflows exist only in
+**Status (milestones 1 and 2 of epic #833).** The format, the validator, the storage and the [profiles](profiles.md) they refer to exist.
+**Nothing runs a workflow yet**: the engine and the finish tool come in the next milestones. A saved workflow is a checked document. The workflows exist only in
 a deployment with the capability `implementer` (the factory); there is no page, only the routes below. Every member of a workspace may
 use them (the permission `start_implementer_task`).
 
 The format is described by two JSON Schemas, [`contracts/workflow.v1.json`](../contracts/workflow.v1.json) and
 [`contracts/result-schema.v1.json`](../contracts/result-schema.v1.json). The validator
 ([`app/src/workflows/`](../app/src/workflows/README.md)) checks everything the schemas say and what they cannot: that every reference points
-at a step that ran before on every path, the types of the values that flow, the limits, and that the profiles and environments exist.
+at a step that ran before on every path, the types of the values that flow, the limits, and that the [profiles](profiles.md) and environments of the workspace exist.
 
 ## How an AI should use it: validate, fix, save
 
@@ -124,11 +124,11 @@ A run of an agent step gets a **profile** and an **environment**, separately: wh
 | Field | Needed | What |
 | --- | --- | --- |
 | `id` | yes | The name other steps use to refer to it: a letter, then letters, digits, `_` or `-` (64 at most). `trigger` and `previous` are taken. Unique in the whole document, also inside branches and loops. |
-| `profile` | yes | `name` (the newest version) or `name@version` (a pinned version). Until profiles are data (next milestone) the only profile is **`implementer`**, version 1: today's Implementer, which may push. The validator lists the names that exist (`profile_unknown`, `profile_version_unknown`). |
+| `profile` | yes | `name` (the newest version) or `name@version` (a pinned version) of a [profile](profiles.md) of the workspace that is not archived. No profile is built in: people create them through `/api/w/<slug>/profiles`, and the validator lists the names that exist (`profile_unknown`) and the versions (`profile_version_unknown`). The version the step runs decides what it yields: whether it may push (`branch`, `commits`) and its default result schema. |
 | `environment` | yes | The name of an environment of the workspace (the Environments page; case is ignored), as a literal: a [target](#one-repository-per-run-and-targets), so no reference (`target_from_untrusted_value`). |
 | `instruction` | yes | The task: a text, or `{"first": "...", "next": "..."}` in a loop body (`first` in round one, `next` from round two on, where `previous.*` exists). |
 | `session` | no | `"new"` (the default) or `{"continue": "<step id>"}`: go on in the session of an agent step that ran before on every path with **the same profile name and the same environment**, or of **this step itself** when it is a direct step of a loop body (round two continues round one; not inside an `if` of the body, where the step may not have run). |
-| `result` | no | What the agent's result looks like, a [result schema](#result-schemas). The agent gets a finish tool made from it. Without one the step yields the facts only (and, later, the default schema of its profile). |
+| `result` | no | What the agent's result looks like, a [result schema](#result-schemas). The agent gets a finish tool made from it. Without one the step yields the facts and the fields of the default result schema of its profile (if the profile version has one). |
 | `description` | no | A note. |
 
 **What an agent step yields**, for `{{<id>.<field>}}`: the fields of its `result`, and the **facts** the platform knows without the agent
@@ -253,8 +253,9 @@ Caps: a string is held to `maxLength` (10000 characters when not given, 100000 a
 
 ## The first workflow
 
-The plan's "Issue to PR", as version 1 states it (with the profile `implementer` for both steps, the only one that exists until profiles
-are data; the review step is told not to change anything. Replace `node` by the name of an environment of your workspace). It validates
+The plan's "Issue to PR", as version 1 states it (with the profile `implementer` for both steps: create it first, it is the example at the end of
+[`profiles.md`](profiles.md#todays-implementer-as-a-profile); the review step is told not to change anything. Replace `node` by the name of
+an environment of your workspace). It validates
 clean; this block is checked against [`contracts/examples/workflow/Workflow.json`](../contracts/examples/workflow/Workflow.json) by a test.
 
 ```json
