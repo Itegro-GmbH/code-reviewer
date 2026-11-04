@@ -239,7 +239,12 @@ class Provider:
 
 @contextmanager
 def provider(
-    script: Sequence[Turn], host: str, *, model: str = MODEL, judge: Any = strict_history
+    script: Sequence[Turn],
+    host: str,
+    *,
+    model: str = MODEL,
+    judge: Any = strict_history,
+    bearer: bool = False,
 ) -> Iterator[Provider]:
     """The scripted fake, listening on every address of the VM (the stock fake listens on loopback
     only; this is the spike's own subclass of its server, `fakes/` is not changed)."""
@@ -251,10 +256,13 @@ def provider(
 
     with mock.patch.object(upstream_module, "ThreadingHTTPServer", Everywhere):
         fake = ScriptedUpstream(
-            "messages", script, model, real_key=FAKE_KEY, judge=judge, also_models=[SMALL_MODEL]
+            "messages", script, model, real_key=FAKE_OAUTH if bearer else FAKE_KEY, judge=judge, also_models=[SMALL_MODEL]
         )
-    with fake:
-        yield Provider(fake, host)
+    # `bearer`: the fake takes the key as `authorization: Bearer <key>` (what a subscription login
+    # sends) instead of `x-api-key`. The key it expects is then the made-up token.
+    with mock.patch.dict(upstream_module.AUTH_HEADER, {"messages": "authorization"} if bearer else {}):
+        with fake:
+            yield Provider(fake, host)
 
 
 # -- the image of Claude Code ----------------------------------------------------------------------
@@ -693,7 +701,8 @@ def tool_results(run: Run) -> list[dict[str, Any]]:
     names: dict[str, str] = {}
     found: list[dict[str, Any]] = []
     for event in run.events:
-        message = cast("dict[str, Any]", event.get("message") or {})
+        message_value: Any = event.get("message")
+        message = cast("dict[str, Any]", message_value) if isinstance(message_value, dict) else {}
         content: Any = message.get("content")
         for block in cast("list[dict[str, Any]]", content) if isinstance(content, list) else []:
             if block.get("type") == "tool_use":
@@ -1068,6 +1077,416 @@ def s1_finish_tool(out: Path, gateway: str) -> None:
     )
 
 
+# -- S1 (d): --resume in a new container, the session on a volume ------------------------------------
+
+R1 = "SPIKE-R1-MARKER: read notes.txt and tell me what the first line says."
+A1 = "SPIKE-R1-ANSWER: the first line says hello."
+R2 = "SPIKE-R2-MARKER: now say which marker I gave you first."
+A2 = "SPIKE-R2-ANSWER: the first marker was R1."
+
+
+def tree(root: Path) -> dict[str, Any]:
+    """What a directory holds: the number of files, the bytes, the largest files."""
+    files = [p for p in root.rglob("*") if p.is_file()]
+    sizes = sorted(((p.stat().st_size, str(p.relative_to(root))) for p in files), reverse=True)
+    return {"files": len(files), "bytes": sum(s for s, _ in sizes), "largest": sizes[:6]}
+
+
+def mentions(root: Path, needle: str) -> list[str]:
+    """The files under `root` that hold `needle`."""
+    found = sh(f"grep -rl -F -- {needle!r} {root} || true").stdout.split()
+    return [str(Path(f).relative_to(root)) for f in found]
+
+
+def s1_resume(out: Path, gateway: str) -> None:
+    """(d) The first turn ends and its container is thrown away; a new container with the same
+    directory mounted continues the session with `--resume <id>`. The strict provider must see the
+    first turn's history in the second turn's first request."""
+    work = seed_work(out / "work-resume")
+    session = out / "session-volume"
+    shutil.rmtree(session, ignore_errors=True)
+    session.mkdir()
+    mounts = [f"{work}:/work", f"{session}:/root/.claude"]
+    with provider([read_notes(), Turn(text=A1)], gateway) as prov:
+        one = claude("resume-1", prov, out, prompt=R1, flags=BYPASS, mounts=mounts, env={"IS_SANDBOX": "1"})
+    sid = one.session_id
+    after_one = tree(session)
+    gone = docker("ps", "-a", "--filter", "name=spike-resume-1", "-q").stdout.strip() == ""
+    with provider([Turn(text=A2)], gateway) as prov:
+        two = claude(
+            "resume-2", prov, out, prompt=R2, flags=[*BYPASS, "--resume", sid], mounts=mounts, env={"IS_SANDBOX": "1"}
+        )
+        text = two.requests_text
+        first = cast("dict[str, Any]", json.loads(text)[0]) if prov.fake.records else {}
+    carries = {
+        "r1_marker": R1[:16] in text,
+        "r1_answer": A1 in text,
+        "tool_result_of_turn_one": "SPIKE-NOTES-LINE" in text,
+        "r2_marker": R2[:16] in text,
+    }
+    REPORT.say(
+        "s1_resume_continues_the_first_turns_history_in_a_new_container",
+        gone and two.returncode == 0 and all(carries.values()) and A2 in str(two.result.get("result")),
+        first_container_gone=gone,
+        carries=carries,
+        session_id_first=sid,
+        session_id_second=two.session_id,
+        same_session_id=sid == two.session_id,
+        messages_in_first_request=len(cast("list[Any]", first.get("messages") or [])),
+        seconds=[one.seconds, two.seconds],
+        returncode=two.returncode,
+        stderr=two.stderr[-300:],
+        session_volume_after_turn_one=after_one,
+        session_volume_after_turn_two=tree(session),
+        key_in_the_volume=mentions(session, FAKE_KEY[-24:]),
+    )
+    # The same, but what goes wrong: an empty volume, another working directory, the id we chose.
+    empty = out / "session-empty"
+    shutil.rmtree(empty, ignore_errors=True)
+    empty.mkdir()
+    with provider([Turn(text=A2)], gateway) as prov:
+        lost = claude(
+            "resume-empty", prov, out, prompt=R2, flags=[*BYPASS, "--resume", sid],
+            mounts=[f"{work}:/work", f"{empty}:/root/.claude"], env={"IS_SANDBOX": "1"},
+        )
+    REPORT.fact(
+        "s1_resume_with_an_empty_volume",
+        returncode=lost.returncode,
+        result=short(lost.result.get("result")),
+        is_error=lost.result.get("is_error"),
+        stderr=lost.stderr[-300:],
+        provider_calls=len(lost.calls),
+    )
+    other = out / "work-resume-other"
+    shutil.rmtree(other, ignore_errors=True)
+    shutil.copytree(work, other)
+    with provider([Turn(text=A2)], gateway) as prov:
+        moved = claude(
+            "resume-other-dir", prov, out, prompt=R2, flags=[*BYPASS, "--resume", sid],
+            mounts=[f"{other}:/other", f"{session}:/root/.claude"], workdir="/other", env={"IS_SANDBOX": "1"},
+        )
+    REPORT.fact(
+        "s1_resume_from_another_working_directory",
+        returncode=moved.returncode,
+        result=short(moved.result.get("result")),
+        is_error=moved.result.get("is_error"),
+        carries_turn_one=R1[:16] in moved.requests_text and A1 in moved.requests_text,
+        stderr=moved.stderr[-300:],
+        provider_calls=len(moved.calls),
+    )
+    chosen = "5f0c1b2e-7a4d-4c1e-9b3a-0d2e6f8a9c11"
+    config = out / "claude-config-volume"
+    shutil.rmtree(config, ignore_errors=True)
+    config.mkdir()
+    with provider([read_notes(), Turn(text=A1)], gateway) as prov:
+        c1 = claude(
+            "resume-config-dir-1", prov, out, prompt=R1, flags=[*BYPASS, "--session-id", chosen],
+            mounts=[f"{work}:/work", f"{config}:/session"],
+            env={"IS_SANDBOX": "1", "CLAUDE_CONFIG_DIR": "/session"},
+        )
+    with provider([Turn(text=A2)], gateway) as prov:
+        c2 = claude(
+            "resume-config-dir-2", prov, out, prompt=R2, flags=[*BYPASS, "--resume", chosen],
+            mounts=[f"{work}:/work", f"{config}:/session"],
+            env={"IS_SANDBOX": "1", "CLAUDE_CONFIG_DIR": "/session"},
+        )
+        carried = R1[:16] in c2.requests_text and A1 in c2.requests_text
+    REPORT.say(
+        "s1_resume_with_a_chosen_session_id_and_one_config_directory",
+        c1.session_id == chosen and c2.returncode == 0 and carried,
+        session_id_of_turn_one=c1.session_id,
+        session_id_of_turn_two=c2.session_id,
+        carried=carried,
+        volume=tree(config),
+    )
+
+
+# -- S1 (e): the permission mode of an unattended run -------------------------------------------------
+
+
+def script_permissions() -> list[Turn]:
+    """A read, a command that writes in the working directory, an edit, a write outside it, a
+    command that writes outside it."""
+    return [
+        read_notes(),
+        Turn(tool="Bash", args={"command": "echo allowed > /work/bash-out.txt", "description": "write in cwd"}),
+        Turn(tool="Edit", args={"file_path": "/work/notes.txt", "old_string": "hello", "new_string": "HELLO"}),
+        Turn(tool="Write", args={"file_path": "/tmp/outside.txt", "content": "outside\n"}),
+        Turn(tool="Bash", args={"command": "touch /etc/spike-outside && echo SPIKE-OUTSIDE-OK", "description": "touch outside"}),
+        Turn(text="SPIKE-PERMISSIONS-DONE"),
+    ]
+
+
+def s1_permissions(out: Path, gateway: str) -> None:
+    """(e) What each way of running unattended allows. The script asks for five things; the table
+    says which were done, which were refused and what the refusal said."""
+    variants: list[tuple[str, list[str], dict[str, str], str | None]] = [
+        ("default", [], {}, None),
+        ("acceptEdits", ["--permission-mode", "acceptEdits"], {}, None),
+        ("allowedTools", ["--allowedTools", "Read,Edit,Write,Bash"], {}, None),
+        ("dontAsk", ["--permission-mode", "dontAsk"], {}, None),
+        ("bypassPermissions-root", ["--permission-mode", "bypassPermissions"], {}, None),
+        ("dangerously-skip-root", ["--dangerously-skip-permissions"], {}, None),
+        ("dangerously-skip-root-IS_SANDBOX", ["--dangerously-skip-permissions"], {"IS_SANDBOX": "1"}, None),
+        ("bypassPermissions-root-IS_SANDBOX", BYPASS, {"IS_SANDBOX": "1"}, None),
+        (
+            "settings-defaultMode-root",
+            ["--settings", json.dumps({"permissions": {"defaultMode": "bypassPermissions"}})],
+            {},
+            None,
+        ),
+        ("dangerously-skip-user-1000", ["--dangerously-skip-permissions"], {"HOME": "/home/node"}, "1000:1000"),
+    ]
+    table: dict[str, Any] = {}
+    for name, flags, env, user in variants:
+        work = seed_work(out / f"work-perm-{name}")
+        with provider(script_permissions(), gateway) as prov:
+            run = claude(f"perm-{name}", prov, out, prompt=ONE, flags=flags, mounts=[f"{work}:/work"], env=env, user=user, timeout=90)
+        init = run.of_type("system", "init")
+        results = tool_results(run)
+        table[name] = {
+            "rc": run.returncode,
+            "mode": init[0].get("permissionMode") if init else None,
+            "tools_run": [("ok" if not r["is_error"] else "refused") for r in results],
+            "bash_out_in_cwd": (work / "bash-out.txt").exists(),
+            "notes_edited": "HELLO" in (work / "notes.txt").read_text(),
+            "denials": len(cast("list[Any]", run.result.get("permission_denials") or [])),
+            "refusal_text": next((r["text"] for r in results if r["is_error"]), None),
+            "stderr": short(run.stderr.strip(), 220) or None,
+            "stdout_other": run.stdout_other[:2],
+        }
+        REPORT.fact(f"s1_permissions_{name}", **table[name])
+    ran_all = [n for n, v in table.items() if v["tools_run"] == ["ok"] * 5]
+    REPORT.say("s1_permissions_some_mode_runs_everything_unattended", bool(ran_all), modes_that_run_all_five_calls=ran_all)
+    helps = docker("run", "--rm", CLAUDE_IMAGE, "claude", "--help").stdout
+    (out / "claude-help.txt").write_text(helps)
+    wanted_flags = [
+        "--permission-mode", "--dangerously-skip-permissions", "--allowedTools", "--disallowedTools", "--mcp-config",
+        "--strict-mcp-config", "--resume", "--session-id", "--fork-session", "--input-format", "--include-partial-messages",
+        "--max-turns", "--max-budget-usd", "--append-system-prompt", "--settings", "--setting-sources", "--add-dir", "--bare",
+        "--model", "--fallback-model", "--no-session-persistence", "--verbose", "--output-format",
+    ]
+    REPORT.fact("s1_cli_flags", present={f: f in helps for f in wanted_flags})
+
+
+# -- S1 (f) and (g): the login, and the cost it reports ------------------------------------------------
+
+
+def credentials_file(directory: Path, *, expires_in_ms: int) -> None:
+    """A `.credentials.json` as `claude` writes it after a login (made-up values)."""
+    directory.mkdir(parents=True, exist_ok=True)
+    expires = int(time.time() * 1000) + expires_in_ms
+    (directory / ".credentials.json").write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": FAKE_OAUTH,
+                    "refreshToken": FAKE_REFRESH,
+                    "expiresAt": expires,
+                    "scopes": ["user:inference", "user:profile"],
+                    "subscriptionType": "max",
+                }
+            }
+        )
+    )
+    (directory / ".credentials.json").chmod(0o600)
+
+
+def s1_auth(out: Path, gateway: str) -> None:
+    """(f) Which variables and files carry the login, seen in what the provider receives. Made-up
+    values only; the provider accepts the made-up key (or, for a subscription login, the made-up
+    token as a bearer) so that the run goes on to its end and (g) shows the figure for it."""
+    one_turn = [Turn(text="SPIKE-AUTH-OK")]
+    day = 24 * 3600 * 1000
+    variants: list[dict[str, Any]] = [
+        {"name": "api-key", "api_key": FAKE_KEY, "env": {}, "bearer": False},
+        {"name": "nothing", "api_key": None, "env": {}, "bearer": False},
+        {"name": "oauth-token-env", "api_key": None, "env": {"CLAUDE_CODE_OAUTH_TOKEN": FAKE_OAUTH}, "bearer": True},
+        {"name": "auth-token-env", "api_key": None, "env": {"ANTHROPIC_AUTH_TOKEN": FAKE_OAUTH}, "bearer": True},
+        {
+            "name": "api-key-and-oauth-token",
+            "api_key": FAKE_KEY,
+            "env": {"CLAUDE_CODE_OAUTH_TOKEN": FAKE_OAUTH},
+            "bearer": False,
+        },
+        {"name": "credentials-file", "api_key": None, "env": {}, "bearer": True, "file": 365 * day},
+        {"name": "credentials-file-expired", "api_key": None, "env": {}, "bearer": True, "file": -day, "timeout": 100},
+        {
+            "name": "api-key-helper",
+            "api_key": None,
+            "env": {},
+            "bearer": False,
+            "flags": ["--settings", json.dumps({"apiKeyHelper": f"echo {FAKE_KEY}"})],
+        },
+    ]
+    for variant in variants:
+        name = str(variant["name"])
+        work = seed_work(out / f"work-auth-{name}")
+        home = out / f"home-auth-{name}"
+        shutil.rmtree(home, ignore_errors=True)
+        home.mkdir()
+        if "file" in variant:
+            credentials_file(home, expires_in_ms=int(variant["file"]))
+        with provider(one_turn, gateway, bearer=bool(variant["bearer"])) as prov:
+            run = claude(
+                f"auth-{name}", prov, out, prompt="say ok", flags=[*BYPASS, *variant.get("flags", [])],
+                mounts=[f"{work}:/work", f"{home}:/root/.claude"], env={"IS_SANDBOX": "1", **variant["env"]},
+                api_key=variant["api_key"], timeout=float(variant.get("timeout", 60)),
+            )
+            seen = [
+                {
+                    "x_api_key": "x-api-key" in r.headers,
+                    "authorization": r.headers.get("authorization", "")[:14] or None,
+                    "beta_has_oauth": "oauth" in r.headers.get("anthropic-beta", ""),
+                    "status_hint": r.headers.get("x-app"),
+                }
+                for r in prov.fake.records
+            ]
+        init = run.of_type("system", "init")
+        REPORT.fact(
+            f"s1_auth_{name}",
+            rc=run.returncode,
+            seconds=run.seconds,
+            api_key_source=init[0].get("apiKeySource") if init else None,
+            provider_requests=seen[:2],
+            result_ok=run.result.get("subtype"),
+            result_is_error=run.result.get("is_error"),
+            result_text=short(run.result.get("result"), 140),
+            total_cost_usd=run.result.get("total_cost_usd"),
+            cost_basis={
+                k: v.get("costBasis") for k, v in cast("dict[str, dict[str, Any]]", run.result.get("modelUsage") or {}).items()
+            },
+            stderr=short(run.stderr.strip(), 300) or None,
+            files_in_the_config_dir=sorted(str(p.relative_to(home)) for p in home.rglob("*") if p.is_file())[:12],
+            token_stored_in_files=mentions(home, FAKE_OAUTH[-20:]) if "file" not in variant else "n/a (the file is the input)",
+        )
+    # What the CLI says about the login without a network (a made-up token, a made-up key).
+    for label, env in (("oauth-token", {"CLAUDE_CODE_OAUTH_TOKEN": FAKE_OAUTH}), ("api-key", {"ANTHROPIC_API_KEY": FAKE_KEY})):
+        status = docker(
+            "run", "--rm", "--network", NETWORK, *[x for k, v in env.items() for x in ("-e", f"{k}={v}")],
+            CLAUDE_IMAGE, "claude", "auth", "status", timeout=60,
+        )
+        REPORT.fact(f"s1_auth_status_with_{label}", rc=status.returncode, text=short((status.stdout + status.stderr).strip(), 400))
+    # What the CLI itself offers around the login.
+    for argv in (["claude", "auth", "--help"], ["claude", "setup-token", "--help"]):
+        helped = docker("run", "--rm", CLAUDE_IMAGE, *argv, timeout=60)
+        REPORT.fact(f"s1_cli_{'_'.join(argv[1:-1])}", rc=helped.returncode, text=short((helped.stdout + helped.stderr).strip(), 600))
+
+
+def s1_cost(out: Path, gateway: str) -> None:
+    """(g) What `result` reports for a model nobody priced, and what `--max-budget-usd` does."""
+    work = seed_work(out / "work-cost")
+    with provider(script_events(), gateway, model=UNKNOWN_MODEL) as prov:
+        run = claude("cost-unknown-model", prov, out, prompt=ONE, flags=BYPASS, mounts=[f"{work}:/work"],
+                     env={"IS_SANDBOX": "1"}, model=UNKNOWN_MODEL)
+    REPORT.fact(
+        "s1_cost_of_a_model_without_a_price",
+        rc=run.returncode,
+        total_cost_usd=run.result.get("total_cost_usd"),
+        model_usage=short(run.result.get("modelUsage")),
+        stderr=short(run.stderr.strip(), 200) or None,
+    )
+    work = seed_work(out / "work-budget")
+    with provider(script_events(), gateway) as prov:
+        run = claude("cost-budget", prov, out, prompt=ONE, flags=[*BYPASS, "--max-budget-usd", "0.01"],
+                     mounts=[f"{work}:/work"], env={"IS_SANDBOX": "1"})
+    REPORT.fact(
+        "s1_max_budget_usd_stops_the_turn",
+        rc=run.returncode,
+        subtype=run.result.get("subtype"),
+        is_error=run.result.get("is_error"),
+        total_cost_usd=run.result.get("total_cost_usd"),
+        provider_calls=len(run.calls),
+        terminal_reason=run.result.get("terminal_reason"),
+        errors=short(run.result.get("errors")),
+    )
+
+
+# -- S1: follow-up messages in one process, and what a run costs the container ---------------------------
+
+
+def stream_input(out: Path, gateway: str) -> None:
+    """The hosted turn sends its extra message to the same session (a tree left dirty): with
+    `--input-format stream-json` one `claude` process takes a second user message after the first
+    `result`, and ends when its input does."""
+    work = seed_work(out / "work-stream-input")
+    with provider([read_notes(), Turn(text=A1), Turn(text=A2)], gateway) as prov:
+        container = "spike-stream-input"
+        docker("rm", "-f", container)
+        argv = [
+            "docker", "run", "--rm", "-i", "--name", container, "--network", NETWORK, "-w", "/work",
+            "-e", f"ANTHROPIC_BASE_URL={prov.url}", "-e", f"ANTHROPIC_API_KEY={FAKE_KEY}", "-e", "IS_SANDBOX=1",
+            "-e", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", "-v", f"{work}:/work", CLAUDE_IMAGE,
+            "claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+            "--model", MODEL, *BYPASS,
+        ]
+        started = time.monotonic()
+        process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        assert process.stdin is not None and process.stdout is not None
+        results: list[dict[str, Any]] = []
+        stamps: list[float] = []
+
+        def send(text: str) -> None:
+            assert process.stdin is not None
+            message = {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": text}]}}
+            process.stdin.write(json.dumps(message) + "\n")
+            process.stdin.flush()
+
+        send(R1)
+        for line in process.stdout:
+            try:
+                event = cast("dict[str, Any]", json.loads(line))
+            except ValueError:
+                continue
+            if event.get("type") == "result":
+                results.append(event)
+                stamps.append(round(time.monotonic() - started, 2))
+                if len(results) == 1:
+                    send(R2)
+                else:
+                    process.stdin.close()
+        try:
+            code = process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            code = -9
+        text = prov.requests_text()
+    REPORT.say(
+        "s1_stream_json_input_takes_a_second_user_message_in_the_same_process",
+        len(results) == 2 and code == 0 and R1[:16] in text and A1 in text,
+        results=[short(r.get("result")) for r in results],
+        session_ids=[r.get("session_id") for r in results],
+        total_cost_usd=[r.get("total_cost_usd") for r in results],
+        seconds_at_results=stamps,
+        returncode=code,
+        provider_requests=len(prov.fake.records),
+    )
+
+
+def resources(out: Path, gateway: str) -> None:
+    """What a `claude -p` run costs the container: the peak memory of its cgroup and the time."""
+    work = seed_work(out / "work-resources")
+    with provider(script_events(), gateway) as prov:
+        container = "spike-resources"
+        docker("rm", "-f", container)
+        started = time.monotonic()
+        done = docker(
+            "run", "--rm", "--name", container, "--network", NETWORK, "-w", "/work",
+            "-e", f"ANTHROPIC_BASE_URL={prov.url}", "-e", f"ANTHROPIC_API_KEY={FAKE_KEY}", "-e", "IS_SANDBOX=1",
+            "-e", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", "-v", f"{work}:/work", CLAUDE_IMAGE,
+            "sh", "-c",
+            f"claude -p {ONE!r} --model {MODEL} --permission-mode bypassPermissions >/dev/null 2>&1; "
+            "cat /sys/fs/cgroup/memory.peak",
+        )
+    peak = int(done.stdout.strip().split()[-1]) if done.stdout.strip().split() else 0
+    REPORT.fact(
+        "s1_resources_of_one_run",
+        container_memory_peak_mib=round(peak / 1048576, 1),
+        wall_seconds=round(time.monotonic() - started, 2),
+        node=docker("run", "--rm", CLAUDE_IMAGE, "node", "--version").stdout.strip(),
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("what", choices=["s1", "s2", "all", "build"])
@@ -1092,6 +1511,18 @@ def main() -> int:
             s1_events(out, gateway)
         if wanted("finish", "s1"):
             s1_finish_tool(out, gateway)
+        if wanted("resume", "s1"):
+            s1_resume(out, gateway)
+        if wanted("permissions", "s1"):
+            s1_permissions(out, gateway)
+        if wanted("auth", "s1"):
+            s1_auth(out, gateway)
+        if wanted("cost", "s1"):
+            s1_cost(out, gateway)
+        if wanted("stream-input", "s1"):
+            stream_input(out, gateway)
+        if wanted("resources", "s1"):
+            resources(out, gateway)
     finally:
         remove_leftovers()
     _ = (Callable, threading, BaseHTTPRequestHandler, ThreadingHTTPServer, field)
