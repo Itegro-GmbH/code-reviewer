@@ -27,6 +27,7 @@ Nothing steers the agent: the cost limit (the door refuses the next call) and th
 only brakes.
 """
 
+import contextlib
 import logging
 import threading
 import time
@@ -58,6 +59,7 @@ from code_reviewer_runner.job import (
     ImplementerInput,
     JobError,
 )
+from code_reviewer_runner.redaction import Redactor
 from code_reviewer_runner.result import ErrorCode, Usage
 
 from .agent import AgentTurn, EngineRuntime, ImplementerAgent
@@ -416,6 +418,12 @@ class ImplementerSession:
             if model is not None:
                 # No call can come any more: the door says its last word, the cost is final.
                 model.stop()
+            if agent is not None:
+                # What the live view lost, after both doors are closed: best effort, so a fault in
+                # it never replaces the turn's outcome.
+                with contextlib.suppress(Exception):
+                    for note in agent.step_notes():
+                        self._note(note)
         try:
             self._finish()
         finally:
@@ -590,6 +598,7 @@ class ImplementerSession:
             model=entry.model_id,
             provider_id=entry.provider_id,
             transport=self.seams.transport,
+            redactor=Redactor(self.secrets()),
             **options,
         )
 

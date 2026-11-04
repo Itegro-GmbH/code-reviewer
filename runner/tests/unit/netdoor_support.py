@@ -8,6 +8,7 @@ and the connection is made to a loopback server standing in for it, so the test 
 the door asked to connect to and how often it looked a name up.
 """
 
+import contextlib
 import socket
 import threading
 from collections.abc import Callable
@@ -124,7 +125,10 @@ def talk(
             send_more(client)
         # The client is done sending: the door passes the end on, so an origin that waits for more
         # (a tunnel with nothing in it) answers and closes.
-        client.shutdown(socket.SHUT_WR)
+        # A door that already answered and closed (a head over its limit) may have reset the
+        # connection; its answer is still in the receive buffer.
+        with contextlib.suppress(OSError):
+            client.shutdown(socket.SHUT_WR)
         chunks: list[bytes] = []
         while True:
             try:

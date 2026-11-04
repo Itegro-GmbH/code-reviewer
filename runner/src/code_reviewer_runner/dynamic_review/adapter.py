@@ -956,7 +956,7 @@ class DynamicEngine:
         dynamic = self.job.dynamic
         assert dynamic is not None  # narrowed in __init__
         audit = ToolPartAudit(self.ledger, session_id, export_root=self.directory)
-        events = EventReader(client.open_events, audit, self.ledger)
+        events = EventReader(client.open_events, [audit], self.ledger)
         events.start(self._events_connect_seconds)
         try:
             final = PlainFinalization(
