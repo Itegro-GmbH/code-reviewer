@@ -33,6 +33,9 @@ async function rowsOfEveryTable(
 ): Promise<Record<string, unknown[]>> {
   const result: Record<string, unknown[]> = {};
   for (const table of await db.introspection.getTables()) {
+    // Tables of later migrations (#833) are empty and are no change to an existing row.
+    if (table.name === "workflows" || table.name === "workflow_versions")
+      continue;
     const { rows } =
       await sql<unknown>`select * from ${sql.table(table.name)} order by 1`.execute(
         db,

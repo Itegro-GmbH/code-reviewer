@@ -36,6 +36,7 @@ import { createBillingProfilesRepository } from "./billing-profiles-repository.t
 import { createBillingNotificationsRepository } from "./billing-notifications-repository.ts";
 import { createBillingWorkspaceSettingsRepository } from "./billing-workspace-settings-repository.ts";
 import { createImplementerEnvironmentsRepository } from "./implementer-environments-repository.ts";
+import { createWorkflowsRepository } from "./workflows-repository.ts";
 import { createImplementerRepository } from "./implementer-repository.ts";
 
 const SHA = "b".repeat(40);
@@ -66,6 +67,7 @@ function reposOf(db: Kysely<Database>, workspaceId: string) {
     notifications: createBillingNotificationsRepository(db, workspaceId),
     implementer: createImplementerRepository(db, workspaceId),
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
+    workflows: createWorkflowsRepository(db, workspaceId),
     erasure: createWorkspaceErasureRepository(db, workspaceId),
   };
 }
@@ -389,8 +391,29 @@ async function seed(
     50,
   );
   if (!created.ok) throw new Error("seeding failed");
+  // A workflow with a second version (#833) in every workspace, under the same name.
+  const workflow = await repos.workflows.create(
+    {
+      name: "Issue to PR",
+      document: `{"tag":"${tag}"}`,
+      createdBy: `user-${tag}`,
+    },
+    100,
+  );
+  if (!workflow.ok) throw new Error("seeding failed");
+  const secondVersion = await repos.workflows.saveVersion(
+    workflow.workflow.id,
+    {
+      name: "Issue to PR",
+      document: `{"tag":"${tag}","v":2}`,
+      createdBy: `user-${tag}`,
+    },
+    200,
+  );
+  if (!secondVersion.ok) throw new Error("seeding failed");
   return {
     environment: created.environment,
+    workflow: secondVersion.workflow,
     implementer: started,
     topUpIntentId: topUpIntent.id,
     unpagedIntentId: unpagedIntent.id,
@@ -552,6 +575,19 @@ async function rowsOf(db: Kysely<Database>, workspaceId: string) {
       .selectAll()
       .where("workspace_id", "=", workspaceId)
       .orderBy("id")
+      .execute(),
+    workflows: await db
+      .selectFrom("workflows")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("id")
+      .execute(),
+    workflowVersions: await db
+      .selectFrom("workflow_versions")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("workflow_id")
+      .orderBy("version")
       .execute(),
   };
 }
@@ -1774,6 +1810,47 @@ const CASES: Case[] = [
     name: "environments.remove",
     run: (a, b) => a.environments.remove(b.environment.id),
     expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  // workflows (#833-M1-T160): B's workflows and versions are not A's to read or save over
+  {
+    name: "workflows.list",
+    run: (a) => a.workflows.list(),
+    expectAnswer: (answer, a) => expect(answer).toEqual([a.workflow]),
+  },
+  {
+    name: "workflows.get",
+    run: (a, b) => a.workflows.get(b.workflow.id),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "workflows.getVersion",
+    run: (a, b) => a.workflows.getVersion(b.workflow.id, 1),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "workflows.listVersions",
+    run: (a, b) => a.workflows.listVersions(b.workflow.id),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    name: "workflows.create",
+    run: (a) =>
+      a.workflows.create(
+        { name: "Another", document: "{}", createdBy: "user-a" },
+        100,
+      ),
+    expectAnswer: (answer) => expect(answer).toMatchObject({ ok: true }),
+  },
+  {
+    name: "workflows.saveVersion",
+    run: (a, b) =>
+      a.workflows.saveVersion(
+        b.workflow.id,
+        { name: "hijacked", document: "{}", createdBy: "user-a" },
+        200,
+      ),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ ok: false, reason: "not_found" }),
   },
   // runs
   {
