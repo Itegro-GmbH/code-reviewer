@@ -30,7 +30,8 @@ this is a decision for internal use: before outside users arrive, move it to Adm
 
 The models are those that serve Dynamic Review: on the operator's key a released catalog entry of that kind, on the workspace's
 own key a model of a provider that the models catalog lists and for which a key is saved. The agent is always OpenCode on the
-native path; the two registry providers (Anthropic, OpenRouter) are not offered.
+native path; the two registry providers (Anthropic, OpenRouter) are offered like any other provider of the catalog, and their
+keys go through the model door (#807).
 
 ## Session and Turn
 
@@ -70,7 +71,8 @@ native path; the two registry providers (Anthropic, OpenRouter) are not offered.
 6. **Work.** The runner starts the **model door**, a container of its own that holds the model key, and the **agent's container**,
    and OpenCode then runs there as root in `/work/repo` with a configuration the runner wrote. It reads, edits, writes,
    searches and runs shell commands, and starts containers in its own Docker; it cannot fetch web pages, search the web,
-   start sub-agents or ask a question, and it has no network but the door.
+   start sub-agents or ask a question, and it has no network but the model door and, when its environment's rule is not `off`, the
+   network door (section "The network door (step 7)").
    The task is the user message. When it ends its turn with uncommitted changes it gets one more message to commit them; what
    is still uncommitted afterwards is committed by the system ("Implementer: uncommitted changes of the turn") on the branch
    the agent is on. Work the agent committed on a detached HEAD, on no branch, is saved first, whether the tree is dirty or
@@ -407,7 +409,7 @@ Stop: the kill of the agent's container took 0.4 to 0.5 s idle and **3.5 s** wit
 the agent in a turn: the door's relay at `10.213.77.2` reached; the model network's gateway, the VM's docker0 gateway, the VM's control port `23456`, `1.1.1.1:443`, a name lookup (ping and `getent`) all blocked, and the agent's only routes are the model network and its own inner `docker0`;
 a plain container on the VM with the same tools reaches the host listener, `1.1.1.1:443` and resolves `example.com`. The reader attack and the full disk are under "The agent's container" and "The disk".
 
-## Step records (the live view, in progress)
+## Step records (the live view)
 
 While a turn runs, Control converts the events of the engine's stream into **step records**, one per part: what the agent
 thinks (`reasoning`), what it answers (`text`), each tool call (`tool`) and the tokens and cost of each model call (`step`)
@@ -637,7 +639,7 @@ The 4 vCPU size (8.4 GB, 6,144 MB for the agent; since fix round 3 6,000) ran th
 
 **Third fix round, 2026-11-03** (the review of the memory guard; snapshot built from the branch, the final code of the check and of the runner bind-mounted over the Worker image's): the script grew by five checks (the OOM score in the agent and in the Setup
 container and as the VM sees it, a legitimate heavy build, one row for the limit of the score) and the memory rows measure more than before. **78 of 78 hold at 2 vCPU (4 GB, 2,048 MB for the agent) and at 8 vCPU (16 GB, the largest size,
-13,537 MB for the agent; it was not measured before).** The agent memory per size is now 2,048, 6,000, 9,768 and 13,537 MB (2, 4, 6 and 8 vCPU) because the guard's floor is taken off it (section "The agent's container", row "Memory"). Not run in this round: 4 and 6 vCPU.
+13,537 MB for the agent; it was not measured before).** The agent memory per size was then 2,048, 6,000, 9,768 and 13,537 MB (2, 4, 6 and 8 vCPU) because the guard's floor is taken off it; since the network door it is 1,952, 5,904, 9,672 and 13,441 MB (section "The agent's container", row "Memory"). Not run in this round: 4 and 6 vCPU.
 
 | Area | What is proven |
 |---|---|
@@ -788,7 +790,8 @@ agent can still fill the disk, and a build that needs more room fails: it is not
 
 ## Network in the agent phase
 
-The agent has the model door and nothing else. The agent's container is on an internal Docker network with no exit
+The agent has the model door and nothing else, and the network door when its environment's rule is `list` or `open` (the next
+section). The agent's container is on an internal Docker network with no exit
 (`gateway_mode_ipv4=isolated`), so there is no route to the internet, to the VM or its services, or to a neighbour, and no name
 server; the containers it starts through its own Docker are behind it and reach the door only. The firewall rules of the Control
 container that used to confine the agent's user, and the allowlist proxy of package registries (`registry.npmjs.org`,
@@ -1218,7 +1221,7 @@ that were pushed first. A Worker that is stopped while it works (`runner_shutdow
 ## Out of scope
 
 - **The repository's own setup scripts and registries for the agent.** The repository's own install and set-up steps are not run. What a
-  task needs is installed by the environment's script, which has the internet; the agent has none until the network door (step 7 of the plan).
+  task needs is installed by the environment's script, which has the internet; the agent has none unless its environment's network rule is `list` or `open` (section "The network door (step 7)").
   Private registries do not work in the script either: it has no secrets, and a credential for one would be a new step.
 - **Secrets for tests.** No credential of any kind reaches the agent: tests that need an API key or a database URL cannot run
   against a real service (a database in the agent's own Docker is fine).
@@ -1273,7 +1276,7 @@ These are decisions of the owner, not oversights.
 
 ## Open points
 
-Open issues at the time of this change (2026-11-02):
+Open issues at the time of this change (2026-11-04):
 
 - **#745**, the epic of the first vertical slice, and **#768**, the operator guide and the live smoke test: the smoke test
   ([`implementer-smoke-test.md`](implementer-smoke-test.md)) is the first run of the whole path on the platform and has not
