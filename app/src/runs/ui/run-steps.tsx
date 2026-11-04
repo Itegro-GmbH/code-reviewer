@@ -32,7 +32,7 @@ import {
   earlierText,
   stepNumberText,
   STEPS_COPY,
-  TOOL_STATUS_TEXT,
+  toolStatusText,
 } from "./steps-messages.ts";
 import { costText } from "./usage-facts.tsx";
 import { useRunSteps } from "./use-run-steps.ts";
@@ -85,13 +85,17 @@ function ToolLine({ step }: { step: StepView }) {
       className="flex flex-col gap-1 text-sm"
     >
       <p className="flex flex-wrap items-baseline gap-x-2 break-words">
-        <span className="font-mono font-semibold">{step.tool}</span>
-        {title.body === "" ? null : <span>{title.body}</span>}
+        <span className="min-w-0 font-mono font-semibold break-all">
+          {step.tool}
+        </span>
+        {title.body === "" ? null : (
+          <span className="min-w-0 break-all">{title.body}</span>
+        )}
         <span
           data-slot="run-step-status"
           className={failed ? "text-danger" : "text-muted-foreground"}
         >
-          {TOOL_STATUS_TEXT[status] ?? status}
+          {toolStatusText(status)}
         </span>
         {took === null ? null : (
           <span className="text-muted-foreground">{took}</span>
@@ -151,7 +155,8 @@ function groupFacts(group: StepGroup, showCost: boolean): string[] {
     facts.push(`${COUNT.format(tokens.output)} out`);
     if (tokens.reasoning > 0)
       facts.push(`${COUNT.format(tokens.reasoning)} reasoning`);
-    if (tokens.cacheRead > 0)
+    // The cache counts say which provider answered: shown only where the cost is.
+    if (showCost && tokens.cacheRead > 0)
       facts.push(`${COUNT.format(tokens.cacheRead)} cached`);
   }
   const took = groupDurationMs(group);
@@ -305,7 +310,11 @@ export function RunSteps({
                     type="button"
                     variant="ghost"
                     size="xs"
-                    onClick={() => setCap((before) => before + RENDER_PARTS)}
+                    onClick={() => {
+                      // The person reads back: the view keeps its place instead of jumping to the end at the next step.
+                      setFollow(false);
+                      setCap((before) => before + RENDER_PARTS);
+                    }}
                   >
                     {earlierText(hidden)}
                   </Button>

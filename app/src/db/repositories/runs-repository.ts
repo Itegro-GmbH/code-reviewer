@@ -73,10 +73,11 @@ export type RunsRepository = {
   /** One run by its id; undefined for an id nobody has. */
   get(id: string): Promise<StoredRun | undefined>;
   /**
-   * Whether the id is a run of the Implementer of this workspace (#745, live view). One indexed look, for the poll of the steps
-   * of a run, which must not pay for everything `get` reads.
+   * Whether the id is a run of the Implementer of this workspace, and whether it ran on the operator's key (#745, live view):
+   * undefined for any other id. Two indexed reads, for the poll of the steps of a run, which must not pay for everything `get`
+   * reads. `onManagedKey` is the one rule of `get`.
    */
-  isImplementerRun(id: string): Promise<boolean>;
+  implementerRun(id: string): Promise<{ onManagedKey: boolean } | undefined>;
   /**
    * The newest job of each of the repositories (by creation time); repositories without one are left
    * out. One lookup per repository, each answered by the index `jobs_repository_recent`.
@@ -90,6 +91,22 @@ export type RunsRepository = {
     >[]
   >;
 };
+
+/**
+ * Whether a run ran on the operator's key: its usage record says so, or names a catalog entry or a tier. The one rule for every
+ * read of a run (`get`, `implementerRun`): what a member may see of a run on the operator's key is hidden by it.
+ */
+function isManagedKey(usage: {
+  keyMode: string | null;
+  catalogEntryId: string | null;
+  modelTier: string | null;
+}): boolean {
+  return (
+    usage.keyMode === "managed" ||
+    usage.catalogEntryId !== null ||
+    usage.modelTier !== null
+  );
+}
 
 export function createRunsRepository(
   db: Kysely<Database>,
@@ -248,8 +265,11 @@ export function createRunsRepository(
       return {
         job: toJob(job),
         project,
-        onManagedKey:
-          keyMode === "managed" || entryId !== null || modelTier !== null,
+        onManagedKey: isManagedKey({
+          keyMode,
+          catalogEntryId: entryId,
+          modelTier,
+        }),
         reviewComment,
         ...(branch === null || baseBranch === null || instruction === null
           ? {}
@@ -273,15 +293,31 @@ export function createRunsRepository(
       };
     },
 
-    async isImplementerRun(id) {
+    async implementerRun(id) {
       const row = await db
         .selectFrom("jobs")
-        .select("id")
-        .where("id", "=", id)
-        .where("workspace_id", "=", workspaceId)
-        .where("review_kind", "=", "implementer")
+        .leftJoin("usage_records", (join) =>
+          join
+            .onRef("usage_records.job_id", "=", "jobs.id")
+            .on("usage_records.workspace_id", "=", workspaceId),
+        )
+        .select([
+          "usage_records.key_mode as key_mode",
+          "usage_records.catalog_entry_id as catalog_entry_id",
+          "usage_records.model_tier as model_tier",
+        ])
+        .where("jobs.id", "=", id)
+        .where("jobs.workspace_id", "=", workspaceId)
+        .where("jobs.review_kind", "=", "implementer")
         .executeTakeFirst();
-      return row !== undefined;
+      if (row === undefined) return undefined;
+      return {
+        onManagedKey: isManagedKey({
+          keyMode: row.key_mode,
+          catalogEntryId: row.catalog_entry_id,
+          modelTier: row.model_tier,
+        }),
+      };
     },
 
     async latestPerRepository(repositoryIds) {

@@ -16,8 +16,11 @@ import type { StepView } from "../steps-view.ts";
 import type { RunsApi } from "./api.ts";
 import { mergeSteps } from "./steps-merge.ts";
 
-/** The most pages one pull takes: a turn at the caps is 80 pages of 200, so the rest comes with the next tick. */
-const MAX_PAGES_PER_PULL = 30;
+/**
+ * A guard against a loop that never ends, not a limit of the view: a pull goes on until nothing more is waiting, because a settled
+ * run has no next tick to fetch the rest. A turn at the caps (16,000 parts) is 80 pages of 200, so this is 2.5 times that.
+ */
+const MAX_PAGES_PER_PULL = 200;
 
 export type RunSteps = {
   steps: StepView[];
@@ -84,10 +87,12 @@ export function useRunSteps({
             break;
           }
           setFailure(null);
-          cursor.current = Math.max(cursor.current, result.data.cursor);
+          const before = cursor.current;
+          cursor.current = Math.max(before, result.data.cursor);
           if (result.data.steps.length > 0)
-            setSteps((before) => mergeSteps(before, result.data.steps));
-          if (!result.data.hasMore) break;
+            setSteps((shown) => mergeSteps(shown, result.data.steps));
+          // A page that says more is waiting and does not move the cursor would be asked again for ever.
+          if (!result.data.hasMore || cursor.current === before) break;
         }
         if (mounted.current) setLoaded(true);
       } while (askAgain.current && !stopped.current && mounted.current);

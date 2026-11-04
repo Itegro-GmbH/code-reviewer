@@ -6,6 +6,7 @@
 import "server-only";
 import { isBillingOn } from "../billing/enabled.ts";
 import { createRunPriceSource } from "../billing/run-prices.ts";
+import { createCatalogRepository } from "../db/repositories/catalog-repository.ts";
 import { createImplementerStepsRepository } from "../db/repositories/implementer-steps-repository.ts";
 import { createRunsRepository } from "../db/repositories/runs-repository.ts";
 import { getDatabase } from "../db/startup.ts";
@@ -46,6 +47,8 @@ export function runStepsServiceFor(workspaceId: string): RunStepsService {
     runs: createRunsRepository(db, workspaceId),
     steps: createImplementerStepsRepository(db, workspaceId),
     redact: (text) => redactText(text, knownSecretsFromEnv(process.env)),
+    // The model ids of every entry of the catalog, as the runner API masks them when it stores a run's texts.
+    hiddenModels: () => createCatalogRepository(db).allModelIds(),
   });
 }
 

@@ -758,7 +758,7 @@ describe("what is stored is cleaned", () => {
       JSON.parse((await rows(turn.jobId))[0]?.payload ?? ""),
     ).toMatchObject({
       cost: 0.25,
-      tokens: { input: 100 },
+      tokens: { input: 100, cacheRead: 80, cacheWrite: 0 },
     });
   });
 
@@ -790,7 +790,8 @@ describe("what is stored is cleaned", () => {
       unknown
     >;
     expect(last).not.toHaveProperty("cost");
-    expect(last).toMatchObject({ tokens: { input: 100 } });
+    // The cache counts say which provider answered, as the cost does: they are not stored either.
+    expect(last["tokens"]).toEqual({ input: 100, output: 20, reasoning: 5 });
   });
 
   // #745-T20

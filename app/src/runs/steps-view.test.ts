@@ -91,6 +91,53 @@ describe("toStepView", () => {
   });
 
   // #745-T64
+  it.each(["__proto__", "constructor", "toString", "hasOwnProperty", "Done"])(
+    "shows a tool state it does not know as 'unknown' (%s)",
+    (status) => {
+      expect(
+        toStepView(stored("tool", { tool: "bash", status })),
+      ).toMatchObject({ status: "unknown" });
+    },
+  );
+
+  // #745-T64
+  it.each(["pending", "running", "completed", "error"])(
+    "keeps the tool state %s",
+    (status) => {
+      expect(
+        toStepView(stored("tool", { tool: "bash", status })),
+      ).toMatchObject({ status });
+    },
+  );
+
+  // #745-T64
+  it("leaves out the cost and the cache counts of a model call when the run is on the operator's key", () => {
+    const payload = {
+      tokens: {
+        input: 10,
+        output: 2,
+        reasoning: 1,
+        cacheRead: 9,
+        cacheWrite: 4,
+      },
+      cost: 0.5,
+    };
+
+    const view = toStepView(stored("step", payload), undefined, {
+      onManagedKey: true,
+    });
+
+    expect(view).not.toHaveProperty("cost");
+    expect(view?.tokens).toEqual({
+      input: 10,
+      output: 2,
+      reasoning: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+    });
+  });
+
+  // #745-T64
   it("skips a kind it does not know", () => {
     expect(toStepView(stored("diagram", { text: "x" }))).toBeUndefined();
   });

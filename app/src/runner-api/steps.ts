@@ -13,7 +13,9 @@
 //    key of the claim, the runner token, the Worker's own credential, anything shaped like a credential) replaced, and on the
 //    operator's key the model and provider names too. The repository's content is the exposure no filter can know (a committed
 //    `.env` the agent printed): a member can read what the agent read;
-//  - the cost of a model call is not stored for a job on the operator's key: a member never reads it (`run-view.ts`);
+//  - the cost of a model call and its cache counts (whether a provider reports cache writes at all says which one answered) are not
+//    stored for a job on the operator's key: a member never reads them (`run-view.ts`). The read path leaves them out again
+//    whatever is stored (`runs/steps-service.ts`);
 //  - the caps of a turn (parts and bytes) are the repository's; what they refuse is counted in `dropped`.
 import "server-only";
 import { maskModelInText } from "../llm/access.ts";
@@ -28,6 +30,7 @@ import {
   RUNNER_API_VERSION,
   type StepRecord,
   type StepsResponse,
+  type StepTokens,
 } from "./contract.ts";
 import type { RunnerApiLogger } from "./logger.ts";
 import { redactBlockText } from "./redact.ts";
@@ -49,11 +52,19 @@ export type StepsDeps = Pick<
 /** `lost`: the caller does not hold the running claim; the caller decides which answer that is. */
 export type StoreStepsOutcome = { response: Response } | { lost: true };
 
+function withoutCacheCounts(
+  tokens: StepRecord["tokens"],
+): Omit<StepTokens, "cacheRead" | "cacheWrite"> | undefined {
+  if (tokens === undefined) return undefined;
+  const { input, output, reasoning } = tokens;
+  return { input, output, reasoning };
+}
+
 /** The record without what the row's columns hold, as the page will read it. Undefined fields are left out. */
 function payloadOf(
   record: StepRecord,
   text: (value: string) => string,
-  withCost: boolean,
+  onManagedKey: boolean,
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     startedAt: record.startedAt,
@@ -66,8 +77,8 @@ function payloadOf(
     input: record.input === undefined ? undefined : text(record.input),
     error: record.error === undefined ? undefined : text(record.error),
     reason: record.reason === undefined ? undefined : text(record.reason),
-    tokens: record.tokens,
-    cost: withCost ? record.cost : undefined,
+    tokens: onManagedKey ? withoutCacheCounts(record.tokens) : record.tokens,
+    cost: onManagedKey ? undefined : record.cost,
   };
   return Object.fromEntries(
     Object.entries(payload).filter(([, value]) => value !== undefined),
@@ -127,7 +138,7 @@ export async function storeSteps(
     partId: record.partId,
     seq: record.seq,
     kind: record.kind,
-    payload: payloadOf(record, clean, !onManagedKey),
+    payload: payloadOf(record, clean, onManagedKey),
   }));
   const result = await deps
     .steps(job.workspaceId)

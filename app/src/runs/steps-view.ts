@@ -13,10 +13,21 @@ import type { StoredStep } from "../db/repositories/implementer-steps-repository
 export const STEP_KINDS = ["reasoning", "text", "tool", "step"] as const;
 export type StepKind = (typeof STEP_KINDS)[number];
 
+/** The states of a tool call the page knows; any other text the runner sent is shown as `unknown`. */
+export const TOOL_STATUSES = [
+  "pending",
+  "running",
+  "completed",
+  "error",
+] as const;
+
 /** How many parts one answer holds at most, and the default. */
 export const STEPS_PAGE_LIMIT = 200;
 
-/** The tokens of one model call, as the runner counts them. */
+/**
+ * The tokens of one model call, as the runner counts them. On the operator's key the cache counts are 0: whether a provider
+ * reports cache writes at all, and how many, says which provider answered.
+ */
 export type StepTokensView = {
   input: number;
   output: number;
@@ -39,7 +50,7 @@ export type StepView = {
   text?: string;
   /** The true size of `text` in bytes, before it was cut. */
   bytes?: number;
-  /** tool: the name, the state (`running`, `completed`, `error`), the title the engine gave the call, the input as JSON text. */
+  /** tool: the name, the state (`pending`, `running`, `completed`, `error`, or `unknown`), the title the engine gave the call, the input as JSON text. */
   tool?: string;
   status?: string;
   title?: string;
@@ -48,7 +59,7 @@ export type StepView = {
   /** step: why the model call ended. */
   reason?: string;
   tokens?: StepTokensView;
-  /** step: the cost of the call; stored only for a run on the workspace's own key. */
+  /** step: the cost of the call; never for a run on the operator's key. */
   cost?: number;
 };
 
@@ -81,7 +92,10 @@ function numberField(
     : undefined;
 }
 
-function tokensOf(value: unknown): StepTokensView | undefined {
+function tokensOf(
+  value: unknown,
+  withCache: boolean,
+): StepTokensView | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     return undefined;
   const source = value as Record<string, unknown>;
@@ -90,21 +104,28 @@ function tokensOf(value: unknown): StepTokensView | undefined {
     input: count("input"),
     output: count("output"),
     reasoning: count("reasoning"),
-    cacheRead: count("cacheRead"),
-    cacheWrite: count("cacheWrite"),
+    cacheRead: withCache ? count("cacheRead") : 0,
+    cacheWrite: withCache ? count("cacheWrite") : 0,
   };
 }
+
+const isToolStatus = (
+  status: string,
+): status is (typeof TOOL_STATUSES)[number] =>
+  (TOOL_STATUSES as readonly string[]).includes(status);
 
 const isKnownKind = (kind: string): kind is StepKind =>
   (STEP_KINDS as readonly string[]).includes(kind);
 
 /**
  * The view of a stored part, or undefined for a kind the page does not show. `clean` is applied to every text again (the secrets
- * the app knows), as the run's other texts are; the runner API has cleaned them once when it stored them.
+ * the app knows), as the run's other texts are; the runner API has cleaned them once when it stored them. On the operator's key
+ * (`onManagedKey`) the cost and the cache counts are left out whatever the row holds, as `run-view.ts` does for the call trace.
  */
 export function toStepView(
   stored: StoredStep,
   clean: (text: string) => string = (text) => text,
+  { onManagedKey = false }: { onManagedKey?: boolean } = {},
 ): StepView | undefined {
   if (!isKnownKind(stored.kind)) return undefined;
   const payload = stored.payload;
@@ -123,14 +144,23 @@ export function toStepView(
   assign("startedAt", numberField(payload, "startedAt"));
   assign("endedAt", numberField(payload, "endedAt"));
   assign("bytes", numberField(payload, "bytes"));
-  assign("cost", numberField(payload, "cost"));
+  assign("cost", onManagedKey ? undefined : numberField(payload, "cost"));
   assign("text", textField(payload, "text", clean));
   assign("tool", textField(payload, "tool", clean));
-  assign("status", textField(payload, "status", clean));
+  // A state is a closed set: a text of another spelling is `unknown`, so no text of the stored row is ever used as a key.
+  const status = textField(payload, "status", (text) => text);
+  assign(
+    "status",
+    status === undefined
+      ? undefined
+      : isToolStatus(status)
+        ? status
+        : "unknown",
+  );
   assign("title", textField(payload, "title", clean));
   assign("input", textField(payload, "input", clean));
   assign("error", textField(payload, "error", clean));
   assign("reason", textField(payload, "reason", clean));
-  assign("tokens", tokensOf(payload["tokens"]));
+  assign("tokens", tokensOf(payload["tokens"], !onManagedKey));
   return view;
 }

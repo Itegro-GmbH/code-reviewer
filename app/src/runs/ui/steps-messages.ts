@@ -7,7 +7,6 @@ export const STEPS_COPY = {
   intro:
     "What the agent thought, said and did, one model call after the other. The output of a tool is not shown here. Everyone in the workspace can read this, and it can include what the agent read in the repository.",
   show: "Show what the agent did",
-  hide: "Hide",
   follow: "Follow",
   followLabel: "Follow the newest step",
   thinking: "Thinking",
@@ -25,12 +24,19 @@ export const STEPS_COPY = {
   logLabel: "Steps of the agent",
 } as const;
 
-/** The state of a tool call in words. A state the page does not know is shown as it came, as text. */
-export const TOOL_STATUS_TEXT: Record<string, string> = {
-  running: "running",
-  completed: "done",
-  error: "failed",
-};
+/** The state of a tool call in words. */
+const TOOL_STATUS_TEXT = new Map<string, string>([
+  ["pending", "waiting"],
+  ["running", "running"],
+  ["completed", "done"],
+  ["error", "failed"],
+  ["unknown", "unknown"],
+]);
+
+/** The words for a state; a state the page does not know is shown as it came, as text (a Map: no property of an object is a state). */
+export function toolStatusText(status: string): string {
+  return TOOL_STATUS_TEXT.get(status) ?? status;
+}
 
 /** "cut, 1,234 bytes": the mark under a text that the runner cut short. */
 export function cutText(bytes: number): string {

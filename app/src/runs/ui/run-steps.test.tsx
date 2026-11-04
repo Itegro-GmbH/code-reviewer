@@ -191,6 +191,57 @@ describe("the timeline", () => {
   });
 
   // #745-T70
+  it("shows no cache count where the page shows no cost: on the operator's key it says which provider answered", async () => {
+    const { api } = apiAnswering(answer(TURN));
+
+    await show(api, { showCost: false });
+
+    expect(screen.getByText(/1,200 in · 80 out/).textContent).not.toContain(
+      "cached",
+    );
+  });
+
+  // #745-T70
+  it.each(["__proto__", "constructor", "toString", "hasOwnProperty"])(
+    "shows a tool state that is the name of an object property as text, without failing (%s)",
+    async (status) => {
+      const { api } = apiAnswering(
+        answer([
+          part("prt_1", 1, { kind: "tool", tool: "bash", status, input: "{}" }),
+        ]),
+      );
+
+      await show(api);
+
+      const line = document.querySelector(
+        '[data-slot="run-step-status"]',
+      ) as HTMLElement;
+      expect(line.textContent).toBe(status);
+    },
+  );
+
+  // #745-T70
+  it("lets a long unbroken title or tool name wrap instead of widening the page", async () => {
+    const { api } = apiAnswering(
+      answer([
+        part("prt_1", 1, {
+          kind: "tool",
+          tool: "bash",
+          status: "completed",
+          title: "x".repeat(400),
+        }),
+      ]),
+    );
+
+    await show(api);
+
+    const title = screen.getByText("x".repeat(400));
+    expect(title.className).toContain("break-all");
+    expect(title.className).toContain("min-w-0");
+    expect(screen.getByText("bash").className).toContain("break-all");
+  });
+
+  // #745-T70
   it("shows a model call that is not over as in progress", async () => {
     const { api } = apiAnswering(
       answer([part("prt_1", 1, { text: "Working on it." })]),
@@ -491,6 +542,46 @@ describe("a settled run", () => {
   });
 });
 
+describe("a long turn", () => {
+  // #745-T79
+  it("loads a settled run to the end, however many pages it has, because no later tick will ask again", async () => {
+    const PAGES = 45;
+    const steps = vi.fn<RunsApi["steps"]>(async (_id, after) => {
+      const page = after / 200 + 1;
+      const parts = Array.from({ length: 200 }, (_, i) =>
+        part(`p${String(after + i + 1)}`, after + i + 1, {
+          kind: "tool",
+          tool: "bash",
+          status: "completed",
+        }),
+      );
+      return answer(parts, { hasMore: page < PAGES });
+    });
+    const api = { steps } as unknown as RunsApi;
+    await show(api, { settled: true });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Show what the agent did" }),
+    );
+    await act(async () => {});
+
+    expect(steps).toHaveBeenCalledTimes(PAGES);
+    expect(steps.mock.calls.at(-1)?.[1]).toBe(200 * (PAGES - 1));
+  });
+
+  // #745-T79
+  it("stops asking when a page that says more is waiting does not move the cursor", async () => {
+    const stuck = vi.fn<RunsApi["steps"]>(async () =>
+      answer([part("prt_1", 1, { text: "One." })], { hasMore: true }),
+    );
+    const api = { steps: stuck } as unknown as RunsApi;
+
+    await show(api);
+
+    expect(stuck.mock.calls.length).toBeLessThanOrEqual(2);
+  });
+});
+
 describe("the follow switch", () => {
   function scrollSpy() {
     const heights = new Map<Element, number>();
@@ -560,6 +651,33 @@ describe("the follow switch", () => {
       screen.getByRole("switch", { name: "Follow the newest step" }),
     );
     expect(assigned).toEqual([1234]);
+  });
+
+  // #745-T80
+  it("lets go of the end when the person asks for earlier steps, so the view keeps its place", async () => {
+    const records: StepView[] = [];
+    for (let i = 0; i < 300; i += 1) {
+      records.push(
+        part(`t${String(i)}`, 2 * i + 1, {
+          text: `Words of call ${String(i)}`,
+        }),
+      );
+      records.push(part(`e${String(i)}`, 2 * i + 2, { kind: "step", tokens }));
+    }
+    const assigned = scrollSpy();
+    const { api } = apiAnswering(answer(records));
+    await show(api);
+    const follow = () =>
+      screen
+        .getByRole("switch", { name: "Follow the newest step" })
+        .getAttribute("aria-checked");
+    expect(follow()).toBe("true");
+    assigned.length = 0;
+
+    fireEvent.click(screen.getByRole("button", { name: /Show earlier steps/ }));
+
+    expect(follow()).toBe("false");
+    expect(assigned).toEqual([]);
   });
 
   // #745-T80

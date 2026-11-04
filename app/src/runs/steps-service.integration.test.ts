@@ -6,6 +6,7 @@
 // untrusted text.
 import { describe, expect, it } from "vitest";
 import { createImplementerStepsRepository } from "../db/repositories/implementer-steps-repository.ts";
+import { createUsageRecordsRepository } from "../db/repositories/usage-records-repository.ts";
 import { sha } from "../test-support/jobs.ts";
 import { createRunsFixture } from "../test-support/runs.ts";
 import { sessionUser } from "../test-support/session-lookup.ts";
@@ -15,6 +16,8 @@ import { createRunStepsRouteHandlers } from "./http.ts";
 import { createRunStepsService } from "./steps-service.ts";
 import type { StepsSnapshot } from "./steps-view.ts";
 import { createRunsRepository } from "../db/repositories/runs-repository.ts";
+
+const HIDDEN_MODEL = "vendor/secret-model";
 
 async function start() {
   const f = await createRunsFixture();
@@ -28,6 +31,7 @@ async function start() {
     runs: f.runsRepository,
     steps,
     redact: (text) => text.replaceAll("SECRET-VALUE", "[redacted]"),
+    hiddenModels: () => Promise.resolve([HIDDEN_MODEL]),
   });
   const handlers = createRunStepsRouteHandlers({
     requireUser: () => Promise.resolve(sessionUser("member")),
@@ -331,5 +335,109 @@ describe("the steps of a run of the Implementer", () => {
     ]);
     // The cursor moves past the part the page does not show, so it is not asked for again.
     expect(page.cursor).toBe(3);
+  });
+  // #745-T49
+  describe("on the operator's key", () => {
+    /** What the runner API would have stored on the workspace's own key: the cost, the cache counts, the names. */
+    const model = [
+      {
+        partId: "prt_1",
+        seq: 1,
+        kind: "text",
+        payload: {
+          text: `I am ${HIDDEN_MODEL}, served by Anthropic.`,
+          bytes: 40,
+        },
+      },
+      {
+        partId: "prt_2",
+        seq: 2,
+        kind: "tool",
+        payload: {
+          tool: "bash",
+          status: "completed",
+          title: `ask ${HIDDEN_MODEL}`,
+          input: '{"model":"vendor/secret-model","by":"openrouter"}',
+          error: "OpenRouter said no",
+        },
+      },
+      {
+        partId: "prt_3",
+        seq: 3,
+        kind: "step",
+        payload: {
+          reason: "stop",
+          tokens: {
+            input: 10,
+            output: 2,
+            reasoning: 1,
+            cacheRead: 900,
+            cacheWrite: 40,
+          },
+          cost: 0.5,
+        },
+      },
+    ];
+
+    // #745-T49
+    it.each([
+      ["a key mode of managed", "key mode"],
+      ["a catalog entry", "entry"],
+    ])(
+      "shows no cost, no cache counts and no model or provider name, with %s, whatever the stored row holds",
+      async (_name, how) => {
+        const { f, steps, turn, ask } = await start();
+        const { job, lease } = await turn();
+        await steps.recordSteps(job.id, lease, model);
+        const usage = createUsageRecordsRepository(
+          f.db,
+          f.workspaceId,
+          f.clock.now,
+        );
+        if (how === "key mode") await usage.setKeyMode(job.id, "managed");
+        else
+          await usage.setSelection(job.id, {
+            provider: "openrouter",
+            catalogEntry: { id: "entry-1", name: "Fast" },
+          });
+
+        const page = (await ask(job.id)).body as StepsSnapshot;
+
+        const shown = JSON.stringify(page);
+        expect(shown).not.toContain(HIDDEN_MODEL);
+        expect(shown.toLowerCase()).not.toContain("anthropic");
+        expect(shown.toLowerCase()).not.toContain("openrouter");
+        expect(page.steps[0]?.text).toBe("I am [model], served by [provider].");
+        const last = page.steps[2];
+        expect(last).not.toHaveProperty("cost");
+        expect(last?.tokens).toEqual({
+          input: 10,
+          output: 2,
+          reasoning: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+        });
+      },
+    );
+
+    // #745-T49
+    it("keeps cost, cache counts and names for a run on the workspace's own key", async () => {
+      const { f, steps, turn, ask } = await start();
+      const { job, lease } = await turn();
+      await steps.recordSteps(job.id, lease, model);
+      await createUsageRecordsRepository(
+        f.db,
+        f.workspaceId,
+        f.clock.now,
+      ).setKeyMode(job.id, "own");
+
+      const page = (await ask(job.id)).body as StepsSnapshot;
+
+      expect(page.steps[0]?.text).toContain(HIDDEN_MODEL);
+      expect(page.steps[2]).toMatchObject({
+        cost: 0.5,
+        tokens: { cacheRead: 900, cacheWrite: 40 },
+      });
+    });
   });
 });

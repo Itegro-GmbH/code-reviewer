@@ -7,9 +7,16 @@
 // Only a run of the Implementer has steps. The id of a run of another kind, of another workspace or of nothing is the same
 // answer: `undefined`, which the route turns into 404 `RUN_NOT_FOUND`, as for a run nobody has. A run of the Implementer that has
 // no steps (yet, or an older one) answers an empty page.
+//
+// What a member may read of a run on the operator's key is decided HERE, when the rows are read, by the one rule the run detail
+// uses (`RunsRepository.implementerRun`): no cost, no cache counts, and no model or provider name in any text, whatever the stored
+// row holds (the runner API leaves them out when it stores, and this is the second lock: a row stored before a rule, or by a path
+// that forgot it, is still safe).
 import "server-only";
 import type { ImplementerStepsRepository } from "../db/repositories/implementer-steps-repository.ts";
 import type { RunsRepository } from "../db/repositories/runs-repository.ts";
+import { maskModelInText } from "../llm/access.ts";
+import { maskProvidersInText } from "../llm/provider-mask.ts";
 import {
   STEPS_PAGE_LIMIT,
   toStepView,
@@ -59,21 +66,31 @@ export type RunStepsService = {
 };
 
 export function createRunStepsService(deps: {
-  runs: Pick<RunsRepository, "isImplementerRun">;
+  runs: Pick<RunsRepository, "implementerRun">;
   steps: Pick<ImplementerStepsRepository, "listAfter">;
   /** Takes secrets out of a text before it is shown, once more after the runner API cleaned it. */
   redact?: (text: string) => string;
+  /** The model ids of the catalog, read only for a run on the operator's key: they are masked in every text of it. */
+  hiddenModels?: () => Promise<readonly string[]>;
 }): RunStepsService {
   return {
     async list(id, after, limit) {
       if (!RUN_ID.test(id)) return undefined;
-      if (!(await deps.runs.isImplementerRun(id))) return undefined;
+      const run = await deps.runs.implementerRun(id);
+      if (run === undefined) return undefined;
+      const { onManagedKey } = run;
+      const redact = deps.redact ?? ((text: string) => text);
+      const models = onManagedKey ? await (deps.hiddenModels?.() ?? []) : [];
+      const clean = onManagedKey
+        ? (text: string) =>
+            maskProvidersInText(maskModelInText(redact(text), ...models))
+        : redact;
       // One more than asked for tells whether there is more behind the answer.
       const rows = await deps.steps.listAfter(id, after, limit + 1);
       const page = rows.slice(0, limit);
       const steps: StepView[] = [];
       for (const row of page) {
-        const view = toStepView(row, deps.redact);
+        const view = toStepView(row, clean, { onManagedKey });
         if (view !== undefined) steps.push(view);
       }
       // The page is taken by `seq` (the cursor), shown by `ordinal`: the order the parts began in.

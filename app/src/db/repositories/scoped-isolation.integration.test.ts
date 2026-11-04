@@ -1861,9 +1861,9 @@ const CASES: Case[] = [
   },
   {
     // #745: the id of a run of the Implementer of workspace B is not one of A's.
-    name: "runs.isImplementerRun",
-    run: (a, b) => a.runs.isImplementerRun(taskOf(b).turn.jobId),
-    expectAnswer: (answer) => expect(answer).toBe(false),
+    name: "runs.implementerRun",
+    run: (a, b) => a.runs.implementerRun(taskOf(b).turn.jobId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {
     name: "runs.latestPerRepository",
