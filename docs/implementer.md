@@ -406,7 +406,7 @@ thinks (`reasoning`), what it answers (`text`), each tool call (`tool`) and the 
 (`implementer/step_records.py`). They go into a bounded in-memory queue (`implementer/step_feed.py`), a pump of the job process
 takes them out every two seconds (`implementer/step_pump.py`), the job host sends them to the app
 (`job_loop/step_sender.py`, section "How the records get to the app" below), and the app stores them (`POST
-/api/workers/v1/jobs/{id}/steps`). The Runs page comes in a later pull request of #745.
+/api/workers/v1/jobs/{id}/steps`). The Runs page shows them (section "What the Runs page shows" below).
 
 - **What is kept.** A record has the part id, a counter, the start and end time and its text. A tool part is reported again when it
   changes (running, then completed or error) with the same part id and a higher counter. Reasoning and answer text are kept
@@ -467,6 +467,49 @@ sends nothing, with no error and no note. (The Worker is the only runner that ru
 - **The network.** The calls go to the same app URL as the heartbeat and the result (`appUrl` of the Worker's start document), from
   the Worker in the VM. The second wall (step 7) narrows the VM's policy to GitHub, the model provider, the App's host (`appHost`,
   the host of the Dispatcher's configured App URL) and the Dispatcher; the steps calls need no host of their own.
+
+### What the Runs page shows
+
+The detail page of a run of the Implementer has a section **What the agent did**, a timeline of the turn, one model call after the
+other (`app/src/runs/ui/run-steps.tsx`):
+
+- **Per model call** a header with its number, its tokens (in, out, reasoning, and cached where the page shows a cost), the time it took and, where the page
+  shows a cost for the run, its cost. A run on the operator's key shows no cost and no cache count, as everywhere on the page (the
+  cache counts say which provider answered). The app does not even store them for such a run, and the route leaves them out again
+  when it reads, by the rule of the run detail (the usage record names the operator's key, a catalog entry or a tier), and masks the
+  model and provider names in every text of such a run, whatever the stored row holds.
+- **Thinking** (the reasoning text, when the provider returned some) is collapsed; click it to read. **What the agent says** is
+  visible. **Each tool call is one line**: the tool, the title the engine gave the call, how it went (`waiting`, `running`, `done`, `failed`; any other state is `unknown`) and
+  how long it took; the input of the call is in a collapsed block, and the error text of a failed call is shown.
+- **Marks.** A text the runner cut shows "cut, N bytes". A turn so long that the runner kept only name and status of the later tool
+  calls says "The log was shortened".
+- **Plain text only.** Everything is rendered as text: no markdown, no HTML, no link, whatever the agent or the repository wrote.
+- **Live.** While the run is waiting or running the section is open and rides on the poll of the run (every 3 s): each new snapshot
+  of the run makes one request, `GET /api/w/:workspace/runs/:id/steps?after=<cursor>`, and the run that settles makes one last, after the
+  runner's final flush, so a finished run shows all its steps. The page merges the answers by part id: a tool call that was `running` and is
+  now `done` replaces its earlier row in place. A **Follow** switch (on while the run is going, off when a settled run is opened later) keeps the
+  view at the end; scrolling up lets go of it, and so does "Show earlier steps". A settled run shows a button, and when it is pressed
+  the steps are fetched page after page until none is left (a turn at the caps is 80 pages of 200), because no later poll will ask again.
+- **Long turns.** The page renders the newest model calls (about 400 parts) and offers "Show earlier steps" for the rest, so a turn at
+  the caps does not put thousands of rows in the document. The caps are the app's: at most 16,000 parts a turn. The runner sends
+  up to 15,000 records (5,000 in full, and 10,000 more as name and status only once a turn is that long).
+
+**The route.** `GET /api/w/:workspace/runs/:id/steps?after=<seq>&limit=200` (`withWorkspace(…, "view")`: any member of the
+workspace in the address). It answers `{ steps, cursor, hasMore }`: the parts that changed after `after` (a part that changed gets
+a new `seq` and comes again), at most `limit` (1 to 200, more is read as 200) taken by `seq`, listed in the order the parts began in, and the
+`seq` to ask after next. A malformed query is `400 STEPS_QUERY_INVALID`. The id of a run that is not a run of the Implementer of the
+workspace (another workspace, another kind, unknown, malformed) is `404 RUN_NOT_FOUND`, so the route does not tell the runs of
+other kinds or workspaces apart; a run of the Implementer without steps (an older one, one whose runner did not send) answers an
+empty list. The route is in the capability `implementer`, like the other Implementer routes. Only text and numbers of the four known
+kinds are passed on, and every text is cleaned of the secrets the app knows again.
+
+**Who can read it.** The same people who can open the run: every member of the workspace (`view`). **A member can read what the
+agent read and said.** The runner and the app strip the secrets they know (the model key, the door's bearer, the tokens of the job, anything shaped
+like a credential), but they cannot know the repository: a `.env` the agent printed with `cat`, a key in a test fixture or customer
+data in a file the agent opened is in the agent's text or the input of its tool call, and so on the page. **The output of a tool is not
+shown** (the runner does not record it and the app never gets it), which keeps most of that out; the input of a tool call (a command, a
+path, a pattern) and the agent's own words are shown. Steps are kept as long as the run is, for now with no time limit. Before outside users arrive, the
+decision to let every member see them moves with the one for starting a task (the note in "What it is").
 
 ## The memory of the readers and the OS
 

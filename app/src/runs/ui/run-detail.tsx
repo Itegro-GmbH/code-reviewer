@@ -41,7 +41,9 @@ import {
   FINDINGS_WAITING_TEXT,
 } from "./findings-messages.ts";
 import { ReviewText } from "./review-text.tsx";
+import { RunSteps } from "./run-steps.tsx";
 import { RunStatusBadge } from "./status-badge.tsx";
+import { STEPS_COPY } from "./steps-messages.ts";
 import { STOPPED_EARLY_TEXT, usageItems } from "./usage-facts.tsx";
 import { RunPriceText } from "../../workspace-billing/ui/run-price.tsx";
 
@@ -711,6 +713,16 @@ export function RunDetail({
         <>
           <TaskInstruction task={task} />
           <TaskSetup task={task} />
+          <Section title={STEPS_COPY.title}>
+            {/* Rides on the poll of the run: a new snapshot (`generatedAt`) is one request for the steps after the cursor. */}
+            <RunSteps
+              api={api}
+              runId={run.id}
+              tick={data.generatedAt}
+              settled={isSettled(run.status)}
+              showCost={!run.costHidden}
+            />
+          </Section>
           <TaskNetwork task={task} />
           <TaskResult task={task} run={run} />
         </>
