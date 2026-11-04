@@ -99,6 +99,16 @@ def _branch(**changes: Any) -> Callable[[Document], None]:
     return edit
 
 
+def _name(value: str) -> Callable[[Document], None]:
+    """Only the name is wrong: `checkout` is left out so it is not the reason for the refusal."""
+
+    def edit(resume: Document) -> None:
+        resume["branches"][1]["name"] = value
+        resume["checkout"] = None
+
+    return edit
+
+
 RESUME_REFUSALS: dict[str, Callable[[Document], None]] = {
     "unknown field": _set("somethingNew", True),
     "no turn": lambda resume: resume.pop("turn"),
@@ -115,6 +125,14 @@ RESUME_REFUSALS: dict[str, Callable[[Document], None]] = {
     "name that starts with a dash": _branch(name="-delete"),
     "name with a space": _branch(name="has space"),
     "name that is not text": _branch(name=7),
+    "name that could never be pushed (a tilde)": _name("a~b"),
+    "name that could never be pushed (two dots)": _name("a..b"),
+    "name that could never be pushed (a lock)": _name("feature/x.lock"),
+    "name that could never be pushed (a plus)": _name("+plus"),
+    "name that could never be pushed (a reflog)": _name("a@{u}b"),
+    "name with a control character": _name("a\x01b"),
+    "name with a NUL": _name("a\x00b"),
+    "name with a lone surrogate": _name("a\ud800b"),
     "head that is a name": _branch(head="main"),
     "head in upper case": _branch(head="A" * 40),
     "short head": _branch(head="abc1234"),
@@ -164,6 +182,21 @@ def test_a_resume_is_no_reason_for_a_branch_name_the_first_turn_would_refuse() -
         _parse(job)
 
     assert refused.value.code is ErrorCode.INVALID_JOB
+
+
+# #838-T05b
+@pytest.mark.parametrize("field", ["baseBranch", "branch"])
+def test_a_lone_surrogate_in_the_base_or_the_session_branch_is_refused_by_the_parser(
+    field: str,
+) -> None:
+    job = _job(_resume())
+    job["implementer"][field] = "a\ud800b"
+
+    with pytest.raises(runner_job.JobError) as refused:
+        _parse(job)
+
+    assert refused.value.code is ErrorCode.INVALID_JOB
+    assert f"implementer.{field}" in refused.value.detail
 
 
 # #838-T08

@@ -61,6 +61,7 @@ from code_reviewer_runner.dynamic_review.passthrough.destination import (
 )
 from code_reviewer_runner.dynamic_review.prompts import MAX_SKILL_BYTES as MAX_DYNAMIC_SKILL_BYTES
 from code_reviewer_runner.implementer.network_rule import OFF, NetworkRule, RuleError, parse_rule
+from code_reviewer_runner.implementer.push_policy import branch_name_problem
 from code_reviewer_runner.llm_providers import (
     LlmProviderSpec,
     provider_for,
@@ -941,6 +942,27 @@ def _matching(value: object, pattern: re.Pattern[str], path: str, what: str) -> 
     return value
 
 
+def _branch_name(value: object, path: str, what: str = "a branch name") -> str:
+    """A branch name as the contract bounds it that also survives the command line: a lone
+    surrogate (JSON allows one) cannot be encoded and would end in a bare `UnicodeEncodeError` in
+    the first git command that gets it."""
+    name = _matching(value, _BRANCH_NAME, path, what)
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:
+        raise _invalid(f"{path} must be {what} in valid UTF-8") from None
+    return name
+
+
+def _pushable_branch_name(value: object, path: str, what: str = "a branch name") -> str:
+    """A branch name of a follow-up's session: one the final push would take (`push_policy`), so
+    that a name that could never be pushed is refused here and not after the work is done."""
+    name = _branch_name(value, path, what)
+    if branch_name_problem(name) is not None:
+        raise _invalid(f"{path} must be {what} that can be pushed")
+    return name
+
+
 def _implementer_repo(spec: dict[str, Any], git: GitAccess) -> ImplementerRepo:
     """The repository of a turn. The job carries a token that may write it and the runner sends that
     token to `cloneUrl`: the address must be the provider's web host and exactly this repository,
@@ -996,10 +1018,8 @@ def _implementer_spec(data: dict[str, Any], git: GitAccess) -> ImplementerSpec:
     cost = _job_cost_policy(spec)
     entry = _job_model_entry(spec)
     assert cost is not None and entry is not None  # both keys are present, so both parse or raise
-    base_branch = _matching(
-        spec.get("baseBranch"), _BRANCH_NAME, "implementer.baseBranch", "a branch name"
-    )
-    branch = _matching(spec.get("branch"), _BRANCH_NAME, "implementer.branch", "a branch name")
+    base_branch = _branch_name(spec.get("baseBranch"), "implementer.baseBranch")
+    branch = _branch_name(spec.get("branch"), "implementer.branch")
     if branch == base_branch:
         raise _invalid("implementer.branch must differ from implementer.baseBranch")
     return ImplementerSpec(
@@ -1047,12 +1067,7 @@ def _implementer_resume(spec: dict[str, Any], session_branch: str) -> Implemente
                 raise _invalid(f"implementer.resume.branches[].{name} is required")
         branches.append(
             ResumeBranch(
-                name=_matching(
-                    entry["name"],
-                    _BRANCH_NAME,
-                    "implementer.resume.branches[].name",
-                    "a branch name",
-                ),
+                name=_pushable_branch_name(entry["name"], "implementer.resume.branches[].name"),
                 head=_matching(
                     entry["head"],
                     _LOWER_SHA,
@@ -1066,8 +1081,8 @@ def _implementer_resume(spec: dict[str, Any], session_branch: str) -> Implemente
         raise _invalid("implementer.resume.branches must not name a branch twice")
     checkout: object = given["checkout"]
     if checkout is not None:
-        checkout = _matching(
-            checkout, _BRANCH_NAME, "implementer.resume.checkout", "a branch name or null"
+        checkout = _pushable_branch_name(
+            checkout, "implementer.resume.checkout", "a branch name or null"
         )
         if checkout not in names and checkout != session_branch:
             raise _invalid(
