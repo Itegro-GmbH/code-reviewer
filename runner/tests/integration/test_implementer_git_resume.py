@@ -169,13 +169,12 @@ def test_the_commits_and_files_of_the_turn_are_counted_from_the_session_branchs_
 
 
 # #838-T20
-def test_the_session_branch_is_fetched_fifty_deep_and_the_others_and_the_base_one_deep(
-    rig: Rig,
-) -> None:
+def test_every_branch_of_the_session_and_the_base_are_fetched_fifty_deep(rig: Rig) -> None:
     tips = {
         BRANCH: rig.origin.many_commits_on(BRANCH, 60),
-        "feature/x": rig.origin.many_commits_on("feature/x", 5),
+        "feature/x": rig.origin.many_commits_on("feature/x", 70),
     }
+    rig.origin.many_commits_on("main", 80)
 
     workspace = rig.prepared(resume=resume_of(*tips.items(), checkout=BRANCH))
 
@@ -183,10 +182,25 @@ def test_the_session_branch_is_fetched_fifty_deep_and_the_others_and_the_base_on
         return raw("rev-list", "--count", ref, cwd=workspace.mirror, git=rig.git)
 
     assert depth(f"refs/heads/{BRANCH}") == "50"
-    assert depth("refs/heads/feature/x") == "1"
-    assert depth("refs/heads/main") == "1"
+    assert depth("refs/heads/feature/x") == "50"
+    assert depth("refs/heads/main") == "50"
     # The agent has the same history: 50 commits to look back at, no more.
     assert raw("rev-list", "--count", BRANCH, cwd=workspace.repo, git=rig.git) == "50"
+    assert raw("rev-list", "--count", "main", cwd=workspace.repo, git=rig.git) == "50"
+
+
+# #838-T20c
+def test_the_agent_can_merge_base_with_a_base_branch_that_moved_after_the_earlier_turn(
+    rig: Rig, three: dict[str, str]
+) -> None:
+    for number in range(3):
+        rig.origin.commit_on("main", f"moved-{number}.txt")
+
+    workspace = rig.prepared(resume=resume_of_three(three, checkout=BRANCH))
+
+    done = agent_git(workspace, "merge-base", "main", "HEAD")
+    assert done.returncode == 0
+    assert done.stdout.strip() == raw("rev-parse", "main~3", cwd=workspace.repo, git=rig.git)
 
 
 # #838-T20b

@@ -109,9 +109,12 @@ RESCUE_STEP_TIMEOUT = 3.0
 # number of refs; this holds about 40,000 branches and the rest is not read.
 LIST_MAX_BYTES = 4 * 1024 * 1024
 FETCH_TIMEOUT = 60.0
-# How much history of the session's own branch a follow-up turn gets; the other branches and the
-# base branch come one deep, as the base branch of a first turn does.
-SESSION_BRANCH_DEPTH = 50
+# How much history every branch of a follow-up turn gets (the base branch, the session branch and
+# the other branches): the agent has no remote to deepen from, and with less the base branch that
+# moved since the earlier turn cannot be merged, rebased or diffed against (`merge-base` finds
+# nothing). A merge base further back than this many commits is not found. A first turn takes the
+# base branch one deep: its branch starts at the tip.
+RESUME_DEPTH = 50
 PUSH_TIMEOUT = 120.0
 # The wait before the one new try of a push the provider could not take.
 TRANSIENT_PAUSE_SECONDS = 3.0
@@ -485,7 +488,7 @@ class GitWorkspace:
             raise fail(ErrorCode.SETUP_FAILED, "reader_unavailable: the reader cannot be made")
 
     def clone_mirror(self) -> None:
-        """Fetch the base branch, depth 1, into the new bare mirror. The token is in this one
+        """Fetch the base branch, depth 1 (`RESUME_DEPTH` on a follow-up), into the new bare mirror. The token is in this one
         process's environment."""
         self._check_names()
         self._prepare_directories()
@@ -493,6 +496,7 @@ class GitWorkspace:
         mirror.mkdir(mode=0o700)
         os.chmod(mirror, 0o700)
         base = self.spec.base_branch
+        depth = 1 if self.spec.resume is None else RESUME_DEPTH
         init = self._root(
             ["init", "-q", "--bare", "--template=", f"--initial-branch={base}", str(mirror)],
             protocols="file",
@@ -504,7 +508,7 @@ class GitWorkspace:
         fetched = self._mirror(
             [
                 "fetch",
-                "--depth=1",
+                f"--depth={depth}",
                 *_PLAIN_FETCH,
                 self.spec.clone_url,
                 f"refs/heads/{base}:refs/heads/{base}",
@@ -533,7 +537,7 @@ class GitWorkspace:
 
     def _fetch_session_branches(self, base_tip: str) -> None:
         """A follow-up turn: each branch the earlier turn left on the provider, into the mirror
-        (the session branch `SESSION_BRANCH_DEPTH` deep, the others one deep). The tip is the one
+        (each `RESUME_DEPTH` deep, the session branch last). The tip is the one
         the provider has now, read from the mirror; a tip that is not the pushed one is recorded. A
         branch the provider no longer has is left out and recorded; the session branch gone is the
         end of the turn (the app checks it before it starts one, so this is a race)."""
@@ -557,11 +561,10 @@ class GitWorkspace:
     def _fetch_branch(self, name: str) -> str | None:
         """One branch of a follow-up into the mirror, as `refs/heads/<name>`: its tip, or None when
         the provider does not have it."""
-        depth = SESSION_BRANCH_DEPTH if name == self.spec.branch else 1
         fetched = self._mirror(
             [
                 "fetch",
-                f"--depth={depth}",
+                f"--depth={RESUME_DEPTH}",
                 *_PLAIN_FETCH,
                 self.spec.clone_url,
                 f"refs/heads/{name}:refs/heads/{name}",
