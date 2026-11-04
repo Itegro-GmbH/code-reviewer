@@ -300,6 +300,8 @@ def clip_texts(block: Mapping[str, Any]) -> dict[str, Any]:
             {**branch, "name": branch["name"][:MAX_BRANCH_NAME_CHARS]}
             for branch in clipped["branches"]
         ]
+        if isinstance(clipped.get("checkedOut"), str):
+            clipped["checkedOut"] = clipped["checkedOut"][:MAX_BRANCH_NAME_CHARS]
         clipped["commits"] = [
             {**commit, "subject": commit["subject"][:MAX_SUBJECT_CHARS]}
             for commit in clipped["commits"]
