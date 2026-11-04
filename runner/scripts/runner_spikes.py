@@ -1,0 +1,1103 @@
+# SPDX-License-Identifier: LicenseRef-Proprietary
+
+"""The spikes R0 of the Factory-Runner (#853, `plans/customer-runner.md`): what the plan assumes about
+running Claude Code headless in the agent's container (S1) and about the agent's own Docker on a
+plain Linux host (S2), settled on a real VM before the runner (R1) is built.
+
+    sudo python3 scripts/runner_spikes.py {s1,s2,all} [--out DIR] [--only LIST]
+
+Run as root on a plain `spike-` VM (the platform's default image, Ubuntu 26.04; the script installs
+`docker.io` itself and starts the daemon with `docker/sandbox/vm-prepare.sh`), with the repository's
+`runner/`, `fakes/` and `docker/` on it. Standard library only (no `uv sync`). The script pulls
+images, installs Claude Code from npm into an image, installs Sysbox from its release and removes
+containers, networks and volumes by fixed names (`spike-`), so it refuses any host whose name does
+not start with `spike-` unless `FOLLOW_UP_SPIKE_I_AM_ON_A_SPIKE_VM=1` is set (`spike_guard.py`).
+It prints one JSON line per check (`{"check": ..., "ok": ...}`) and per measured fact
+(`{"fact": ...}`), no secret, and keeps what it saw (the raw `stream-json` of every run, the
+requests the strict provider received) in `--out`.
+
+No real model, no real key, no subscription: the provider is the strict scripted Anthropic Messages
+fake of `fakes/wire` behind a made-up key (it refuses a history the real API would refuse), and the
+tokens that are tried for the login are made-up strings. The fake listens on the VM's address on an
+`--internal` Docker network, the way the model door does, so a Claude Code that wants anything but
+the one address it was given is refused (its traffic that fails is a fact too).
+
+S1, Claude Code headless in a container (`--only` takes the names):
+
+* `events`, `mcp`, `command`: one scripted turn that reads a file, runs a command, edits a file and
+  ends, with the finish tool as a local MCP server (stdio in the container, and HTTP on the runner
+  side), and as the command `factory-submit` through Claude Code's Bash tool. The raw events and the
+  proposed mapping to the step records;
+* `resume`: `--resume` in a new container with the session directory on a mounted volume;
+* `permissions`: what an unattended run needs;
+* `auth`: which environment variables and files carry the login, seen in the headers the provider
+  receives;
+* `cost`: the figure `result` carries for an API-key run.
+
+S2, the agent's own Docker (`--only` takes `none`, `rootless`, `privileged`, `sysbox-plain`,
+`sysbox`): the isolation each option needs from the host, the start time and a `docker run postgres`
+inside the agent.
+"""
+
+import argparse
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from collections import Counter
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any, cast
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from fakes.wire import upstream as upstream_module
+from fakes.wire.formats import Turn
+from fakes.wire.upstream import Refusal, ScriptedUpstream
+from spike_guard import refuse_unless_spike_vm
+
+from code_reviewer_runner.implementer.step_records import StepRecord
+from code_reviewer_runner.redaction import Redactor
+
+REPO = Path(__file__).resolve().parents[2]
+
+# -- what S1 pins ----------------------------------------------------------------------------------
+
+# The version of Claude Code the spike used (npm `stable` dist-tag on 2026-11-04). Pinned: the event
+# shapes below are those of this version.
+CLAUDE_CODE_VERSION = "2.1.311"
+NODE_IMAGE = "node:24-bookworm-slim"
+CLAUDE_IMAGE = f"spike-claude-code:{CLAUDE_CODE_VERSION}"
+NETWORK = "spike-internal"
+# A made-up key: it is accepted by the fake and by nothing else.
+FAKE_KEY = "sk-ant-api03-spike-made-up-key-not-real-0000000000000000"
+FAKE_OAUTH = "sk-ant-oat01-spike-made-up-token-not-real-000000000000"
+FAKE_REFRESH = "sk-ant-ort01-spike-made-up-refresh-not-real-0000000000"
+# A model Claude Code has a price for, and one it has not.
+MODEL = "claude-sonnet-4-5"
+UNKNOWN_MODEL = "spike-model-nobody-priced"
+SMALL_MODEL = "claude-haiku-4-5"
+IMAGE_DIR_NAME = "claude-image"
+
+
+class Report:
+    def __init__(self) -> None:
+        self.ok = True
+
+    def say(self, check: str, ok: bool, **details: Any) -> bool:
+        self.ok = self.ok and ok
+        print(json.dumps({"check": check, "ok": ok, **details}, default=str), flush=True)
+        return ok
+
+    def fact(self, name: str, **details: Any) -> None:
+        print(json.dumps({"fact": name, **details}, default=str), flush=True)
+
+
+REPORT = Report()
+
+
+# -- docker ----------------------------------------------------------------------------------------
+
+
+def docker(
+    *args: str, stdin: bytes | None = None, timeout: float = 300.0, check: bool = False
+) -> subprocess.CompletedProcess[str]:
+    done = subprocess.run(
+        ["docker", *args],
+        input=None if stdin is None else stdin.decode(),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if check and done.returncode != 0:
+        raise RuntimeError(f"docker {' '.join(args[:3])} failed: {done.stderr.strip()[-400:]}")
+    return done
+
+
+def sh(script: str, *, timeout: float = 600.0) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, timeout=timeout, check=False
+    )
+
+
+def ensure_docker() -> None:
+    """Docker from the distribution and a daemon, the way a job VM has them: `docker.io` is
+    installed when it is missing and `docker/sandbox/vm-prepare.sh` (the cgroup root and the start
+    of `dockerd`; nothing of Sysbox) prepares the VM."""
+    if shutil.which("docker") is None:
+        sh(
+            "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && "
+            "apt-get install -y -qq docker.io docker-buildx ca-certificates curl > /dev/null",
+            timeout=900,
+        )
+    prepared = sh(str(REPO / "docker" / "sandbox" / "vm-prepare.sh"))
+    if prepared.returncode != 0:
+        raise SystemExit(f"vm-prepare failed: {prepared.stderr[-400:]}")
+
+
+def network_gateway() -> str:
+    """The `--internal` network the agent's containers join, and the VM's address on it: the one
+    place a provider can be reached."""
+    if docker("network", "inspect", NETWORK).returncode != 0:
+        docker("network", "create", "--internal", NETWORK, check=True)
+    shown = docker(
+        "network", "inspect", NETWORK, "--format", "{{(index .IPAM.Config 0).Gateway}}", check=True
+    )
+    return shown.stdout.strip()
+
+
+def remove_leftovers() -> None:
+    listed = docker("ps", "-aq", "--filter", "name=spike-")
+    ids = listed.stdout.split()
+    if ids:
+        docker("rm", "-f", *ids)
+
+
+# -- the provider: the strict fake of fakes/wire, reachable from the internal network --------------
+
+
+def strict_history(_headers: Mapping[str, str], body: Mapping[str, Any]) -> Refusal | None:
+    """The strict side of the fake: a history the real API would refuse is refused here. The first
+    message is the user's, every `tool_use` of an assistant message is answered by a `tool_result`
+    of its id in the user message after it, and a `tool_result` answers nothing else."""
+    messages = cast("list[dict[str, Any]]", body.get("messages") or [])
+
+    def refuse(why: str) -> Refusal:
+        return 400, {
+            "type": "error",
+            "error": {"type": "invalid_request_error", "message": f"messages: {why}"},
+        }
+
+    if not messages or messages[0].get("role") != "user":
+        return refuse("the first message must be a user message")
+    pending: set[str] = set()
+    for index, message in enumerate(messages):
+        content: Any = message.get("content")
+        blocks = cast("list[dict[str, Any]]", content) if isinstance(content, list) else []
+        if message.get("role") == "assistant":
+            pending = {str(b.get("id")) for b in blocks if b.get("type") == "tool_use"}
+            continue
+        answered = {str(b.get("tool_use_id")) for b in blocks if b.get("type") == "tool_result"}
+        if answered != pending:
+            return refuse(f"the tool_result ids of message {index} do not match the tool_use before")
+        pending = set()
+    if pending:
+        return refuse("the last message has a tool_use that nothing answers")
+    return None
+
+
+@dataclass
+class Provider:
+    """The fake behind a made-up key, and the address a container reaches it at."""
+
+    fake: ScriptedUpstream
+    host: str
+
+    @property
+    def url(self) -> str:
+        return f"http://{self.host}:{self.fake._server.server_address[1]}"  # pyright: ignore[reportPrivateUsage]
+
+    def calls(self) -> list[dict[str, Any]]:
+        """What each request was: path, model, tools offered, message count, the auth headers."""
+        found: list[dict[str, Any]] = []
+        for record in self.fake.records:
+            body = record.body if isinstance(record.body, dict) else {}
+            document = cast("dict[str, Any]", body)
+            tools = cast("list[dict[str, Any]]", document.get("tools") or [])
+            found.append(
+                {
+                    "method": record.method,
+                    "path": record.target,
+                    "model": document.get("model"),
+                    "tools": len(tools),
+                    "messages": len(cast("list[Any]", document.get("messages") or [])),
+                    "stream": document.get("stream"),
+                    "x_api_key": "present" if "x-api-key" in record.headers else None,
+                    "authorization": record.headers.get("authorization", "")[:24] or None,
+                    "anthropic_beta": record.headers.get("anthropic-beta"),
+                    "user_agent": record.headers.get("user-agent"),
+                }
+            )
+        return found
+
+    def requests_text(self) -> str:
+        return json.dumps([record.body for record in self.fake.records])
+
+
+@contextmanager
+def provider(
+    script: Sequence[Turn], host: str, *, model: str = MODEL, judge: Any = strict_history
+) -> Iterator[Provider]:
+    """The scripted fake, listening on every address of the VM (the stock fake listens on loopback
+    only; this is the spike's own subclass of its server, `fakes/` is not changed)."""
+    real_server = upstream_module.ThreadingHTTPServer
+
+    class Everywhere(real_server):  # type: ignore[misc, valid-type]
+        def __init__(self, address: tuple[str, int], handler: Any) -> None:
+            super().__init__(("0.0.0.0", address[1]), handler)
+
+    with mock.patch.object(upstream_module, "ThreadingHTTPServer", Everywhere):
+        fake = ScriptedUpstream(
+            "messages", script, model, real_key=FAKE_KEY, judge=judge, also_models=[SMALL_MODEL]
+        )
+    with fake:
+        yield Provider(fake, host)
+
+
+# -- the image of Claude Code ----------------------------------------------------------------------
+
+# The validation the finish tool does, shared by the MCP server and the command (what the runner's
+# `submit_result` will do with the profile's result schema, in miniature).
+VALIDATE_JS = r"""
+const ALLOWED = new Set(["summary", "files"]);
+exports.validate = (input) => {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) return "the result must be an object";
+  for (const key of Object.keys(input)) if (!ALLOWED.has(key)) return `unknown field "${key}" (allowed: summary, files)`;
+  if (typeof input.summary !== "string" || input.summary.length === 0) return 'field "summary" is required and must be a non-empty string';
+  if (input.files !== undefined && (!Array.isArray(input.files) || input.files.some((f) => typeof f !== "string")))
+    return 'field "files" must be an array of strings';
+  return null;
+};
+exports.SCHEMA = {
+  type: "object",
+  properties: {
+    summary: { type: "string", description: "What was done, in one paragraph." },
+    files: { type: "array", items: { type: "string" }, description: "Paths that were changed." },
+  },
+  required: ["summary"],
+  additionalProperties: false,
+};
+"""
+
+MCP_STDIO_JS = r"""
+const fs = require("fs");
+const { validate, SCHEMA } = require("/opt/spike/validate.js");
+const log = (line) => fs.appendFileSync("/out/mcp-stdio.log", line + "\n");
+let buffer = "";
+const send = (message) => process.stdout.write(JSON.stringify(message) + "\n");
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  let at;
+  while ((at = buffer.indexOf("\n")) >= 0) {
+    const line = buffer.slice(0, at);
+    buffer = buffer.slice(at + 1);
+    if (line.trim()) handle(JSON.parse(line));
+  }
+});
+function handle(message) {
+  log("<- " + JSON.stringify(message));
+  const { id, method, params } = message;
+  if (method === "initialize")
+    return send({ jsonrpc: "2.0", id, result: { protocolVersion: params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "factory", version: "0" } } });
+  if (method === "tools/list")
+    return send({ jsonrpc: "2.0", id, result: { tools: [{ name: "submit_result", description: "Submit the result of the task. Call it once, when the work is done.", inputSchema: SCHEMA }] } });
+  if (method === "tools/call") {
+    const problem = validate(params.arguments);
+    if (problem) return send({ jsonrpc: "2.0", id, result: { isError: true, content: [{ type: "text", text: "Rejected: " + problem }] } });
+    fs.writeFileSync("/out/submitted-stdio.json", JSON.stringify(params.arguments));
+    return send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "Result accepted." }] } });
+  }
+  if (id !== undefined) send({ jsonrpc: "2.0", id, error: { code: -32601, message: "no such method" } });
+}
+"""
+
+FACTORY_SUBMIT_JS = r"""#!/usr/bin/env node
+const fs = require("fs");
+const { validate } = require("/opt/spike/validate.js");
+let text = "";
+process.stdin.on("data", (chunk) => (text += chunk));
+process.stdin.on("end", () => {
+  let input;
+  try { input = JSON.parse(text); } catch (error) { console.error("factory-submit: stdin is not JSON: " + error.message); process.exit(2); }
+  const problem = validate(input);
+  if (problem) { console.error("factory-submit: rejected: " + problem); process.exit(2); }
+  fs.writeFileSync("/out/submitted-command.json", JSON.stringify(input));
+  console.log("factory-submit: result accepted");
+});
+"""
+
+DOCKERFILE = f"""FROM {NODE_IMAGE}
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates ripgrep procps \\
+    && rm -rf /var/lib/apt/lists/*
+RUN npm install -g @anthropic-ai/claude-code@{CLAUDE_CODE_VERSION} && npm cache clean --force
+COPY validate.js mcp-stdio.js /opt/spike/
+COPY factory-submit /usr/local/bin/factory-submit
+RUN chmod 0755 /usr/local/bin/factory-submit && mkdir -p /out /work
+ENV HOME=/root
+"""
+
+
+def build_claude_image(out: Path) -> None:
+    started = time.monotonic()
+    context = out / IMAGE_DIR_NAME
+    shutil.rmtree(context, ignore_errors=True)
+    context.mkdir(parents=True)
+    (context / "Dockerfile").write_text(DOCKERFILE)
+    (context / "validate.js").write_text(VALIDATE_JS)
+    (context / "mcp-stdio.js").write_text(MCP_STDIO_JS)
+    (context / "factory-submit").write_text(FACTORY_SUBMIT_JS)
+    built = docker("build", "-t", CLAUDE_IMAGE, str(context), timeout=1200)
+    if built.returncode != 0:
+        raise SystemExit(f"image build failed: {built.stderr[-800:]}")
+    size = docker("image", "inspect", CLAUDE_IMAGE, "--format", "{{.Size}}").stdout.strip()
+    version = docker("run", "--rm", CLAUDE_IMAGE, "claude", "--version").stdout.strip()
+    REPORT.fact(
+        "s1_image",
+        base=NODE_IMAGE,
+        claude_code=version,
+        pinned=CLAUDE_CODE_VERSION,
+        build_seconds=round(time.monotonic() - started, 1),
+        image_bytes=int(size or 0),
+    )
+
+
+# -- one run of `claude -p` in a container ---------------------------------------------------------
+
+
+@dataclass
+class Run:
+    name: str
+    returncode: int
+    seconds: float
+    events: list[dict[str, Any]]
+    stderr: str
+    stdout_other: list[str]
+    calls: list[dict[str, Any]] = field(default_factory=lambda: [])
+    requests_text: str = ""
+
+    def of_type(self, kind: str, subtype: str | None = None) -> list[dict[str, Any]]:
+        return [
+            e
+            for e in self.events
+            if e.get("type") == kind and (subtype is None or e.get("subtype") == subtype)
+        ]
+
+    @property
+    def result(self) -> dict[str, Any]:
+        found = self.of_type("result")
+        return found[-1] if found else {}
+
+    @property
+    def session_id(self) -> str:
+        init = self.of_type("system", "init")
+        return str(init[0].get("session_id")) if init else ""
+
+
+def claude(
+    name: str,
+    prov: Provider,
+    out: Path,
+    *,
+    prompt: str,
+    flags: Sequence[str] = (),
+    env: Mapping[str, str | None] | None = None,
+    mounts: Sequence[str] = (),
+    user: str | None = None,
+    workdir: str = "/work",
+    model: str | None = MODEL,
+    api_key: str | None = FAKE_KEY,
+    timeout: float = 240.0,
+    stream: bool = True,
+) -> Run:
+    """`claude -p` in a fresh container of the image on the internal network, with the provider's
+    address as its base URL. The raw standard output is kept in `out`."""
+    container = f"spike-{name}"[:60]
+    docker("rm", "-f", container)
+    environment: dict[str, str | None] = {
+        "ANTHROPIC_BASE_URL": prov.url,
+        "ANTHROPIC_API_KEY": api_key,
+        # Everything that is not the conversation stays off (telemetry, updates, error reports).
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "DISABLE_AUTOUPDATER": "1",
+        "ANTHROPIC_SMALL_FAST_MODEL": SMALL_MODEL,
+    }
+    environment.update(env or {})
+    argv = ["docker", "run", "--rm", "--name", container, "--network", NETWORK, "-w", workdir]
+    if user:
+        argv += ["--user", user]
+    for key, value in environment.items():
+        if value is not None:
+            argv += ["-e", f"{key}={value}"]
+    for mount in mounts:
+        argv += ["-v", mount]
+    claude_argv = ["claude", "-p", prompt]
+    if stream:
+        claude_argv += ["--output-format", "stream-json", "--verbose"]
+    if model:
+        claude_argv += ["--model", model]
+    argv += [CLAUDE_IMAGE, *claude_argv, *flags]
+    started = time.monotonic()
+    try:
+        done = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout, check=False, stdin=subprocess.DEVNULL
+        )
+        code, stdout, stderr = done.returncode, done.stdout, done.stderr
+    except subprocess.TimeoutExpired as expired:
+        docker("rm", "-f", container)
+        code, stdout, stderr = -9, str(expired.stdout or ""), "timeout " + str(expired.stderr or "")
+    seconds = round(time.monotonic() - started, 2)
+    (out / f"{name}.stdout.jsonl").write_text(stdout)
+    (out / f"{name}.stderr.txt").write_text(stderr)
+    events: list[dict[str, Any]] = []
+    other: list[str] = []
+    for line in stdout.splitlines():
+        try:
+            parsed = json.loads(line)
+        except ValueError:
+            other.append(line[:200])
+            continue
+        if isinstance(parsed, dict):
+            events.append(cast("dict[str, Any]", parsed))
+    run = Run(name, code, seconds, events, stderr, other, prov.calls(), prov.requests_text())
+    (out / f"{name}.provider-calls.json").write_text(json.dumps(run.calls, indent=1))
+    if prov.fake.records:
+        (out / f"{name}.first-request.json").write_text(json.dumps(prov.fake.records[0].body, indent=1))
+    return run
+
+
+def short(value: Any, limit: int = 120) -> Any:
+    """`value` with every long string cut, for facts."""
+    if isinstance(value, str):
+        return value if len(value) <= limit else value[:limit] + f"...[{len(value)}]"
+    if isinstance(value, list):
+        return [short(v, limit) for v in cast("list[Any]", value)]
+    if isinstance(value, dict):
+        return {k: short(v, limit) for k, v in cast("dict[str, Any]", value).items()}
+    return value
+
+
+def shape(value: Any) -> Any:
+    """The structure of a JSON value: keys with the type of each value (lists by their first item)."""
+    if isinstance(value, dict):
+        return {k: shape(v) for k, v in cast("dict[str, Any]", value).items()}
+    if isinstance(value, list):
+        items = cast("list[Any]", value)
+        return [shape(items[0])] if items else []
+    return type(value).__name__
+
+
+# -- S1: Claude Code's events as our step records ----------------------------------------------------
+
+
+def _ms(stamp: Any) -> int | None:
+    """An ISO time stamp (`2026-11-04T21:35:55.880Z`) in epoch milliseconds."""
+    if not isinstance(stamp, str):
+        return None
+    try:
+        return int(datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp() * 1000)
+    except ValueError:
+        return None
+
+
+class ClaudeEvents:
+    """The proposed adapter of Claude Code's `stream-json` for the live view: each event becomes the
+    engine-shaped event (`message.updated`, `message.part.updated`) that `StepConverter` already
+    reads, so that the bounds (16 KiB of text, 4 KiB of tool input, the 5,000 records), the
+    redaction and the rule that an output is never recorded stay where they are. Needs
+    `--include-partial-messages`: only its `message_delta` carries the final token counts of a model
+    call (`output_tokens` of an `assistant` event is 1, the count of `message_start`).
+
+    * `assistant` event (one per content block, all of one model call share `message.id`):
+      `thinking` -> a `reasoning` part, `text` -> a `text` part (both finished: the event comes when
+      the block ended), `tool_use` -> a `tool` part, status `running`, part id = the `tool_use` id;
+    * `user` event with a `tool_result` block -> the same tool part again, `completed`, or `error`
+      with the text of the result when `is_error` is true;
+    * `stream_event` `message_delta` -> a `step-finish` part with the call's tokens (no price: the
+      price is computed from the book, `result.total_cost_usd` is the turn's total);
+    * `system`, `result` and the rest -> nothing here (`result` ends the turn and carries the total).
+    """
+
+    def __init__(self, session_id: str) -> None:
+        self.session = session_id
+        self._messages: set[str] = set()
+        self._blocks: Counter[str] = Counter()
+        self._tools: dict[str, tuple[str, Any, int | None, str]] = {}
+        self._current = ""
+
+    def _event(self, kind: str, **properties: Any) -> dict[str, Any]:
+        return {"type": kind, "properties": {"sessionID": self.session, **properties}}
+
+    def _part(self, part: dict[str, Any], at: int | None) -> dict[str, Any]:
+        return self._event("message.part.updated", part=part, time=at)
+
+    def convert(self, event: Mapping[str, Any]) -> list[dict[str, Any]]:
+        kind = event.get("type")
+        at = _ms(event.get("timestamp"))
+        if kind == "assistant":
+            return self._assistant(cast("dict[str, Any]", event.get("message") or {}), at)
+        if kind == "user":
+            return self._results(cast("dict[str, Any]", event.get("message") or {}), at)
+        if kind == "stream_event":
+            inner = cast("dict[str, Any]", event.get("event") or {})
+            if inner.get("type") == "message_start":
+                message = cast("dict[str, Any]", inner.get("message") or {})
+                self._current = str(message.get("id"))
+            if inner.get("type") == "message_delta":
+                return self._step(inner, at)
+        return []
+
+    def _assistant(self, message: dict[str, Any], at: int | None) -> list[dict[str, Any]]:
+        identifier = str(message.get("id"))
+        found: list[dict[str, Any]] = []
+        if identifier not in self._messages:
+            self._messages.add(identifier)
+            found.append(
+                self._event("message.updated", info={"id": identifier, "role": "assistant"})
+            )
+        for block in cast("list[dict[str, Any]]", message.get("content") or []):
+            self._blocks[identifier] += 1
+            part_id = f"{identifier}.{self._blocks[identifier]}"
+            if block.get("type") in ("thinking", "text"):
+                text = block.get("thinking") if block.get("type") == "thinking" else block.get("text")
+                found.append(
+                    self._part(
+                        {
+                            "id": part_id,
+                            "type": "reasoning" if block.get("type") == "thinking" else "text",
+                            "messageID": identifier,
+                            "text": text,
+                            "time": {"start": at, "end": at},
+                        },
+                        at,
+                    )
+                )
+            if block.get("type") == "tool_use":
+                call = str(block.get("id"))
+                self._tools[call] = (str(block.get("name")), block.get("input"), at, identifier)
+                found.append(self._tool_part(call, "running", at, None))
+        return found
+
+    def _tool_part(self, call: str, status: str, at: int | None, error: str | None) -> dict[str, Any]:
+        name, arguments, started, message = self._tools[call]
+        state: dict[str, Any] = {
+            "status": status,
+            "input": arguments,
+            "time": {"start": started, **({"end": at} if status != "running" else {})},
+        }
+        if error is not None:
+            state["error"] = error
+        return self._part(
+            {"id": call, "type": "tool", "tool": name, "callID": call, "messageID": message, "state": state},
+            at,
+        )
+
+    def _results(self, message: dict[str, Any], at: int | None) -> list[dict[str, Any]]:
+        found: list[dict[str, Any]] = []
+        content: Any = message.get("content")
+        for block in cast("list[dict[str, Any]]", content) if isinstance(content, list) else []:
+            call = str(block.get("tool_use_id"))
+            if block.get("type") != "tool_result" or call not in self._tools:
+                continue
+            failed = bool(block.get("is_error"))
+            text: Any = block.get("content")
+            if isinstance(text, list):
+                text = " ".join(str(b.get("text", "")) for b in cast("list[dict[str, Any]]", text))
+            found.append(
+                self._tool_part(call, "error" if failed else "completed", at, str(text) if failed else None)
+            )
+        return found
+
+    def _step(self, inner: dict[str, Any], at: int | None) -> list[dict[str, Any]]:
+        usage = cast("dict[str, Any]", inner.get("usage") or {})
+        delta = cast("dict[str, Any]", inner.get("delta") or {})
+        part = {
+            "id": f"{self._current}.step",
+            "type": "step-finish",
+            "messageID": self._current,
+            "reason": delta.get("stop_reason"),
+            "tokens": {
+                "input": usage.get("input_tokens"),
+                "output": usage.get("output_tokens"),
+                "reasoning": 0,
+                "cache": {
+                    "read": usage.get("cache_read_input_tokens"),
+                    "write": usage.get("cache_creation_input_tokens"),
+                },
+            },
+        }
+        return [self._part(part, at)]
+
+
+def step_records(events: Sequence[Mapping[str, Any]]) -> list[StepRecord]:
+    """The records `StepConverter` makes of a Claude Code run through the adapter above."""
+    from code_reviewer_runner.implementer.step_records import StepConverter
+
+    session = next((str(e.get("session_id")) for e in events if e.get("session_id")), "")
+    adapter = ClaudeEvents(session)
+    converter = StepConverter(session, Redactor((FAKE_KEY, FAKE_OAUTH, FAKE_REFRESH)))
+    records: list[StepRecord] = []
+    for event in events:
+        for engine_event in adapter.convert(event):
+            record = converter.convert(engine_event)
+            if record is not None:
+                records.append(record)
+    return records
+
+
+# -- S1: the scripted turn -------------------------------------------------------------------------
+
+NOTES = "SPIKE-NOTES-LINE: hello from the repository\nsecond line\n"
+ONE = "SPIKE-ONE-MARKER: read notes.txt, count its lines, change hello to HELLO, then say you are done."
+ANSWER_ONE = "SPIKE-ANSWER-ONE: notes.txt now says HELLO."
+BYPASS = ["--permission-mode", "bypassPermissions"]
+
+
+def seed_work(directory: Path) -> Path:
+    shutil.rmtree(directory, ignore_errors=True)
+    directory.mkdir(parents=True)
+    (directory / "notes.txt").write_text(NOTES)
+    sh(
+        f"cd {directory} && git init -q && git add . && "
+        "git -c user.email=a@b -c user.name=s commit -qm init && chmod -R a+rwX ."
+    )
+    return directory
+
+
+def read_notes() -> Turn:
+    return Turn(tool="Read", args={"file_path": "/work/notes.txt"})
+
+
+def script_events() -> list[Turn]:
+    """Reads a file (with a thought first), runs a command beside a second read in one step
+    (parallel tool use), edits the file, ends with text."""
+    return [
+        Turn(thinking="I should read the notes first.", tool="Read", args={"file_path": "/work/notes.txt"}),
+        Turn(
+            tool="Bash",
+            args={"command": "wc -l /work/notes.txt && echo SPIKE-BASH-OK", "description": "count lines"},
+            also=(("Read", {"file_path": "/work/notes.txt", "limit": 1}),),
+        ),
+        Turn(
+            tool="Edit",
+            args={"file_path": "/work/notes.txt", "old_string": "hello", "new_string": "HELLO"},
+        ),
+        Turn(text=ANSWER_ONE),
+    ]
+
+
+def tool_results(run: Run) -> list[dict[str, Any]]:
+    """Every `tool_result` of a run: the tool's name, whether it failed and the start of its text."""
+    names: dict[str, str] = {}
+    found: list[dict[str, Any]] = []
+    for event in run.events:
+        message = cast("dict[str, Any]", event.get("message") or {})
+        content: Any = message.get("content")
+        for block in cast("list[dict[str, Any]]", content) if isinstance(content, list) else []:
+            if block.get("type") == "tool_use":
+                names[str(block.get("id"))] = str(block.get("name"))
+            if block.get("type") == "tool_result":
+                text: Any = block.get("content")
+                if isinstance(text, list):
+                    text = " ".join(str(b.get("text", "")) for b in cast("list[dict[str, Any]]", text))
+                found.append(
+                    {
+                        "tool": names.get(str(block.get("tool_use_id"))),
+                        "is_error": bool(block.get("is_error")),
+                        "text": short(str(text), 160),
+                    }
+                )
+    return found
+
+
+def s1_events(out: Path, gateway: str) -> None:
+    """(a) The events of a turn and their mapping to the step records; (g) the cost it reports."""
+    work = seed_work(out / "work-events")
+    with provider(script_events(), gateway) as prov:
+        run = claude(
+            "events",
+            prov,
+            out,
+            prompt=ONE,
+            flags=[*BYPASS, "--include-partial-messages"],
+            mounts=[f"{work}:/work"],
+            env={"IS_SANDBOX": "1"},
+        )
+    first_init = run.of_type("system", "init")
+    init = first_init[0] if first_init else {}
+    REPORT.say(
+        "s1_events_turn_ends",
+        run.returncode == 0 and run.result.get("subtype") == "success" and ANSWER_ONE in str(run.result.get("result")),
+        returncode=run.returncode,
+        seconds=run.seconds,
+        stderr=run.stderr[-200:],
+        notes_after=(work / "notes.txt").read_text()[:30],
+    )
+    REPORT.fact(
+        "s1_event_types",
+        types=dict(Counter(f"{e.get('type')}/{e.get('subtype')}" for e in run.events)),
+        stream_events=dict(
+            Counter(str(cast("dict[str, Any]", e.get("event") or {}).get("type")) for e in run.of_type("stream_event"))
+        ),
+        init={
+            k: init.get(k)
+            for k in ("cwd", "session_id", "model", "permissionMode", "apiKeySource", "claude_code_version", "mcp_servers", "tools")
+        },
+        init_keys=sorted(init),
+        assistant_event_shape=shape(run.of_type("assistant")[0]) if run.of_type("assistant") else None,
+        user_event_shape=shape(run.of_type("user")[0]) if run.of_type("user") else None,
+        result_keys=sorted(run.result),
+        result_usage_keys=sorted(cast("dict[str, Any]", run.result.get("usage") or {})),
+        model_usage=short(run.result.get("modelUsage")),
+    )
+    records = step_records(run.events)
+    by_kind = Counter(r.kind for r in records)
+    tools = {r.part_id: [x.status for x in records if x.part_id == r.part_id] for r in records if r.kind == "tool"}
+    steps = [r for r in records if r.kind == "step"]
+    usage = cast("dict[str, Any]", run.result.get("usage") or {})
+    summed_in = sum((r.tokens or {}).get("input", 0) for r in steps)
+    summed_out = sum((r.tokens or {}).get("output", 0) for r in steps)
+    REPORT.say(
+        "s1_events_map_to_step_records",
+        by_kind == Counter(reasoning=1, text=1, tool=8, step=4)
+        and all(v == ["running", "completed"] for v in tools.values())
+        and summed_in == usage.get("input_tokens")
+        and summed_out == usage.get("output_tokens"),
+        by_kind=dict(by_kind),
+        tool_statuses=tools,
+        step_tokens=[dict(r.tokens or {}) for r in steps],
+        summed_input=summed_in,
+        summed_output=summed_out,
+        result_usage_input=usage.get("input_tokens"),
+        result_usage_output=usage.get("output_tokens"),
+        records=[short(r.as_json(), 90) for r in records[:10]],
+    )
+    # (g) The figure `result` carries, against the list price of the model for the fake's usage.
+    prices = {"input": 3.0, "output": 15.0, "cache_read": 0.30, "write_5m": 3.75, "write_1h": 6.0}
+    creation = cast("dict[str, Any]", usage.get("cache_creation") or {})
+    expected = (
+        usage.get("input_tokens", 0) * prices["input"]
+        + usage.get("output_tokens", 0) * prices["output"]
+        + usage.get("cache_read_input_tokens", 0) * prices["cache_read"]
+        + creation.get("ephemeral_5m_input_tokens", 0) * prices["write_5m"]
+        + creation.get("ephemeral_1h_input_tokens", 0) * prices["write_1h"]
+    ) / 1e6
+    reported = run.result.get("total_cost_usd")
+    REPORT.say(
+        "s1_cost_of_an_api_key_run_is_the_list_price_of_the_usage",
+        isinstance(reported, float) and abs(reported - expected) < 1e-9,
+        total_cost_usd=reported,
+        expected_from_list_prices=round(expected, 9),
+        per_call_cost_in_events=any("cost" in json.dumps(e.get("message", {})) for e in run.of_type("assistant")),
+        model_usage=short(run.result.get("modelUsage")),
+        api_ms=run.result.get("duration_api_ms"),
+        duration_ms=run.result.get("duration_ms"),
+        wall_seconds=run.seconds,
+    )
+    REPORT.fact(
+        "s1_provider_traffic",
+        calls=[
+            {k: c[k] for k in ("path", "model", "tools", "messages", "stream", "x_api_key")} for c in run.calls
+        ],
+        anthropic_beta=run.calls[0]["anthropic_beta"] if run.calls else None,
+        user_agent=run.calls[0]["user_agent"] if run.calls else None,
+        request_tool_names=sorted(
+            {
+                str(t.get("name"))
+                for t in cast(
+                    "list[dict[str, Any]]",
+                    cast("dict[str, Any]", json.loads(run.requests_text)[0]).get("tools") or [],
+                )
+            }
+        ),
+    )
+
+
+# -- S1 (b) and (c): the finish tool as an MCP server, and as a command ----------------------------
+
+SUBMIT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string", "description": "What was done, in one paragraph."},
+        "files": {"type": "array", "items": {"type": "string"}, "description": "Paths that were changed."},
+    },
+    "required": ["summary"],
+    "additionalProperties": False,
+}
+CAPABILITY = "spike-capability-0123456789"
+
+
+def validate_result(value: Any) -> str | None:
+    """The same rules as `VALIDATE_JS` (in miniature, what the profile's result schema will say)."""
+    if not isinstance(value, dict):
+        return "the result must be an object"
+    document = cast("dict[str, Any]", value)
+    for key in document:
+        if key not in ("summary", "files"):
+            return f'unknown field "{key}" (allowed: summary, files)'
+    summary = document.get("summary")
+    if not isinstance(summary, str) or not summary:
+        return 'field "summary" is required and must be a non-empty string'
+    files = document.get("files")
+    if files is not None and (not isinstance(files, list) or any(not isinstance(f, str) for f in cast("list[Any]", files))):
+        return 'field "files" must be an array of strings'
+    return None
+
+
+class HttpMcp:
+    """The finish tool as an MCP server on the runner's side: Streamable HTTP, one POST per
+    JSON-RPC message, JSON answers (no streaming), a bearer capability in the header. What it
+    saw is kept in `log`."""
+
+    def __init__(self, host: str) -> None:
+        self.host = host
+        self.log: list[dict[str, Any]] = []
+        self.submitted: list[dict[str, Any]] = []
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, format: str, *args: Any) -> None:
+                return
+
+            def _send(self, status: int, document: Any = None, extra: Mapping[str, str] | None = None) -> None:
+                payload = b"" if document is None else json.dumps(document).encode()
+                self.send_response(status)
+                if payload:
+                    self.send_header("Content-Type", "application/json")
+                for name, value in (extra or {}).items():
+                    self.send_header(name, value)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self) -> None:
+                outer.log.append({"method": "GET", "path": self.path})
+                self._send(405)
+
+            def do_DELETE(self) -> None:
+                outer.log.append({"method": "DELETE", "path": self.path})
+                self._send(200)
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                message = cast("dict[str, Any]", json.loads(self.rfile.read(length) or b"{}"))
+                authorised = self.headers.get("Authorization") == f"Bearer {CAPABILITY}"
+                outer.log.append(
+                    {
+                        "method": message.get("method"),
+                        "authorised": authorised,
+                        "accept": self.headers.get("Accept"),
+                        "session_header": self.headers.get("Mcp-Session-Id"),
+                        "protocol_header": self.headers.get("MCP-Protocol-Version"),
+                    }
+                )
+                if not authorised:
+                    self._send(401, {"error": "capability"})
+                    return
+                identifier = message.get("id")
+                if identifier is None:
+                    self._send(202)
+                    return
+                result = outer.handle(message)
+                self._send(200, {"jsonrpc": "2.0", "id": identifier, **result}, {"Mcp-Session-Id": "spike-session"})
+
+        self._server = ThreadingHTTPServer(("0.0.0.0", 0), Handler)
+        self._server.daemon_threads = True
+        self._thread = threading.Thread(target=self._server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+
+    @property
+    def url(self) -> str:
+        return f"http://{self.host}:{self._server.server_address[1]}/mcp"
+
+    def handle(self, message: dict[str, Any]) -> dict[str, Any]:
+        method = message.get("method")
+        params = cast("dict[str, Any]", message.get("params") or {})
+        if method == "initialize":
+            return {
+                "result": {
+                    "protocolVersion": params.get("protocolVersion"),
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "factory", "version": "0"},
+                }
+            }
+        if method == "tools/list":
+            return {
+                "result": {
+                    "tools": [
+                        {
+                            "name": "submit_result",
+                            "description": "Submit the result of the task. Call it once, when the work is done.",
+                            "inputSchema": SUBMIT_SCHEMA,
+                        }
+                    ]
+                }
+            }
+        if method == "tools/call":
+            arguments = params.get("arguments")
+            problem = validate_result(arguments)
+            if problem:
+                return {"result": {"isError": True, "content": [{"type": "text", "text": f"Rejected: {problem}"}]}}
+            self.submitted.append(cast("dict[str, Any]", arguments))
+            return {"result": {"content": [{"type": "text", "text": "Result accepted."}]}}
+        return {"error": {"code": -32601, "message": "no such method"}}
+
+    def __enter__(self) -> "HttpMcp":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def script_finish(tool: str, command: bool = False) -> list[Turn]:
+    """Reads the notes, submits a result the finish tool must reject (a number, an unknown field),
+    corrects it, ends."""
+    bad: Mapping[str, Any] = {"summary": 5, "extra": True}
+    good: Mapping[str, Any] = {"summary": "notes.txt now says HELLO", "files": ["notes.txt"]}
+    if command:
+        return [
+            read_notes(),
+            Turn(tool="Bash", args={"command": f"echo '{json.dumps(bad)}' | factory-submit", "description": "submit"}),
+            Turn(tool="Bash", args={"command": f"echo '{json.dumps(good)}' | factory-submit", "description": "submit"}),
+            Turn(text="SPIKE-FINISHED"),
+        ]
+    return [
+        read_notes(),
+        Turn(tool=tool, args=bad),
+        Turn(tool=tool, args=good),
+        Turn(text="SPIKE-FINISHED"),
+    ]
+
+
+def s1_finish_tool(out: Path, gateway: str) -> None:
+    """(b) A local MCP server with `submit_result` and a JSON-schema input: stdio in the container,
+    and HTTP on the runner's side. (c) `factory-submit` on PATH, through the Bash tool."""
+    tool = "mcp__factory__submit_result"
+    stdio_config = json.dumps({"mcpServers": {"factory": {"command": "node", "args": ["/opt/spike/mcp-stdio.js"]}}})
+    with HttpMcp(gateway) as http:
+        http_config = json.dumps(
+            {
+                "mcpServers": {
+                    "factory": {"type": "http", "url": http.url, "headers": {"Authorization": f"Bearer {CAPABILITY}"}}
+                }
+            }
+        )
+        for kind, config in (("stdio", stdio_config), ("http", http_config), ("stdio-search-off", stdio_config)):
+            work = seed_work(out / f"work-mcp-{kind}")
+            results = out / f"out-mcp-{kind}"
+            shutil.rmtree(results, ignore_errors=True)
+            results.mkdir()
+            results.chmod(0o777)
+            with provider(script_finish(tool), gateway) as prov:
+                run = claude(
+                    f"mcp-{kind}",
+                    prov,
+                    out,
+                    prompt=ONE,
+                    flags=[*BYPASS, "--mcp-config", config, "--strict-mcp-config"],
+                    mounts=[f"{work}:/work", f"{results}:/out"],
+                    env={"IS_SANDBOX": "1", **({"ENABLE_TOOL_SEARCH": "false"} if kind.endswith("off") else {})},
+                )
+                body = json.loads(run.requests_text)
+            init = run.of_type("system", "init")
+            listed = [
+                t
+                for t in cast("list[dict[str, Any]]", cast("dict[str, Any]", body[0]).get("tools") or [])
+                if "submit_result" in str(t.get("name"))
+            ]
+            answers = [r for r in tool_results(run) if r["tool"] == tool]
+            submitted = (results / "submitted-stdio.json").exists() if kind.startswith("stdio") else bool(http.submitted)
+            first_request = json.dumps(body[0])
+            REPORT.say(
+                f"s1_mcp_{kind}_finish_tool_is_listed_and_called",
+                run.returncode == 0
+                and len(answers) == 2
+                and answers[0]["is_error"]
+                and not answers[1]["is_error"]
+                and submitted,
+                returncode=run.returncode,
+                stderr=run.stderr[-300:],
+                mcp_servers=init[0].get("mcp_servers") if init else None,
+                tool_in_init=tool in (init[0].get("tools") if init else []),
+                tool_in_first_request=[short(t, 300) for t in listed],
+                name_mentions_in_first_request=first_request.count("submit_result"),
+                mention_context=[first_request[m - 80 : m + 60] for m in [first_request.find("submit_result")] if m >= 0],
+                tool_names_in_first_request=sorted(
+                    str(t.get("name")) for t in cast("list[dict[str, Any]]", cast("dict[str, Any]", body[0]).get("tools") or [])
+                ),
+                answers=answers,
+                denials=run.result.get("permission_denials"),
+                second_request_carries_the_error=("Rejected:" in run.requests_text),
+                server_log=[x[:200] for x in (results / "mcp-stdio.log").read_text().splitlines()[:6]] if kind.startswith("stdio") and (results / "mcp-stdio.log").exists() else http.log[:8],
+                seconds=run.seconds,
+            )
+            http.log.clear()
+            http.submitted.clear()
+    # (c) the command
+    work = seed_work(out / "work-command")
+    results = out / "out-command"
+    shutil.rmtree(results, ignore_errors=True)
+    results.mkdir()
+    results.chmod(0o777)
+    with provider(script_finish("", command=True), gateway) as prov:
+        run = claude(
+            "command",
+            prov,
+            out,
+            prompt=ONE,
+            flags=BYPASS,
+            mounts=[f"{work}:/work", f"{results}:/out"],
+            env={"IS_SANDBOX": "1"},
+        )
+    answers = [r for r in tool_results(run) if r["tool"] == "Bash"]
+    REPORT.say(
+        "s1_factory_submit_command_through_the_bash_tool",
+        run.returncode == 0
+        and len(answers) == 2
+        and answers[0]["is_error"]
+        and not answers[1]["is_error"]
+        and (results / "submitted-command.json").exists(),
+        answers=answers,
+        second_request_carries_the_error=("factory-submit: rejected" in run.requests_text),
+        seconds=run.seconds,
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("what", choices=["s1", "s2", "all", "build"])
+    parser.add_argument("--out", help="work directory; default: a fresh one in the temp directory")
+    parser.add_argument("--only", default="", help="comma list of the parts to run")
+    arguments = parser.parse_args()
+    refuse_unless_spike_vm(socket.gethostname(), os.environ)
+    out = Path(arguments.out) if arguments.out else Path(tempfile.mkdtemp(prefix="runner-spikes-"))
+    out.mkdir(parents=True, exist_ok=True)
+    only = {part for part in arguments.only.split(",") if part}
+    ensure_docker()
+    remove_leftovers()
+    gateway = network_gateway()
+
+    def wanted(name: str, group: str) -> bool:
+        return arguments.what in (group, "all") and (not only or name in only)
+
+    if arguments.what in ("build", "s1", "all") and docker("image", "inspect", CLAUDE_IMAGE).returncode != 0:
+        build_claude_image(out)
+    try:
+        if wanted("events", "s1"):
+            s1_events(out, gateway)
+        if wanted("finish", "s1"):
+            s1_finish_tool(out, gateway)
+    finally:
+        remove_leftovers()
+    _ = (Callable, threading, BaseHTTPRequestHandler, ThreadingHTTPServer, field)
+    REPORT.say("total", REPORT.ok)
+    return 0 if REPORT.ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
