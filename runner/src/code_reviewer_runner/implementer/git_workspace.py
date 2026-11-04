@@ -11,12 +11,13 @@ What the system does, and what the agent can and cannot:
   environment of that one git process and nowhere else: not in argv, a config file, a URL, the
   mirror or anything the agent can reach.
 * **A follow-up turn** (#838, `resume` of the job) starts from the branches the earlier turn left on
-  the provider and not from the base alone: each is fetched into the mirror (the session branch 50
-  deep, the others and the base one deep), the agent's repository gets a local branch for each and
-  the one the agent was on is checked out. A branch that moved on the provider since is taken at the
-  provider's tip and the change is recorded (`resume_moved`). The start tip is kept **per branch**
-  (`start_tips`): a branch the agent did not touch is not pushed again, and what a setup script did
-  is undone branch by branch.
+  the provider and not from the base alone: the provider is asked which of them it still has, and
+  the base and all of those are fetched in one `--depth=50` fetch (git counts the depth from every
+  tip, so none has less than 50 commits of history where it has that many), the agent's repository
+  gets a local branch for each and the one the agent was on is checked out. A branch that moved on
+  the provider since is taken at the provider's tip and the change is recorded (`resume_moved`). The
+  start tip is kept **per branch** (`start_tips`): a branch the agent did not touch is not pushed
+  again, and what a setup script did is undone branch by branch.
 * The agent works in `/work/repo` of **its own container** (`agent_container.py`): the Subpath
   `repo` of the work volume, a local clone of the mirror with no remote and no credential. It may do
   anything with git there: commit, amend, rebase, reset, create and switch branches, tag. Nothing is
@@ -109,14 +110,16 @@ RESCUE_STEP_TIMEOUT = 3.0
 # number of refs; this holds about 40,000 branches and the rest is not read.
 LIST_MAX_BYTES = 4 * 1024 * 1024
 FETCH_TIMEOUT = 60.0
-# The most time all the fetches of a follow-up's branches (one per branch, one after the other, at
-# most 20) may take together; a turn that is not set up by then ends `clone_failed`, free.
+# The most time the `ls-remote` and the one fetch of a follow-up's branches may take together (the
+# `ls-remote` gets `FETCH_TIMEOUT` of it at most); a turn that is not set up by then ends
+# `clone_failed`, free.
 RESUME_FETCH_SECONDS = 300.0
-# How much history every branch of a follow-up turn gets (the base branch, the session branch and
-# the other branches): the agent has no remote to deepen from, and with less the base branch that
-# moved since the earlier turn cannot be merged, rebased or diffed against (`merge-base` finds
-# nothing). A merge base further back than this many commits is not found. A first turn takes the
-# base branch one deep: its branch starts at the tip.
+# How much history every branch of a follow-up turn gets at least (the base branch, the session
+# branch and the other branches, fetched in one command so that git counts the depth from every
+# tip): the agent has no remote to deepen from, and with less the base branch that moved since the
+# earlier turn cannot be merged, rebased or diffed against (`merge-base` finds nothing). A merge
+# base further back than this many commits is not found. A first turn takes the base branch one
+# deep: its branch starts at the tip.
 RESUME_DEPTH = 50
 PUSH_TIMEOUT = 120.0
 # The wait before the one new try of a push the provider could not take.
@@ -495,15 +498,15 @@ class GitWorkspace:
             raise fail(ErrorCode.SETUP_FAILED, "reader_unavailable: the reader cannot be made")
 
     def clone_mirror(self) -> None:
-        """Fetch the base branch, depth 1 (`RESUME_DEPTH` on a follow-up), into the new bare mirror.
-        The token is in this one process's environment."""
+        """Fetch the base branch, depth 1, into the new bare mirror; a follow-up fetches the
+        branches of its session as well, `RESUME_DEPTH` deep (`_fetch_follow_up`). The token is in
+        the environment of each git process that reaches the provider and nowhere else."""
         self._check_names()
         self._prepare_directories()
         mirror = self.mirror
         mirror.mkdir(mode=0o700)
         os.chmod(mirror, 0o700)
         base = self.spec.base_branch
-        depth = 1 if self.spec.resume is None else RESUME_DEPTH
         init = self._root(
             ["init", "-q", "--bare", "--template=", f"--initial-branch={base}", str(mirror)],
             protocols="file",
@@ -512,10 +515,22 @@ class GitWorkspace:
             raise fail(
                 ErrorCode.SETUP_FAILED, "the mirror cannot be created: " + self._detail(init)
             )
+        self._moved, self._missing = [], []
+        if self.spec.resume is not None:
+            self._starts = self._fetch_follow_up()
+        else:
+            self._starts = {base: self._fetch_base()}
+        # The session branch starts at the base tip unless an earlier turn pushed it.
+        self._start = self._starts.setdefault(self.spec.branch, self._starts[base])
+
+    def _fetch_base(self) -> str:
+        """A first turn: the base branch, one deep, into the mirror as `refs/heads/<base>`; its
+        tip."""
+        base = self.spec.base_branch
         fetched = self._mirror(
             [
                 "fetch",
-                f"--depth={depth}",
+                "--depth=1",
                 *_PLAIN_FETCH,
                 self.spec.clone_url,
                 f"refs/heads/{base}:refs/heads/{base}",
@@ -530,33 +545,73 @@ class GitWorkspace:
                 else ErrorCode.CLONE_FAILED
             )
             raise fail(code, "the base branch cannot be cloned: " + self._detail(fetched))
-        tip = self._mirror(["rev-parse", "--verify", f"refs/heads/{base}^{{commit}}"])
-        if tip.returncode != 0:
-            raise fail(ErrorCode.CLONE_FAILED, "the cloned base branch has no commit")
-        base_tip = tip.stdout.strip()
-        self._starts = {base: base_tip}
-        self._moved, self._missing = [], []
-        if self.spec.resume is not None:
-            self._fetch_session_branches(base_tip)
-        # The session branch starts at the base tip unless an earlier turn pushed it.
-        self._starts.setdefault(self.spec.branch, base_tip)
-        self._start = self._starts[self.spec.branch]
+        return self._tips_in_mirror([base])[base]
 
-    def _fetch_session_branches(self, base_tip: str) -> None:
-        """A follow-up turn: each branch the earlier turn left on the provider, into the mirror
-        (each `RESUME_DEPTH` deep, the session branch last). The tip is the one
-        the provider has now, read from the mirror; a tip that is not the pushed one is recorded. A
-        branch the provider no longer has is left out and recorded; the session branch gone is the
-        end of the turn (the app checks it before it starts one, so this is a race)."""
+    def _fetch_follow_up(self) -> dict[str, str]:
+        """A follow-up turn: the base branch and each branch the earlier turn left on the provider,
+        into the mirror as `refs/heads/<name>`, by name and tip as the mirror has them.
+
+        The provider is asked first which of the branches it has (`git ls-remote`, with the token
+        as every other command that reaches it), then **one** `git fetch --depth=RESUME_DEPTH` takes
+        all of them: git counts the depth from every tip and keeps a commit when any tip reaches it
+        within that many commits, so no tip is left with less than `RESUME_DEPTH` commits of
+        history (where it has that many), whatever the branches lie to each other. Separate fetches
+        would not do that: a later `--depth` fetch moves the shallow boundary and can make a branch
+        that is an ancestor of the new one, or a base that it is far ahead of, a shallow root.
+
+        A branch the provider no longer has is left out and recorded (`resume_missing`); a tip that
+        is not the pushed one is recorded (`resume_moved`). The base branch gone is
+        `base_branch_not_found`; the session branch gone is the end of the turn (the app checks it
+        before it starts one, so this is a race). Both git commands are bound by `FETCH_TIMEOUT`
+        and the `RESUME_FETCH_SECONDS` deadline together."""
         resume = self.spec.resume
         assert resume is not None
         base = self.spec.base_branch
         deadline = self._clock() + RESUME_FETCH_SECONDS
-        # The session branch comes last: a `--depth` fetch of another branch that is an ancestor of
-        # it would make that ancestor a shallow root and cut the session branch's history to what
-        # lies between (the depth of the last fetch wins).
-        for entry in sorted(resume.branches, key=lambda item: item.name == self.spec.branch):
-            tip = base_tip if entry.name == base else self._fetch_branch(entry.name, deadline)
+        wanted = [base, *(entry.name for entry in resume.branches if entry.name != base)]
+        listed = self._mirror(
+            [
+                "ls-remote",
+                "--heads",
+                self.spec.clone_url,
+                *(f"refs/heads/{name}" for name in wanted),
+            ],
+            protocols=":".join(self._schemes),
+            token=True,
+            timeout=self._left(FETCH_TIMEOUT, deadline),
+        )
+        if listed.returncode != 0:
+            raise fail(
+                ErrorCode.CLONE_FAILED,
+                "the branches of the session cannot be listed: " + self._detail(listed),
+            )
+        on_provider = {
+            line.partition("\t")[2].removeprefix("refs/heads/")
+            for line in listed.stdout.splitlines()
+        }
+        if base not in on_provider:
+            raise fail(ErrorCode.BASE_BRANCH_NOT_FOUND, "the base branch is not on the provider")
+        present = [name for name in wanted if name in on_provider]
+        fetched = self._mirror(
+            [
+                "fetch",
+                f"--depth={RESUME_DEPTH}",
+                *_PLAIN_FETCH,
+                self.spec.clone_url,
+                *(f"refs/heads/{name}:refs/heads/{name}" for name in present),
+            ],
+            protocols=":".join(self._schemes),
+            token=True,
+            timeout=self._left(RESUME_FETCH_SECONDS, deadline),
+        )
+        if fetched.returncode != 0:
+            raise fail(
+                ErrorCode.CLONE_FAILED,
+                "the branches of the session cannot be fetched: " + self._detail(fetched),
+            )
+        tips = self._tips_in_mirror(present)
+        for entry in resume.branches:
+            tip = tips.get(entry.name)
             if tip is None:
                 if entry.name == self.spec.branch:
                     raise fail(ErrorCode.CLONE_FAILED, "the session branch is gone on the provider")
@@ -564,39 +619,17 @@ class GitWorkspace:
                 continue
             if tip != entry.head:
                 self._moved.append(BranchMoved(entry.name, entry.head, tip))
-            self._starts[entry.name] = tip
+        return tips
 
-    def _fetch_branch(self, name: str, deadline: float) -> str | None:
-        """One branch of a follow-up into the mirror, as `refs/heads/<name>`: its tip, or None when
-        the provider does not have it. The fetch gets `FETCH_TIMEOUT` at most and what is left of
-        the `deadline` of all of them."""
-        if self._clock() >= deadline:
-            raise fail(
-                ErrorCode.CLONE_FAILED, "the branches of the session cannot be fetched in time"
-            )
-        fetched = self._mirror(
-            [
-                "fetch",
-                f"--depth={RESUME_DEPTH}",
-                *_PLAIN_FETCH,
-                self.spec.clone_url,
-                f"refs/heads/{name}:refs/heads/{name}",
-            ],
-            protocols=":".join(self._schemes),
-            token=True,
-            timeout=self._left(FETCH_TIMEOUT, deadline),
-        )
-        if fetched.returncode != 0:
-            if "couldn't find remote ref" in fetched.stderr:
-                return None
-            raise fail(
-                ErrorCode.CLONE_FAILED,
-                "a branch of the session cannot be fetched: " + self._detail(fetched),
-            )
-        tip = self._mirror(["rev-parse", "--verify", f"refs/heads/{name}^{{commit}}"])
-        if tip.returncode != 0 or not _SHA.fullmatch(tip.stdout.strip()):
-            raise fail(ErrorCode.CLONE_FAILED, "a fetched branch of the session has no commit")
-        return tip.stdout.strip()
+    def _tips_in_mirror(self, names: Sequence[str]) -> dict[str, str]:
+        """The commit each of the branches fetched into the mirror is at, by name."""
+        tips: dict[str, str] = {}
+        for name in names:
+            done = self._mirror(["rev-parse", "--verify", f"refs/heads/{name}^{{commit}}"])
+            if done.returncode != 0 or not _SHA.fullmatch(done.stdout.strip()):
+                raise fail(ErrorCode.CLONE_FAILED, "a fetched branch of the session has no commit")
+            tips[name] = done.stdout.strip()
+        return tips
 
     def create_agent_repository(self) -> None:
         """The agent's repository: a local clone of the mirror (no hard links, so nothing is shared

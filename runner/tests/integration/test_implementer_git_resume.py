@@ -70,6 +70,16 @@ def resume_of_three(tips: dict[str, str], checkout: str | None) -> ImplementerRe
     return resume_of(*tips.items(), checkout=checkout)
 
 
+def logging_git(tmp_path: Path, real: str, log: Path) -> str:
+    """A `git` that appends its arguments to `log` and runs the real one. Returns its path."""
+    directory = tmp_path / "logger"
+    directory.mkdir()
+    script = directory / "git"
+    script.write_text(f'#!/bin/sh\necho "$*" >> "{log}"\nexec "{real}" "$@"\n')
+    script.chmod(0o755)
+    return str(script)
+
+
 # -- fetching and checking out -------------------------------------------------------------------
 
 
@@ -221,9 +231,60 @@ def test_a_branch_that_is_an_ancestor_of_the_session_branch_does_not_cut_its_his
 
     workspace = rig.prepared(resume=resume_of(*listed, checkout=BRANCH))
 
-    # The session branch keeps the depth it is promised, whatever the order of `resume.branches`.
-    assert raw("rev-list", "--count", BRANCH, cwd=workspace.mirror, git=rig.git) == "50"
-    assert raw("rev-list", "--count", BRANCH, cwd=workspace.repo, git=rig.git) == "50"
+    # The session branch keeps the depth it is promised, whatever the order of `resume.branches`
+    # (the ancestor's 50 commits are all within reach of the session branch's tip: 10 + 50).
+    assert int(raw("rev-list", "--count", BRANCH, cwd=workspace.mirror, git=rig.git)) >= 50
+    assert int(raw("rev-list", "--count", BRANCH, cwd=workspace.repo, git=rig.git)) >= 50
+
+
+# #838-T20d
+@pytest.mark.parametrize("order", ["base_first", "base_last", "session_between"])
+def test_a_branch_far_ahead_of_the_base_does_not_cut_the_history_of_the_base(
+    rig: Rig, order: str
+) -> None:
+    base = rig.origin.many_commits_on("main", 60)
+    ahead = rig.origin.commits_from("feature/x", "origin/main", 49)
+    session = rig.origin.commits_from(BRANCH, "origin/main~5", 3)
+    listed = {
+        "base_first": [("main", base), ("feature/x", ahead), (BRANCH, session)],
+        "base_last": [(BRANCH, session), ("feature/x", ahead), ("main", base)],
+        "session_between": [("feature/x", ahead), (BRANCH, session), ("main", base)],
+    }[order]
+
+    workspace = rig.prepared(resume=resume_of(*listed, checkout=BRANCH))
+
+    for place in (workspace.mirror, workspace.repo):
+        ref = "refs/heads/" if place == workspace.mirror else ""
+
+        def depth(name: str, where: Path = place, prefix: str = ref) -> int:
+            return int(raw("rev-list", "--count", prefix + name, cwd=where, git=rig.git))
+
+        # Git counts the depth as the least over all tips: no tip has less than 50 commits of
+        # history, however the branches lie to each other.
+        assert depth("main") >= 50
+        assert depth(BRANCH) >= 50
+        assert depth("feature/x") >= 50
+    for other in ("main", "feature/x"):
+        done = agent_git(workspace, "merge-base", other, BRANCH)
+        assert done.returncode == 0 and done.stdout.strip(), other
+    done = agent_git(workspace, "merge-base", "main", BRANCH)
+    assert done.stdout.strip() == raw(
+        "rev-parse", "origin/main~5", cwd=rig.origin.seed, git=rig.git
+    )
+
+
+# #838-T20e
+def test_the_branches_of_a_follow_up_are_fetched_in_one_command(
+    rig: Rig, three: dict[str, str], tmp_path: Path
+) -> None:
+    log = tmp_path / "git.log"
+    wrapper = logging_git(tmp_path, rig.git, log)
+
+    rig.workspace(git=wrapper, resume=resume_of_three(three, checkout=BRANCH)).prepare()
+
+    calls = log.read_text().splitlines()
+    assert sum(1 for line in calls if " fetch " in f" {line} ") == 1
+    assert sum(1 for line in calls if " ls-remote " in f" {line} ") == 1
 
 
 # -- what moved, what is gone --------------------------------------------------------------------
@@ -548,29 +609,25 @@ def test_the_other_branches_are_fetched_with_the_token_in_the_environment_only(
 # -- the time the fetches may take ---------------------------------------------------------------
 
 
-def slow_fetch_git(tmp_path: Path, real: str, seconds: str) -> str:
-    """A `git` that waits `seconds` before every fetch of a branch other than `main`. Returns its
+def slow_git(tmp_path: Path, real: str, command: str, seconds: str) -> str:
+    """A `git` that waits `seconds` before every `command` (`fetch`, `ls-remote`). Returns its
     path."""
     directory = tmp_path / "wrapper"
     directory.mkdir()
     script = directory / "git"
     script.write_text(
-        "#!/bin/sh\n"
-        'case " $* " in *" fetch "*)\n'
-        '  case " $* " in *refs/heads/main:*) ;; *) sleep ' + seconds + " ;; esac ;;\n"
-        "esac\n"
-        f'exec "{real}" "$@"\n'
+        f'#!/bin/sh\ncase " $* " in *" {command} "*) sleep {seconds} ;; esac\nexec "{real}" "$@"\n'
     )
     script.chmod(0o755)
     return str(script)
 
 
 # #838-T33
-def test_one_fetch_of_a_follow_up_is_bounded_by_the_fetch_timeout_not_by_the_default(
+def test_the_look_at_the_provider_is_bounded_by_the_fetch_timeout_not_by_the_default(
     rig: Rig, three: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(git_workspace, "FETCH_TIMEOUT", 1.0)
-    wrapper = slow_fetch_git(tmp_path, rig.git, "20")
+    wrapper = slow_git(tmp_path, rig.git, "ls-remote", "20")
     workspace = rig.workspace(git=wrapper, resume=resume_of_three(three, checkout=BRANCH))
     started = time.monotonic()
 
@@ -582,22 +639,42 @@ def test_one_fetch_of_a_follow_up_is_bounded_by_the_fetch_timeout_not_by_the_def
 
 
 # #838-T34
-def test_all_fetches_of_a_follow_up_together_are_bounded(
-    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_the_fetch_of_a_follow_up_is_bounded_by_the_deadline_of_the_follow_up_not_by_the_default(
+    rig: Rig, three: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    tips = {
-        f"feature/{number}": rig.origin.commit_on(f"feature/{number}", f"{number}.txt")
-        for number in range(5)
-    }
     monkeypatch.setattr(git_workspace, "RESUME_FETCH_SECONDS", 2.0)
-    wrapper = slow_fetch_git(tmp_path, rig.git, "0.9")
-    workspace = rig.workspace(git=wrapper, resume=resume_of(*tips.items(), checkout=None))
+    wrapper = slow_git(tmp_path, rig.git, "fetch", "20")
+    workspace = rig.workspace(git=wrapper, resume=resume_of_three(three, checkout=BRANCH))
     started = time.monotonic()
 
     with pytest.raises(JobError) as refused:
         workspace.prepare()
 
     assert refused.value.code is ErrorCode.CLONE_FAILED
-    assert "in time" in refused.value.detail
+    assert time.monotonic() - started < 10
+    assert not workspace.repo.exists()
+
+
+# #838-T34b
+def test_the_look_and_the_fetch_of_a_follow_up_are_bounded_together(
+    rig: Rig, three: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(git_workspace, "RESUME_FETCH_SECONDS", 2.0)
+    directory = tmp_path / "wrapper"
+    directory.mkdir()
+    script = directory / "git"
+    script.write_text(
+        "#!/bin/sh\n"
+        'case " $* " in *" ls-remote "*|*" fetch "*) sleep 1.5 ;; esac\n'
+        f'exec "{rig.git}" "$@"\n'
+    )
+    script.chmod(0o755)
+    workspace = rig.workspace(git=str(script), resume=resume_of_three(three, checkout=BRANCH))
+    started = time.monotonic()
+
+    with pytest.raises(JobError) as refused:
+        workspace.prepare()
+
+    assert refused.value.code is ErrorCode.CLONE_FAILED
     assert time.monotonic() - started < 4.5
     assert not workspace.repo.exists()
