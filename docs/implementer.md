@@ -144,6 +144,13 @@ arrived**. It ends `push_rejected` when the task's branch was not taken (rejecte
 commits, or when the agent's repository, or its list of branches (read up to 4 MiB), could not be read at all; it ends
 `agent_gave_up` when no branch has anything new. A rejected branch of the report is not an error of the turn by itself.
 
+**The branch the agent ended on.** The result also says which local branch HEAD was on when the runner read the repository
+(`checkedOut`, #837): read in the reader from the `symbolic-ref` that the rescue of a detached HEAD already runs, so it costs no
+further call, and set to the `-leftover-` branch when the rescue or the commit of the leftover had to make one. It is `null` when
+HEAD was detached and on no branch, when its name is not one the runner pushes (it is never shown), and when the repository was not
+read (the agent's container could not be confirmed gone). It names a branch of the agent's repository, which may not have arrived:
+`branches` says which did. The app accepts the field (`parseImplementerResult`) and nothing reads it yet; the follow-up turn will start on it.
+
 **One place for a later rule.** `PUSH_EXCLUDED_BRANCHES` in `runner/src/code_reviewer_runner/implementer/push_policy.py` is
 empty. A rule such as "only the branch the form named" goes into `select_branches` in the same file and nowhere else.
 
@@ -510,6 +517,51 @@ data in a file the agent opened is in the agent's text or the input of its tool 
 shown** (the runner does not record it and the app never gets it), which keeps most of that out; the input of a tool call (a command, a
 path, a pattern) and the agent's own words are shown. Steps are kept as long as the run is, for now with no time limit. Before outside users arrive, the
 decision to let every member see them moves with the one for starting a task (the note in "What it is").
+
+## Follow-up turns: what was measured on a real VM (#837)
+
+A follow-up turn continues a session in a new VM: the old conversation is exported from the engine before its container is
+killed, kept, and imported on the new VM. None of that is built yet. This section is what a real VM said about the plan's
+assumptions before it is built; `runner/scripts/follow_up_spike.py` reproduces it (15 of 15 checks passed on the VM below, the lane's 11 tests of `test_implementer_git.py` and `test_implementer_turn.py` too).
+
+**Measured on a real VM (2026-11-04, `spike-837-followup-1`, 2 vCPU, 4 GB, a snapshot built from `development` at `f34a40a1`,
+`sysbox: proven`; the agent's container 2,048 MB under `sysbox-runc`; the pinned OpenCode 1.19.0; the strict scripted provider of
+`fakes/wire` behind a made-up key, so no model and no real key).** The script runs the lane's whole turn (`ImplementerSession.run()`,
+the real door, container, reader and workspace) several times on one VM and puts itself into the flow at three places: a recorder
+on the engine's event stream, the export just before `ImplementerAgent.stop()`, and the import just before the engine starts.
+
+| Question | What the VM said |
+| --- | --- |
+| Is the export by HTTP the CLI's export? | **Yes, equal as parsed JSON**, for 63 and 72 messages, in one call and in pages of 50. `GET /session/<id>` gives `info`; `GET /session/<id>/message` gives the messages. Without `limit` all of them come back in one answer. With `limit=N` the **newest** N come back, oldest first, and the header `x-next-cursor` (also `Link ... rel="next"`) holds the cursor for the next, older page (`before=<cursor>`; a cursor that is not one is a 400). The pages are put back in order by reversing them. A client that sends the runner's `x-opencode-directory` header gets the answer, and so does one that sends none (checked on a local engine). The empty answer of the earlier research was not the engine's. |
+| What does the CLI do when its output goes to a pipe? | **It cuts the document at the size of the pipe** (65,536 to 131,072 bytes arrived of 2.7 MB, never valid JSON) and exits 0. Redirected to a file it writes all of it. The CLI is a way to compare, not a way to take the export. |
+| Time of the export by HTTP, through the exec tunnel | 2.6 MB (63 messages, 61 tool calls): 0.10 s in one call, 0.2 s in three pages. 18.4 MB (244 messages): 0.24 to 0.29 s in one call, 0.37 to 0.41 s in six pages. The CLI takes 1.2 to 1.3 s, because it is a second OpenCode. |
+| Memory of the export by HTTP | Control (Python, joining the pages and parsing them): 7.6 MiB in one call and 10 MiB paged at 2.6 MB, 53 and 70 MiB at 18.4 MB, so three to four times the document. The engine's resident memory moved by less than 25 MB (769 MB before and after at 2.6 MB), and the VM's available memory dipped by at most 66 MiB (1,210 to 1,144 MiB at 18.4 MB). |
+| Memory of the CLI's export | A second OpenCode process: **312 MiB** peak at 2.6 MB, 345 MiB at 10 MB. On a transcript of 300 maximal tool calls, with two CLI exports in a row, the VM's guard (`vm_memory.py`, 512 MiB left) killed the agent's container. That is the reason to take the export over HTTP, as the plan says. |
+| The whole path of the runner (fetch, parse, redact, dump, gzip) | 0.4 s at 2.6 MB, 1.6 to 1.7 s at 18.4 MB. |
+| Redaction | The runner's `Redactor` **on the JSON text breaks the JSON**: its `Bearer ...` shape runs up to a quote, and in JSON text the quote it eats is the backslash of an escaped one (137 bytes changed, invalid JSON, in a transcript of the repository's own code; 15 strings). On the string values (and keys) it leaves valid JSON and takes the same time (0.09 s against 0.10 s at 2.6 MB, 0.62 to 0.74 s against 0.68 to 1.03 s at 18.4 MB). |
+| Does `opencode import` work under Sysbox, in a depth-cut clone with another root commit? | **Yes.** The second turn's clone was cut at depth one of the first turn's branch, so its only root commit (`0e4545bf`) was the first turn's tip and not the first turn's (`ea7bed08`). Before the engine started, the snapshot was written to `/etc/code-reviewer/resume.json` (0600, 0.05 s) and `opencode import` ran in the container with the engine's environment: it printed `Imported session: <id>`, kept the session id and the message ids, rewrote the project id to the new root commit and the directory to `/work/repo`. The engine then answered `GET /session/<id>` with 200. |
+| Does the imported session continue? | **Yes.** The runner's second user message (and its extra message for a dirty tree) went to the imported session; the first request of the model had 123 messages (1.35 MB) and carried the first turn's instruction, its answer and its tool results; the strict provider accepted the history; the second turn's export holds the 63 messages of the first with the same ids and 9 more. |
+| Time and memory of the import | 1.5 to 1.7 s at 2.6 MB with a peak of 306 to 313 MiB (a second OpenCode process; the container's own peak read 288 MiB then). At 18.4 MB: 2.1 to 2.3 s, 378 to 385 MiB (the container's peak 387 to 397 MiB), and the engine served the session. The plan's 60 s box is about 25 times the largest measured. |
+| What does a large history cost the first call? | At the lane's $5 limit the first call of a follow-up from the 18.4 MB snapshot was **refused by the door before any model call** (`cost_limit_reached`, no request reached the provider): the door reserves the cost of a call before it is made, and the history alone is more than the limit. The form's hint ("the first call reads all of it again") is the place to say so. |
+| Size of a realistic transcript | 61 tool calls over the repository's own source (63 messages, 187 parts): 2.60 MB as compact JSON, **0.62 MB gzipped** (0.24). Tool outputs are 1.26 MB of it, and the tools' metadata another 1.21 MB (a tool repeats its output in its metadata); everything else is 0.07 MB. About 43 KB and 10 KB gzipped per tool call. The CLI's own formatting makes the document 3 % larger. |
+| Size of the worst transcript | 240 tool calls that each answer 44 KB of random text (the engine cuts at 50 KB): 244 messages, 18.4 MB, **8.42 MB gzipped** (0.46), which is 33 KB over the plan's 8 MiB. The cap holds for about 235 of the largest tool answers there can be. |
+| Can the compacted outputs be left out? | **Yes.** After a later user message the engine's prune marks old tool outputs as compacted (`state.time.compacted`) and sends the model a fixed text in their place. After the second turn 42 of the 61 outputs were marked (1.11 of 1.32 MB). A follow-up from the snapshot with those outputs and the long strings of their metadata emptied sent the model **exactly the same 137 messages** as one from the full snapshot (equal JSON, the same 42 markers), and the snapshot was 1.52 MB against 2.73 MB (0.39 against 0.66 MB gzipped). Emptying the metadata strings of every tool part saved 36 KB more here. Nothing was marked after the first turn (two user messages), so it helps from the snapshot of the second turn on. |
+| Can `step-finish` come before a long tool call ends? | **No.** In 61 steps of turn one, one of which ran a 12 s `bash` beside two quick tools, every `step-finish` part came after all the tools of its step ended: the two quick tools ended 0.1 s after the start, the long one 12.1 s, and the `step-finish` in the same millisecond. A tool part is reported as `running` twice (the second carries its metadata). |
+| What does the stream do on abort? | `POST /session/<id>/abort` returned in 0.1 s. The stream then carried `session.error` (`MessageAbortedError`), `session.status` idle and `session.idle`, and 20 ms later the tool part as `completed`, the message as completed with the error, and idle again. **No `step-finish` comes for an aborted step**, and the command (`sleep 60`) was gone. The export shows the aborted assistant message with the error and no finish. A view that groups by step must close an open step on `session.idle` or at the end of the turn. |
+| Does the stream say anything about old parts? | In the second turn the stream carried 42 `message.part.updated` events for tool parts of the first turn, as many as the prune marked, so the engine most likely re-sends a part when it marks it. The step feeder keys a record by part id, so they are upserts of rows the page already has; they must not move them. |
+
+**The end of the turn.** The export is cheap, so its budget can be small. The sums of the end (the sum test of `runner/tests/unit/test_implementer_session_parts.py`)
+are 222 of 270 s at a normal end (the test holds them to 85 %, 229.5 s) and 84 of 115 s at a stop (75 %, 86.25 s). The 20 s and 8 s of the plan would make
+242 and 92 and fail both limits; the measured path takes 1.7 s at 18.4 MB, so **5 s at a normal end (227 s) and 2 s at a stop (86 s)** fit the sums and are about three
+and 1.2 times the largest measurement. The upload of the file goes through the job host before `complete` and is not part of the grace.
+
+**Rerun.** On a `spike-` VM from a snapshot built from the branch (`docs/golden-snapshot.md`, `--skip-retention`), as root, with the repository's
+`runner/` and `fakes/` on the VM and `uv sync --frozen` run: `LANE_RUNTIME=sysbox-runc LANE_WORKER_IMAGE=code-reviewer-worker:golden
+LANE_AGENT_IMAGE=code-reviewer-agent:golden .venv/bin/python scripts/follow_up_spike.py` (about four minutes; `--skip` takes `two`, `blank`, `abort`, `bulk`,
+`bulk-import`; `--bulk-steps` and `--bulk-window` size the worst transcript). It prints one JSON line per check and per fact.
+
+**Not measured.** A real model (what a provider says to a replayed history, or to reasoning parts of another model), the clock of the VM against the first turn's, 4 vCPU,
+the narrowed network policy, and the import of a snapshot written by another OpenCode version.
 
 ## The memory of the readers and the OS
 
