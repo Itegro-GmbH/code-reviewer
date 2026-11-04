@@ -2083,6 +2083,15 @@ def sysbox_state() -> dict[str, Any]:
     }
 
 
+def install_package(deb: Path) -> subprocess.CompletedProcess[str]:
+    return sh(
+        "export DEBIAN_FRONTEND=noninteractive; stub=$(mktemp -d); "
+        "printf '#!/bin/sh\\nexit 0\\n' > $stub/systemctl; chmod 0755 $stub/systemctl; "
+        f"PATH=$stub:$PATH apt-get install -y -qq kmod jq {deb} 2>&1 | tail -6; rm -rf $stub",
+        timeout=600,
+    )
+
+
 def install_sysbox() -> dict[str, Any]:
     """(1) The Sysbox package as the golden snapshot installs it, on this distribution: download,
     checksum, install without systemd, and what the package says it needs."""
@@ -2114,14 +2123,34 @@ def install_sysbox() -> dict[str, Any]:
         f"rm -rf /tmp/spike-deb && mkdir /tmp/spike-deb && dpkg -e {deb} /tmp/spike-deb && ls /tmp/spike-deb && grep -hE 'systemctl|docker|restart|reboot|modprobe|useradd|subuid' /tmp/spike-deb/postinst /tmp/spike-deb/preinst /tmp/spike-deb/prerm 2>/dev/null | head -40"
     ).stdout
     facts["maintainer_scripts_touch"] = scripts.strip().splitlines()[:40]
+    # First as a customer would: Docker is running, nothing is prepared, the package does what its
+    # maintainer script does. The host here has no systemd, so a `systemctl` stub is first on the
+    # `PATH` (dpkg keeps its own `PATH` for maintainer scripts: the stub is seen by `apt`, not by
+    # the script, and the result says what happened).
+    config = Path("/etc/docker/daemon.json")
+    config.unlink(missing_ok=True)
     began = time.monotonic()
-    installed = sh(
-        "export DEBIAN_FRONTEND=noninteractive; stub=$(mktemp -d); printf '#!/bin/sh\\nexit 0\\n' > $stub/systemctl; chmod 0755 $stub/systemctl; "
-        f"PATH=$stub:$PATH apt-get install -y -qq {deb} kmod 2>&1 | tail -5; rm -rf $stub",
-        timeout=600,
+    first = install_package(deb)
+    facts["first_install"] = {
+        "seconds": round(time.monotonic() - began, 2),
+        "package_status": sh("dpkg -s sysbox-ce | grep ^Status").stdout.strip(),
+        "output_tail": short(first.stdout.strip(), 500),
+        "daemon_json_afterwards": json.loads(config.read_text()) if config.exists() else None,
+    }
+    # Then as the golden snapshot does: the package is installed while the daemon is not running
+    # (the maintainer script then only advises a restart), and the daemon is configured and
+    # started after it.
+    sh(
+        "pkill -x sysbox-fs; pkill -x sysbox-mgr; dpkg --purge --force-all sysbox-ce; pkill -x dockerd; "
+        "for i in $(seq 1 100); do pgrep -x dockerd >/dev/null || break; sleep 0.1; done"
     )
+    config.unlink(missing_ok=True)
+    began = time.monotonic()
+    installed = install_package(deb)
     facts["install_seconds"] = round(time.monotonic() - began, 2)
-    facts["install_output_tail"] = short(installed.stdout.strip(), 400)
+    facts["install_output_tail"] = short(installed.stdout.strip(), 300)
+    facts["package_status"] = sh("dpkg -s sysbox-ce | grep ^Status").stdout.strip()
+    register_runtime()
     facts["installed_version"] = sysbox_state()["installed"]
     facts["sysbox_runc_version"] = (
         sh("sysbox-runc --version | head -3").stdout.strip().replace("\n", " / ")
@@ -2171,7 +2200,6 @@ def s2_sysbox_plain(out: Path) -> bool:
     of the steps of `docker/sandbox/sysbox-prepare.sh` this platform needs and why. Returns whether
     a container ran at the end."""
     REPORT.fact("s2_sysbox_install", **install_sysbox())
-    register_runtime()
     state = sysbox_state()
     if state["mgr_running"] or not state["kcore_masked"]:
         REPORT.fact(
