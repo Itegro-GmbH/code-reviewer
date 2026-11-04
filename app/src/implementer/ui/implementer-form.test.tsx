@@ -1534,6 +1534,7 @@ const NODE_ENV = {
   memoryGb: 10,
   sizeSupported: true,
   hasScript: true,
+  networkMode: "off" as const,
 };
 const BARE_ENV = {
   ...NODE_ENV,
@@ -1651,6 +1652,63 @@ describe("the environment picker (#818)", () => {
     expect(note.textContent).toMatch(/not charged/i);
     // It does not say the scripts are not run: they are.
     expect(screen.queryByText(/do not run yet/i)).toBeNull();
+  });
+
+  // #745-T45: the rule for the agent's network is part of what the person chooses
+  it("says in the list which environments give the agent a network, and in a note what that means", async () => {
+    const user = userEvent.setup();
+    const listed = {
+      ...NODE_ENV,
+      id: "env-list",
+      name: "Py",
+      networkMode: "list" as const,
+    };
+    const opened = {
+      ...BARE_ENV,
+      id: "env-open",
+      name: "Web",
+      networkMode: "open" as const,
+    };
+    const api = fakeApi({
+      environments: vi.fn<ImplementerApi["environments"]>(() =>
+        Promise.resolve(
+          ok({ environments: [BARE_ENV, listed, opened], maximum: 50 }),
+        ),
+      ),
+    });
+    renderForm(api);
+    await waitFor(() =>
+      expect(control("Environment")).not.toHaveProperty("disabled", true),
+    );
+
+    await user.click(control("Environment"));
+    const options = (await screen.findAllByRole("option")).map(
+      (o) => o.textContent,
+    );
+    expect(options).toContain(
+      "Py (6 vCPU, 10 GB memory, setup script, network: listed hosts)",
+    );
+    expect(options).toContain("Web (2 vCPU, 2 GB memory, network: any host)");
+    expect(options).toContain("Bare (2 vCPU, 2 GB memory)");
+    await user.keyboard("{Escape}");
+
+    await chooseOption(user, control("Environment"), /^Py/);
+    expect(
+      screen.getByText(/only the hosts of this environment's list/i),
+    ).toBeTruthy();
+    expect(screen.queryByText(/without internet access/i)).toBeNull();
+
+    await chooseOption(user, control("Environment"), /^Web/);
+    expect(
+      screen.getByText(/reaches any public host through a proxy/i),
+    ).toBeTruthy();
+
+    await chooseOption(user, control("Environment"), /^Bare/);
+    expect(screen.queryByText(/without internet access/i)).toBeNull();
+    expect(screen.queryByText(/reaches any public host/i)).toBeNull();
+    expect(
+      screen.queryByText(/only the hosts of this environment/i),
+    ).toBeNull();
   });
 
   // #818-T23: an environment that still has 1 vCPU is shown as it is, and the task is refused with a clear message

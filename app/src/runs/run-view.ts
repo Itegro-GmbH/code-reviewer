@@ -88,6 +88,37 @@ export type ImplementerSetupView = {
   output: string;
 };
 
+/** One line of what the network door saw (#745, step 7): a host, a port and how many times it was allowed or refused. */
+export type ImplementerNetworkConnectionView = {
+  /** What the agent asked for, cleaned and cut. Untrusted text. */
+  host: string;
+  port: number;
+  outcome: "allowed" | "refused";
+  /** The door's word for a refusal (`not_listed`, `ip_literal`, ...); null when allowed. */
+  reason: string | null;
+  count: number;
+  bytesIn: number;
+  bytesOut: number;
+};
+
+/** The environment's rule for the agent's network, and what the door did (#745, step 7); the report is null until the runner sent one. */
+export type ImplementerNetworkView = {
+  mode: "off" | "list" | "open";
+  /** The hosts of a list, as the environment had them when the task started. */
+  hosts: string[];
+  report: {
+    /** `narrowed`, `unchanged`, `not_configured`: what the second wall (the VM's network policy) did. */
+    vmPolicy: string;
+    allowed: number;
+    refused: number;
+    bytesIn: number;
+    bytesOut: number;
+    connections: ImplementerNetworkConnectionView[];
+    /** Entries the report did not have room for. */
+    dropped: number;
+  } | null;
+};
+
 /** The environment a task started with, as the turn copied it (#818). */
 export type ImplementerEnvironmentView = {
   /** Untrusted text from a member of the workspace. */
@@ -95,6 +126,7 @@ export type ImplementerEnvironmentView = {
   vcpus: number;
   memoryGb: number;
   setup: ImplementerSetupView | null;
+  network: ImplementerNetworkView;
 };
 
 /** One commit of a task, as the run shows it. */
@@ -172,7 +204,12 @@ export type ImplementerDetailSource = ImplementerRowSource & {
   baseBranch: string;
   instruction: string;
   /** The environment the turn copied when it started (#818); absent or null for a task without one. */
-  environment?: { name: string; vcpus: number } | null;
+  environment?: {
+    name: string;
+    vcpus: number;
+    /** #745, step 7: the rule for the agent's network the turn copied; left out: `off`. */
+    network?: { mode: "off" | "list" | "open"; hosts: string[] };
+  } | null;
 };
 
 /**
@@ -558,10 +595,10 @@ const MAX_ENVIRONMENT_NAME_CHARS = 200;
  */
 export const AGENT_MEMORY_GB: Readonly<Record<number, number>> = {
   1: 0,
-  2: 2,
-  4: 5.8,
-  6: 9.5,
-  8: 13.2,
+  2: 1.9,
+  4: 5.7,
+  6: 9.4,
+  8: 13.1,
 };
 
 /** The setup block of a stored result, or null: read field by field like the rest, an entry that is not what the contract says is left out. */
@@ -590,6 +627,65 @@ function readStoredSetup(result: JsonValue | null): {
     timedOut,
     durationSeconds,
     output,
+  };
+}
+
+/** A count from a stored report: a safe, non-negative integer, else 0. */
+function count(value: unknown): number {
+  return isCount(value) ? value : 0;
+}
+
+/**
+ * The network block of a stored result (#745, step 7), read field by field like the rest: an entry that is not what the contract
+ * says is left out, and a block without a valid frame is null. The hosts are what the agent asked the door for, text the agent
+ * chose: cleaned, stripped of known secrets, cut, and rendered as text by the page.
+ */
+function networkReportView(
+  result: JsonValue | null,
+  display: (text: string) => string,
+): ImplementerNetworkView["report"] {
+  if (!isRecord(result) || !isRecord(result.implementer)) return null;
+  const block = result.implementer.network;
+  if (!isRecord(block)) return null;
+  const connections: ImplementerNetworkConnectionView[] = [];
+  for (const entry of Array.isArray(block.connections)
+    ? block.connections.slice(0, 100)
+    : []) {
+    if (
+      !isRecord(entry) ||
+      typeof entry.host !== "string" ||
+      !isCount(entry.port) ||
+      entry.port > 65535 ||
+      (entry.outcome !== "allowed" && entry.outcome !== "refused")
+    )
+      continue;
+    connections.push({
+      host: display(cleanTaskLine(head(entry.host, 253 * 4))),
+      port: entry.port,
+      outcome: entry.outcome,
+      reason:
+        typeof entry.reason === "string" &&
+        /^[a-z][a-z_]{0,39}$/.test(entry.reason)
+          ? entry.reason
+          : null,
+      count: count(entry.count),
+      bytesIn: count(entry.bytesIn),
+      bytesOut: count(entry.bytesOut),
+    });
+  }
+  return {
+    vmPolicy:
+      block.vmPolicy === "narrowed" ||
+      block.vmPolicy === "unchanged" ||
+      block.vmPolicy === "not_configured"
+        ? block.vmPolicy
+        : "not_configured",
+    allowed: count(block.allowed),
+    refused: count(block.refused),
+    bytesIn: count(block.bytesIn),
+    bytesOut: count(block.bytesOut),
+    connections,
+    dropped: count(block.dropped),
   };
 }
 
@@ -630,6 +726,13 @@ function environmentView(
     vcpus: environment.vcpus,
     memoryGb: AGENT_MEMORY_GB[environment.vcpus] ?? 0,
     setup,
+    network: {
+      mode: environment.network?.mode ?? "off",
+      hosts: (environment.network?.hosts ?? []).map((host) =>
+        display(cleanTaskLine(head(host, 253 * 4))),
+      ),
+      report: networkReportView(result, display),
+    },
   };
 }
 

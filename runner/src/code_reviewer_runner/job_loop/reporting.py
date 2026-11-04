@@ -331,6 +331,10 @@ def _with_implementer_block(
     sent = line.get("implementer")
     # The files the app would refuse are left out first: one odd path must not cost the report.
     block = None if sent is None else valid_block(_cleaned(sent))
+    if block is None and sent is not None:
+        # The network block is what the turn saw, not what it did: one the app would refuse is left
+        # out rather than costing the report, the verdict and the usage of the turn.
+        block = valid_block(_cleaned(_without_network(sent)))
     redacted = None if block is None else valid_block(_redacted_block(block, redactor))
     if sent is not None and redacted is None:
         _log_dropped(DroppedValue.IMPLEMENTER_INVALID)
@@ -457,11 +461,16 @@ def fit_request(result: Result) -> Result:
     return current
 
 
+def _without_network(sent: object) -> object:
+    block = as_object(sent)
+    return sent if block is None else {k: v for k, v in block.items() if k != "network"}
+
+
 def _short_block(block: Mapping[str, Any]) -> Result:
     """The report of a turn when even the whole result was refused: where it ended and the head
-    commit, no file list and no summary."""
+    commit, no file list, no summary and no network block."""
     return {
-        **block,
+        **{k: v for k, v in block.items() if k != "network"},
         "commits": list(block["commits"])[-1:],
         "filesChanged": [],
         "summary": "",

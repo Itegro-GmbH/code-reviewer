@@ -23,6 +23,7 @@ import {
   ENVIRONMENT_NAME_MAX_LENGTH,
   SETUP_SCRIPT_MAX_BYTES,
 } from "../limits.ts";
+import { NETWORK_HOSTS_MAX } from "../../../network-rule/network.ts";
 
 /** The words of the labels, hints and states of the page. */
 export const PAGE_COPY = {
@@ -53,6 +54,22 @@ export const PAGE_COPY = {
   script: "Setup script",
   scriptHint:
     "The script runs once when a task starts, as root in a container of its own with full internet access and no secrets, in the repository's folder (bash, with -e: a failing command ends it; a first line starting with #! picks another interpreter). What it installs, including the images its Docker pulls, is what the agent starts with; the agent has no internet access. A script that fails or runs longer than 15 minutes stops the task before the AI model is called, and the task is not charged. Changes it makes to files tracked by git are undone before the agent starts. The text is stored as written and shown to every member. Keep secrets out of it: there is no secrets field.",
+  network: "Network",
+  networkHint:
+    "This setting applies to the agent, after the setup script is done: the setup script always has full internet access, whatever you choose here. The agent has no way out that does not pass a proxy, which checks the host name of every request; IP addresses, names that resolve to private addresses and ports other than 80 and 443 are always refused.",
+  networkModeLabels: {
+    off: "Off: no network (the default)",
+    list: "Only the hosts listed below",
+    open: "Any public host",
+  },
+  networkRisk:
+    "Network access can be used to send out anything the agent can read: it can publish a file to a package registry or upload it to any host that accepts uploads. Allow it for repositories whose content you would be ready to publish.",
+  networkHosts: "Allowed hosts",
+  networkHostsHint:
+    "One host name on each line, for example registry.npmjs.org. A line that starts with *. matches every name below it, not the name itself: *.pythonhosted.org matches files.pythonhosted.org and not pythonhosted.org, so list both if you need both. At most 100 hosts.",
+  networkShownOff: "Network: off",
+  networkShownOpen: "Network: any public host",
+  networkShownList: "Network: only these hosts",
   scriptsRunning:
     "Setup scripts run when a task starts: as root, with full internet access and no secrets, in a container of its own, before the agent starts.",
   scriptLabelShown: "Setup script",
@@ -78,6 +95,16 @@ const FIELD_COPY: Record<
     required: "Choose a size.",
     invalid: "Choose one of the sizes in the list.",
     too_long: "Choose one of the sizes in the list.",
+  },
+  network: {
+    required: "Choose a network setting.",
+    invalid: "Choose one of the network settings in the list.",
+    too_long: "Choose one of the network settings in the list.",
+  },
+  networkHosts: {
+    required: "List at least one host, or choose another network setting.",
+    invalid: `A line is not a host name. Write names like registry.npmjs.org or *.pythonhosted.org: letters, digits, hyphens and dots, at least two parts, no IP address, port, path or scheme.`,
+    too_long: `A list has at most ${NETWORK_HOSTS_MAX} hosts.`,
   },
   setupScript: {
     required: "Enter the script or leave the field empty.",

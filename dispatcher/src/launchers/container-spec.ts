@@ -108,6 +108,7 @@ export const IMPLEMENTER_CONTAINER_SPEC: ImplementerContainerSpec = {
     "RUNNER_IMPLEMENTER_MODEL_DOOR",
     "RUNNER_IMPLEMENTER_SANDBOX_PROOF",
     "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB",
+    "RUNNER_IMPLEMENTER_NETWORK_SWITCH",
   ],
   forbiddenKeys: WORKER_CONTAINER_SPEC.forbiddenKeys.filter(
     (key) => key !== "dockerSocket",

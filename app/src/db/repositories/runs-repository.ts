@@ -16,6 +16,7 @@ import type {
   ImplementerRowSource,
   RunRowSource,
 } from "../../runs/run-view.ts";
+import { ruleOf } from "../../network-rule/network.ts";
 import type { Database } from "../schema.ts";
 import type { WorkspaceId } from "../workspace-scope.ts";
 import {
@@ -212,6 +213,8 @@ export function createRunsRepository(
           "implementer_turns.instruction as turn_instruction",
           "implementer_turns.environment_name as turn_environment_name",
           "implementer_turns.environment_vcpus as turn_environment_vcpus",
+          "implementer_turns.environment_network_mode as turn_environment_network_mode",
+          "implementer_turns.environment_network_hosts as turn_environment_network_hosts",
           "usage_records.key_mode as key_mode",
           "usage_records.catalog_entry_id as catalog_entry_id",
           "usage_records.model_tier as model_tier",
@@ -233,6 +236,8 @@ export function createRunsRepository(
         turn_instruction: instruction,
         turn_environment_name: environmentName,
         turn_environment_vcpus: environmentVcpus,
+        turn_environment_network_mode: networkMode,
+        turn_environment_network_hosts: networkHosts,
         ...job
       } = row;
       return {
@@ -253,7 +258,11 @@ export function createRunsRepository(
                 environment:
                   environmentName === null || environmentVcpus === null
                     ? null
-                    : { name: environmentName, vcpus: environmentVcpus },
+                    : {
+                        name: environmentName,
+                        vcpus: environmentVcpus,
+                        network: ruleOf(networkMode, networkHosts),
+                      },
               },
             }),
       };

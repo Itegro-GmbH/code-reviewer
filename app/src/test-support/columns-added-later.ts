@@ -16,9 +16,19 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
     "environment_name",
     "environment_vcpus",
     "environment_setup_script",
+    // #745, step 7: the environment's network rule, copied with it; null for every turn that exists (it reads `off`).
+    "environment_network_mode",
+    "environment_network_hosts",
   ],
+  // #745, step 7: the environment's network rule; every environment that exists reads `off` and no hosts (`DEFAULTS_OF_COLUMNS`).
+  implementer_environments: ["network_mode", "network_hosts"],
   // #818: the size of the VM where the Dispatcher reported it; null for every VM that exists.
   job_vm_runs: ["vcpus"],
+};
+
+/** What a column added later holds on an existing row when it is not null: a constant default. */
+const DEFAULTS_OF_COLUMNS: Record<string, Record<string, unknown>> = {
+  implementer_environments: { network_mode: "off", network_hosts: "" },
 };
 
 /** `rows` of `table` without the columns that migrations after the one under test added; those columns must be null. */
@@ -31,9 +41,10 @@ export function withoutColumnsAddedLater(
   return rows.map((row) => {
     const copy = { ...(row as Record<string, unknown>) };
     for (const column of added) {
-      if (column in copy && copy[column] !== null)
+      const expected = DEFAULTS_OF_COLUMNS[table]?.[column] ?? null;
+      if (column in copy && copy[column] !== expected)
         throw new Error(
-          `${table}.${column} was added by a later migration and must be null on an existing row.`,
+          `${table}.${column} was added by a later migration and must be ${expected === null ? "null" : "its default"} on an existing row.`,
         );
       delete copy[column];
     }

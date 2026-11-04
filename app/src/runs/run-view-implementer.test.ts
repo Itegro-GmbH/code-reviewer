@@ -1142,7 +1142,7 @@ describe("the environment of an implementer run (#818)", () => {
     expect(run.implementer?.environment).toMatchObject({
       name: "Node 22",
       vcpus: 6,
-      memoryGb: 9.5,
+      memoryGb: 9.4,
     });
   });
 
@@ -1261,5 +1261,202 @@ describe("the environment of an implementer run (#818)", () => {
         view(failedJob(bad as JsonValue), withEnvironment()).implementer
           ?.environment?.setup,
       ).toBeNull();
+  });
+});
+
+// #745, step 7: the rule for the agent's network the turn ran with, and what the door reported of it.
+describe("the network of an implementer run (#745)", () => {
+  const withNetwork = (
+    network: { mode: "off" | "list" | "open"; hosts: string[] } | undefined,
+  ) =>
+    source({
+      environment: {
+        name: "Node 22",
+        vcpus: 4,
+        ...(network === undefined ? {} : { network }),
+      },
+    });
+  const reported = (network: JsonValue | undefined) =>
+    turn({
+      status: "succeeded",
+      result: resultWith({
+        headCommit: null,
+        pushed: false,
+        commits: [],
+        filesChanged: [],
+        summary: "",
+        opencode: null,
+        ...(network === undefined ? {} : { network }),
+      }),
+    });
+  const block = (overrides: Record<string, JsonValue> = {}): JsonValue => ({
+    mode: "list",
+    door: true,
+    vmPolicy: "narrowed",
+    allowed: 3,
+    refused: 1,
+    bytesIn: 4096,
+    bytesOut: 512,
+    dropped: 2,
+    connections: [
+      {
+        host: "example.com",
+        port: 443,
+        outcome: "refused",
+        reason: "not_listed",
+        count: 1,
+        bytesIn: 0,
+        bytesOut: 0,
+      },
+      {
+        host: "registry.npmjs.org",
+        port: 443,
+        outcome: "allowed",
+        reason: null,
+        count: 3,
+        bytesIn: 4096,
+        bytesOut: 512,
+      },
+    ],
+    ...overrides,
+  });
+
+  // #745-T43
+  it("reads off for a task that has no rule, with nothing reported", () => {
+    const run = detailOf(reported(undefined), withNetwork(undefined));
+
+    expect(run.implementer?.environment?.network).toEqual({
+      mode: "off",
+      hosts: [],
+      report: null,
+    });
+  });
+
+  // #745-T43
+  it("shows the rule the task ran with and the door's report", () => {
+    const run = detailOf(
+      reported(block()),
+      withNetwork({ mode: "list", hosts: ["registry.npmjs.org"] }),
+    );
+
+    expect(run.implementer?.environment?.network).toEqual({
+      mode: "list",
+      hosts: ["registry.npmjs.org"],
+      report: {
+        vmPolicy: "narrowed",
+        allowed: 3,
+        refused: 1,
+        bytesIn: 4096,
+        bytesOut: 512,
+        dropped: 2,
+        connections: [
+          {
+            host: "example.com",
+            port: 443,
+            outcome: "refused",
+            reason: "not_listed",
+            count: 1,
+            bytesIn: 0,
+            bytesOut: 0,
+          },
+          {
+            host: "registry.npmjs.org",
+            port: 443,
+            outcome: "allowed",
+            reason: null,
+            count: 3,
+            bytesIn: 4096,
+            bytesOut: 512,
+          },
+        ],
+      },
+    });
+  });
+
+  // #745-T43
+  it("cleans the hosts the agent asked for and leaves out an entry that is not what the contract says", () => {
+    const run = detailOf(
+      reported(
+        block({
+          connections: [
+            {
+              host: "evil\u0007.example\u202e.com",
+              port: 443,
+              outcome: "refused",
+              reason: "not_listed",
+              count: 1,
+              bytesIn: 0,
+              bytesOut: 0,
+            },
+            {
+              host: "a.example.com",
+              port: 70000,
+              outcome: "allowed",
+              reason: null,
+              count: 1,
+              bytesIn: 0,
+              bytesOut: 0,
+            },
+            {
+              host: "b.example.com",
+              port: 443,
+              outcome: "maybe",
+              reason: null,
+              count: 1,
+              bytesIn: 0,
+              bytesOut: 0,
+            },
+            {
+              host: 3,
+              port: 443,
+              outcome: "allowed",
+              reason: null,
+              count: 1,
+              bytesIn: 0,
+              bytesOut: 0,
+            },
+            "nope",
+            {
+              host: "c.example.com",
+              port: 80,
+              outcome: "refused",
+              reason: "NOT A WORD",
+              count: -4,
+              bytesIn: "x",
+              bytesOut: 1.5,
+            },
+          ],
+        }),
+      ),
+      withNetwork({ mode: "list", hosts: ["registry.npmjs.org"] }),
+    );
+
+    const connections =
+      run.implementer?.environment?.network.report?.connections ?? [];
+    expect(connections).toHaveLength(2);
+    expect(connections[0]?.host).not.toMatch(/[\u0007\u202e]/);
+    expect(connections[1]).toEqual({
+      host: "c.example.com",
+      port: 80,
+      outcome: "refused",
+      reason: null,
+      count: 0,
+      bytesIn: 0,
+      bytesOut: 0,
+    });
+  });
+
+  // #745-T43
+  it("has no report for a block that is not an object, and reads an unknown policy word as not configured", () => {
+    expect(
+      detailOf(reported("nope"), withNetwork({ mode: "open", hosts: [] }))
+        .implementer?.environment?.network.report,
+    ).toBeNull();
+    expect(
+      detailOf(
+        reported(block({ vmPolicy: "something" })),
+        withNetwork({ mode: "open", hosts: [] }),
+      ).implementer?.environment?.network.report?.vmPolicy,
+    ).toBe("not_configured");
   });
 });

@@ -52,6 +52,10 @@ export const CLAIM_FEATURES = [
   // #818: the runner reads `implementer.environment` and runs its setup script before the model. Sent only to a caller that named
   // it; a turn whose environment has a script is refused (`implementer_engine_unavailable`, free) for a caller that did not.
   "implementer_environment",
+  // #745, step 7: the runner reads `implementer.environment.network` and starts the network door for it. Sent only to a caller that
+  // named it; a turn whose environment has a rule other than `off` is refused (`implementer_engine_unavailable`, free) for a
+  // caller that did not.
+  "implementer_network",
 ] as const;
 export type ClaimFeature = (typeof CLAIM_FEATURES)[number];
 
@@ -338,6 +342,7 @@ export const IMPLEMENTER_ENVIRONMENT_NAMES = [
   "RUNNER_IMPLEMENTER_MODEL_DOOR",
   "RUNNER_IMPLEMENTER_SANDBOX_PROOF",
   "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB",
+  "RUNNER_IMPLEMENTER_NETWORK_SWITCH",
 ] as const;
 export type ImplementerEnvironmentName =
   (typeof IMPLEMENTER_ENVIRONMENT_NAMES)[number];
@@ -507,6 +512,13 @@ export type SplitClaimResponse = {
     heartbeatIntervalSeconds: number;
     /** #818: the VM size the turn's environment asks for; only for a turn that has an environment. */
     vcpus?: number;
+    /** #745, step 7: the rule for the agent's network; for every turn of the Implementer, for no other job. */
+    network?: { mode: "off" | "list" | "open"; hosts: string[] };
+    /**
+     * #745, step 7: the host name of the turn's model provider, for the Dispatcher that signs it into the token of the network
+     * switch (the Worker cannot choose it). Only for a turn of the Implementer whose provider has a plain host name.
+     */
+    modelHost?: string;
   };
 };
 
@@ -680,6 +692,8 @@ export const IMPLEMENTER_RESULT_LIMITS = {
   filesChanged: 500,
   summaryChars: 8192,
   branches: 50,
+  /** #745, step 7: the entries of `network.connections`. */
+  networkConnections: 100,
 } as const;
 
 /**
@@ -699,6 +713,7 @@ export const IMPLEMENTER_MAX_BODY_BYTES =
       IMPLEMENTER_RESULT_LIMITS.summaryChars +
       IMPLEMENTER_RESULT_LIMITS.branches * (255 + 160) +
       IMPLEMENTER_SETUP_OUTPUT_CHARS +
+      IMPLEMENTER_RESULT_LIMITS.networkConnections * (253 + 160) +
       (8192 + 2000));
 
 /** What became of one local branch of the agent's repository at the end of a turn (`branches` of `ImplementerResult`). */
@@ -720,6 +735,31 @@ export type ImplementerSetupResult = {
   output: string;
 };
 
+/**
+ * #745, step 7: what the network door did in a turn (`ImplementerNetworkReport` in the contract): the mode of the rule, whether a
+ * door ran, what the second wall (the VM's network policy) did, and the connections the door saw, one entry for each distinct
+ * host, port and outcome. `reason` is a word of the door for a refusal, null for an allowed connection.
+ */
+export type ImplementerNetworkReport = {
+  mode: "off" | "list" | "open";
+  door: boolean;
+  vmPolicy: "narrowed" | "unchanged" | "not_configured";
+  allowed: number;
+  refused: number;
+  bytesIn: number;
+  bytesOut: number;
+  dropped: number;
+  connections: {
+    host: string;
+    port: number;
+    outcome: "allowed" | "refused";
+    reason: string | null;
+    count: number;
+    bytesIn: number;
+    bytesOut: number;
+  }[];
+};
+
 /** #746: `ImplementerResult` in the contract: facts the runner measured in the repository, and a plain-text summary. */
 export type ImplementerResult = {
   baseCommit: string;
@@ -738,6 +778,8 @@ export type ImplementerResult = {
   opencode: { sessionId: string; version: string } | null;
   /** #818: present when a setup script ran. */
   setup?: ImplementerSetupResult;
+  /** #745, step 7: present when the turn had a network door or the VM's network policy was changed. */
+  network?: ImplementerNetworkReport;
 };
 
 export type CompleteRequest = { leaseToken: string; result: RunnerResult };

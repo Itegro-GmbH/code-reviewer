@@ -38,13 +38,49 @@
       }
     ],
     "filesChanged": [
-      { "path": "src/webhooks/sender.ts", "status": "modified" },
-      { "path": "src/webhooks/sender.test.ts", "status": "added" }
+      {
+        "path": "src/webhooks/sender.ts",
+        "status": "modified"
+      },
+      {
+        "path": "src/webhooks/sender.test.ts",
+        "status": "added"
+      }
     ],
     "summary": "The webhook sender now retries a failed delivery up to three times with exponential backoff. The new test covers the retry and the give-up path.",
     "opencode": {
       "sessionId": "ses_01HZXEXAMPLE0123456789",
       "version": "1.4.2"
+    },
+    "network": {
+      "mode": "list",
+      "door": true,
+      "vmPolicy": "narrowed",
+      "allowed": 3,
+      "refused": 1,
+      "bytesIn": 10240,
+      "bytesOut": 2048,
+      "dropped": 0,
+      "connections": [
+        {
+          "host": "registry.npmjs.org",
+          "port": 443,
+          "outcome": "allowed",
+          "reason": null,
+          "count": 3,
+          "bytesIn": 10240,
+          "bytesOut": 2048
+        },
+        {
+          "host": "example.com",
+          "port": 443,
+          "outcome": "refused",
+          "reason": "not_listed",
+          "count": 1,
+          "bytesIn": 0,
+          "bytesOut": 0
+        }
+      ]
     }
   }
 }

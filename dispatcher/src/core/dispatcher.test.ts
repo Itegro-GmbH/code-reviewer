@@ -927,6 +927,129 @@ describe("the Dispatcher core after the hand-over", () => {
   });
 });
 
+describe("the network rule of a job (#745, step 7)", () => {
+  const buildAll = () =>
+    build(
+      {
+        engines: ["pr-agent", "opencode", "implementer"],
+        kinds: ["diff", "dynamic", "implementer"],
+      },
+      { engines: ["pr-agent", "opencode", "implementer"] },
+    );
+  const LIST = { mode: "list", hosts: ["registry.npmjs.org"] };
+
+  // #745-T33
+  it("passes the rule the App names for a job of the Implementer to the Launcher, and for nothing else", async () => {
+    const withRule = app.enqueue({ reviewKind: "implementer", network: LIST });
+    const without = app.enqueue({ reviewKind: "implementer" });
+    const { core, launcher } = buildAll();
+
+    await handled(
+      core.handle({
+        appId: "reviewer",
+        jobId: withRule,
+        reviewKind: "implementer",
+      }),
+    );
+    await handled(
+      core.handle({
+        appId: "reviewer",
+        jobId: without,
+        reviewKind: "implementer",
+      }),
+    );
+
+    expect(launcher.launches[0]?.network).toStrictEqual(LIST);
+    expect(launcher.launches[1]?.network).toBeUndefined();
+  });
+
+  // The review of #830: the provider's host is the App's to name, in the claim answer, and the Launcher signs it.
+  it("passes the model host the App names for a job of the Implementer to the Launcher, and for nothing else", async () => {
+    const named = app.enqueue({
+      reviewKind: "implementer",
+      network: LIST,
+      modelHost: "api.anthropic.com",
+    });
+    const unnamed = app.enqueue({ reviewKind: "implementer", network: LIST });
+    const review = app.enqueue({
+      reviewKind: "diff",
+      modelHost: "api.anthropic.com",
+    });
+    const { core, launcher } = buildAll();
+
+    for (const [jobId, reviewKind] of [
+      [named, "implementer"],
+      [unnamed, "implementer"],
+      [review, "diff"],
+    ] as const)
+      await handled(core.handle({ appId: "reviewer", jobId, reviewKind }));
+
+    expect(launcher.launches[0]?.modelHost).toBe("api.anthropic.com");
+    expect(launcher.launches[1]?.modelHost).toBeUndefined();
+    expect(launcher.launches[2]?.modelHost).toBeUndefined();
+  });
+
+  it.each([
+    ["an address", "10.0.0.1"],
+    ["a wildcard", "*.anthropic.com"],
+    ["a name with a path", "api.anthropic.com/v1"],
+    ["a name in upper case", "API.anthropic.com"],
+    ["a number", 5],
+  ])(
+    "treats a claim answer whose model host is %s as an answer it cannot read: nothing is launched",
+    async (_name, modelHost) => {
+      const jobId = app.enqueue({
+        reviewKind: "implementer",
+        network: LIST,
+        modelHost,
+      });
+      const { core, launcher } = buildAll();
+
+      await handled(
+        core.handle({ appId: "reviewer", jobId, reviewKind: "implementer" }),
+      );
+
+      expect(launcher.launches).toStrictEqual([]);
+    },
+  );
+
+  // #745-T33
+  it.each(["diff", "dynamic"] as const)(
+    "never hands a %s job's rule to the Launcher, even when the App's answer names one",
+    async (reviewKind) => {
+      const jobId = app.enqueue({ reviewKind, network: LIST });
+      const { core, launcher } = buildAll();
+
+      await handled(core.handle({ appId: "reviewer", jobId, reviewKind }));
+
+      expect(launcher.launches).toHaveLength(1);
+      expect(launcher.launches[0]?.network).toBeUndefined();
+    },
+  );
+
+  // #745-T33
+  it.each([
+    ["a mode that is not one", { mode: "closed", hosts: [] }],
+    ["a list with no host", { mode: "list", hosts: [] }],
+    ["hosts for an open rule", { mode: "open", hosts: ["a.example.com"] }],
+    ["an address as a host", { mode: "list", hosts: ["10.0.0.1"] }],
+    ["text", "open"],
+    ["null", null],
+  ])(
+    "treats a claim answer whose rule is %s as an answer it cannot read: nothing is launched",
+    async (_name, network) => {
+      const jobId = app.enqueue({ reviewKind: "implementer", network });
+      const { core, launcher } = buildAll();
+
+      await handled(
+        core.handle({ appId: "reviewer", jobId, reviewKind: "implementer" }),
+      );
+
+      expect(launcher.launches).toStrictEqual([]);
+    },
+  );
+});
+
 describe("the size of a job (#818)", () => {
   /** A core that serves the Implementer as well as the reviews. */
   const buildAll = () =>

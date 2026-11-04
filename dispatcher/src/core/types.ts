@@ -7,6 +7,7 @@ import type {
   Engine as ContractEngine,
 } from "../contracts/runner-api.ts";
 import type { WorkerContainerOverrides } from "../contracts/worker-container.ts";
+import type { NetworkRule } from "../network/rule.ts";
 
 export type Engine = ContractEngine;
 /** A kind as the contract names it (and as a signed wake-up call or a claim answer may carry it). */
@@ -97,6 +98,14 @@ export type LaunchSpec = {
    * with its own code for any other. Absent: the kind's configuration and default apply.
    */
   vcpus?: number;
+  /**
+   * #745, step 7: the environment's rule for the agent's network, from the App's authenticated claim answer (an Implementer job
+   * only, like `vcpus`). The Launcher gives it, with a token, to the Control container so that it can narrow the VM's network
+   * policy after the setup. Absent: the App did not say (the release before), and the policy is not narrowed.
+   */
+  network?: NetworkRule;
+  /** #745, step 7: the host name of the model provider, from the same answer; the Launcher signs it into the switch token. */
+  modelHost?: string;
   /**
    * #493: a Launcher that creates a VM calls this right after the create returned. The core reports the VM to the App,
    * best effort and in the background; the call returns at once and never throws, and nothing it does can fail the

@@ -105,6 +105,8 @@ const service: SandboxService & SandboxFleet = {
   stop: (name) => local.stop(name),
   delete: (name) => local.delete(name),
   list: (filter) => local.list(filter),
+  // A local Docker host has no network policy of the platform's kind (#745, step 7).
+  setNetworkPolicy: () => Promise.resolve(),
 };
 
 const dynamicEnvironment: Record<string, string> = {};

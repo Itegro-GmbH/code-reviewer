@@ -11,6 +11,7 @@
 // What this adapter never does: pass an environment to a command, write a file, set a failover region or a
 // persistent sandbox. The per-job credential reaches the VM through `SandboxProcess.writeStdin` and nothing else.
 import { Writable } from "node:stream";
+import type { NetworkPolicy } from "../network/rule.ts";
 import {
   DELETABLE_STATUSES,
   SandboxServiceError,
@@ -64,6 +65,11 @@ export interface SdkSandbox {
   readonly status: string;
   readonly persistent: boolean;
   stop(opts?: { signal?: AbortSignal }): Promise<unknown>;
+  /** The platform's call for the network policy of a running VM (#745, step 7). */
+  updateNetworkPolicy(
+    policy: NetworkPolicy,
+    opts?: { signal?: AbortSignal },
+  ): Promise<unknown>;
   delete(opts?: {
     deleteOrphanSnapshots?: boolean;
     signal?: AbortSignal;
@@ -343,6 +349,24 @@ export function createVercelSandboxService(
         await sandbox.stop();
       } catch (error) {
         if (isGone(error)) return;
+        throw mapped(error);
+      }
+    },
+
+    async setNetworkPolicy(name, policy) {
+      const { Sandbox } = await loaded();
+      try {
+        // No `resume`: the VM must be running, and a stopped one is not started to be narrowed.
+        const sandbox = await limited((signal) =>
+          Sandbox.get({ ...auth, name, signal }),
+        );
+        await limited((signal) =>
+          sandbox.updateNetworkPolicy(policy, { signal }),
+        );
+      } catch (error) {
+        if (error instanceof SandboxServiceError) throw error;
+        if (statusOf(error) === 404 || statusOf(error) === 410)
+          throw new SandboxServiceError("not_ready");
         throw mapped(error);
       }
     },

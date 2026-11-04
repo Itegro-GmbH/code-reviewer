@@ -305,7 +305,8 @@
             { "contains": { "const": "RUNNER_IMPLEMENTER_WORK_DIR" } },
             { "contains": { "const": "RUNNER_IMPLEMENTER_MODEL_DOOR" } },
             { "contains": { "const": "RUNNER_IMPLEMENTER_SANDBOX_PROOF" } },
-            { "contains": { "const": "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB" } }
+            { "contains": { "const": "RUNNER_IMPLEMENTER_AGENT_MEMORY_MB" } },
+            { "contains": { "const": "RUNNER_IMPLEMENTER_NETWORK_SWITCH" } }
           ]
         },
         "forbiddenKeys": {

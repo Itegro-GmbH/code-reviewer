@@ -134,7 +134,7 @@ describe("the environment route files", () => {
     const listed = await list();
     expect(listed.headers.get("cache-control")).toBe("no-store");
     expect(await listed.json()).toMatchObject({
-      environments: [{ id: environment.id, memoryGb: 5.8 }],
+      environments: [{ id: environment.id, memoryGb: 5.7 }],
       maximum: 50,
     });
 
@@ -194,7 +194,13 @@ describe("the environment route files", () => {
     expect(text).not.toContain("SECRET-MARKER-SCRIPT");
     expect(JSON.parse(text)).toMatchObject({
       environments: [
-        { name: "Node 22", vcpus: 4, memoryGb: 5.8, hasScript: true },
+        {
+          name: "Node 22",
+          vcpus: 4,
+          memoryGb: 5.7,
+          hasScript: true,
+          networkMode: "off",
+        },
       ],
     });
     // The page's own list still has the script.

@@ -57,6 +57,7 @@ describe("the environments repository", () => {
         name: "Node 22",
         vcpus: 4,
         setupScript: "  npm ci\r\n\tnpm run build  \n",
+        network: { mode: "off", hosts: [] },
         createdBy: "u-1",
         createdAt: "2026-11-02T08:00:00.000Z",
         updatedAt: "2026-11-02T08:00:00.000Z",
@@ -93,14 +94,27 @@ describe("the environments repository", () => {
     const summaries = await a.listSummaries();
 
     expect(summaries).toEqual([
-      { id: expect.any(String), name: "Bun", vcpus: 1, hasScript: true },
-      { id: expect.any(String), name: "pnpm", vcpus: 4, hasScript: false },
+      {
+        id: expect.any(String),
+        name: "Bun",
+        vcpus: 1,
+        hasScript: true,
+        networkMode: "off",
+      },
+      {
+        id: expect.any(String),
+        name: "pnpm",
+        vcpus: 4,
+        hasScript: false,
+        networkMode: "off",
+      },
     ]);
     for (const summary of summaries)
       expect(Object.keys(summary).sort()).toEqual([
         "hasScript",
         "id",
         "name",
+        "networkMode",
         "vcpus",
       ]);
   });
@@ -254,5 +268,94 @@ describe("the environments repository", () => {
 
     expect(await a.get("env-1")).toBeUndefined();
     expect((await a.create({ ...NODE, name: "Node" }, 50)).ok).toBe(true);
+  });
+});
+
+// #745-T36: the rule for the agent's network (step 7)
+describe("the environments repository and the network rule", () => {
+  const LIST = {
+    mode: "list",
+    hosts: ["registry.npmjs.org", "*.pythonhosted.org"],
+  } as const;
+
+  // #745-T36
+  it("keeps a rule of each mode and reads it back, the hosts in the order they were written", async () => {
+    const { a } = await setup();
+    const open = await a.create(
+      { ...NODE, name: "Open", network: { mode: "open", hosts: [] } },
+      50,
+    );
+    const list = await a.create(
+      {
+        ...NODE,
+        name: "List",
+        network: { mode: "list", hosts: [...LIST.hosts] },
+      },
+      50,
+    );
+    const off = await a.create({ ...NODE, name: "Off" }, 50);
+
+    expect(open.ok && open.environment.network).toEqual({
+      mode: "open",
+      hosts: [],
+    });
+    expect(list.ok && list.environment.network).toEqual(LIST);
+    expect(off.ok && off.environment.network).toEqual({
+      mode: "off",
+      hosts: [],
+    });
+    expect((await a.get("env-2"))?.network).toEqual(LIST);
+    expect(
+      (await a.listSummaries()).map((s) => [s.name, s.networkMode]),
+    ).toEqual([
+      ["List", "list"],
+      ["Off", "off"],
+      ["Open", "open"],
+    ]);
+  });
+
+  // #745-T36
+  it("changes the rule with the rest of the environment", async () => {
+    const { a } = await setup();
+    await a.create(
+      { ...NODE, network: { mode: "list", hosts: [...LIST.hosts] } },
+      50,
+    );
+
+    const updated = await a.update("env-1", {
+      name: "Node 22",
+      vcpus: 4,
+      setupScript: "",
+      network: { mode: "open", hosts: [] },
+    });
+    const left = await a.update("env-1", {
+      name: "Node 22",
+      vcpus: 4,
+      setupScript: "",
+    });
+
+    expect(updated.ok && updated.environment.network.mode).toBe("open");
+    expect(left.ok && left.environment.network).toEqual({
+      mode: "off",
+      hosts: [],
+    });
+  });
+
+  // #745-T36
+  it("refuses in the database what the app would never write: a list without hosts, hosts without a list, another mode", async () => {
+    const { db, a } = await setup();
+    await a.create(NODE, 50);
+    for (const [mode, hosts] of [
+      ["list", ""],
+      ["open", "a.example.com"],
+      ["off", "a.example.com"],
+      ["closed", ""],
+      ["list", "x".repeat(25_401)],
+    ] as const)
+      await expect(
+        sql`update implementer_environments set network_mode = ${mode}, network_hosts = ${hosts}`.execute(
+          db,
+        ),
+      ).rejects.toThrow(/implementer_environments_network_check/);
   });
 });

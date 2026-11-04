@@ -207,7 +207,8 @@ def test_the_floor_is_the_one_the_dispatcher_takes_off_the_agents_memory() -> No
     assert contract["memoryGuard"]["floorPercent"] / 100 == FLOOR_FRACTION
     per_vcpu = contract["memoryPerVcpuMb"]
     headroom = 512  # the OS's room, `IMPLEMENTER_VM_HEADROOM_MB`
-    others = 768 + 256 + 2 * 256  # Control, the door, both readers
+    others = 768 + 256 + 96 + 2 * 256  # Control, the model door, the network door, both readers
+    assert contract["networkDoorMemoryMb"] == 96
     for vcpus in contract["environmentVcpus"]:
         ram = vcpus * per_vcpu
         floor_mb = -(-floor_bytes(ram * MIB) // MIB)  # up
@@ -225,3 +226,21 @@ def test_a_guard_kill_starts_the_sentence_of_the_turns_end_with_its_reason_word(
     assert ended.startswith(f"{REASON_VM_MEMORY}: the agent's container ended during the turn")
     assert "running out of memory" in ended
     assert REASON_VM_MEMORY not in AgentEnd(137, True, True).sentence()
+
+
+# #745, step 7: the network door's limit is the figure the Dispatcher takes off the agent's memory
+@pytest.mark.unit
+def test_the_network_doors_limit_is_the_figure_of_the_contract() -> None:
+    from code_reviewer_runner.implementer.netdoor_launcher import (
+        NETDOOR_MEMORY_BYTES,
+        NETDOOR_MEMORY_MB,
+        door_document,
+    )
+
+    contract = json.loads(
+        (Path(__file__).parents[3] / "contracts" / "environment-sizes.v1.json").read_text()
+    )
+    assert contract["networkDoorMemoryMb"] == NETDOOR_MEMORY_MB
+    assert NETDOOR_MEMORY_BYTES == NETDOOR_MEMORY_MB * MIB
+    host = door_document("sha256:x")["HostConfig"]
+    assert host["Memory"] == host["MemorySwap"] == NETDOOR_MEMORY_BYTES

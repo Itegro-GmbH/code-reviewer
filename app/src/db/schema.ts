@@ -1082,6 +1082,20 @@ export interface ImplementerTurnsTable {
     string | null | undefined,
     string | null
   >;
+  /**
+   * The environment's rule for the agent's network, copied with it (#745, step 7): both null (a task written before the rule, or without
+   * an environment: it reads `off`) or both set. `hosts` is one host name on each line.
+   */
+  environment_network_mode: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  environment_network_hosts: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
 }
 
 /**
@@ -1097,6 +1111,10 @@ export interface ImplementerEnvironmentsTable {
   /** A size of `contracts/environment-sizes.v1.json`; the app checks the list, the database only that it is positive. */
   vcpus: number;
   setup_script: string;
+  /** `off`, `list` or `open` (#745, step 7): the rule for the agent's network. Existing environments read `off`. */
+  network_mode: ColumnType<string, string | undefined, string>;
+  /** The host names of a list, one on each line, in the form the door compares them in; empty unless the mode is `list`. */
+  network_hosts: ColumnType<string, string | undefined, string>;
   created_by: string;
   /** ISO 8601 UTC. */
   created_at: string;
