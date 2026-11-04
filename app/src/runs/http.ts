@@ -8,16 +8,19 @@
 // service. Every refusal is `{ "error": <code> }` with a stable code; every answer is `no-store`.
 import type { SessionUser } from "../auth/access-policy.ts";
 import { parseRunsFilter, type RunsService } from "./runs-service.ts";
+import { parseStepsQuery, type RunStepsService } from "./steps-service.ts";
 
 export const RUNS_ERROR_CODES = [
   "RUNS_FILTER_INVALID",
   "RUN_NOT_FOUND",
+  "STEPS_QUERY_INVALID",
 ] as const;
 export type RunsErrorCode = (typeof RUNS_ERROR_CODES)[number];
 
 const STATUS: Record<RunsErrorCode, number> = {
   RUNS_FILTER_INVALID: 400,
   RUN_NOT_FOUND: 404,
+  STEPS_QUERY_INVALID: 400,
 };
 
 export type RunsRouteDependencies = {
@@ -26,9 +29,18 @@ export type RunsRouteDependencies = {
   service: RunsService;
 };
 
+export type RunStepsRouteDependencies = {
+  requireUser: () => Promise<SessionUser>;
+  service: RunStepsService;
+};
+
 export type RunsRouteHandlers = {
   list(request: Request): Promise<Response>;
   detail(request: Request, id: string): Promise<Response>;
+};
+
+export type RunStepsRouteHandlers = {
+  steps(request: Request, id: string): Promise<Response>;
 };
 
 const NO_STORE = { "cache-control": "no-store" };
@@ -61,6 +73,31 @@ export function createRunsRouteHandlers({
     async detail(_request, id) {
       await requireUser();
       const snapshot = await service.get(id);
+      if (snapshot === undefined) return refusal("RUN_NOT_FOUND");
+      return Response.json(snapshot, { headers: NO_STORE });
+    },
+  };
+}
+
+/**
+ * The handler behind `GET /api/w/:workspace/runs/:id/steps?after=&limit=` (#745, live view): the parts of the agent's work that
+ * changed after the cursor. Same order as the others: the user, then the query, then the service. A run that is not a run of the
+ * Implementer of the workspace answers 404 `RUN_NOT_FOUND`.
+ */
+export function createRunStepsRouteHandlers({
+  requireUser,
+  service,
+}: RunStepsRouteDependencies): RunStepsRouteHandlers {
+  return {
+    async steps(request, id) {
+      await requireUser();
+      const params = new URL(request.url).searchParams;
+      const query = parseStepsQuery({
+        after: params.get("after"),
+        limit: params.get("limit"),
+      });
+      if (!query.ok) return refusal("STEPS_QUERY_INVALID");
+      const snapshot = await service.list(id, query.after, query.limit);
       if (snapshot === undefined) return refusal("RUN_NOT_FOUND");
       return Response.json(snapshot, { headers: NO_STORE });
     },

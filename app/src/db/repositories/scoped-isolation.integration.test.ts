@@ -1860,6 +1860,12 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {
+    // #745: the id of a run of the Implementer of workspace B is not one of A's.
+    name: "runs.isImplementerRun",
+    run: (a, b) => a.runs.isImplementerRun(taskOf(b).turn.jobId),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
     name: "runs.latestPerRepository",
     run: (a, b) => a.runs.latestPerRepository([b.repository.id]),
     expectAnswer: (answer) => expect(answer).toEqual([]),

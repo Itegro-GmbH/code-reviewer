@@ -68,6 +68,7 @@ function apiAnswering(
   return {
     list: vi.fn(async () => answers.shift() ?? failure),
     detail: vi.fn(),
+    steps: vi.fn(),
   } as RunsApi & { list: ReturnType<typeof vi.fn> };
 }
 

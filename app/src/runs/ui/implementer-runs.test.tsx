@@ -17,7 +17,15 @@ import { RunsList } from "./runs-list.tsx";
 
 afterEach(cleanup);
 
-const api = { list: vi.fn(), detail: vi.fn() } as unknown as RunsApi;
+const api = {
+  list: vi.fn(),
+  detail: vi.fn(),
+  // The steps of a running task (#745): none have been reported.
+  steps: vi.fn(async () => ({
+    ok: true,
+    data: { steps: [], cursor: 0, hasMore: false },
+  })),
+} as unknown as RunsApi;
 const NONE_DROPPED = { invalid: 0, overflow: 0 };
 const SHA = "b".repeat(40);
 

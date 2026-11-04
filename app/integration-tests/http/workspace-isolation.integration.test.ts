@@ -134,6 +134,17 @@ const ENTRIES: Entry[] = [
     file: "runs/[id]/route.ts",
   },
   {
+    // #745: the steps of the agent's work are read like the run, by every member of the workspace in the address.
+    name: "GET runs/[id]/steps",
+    route: "/api/w/[workspace]/runs/[id]/steps",
+    method: "GET",
+    minRole: MINIMUM_ROLE.view,
+    path: (ids) => `/runs/${ids.runId}/steps`,
+    params: (ids) => ({ id: ids.runId }),
+    file: "runs/[id]/steps/route.ts",
+    implementer: true,
+  },
+  {
     name: "PUT repositories/[repositoryId]/project",
     route: "/api/w/[workspace]/repositories/[repositoryId]/project",
     method: "PUT",

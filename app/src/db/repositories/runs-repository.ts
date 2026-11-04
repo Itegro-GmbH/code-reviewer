@@ -73,6 +73,11 @@ export type RunsRepository = {
   /** One run by its id; undefined for an id nobody has. */
   get(id: string): Promise<StoredRun | undefined>;
   /**
+   * Whether the id is a run of the Implementer of this workspace (#745, live view). One indexed look, for the poll of the steps
+   * of a run, which must not pay for everything `get` reads.
+   */
+  isImplementerRun(id: string): Promise<boolean>;
+  /**
    * The newest job of each of the repositories (by creation time); repositories without one are left
    * out. One lookup per repository, each answered by the index `jobs_repository_recent`.
    */
@@ -266,6 +271,17 @@ export function createRunsRepository(
               },
             }),
       };
+    },
+
+    async isImplementerRun(id) {
+      const row = await db
+        .selectFrom("jobs")
+        .select("id")
+        .where("id", "=", id)
+        .where("workspace_id", "=", workspaceId)
+        .where("review_kind", "=", "implementer")
+        .executeTakeFirst();
+      return row !== undefined;
     },
 
     async latestPerRepository(repositoryIds) {
