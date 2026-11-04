@@ -79,6 +79,18 @@
         }
       }
     },
+    "WorkerStepsRequest": {
+      "description": "#745: the body of POST /api/workers/v1/jobs/{id}/steps: a batch of the records of the running turn of the Implementer (the live view), at most 50 in at most 48 KiB. The credential identifies the job and proves the claim, so the body holds no lease token. The same rules and answers as POST /api/runners/v1/jobs/{id}/steps (`StepsRequest` in runner-api.v1.json): the call does NOT extend the lease, 409 RUNNER_LEASE_LOST for a lost claim, 409 RUNNER_JOB_ENDED when the job is over, 400 RUNNER_REQUEST_INVALID for a job that is not a turn of the Implementer or a record that does not fit.",
+      "type": "object",
+      "required": ["records"],
+      "properties": {
+        "records": { "type": "array", "items": { "$ref": "runner-api.v1.json#/$defs/StepRecord" }, "minItems": 1, "maxItems": 50 }
+      }
+    },
+    "WorkerStepsResponse": {
+      "description": "#745: 200 from the Worker's steps call: `StepsResponse` of runner-api.v1.json.",
+      "$ref": "runner-api.v1.json#/$defs/StepsResponse"
+    },
     "WorkerResultRequest": {
       "description": "The body of POST /api/workers/v1/jobs/{id}/result. The whole request body must not exceed 65536 bytes (413 otherwise). The app applies the redaction of the runner API's complete call, including the model key remembered at fetch. A result with errorCode runner_shutdown or launch_failed is not stored: the job is given back and counts an attempt.",
       "type": "object",

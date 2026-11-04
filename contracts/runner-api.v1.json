@@ -1170,15 +1170,80 @@
       }
     },
     "KnownAppFeature": {
-      "description": "The features an app lists in VersionResponse.features. A reader ignores a name it does not know and refuses to run against an app that lacks one it needs. `worker_api`: /api/workers/v1 exists. `claim_by_job_id`: ClaimRequest.jobId is honoured. `pool_cap`: ClaimRequest.maxRunning is honoured. `release`: the release call exists. `vm_lifecycle` (#493): POST /api/runners/v1/jobs/{id}/vm exists (the Dispatcher reports the VM it created, for the billable minutes); a Dispatcher sends that call only to an app that lists the feature.",
+      "description": "The features an app lists in VersionResponse.features. A reader ignores a name it does not know and refuses to run against an app that lacks one it needs. `worker_api`: /api/workers/v1 exists. `claim_by_job_id`: ClaimRequest.jobId is honoured. `pool_cap`: ClaimRequest.maxRunning is honoured. `release`: the release call exists. `vm_lifecycle` (#493): POST /api/runners/v1/jobs/{id}/vm exists (the Dispatcher reports the VM it created, for the billable minutes); a Dispatcher sends that call only to an app that lists the feature. `implementer_steps` (#745): POST /api/runners/v1/jobs/{id}/steps and POST /api/workers/v1/jobs/{id}/steps exist (the steps of a running turn of the Implementer, for the live view); a runner sends them only to an app that lists the feature. It is an app feature, not a claim feature: the call adds nothing to the job input, so there is nothing the app must withhold from a caller that does not know it.",
       "type": "string",
       "enum": [
         "worker_api",
         "claim_by_job_id",
         "pool_cap",
         "release",
-        "vm_lifecycle"
+        "vm_lifecycle",
+        "implementer_steps"
       ]
+    },
+    "KnownStepKind": {
+      "description": "#745: the kinds of `StepRecord` the app stores. `reasoning`: a finished reasoning part, with the text the provider returned (often a summary). `text`: a finished assistant text part. `tool`: a tool call, with its name, status, title, the input as JSON text and the error text; the OUTPUT of a tool is never recorded, on either side. `step`: the end of one model call, with its tokens and cost. A record of another kind is left out and counted in `StepsResponse.dropped`: a newer runner may send more kinds.",
+      "type": "string",
+      "enum": ["reasoning", "text", "tool", "step"]
+    },
+    "StepTokens": {
+      "description": "#745: the tokens of one model call, as the runner counts them.",
+      "type": "object",
+      "required": ["input", "output", "reasoning", "cacheRead", "cacheWrite"],
+      "properties": {
+        "input": { "type": "integer", "minimum": 0, "maximum": 1000000000000 },
+        "output": { "type": "integer", "minimum": 0, "maximum": 1000000000000 },
+        "reasoning": { "type": "integer", "minimum": 0, "maximum": 1000000000000 },
+        "cacheRead": { "type": "integer", "minimum": 0, "maximum": 1000000000000 },
+        "cacheWrite": { "type": "integer", "minimum": 0, "maximum": 1000000000000 }
+      }
+    },
+    "StepRecord": {
+      "description": "#745: one record of the live view, for one part of the engine's messages. A part is sent again when it changes (a tool: running, then completed) with the same `partId` and a higher `seq`; the app keeps the record with the highest `seq` of each part, so a retry or a record that arrives behind a newer one changes nothing. `kind` is any lower case word, and the app stores the kinds of `KnownStepKind` only. A reader ignores fields it does not know. `startedAt` and `endedAt` are epoch milliseconds of the sandbox's clock. The texts are cut by the runner (`text` at 16 KiB, `input` and `error` at 4 KiB, `title` at 512 bytes) and `bytes` is the true size of the cut text; the app cleans them again (control characters, secrets, and on the operator's key the model and provider names) and stores the cost of a model call only for a job on the workspace's own key. Per kind, `text` is required for `reasoning` and `text`, `tool` and `status` for `tool`, `tokens` for `step`.",
+      "type": "object",
+      "required": ["kind", "partId", "seq"],
+      "properties": {
+        "kind": { "type": "string", "pattern": "^[a-z][a-z-]{0,31}$" },
+        "partId": { "type": "string", "pattern": "^[A-Za-z0-9_.:@-]{1,256}$" },
+        "seq": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "startedAt": { "type": "integer", "minimum": 0, "maximum": 1000000000000000 },
+        "endedAt": { "type": "integer", "minimum": 0, "maximum": 1000000000000000 },
+        "text": { "type": "string", "maxLength": 16448 },
+        "bytes": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "tool": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "maxLength": 32 },
+        "title": { "type": "string", "maxLength": 576 },
+        "input": { "type": "string", "maxLength": 4160 },
+        "error": { "type": "string", "maxLength": 4160 },
+        "reason": { "type": "string", "maxLength": 64 },
+        "tokens": { "$ref": "#/$defs/StepTokens" },
+        "cost": { "type": "number", "minimum": 0, "maximum": 1000000000 }
+      },
+      "allOf": [
+        { "if": { "properties": { "kind": { "enum": ["reasoning", "text"] } } }, "then": { "required": ["text"] } },
+        { "if": { "properties": { "kind": { "const": "tool" } } }, "then": { "required": ["tool", "status"] } },
+        { "if": { "properties": { "kind": { "const": "step" } } }, "then": { "required": ["tokens"] } }
+      ]
+    },
+    "StepsRequest": {
+      "description": "#745: POST /api/runners/v1/jobs/{id}/steps, with the runner token in Authorization and the lease token of the claim in the body, like the heartbeat. A batch of the records of a running turn of the Implementer: at most 50, in a body of at most 48 KiB (the app reads up to 64 KiB, RUNNER_MAX_BODY_BYTES, so the lease token and the escaping of the sender's JSON have room; 413 above). The call proves the claim and nothing more: it does NOT extend the lease, only the heartbeat does. 409 RUNNER_LEASE_LOST for a lost or stale claim (stop sending steps); 400 RUNNER_REQUEST_INVALID for a job that is not a turn of the Implementer or a record that does not fit the schema (the whole batch is refused: `fields` names the first wrong ones, as `records[2].text`); 404 RUNNER_JOB_NOT_FOUND. The sender is best effort: it drops what the app refuses and never lets this call delay the turn. The app also bounds a turn on its own (16,000 parts, 6 MiB of payload): what is past a bound is counted in `StepsResponse.dropped`.",
+      "type": "object",
+      "required": ["leaseToken", "records"],
+      "properties": {
+        "leaseToken": { "$ref": "#/$defs/LeaseToken" },
+        "records": { "type": "array", "items": { "$ref": "#/$defs/StepRecord" }, "minItems": 1, "maxItems": 50 }
+      }
+    },
+    "StepsResponse": {
+      "description": "#745: 200 from the steps call. Counts of the records of the batch: `stored` made or changed a row, `stale` did not because the part holds a record with an equal or higher `seq` (a retry, or an older record that came late), `dropped` were left out (a kind the app does not know, or past a bound of the turn). Repeating a batch answers 200 with `stored` 0.",
+      "type": "object",
+      "required": ["version", "stored", "stale", "dropped"],
+      "properties": {
+        "version": { "const": 1 },
+        "stored": { "type": "integer", "minimum": 0, "maximum": 50 },
+        "stale": { "type": "integer", "minimum": 0, "maximum": 50 },
+        "dropped": { "type": "integer", "minimum": 0, "maximum": 50 }
+      }
     },
     "VersionResponse": {
       "description": "#318: 200 from GET /api/runners/v1/version (dispatcher credential; #322: a Worker may also send its per-job credential with ?jobId=<its job>, which must be the running claim of that job). Lets a Dispatcher or a Worker detect an app that is too old before it claims anything. An app of a previous release has no such route (404), which means it is too old. `version` is the runner API version; `appVersion` is the build of the app, for logs.",

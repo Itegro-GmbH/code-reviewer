@@ -103,6 +103,7 @@ export const APP_FEATURES = [
   "pool_cap",
   "release",
   "vm_lifecycle",
+  "implementer_steps",
 ] as const;
 export type AppFeature = (typeof APP_FEATURES)[number];
 
@@ -795,4 +796,82 @@ export type CompleteResponse = {
     status: "succeeded" | "failed" | "queued" | "superseded";
   };
   alreadyCompleted: boolean;
+};
+
+/**
+ * #745: the kinds of record of the live view (`KnownStepKind` in the contract): a finished `reasoning` part, a finished assistant
+ * `text` part, a `tool` call (name, status, title, input, error; never its output) and a `step` (the tokens and cost of one model
+ * call). A record of a kind not listed is not stored and is counted as `dropped`: a newer runner may send more kinds.
+ */
+export const STEP_KINDS = ["reasoning", "text", "tool", "step"] as const;
+export type StepKind = (typeof STEP_KINDS)[number];
+
+/**
+ * #745: the bounds of a steps request and of one record (`StepsRequest` and `StepRecord` in the contract). The lengths are in
+ * characters, as JSON Schema counts them; the runner cuts its texts at 16 KiB, 4 KiB and 512 bytes and adds a mark of a few
+ * characters (`[N bytes cut]`), which `*Chars` leaves room for. A batch is at most `STEPS_BATCH_BYTES` of body so that it is within
+ * `RUNNER_MAX_BODY_BYTES` with the lease token around it.
+ */
+export const STEPS_LIMITS = {
+  records: 50,
+  partIdChars: 256,
+  seq: 2_147_483_647,
+  textChars: 16 * 1024 + 64,
+  inputChars: 4 * 1024 + 64,
+  errorChars: 4 * 1024 + 64,
+  titleChars: 512 + 64,
+  toolChars: 128,
+  statusChars: 32,
+  reasonChars: 64,
+  epochMs: 1e15,
+  count: 1e12,
+  cost: 1e9,
+} as const;
+
+/** #745: the size a sender keeps a steps body under (the app reads up to `RUNNER_MAX_BODY_BYTES`). */
+export const STEPS_BATCH_BYTES = 48 * 1024;
+
+/** #745: the tokens of a `step` record, as the runner counts them. */
+export type StepTokens = {
+  input: number;
+  output: number;
+  reasoning: number;
+  cacheRead: number;
+  cacheWrite: number;
+};
+
+/**
+ * #745: `StepRecord` in the contract. `startedAt` and `endedAt` are epoch milliseconds of the sandbox's clock. `bytes` is the true
+ * size of the text the record shows when the runner cut it. Fields a reader does not know are ignored.
+ */
+export type StepRecord = {
+  kind: string;
+  partId: string;
+  seq: number;
+  startedAt?: number;
+  endedAt?: number;
+  text?: string;
+  bytes?: number;
+  tool?: string;
+  status?: string;
+  title?: string;
+  input?: string;
+  error?: string;
+  reason?: string;
+  tokens?: StepTokens;
+  cost?: number;
+};
+
+/** #745: `POST /api/runners/v1/jobs/{id}/steps` (`StepsRequest`): the lease token of the claim and a batch of records. */
+export type StepsRequest = { leaseToken: string; records: StepRecord[] };
+
+/** #745: `POST /api/workers/v1/jobs/{id}/steps` (`WorkerStepsRequest`): the credential identifies the job. */
+export type WorkerStepsRequest = { records: StepRecord[] };
+
+/** #745: 200 from the steps call (`StepsResponse`). Counts of the records of the batch; the lease is not extended. */
+export type StepsResponse = {
+  version: typeof RUNNER_API_VERSION;
+  stored: number;
+  stale: number;
+  dropped: number;
 };

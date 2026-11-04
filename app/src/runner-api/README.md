@@ -13,6 +13,7 @@ checks and the redaction with the runner API and is described in "The Worker API
 | `POST /api/runners/v1/claim`              | `200` job, `204` nothing to do | Reserves the oldest due job and hands it out with its credentials      |
 | `POST /api/runners/v1/jobs/:id/heartbeat` | `200`                          | Extends the lease (2 minutes; runners beat every 30 seconds)           |
 | `POST /api/runners/v1/jobs/:id/complete`  | `200`                          | Stores the result and finishes the job                                 |
+| `POST /api/runners/v1/jobs/:id/steps`     | `200`                          | Stores the steps of a running turn of the Implementer (#745, below)    |
 | `POST /api/runners/v1/jobs/:id/release`   | `200`                          | A Dispatcher gives a claimed job back (#322, "The Dispatcher's calls") |
 | `POST /api/runners/v1/jobs/:id/vm`        | `200`                          | A Dispatcher reports the VM it created for a claim (#493)              |
 | `GET /api/runners/v1/version`             | `200`                          | The app's version and features (#322)                                  |
@@ -96,6 +97,27 @@ What happens to a block that is accepted:
   cost of a run on the operator's key: the Runs views take it out (`run-view.ts`), the stored usage keeps it for the settlement.
 - Billing classes of the Implementer's codes are in `billing/outcome.ts`: `agent_gave_up`, `push_rejected`, `branch_violation` (no
   longer produced) and `time_limit_reached` are charged (the agent ran), the codes that end a turn before it are free.
+
+## The steps of a turn of the Implementer (#745)
+
+The live view shows what the agent thinks and does while a turn runs. The runner sends **records** (`StepRecord`: a finished `reasoning` or `text` part, a `tool` call, the end
+of a model call as `step`) in batches of at most 50 records and 48 KiB to `POST /api/runners/v1/jobs/:id/steps` (the lease token in the body) or, from a Worker,
+`POST /api/workers/v1/jobs/:id/steps` (the credential in the header). One handler (`steps.ts`) serves both; `steps-request.ts` reads the body.
+
+- **Best effort for the sender, strict for the app.** The call proves the claim and nothing else: it does **not** extend the lease (only the heartbeat does). A lost or stale
+  lease, a job that has ended, is `409` (`RUNNER_LEASE_LOST`; `RUNNER_JOB_ENDED` on the Worker API); a job that is not a turn of the Implementer, or a body that does not fit
+  the schema, is `400` (`RUNNER_REQUEST_INVALID`, `fields` as `records[2].text`); an unknown job is `404`. A batch is all or nothing. A record of a kind the app does not
+  know, and one past a bound of the turn, is not an error: it is counted in `dropped` of the `200` answer (`stored`, `stale`, `dropped`).
+- **Upsert by part.** One row for each `(job, partId)`; the higher `seq` wins (`db/repositories/implementer-steps-repository.ts`), so a retry, a batch that comes behind a newer one
+  and a tool that was `running` and is `completed` are all the same operation. Repeating a batch answers `200` with `stored: 0`.
+- **Bounds on the app's side.** At most 16,000 parts and 6 MiB of payload for a turn; the runner stops at 15,000 records and 2 MiB of text, so a runner that works as designed
+  never meets them.
+- **What is stored is cleaned like a result.** Control characters and lone surrogates go; the secrets the app knows (the workspace's key, the key of the claim, the runner token, the
+  Worker's own credential, anything shaped like a credential, also split by zero-width characters) become `[redacted]`; on the operator's key the model and provider names become
+  `[model]` and `[provider]`, and the **cost** of a model call is not stored at all (a member never reads it). A field the contract does not know is not kept, so the output of a
+  tool cannot get in by a runner that sends it. What no filter knows is what the repository holds (a committed `.env` the agent printed): **a member can read what the agent read**.
+- **No claim feature.** A claim feature gates what the app _sends_ a runner (a job field it must understand). This call adds nothing to the job; what a runner needs to know is
+  whether the app _has_ the call, and that is the app feature `implementer_steps` of `GET /api/runners/v1/version`.
 
 ## Authentication
 

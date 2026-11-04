@@ -292,10 +292,40 @@ export type KnownReleaseReason = "launch_failed" | "worker_exited";
  */
 export type VmName = string;
 /**
- * The features an app lists in VersionResponse.features. A reader ignores a name it does not know and refuses to run against an app that lacks one it needs. `worker_api`: /api/workers/v1 exists. `claim_by_job_id`: ClaimRequest.jobId is honoured. `pool_cap`: ClaimRequest.maxRunning is honoured. `release`: the release call exists. `vm_lifecycle` (#493): POST /api/runners/v1/jobs/{id}/vm exists (the Dispatcher reports the VM it created, for the billable minutes); a Dispatcher sends that call only to an app that lists the feature.
+ * The features an app lists in VersionResponse.features. A reader ignores a name it does not know and refuses to run against an app that lacks one it needs. `worker_api`: /api/workers/v1 exists. `claim_by_job_id`: ClaimRequest.jobId is honoured. `pool_cap`: ClaimRequest.maxRunning is honoured. `release`: the release call exists. `vm_lifecycle` (#493): POST /api/runners/v1/jobs/{id}/vm exists (the Dispatcher reports the VM it created, for the billable minutes); a Dispatcher sends that call only to an app that lists the feature. `implementer_steps` (#745): POST /api/runners/v1/jobs/{id}/steps and POST /api/workers/v1/jobs/{id}/steps exist (the steps of a running turn of the Implementer, for the live view); a runner sends them only to an app that lists the feature. It is an app feature, not a claim feature: the call adds nothing to the job input, so there is nothing the app must withhold from a caller that does not know it.
  */
 export type KnownAppFeature =
-  "worker_api" | "claim_by_job_id" | "pool_cap" | "release" | "vm_lifecycle";
+  | "worker_api"
+  | "claim_by_job_id"
+  | "pool_cap"
+  | "release"
+  | "vm_lifecycle"
+  | "implementer_steps";
+/**
+ * #745: the kinds of `StepRecord` the app stores. `reasoning`: a finished reasoning part, with the text the provider returned (often a summary). `text`: a finished assistant text part. `tool`: a tool call, with its name, status, title, the input as JSON text and the error text; the OUTPUT of a tool is never recorded, on either side. `step`: the end of one model call, with its tokens and cost. A record of another kind is left out and counted in `StepsResponse.dropped`: a newer runner may send more kinds.
+ */
+export type KnownStepKind = "reasoning" | "text" | "tool" | "step";
+/**
+ * #745: one record of the live view, for one part of the engine's messages. A part is sent again when it changes (a tool: running, then completed) with the same `partId` and a higher `seq`; the app keeps the record with the highest `seq` of each part, so a retry or a record that arrives behind a newer one changes nothing. `kind` is any lower case word, and the app stores the kinds of `KnownStepKind` only. A reader ignores fields it does not know. `startedAt` and `endedAt` are epoch milliseconds of the sandbox's clock. The texts are cut by the runner (`text` at 16 KiB, `input` and `error` at 4 KiB, `title` at 512 bytes) and `bytes` is the true size of the cut text; the app cleans them again (control characters, secrets, and on the operator's key the model and provider names) and stores the cost of a model call only for a job on the workspace's own key. Per kind, `text` is required for `reasoning` and `text`, `tool` and `status` for `tool`, `tokens` for `step`.
+ */
+export type StepRecord = {
+  kind: string;
+  partId: string;
+  seq: number;
+  startedAt?: number;
+  endedAt?: number;
+  text?: string;
+  bytes?: number;
+  tool?: string;
+  status?: string;
+  title?: string;
+  input?: string;
+  error?: string;
+  reason?: string;
+  tokens?: StepTokens;
+  cost?: number;
+  [k: string]: unknown;
+};
 /**
  * Every error of the API has one of these codes. 401 RUNNER_UNAUTHORIZED, 400 RUNNER_ID_INVALID / RUNNER_REQUEST_INVALID, 404 RUNNER_JOB_NOT_FOUND, 409 RUNNER_LEASE_LOST / RUNNER_RESULT_CONFLICT, 413 RUNNER_BODY_TOO_LARGE, 503 RUNNER_GIT_ACCESS_UNAVAILABLE (with Retry-After), 500 RUNNER_INTERNAL_ERROR. #318 adds 401 WORKER_CREDENTIAL_INVALID (a Worker route got a credential that is not the job's: wrong job, unknown, expired or from an earlier claim; also the fourth call of the details route in one claim, whose three calls are spent: the Worker has nothing left to fetch and stops, the claim itself is not lost) and 409 RUNNER_JOB_ENDED (the app ended the job, for example after a permanent access failure at fetch; the Worker stops).
  */
@@ -1410,6 +1440,39 @@ export interface JobStateResponse {
     draining?: boolean;
     [k: string]: unknown;
   };
+  [k: string]: unknown;
+}
+/**
+ * #745: the tokens of one model call, as the runner counts them.
+ */
+export interface StepTokens {
+  input: number;
+  output: number;
+  reasoning: number;
+  cacheRead: number;
+  cacheWrite: number;
+  [k: string]: unknown;
+}
+/**
+ * #745: POST /api/runners/v1/jobs/{id}/steps, with the runner token in Authorization and the lease token of the claim in the body, like the heartbeat. A batch of the records of a running turn of the Implementer: at most 50, in a body of at most 48 KiB (the app reads up to 64 KiB, RUNNER_MAX_BODY_BYTES, so the lease token and the escaping of the sender's JSON have room; 413 above). The call proves the claim and nothing more: it does NOT extend the lease, only the heartbeat does. 409 RUNNER_LEASE_LOST for a lost or stale claim (stop sending steps); 400 RUNNER_REQUEST_INVALID for a job that is not a turn of the Implementer or a record that does not fit the schema (the whole batch is refused: `fields` names the first wrong ones, as `records[2].text`); 404 RUNNER_JOB_NOT_FOUND. The sender is best effort: it drops what the app refuses and never lets this call delay the turn. The app also bounds a turn on its own (16,000 parts, 6 MiB of payload): what is past a bound is counted in `StepsResponse.dropped`.
+ */
+export interface StepsRequest {
+  leaseToken: LeaseToken;
+  /**
+   * @minItems 1
+   * @maxItems 50
+   */
+  records: [StepRecord, ...StepRecord[]];
+  [k: string]: unknown;
+}
+/**
+ * #745: 200 from the steps call. Counts of the records of the batch: `stored` made or changed a row, `stale` did not because the part holds a record with an equal or higher `seq` (a retry, or an older record that came late), `dropped` were left out (a kind the app does not know, or past a bound of the turn). Repeating a batch answers 200 with `stored` 0.
+ */
+export interface StepsResponse {
+  version: 1;
+  stored: number;
+  stale: number;
+  dropped: number;
   [k: string]: unknown;
 }
 /**

@@ -33,6 +33,8 @@ async function rowsOfEveryTable(
 ): Promise<Record<string, unknown[]>> {
   const result: Record<string, unknown[]> = {};
   for (const table of await db.introspection.getTables()) {
+    // A later migration's table (#745): it does not exist before this migration is applied, and it is empty after.
+    if (table.name === "implementer_turn_steps") continue;
     const { rows } =
       await sql<unknown>`select * from ${sql.table(table.name)} order by 1`.execute(
         db,
