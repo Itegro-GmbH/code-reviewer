@@ -26,7 +26,7 @@ No database, no I/O: a document and a `WorkflowResolver` go in, a list of proble
 | `connectors.ts`, `triggers.ts`, `facts.ts`        | What the three actions take and yield, what each trigger hands over, the facts every agent step yields without the agent                                                                                        |
 | `resolver.ts`                                     | `WorkflowResolver`: which profiles, environments and connectors exist, as plain data                                                                                                                            |
 | `issues.ts`, `limits.ts`                          | The issue shape and its stable codes (form codes are the ones the JSON Schema states too), the bounds                                                                                                           |
-| `service.ts`, `http.ts`, `errors.ts`, `shared.ts` | The workspace service (validate, list, get, create, save a version, archive), the handlers, the route codes, the wiring                                                                                                  |
+| `service.ts`, `http.ts`, `errors.ts`, `shared.ts` | The workspace service (validate, list, get, create, save a version, archive), the handlers, the route codes, the wiring                                                                                         |
 
 The storage is `workflows` (name, current version, `archived_at`) and `workflow_versions` (the document text of every version; the database refuses an
 UPDATE, only the erasure of a workspace deletes) in `src/db/repositories/workflows-repository.ts`, scoped to a workspace. A workflow is archived, not

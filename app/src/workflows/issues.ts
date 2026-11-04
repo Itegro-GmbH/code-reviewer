@@ -6,7 +6,8 @@
 
 /**
  * Codes the JSON Schema (`contracts/workflow.v1.json`, `contracts/result-schema.v1.json`) states too: the shape of the document.
- * `schema-agreement.test.ts` holds that a document is refused by the schema exactly when one of these is reported.
+ * `integration-tests/compatibility/workflow-contract.integration.test.ts` holds that a document is refused by the schema exactly when
+ * one of these is reported.
  */
 export const FORM_ISSUE_CODES = [
   /** A value of the wrong JSON type. */

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // The workflows of a workspace (#833) against a real Postgres: what the repository keeps true (a name once per workspace whatever
-// its case, a bounded count, every save a new immutable version, the next number never taken twice, nothing across workspaces).
+// its case, a bounded count, every save a new version that is never updated, the next number never taken twice, nothing across workspaces).
 import { sql } from "kysely";
 import { describe, expect, it } from "vitest";
 import { createWorkflowsRepository } from "./workflows-repository.ts";

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // The bounds of workflow format v1 (#833). A typed copy of what `contracts/workflow.v1.json` and `contracts/result-schema.v1.json`
-// state as numbers; `schema-agreement.test.ts` holds the two together.
+// state as numbers; `integration-tests/compatibility/workflow-contract.integration.test.ts` holds the two together.
 
 /** Rounds a loop may be given at most. `maxRounds` is required and cannot be raised above this. */
 export const LOOP_ROUNDS_MAX = 10;

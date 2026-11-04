@@ -112,7 +112,7 @@ function whyNotReachable(
   if (isPrefix(info.path, use.nodePath))
     return {
       code: "reference_to_later_step",
-      message: `'${info.id}' is still running here: it contains this step, and its values exist only when it has ended. Use a step that ends before.`,
+      message: `${shown(info.id)} is still running here: it contains this step, and its values exist only when it has ended. Use a step that ends before.`,
     };
   const later =
     comparePaths(info.path, use.nodePath) > 0 &&
@@ -124,11 +124,11 @@ function whyNotReachable(
   if (foreign !== undefined && (!later || otherBranchOfOurIf))
     return {
       code: "reference_not_in_scope",
-      message: `'${info.id}' is in the '${foreign.branch}' branch of the if '${foreign.ifId}'. A step in a branch is certain to have run only inside that branch; after the if only '${foreign.ifId}.taken' is available.`,
+      message: `${shown(info.id)} is in the '${foreign.branch}' branch of the if ${shown(foreign.ifId)}. A step in a branch is certain to have run only inside that branch; after the if only '${clip(foreign.ifId)}.taken' is available.`,
     };
   return {
     code: "reference_to_later_step",
-    message: `'${info.id}' (${info.path}) comes later than this text, or is this step itself. Steps run in order and can only use what ran before them.`,
+    message: `${shown(info.id)} (${info.path}) comes later than this text, or is this step itself. Steps run in order and can only use what ran before them.`,
   };
 }
 

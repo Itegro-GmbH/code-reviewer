@@ -1921,6 +1921,12 @@ const CASES: Case[] = [
     expectAnswer: (answer) =>
       expect(answer).toEqual({ ok: false, reason: "not_found" }),
   },
+  {
+    name: "workflows.archive",
+    run: (a, b) => a.workflows.archive(b.workflow.id),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ ok: false, reason: "not_found" }),
+  },
   // runs
   {
     name: "runs.list",

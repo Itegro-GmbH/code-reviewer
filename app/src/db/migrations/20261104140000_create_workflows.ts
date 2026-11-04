@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // The workflows of a workspace (#833, agent workflows, milestone 1): a workflow is a JSON document with a name, saved per workspace.
-// Every save is a new, immutable version; `workflows` holds the name and which version is the current one, `workflow_versions`
+// Every save is a new version that is never changed (the database refuses an UPDATE; only the erasure of a workspace deletes); `workflows` holds the name and which version is the current one, `workflow_versions`
 // holds the documents. A workflow is never deleted by the user: it is archived (`archived_at`), which hides it from the list, gives its
 // name back and counts it no more against the workspace's maximum; its versions stay. The tables are new and empty and nothing else points at them yet (the engine of a later milestone will
 // point at a version).

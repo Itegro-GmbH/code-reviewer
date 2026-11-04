@@ -79,6 +79,25 @@ describe("a message repeats at most the length of a name", () => {
     ["a session", (d) => (work(d).session = { continue: LONG })],
     ["a step in a reference", (d) => (work(d).instruction = `{{${LONG}.x}}`)],
     [
+      "an id used in a reference where it comes later",
+      (d) => {
+        work(d).instruction = `{{${LONG}.x}}`;
+        steps(d).push({ ...COMMENT, id: LONG });
+      },
+    ],
+    [
+      "an id of an if used in a reference outside its branch",
+      (d) => {
+        steps(d).push({
+          id: LONG,
+          kind: "if",
+          when: { empty: "{{trigger.input.repo}}" },
+          then: [{ ...COMMENT, id: "inside" }],
+        });
+        steps(d).push({ ...COMMENT, id: "after", body: "{{inside.url}}" });
+      },
+    ],
+    [
       "a field in a reference",
       (d) => (work(d).instruction = `{{work.${LONG}}}`),
     ],
