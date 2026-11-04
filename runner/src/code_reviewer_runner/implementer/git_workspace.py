@@ -540,7 +540,10 @@ class GitWorkspace:
         resume = self.spec.resume
         assert resume is not None
         base = self.spec.base_branch
-        for entry in resume.branches:
+        # The session branch comes last: a `--depth` fetch of another branch that is an ancestor of
+        # it would make that ancestor a shallow root and cut the session branch's history to what
+        # lies between (the depth of the last fetch wins).
+        for entry in sorted(resume.branches, key=lambda item: item.name == self.spec.branch):
             tip = base_tip if entry.name == base else self._fetch_branch(entry.name)
             if tip is None:
                 if entry.name == self.spec.branch:

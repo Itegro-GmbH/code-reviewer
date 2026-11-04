@@ -189,6 +189,25 @@ def test_the_session_branch_is_fetched_fifty_deep_and_the_others_and_the_base_on
     assert raw("rev-list", "--count", BRANCH, cwd=workspace.repo, git=rig.git) == "50"
 
 
+# #838-T20b
+@pytest.mark.parametrize("session_first", [True, False])
+def test_a_branch_that_is_an_ancestor_of_the_session_branch_does_not_cut_its_history(
+    rig: Rig, session_first: bool
+) -> None:
+    ancestor = rig.origin.many_commits_on("feature/x", 60)
+    raw("push", "-q", "origin", f"{ancestor}:refs/heads/{BRANCH}", cwd=rig.origin.seed, git=rig.git)
+    session = rig.origin.many_commits_on(BRANCH, 10)
+    listed = [(BRANCH, session), ("feature/x", ancestor)]
+    if not session_first:
+        listed.reverse()
+
+    workspace = rig.prepared(resume=resume_of(*listed, checkout=BRANCH))
+
+    # The session branch keeps the depth it is promised, whatever the order of `resume.branches`.
+    assert raw("rev-list", "--count", BRANCH, cwd=workspace.mirror, git=rig.git) == "50"
+    assert raw("rev-list", "--count", BRANCH, cwd=workspace.repo, git=rig.git) == "50"
+
+
 # -- what moved, what is gone --------------------------------------------------------------------
 
 
