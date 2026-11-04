@@ -564,11 +564,14 @@ bill, Control, the VM's services or the outside beyond the door**, not something
 **What runs, and where.**
 
 * `runner/scripts/sandbox_boundary_check.py` is run as the Control container of the Implementer's profile on a VM with Sysbox (the flags the Launcher renders,
-  the Docker socket, the work volume; the script and `boundary_probe.py` mounted read-only at `/driver`, as `model_door_check.py` is). It starts what a turn
+  the Docker socket, the work volume; the script and `boundary_probe.py` mounted read-only at `/driver`, as `model_door_check.py` is, and `contracts/environment-sizes.v1.json` read-only at `/contracts/environment-sizes.v1.json`). It starts what a turn
   starts with the production code (the model door with a made-up key, both readers, the agent's container, the Setup container with a script of its own) and
   prints one JSON line per check and a table. Each check names the **expected denial** and asserts it, and every denial has its control (the same attempt
   reaching what it may reach: the door, the internet from the Setup container, a listener on the default bridge, a link-local address that IPv6 really got).
   `--skip-abuse` leaves out the checks that stress the VM, `--offline` the one call that reaches the real provider. No secret is printed.
+  The agent's memory has no default in the script (#827): `RUNNER_IMPLEMENTER_AGENT_MEMORY_MB` when it is set, otherwise the figure of `agentMemoryMb` in
+  `contracts/environment-sizes.v1.json` for the VM's vCPU count (`boundary_memory.py`, next to the script; found at `<repository>/contracts` from a checkout and at
+  `/contracts` from `/driver`), and otherwise, or for a vCPU count the contract has no figure for, the script stops with a message that names the variable and the file.
 * `runner/scripts/boundary_probe.py` is the program that runs **inside** the agent's container, the Setup container and a container of the agent's own Docker.
   It uses the standard library only, makes plain `connect()` calls with short timeouts to addresses of this VM, and prints facts; the expectations are the
   checker's.
