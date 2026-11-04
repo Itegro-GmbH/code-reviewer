@@ -230,13 +230,40 @@ describe("the steps call of the runner API", () => {
     expect(await later.json()).toMatchObject({ stored: 0, stale: 1 });
     expect(await together.json()).toMatchObject({ stored: 1, stale: 1 });
     const stored = await rows(turn.jobId);
-    // Listed by the place of the part: the seq of its first record.
-    expect(stored.map((row) => [row.part_id, row.seq])).toStrictEqual([
-      ["prt_5", 8],
-      ["prt_2", 9],
+    // Listed by the place of the part: the lowest seq of its records in the batch (prt_5: 6, though the stored record is seq 8).
+    expect(
+      stored.map((row) => [row.part_id, row.seq, row.ordinal]),
+    ).toStrictEqual([
+      ["prt_5", 8, 6],
+      ["prt_2", 9, 9],
     ]);
     for (const row of stored)
       expect(JSON.parse(row.payload)).toMatchObject({ status: "completed" });
+  });
+
+  // #745-T12
+  it("puts parts that interleave in one batch in the order of their first record", async () => {
+    const { running, send, rows } = await start();
+    const turn = await running();
+
+    const response = await send(turn, [
+      tool("prt_a", 1, "running"),
+      tool("prt_b", 2, "running"),
+      tool("prt_b", 3, "completed"),
+      tool("prt_a", 4, "completed"),
+    ]);
+
+    expect(await response.json()).toMatchObject({ stored: 2, stale: 2 });
+    expect(
+      (await rows(turn.jobId)).map((row) => [
+        row.part_id,
+        row.seq,
+        row.ordinal,
+      ]),
+    ).toStrictEqual([
+      ["prt_a", 4, 1],
+      ["prt_b", 3, 2],
+    ]);
   });
 
   // #745-T12
@@ -501,6 +528,110 @@ describe("the bounds of a turn on the app's side", () => {
     expect(all).toHaveLength(MAX_STEPS_PER_TURN);
     expect(all.find((row) => row.part_id === "prt_new")).toBeUndefined();
     expect(all.find((row) => row.part_id === "fill_7")?.seq).toBe(9);
+  });
+
+  // #745-T18
+  it("keeps the caps when batches of one turn run at the same time: a batch waits for the one before it", async () => {
+    const { h, running, rows } = await start();
+    const turn = await running();
+    await h.db
+      .insertInto("implementer_turn_steps")
+      .values({
+        job_id: turn.jobId,
+        part_id: "fill",
+        workspace_id: h.workspaceId,
+        seq: 1,
+        ordinal: 1,
+        kind: "text",
+        payload: "{}",
+        bytes: MAX_STEP_BYTES_PER_TURN - 1000,
+        created_at: "2026-11-04T08:00:00.000Z",
+        updated_at: "2026-11-04T08:00:00.000Z",
+      })
+      .execute();
+    // Room for one of these (about 600 bytes each), not for two.
+    const batch = (part: string, seq: number) => [
+      text(part, seq, "x".repeat(500)),
+    ];
+    const write = (part: string, seq: number) =>
+      batch(part, seq).map((record) => ({
+        partId: record.partId,
+        seq: record.seq,
+        kind: record.kind,
+        payload: { text: record.text },
+      }));
+    const second = createImplementerStepsRepository(
+      h.db,
+      h.workspaceId,
+      h.clock.now,
+    );
+
+    // The first batch is stored but its transaction is still open when the second one starts: the second may not count the rows
+    // before the first has committed, or both fit.
+    const [first, other] = await h.db.transaction().execute(async (trx) => {
+      const inside = createImplementerStepsRepository(
+        trx,
+        h.workspaceId,
+        h.clock.now,
+      );
+      const stored = await inside.recordSteps(
+        turn.jobId,
+        turn.leaseToken,
+        write("prt_1", 2),
+      );
+      const racing = second.recordSteps(
+        turn.jobId,
+        turn.leaseToken,
+        write("prt_2", 3),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      return [stored, racing] as const;
+    });
+
+    expect(first).toMatchObject({ status: "ok", stored: 1, dropped: 0 });
+    expect(await other).toMatchObject({ status: "ok", stored: 0, dropped: 1 });
+    expect((await rows(turn.jobId)).map((row) => row.part_id)).toStrictEqual([
+      "fill",
+      "prt_1",
+    ]);
+  });
+
+  // #745-T18
+  it("keeps the part cap when many batches of one turn arrive together", async () => {
+    const { h, running, send, rows } = await start();
+    const turn = await running();
+    for (let from = 0; from < MAX_STEPS_PER_TURN - 1; from += 1000)
+      await h.db
+        .insertInto("implementer_turn_steps")
+        .values(
+          Array.from(
+            { length: Math.min(1000, MAX_STEPS_PER_TURN - 1 - from) },
+            (_, index) => ({
+              job_id: turn.jobId,
+              part_id: `fill_${String(from + index)}`,
+              workspace_id: h.workspaceId,
+              seq: 1,
+              ordinal: 1,
+              kind: "text",
+              payload: "{}",
+              bytes: 2,
+              created_at: "2026-11-04T08:00:00.000Z",
+              updated_at: "2026-11-04T08:00:00.000Z",
+            }),
+          ),
+        )
+        .execute();
+
+    const answers = await Promise.all(
+      Array.from({ length: 6 }, (_, index) =>
+        send(turn, [text(`prt_${String(index)}`, index + 1)]),
+      ),
+    );
+
+    const counts = await Promise.all(answers.map((answer) => answer.json()));
+    expect(counts.filter((count) => count.stored === 1)).toHaveLength(1);
+    expect(counts.filter((count) => count.dropped === 1)).toHaveLength(5);
+    expect(await rows(turn.jobId)).toHaveLength(MAX_STEPS_PER_TURN);
   });
 
   // #745-T18

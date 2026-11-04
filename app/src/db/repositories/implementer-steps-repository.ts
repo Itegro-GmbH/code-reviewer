@@ -6,9 +6,11 @@
 // arrives behind a newer one, changes nothing. A row of another workspace is simply not there.
 //
 // The write proves the claim in the same transaction that stores the rows: the job must be a running turn of the Implementer of
-// this workspace with this lease token. It does NOT extend the lease (only the heartbeat does). The caps of a turn are kept
-// here, so no caller can skip them: at most `MAX_STEPS_PER_TURN` parts and `MAX_STEP_BYTES_PER_TURN` bytes of payload. A record
-// past a cap is dropped and counted, never stored; a part that is already there may still change while the bytes allow it.
+// this workspace with this lease token. It does NOT extend the lease (only the heartbeat does). The batches of one turn take
+// turns (a lock on the job row, taken first like every other path does), so the caps are counted on what the batch before has
+// committed. The caps of a turn are kept here, so no caller can skip them: at most `MAX_STEPS_PER_TURN` parts and
+// `MAX_STEP_BYTES_PER_TURN` bytes of payload. A record past a cap is dropped and counted, never stored; a part that is already
+// there may still change while the bytes allow it.
 import "server-only";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
@@ -98,8 +100,12 @@ export function createImplementerStepsRepository(
   return {
     recordSteps(jobId, leaseToken, records) {
       return inTransaction<RecordStepsResult>(async (trx) => {
-        // A share lock: a result that ends the turn at the same moment waits for this batch (or this batch for it), so a batch
-        // never lands after the turn has ended on a lease it checked before.
+        // The lock that does not block the foreign keys of the rows being inserted, and conflicts with itself: the batches of one
+        // turn take turns, so the totals below are read after the batch before has committed and the caps hold. A result, a
+        // heartbeat or the reaper updating the job waits for this batch (or this batch for it), so a batch never lands after the
+        // turn has ended on a lease it checked before. The job row is the first lock of this transaction, as in every other path
+        // that touches the job, and the steps are touched only here (and by the erasure of a workspace, which locks its jobs
+        // first), so no order of locks can close a circle. The wait is the length of one batch, a few milliseconds.
         const held = await trx
           .selectFrom("jobs")
           .select("id")
@@ -108,7 +114,7 @@ export function createImplementerStepsRepository(
           .where("lease_token", "=", leaseToken)
           .where("status", "=", "running")
           .where("review_kind", "=", "implementer")
-          .forShare()
+          .forNoKeyUpdate()
           .executeTakeFirst();
         if (held === undefined) return { status: "not_holder" };
 
@@ -140,11 +146,22 @@ export function createImplementerStepsRepository(
 
         // The decision for each part: the record that wins within the batch and against the stored row, and whether the caps of
         // the turn leave room for it. Records are looked at in the order they came in; a later one with a higher `seq` replaces
-        // the earlier one of its part (its bytes replace the earlier ones, so the caps count the final state).
-        type Chosen = StepWrite & { json: string; bytes: number };
+        // the earlier one of its part (its bytes replace the earlier ones, so the caps count the final state). The place of a part
+        // is the lowest `seq` it has in the batch, whichever record wins; a part that is stored keeps its place.
+        type Chosen = StepWrite & {
+          json: string;
+          bytes: number;
+          ordinal: number;
+        };
         const chosen = new Map<string, Chosen>();
+        const firstSeq = new Map<string, number>();
         let stale = 0;
         let dropped = 0;
+        for (const record of records)
+          firstSeq.set(
+            record.partId,
+            Math.min(firstSeq.get(record.partId) ?? record.seq, record.seq),
+          );
         for (const record of records) {
           const current = known.get(record.partId);
           if (current !== undefined && record.seq <= current.seq) {
@@ -167,30 +184,40 @@ export function createImplementerStepsRepository(
           known.set(record.partId, { seq: record.seq, bytes });
           // The part had a record in this batch already: it is replaced, and stored once.
           if (chosen.has(record.partId)) stale += 1;
-          chosen.set(record.partId, { ...record, json, bytes });
+          chosen.set(record.partId, {
+            ...record,
+            json,
+            bytes,
+            ordinal: firstSeq.get(record.partId) ?? record.seq,
+          });
         }
 
         if (chosen.size === 0)
           return { status: "ok", stored: 0, stale, dropped };
 
         const timestamp = formatTimestamp(now());
-        // The guard on `seq` is in the statement too: another batch of the same turn may have stored a higher `seq` since the
-        // rows were read, and it must not be overwritten.
+        // The guard on `seq` is in the statement too, as a second line behind the lock on the job: a row that holds a higher `seq`
+        // is never overwritten, whatever happened since the rows were read.
         const written = await trx
           .insertInto("implementer_turn_steps")
           .values(
-            [...chosen.values()].map((record) => ({
-              job_id: jobId,
-              part_id: record.partId,
-              workspace_id: workspaceId,
-              seq: record.seq,
-              ordinal: record.seq,
-              kind: record.kind,
-              payload: record.json,
-              bytes: record.bytes,
-              created_at: timestamp,
-              updated_at: timestamp,
-            })),
+            // In the order of the part ids: should two writers ever overlap on rows, they lock the rows they share in the same order.
+            [...chosen.values()]
+              .sort((a, b) =>
+                a.partId < b.partId ? -1 : a.partId > b.partId ? 1 : 0,
+              )
+              .map((record) => ({
+                job_id: jobId,
+                part_id: record.partId,
+                workspace_id: workspaceId,
+                seq: record.seq,
+                ordinal: record.ordinal,
+                kind: record.kind,
+                payload: record.json,
+                bytes: record.bytes,
+                created_at: timestamp,
+                updated_at: timestamp,
+              })),
           )
           .onConflict((conflict) =>
             conflict
