@@ -199,6 +199,14 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     class: "implementer",
   },
   { route: "/w/[workspace]/environments", class: "implementer" },
+  // The agent workflows, written through the API (#833, milestone 1): the list and the save, the check without storing, one
+  // workflow with its versions. No page yet.
+  { route: "/api/w/[workspace]/workflows", class: "implementer" },
+  { route: "/api/w/[workspace]/workflows/validate", class: "implementer" },
+  {
+    route: "/api/w/[workspace]/workflows/[workflowId]",
+    class: "implementer",
+  },
 
   // Billing: payments, balance, rates and everything that only exists while a workspace pays.
   { route: "/api/billing/webhook", class: "billing" },

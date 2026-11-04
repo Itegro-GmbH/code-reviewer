@@ -38,6 +38,7 @@ import {
 } from "../../src/test-support/github-app.ts";
 import { signedInMember } from "../../src/test-support/session-lookup.ts";
 import { createImplementerEnvironmentsRepository } from "../../src/db/repositories/implementer-environments-repository.ts";
+import { createWorkflowsRepository } from "../../src/db/repositories/workflows-repository.ts";
 import { openRouteTestDatabase } from "../../src/test-support/test-database.ts";
 import { discoverRoutes } from "../../src/test-support/routes.ts";
 import { MINIMUM_ROLE } from "../../src/workspaces/permissions.ts";
@@ -66,6 +67,7 @@ type Ids = {
   userId: string;
   invitationId: string;
   environmentId: string;
+  workflowId: string;
 };
 
 /** What a row of the table needs to make a request: the parts of the address and the body. */
@@ -424,6 +426,105 @@ const ENTRIES: Entry[] = [
     implementer: true,
   },
   {
+    // #833-M1-T228: every member lists the workflows of their own workspace; the other workspace's are not reachable.
+    name: "GET workflows",
+    route: "/api/w/[workspace]/workflows",
+    method: "GET",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/workflows",
+    params: () => ({}),
+    file: "workflows/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    name: "POST workflows",
+    route: "/api/w/[workspace]/workflows",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/workflows",
+    body: () => ({
+      version: 1,
+      name: "Created by the matrix",
+      // The environment is a reference, which is checked for its type and not for its existence: valid in any workspace.
+      trigger: {
+        kind: "manual",
+        input: {
+          type: "object",
+          required: ["env"],
+          properties: { env: { type: "string" } },
+        },
+      },
+      steps: [
+        {
+          id: "work",
+          kind: "agent",
+          profile: "implementer",
+          environment: "{{trigger.input.env}}",
+          instruction: "x",
+        },
+      ],
+    }),
+    params: () => ({}),
+    file: "workflows/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    name: "POST workflows/validate",
+    route: "/api/w/[workspace]/workflows/validate",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/workflows/validate",
+    body: () => ({}),
+    params: () => ({}),
+    file: "workflows/validate/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    name: "GET workflows/[workflowId]",
+    route: "/api/w/[workspace]/workflows/[workflowId]",
+    method: "GET",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) => `/workflows/${ids.workflowId}`,
+    params: (ids) => ({ workflowId: ids.workflowId }),
+    file: "workflows/[workflowId]/route.ts",
+    implementer: true,
+  },
+  {
+    name: "PUT workflows/[workflowId]",
+    route: "/api/w/[workspace]/workflows/[workflowId]",
+    method: "PUT",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) => `/workflows/${ids.workflowId}`,
+    body: () => ({
+      version: 1,
+      name: "Changed by the matrix",
+      // The environment is a reference, which is checked for its type and not for its existence: valid in any workspace.
+      trigger: {
+        kind: "manual",
+        input: {
+          type: "object",
+          required: ["env"],
+          properties: { env: { type: "string" } },
+        },
+      },
+      steps: [
+        {
+          id: "work",
+          kind: "agent",
+          profile: "implementer",
+          environment: "{{trigger.input.env}}",
+          instruction: "x",
+        },
+      ],
+    }),
+    params: (ids) => ({ workflowId: ids.workflowId }),
+    file: "workflows/[workflowId]/route.ts",
+    implementer: true,
+  },
+  {
     name: "POST plan-handoff",
     route: "/api/w/[workspace]/plan-handoff",
     method: "POST",
@@ -770,12 +871,23 @@ async function seedWorkspace(
     50,
   );
   if (!environment.ok) throw new Error("seeding failed");
+  // A workflow (#833): the other workspace's must not be reachable through this one's address, nor changed.
+  const workflow = await createWorkflowsRepository(db, workspace.id).create(
+    {
+      name: `Workflow of ${slug}`,
+      document: `{"of":"${slug}"}`,
+      createdBy: names.owner,
+    },
+    100,
+  );
+  if (!workflow.ok) throw new Error("seeding failed");
   return {
     workspace,
     owner,
     keySentinel,
     ids: {
       environmentId: environment.environment.id,
+      workflowId: workflow.workflow.id,
       integrationId: integration.id,
       repositoryId: repository.id,
       runId: job.job.id,
@@ -912,7 +1024,9 @@ async function start() {
         | "workspace_members"
         | "plan_handoff_tokens"
         | "billing_workspace_settings"
-        | "implementer_environments",
+        | "implementer_environments"
+        | "workflows"
+        | "workflow_versions",
     ) =>
       db
         .selectFrom(table)
@@ -933,6 +1047,8 @@ async function start() {
       planHandoffTokens: await select("plan_handoff_tokens"),
       billingWorkspaceSettings: await select("billing_workspace_settings"),
       implementerEnvironments: await select("implementer_environments"),
+      workflows: await select("workflows"),
+      workflowVersions: await select("workflow_versions"),
       projects: await db
         .selectFrom("projects")
         .innerJoin("repositories", "repositories.id", "projects.repository_id")
