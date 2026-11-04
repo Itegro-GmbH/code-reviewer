@@ -593,7 +593,7 @@ migration in an earlier deployment does not have it.
   token, the job row locked `FOR NO KEY UPDATE`) and **does not extend the lease**. It bounds a turn on its own: `MAX_STEPS_PER_TURN` parts and `MAX_STEP_BYTES_PER_TURN` of payload;
   a record past a bound is dropped and counted. The lock on the job row makes the batches of one turn take turns, so the totals are read after the batch before has committed and
   the caps hold with any number of senders. It does not block the foreign keys of the step rows and conflicts with the update of the job by a heartbeat, a result or the reaper,
-  which therefore wait for a batch (a few milliseconds) and the other way round. The job row is the first lock of the transaction, as in the other paths that touch a job; the
+  which therefore wait for a batch (a few milliseconds) and the other way round. The transaction takes no gate and the job row is its only lock before the inserts (the runner's transitions take the Dynamic gate first, and a transaction that never asks for the gate cannot close a circle through it); the
   step rows are touched by no other path but the erasure of a workspace, which locks the jobs first, so no circle of waiting can form.
 - The composite key `(job_id, workspace_id)` to `jobs` keeps the workspaces apart in the database, like the other Implementer tables. The erasure of a workspace deletes the steps
   before the turns and the jobs. The steps are kept as long as the job (no sweep, owner's decision of 2026-11-04).

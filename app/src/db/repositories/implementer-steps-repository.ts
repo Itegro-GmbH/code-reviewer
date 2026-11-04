@@ -7,7 +7,7 @@
 //
 // The write proves the claim in the same transaction that stores the rows: the job must be a running turn of the Implementer of
 // this workspace with this lease token. It does NOT extend the lease (only the heartbeat does). The batches of one turn take
-// turns (a lock on the job row, taken first like every other path does), so the caps are counted on what the batch before has
+// turns (a lock on the job row, the only lock taken before the inserts; no gate), so the caps are counted on what the batch before has
 // committed. The caps of a turn are kept here, so no caller can skip them: at most `MAX_STEPS_PER_TURN` parts and
 // `MAX_STEP_BYTES_PER_TURN` bytes of payload. A record past a cap is dropped and counted, never stored; a part that is already
 // there may still change while the bytes allow it.
@@ -103,8 +103,8 @@ export function createImplementerStepsRepository(
         // The lock that does not block the foreign keys of the rows being inserted, and conflicts with itself: the batches of one
         // turn take turns, so the totals below are read after the batch before has committed and the caps hold. A result, a
         // heartbeat or the reaper updating the job waits for this batch (or this batch for it), so a batch never lands after the
-        // turn has ended on a lease it checked before. The job row is the first lock of this transaction, as in every other path
-        // that touches the job, and the steps are touched only here (and by the erasure of a workspace, which locks its jobs
+        // turn has ended on a lease it checked before. This transaction takes no gate and the job row is its only lock before the
+        // inserts (the runner's transitions take the Dynamic gate first, which cannot close a circle with a transaction that never asks for it), and the steps are touched only here (and by the erasure of a workspace, which locks its jobs
         // first), so no order of locks can close a circle. The wait is the length of one batch, a few milliseconds.
         const held = await trx
           .selectFrom("jobs")
