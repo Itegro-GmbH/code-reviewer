@@ -1199,7 +1199,7 @@
       }
     },
     "StepRecord": {
-      "description": "#745: one record of the live view, for one part of the engine's messages. A part is sent again when it changes (a tool: running, then completed) with the same `partId` and a higher `seq`; the app keeps the record with the highest `seq` of each part, so a retry or a record that arrives behind a newer one changes nothing. `kind` is any lower case word, and the app stores the kinds of `KnownStepKind` only. A reader ignores fields it does not know. `startedAt` and `endedAt` are epoch milliseconds of the sandbox's clock. The texts are cut by the runner (`text` at 16 KiB, `input` and `error` at 4 KiB, `title` at 512 bytes) and `bytes` is the true size of the cut text; the app cleans them again (control characters, secrets, and on the operator's key the model and provider names) and stores the cost of a model call only for a job on the workspace's own key. Per kind, `text` is required for `reasoning` and `text`, `tool` and `status` for `tool`, `tokens` for `step`.",
+      "description": "#745: one record of the live view, for one part of the engine's messages. A part is sent again when it changes (a tool: running, then completed) with the same `partId` and a higher `seq`; the app keeps the record with the highest `seq` of each part, so a retry or a record that arrives behind a newer one changes nothing. `kind` is any lower case word, and the app stores the kinds of `KnownStepKind` only. A reader ignores fields it does not know. For a kind the app does not know only `kind`, `partId`, `seq`, `startedAt` and `endedAt` are checked and the other fields are dropped unread, whatever they hold: a newer runner may send kinds of any shape, and one of them must not make the app refuse the batch beside it. For a kind it knows, `KnownStepFields` bounds the other fields. `startedAt` and `endedAt` are epoch milliseconds of the sandbox's clock. The texts are cut by the runner (`text` at 16 KiB, `input` and `error` at 4 KiB, `title` at 512 bytes) and `bytes` is the true size of the cut text; the app cleans them again (control characters, secrets, and on the operator's key the model and provider names) and stores the cost of a model call only for a job on the workspace's own key. Per kind, `text` is required for `reasoning` and `text`, `tool` and `status` for `tool`, `tokens` for `step`.",
       "type": "object",
       "required": ["kind", "partId", "seq"],
       "properties": {
@@ -1207,7 +1207,19 @@
         "partId": { "type": "string", "pattern": "^[A-Za-z0-9_.:@-]{1,256}$" },
         "seq": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
         "startedAt": { "type": "integer", "minimum": 0, "maximum": 1000000000000000 },
-        "endedAt": { "type": "integer", "minimum": 0, "maximum": 1000000000000000 },
+        "endedAt": { "type": "integer", "minimum": 0, "maximum": 1000000000000000 }
+      },
+      "allOf": [
+        { "if": { "properties": { "kind": { "$ref": "#/$defs/KnownStepKind" } } }, "then": { "$ref": "#/$defs/KnownStepFields" } },
+        { "if": { "properties": { "kind": { "enum": ["reasoning", "text"] } } }, "then": { "required": ["text"] } },
+        { "if": { "properties": { "kind": { "const": "tool" } } }, "then": { "required": ["tool", "status"] } },
+        { "if": { "properties": { "kind": { "const": "step" } } }, "then": { "required": ["tokens"] } }
+      ]
+    },
+    "KnownStepFields": {
+      "description": "#745: the fields of a `StepRecord` of a kind of `KnownStepKind` beyond the ones every record has, and their bounds. The lengths are in characters.",
+      "type": "object",
+      "properties": {
         "text": { "type": "string", "maxLength": 16448 },
         "bytes": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
         "tool": { "type": "string", "maxLength": 128 },
@@ -1218,12 +1230,7 @@
         "reason": { "type": "string", "maxLength": 64 },
         "tokens": { "$ref": "#/$defs/StepTokens" },
         "cost": { "type": "number", "minimum": 0, "maximum": 1000000000 }
-      },
-      "allOf": [
-        { "if": { "properties": { "kind": { "enum": ["reasoning", "text"] } } }, "then": { "required": ["text"] } },
-        { "if": { "properties": { "kind": { "const": "tool" } } }, "then": { "required": ["tool", "status"] } },
-        { "if": { "properties": { "kind": { "const": "step" } } }, "then": { "required": ["tokens"] } }
-      ]
+      }
     },
     "StepsRequest": {
       "description": "#745: POST /api/runners/v1/jobs/{id}/steps, with the runner token in Authorization and the lease token of the claim in the body, like the heartbeat. A batch of the records of a running turn of the Implementer: at most 50, in a body of at most 48 KiB (the app reads up to 64 KiB, RUNNER_MAX_BODY_BYTES, so the lease token and the escaping of the sender's JSON have room; 413 above). The call proves the claim and nothing more: it does NOT extend the lease, only the heartbeat does. 409 RUNNER_LEASE_LOST for a lost or stale claim (stop sending steps); 400 RUNNER_REQUEST_INVALID for a job that is not a turn of the Implementer or a record that does not fit the schema (the whole batch is refused: `fields` names the first wrong ones, as `records[2].text`); 404 RUNNER_JOB_NOT_FOUND. The sender is best effort: it drops what the app refuses and never lets this call delay the turn. The app also bounds a turn on its own (16,000 parts, 6 MiB of payload): what is past a bound is counted in `StepsResponse.dropped`.",

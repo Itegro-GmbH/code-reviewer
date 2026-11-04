@@ -5,9 +5,11 @@
 // requires the same verdict as the schema for a set of good and bad bodies. A refusal lists fields and reasons, never values:
 // the records hold what an agent wrote.
 //
-// Two things are deliberate. A record of a kind this app does not know is not an error: it is counted and left out, because a
-// newer runner may send more kinds and a refusal of the whole batch would lose the records beside it. And a field the schema
-// does not know is ignored, not refused, for the same reason; only the known fields are kept.
+// Three things are deliberate. A record of a kind this app does not know is not an error: it is counted and left out, because a
+// newer runner may send more kinds and a refusal of the whole batch would lose the records beside it. For the same reason the
+// fields of such a record are not looked at beyond the ones every record has (`kind`, `partId`, `seq`, `startedAt`, `endedAt`):
+// a kind of another shape cannot make the batch fail. And a field the schema does not know is ignored, not refused; only the
+// known fields are kept.
 import {
   STEP_KINDS,
   STEPS_LIMITS,
@@ -16,7 +18,12 @@ import {
   type StepRecord,
   type StepTokens,
 } from "./contract.ts";
-import { LEASE_TOKEN_LENGTH, type Parsed } from "./requests.ts";
+import {
+  LEASE_TOKEN_LENGTH,
+  isRecord,
+  lengthOf,
+  type Parsed,
+} from "./requests.ts";
 
 /** The part ids the engine makes (`prt_...`); anything else cannot be a key and is refused. */
 export const STEP_PART_ID = /^[A-Za-z0-9_.:@-]{1,256}$/;
@@ -27,15 +34,6 @@ export const STEP_KIND = /^[a-z][a-z-]{0,31}$/;
 export type ParsedSteps = { records: StepRecord[]; unknownKind: number };
 
 type Fields = Record<string, unknown>;
-
-function isRecord(value: unknown): value is Fields {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/** The length JSON Schema counts: characters (code points), not UTF-16 units. */
-function lengthOf(value: string): number {
-  return [...value].length;
-}
 
 class Problems {
   readonly fields: FieldError[] = [];
@@ -120,7 +118,10 @@ function parseTokens(
   return tokens as StepTokens;
 }
 
-/** One record; `undefined` when it is refused (the reasons are in `problems`). Only the fields the contract knows are kept. */
+/**
+ * One record; `undefined` when it is refused (the reasons are in `problems`). Only the fields the contract knows are kept; a
+ * record of a kind the app does not know is read as far as the fields every record has.
+ */
 function parseRecord(
   problems: Problems,
   value: unknown,
@@ -158,6 +159,25 @@ function parseRecord(
     time,
     true,
   );
+  // A kind the app does not know: the common fields are all that is read, the rest is dropped unread (`KnownStepFields`).
+  const known =
+    typeof kind === "string" &&
+    (STEP_KINDS as readonly string[]).includes(kind);
+  if (typeof kind === "string" && !known) {
+    if (
+      problems.fields.length > before ||
+      typeof partId !== "string" ||
+      seq === undefined
+    )
+      return undefined;
+    return {
+      kind,
+      partId,
+      seq,
+      ...(startedAt === undefined ? {} : { startedAt }),
+      ...(endedAt === undefined ? {} : { endedAt }),
+    };
+  }
   const text = problems.string(
     value,
     "text",

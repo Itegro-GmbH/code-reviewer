@@ -223,7 +223,10 @@ def test_a_record_at_the_size_of_its_caps_is_still_valid_in_characters_and_in_by
 @pytest.mark.contract
 def test_the_caps_of_the_converter_are_the_bounds_of_the_schema() -> None:
     # #745-T32
-    properties = RUNNER_SCHEMA["$defs"]["StepRecord"]["properties"]
+    properties = {
+        **RUNNER_SCHEMA["$defs"]["StepRecord"]["properties"],
+        **RUNNER_SCHEMA["$defs"]["KnownStepFields"]["properties"],
+    }
 
     assert properties["text"]["maxLength"] == MAX_TEXT_BYTES + MARK
     assert properties["input"]["maxLength"] == MAX_INPUT_BYTES + MARK

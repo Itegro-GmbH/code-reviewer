@@ -587,12 +587,14 @@ migration in an earlier deployment does not have it.
   keyed by `(job_id, part_id)`. `kind` is `reasoning`, `text`, `tool` or `step`; `payload` is the record without `kind`, `partId` and `seq` as JSON text (the schema is text and
   integers only, see "Portable schema conventions"); `bytes` is its size. **A tool's output is never stored**: a tool record carries name, status, title, input and error. `seq` is
   the highest the runner has sent for the part (a retry or an older record that comes late does not overwrite it: `recordSteps` keeps the higher one, in the statement too, so two
-  batches at the same moment cannot undo each other); `ordinal` is the `seq` of the part's first record, which never changes: the order the page shows the parts in.
+  batches at the same moment cannot undo each other); `ordinal` is the lowest `seq` the part had in the batch that created it, which never changes afterwards: the order the page shows the parts in.
   The index `(job_id, seq)` serves "what changed after `seq`".
 - `recordSteps(jobId, leaseToken, records)` proves the claim in the transaction that stores the rows (a running turn of the Implementer of this workspace with this lease
-  token, the job row share-locked) and **does not extend the lease**. It bounds a turn on its own: `MAX_STEPS_PER_TURN` parts and `MAX_STEP_BYTES_PER_TURN` of payload;
-  a record past a bound is dropped and counted. The caps are checked in the same transaction, not under a lock of the turn: a runner has one sender, and two batches at the
-  same moment could pass the bound by one batch at most.
+  token, the job row locked `FOR NO KEY UPDATE`) and **does not extend the lease**. It bounds a turn on its own: `MAX_STEPS_PER_TURN` parts and `MAX_STEP_BYTES_PER_TURN` of payload;
+  a record past a bound is dropped and counted. The lock on the job row makes the batches of one turn take turns, so the totals are read after the batch before has committed and
+  the caps hold with any number of senders. It does not block the foreign keys of the step rows and conflicts with the update of the job by a heartbeat, a result or the reaper,
+  which therefore wait for a batch (a few milliseconds) and the other way round. The job row is the first lock of the transaction, as in the other paths that touch a job; the
+  step rows are touched by no other path but the erasure of a workspace, which locks the jobs first, so no circle of waiting can form.
 - The composite key `(job_id, workspace_id)` to `jobs` keeps the workspaces apart in the database, like the other Implementer tables. The erasure of a workspace deletes the steps
   before the turns and the jobs. The steps are kept as long as the job (no sweep, owner's decision of 2026-11-04).
 - **Live database.** Expand only: the table is created first (waiting only for `workspaces`, which holds nothing of `jobs`), the index, then the link to `jobs` as an `alter table`

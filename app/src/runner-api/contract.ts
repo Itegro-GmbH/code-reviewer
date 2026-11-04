@@ -809,8 +809,9 @@ export type StepKind = (typeof STEP_KINDS)[number];
 /**
  * #745: the bounds of a steps request and of one record (`StepsRequest` and `StepRecord` in the contract). The lengths are in
  * characters, as JSON Schema counts them; the runner cuts its texts at 16 KiB, 4 KiB and 512 bytes and adds a mark of a few
- * characters (`[N bytes cut]`), which `*Chars` leaves room for. A batch is at most `STEPS_BATCH_BYTES` of body so that it is within
- * `RUNNER_MAX_BODY_BYTES` with the lease token around it.
+ * characters (`[N bytes cut]`), which `*Chars` leaves room for. The size of a batch is the sender's to keep (the runner sends at most
+ * 48 KiB of body, which is within `RUNNER_MAX_BODY_BYTES` with the lease token around it); the app only refuses what is over the
+ * body limit.
  */
 export const STEPS_LIMITS = {
   records: 50,
@@ -827,9 +828,6 @@ export const STEPS_LIMITS = {
   count: 1e12,
   cost: 1e9,
 } as const;
-
-/** #745: the size a sender keeps a steps body under (the app reads up to `RUNNER_MAX_BODY_BYTES`). */
-export const STEPS_BATCH_BYTES = 48 * 1024;
 
 /** #745: the tokens of a `step` record, as the runner counts them. */
 export type StepTokens = {

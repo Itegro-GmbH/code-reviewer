@@ -10,13 +10,7 @@ import {
   readContract,
   readExamples,
 } from "../test-support/runner-contract.ts";
-import {
-  APP_FEATURES,
-  STEP_KINDS,
-  STEPS_BATCH_BYTES,
-  STEPS_LIMITS,
-  RUNNER_MAX_BODY_BYTES,
-} from "./contract.ts";
+import { APP_FEATURES, STEP_KINDS, STEPS_LIMITS } from "./contract.ts";
 import { parseStepsRequest, parseWorkerStepsRequest } from "./steps-request.ts";
 
 const contract = createContractValidator();
@@ -72,7 +66,11 @@ describe("the lists and bounds the app keeps", () => {
   // #745-T41
   it("are the file's: the kinds, the bounds of a record, the size of a batch", () => {
     const schema = readContract();
-    const properties = (schema.$defs["StepRecord"] as Document).properties;
+    const common = (schema.$defs["StepRecord"] as Document).properties;
+    const properties = {
+      ...common,
+      ...(schema.$defs["KnownStepFields"] as Document).properties,
+    };
     expect([...STEP_KINDS].sort()).toStrictEqual(
       [...(schema.$defs["KnownStepKind"]?.enum ?? [])].sort(),
     );
@@ -94,8 +92,6 @@ describe("the lists and bounds the app keeps", () => {
       (schema.$defs["StepsRequest"] as Document).properties.records.maxItems,
     ).toBe(STEPS_LIMITS.records);
     expect(new RegExp(properties.partId.pattern).source).toContain("256");
-    // A batch of at most 48 KiB leaves the lease token and the escaping of the sender's JSON room within the body limit.
-    expect(STEPS_BATCH_BYTES).toBeLessThan(RUNNER_MAX_BODY_BYTES);
   });
 
   // #745-T41
@@ -303,6 +299,234 @@ function bodies(): Array<[string, Document, boolean]> {
       false,
     ],
     ["a body that is a list", [] as unknown as Document, false],
+    // The characters of a part id: the engine's alphabet, nothing else.
+    [
+      "a part id of every allowed character",
+      withRecord((entry) => (entry.partId = "aZ09_.:@-")),
+      true,
+    ],
+    ...["prt/1", "prt\\1", "prt#1", "prtü1", "prt\n1", "prt_1\n", "prt+1"].map(
+      (partId): [string, Document, boolean] => [
+        `a part id of ${JSON.stringify(partId)}`,
+        withRecord((entry) => (entry.partId = partId)),
+        false,
+      ],
+    ),
+    ["an empty part id", withRecord((entry) => (entry.partId = "")), false],
+    [
+      "a part id that is a number",
+      withRecord((entry) => (entry.partId = 1)),
+      false,
+    ],
+    // The kind: a lower case word of at most 32 characters.
+    [
+      "a kind of 32 characters",
+      withRecord((entry) => (entry.kind = "a" + long(31))),
+      true,
+    ],
+    [
+      "a kind of 33 characters",
+      withRecord((entry) => (entry.kind = "a" + long(32))),
+      false,
+    ],
+    [
+      "a kind with a hyphen",
+      withRecord((entry) => (entry.kind = "tool-call")),
+      true,
+    ],
+    ["a kind with a digit", withRecord((entry) => (entry.kind = "p2")), false],
+    [
+      "a kind that starts with a hyphen",
+      withRecord((entry) => (entry.kind = "-a")),
+      false,
+    ],
+    ["a kind that is a number", withRecord((entry) => (entry.kind = 1)), false],
+    // A kind the app does not know: only what every record has is checked, whatever the other fields hold.
+    [
+      "a kind it does not know with fields of any shape",
+      withRecord((entry) => {
+        entry.kind = "patch";
+        entry.text = 5;
+        entry.tool = { name: "x" };
+        entry.status = long(100);
+        entry.tokens = "many";
+        entry.cost = -1;
+        entry.bytes = "big";
+        entry.title = long(STEPS_LIMITS.titleChars + 1);
+        entry.input = [1];
+        entry.error = null;
+        entry.reason = long(65);
+      }),
+      true,
+    ],
+    [
+      "a kind it does not know without the fields a known kind needs",
+      withRecord((entry) => {
+        entry.kind = "patch";
+        delete entry.text;
+      }),
+      true,
+    ],
+    [
+      "a kind it does not know with a part id that is no key",
+      withRecord((entry) => {
+        entry.kind = "patch";
+        entry.partId = "prt 1";
+      }),
+      false,
+    ],
+    [
+      "a kind it does not know without a seq",
+      withRecord((entry) => {
+        entry.kind = "patch";
+        delete entry.seq;
+      }),
+      false,
+    ],
+    [
+      "a kind it does not know with a time that is text",
+      withRecord((entry) => {
+        entry.kind = "patch";
+        entry.endedAt = "now";
+      }),
+      false,
+    ],
+    // The bounds of the numbers, at the largest value and one past it.
+    [
+      "the largest start",
+      withRecord((entry) => (entry.startedAt = STEPS_LIMITS.epochMs)),
+      true,
+    ],
+    [
+      "a start past the largest",
+      withRecord((entry) => (entry.startedAt = STEPS_LIMITS.epochMs + 1)),
+      false,
+    ],
+    [
+      "the largest end",
+      withRecord((entry) => (entry.endedAt = STEPS_LIMITS.epochMs)),
+      true,
+    ],
+    [
+      "an end past the largest",
+      withRecord((entry) => (entry.endedAt = STEPS_LIMITS.epochMs + 2)),
+      false,
+    ],
+    ["an end of 0", withRecord((entry) => (entry.endedAt = 0)), true],
+    [
+      "an end that is a fraction",
+      withRecord((entry) => (entry.endedAt = 1.5)),
+      false,
+    ],
+    [
+      "the largest byte count",
+      withRecord((entry) => (entry.bytes = Number.MAX_SAFE_INTEGER)),
+      true,
+    ],
+    [
+      "a byte count past the largest",
+      withRecord((entry) => (entry.bytes = Number.MAX_SAFE_INTEGER + 1)),
+      false,
+    ],
+    ["a negative byte count", withRecord((entry) => (entry.bytes = -1)), false],
+    [
+      "the largest cost",
+      edited((body) => (body.records[4].cost = STEPS_LIMITS.cost)),
+      true,
+    ],
+    [
+      "a cost past the largest",
+      edited((body) => (body.records[4].cost = STEPS_LIMITS.cost + 1)),
+      false,
+    ],
+    ["a cost of 0", edited((body) => (body.records[4].cost = 0)), true],
+    [
+      "the largest token count",
+      edited((body) => (body.records[4].tokens.cacheRead = STEPS_LIMITS.count)),
+      true,
+    ],
+    [
+      "a token count past the largest",
+      edited(
+        (body) => (body.records[4].tokens.cacheRead = STEPS_LIMITS.count + 1),
+      ),
+      false,
+    ],
+    [
+      "tokens that are a list",
+      edited((body) => (body.records[4].tokens = [])),
+      false,
+    ],
+    // The lengths of the short texts, at the longest and one past it.
+    [
+      "a tool name of the longest length",
+      edited((body) => (body.records[1].tool = long(STEPS_LIMITS.toolChars))),
+      true,
+    ],
+    [
+      "a tool name one character too long",
+      edited(
+        (body) => (body.records[1].tool = long(STEPS_LIMITS.toolChars + 1)),
+      ),
+      false,
+    ],
+    [
+      "a status of the longest length",
+      edited(
+        (body) => (body.records[1].status = long(STEPS_LIMITS.statusChars)),
+      ),
+      true,
+    ],
+    [
+      "a status one character too long",
+      edited(
+        (body) => (body.records[1].status = long(STEPS_LIMITS.statusChars + 1)),
+      ),
+      false,
+    ],
+    [
+      "a reason of the longest length",
+      edited(
+        (body) => (body.records[4].reason = long(STEPS_LIMITS.reasonChars)),
+      ),
+      true,
+    ],
+    [
+      "a reason one character too long",
+      edited(
+        (body) => (body.records[4].reason = long(STEPS_LIMITS.reasonChars + 1)),
+      ),
+      false,
+    ],
+    [
+      "a title of the longest length",
+      edited((body) => (body.records[1].title = long(STEPS_LIMITS.titleChars))),
+      true,
+    ],
+    [
+      "an error of the longest length",
+      edited((body) => (body.records[1].error = long(STEPS_LIMITS.errorChars))),
+      true,
+    ],
+    // Characters, not UTF-16 units: a text of astral characters counts one for each.
+    [
+      "a title of astral characters at the longest length",
+      edited(
+        (body) =>
+          (body.records[1].title = "\u{1F600}".repeat(STEPS_LIMITS.titleChars)),
+      ),
+      true,
+    ],
+    [
+      "a title of astral characters one too long",
+      edited(
+        (body) =>
+          (body.records[1].title = "\u{1F600}".repeat(
+            STEPS_LIMITS.titleChars + 1,
+          )),
+      ),
+      false,
+    ],
   ];
 }
 

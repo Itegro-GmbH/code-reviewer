@@ -107,7 +107,8 @@ of a model call as `step`) in batches of at most 50 records and 48 KiB to `POST 
 - **Best effort for the sender, strict for the app.** The call proves the claim and nothing else: it does **not** extend the lease (only the heartbeat does). A lost or stale
   lease, a job that has ended, is `409` (`RUNNER_LEASE_LOST`; `RUNNER_JOB_ENDED` on the Worker API); a job that is not a turn of the Implementer, or a body that does not fit
   the schema, is `400` (`RUNNER_REQUEST_INVALID`, `fields` as `records[2].text`); an unknown job is `404`. A batch is all or nothing. A record of a kind the app does not
-  know, and one past a bound of the turn, is not an error: it is counted in `dropped` of the `200` answer (`stored`, `stale`, `dropped`).
+  know, and one past a bound of the turn, is not an error: it is counted in `dropped` of the `200` answer (`stored`, `stale`, `dropped`). Of a record of an unknown kind only
+  `kind`, `partId`, `seq`, `startedAt` and `endedAt` are checked; its other fields are dropped unread, so a newer runner's kind cannot make the app refuse the batch.
 - **Upsert by part.** One row for each `(job, partId)`; the higher `seq` wins (`db/repositories/implementer-steps-repository.ts`), so a retry, a batch that comes behind a newer one
   and a tool that was `running` and is `completed` are all the same operation. Repeating a batch answers `200` with `stored: 0`.
 - **Bounds on the app's side.** At most 16,000 parts and 6 MiB of payload for a turn; the runner stops at 15,000 records and 2 MiB of text, so a runner that works as designed

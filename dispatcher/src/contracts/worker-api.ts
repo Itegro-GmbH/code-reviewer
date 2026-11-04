@@ -79,7 +79,7 @@ export type ImplementerEnvironment = {
   network?: ImplementerNetworkRule;
 };
 /**
- * #745: one record of the live view, for one part of the engine's messages. A part is sent again when it changes (a tool: running, then completed) with the same `partId` and a higher `seq`; the app keeps the record with the highest `seq` of each part, so a retry or a record that arrives behind a newer one changes nothing. `kind` is any lower case word, and the app stores the kinds of `KnownStepKind` only. A reader ignores fields it does not know. `startedAt` and `endedAt` are epoch milliseconds of the sandbox's clock. The texts are cut by the runner (`text` at 16 KiB, `input` and `error` at 4 KiB, `title` at 512 bytes) and `bytes` is the true size of the cut text; the app cleans them again (control characters, secrets, and on the operator's key the model and provider names) and stores the cost of a model call only for a job on the workspace's own key. Per kind, `text` is required for `reasoning` and `text`, `tool` and `status` for `tool`, `tokens` for `step`.
+ * #745: one record of the live view, for one part of the engine's messages. A part is sent again when it changes (a tool: running, then completed) with the same `partId` and a higher `seq`; the app keeps the record with the highest `seq` of each part, so a retry or a record that arrives behind a newer one changes nothing. `kind` is any lower case word, and the app stores the kinds of `KnownStepKind` only. A reader ignores fields it does not know. For a kind the app does not know only `kind`, `partId`, `seq`, `startedAt` and `endedAt` are checked and the other fields are dropped unread, whatever they hold: a newer runner may send kinds of any shape, and one of them must not make the app refuse the batch beside it. For a kind it knows, `KnownStepFields` bounds the other fields. `startedAt` and `endedAt` are epoch milliseconds of the sandbox's clock. The texts are cut by the runner (`text` at 16 KiB, `input` and `error` at 4 KiB, `title` at 512 bytes) and `bytes` is the true size of the cut text; the app cleans them again (control characters, secrets, and on the operator's key the model and provider names) and stores the cost of a model call only for a job on the workspace's own key. Per kind, `text` is required for `reasoning` and `text`, `tool` and `status` for `tool`, `tokens` for `step`.
  */
 export type StepRecord = {
   kind: string;
@@ -87,16 +87,6 @@ export type StepRecord = {
   seq: number;
   startedAt?: number;
   endedAt?: number;
-  text?: string;
-  bytes?: number;
-  tool?: string;
-  status?: string;
-  title?: string;
-  input?: string;
-  error?: string;
-  reason?: string;
-  tokens?: StepTokens;
-  cost?: number;
   [k: string]: unknown;
 } & {
   kind: string;
@@ -104,16 +94,6 @@ export type StepRecord = {
   seq: number;
   startedAt?: number;
   endedAt?: number;
-  text?: string;
-  bytes?: number;
-  tool?: string;
-  status?: string;
-  title?: string;
-  input?: string;
-  error?: string;
-  reason?: string;
-  tokens?: StepTokens;
-  cost?: number;
   [k: string]: unknown;
 };
 /**
@@ -606,17 +586,6 @@ export interface WorkerStepsRequest {
    * @maxItems 50
    */
   records: [StepRecord, ...StepRecord[]];
-  [k: string]: unknown;
-}
-/**
- * #745: the tokens of one model call, as the runner counts them.
- */
-export interface StepTokens {
-  input: number;
-  output: number;
-  reasoning: number;
-  cacheRead: number;
-  cacheWrite: number;
   [k: string]: unknown;
 }
 /**
