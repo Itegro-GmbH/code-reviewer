@@ -181,9 +181,9 @@ def test_the_example_of_the_resume_is_valid_alone_and_in_the_job_and_the_runner_
     assert (resume.turn, resume.checkout) == (2, "feature/retry-docs")
 
 
-def _resume_set(path: tuple[str, ...], value: Any) -> Callable[[Document], None]:
+def _resume_set(path: tuple[str | int, ...], value: Any) -> Callable[[Document], None]:
     def edit(resume: Document) -> None:
-        target = resume
+        target: Any = resume
         for key in path[:-1]:
             target = target[key]
         target[path[-1]] = value
