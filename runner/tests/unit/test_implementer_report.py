@@ -365,6 +365,17 @@ def test_the_counts_of_the_branches_that_were_left_out_are_optional_and_checked(
         assert valid_block(block(branchesDropped=bad)) is None, bad
 
 
+# #837
+def test_the_branch_that_was_checked_out_is_a_name_or_null_and_optional() -> None:
+    named = block(checkedOut="work/b")
+
+    assert valid_block(named) == named
+    assert valid_block(block(checkedOut=None)) is not None
+    assert valid_block(block()) is not None  # a runner of the release before
+    for bad in ("", "x" * 256, 3, True, ["work/b"], {"name": "work/b"}):
+        assert valid_block(block(checkedOut=bad)) is None, bad
+
+
 def test_a_report_with_no_branch_at_all_is_valid_for_a_turn_that_pushed_nothing() -> None:
     assert valid_block(block(commits=[], branches=[], filesChanged=[])) is not None
 

@@ -266,6 +266,9 @@ def _redacted_block(block: Mapping[str, Any], redactor: TextRedactor) -> Result:
             for file in block["filesChanged"]
         ],
     }
+    # The name of a branch the agent ended on is the agent's too (#837).
+    if isinstance(block.get("checkedOut"), str):
+        redacted["checkedOut"] = redactor.redact(block["checkedOut"])
     # Redaction can make a text longer: a text the bound now refuses would cost the whole result.
     return clip_texts(redacted)
 

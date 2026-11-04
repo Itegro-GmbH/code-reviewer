@@ -867,6 +867,7 @@ class ImplementerSession:
             usage=usage,
             notes=tuple(self._notes),
             network=self._network_block(),
+            checked_out=workspace.checked_out,
         )
 
     def _usage(self) -> Usage:

@@ -8,6 +8,7 @@ from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -45,10 +46,14 @@ from code_reviewer_runner.implementer.session import (
     deadline_seconds,
 )
 from code_reviewer_runner.implementer.step_pump import ANSWER_MARGIN_SECONDS
-from code_reviewer_runner.implementer.turn_result import MAX_SUMMARY_CHARS, clip_summary
+from code_reviewer_runner.implementer.turn_result import (
+    MAX_SUMMARY_CHARS,
+    TurnResult,
+    clip_summary,
+)
 from code_reviewer_runner.job import JobError, parse_implementer_input
 from code_reviewer_runner.redaction import REDACTED
-from code_reviewer_runner.result import ErrorCode
+from code_reviewer_runner.result import ErrorCode, Usage
 from code_reviewer_runner.step_wire import MAX_FLUSH_SECONDS
 
 EXAMPLE = (
@@ -478,3 +483,28 @@ def test_the_last_flush_of_the_live_view_asks_the_host_for_no_more_than_it_honou
     for seconds in (STEPS_FLUSH_SECONDS, STOP_STEPS_FLUSH_SECONDS):
         assert 0 < seconds - ANSWER_MARGIN_SECONDS <= MAX_FLUSH_SECONDS
     assert STOP_STEPS_FLUSH_SECONDS < STEPS_FLUSH_SECONDS
+
+
+def _turn(**changes: Any) -> TurnResult:
+    fields: dict[str, Any] = {
+        "error_code": None,
+        "error_detail": None,
+        "base_commit": "1" * 40,
+        "head_commit": None,
+        "pushed": False,
+        "branches": (),
+        "branches_dropped": (0, 0),
+        "commits": (),
+        "files_changed": (),
+        "summary": "Done.",
+        "opencode_session_id": None,
+        "opencode_version": "1.19.0",
+        "usage": Usage(None, 0, 0, 0, 0, False, None),
+    }
+    return TurnResult(**{**fields, **changes})
+
+
+# #837: an app of the release before refuses a key it does not know, a null included.
+def test_the_block_sends_the_branch_checked_out_only_when_there_is_one() -> None:
+    assert "checkedOut" not in _turn(checked_out=None).implementer_block()
+    assert _turn(checked_out="work/b").implementer_block()["checkedOut"] == "work/b"

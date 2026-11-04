@@ -784,6 +784,11 @@ export type ImplementerResult = {
   setup?: ImplementerSetupResult;
   /** #745, step 7: present when the turn had a network door or the VM's network policy was changed. */
   network?: ImplementerNetworkReport;
+  /**
+   * #837: the local branch HEAD was on when the agent's work was read, after the rescue of a detached HEAD; null when HEAD was
+   * detached and on no branch, or was not read. Absent from a runner of the release before.
+   */
+  checkedOut?: string | null;
 };
 
 export type CompleteRequest = { leaseToken: string; result: RunnerResult };

@@ -84,6 +84,52 @@ def test_git_is_free_in_the_workspace_and_every_local_branch_arrives_at_the_end(
         assert "'origin' does not appear to be a git repository" in shown
         assert "[push-direct] 128" in shown
         assert [(b.name, b.pushed) for b in result.branches] == [(BRANCH, True), (side, True)]
+        # The agent switched back to the task's branch before it ended (#837).
+        assert result.checked_out == BRANCH
+
+
+# #837
+def test_the_branch_the_agent_ends_on_is_reported_as_the_one_checked_out(tmp_path: Path) -> None:
+    side = "e837-side"
+
+    def script(_repo: Path) -> list[Turn]:
+        return [
+            bash(
+                f"git switch -q -c {side} && echo x > x.txt && git add -A "
+                "&& git commit -q -m Side; echo '[side]' $?"
+            ),
+            says("Worked on a branch of my own."),
+        ]
+
+    with lane_turn(tmp_path, script) as turned:
+        result = turned.result
+
+        assert result.ok, (result.error_code, result.error_detail, result.notes)
+        assert [(b.name, b.pushed) for b in result.branches] == [(side, True)]
+        assert result.checked_out == side
+        assert result.implementer_block()["checkedOut"] == side
+
+
+# #837
+def test_work_on_a_detached_head_is_saved_and_that_branch_is_the_one_checked_out(
+    tmp_path: Path,
+) -> None:
+    def script(_repo: Path) -> list[Turn]:
+        return [
+            bash(
+                "git checkout -q --detach && echo y > y.txt && git add -A "
+                "&& git commit -q -m Loose; echo '[loose]' $?"
+            ),
+            says("Committed on a detached HEAD."),
+        ]
+
+    with lane_turn(tmp_path, script) as turned:
+        result = turned.result
+
+        assert result.ok or result.branches, (result.error_code, result.error_detail, result.notes)
+        saved = [b.name for b in result.branches if b.name.startswith(f"{BRANCH}-leftover-")]
+        assert len(saved) == 1 and result.branches[0].pushed
+        assert result.checked_out == saved[0]
 
 
 # #745-E07
