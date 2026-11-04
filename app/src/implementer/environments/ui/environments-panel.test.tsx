@@ -659,6 +659,12 @@ describe("the network setting of an environment (#745)", () => {
     expect(
       screen.getByRole("radio", { name: /^Any public host/ }),
     ).toBeTruthy();
+    // The review of #830: said once, plainly, where the setting is chosen.
+    expect(
+      screen.getByText(
+        /applies to the agent.*setup script always has full internet access/,
+      ),
+    ).toBeTruthy();
     expect(screen.queryByLabelText("Allowed hosts")).toBeNull();
     expect(
       screen.queryByText(/send out anything the agent can read/),

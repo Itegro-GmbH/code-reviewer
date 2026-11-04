@@ -8,6 +8,7 @@ import {
   checkNetwork,
   hostsToText,
   normalizeHostEntry,
+  providerHostOf,
   ruleOf,
 } from "./network.ts";
 
@@ -229,5 +230,27 @@ describe("the stored rule", () => {
     expect(ruleOf("everything", "")).toEqual({ mode: "off", hosts: [] });
     expect(ruleOf("list", "")).toEqual({ mode: "off", hosts: [] });
     expect(ruleOf("list", null)).toEqual({ mode: "off", hosts: [] });
+  });
+});
+
+// #745, step 7 (the review of #830): the provider's host the Dispatcher signs into the token of the network switch.
+describe("the host of a model provider's address", () => {
+  it.each([
+    ["https://openrouter.ai/api/v1", "openrouter.ai"],
+    ["https://API.Anthropic.com/", "api.anthropic.com"],
+    ["https://api.example.com:8443/v1", "api.example.com"],
+    ["https://bücher.example/v1", "xn--bcher-kva.example"],
+  ])("reads %s as %s", (address, host) => {
+    expect(providerHostOf(address)).toBe(host);
+  });
+
+  it.each([
+    "https://10.0.0.1/v1",
+    "https://[::1]/v1",
+    "https://localhost/v1",
+    "not a url",
+    "",
+  ])("has no plain host name in %s", (address) => {
+    expect(providerHostOf(address)).toBeNull();
   });
 });

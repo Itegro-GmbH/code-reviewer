@@ -363,6 +363,8 @@ class ImplementerSession:
         self._netdoor: RunningNetDoor | None = None
         self._net_log: dict[str, Any] | None = None
         self._vm_policy = VM_POLICY_NOT_CONFIGURED
+        # Whether the turn got as far as the network (one that failed before says nothing of it).
+        self._network_reached = False
 
     @property
     def ledger(self) -> BudgetLedger | None:
@@ -464,6 +466,7 @@ class ImplementerSession:
         narrowed to GitHub, the model provider, the app and the rule. `open` leaves the policy as
         it is. The switch ends the connections that are open, so nothing the agent could have is
         in flight yet. A door or a switch that fails ends the turn `setup_failed`, free."""
+        self._network_reached = True
         rule = self.rule
         if rule.mode != MODE_OFF:
             self._netdoor = start_network_door(
@@ -473,11 +476,8 @@ class ImplementerSession:
         if rule.mode == MODE_OPEN:
             self._vm_policy = VM_POLICY_UNCHANGED
         elif switch is None:
-            # `off` without a switch is what a turn has always been: the report says nothing then.
-            if rule.mode != MODE_OFF:
-                self._note(
-                    "the VM's network policy was not changed: this runner has no way to do it"
-                )
+            # For every mode, `off` included: a second wall that is not there is said.
+            self._note("the VM's network policy was not changed: this runner has no way to do it")
         else:
             narrow_policy(
                 switch,
@@ -498,9 +498,10 @@ class ImplementerSession:
         self._net_log = door.stop()
 
     def _network_block(self) -> dict[str, Any] | None:
-        """`ImplementerNetworkReport`; None for `off` when the policy was not touched."""
+        """`ImplementerNetworkReport`: one for every turn that got as far as the network, whatever
+        its mode and whatever the second wall did (`vmPolicy` says, `not_configured` included)."""
         rule = self.rule
-        if rule.mode == MODE_OFF and self._vm_policy == VM_POLICY_NOT_CONFIGURED:
+        if not self._network_reached:
             return None
         return network_report(
             rule,

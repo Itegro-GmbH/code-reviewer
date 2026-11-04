@@ -4,7 +4,10 @@ import { Hono } from "hono";
 import { describe, expect, it } from "vitest";
 import { FakeSandboxService } from "../../../fakes/sandbox/service.ts";
 import type { NetworkRule } from "../network/rule.ts";
-import { switchToken } from "../network/switch-token.ts";
+import {
+  switchToken,
+  type SwitchTokenSubject,
+} from "../network/switch-token.ts";
 import { recordingLogger } from "../test-support/harness.ts";
 import { MAX_NETWORK_BODY_BYTES, mountNetworkRoute } from "./network.ts";
 
@@ -17,6 +20,24 @@ const LIST: NetworkRule = {
 };
 const OFF: NetworkRule = { mode: "off", hosts: [] };
 const OPEN: NetworkRule = { mode: "open", hosts: [] };
+const NOW = 1_800_000_000;
+const MODEL_HOST = "api.anthropic.com";
+
+/** The token the Dispatcher would have made for this VM, rule and provider, good for an hour from `NOW`. */
+function tokenFor(
+  rule: NetworkRule,
+  changes: Partial<SwitchTokenSubject> = {},
+  secret = SECRET,
+) {
+  return switchToken(secret, {
+    appId: "factory",
+    vm: VM,
+    rule,
+    modelHost: MODEL_HOST,
+    expires: NOW + 3600,
+    ...changes,
+  });
+}
 
 function build() {
   const sandbox = new FakeSandboxService();
@@ -40,6 +61,7 @@ function build() {
     fleet: sandbox,
     publicUrl: "https://dispatcher.example.test",
     logger,
+    now: () => NOW * 1000,
   });
   return { app, sandbox, logger };
 }
@@ -49,8 +71,9 @@ function body(rule: NetworkRule, changes: Record<string, unknown> = {}) {
     vm: VM,
     appId: "factory",
     network: rule,
-    modelHost: "api.anthropic.com",
-    token: switchToken(SECRET, "factory", VM, rule),
+    modelHost: MODEL_HOST,
+    expires: NOW + 3600,
+    token: tokenFor(rule),
     ...changes,
   };
 }
@@ -141,7 +164,7 @@ describe("POST /network", () => {
   // #745-T31
   it("accepts a token made with the previous key while keys rotate", async () => {
     const { app } = build();
-    const token = switchToken(PREVIOUS, "factory", VM, LIST);
+    const token = tokenFor(LIST, {}, PREVIOUS);
 
     expect((await call(app, body(LIST, { token }))).status).toBe(200);
   });
@@ -150,15 +173,42 @@ describe("POST /network", () => {
   it.each([
     [
       "another rule than the token was made for",
-      () => body(OFF, { token: switchToken(SECRET, "factory", VM, LIST) }),
+      () => body(OFF, { token: tokenFor(LIST) }),
+    ],
+    // The review of #830: the provider's host and the expiry are signed, so neither is the caller's to choose.
+    [
+      "another model host than the token was made for",
+      () => body(LIST, { modelHost: "evil.example.com" }),
+    ],
+    [
+      "a model host that only starts like the signed one",
+      () => body(LIST, { modelHost: `${MODEL_HOST}.evil.example.com` }),
+    ],
+    [
+      "an expiry moved to a later time than the token was made for",
+      () => body(LIST, { expires: NOW + 86_400 }),
+    ],
+    [
+      "a token that has expired",
+      () =>
+        body(LIST, {
+          expires: NOW - 1,
+          token: tokenFor(LIST, { expires: NOW - 1 }),
+        }),
     ],
     ["another VM", () => body(LIST, { vm: VM.replace("abcd", "dcba") })],
+    [
+      "a token made for another VM (a replay)",
+      () =>
+        body(LIST, {
+          token: tokenFor(LIST, { vm: VM.replace("abcd", "dcba") }),
+        }),
+    ],
     ["another app", () => body(LIST, { appId: "reviewer" })],
     ["an app that is not served", () => body(LIST, { appId: "nobody" })],
     [
       "a token of another key",
-      () =>
-        body(LIST, { token: switchToken("x".repeat(40), "factory", VM, LIST) }),
+      () => body(LIST, { token: tokenFor(LIST, {}, "x".repeat(40)) }),
     ],
     ["a token that is not one", () => body(LIST, { token: "nope" })],
   ])(
@@ -176,17 +226,22 @@ describe("POST /network", () => {
   // #745-T31
   it("gives the same words to a token that does not fit and a rule it was not made for", async () => {
     const { app } = build();
-    const wrongRule = await call(
-      app,
-      body(OFF, { token: switchToken(SECRET, "factory", VM, LIST) }),
-    );
+    const wrongRule = await call(app, body(OFF, { token: tokenFor(LIST) }));
     const wrongKey = await call(
       app,
-      body(LIST, { token: switchToken("x".repeat(40), "factory", VM, LIST) }),
+      body(LIST, { token: tokenFor(LIST, {}, "x".repeat(40)) }),
+    );
+    const expired = await call(
+      app,
+      body(LIST, {
+        expires: NOW - 1,
+        token: tokenFor(LIST, { expires: NOW - 1 }),
+      }),
     );
 
     expect(wrongRule.status).toBe(wrongKey.status);
     expect(await wrongRule.text()).toBe(await wrongKey.text());
+    expect(expired.status).toBe(wrongKey.status);
   });
 
   // #745-T31
@@ -200,6 +255,8 @@ describe("POST /network", () => {
     ],
     ["a VM name with a path in it", { vm: "../etc/passwd" }],
     ["a field it does not know", { extra: 1 }],
+    ["an expiry that is not a whole number", { expires: "soon" }],
+    ["no expiry", { expires: undefined }],
   ])("refuses %s", async (_what, changes) => {
     const { app, sandbox } = build();
 
@@ -226,6 +283,56 @@ describe("POST /network", () => {
     expect((await call(app, big)).status).toBe(413);
   });
 
+  // The review of #830: a public route that nobody has authenticated yet reads no more than the limit, declared or not.
+  it("stops reading a chunked body at the limit, before it is parsed or its token looked at", async () => {
+    const { app, sandbox } = build();
+    const chunk = new TextEncoder().encode("x".repeat(16 * 1024));
+    let pulled = 0;
+    const endless = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += 1;
+        // A body that never ends: only the limit can stop the read.
+        if (pulled > 10_000) controller.close();
+        else controller.enqueue(chunk);
+      },
+    });
+
+    const response = await app.request("/network", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: endless,
+      duplex: "half",
+    });
+
+    expect(response.status).toBe(413);
+    // 64 KiB of limit is four chunks of 16 KiB; the stream is cancelled right after, not read to its end.
+    expect(pulled).toBeLessThan(20);
+    expect(sandbox.policies).toStrictEqual([]);
+  });
+
+  it("reads a chunked body within the limit", async () => {
+    const { app, sandbox } = build();
+    const bytes = new TextEncoder().encode(JSON.stringify(body(LIST)));
+    const half = Math.floor(bytes.length / 2);
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes.slice(0, half));
+        controller.enqueue(bytes.slice(half));
+        controller.close();
+      },
+    });
+
+    const response = await app.request("/network", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: stream,
+      duplex: "half",
+    });
+
+    expect(response.status).toBe(200);
+    expect(sandbox.policies).toHaveLength(1);
+  });
+
   // #745-T32
   it("asks the caller to come back when the platform cannot be reached, and never says why", async () => {
     const { app, sandbox, logger } = build();
@@ -248,12 +355,9 @@ describe("POST /network", () => {
       app,
       body(LIST, {
         vm: "cr-implementer-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa-abcd1234",
-        token: switchToken(
-          SECRET,
-          "factory",
-          "cr-implementer-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa-abcd1234",
-          LIST,
-        ),
+        token: tokenFor(LIST, {
+          vm: "cr-implementer-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa-abcd1234",
+        }),
       }),
     );
 

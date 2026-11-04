@@ -129,6 +129,8 @@ export const MODEL_DOOR_MEMORY_MB = 256;
  * exceeds the VM.
  */
 export const NETWORK_DOOR_MEMORY_MB = 96;
+/** Seconds added to the VM's lifetime for the expiry of the switch token (another instance's clock may be a little behind). */
+export const NETWORK_SWITCH_CLOCK_MARGIN_SECONDS = 60;
 /**
  * The memory limit of one reader, a container in which Control looks at the agent's repository (`READER_MEMORY_BYTES` of
  * runner/src/code_reviewer_runner/implementer/reader.py). There are **two** of them (`READER_COUNT`): the one every look uses, which
@@ -287,7 +289,12 @@ export type SandboxLauncherOptions = {
     appId: string;
     vm: string;
     rule: NetworkRule;
+    /** The model provider's host the App named in the claim answer. */
+    modelHost: string;
+    /** Unix time in seconds at which the VM is gone for certain (its lifetime from now, with a margin): the token's expiry. */
+    expires: number;
   }) => string | undefined;
+
   /** Where the VM keeps the work volumes of the Implementer (`WORK_VOLUME_ROOT`); another directory only for a test. */
   workVolumeRoot?: string;
 };
@@ -524,6 +531,20 @@ export function createSandboxLauncher(
     );
   }
 
+  /**
+   * When the token of the network switch stops working: the VM lives at most `vmLifetimeSeconds` from its creation, which is
+   * before this, and the margin covers the clock of another instance of the Dispatcher answering the call. The longest turn,
+   * its setup included, is inside the lifetime (it is made from the job's own time limit), so the token never expires under a
+   * turn that is still allowed to run.
+   */
+  function switchExpiry(spec: LaunchSpec): number {
+    return (
+      Math.floor((options.now ?? (() => new Date()))().getTime() / 1000) +
+      vmLifetimeSeconds(spec) +
+      NETWORK_SWITCH_CLOCK_MARGIN_SECONDS
+    );
+  }
+
   async function stopQuietly(name: string, jobId: string): Promise<void> {
     try {
       await service.stop(name);
@@ -677,11 +698,15 @@ export function createSandboxLauncher(
             options.dynamicEnvironment,
             plan,
             options.sysboxProof ?? "unproven",
-            spec.kind === "implementer" && spec.network !== undefined
+            spec.kind === "implementer" &&
+              spec.network !== undefined &&
+              spec.modelHost !== undefined
               ? options.networkSwitch?.({
                   appId: spec.appId,
                   vm: name,
                   rule: spec.network,
+                  modelHost: spec.modelHost,
+                  expires: switchExpiry(spec),
                 })
               : undefined,
           ),

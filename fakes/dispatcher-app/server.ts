@@ -107,6 +107,8 @@ export type EnqueueOptions = {
   vcpus?: unknown;
   /** #745, step 7: the network rule the claim answer names (any kind, like `vcpus`). */
   network?: unknown;
+  /** #745, step 7: the provider's host the claim answer names (any kind, like `network`). */
+  modelHost?: unknown;
 };
 
 export type LoggedRequest = {
@@ -150,6 +152,7 @@ type JobState = {
   input: Record<string, unknown>;
   vcpus?: unknown;
   network?: unknown;
+  modelHost?: unknown;
   status: JobStatus;
   attempts: number;
   claims: number;
@@ -295,6 +298,9 @@ export async function startDispatcherAppFake(
       ...(enqueueOptions.network === undefined
         ? {}
         : { network: enqueueOptions.network }),
+      ...(enqueueOptions.modelHost === undefined
+        ? {}
+        : { modelHost: enqueueOptions.modelHost }),
       status: "queued",
       attempts: 0,
       claims: 0,
@@ -396,6 +402,9 @@ export async function startDispatcherAppFake(
             heartbeatIntervalSeconds: HEARTBEAT_SECONDS,
             ...(job.vcpus === undefined ? {} : { vcpus: job.vcpus }),
             ...(job.network === undefined ? {} : { network: job.network }),
+            ...(job.modelHost === undefined
+              ? {}
+              : { modelHost: job.modelHost }),
           },
         },
       };
@@ -755,6 +764,7 @@ export async function startDispatcherAppFake(
           kind === "dynamic" || kind === "implementer" ? kind : "diff",
         ...(body.vcpus === undefined ? {} : { vcpus: body.vcpus }),
         ...(body.network === undefined ? {} : { network: body.network }),
+        ...(body.modelHost === undefined ? {} : { modelHost: body.modelHost }),
       });
       return { status: 200, body: { id } };
     }

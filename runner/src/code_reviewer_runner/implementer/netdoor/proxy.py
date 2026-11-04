@@ -5,10 +5,13 @@ name of every request by the environment's rule, and connects to the address it 
 
 * `CONNECT host:port` is a tunnel (HTTPS): the door never looks inside, no certificate of ours is
   involved. Port 443 and 80 only.
-* `METHOD http://host[:port]/path` is plain HTTP forwarded to port 80 (or the port named, if it is
-  80): the request line is rewritten to its origin form, `Host` is set from the same authority the
-  decision was made on, `Connection: close` is forced and the rest of the traffic is relayed
-  without being read, so one connection is one destination whatever the client sends next.
+* `METHOD http://host[:port]/path` is plain HTTP, forwarded to the port the URL names (80 when it
+  names none) as long as that port is one the door allows, 80 or 443 like for a tunnel; any other
+  port is refused (`port_not_allowed`). A plain request to port 443 reaches a TLS port and is of
+  no use, but it is the same destination decision as everywhere else. The request line is
+  rewritten to its origin form, `Host` is set from the same authority the decision was made on,
+  `Connection: close` is forced and the rest of the traffic is relayed without being read, so one
+  connection is one destination whatever the client sends next.
 * Anything else (a request in origin form, `https://` as a URL, a user name in the authority, a
   malformed line) is refused with 400.
 
@@ -22,6 +25,7 @@ word and the bytes. No body, no header and no path is kept anywhere.
 
 import contextlib
 import logging
+import re
 import socket
 import socketserver
 import threading
@@ -69,6 +73,11 @@ _DROPPED = frozenset(
         "host",
     }
 )
+
+# A method is a token (RFC 7230, 3.2.6): one or more of these characters, no space, no control
+# character. The door forwards the method as it was sent, so a line that is not one is refused
+# rather than passed to an origin.
+_METHOD_TOKEN: Final = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 
 Connector = Callable[[str, int, float], socket.socket]
 
@@ -232,7 +241,8 @@ def _read_head(sock: socket.socket) -> _Head | None:
 
 
 def _origin_form(target: str) -> tuple[Authority, str] | None:
-    """`http://authority/path?query` to (authority, path). Only `http`, only 80, no user name."""
+    """`http://authority/path?query` to (authority, path). Only `http`, port 80 unless the URL names
+    one (the decision on the port is `Decider.decide`'s), no user name."""
     prefix = "http://"
     if target[: len(prefix)].lower() != prefix:
         return None
@@ -320,6 +330,10 @@ class _Handler(socketserver.BaseRequestHandler):
             _respond(client, 400, REASON_BAD_REQUEST)
             return
         method, target, _version = parts
+        if _METHOD_TOKEN.fullmatch(method) is None:
+            proxy.log.add("", 0, OUTCOME_REFUSED, REASON_BAD_REQUEST)
+            _respond(client, 400, REASON_BAD_REQUEST)
+            return
         if method.upper() == "CONNECT":
             authority = split_authority(target, None)
             path = None

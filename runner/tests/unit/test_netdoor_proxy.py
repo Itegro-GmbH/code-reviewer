@@ -311,6 +311,62 @@ def test_a_plain_http_request_to_an_unlisted_host_a_port_or_an_address_is_refuse
     assert origin.received == [] and lookups.connected == []
 
 
+# The port a plain request names is the port of the decision: 80 by default, 443 as for a tunnel
+# (it reaches a TLS port and gets nothing useful, but it is not a way past the rule), and every
+# other port is refused.
+def test_a_plain_http_request_names_its_port_and_443_is_decided_like_a_tunnel_to_it(
+    origin: Origin,
+) -> None:
+    lookups = lookups_for(origin, "registry.npmjs.org")
+    running = start_proxy(LIST, lookups)
+    try:
+        answer = talk(running.port, get("http://registry.npmjs.org:443/x"))
+    finally:
+        running.stop()
+    assert status_of(answer) == 200
+    assert lookups.connected == [(PUBLIC, 443)]
+    [received] = origin.received
+    assert "Host: registry.npmjs.org:443" in received.decode().split("\r\n")
+    [entry] = running.log.snapshot()["connections"]
+    assert entry["port"] == 443 and entry["outcome"] == "allowed"
+
+
+@pytest.mark.parametrize(
+    "method",
+    ["GE T", "G\x01ET", "GET\x7f", "G(ET)", "GE@T", "G/ET", 'G"ET', "GET,", "G\\ET", "{GET}"],
+)
+def test_a_method_that_is_not_an_http_token_is_a_bad_request_and_goes_nowhere(
+    origin: Origin, method: str
+) -> None:
+    lookups = lookups_for(origin, "registry.npmjs.org")
+    running = start_proxy(LIST, lookups)
+    try:
+        # A space in the method makes the line four parts; the others are one part, not a token.
+        answer = talk(
+            running.port, f"{method} http://registry.npmjs.org/ HTTP/1.1\r\n\r\n".encode()
+        )
+    finally:
+        running.stop()
+    assert status_of(answer) == 400 and refusal_reason(answer) == "bad_request"
+    assert lookups.connected == [] and origin.received == []
+
+
+@pytest.mark.parametrize("method", ["GET", "POST", "M-SEARCH", "PROPFIND", "X.Y_z~1", "PATCH"])
+def test_any_method_that_is_a_token_is_forwarded_as_it_was_sent(
+    origin: Origin, method: str
+) -> None:
+    lookups = lookups_for(origin, "registry.npmjs.org")
+    running = start_proxy(LIST, lookups)
+    try:
+        answer = talk(
+            running.port, f"{method} http://registry.npmjs.org/p HTTP/1.1\r\n\r\n".encode()
+        )
+    finally:
+        running.stop()
+    assert status_of(answer) == 200
+    assert origin.received[0].decode().startswith(f"{method} /p HTTP/1.1\r\n")
+
+
 @pytest.mark.parametrize(
     "request_bytes",
     [

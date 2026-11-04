@@ -11,10 +11,12 @@ the environment of its container, everything for one call and a token that is go
 only (`RUNNER_IMPLEMENTER_NETWORK_SWITCH`), and Control makes the call at the right moment: after
 the setup, before the agent exists.
 
-The token is an HMAC the Dispatcher computes over the VM's name and the rule it read in the claim
-(`dispatcher/src/network/switch-token.ts`). Control cannot choose the rule: a call with another
-rule is refused. What Control does add, because only the Worker knows it, is the host of the model
-provider (`modelHost`); the Dispatcher accepts a plain host name there and nothing else.
+The token is an HMAC the Dispatcher computes over the VM's name, the rule and the model provider's
+host it read in the claim answer of the App, and the time the token stops working
+(`dispatcher/src/network/switch-token.ts`). Control chooses none of them: the document carries the
+values that were signed, and a call with another rule, another host or a later expiry is refused.
+The runner checks that the provider host in the document is the host of the model it is about to
+use, so a turn whose model is not the one the Dispatcher signed does not run.
 
 **The call may not come back.** Narrowing the policy ends the connections that are open, and the
 call that asks for it is one of them. So the answer to a call that was cut is not known, and Control
@@ -52,13 +54,16 @@ Post = Callable[[str, bytes, float], tuple[int, bytes]]
 
 @dataclass(frozen=True)
 class NetworkSwitch:
-    """What the Dispatcher handed over: where to call, which VM and app, the rule it read, and the
-    token that proves it. Nothing here opens more than this one call for this one VM."""
+    """What the Dispatcher handed over: where to call, which VM and app, the rule and the provider
+    host it read, the time the token stops working, and the token that proves them. Nothing here
+    opens more than this one call for this one VM."""
 
     url: str
     vm: str
     app_id: str
     rule: NetworkRule
+    model_host: str
+    expires: int
     token: str
 
     def __repr__(self) -> str:
@@ -75,16 +80,35 @@ def parse_switch(text: str | None) -> NetworkSwitch | None:
         if len(text) > MAX_DOCUMENT_BYTES:
             raise ValueError
         given = as_object(json.loads(text))
-        if given is None or given.keys() != {"url", "vm", "appId", "network", "token"}:
+        if given is None or given.keys() != {
+            "url",
+            "vm",
+            "appId",
+            "network",
+            "modelHost",
+            "expires",
+            "token",
+        }:
             raise ValueError
         url, vm, app_id, token = given["url"], given["vm"], given["appId"], given["token"]
-        if not all(isinstance(value, str) and value for value in (url, vm, app_id, token)):
+        model_host, expires = given["modelHost"], given["expires"]
+        if not all(
+            isinstance(value, str) and value for value in (url, vm, app_id, token, model_host)
+        ):
+            raise ValueError
+        if not isinstance(expires, int) or isinstance(expires, bool) or expires <= 0:
             raise ValueError
         parts = urlsplit(str(url))
         if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:
             raise ValueError
         return NetworkSwitch(
-            str(url), str(vm), str(app_id), parse_rule(given["network"], "network"), str(token)
+            str(url),
+            str(vm),
+            str(app_id),
+            parse_rule(given["network"], "network"),
+            str(model_host),
+            expires,
+            str(token),
         )
     except (ValueError, RuleError, RecursionError):
         raise JobError(
@@ -132,18 +156,25 @@ def narrow_policy(
 ) -> int:
     """Ask for the narrowed policy until the Dispatcher says `applied`; returns the number of
     calls it took. Raises `JobError` (`setup_failed`, free) when it never does, and
-    `implementer_config_invalid` when the rule in the job is not the one the Dispatcher read."""
+    `implementer_config_invalid` when the rule or the provider's host in the job is not the one the
+    Dispatcher read and signed."""
     if rule != switch.rule:
         raise JobError(
             ErrorCode.IMPLEMENTER_CONFIG_INVALID,
             "the network rule of the job is not the one the Dispatcher read",
+        )
+    if model_host != switch.model_host:
+        raise JobError(
+            ErrorCode.IMPLEMENTER_CONFIG_INVALID,
+            "the model provider of the job is not the one the Dispatcher read",
         )
     body = json.dumps(
         {
             "vm": switch.vm,
             "appId": switch.app_id,
             "network": switch.rule.to_json(),
-            "modelHost": model_host,
+            "modelHost": switch.model_host,
+            "expires": switch.expires,
             "token": switch.token,
         },
         separators=(",", ":"),

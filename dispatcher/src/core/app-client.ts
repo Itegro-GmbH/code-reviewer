@@ -9,7 +9,11 @@ import type {
   KnownClaimFeature,
   KnownReleaseReason,
 } from "../contracts/runner-api.ts";
-import { NetworkRuleSchema, type NetworkRule } from "../network/rule.ts";
+import {
+  NetworkRuleSchema,
+  PLAIN_HOST,
+  type NetworkRule,
+} from "../network/rule.ts";
 import { CONTRACT_REVIEW_KINDS, type WireReviewKind } from "./types.ts";
 
 /** The features of the App the split needs (`VersionResponse.features`). */
@@ -47,6 +51,11 @@ export type ClaimedJob = {
    * environment is `off`). Read from the App's authenticated answer only; absent from the release before.
    */
   network?: NetworkRule;
+  /**
+   * #745, step 7: the host name of the turn's model provider, from the same answer. The Dispatcher signs it into the token of the
+   * network switch, so the Worker cannot choose it. Absent: the App did not name one, and the VM gets no switch.
+   */
+  modelHost?: string;
 };
 
 export type ClaimResult =
@@ -115,6 +124,7 @@ const splitClaim = z.object({
     // The contract's range; which sizes are launched is the Launcher's decision (`SANDBOX_VCPUS`).
     vcpus: z.number().int().min(1).max(64).optional(),
     network: NetworkRuleSchema.optional(),
+    modelHost: z.string().max(253).regex(PLAIN_HOST).optional(),
   }),
 });
 
@@ -129,6 +139,7 @@ export function parseSplitClaim(body: unknown): ClaimedJob | null {
     heartbeatIntervalSeconds,
     vcpus,
     network,
+    modelHost,
   } = parsed.data.job;
   return {
     id,
@@ -137,6 +148,7 @@ export function parseSplitClaim(body: unknown): ClaimedJob | null {
     heartbeatIntervalSeconds,
     ...(vcpus === undefined ? {} : { vcpus }),
     ...(network === undefined ? {} : { network }),
+    ...(modelHost === undefined ? {} : { modelHost }),
   };
 }
 

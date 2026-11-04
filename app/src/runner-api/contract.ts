@@ -512,6 +512,13 @@ export type SplitClaimResponse = {
     heartbeatIntervalSeconds: number;
     /** #818: the VM size the turn's environment asks for; only for a turn that has an environment. */
     vcpus?: number;
+    /** #745, step 7: the rule for the agent's network; for every turn of the Implementer, for no other job. */
+    network?: { mode: "off" | "list" | "open"; hosts: string[] };
+    /**
+     * #745, step 7: the host name of the turn's model provider, for the Dispatcher that signs it into the token of the network
+     * switch (the Worker cannot choose it). Only for a turn of the Implementer whose provider has a plain host name.
+     */
+    modelHost?: string;
   };
 };
 

@@ -13,6 +13,7 @@
         "registry.npmjs.org",
         "*.pythonhosted.org"
       ]
-    }
+    },
+    "modelHost": "api.anthropic.com"
   }
 }

@@ -272,7 +272,7 @@ export function sandboxFromEnvironment(
         ...(publicUrl === undefined
           ? {}
           : {
-              networkSwitch: ({ appId, vm, rule }) => {
+              networkSwitch: ({ appId, vm, rule, modelHost, expires }) => {
                 const key = settings.signingKeys.find(
                   (candidate) => candidate.appId === appId,
                 );
@@ -282,7 +282,15 @@ export function sandboxFromEnvironment(
                   vm,
                   appId,
                   network: rule,
-                  token: switchToken(key.secret, appId, vm, rule),
+                  modelHost,
+                  expires,
+                  token: switchToken(key.secret, {
+                    appId,
+                    vm,
+                    rule,
+                    modelHost,
+                    expires,
+                  }),
                 });
               },
             }),

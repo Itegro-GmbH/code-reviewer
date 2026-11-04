@@ -227,7 +227,7 @@ const VM_POLICY_TEXT: Record<string, string> = {
     "The VM's network policy was narrowed to GitHub, the model provider, this app and the rule.",
   unchanged: "The VM's network policy was left as it was (any public host).",
   not_configured:
-    "The VM's network policy was not changed: only the network door's own rules held.",
+    "The VM's network policy was not changed, so the second wall was not in place: only the first wall held.",
 };
 
 const bytesText = (bytes: number) =>

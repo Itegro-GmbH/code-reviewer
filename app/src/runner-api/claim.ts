@@ -37,7 +37,11 @@ import type {
   StoredImplementerTurn,
 } from "../db/repositories/implementer-repository.ts";
 import type { RepositoriesRepository } from "../db/repositories/repositories-repository.ts";
-import { NETWORK_OFF, type NetworkRule } from "../network-rule/network.ts";
+import {
+  NETWORK_OFF,
+  providerHostOf,
+  type NetworkRule,
+} from "../network-rule/network.ts";
 import { IntegrationError } from "../integrations/errors.ts";
 import { revealGitAccess } from "../integrations/normalized.ts";
 import type { IntegrationRegistry } from "../integrations/registry.ts";
@@ -1376,6 +1380,14 @@ export async function buildJobInput(
   };
 }
 
+/** `{ modelHost }` for the claim answer of a turn, or nothing when the entry has no provider address with a plain host name. */
+function modelHostOf(
+  entry: { upstreamBaseUrl: string } | null,
+): { modelHost: string } | Record<string, never> {
+  const host = entry === null ? null : providerHostOf(entry.upstreamBaseUrl);
+  return host === null ? {} : { modelHost: host };
+}
+
 async function prepare(
   deps: ClaimDeps,
   claimed: NonNullable<ClaimResult>,
@@ -1424,6 +1436,8 @@ async function prepare(
             : {
                 network:
                   checked.implementer.environment?.network ?? NETWORK_OFF,
+                // The provider's host, for the token of the network switch: signed by the Dispatcher, so not the Worker's to name.
+                ...modelHostOf(checked.modelEntry),
               }),
         },
       },

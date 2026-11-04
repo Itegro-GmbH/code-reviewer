@@ -134,13 +134,19 @@ def test_the_model_door_and_the_machine_itself_are_not_proxied() -> None:
 # -- the call that narrows the policy ---
 
 
-def switch_text(rule: NetworkRule) -> str:
+MODEL_HOST = "api.anthropic.com"
+EXPIRES = 1_800_000_000
+
+
+def switch_text(rule: NetworkRule, model_host: str = MODEL_HOST) -> str:
     return json.dumps(
         {
             "url": "https://dispatcher.example.test/network",
             "vm": "cr-implementer-0b9f6f4e-3c1a-4d9e-8f43-2a7d5e1c9b10-1",
             "appId": "factory",
             "network": rule.to_json(),
+            "modelHost": model_host,
+            "expires": EXPIRES,
             "token": "t" * 64,
         }
     )
@@ -152,6 +158,7 @@ SWITCH = switch_text(LIST)
 def test_the_switch_of_the_environment_is_read_back_and_unset_is_none() -> None:
     switch = parse_switch(SWITCH)
     assert switch is not None and switch.rule == LIST and switch.app_id == "factory"
+    assert (switch.model_host, switch.expires) == (MODEL_HOST, EXPIRES)
     assert "t" * 64 not in repr(switch), "the token is not in a log line"
     assert parse_switch(None) is None and parse_switch("  ") is None
 
@@ -168,6 +175,12 @@ def test_the_switch_of_the_environment_is_read_back_and_unset_is_none() -> None:
         ),
         SWITCH.replace('"token": ', '"extra": 1, "token": '),
         SWITCH.replace('"mode": "list"', '"mode": "open"'),
+        SWITCH.replace('"modelHost": "api.anthropic.com", ', ""),
+        SWITCH.replace('"expires": 1800000000, ', ""),
+        SWITCH.replace('"expires": 1800000000', '"expires": "soon"'),
+        SWITCH.replace('"expires": 1800000000', '"expires": 0'),
+        SWITCH.replace('"expires": 1800000000', '"expires": true'),
+        SWITCH.replace('"modelHost": "api.anthropic.com"', '"modelHost": ""'),
         "x" * 40_000,
     ],
 )
@@ -207,7 +220,7 @@ def narrow(post: Dispatcher, *, rule: NetworkRule = LIST, attempts: int = 4) -> 
 
 
 # #745-T23
-def test_the_call_sends_the_vm_the_rule_the_model_host_and_the_token_and_nothing_else() -> None:
+def test_the_call_sends_what_was_signed_and_the_token_and_nothing_else() -> None:
     post = Dispatcher(APPLIED)
     assert narrow(post) == 1
     assert post.bodies == [
@@ -216,6 +229,7 @@ def test_the_call_sends_the_vm_the_rule_the_model_host_and_the_token_and_nothing
             "appId": "factory",
             "network": LIST.to_json(),
             "modelHost": "api.anthropic.com",
+            "expires": EXPIRES,
             "token": "t" * 64,
         }
     ]
@@ -251,6 +265,16 @@ def test_an_answer_of_no_is_not_asked_again(status: int) -> None:
 def test_a_200_that_does_not_say_applied_is_not_applied() -> None:
     post = Dispatcher((200, b"<html>ok</html>"), (200, b'{"status":"accepted"}'), APPLIED)
     assert narrow(post) == 3
+
+
+# The review of #830: the provider is the one the Dispatcher signed, not one the Worker chooses.
+def test_a_model_host_in_the_job_that_is_not_the_one_the_dispatcher_signed_is_refused() -> None:
+    post = Dispatcher(APPLIED)
+    switch = parse_switch(SWITCH)
+    assert switch is not None
+    with pytest.raises(JobError) as caught:
+        narrow_policy(switch, LIST, "evil.example.com", post=post, sleep=lambda _: None)
+    assert caught.value.code is ErrorCode.IMPLEMENTER_CONFIG_INVALID and post.bodies == []
 
 
 # #745-T23
@@ -294,6 +318,7 @@ class Rig:
         switch: bool,
         answers: tuple[Any, ...] = (APPLIED,),
         door_error: JobError | None = None,
+        signed_host: str | None = None,
     ) -> None:
         self.calls: list[str] = []
         self.started_with: list[tuple[NetworkRule, float]] = []
@@ -337,7 +362,8 @@ class Rig:
         monkeypatch.setattr(session_module, "start_network_door", start)
         job = parse_implementer_input(job_text(environment))
         rule = OFF if environment is None else parse_rule(environment["network"])
-        variables = {IMPLEMENTER_NETWORK_SWITCH_VARIABLE: switch_text(rule)} if switch else {}
+        host = signed_host or model_host_of(job.implementer.model_entry.upstream_base_url)
+        variables = {IMPLEMENTER_NETWORK_SWITCH_VARIABLE: switch_text(rule, host)} if switch else {}
         self.session = ImplementerSession(
             job,
             workspace=cast("Any", None),
@@ -422,12 +448,39 @@ def test_without_a_switch_the_first_wall_alone_holds_and_the_report_says_so(
     assert any("network policy was not changed" in note for note in rig.session._notes)  # pyright: ignore[reportPrivateUsage]
 
 
-# #745-T24
-def test_off_without_a_switch_has_nothing_to_report(monkeypatch: pytest.MonkeyPatch) -> None:
-    rig = Rig(monkeypatch, None, switch=False)
+# The review of #830: the second wall that is not there is visible for every mode, `off` included.
+@pytest.mark.parametrize("environment", [None, environment_of(OFF)], ids=["no environment", "off"])
+def test_off_without_a_switch_reports_that_the_second_wall_is_not_there(
+    monkeypatch: pytest.MonkeyPatch, environment: dict[str, Any] | None
+) -> None:
+    rig = Rig(monkeypatch, environment, switch=False)
     rig.start()
 
-    assert rig.calls == [] and rig.block() is None
+    assert rig.calls == [] and rig.post.bodies == []
+    block = rig.block()
+    assert block is not None and valid_block(_with_base(block)) is not None
+    assert (block["mode"], block["door"], block["vmPolicy"]) == ("off", False, "not_configured")
+    assert block["connections"] == []
+    assert any("network policy was not changed" in note for note in rig.session._notes)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_turn_that_never_reached_the_network_reports_nothing_of_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = Rig(monkeypatch, environment_of(LIST), switch=False)
+
+    assert rig.session._network_block() is None  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_model_other_than_the_signed_one_ends_the_turn_before_any_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = Rig(monkeypatch, environment_of(LIST), switch=True, signed_host="other.example.com")
+    with pytest.raises(JobError) as caught:
+        rig.start()
+
+    assert caught.value.code is ErrorCode.IMPLEMENTER_CONFIG_INVALID
+    assert rig.post.bodies == []
 
 
 # #745-T24

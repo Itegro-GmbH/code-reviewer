@@ -1376,6 +1376,8 @@ describe("the network rule of a turn (#745)", () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as { job: Record<string, unknown> };
     expect(body.job).toMatchObject({ vcpus: 6, network: LIST });
+    // The provider's host comes with it, for the Dispatcher to sign into the switch token: the Worker cannot name it.
+    expect(body.job.modelHost).toMatch(/^[a-z0-9.-]+\.[a-z]+$/);
     expect(contract.check("SplitClaimResponse", body)).toStrictEqual({
       valid: true,
       errors: "",
@@ -1402,6 +1404,7 @@ describe("the network rule of a turn (#745)", () => {
     expect(plain.job.network).toEqual({ mode: "off", hosts: [] });
     expect(bare.job.network).toEqual({ mode: "off", hosts: [] });
     expect(review.job).not.toHaveProperty("network");
+    expect(review.job).not.toHaveProperty("modelHost");
   });
 
   // #745-T47

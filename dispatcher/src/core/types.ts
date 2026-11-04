@@ -104,6 +104,8 @@ export type LaunchSpec = {
    * policy after the setup. Absent: the App did not say (the release before), and the policy is not narrowed.
    */
   network?: NetworkRule;
+  /** #745, step 7: the host name of the model provider, from the same answer; the Launcher signs it into the switch token. */
+  modelHost?: string;
   /**
    * #493: a Launcher that creates a VM calls this right after the create returned. The core reports the VM to the App,
    * best effort and in the background; the call returns at once and never throws, and nothing it does can fail the

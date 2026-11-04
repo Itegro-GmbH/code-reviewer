@@ -55,6 +55,7 @@ import {
   implementerEnvironment,
   planForKind,
   validateKindConfig,
+  NETWORK_SWITCH_CLOCK_MARGIN_SECONDS,
   VM_TIMEOUT_MARGIN_SECONDS,
   createSandboxLauncher,
   type SandboxLauncherOptions,
@@ -1241,23 +1242,31 @@ describe("the Sandbox-Launcher", () => {
   // #745-T34: the second wall's call, given to the Control container of an Implementer VM and to no other
   describe("the network switch of an Implementer VM (#745, step 7)", () => {
     const RULE: NetworkRule = { mode: "list", hosts: ["registry.npmjs.org"] };
+    const seen: { modelHost: string; expires: number }[] = [];
     const switchFor = (input: {
       appId: string;
       vm: string;
       rule: NetworkRule;
-    }) =>
-      JSON.stringify({
+      modelHost: string;
+      expires: number;
+    }) => {
+      seen.push({ modelHost: input.modelHost, expires: input.expires });
+      return JSON.stringify({
         url: "https://dispatcher.example.test/network",
         vm: input.vm,
         appId: input.appId,
         network: input.rule,
+        modelHost: input.modelHost,
+        expires: input.expires,
         token: "t".repeat(64),
       });
+    };
+    const NAMED = { network: RULE, modelHost: "api.anthropic.com" };
 
     it("hands the document made for this VM and this rule to the container, as one variable", async () => {
       await launch(
         build({ networkSwitch: switchFor }),
-        spec({ kind: "implementer", network: RULE }),
+        spec({ kind: "implementer", ...NAMED }),
       );
 
       const given = valuesOf(dockerRun()?.args ?? [], "--env").find((entry) =>
@@ -1270,6 +1279,39 @@ describe("the Sandbox-Launcher", () => {
       expect(document.vm).toBe(service.creates[0]?.name);
       expect(document.appId).toBe("reviewer");
       expect(document.network).toStrictEqual(RULE);
+    });
+
+    // The review of #830: the token stops working with the VM, and the provider's host is the one the App named.
+    it("signs the provider the App named, and an expiry at the end of the VM's life", async () => {
+      seen.length = 0;
+      const timeoutSeconds = 1200;
+      await launch(
+        build({
+          networkSwitch: switchFor,
+          now: () => new Date(1_800_000_000_000),
+        }),
+        spec({ kind: "implementer", timeoutSeconds, ...NAMED }),
+      );
+
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.modelHost).toBe("api.anthropic.com");
+      // The VM is made to live the job's time, the margin and the Implementer's launch steps, and not a second longer.
+      const lifetime = (service.creates[0]?.timeoutMs ?? 0) / 1000;
+      expect(lifetime).toBeGreaterThanOrEqual(timeoutSeconds);
+      expect(seen[0]?.expires).toBe(
+        1_800_000_000 + lifetime + NETWORK_SWITCH_CLOCK_MARGIN_SECONDS,
+      );
+    });
+
+    it("hands nothing when the App named no provider host: the Worker cannot be allowed to name one", async () => {
+      await launch(
+        build({ networkSwitch: switchFor }),
+        spec({ kind: "implementer", network: RULE }),
+      );
+
+      expect(
+        valuesOf(dockerRun()?.args ?? [], "--env").join(" "),
+      ).not.toContain("NETWORK_SWITCH");
     });
 
     it("hands nothing when the deployment has no address to be called at, or the App named no rule", async () => {
@@ -1293,7 +1335,7 @@ describe("the Sandbox-Launcher", () => {
       async (kind) => {
         await launch(
           build({ networkSwitch: switchFor }),
-          spec({ kind, network: RULE }),
+          spec({ kind, ...NAMED }),
         );
         expect(
           valuesOf(dockerRun()?.args ?? [], "--env").join(" "),

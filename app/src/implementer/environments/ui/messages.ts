@@ -56,7 +56,7 @@ export const PAGE_COPY = {
     "The script runs once when a task starts, as root in a container of its own with full internet access and no secrets, in the repository's folder (bash, with -e: a failing command ends it; a first line starting with #! picks another interpreter). What it installs, including the images its Docker pulls, is what the agent starts with; the agent has no internet access. A script that fails or runs longer than 15 minutes stops the task before the AI model is called, and the task is not charged. Changes it makes to files tracked by git are undone before the agent starts. The text is stored as written and shown to every member. Keep secrets out of it: there is no secrets field.",
   network: "Network",
   networkHint:
-    "What the agent can reach once the setup script is done. The setup script itself always has full internet access. The agent has no way out that does not pass a proxy, which checks the host name of every request; IP addresses, names that resolve to private addresses and ports other than 80 and 443 are always refused.",
+    "This setting applies to the agent, after the setup script is done: the setup script always has full internet access, whatever you choose here. The agent has no way out that does not pass a proxy, which checks the host name of every request; IP addresses, names that resolve to private addresses and ports other than 80 and 443 are always refused.",
   networkModeLabels: {
     off: "Off: no network (the default)",
     list: "Only the hosts listed below",

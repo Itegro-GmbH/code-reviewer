@@ -179,7 +179,7 @@ one instruction, and one turn is one `jobs` row of the kind `implementer`. It ex
   has one sentence for each in `app/src/runs/error-copy.ts`.
 - The names of the environment variables the Worker container of an implementer job gets (`KnownImplementerEnvironmentName`): `RUNNER_IMPLEMENTER_WORK_DIR` (always `/work`), `RUNNER_IMPLEMENTER_MODEL_DOOR` (`docker`: the container
   starts the model door, the agent's container and the reader through the VM's Docker, #745), `RUNNER_IMPLEMENTER_SANDBOX_PROOF` (the
-  snapshot's Sysbox verdict) and `RUNNER_IMPLEMENTER_AGENT_MEMORY_MB` (the limit of the agent's container) and `RUNNER_IMPLEMENTER_NETWORK_SWITCH` (#745 step 7: the document by which the container asks the Dispatcher to narrow the VM's network policy). The Dispatcher sets them; the container
+  snapshot's Sysbox verdict) and `RUNNER_IMPLEMENTER_AGENT_MEMORY_MB` (the limit of the agent's container) and `RUNNER_IMPLEMENTER_NETWORK_SWITCH` (#745 step 7: the document by which the container asks the Dispatcher to narrow the VM's network policy: the rule and the provider's host the Dispatcher signed, and the time the token stops working). The Dispatcher sets them; the container
   profile that carries them is `ImplementerContainerSpec` of `worker-container.v1.json` (#760), which since #745 also carries the VM's Docker socket (`DockerSocket`)
   and is the one spec that does.
 - Examples: `examples/implementer/RunnerJobInput.json`, `RunnerResult.json` and `SplitClaimResponse.json`.

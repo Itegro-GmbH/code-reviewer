@@ -5,10 +5,11 @@
 // platform's credential and nothing after the hand-over (#487), so the VM gets, in its container's environment, a token that is
 // good for this one call (`network/switch-token.ts`), and calls at the right moment.
 //
-// What the caller can and cannot choose. The token is an HMAC over the app, the VM and the rule the App chose, so the caller
-// cannot name another VM or another rule: the policy is built here from the rule, the hosts of the App and of this Dispatcher
-// (both configuration) and GitHub's. The one thing the caller adds is the model provider's host, which only the Worker knows; it
-// must be a plain host name and nothing else (no wildcard, no address). The rule `open` is never narrowed.
+// What the caller can and cannot choose. The token is an HMAC over the app, the VM, the rule and the model provider's host (both
+// from the App's claim answer, which the Dispatcher read) and the time the token stops working, so the caller can name no other
+// VM, rule or host and cannot use a token after the VM's life: the policy is built here from the rule, the hosts of the App and
+// of this Dispatcher (both configuration), the provider's and GitHub's. The body carries the same values the token was made over,
+// and a value that is not the signed one is a token that does not verify. The rule `open` is never narrowed.
 //
 // The call is idempotent, and the caller repeats it: narrowing the policy ends the connections that are open, and the call that
 // asked for it is one of them, so an answer may never arrive. The Dispatcher's own host is in the narrowed policy, so the next
@@ -38,6 +39,7 @@ const BodySchema = z
     appId: z.string().min(1).max(64),
     network: NetworkRuleSchema,
     modelHost: z.string().max(253).regex(PLAIN_HOST),
+    expires: z.number().int().positive(),
     token: z.string().regex(/^[0-9a-f]{64}$/),
   })
   .strict();
@@ -53,7 +55,34 @@ export type NetworkRouteOptions = {
   /** The address this Dispatcher is reached at (the switch call's own host stays reachable). */
   publicUrl: string;
   logger: Logger;
+  /** The wall clock in milliseconds, for the expiry of a token; `Date.now` unless a test brings its own. */
+  now?: () => number;
 };
+
+/**
+ * The body of the request as text, read with a byte limit: a body longer than `limit` is not read further (the stream is
+ * cancelled), whatever its declared length says or whether it declared one (a chunked body). Null when it is over the limit.
+ */
+async function readLimited(
+  request: Request,
+  limit: number,
+): Promise<string | null> {
+  if (request.body === null) return "";
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
+}
 
 function hostOf(url: string): string {
   return new URL(url).hostname.toLowerCase();
@@ -76,9 +105,9 @@ export function mountNetworkRoute(
     if (declared > MAX_NETWORK_BODY_BYTES) return refused(c, 413);
     if (!(c.req.header("content-type") ?? "").startsWith("application/json"))
       return refused(c, 400);
-    const text = await c.req.text();
-    if (new TextEncoder().encode(text).length > MAX_NETWORK_BODY_BYTES)
-      return refused(c, 413);
+    // Before the token is looked at, on a route anyone can reach: never more than the limit is read.
+    const text = await readLimited(c.req.raw, MAX_NETWORK_BODY_BYTES);
+    if (text === null) return refused(c, 413);
     let parsed: unknown;
     try {
       parsed = JSON.parse(text);
@@ -87,7 +116,7 @@ export function mountNetworkRoute(
     }
     const body = BodySchema.safeParse(parsed);
     if (!body.success) return refused(c, 400);
-    const { vm, appId, network, modelHost, token } = body.data;
+    const { vm, appId, network, modelHost, expires, token } = body.data;
 
     const configured = options.apps.find((candidate) => candidate.id === appId);
     const secrets = options.keys
@@ -95,7 +124,12 @@ export function mountNetworkRoute(
       .map((key) => key.secret);
     if (
       configured === undefined ||
-      !verifySwitchToken(secrets, appId, vm, network, token)
+      !verifySwitchToken(
+        secrets,
+        { appId, vm, rule: network, modelHost, expires },
+        token,
+        Math.floor((options.now ?? Date.now)() / 1000),
+      )
     ) {
       logger.warn("network_refused", { verdict: "unauthorized" });
       return refused(c, 401);

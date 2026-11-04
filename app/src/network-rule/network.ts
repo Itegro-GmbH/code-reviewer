@@ -57,6 +57,20 @@ export function normalizeHostEntry(raw: string): string | null {
   return wildcard ? `*.${ascii}` : ascii;
 }
 
+/**
+ * The host name of a model provider's address, in the form the second wall names it (a plain host name, no address), or null when
+ * the address has none. The Dispatcher gets it in the claim answer and signs it into the token of the network switch, so the
+ * Worker cannot name another host there.
+ */
+export function providerHostOf(address: string): string | null {
+  try {
+    const host = new URL(address).hostname;
+    return host.startsWith("*.") ? null : normalizeHostEntry(host);
+  } catch {
+    return null;
+  }
+}
+
 export type NetworkCheck =
   | { ok: true; rule: NetworkRule }
   | {

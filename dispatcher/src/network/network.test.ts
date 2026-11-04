@@ -13,7 +13,11 @@ import {
   policyFor,
   type NetworkRule,
 } from "./rule.ts";
-import { switchToken, verifySwitchToken } from "./switch-token.ts";
+import {
+  switchToken,
+  verifySwitchToken,
+  type SwitchTokenSubject,
+} from "./switch-token.ts";
 
 const HOSTS = {
   appHost: "app.example.test",
@@ -116,54 +120,59 @@ describe("the second wall", () => {
 
 describe("the switch token", () => {
   const SECRET = "s".repeat(40);
+  const NOW = 1_800_000_000;
+  const SUBJECT: SwitchTokenSubject = {
+    appId: "factory",
+    vm: VM,
+    rule: LIST,
+    modelHost: "api.anthropic.com",
+    expires: NOW + 3600,
+  };
+  const verify = (
+    subject: SwitchTokenSubject,
+    token: string,
+    secrets: readonly string[] = [SECRET],
+    now = NOW,
+  ) => verifySwitchToken(secrets, subject, token, now);
 
   // #745-T28
-  it("is good for the app, the VM and the rule it was made for and no other", () => {
-    const token = switchToken(SECRET, "factory", VM, LIST);
+  it("is good for the app, the VM, the rule, the model host and the expiry it was made for and no other", () => {
+    const token = switchToken(SECRET, SUBJECT);
 
     expect(token).toMatch(/^[0-9a-f]{64}$/);
-    expect(verifySwitchToken([SECRET], "factory", VM, LIST, token)).toBe(true);
-    expect(verifySwitchToken([SECRET], "other", VM, LIST, token)).toBe(false);
-    expect(
-      verifySwitchToken(
-        [SECRET],
-        "factory",
-        VM.replace("abcd", "dcba"),
-        LIST,
-        token,
-      ),
-    ).toBe(false);
-    expect(
-      verifySwitchToken(
-        [SECRET],
-        "factory",
-        VM,
-        { mode: "list", hosts: [...LIST.hosts, "evil.example.com"] },
-        token,
-      ),
-    ).toBe(false);
-    expect(
-      verifySwitchToken(
-        [SECRET],
-        "factory",
-        VM,
-        { mode: "open", hosts: [] },
-        token,
-      ),
-    ).toBe(false);
-    expect(
-      verifySwitchToken(["t".repeat(40)], "factory", VM, LIST, token),
-    ).toBe(false);
+    expect(verify(SUBJECT, token)).toBe(true);
+    for (const other of [
+      { ...SUBJECT, appId: "other" },
+      { ...SUBJECT, vm: VM.replace("abcd", "dcba") },
+      {
+        ...SUBJECT,
+        rule: { mode: "list", hosts: [...LIST.hosts, "evil.example.com"] },
+      },
+      { ...SUBJECT, rule: { mode: "open", hosts: [] } },
+      // The review of #830: the provider's host is signed, so the Worker cannot name another one.
+      { ...SUBJECT, modelHost: "evil.example.com" },
+      { ...SUBJECT, modelHost: "api.anthropic.com.evil.example.com" },
+      // ... and so is the expiry, so a token cannot be given a longer life.
+      { ...SUBJECT, expires: SUBJECT.expires + 1 },
+    ] satisfies SwitchTokenSubject[])
+      expect(verify(other, token)).toBe(false);
+    expect(verify(SUBJECT, token, ["t".repeat(40)])).toBe(false);
+  });
+
+  // The review of #830: a token for a VM that is gone is no token.
+  it("is refused after its expiry and accepted up to it", () => {
+    const token = switchToken(SECRET, SUBJECT);
+
+    expect(verify(SUBJECT, token, [SECRET], SUBJECT.expires)).toBe(true);
+    expect(verify(SUBJECT, token, [SECRET], SUBJECT.expires + 1)).toBe(false);
   });
 
   // #745-T28
   it("is accepted for the previous key while keys rotate, and refuses what is not a token", () => {
     const old = "o".repeat(40);
-    const token = switchToken(old, "factory", VM, LIST);
+    const token = switchToken(old, SUBJECT);
 
-    expect(verifySwitchToken([SECRET, old], "factory", VM, LIST, token)).toBe(
-      true,
-    );
+    expect(verify(SUBJECT, token, [SECRET, old])).toBe(true);
     for (const bad of [
       "",
       "xyz",
@@ -171,28 +180,26 @@ describe("the switch token", () => {
       token.toUpperCase(),
       `${token}0`,
     ])
-      expect(verifySwitchToken([SECRET, old], "factory", VM, LIST, bad)).toBe(
-        false,
-      );
+      expect(verify(SUBJECT, bad, [SECRET, old])).toBe(false);
   });
 
   // #745-T28
   it("is not a signature of the wake-up call: the key is derived for this purpose", () => {
-    const token = switchToken(SECRET, "factory", VM, LIST);
+    const token = switchToken(SECRET, SUBJECT);
 
-    expect(token).not.toBe(switchToken(`${SECRET}x`, "factory", VM, LIST));
+    expect(token).not.toBe(switchToken(`${SECRET}x`, SUBJECT));
     expect(token).not.toContain(SECRET);
   });
 
   // #745-T28
   it("cannot be moved between a host that is a prefix of another by the way the message is joined", () => {
-    const a = switchToken(SECRET, "factory", VM, {
-      mode: "list",
-      hosts: ["a.b.com", "c.d.com"],
+    const a = switchToken(SECRET, {
+      ...SUBJECT,
+      rule: { mode: "list", hosts: ["a.b.com", "c.d.com"] },
     });
-    const b = switchToken(SECRET, "factory", VM, {
-      mode: "list",
-      hosts: ["a.b.com,c.d.com"] as string[],
+    const b = switchToken(SECRET, {
+      ...SUBJECT,
+      rule: { mode: "list", hosts: ["a.b.com,c.d.com"] },
     });
     expect(a).not.toBe(b);
   });
@@ -207,9 +214,32 @@ describe("the Dispatcher's own address", () => {
       }),
     ).toBe("https://dispatcher.example.test");
     expect(
-      publicUrlOf({ DISPATCHER_PUBLIC_URL: "https://x.example.test/base/" }),
-    ).toBe("https://x.example.test/base");
+      publicUrlOf({ DISPATCHER_PUBLIC_URL: "https://dispatcher.example.test" }),
+    ).toBe("https://dispatcher.example.test");
   });
+
+  // The review of #830: the route is mounted at the root, so a path would send every call of every turn to nothing.
+  it.each([
+    "https://x.example.test/base",
+    "https://x.example.test/base/",
+    "https://x.example.test//",
+    "https://x.example.test/a/b",
+  ])(
+    "refuses a configured address with a path, at start-up and clearly: %s",
+    (value) => {
+      const refusal = (() => {
+        try {
+          publicUrlOf({ DISPATCHER_PUBLIC_URL: value });
+        } catch (error) {
+          return error;
+        }
+        return undefined;
+      })();
+      expect(refusal).toBeInstanceOf(ConfigError);
+      expect((refusal as ConfigError).variable).toBe("DISPATCHER_PUBLIC_URL");
+      expect((refusal as ConfigError).message).toContain("without a path");
+    },
+  );
 
   // #745-T29
   it("is the platform's production host when nothing is configured, and nothing without either", () => {
