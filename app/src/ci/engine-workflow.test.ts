@@ -131,6 +131,23 @@ describe("engine workflow", () => {
     expect(String(cache?.with?.key)).toContain("opencode-pin.json");
   });
 
+  // #856-T37
+  it("fetches the pinned Claude Code before the namespace and caches it", () => {
+    expect(script).toContain("scripts/fetch_claude_code.py");
+    expect(script.indexOf("scripts/fetch_claude_code.py")).toBeLessThan(
+      script.indexOf("unshare --net"),
+    );
+
+    const cache = steps.find(
+      (step) =>
+        step.uses?.startsWith("actions/cache@") &&
+        String(step.with?.key).includes("claude-code"),
+    );
+    expect(cache?.with?.path).toBe("~/.cache/code-reviewer/claude-code");
+    // The pin is the version and the digest in the layer's module, so the cache follows it.
+    expect(String(cache?.with?.key)).toContain("claude_code/layer.py");
+  });
+
   // #197-T09, #713-T01
   it("runs the privileged suite in a job of its own, as root with the production capabilities and no network", () => {
     const lines = commandLines(privileged);

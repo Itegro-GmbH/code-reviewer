@@ -186,6 +186,8 @@ class RunnerService:
         """Announce, then claim and run until the mode ends it. Returns the exit code."""
         for line in summary(self._prepared.selftest):
             self._log.info("self-test %s", line)
+        for note in self._prepared.harness_notes:
+            self._log.info("harness %s", note)
         loop = asyncio.get_running_loop()
         for number in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(number, self.stop)

@@ -45,6 +45,7 @@ from code_reviewer_runner.implementer.agent_container import (
     AgentSeams,
     agent_document,
 )
+from code_reviewer_runner.implementer.claude_code.agent import ClaudePlace
 from code_reviewer_runner.implementer.docker_api import DockerApi
 from code_reviewer_runner.implementer.door_launcher import network_document
 from code_reviewer_runner.implementer.reader import (
@@ -1144,3 +1145,59 @@ def test_the_finish_files_are_the_module_under_an_isolated_shebang_and_the_schem
         "/etc/code-reviewer/factory-submit",
         "mcp",
     )
+
+
+# -- a command whose output is read as it comes (#856) -------------------------------------------
+
+
+# #856-T25
+def test_a_streamed_command_runs_as_the_given_user_with_stdin_and_gives_its_output_as_it_comes(
+    rig: Rig,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def behave(made: FakeExec, stdin: BinaryIO, stdout: Any) -> int:
+        if made.document["Cmd"][:1] != ["claude"]:
+            return 0
+        seen["user"] = made.document.get("User")
+        seen["workdir"] = made.document.get("WorkingDir")
+        seen["env"] = made.document.get("Env")
+        seen["stdin"] = stdin.read()
+        stdout.write('{"type": "a"}\n{"type": "b"}\n')
+        return 3
+
+    rig.engine.exec_behaviour = behave
+    place = container(rig)
+    place.create()
+    chunks: list[bytes] = []
+
+    done = place.run_streaming(
+        ["claude", "-p"],
+        {"HOME": "/home/agent"},
+        user="10201:10201",
+        stdin=b"the prompt",
+        timeout=10,
+        consume=chunks.append,
+    )
+
+    assert (seen["user"], seen["workdir"], seen["env"]) == (
+        "10201:10201",
+        "/work/repo",
+        ["HOME=/home/agent"],
+    )
+    assert seen["stdin"] == b"the prompt"
+    assert b"".join(chunks) == b'{"type": "a"}\n{"type": "b"}\n'
+    assert done.returncode == 3 and not done.unanswered
+    place.stop()
+
+
+# #856-T25
+def test_a_streamed_command_in_a_container_that_is_not_there_is_unanswered_not_raised() -> None:
+    place = AgentContainer(2560, AgentSeams())
+    harness_place: ClaudePlace = place  # the container is what the Claude Code agent drives
+
+    done = harness_place.run_streaming(
+        ["claude"], {}, user="10201:10201", stdin=b"", timeout=1, consume=lambda _: None
+    )
+
+    assert done.unanswered

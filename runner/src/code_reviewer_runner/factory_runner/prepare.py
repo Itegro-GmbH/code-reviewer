@@ -21,6 +21,7 @@ from code_reviewer_runner.factory_runner.app_client import Announcement
 from code_reviewer_runner.factory_runner.base import BASE_VERSION, HARNESS_OPENCODE
 from code_reviewer_runner.factory_runner.config import (
     RunnerConfig,
+    home_directory,
     limits_document,
     runner_identity,
 )
@@ -38,6 +39,11 @@ from code_reviewer_runner.factory_runner.selftest import (
     run_selftest,
 )
 from code_reviewer_runner.implementer.agent_container import AGENT_IMAGE_REFERENCE, AGENT_RUNTIME
+from code_reviewer_runner.implementer.claude_code.readiness import (
+    HARNESS_CLAUDE_CODE,
+    HarnessStatus,
+    claude_code_status,
+)
 from code_reviewer_runner.implementer.docker_api import DockerApi, DockerError
 from code_reviewer_runner.implementer.role_labels import RUNNER_ID_VARIABLE
 from code_reviewer_runner.implementer.runner_profile import AGENT_RUNTIME_VARIABLE
@@ -65,6 +71,8 @@ class Prepared:
     environment: Mapping[str, str]
     announcement: Announcement
     selftest: SelfTestResult
+    # What the runner found out about the harnesses it adds to the base (#856), for its log.
+    harness_notes: tuple[str, ...] = ()
 
     @property
     def ready(self) -> bool:
@@ -153,16 +161,37 @@ def free_disk_gb(path: Path = Path(IMPLEMENTER_WORK_DIR)) -> int | None:
         return None
 
 
+# The harnesses a runner adds to the base, as `(api, environment, build) -> {name: status}`.
+HarnessChecks = Callable[[DockerApi, Mapping[str, str], bool], dict[str, HarnessStatus]]
+
+
+def harness_checks(
+    api: DockerApi, source: Mapping[str, str], build: bool
+) -> dict[str, HarnessStatus]:
+    """What this device adds to the base: Claude Code when it has a login for it (#856). `build`
+    False only looks."""
+    found = claude_code_status(api, source, home_directory(source), build=build)
+    return {} if found is None else {HARNESS_CLAUDE_CODE: found}
+
+
 def announcement_for(
-    config: RunnerConfig, result: SelfTestResult, memory_mb: int | None
+    config: RunnerConfig,
+    result: SelfTestResult,
+    memory_mb: int | None,
+    harnesses: Mapping[str, HarnessStatus] | None = None,
 ) -> Announcement:
-    """What this runner says about itself: its labels, the base, the harness it proved and the
-    capabilities of the self-test, the limits it works within."""
+    """What this runner says about itself: its labels, the base, the harness it proved, the
+    harnesses it adds (never instead of OpenCode) and the capabilities of the self-test, the limits
+    it works within."""
     harness: dict[str, object] = {
         "version": result.opencode_version or pinned_opencode_version() or "0",
         "ready": result.base_ok,
     }
-    manifest: dict[str, object] = {"harnesses": {HARNESS_OPENCODE: harness}}
+    announced: dict[str, object] = {HARNESS_OPENCODE: harness}
+    for name, status in (harnesses or {}).items():
+        if name != HARNESS_OPENCODE:
+            announced[name] = {"version": status.version, "ready": status.ready}
+    manifest: dict[str, object] = {"harnesses": announced}
     if result.capabilities:
         manifest["capabilities"] = list(result.capabilities)
     limits = limits_document(config.limits)
@@ -183,6 +212,7 @@ def prepare(
     api: Callable[[], DockerApi] = DockerApi,
     pull: Callable[[DockerApi, str], None] | None = pull_image,
     machine_mb: Callable[[], int] = machine_memory_mb,
+    harnesses: HarnessChecks = harness_checks,
 ) -> Prepared:
     """Test the machine and decide what the runner is. Never raises for a machine that is not
     ready: that is a `Prepared` whose base is not proven. `pull=None` only looks: an image that is
@@ -208,11 +238,14 @@ def prepare(
         )
         if result.base_ok:
             break
+    # Only on a machine whose base holds: a daemon that fails the base cannot build a layer either.
+    added = harnesses(docker, source, pull is not None) if result.base_ok else {}
     return Prepared(
         settings,
         job_environment(source, config, runtime, memory),
-        announcement_for(config, result, memory),
+        announcement_for(config, result, memory, added),
         result,
+        tuple(f"{name}: {note}" for name, status in sorted(added.items()) for note in status.notes),
     )
 
 
