@@ -404,10 +404,6 @@ class SetupContainer:
             if outcome != OUTCOME_OK:
                 self._clean()
                 return self._ended_run(outcome, why, tail, begun, started, finished, code=code)
-            # The script is over and the memory it could take is back: the guard must not kill the
-            # container under `docker commit`, which reads its layer and needs memory of its own.
-            if self._guard is not None:
-                self._guard.close()
             try:
                 image = self._save(container, free_bytes)
             except _NoRoom as reason:
@@ -733,6 +729,18 @@ class SetupContainer:
             )
         if not self._ended.wait(STOP_WAIT_SECONDS):
             raise _Unavailable("the container did not stop, so its file system is not kept")
+        # The container is gone and the memory it could take is back: the guard must not kill
+        # anything under `docker commit`, which reads its layer and needs memory of its own. Until
+        # now it watched, because a process the script left behind runs until the container stops.
+        if self._guard is not None:
+            self._guard.close()
+            if self._guard.tripped_at is not None:
+                # The kill came while the setup was being finished: what the image would hold is
+                # not what the script left.
+                raise _Unavailable(
+                    f"{REASON_VM_MEMORY}: the VM was running out of memory while the setup was "
+                    "being finished, so its result is not kept"
+                )
         self._check_room(container, free_bytes)
         return api.commit_container(
             container, SETUP_IMAGE_REPOSITORY, SETUP_IMAGE_TAG, timeout=self._seams.commit_seconds
