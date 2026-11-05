@@ -5,6 +5,7 @@
 // every scoped repository: each is called with the scope of workspace A against the ids and keys of
 // workspace B, and nothing of B may come back or change. The table must cover every method of every
 // repository, so a method added later without a row here fails the last test.
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { Kysely } from "kysely";
 import { createTestDatabase } from "../../test-support/test-database.ts";
@@ -39,6 +40,7 @@ import { createImplementerEnvironmentsRepository } from "./implementer-environme
 import { createWorkflowsRepository } from "./workflows-repository.ts";
 import { createProfilesRepository } from "./profiles-repository.ts";
 import { createImplementerRepository } from "./implementer-repository.ts";
+import { createImplementerSnapshotsRepository } from "./implementer-snapshots-repository.ts";
 import { createImplementerStepsRepository } from "./implementer-steps-repository.ts";
 
 const SHA = "b".repeat(40);
@@ -69,6 +71,7 @@ function reposOf(db: Kysely<Database>, workspaceId: string) {
     notifications: createBillingNotificationsRepository(db, workspaceId),
     implementer: createImplementerRepository(db, workspaceId),
     steps: createImplementerStepsRepository(db, workspaceId),
+    snapshots: createImplementerSnapshotsRepository(db, workspaceId),
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
     workflows: createWorkflowsRepository(db, workspaceId),
     agentProfiles: createProfilesRepository(db, workspaceId),
@@ -422,6 +425,25 @@ async function seed(
     );
     if (stored.status !== "ok" || stored.stored !== 2)
       throw new Error("seeding failed");
+    // The session snapshot of that turn (#839): one part is in (an upload under way) and the snapshot of the earlier turn is
+    // stored, so the other workspace has a snapshot to read and a part to complete or overwrite.
+    const first = await repos.snapshots.recordPart(
+      started.turn.jobId,
+      `lease-${tag}`,
+      {
+        index: 0,
+        count: 1,
+        size: 5,
+        rawBytes: 20,
+        sha256: createHash("sha256")
+          .update(Buffer.from(`snap-${tag}`.slice(0, 5)))
+          .digest("hex"),
+        opencodeVersion: "1.19.0",
+        data: Buffer.from(`snap-${tag}`.slice(0, 5)),
+      },
+    );
+    if (first.status !== "ok" || !first.complete)
+      throw new Error("seeding failed");
   }
   // An environment of the Implementer (#818) in every workspace, under the same name: the other workspace's is there to be read,
   // changed and deleted.
@@ -680,6 +702,19 @@ async function rowsOf(db: Kysely<Database>, workspaceId: string) {
       .where("workspace_id", "=", workspaceId)
       .orderBy("job_id")
       .orderBy("part_id")
+      .execute(),
+    implementerSessionSnapshots: await db
+      .selectFrom("implementer_session_snapshots")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("session_id")
+      .execute(),
+    implementerSessionSnapshotParts: await db
+      .selectFrom("implementer_session_snapshot_parts")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("job_id")
+      .orderBy("part_index")
       .execute(),
   };
 }
@@ -1885,6 +1920,33 @@ const CASES: Case[] = [
     name: "steps.listAfter",
     run: (a, b) => a.steps.listAfter(taskOf(b).turn.jobId, 0, 100),
     expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  // implementer session snapshots (#839): B's snapshot is not A's to read, replace or complete, not even with B's lease token
+  {
+    name: "snapshots.recordPart",
+    run: (a, b) =>
+      a.snapshots.recordPart(taskOf(b).turn.jobId, `lease-b`, {
+        index: 0,
+        count: 1,
+        size: 7,
+        rawBytes: 28,
+        sha256: createHash("sha256")
+          .update(Buffer.from("planted"))
+          .digest("hex"),
+        opencodeVersion: "1.19.0",
+        data: Buffer.from("planted"),
+      }),
+    expectAnswer: (answer) => expect(answer).toEqual({ status: "not_holder" }),
+  },
+  {
+    name: "snapshots.find",
+    run: (a, b) => a.snapshots.find(taskOf(b).session.id),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "snapshots.read",
+    run: (a, b) => a.snapshots.read(taskOf(b).session.id),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   // implementer environments (#818-T04): B's environments are not A's to read, change or delete
   {

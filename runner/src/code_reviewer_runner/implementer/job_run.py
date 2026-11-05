@@ -71,6 +71,7 @@ from .report import clip_texts, escaped_size, fit_block, valid_block
 from .result_channel import ResultReader, make_result_directory
 from .session import AgentPlace, ImplementerSession, SessionSeams
 from .setup_container import SetupSeams
+from .snapshot_pump import SnapshotPump
 from .step_pump import StepPump
 from .turn_result import TurnResult
 
@@ -384,6 +385,7 @@ def run_implementer_job(
     process_timeout: float | None = None,
     secrets_sink: list[str] | None = None,
     steps: StepPump | None = None,
+    snapshot: SnapshotPump | None = None,
     seams: JobSeams = JobSeams(),  # noqa: B008 - frozen, shared on purpose
 ) -> JobResult:
     """Run one turn and return its result. Never raises for a turn that failed; whatever an
@@ -393,7 +395,8 @@ def run_implementer_job(
     held to the smaller of it and its own time limit, so a lowered timeout still leaves the time for
     the last push. `secrets_sink` receives the secrets the turn made up (the capability of its model
     proxy), for the scrub of the line that is printed. `steps` is the channel the step records of
-    the turn go out over (#745); None records nothing."""
+    the turn go out over (#745); None records nothing. `snapshot` is the channel the engine's
+    session leaves over at the end of the turn (#839); None takes no export."""
     clock = seams.clock
     advertised = engines_from_environment(environment) if engines is None else engines
     if ENGINE_IMPLEMENTER not in advertised:
@@ -429,7 +432,7 @@ def run_implementer_job(
             assert prepared.image is not None and setup.environment is not None
             setup = replace(setup, place=setup.environment.place(prepared.image))
         session = _session(
-            job, setup, started, environment, shutdown, seams, process_timeout, steps
+            job, setup, started, environment, shutdown, seams, process_timeout, steps, snapshot
         )
         if usage_probe is not None:
             usage_probe.watch(lambda: _usage_of(session, job))
@@ -514,6 +517,7 @@ def _session(
     seams: JobSeams,
     process_timeout: float | None,
     steps: StepPump | None = None,
+    snapshot: SnapshotPump | None = None,
 ) -> TurnLike:
     options: dict[str, object] = {
         "workspace": setup.workspace,
@@ -525,6 +529,7 @@ def _session(
         "should_stop": shutdown.is_set,
         "max_seconds": process_timeout,
         "steps": steps,
+        "snapshot": snapshot,
     }
     if setup.results is not None:
         options["results"] = setup.results

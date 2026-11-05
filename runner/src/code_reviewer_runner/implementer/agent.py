@@ -46,6 +46,7 @@ from code_reviewer_runner.redaction import Redactor
 from code_reviewer_runner.result import ErrorCode
 
 from .config import IMPLEMENTER_AGENT, SESSION_TITLE
+from .session_export import EngineFetch, ExportFailed, ExportReason, SessionSnapshot, take_snapshot
 from .step_feed import StepFeeder
 
 _log = logging.getLogger(__name__)
@@ -221,6 +222,21 @@ class ImplementerAgent:
             self._feeder_errors = self._events.feeder_errors
             self._events = None
         return self._runtime.stop()
+
+    def export_session(self, redactor: Redactor, seconds: float) -> SessionSnapshot:
+        """The engine's session as the file a follow-up turn imports (#839), within `seconds`, with
+        the secrets of the turn taken out. Taken over the engine's HTTP API, so it needs the engine
+        to be running: call it before `stop()`. Raises `ExportFailed`."""
+        client, session_id = self._client, self.session_id
+        if client is None or session_id is None:
+            raise ExportFailed(ExportReason.UNREACHABLE)
+        fetch = EngineFetch(client.base_url, client.directory)
+        try:
+            return take_snapshot(
+                fetch, session_id, redactor=redactor, seconds=seconds, abort=fetch.close
+            )
+        finally:
+            fetch.close()
 
     def step_notes(self) -> tuple[str, ...]:
         """What the live view lost in the turn (#745), for the turn's notes: events the step

@@ -296,7 +296,7 @@ export type KnownReleaseReason = "launch_failed" | "worker_exited";
  */
 export type VmName = string;
 /**
- * The features an app lists in VersionResponse.features. A reader ignores a name it does not know and refuses to run against an app that lacks one it needs. `worker_api`: /api/workers/v1 exists. `claim_by_job_id`: ClaimRequest.jobId is honoured. `pool_cap`: ClaimRequest.maxRunning is honoured. `release`: the release call exists. `vm_lifecycle` (#493): POST /api/runners/v1/jobs/{id}/vm exists (the Dispatcher reports the VM it created, for the billable minutes); a Dispatcher sends that call only to an app that lists the feature. `implementer_steps` (#745): POST /api/runners/v1/jobs/{id}/steps and POST /api/workers/v1/jobs/{id}/steps exist (the steps of a running turn of the Implementer, for the live view); a runner sends them only to an app that lists the feature. It is an app feature, not a claim feature: the call adds nothing to the job input, so there is nothing the app must withhold from a caller that does not know it.
+ * The features an app lists in VersionResponse.features. A reader ignores a name it does not know and refuses to run against an app that lacks one it needs. `worker_api`: /api/workers/v1 exists. `claim_by_job_id`: ClaimRequest.jobId is honoured. `pool_cap`: ClaimRequest.maxRunning is honoured. `release`: the release call exists. `vm_lifecycle` (#493): POST /api/runners/v1/jobs/{id}/vm exists (the Dispatcher reports the VM it created, for the billable minutes); a Dispatcher sends that call only to an app that lists the feature. `implementer_steps` (#745): POST /api/runners/v1/jobs/{id}/steps and POST /api/workers/v1/jobs/{id}/steps exist (the steps of a running turn of the Implementer, for the live view); a runner sends them only to an app that lists the feature. It is an app feature, not a claim feature: the call adds nothing to the job input, so there is nothing the app must withhold from a caller that does not know it. `implementer_snapshot` (#839): PUT /api/workers/v1/jobs/{id}/session exists (one part of the session snapshot of a turn of the Implementer, for the follow-up turns); a Worker puts it only to an app that lists the feature. An app feature too: the call adds nothing to the job input.
  */
 export type KnownAppFeature =
   | "worker_api"
@@ -304,7 +304,8 @@ export type KnownAppFeature =
   | "pool_cap"
   | "release"
   | "vm_lifecycle"
-  | "implementer_steps";
+  | "implementer_steps"
+  | "implementer_snapshot";
 /**
  * #745: the kinds of `StepRecord` the app stores. `reasoning`: a finished reasoning part, with the text the provider returned (often a summary). `text`: a finished assistant text part. `tool`: a tool call, with its name, status, title, the input as JSON text and the error text; the OUTPUT of a tool is never recorded, on either side. `step`: the end of one model call, with its tokens and cost. A record of another kind is left out and counted in `StepsResponse.dropped`: a newer runner may send more kinds.
  */

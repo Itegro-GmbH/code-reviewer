@@ -92,6 +92,7 @@ from code_reviewer_runner.job_loop.reporting import (
     result_from_outcome,
     stopped_result,
 )
+from code_reviewer_runner.job_loop.snapshot_sender import SnapshotApi, SnapshotSender
 from code_reviewer_runner.job_loop.step_sender import StepsApi, StepSender
 from code_reviewer_runner.lease_check import LeaseState
 from code_reviewer_runner.pr_agent_config import PASSTHROUGH_VARIABLES
@@ -415,6 +416,16 @@ class JobHost:
             return None
         return StepSender(self._api, claimed.id, clock=self._clock, log=self._log).serve
 
+    def _snapshot_handler(self, claimed: ClaimedJob, kind: ReviewKind) -> StepsHandler | None:
+        """The uploader of the session snapshot of an Implementer turn (#839), or None: any other
+        kind of job, an API that has no snapshot call, and an app that did not list
+        `implementer_snapshot` get no channel, and then the process takes no export."""
+        if kind is not ReviewKind.IMPLEMENTER:
+            return None
+        if not isinstance(self._api, SnapshotApi) or not self._api.supports_snapshot:
+            return None
+        return SnapshotSender(self._api, claimed.id, clock=self._clock, log=self._log).serve
+
     def _ms_since(self, started: float) -> int:
         return int((self._clock.monotonic() - started) * 1000)
 
@@ -472,6 +483,8 @@ class JobHost:
                 # #745: the step records of an Implementer turn, for the live view, when the app
                 # has the call. The process has no credential: this end posts them.
                 steps=self._steps_handler(claimed, kind),
+                # #839: and the session of the turn, for a follow-up; uploaded before the result.
+                snapshot=self._snapshot_handler(claimed, kind),
                 terminate_grace=(
                     IMPLEMENTER_TERMINATE_GRACE_SECONDS if kind is ReviewKind.IMPLEMENTER else None
                 ),

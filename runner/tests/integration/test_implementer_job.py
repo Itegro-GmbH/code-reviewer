@@ -67,6 +67,7 @@ from code_reviewer_runner.implementer.job_run import (
 )
 from code_reviewer_runner.implementer.limits import agent_limits
 from code_reviewer_runner.implementer.session import SessionSeams
+from code_reviewer_runner.implementer.session_export import ExportFailed, ExportReason
 from code_reviewer_runner.implementer.step_feed import StepFeeder
 from code_reviewer_runner.implementer.step_records import StepConverter
 from code_reviewer_runner.job import JobError
@@ -75,7 +76,9 @@ from code_reviewer_runner.job_loop.settings import WorkerSettings
 from code_reviewer_runner.lease_check import LEASE_CHECK_FD_VARIABLE
 from code_reviewer_runner.redaction import Redactor
 from code_reviewer_runner.result import ErrorCode
+from code_reviewer_runner.snapshot_wire import SNAPSHOT_FD_VARIABLE
 from code_reviewer_runner.step_wire import STEPS_FD_VARIABLE
+from snapshot_support import SnapshotHost, snapshot_of
 from step_support import HostEnd, say
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -315,6 +318,10 @@ class FakeAgent:
     notes_fail: bool = False
     # The step feeder of the session, made at start and only with a redactor, as the real agent's.
     steps: StepFeeder | None = None
+    # The export of the engine's session (#839): what `export_session` returns or raises, and the
+    # budgets it was asked for.
+    export: Any = None
+    exports: list[float] = field(default_factory=lambda: [])
 
     @property
     def ledger(self) -> Any:
@@ -356,6 +363,13 @@ class FakeAgent:
         self.events.append("stop")
         self.stopped.append(quick)
         return self.ends_clean
+
+    def export_session(self, redactor: Any, seconds: float) -> Any:
+        self.events.append("export")
+        self.exports.append(seconds)
+        if isinstance(self.export, Exception):
+            raise self.export
+        return self.export if self.export is not None else snapshot_of()
 
     def step_notes(self) -> tuple[str, ...]:
         if self.notes_fail:
@@ -466,6 +480,8 @@ def play(
         ends_clean: bool = True,
         steps: HostEnd | None = None,
         steps_flush_seconds: float = 2.0,
+        snapshot: SnapshotHost | None = None,
+        export: Any = None,
         profile: dict[str, Any] | None = None,
         result_schema: dict[str, Any] | None = None,
         results: "FakeResults | None" = None,
@@ -483,6 +499,8 @@ def play(
             monkeypatch.setenv(ENGINES_VARIABLE, engines)
         if steps is not None:
             monkeypatch.setenv(STEPS_FD_VARIABLE, str(steps.process_end.detach()))
+        if snapshot is not None:
+            monkeypatch.setenv(SNAPSHOT_FD_VARIABLE, str(snapshot.process_end.detach()))
 
         def setup(job: Any, env: Any, gate: Callable[[], None]) -> TurnSetup:
             if setup_error is not None:
@@ -503,7 +521,9 @@ def play(
             )
 
         def agent_factory(**options: Any) -> FakeAgent:
-            agent = FakeAgent(script, events, made[0], options, ends_clean=ends_clean)
+            agent = FakeAgent(
+                script, events, made[0], options, ends_clean=ends_clean, export=export
+            )
             agents.append(agent)
             return agent
 
@@ -1597,6 +1617,141 @@ def test_a_stop_flushes_too_and_still_ends_runner_shutdown_with_the_commits_push
     host.close()
 
 
+# -- the engine's session leaves for the app at the end of the turn (#839, PR 7) -------------------
+
+
+def what_a_snapshot_changes(turn: Turn) -> dict[str, Any]:
+    """The turn's outcome, without the one event the export adds."""
+    did = what_the_turn_did(turn)
+    return {**did, "events": [event for event in did["events"] if event != "export"]}
+
+
+# #839-T16
+def test_the_session_is_exported_before_the_container_is_killed_and_handed_to_the_host(
+    play: Any,
+) -> None:
+    without = play(commits_then_ends())
+    host = SnapshotHost()
+
+    turn = play(commits_then_ends(), snapshot=host)
+
+    assert turn.exit_code == 0, turn.output
+    assert turn.events.index("export") < turn.events.index("stop"), "read from the running engine"
+    assert turn.agent is not None and turn.agent.exports == [5.0]
+    assert host.wait()
+    assert host.header is not None and host.header.version == "1.19.0"
+    assert host.data == snapshot_of().data
+    assert what_a_snapshot_changes(turn) == what_a_snapshot_changes(without)
+    assert turn.result["logTail"] == without.result["logTail"], "nothing to say about a success"
+    host.close()
+
+
+# #839-T16
+def test_a_stop_takes_the_export_in_two_seconds_and_still_ends_runner_shutdown(play: Any) -> None:
+    host = SnapshotHost()
+
+    turn = play(sends_sigterm_after_committing, snapshot=host, dirty=True)
+
+    assert turn.result["errorCode"] == "runner_shutdown"
+    assert turn.agent is not None and turn.agent.exports == [2.0]
+    assert turn.git.pushes == [TIP]
+    assert host.wait() and host.data == snapshot_of().data
+    host.close()
+
+
+# #839-T17
+@pytest.mark.parametrize(
+    ("export", "word"),
+    [
+        (ExportFailed(ExportReason.TOO_LARGE), "too_large"),
+        (ExportFailed(ExportReason.OUT_OF_TIME), "out_of_time"),
+        (ExportFailed(ExportReason.UNREACHABLE), "engine_unreachable"),
+        (RuntimeError("a bug in the export"), "export_failed"),
+    ],
+)
+def test_an_export_that_fails_is_one_note_and_changes_nothing_about_the_turn(
+    play: Any, export: Exception, word: str
+) -> None:
+    without = play(commits_then_ends())
+    host = SnapshotHost()
+
+    turn = play(commits_then_ends(), snapshot=host, export=export)
+
+    assert what_a_snapshot_changes(turn) == what_a_snapshot_changes(without)
+    assert f"the session was not saved for a follow-up turn: {word}" in turn.result["logTail"]
+    assert "a bug in the export" not in turn.result["logTail"], "a reason word, never the text"
+    assert host.wait() and host.data == b"", "the channel is closed with nothing in it"
+    host.close()
+
+
+# #839-T17
+def test_a_host_that_never_reads_costs_the_budget_and_changes_nothing_else(play: Any) -> None:
+    without = play(commits_then_ends())
+    host = SnapshotHost(reads=False)
+    big = snapshot_of(b"\x1f\x8b" + os.urandom(8_000_000))
+
+    began = time.monotonic()
+    turn = play(commits_then_ends(), snapshot=host, export=big)
+
+    assert time.monotonic() - began < 15
+    assert what_a_snapshot_changes(turn) == what_a_snapshot_changes(without)
+    assert "not handed to the host" in turn.result["logTail"]
+    host.close()
+
+
+# #839-T17
+def test_a_snapshot_host_that_has_gone_changes_nothing_about_the_turn(play: Any) -> None:
+    without = play(commits_then_ends())
+    host = SnapshotHost()
+    host.close()  # the host closed its end before the turn began
+
+    turn = play(commits_then_ends(), snapshot=host)
+
+    assert what_a_snapshot_changes(turn) == what_a_snapshot_changes(without)
+    assert turn.git.pushes == [TIP]
+
+
+# #839-T18
+def test_a_turn_without_a_channel_exports_nothing(play: Any) -> None:
+    turn = play(commits_then_ends())
+
+    assert turn.agent is not None and turn.agent.exports == []
+    assert "export" not in turn.events
+    assert "follow-up" not in turn.result["logTail"]
+
+
+# #839-T18
+def test_a_lost_lease_exports_nothing_and_closes_the_channel(play: Any) -> None:
+    host = SnapshotHost()
+
+    def asks_the_lease(agent: FakeAgent, check: Callable[[], None]) -> str:
+        agent.use_the_model()
+        time.sleep(0.1)  # the watch asks every 0.05 s in this test
+        check()
+        return "unreachable"
+
+    turn = play(asks_the_lease, snapshot=host, answers=lost)
+
+    assert turn.result["errorCode"] == "lease_lost"
+    assert turn.agent is not None and turn.agent.exports == []
+    assert host.wait() and host.data == b""
+    host.close()
+
+
+# #839-T18
+def test_the_session_is_exported_when_the_turn_ended_badly_too(play: Any) -> None:
+    host = SnapshotHost()
+
+    turn = play(never_commits, snapshot=host)
+
+    assert turn.result["ok"] is False
+    assert turn.agent is not None and turn.agent.exports == [5.0], (
+        "the conversation is worth keeping"
+    )
+    assert host.wait() and host.data == snapshot_of().data
+    host.close()
+
+
 # -- #843: the profile of a turn ------------------------------------------------------------------
 
 NO_PUSH = {"name": "reviewer", "version": 3, "canPush": False, "instructions": "Review only."}
@@ -2011,3 +2166,15 @@ def test_an_agent_container_not_confirmed_gone_is_no_result_and_the_file_is_not_
     assert "not confirmed gone" in turn.result["logTail"]
     assert "agentResult" not in turn.result["implementer"]
     assert len(results.calls) == 1, "only the first look; the final one waits for a quiet place"
+
+
+# #839-T18
+def test_a_profile_that_may_not_push_still_saves_the_session(play: Any) -> None:
+    host = SnapshotHost()
+
+    turn = play(commits_then_ends(), snapshot=host, profile=NO_PUSH)
+
+    assert turn.agent is not None and turn.agent.exports == [5.0]
+    assert host.wait() and host.data == snapshot_of().data
+    assert turn.git.pushes == []
+    host.close()

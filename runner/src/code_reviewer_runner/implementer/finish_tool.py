@@ -15,7 +15,7 @@ One file, standard library only, no import of this package, because it runs in t
   parsed (a value of two million keys costs about a second to check), its nesting and its number of
   values are bounded by a scan that does not build anything, and only then it is parsed and checked
   against the schema with the rules of the app's `checkResultValue`
-  (`app/src/workflows/result-schema.ts`). `contracts/result-check-vectors.v1.json` holds both to the
+  (`app/src/workflows/result-schema.ts`). `contracts/result-check-vectors.json` holds both to the
   same answers.
 
 The format of a result schema is `contracts/result-schema.v1.json`: fields are strings (optionally

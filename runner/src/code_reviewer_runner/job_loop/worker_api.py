@@ -24,7 +24,7 @@ import json
 import re
 import threading
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
@@ -43,8 +43,10 @@ from code_reviewer_runner.job_loop.http import (
     send,
 )
 from code_reviewer_runner.job_loop.jsonvalues import as_object
+from code_reviewer_runner.job_loop.snapshot_sender import SnapshotPart
 from code_reviewer_runner.job_loop.worker_errors import WorkerFailure, WorkerSetupError
 from code_reviewer_runner.llm_providers import registered_provider_ids
+from code_reviewer_runner.snapshot_wire import FEATURE_IMPLEMENTER_SNAPSHOT
 from code_reviewer_runner.step_wire import FEATURE_IMPLEMENTER_STEPS
 
 _JOB_ID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
@@ -77,6 +79,17 @@ FEATURE_WORKER_API = "worker_api"
 # socket operation, not the call (nor the name lookup), so the sender bounds a call by its own clock
 # as well (`step_sender.REQUEST_SECONDS`).
 STEPS_REQUEST_TIMEOUT_SECONDS = 5.0
+# One part of the session snapshot (#839): up to 3 MiB, so the socket may be slower than for a batch
+# of steps; the sender bounds the call by its own clock as well (`snapshot_sender.REQUEST_SECONDS`).
+SNAPSHOT_REQUEST_TIMEOUT_SECONDS = 20.0
+
+
+def snapshot_query(part: SnapshotPart) -> str:
+    """The query of one part of the snapshot (`SessionPartQuery` in the Worker contract)."""
+    return (
+        f"part={part.index}&parts={part.count}&bytes={part.size}&rawBytes={part.raw_bytes}"
+        f"&sha256={part.sha256}&opencodeVersion={part.version}"
+    )
 
 
 class CredentialInvalid(LeaseLost):
@@ -120,8 +133,9 @@ class HttpWorkerApi:
         self._opener = build_opener()
         # The features the app listed in the version answer (empty: none or not asked).
         self._features: frozenset[str] = frozenset()
-        # The thread of the steps call in flight, if any (see `steps`).
+        # The thread of the steps call in flight, if any, and of the snapshot call (`_call_alone`).
         self._steps_thread: threading.Thread | None = None
+        self._snapshot_thread: threading.Thread | None = None
 
     # -- the checks and the three calls -------------------------------------------------------
 
@@ -214,9 +228,47 @@ class HttpWorkerApi:
         a first that is still waiting: it is `ApiUnavailable` until that one is over.
         """
         path = f"/api/workers/v1/jobs/{self._safe_id(job_id)}/steps"
-        running = self._steps_thread
+        reply = await self._call_alone(
+            "_steps_thread",
+            "steps-call",
+            lambda: self._send_bytes("POST", path, body, STEPS_REQUEST_TIMEOUT_SECONDS),
+        )
+        if reply.status != 200:
+            raise self._failure(reply)
+
+    @property
+    def supports_snapshot(self) -> bool:
+        """True when the app listed `implementer_snapshot` (#839): it has the snapshot call. An app
+        that did not answer the version call, or does not list it, gets none."""
+        return FEATURE_IMPLEMENTER_SNAPSHOT in self._features
+
+    async def snapshot(self, job_id: str, part: SnapshotPart) -> None:
+        """Put one part of the session snapshot (`PUT /api/workers/v1/jobs/{id}/session`). The
+        description of the whole file travels with every part, in the query, so a part is judged
+        on its own and a part sent twice is the same call; the body is the bytes of the part.
+
+        On a thread of its own like `steps`, one at a time."""
+        path = f"/api/workers/v1/jobs/{self._safe_id(job_id)}/session?{snapshot_query(part)}"
+        reply = await self._call_alone(
+            "_snapshot_thread",
+            "snapshot-call",
+            lambda: self._send_bytes(
+                "PUT",
+                path,
+                part.data,
+                SNAPSHOT_REQUEST_TIMEOUT_SECONDS,
+                content_type="application/octet-stream",
+            ),
+        )
+        if reply.status != 200:
+            raise self._failure(reply)
+
+    async def _call_alone(self, slot: str, name: str, call: Callable[[], Reply]) -> Reply:
+        """Run `call` on a daemon thread kept in `slot`, and refuse (`ApiUnavailable`) while the
+        call before it on the same slot has not ended."""
+        running: threading.Thread | None = getattr(self, slot)
         if running is not None and running.is_alive():
-            raise ApiUnavailable("an earlier steps call has not ended")
+            raise ApiUnavailable(f"an earlier {name} has not ended")
         loop = asyncio.get_running_loop()
         done: asyncio.Future[Reply] = loop.create_future()
 
@@ -224,9 +276,9 @@ class HttpWorkerApi:
             if not done.done():
                 setter(value)
 
-        def call() -> None:
+        def run() -> None:
             try:
-                reply = self._send_bytes("POST", path, body, STEPS_REQUEST_TIMEOUT_SECONDS)
+                reply = call()
             except BaseException as error:
                 outcome = (done.set_exception, error)
             else:
@@ -235,11 +287,10 @@ class HttpWorkerApi:
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(settle, *outcome)
 
-        self._steps_thread = threading.Thread(target=call, name="steps-call", daemon=True)
-        self._steps_thread.start()
-        reply = await done
-        if reply.status != 200:
-            raise self._failure(reply)
+        thread = threading.Thread(target=run, name=name, daemon=True)
+        setattr(self, slot, thread)
+        thread.start()
+        return await done
 
     # -- internals ----------------------------------------------------------------------------
 
@@ -253,14 +304,22 @@ class HttpWorkerApi:
         data = json.dumps(body, separators=(",", ":")).encode("ascii") if body is not None else None
         return self._send_bytes(method, path, data, self._timeout)
 
-    def _send_bytes(self, method: str, path: str, data: bytes | None, timeout: float) -> Reply:
+    def _send_bytes(
+        self,
+        method: str,
+        path: str,
+        data: bytes | None,
+        timeout: float,
+        *,
+        content_type: str = "application/json",
+    ) -> Reply:
         request = urllib.request.Request(
             f"{self._base_url}{path}",
             data=data,
             method=method,
             headers={
                 "Authorization": f"Bearer {self._credential}",
-                "Content-Type": "application/json",
+                "Content-Type": content_type,
                 "Accept": "application/json",
                 "User-Agent": f"code-reviewer-worker/{__version__}",
             },

@@ -105,7 +105,7 @@ READER_MEMORY_BYTES: Final = 256 * 1024 * 1024
 READER_PIDS_LIMIT: Final = 256
 READER_TMPFS: Final = "rw,noexec,nosuid,nodev,size=64m,mode=1777"
 # The most a read of the result file takes (#843).
-RESULT_READ_SECONDS: Final = 5.0
+RESULT_READ_SECONDS: Final = 2.5
 # The most a reset of the readers takes, all of them together (`ReaderAccess.reset`).
 RESET_SECONDS: Final = 10.0
 READER_ENTRYPOINT: Final = ["/usr/bin/tini", "--", "/usr/bin/sleep", "infinity"]

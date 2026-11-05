@@ -115,6 +115,7 @@ export const APP_FEATURES = [
   "release",
   "vm_lifecycle",
   "implementer_steps",
+  "implementer_snapshot",
 ] as const;
 export type AppFeature = (typeof APP_FEATURES)[number];
 
@@ -898,4 +899,29 @@ export type StepsResponse = {
   stored: number;
   stale: number;
   dropped: number;
+};
+
+/**
+ * #839: the bounds of the session snapshot of a turn of the Implementer (`PUT /api/workers/v1/jobs/{id}/session`,
+ * `SessionPartResponse` in the contract). The snapshot is the engine's export, gzipped, and arrives in parts: a function of the
+ * platform takes no request body over 4.5 MB (a larger one is refused before the app is called), so a part is at most
+ * `partBytes` and the largest snapshot is `maxParts` of them. The last part is whatever is left.
+ */
+export const SNAPSHOT_LIMITS = {
+  /** The most a snapshot is, gzipped (the plan's cap; the runner keeps no snapshot over it). */
+  maxBytes: 8 * 1024 * 1024,
+  /** The most one request carries, and exactly what every part but the last carries. */
+  partBytes: 3 * 1024 * 1024,
+  /** `ceil(maxBytes / partBytes)`. */
+  maxParts: 3,
+  /** The most the JSON inside the gzip file may be. The app never inflates it; it is a figure for the page that will show a size. */
+  maxRawBytes: 256 * 1024 * 1024,
+} as const;
+
+/** #839: 200 from the snapshot call (`SessionPartResponse`). `complete` is true once the whole snapshot is stored. */
+export type SessionPartResponse = {
+  version: typeof RUNNER_API_VERSION;
+  part: number;
+  parts: number;
+  complete: boolean;
 };
