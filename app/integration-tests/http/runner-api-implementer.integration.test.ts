@@ -1826,7 +1826,7 @@ describe("the result of a turn (#843)", () => {
   });
 
   // #843-T116
-  it("refuses a result block whose agent result is not an object or is out of bounds, as the contract does", async () => {
+  it("drops an agent result that is not an object or is out of bounds, records no_result and keeps the report", async () => {
     for (const bad of [[], "text", { text: "x".repeat(256 * 1024) }]) {
       const h = await start();
       const { jobId } = await h.turn({ resultSchema: SCHEMA });
@@ -1840,7 +1840,13 @@ describe("the result of a turn (#843)", () => {
         }),
       );
 
-      expect(response.status).toBe(400);
+      expect(response.status).toBe(200);
+      const job = await h.queue.get(jobId);
+      expect(job).toMatchObject({ status: "failed", errorCode: "no_result" });
+      expect(job?.result).toMatchObject({
+        implementer: { headCommit: TURN_BLOCK.headCommit },
+      });
+      expect(JSON.stringify(job?.result)).not.toContain("agentResult");
     }
   });
 
