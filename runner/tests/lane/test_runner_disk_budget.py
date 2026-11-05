@@ -66,25 +66,30 @@ def test_what_a_container_writes_is_measured_noticed_and_freed_by_the_tidy(tmp_p
 
 
 # #855-L02
-def test_the_image_a_setup_result_is_committed_as_is_removed_by_the_tidy(tmp_path: Path) -> None:
-    worker = lane_config().worker_image
+def test_the_image_a_setup_result_is_committed_as_counts_its_added_layer_and_is_removed(
+    tmp_path: Path,
+) -> None:
+    config = lane_config()
+    base = config.agent_image
     docker("rm", "-f", COMMITTED, check=False)
     try:
         docker(
-            "run", "--name", COMMITTED, "--entrypoint", "sh", worker, "-c",
+            "run", "--name", COMMITTED, "--entrypoint", "sh", base, "-c",
             "head -c 5000000 /dev/zero > /var/tmp/x",
         )  # fmt: skip
         docker("commit", COMMITTED, ENVIRONMENT_IMAGE)
         docker("rm", "-f", COMMITTED)
         api = DockerApi()
-        assert used_bytes(api, tmp_path, RUNNER) > 0  # the committed image's size is counted
+
+        # What the commit added to the agent image: the 5 000 000 bytes, not the agent image's own
+        # size (gigabytes) that the committed image carries as its parent.
+        used = used_bytes(api, tmp_path, RUNNER, base_image=base)
+        assert 5_000_000 <= used < 5_000_000 + 2**20, f"{used} bytes"
 
         assert tidy(TidySeams(work_dir=tmp_path, runner_id=RUNNER)) == []
 
         assert docker("image", "inspect", ENVIRONMENT_IMAGE, check=False).returncode != 0
-        assert (
-            docker("image", "inspect", worker).returncode == 0
-        )  # only the name of the result went
+        assert docker("image", "inspect", base).returncode == 0  # only the name of the result went
     finally:
         docker("rm", "-f", COMMITTED, check=False)
         docker("rmi", ENVIRONMENT_IMAGE, check=False)

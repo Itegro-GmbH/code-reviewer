@@ -25,6 +25,7 @@ from code_reviewer_runner.factory_runner.housekeeping import (
     remove_environment_image,
 )
 from code_reviewer_runner.implementer.docker_api import DockerError
+from code_reviewer_runner.implementer.role_labels import ROLE_LABEL
 
 pytestmark = pytest.mark.unit
 
@@ -51,10 +52,24 @@ def test_a_folder_is_measured_by_what_it_holds_on_disk_links_not_followed(tmp_pa
     assert tree_bytes(tmp_path / "missing") == 0
 
 
+AGENT_IMAGE = "code-reviewer-agent:golden"
+
+
 class Daemon:
-    def __init__(self, *, sizes: dict[str, int | None], image: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        sizes: dict[str, int | None],
+        image: int | None = None,
+        base: int | None = 0,
+        roles: dict[str, str] | None = None,
+    ) -> None:
         self.sizes = sizes
+        # The size of the environment image (None: there is none) and of the agent image it was
+        # committed from (None: the daemon does not know it).
         self.image = image
+        self.base = base
+        self.roles = roles or {}
         self.unlistable = False
         self.removed: list[str] = []
 
@@ -62,7 +77,10 @@ class Daemon:
         assert method == "GET" and path.startswith("/containers/json")
         if self.unlistable:
             raise DockerError(500, "no")
-        return [{"Id": identifier} for identifier in self.sizes] + [{"Names": ["no id"]}]
+        return [
+            {"Id": identifier, "Labels": {ROLE_LABEL: self.roles.get(identifier, "agent")}}
+            for identifier in self.sizes
+        ] + [{"Names": ["no id"]}]
 
     def container_rw_bytes(self, ref: str, *, timeout: float) -> int | None:
         value = self.sizes[ref]
@@ -71,10 +89,10 @@ class Daemon:
         return value
 
     def inspect_image(self, reference: str) -> dict[str, Any]:
-        assert reference == ENVIRONMENT_IMAGE
-        if self.image is None:
+        size = {ENVIRONMENT_IMAGE: self.image, AGENT_IMAGE: self.base}[reference]
+        if size is None:
             raise DockerError(404, "no such image")
-        return {"Size": self.image}
+        return {"Size": size}
 
     def remove_image(self, reference: str) -> None:
         self.removed.append(reference)
@@ -87,11 +105,44 @@ def test_what_the_job_holds_is_its_work_folders_its_containers_and_its_environme
     (tmp_path / "repo" / "f").write_bytes(b"x" * 50_000)
     (tmp_path / "unrelated").mkdir()
     (tmp_path / "unrelated" / "f").write_bytes(b"x" * 9_000_000)  # not the job's
-    daemon = Daemon(sizes={"a" * 64: 1_000, "b" * 64: 2_000, "c" * 64: None}, image=500_000)
+    daemon = Daemon(sizes={"a" * 64: 1_000, "b" * 64: 2_000, "c" * 64: None}, image=500_000, base=0)
 
     total = used_bytes(daemon, tmp_path, "r1")  # type: ignore[arg-type]
 
     assert 553_000 <= total < 600_000
+
+
+# #855-F1 (S5)
+def test_a_big_agent_image_under_a_small_commit_counts_only_what_the_commit_added(
+    tmp_path: Path,
+) -> None:
+    for name in ("reserve", "repo", "result"):
+        (tmp_path / name).mkdir()
+    base = 4 * GIB  # the agent image: the runner's, there before the job
+    daemon = Daemon(sizes={}, image=base + 300_000, base=base)
+
+    assert used_bytes(daemon, tmp_path, "r1") == 300_000  # type: ignore[arg-type]
+
+    # An agent image the daemon cannot size: the part counts as nothing, never as the whole image.
+    unknown = Daemon(sizes={}, image=base + 300_000, base=None)
+    assert used_bytes(unknown, tmp_path, "r1") == 0  # type: ignore[arg-type]
+
+
+# #855-F1 (S5)
+def test_the_setup_containers_layer_is_counted_once_not_again_in_its_committed_image(
+    tmp_path: Path,
+) -> None:
+    setup, agent = "s" * 64, "a" * 64
+    sizes: dict[str, int | None] = {setup: 700_000, agent: 1_000}
+    roles = {setup: "setup", agent: "agent"}
+
+    committed = Daemon(sizes=sizes, image=GIB + 700_000, base=GIB, roles=roles)
+    # The image holds the setup container's 700 000; its own layer is not added a second time.
+    assert used_bytes(committed, tmp_path, "r1") == 701_000  # type: ignore[arg-type]
+
+    # Before the commit there is no image: the container's own layer is the measure.
+    running = Daemon(sizes=sizes, image=None, base=GIB, roles=roles)
+    assert used_bytes(running, tmp_path, "r1") == 701_000  # type: ignore[arg-type]
 
 
 def test_a_daemon_that_cannot_answer_counts_for_nothing_and_ends_no_job(tmp_path: Path) -> None:
