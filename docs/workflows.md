@@ -156,8 +156,8 @@ command; consequences (a comment, a pull request) happen only here. The inputs s
 The action works on the repository of the run. `head`, `base`, `issue`, `add` and `remove` are [targets](#one-repository-per-run-and-targets). With
 the trigger `github.issueLabeled` an action may **not add the label that starts the workflow** (case ignored): the workflow would start itself
 again (`label_retriggers_workflow`); removing it is fine. A connector that does not exist is refused (`unknown_connector`). The engine runs an action
-through a connector it has; the three GitHub connectors come with milestone 3b, and a step whose connector is not there ends with
-`connector_unavailable` (see [Engine](#engine)).
+through a connector it has: the three GitHub connectors run on a server that has the GitHub App, and a step whose connector is not there ends with
+`connector_unavailable` (see [Engine](#engine) and [GitHub actions](#github-actions)).
 
 ### Control: `if` and `loop`
 
@@ -567,14 +567,105 @@ the step and shown on the [run page](#the-run-page).
 
 An action step is a **connector**: an interface (`name`, `run(call)`) and a registry the engine asks. The inputs are the node's, with references resolved and
 held to the connector's types again. The three connectors of the format (`github.pullRequest.open`, `github.issue.comment`, `github.issue.labels`)
-need rights of the GitHub App that the owner grants first, so they come with milestone 3b; a step whose connector is not available ends with
-`connector_unavailable` and the run with `step_failed`. The tests use a fake connector.
+are real connectors of the GitHub App ([GitHub actions](#github-actions)); a step whose connector is not available ends with
+`connector_unavailable` and the run with `step_failed`. The engine's own tests use a fake connector.
 
 **A call takes 60 seconds at most** (`ACTION_TIMEOUT_MS`), which is well under the two minutes after which a step that was claimed and has no outcome is taken
 for abandoned (`STEP_STALE_MS`). A call that takes longer ends its step with `action_timeout` and is not repeated (it may have happened); the call gets an
-`AbortSignal` that is aborted then. **The connectors of milestone 3b must keep to it**: pass `call.signal` to every request they make and set no longer
-time limit or retry of their own. A connector that outlasts the limit could otherwise run twice, once for the engine that waits for it and once for the
+`AbortSignal` that is aborted then. **A connector keeps to it** (the three GitHub connectors do): it passes `call.signal` to every request it makes and sets no longer
+time limit or retry of its own. A connector that outlasts the limit could otherwise run twice, once for the engine that waits for it and once for the
 one that took the step over. Use `call.idempotencyKey` for what the platform supports.
+
+### GitHub actions
+
+The three connectors act through the **GitHub App of the workspace**, on **the repository of the run** and nothing else: the repository is never an input, so
+no value (a branch, a reference, an agent's text) can name another one. Each makes its requests with a token of its own, limited to that
+repository and to the one permission it needs, and switched off afterwards. The inputs are data: they are cleaned and bounded here, after the
+references are resolved.
+
+| Connector | App permission it needs (as the App's settings page words it) | Idempotent? |
+| --- | --- | --- |
+| `github.pullRequest.open` | Pull requests: Read and write | Yes: an open pull request for the same head and base is the result (`number` and `url` of it, `existing: true`), not an error. It is looked for first, and again when GitHub answers that one exists. Only a pull request whose head is a branch of this repository (not of a fork of the same owner) and whose head and base are the ones asked for counts. |
+| `github.issue.comment` | Issues: Read and write | Not by GitHub (it has no way to say "this comment once"). The engine never repeats an action (`action_timeout`, `action_interrupted`), which keeps a comment from being written twice. As a second guard the comment ends with an invisible marker `<!-- wf-<runId>-<position> -->`, and the comments of the issue that changed since the step began (five minutes earlier, for the clocks) are looked at for the App's own comment with it before one is written (`existing: true`, the url of that comment). That holds **within one run** only; see "After a timeout or an error of GitHub's own". |
+| `github.issue.labels` | Issues: Read and write | Yes: an added label that is on the issue stays, a removed one that is not on it is skipped. A label the repository lacks is created by the add. `labels` is what the issue has afterwards. |
+
+GitHub files the comments and labels of a pull request under issues, so `Issues` covers a pull request too.
+
+| Input | Bound |
+| --- | --- |
+| `title` | One line (line breaks and control characters become a space), at most 256 characters; a longer title is cut (never inside a surrogate pair, so no emoji is torn in two), lone surrogate halves are dropped, and the bidirectional controls (U+200E, U+200F, U+061C, U+202A–U+202E, U+2066–U+2069) are removed so that a title reads as it is written. Empty after cleaning is `action_input_invalid`. |
+| `body` (pull request, comment) | Control characters other than line breaks and tabs are dropped, as are the bidirectional controls of the title row and lone surrogate halves; at most 60 000 characters, a longer text is cut (never inside a surrogate pair) and ends with a note saying how much was left out. A comment must not be empty. |
+| `head`, `base` | A plain branch name of the repository (`A-Za-z0-9._/-`, at most 255 characters, no `..`, no `owner:` prefix that would reach into a fork). `base` is the branch the run's agent steps started from (the default branch of the repository when the run began) when the node names none. |
+| `issue` | A whole number from 1. |
+| `add`, `remove` | At most 20 names each, 50 characters at most, no control characters, no empty name, **no name of dots only** (`.`, `..`): the address that removes a label ends with its name, `DELETE …/labels/.` is read as `…/labels/` and would remove every label of the issue. The connector and the client both refuse such a name before any request. Duplicates are dropped. |
+
+**Failures.** What GitHub refuses ends the step with a code of its own and a message for the run page that names no token, no answer of GitHub and no text of the action:
+
+| What GitHub answered | Code |
+| --- | --- |
+| The App lacks the permission (the token request is refused with 422, or the call with 403 "Resource not accessible by integration"), or the installation is suspended | `github_permission_missing` |
+| 404 for the issue or pull request; the repository is not (or no longer) part of the installation; the installation is gone | `github_not_found` |
+| 422: no commits between head and base, a branch that does not exist; 403 for an archived repository | `github_validation` |
+| 429, or 403 with a rate-limit header, or 403 without one whose message names a rate limit (GitHub's secondary limit answers like that) | `github_rate_limited` |
+| 403 for any other reason (no permission, no rate limit, no archived repository) | `action_failed` (the message names the call and the status; it does not send the owner to the App's settings) |
+| 5xx, no connection, no answer in time | `github_unavailable` |
+
+**Outputs.** `github.pullRequest.open` answers `{ number, url, existing }`, `github.issue.comment` `{ url, existing }`, `github.issue.labels` `{ labels }`.
+`existing` is `true` when the action found what it would have made (an open pull request for the head and base, the App's own comment with the marker of the step) and
+made nothing. The `url` of an output is **always a page of the repository of the run** (`<repository url>/pull/<n>`, `<repository url>/issues/<n>#issuecomment-<id>`):
+GitHub's answer counts only when it is parsed as an address with the same origin as the repository, no user or password in it, and a path below the repository's own (`/owner/repo/…`, compared per path segment, so `…/repo/../x` and `…/repo-other/…` do not pass). If GitHub's answer holds another address, the connector reports the repository's own address for the pull request or the issue instead of it, so a run page
+can show it as a link (#873, M3c) without a check of its own; it still renders only `http(s)` addresses.
+
+**After a timeout or an error of GitHub's own.** For `github.pullRequest.open` and `github.issue.comment`, a step that ends with `github_unavailable` (no answer, 5xx) or
+`action_timeout` says **"The action may have happened; check GitHub before starting again."** The request may have reached GitHub and been carried out before the answer
+was lost, and the engine never repeats an action. **Starting the workflow again is a new run**: it opens a pull request again (the open one for the same head and base is
+found, but a closed or merged one is not) and writes a new comment (the marker holds within one run only). `github.issue.labels` is idempotent and does not say it.
+
+**Text an agent wrote.** A value that an agent step reported (`{{review.summary}}`) and that is put into a text input of an action (`title`, `body`) is **defused**
+once the text is put together (`defuseSegments`, `app/src/workflow-runs/templates.ts`), so what two parts form at their boundary is seen as well. A zero-width space
+(the text reads the same to a person) goes:
+
+- after an `@` that is followed by a name (a letter, a digit, `_` or `-`) and stands at the start of a line or after a character that is not part of a word: no `@name`,
+  no `@org/team`. `john@example.com` stays as it is;
+- after the `#` of an issue reference: `#12` and `owner/repo#12` (after a space, a bracket, a quote, punctuation, or an `owner/repo`) link to nothing, and **a "Closes #12" in an
+  agent's text closes nothing** when the pull request merges. Left alone: a number that starts with `0` only (`#000`), a number followed by a letter or `_` (`#1a2b3c`), a `#`
+  after a letter or digit that is no `owner/repo` (`abc#12`, `https://example.com/page#12`), the `#` of an entity (`&#123;`) and a link to a heading (`[text](#2-section)`);
+- after `GH-` before a number (`GH-12`, also `gh-12`), and before the number of an issue or pull request address (`…/issues/12`, `…/pull/12`);
+- inside `<!--` (`<!-` + zero-width space + `-`), so that an agent cannot write the invisible marker of a comment (`<!-- wf-<runId>-<position> -->`) and make the next
+  attempt of a step believe its comment exists. This holds inside code as well;
+- as `&amp;` for the `&` of the entities of `@` and `#` (`&#64;`, `&#x40;`, `&commat;`, `&#35;`, `&#x23;`, `&num;`).
+
+A fenced block (```` ``` ```` or `~~~`, open to the end of the text when it is never closed) and a code span (`` `…` ``) are left out of all of this except for `<!--`: GitHub
+mentions nobody there. A title is no Markdown, so nothing is left out of a title. Where a code span or a fence of an agent cannot be told from the one GitHub sees (a quote
+or list item, an indented line, a table row), the text is defused as if it were no code.
+
+At a boundary between two parts the rule is: a part that an agent wrote is defused, the rest is not. An agent value that begins with a name after a `@`, or with a number after
+`#` or `GH-`, gets the space in front of it, **also when the `@` or `#` is a literal of the workflow** (`@{{review.author}}`, `Closes #{{review.issue}}`), and an agent value that
+ends with `@` or `#` gets it behind it when a name or a number follows. The literals of the workflow and the values of the trigger stay as they are:
+`Closes #{{trigger.input.issue}}` in the workflow still closes the issue. Only the text inputs of an action are defused, not the instruction of an agent step, and not a
+number or a list that is a whole reference (an issue number, labels). What a step of a connector reports (`{{pr.url}}`, `{{pr.number}}`) is not an agent's text either.
+
+**Known limits.**
+
+- **A token is not switched off when the call was aborted** (N4). After `action_timeout` the client still asks GitHub to revoke the token of the call, but with the call's
+  signal already aborted that request can be lost; the token then lives until it expires (an hour at most) and is limited to the repository of the run and one permission.
+- **A label name is in the message of a failed removal** (N5). The address of a removal ends with the label's name, and a message that names the call (`GitHub answered 500
+  for DELETE …/labels/<name>`) carries it. The label names are inputs of the workflow, not secrets, but a message of this kind is not free of the action's text.
+- The defusing knows the forms above and no others. A full address of an issue in an agent's text (`https://github.com/o/r/issues/12`) is defused only as far as the number is
+  concerned; a closing keyword with a reference that is none of the forms above, mentions that GitHub recognises through other markup (HTML tags, a link
+  whose text is a name), and look-alike characters (a full-width `＠`) are not modelled. Text a person reads in a title of a pull request is not Markdown, so a
+  reference in it is defused but a code span in it does not hide anything.
+- **Text with HTML is defused everywhere, code included.** Where the text holds `<` followed by a letter, `/` or `!`, no code span or fenced block is left out of the
+  defusing: there is no HTML parser here to tell where HTML ends a span early. A generic type in code (`List<String>`) therefore gets its zero-width spaces too.
+- **`&#64;` in a title reads as `&amp;#64;`.** A title is no Markdown: GitHub shows the `&amp;` it is given as text and decodes nothing, so the entity that was defused is
+  visible as `&amp;#64;`. The `#64` that stays inside it can be linked as an issue in a title (a title cannot be checked against the Markdown renderer).
+- A mention or a reference that two literals of the workflow form with nothing of an agent in it is the workflow's own text and stays raw (`Closes #{{trigger.issue.number}}`).
+- **A `#000`-like number is left alone** (a CSS colour, a "number" that starts with zeros only). `#123456` is defused: it cannot be told from an issue.
+
+**Permissions the owner grants.** The App of a deployment has no Issues and Pull requests write at first. Until the owner of the App adds **Issues: Read and write**
+and **Pull requests: Read and write** to it and the owner of each installation accepts the change, every one of these steps ends with
+`github_permission_missing` and a sentence that names the permission ("The GitHub App of this workspace may not open pull requests: it needs the permission
+"Pull requests: Read and write". …"). Nothing in the app changes the App's configuration at GitHub.
 
 ### Failure codes
 
@@ -597,8 +688,13 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `job_failed` | step | The job ended without success and without a code of its own. Any other code of the job (`timeout`, `cost_limit_reached`, …) is kept as it is. |
 | `connector_unavailable` | step | No connector is there for the action. |
 | `action_input_invalid` | step | The inputs of the action are not what the connector takes, once the references are resolved. |
-| `action_failed` | step | The connector failed; the message is its own. |
-| `action_timeout` | step | The connector did not answer within 60 seconds; the action is not repeated. |
+| `action_failed` | step | The connector failed for a reason that has no code of its own; the message is its own. |
+| `github_permission_missing` | step | The GitHub App of the workspace lacks a permission the action needs, or the installation is suspended; the message names the permission. |
+| `github_not_found` | step | GitHub has no such issue, pull request or repository, or the installation is gone. |
+| `github_validation` | step | GitHub refused the content: no commits between head and base, an archived repository, a value it does not accept. |
+| `github_rate_limited` | step | GitHub's rate limit was reached (also the secondary limit, which comes without a rate-limit header); the action is not repeated. |
+| `github_unavailable` | step | GitHub could not be reached or did not answer in time. For an action that creates something the message adds that the action may have happened. |
+| `action_timeout` | step | The connector did not answer within 60 seconds; the action is not repeated, and for an action that is not idempotent the message says it may have happened. |
 | `action_interrupted` | step | The engine was interrupted while the action ran; it is not repeated. |
 
 ### Errors of the run routes (`error`)
@@ -653,7 +749,13 @@ not exist.
   - **Steps**, in the order they ran, each with its status, its failure, how long it took, the profile of an agent step and its cost. An agent step links to its
     Implementer run (`/w/<slug>/runs/<jobId>`), where the live view shows what the agent does.
   - **Results.** An agent step shows its branch and, collapsed, the rest of what it returned as JSON text. An action step shows what any action returns:
-    `url`, `number` and `existing`. Everything in them is text from outside, rendered as text and never as markup.
+    `url` (a link only if it passes the check below, else the text), `number` and `existing` (whether the action found what it would have made, so nothing new was created).
+    Everything in them is text from outside, rendered as text and never as markup.
+  - **Failed actions.** The codes of the GitHub connectors are told in a sentence, not as the code: `github_permission_missing` names the permission the App lacks
+    ("Pull requests: Read and write" or "Issues: Read and write", taken from the step's message only if it is one of these two) and says that the owner of the installation has
+    to grant it; `github_rate_limited` says the limit was reached and the action was not repeated; `github_not_found`, `github_validation` and `github_unavailable` have a
+    sentence of their own; an action that creates something and ended without an answer (`github_unavailable` with that note, `action_timeout`, `action_interrupted`) says
+    **"The action may have happened: check GitHub before starting again."** The message the step stored is shown under the sentence as text.
   - **Links.** The only links made from a step's output go to GitHub: a value is linked only if `new URL` reads it as `https://github.com/<owner>/<name>` or
     below it, of **the repository of the run** (`input.repo`, case ignored), with no user name or port in it; `javascript:`, another host or another
     repository are shown as text and not linked. The link of a branch is made from the repository and the branch name, not taken from the output.

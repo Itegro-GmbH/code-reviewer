@@ -56,6 +56,62 @@ describe("the copy of the workflow pages", () => {
     expect(describeRunFailure(null)).toBeNull();
   });
 
+  // #873-T25
+  it("names the missing permission of the GitHub App when the message of the step does", () => {
+    const text = describeStepFailure(
+      "github_permission_missing",
+      'The GitHub App of this workspace may not open pull requests: it needs the permission "Pull requests: Read and write". The owner has to grant it.',
+    );
+    expect(text).toContain('"Pull requests: Read and write"');
+    expect(text).not.toContain("github_permission_missing");
+    expect(
+      describeStepFailure(
+        "github_permission_missing",
+        'it needs the permission "Issues: Read and write".',
+      ),
+    ).toContain('"Issues: Read and write"');
+  });
+
+  // #873-T25
+  it("names no permission that is not one of the two known ones, or when the message has none", () => {
+    for (const message of [
+      'it needs the permission "Administration: Read and write".',
+      "<script>alert(1)</script>",
+      null,
+    ]) {
+      const text = describeStepFailure("github_permission_missing", message);
+      expect(text).toContain("lacks a permission this action needs");
+      expect(text).not.toContain("Administration");
+      expect(text).not.toContain("script");
+    }
+  });
+
+  // #873-T26
+  it("says that GitHub's rate limit was reached, and that an action that creates something may have happened after an error of GitHub's own", () => {
+    expect(describeStepFailure("github_rate_limited")).toContain(
+      "rate limit was reached",
+    );
+    const lost = describeStepFailure(
+      "github_unavailable",
+      "GitHub could not be reached or did not answer in time. The action may have happened; check GitHub before starting again.",
+    );
+    expect(lost).toContain("may have happened");
+    // An idempotent action says nothing of the kind, and neither does the sentence.
+    expect(
+      describeStepFailure(
+        "github_unavailable",
+        "GitHub could not be reached or did not answer in time.",
+      ),
+    ).not.toContain("may have happened");
+    // The two codes that are about an unknown outcome say it in their own sentence.
+    expect(describeStepFailure("action_timeout")).toContain(
+      "may have happened",
+    );
+    expect(describeStepFailure("action_interrupted")).toContain(
+      "may have happened",
+    );
+  });
+
   // #873-T22
   it("explains each cost basis in a sentence", () => {
     for (const basis of ["reported", "estimated", "limit"] as const) {

@@ -17,7 +17,8 @@ the task, picks a model and, if they want, a lower cost limit. The task becomes 
 OpenCode agent works in a clone, in a container of its own with its own Docker, and starts on the new branch. Git is free for
 the agent inside that clone, and it has no way to push: when the turn ends, **the runner pushes every local branch of the
 clone** to GitHub, the new branch among them (section "The git rules"). It does not open a pull request and does not merge.
-The person finds the branches on GitHub and the run on the Runs page.
+The person finds the branches on GitHub and the run on the Runs page, and can **continue the session** there with a next instruction on a new VM
+(section "Session and Turn").
 
 A task may name an **environment** (section "Environments"): a size for the VM and a setup script. The script runs once, before the agent
 starts, in a container of its own with full internet access and no secret of any kind (section "The environment's setup script"); what it
@@ -39,11 +40,93 @@ keys go through the model door (#807).
   summary. Per repository one session holds a branch name (a unique index), and it holds it even if the branch never reached GitHub:
   a turn that failed before it started keeps its name. A name that exists on GitHub already is refused at submit.
 - A **Turn** is one instruction. A session has one turn when a task starts and gets another each time the person continues it
-  (section "Follow-up turns: the API and the form (#841)"). A turn is a row of `jobs` too, so its status is the status of its job:
-  there is no second state machine. A session is never closed or deleted for now (owner's decision of 2026-11-04).
+  (below, "Follow-ups"). A turn is a row of `jobs` too, so its status is the status of its job: there is no second state machine.
 - Two turns of one session never run at once; sessions of one repository run in parallel (the factory's
   `RUNNER_DISPATCH_MAX_RUNNING` is 2 for all kinds together, and a turn can take an hour, so reviews wait behind tasks when two
   are running; raise it and the Dispatcher entry's `maxRunning` together).
+
+### Follow-ups
+
+When a turn has ended the session is idle, and any member of the workspace may give it the next instruction. The form is "Continue"
+on the Runs page of the **newest** turn of the session; the route and its checks are in "Follow-up turns: the API and the form (#841)".
+A follow-up is a job like the first turn's: a new VM from the golden snapshot, the same sandbox, the same git rules, the same final push.
+
+- **Exactly one instruction can wait.** While a turn runs, the person may queue the next instruction; it starts when the turn ends. A
+  second one while one waits is `IMPLEMENTER_SESSION_BUSY` (409). An instruction that cannot start any more (the branch is gone from
+  GitHub, the model is no longer allowed, and so on) is discarded with a reason, and the Runs page shows the reason and the text.
+- **What the form leaves alone is what the last turn had:** the model, the cost limit, the environment (as a copy, so a deleted or edited
+  one changes nothing) and the profile. The model may be changed.
+- **What comes back to the new VM, and what does not.** Only the git repository comes back (below, "Branches"), and the conversation
+  (below, "The conversation"). The VM is new: processes, dev servers, databases, containers and the images they pulled, shell state, files outside the
+  repository and anything installed by hand are gone. The environment's setup script runs again. The agent is told so in a **preface** to
+  its instruction (section "Follow-up turns: resume in the runner (#840)"): that it is in a fresh sandbox, which branches exist and which one
+  is checked out, which branches moved on GitHub since the last turn, to check what runs and to start the dev tools again, and that the
+  commits of the earlier turns are already on GitHub, so that rewriting them makes the push reject the branch (the agent is warned,
+  not stopped).
+- **Branches.** A turn may push several branches (section "The git rules"), so a follow-up starts from **all** the branches the earlier turns
+  left on GitHub, not only the session's: one fetch, 50 commits deep from every tip, a local branch for each, and the branch the agent
+  ended on checked out (section "A follow-up turn: the workspace with several branches"). Each branch is judged against its own start
+  tip at the push, so a branch the turn did not touch is not pushed again. If someone pushed to a branch meanwhile, the turn continues on
+  the GitHub tip and the preface says so. A session whose branch was deleted on GitHub cannot be continued (`IMPLEMENTER_BRANCH_GONE`,
+  "start a new task"); one that never pushed anything starts again from the base branch under the same name.
+
+### The conversation
+
+At the end of every turn the runner reads the engine's session over its HTTP API, takes out the secrets it knows, gzips it (8 MiB at
+most) and hands it to the app through the job host (section "The session snapshot (#839)"). The app keeps **one snapshot per session**,
+replaced by each turn. The next turn downloads it before its process starts and runs `opencode import` in the agent's container before the
+engine starts, so the agent continues in the **same OpenCode session** with its earlier messages and tool results. The Runs page shows the
+way it went as a line "Continuation":
+
+- `imported`: the conversation was imported.
+- `summary_only`: the turn goes on from a record instead, because there was no snapshot to import. The agent gets a fresh session, the
+  preface, and the last turn's summary and a digest of the earlier turns (the last instructions, the summaries, the commit subjects and the
+  changed files) in a part of its own, as data and never as instructions. The reason is a stable word: `no_snapshot` (none stored, or
+  it was over the cap or the export failed), `download_failed`, `snapshot_unreadable` (size, digest, shape), `import_failed` and
+  `version_changed` (the import failed and the engine's version is not the one that wrote the snapshot). None of them fails the turn.
+
+A snapshot holds what the agent read and said **with the outputs of its tools**, which the live view does not show. The page never shows
+it; the one reader is the next turn of the same session.
+
+### The live view
+
+While any turn runs, the Runs page shows what the agent thinks, says and does, one step after the other, and the steps of a follow-up
+turn are those of its own run (section "Step records (the live view)"). A follow-up is a run of its own, and the "Continue" form is on the
+newest one only.
+
+### Keeping it: for ever, no close
+
+**Nothing is closed, and nothing is deleted** (owner's decisions 4 and 8 of 2026-11-04). A session has no close button and no
+column that says it is closed, and no sweep removes old ones. The steps of a turn and the snapshot of a session are **kept for ever**, as long as the
+workspace exists; the one thing that removes them is the erasure of the workspace. The snapshot is the latest turn's only (each turn
+replaces it); the steps of every turn stay. The branch name stays held by its session. If the retention or a close becomes a need, it is a
+new decision with its own change.
+
+### What a long history costs
+
+A follow-up that imports a long conversation makes its **first call read all of it again**, at the price of the model for that many input
+tokens (the provider's cache may help if the follow-up starts soon after the last call; it is not promised). The form shows the size of
+the history ("about N tokens") before the person sends. The model door reserves the cost of a call before it makes it, so a history so
+long that the first call alone could cost more than the cost limit ends the turn with `cost_limit_reached`, **before any call reaches the
+provider** (measured: an 18.4 MB history at 5 USD). The person raises the limit, or starts a new task. When the model's window is too small
+for the history, the engine's automatic compaction summarises it, at the price of one more call. Each turn has its own cost limit; a
+follow-up's cost is not counted in the budget of the workflow run that started the session.
+
+### On a customer's machine
+
+A turn on a runner of the customer (section "Environments of the kind `runner`" in [`runner.md`](runner.md)) is a turn like any other for
+the session, its branches and the preface. The conversation is the exception: the two snapshot routes take the Worker's per-job credential
+and a runner holds a runner credential, so a turn there **stores no snapshot and cannot download one** until #879 gives the runner its own
+two routes. A follow-up on a runner therefore continues from the summary and the digest (`summary_only`). The app sends `resume` only to a
+runner that names the claim feature `implementer_resume`; for any other the follow-up ends `implementer_engine_unavailable`, free, before a
+credential exists.
+
+### Shipping it
+
+The change is an App part and a runner part, and they go out **together**: the App (the contract and the migrations) first, the runner in
+the golden snapshot the same release builds. The App refuses keys in a result that it does not know, and the runner names `implementer_resume`
+only when it can read `resume`; a follow-up claimed by an older runner ends `implementer_engine_unavailable`, free, so a gap between
+the two deployments costs nothing but the follow-ups that fall into it. The live check on a real VM is the section "Release 2: live test".
 
 ## The data flow
 
@@ -80,15 +163,16 @@ keys go through the model door (#807).
    the agent is on. Work the agent committed on a detached HEAD, on no branch, is saved first, whether the tree is dirty or
    not: the runner makes a branch `<the task's branch>-leftover-<id>` at HEAD and the push takes it with the others. The
    branch is named in the summary and reported with the other branches.
-7. **Push.** Nothing is pushed while the agent works. When the turn ends, the agent's container is killed, and then the
+7. **Push.** Nothing is pushed while the agent works. When the turn ends, the runner first reads the engine's session out for a
+   follow-up (section "The session snapshot (#839)"), then the agent's container is killed, and then the
    runner pushes all local branches of the agent's repository, without force, one at a time (below, "The git rules"). Before it lists anything, and again right before each
    `git push`, it asks whether the lease is still held; only `held` allows a push. A lost lease ends the turn `lease_lost`
    with nothing pushed after it.
 8. **Report.** The Worker reports the result once: base and head commit and whether the head was pushed (both of the branch
    the form named), **every branch it pushed or tried to push with its outcome**, the commits (at most 200) and the changed
    files (at most 500) of the form's branch, the agent's closing summary (at most 8,192 characters, with known secrets
-   removed), the OpenCode ids and the usage. The session becomes idle and the Runs page shows the branches, the commits, the
-   files, the summary and the cost.
+   removed), the OpenCode ids and the usage. The session becomes idle, the Runs page shows the branches, the commits, the
+   files, the summary and the cost, and an instruction that waited for the turn (section "Session and Turn") starts.
 
 The repository's own OpenCode files (`opencode.json`, `opencode.jsonc`, `.opencode/`, its instruction files and skills) apply
 as they would on a person's machine: the agent is free in its container. What they cannot change is what the model door holds
@@ -153,7 +237,7 @@ commits, or when the agent's repository, or its list of branches (read up to 4 M
 further call, and set to the `-leftover-` branch when the rescue or the commit of the leftover had to make one. It is `null` when
 HEAD was detached and on no branch, when its name is not one the runner pushes (it is never shown), and when the repository was not
 read (the agent's container could not be confirmed gone). It names a branch of the agent's repository, which may not have arrived:
-`branches` says which did. The app accepts the field (`parseImplementerResult`) and nothing reads it yet; the follow-up turn will start on it.
+`branches` says which did. The app keeps the field (`parseImplementerResult`), and the claim of a follow-up turn reads it back as the branch to check out (`checkout` of `resume`).
 The runner sends the field only when it names a branch, so a newer runner against an older app still works for `null`; a name needs the app first (the older parser refuses unknown keys). `checkedOut` can name a branch that is not in `branches` (for example the base branch the agent switched back to); a resume then falls back to the session branch (#849 refuses a checkout outside the resume branches). The name is redacted and clipped by the host like the names in `branches`.
 
 **One place for a later rule.** `PUSH_EXCLUDED_BRANCHES` in `runner/src/code_reviewer_runner/implementer/push_policy.py` is
@@ -238,7 +322,7 @@ page).
 
 A follow-up turn is a job whose `implementer` carries `resume` (`ImplementerResume` of the contract): the number of the turn, the branches the last turn pushed with the tip it pushed (the
 session branch first when it is among them, at most 20) and the branch the agent was on when that turn ended. Only a Worker that names the claim feature `implementer_resume` gets one. The
-app does not send a `resume` yet (the follow-up API is a later step of #745); this is the runner's side. What the runner does with the stored conversation is "Follow-up turns: resume in the runner" below.
+app builds it from the stored reports of the earlier turns when a person continues a session (section "Follow-up turns: the API and the form (#841)"); this is the runner's side. What the runner does with the stored conversation is "Follow-up turns: resume in the runner" below.
 
 The workspace (`GitWorkspace`) prepares such a turn like this:
 
@@ -268,7 +352,7 @@ The workspace (`GitWorkspace`) prepares such a turn like this:
 - **One start tip per branch** (`start_tips`). `start_commit` is the start tip of the session branch (the base tip on a first turn), so `baseCommit`, `commits` and `filesChanged` of the report cover what this turn did to the
   session branch. The final push judges every branch against its own start tip: a branch of the session that the agent did not touch is not fetched, not pushed and not reported; a branch the agent made is left alone while it is still at
   some start tip (it holds no commit of its own). The push is as before: every local branch, no force. In the result of a follow-up turn `pushed` and `headCommit` describe the session branch only; the other
-  branches the turn pushed are in `branches` (the follow-up that reads them is a later step of #745).
+  branches the turn pushed are in `branches`, which the claim of the next follow-up turn reads (`resume.branches`).
 - **After the setup script** the history of the script is undone branch by branch: HEAD back on the branch the agent starts on, every branch of the turn at its start tip, every other branch and tag deleted.
 
 ## The model door
@@ -557,14 +641,14 @@ agent read and said.** The runner and the app strip the secrets they know (the m
 like a credential), but they cannot know the repository: a `.env` the agent printed with `cat`, a key in a test fixture or customer
 data in a file the agent opened is in the agent's text or the input of its tool call, and so on the page. **The output of a tool is not
 shown** (the runner does not record it and the app never gets it), which keeps most of that out; the input of a tool call (a command, a
-path, a pattern) and the agent's own words are shown. Steps are kept as long as the run is, for now with no time limit. Before outside users arrive, the
+path, a pattern) and the agent's own words are shown. Steps are kept for ever (owner's decision 4 of 2026-11-04: no sweep, no close), until the workspace is erased. Before outside users arrive, the
 decision to let every member see them moves with the one for starting a task (the note in "What it is").
 
 ## Follow-up turns: what was measured on a real VM (#837)
 
 A follow-up turn continues a session in a new VM: the old conversation is exported from the engine before its container is
-killed, kept, and imported on the new VM. None of that is built yet. This section is what a real VM said about the plan's
-assumptions before it is built; `runner/scripts/follow_up_spike.py` reproduces it (15 of 15 checks passed on the VM below, the lane's 11 tests of `test_implementer_git.py` and `test_implementer_turn.py` too).
+killed, kept, and imported on the new VM. This section is what a real VM said about the plan's
+assumptions before it was built (the result is in "Session and Turn" and the sections that follow); `runner/scripts/follow_up_spike.py` reproduces it (15 of 15 checks passed on the VM below, the lane's 11 tests of `test_implementer_git.py` and `test_implementer_turn.py` too).
 
 **Measured on a real VM (2026-11-04, `spike-837-followup-1`, 2 vCPU, 4 GB, a snapshot built from `development` at `f34a40a1`,
 `sysbox: proven`; the agent's container 2,048 MB under `sysbox-runc`; the pinned OpenCode 1.19.0; the strict scripted provider of
@@ -609,7 +693,7 @@ the narrowed network policy, and the import of a snapshot written by another Ope
 
 A follow-up turn (#745) continues a session in a new VM, so the engine's conversation has to outlive the VM. At the end of every turn the runner takes the
 engine's session as a file and the job host uploads it to the app, which keeps **one snapshot for each session, replaced by each turn, and never deleted but by the erasure
-of the workspace** (owner's decision of 2026-11-04). The runner of a follow-up turn reads it back and imports it on the new VM ("Follow-up turns: resume in the runner", #840); the follow-up API and page are another step (PR 9).
+of the workspace** (owner's decision of 2026-11-04). The runner of a follow-up turn reads it back and imports it on the new VM ("Follow-up turns: resume in the runner", #840); the follow-up API and page are "Follow-up turns: the API and the form (#841)".
 
 **Taking it** (`implementer/session_export.py`, called by `ImplementerSession` right before `ImplementerAgent.stop()`, because it is read from the running engine). Over the
 engine's HTTP API only, as the spike measured: `GET /session/<id>` and `GET /session/<id>/message` in pages of 50, newest page first with the cursor in `x-next-cursor`, put back
@@ -778,6 +862,41 @@ that instruction and is disabled. The hint "history: about N tokens; the first c
 
 **Tests.** `follow-up.test.ts` (fakes: the turn that ends between the two writes, the repeat of a queued request id, the discard of one instruction only, the attempt, the day), `follow-up.integration.test.ts` and `follow-up-http.integration.test.ts` (Postgres: busy and queued, the second queued is `409`, branch gone, model not allowed, the environment copy, two parallel submits make one turn or one queued instruction, idempotency, another workspace is `404`, the start at the end of a turn also for a double event, the discard), `implementer-queue.integration.test.ts` (also the stale discard and the order and backoff of the sweep), `turn-ended-hook.test.ts`,
 `implementer-own-key-claim.integration.test.ts` (the claim with and without `implementer_resume`), `add-implementer-session-queue.integration.test.ts` (the migration), `resume.test.ts`, `continue-input.test.ts`, `follow-up-starter.test.ts`, `sweep.test.ts` and `continue-form.test.tsx`.
+
+## Release 2: live test
+
+This is the checklist of the lead for the release that brings the follow-up turns (#842, part of #745) to the factory. Everything above
+was proven with fakes, on a spike VM and in the Docker lane; **none of it has run on the factory's real VM with the real deployment**. The
+release and this test need the owner's go, and nobody runs them without it. The test costs about the same as the live view's (two short turns
+on a cheap model, well under 1 USD). How to run a turn and read the Runs page is in [`implementer-smoke-test.md`](implementer-smoke-test.md);
+the checks below add to it and do not replace it.
+
+**Before the release.**
+
+- The owner's go is given in writing (a comment on #842).
+- The cost maximum of the factory is at least the 5.00 USD of the owner's setting ("Limits"), and the test repository has a branch protection on its
+  default branch ("The risk, plainly").
+- Release 1 (the live view) is live: the steps below read the page's live view.
+
+**The order of the deployment.** One release run builds the golden snapshot with the new runner, stages the App and the Dispatcher and promotes the App first,
+the Dispatcher last (`docs/deployment-vercel.md`, the deployment pipeline). The test starts only after `persist` and the canary of that run are green and
+the Dispatcher serves the snapshot of the run. The App and the runner are **one release**: the App accepts the new keys of a result (`checkedOut`)
+and sends `resume` only to a runner that names `implementer_resume`, so between the two promotions a follow-up ends
+`implementer_engine_unavailable`, free, and a first turn is unharmed. Do not start a follow-up in that window and do not promote one half alone.
+
+| # | Check | A pass is | A failure is |
+|---|---|---|---|
+| R1 | **Turn 1** on a 2 vCPU environment with a setup script: the task makes the agent start a dev server in the background (a web server on a port is enough), commit a change on the session branch and create a **second branch** with a commit | The run ends `completed`; the Runs page lists both branches with their commits; the live view showed the steps while it ran; GitHub has both branches | Only one branch arrives, or the steps do not show |
+| R2 | **Turn 2**, the "Continue" form with "check what is running, then start it again, change both branches and push": no change to the model | The line "Continuation" says `imported`; the first thing the agent does is look (`git status`, the process list); it finds that the **server is gone** and **both branches are there at the pushed tips**; it starts the server again and pushes **both** branches; the second request of the model holds turn 1's instruction | `summary_only` (with a reason word): note it, then see R3 and the log. The agent says nothing of a new sandbox, or finds the server running |
+| R3 | **A branch that moved**: between turn 1 and turn 2 push one more commit to the second branch on GitHub (by hand, on the web) | The preface names that branch as moved; the agent continues from the new tip and its commits come on top of the commit made by hand | The push of that branch is `non_fast_forward`, or the agent works on the old tip |
+| R4 | **The app host under the narrow network rule**: turn 1 and turn 2 run with the environment's rule `off` (and once with `list`), so the VM's policy is narrowed ("The second wall") | The steps arrive during the turn, the snapshot is uploaded before the result (no note "the session was not saved for a follow-up turn"), and turn 2 downloads it (`imported`, not `download_failed`) | `download_failed` or a note about the snapshot with the rule `off`: the App's host is not in the policy for these calls; the fix is in the policy, not in the runner |
+| R5 | **The grace sums at 2 and 4 vCPU**: repeat R1 and R2 on a 4 vCPU environment, once ending normally and once ended by a stop of the Worker while the agent works (SIGTERM, "Limits", row Stop) | At both sizes the turn ends `completed` (or `runner_shutdown` on the stop), the final push of every branch arrives, and the snapshot is saved (a stop gets 2 s for the export, a normal end 5 s; "The git rules", "Time") | A branch is missing after the stop, a note says the export ran `out_of_time`, or the process was killed before it reported |
+| R6 | **A long history**: a third turn on the same session with a model of a small window, or with a cost limit lower than the history | The turn compacts and goes on, or ends `cost_limit_reached` before any call with the sentence about the imported conversation ("What a long history costs") | A turn that hangs, or one that bills a call it should have refused |
+| R7 | **One instruction waits**: while a turn runs, queue one instruction; queue a second | The first is accepted (`202`, "queued") and starts when the turn ends; the second is `IMPLEMENTER_SESSION_BUSY` | Both are accepted, or the queued one never starts |
+| R8 | **Nothing is closed**: the run page of the session has no close button; the steps and the snapshot of turn 1 are still there after turn 3 | The steps of every turn are listed; the session accepts another follow-up | A turn's steps are gone |
+
+**After the test.** Write the result, with the run ids, as a comment on #842, and in this section only what differs from the above. Delete the test branches on GitHub
+by hand and let the test workspace keep its sessions (nothing deletes them). An R2 that fell back to `summary_only`, whatever the reason word, is a failure of the release, not a detail: stop and read the notes of the run before anything else.
 
 ## The memory of the readers and the OS
 
@@ -1507,8 +1626,8 @@ that were pushed first. A Worker that is stopped while it works (`runner_shutdow
 - **Pushes that touch `.github/workflows/`.** The App has no `workflows` permission and never asks for it for this; GitHub
   rejects that branch (`workflows_not_allowed`) while the others arrive; a task whose own branch is the one rejected ends
   `push_rejected`. Change workflow files by hand ([`github-app.md`](github-app.md)).
-- Opening or merging a pull request, a second turn on the same branch, a task on an existing branch, forks, other platforms
-  than GitHub.
+- Opening or merging a pull request, a task on an existing branch (a follow-up continues the session's own branch and the others it
+  pushed, never one that a person made), forks, other platforms than GitHub.
 - **A targeted escape from the kernel or the Sysbox daemons.** Step 6 attacked the boundaries the runner builds (section "The attack test (step 6)"); it
   did not look for a flaw in the kernel, Sysbox or Docker themselves.
 

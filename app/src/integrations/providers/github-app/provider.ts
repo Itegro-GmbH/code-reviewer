@@ -21,6 +21,8 @@ import {
   createGithubAppClient,
   type GithubAppClient,
   type GithubAppClientOptions,
+  type InstallationPermissions,
+  type JobTokenScope,
   type RemoteInstallation,
 } from "./client.ts";
 import type { GithubAppConfig } from "./config.ts";
@@ -33,12 +35,15 @@ import {
   IMPLEMENTER_TOKEN_PERMISSIONS,
   JOB_TOKEN_PERMISSIONS,
   COMMENT_READ_TOKEN_PERMISSIONS,
+  ISSUE_ACTION_TOKEN_PERMISSIONS,
   NOTICE_TOKEN_PERMISSIONS,
+  PULL_REQUEST_ACTION_TOKEN_PERMISSIONS,
   VERDICT_TOKEN_PERMISSIONS,
   jobTokenRepositoryIds,
   toImplementerAccessError,
   toJobAccessError,
   toReadError,
+  toActionError,
   toWriteError,
 } from "./job-access.ts";
 import { isValidSignature } from "./webhook-signature.ts";
@@ -72,6 +77,21 @@ export type GithubAppProviderOptions = {
    */
   capabilities?: () => CapabilitySet;
 };
+
+/** The token scope of a workflow action (#844): exactly this repository, and the permissions the action needs. */
+function actionScope(
+  integration: Integration,
+  repo: RepoRef,
+  permissions: InstallationPermissions,
+): JobTokenScope {
+  const repositoryIds = jobTokenRepositoryIds(repo.externalId);
+  if (repo.integrationId !== integration.id || repositoryIds === null)
+    throw new IntegrationError(
+      "INTEGRATION_ACCESS_SCOPE_REFUSED",
+      "The repository does not belong to this integration or has no usable id.",
+    );
+  return { repositoryIds, permissions };
+}
 
 function toDiscovered(installation: RemoteInstallation): DiscoveredConnection {
   return {
@@ -371,6 +391,87 @@ export function createGithubAppProvider(
         return "posted";
       } catch (error) {
         throw toReadError(error);
+      }
+    },
+
+    async openPullRequest(integration, repo, input, signal) {
+      try {
+        return await (
+          await getClient()
+        ).openPullRequest(
+          integration.externalId,
+          actionScope(integration, repo, PULL_REQUEST_ACTION_TOKEN_PERMISSIONS),
+          repo.fullName,
+          input,
+          signal,
+        );
+      } catch (error) {
+        throw toActionError(error);
+      }
+    },
+
+    async commentOnIssue(integration, repo, issueNumber, body, options = {}) {
+      try {
+        const { signal, marker, since } = options;
+        const client = await getClient();
+        const scope = actionScope(
+          integration,
+          repo,
+          ISSUE_ACTION_TOKEN_PERMISSIONS,
+        );
+        if (marker !== undefined) {
+          const botLogin = `${(await getConfig()).slug}[bot]`;
+          const earlier = await client.listIssueComments(
+            integration.externalId,
+            scope,
+            repo.fullName,
+            issueNumber,
+            {
+              ...(since === undefined ? {} : { since }),
+              ...(signal === undefined ? {} : { signal }),
+            },
+          );
+          // Only the app's own comment counts: anybody can copy a marker into theirs.
+          const found = earlier.find(
+            (comment) =>
+              comment.authorLogin === botLogin && comment.body.includes(marker),
+          );
+          if (found !== undefined)
+            return {
+              url: `${repo.url}/issues/${String(issueNumber)}#issuecomment-${found.id}`,
+              existing: true,
+            };
+        }
+        const { url } = await client.createIssueComment(
+          integration.externalId,
+          scope,
+          repo.fullName,
+          issueNumber,
+          body,
+          signal,
+        );
+        return { url, existing: false };
+      } catch (error) {
+        throw toActionError(error);
+      }
+    },
+
+    async changeIssueLabels(integration, repo, issueNumber, change, signal) {
+      try {
+        return {
+          labels: await (
+            await getClient()
+          ).changeIssueLabels(
+            integration.externalId,
+            actionScope(integration, repo, ISSUE_ACTION_TOKEN_PERMISSIONS),
+            repo.fullName,
+            issueNumber,
+            change,
+            signal,
+          ),
+        };
+      } catch (error) {
+        throw toActionError(error);
       }
     },
 

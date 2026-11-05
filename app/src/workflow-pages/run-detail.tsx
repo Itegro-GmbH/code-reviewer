@@ -231,7 +231,7 @@ function Step({
   repository: string | undefined;
 }) {
   const duration = stepDurationMs(step);
-  const failure = describeStepFailure(step.errorCode);
+  const failure = describeStepFailure(step.errorCode, step.errorMessage);
   return (
     <li
       data-slot="run-step"

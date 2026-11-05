@@ -87,8 +87,18 @@ export const STEP_FAILURE_CODES = [
   "connector_unavailable",
   /** The inputs of the action are not what the connector takes, once the references are resolved. */
   "action_input_invalid",
-  /** The connector refused or failed. */
+  /** The connector refused or failed for a reason that has no code of its own. */
   "action_failed",
+  /** The GitHub App of the workspace lacks a permission the action needs (or the installation is suspended); the message names the permission. */
+  "github_permission_missing",
+  /** GitHub has no such issue, pull request or repository, or the installation is gone. */
+  "github_not_found",
+  /** GitHub refused what was asked for its content: no commits between the branches, an archived repository, an unusable value. */
+  "github_validation",
+  /** GitHub's rate limit was reached; the action is not repeated. */
+  "github_rate_limited",
+  /** GitHub could not be reached or answered with an error of its own. */
+  "github_unavailable",
   /** The connector did not answer within `ACTION_TIMEOUT_MS`; whether the action happened is not known, and it is not repeated. */
   "action_timeout",
   /** The engine was interrupted while an action ran; whether it happened is not known, and it is not repeated. */

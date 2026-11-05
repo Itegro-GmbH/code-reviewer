@@ -43,6 +43,8 @@ export const INTEGRATION_ERROR_CODES = [
    * example a review of the app's own pull request). Trying the same call again does not help.
    */
   "INTEGRATION_REQUEST_REFUSED",
+  /** The platform refused a pull request because the head branch has nothing the base branch lacks (GitHub: 422 "No commits between"). Trying again does not help until something is pushed. */
+  "INTEGRATION_NO_CHANGES_TO_COMPARE",
   /** The repository is archived, so the platform accepts no write to it (GitHub: 403 "archived so is read-only"). */
   "INTEGRATION_REPOSITORY_ARCHIVED",
   /** The repository is not (or no longer) part of the installation the call was made for. */

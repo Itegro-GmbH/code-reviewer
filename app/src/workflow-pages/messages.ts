@@ -83,9 +83,18 @@ const STEP_FAILURE_TEXT: Record<
   no_result:
     "The agent ended without a result that fits what the step asks for.",
   job_failed: "The agent's task ended without success.",
-  connector_unavailable: "This action is not available on this server yet.",
+  connector_unavailable: "This action is not available on this server.",
   action_input_invalid: "The values of the action are not what it takes.",
   action_failed: "The action failed.",
+  github_permission_missing:
+    "The GitHub App of this workspace lacks a permission this action needs, or its installation is suspended. The owner of the GitHub installation has to grant the permission and accept the change; then run the workflow again.",
+  github_not_found:
+    "GitHub has no such issue, pull request or repository, or the GitHub installation of this workspace no longer exists.",
+  github_validation:
+    "GitHub refused what the action asked for: for example there are no commits between the branches, the repository is archived, or a value is not accepted.",
+  github_rate_limited:
+    "GitHub's rate limit was reached. The action was not repeated; wait a while and run the workflow again.",
+  github_unavailable: "GitHub could not be reached or did not answer in time.",
   action_timeout:
     "The action did not answer in time. It is not repeated, because it may have happened.",
   action_interrupted:
@@ -111,12 +120,46 @@ export function describeRunFailure(code: string | null): string | null {
     : FAILURE_UNKNOWN_TEXT;
 }
 
-/** The sentence for why a step failed; never the code. */
-export function describeStepFailure(code: string | null): string | null {
+/** The permissions the actions need, as the settings page of the GitHub App words them. Only these are ever named. */
+const GITHUB_PERMISSIONS = [
+  "Pull requests: Read and write",
+  "Issues: Read and write",
+] as const;
+
+/** What the connector says about an action that cannot be repeated and ended without an answer (`MAY_HAVE_HAPPENED` of the engine). */
+const MAY_HAVE_HAPPENED_MARK = "may have happened";
+export const MAY_HAVE_HAPPENED_TEXT =
+  "The action may have happened: check GitHub before starting again.";
+
+/** The permission a `github_permission_missing` message names, when it is one of the known ones. */
+export function missingPermissionOf(message: string | null): string | null {
+  if (message === null) return null;
+  return (
+    GITHUB_PERMISSIONS.find((name) => message.includes(`"${name}"`)) ?? null
+  );
+}
+
+/**
+ * The sentence for why a step failed; never the code. The message the step stored is used for two things only, and only by matching
+ * known strings: which permission is missing, and whether an action that creates something may have happened.
+ */
+export function describeStepFailure(
+  code: string | null,
+  message: string | null = null,
+): string | null {
   if (code === null) return null;
-  return has(STEP_FAILURE_TEXT, code)
-    ? STEP_FAILURE_TEXT[code]
-    : FAILURE_UNKNOWN_TEXT;
+  if (!has(STEP_FAILURE_TEXT, code)) return FAILURE_UNKNOWN_TEXT;
+  const base = STEP_FAILURE_TEXT[code];
+  if (code === "github_permission_missing") {
+    const permission = missingPermissionOf(message);
+    if (permission !== null)
+      return `The GitHub App of this workspace lacks the permission "${permission}", or its installation is suspended. The owner of the GitHub installation has to grant the permission and accept the change; then run the workflow again.`;
+  }
+  const mayHaveHappened =
+    code === "github_unavailable" &&
+    message !== null &&
+    message.includes(MAY_HAVE_HAPPENED_MARK);
+  return mayHaveHappened ? `${base} ${MAY_HAVE_HAPPENED_TEXT}` : base;
 }
 
 /** Where the cost charged to a step comes from, and what that means for the figure. */

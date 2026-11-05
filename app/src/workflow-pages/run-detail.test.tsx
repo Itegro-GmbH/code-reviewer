@@ -265,6 +265,76 @@ describe("what an action returned", () => {
   });
 });
 
+describe("what a failed GitHub action says", () => {
+  const failedAction = (errorCode: string, errorMessage: string) =>
+    step({
+      id: "open-pr",
+      kind: "action",
+      jobId: null,
+      profile: null,
+      costUsd: null,
+      costBasis: null,
+      status: "failed",
+      output: null,
+      errorCode,
+      errorMessage,
+    });
+
+  // #873-T49
+  it("names the permission the App lacks, in words and not as the code", () => {
+    const { container } = renderRun(
+      run({
+        status: "failed",
+        errorCode: "step_failed",
+        steps: [
+          failedAction(
+            "github_permission_missing",
+            'The GitHub App of this workspace may not open pull requests: it needs the permission "Pull requests: Read and write". The owner has to grant it.',
+          ),
+        ],
+      }),
+    );
+
+    const failure = container.querySelector("[data-slot=step-failure]");
+    expect(failure?.textContent).toContain('"Pull requests: Read and write"');
+    expect(container.textContent).not.toContain("github_permission_missing");
+  });
+
+  // #873-T49
+  it("tells the rate limit and an action that may have happened", () => {
+    const limited = renderRun(
+      run({
+        steps: [
+          failedAction(
+            "github_rate_limited",
+            "GitHub's rate limit was reached. The action was not repeated.",
+          ),
+        ],
+      }),
+    );
+    expect(
+      limited.container.querySelector("[data-slot=step-failure]")?.textContent,
+    ).toContain("rate limit was reached");
+    expect(limited.container.textContent).not.toContain("github_rate_limited");
+    limited.unmount();
+
+    const lost = renderRun(
+      run({
+        steps: [
+          failedAction(
+            "github_unavailable",
+            "GitHub could not be reached or did not answer in time. The action may have happened; check GitHub before starting again.",
+          ),
+        ],
+      }),
+    );
+    expect(
+      lost.container.querySelector("[data-slot=step-failure]")?.textContent,
+    ).toContain("may have happened");
+    expect(lost.container.textContent).not.toContain("github_unavailable");
+  });
+});
+
 describe("values that come from outside", () => {
   // #873-T46
   it("renders what an agent returned as text, never as markup", () => {

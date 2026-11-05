@@ -944,7 +944,11 @@ describe("the action", () => {
     });
 
     expect(codes(doc)).toEqual([["/steps/2/body", "reference_unknown_field"]]);
-    expect(run(doc).errors[0]?.available).toEqual(["number", "url"]);
+    expect(run(doc).errors[0]?.available).toEqual([
+      "number",
+      "url",
+      "existing",
+    ]);
   });
 });
 
