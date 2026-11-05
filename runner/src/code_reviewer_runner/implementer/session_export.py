@@ -77,7 +77,7 @@ MAX_RAW_BYTES: Final = 64 * 1024 * 1024
 # The most elements (values of lists and objects, at any depth) a document may have, counted as the
 # commas of a page before it is parsed (an upper bound: a comma in a string counts) and as the walk
 # of the parsed document. A transcript has an element for 20 bytes or more (an estimate from the
-# fixtures; the spike's 18.4 MB is about 0.9 M), a page made of tiny strings has one for 4 (7.5 M in
+# fixtures: the spike's 18.4 MB would be 0.9 M), a page made of tiny strings has one for 4 (7.5 M in
 # 30 MB took 680 MB of memory and 11 s to go through).
 MAX_NODES: Final = 2_000_000
 # The deepest nesting a document may have: a transcript's is about ten (message, part, state,
@@ -161,7 +161,7 @@ def take_snapshot(
     def run() -> None:
         try:
             outcome.append(_export(fetch, session_id, redactor, deadline, clock, work))
-        except BaseException as error:  # noqa: BLE001 - handed to the caller's thread
+        except BaseException as error:
             outcome.append(error)
 
     worker = threading.Thread(target=run, name="session-export", daemon=True)
@@ -238,9 +238,7 @@ def _json(answer: tuple[Mapping[str, str], bytes]) -> Any:
         raise ExportFailed(ExportReason.BAD_ANSWER) from None
 
 
-def _messages(
-    fetch: Fetch, safe: str, left: Callable[[], float], work: _Work
-) -> list[Any]:
+def _messages(fetch: Fetch, safe: str, left: Callable[[], float], work: _Work) -> list[Any]:
     """Every message, oldest first. The engine answers the newest `PAGE_SIZE` and, while there are
     older ones, the cursor for them in a header; the pages are put back in order."""
     pages: list[list[Any]] = []

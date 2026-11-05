@@ -602,7 +602,7 @@ def test_a_slow_computation_is_given_up_on_at_the_deadline_and_stops() -> None:
     assert elapsed < 1.0
 
 
-# -- a document made to be expensive ----------------------------------------------------------------
+# -- a document made to be expensive ----------------------------------------------------------
 
 
 def hostile_page(strings: int) -> bytes:
@@ -687,7 +687,7 @@ def test_the_production_fetch_stops_reading_past_its_limit_across_all_calls() ->
     assert len(second[2]) == 1000 - len(first[2]) + 1
 
 
-# -- tool metadata that nests its copies of the content ---------------------------------------------
+# -- tool metadata that nests its copies of the content -------------------------------------
 
 
 def edit_part(number: int, size: int, *, compacted: int | None) -> dict[str, Any]:
@@ -740,7 +740,7 @@ def test_an_edit_heavy_session_stays_well_under_the_cap_once_its_old_diffs_are_b
     # 300 edits of 30 KB files, random so that gzip does not help: 36 MB of metadata, far over
     # the cap of what is stored, and inside what the export reads.
     noise = base64.b64encode(os.urandom(30_000)).decode()
-    parts = []
+    parts: list[dict[str, Any]] = []
     for number in range(300):
         part = edit_part(number, 0, compacted=number + 1 if number < 290 else None)
         part["state"]["metadata"]["filediff"]["before"] = noise

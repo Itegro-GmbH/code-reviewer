@@ -146,7 +146,10 @@ def test_the_host_has_the_snapshot_uploaded_before_it_delivers_the_result() -> N
 
         api.complete = completing
         data = b"\x1f\x8bsession"
-        wire = header_line(SnapshotHeader(len(data), 30, hashlib.sha256(data).hexdigest(), "1.19.0")) + data
+        wire = (
+            header_line(SnapshotHeader(len(data), 30, hashlib.sha256(data).hexdigest(), "1.19.0"))
+            + data
+        )
 
         async def start(spec: ProcessSpec) -> RunningProcess:
             process = ServingProcess(spec)
