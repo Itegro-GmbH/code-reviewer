@@ -317,7 +317,7 @@ export type KnownReleaseReason = "launch_failed" | "worker_exited";
  */
 export type VmName = string;
 /**
- * The features an app lists in VersionResponse.features. A reader ignores a name it does not know and refuses to run against an app that lacks one it needs. `worker_api`: /api/workers/v1 exists. `claim_by_job_id`: ClaimRequest.jobId is honoured. `pool_cap`: ClaimRequest.maxRunning is honoured. `release`: the release call exists. `vm_lifecycle` (#493): POST /api/runners/v1/jobs/{id}/vm exists (the Dispatcher reports the VM it created, for the billable minutes); a Dispatcher sends that call only to an app that lists the feature. `implementer_steps` (#745): POST /api/runners/v1/jobs/{id}/steps and POST /api/workers/v1/jobs/{id}/steps exist (the steps of a running turn of the Implementer, for the live view); a runner sends them only to an app that lists the feature. It is an app feature, not a claim feature: the call adds nothing to the job input, so there is nothing the app must withhold from a caller that does not know it. `implementer_snapshot` (#839): PUT /api/workers/v1/jobs/{id}/session exists (one part of the session snapshot of a turn of the Implementer, for the follow-up turns); a Worker puts it only to an app that lists the feature. An app feature too: the call adds nothing to the job input.
+ * The features an app lists in VersionResponse.features. A reader ignores a name it does not know and refuses to run against an app that lacks one it needs. `worker_api`: /api/workers/v1 exists. `claim_by_job_id`: ClaimRequest.jobId is honoured. `pool_cap`: ClaimRequest.maxRunning is honoured. `release`: the release call exists. `vm_lifecycle` (#493): POST /api/runners/v1/jobs/{id}/vm exists (the Dispatcher reports the VM it created, for the billable minutes); a Dispatcher sends that call only to an app that lists the feature. `implementer_steps` (#745): POST /api/runners/v1/jobs/{id}/steps and POST /api/workers/v1/jobs/{id}/steps exist (the steps of a running turn of the Implementer, for the live view); a runner sends them only to an app that lists the feature. It is an app feature, not a claim feature: the call adds nothing to the job input, so there is nothing the app must withhold from a caller that does not know it. `implementer_snapshot` (#839): PUT /api/workers/v1/jobs/{id}/session exists (one part of the session snapshot of a turn of the Implementer, for the follow-up turns); a Worker puts it only to an app that lists the feature. An app feature too: the call adds nothing to the job input. `runner_session_snapshot` (#879): PUT /api/runners/v1/jobs/{id}/session and GET /api/runners/v1/jobs/{id}/resume-session exist (the same calls for a customer's runner, which holds a runner credential and no per-job credential: `RunnerLeaseTokenHeader`, `RunnerSessionPartQuery`, `RunnerResumeSessionQuery`); such a runner reads the list from GET /api/runners/v1/version with its own credential and uses the two calls only if the app lists the feature. `implementer_snapshot` does not say it: an app can have the Worker API's calls and not these.
  */
 export type KnownAppFeature =
   | "worker_api"
@@ -326,7 +326,8 @@ export type KnownAppFeature =
   | "release"
   | "vm_lifecycle"
   | "implementer_steps"
-  | "implementer_snapshot";
+  | "implementer_snapshot"
+  | "runner_session_snapshot";
 /**
  * #745: the kinds of `StepRecord` the app stores. `reasoning`: a finished reasoning part, with the text the provider returned (often a summary). `text`: a finished assistant text part. `tool`: a tool call, with its name, status, title, the input as JSON text and the error text; the OUTPUT of a tool is never recorded, on either side. `step`: the end of one model call, with its tokens and cost. A record of another kind is left out and counted in `StepsResponse.dropped`: a newer runner may send more kinds.
  */
@@ -1811,7 +1812,54 @@ export interface StepsResponse {
   [k: string]: unknown;
 }
 /**
- * #318: 200 from GET /api/runners/v1/version (dispatcher credential; #322: a Worker may also send its per-job credential with ?jobId=<its job>, which must be the running claim of that job). Lets a Dispatcher or a Worker detect an app that is too old before it claims anything. An app of a previous release has no such route (404), which means it is too old. `version` is the runner API version; `appVersion` is the build of the app, for logs.
+ * #879: the request headers of the two runner calls whose body is raw bytes (`PUT .../session`, `GET .../resume-session`), as an object of lower-case header names. The lease token of the claim, which the calls with a JSON body (heartbeat, complete, steps) carry in the body, travels in `X-Lease-Token` here, next to the runner credential in `Authorization: Bearer crc_...` (contracts/runner-registration.v1.json). Secret: never log it. The shared `RUNNER_TOKEN` of a Dispatcher is not accepted by these two calls (401 RUNNER_UNAUTHORIZED): a Dispatcher's Worker has the Worker API's calls of the same names.
+ */
+export interface RunnerLeaseTokenHeader {
+  "x-lease-token": LeaseToken;
+  [k: string]: unknown;
+}
+/**
+ * #879: the query string of PUT /api/runners/v1/jobs/{id}/session, as an object of its parameters (every value is decimal digits or text in the URL): one part of the session snapshot of the running turn of the Implementer a customer's runner holds (follow-up turns). It is the call of the Worker API (`SessionPartQuery` in contracts/worker-api.v1.json: the same parts of exactly 3 MiB, at most 3, the same description of the whole file in every part, the same checks, the same replacement of the session's old snapshot once the last part is in) for a runner that holds no per-job credential: the runner credential is in `Authorization`, the lease token in `X-Lease-Token` (`RunnerLeaseTokenHeader`), the bytes of the part are the body (`application/octet-stream`, up to 3 MiB: 413 RUNNER_BODY_TOO_LARGE above, 400 RUNNER_REQUEST_INVALID with `fields` naming `body` unless exactly as long as `bytes` says for that part). The call proves the claim and nothing more: it does NOT extend the lease. 401 RUNNER_UNAUTHORIZED for a credential the app does not know, a revoked runner's included (and for the shared token); 404 RUNNER_JOB_NOT_FOUND for a job of another workspace, one another runner holds, or a hosted one (a Dispatcher holds it); 409 RUNNER_LEASE_LOST for a lease that ran out, a claim that ended or a token that is not the claim's (stop sending); 400 for a job that is not a turn of the Implementer, a missing or malformed `X-Lease-Token` (`fields`: `x-lease-token`) or a query or body that does not fit. The sender is best effort: a snapshot that is not stored means the next turn starts from a summary. The app lists the feature `runner_session_snapshot` in `KnownAppFeature`; a runner sends the call only to an app that lists it.
+ */
+export interface RunnerSessionPartQuery {
+  part: string;
+  parts: string;
+  bytes: string;
+  rawBytes: string;
+  sha256: string;
+  opencodeVersion: string;
+  [k: string]: unknown;
+}
+/**
+ * #879: 200 from PUT /api/runners/v1/jobs/{id}/session. `part` and `parts` repeat the request's; `complete` is true once the whole snapshot is stored, also for a part sent again after that. Repeating a part answers 200.
+ */
+export interface RunnerSessionPartResponse {
+  version: 1;
+  part: number;
+  parts: number;
+  complete: boolean;
+  [k: string]: unknown;
+}
+/**
+ * #879: the query string of GET /api/runners/v1/jobs/{id}/resume-session, as an object of its parameters: one part of the session snapshot the earlier turns stored, read by the customer's runner that holds a follow-up turn of the Implementer. It is the call of the Worker API (`ResumeSessionQuery` in contracts/worker-api.v1.json: the same parts of exactly 3 MiB, `part` from 0 and 0 when absent, the same answer of 200 with the bytes of the part, 204 when the session has no stored snapshot, a snapshot of the job's own session and of an earlier turn only) with the runner credential in `Authorization` and the lease token in `X-Lease-Token` (`RunnerLeaseTokenHeader`). The description of the whole file is in the headers of every part (`RunnerResumeSessionHeaders`). It proves the claim and nothing more: it does NOT extend the lease. The refusals are those of `RunnerSessionPartQuery`: 401 RUNNER_UNAUTHORIZED, 404 RUNNER_JOB_NOT_FOUND, 409 RUNNER_LEASE_LOST, and 400 RUNNER_REQUEST_INVALID (`fields`: `part` for a part that is not a number or beyond the last, `x-lease-token` for a missing or malformed token) also for a job that is not a turn of the Implementer. The runner checks the size and the sha256 of the whole file; a file it cannot fetch or read means the turn continues from a summary, never a failed turn.
+ */
+export interface RunnerResumeSessionQuery {
+  part?: string;
+  [k: string]: unknown;
+}
+/**
+ * #879: the response headers of a 200 from GET /api/runners/v1/jobs/{id}/resume-session, as an object of lower-case header names (every value is text in the header). They are those of `ResumeSessionHeaders` in contracts/worker-api.v1.json and describe the WHOLE file, not the part: `x-snapshot-parts` (how many parts, 1 to 3, which is what `x-snapshot-bytes` makes), `x-snapshot-bytes` (the size of the gzip file), `x-snapshot-raw-bytes` (the size of the JSON inside it), `x-snapshot-sha256` (the lower case hex digest of the gzip file) and `x-snapshot-opencode-version` (the engine that wrote it). `Content-Length` is the size of this part. `Cache-Control` is `no-store`.
+ */
+export interface RunnerResumeSessionHeaders {
+  "x-snapshot-parts": string;
+  "x-snapshot-bytes": string;
+  "x-snapshot-raw-bytes": string;
+  "x-snapshot-sha256": string;
+  "x-snapshot-opencode-version": string;
+  [k: string]: unknown;
+}
+/**
+ * #879: a customer's runner may also send its own credential (`Authorization: Bearer crc_...`; a revoked or unknown one is 401), to read the features before it uses a call the app of an earlier release does not have. #318: 200 from GET /api/runners/v1/version (dispatcher credential; #322: a Worker may also send its per-job credential with ?jobId=<its job>, which must be the running claim of that job). Lets a Dispatcher or a Worker detect an app that is too old before it claims anything. An app of a previous release has no such route (404), which means it is too old. `version` is the runner API version; `appVersion` is the build of the app, for logs.
  */
 export interface VersionResponse {
   version: 1;
