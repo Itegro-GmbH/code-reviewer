@@ -348,6 +348,22 @@ def test_a_checkout_that_is_gone_falls_back_to_the_session_branch(
     assert workspace.resume_missing == ("feature/gone",)
 
 
+# #838-T25b: a follow-up looks at the provider first; a base that is gone is its own reason, free
+def test_a_base_branch_that_is_gone_ends_a_follow_up_before_the_agent_exists(
+    rig: Rig, three: dict[str, str]
+) -> None:
+    # The provider's current branch cannot be deleted, so the base names one it does not have.
+    workspace = rig.workspace(
+        base_branch="release/gone", resume=resume_of_three(three, checkout="feature/x")
+    )
+
+    with pytest.raises(JobError) as refused:
+        workspace.prepare()
+
+    assert refused.value.code is ErrorCode.BASE_BRANCH_NOT_FOUND
+    assert not workspace.repo.exists()
+
+
 # #838-T25
 def test_a_session_branch_that_is_gone_ends_the_turn_before_the_agent_exists(
     rig: Rig, three: dict[str, str]
