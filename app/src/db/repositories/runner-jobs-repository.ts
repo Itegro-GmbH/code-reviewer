@@ -470,6 +470,8 @@ export function createRunnerJobsRepository(
     /** #753: the input of the job never reached a Worker; the rule that a turn is never run twice does not apply. */
     beforeStart = false,
   ): Promise<{ failed: number; requeued: number }> {
+    // #891: a job a member asked to stop is over with its claim, whatever else the claim lost: it is not tried again.
+    await endCancelRequested(executor, scope, new Date(timestamp), false);
     let disabled = 0;
     if (!(await dynamicReviewAllowed(executor))) {
       const result = await executor
@@ -583,6 +585,42 @@ export function createRunnerJobsRepository(
   }
 
   /** Fails running jobs that were claimed longer ago than the hard limit allows. */
+  /**
+   * #891: ends the running jobs of `scope` that a member asked to stop, with `cancelled`, without a word of their runner: their lease lapsed
+   * (the scope says so), their claim was given back, or the grace for the stop is over (`pastGraceOnly`: the runner heard nothing, did not
+   * stop or could not report in time). Such a job is never queued again, however many attempts it has left. Returns how many ended; the
+   * caller closes their usage records and the sessions of their turns.
+   */
+  async function endCancelRequested(
+    executor: Kysely<Database>,
+    scope: RunningScope,
+    current: Date,
+    pastGraceOnly: boolean,
+  ): Promise<number> {
+    const timestamp = formatTimestamp(current);
+    const graceBefore = formatTimestamp(
+      new Date(current.getTime() - limits.cancelGraceMs),
+    );
+    const result = await executor
+      .updateTable("jobs")
+      .set({
+        status: "cancelled",
+        error_code: "cancelled" satisfies JobErrorCode,
+        lease_expires_at: null,
+        finished_at: timestamp,
+        updated_at: timestamp,
+      })
+      .where(runningWhere(scope))
+      .where("cancel_requested_at", "is not", null)
+      .$if(pastGraceOnly, (query) =>
+        query.where("cancel_requested_at", "<=", graceBefore),
+      )
+      .executeTakeFirst();
+    const ended = Number(result.numUpdatedRows);
+    if (ended > 0) await idleSessionsOfEndedTurns(executor, timestamp);
+    return ended;
+  }
+
   async function failTimedOut(
     executor: Kysely<Database>,
     scope: RunningScope,
@@ -755,6 +793,9 @@ export function createRunnerJobsRepository(
     current: Date,
   ): Promise<string[]> {
     const timestamp = formatTimestamp(current);
+    const cancelGraceBefore = formatTimestamp(
+      new Date(current.getTime() - limits.cancelGraceMs),
+    );
     const rows = await executor
       .selectFrom("jobs")
       .select("id")
@@ -763,6 +804,8 @@ export function createRunnerJobsRepository(
         eb.or([
           eb("lease_expires_at", "<=", timestamp),
           pastHardLimit(current)(eb),
+          // #891: a stop a member asked for that nobody carried out within the grace.
+          eb("cancel_requested_at", "<=", cancelGraceBefore),
         ]),
       )
       .execute();
@@ -805,6 +848,9 @@ export function createRunnerJobsRepository(
     // migration (a race); a running one was claimed before the upgrade. They are cancelled here so
     // they can neither starve review jobs nor be requeued.
     await cancelRemovedCommands(executor, timestamp);
+    // #891: a stop a member asked for ends the job `cancelled` once its grace is over, whatever the lease says; before the passes that would
+    // queue it again or fail it for a lapsed lease.
+    await endCancelRequested(executor, {}, current, true);
     const revoked =
       revokedRunnerId === undefined
         ? { failed: 0, requeued: 0 }
@@ -1315,6 +1361,21 @@ export function createRunnerJobsRepository(
               ...(await closeRecordsOfEndedJobs(trx, timestamp)),
             );
           }
+          // #891: a stop a member asked for that the holder did not carry out within the grace ends here, like the hard limit: the holder
+          // learns of it as of a lost claim, and stops without a push.
+          else if (
+            (await endCancelRequested(
+              trx,
+              { claim: { jobId, leaseToken } },
+              current,
+              true,
+            )) > 0
+          ) {
+            endedClaims.push(jobId);
+            unknownCost.push(
+              ...(await closeRecordsOfEndedJobs(trx, timestamp)),
+            );
+          }
           const row = await trx
             .updateTable("jobs")
             .set({
@@ -1358,7 +1419,12 @@ export function createRunnerJobsRepository(
     },
 
     complete(jobId, leaseToken, outcome) {
-      const target: JobStatus = outcome.ok ? "succeeded" : "failed";
+      // #891: a runner that stopped a turn a member asked it to stop reports `cancelled`; the job ends `cancelled`, with the usage it reports.
+      const target: JobStatus = outcome.ok
+        ? "succeeded"
+        : outcome.errorCode === "cancelled"
+          ? "cancelled"
+          : "failed";
       const errorCode = outcome.ok ? null : outcome.errorCode;
       const result = outcome.result ?? null;
       return inAlertingTransaction<CompleteResult>(
@@ -1477,7 +1543,13 @@ export function createRunnerJobsRepository(
             endedClaims.push(jobId);
             return { status: "completed", job: toJob(stored) };
           }
-          if (job.status !== "succeeded" && job.status !== "failed")
+          // `cancelled` (#891) only when a member's stop ended it; a job cancelled for another reason (a removed command, a deactivated project)
+          // took no report and takes none.
+          if (
+            job.status !== "succeeded" &&
+            job.status !== "failed" &&
+            !(job.status === "cancelled" && job.errorCode === "cancelled")
+          )
             return { status: "not_holder" };
           const sameOutcome =
             job.status === target &&
@@ -1515,6 +1587,31 @@ export function createRunnerJobsRepository(
               ...(await closeRecordsOfEndedJobs(trx, timestamp)),
             );
             return { status: "cancelled", job: toJob(removed) };
+          }
+          // #891: a job a member asked to stop is not given back to the queue: it ends `cancelled`, and a turn keeps what its runner reported.
+          if (
+            (await endCancelRequested(
+              trx,
+              { claim: { jobId, leaseToken } },
+              now(),
+              false,
+            )) > 0
+          ) {
+            endedClaims.push(jobId);
+            unknownCost.push(
+              ...(await closeRecordsOfEndedJobs(trx, timestamp)),
+            );
+            const ended = await trx
+              .selectFrom("jobs")
+              .selectAll()
+              .where("id", "=", jobId)
+              .executeTakeFirstOrThrow();
+            if (
+              ended.review_kind === "implementer" &&
+              releaseOptions.result !== undefined
+            )
+              await recordTurnOfJob(trx, ended, releaseOptions.result, now);
+            return { status: "cancelled", job: toJob(ended) };
           }
           const lost = await loseAttempt(
             trx,

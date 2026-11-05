@@ -22,6 +22,7 @@ import {
   validateImplementerTurnInput,
 } from "./job-input.ts";
 import type {
+  CancelJobResult,
   EnqueueFollowUpTurnInput,
   EnqueueFollowUpTurnResult,
   EnqueueImplementerTurnInput,
@@ -83,6 +84,13 @@ export type JobQueue = {
   findImplementerTurn(
     clientRequestId: string,
   ): Promise<EnqueueImplementerTurnResult | undefined>;
+  /**
+   * #891: a member asks for a job of this workspace to stop. A waiting job ends `cancelled` at once and nothing ran; a running job is
+   * marked, its holder learns it at the next heartbeat, stops the turn (pushing what is committed) and reports, and the job ends `cancelled`
+   * with that report, with the lapse of its lease or with the end of the grace for the stop. Asking again, and asking for a job that is
+   * over, change nothing and say so (`already_requested`, `already_ended`).
+   */
+  requestCancel(jobId: string): Promise<CancelJobResult>;
   /** Cancels all waiting jobs of a repository (project deactivated); running jobs finish. */
   cancelWaitingForRepository(repositoryId: string): Promise<number>;
   /**
@@ -205,6 +213,7 @@ export function createJobQueue(
       CLIENT_REQUEST_ID.test(clientRequestId)
         ? jobs.findImplementerTurn(clientRequestId)
         : Promise.resolve(undefined),
+    requestCancel: (jobId) => jobs.requestCancel(jobId),
     cancelWaitingForRepository: (repositoryId) =>
       jobs.cancelWaitingForRepository(repositoryId),
     cancelWaitingForReviewKindChange: (repositoryId) =>

@@ -91,6 +91,7 @@ import { migration as createWorkflowRuns } from "./20261105130000_create_workflo
 import { migration as addImplementerSessionQueue } from "./20261105160000_add_implementer_session_queue.ts";
 import { migration as addWorkflowRunTrigger } from "./20261105190000_add_workflow_run_trigger.ts";
 import { migration as addWorkflowStepRounds } from "./20261105200000_add_workflow_step_rounds.ts";
+import { migration as addRunCancellation } from "./20261106090000_add_run_cancellation.ts";
 import { migration as addImplementerTurnEnvironment } from "./20261102150000_add_implementer_turn_environment.ts";
 import { migration as createImplementerEnvironments } from "./20261102140000_create_implementer_environments.ts";
 import { migration as createImplementerSessionsAndTurns } from "./20261030140000_create_implementer_sessions_and_turns.ts";
@@ -207,6 +208,7 @@ const migrations: Record<string, Migration> = {
   "20261105170000_add_workflow_step_cost_basis": addWorkflowStepCostBasis,
   "20261105190000_add_workflow_run_trigger": addWorkflowRunTrigger,
   "20261105200000_add_workflow_step_rounds": addWorkflowStepRounds,
+  "20261106090000_add_run_cancellation": addRunCancellation,
 };
 
 export const migrationProvider: MigrationProvider = {
