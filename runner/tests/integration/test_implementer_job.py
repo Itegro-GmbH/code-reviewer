@@ -1613,6 +1613,8 @@ def test_a_profile_without_the_right_to_push_does_not_commit_the_leftovers_eithe
     assert turn.result["ok"] is True
     assert turn.git.events.count("commit_all") == 0
     assert turn.git.push_calls == 0
+    # Nothing is collected from the tree, so a dirty tree is no reason for a second, paid message.
+    assert turn.events.count("turn") == 1
 
 
 # #843-T203

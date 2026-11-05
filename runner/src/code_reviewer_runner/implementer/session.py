@@ -670,11 +670,15 @@ class ImplementerSession:
         return check
 
     def _work(self, agent: ImplementerAgent) -> None:
-        """The instruction, and the one extra message when the tree is still dirty."""
+        """The instruction, and the one extra message when the tree is still dirty. A profile that
+        may not push gets no extra message: nothing is collected from the tree, so a second paid
+        turn would only ask for a commit that nobody takes (#843)."""
         check = self._watch()
         ended = agent.turn(self.job.implementer.instruction, check=check)
         self._summary = ended.text
         self._note("the agent ended its turn")
+        if not self._can_push:
+            return
         if not self.workspace.dirty() or not self._time_for_another_turn(agent):
             return
         self._note("the working tree is dirty: one extra message")

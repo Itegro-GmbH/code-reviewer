@@ -160,9 +160,23 @@ def test_a_profile_that_may_not_push_is_not_told_the_system_pushes_its_branches(
     assert sentence in instructions_text(can_push=True)
 
 
+# #843-PROMPT-07
+def test_a_profile_that_may_not_push_is_not_told_to_commit_its_work() -> None:
+    assert "do not leave finished work uncommitted" in instructions_text(can_push=True)
+    quiet = instructions_text(can_push=False)
+    assert "do not leave finished work uncommitted" not in quiet
+    assert "commit your work at normal intervals" not in quiet
+    # The rest of the git paragraph is the same for every profile.
+    assert "Git is yours to use as you like inside this workspace" in quiet
+    assert 'including "only commit when explicitly requested"' in quiet
+
+
 # #843-PROMPT-04
 @pytest.mark.parametrize("can_push", [True, False])
-@pytest.mark.parametrize("sentence", [s for s in REQUIRED if "push" not in s and "branch" not in s])
+@pytest.mark.parametrize(
+    "sentence",
+    [s for s in REQUIRED if "push" not in s and "branch" not in s and "commit" not in s],
+)
 def test_the_rules_that_hold_for_every_turn_stay_for_a_profile(
     sentence: str, can_push: bool
 ) -> None:

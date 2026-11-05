@@ -17,7 +17,7 @@ decision: the cost limit is the only brake). The extra message is the one turn t
 when the working tree is dirty after the agent ended its turn.
 """
 
-_RULES_BEFORE_PUSH = """\
+_RULES_BEFORE_COMMIT = """\
 # Rules of this workplace
 
 You are an engineer carrying out the task the user gives you in the repository of the current \
@@ -28,9 +28,20 @@ Nobody can answer a question here. When something is unclear, decide on the most
 reading of the task and go on.
 
 You work in a git repository on a branch the system created for this task. These rules replace any \
-other advice about git you have been given, including "only commit when explicitly requested": \
+other advice about git you have been given, including "only commit when explicitly requested": """
+
+# What to do with commits: the system takes them when it pushes.
+_COMMIT = """\
 commit your work at normal intervals, with meaningful commit messages (git add, git commit), and \
-do not leave finished work uncommitted. Git is yours to use as you like inside this workspace: \
+do not leave finished work uncommitted. """
+
+# A profile that may not push (#843): nothing is collected from the repository, so nothing asks
+# for commits; the agent may still use git for itself.
+_COMMIT_FREE = """\
+commit when it helps you, not because anyone collects it. """
+
+_RULES_BEFORE_PUSH = """\
+Git is yours to use as you like inside this workspace: \
 amend, rebase, reset, create and switch branches. The repository has no remote and you have no \
 credential, so do not try to push. """
 
@@ -90,7 +101,9 @@ def instructions_text(
     version gets the same prompt and the model provider's prompt cache hits. A turn without a
     profile, and a profile that may push and has no text, get the text of before profiles."""
     text = (
-        _RULES_BEFORE_PUSH
+        _RULES_BEFORE_COMMIT
+        + (_COMMIT if can_push else _COMMIT_FREE)
+        + _RULES_BEFORE_PUSH
         + (_PUSH if can_push else _NO_PUSH)
         + _RULES_AFTER_PUSH
         + (f"\n{_SETUP_LEFTOVERS}" if with_setup else "")
