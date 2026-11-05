@@ -8,8 +8,9 @@ every request body the runner sends is checked against the contracts
 does not fit is answered 400 and kept in `violations`, so a test asserts there are none.
 
 It knows the rules the runner depends on: the registration token is good once, every other
-call needs a live credential (`401 RUNNER_UNAUTHORIZED` once it is revoked), a renewed credential is valid beside the previous one until it is used, a claim
-below the minimum base version is `426`, and a call about a job needs the lease token of the claim.
+call needs a live credential (`401 RUNNER_UNAUTHORIZED` once it is revoked), a renewed
+credential is valid beside the previous one until it is used, a claim below the minimum base
+version is `426`, and a call about a job needs the lease token of the claim.
 """
 
 import json

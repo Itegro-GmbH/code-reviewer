@@ -1,11 +1,13 @@
 # The Factory-Runner: spikes and decisions
 
 The Factory-Runner is the Implementer's Control, packaged to run on a customer's Linux machine and take the jobs of its
-workspace (the plan is the owner's `plans/customer-runner.md`, milestones R0 to R4, epic #852). The runner itself does not
-exist yet; its app side (registration, the list, routing) is built in R1a. This document holds what was **measured** before it
-was built and what the app does for it; it grows with the milestones.
+workspace (the plan is the owner's `plans/customer-runner.md`, milestones R0 to R4, epic #852). Its app side (registration, the
+list, routing) is R1a; the runner itself, with the base and OpenCode, is R1b. This document holds what the app does for it, how
+the runner is built and used, and what was **measured** before it was built; it grows with the milestones.
 
 - [Registration and routing](#registration-and-routing-r1a-854): how a machine becomes a runner of a workspace (R1a).
+- [The Factory-Runner](#the-factory-runner-r1b-854): the service, the `factory-runner` command, the image, installation for a
+  developer and operation in a VM (R1b).
 - [Spikes R0](#spikes-r0-853): what was measured on a real VM before the build.
 
 ## Registration and routing (R1a, #854)
@@ -51,6 +53,183 @@ POST /api/w/:ws/runners/tokens   ->  token crt_... (1 hour, once, hash kept)
   it is `426 RUNNER_UPDATE_NEEDED` with `minBaseVersion`, the list shows _update needed_, and the runner says so on the machine. The app never updates a runner.
 - **Two doors.** The shared `RUNNER_TOKEN` (the Dispatcher's, and the poll mode's) and a runner credential are different secrets; a request that carries a
   `crc_` credential takes the runner's path and never the shared one, and the other way round.
+
+## The Factory-Runner (R1b, #854)
+
+The runner is the Implementer's Control, packaged to run on a customer's Linux machine: **the same code as the hosted Control**
+(the job host, the model door with the key out of the agent, the cost ledger, the step records, the finish tool, the session
+snapshot, the git rules: no remote in the agent, the runner pushes every local branch, never force), started by a loop that
+claims its own jobs instead of being handed one by the Dispatcher. The code is
+[`runner/src/code_reviewer_runner/factory_runner/`](../runner/src/code_reviewer_runner/factory_runner); the command is
+`factory-runner`.
+
+```
+machine (Linux, Docker)
+├─ factory-runner  (container of the runner image, root, the host's Docker socket, a volume at /work)
+│    ├─ announce (PUT /self): labels, base version, manifest {opencode ready, capabilities}, limits
+│    ├─ claim (POST /claim, every 30 s or so; it is also the heartbeat of the runner)
+│    ├─ job host (the hosted one): job process with the job on stdin, heartbeats, steps, result with the lease token
+│    └─ through the host's Docker, per turn:  model door · agent container (the pinned OpenCode) · reader · git mirror
+└─ volumes: factory-runner-home (the configuration), factory-runner-work (/work: mirror, repository, result)
+```
+
+### What is the same as hosted, and what is not
+
+| Part                                     | On a runner                                                                                                                                           |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Model door, key, cost ledger             | As hosted. The key is the workspace's **own** key (BYOK): the claim hands it over, it lives in the door's container, the agent only holds a worthless bearer. A managed model never reaches a runner. |
+| Steps, finish tool, result, git rules    | As hosted (same code).                                                                                                                                |
+| Agent's container                        | The same image, the same fixed address on the same internal model network, memory without swap, no host mount, no socket, **but** the runtime is `sysbox-runc` only where the self-test proved it; otherwise the daemon's default (`runc`), with an init that only says "ready". |
+| The agent's own Docker                   | **Not part of the base** (decision 3, S2). The capability `agent-docker` is announced only when the self-test ran a container in a Docker inside Sysbox. A job whose setup needs Docker is for a runner that announces it. |
+| Lease, heartbeat, result                 | The runner API (`/api/runners/v1/jobs/{id}/heartbeat`, `/complete`, `/steps`) with the runner's credential and the lease token of the claim in the body. |
+| Session snapshot and stored session      | **Not yet** (see "Known limits"): the app takes them from the per-job credential only. The client for them is in the runner and switched off.         |
+| Sizing                                   | The configured memory and CPUs, not the VM size the Dispatcher computes. One run at a time.                                                           |
+
+### Install (developer, one machine)
+
+Needs Docker (the engine, not rootless) and a Linux machine; Sysbox is optional (it only adds `agent-docker`).
+
+```sh
+# the images: the runner (the Worker image with the command) and the agent. A release publishes both;
+# a developer builds them from a checkout of the repository:
+docker build -f runner/Dockerfile --target sandbox -t code-reviewer-runner-sandbox:local .
+docker build -f runner/Dockerfile --target agent -t code-reviewer-agent:golden .
+docker build -f runner/Dockerfile.factory-runner --build-arg WORKER_IMAGE=code-reviewer-runner-sandbox:local -t factory-runner:local runner
+
+alias factory-runner='docker run --rm -i --name factory-runner-cli \
+  -v factory-runner-home:/var/lib/factory-runner factory-runner:local'
+
+# in the app (Owner or Admin): Runners, "Add a runner", copy the token. Then:
+factory-runner register --token crt_... --name build-box --labels linux,gpu
+factory-runner selftest        # the base on this machine, see below; needs the socket and /work, so run it like the service:
+
+docker run -d --name factory-runner --restart unless-stopped \
+  -v /var/run/docker.sock:/run/docker.sock \
+  -v factory-runner-home:/var/lib/factory-runner \
+  -v factory-runner-work:/work \
+  factory-runner:local run
+```
+
+- **No `--hostname`, no `--network host`, no `--privileged`.** The runner finds the name of its `/work` volume by reading its own
+  container from the daemon (the hostname is the container id), and the agent mounts that volume by name.
+- **The Docker socket is root of the machine.** The runner needs it (it starts the containers of a turn); the agent never gets it.
+  Run the runner on a machine you are willing to give that to, which is what a self-hosted runner of any CI system asks too.
+- **The model network is fixed** (`10.213.77.0/29`, `code-reviewer-model`) and the containers have fixed names, so one daemon runs
+  one turn at a time and the address must be free on the machine.
+- With the image pinned to a **digest** in a release, the runner pulls the agent image itself when the daemon does not have it
+  (`/opt/code-reviewer/agent-image.json`, or `FACTORY_RUNNER_AGENT_IMAGE`).
+
+### The command
+
+| Command                        | What it does                                                                                                                               |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `register --token T [--name N] [--labels a,b] [--url U] [--cpus] [--memory-mb] [--disk-gb] [--runtime] [--agent-image] [--force]` | Exchanges the token for the runner's credential and writes the configuration (file mode 0600, directory 0700). Refuses to replace a registration without `--force`. Without `--url` it goes to `https://code-review.com`. The manifest of the registration is empty: `run` announces what the self-test proved. |
+| `run`                          | The service loop (below).                                                                                                                  |
+| `run --once [--wait SECONDS]`  | Takes **one** job and ends with its exit code. With no job within `--wait` (default 600) it ends with **exit code 0** and the line `no job for the labels of this runner within Ns: nothing to do`. |
+| `selftest [--json]`            | Proves the base (below). Exit code 0 when it holds, 5 when it does not. Needs no registration.                                             |
+| `config show`                  | The configuration as the runner sees it (file and environment), the credential only as `set` / `not set`.                                  |
+
+**Exit codes:** 0 done (also: no job in time), 1 a job failed or was lost, 2 usage, 3 the app requires a newer base (`426`), 4 revoked,
+5 not ready (the self-test failed), 6 configuration.
+
+### Configuration
+
+The file is `$FACTORY_RUNNER_HOME/config.json` (`~/.factory-runner`; `/var/lib/factory-runner` in the image). **Every value can come
+from the environment instead, and the environment wins**, which is how a VM that runs one job gets its credential without a file:
+
+| Variable                                 | Meaning                                                                                      |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `FACTORY_RUNNER_URL`                     | The app (`https://...`; `http://` only for loopback, or with `FACTORY_RUNNER_ALLOW_HTTP=1`)  |
+| `FACTORY_RUNNER_CREDENTIAL`              | The runner's credential (`crc_...`), a secret                                                |
+| `FACTORY_RUNNER_NAME`, `FACTORY_RUNNER_LABELS` | The name, and the labels (comma separated, lower case)                                 |
+| `FACTORY_RUNNER_CPUS`, `_MEMORY_MB`, `_DISK_GB` | The limits (below)                                                                    |
+| `FACTORY_RUNNER_AGENT_IMAGE`, `FACTORY_RUNNER_RUNTIME` | The agent image to pull; `auto` (default), `runc` or `sysbox-runc`                |
+
+A wrong value is refused with the name of the field and never its value (the file holds a secret). The credential is **renewed**
+(`POST /credential`) between jobs when it is older than seven days and lives in the file; the new one is written before it is
+used, because the app keeps the old one valid until the new one is used once. A credential from the environment belongs to whoever
+set it and is never renewed.
+
+### The service loop
+
+1. **Prepare.** Check the machine (below) and decide the runtime: `auto` tries `sysbox-runc` when the daemon has it and falls back to
+   `runc` when the self-test does not pass under it.
+2. **Announce** (`PUT /api/runners/v1/self`): labels, base version, the manifest (`opencode` with the version the runner pins and
+   `ready`; `capabilities` such as `agent-docker`) and the limits it works within. A runner whose base is not proven announces
+   `ready: false` and takes no job (exit code 5; the failed check is in the log).
+3. **Claim**, every 30 seconds with a little jitter. The claim is the runner's heartbeat: the list shows it online for two minutes after.
+   A claim names the engine `implementer` and the features the job host understands, so the job is built exactly as the Dispatcher's
+   Worker gets it.
+4. **Run** the job through the hosted job host. Its credential is the runner's; the job process gets the job on its stdin and a minimal
+   environment, never the runner's credential. A SIGTERM or SIGINT gives the running job back (`runner_shutdown`) and ends the loop.
+5. What a claim's failure means: `401` the runner is **revoked**, stop for good (exit 4); `426` **update needed**, say so, wait five
+   minutes (`--once`: exit 3); the app unreachable, wait 5 s, 10 s, ... up to five minutes.
+
+**Revoking** a runner in the app ends the job it is running at once (the app cuts the lease; the runner's next heartbeat is a `401`, the
+host ends the process, nothing more is sent) and the next claim stops the service.
+
+### `run --once`: a VM that runs one job and ends
+
+```sh
+FACTORY_RUNNER_URL=https://code-review.com \
+FACTORY_RUNNER_CREDENTIAL=crc_... \
+FACTORY_RUNNER_LABELS=itegro-claude \
+FACTORY_RUNNER_MEMORY_MB=4096 \
+docker run --rm -v /var/run/docker.sock:/run/docker.sock -v /work \
+  --env FACTORY_RUNNER_URL --env FACTORY_RUNNER_CREDENTIAL --env FACTORY_RUNNER_LABELS --env FACTORY_RUNNER_MEMORY_MB \
+  factory-runner:local run --once --wait 120
+```
+
+The VM announces itself (so the app sees an ordinary runner with these labels), takes the one job that is waiting for them, runs it,
+reports and ends; **with no job within the wait it ends with exit code 0** and says so, so a VM that was started for a job another
+runner took costs nothing more. The credential comes from the VM's secret store; nothing is written to disk. The anonymous volume
+`-v /work` is the work volume of the turn and goes with the container.
+
+### The self-test
+
+`factory-runner selftest` is the proof of the base (decision 3) and runs at the start of every `run`. In order, each with a stable
+name: `docker` (the daemon answers and has the chosen runtime), `work-volume` (`/work` is a Docker volume of this container),
+`memory` (the agent gets at least 1024 MB: 60% of the machine up to 16 GiB unless `memoryMb` is set), `agent-image`,
+`agent-container` (the agent's container starts under the runtime with the limits, no network, and is ready), `opencode` (it reports
+the pinned version), `canned-turn` and, as a capability that may fail without costing the base, `agent-docker`.
+
+The **canned turn** is a whole turn of the pinned OpenCode inside that container against a canned model
+(`canned_provider.py`, an OpenAI-style completion with a stream, run beside the engine): the engine starts, calls a provider,
+streams the words, ends with the usage the model gave. No network, no key, no model, no subscription. `agent-docker` is checked
+only under `sysbox-runc`: a container is made from a file of the image and run in the agent's own Docker.
+What it does **not** prove is covered elsewhere: the door and the git rules by the unit and lane tests of the Implementer, the
+Sysbox wall by a VM with Sysbox.
+
+### Limits
+
+Enforced on the containers of a turn, through the host's Docker (`limits.py`): **memory** (`Memory` = `MemorySwap` of the agent's
+container; below 1024 MB the runner is not ready), **CPUs** (`NanoCpus`), **one run at a time**. Announced to the app and shown in its
+list: the same, plus `diskGb`.
+
+**R2** (not done): a disk budget for the work and session volumes with cleanup; limits for the containers beside the agent (reader,
+doors); more than one run at a time (needs per-run names and networks); the install script, `update` and the signed self-update;
+the Sysbox install step.
+
+### Tests
+
+Unit (`tests/unit/test_factory_runner_*.py`, `test_runner_profile.py`): configuration, command, loop with doubles, once mode, self-test
+with a double daemon, limits. Contract (`tests/contract/test_factory_runner_contract.py`): the runner's real client against
+a fake App (`tests/runner_app.py`) that holds every body to `runner-registration.v1.json` and `runner-api.v1.json`. Integration
+(`tests/integration/test_factory_runner_loopback.py`): register, announce, claim, run a turn through the real job host with a
+stand-in job process, heartbeat, report; no job in time; the once mode with the environment alone; a revoked runner (before a claim
+and during a turn); an app that requires an update. Lane (`tests/lane/test_runner_selftest.py`): the self-test on a real
+daemon with the real agent image. The whole turn with a model and a repository is the Implementer's lane (`test_implementer_turn.py`),
+whose code the runner runs unchanged.
+
+### Known limits
+
+- **Snapshot and stored session.** `PUT .../session` and `GET .../resume-session` are Worker API routes and take the per-job
+  credential alone; R1a part 2 decided that a runner credential must not reach them. Until the app lets a runner credential reach them
+  for a job it holds, a turn on a runner takes **no snapshot** and a follow-up turn continues from the summary of the earlier ones (the
+  fallback of the plan). The client is written (`RunnerJobApi(snapshot=True)`, tested against the fake App) and off.
+- **The credential file** is as safe as the machine: whoever reads it is the runner. Revoke the runner in the app if the machine is lost.
+- **The page's command** shows `factory-runner register --token ...` without an address; the command goes to `https://code-review.com`.
+  `--url` is for another app.
 
 ## Spikes R0 (#853)
 

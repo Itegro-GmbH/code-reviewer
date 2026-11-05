@@ -799,6 +799,21 @@ jobs:
           cache-to: type=gha,mode=max,scope=runner-sandbox
       - name: Smoke test the image
         run: docker/smoke/runner.sh code-reviewer-runner-sandbox:ci
+      # The Factory-Runner image (#854, R1b) is the Worker image with the `factory-runner` command as its entry point. It is
+      # built from the image above, which the default builder (the daemon's own) sees. Built, not pushed.
+      - name: Build the Factory-Runner image (no push)
+        run: >-
+          docker buildx build --builder default --load
+          --file runner/Dockerfile.factory-runner
+          --build-arg WORKER_IMAGE=code-reviewer-runner-sandbox:ci
+          --build-arg AGENT_IMAGE_REF=ghcr.io/itegro-gmbh/code-reviewer-agent:ci
+          --tag factory-runner:ci runner
+      - name: Smoke test the Factory-Runner image
+        run: |
+          docker run --rm factory-runner:ci --version
+          docker run --rm factory-runner:ci register --help > /dev/null
+          docker run --rm --env FACTORY_RUNNER_URL=https://app.example factory-runner:ci config show | grep '"credential": "not set"'
+          docker run --rm --entrypoint cat factory-runner:ci /opt/code-reviewer/agent-image.json | grep 'code-reviewer-agent:ci'
 
   actionlint:
     name: Lint workflow files

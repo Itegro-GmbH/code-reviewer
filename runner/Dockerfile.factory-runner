@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1
+# SPDX-License-Identifier: LicenseRef-Proprietary
+#
+# Image of the Factory-Runner (#854, R1b): the Implementer's Control as a service on a customer's Linux
+# machine. It is the Worker image (the `sandbox` target of runner/Dockerfile) with the `factory-runner`
+# command as its entry point: the same Python venv, the same job host, the same model door and git
+# code, the pinned OpenCode and ripgrep, because Control starts the door, the reader and the rule
+# helpers from its own image. Nothing of the hosted deployment is changed by it: runner/Dockerfile
+# stays as it is (the golden snapshot hashes it, and a test pins `sandbox` as its last stage).
+#
+#   docker build -f runner/Dockerfile --target sandbox -t code-reviewer-runner-sandbox:local .
+#   docker build -f runner/Dockerfile.factory-runner \
+#     --build-arg WORKER_IMAGE=code-reviewer-runner-sandbox:local \
+#     --build-arg AGENT_IMAGE_REF=ghcr.io/itegro-gmbh/code-reviewer-agent:1.0.0 \
+#     -t factory-runner:local runner
+#
+# `AGENT_IMAGE_REF` is the reference of the agent image the runner pulls when the daemon does not have
+# it (the `agent` target of runner/Dockerfile, published with the release; empty: the image must be
+# loaded by hand or named with FACTORY_RUNNER_AGENT_IMAGE). Pin it by digest in a release. The build
+# context is the folder `runner/` (nothing is copied from it).
+ARG WORKER_IMAGE=code-reviewer-runner-sandbox:local
+
+FROM ${WORKER_IMAGE} AS factory-runner
+ARG AGENT_IMAGE_REF=""
+LABEL org.opencontainers.image.title="Factory-Runner" \
+      org.opencontainers.image.description="Runs the jobs of a Code Reviewer workspace on this machine (factory-runner)" \
+      org.opencontainers.image.source="https://github.com/Itegro-GmbH/code-reviewer" \
+      org.opencontainers.image.licenses="LicenseRef-Proprietary"
+# Control is root on the machine's Docker through the socket it is given, as it is on the hosted VM:
+# it starts the containers of a turn and a volume it can write (/work) is the volume it mounts into
+# them by name. The agent is not root of this container: it is a container of its own.
+USER 0:0
+RUN install -d -m 0755 /opt/code-reviewer \
+    && printf '{"reference": "%s"}\n' "${AGENT_IMAGE_REF}" > /opt/code-reviewer/agent-image.json \
+    && install -d -m 0700 /var/lib/factory-runner /work
+ENV FACTORY_RUNNER_HOME=/var/lib/factory-runner
+# The configuration (credential included) and the work of the turns are volumes, so that the container
+# can be replaced by an update without losing the registration.
+VOLUME ["/var/lib/factory-runner", "/work"]
+WORKDIR /var/lib/factory-runner
+ENTRYPOINT ["/usr/bin/tini", "--", "factory-runner"]
+CMD ["run"]
