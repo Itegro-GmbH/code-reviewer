@@ -14,10 +14,16 @@
 #     --build-arg AGENT_IMAGE_REF=ghcr.io/itegro-gmbh/code-reviewer-agent:1.0.0 \
 #     -t factory-runner:local runner
 #
+# `WORKER_IMAGE` is the base. The default is the local tag of the commands above, for a developer;
+# a release builds from the Worker image **by digest** (`registry/code-reviewer-worker@sha256:...`),
+# never from a moving tag, so the runner image is made of exactly the code that was released.
+#
 # `AGENT_IMAGE_REF` is the reference of the agent image the runner pulls when the daemon does not have
-# it (the `agent` target of runner/Dockerfile, published with the release; empty: the image must be
-# loaded by hand or named with FACTORY_RUNNER_AGENT_IMAGE). Pin it by digest in a release. The build
-# context is the folder `runner/` (nothing is copied from it).
+# it, or has another one (the `agent` target of runner/Dockerfile, published with the release; empty:
+# the image must be loaded by hand or named with FACTORY_RUNNER_AGENT_IMAGE). **Pin it by digest in a
+# release**: a tag can move, and the runner can only tell a stale image from the right one by digest.
+# The build says so when it is not one. The build context is the folder `runner/` (nothing is
+# copied from it).
 ARG WORKER_IMAGE=code-reviewer-runner-sandbox:local
 
 FROM ${WORKER_IMAGE} AS factory-runner
@@ -26,13 +32,20 @@ LABEL org.opencontainers.image.title="Factory-Runner" \
       org.opencontainers.image.description="Runs the jobs of a Code Reviewer workspace on this machine (factory-runner)" \
       org.opencontainers.image.source="https://github.com/Itegro-GmbH/code-reviewer" \
       org.opencontainers.image.licenses="LicenseRef-Proprietary"
-# Control is root on the machine's Docker through the socket it is given, as it is on the hosted VM:
-# it starts the containers of a turn and a volume it can write (/work) is the volume it mounts into
-# them by name. The agent is not root of this container: it is a container of its own.
+# Why root: Control starts the containers of a turn through the host's Docker socket, and whoever can
+# use that socket is root of the machine whatever user they are in this container, so a non-root user
+# here would add no isolation. Root is what it needs besides: to write the work volume it mounts into
+# the agent's container by name (the files of a turn belong to other uids), and to empty it between
+# jobs (`factory_runner/housekeeping.py`). The agent is not root of this container: it is a container
+# of its own, under Sysbox where there is one (docs/runner.md says what `runc` means instead).
 USER 0:0
 RUN install -d -m 0755 /opt/code-reviewer \
     && printf '{"reference": "%s"}\n' "${AGENT_IMAGE_REF}" > /opt/code-reviewer/agent-image.json \
     && install -d -m 0700 /var/lib/factory-runner /work
+RUN case "${AGENT_IMAGE_REF}" in \
+      ""|*@sha256:????????????????????????????????????????????????????????????????) ;; \
+      *) echo "warning: AGENT_IMAGE_REF is a tag, not a digest (@sha256:...): pin it in a release" >&2 ;; \
+    esac
 ENV FACTORY_RUNNER_HOME=/var/lib/factory-runner
 # The configuration (credential included) and the work of the turns are volumes, so that the container
 # can be replaced by an update without losing the registration.
