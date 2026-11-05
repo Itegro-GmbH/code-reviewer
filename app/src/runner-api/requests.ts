@@ -45,6 +45,10 @@ import {
 } from "./contract.ts";
 import { WORKER_CREDENTIAL_PATTERN } from "../jobs/worker-credential.ts";
 import { checkCallTrace } from "./call-trace.ts";
+import {
+  boundAgentResult,
+  type AgentResultValue,
+} from "../db/agent-result.ts";
 
 export type Parsed<T> =
   { ok: true; value: T } | { ok: false; fields: FieldError[] };
@@ -1069,6 +1073,7 @@ function parseImplementerResult(
       "setup",
       "network",
       "checkedOut",
+      "agentResult",
     ],
     prefix,
   );
@@ -1134,6 +1139,14 @@ function parseImplementerResult(
           max: MAX_BRANCH_NAME_CHARS,
           stripControls: true,
         });
+  // #843: the result the agent handed in through the finish tool: an object within the bounds of a result. Whether it fits the schema
+  // of the turn is decided with the turn (`implementer/agent-result.ts`), which the parser does not know.
+  let agentResult: AgentResultValue | undefined;
+  if (value.agentResult !== undefined) {
+    const bounded = boundAgentResult(value.agentResult);
+    if (bounded.ok) agentResult = bounded.value;
+    else check.fail(`${prefix}agentResult`, "invalid");
+  }
   if (typeof pushed === "boolean" && headCommit !== undefined) {
     if (pushed && headCommit === null) check.fail(`${prefix}pushed`, "invalid");
     const last = commits?.at(-1);
@@ -1171,6 +1184,7 @@ function parseImplementerResult(
     ...(network === undefined ? {} : { network }),
     // Kept only when the runner sent it, as `branches` is.
     ...(value.checkedOut === undefined ? {} : { checkedOut }),
+    ...(agentResult === undefined ? {} : { agentResult }),
   };
 }
 

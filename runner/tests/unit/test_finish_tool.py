@@ -125,6 +125,18 @@ def test_more_values_than_the_bound_are_refused() -> None:
 
 
 # #843-T42
+def test_the_values_are_counted_as_the_app_counts_them_to_the_edge() -> None:
+    # The root, the list and the entries: 20,000 values are within the bound, 20,001 are not.
+    edge = b'{"findings": [' + b",".join([b"1"] * 19_998) + b"]}"
+    over = b'{"findings": [' + b",".join([b"1"] * 19_999) + b"]}"
+    empties = b'{"a": {}, "b": [], "c": [[], {}]}'
+
+    assert scan_bounds(edge) is None
+    assert scan_bounds(over) == "too_many_values"
+    assert scan_bounds(empties) is None
+
+
+# #843-T42
 def test_brackets_and_commas_inside_a_text_are_not_counted() -> None:
     text = "[" * 5000 + "," * 5000 + '\\"' + "{" * 5000
     raw = json.dumps({"findings": [], "t": text}).encode()

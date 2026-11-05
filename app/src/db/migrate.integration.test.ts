@@ -130,6 +130,7 @@ describe("the migrations of both epics", () => {
       "20261104140000_create_workflows",
       "20261104150000_create_profiles",
       "20261104160000_add_implementer_turn_profile",
+      "20261105100000_add_implementer_turn_result",
     ]);
   });
 

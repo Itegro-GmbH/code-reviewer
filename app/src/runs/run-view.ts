@@ -181,6 +181,13 @@ export type ImplementerDetailView = ImplementerRowView & {
   };
   /** The environment the task started with; null for a task without one (the standard). */
   environment: ImplementerEnvironmentView | null;
+  /**
+   * The result the agent handed in through the finish tool (#843), as the app kept it after it checked it against the task's schema:
+   * data from the agent, each text in it cleaned and stripped of known secrets, and nothing else changed. Null when there is none.
+   */
+  result: Record<string, unknown> | null;
+  /** The task had a result schema (the agent was given a finish tool), so a settled task without `result` ended without one. */
+  resultExpected: boolean;
   /** The last commit on the branch after the turn, when the turn pushed. */
   head: { shortSha: string; url: string | null } | null;
   /** For a task that did not succeed but pushed work: "N commits were pushed to <branch>."; null otherwise. */
@@ -208,6 +215,8 @@ export type ImplementerRowSource = {
 export type ImplementerDetailSource = ImplementerRowSource & {
   baseBranch: string;
   instruction: string;
+  /** #843: whether the turn had a result schema, and the result the agent handed in once it was checked against it. */
+  result?: { expected: boolean; value: Record<string, unknown> | null };
   /** The environment the turn copied when it started (#818); absent or null for a task without one. */
   environment?: {
     name: string;
@@ -753,6 +762,20 @@ function plural(count: number, one: string, many: string): string {
  * log, stripped of known secrets, cut to the limits of the contract and rendered as text by the page; a link is made only by
  * `githubBranchUrl` and `githubCommitUrl`.
  */
+/** `value` with `clean` applied to every text in it, keys included: a result is data from the agent and is shown as it is otherwise. */
+function cleanedValue(value: unknown, clean: (text: string) => string): unknown {
+  if (typeof value === "string") return clean(value);
+  if (Array.isArray(value)) return value.map((item) => cleanedValue(item, clean));
+  if (isRecord(value))
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        clean(key),
+        cleanedValue(item, clean),
+      ]),
+    );
+  return value;
+}
+
 function implementerDetailView(
   job: Job,
   source: ImplementerDetailSource | null,
@@ -842,6 +865,13 @@ function implementerDetailView(
     },
     summary: summary === "" ? null : summary,
     environment: environmentView(source, job.result, display),
+    resultExpected: source?.result?.expected ?? false,
+    result:
+      source?.result?.value == null
+        ? null
+        : (cleanedValue(source.result.value, (text) =>
+            display(cleanTaskText(text)),
+          ) as Record<string, unknown>),
     commits: {
       shown: commits.slice(0, MAX_LISTED_COMMITS),
       more: Math.max(0, commits.length - MAX_LISTED_COMMITS),

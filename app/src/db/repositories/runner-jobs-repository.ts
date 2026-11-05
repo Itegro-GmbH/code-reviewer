@@ -70,7 +70,8 @@ import { headNoticeKey } from "../refusal-notice-key.ts";
 import { claimOldestDueJob } from "./jobs-claim.ts";
 import { toJob } from "./jobs-repository.ts";
 import { createUsageRecordsRepository } from "./usage-records-repository.ts";
-import { turnResultOf } from "../implementer-turn-result.ts";
+import { agentResultOf, turnResultOf } from "../implementer-turn-result.ts";
+import { boundAgentResult } from "../agent-result.ts";
 import { createImplementerRepository } from "./implementer-repository.ts";
 import { idleSessionsOfEndedTurns } from "./implementer-sessions-sweep.ts";
 import { closeRecordsOfEndedJobs } from "./usage-records-sweep.ts";
@@ -98,8 +99,21 @@ async function recordTurnOfJob(
 ): Promise<void> {
   const sessions = createImplementerRepository(trx, job.workspace_id, now);
   const turn = await sessions.getTurnByJob(job.id);
-  if (turn !== undefined)
-    await sessions.recordTurnResult(turn.session.id, turnResultOf(result));
+  if (turn === undefined) return;
+  await sessions.recordTurnResult(turn.session.id, turnResultOf(result));
+  // #843: the result the agent handed in is kept with the turn, which has a schema. The report path (`runner-api/report.ts`) checked it
+  // against that schema and took out one that does not fit before it got here; the bounds are held again, because this is the last
+  // place before it is stored.
+  if (turn.turn.resultSchema === null) return;
+  const handed = agentResultOf(result);
+  if (handed === undefined) return;
+  const bounded = boundAgentResult(handed);
+  if (bounded.ok)
+    await sessions.recordTurnAgentResult(turn.turn.id, bounded.value);
+  else
+    console.error(
+      `[queue] agent_result_refused job=${job.id} reason=${bounded.reason}`,
+    );
 }
 
 /** What `expireStaleJobs` did. */

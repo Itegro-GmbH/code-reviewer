@@ -375,26 +375,34 @@ _SCAN = re.compile(rb'"(?:[^"\\]|\\.)*"|[\[\]{},]', re.DOTALL)
 
 def scan_bounds(raw: bytes) -> str | None:
     """Whether `raw` is within the bounds of a result, found without parsing it: its size, how deep
-    its lists and objects nest, and how many values it holds (commas and openings; the strings are
-    skipped whole). None when it is. The scan is linear and builds nothing, so a hostile file costs
-    what its size costs."""
+    its lists and objects nest, and how many values it holds (the root, every entry and field, every
+    list and object: what the app counts too). None when it is. The scan is linear and builds
+    nothing, and the strings are skipped whole, so a hostile file costs what its size costs.
+
+    The values are counted from the structure: one for the root, one for each comma, and one for
+    each list or object that is not empty (the commas of a container count its entries but one)."""
     if len(raw) > MAX_RESULT_BYTES:
         return TOO_LARGE
-    depth = items = 0
+    depth = 0
+    values = 1
+    previous = 0
     for token in _SCAN.finditer(raw):
         first = token.group()[0]
         if first == 0x22:  # a string
+            previous = first
             continue
         if first in b"[{":
             depth += 1
-            items += 1
             if depth > MAX_VALUE_DEPTH:
                 return TOO_DEEP
         elif first in b"]}":
             depth -= 1
+            if previous not in b"[{":
+                values += 1
         else:
-            items += 1
-        if items > MAX_VALUE_ITEMS:
+            values += 1
+        previous = first
+        if values > MAX_VALUE_ITEMS:
             return TOO_MANY_VALUES
     return None
 

@@ -27,6 +27,7 @@ const parsed: StartInput = {
   costLimitCents: null,
   environmentId: null,
   profile: null,
+  result: null,
   clientRequestId: "req-1",
 };
 
@@ -321,5 +322,70 @@ describe("the body that starts a task with a profile (#843)", () => {
         costLimitCents: null,
       }).ok,
     ).toBe(true);
+  });
+});
+
+describe("the body that starts a task with a result schema (#843)", () => {
+  const SCHEMA = {
+    type: "object",
+    required: ["summary"],
+    properties: { summary: { type: "string", description: "What was done." } },
+  };
+
+  // #843-T93
+  it("takes a result schema and keeps it as the validator returned it", () => {
+    expect(validateStartInput({ ...VALID, result: SCHEMA })).toEqual({
+      ok: true,
+      value: { ...parsed, result: SCHEMA },
+    });
+  });
+
+  // #843-T93
+  it("takes none or null as none: the profile's default applies, or no finish tool", () => {
+    for (const result of [undefined, null])
+      expect(validateStartInput({ ...VALID, result })).toEqual({
+        ok: true,
+        value: parsed,
+      });
+  });
+
+  // #843-T93
+  it.each([
+    ["a text", "findings"],
+    ["a list", []],
+    ["an object that is not a schema", {}],
+    ["a schema whose root is not an object", { type: "string" }],
+    ["an unknown field type", { type: "object", properties: { a: { type: "date" } } }],
+    ["a required name that is no property", { ...SCHEMA, required: ["other"] }],
+  ])("refuses %s, with the first problem the validator found", (_name, result) => {
+    const issues = issuesOf({ ...VALID, result });
+
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ field: "result", code: "invalid" });
+    expect(issues[0]?.detail).toMatch(/\S/);
+  });
+
+  // #843-T93
+  it("refuses a schema larger than the bound of a body, without echoing it", () => {
+    const wide = {
+      type: "object",
+      properties: Object.fromEntries(
+        Array.from({ length: 50 }, (_, i) => [
+          `f${i}`,
+          { type: "string", enum: Array.from({ length: 50 }, (_, j) => `v${i}-${j}${"x".repeat(190)}`) },
+        ]),
+      ),
+    };
+
+    const issues = issuesOf({ ...VALID, result: wide });
+
+    expect(issues).toEqual([{ field: "result", code: "too_long" }]);
+  });
+
+  // #843-T93
+  it("is told alongside the other fields' problems", () => {
+    const issues = issuesOf({ ...VALID, instruction: "", result: [] });
+
+    expect(issues.map((i) => i.field)).toEqual(["instruction", "result"]);
   });
 });

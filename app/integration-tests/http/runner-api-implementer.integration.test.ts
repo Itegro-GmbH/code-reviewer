@@ -1722,3 +1722,153 @@ describe("the profile of a turn (#843)", () => {
     ]);
   });
 });
+
+// #843: the result schema of a turn and the result the agent handed in. The schema travels in `implementer.resultSchema`, only to a
+// Worker that names the feature that reads it; the result comes back in the implementer block and is kept with the turn only when it
+// fits the schema the turn ran with.
+describe("the result of a turn (#843)", () => {
+  const WITH_RESULT = `${WORKER_FEATURES},implementer_result`;
+  const SCHEMA = {
+    type: "object" as const,
+    required: ["summary"],
+    properties: {
+      summary: { type: "string" as const, description: "What was done." },
+      verdict: { type: "string" as const, enum: ["done", "partial"] },
+    },
+  };
+
+  async function handedIn(agentResult: unknown, schema = true) {
+    const h = await start();
+    const { jobId } = await h.turn(schema ? { resultSchema: SCHEMA } : {});
+    const { credential } = await fetched(h, WITH_RESULT);
+    const response = await h.worker.result(
+      jobId,
+      credential,
+      turnResult({
+        implementer: { ...TURN_BLOCK, agentResult } as never,
+      }),
+    );
+    const turn = await h.db
+      .selectFrom("implementer_turns")
+      .select(["result_schema", "result_value"])
+      .executeTakeFirstOrThrow();
+    return { h, jobId, response, turn };
+  }
+
+  // #843-T110
+  it("gives the Worker the result schema of the turn, exactly as stored, in an input the contract accepts", async () => {
+    const h = await start();
+    await h.turn({ resultSchema: SCHEMA });
+
+    const { input } = await fetched(h, WITH_RESULT);
+
+    expect(contract.check("RunnerJobInput", input)).toStrictEqual({
+      valid: true,
+      errors: "",
+    });
+    expect(input).toMatchObject({ implementer: { resultSchema: SCHEMA } });
+  });
+
+  // #843-T111
+  it("carries no schema for a turn without one, whatever the Worker names: no finish tool, as before", async () => {
+    const h = await start();
+    await h.turn();
+
+    const { input } = await fetched(h, WITH_RESULT);
+
+    expect(JSON.stringify(input)).not.toContain("resultSchema");
+    expect(contract.check("RunnerJobInput", input).valid).toBe(true);
+  });
+
+  // #843-T112
+  it("ends a turn with a result schema, free and before any credential or token exists, when the Worker does not read result schemas", async () => {
+    const h = await start();
+    const { jobId } = await h.turn({ resultSchema: SCHEMA });
+    const split = await h.claimedSplit(DISPATCHER);
+
+    await h.worker.details(
+      split.job.id,
+      split.job.credential,
+      `${WORKER_FEATURES},implementer_profile`,
+      undefined,
+      BOTH.join(","),
+    );
+
+    expect(await h.queue.get(jobId)).toMatchObject({
+      status: "failed",
+      errorCode: "implementer_engine_unavailable",
+    });
+    expect(h.fake.issuedInstallationTokens()).toEqual([]);
+  });
+
+  // #843-T113
+  it("keeps the result the agent handed in with the turn (the runner checked it against the schema)", async () => {
+    const { h, jobId, response, turn } = await handedIn({
+      summary: "Added it.",
+      verdict: "done",
+    });
+
+    expect(response.status).toBe(200);
+    expect(await h.queue.get(jobId)).toMatchObject({ status: "succeeded" });
+    expect(JSON.parse(turn.result_value ?? "null")).toEqual({
+      summary: "Added it.",
+      verdict: "done",
+    });
+    expect(JSON.parse(turn.result_schema ?? "null")).toEqual(SCHEMA);
+  });
+
+  // #843-T115
+  it("does not keep a result for a turn that had no schema", async () => {
+    const { response, turn } = await handedIn({ summary: "x" }, false);
+
+    expect(response.status).toBe(200);
+    expect(turn).toEqual({ result_schema: null, result_value: null });
+  });
+
+  // #843-T116
+  it("refuses a result block whose agent result is not an object or is out of bounds, as the contract does", async () => {
+    for (const bad of [[], "text", { text: "x".repeat(256 * 1024) }]) {
+      const h = await start();
+      const { jobId } = await h.turn({ resultSchema: SCHEMA });
+      const { credential } = await fetched(h, WITH_RESULT);
+
+      const response = await h.worker.result(
+        jobId,
+        credential,
+        turnResult({
+          implementer: { ...TURN_BLOCK, agentResult: bad } as never,
+        }),
+      );
+
+      expect(response.status).toBe(400);
+    }
+  });
+
+  // #843-T117
+  it("completes a turn that ended no_result as a failure with that code, and keeps no result", async () => {
+    const h = await start();
+    const { jobId } = await h.turn({ resultSchema: SCHEMA });
+    const { credential } = await fetched(h, WITH_RESULT);
+
+    const response = await h.worker.result(
+      jobId,
+      credential,
+      goodResult({
+        ok: false,
+        errorCode: "no_result",
+        implementer: TURN_BLOCK,
+      } as never),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await h.queue.get(jobId)).toMatchObject({
+      status: "failed",
+      errorCode: "no_result",
+    });
+    const turn = await h.db
+      .selectFrom("implementer_turns")
+      .select("result_value")
+      .executeTakeFirstOrThrow();
+    expect(turn.result_value).toBeNull();
+  });
+});

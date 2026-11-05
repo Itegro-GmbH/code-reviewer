@@ -28,6 +28,10 @@ import type {
   ImplementerTurnsTable,
 } from "../schema.ts";
 import type { WorkspaceId } from "../workspace-scope.ts";
+import type {
+  AgentResultValue,
+  StoredResultSchema,
+} from "../agent-result.ts";
 
 /** A session as the rest of the app sees it. Timestamps are ISO 8601 text in UTC. */
 export type StoredImplementerSession = {
@@ -75,6 +79,8 @@ export type TurnProfile = {
   canPush: boolean;
 };
 
+export type { AgentResultValue };
+
 export type StoredImplementerTurn = {
   id: string;
   sessionId: string;
@@ -93,6 +99,10 @@ export type StoredImplementerTurn = {
   environment: TurnEnvironment | null;
   /** The profile version the task ran with; null for a task without one (the platform's defaults). */
   profile: TurnProfile | null;
+  /** The result schema the task ran with (#843): its own, or its profile's default; null for none (no finish tool). */
+  resultSchema: StoredResultSchema | null;
+  /** The result the agent handed in, once it was checked against `resultSchema`; null until then and for a turn without one. */
+  resultValue: AgentResultValue | null;
 };
 
 /** What is known when a task is accepted. */
@@ -109,6 +119,8 @@ export type NewImplementerTask = {
   environment?: TurnEnvironment | null;
   /** A copy of the profile version chosen at submit (#843); left out or null for none. */
   profile?: TurnProfile | null;
+  /** The result schema of the task (#843), already validated by the format's validator; left out or null for none. */
+  resultSchema?: StoredResultSchema | null;
 };
 
 /**
@@ -162,6 +174,15 @@ export type ImplementerRepository = {
     sessionId: string,
     result: TurnResult,
   ): Promise<StoredImplementerSession | undefined>;
+  /**
+   * Keeps the result the agent handed in with the turn (#843): only a turn of this workspace that has a schema and no result yet takes
+   * one, so a repeated completion writes nothing new. Returns whether it was written. The caller has checked the value against the
+   * turn's schema; the database holds only the bound of its size.
+   */
+  recordTurnAgentResult(
+    turnId: string,
+    value: AgentResultValue,
+  ): Promise<boolean>;
   /** The sessions of a repository, newest first (highest slot first), each with its turns by number. */
   listForRepository(
     repositoryId: string,
@@ -235,7 +256,22 @@ function turnFrom(
             instructions: row.profile_instructions,
             canPush: row.profile_can_push === 1,
           },
+    resultSchema: readJsonObject(row.result_schema) as StoredResultSchema | null,
+    resultValue: readJsonObject(row.result_value) as AgentResultValue | null,
   };
+}
+
+/** A JSON text written by this module as an object; null for none, and for text that is not one (it cannot be, the checks ran first). */
+function readJsonObject(text: string | null): Record<string, unknown> | null {
+  if (text === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 export function createImplementerRepository(
@@ -373,6 +409,10 @@ export function createImplementerRepository(
                 : task.profile.canPush
                   ? 1
                   : 0,
+            result_schema:
+              task.resultSchema === undefined || task.resultSchema === null
+                ? null
+                : JSON.stringify(task.resultSchema),
           })
           .returningAll()
           .executeTakeFirstOrThrow();
@@ -419,6 +459,19 @@ export function createImplementerRepository(
         .returningAll()
         .executeTakeFirst();
       return row === undefined ? undefined : sessionFrom(row);
+    },
+
+    async recordTurnAgentResult(turnId, value) {
+      const written = await db
+        .updateTable("implementer_turns")
+        .set({ result_value: JSON.stringify(value) })
+        .where("workspace_id", "=", workspaceId)
+        .where("id", "=", turnId)
+        .where("result_schema", "is not", null)
+        .where("result_value", "is", null)
+        .returning("id")
+        .executeTakeFirst();
+      return written !== undefined;
     },
 
     async listForRepository(repositoryId) {

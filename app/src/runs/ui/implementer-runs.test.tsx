@@ -98,6 +98,8 @@ function task(
       url: `https://github.com/acme/widgets/commit/${SHA}`,
     },
     pushedNote: null,
+    result: null,
+    resultExpected: false,
     reported: true,
     ...overrides,
   };
@@ -508,6 +510,80 @@ describe("the detail page of an implementer run", () => {
       container.querySelectorAll('[data-slot="run-detail"] a[href*="alert"]'),
     ).toHaveLength(0);
     expect(container.textContent).toContain(hostile);
+  });
+
+  describe("the result the agent handed in (#843)", () => {
+    // #843-T95
+    it("shows nothing for a task that had no result schema", () => {
+      const { container } = renderDetail(detail());
+
+      expect(container.querySelector('[data-slot="run-agent-result"]')).toBeNull();
+      expect(
+        container.querySelector('[data-slot="run-agent-result-none"]'),
+      ).toBeNull();
+    });
+
+    // #843-T95
+    it("shows the result as plain JSON text in a block that is closed", () => {
+      const { container } = renderDetail(
+        detail({
+          implementer: task({
+            resultExpected: true,
+            result: { verdict: "done", note: "<b>bold</b>", list: [1, true, null] },
+          }),
+        }),
+      );
+
+      const block = container.querySelector<HTMLDetailsElement>(
+        '[data-slot="run-agent-result"]',
+      );
+      expect(block).not.toBeNull();
+      expect(block?.open).toBe(false);
+      const text = block?.querySelector("pre")?.textContent ?? "";
+      expect(JSON.parse(text)).toEqual({
+        verdict: "done",
+        note: "<b>bold</b>",
+        list: [1, true, null],
+      });
+      expect(block?.querySelector("b")).toBeNull();
+    });
+
+    // #843-T95
+    it("renders hostile text in the result as text", () => {
+      const hostile = '<img src=x onerror="alert(1)">';
+      const { container } = renderDetail(
+        detail({
+          implementer: task({ resultExpected: true, result: { note: hostile } }),
+        }),
+      );
+
+      expect(container.querySelector("img")).toBeNull();
+      expect(container.textContent).toContain("alert(1)");
+    });
+
+    // #843-T95
+    it("says that a settled task with a schema handed in no result, and that a running one has not yet", () => {
+      const settled = renderDetail(
+        detail({ implementer: task({ resultExpected: true, result: null }) }),
+      );
+      expect(
+        settled.container.querySelector('[data-slot="run-agent-result-none"]')
+          ?.textContent,
+      ).toBe("The agent handed in no result.");
+      settled.unmount();
+
+      const running = renderDetail(
+        detail({
+          status: "running",
+          finishedAt: null,
+          implementer: task({ resultExpected: true, result: null }),
+        }),
+      );
+      expect(
+        running.container.querySelector('[data-slot="run-agent-result-none"]')
+          ?.textContent,
+      ).toBe("The agent has not handed in a result yet.");
+    });
   });
 
   // #758-T02

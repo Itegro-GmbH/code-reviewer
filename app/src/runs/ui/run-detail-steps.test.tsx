@@ -45,6 +45,8 @@ function task(): ImplementerDetailView {
     branches: { shown: [], more: 0, dropped: NONE_DROPPED },
     head: null,
     pushedNote: null,
+    result: null,
+    resultExpected: false,
     reported: false,
   };
 }

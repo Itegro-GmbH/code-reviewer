@@ -30,6 +30,7 @@
 // credentials and the model key) runs when the Worker fetches the job (`worker-fetch.ts`), by the same
 // code, so the Dispatcher never sees a secret of the job.
 import "server-only";
+import type { StoredResultSchema } from "../db/agent-result.ts";
 import type { AttemptedShas } from "../db/repositories/jobs-repository.ts";
 import type { IntegrationsRepository } from "../db/repositories/integrations-repository.ts";
 import type {
@@ -366,6 +367,8 @@ export type Checked = {
       instructions: string;
       canPush: boolean;
     } | null;
+    /** #843: the result schema the turn copied when it started; null for a task without one (no finish tool). */
+    resultSchema: StoredResultSchema | null;
   } | null;
 };
 
@@ -1083,6 +1086,7 @@ export async function checkJob(
                 instructions: turn.turn.profile.instructions,
                 canPush: turn.turn.profile.canPush,
               },
+        resultSchema: turn.turn.resultSchema,
       },
     };
   }
@@ -1198,6 +1202,9 @@ export async function buildJobInput(
   // the agent without the instructions the person chose.
   if (implementer?.profile != null && !features.includes("implementer_profile"))
     return refuse("implementer_engine_unavailable", "reason=profile");
+  // #843: the same for the result schema. A Worker that does not read it would run an agent that is never asked for its result.
+  if (implementer?.resultSchema != null && !features.includes("implementer_result"))
+    return refuse("implementer_engine_unavailable", "reason=result");
   if (costLimit.enforced === "none")
     deps.logger.info(
       `[runner-api] job=${job.id} carries no cost limit: the runner names neither claim feature cost_limit nor operator_cost_limit, so a Dynamic Review is held only to the runner's own RUNNER_DYNAMIC_MAX_COST_USD and a Diff Review to none`,
@@ -1340,6 +1347,10 @@ export async function buildJobInput(
                     canPush: implementer.profile.canPush,
                   },
                 }),
+            // #843: only a turn that has a result schema carries one, and only to a Worker that reads it (the refusal above).
+            ...(implementer.resultSchema === null
+              ? {}
+              : { resultSchema: implementer.resultSchema }),
           },
           git: {
             provider: "github",

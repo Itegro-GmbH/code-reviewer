@@ -11,8 +11,8 @@ exist only in a deployment with the capability `implementer` (the factory).
 
 **Status (milestone 2 of epic #833, first half).** Profiles are stored with versions, the workflow validator resolves `profile` against them,
 and a task can run with one: the version's model and cost limit become the task's, its instructions go into the agent's prompt, and a version
-without the right to push is not pushed. The profile's default result schema is stored and used by the validator; the finish tool that makes
-use of it at run time is the next change.
+without the right to push is not pushed. The profile's default result schema is stored, used by the validator and, when a task runs with the
+profile, becomes the task's [result schema](implementer.md#the-finish-tool): the agent gets a finish tool made from it.
 
 ## A profile
 
@@ -42,7 +42,7 @@ use of it at run time is the next change.
 | `instructions` | no | The standing, system-level text the agent is given, 20,000 characters at most. It is **not** the task: the task is what a person (or a workflow step) sends with each run. Tabs and line breaks are kept as written. Text that is only white space is refused (`invalid_value`); leave the field out instead. |
 | `costLimitCents` | no | The most one turn may cost, in whole US cents (1 to 10,000), the brake of the turn. Left out (or `null`), the operator's maximum alone applies. Above the operator's maximum it is refused (`cost_limit_above_maximum`), and it is checked again when a task starts, because the maximum can change. |
 | `canPush` | yes | `true` if a turn of this profile may push branches, `false` if not. See [the push right](#the-push-right). Required on purpose: decide it. |
-| `defaultResult` | no | A [result schema](workflows.md#result-schemas) (the same format and the same validator as a step's `result`). A workflow step that declares no `result` yields this one, and the validator uses it for the references in the workflow. It is stored and checked now; the finish tool that asks the agent for it at run time comes next. |
+| `defaultResult` | no | A [result schema](workflows.md#result-schemas) (the same format and the same validator as a step's `result`). A workflow step that declares no `result` yields this one, and the validator uses it for the references in the workflow. A task that runs with the profile and brings no `result` of its own gets this one as the schema of its turn, and with it a finish tool ([`implementer.md`](implementer.md#the-finish-tool)). |
 
 A body with a field not in the table is refused (`unknown_field`, with the names that exist).
 

@@ -725,6 +725,8 @@ describe("the detail of an implementer run", () => {
         "instruction",
         "pushedNote",
         "reported",
+        "result",
+        "resultExpected",
         "summary",
       ].sort(),
     );
@@ -1496,5 +1498,65 @@ describe("the network of an implementer run (#745)", () => {
         withNetwork({ mode: "open", hosts: [] }),
       ).implementer?.environment?.network.report?.vmPolicy,
     ).toBe("not_configured");
+  });
+});
+
+// #843: the result the agent handed in, as the page and the run API show it.
+describe("the result of an implementer run (#843)", () => {
+  const detailWith = (result: ImplementerDetailSource["result"], redact = (text: string) => text) =>
+    toCustomerRunDetailView(
+      PRODUCT,
+      turn({ status: "succeeded", result: resultWith({}) }),
+      "acme/widgets",
+      NOW,
+      redact,
+      false,
+      null,
+      { ...source(), ...(result === undefined ? {} : { result }) },
+    ).implementer;
+
+  // #843-T96
+  it("has no result and expects none for a task that had no schema", () => {
+    const view = detailWith(undefined);
+
+    expect(view?.result).toBeNull();
+    expect(view?.resultExpected).toBe(false);
+  });
+
+  // #843-T96
+  it("expects one and has none for a task that had a schema and handed in nothing that fit", () => {
+    const view = detailWith({ expected: true, value: null });
+
+    expect(view?.result).toBeNull();
+    expect(view?.resultExpected).toBe(true);
+  });
+
+  // #843-T96
+  it("shows the result as data, every text cleaned and stripped of known secrets, keys included", () => {
+    const view = detailWith(
+      {
+        expected: true,
+        value: {
+          summary: `see ${GIT_TOKEN}\u001b[31m red\u202e`,
+          [`k-${GIT_TOKEN}`]: [1, true, null, { deep: "x" }],
+        },
+      },
+      (text) => text.replaceAll(GIT_TOKEN, "[redacted]"),
+    );
+
+    expect(view?.result).toEqual({
+      summary: "see [redacted] red",
+      "k-[redacted]": [1, true, null, { deep: "x" }],
+    });
+  });
+
+  // #843-T96
+  it("names a key such as __proto__ as a key and changes nothing of the prototype", () => {
+    const value = JSON.parse('{"__proto__": {"polluted": true}}');
+
+    const view = detailWith({ expected: true, value });
+
+    expect(Object.keys(view?.result ?? {})).toEqual(["__proto__"]);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 });
