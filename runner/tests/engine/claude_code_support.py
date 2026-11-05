@@ -23,6 +23,7 @@ from code_reviewer_runner.implementer.claude_code.command import (
     claude_environment,
 )
 from code_reviewer_runner.implementer.claude_code.events import (
+    ClaudeEvents,
     ClaudeResult,
     LineSplitter,
     parse_result,
@@ -127,7 +128,12 @@ class Turn:
 
     @property
     def result(self) -> ClaudeResult:
-        return parse_result(next(e for e in reversed(self.events) if e.get("type") == "result"))
+        """The end of the turn, read as the adapter reads it (with the `error` of a failed call)."""
+        adapter = ClaudeEvents("engine-test")
+        for event in self.events:
+            adapter.convert(event)
+        ended = next(e for e in reversed(self.events) if e.get("type") == "result")
+        return parse_result(ended, adapter.take_api_error())
 
     @property
     def init(self) -> dict[str, Any]:

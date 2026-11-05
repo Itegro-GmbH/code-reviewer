@@ -23,18 +23,30 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Final, cast
 
+from .command import FINISH_TOOL
+
 # The longest line taken. A tool result is in a `user` event whole (a file read, a command's
 # output), so a line may be large; one over this is dropped and counted, the stream goes on.
 MAX_LINE_BYTES: Final = 8 * 1024 * 1024
 
 # What `result.modelUsage.<model>.costBasis` says of a price that comes from Anthropic's list.
 COST_BASIS_LIST: Final = "list"
+# What the step record says of a tool that failed (a command's output is never recorded).
+TOOL_FAILED: Final = "failed"
 SUBTYPE_SUCCESS: Final = "success"
 SUBTYPE_BUDGET: Final = "error_max_budget_usd"
 # `claude --resume <id>` with nothing at that id (an empty session volume) fails without a model
 # call; the runner starts a fresh session instead.
 _NO_CONVERSATION: Final = "no conversation found"
 _NOT_LOGGED_IN: Final = "not logged in"
+# The `error` field Claude Code puts on the assistant message of a failed API call (the SDK's
+# `SDKAssistantMessageError`), and the HTTP statuses of the same call (`result.api_error_status`).
+# These are structured fields; the text of a result is what the agent said, or what Claude Code
+# prints for a person at a terminal, and is never read for a meaning.
+API_ERROR_AUTH: Final = "authentication_failed"
+API_ERRORS_LIMIT: Final = ("rate_limit", "billing_error")
+STATUSES_AUTH: Final = (401,)
+STATUSES_LIMIT: Final = (402, 429)
 
 
 class LineSplitter:
@@ -122,10 +134,15 @@ class ClaudeEvents:
       `thinking` -> a `reasoning` part, `text` -> a `text` part (both finished: the event comes
       when the block ended), `tool_use` -> a `tool` part, status `running`, part id = the
       `tool_use` id;
-    * `user` event with a `tool_result` block -> the same tool part again, `completed`, or `error`
-      with the text of the result when `is_error` is true;
+    * `user` event with a `tool_result` block -> the same tool part again, `completed`, or `error`.
+      The text of a failing result is **not** recorded (`TOOL_FAILED` instead): Claude Code puts a
+      failing command's whole output into it, and a tool's output is never recorded. The one
+      exception is the finish tool, whose refusal says what is wrong with the result the agent
+      handed in, which the agent and the page need;
     * `stream_event` `message_delta` -> a `step-finish` part with the call's tokens (no price: a
-      per-call cost is in no event; `result.total_cost_usd` is the turn's total);
+      per-call cost is in no event; `result.total_cost_usd` is the turn's total). It ends a model
+      call, so the call's message and its blocks are forgotten there, as a tool is at its result:
+      a session of thousands of calls holds nothing it has finished with;
     * `system`, `result` and the rest -> nothing here (`parse_result` reads the end).
     """
 
@@ -135,6 +152,17 @@ class ClaudeEvents:
         self._blocks: Counter[str] = Counter()
         self._tools: dict[str, tuple[str, Any, int | None, str]] = {}
         self._current = ""
+        self._api_error: str | None = None
+
+    def take_api_error(self) -> str | None:
+        """The `error` of the failed API call seen since the last time, once."""
+        found, self._api_error = self._api_error, None
+        return found
+
+    @property
+    def tracked(self) -> int:
+        """How many tools, messages and blocks are held (zero between calls of a long session)."""
+        return len(self._tools) + len(self._messages) + len(self._blocks)
 
     def _event(self, kind: str, **properties: Any) -> dict[str, Any]:
         return {"type": kind, "properties": {"sessionID": self.session, **properties}}
@@ -146,7 +174,7 @@ class ClaudeEvents:
         kind = event.get("type")
         at = _ms(event.get("timestamp"))
         if kind == "assistant":
-            return self._assistant(_object(event.get("message")), at)
+            return self._assistant(event, _object(event.get("message")), at)
         if kind == "user":
             return self._results(_object(event.get("message")), at)
         if kind == "stream_event":
@@ -154,10 +182,18 @@ class ClaudeEvents:
             if inner.get("type") == "message_start":
                 self._current = str(_object(inner.get("message")).get("id"))
             if inner.get("type") == "message_delta":
-                return self._step(inner, at)
+                found = self._step(inner, at)
+                self._messages.discard(self._current)
+                self._blocks.pop(self._current, None)
+                return found
         return []
 
-    def _assistant(self, message: dict[str, Any], at: int | None) -> list[dict[str, Any]]:
+    def _assistant(
+        self, event: Mapping[str, Any], message: dict[str, Any], at: int | None
+    ) -> list[dict[str, Any]]:
+        error = event.get("error")
+        if isinstance(error, str) and error:
+            self._api_error = error
         identifier = str(message.get("id"))
         found: list[dict[str, Any]] = []
         if identifier not in self._messages:
@@ -218,15 +254,25 @@ class ClaudeEvents:
             if block.get("type") != "tool_result" or call not in self._tools:
                 continue
             failed = bool(block.get("is_error"))
-            text: Any = block.get("content")
-            if isinstance(text, list):
-                text = " ".join(str(b.get("text", "")) for b in _blocks(text))
             found.append(
                 self._tool_part(
-                    call, "error" if failed else "completed", at, str(text) if failed else None
+                    call,
+                    "error" if failed else "completed",
+                    at,
+                    self._failure(self._tools[call][0], block) if failed else None,
                 )
             )
+            del self._tools[call]
         return found
+
+    @staticmethod
+    def _failure(tool: str, block: dict[str, Any]) -> str:
+        if tool != FINISH_TOOL:
+            return TOOL_FAILED
+        text: Any = block.get("content")
+        if isinstance(text, list):
+            text = " ".join(str(b.get("text", "")) for b in _blocks(text))
+        return str(text)
 
     def _step(self, inner: dict[str, Any], at: int | None) -> list[dict[str, Any]]:
         usage = _object(inner.get("usage"))
@@ -264,6 +310,10 @@ class ClaudeResult:
     # the turn from its list (`costBasis: list`). Otherwise None: unknown. It is an estimate for
     # the display "≈ ... through a subscription"; it is never billed and never added to our totals.
     estimated_cost_usd: Decimal | None
+    # How the last API call of the turn failed: the `error` of its assistant message (read by
+    # `ClaudeEvents`) and the HTTP status of the result; None when neither says.
+    api_error: str | None = None
+    api_error_status: int | None = None
 
     @property
     def ok(self) -> bool:
@@ -274,8 +324,10 @@ class ClaudeResult:
         return self.subtype == SUBTYPE_BUDGET
 
     def _says(self, sentence: str) -> bool:
+        """Whether Claude Code's own `errors` or `subtype` say it. Never `text`: that is what the
+        agent wrote, and an agent that says "not logged in" has not failed the login."""
         return self.is_error and any(
-            sentence in words.lower() for words in (self.text, *self.errors)
+            sentence in words.lower() for words in (self.subtype, *self.errors)
         )
 
     @property
@@ -284,7 +336,19 @@ class ClaudeResult:
 
     @property
     def not_logged_in(self) -> bool:
-        return self._says(_NOT_LOGGED_IN)
+        """No login, or one that is expired or revoked (Claude Code answers 401)."""
+        return self.is_error and (
+            self.api_error == API_ERROR_AUTH
+            or self.api_error_status in STATUSES_AUTH
+            or self._says(_NOT_LOGGED_IN)
+        )
+
+    @property
+    def usage_limit(self) -> bool:
+        """The subscription's usage limit (or a billing refusal) ended the call."""
+        return self.is_error and (
+            self.api_error in API_ERRORS_LIMIT or self.api_error_status in STATUSES_LIMIT
+        )
 
 
 def estimated_cost(result: Mapping[str, Any]) -> Decimal | None:
@@ -296,12 +360,16 @@ def estimated_cost(result: Mapping[str, Any]) -> Decimal | None:
         return None
     if any(_object(model).get("costBasis") != COST_BASIS_LIST for model in usage.values()):
         return None
-    return Decimal(str(total))
+    amount = Decimal(str(total))
+    # JSON that Python reads takes `NaN` and `Infinity`; neither, nor a negative, is a cost.
+    return amount if amount.is_finite() and amount >= 0 else None
 
 
-def parse_result(event: Mapping[str, Any]) -> ClaudeResult:
+def parse_result(event: Mapping[str, Any], api_error: str | None = None) -> ClaudeResult:
     """The end of a turn. Reads what is there and trusts nothing: a missing or odd field is a
-    failed turn with no text and no cost, never an exception."""
+    failed turn with no text and no cost, never an exception. `api_error` is what
+    `ClaudeEvents.take_api_error` saw of the turn."""
+    status = event.get("api_error_status")
     text, session = event.get("result"), event.get("session_id")
     denials = event.get("permission_denials")
     reason = event.get("terminal_reason")
@@ -316,5 +384,9 @@ def parse_result(event: Mapping[str, Any]) -> ClaudeResult:
         errors=tuple(e for e in cast("list[Any]", errors) if isinstance(e, str))
         if isinstance(errors, list)
         else (),
+        api_error=api_error,
+        api_error_status=status
+        if isinstance(status, int) and not isinstance(status, bool)
+        else None,
         estimated_cost_usd=estimated_cost(event),
     )

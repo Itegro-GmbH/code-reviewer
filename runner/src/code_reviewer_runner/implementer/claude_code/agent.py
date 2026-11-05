@@ -272,7 +272,7 @@ class ClaudeCodeAgent:
 
     def _take(self, event: dict[str, Any], ended: list[ClaudeResult]) -> None:
         if event.get("type") == "result":
-            ended.append(parse_result(event))
+            ended.append(parse_result(event, self._events.take_api_error()))
             return
         feeder = self.steps
         if feeder is None:
@@ -290,8 +290,11 @@ class ClaudeCodeAgent:
             raise LimitError(ErrorCode.COST_LIMIT_REACHED, "the turn reached its budget")
         if result.not_logged_in:
             raise EngineError(
-                ErrorCode.LLM_AUTH, "Claude Code is not logged in on this device (login.py)"
+                ErrorCode.LLM_AUTH,
+                "Claude Code has no valid login on this device (none, expired, revoked: login.py)",
             )
+        if result.usage_limit:
+            raise LimitError(ErrorCode.LLM_QUOTA, "the subscription's usage limit is reached")
         if not result.ok:
             reason = result.terminal_reason or result.subtype or "unknown"
             raise EngineError(

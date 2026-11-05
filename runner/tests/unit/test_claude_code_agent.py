@@ -32,8 +32,9 @@ def line(document: Mapping[str, Any]) -> bytes:
     return json.dumps(document).encode() + b"\n"
 
 
-def stream(text: str = "All done.", **result: Any) -> list[bytes]:
-    """The output of one turn: a message that ends in text, and the result."""
+def stream(text: str = "All done.", *, api_error: str | None = None, **result: Any) -> list[bytes]:
+    """The output of one turn: a message that ends in text, and the result. `api_error` is the
+    `error` field Claude Code puts on the assistant message of a failed API call."""
     ended: dict[str, Any] = {
         "type": "result",
         "subtype": "success",
@@ -58,6 +59,7 @@ def stream(text: str = "All done.", **result: Any) -> list[bytes]:
                 "type": "assistant",
                 "session_id": SESSION,
                 "timestamp": "2026-11-04T21:35:56.050Z",
+                **({} if api_error is None else {"error": api_error}),
                 "message": {
                     "id": "msg_1",
                     "content": [{"type": "text", "text": text}],
@@ -267,8 +269,10 @@ def test_a_follow_up_turn_resumes_the_stored_session() -> None:
 
 # #856-T21
 def test_an_empty_session_volume_starts_a_fresh_session_under_the_same_id() -> None:
+    # As the real program prints it: the sentence is in `errors`, the `result` text is empty.
     missing = stream(
-        "No conversation found with session ID: " + OTHER,
+        "",
+        errors=["No conversation found with session ID: " + OTHER],
         subtype="error_during_execution",
         is_error=True,
         total_cost_usd=0,
@@ -331,7 +335,10 @@ def test_a_device_that_is_not_logged_in_is_an_auth_error_that_says_so() -> None:
     place = Place(
         outputs=[
             stream(
-                "Not logged in · Please run /login", is_error=True, subtype="error_during_execution"
+                "Not logged in · Please run /login",
+                api_error="authentication_failed",
+                is_error=True,
+                subtype="success",
             )
         ],
         returncode=1,
@@ -342,6 +349,105 @@ def test_a_device_that_is_not_logged_in_is_an_auth_error_that_says_so() -> None:
 
     assert failed.value.code is ErrorCode.LLM_AUTH
     assert TOKEN not in str(failed.value)
+
+
+# #856-T23
+def test_an_expired_or_revoked_token_is_the_auth_error_not_an_engine_failure() -> None:
+    for status in (401, None):
+        place = Place(
+            outputs=[
+                stream(
+                    "OAuth token has expired · Please run /login",
+                    api_error="authentication_failed",
+                    api_error_status=status,
+                    is_error=True,
+                    terminal_reason="api_error",
+                )
+            ],
+            returncode=1,
+        )
+
+        with pytest.raises(EngineError) as failed:
+            agent_of(place).turn("go")
+
+        assert failed.value.code is ErrorCode.LLM_AUTH
+        assert "run /login" not in str(failed.value), "what Claude Code printed is not passed on"
+
+
+# #856-T23
+def test_a_rejected_status_alone_is_the_auth_error_too() -> None:
+    place = Place(
+        outputs=[stream("x", api_error_status=401, is_error=True, terminal_reason="api_error")],
+        returncode=1,
+    )
+
+    with pytest.raises(EngineError) as failed:
+        agent_of(place).turn("go")
+
+    assert failed.value.code is ErrorCode.LLM_AUTH
+
+
+# #856-T23
+def test_the_usage_limit_of_a_subscription_is_a_clean_limit_code() -> None:
+    for error, status in (("rate_limit", 429), ("rate_limit", None), ("billing_error", 402)):
+        place = Place(
+            outputs=[
+                stream(
+                    "You've hit your limit · resets 3pm",
+                    api_error=error,
+                    api_error_status=status,
+                    is_error=True,
+                    terminal_reason="api_error",
+                )
+            ],
+            returncode=1,
+        )
+
+        with pytest.raises(LimitError) as stopped:
+            agent_of(place).turn("go")
+
+        assert stopped.value.code is ErrorCode.LLM_QUOTA
+        assert "resets" not in str(stopped.value) and TOKEN not in str(stopped.value)
+
+
+# #856-T23
+def test_what_the_agent_says_in_its_text_is_never_taken_for_a_failure_of_the_login() -> None:
+    """A failed turn whose text happens to say the words: it is an engine failure, nothing more."""
+    place = Place(
+        outputs=[
+            stream(
+                "I am not logged in to the registry; no conversation found",
+                is_error=True,
+                subtype="error_during_execution",
+                terminal_reason="aborted_streaming",
+            )
+        ],
+        returncode=1,
+    )
+
+    with pytest.raises(EngineError) as failed:
+        agent_of(place).turn("go")
+
+    assert failed.value.code is ErrorCode.IMPLEMENTER_ENGINE_UNAVAILABLE
+
+
+# #856-T23
+def test_an_api_error_of_an_earlier_turn_does_not_mark_the_next_one() -> None:
+    place = Place(
+        outputs=[
+            stream("x", api_error="rate_limit", is_error=True, terminal_reason="api_error"),
+            stream("fine", is_error=True, subtype="error_during_execution"),
+        ],
+        returncode=1,
+    )
+    agent = agent_of(place)
+    with pytest.raises(LimitError):
+        agent.turn("go")
+
+    with pytest.raises(EngineError) as failed:
+        agent.turn("again")
+
+    assert failed.value.code is ErrorCode.IMPLEMENTER_ENGINE_UNAVAILABLE
 
 
 # #856-T23

@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Final
 
+from code_reviewer_runner.implementer import finish_tool
+
 from .login import ClaudeLogin
 
 # The user of the install layer, as `uid:gid` for the exec. Not 0, not 1000 (a mapped user of the
@@ -38,6 +40,7 @@ AGENT_TMP: Final = "/tmp"
 CONFIG_DIRECTORY: Final = f"{AGENT_HOME}/.claude"
 # The one MCP server, the finish tool: Claude Code names its tool `mcp__finish__submit_result`.
 FINISH_SERVER: Final = "finish"
+FINISH_TOOL: Final = f"mcp__{FINISH_SERVER}__{finish_tool.TOOL_NAME}"
 AGENT_PATH: Final = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 EXECUTABLE: Final = "claude"
 
