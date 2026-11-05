@@ -24,6 +24,7 @@ import { createResolver } from "../workflows/resolver.ts";
 import { validateWorkflow } from "../workflows/validate.ts";
 import type { JsonValue } from "../integrations/types.ts";
 import { sha } from "./jobs.ts";
+import { REVIEWER_PROFILE } from "./reviewer-profile.ts";
 import { USER, startImplementerHarness } from "./implementer-harness.ts";
 
 export { USER };
@@ -122,7 +123,12 @@ export async function startEngineHarness(
   const reviewer = await app.profiles.create(
     {
       name: "reviewer",
-      content: { ...PROFILE, canPush: false, costLimitCents: 300 },
+      content: {
+        ...PROFILE,
+        ...REVIEWER_PROFILE,
+        // The repository keeps the schema as text.
+        defaultResult: JSON.stringify(REVIEWER_PROFILE.defaultResult),
+      },
       createdBy: USER.id,
     },
     100,

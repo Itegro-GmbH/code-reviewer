@@ -6,6 +6,7 @@
 import {
   CheckIcon,
   HourglassIcon,
+  MinusIcon,
   PlayIcon,
   XIcon,
 } from "@phosphor-icons/react/dist/ssr";
@@ -14,19 +15,21 @@ import { InfoHint } from "../components/info-hint.tsx";
 import { Badge } from "../components/ui/badge.tsx";
 import { RUN_STATUS_COPY, STEP_STATUS_COPY } from "./messages.ts";
 
-type Status = "pending" | "running" | "succeeded" | "failed";
+type Status = "pending" | "running" | "succeeded" | "failed" | "skipped";
 
 const ICON: Record<Status, Icon> = {
   pending: HourglassIcon,
   running: PlayIcon,
   succeeded: CheckIcon,
   failed: XIcon,
+  skipped: MinusIcon,
 };
 const TONE: Record<Status, "neutral" | "running" | "success" | "danger"> = {
   pending: "neutral",
   running: "running",
   succeeded: "success",
   failed: "danger",
+  skipped: "neutral",
 };
 
 function StatusBadge({

@@ -14,6 +14,7 @@ import {
   PROFILES_PER_WORKSPACE_MAX,
   VERSIONS_PER_PROFILE_MAX,
 } from "./limits.ts";
+import { REVIEWER_PROFILE } from "../test-support/reviewer-profile.ts";
 import {
   COST_LIMIT_CENTS,
   PROFILE_FIELDS,
@@ -40,6 +41,17 @@ describe("docs/profiles.md", () => {
       expect(result.errors).toEqual([]);
       expect(result.valid).toBe(true);
     }
+  });
+
+  // #846-T90
+  it("holds the reviewer of the workflow Issue to PR, as the engine tests save it", () => {
+    const [reviewer] = jsonBlocks(docs);
+
+    expect(reviewer).toEqual({
+      name: "reviewer",
+      model: { entryId: "..." },
+      ...REVIEWER_PROFILE,
+    });
   });
 
   // #843-T211

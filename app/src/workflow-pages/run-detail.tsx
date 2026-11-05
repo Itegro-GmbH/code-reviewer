@@ -33,6 +33,7 @@ import {
 import {
   COST_BASIS_COPY,
   COST_COPY,
+  CONTROL_COPY,
   COST_NOT_RUN_COPY,
   describeRunFailure,
   describeRunPollFailure,
@@ -45,6 +46,7 @@ import { StepStatusBadge, WorkflowRunStatusBadge } from "./status-badge.tsx";
 import {
   actionResultOf,
   agentResultOf,
+  controlResultOf,
   costBasesOf,
   formatUsd,
   neverRan,
@@ -240,12 +242,39 @@ function AgentOutcome({
   );
 }
 
+/** What a condition or a loop decided, in a sentence, and for a loop how many rounds it ran. */
+function ControlOutcome({ step }: { step: StepView }) {
+  const result = controlResultOf(step);
+  if (result === undefined) return null;
+  return (
+    <div
+      data-slot="step-control-result"
+      className="flex flex-col gap-1 text-sm"
+    >
+      {result.taken === undefined ? null : (
+        <p>{CONTROL_COPY.taken[result.taken]}</p>
+      )}
+      {result.exit === undefined ? null : (
+        <p>{CONTROL_COPY.exit[result.exit]}</p>
+      )}
+      {result.rounds === undefined ? null : (
+        <p className="text-muted-foreground">
+          {CONTROL_COPY.rounds}: {result.rounds}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function Step({
   step,
+  repeated,
   workspaceSlug,
   repository,
 }: {
   step: StepView;
+  /** The step ran more than once in this run (the rounds of a loop): its round is told. */
+  repeated: boolean;
   workspaceSlug: string;
   repository: string | undefined;
 }) {
@@ -267,6 +296,9 @@ function Step({
         <StepStatusBadge status={step.status} />
         <span className="text-xs text-muted-foreground">
           {STEP_KIND_COPY[step.kind]}
+          {repeated
+            ? `, ${CONTROL_COPY.round.toLowerCase()} ${String(step.round)}`
+            : ""}
           {step.profile === null
             ? ""
             : `, ${PAGE_COPY.profile.toLowerCase()} ${step.profile.name} version ${String(step.profile.version)}`}
@@ -329,8 +361,10 @@ function Step({
       ) : null}
       {step.kind === "agent" ? (
         <AgentOutcome step={step} repository={repository} />
-      ) : (
+      ) : step.kind === "action" ? (
         <ActionOutcome step={step} repository={repository} />
+      ) : (
+        <ControlOutcome step={step} />
       )}
     </li>
   );
@@ -430,8 +464,11 @@ export function WorkflowRunDetail({
           <ol className="flex flex-col gap-3">
             {run.steps.map((step) => (
               <Step
-                key={step.id}
+                key={step.position}
                 step={step}
+                repeated={run.steps.some(
+                  (other) => other.id === step.id && other.round !== step.round,
+                )}
                 workspaceSlug={workspaceSlug}
                 repository={repository}
               />

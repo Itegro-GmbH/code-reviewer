@@ -5,6 +5,7 @@ import { startFormOf } from "./start-form-spec.ts";
 import {
   actionResultOf,
   agentResultOf,
+  controlResultOf,
   costBasesOf,
   formatUsd,
   neverRan,
@@ -266,5 +267,22 @@ describe("the form that starts a run", () => {
     expect(startFormOf(document({ kind: "manual", input: 7 }))).toEqual({
       kind: "unusable",
     });
+  });
+
+  // #846-T84
+  it("reads what a condition or a loop decided, and nothing else from other steps", () => {
+    expect(
+      controlResultOf({ kind: "if", output: { taken: "else", extra: 1 } }),
+    ).toEqual({ taken: "else" });
+    expect(
+      controlResultOf({ kind: "loop", output: { exit: "budget", rounds: 3 } }),
+    ).toEqual({ exit: "budget", rounds: 3 });
+    expect(
+      controlResultOf({ kind: "loop", output: { exit: "<b>", rounds: 1.5 } }),
+    ).toBeUndefined();
+    expect(controlResultOf({ kind: "if", output: null })).toBeUndefined();
+    expect(
+      controlResultOf({ kind: "action", output: { taken: "then" } }),
+    ).toBeUndefined();
   });
 });

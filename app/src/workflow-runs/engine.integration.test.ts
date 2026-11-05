@@ -11,6 +11,7 @@ import { addWorkspace } from "../test-support/workspaces.ts";
 import {
   MANUAL_TRIGGER,
   SUMMARY_RESULT,
+  USER,
   startEngineHarness,
   twoAgentSteps,
   type EngineHarness,
@@ -354,6 +355,7 @@ describe("events that repeat, arrive late or arrive together", () => {
         position: 0,
         stepId: "plan",
         kind: "agent",
+        round: 1,
         profile: { name: "worker", version: 1 },
         capMicroUsd: 20_000_000,
       }),
@@ -436,6 +438,7 @@ describe("a turn that was started and not recorded", () => {
             "The request is not valid.",
           );
         },
+        continueSession: app.implementerService.continueSession,
       },
       turns: app.turnReader,
       connectors: createConnectorRegistry(),
@@ -460,6 +463,7 @@ describe("a turn that was started and not recorded", () => {
         position: 0,
         stepId: "plan",
         kind: "agent",
+        round: 1,
         profile: { name: "worker", version: 1 },
         capMicroUsd: 20_000_000,
       }),
@@ -861,39 +865,39 @@ describe("starting a run", () => {
   });
 
   // #844-T85
-  it("refuses a workflow with an if or a loop, naming the step, before anything is written", async () => {
+  it("refuses a workflow with a node the engine does not run, naming the step, before anything is written", async () => {
     const app = await startEngineHarness();
-    const workflow = await app.saveWorkflow({
-      version: 1,
-      name: "With a loop",
-      trigger: MANUAL_TRIGGER,
-      steps: [
-        {
-          id: "again",
-          kind: "loop",
-          maxRounds: 2,
-          body: [
+    // The validator refuses the reserved kinds, so the document is written past it, the way an older or hand-made document could be.
+    const saved = await app.workflows.create(
+      {
+        name: "With a reserved kind",
+        document: JSON.stringify({
+          version: 1,
+          name: "With a reserved kind",
+          trigger: MANUAL_TRIGGER,
+          steps: [
             {
-              id: "work",
-              kind: "agent",
-              profile: "worker",
-              environment: "Python",
-              instruction: "Work.",
-              result: SUMMARY_RESULT,
+              id: "again",
+              kind: "loop",
+              maxRounds: 2,
+              body: [{ id: "each", kind: "forEach" }],
+              until: { notEmpty: "{{work.summary}}" },
             },
           ],
-          until: { notEmpty: "{{work.summary}}" },
-        },
-      ],
-    });
+        }),
+        createdBy: USER.id,
+      },
+      100,
+    );
+    if (!saved.ok) throw new Error("seeding failed");
 
     const failure = await app
-      .start(workflow.id)
+      .start(saved.workflow.id)
       .catch((error: unknown) => error);
 
     expect(failure).toMatchObject({
       code: "WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED",
-      step: { id: "again", kind: "loop" },
+      step: { id: "each", kind: "forEach" },
     });
     expect(
       await app.h.db.selectFrom("workflow_runs").select("id").execute(),
@@ -1217,6 +1221,7 @@ describe("actions", () => {
         position: 1,
         stepId: "open",
         kind: "action",
+        round: 1,
         profile: null,
         capMicroUsd: null,
       });

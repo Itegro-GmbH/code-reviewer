@@ -1,8 +1,8 @@
-# Workflow engine (#844, milestone 3a of epic #833)
+# Workflow engine (#844, milestones 3 and 5 of epic #833)
 
-Runs a saved [workflow](../../../docs/workflows.md#engine) version: one **run** per start, one **step run** per step, the steps one after the other.
-This slice has the **core** and the **GitHub actions** (milestone 3b: `github-connectors.ts`): linear `agent` and `action` steps, the manual trigger, no `if` and `loop`
-(milestone 5). The pages (milestone 3c, #873) are in [`workflow-pages/`](../workflow-pages/README.md). What it does and the error codes: [`docs/workflows.md`](../../../docs/workflows.md#engine). The plan: `plans/agent-workflows.md`.
+Runs a saved [workflow](../../../docs/workflows.md#engine) version: one **run** per start, one **step run** per time a step runs, in the order they run.
+It has the **core** and the **GitHub actions** (milestone 3b: `github-connectors.ts`): `agent` and `action` steps, and since milestone 5 (#846) the control steps `if` (a branch is
+taken, the other is written as skipped) and `loop` (rounds, `until`, `maxRounds`, `previous.*`, `session.continue`: `conditions.ts`, and the replay of the rows in `machine.ts`). The pages (milestone 3c, #873) are in [`workflow-pages/`](../workflow-pages/README.md). What it does and the error codes: [`docs/workflows.md`](../../../docs/workflows.md#engine). The plan: `plans/agent-workflows.md`.
 
 The routes exist only in a deployment with the capability `implementer` (`src/capabilities/routes.ts`), like the workflows and the Implementer; every
 member may use them (`start_implementer_task`: a run starts tasks).

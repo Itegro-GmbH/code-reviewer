@@ -56,9 +56,11 @@ export const RUN_FAILURE_CODES = [
   "step_failed",
   /** The workflow's budget does not cover another agent step. */
   "budget_exhausted",
-  /** The document holds a step this engine does not run (`if` and `loop` are milestone 5). */
+  /** The document holds a node this engine does not run (a reserved kind, or a node that is not well formed). */
   "step_kind_not_supported",
-  /** The document of the pinned version cannot be read or does not fit the run. */
+  /** The condition of an `if` or the `until` of a `loop` could not be evaluated (a value it needs does not exist). */
+  "condition_failed",
+  /** The document of the pinned version cannot be read, or the steps written so far are not what it says they should be. */
   "document_unusable",
   /** A run a label started: the account that owns the workflow is no longer a member of the workspace (`WORKFLOW_OWNER_GONE_TEXT`). */
   "workflow_owner_gone",

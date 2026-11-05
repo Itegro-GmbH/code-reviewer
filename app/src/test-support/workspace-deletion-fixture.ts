@@ -199,6 +199,7 @@ export async function seedWorkspaceForDeletion(
       position: 0,
       stepId: "work",
       kind: "agent",
+      round: 1,
       profile: null,
       capMicroUsd: 1000,
     }),

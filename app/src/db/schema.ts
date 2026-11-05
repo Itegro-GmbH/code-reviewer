@@ -1351,9 +1351,12 @@ export interface WorkflowStepRunsTable {
   workspace_id: string;
   position: number;
   step_id: string;
-  /** `agent` or `action`. */
+  /** `agent`, `action`, or a control step the run decided: `if` or `loop` (#846). */
   kind: string;
+  /** `pending`, `running`, `succeeded`, `failed`, or `skipped` (a step in the branch of an `if` that was not taken, #846). */
   status: string;
+  /** How often the step has run in the run, from 1: the rounds of a loop (#846). */
+  round: number;
   profile_name: string | null;
   profile_version: number | null;
   /** The job of the Implementer turn an agent step started. */

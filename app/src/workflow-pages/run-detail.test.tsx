@@ -442,6 +442,118 @@ describe("what a failed GitHub action says", () => {
   });
 });
 
+describe("rounds, conditions and skipped steps (#846)", () => {
+  const rounds = (): RunView =>
+    run({
+      status: "succeeded",
+      finishedAt: "2026-11-05T10:20:00.000Z",
+      steps: [
+        step({ id: "implement", position: 0, round: 1 }),
+        step({ id: "review", position: 1, round: 1 }),
+        step({ id: "implement", position: 2, round: 2 }),
+        step({ id: "review", position: 3, round: 2 }),
+        step({
+          id: "fix",
+          position: 4,
+          kind: "loop",
+          status: "succeeded",
+          profile: null,
+          jobId: null,
+          turnId: null,
+          costUsd: null,
+          costBasis: null,
+          output: { exit: "until", rounds: 2 },
+        }),
+        step({
+          id: "done",
+          position: 5,
+          kind: "if",
+          profile: null,
+          jobId: null,
+          turnId: null,
+          costUsd: null,
+          costBasis: null,
+          output: { taken: "then" },
+        }),
+        step({
+          id: "stuck",
+          position: 6,
+          kind: "action",
+          status: "skipped",
+          profile: null,
+          jobId: null,
+          turnId: null,
+          costUsd: null,
+          costBasis: null,
+          output: null,
+          startedAt: null,
+          finishedAt: "2026-11-05T10:19:00.000Z",
+        }),
+      ],
+    });
+
+  // #846-T80
+  it("lists every round of a step on its own, and tells the round of a step that ran more than once", () => {
+    const { container } = renderRun(rounds());
+
+    const listed = [...container.querySelectorAll("[data-slot=run-step]")];
+    expect(listed.map((item) => item.getAttribute("data-step-id"))).toEqual([
+      "implement",
+      "review",
+      "implement",
+      "review",
+      "fix",
+      "done",
+      "stuck",
+    ]);
+    expect(listed[0]?.textContent).toContain("round 1");
+    expect(listed[2]?.textContent).toContain("round 2");
+    // A step that ran once says nothing about rounds.
+    expect(listed[5]?.textContent).not.toContain("round");
+    expect(listed[6]?.textContent).not.toContain("round");
+  });
+
+  // #846-T81
+  it("tells in words how a loop ended and which branch a condition took", () => {
+    const { container } = renderRun(rounds());
+
+    const results = [
+      ...container.querySelectorAll("[data-slot=step-control-result]"),
+    ].map((node) => node.textContent);
+    expect(results[0]).toContain("The loop ended because its condition held");
+    expect(results[0]).toContain("Rounds: 2");
+    expect(results[1]).toContain("The condition held");
+    expect(container.textContent).not.toContain("maxRounds");
+  });
+
+  // #846-T82
+  it("shows a step in a branch that was not taken as skipped", () => {
+    const { container } = renderRun(rounds());
+
+    const skipped = container.querySelector(
+      "[data-slot=run-step][data-step-id=stuck]",
+    );
+    expect(skipped?.getAttribute("data-status")).toBe("skipped");
+    expect(within(skipped as HTMLElement).getByText("Skipped")).toBeTruthy();
+  });
+
+  // #846-T83
+  it("tells a run that ended on a condition it could not evaluate in words", () => {
+    const { container } = renderRun(
+      run({
+        status: "failed",
+        errorCode: "condition_failed",
+        finishedAt: "2026-11-05T10:05:00.000Z",
+      }),
+    );
+
+    expect(
+      container.querySelector("[data-slot=run-failure]")?.textContent,
+    ).toContain("condition of the workflow could not be evaluated");
+    expect(container.textContent).not.toContain("condition_failed");
+  });
+});
+
 describe("values that come from outside", () => {
   // #873-T46
   it("renders what an agent returned as text, never as markup", () => {

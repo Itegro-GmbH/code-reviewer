@@ -47,7 +47,7 @@
         {
           "id": "review",
           "kind": "agent",
-          "profile": "implementer@1",
+          "profile": "reviewer@1",
           "environment": "node",
           "session": "new",
           "instruction": "Review branch {{implement.branch}} against the issue. Do not change anything.",

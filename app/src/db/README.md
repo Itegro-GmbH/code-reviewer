@@ -620,6 +620,10 @@ migration in an earlier deployment does not have it.
 
 `20261105190000_add_workflow_run_trigger` lets a run that a label on an issue started have no person: `workflow_runs.created_by` is nullable, and the new column `trigger_kind` (`manual`, the default, or `github.issueLabeled`) says what started the run. The check `workflow_runs_trigger_check` holds the rule: only a `manual` run needs a user. `actor_login` stays required (for a label it is the login of whoever put the label on, display only). Expand only: `drop not null` and a constant default change the catalog, not the rows; `lock_timeout` 5 s. `down` puts `not null` back, which Postgres refuses while a run of a label exists.
 
+### Rounds, control steps and skipped steps (#846)
+
+`20261106090000_add_workflow_step_rounds` changes `workflow_step_runs` for `loop` and `if`. The new column `round` says how often the step has run in the run (from 1: the rounds of a loop; in a loop inside a loop the count goes on across the outer rounds, so it stays unique), and the unique index on (`run_id`, `step_id`) becomes one on (`run_id`, `step_id`, `round`), created before the old one is dropped. `kind` may also be `if` or `loop` (the row holds what the control step decided as its `output`), `status` may also be `skipped` (a step in the branch an `if` did not take; it counts as over, so it has a `finished_at`). Every step written before reads round 1. Expand only for the rows: a constant default and plain `add constraint` checks on a table of one row per step, `lock_timeout` 5 s. In the deploy window the old version, whose sweep advances every running run, can mishandle a run with a loop that the new version wrote just before it stopped; the migration's comment says so. `down` puts the old rules back, which Postgres refuses while a step ran twice, a control step or a skipped step exists.
+
 ### The queued instruction of a session (#841)
 
 `20261105160000_add_implementer_session_queue` (follow-up turns) adds four nullable text columns to `implementer_sessions` and one check; no table, index or link.
