@@ -225,13 +225,20 @@ export function fakeGithubAppClient(
       record("getCollaboratorPermission", installationId, repoFullName, login);
       return data.permissions?.[`${repoFullName}#${login}`] ?? "none";
     },
-    async listIssueComments(installationId, scope, repoFullName, prNumber) {
+    async listIssueComments(
+      installationId,
+      scope,
+      repoFullName,
+      prNumber,
+      options,
+    ) {
       record(
         "listIssueComments",
         installationId,
         scope,
         repoFullName,
         prNumber,
+        ...(options === undefined ? [] : [options]),
       );
       if (data.listCommentsFailure) throw data.listCommentsFailure;
       return data.comments?.[`${repoFullName}#${prNumber}`] ?? [];

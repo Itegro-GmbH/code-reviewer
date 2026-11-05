@@ -134,14 +134,15 @@ export interface IntegrationProvider {
    * Only where the app can write a comment (#844, `github.issue.comment`): writes `body` below an issue or pull request, as the
    * app, with a token limited to this repository and the issue permission. With a `marker` (text inside `body`), the comments of the
    * issue are looked at first: the app's own comment that holds the marker is the result (`existing`) and nothing is written, so a
-   * call that is made again does not comment twice. Rejects like `openPullRequest`.
+   * call that is made again does not comment twice. `since` (ISO 8601) bounds that look to the comments changed after it: nothing older
+   * can hold the marker. Rejects like `openPullRequest`.
    */
   commentOnIssue?(
     integration: Integration,
     repo: RepoRef,
     issueNumber: number,
     body: string,
-    options?: { signal?: AbortSignal; marker?: string },
+    options?: { signal?: AbortSignal; marker?: string; since?: string },
   ): Promise<{ url: string; existing: boolean }>;
 
   /**

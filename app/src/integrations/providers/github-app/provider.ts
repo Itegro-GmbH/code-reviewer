@@ -412,7 +412,7 @@ export function createGithubAppProvider(
 
     async commentOnIssue(integration, repo, issueNumber, body, options = {}) {
       try {
-        const { signal, marker } = options;
+        const { signal, marker, since } = options;
         const client = await getClient();
         const scope = actionScope(
           integration,
@@ -426,7 +426,10 @@ export function createGithubAppProvider(
             scope,
             repo.fullName,
             issueNumber,
-            { ...(signal === undefined ? {} : { signal }) },
+            {
+              ...(since === undefined ? {} : { since }),
+              ...(signal === undefined ? {} : { signal }),
+            },
           );
           // Only the app's own comment counts: anybody can copy a marker into theirs.
           const found = earlier.find(

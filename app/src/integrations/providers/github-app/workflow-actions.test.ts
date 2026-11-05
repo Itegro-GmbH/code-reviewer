@@ -73,6 +73,7 @@ function call(
     baseBranch: "main",
     inputs,
     idempotencyKey: "wf-r1-1",
+    stepCreatedAt: "2026-11-05T10:00:00.000Z",
     signal,
   };
 }
@@ -519,6 +520,13 @@ describe("what a step reports and what it is told", () => {
       "javascript:alert(1)",
       "https://evil.example/acme/widgets/pull/5",
       "https://github.com/acme/widgets-other/pull/5",
+      "https://github.com/acme/widgets/../../evil/repo/pull/5",
+      "https://github.com/acme/widgets/%2e%2e/%2e%2e/evil/repo/pull/5",
+      "https://github.com@evil.example/acme/widgets/pull/5",
+      "https://user:pass@github.com/acme/widgets/pull/5",
+      "https://github.com.evil.example/acme/widgets/pull/5",
+      "https://github.com/acme/widgets",
+      "http://github.com/acme/widgets/pull/5",
     ]) {
       const { connector } = setup({
         openedPullRequest: { number: 5, url, existing: false },
@@ -560,7 +568,15 @@ describe("what a step reports and what it is told", () => {
     expect(cleanTitle("a\ud800b\udc00c")).toBe("abc");
     expect(cleanBody("a\ud800b", "body")).toBe("ab");
     expect(cleanTitle("fix ‮gnp.exe‬ ⁦x⁩ done")).toBe("fix gnp.exe x done");
-    expect(cleanBody("keep ‮ here", "body")).toBe("keep ‮ here");
+    expect(cleanTitle("a\u200eb\u200fc\u061cd")).toBe("abcd");
+    // A body loses the bidirectional controls as well (overrides, isolates, direction marks, the Arabic letter mark); the zero-width
+    // space that defuses a mention stays.
+    expect(
+      cleanBody(
+        "keep \u202e\u2066x\u2069\u202a\u200e\u200f\u061c here @\u200bbob",
+        "body",
+      ),
+    ).toBe("keep x here @\u200bbob");
   });
 
   // #844-T309
@@ -609,6 +625,13 @@ describe("what a step reports and what it is told", () => {
     expect(
       again.client.calls.some((c) => c.method === "createIssueComment"),
     ).toBe(false);
+
+    // Only the comments changed since the step began (less a margin for the clocks) are looked at, not all pages.
+    expect(
+      again.client.calls
+        .find((c) => c.method === "listIssueComments")
+        ?.args.at(-1),
+    ).toMatchObject({ since: "2026-11-05T09:55:00.000Z" });
 
     // A comment of somebody else with the same text is not the app's, and the marker of another step is another comment.
     const other = setup({

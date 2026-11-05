@@ -61,8 +61,8 @@ const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
 const CONTROL_EXCEPT_LINE_BREAKS =
   /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 const LINE_BREAKS = /[\u0000-\u001f\u007f\u2028\u2029]+/g;
-/** The characters that reorder how a line is shown (embeddings, overrides, isolates): a title must read as it is written. */
-const BIDI_CONTROLS = /[\u202a-\u202e\u2066-\u2069]/g;
+/** The characters that reorder how a line is shown (direction marks, embeddings, overrides, isolates): a title must read as it is written. */
+const BIDI_CONTROLS = /[\u200e\u200f\u061c\u202a-\u202e\u2066-\u2069]/g;
 /** A half of a surrogate pair on its own is no text (JSON carries it as an escape that GitHub may refuse). */
 const LONE_SURROGATE =
   /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
@@ -100,12 +100,13 @@ export function cleanTitle(value: unknown): string {
     : `${leading(line, ACTION_TITLE_MAX_CHARS - 1).trimEnd()}…`;
 }
 
-/** A text of a comment or a description: control characters other than line breaks and tabs are dropped, a long text is cut and says so. */
+/** A text of a comment or a description: control characters other than line breaks and tabs and the bidirectional controls are dropped, a long text is cut and says so. */
 export function cleanBody(value: unknown, name: string): string {
   if (typeof value !== "string")
     throw new ActionInputError(`${name} must be a text.`);
   const text = value
     .replace(CONTROL_EXCEPT_LINE_BREAKS, "")
+    .replace(BIDI_CONTROLS, "")
     .replace(LONE_SURROGATE, "");
   if (text.length <= ACTION_BODY_MAX_CHARS) return text;
   const kept = leading(text, ACTION_BODY_MAX_CHARS);
@@ -246,6 +247,17 @@ async function targetOrFail(
   return target;
 }
 
+/** The clocks of GitHub and of this server need not agree to the second: the search for an earlier comment starts this much before the step. */
+const CLOCK_SKEW_MS = 5 * 60_000;
+
+/** Where the search for the comment of an earlier attempt of the step starts: before it, nothing of the step can exist. */
+function searchSince(call: ActionCall): { since?: string } {
+  const created = Date.parse(call.stepCreatedAt);
+  return Number.isNaN(created)
+    ? {}
+    : { since: new Date(created - CLOCK_SKEW_MS).toISOString() };
+}
+
 /**
  * The address a step reports is a page of the repository of the run: GitHub's answer is taken only when it is one, otherwise the
  * address the repository's own pages have (`fallbackPath`). A step output ends up as a link on the run page.
@@ -256,7 +268,26 @@ function pageOfRepository(
   fallbackPath: string,
 ): string {
   const base = repo.url.replace(/\/+$/, "");
-  return reported.startsWith(`${base}/`) ? reported : `${base}${fallbackPath}`;
+  const fallback = `${base}${fallbackPath}`;
+  try {
+    const own = new URL(base);
+    const page = new URL(reported);
+    if (
+      page.origin !== own.origin ||
+      page.username !== "" ||
+      page.password !== ""
+    )
+      return fallback;
+    const segments = (path: string) => path.split("/").filter((s) => s !== "");
+    const ownSegments = segments(own.pathname).map((s) => s.toLowerCase());
+    const pageSegments = segments(page.pathname);
+    const inside =
+      pageSegments.length > ownSegments.length &&
+      ownSegments.every((s, i) => pageSegments[i]?.toLowerCase() === s);
+    return inside ? page.href : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 function unavailable(name: GithubConnectorName): ConnectorError {
@@ -333,7 +364,7 @@ export function createGithubConnectors(
           repo,
           issue,
           `${body}\n\n${marker}`,
-          { signal: call.signal, marker },
+          { signal: call.signal, marker, ...searchSince(call) },
         );
         return {
           url: pageOfRepository(url, repo, `/issues/${String(issue)}`),

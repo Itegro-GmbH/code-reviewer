@@ -31,6 +31,8 @@ export type ActionCall = {
   inputs: Record<string, unknown>;
   /** The same for a call that is made again, so a connector can recognise a repeat. Stable per step of a run. */
   idempotencyKey: string;
+  /** When the step was written (ISO 8601): nothing the step did, also in an earlier attempt, is older. Bounds a search for what a repeat finds. */
+  stepCreatedAt: string;
   /** Aborted when the call has taken `ACTION_TIMEOUT_MS`; a connector passes it on to what it calls. */
   signal: AbortSignal;
 };
@@ -161,7 +163,10 @@ export function resolveActionInputs(
     }
     const resolved =
       typeof raw === "string" && input.type.kind === "string"
-        ? renderText(raw, values, undefined, { defuse: true })
+        ? renderText(raw, values, undefined, {
+            defuse: true,
+            plain: name === "title",
+          })
         : typeof raw === "string"
           ? resolveValue(raw, values)
           : Array.isArray(raw) && input.type.kind === "list"
