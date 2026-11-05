@@ -7,8 +7,8 @@
   input), from `FACTORY_RUNNER_TOKEN`, or from `--token`, which is the least safe (the process list
   and the shell history show it).
 - `run`: the service loop. `--once` takes one job and ends; with no job within `--wait` seconds it
-  ends with exit code 0 and says so, and with an app that could not be reached for the whole wait
-  it ends with exit code 7.
+  ends with exit code 0 and says so, and with an app that never answered during the wait it ends
+  with exit code 7.
 - `selftest`: proves the base on this machine; exit code 0 when it holds. It only looks: it pulls
   and names no image, so a machine whose agent image is missing or not the pinned one is reported
   as not ready (a running service pulls it at its own start). It may run beside a service, though
@@ -21,7 +21,8 @@ the file (`config.py`): a VM that runs one job needs no `register`.
 Exit codes (`base.py`): 0 done (also: no job within the wait), 1 a job failed, 2 usage, 3 the app
 requires an update, 4 revoked, 5 not ready (the self-test failed), 6 configuration, 7 `run --once`:
 the app never answered during the wait, 8 `register`: registered, but the credential could not be
-saved, 9 another runner uses this Docker daemon.
+saved, 9 another runner uses this Docker daemon (the log names the first container or
+network of another runner that was found).
 """
 
 import argparse

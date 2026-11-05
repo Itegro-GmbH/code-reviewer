@@ -51,7 +51,11 @@ from code_reviewer_runner.implementer.agent_container import (
 from code_reviewer_runner.implementer.docker_api import DockerApi, DockerError
 from code_reviewer_runner.implementer.exec_run import run_exec
 from code_reviewer_runner.implementer.reader import work_volume_of
-from code_reviewer_runner.implementer.role_labels import RUNNER_ID_VARIABLE, role_labels
+from code_reviewer_runner.implementer.role_labels import (
+    RUNNER_ID_VARIABLE,
+    RUNNER_LABEL,
+    role_labels,
+)
 from code_reviewer_runner.implementer.runner_profile import entrypoint_for
 from code_reviewer_runner.job import JobError
 from code_reviewer_runner.job_loop.jsonvalues import as_object
@@ -403,7 +407,7 @@ def _throwaway(
 
 def _start(run: _Run, runtime: str, memory_mb: int, cpus: int | None) -> str | None:
     api = run.api
-    _remove(api, SELFTEST_CONTAINER)
+    _clear_own(api, SELFTEST_CONTAINER, run.runner_id)
     container: str | None = None
     try:
         container = api.create_container(
@@ -421,7 +425,10 @@ def _start(run: _Run, runtime: str, memory_mb: int, cpus: int | None) -> str | N
                 break
             run.seams.sleep(0.2)
     except DockerError as error:
-        run.record(CHECK_CONTAINER, False, f"the daemon refused a step ({error.status})")
+        detail = f"the daemon refused a step ({error.status})"
+        if error.status == 409:
+            detail += f": a container named {SELFTEST_CONTAINER} of another runner is in the way"
+        run.record(CHECK_CONTAINER, False, detail)
     if container is not None:
         _remove(api, container)
     return None
@@ -528,6 +535,20 @@ def _nested(run: _Run, container: str) -> None:
         ok,
         "a container ran in the agent's own Docker" if ok else "no container ran in the agent",
     )
+
+
+def _clear_own(api: DockerApi, container: str, runner_id: str) -> None:
+    """Remove `container` if it is this runner's (a self-test that was killed leaves one): the name
+    is fixed, so another runner's must not be removed by it."""
+    try:
+        found = api.inspect_container(container)
+    except DockerError:
+        return
+    config = found.get("Config")
+    labels = config.get("Labels") if isinstance(config, dict) else None  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    owner = labels.get(RUNNER_LABEL) if isinstance(labels, dict) else None  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    if (owner if isinstance(owner, str) else "") == runner_id:
+        _remove(api, container)
 
 
 def _remove(api: DockerApi, container: str) -> None:

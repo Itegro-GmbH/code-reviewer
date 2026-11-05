@@ -15,7 +15,10 @@ runner claims by itself instead of being handed a job by a Dispatcher.
   VM that never spoke to the app is told from one that found nothing to do; an app that answered
   once and was lost later is "no job", exit 0).
 - A runner starts only on a daemon that no other runner uses (exit 9): the containers of a turn have
-  fixed names, so one daemon serves one runner until R2.
+  fixed names, so one daemon serves one runner until R2. Any container (in any state) or network of
+  Control that is not its own makes it stop, and the log names the first one; a lock container with
+  a fixed name, taken at the start and removed at the end, makes two runners that start together
+  meet before either has made anything. A runner with no identity ends with exit 6.
 
 The loop owns four things the host does not: the credential's renewal between jobs, the claim's
 rhythm and what a claim's failure means (revoked: stop for good; update needed: say so and wait;
@@ -42,6 +45,7 @@ from code_reviewer_runner.factory_runner.app_client import (
 )
 from code_reviewer_runner.factory_runner.base import (
     EXIT_APP_UNREACHABLE,
+    EXIT_CONFIG,
     EXIT_FAILED,
     EXIT_NOT_READY,
     EXIT_OK,
@@ -57,10 +61,18 @@ from code_reviewer_runner.factory_runner.config import (
     update_credential,
     with_credential,
 )
-from code_reviewer_runner.factory_runner.housekeeping import TidySeams, foreign_runner, tidy
+from code_reviewer_runner.factory_runner.housekeeping import (
+    NO_IDENTITY,
+    TidySeams,
+    foreign_object,
+    release_lock,
+    take_lock,
+    tidy,
+)
 from code_reviewer_runner.factory_runner.job_api import RunnerJobApi
 from code_reviewer_runner.factory_runner.prepare import Prepared
 from code_reviewer_runner.factory_runner.selftest import summary
+from code_reviewer_runner.implementer.agent_container import AGENT_IMAGE_REFERENCE
 from code_reviewer_runner.implementer.docker_api import DockerApi
 from code_reviewer_runner.job import IMPLEMENTER_WORK_DIR, IMPLEMENTER_WORK_DIR_VARIABLE
 from code_reviewer_runner.job_loop.api import ApiUnavailable, ClaimedJob
@@ -124,6 +136,8 @@ class RunnerService:
         self._announced: Announcement | None = None
         # The machine is tidied before the first claim and again whenever a job has ended.
         self._untidy = True
+        # This runner holds the lock container (`housekeeping.take_lock`).
+        self._locked = False
         self._tidy = TidySeams(
             api=seams.docker,
             work_dir=Path(environment_work_dir(prepared.environment)),
@@ -144,6 +158,7 @@ class RunnerService:
         finally:
             for number in (signal.SIGTERM, signal.SIGINT):
                 loop.remove_signal_handler(number)
+            await self._unlock()
 
     def stop(self) -> None:
         """A signal: stop claiming, and give back the job that runs (`runner_shutdown`)."""
@@ -152,14 +167,9 @@ class RunnerService:
             self._host.request_hard_stop()
 
     async def _run(self, once: bool, wait_seconds: float) -> int:
-        if await asyncio.to_thread(foreign_runner, self._tidy.api(), self._tidy.runner_id):
-            # The containers of a turn have fixed names: a second runner on this daemon would fail
-            # every turn with a 409 (and, before the labels, would remove the first one's).
-            self._log.error(
-                "another factory-runner uses this Docker daemon; one runner per daemon for now "
-                "(if none is running, remove its leftover containers: label code-reviewer.role)"
-            )
-            return EXIT_SHARED_DAEMON
+        other = await self._other_runner()
+        if other is not None:
+            return other
         refused = await self._announce()
         if refused is not None:
             return refused
@@ -235,6 +245,37 @@ class RunnerService:
         return EXIT_OK
 
     # -- steps -------------------------------------------------------------------------------------
+
+    async def _other_runner(self) -> int | None:
+        """The exit code when this runner may not use the daemon: it has no identity (6), or
+        another runner holds the lock or has a container or network on it (9)."""
+        runner_id = self._tidy.runner_id
+        if not runner_id:
+            self._log.error("%s", NO_IDENTITY)
+            return EXIT_CONFIG
+        api = self._tidy.api()
+        holder = await asyncio.to_thread(take_lock, api, runner_id, AGENT_IMAGE_REFERENCE)
+        if holder is not None:
+            found = holder
+        else:
+            self._locked = True
+            found = await asyncio.to_thread(foreign_object, api, runner_id)
+        if found is None:
+            return None
+        # The containers of a turn have fixed names: a second runner on this daemon would fail
+        # every turn with a 409 (and, without the labels, would remove the first one's).
+        self._log.error(
+            "another factory-runner uses this Docker daemon: %s; one runner per daemon for now "
+            "(if none is running, remove it: the label code-reviewer.role or the lock container)",
+            found,
+        )
+        await self._unlock()
+        return EXIT_SHARED_DAEMON
+
+    async def _unlock(self) -> None:
+        if self._locked:
+            self._locked = False
+            await asyncio.to_thread(release_lock, self._tidy.api(), self._tidy.runner_id)
 
     async def _announce(self) -> int | None:
         """Tell the app what this runner is. An exit code if that ends the run."""

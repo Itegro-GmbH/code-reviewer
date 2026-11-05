@@ -3,6 +3,7 @@
 """The configuration of the Factory-Runner (#854, R1b): the file, the environment over it, the
 checks, and that the secret never shows."""
 
+import errno
 import json
 import os
 import stat
@@ -167,7 +168,7 @@ def test_a_broken_file_is_a_configuration_error_without_its_content(tmp_path: Pa
 # #854-S2
 def test_a_credential_is_from_the_file_unless_the_environment_names_one(tmp_path: Path) -> None:
     environment = home(tmp_path)
-    save_config(config(credential=CREDENTIAL), environment)
+    save_config(config(credential=CREDENTIAL, runner_id="r1"), environment)
 
     from_file = load_config(environment)
     from_environment = load_config({**environment, "FACTORY_RUNNER_CREDENTIAL": OTHER})
@@ -185,7 +186,10 @@ def test_update_credential_changes_the_credential_and_its_time_and_nothing_else(
 ) -> None:
     environment = home(tmp_path)
     save_config(
-        config(credential=CREDENTIAL, limits=Limits(cpus=2), credential_renewed_at=1.0), environment
+        config(
+            credential=CREDENTIAL, runner_id="r1", limits=Limits(cpus=2), credential_renewed_at=1.0
+        ),
+        environment,
     )
     overriding = {
         **environment,
@@ -194,7 +198,7 @@ def test_update_credential_changes_the_credential_and_its_time_and_nothing_else(
         "FACTORY_RUNNER_CPUS": "9",
     }
 
-    path = update_credential(overriding, runner_id=None, renewed_at=5.0, credential=OTHER)
+    path = update_credential(overriding, runner_id="r1", renewed_at=5.0, credential=OTHER)
 
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     stored = json.loads(path.read_text())
@@ -206,9 +210,9 @@ def test_update_credential_changes_the_credential_and_its_time_and_nothing_else(
 # #854-S2
 def test_update_credential_with_only_a_time_keeps_the_credential(tmp_path: Path) -> None:
     environment = home(tmp_path)
-    save_config(config(credential=CREDENTIAL), environment)
+    save_config(config(credential=CREDENTIAL, runner_id="r1"), environment)
 
-    update_credential(environment, runner_id=None, renewed_at=7.0)
+    update_credential(environment, runner_id="r1", renewed_at=7.0)
 
     loaded = load_config(environment)
     assert (loaded.credential, loaded.credential_renewed_at) == (CREDENTIAL, 7.0)
@@ -266,3 +270,99 @@ def test_the_identity_is_the_runner_id_else_a_digest_that_hides_the_credential()
     assert digest == runner_identity(config(credential=CREDENTIAL))
     assert digest != runner_identity(config(credential=OTHER))
     assert runner_identity(config()) == ""
+
+
+# #854-S3
+def test_a_file_with_a_credential_and_no_runner_id_is_refused_with_the_way_out(
+    tmp_path: Path,
+) -> None:
+    environment = home(tmp_path)
+    save_config(config(credential=CREDENTIAL), environment)
+
+    with pytest.raises(ConfigError) as caught:
+        load_config(environment)
+
+    assert "register --force" in str(caught.value) and "runnerId" in str(caught.value)
+    assert CREDENTIAL not in str(caught.value)
+
+
+# #854-S3
+def test_a_file_without_a_credential_or_with_the_credential_of_the_environment_needs_no_id(
+    tmp_path: Path,
+) -> None:
+    environment = home(tmp_path)
+    save_config(config(), environment)
+    assert load_config(environment).credential is None
+
+    save_config(config(credential=CREDENTIAL), environment)
+    loaded = load_config({**environment, "FACTORY_RUNNER_CREDENTIAL": OTHER})
+    assert loaded.credential == OTHER and loaded.runner_id is None
+
+
+# #854-S3
+def test_the_identity_of_a_runner_from_the_file_is_its_id_and_a_renewal_does_not_change_it(
+    tmp_path: Path,
+) -> None:
+    environment = home(tmp_path)
+    save_config(config(credential=CREDENTIAL, runner_id="r1"), environment)
+    before = load_config(environment)
+
+    update_credential(environment, runner_id="r1", renewed_at=5.0, credential=OTHER)
+    after = load_config(environment)
+
+    assert after.credential == OTHER
+    assert runner_identity(before) == runner_identity(after) == "r1"
+
+
+# #854-N3
+def test_the_runner_id_is_trimmed_when_it_is_read(tmp_path: Path) -> None:
+    environment = home(tmp_path)
+    path = save_config(config(credential=CREDENTIAL, runner_id="r1"), environment)
+    stored = json.loads(path.read_text())
+    stored["runnerId"] = "  r1\n"
+    path.write_text(json.dumps(stored))
+
+    loaded = load_config(environment)
+
+    assert loaded.runner_id == "r1" and runner_identity(loaded) == "r1"
+    update_credential(environment, runner_id="r1", renewed_at=5.0)  # and it matches the writer's
+
+
+# #854-N2
+@pytest.mark.parametrize("code", [errno.EINVAL, errno.ENOTSUP])
+def test_a_file_system_that_cannot_sync_a_directory_does_not_fail_the_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    environment = home(tmp_path)
+    real = os.fsync
+    directories: list[int] = []
+
+    def fsync(descriptor: int) -> None:
+        if os.path.isdir(f"/proc/self/fd/{descriptor}"):
+            directories.append(descriptor)
+            raise OSError(code, "cannot sync a directory")
+        real(descriptor)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+
+    path = save_config(config(credential=CREDENTIAL, runner_id="r1"), environment)
+
+    assert directories and load_config(environment).credential == CREDENTIAL
+    assert list(path.parent.iterdir()) == [path]
+
+
+# #854-N2
+def test_another_error_of_the_directory_sync_is_still_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = os.fsync
+
+    def fsync(descriptor: int) -> None:
+        if os.path.isdir(f"/proc/self/fd/{descriptor}"):
+            raise OSError(errno.EIO, "disk")
+        real(descriptor)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+
+    with pytest.raises(OSError):
+        save_config(config(credential=CREDENTIAL, runner_id="r1"), home(tmp_path))

@@ -4,12 +4,13 @@
 failure means, the once mode a VM runs, the renewal of the credential and the stop."""
 
 import asyncio
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 from loop_support import (
@@ -32,6 +33,7 @@ from code_reviewer_runner.factory_runner.app_client import (
 )
 from code_reviewer_runner.factory_runner.base import (
     EXIT_APP_UNREACHABLE,
+    EXIT_CONFIG,
     EXIT_FAILED,
     EXIT_NOT_READY,
     EXIT_OK,
@@ -146,7 +148,8 @@ class AutoLauncher(FakeLauncher):
 
 
 class FakeDaemon:
-    """The daemon's list of what carries the role label, and the removals asked of it."""
+    """The daemon's list of what carries the role label, the lock container and the removals asked
+    of it."""
 
     def __init__(self) -> None:
         self.containers: list[str] = []
@@ -154,20 +157,42 @@ class FakeDaemon:
         self.removed: list[str] = []
         self.listing_fails = False
         self.filters: list[str] = []
-        # The running containers of Control that the check for another runner is shown.
-        self.running: list[dict[str, Any]] = []
+        # What the check for another runner is shown (every state, containers and networks).
+        self.foreign: list[dict[str, Any]] = []
+        # The labels of the lock container, if there is one, and every request made about it.
+        self.lock: dict[str, str] | None = None
+        self.lock_calls: list[str] = []
 
     def request(self, method: str, path: str, *args: Any, **kwargs: Any) -> Any:
         assert method == "GET"
         if self.listing_fails:
             raise DockerError(500, "no")
-        if "running" in path:
-            return self.running
+        labels = json.loads(parse_qs(urlsplit(path).query)["filters"][0])["label"]
+        if len(labels) == 1:  # the role label alone: the check for another runner
+            return self.foreign if path.startswith("/containers") else []
         self.filters.append(path)
         found = self.containers if path.startswith("/containers/json") else self.networks
         return [{"Id": identifier} for identifier in found]
 
+    def create_container(self, document: dict[str, Any], name: str) -> str:
+        assert name == "code-reviewer-runner-lock"
+        self.lock_calls.append("create")
+        if self.lock is not None:
+            raise DockerError(409, "name in use")
+        self.lock = document["Labels"]
+        return container_id("9")
+
+    def inspect_container(self, name: str) -> dict[str, Any]:
+        assert name == "code-reviewer-runner-lock"
+        if self.lock is None:
+            raise DockerError(404, "no such container")
+        return {"Config": {"Labels": self.lock}}
+
     def remove_container(self, container: str, **_kwargs: Any) -> None:
+        if container == "code-reviewer-runner-lock":
+            self.lock_calls.append("remove")
+            self.lock = None
+            return
         self.containers.remove(container)
         self.removed.append(container)
 
@@ -418,6 +443,7 @@ def test_an_old_credential_in_the_file_is_renewed_between_jobs_and_saved_first(
         RunnerConfig(
             url="https://app.example",
             credential=CREDENTIAL,
+            runner_id="r1",
             credential_renewed_at=1_800_000_000.0 - RENEW_AFTER_SECONDS - 1,
         ),
         rig.environment,
@@ -435,7 +461,10 @@ def test_a_recent_credential_is_left_alone(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
     save_config(
         RunnerConfig(
-            url="https://app.example", credential=CREDENTIAL, credential_renewed_at=1_800_000_000.0
+            url="https://app.example",
+            credential=CREDENTIAL,
+            runner_id="r1",
+            credential_renewed_at=1_800_000_000.0,
         ),
         rig.environment,
     )
@@ -456,15 +485,15 @@ def test_a_credential_from_the_environment_is_not_renewed_because_it_is_not_ours
     assert rig.client.renewals == 0
 
 
-def old_file(rig: Rig, **changes: Any) -> None:
+def old_file(rig: Rig, *, runner_id: str = "r1") -> None:
     save_config(
         RunnerConfig(
             url="https://file.example",
             name="from-file",
             labels=("file-label",),
             credential=CREDENTIAL,
+            runner_id=runner_id,
             credential_renewed_at=1_800_000_000.0 - RENEW_AFTER_SECONDS - 1,
-            **changes,
         ),
         rig.environment,
     )
@@ -725,12 +754,22 @@ def test_without_an_id_in_the_config_the_runner_is_named_by_a_digest_of_its_cred
     assert CREDENTIAL not in "".join(rig.daemon.filters)
 
 
+def foreign_container(
+    name: str = "code-reviewer-agent", runner: str | None = None
+) -> dict[str, Any]:
+    return {
+        "Id": container_id("f"),
+        "Names": [f"/{name}"],
+        "Labels": {ROLE_LABEL: "agent", **({} if runner is None else {RUNNER_LABEL: runner})},
+    }
+
+
 # #854-R1
-def test_a_running_container_of_another_runner_ends_the_start_before_any_claim(
+def test_a_container_of_another_runner_ends_the_start_before_any_claim(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     rig = Rig(tmp_path)
-    rig.daemon.running = [{"Id": container_id("f"), "Labels": {ROLE_LABEL: "agent"}}]
+    rig.daemon.foreign = [foreign_container()]
     rig.client.claims = [implementer_claim()]
 
     with caplog.at_level(logging.ERROR, logger="code_reviewer_runner.loop"):
@@ -741,14 +780,114 @@ def test_a_running_container_of_another_runner_ends_the_start_before_any_claim(
     assert "another factory-runner uses this Docker daemon" in caplog.text
 
 
+# #854-S4
+def test_the_log_of_exit_nine_names_the_first_hit(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    rig = Rig(tmp_path)
+    rig.daemon.foreign = [foreign_container("code-reviewer-door"), foreign_container("second-hit")]
+
+    with caplog.at_level(logging.ERROR, logger="code_reviewer_runner.loop"):
+        assert rig.go(once=True) == EXIT_SHARED_DAEMON
+
+    assert "container code-reviewer-door (role agent, runner none)" in caplog.text
+    assert "second-hit" not in caplog.text
+
+
+# #854-S4
+def test_the_log_names_the_runner_id_of_the_other_one(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    rig = Rig(tmp_path)
+    rig.daemon.foreign = [foreign_container(runner="runner-2")]
+
+    with caplog.at_level(logging.ERROR, logger="code_reviewer_runner.loop"):
+        assert rig.go(once=True) == EXIT_SHARED_DAEMON
+
+    assert "(role agent, runner runner-2)" in caplog.text
+
+
 # #854-R1
-def test_a_running_container_of_this_runner_is_not_another_runner(tmp_path: Path) -> None:
+def test_a_container_of_this_runner_is_not_another_runner(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
     own = rig.service._tidy.runner_id  # pyright: ignore[reportPrivateUsage]
-    rig.daemon.running = [{"Id": container_id("f"), "Labels": {ROLE_LABEL: "a", RUNNER_LABEL: own}}]
+    rig.daemon.foreign = [foreign_container(runner=own)]
 
     assert rig.go(once=True) == EXIT_OK
     assert rig.client.claim_calls == 1
+
+
+# #854-S1
+def test_the_runner_holds_the_lock_while_it_runs_and_removes_it_at_the_end(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    seen: list[dict[str, str] | None] = []
+    real = rig.client.claim
+
+    def claim() -> Any:
+        seen.append(rig.daemon.lock)
+        return real()
+
+    rig.client.claim = claim  # type: ignore[method-assign]
+
+    assert rig.go(once=True) == EXIT_OK
+
+    own = rig.service._tidy.runner_id  # pyright: ignore[reportPrivateUsage]
+    assert seen == [{"code-reviewer.runner-lock": own}]
+    assert rig.daemon.lock is None
+
+
+# #854-S1
+def test_a_second_runner_that_finds_the_lock_taken_ends_with_exit_nine_and_leaves_it(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    rig = Rig(tmp_path)
+    rig.daemon.lock = {"code-reviewer.runner-lock": "runner-2"}
+
+    with caplog.at_level(logging.ERROR, logger="code_reviewer_runner.loop"):
+        assert rig.go(once=True) == EXIT_SHARED_DAEMON
+
+    assert rig.client.claim_calls == 0 and rig.client.announced == []
+    assert "held by runner runner-2" in caplog.text
+    assert rig.daemon.lock == {"code-reviewer.runner-lock": "runner-2"}  # and it is still theirs
+
+
+# #854-S1
+def test_the_lock_is_given_back_when_another_runner_was_found(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    rig.daemon.foreign = [foreign_container()]
+
+    assert rig.go(once=True) == EXIT_SHARED_DAEMON
+
+    assert rig.daemon.lock is None
+
+
+# #854-S1
+def test_the_lock_is_removed_when_the_run_ends_by_a_revoked_credential(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    rig.client.claims = [Revoked("revoked", 401)]
+
+    assert rig.go(once=True) == EXIT_REVOKED
+
+    assert rig.daemon.lock is None
+
+
+# #854-N4
+def test_a_runner_with_no_identity_ends_with_a_configuration_error_and_sweeps_nothing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    rig = Rig(tmp_path)
+    rig.service._tidy = replace(  # pyright: ignore[reportPrivateUsage]
+        rig.service._tidy,  # pyright: ignore[reportPrivateUsage]
+        runner_id="",
+    )
+    rig.daemon.containers = [container_id("a")]
+
+    with caplog.at_level(logging.ERROR, logger="code_reviewer_runner.loop"):
+        assert rig.go(once=True) == EXIT_CONFIG
+
+    assert "no identity" in caplog.text
+    assert rig.daemon.removed == [] and rig.daemon.filters == [] and rig.daemon.lock_calls == []
+    assert rig.client.claim_calls == 0
 
 
 # #854-N3

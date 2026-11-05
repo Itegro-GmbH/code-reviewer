@@ -174,8 +174,8 @@ docker run -d --name factory-runner --restart unless-stopped --stop-timeout 150 
   model door among them, which holds the workspace's key) would stay on the machine. 150 is those 130 seconds with a margin. A
   runner that is killed anyway (`SIGKILL`, a power cut) leaves its containers and `/work` behind; the next start removes them (below).
 - A job needs the **whole `/work` volume to itself**: before a claim, and right after every job, the runner removes the folders of a turn from
-  it (`reserve`, `repo`, `result`; nothing else, links are not followed) and every container and network that carries the label
-  `code-reviewer.role`. Do not put anything of yours into those names, and do not share the work volume between runners.
+  it (`reserve`, `repo`, `result`; nothing else, links are not followed; a folder a job made unreadable, mode 000, gets its rights back first)
+  and every container and network that carries the label `code-reviewer.role` and this runner's id. Do not put anything of yours into those names, and do not share the work volume between runners.
 - **No `--hostname`, no `--network host`, no `--privileged`.** The runner finds the name of its `/work` volume by reading its own
   container from the daemon (the hostname is the container id), and the agent mounts that volume by name.
 - **The Docker socket is root of the machine.** The runner needs it (it starts the containers of a turn); the agent never gets it.
@@ -205,10 +205,10 @@ docker run -d --name factory-runner --restart unless-stopped --stop-timeout 150 
 | 3    | The app requires a newer base (`426`)                                                                                                           |
 | 4    | Revoked: the app does not know the credential any more                                                                                          |
 | 5    | Not ready: the self-test failed (the failed check says why)                                                                                     |
-| 6    | Configuration: a value is missing or wrong                                                                                                      |
+| 6    | Configuration: a value is missing or wrong; a file with a credential and no `runnerId` (`register --force`, or add the runnerId); a runner with no identity |
 | 7    | `run --once` only: **the app never answered a claim** during the whole wait. Not the same as 0: the runner does not know whether a job waited. An app that answered once and was lost later is "no job", exit 0 |
 | 8    | `register` only: the app registered the runner, but its credential could not be saved (revoke the runner in the app and register again)        |
-| 9    | Another factory-runner uses this Docker daemon (see "One runner per daemon"); the runner announced nothing and claimed nothing                   |
+| 9    | Another factory-runner uses this Docker daemon (see "One runner per daemon"); the log names the first container or network found; the runner announced nothing and claimed nothing |
 
 ### Configuration
 
@@ -233,10 +233,15 @@ older credential exists. A renewal whose file cannot be written is dropped: the 
 
 ### The service loop
 
-0. **One runner per daemon.** If a running container with `code-reviewer.role` but another (or no) `code-reviewer.runner` exists on the
-   daemon, the runner says `another factory-runner uses this Docker daemon; one runner per daemon for now`, ends with exit code 9 and
-   announces and claims nothing. Leftovers of an earlier registration (`register --force` makes a new id) look the same: remove the
-   containers with the label `code-reviewer.role` by hand if no other runner runs.
+0. **One runner per daemon.** The runner first takes a lock: a container `code-reviewer-runner-lock` (created, never started) that
+   carries its id and no role label. If it exists and carries another id, the runner ends with exit code 9. Then it looks at every
+   container (in any state: running, exited, paused, restarting) and every network with the label `code-reviewer.role` whose
+   `code-reviewer.runner` is another id or missing. The first one it finds ends the start with exit code 9, and the log says which:
+   `another factory-runner uses this Docker daemon: container code-reviewer-agent (role agent, runner none); one runner per daemon for now`.
+   Nothing is announced or claimed. What carries its own id is not foreign: the tidy removes it (below). Leftovers of an earlier
+   registration (`register --force` makes a new id) look foreign: remove them by hand if no other runner runs. The lock is removed when
+   the runner ends; one left by a crash is taken over by the same runner on its next start. A runner with no identity (no id, no
+   credential) sweeps nothing and ends with exit code 6: the role label alone never selects what to remove.
 1. **Prepare.** Check the machine (below) and decide the runtime: `auto` tries `sysbox-runc` when the daemon has it and falls back to
    `runc` when the self-test does not pass under it.
 2. **Announce** (`PUT /api/runners/v1/self`): labels, base version, the manifest (`opencode` with the version the runner pins and
@@ -370,8 +375,11 @@ whose code the runner runs unchanged.
 - **One runner per Docker daemon.** The containers have fixed names (`code-reviewer-agent` ...) and the model network a fixed address, so a
   second runner on the same daemon would fail every turn with a 409. Every container and network a runner's job creates carries
   `code-reviewer.runner=<runnerId>` (a runner without an id from the file, one with a credential from the environment, uses a digest of
-  the credential), so a runner removes only its own and refuses to start beside another (exit 9). Unique names, and with them more
-  runners on one daemon, are R2. The hosted version sets no id and is unchanged.
+  the credential), so a runner removes only its own and refuses to start beside another (exit 9). **The operator must run one runner per
+  daemon.** Another runner is recognised only while it has a container or a network on the daemon, or holds the lock; two runners with the
+  same id (one configuration copied to two machines on one daemon) are not told apart. The lock closes the window of two different runners
+  that start in the same moment. Unique names, and with them more runners on one daemon, are R2. The hosted version sets no id and is
+  unchanged.
 - **Snapshot and stored session.** `PUT .../session` and `GET .../resume-session` are Worker API routes and take the per-job
   credential alone; R1a part 2 decided that a runner credential must not reach them. Until the app lets a runner credential reach them
   for a job it holds, a turn on a runner takes **no snapshot** and a follow-up turn continues from the summary of the earlier ones (the

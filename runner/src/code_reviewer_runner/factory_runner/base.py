@@ -15,7 +15,7 @@ DEFAULT_URL: Final = "https://code-review.com"
 HARNESS_OPENCODE: Final = "opencode"
 
 # Exit codes of `factory-runner` (the list is in docs/runner.md). 0 is also "no job came in time" in
-# `run --once`; 7 is "the app could not be reached for the whole wait" there; 8 is "registered, but
+# `run --once`; 7 is "the app never answered during the wait" there; 8 is "registered, but
 # the credential could not be saved"; 9 is "another runner uses this Docker daemon".
 EXIT_OK: Final = 0
 EXIT_FAILED: Final = 1

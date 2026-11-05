@@ -376,3 +376,20 @@ def test_selftest_needs_no_registration(tmp_path: Path) -> None:
     )
 
     assert seen[0].credential is None
+
+
+# #854-S3
+@pytest.mark.parametrize("command", ["run", "config", "selftest"])
+def test_a_file_with_a_credential_and_no_runner_id_is_exit_six_that_names_the_way_out(
+    tmp_path: Path, command: str
+) -> None:
+    invoke(tmp_path, "register", "--token", TOKEN)
+    path = tmp_path / "home" / "config.json"
+    stored = json.loads(path.read_text())
+    del stored["runnerId"]
+    path.write_text(json.dumps(stored))
+
+    code, _, err = invoke(tmp_path, command, *(["show"] if command == "config" else []))
+
+    assert code == EXIT_CONFIG
+    assert "register --force" in err and "runnerId" in err

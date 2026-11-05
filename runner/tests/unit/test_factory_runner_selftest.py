@@ -53,6 +53,8 @@ class FakeDocker:
         self.runtimes_set = set(runtimes)
         self.image = image
         self.work_volume: str | None = "work-volume"
+        # The labels of the self-test container that is in the daemon already, if there is one.
+        self.leftover: dict[str, str] | None = None
         self.created: list[tuple[dict[str, Any], str]] = []
         self.removed: list[str] = []
         self.pulled: list[str] = []
@@ -65,7 +67,9 @@ class FakeDocker:
     def runtimes(self) -> set[str]:
         return self.runtimes_set
 
-    def inspect_container(self, _ref: str) -> dict[str, Any]:
+    def inspect_container(self, ref: str) -> dict[str, Any]:
+        if ref == "code-reviewer-selftest-agent" and self.leftover is not None:
+            return {"Config": {"Labels": self.leftover}, "Mounts": []}
         mounts = (
             []
             if self.work_volume is None
@@ -508,3 +512,46 @@ def test_a_digest_reference_gives_no_warning(rig: Rig) -> None:
     result = rig.run(image=BY_DIGEST)
 
     assert result.checks[3].detail == ""
+
+
+# #854-S1
+def test_a_self_test_container_of_this_runner_that_was_left_is_replaced(rig: Rig) -> None:
+    rig.docker.leftover = {"code-reviewer.role": "selftest", "code-reviewer.runner": "r1"}
+
+    result = rig.run(runner_id="r1")
+
+    assert result.base_ok
+    assert rig.docker.removed[0] == "code-reviewer-selftest-agent"
+
+
+# #854-S1
+def test_the_self_test_container_of_another_runner_is_never_removed_by_its_name(rig: Rig) -> None:
+    rig.docker.leftover = {"code-reviewer.role": "selftest", "code-reviewer.runner": "r2"}
+
+    rig.run(runner_id="r1")
+
+    assert "code-reviewer-selftest-agent" not in rig.docker.removed
+
+
+# #854-S1
+def test_a_self_test_container_without_an_id_is_not_this_runners_either(rig: Rig) -> None:
+    rig.docker.leftover = {"code-reviewer.role": "selftest"}
+
+    rig.run(runner_id="r1")
+
+    assert "code-reviewer-selftest-agent" not in rig.docker.removed
+
+
+# #854-S1
+def test_a_name_that_is_taken_by_another_runner_is_said_in_the_check(rig: Rig) -> None:
+    rig.docker.leftover = {"code-reviewer.role": "selftest", "code-reviewer.runner": "r2"}
+
+    def taken(_document: dict[str, Any], _name: str) -> str:
+        raise DockerError(409, "name in use")
+
+    rig.docker.create_container = taken  # type: ignore[method-assign]
+
+    result = rig.run(runner_id="r1")
+
+    check = result.failed()
+    assert check is not None and "of another runner is in the way" in check.detail

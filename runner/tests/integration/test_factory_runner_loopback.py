@@ -30,6 +30,7 @@ from code_reviewer_runner.factory_runner.cli import CliSeams, main
 from code_reviewer_runner.factory_runner.config import RunnerConfig
 from code_reviewer_runner.factory_runner.prepare import Prepared
 from code_reviewer_runner.factory_runner.selftest import Check, SelfTestResult
+from code_reviewer_runner.implementer.docker_api import DockerError
 from code_reviewer_runner.job_loop.settings import WorkerSettings
 from runner_app import FakeRunnerApp
 
@@ -46,6 +47,13 @@ class NothingLeft:
         raise AssertionError("there was nothing to remove")
 
     remove_network = remove_container
+
+    # The lock container of the start: taken, and never seen again by the check at the end.
+    def create_container(self, *args: object, **kwargs: object) -> str:
+        return "d" * 64
+
+    def inspect_container(self, *args: object, **kwargs: object) -> dict[str, object]:
+        raise DockerError(404, "no such container")
 
 
 JOB = "00000000-0000-4000-8000-0000000000aa"

@@ -26,6 +26,7 @@ A refusal names the variable or the field and never its value: the configuration
 """
 
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -232,7 +233,7 @@ def _read_file(path: Path) -> dict[str, object]:
 
 
 def _text(value: object) -> str | None:
-    return value if isinstance(value, str) and value.strip() else None
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def load_config(environment: Mapping[str, str], *, require_url: bool = True) -> RunnerConfig:
@@ -261,12 +262,21 @@ def load_config(environment: Mapping[str, str], *, require_url: bool = True) -> 
     image = pick("FACTORY_RUNNER_AGENT_IMAGE", "agentImage")
     labels = pick("FACTORY_RUNNER_LABELS", "labels")
     address = pick("FACTORY_RUNNER_URL", "url")
+    runner_id = _text(stored.get("runnerId"))
+    if credential not in (None, "") and not from_environment and runner_id is None:
+        # The id names the runner's containers for as long as it lives. Without it the name would
+        # be a digest of the credential, which every renewal changes: the containers of the
+        # earlier credential would look like another runner's.
+        raise ConfigError(
+            "the configuration file has a credential but no runnerId: register again "
+            "(factory-runner register --force), or add the runnerId of this runner to the file"
+        )
     return RunnerConfig(
         url=check_url(address, allow_http=allow_http) if require_url or address else "",
         name=check_name(pick("FACTORY_RUNNER_NAME", "name") or RunnerConfig.name),
         labels=check_labels(labels if labels is not None else []),
         credential=None if credential in (None, "") else check_credential(credential),
-        runner_id=_text(stored.get("runnerId")),
+        runner_id=runner_id,
         limits=check_limits(limits_raw),
         agent_image=None if image in (None, "") else check_image(image),
         runtime=check_runtime(pick("FACTORY_RUNNER_RUNTIME", "runtime") or "auto"),
@@ -375,6 +385,10 @@ def _sync_directory(directory: Path) -> None:
     descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(descriptor)
+    except OSError as error:
+        # A file system that cannot sync a directory has nothing to say about the rename.
+        if error.errno not in (errno.EINVAL, errno.ENOTSUP):
+            raise
     finally:
         os.close(descriptor)
 
