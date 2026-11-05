@@ -188,6 +188,9 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/workflows",
   "/api/w/[workspace]/workflows/[workflowId]",
   "/api/w/[workspace]/workflows/validate",
+  // The runs of a workflow (#844).
+  "/api/w/[workspace]/workflows/[workflowId]/runs",
+  "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]",
   // The profiles of the agents (#843).
   "/api/w/[workspace]/profiles",
   "/api/w/[workspace]/profiles/[profileId]",
