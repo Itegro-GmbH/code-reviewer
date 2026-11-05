@@ -3,6 +3,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { boundAgentResult } from "../db/agent-result.ts";
 import {
   checkResultValue,
   validateResultSchema,
@@ -31,6 +32,7 @@ const VECTORS = JSON.parse(
     value: unknown;
     issues: [string, string][];
   }[];
+  bounds: { name: string; parts: [string, number][]; bound: string | null }[];
 };
 
 const pairs = (issues: { path: string; code: string }[]) =>
@@ -51,6 +53,17 @@ describe("the vectors of the result check, shared with the runner", () => {
     expect(pairs(checkResultValue(vector.schema, vector.value))).toEqual(
       expected.sort(),
     );
+  });
+
+  // #843-T42
+  it.each(VECTORS.bounds)("bounds the value: $name", (vector) => {
+    // The runner scans these same texts (`scan_bounds`); an agent result the runner lets through and the app refuses would be lost with
+    // the report it arrives in.
+    const text = vector.parts.map(([part, times]) => part.repeat(times)).join("");
+
+    const bounded = boundAgentResult(JSON.parse(text));
+
+    expect(bounded.ok ? null : bounded.reason).toBe(vector.bound);
   });
 
   // #843-T40

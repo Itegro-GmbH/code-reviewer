@@ -1914,6 +1914,25 @@ def test_a_file_that_is_too_large_too_deep_or_not_json_is_no_result_and_is_not_e
     assert max(results.calls) == 256 * 1024 + 1, "the read is bounded one byte past the limit"
 
 
+# #843-T70
+def test_a_result_the_redaction_makes_too_large_is_dropped_and_the_turn_ends_no_result(
+    play: Any,
+) -> None:
+    # It fits as the agent wrote it; the credentials of its addresses taken out, it does not.
+    finding = {"type": "bug", "name": "Lease", "description": "://a:b@" * 1400}
+    grown = json.dumps({"findings": [finding] * 20}).encode()
+    assert len(grown) < 256 * 1024
+    results = FakeResults([grown])
+
+    turn = play(commits_then_ends(), result_schema=RESULT_SCHEMA, results=results)
+
+    result = turn.result
+    assert result["ok"] is False and result["errorCode"] == "no_result", turn.output
+    assert valid_result(result)
+    assert "agentResult" not in result["implementer"]
+    assert result["implementer"]["pushed"] is True, "the work and the report stay"
+
+
 # #843-T79
 def test_a_turn_without_a_result_schema_reads_no_file_sends_no_reminder_and_has_no_tool(
     play: Any,

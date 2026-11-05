@@ -237,7 +237,7 @@ def _checked_out_ok(value: object) -> bool:
     return value is None or _is_string(value, MAX_BRANCH_NAME_CHARS, minimum=1)
 
 
-def _agent_result_ok(value: object) -> bool:
+def agent_result_ok(value: object) -> bool:
     """`agentResult` (#843): an object the app takes as data. The bounds of a result hold again
     here, on the compact UTF-8 form the app measures (which is never longer than the file the
     finish tool was read from), so a block with a result over them is refused and never sent."""
@@ -272,7 +272,7 @@ def valid_block(value: object) -> dict[str, Any] | None:
         return None
     if "checkedOut" in block and not _checked_out_ok(block["checkedOut"]):
         return None
-    if "agentResult" in block and not _agent_result_ok(block["agentResult"]):
+    if "agentResult" in block and not agent_result_ok(block["agentResult"]):
         return None
     base, head, pushed = block["baseCommit"], block["headCommit"], block["pushed"]
     commits, files, branches = block["commits"], block["filesChanged"], block["branches"]

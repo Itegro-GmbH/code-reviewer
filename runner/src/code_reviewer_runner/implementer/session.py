@@ -101,6 +101,7 @@ from .network_rule import MODE_OFF, MODE_OPEN, OFF, NetworkRule
 from .network_switch import Post, model_host_of, narrow_policy, parse_switch, urllib_post
 from .prompts import LEFTOVER_PROMPT, RESULT_REMINDER_PROMPT, instructions_text
 from .reader import RESET_SECONDS as READER_RESET_SECONDS
+from .report import agent_result_ok
 from .result_channel import (
     CONFIG_DIRECTORY,
     ResultReader,
@@ -827,7 +828,14 @@ class ImplementerSession:
             if read is not None:
                 # The agent wrote it, and anything it was shown can be in it: the job's secrets
                 # are taken out of every text before the result leaves this process.
-                self._agent_result = redacted_value(read, Redactor(self.secrets()).redact)
+                cleaned = redacted_value(read, Redactor(self.secrets()).redact)
+                # Taking secrets out can make the texts longer. A result over the bounds now would
+                # cost the whole report, so it is the result that is left out.
+                if agent_result_ok(cleaned):
+                    self._agent_result = cleaned
+                else:
+                    self._result_problem = "too_large once the secrets were taken out"
+                    self._note("the result was left out: it is over the bounds without its secrets")
         if self._agent_result is None and self._error is None:
             self._error = (
                 ErrorCode.NO_RESULT,

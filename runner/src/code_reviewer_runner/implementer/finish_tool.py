@@ -391,7 +391,9 @@ def scan_bounds(raw: bytes) -> str | None:
         return TOO_LARGE
     depth = 0
     values = 1
-    empty = False  # the last thing seen, white space apart, is the bracket that opened the container
+    empty = (
+        False  # the last thing seen, white space apart, is the bracket that opened the container
+    )
     in_text = False
     escaped = False
     for byte in raw:

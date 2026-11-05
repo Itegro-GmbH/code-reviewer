@@ -1017,6 +1017,22 @@ def test_the_job_secrets_in_the_result_of_the_agent_are_taken_out_of_every_text(
 
 
 # #843-T67
+def test_a_result_the_host_redaction_makes_too_large_is_dropped_and_the_turn_ends_no_result() -> (
+    None
+):
+    # Within the bounds when the process printed it; the second look of the host grew it.
+    grown = {"text": "://a:b@" * 30_000}
+    assert len(json.dumps(grown)) < 256 * 1024
+
+    result = _reported_turn(_turn_block(agentResult=grown))
+
+    assert result["ok"] is False and result["errorCode"] == "no_result"
+    assert "agentResult" not in result["implementer"]
+    assert result["implementer"]["commits"] == _turn_block()["commits"]
+    assert result["usage"] is not None, "the usage of the turn stays"
+
+
+# #843-T67
 def test_a_result_of_the_agent_over_the_bounds_costs_the_report_and_not_the_turns_end() -> None:
     result = _reported_turn(_turn_block(agentResult={"text": "x" * (300 * 1024)}))
 
