@@ -45,10 +45,7 @@ import {
 } from "./contract.ts";
 import { WORKER_CREDENTIAL_PATTERN } from "../jobs/worker-credential.ts";
 import { checkCallTrace } from "./call-trace.ts";
-import {
-  boundAgentResult,
-  type AgentResultValue,
-} from "../db/agent-result.ts";
+import { boundAgentResult, type AgentResultValue } from "../db/agent-result.ts";
 
 export type Parsed<T> =
   { ok: true; value: T } | { ok: false; fields: FieldError[] };

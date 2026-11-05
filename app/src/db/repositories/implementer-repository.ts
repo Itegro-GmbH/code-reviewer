@@ -28,10 +28,7 @@ import type {
   ImplementerTurnsTable,
 } from "../schema.ts";
 import type { WorkspaceId } from "../workspace-scope.ts";
-import type {
-  AgentResultValue,
-  StoredResultSchema,
-} from "../agent-result.ts";
+import type { AgentResultValue, StoredResultSchema } from "../agent-result.ts";
 
 /** A session as the rest of the app sees it. Timestamps are ISO 8601 text in UTC. */
 export type StoredImplementerSession = {
@@ -256,7 +253,9 @@ function turnFrom(
             instructions: row.profile_instructions,
             canPush: row.profile_can_push === 1,
           },
-    resultSchema: readJsonObject(row.result_schema) as StoredResultSchema | null,
+    resultSchema: readJsonObject(
+      row.result_schema,
+    ) as StoredResultSchema | null,
     resultValue: readJsonObject(row.result_value) as AgentResultValue | null,
   };
 }
@@ -266,7 +265,9 @@ function readJsonObject(text: string | null): Record<string, unknown> | null {
   if (text === null) return null;
   try {
     const parsed: unknown = JSON.parse(text);
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+    return typeof parsed === "object" &&
+      parsed !== null &&
+      !Array.isArray(parsed)
       ? (parsed as Record<string, unknown>)
       : null;
   } catch {

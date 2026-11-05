@@ -1503,7 +1503,10 @@ describe("the network of an implementer run (#745)", () => {
 
 // #843: the result the agent handed in, as the page and the run API show it.
 describe("the result of an implementer run (#843)", () => {
-  const detailWith = (result: ImplementerDetailSource["result"], redact = (text: string) => text) =>
+  const detailWith = (
+    result: ImplementerDetailSource["result"],
+    redact = (text: string) => text,
+  ) =>
     toCustomerRunDetailView(
       PRODUCT,
       turn({ status: "succeeded", result: resultWith({}) }),

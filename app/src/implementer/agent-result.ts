@@ -14,7 +14,9 @@ import {
  * A schema written by the validator of the format, read back as the validator reads it. Null for text that is none (it cannot be: the
  * only writer is the validator's own service), so a caller never runs a turn with a schema it cannot use.
  */
-export function readStoredResultSchema(text: string | null): ResultSchema | null {
+export function readStoredResultSchema(
+  text: string | null,
+): ResultSchema | null {
   if (text === null) return null;
   let parsed: unknown;
   try {

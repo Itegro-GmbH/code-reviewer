@@ -37,6 +37,7 @@ const NEW_ERROR_CODES = [
   "clone_failed",
   "setup_failed",
   "agent_gave_up",
+  "no_result",
   "push_rejected",
   "branch_violation",
   "cost_limit_reached",
@@ -808,5 +809,64 @@ describe("a job of the implementer kind in the claim", () => {
       kind: "refused",
       errorCode: "implementer_engine_unavailable",
     });
+  });
+});
+
+describe("the result schema and the result of a turn (#843)", () => {
+  function withSchema(schema: unknown): Document {
+    const input = example("RunnerJobInput");
+    input.implementer.resultSchema = schema;
+    return input;
+  }
+
+  // #843-T98
+  it("has valid examples of the schema and of the agent's result, alone and inside the job input and the result", () => {
+    const schema = example("ImplementerResultSchema");
+    const result = example("RunnerResult");
+    result.implementer.agentResult = example("ImplementerAgentResult");
+
+    expect(contract.check("ImplementerResultSchema", schema)).toStrictEqual({
+      valid: true,
+      errors: "",
+    });
+    expect(
+      accepts("ImplementerAgentResult", example("ImplementerAgentResult")),
+    ).toBe(true);
+    expect(accepts("RunnerJobInput", withSchema(schema))).toBe(true);
+    expect(accepts("RunnerResult", result)).toBe(true);
+  });
+
+  // #843-T98
+  it("is optional in both: a turn without a schema carries none, a result without a handed-in result has none", () => {
+    expect(example("RunnerJobInput").implementer.resultSchema).toBeUndefined();
+    expect(example("RunnerResult").implementer.agentResult).toBeUndefined();
+    expect(accepts("RunnerJobInput", example("RunnerJobInput"))).toBe(true);
+    expect(accepts("RunnerResult", example("RunnerResult"))).toBe(true);
+  });
+
+  // #843-T98
+  it("refuses a schema whose root is no object and a result that is not an object", () => {
+    for (const bad of ["findings", [], { type: "string" }, { type: "object" }])
+      expect(
+        accepts("RunnerJobInput", withSchema(bad)),
+        JSON.stringify(bad),
+      ).toBe(false);
+    for (const bad of [[], "text", 3, null]) {
+      const result = example("RunnerResult");
+      result.implementer.agentResult = bad;
+      expect(accepts("RunnerResult", result), JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  // #843-T98
+  it("names the claim feature that reads the schema and the code of a turn that handed in nothing", () => {
+    const features = contract.check("ClaimRequest", {
+      engines: ["implementer"],
+      features: ["implementer_result"],
+    });
+    expect(features.valid).toBe(true);
+    const failed = example("RunnerResult");
+    Object.assign(failed, { ok: false, errorCode: "no_result" });
+    expect(accepts("RunnerResult", failed)).toBe(true);
   });
 });

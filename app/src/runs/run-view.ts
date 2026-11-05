@@ -763,9 +763,13 @@ function plural(count: number, one: string, many: string): string {
  * `githubBranchUrl` and `githubCommitUrl`.
  */
 /** `value` with `clean` applied to every text in it, keys included: a result is data from the agent and is shown as it is otherwise. */
-function cleanedValue(value: unknown, clean: (text: string) => string): unknown {
+function cleanedValue(
+  value: unknown,
+  clean: (text: string) => string,
+): unknown {
   if (typeof value === "string") return clean(value);
-  if (Array.isArray(value)) return value.map((item) => cleanedValue(item, clean));
+  if (Array.isArray(value))
+    return value.map((item) => cleanedValue(item, clean));
   if (isRecord(value))
     return Object.fromEntries(
       Object.entries(value).map(([key, item]) => [

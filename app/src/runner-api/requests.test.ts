@@ -1186,7 +1186,9 @@ describe("the implementer block of a result (#754)", () => {
       const done = parsed(value);
       const absent = parseCompleteRequest(bodyWith(block()));
 
-      expect(done.ok && done.value.result.implementer?.agentResult).toEqual(value);
+      expect(done.ok && done.value.result.implementer?.agentResult).toEqual(
+        value,
+      );
       expect(
         absent.ok && "agentResult" in (absent.value.result.implementer ?? {}),
       ).toBe(false);
@@ -1197,9 +1199,15 @@ describe("the implementer block of a result (#754)", () => {
       ["a list", []],
       ["a text", "done"],
       ["null", null],
-      ["an object nested nine levels", JSON.parse('{"a":'.repeat(9) + "{}" + "}".repeat(9))],
+      [
+        "an object nested nine levels",
+        JSON.parse('{"a":'.repeat(9) + "{}" + "}".repeat(9)),
+      ],
       ["an object over 256 KiB", { text: "x".repeat(256 * 1024) }],
-      ["an object of more than 20,000 values", { list: Array.from({ length: 20_000 }, () => 1) }],
+      [
+        "an object of more than 20,000 values",
+        { list: Array.from({ length: 20_000 }, () => 1) },
+      ],
     ])("refuses %s", (_, value) => {
       const done = parsed(value);
 

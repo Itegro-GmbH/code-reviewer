@@ -355,15 +355,21 @@ describe("the body that starts a task with a result schema (#843)", () => {
     ["a list", []],
     ["an object that is not a schema", {}],
     ["a schema whose root is not an object", { type: "string" }],
-    ["an unknown field type", { type: "object", properties: { a: { type: "date" } } }],
+    [
+      "an unknown field type",
+      { type: "object", properties: { a: { type: "date" } } },
+    ],
     ["a required name that is no property", { ...SCHEMA, required: ["other"] }],
-  ])("refuses %s, with the first problem the validator found", (_name, result) => {
-    const issues = issuesOf({ ...VALID, result });
+  ])(
+    "refuses %s, with the first problem the validator found",
+    (_name, result) => {
+      const issues = issuesOf({ ...VALID, result });
 
-    expect(issues).toHaveLength(1);
-    expect(issues[0]).toMatchObject({ field: "result", code: "invalid" });
-    expect(issues[0]?.detail).toMatch(/\S/);
-  });
+      expect(issues).toHaveLength(1);
+      expect(issues[0]).toMatchObject({ field: "result", code: "invalid" });
+      expect(issues[0]?.detail).toMatch(/\S/);
+    },
+  );
 
   // #843-T93
   it("refuses a schema larger than the bound of a body, without echoing it", () => {
@@ -372,7 +378,13 @@ describe("the body that starts a task with a result schema (#843)", () => {
       properties: Object.fromEntries(
         Array.from({ length: 50 }, (_, i) => [
           `f${i}`,
-          { type: "string", enum: Array.from({ length: 50 }, (_, j) => `v${i}-${j}${"x".repeat(190)}`) },
+          {
+            type: "string",
+            enum: Array.from(
+              { length: 50 },
+              (_, j) => `v${i}-${j}${"x".repeat(190)}`,
+            ),
+          },
         ]),
       ),
     };

@@ -359,6 +359,11 @@ async function seed(
             instruction: `Instruction ${tag}`,
             modelChoice: { entryId: `entry-${tag}` },
             costLimitCents: 100,
+            // #843: a result schema, so that the turn is one that takes a result and only the workspace stops the other from writing it.
+            resultSchema: {
+              type: "object",
+              properties: { summary: { type: "string" } },
+            },
             createdBy: `user-${tag}`,
           },
           async (trx, { slot }) => {
@@ -1828,6 +1833,14 @@ const CASES: Case[] = [
         summary: "hijacked",
       }),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "implementer.recordTurnAgentResult",
+    run: (a, b) =>
+      a.implementer.recordTurnAgentResult(taskOf(b).turn.id, {
+        summary: "hijacked",
+      }),
+    expectAnswer: (answer) => expect(answer).toBe(false),
   },
   {
     name: "implementer.createSessionWithTurn",

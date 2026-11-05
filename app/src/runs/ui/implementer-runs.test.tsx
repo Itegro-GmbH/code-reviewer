@@ -517,7 +517,9 @@ describe("the detail page of an implementer run", () => {
     it("shows nothing for a task that had no result schema", () => {
       const { container } = renderDetail(detail());
 
-      expect(container.querySelector('[data-slot="run-agent-result"]')).toBeNull();
+      expect(
+        container.querySelector('[data-slot="run-agent-result"]'),
+      ).toBeNull();
       expect(
         container.querySelector('[data-slot="run-agent-result-none"]'),
       ).toBeNull();
@@ -529,7 +531,11 @@ describe("the detail page of an implementer run", () => {
         detail({
           implementer: task({
             resultExpected: true,
-            result: { verdict: "done", note: "<b>bold</b>", list: [1, true, null] },
+            result: {
+              verdict: "done",
+              note: "<b>bold</b>",
+              list: [1, true, null],
+            },
           }),
         }),
       );
@@ -553,7 +559,10 @@ describe("the detail page of an implementer run", () => {
       const hostile = '<img src=x onerror="alert(1)">';
       const { container } = renderDetail(
         detail({
-          implementer: task({ resultExpected: true, result: { note: hostile } }),
+          implementer: task({
+            resultExpected: true,
+            result: { note: hostile },
+          }),
         }),
       );
 

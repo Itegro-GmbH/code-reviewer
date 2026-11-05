@@ -6,12 +6,7 @@
 
 /** JSON as the app holds it; kept here so that this module needs no other. */
 export type AgentJson =
-  | null
-  | boolean
-  | number
-  | string
-  | AgentJson[]
-  | { [key: string]: AgentJson };
+  null | boolean | number | string | AgentJson[] | { [key: string]: AgentJson };
 
 /** The result of an agent: an object of JSON, bounded before the app keeps it. */
 export type AgentResultValue = { [key: string]: AgentJson };
@@ -112,4 +107,3 @@ export function boundAgentResult(
   // Counted value by value above: nothing but JSON is in it (a function, a symbol or a bigint is `not_json`).
   return { ok: true, value: value as AgentResultValue, text };
 }
-

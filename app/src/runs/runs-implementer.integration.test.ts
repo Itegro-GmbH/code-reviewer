@@ -161,7 +161,12 @@ describe("implementer runs in the Runs pages", () => {
       {
         ok: false,
         errorCode: "no_result",
-        result: { ok: false, commentUrl: null, logTail: "", implementer: block },
+        result: {
+          ok: false,
+          commentUrl: null,
+          logTail: "",
+          implementer: block,
+        },
       },
       { resultSchema: schema },
     );

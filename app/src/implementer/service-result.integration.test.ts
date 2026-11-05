@@ -81,7 +81,9 @@ describe("a task with a result schema", () => {
     const started = await app.service.startTask(USER, withProfile(app));
 
     expect(
-      JSON.parse((await turnOf(app, started.sessionId)).result_schema ?? "null"),
+      JSON.parse(
+        (await turnOf(app, started.sessionId)).result_schema ?? "null",
+      ),
     ).toEqual(DEFAULT);
   });
 
@@ -95,7 +97,9 @@ describe("a task with a result schema", () => {
     );
 
     expect(
-      JSON.parse((await turnOf(app, started.sessionId)).result_schema ?? "null"),
+      JSON.parse(
+        (await turnOf(app, started.sessionId)).result_schema ?? "null",
+      ),
     ).toEqual(OWN);
   });
 
@@ -127,7 +131,9 @@ describe("a task with a result schema", () => {
     );
 
     expect(
-      JSON.parse((await turnOf(app, started.sessionId)).result_schema ?? "null"),
+      JSON.parse(
+        (await turnOf(app, started.sessionId)).result_schema ?? "null",
+      ),
     ).toEqual(DEFAULT);
   });
 
@@ -147,9 +153,9 @@ describe("a task with a result schema", () => {
       code: "IMPLEMENTER_REQUEST_INVALID",
       issues: [{ field: "result", code: "invalid" }],
     });
-    expect(await app.h.db.selectFrom("implementer_turns").selectAll().execute()).toEqual(
-      [],
-    );
+    expect(
+      await app.h.db.selectFrom("implementer_turns").selectAll().execute(),
+    ).toEqual([]);
   });
 
   // #843-T126

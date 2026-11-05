@@ -183,10 +183,7 @@ function resultOfProfile(stored: string | null): ResultSchema | null {
 }
 
 /** Whether the result schema a repeated body names is the one the earlier task ran with (a body that names none compares nothing). */
-function sameResult(
-  stored: unknown,
-  asked: StartInput["result"],
-): boolean {
+function sameResult(stored: unknown, asked: StartInput["result"]): boolean {
   return asked === null || JSON.stringify(stored) === JSON.stringify(asked);
 }
 

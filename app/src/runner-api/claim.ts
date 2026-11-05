@@ -1203,7 +1203,10 @@ export async function buildJobInput(
   if (implementer?.profile != null && !features.includes("implementer_profile"))
     return refuse("implementer_engine_unavailable", "reason=profile");
   // #843: the same for the result schema. A Worker that does not read it would run an agent that is never asked for its result.
-  if (implementer?.resultSchema != null && !features.includes("implementer_result"))
+  if (
+    implementer?.resultSchema != null &&
+    !features.includes("implementer_result")
+  )
     return refuse("implementer_engine_unavailable", "reason=result");
   if (costLimit.enforced === "none")
     deps.logger.info(

@@ -75,12 +75,12 @@ describe("the result of a turn", () => {
       taskOf(seed, { resultSchema: SCHEMA }),
     );
 
-    expect(await sessions.recordTurnAgentResult(turn.id, { summary: "Done." })).toBe(
-      true,
-    );
-    expect(await sessions.recordTurnAgentResult(turn.id, { summary: "Other" })).toBe(
-      false,
-    );
+    expect(
+      await sessions.recordTurnAgentResult(turn.id, { summary: "Done." }),
+    ).toBe(true);
+    expect(
+      await sessions.recordTurnAgentResult(turn.id, { summary: "Other" }),
+    ).toBe(false);
 
     const read = await sessions.getTurnByJob(turn.jobId);
     expect(read?.turn.resultValue).toEqual({ summary: "Done." });
@@ -92,10 +92,12 @@ describe("the result of a turn", () => {
     const sessions = createImplementerRepository(db, workspaceId);
     const { turn } = await startTask(db, workspaceId, taskOf(seed));
 
-    expect(await sessions.recordTurnAgentResult(turn.id, { summary: "x" })).toBe(
-      false,
-    );
-    expect((await sessions.getTurnByJob(turn.jobId))?.turn.resultValue).toBeNull();
+    expect(
+      await sessions.recordTurnAgentResult(turn.id, { summary: "x" }),
+    ).toBe(false);
+    expect(
+      (await sessions.getTurnByJob(turn.jobId))?.turn.resultValue,
+    ).toBeNull();
   });
 
   // #843-T104
