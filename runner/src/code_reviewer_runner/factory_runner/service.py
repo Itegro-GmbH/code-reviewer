@@ -32,8 +32,9 @@ import asyncio
 import logging
 import random
 import signal
+import socket
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -52,6 +53,7 @@ from code_reviewer_runner.factory_runner.base import (
     EXIT_REVOKED,
     EXIT_SHARED_DAEMON,
     EXIT_UPDATE_NEEDED,
+    EXIT_UPDATED,
 )
 from code_reviewer_runner.factory_runner.config import (
     CREDENTIAL_FROM_FILE,
@@ -60,6 +62,12 @@ from code_reviewer_runner.factory_runner.config import (
     runner_identity,
     update_credential,
     with_credential,
+)
+from code_reviewer_runner.factory_runner.disk_budget import (
+    MEASURE_SECONDS,
+    budget_bytes,
+    guard_for,
+    used_bytes,
 )
 from code_reviewer_runner.factory_runner.housekeeping import (
     NO_IDENTITY,
@@ -72,6 +80,13 @@ from code_reviewer_runner.factory_runner.housekeeping import (
 from code_reviewer_runner.factory_runner.job_api import RunnerJobApi
 from code_reviewer_runner.factory_runner.prepare import Prepared
 from code_reviewer_runner.factory_runner.selftest import summary
+from code_reviewer_runner.factory_runner.update import (
+    Fetch,
+    ReleaseChannel,
+    UpdatePolicy,
+    fetch_https,
+    load_channel,
+)
 from code_reviewer_runner.implementer.agent_container import AGENT_IMAGE_REFERENCE
 from code_reviewer_runner.implementer.docker_api import DockerApi
 from code_reviewer_runner.job import IMPLEMENTER_WORK_DIR, IMPLEMENTER_WORK_DIR_VARIABLE
@@ -88,6 +103,10 @@ POLL_JITTER = 0.2
 BACKOFF_FIRST_SECONDS = 5.0
 BACKOFF_MAX_SECONDS = 300.0
 UPDATE_NEEDED_WAIT_SECONDS = 300.0
+# A service that is not ready waits this long before it ends (exit code 5), so that the unit's
+# restart (every 10 seconds) does not run the self-test over and over, which is what a bad update
+# would do. `run --once` ends at once.
+NOT_READY_WAIT_SECONDS = 300.0
 # How long a runner that cannot tidy waits before it tries again (it claims nothing meanwhile).
 TIDY_RETRY_SECONDS = 60.0
 # How long `run --once` waits for a job by default.
@@ -106,6 +125,12 @@ class Seams:
     jitter: Callable[[], float] = random.random
     launcher: Callable[[float], ProcessLauncher] = SubprocessLauncher
     docker: Callable[[], DockerApi] = DockerApi
+    hostname: Callable[[], str] = socket.gethostname
+    # How often the disk budget is measured while a job runs.
+    measure_seconds: float = MEASURE_SECONDS
+    # The release channel of the image and how its documents are fetched (`update.py`).
+    channel: Callable[[], ReleaseChannel | None] = load_channel
+    fetch: Fetch = fetch_https
 
 
 class RunnerService:
@@ -142,6 +167,17 @@ class RunnerService:
             api=seams.docker,
             work_dir=Path(environment_work_dir(prepared.environment)),
             runner_id=runner_identity(config),
+        )
+        self._updates = UpdatePolicy(
+            seams.docker,
+            environment,
+            auto_update=config.auto_update,
+            hostname=seams.hostname,
+            now=seams.wall,
+            jitter=seams.jitter,
+            channel=seams.channel,
+            fetch=seams.fetch,
+            logger=self._logger,
         )
 
     # -- the run ---------------------------------------------------------------------------------
@@ -180,7 +216,10 @@ class RunnerService:
                 failed.name if failed else "the self-test",
                 failed.detail if failed else "",
             )
+            if not once:
+                await self._wait(NOT_READY_WAIT_SECONDS)
             return EXIT_NOT_READY
+        await asyncio.to_thread(self._updates.tidy_references)
         self._host = self._make_host()
         started = self._clock.monotonic()
         failures = 0
@@ -193,6 +232,9 @@ class RunnerService:
                 await self._wait(TIDY_RETRY_SECONDS)
                 continue
             await self._renew_if_due()
+            # Between jobs, never during one: a staged image is switched to here (`update.py`).
+            if not once and await asyncio.to_thread(self._updates.switch_due):
+                return EXIT_UPDATED
             try:
                 claimed = await asyncio.to_thread(self._client.claim)
             except Revoked:
@@ -207,6 +249,10 @@ class RunnerService:
                 )
                 if once:
                     return EXIT_UPDATE_NEEDED
+                # The minimum version is the app's: look for the release at once, whatever the
+                # setting for automatic updates says.
+                if await asyncio.to_thread(self._updates.switch_due, needed=True):
+                    return EXIT_UPDATED
                 await self._wait(UPDATE_NEEDED_WAIT_SECONDS)
                 continue
             except ApiUnavailable as error:
@@ -309,6 +355,19 @@ class RunnerService:
             clock=self._clock,
             logger=self._logger,
             environment=dict(self._prepared.environment),
+            guard=self._disk_guard(),
+        )
+
+    def _disk_guard(self) -> Callable[[], Awaitable[str]] | None:
+        """The job host's guard for the disk budget (`disk_budget.py`); none without `diskGb`."""
+        limit = budget_bytes(self._config.limits)
+        if limit is None:
+            return None
+        tidy_seams = self._tidy
+        return guard_for(
+            limit,
+            lambda: used_bytes(tidy_seams.api(), tidy_seams.work_dir, tidy_seams.runner_id),
+            interval=self._seams.measure_seconds,
         )
 
     async def _run_job(self, claimed: ClaimedJob) -> JobEnd:

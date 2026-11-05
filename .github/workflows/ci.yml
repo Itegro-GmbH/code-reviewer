@@ -400,6 +400,10 @@ jobs:
         run: uv run ruff format --check . ../fakes
       - name: Typecheck
         run: uv run pyright
+      # The installer of the Factory-Runner (#855). The runner image of GitHub's ubuntu-24.04 has shellcheck. Its
+      # behaviour is tested by tests/unit/test_install_script.py against stand-ins for docker and systemd.
+      - name: Shellcheck the installer
+        run: shellcheck install/install.sh
       - name: Unit tests
         run: uv run pytest -m unit
       - name: Integration and contract tests on the host

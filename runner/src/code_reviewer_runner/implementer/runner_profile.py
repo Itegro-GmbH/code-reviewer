@@ -16,8 +16,8 @@ configuration); nothing in a job sets them. Unset, everything is as hosted.
 
 - `RUNNER_IMPLEMENTER_AGENT_RUNTIME`: the runtime of the agent, the reader and the setup container
   (default `sysbox-runc`).
-- `RUNNER_IMPLEMENTER_AGENT_CPUS`: the CPUs the agent's container may use, a whole number (default:
-  no limit).
+- `RUNNER_IMPLEMENTER_AGENT_CPUS`: the CPUs the agent's container and the setup container may use,
+  a whole number (default: no limit).
 
 and a fourth, `RUNNER_IMPLEMENTER_RUNNER_ID` (`role_labels.py`): the runner's id, which every
 container and network of the job carries as a label so that the runner removes only its own.
@@ -77,7 +77,12 @@ def agent_seams(environment: Mapping[str, str], base: AgentSeams = AgentSeams())
 
 def setup_seams(environment: Mapping[str, str], base: SetupSeams = SetupSeams()) -> SetupSeams:  # noqa: B008
     runtime = runtime_of(environment)
-    return replace(base, runtime=runtime, entrypoint=entrypoint_for(runtime))
+    return replace(
+        base,
+        runtime=runtime,
+        entrypoint=entrypoint_for(runtime),
+        nano_cpus=nano_cpus_of(environment),
+    )
 
 
 def reader_seams(environment: Mapping[str, str], base: ReaderSeams = ReaderSeams()) -> ReaderSeams:  # noqa: B008

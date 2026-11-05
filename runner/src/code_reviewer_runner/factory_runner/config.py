@@ -20,6 +20,7 @@ The environment wins over the file.
 | `FACTORY_RUNNER_DISK_GB`      | Disk the runner may use (announced; see `limits.py`)             |
 | `FACTORY_RUNNER_AGENT_IMAGE`  | The agent image to pull (default: the one baked into the image)  |
 | `FACTORY_RUNNER_RUNTIME`      | `auto`, `runc` or `sysbox-runc` (default `auto`)                 |
+| `FACTORY_RUNNER_AUTO_UPDATE`  | `1` (default) or `0`: update between jobs (`update.py`)          |
 | `FACTORY_RUNNER_ALLOW_HTTP`   | `1`: accept an `http://` app address (tests and development)     |
 
 A refusal names the variable or the field and never its value: the configuration holds a secret.
@@ -89,6 +90,9 @@ class RunnerConfig:
     limits: Limits = field(default_factory=Limits)
     agent_image: str | None = None
     runtime: str = "auto"
+    # Whether the service updates itself between jobs (`update.py`); `factory-runner update` works
+    # either way.
+    auto_update: bool = True
     # When the credential was last renewed (seconds since the epoch); 0: never recorded.
     credential_renewed_at: float = 0.0
     # `CREDENTIAL_FROM_FILE` or `CREDENTIAL_FROM_ENVIRONMENT`; not part of what a configuration is
@@ -212,6 +216,30 @@ def check_runtime(raw: object) -> str:
     return str(raw)
 
 
+_FLAG_WORDS = {
+    "1": True,
+    "true": True,
+    "on": True,
+    "yes": True,
+    "0": False,
+    "false": False,
+    "off": False,
+    "no": False,
+}
+
+
+def check_flag(name: str, raw: object, *, default: bool = True) -> bool:
+    """A switch: a boolean, or one of on/off, yes/no, true/false, 1/0. Absent: `default`."""
+    if raw is None or raw == "":
+        return default
+    if isinstance(raw, bool):
+        return raw
+    value = _FLAG_WORDS.get(raw.strip().lower()) if isinstance(raw, str) else None
+    if value is None:
+        raise ConfigError(f"{name} must be on or off")
+    return value
+
+
 # -- file and environment -------------------------------------------------------------------------
 
 
@@ -280,6 +308,7 @@ def load_config(environment: Mapping[str, str], *, require_url: bool = True) -> 
         limits=check_limits(limits_raw),
         agent_image=None if image in (None, "") else check_image(image),
         runtime=check_runtime(pick("FACTORY_RUNNER_RUNTIME", "runtime") or "auto"),
+        auto_update=check_flag("autoUpdate", pick("FACTORY_RUNNER_AUTO_UPDATE", "autoUpdate")),
         credential_renewed_at=float(renewed) if isinstance(renewed, (int, float)) else 0.0,
         credential_source=CREDENTIAL_FROM_ENVIRONMENT if from_environment else CREDENTIAL_FROM_FILE,
     )
@@ -305,6 +334,7 @@ def to_document(config: RunnerConfig) -> dict[str, object]:
         "labels": list(config.labels),
         "limits": limits_document(config.limits),
         "runtime": config.runtime,
+        "autoUpdate": config.auto_update,
     }
     if config.credential is not None:
         document["credential"] = config.credential
@@ -357,6 +387,47 @@ def update_credential(
     if credential is not None:
         document["credential"] = credential
     document["credentialRenewedAt"] = renewed_at
+    return _write_document(path, document)
+
+
+SETTING_KEYS = ("name", "labels", "runtime", "agentImage", "autoUpdate")
+LIMIT_KEYS = ("cpus", "memoryMb", "diskGb", "parallelRuns")
+
+
+def edit_config(environment: Mapping[str, str], changes: Mapping[str, object]) -> Path:
+    """`factory-runner config set`: change settings in the file as it is on disk. A key of
+    `SETTING_KEYS` or `LIMIT_KEYS` with a value sets it, with `None` removes it (a limit then has
+    none, `agentImage` is the one baked into the image, `labels` has none to remove: pass an
+    empty list). Every value goes through the check of `register`; nothing is written when one is
+    wrong. The credential, the runner id and everything not named stay as they are, and the
+    environment is never written into the file. `ConfigError` when there is no file."""
+    path = config_path(environment)
+    document = _read_file(path)
+    if not document:
+        raise ConfigError("there is no configuration file: register this machine first")
+    limits: dict[str, object] = dict(as_object(document.get("limits")) or {})
+    for key, value in changes.items():
+        if key in LIMIT_KEYS:
+            if value is None:
+                limits.pop(key, None)
+            else:
+                limits[key] = value
+        elif key == "name":
+            document[key] = check_name(value)
+        elif key == "labels":
+            document[key] = list(check_labels(value))
+        elif key == "runtime":
+            document[key] = check_runtime(value)
+        elif key == "agentImage":
+            if value is None:
+                document.pop(key, None)
+            else:
+                document[key] = check_image(value)
+        elif key == "autoUpdate":
+            document[key] = check_flag("autoUpdate", value)
+        else:
+            raise ConfigError(f"{key} is not a setting of the runner")
+    document["limits"] = limits_document(check_limits(limits))
     return _write_document(path, document)
 
 

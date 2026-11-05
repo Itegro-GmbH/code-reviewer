@@ -233,6 +233,7 @@ def setup_document(
     *,
     runtime: str = AGENT_RUNTIME,
     entrypoint: Sequence[str] | None = None,
+    nano_cpus: int = 0,
 ) -> dict[str, Any]:
     """The Setup container: the agent's image, the agent's limits, the repository and nothing else.
     Constants, the image id, the volume name the daemon gave and the memory the Dispatcher computed.
@@ -256,6 +257,8 @@ def setup_document(
             "Privileged": False,
             "Memory": memory_bytes,
             "MemorySwap": memory_bytes,
+            # A customer's runner (#855) limits the CPUs of this container as it does the agent's.
+            **({"NanoCpus": nano_cpus} if nano_cpus > 0 else {}),
             "PidsLimit": AGENT_PIDS_LIMIT,
             "OomScoreAdj": AGENT_OOM_SCORE_ADJ,
             "RestartPolicy": {"Name": "no"},
@@ -330,6 +333,8 @@ class SetupSeams:
     helper_image: str = AGENT_IMAGE_REFERENCE
     runtime: str = AGENT_RUNTIME
     entrypoint: Sequence[str] | None = None
+    # A customer's runner (#855) limits the CPUs of the container (`NanoCpus`); 0: no limit.
+    nano_cpus: int = 0
     ready_seconds: float = READY_SECONDS
     commit_seconds: float = COMMIT_SECONDS
     finish_seconds: float = FINISH_EXEC_SECONDS
@@ -492,6 +497,7 @@ class SetupContainer:
                 self._memory_bytes,
                 runtime=self._seams.runtime,
                 entrypoint=self._seams.entrypoint,
+                nano_cpus=self._seams.nano_cpus,
             ),
             SETUP_CONTAINER_NAME,
         )

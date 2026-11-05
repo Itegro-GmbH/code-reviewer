@@ -22,9 +22,15 @@ case "$output" in
   *) fail "unexpected --version output: $output" ;;
 esac
 
-step "register and selftest are commands of it"
+step "register, selftest, config, credential and update are commands of it"
 docker run --rm "$image" register --help >/dev/null || fail "register --help failed"
 docker run --rm "$image" selftest --help >/dev/null || fail "selftest --help failed"
+docker run --rm "$image" config set --help >/dev/null || fail "config set --help failed"
+docker run --rm "$image" credential renew --help >/dev/null || fail "credential renew --help failed"
+docker run --rm "$image" update --help >/dev/null || fail "update --help failed"
+
+step "the release channel file is in it"
+docker run --rm --entrypoint cat "$image" /opt/code-reviewer/release-channel.json | grep -q '"repository"' || fail "release-channel.json is not in the image"
 
 step "config show reads the environment and never prints the credential"
 credential="crc_$(printf 'A%.0s' $(seq 1 43))"

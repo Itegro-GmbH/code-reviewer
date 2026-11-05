@@ -42,6 +42,7 @@ from urllib.parse import quote
 
 from code_reviewer_runner.implementer.docker_api import DockerApi, DockerError
 from code_reviewer_runner.implementer.role_labels import ROLE_LABEL, RUNNER_LABEL
+from code_reviewer_runner.implementer.setup_container import SETUP_IMAGE_REPOSITORY, SETUP_IMAGE_TAG
 from code_reviewer_runner.job import IMPLEMENTER_WORK_DIR
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 
@@ -51,6 +52,9 @@ _log = logging.getLogger(__name__)
 # repository, `result_channel.RESULT_SUBPATH`). Nothing else in `/work` is the runner's to remove.
 WORK_SUBDIRECTORIES: Final = ("reserve", "repo", "result")
 _IDENTIFIER: Final = re.compile(r"[0-9a-f]{12,64}")
+# The image a setup container's result is committed as (`setup_container.py`); the golden agent
+# image has the same repository and another tag.
+ENVIRONMENT_IMAGE: Final = f"{SETUP_IMAGE_REPOSITORY}:{SETUP_IMAGE_TAG}"
 
 
 @dataclass(frozen=True)
@@ -212,7 +216,8 @@ LOCK_LABEL: Final = "code-reviewer.runner-lock"
 _MAX_SHOWN: Final = 64
 
 
-def _labels(runner_id: str) -> list[str]:
+def container_filters(runner_id: str) -> list[str]:
+    """The label filters that select this runner's containers and networks."""
     return [ROLE_LABEL, f"{RUNNER_LABEL}={runner_id}"]
 
 
@@ -301,7 +306,7 @@ def remove_leftovers(api: DockerApi, runner_id: str) -> list[str]:
     if not runner_id:
         return [NO_IDENTITY]
     problems: list[str] = []
-    selector = quote(json.dumps({"label": _labels(runner_id)}))
+    selector = quote(json.dumps({"label": container_filters(runner_id)}))
     for kind, listing, remove in (
         ("container", f"/containers/json?all=1&filters={selector}", api.remove_container),
         ("network", f"/networks?filters={selector}", api.remove_network),
@@ -332,11 +337,22 @@ def _identifiers(answer: object) -> list[str]:
     return found
 
 
+def remove_environment_image(api: DockerApi) -> None:
+    """Drop the name of the image a setup container's result was committed as, so the daemon frees
+    its layers: a machine keeps what a job made until somebody removes it, a hosted VM does not."""
+    with contextlib.suppress(DockerError):
+        api.remove_image(ENVIRONMENT_IMAGE)
+
+
 def tidy(seams: TidySeams = TidySeams()) -> list[str]:  # noqa: B008
-    """The containers and networks first (nothing mounts the work volume then), then the work
-    volume, unless the daemon could not be cleaned: a container that stays may still have the
-    volume mounted. The problems, empty when the machine is clean."""
-    problems = [f"docker: {problem}" for problem in remove_leftovers(seams.api(), seams.runner_id)]
+    """The containers and networks first (nothing mounts the work volume then), then the image a
+    setup container's result was committed as, then the work volume, unless the daemon could not
+    be cleaned: a container that stays may still have the volume mounted. The problems, empty when
+    the machine is clean."""
+    api = seams.api()
+    problems = [f"docker: {problem}" for problem in remove_leftovers(api, seams.runner_id)]
     if problems:
         return problems
+    # What a hosted VM loses with the VM: the layers of the environment image (`disk_budget.py`).
+    remove_environment_image(api)
     return [f"work volume: {problem}" for problem in clear_work(seams.work_dir)]

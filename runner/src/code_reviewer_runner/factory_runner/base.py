@@ -16,7 +16,8 @@ HARNESS_OPENCODE: Final = "opencode"
 
 # Exit codes of `factory-runner` (the list is in docs/runner.md). 0 is also "no job came in time" in
 # `run --once`; 7 is "the app never answered during the wait" there; 8 is "registered, but
-# the credential could not be saved"; 9 is "another runner uses this Docker daemon".
+# the credential could not be saved"; 9 is "another runner uses this Docker daemon"; 10 is "the
+# service ends so that its supervisor starts the updated image" (`update.py`).
 EXIT_OK: Final = 0
 EXIT_FAILED: Final = 1
 EXIT_USAGE: Final = 2
@@ -27,3 +28,4 @@ EXIT_CONFIG: Final = 6
 EXIT_APP_UNREACHABLE: Final = 7
 EXIT_CREDENTIAL_UNSAVED: Final = 8
 EXIT_SHARED_DAEMON: Final = 9
+EXIT_UPDATED: Final = 10

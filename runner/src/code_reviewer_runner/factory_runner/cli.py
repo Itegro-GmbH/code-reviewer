@@ -13,7 +13,8 @@
   and names no image, so a machine whose agent image is missing or not the pinned one is reported
   as not ready (a running service pulls it at its own start). It may run beside a service, though
   its throwaway container is one more on the daemon for as long as it takes.
-- `config show`: the configuration without its secret.
+- `config show`, `config set`: the configuration without its secret, and changing it
+  (`cli_manage.py`); `credential show|renew` and `update [--rollback]` are there too.
 
 The app address, the credential, the labels and the limits can come from the environment instead of
 the file (`config.py`): a VM that runs one job needs no `register`.
@@ -22,7 +23,8 @@ Exit codes (`base.py`): 0 done (also: no job within the wait), 1 a job failed, 2
 requires an update, 4 revoked, 5 not ready (the self-test failed), 6 configuration, 7 `run --once`:
 the app never answered during the wait, 8 `register`: registered, but the credential could not be
 saved, 9 another runner uses this Docker daemon (the log names the first container or
-network of another runner that was found).
+network of another runner that was found), 10 the service ended so that its supervisor starts the
+image that `update` staged.
 """
 
 import argparse
@@ -38,6 +40,7 @@ from dataclasses import dataclass, replace
 from typing import NoReturn, TextIO
 
 from code_reviewer_runner import __version__
+from code_reviewer_runner.factory_runner import cli_manage
 from code_reviewer_runner.factory_runner.app_client import (
     Announcement,
     ApiError,
@@ -68,7 +71,6 @@ from code_reviewer_runner.factory_runner.config import (
     check_url,
     config_path,
     load_config,
-    redacted,
     save_config,
 )
 from code_reviewer_runner.factory_runner.job_api import RunnerJobApi
@@ -79,6 +81,12 @@ from code_reviewer_runner.factory_runner.service import (
     LOGGER_NAME,
     RunnerService,
     Seams,
+)
+from code_reviewer_runner.factory_runner.update import (
+    Fetch,
+    ReleaseChannel,
+    fetch_https,
+    load_channel,
 )
 from code_reviewer_runner.implementer.docker_api import DockerApi
 from code_reviewer_runner.job_loop.service import configure_logging
@@ -105,6 +113,9 @@ class CliSeams:
     hostname: Callable[[], str] = socket.gethostname
     # The daemon the loop tidies (`housekeeping.py`).
     docker: Callable[[], DockerApi] = DockerApi
+    # The release channel of the image and how its documents are fetched (`update.py`).
+    channel: Callable[[], ReleaseChannel | None] = load_channel
+    fetch: Fetch = fetch_https
 
 
 def _look(config: RunnerConfig, env: Mapping[str, str]) -> Prepared:
@@ -160,8 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
     selftest = commands.add_parser("selftest", help="prove the base on this machine")
     selftest.add_argument("--json", action="store_true", help="print the result as JSON")
 
-    config = commands.add_parser("config", help="the configuration")
-    config.add_argument("action", choices=("show",))
+    cli_manage.add_parsers(commands)
     return parser
 
 
@@ -186,7 +196,26 @@ def main(
         if arguments.command == "register":
             return _register(arguments, env, seams, stdout, stderr, stdin or sys.stdin)
         if arguments.command == "config":
-            return _config_show(env, stdout, stderr)
+            if arguments.action == "set":
+                return cli_manage.config_set(arguments, env, stdout, stderr)
+            return cli_manage.config_show(env, stdout)
+        if arguments.command == "credential":
+            if arguments.action == "renew":
+                return cli_manage.credential_renew(
+                    env, stdout, stderr, client=seams.client, now=seams.now
+                )
+            return cli_manage.credential_show(env, stdout, seams.now)
+        if arguments.command == "update":
+            return cli_manage.update_image(
+                arguments,
+                env,
+                stdout,
+                stderr,
+                docker=seams.docker,
+                hostname=seams.hostname,
+                channel=seams.channel,
+                fetch=seams.fetch,
+            )
         if arguments.command == "selftest":
             return _selftest(arguments, env, seams, stdout, stderr)
         return _run(arguments, env, seams, stderr)
@@ -304,18 +333,6 @@ def _limits(limits: Limits) -> dict[str, int]:
     from code_reviewer_runner.factory_runner.config import limits_document
 
     return limits_document(limits)
-
-
-# -- config show -----------------------------------------------------------------------------------
-
-
-def _config_show(env: Mapping[str, str], out: TextIO, err: TextIO) -> int:
-    config = load_config(env, require_url=False)
-    document = redacted(config)
-    document["configFile"] = str(config_path(env))
-    json.dump(document, out, indent=2, sort_keys=True)
-    out.write("\n")
-    return EXIT_OK
 
 
 # -- selftest ------------------------------------------------------------------------------

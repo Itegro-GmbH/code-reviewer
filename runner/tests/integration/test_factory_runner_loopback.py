@@ -48,6 +48,9 @@ class NothingLeft:
 
     remove_network = remove_container
 
+    def remove_image(self, *args: object, **kwargs: object) -> None:
+        return None
+
     # The lock container of the start: taken, and never seen again by the check at the end.
     def create_container(self, *args: object, **kwargs: object) -> str:
         return "d" * 64

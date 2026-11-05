@@ -22,6 +22,7 @@ from loop_support import (
     outcome,
     run,
 )
+from release_support import DIGEST, MANIFEST_URL, REPOSITORY, SIGNATURE_URL, Release, fetcher
 from test_implementer_job_host import implementer_claim, line
 
 from code_reviewer_runner.factory_runner import service as service_module
@@ -40,6 +41,7 @@ from code_reviewer_runner.factory_runner.base import (
     EXIT_REVOKED,
     EXIT_SHARED_DAEMON,
     EXIT_UPDATE_NEEDED,
+    EXIT_UPDATED,
 )
 from code_reviewer_runner.factory_runner.config import (
     RunnerConfig,
@@ -54,6 +56,13 @@ from code_reviewer_runner.factory_runner.service import (
     TIDY_RETRY_SECONDS,
     RunnerService,
     Seams,
+)
+from code_reviewer_runner.factory_runner.update import (
+    CURRENT_REFERENCE,
+    IMAGE_TAG_VARIABLE,
+    PREVIOUS_REFERENCE,
+    RELEASE_LABEL,
+    rollback,
 )
 from code_reviewer_runner.implementer.docker_api import DockerError
 from code_reviewer_runner.implementer.result_channel import make_result_directory
@@ -165,6 +174,7 @@ class FakeDaemon:
         self.networks: list[str] = []
         self.removed: list[str] = []
         self.listing_fails = False
+        self.images_removed: list[str] = []
         self.filters: list[str] = []
         # What the check for another runner is shown (every state, containers and networks).
         self.foreign: list[dict[str, Any]] = []
@@ -208,6 +218,9 @@ class FakeDaemon:
     def remove_network(self, network: str) -> None:
         self.networks.remove(network)
         self.removed.append(network)
+
+    def remove_image(self, reference: str) -> None:
+        self.images_removed.append(reference)
 
 
 def container_id(letter: str) -> str:
@@ -266,6 +279,10 @@ class Rig:
         launcher: FakeLauncher | None = None,
         ready: bool = True,
         clock: Any = None,
+        environment: dict[str, str] | None = None,
+        auto_update: bool = True,
+        channel: Any = None,
+        fetch: Any = None,
     ) -> None:
         self.client = FakeClient()
         self.api = FakeJobApi()
@@ -274,9 +291,12 @@ class Rig:
         self.work = tmp_path / "work"
         self.work.mkdir()
         self.launcher = launcher or AutoLauncher()
-        self.environment = {"FACTORY_RUNNER_HOME": str(tmp_path / "home")}
+        self.environment = {"FACTORY_RUNNER_HOME": str(tmp_path / "home"), **(environment or {})}
         self.config = RunnerConfig(
-            url="https://app.example", credential=CREDENTIAL, labels=("linux",)
+            url="https://app.example",
+            credential=CREDENTIAL,
+            labels=("linux",),
+            auto_update=auto_update,
         )
         self.service = RunnerService(
             self.config,
@@ -289,6 +309,8 @@ class Rig:
                 wall=self.clock.wall,
                 launcher=lambda _grace: self.launcher,
                 docker=lambda: self.daemon,  # type: ignore[arg-type,return-value]
+                hostname=lambda: "runner-container",
+                **({} if channel is None else {"channel": channel, "fetch": fetch}),
             ),
         )
 
@@ -984,3 +1006,219 @@ def test_a_credential_file_of_another_runner_is_not_overwritten_by_a_renewal(
     assert rig.client.renewals == 1 and rig.client.credentials == []  # the old one stays in use
     stored = load_config(rig.environment)
     assert (stored.runner_id, stored.credential) == ("runner-2", CREDENTIAL)
+
+
+# -- the update between jobs (#855) -----------------------------------------------------------
+
+
+class ImageDaemon(FakeDaemon):
+    """A daemon that also knows images: the one this container runs (release 1) and, once the
+    digest of the release is pulled, that image (with the number it carries)."""
+
+    def __init__(self, *, label: int) -> None:
+        super().__init__()
+        self.label = label
+        self.images: dict[str, dict[str, Any]] = {
+            "sha256:own": {"Id": "sha256:own", "Config": {"Labels": {RELEASE_LABEL: "1"}}},
+            CURRENT_REFERENCE: {"Id": "sha256:own"},
+        }
+        self.pulls = 0
+        # The image id the container of the service runs.
+        self.own = "sha256:own"
+        # What `GET /images/json` lists, and the references asked to be removed.
+        self.listing: list[dict[str, Any]] = []
+        self.deleted: list[str] = []
+
+    def inspect_container(self, name: str) -> dict[str, Any]:
+        if name == "runner-container":
+            return {"Image": self.own}
+        return super().inspect_container(name)
+
+    def inspect_image(self, reference: str) -> dict[str, Any]:
+        if reference not in self.images:
+            raise DockerError(404, "no such image")
+        return self.images[reference]
+
+    def request(self, method: str, path: str, *args: Any, **kwargs: Any) -> Any:
+        if not path.startswith("/images/"):
+            return super().request(method, path, *args, **kwargs)
+        if path.startswith("/images/json"):
+            return self.listing
+        if method == "DELETE":
+            self.deleted.append(path.removeprefix("/images/"))
+            return None
+        if path.startswith("/images/create"):
+            self.pulls += 1
+            self.images[f"{REPOSITORY}@{DIGEST}"] = {
+                "Id": "sha256:new",
+                "Config": {"Labels": {RELEASE_LABEL: str(self.label)}},
+            }
+        elif "/tag?" in path and path.endswith("repo=factory-runner&tag=current"):
+            self.images[CURRENT_REFERENCE] = self.images[
+                path.split("/images/")[1].split("/tag?")[0]
+            ]
+        return None
+
+
+class UpdateRig(Rig):
+    def __init__(self, tmp_path: Path, *, offered: int = 2, **kwargs: Any) -> None:
+        self.release = Release(release=offered)
+        self.served = self.release.served()
+        self.fetched: list[str] = []
+        super().__init__(
+            tmp_path,
+            environment={IMAGE_TAG_VARIABLE: CURRENT_REFERENCE},
+            channel=self.release.channel,
+            fetch=self._fetch,
+            **kwargs,
+        )
+        self.daemon = ImageDaemon(label=offered)
+
+    def _fetch(self, url: str) -> bytes:
+        self.fetched.append(url)
+        return fetcher(self.served)(url)
+
+
+def test_a_staged_image_is_switched_to_between_jobs_and_nothing_is_claimed_first(
+    tmp_path: Path,
+) -> None:
+    rig = UpdateRig(tmp_path)
+    rig.daemon.images[CURRENT_REFERENCE] = {"Id": "sha256:new"}  # `factory-runner update` did it
+    rig.client.claims = [implementer_claim()]
+
+    assert rig.go(once=False) == EXIT_UPDATED
+    assert rig.client.claim_calls == 0
+
+
+def test_a_job_that_is_running_is_never_interrupted_by_an_update(tmp_path: Path) -> None:
+    rig = UpdateRig(tmp_path)
+    daemon = rig.daemon
+
+    class Staging(AutoLauncher):
+        async def start(self, spec: Any) -> Any:
+            daemon.images[CURRENT_REFERENCE] = {"Id": "sha256:new"}  # staged during the job
+            return await super().start(spec)
+
+    rig.launcher = Staging()
+    rig.client.claims = [implementer_claim(), implementer_claim(2)]
+
+    assert rig.go(once=False) == EXIT_UPDATED
+    assert rig.client.claim_calls == 1
+    assert rig.api.completions[0][2]["ok"] is True  # the job ended and was reported first
+
+
+def test_the_once_mode_and_a_runner_without_a_supervisor_never_switch(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    once = UpdateRig(tmp_path / "a")
+    once.daemon.images[CURRENT_REFERENCE] = {"Id": "sha256:new"}
+    assert once.go(once=True, wait=0) == EXIT_OK
+
+    # No FACTORY_RUNNER_IMAGE_TAG: somebody's `docker run`, nobody would start it again.
+    free = Rig(tmp_path / "b")
+    assert free.go(once=True, wait=0) == EXIT_OK
+
+
+def test_the_first_look_for_a_release_comes_minutes_after_the_start_not_at_it(
+    tmp_path: Path,
+) -> None:
+    rig = UpdateRig(tmp_path)
+    rig.client.claims = [*([None] * 30), Revoked("no", 401)]
+
+    assert rig.go(once=False) == EXIT_UPDATED  # the release 2 behind `stable` was staged
+    # 30 s polls: the check was due after 600 s, i.e. after about 20 of them.
+    assert 15 <= rig.client.claim_calls <= 25
+    assert rig.daemon.pulls == 1
+    assert rig.fetched == [MANIFEST_URL, SIGNATURE_URL]
+
+
+def test_a_runner_with_automatic_updates_off_does_not_look_by_itself(tmp_path: Path) -> None:
+    rig = UpdateRig(tmp_path, auto_update=False)
+    rig.client.claims = [*([None] * 30), Revoked("no", 401)]
+
+    assert rig.go(once=False) == EXIT_REVOKED
+    assert rig.daemon.pulls == 0
+
+
+def test_update_needed_looks_at_once_even_with_automatic_updates_off(tmp_path: Path) -> None:
+    rig = UpdateRig(tmp_path, auto_update=False)
+    rig.client.claims = [UpdateNeeded("1.4.0")]
+
+    assert rig.go(once=False) == EXIT_UPDATED
+    assert rig.daemon.pulls == 1
+
+
+def test_an_update_needed_that_cannot_be_met_is_said_and_waits_as_before(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    rig = UpdateRig(tmp_path)
+    forged = Release(release=2)  # somebody else's key signs what the channel's address serves
+    rig.served = {MANIFEST_URL: forged.manifest(), SIGNATURE_URL: forged.signature()}
+    rig.client.claims = [UpdateNeeded("1.4.0"), Revoked("no", 401)]
+
+    with caplog.at_level(logging.WARNING):
+        assert rig.go(once=False) == EXIT_REVOKED
+
+    assert "no update: the signature of the release manifest is not valid" in caplog.text
+    assert rig.daemon.pulls == 0
+    assert CURRENT_REFERENCE in rig.daemon.images and rig.daemon.images[CURRENT_REFERENCE] == {
+        "Id": "sha256:own"
+    }
+
+
+# #855-F1 (B1): a rollback is not undone by the service ten minutes later.
+@pytest.mark.parametrize(("offered", "switches"), [(2, False), (3, True)])
+def test_a_rolled_back_release_is_not_taken_again_until_a_higher_one_comes(
+    tmp_path: Path, offered: int, switches: bool
+) -> None:
+    rig = UpdateRig(tmp_path, offered=offered)
+    daemon = rig.daemon
+    # Release 2 ran and was bad; the operator rolled back, and the service starts on release 1.
+    daemon.images["sha256:bad"] = {"Id": "sha256:bad", "Config": {"Labels": {RELEASE_LABEL: "2"}}}
+    daemon.images["sha256:own"]["Config"] = {"Labels": {RELEASE_LABEL: "1"}}
+    daemon.images[CURRENT_REFERENCE] = daemon.images["sha256:bad"]
+    daemon.images[PREVIOUS_REFERENCE] = daemon.images["sha256:own"]
+    assert rollback(daemon, tmp_path / "home") == 2  # type: ignore[arg-type]
+    assert daemon.images[CURRENT_REFERENCE]["Id"] == "sha256:own"
+    rig.client.claims = [*([None] * 30), Revoked("no", 401)]
+
+    assert rig.go(once=False) == (EXIT_UPDATED if switches else EXIT_REVOKED)
+
+    assert daemon.pulls == (1 if switches else 0)
+    assert (daemon.images[CURRENT_REFERENCE]["Id"] == "sha256:new") is switches
+
+
+# #855-F1 (S7): a runner that is not ready waits before it ends, so the unit does not restart it
+# every ten seconds.
+def test_a_service_that_is_not_ready_waits_before_it_ends_and_the_once_mode_does_not(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    service = Rig(tmp_path / "a", ready=False)
+    assert service.go(once=False) == EXIT_NOT_READY
+    assert sum(service.clock.slept) >= 300
+
+    once = Rig(tmp_path / "b", ready=False)
+    assert once.go(once=True) == EXIT_NOT_READY
+    assert once.clock.slept == []
+
+
+# #855-F1 (S6): the references of releases before `current` and `previous` go at the start.
+def test_the_digest_references_of_old_releases_are_removed_at_the_start(tmp_path: Path) -> None:
+    rig = UpdateRig(tmp_path)
+    daemon = rig.daemon
+    keep, old = f"{REPOSITORY}@sha256:" + "a" * 64, f"{REPOSITORY}@sha256:" + "b" * 64
+    foreign = "other.example/thing@sha256:" + "c" * 64
+    daemon.images[CURRENT_REFERENCE] = {"Id": "sha256:own", "RepoDigests": [keep]}
+    daemon.listing = [
+        {"Id": "sha256:own", "RepoDigests": [keep]},
+        {"Id": "sha256:older", "RepoDigests": [old]},
+        {"Id": "sha256:other", "RepoDigests": [foreign]},
+        {"Id": "sha256:none", "RepoDigests": None},
+    ]
+    rig.client.claims = [Revoked("no", 401)]
+
+    assert rig.go(once=False) == EXIT_REVOKED
+
+    assert daemon.deleted == [old]

@@ -24,11 +24,23 @@
 # release**: a tag can move, and the runner can only tell a stale image from the right one by digest.
 # The build says so when it is not one. The build context is the folder `runner/` (nothing is
 # copied from it).
+#
+# `RUNNER_RELEASE` is the number of the release (the release pipeline passes its run number): a whole
+# number that grows with every release, in the label `code-reviewer.runner.release`. The runner
+# updates itself only to a release with a higher number (docs/runner.md, "Updates").
+#
+# The release channel a runner updates itself from is the file runner/release-channel.json, copied into
+# the image (`/opt/code-reviewer/release-channel.json`): the image repository, where the signed release
+# manifest is, and the public key that proves it. It is part of the image, so a configuration on the
+# device cannot redirect an update. The owner fills it when a release pipeline exists (docs/runner.md,
+# "Updates"); empty, the runner does not update by itself.
 ARG WORKER_IMAGE=code-reviewer-runner-sandbox:local
 
 FROM ${WORKER_IMAGE} AS factory-runner
 ARG AGENT_IMAGE_REF=""
-LABEL org.opencontainers.image.title="Factory-Runner" \
+ARG RUNNER_RELEASE="0"
+LABEL code-reviewer.runner.release="${RUNNER_RELEASE}" \
+      org.opencontainers.image.title="Factory-Runner" \
       org.opencontainers.image.description="Runs the jobs of a Code Reviewer workspace on this machine (factory-runner)" \
       org.opencontainers.image.source="https://github.com/Itegro-GmbH/code-reviewer" \
       org.opencontainers.image.licenses="LicenseRef-Proprietary"
@@ -39,6 +51,7 @@ LABEL org.opencontainers.image.title="Factory-Runner" \
 # jobs (`factory_runner/housekeeping.py`). The agent is not root of this container: it is a container
 # of its own, under Sysbox where there is one (docs/runner.md says what `runc` means instead).
 USER 0:0
+COPY --chown=0:0 --chmod=0644 release-channel.json /opt/code-reviewer/release-channel.json
 RUN install -d -m 0755 /opt/code-reviewer \
     && printf '{"reference": "%s"}\n' "${AGENT_IMAGE_REF}" > /opt/code-reviewer/agent-image.json \
     && install -d -m 0700 /var/lib/factory-runner /work
