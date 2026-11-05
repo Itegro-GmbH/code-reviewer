@@ -24,6 +24,7 @@ from code_reviewer_runner.job_loop.api import HeartbeatReply, parse_heartbeat
 from code_reviewer_runner.job_loop.host import JobEnd
 from code_reviewer_runner.job_loop.http import Reply
 from code_reviewer_runner.lease_check import LeaseState
+from code_reviewer_runner.result import NO_RESULT_REASON
 
 
 # #891-T10
@@ -92,6 +93,106 @@ def test_a_cancelled_turn_without_a_printed_result_reports_the_bare_cancelled() 
         result = harness.api.completions[0][2]
         assert result["errorCode"] == "cancelled"
         assert "implementer" not in result and result["usage"] is None
+
+    run(scenario)
+
+
+# #891-T15
+def test_a_cancelled_turn_that_left_no_result_is_reported_as_no_result_so_its_cost_is_counted() -> (
+    None
+):
+    # Killed after the grace, or ended by a failing terminate: the model may have been used and
+    # nobody can say how much, so the app must not void it (`settlementOfOutcome`).
+    async def scenario() -> None:
+        harness = advertising_harness()
+        harness.api.claims = [implementer_claim()]
+        harness.api.cancel_from = 1
+        await harness.start()
+
+        await harness.clock.advance(30)
+        await settle()
+
+        result = harness.api.completions[0][2]
+        assert result["errorCode"] == "cancelled"
+        assert result["errorReason"] == NO_RESULT_REASON
+
+    run(scenario)
+
+
+# #891-T15
+def test_a_cancelled_turn_whose_process_could_not_be_ended_cleanly_is_no_result_too() -> None:
+    async def scenario() -> None:
+        harness = advertising_harness()
+        harness.api.claims = [implementer_claim()]
+        harness.api.cancel_from = 1
+        await harness.start()
+        process = harness.launcher.processes[0]
+
+        async def failing() -> None:
+            process.terminated = True
+            raise OSError("no such process")
+
+        process.terminate = failing  # type: ignore[method-assign]
+
+        await harness.clock.advance(30)
+        await settle()
+
+        result = harness.api.completions[0][2]
+        assert result["errorCode"] == "cancelled"
+        assert result["errorReason"] == NO_RESULT_REASON
+
+    run(scenario)
+
+
+# #891-T15
+def test_a_cancelled_turn_that_printed_its_usage_has_no_failure_reason() -> None:
+    async def scenario() -> None:
+        harness = advertising_harness()
+        harness.api.claims = [implementer_claim()]
+        harness.api.cancel_from = 1
+        await harness.start()
+        harness.launcher.processes[0].printed_on_terminate = line(
+            ok=False, errorCode="runner_shutdown", usage=USAGE, implementer=report()
+        )
+
+        await harness.clock.advance(30)
+        await settle()
+
+        assert "errorReason" not in harness.api.completions[0][2]
+
+    run(scenario)
+
+
+# #891-T16
+def test_the_lease_is_kept_alive_while_a_cancelled_turn_is_ending() -> None:
+    # The stop has up to 120 s; the lease is 120 s. The heart keeps beating until the report goes
+    # out, or the sweep would end the job and lose the report and the head of the session.
+    async def scenario() -> None:
+        harness = advertising_harness()
+        harness.api.claims = [implementer_claim()]
+        harness.api.cancel_from = 2
+        await harness.start()
+        process = harness.launcher.processes[0]
+        process.hang_on_terminate = True
+
+        await harness.clock.advance(60)  # the second heartbeat learns of the cancel
+        assert process.terminated
+        beats = len(harness.api.heartbeats)
+
+        await harness.clock.advance(90)  # the process is still pushing
+
+        assert len(harness.api.heartbeats) == beats + 3
+        process.finish(
+            outcome(
+                exit_code=-15,
+                stdout=line(
+                    ok=False, errorCode="runner_shutdown", usage=USAGE, implementer=report()
+                ),
+            )
+        )
+        await settle()
+        assert harness.end is JobEnd.CANCELLED
+        assert harness.api.completions[0][2]["implementer"] == report()
 
     run(scenario)
 

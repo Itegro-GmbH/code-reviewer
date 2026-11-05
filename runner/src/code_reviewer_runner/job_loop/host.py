@@ -702,7 +702,7 @@ class JobHost:
             )
             self._log_outcome(claimed, result, outcome)
             return result
-        outcome = await self._end(process, finished)
+        outcome = await self._end_beating(claimed, process, finished, state)
         tail = outcome.stderr.decode("utf-8", errors="replace") if outcome else ""
         if lost_wait.done() and not lost_wait.cancelled():
             self._log.warning("job %s: the lease is lost, the process was ended", claimed.id)
@@ -757,6 +757,7 @@ class JobHost:
                 implementer=implementer,
                 code=ErrorCode.CANCELLED.value,
                 detail="the run was cancelled by a member of the workspace",
+                reason_without_usage=NO_RESULT_REASON,
             )
         if shutdown.done() and not shutdown.cancelled():
             self._log.warning(
@@ -766,6 +767,24 @@ class JobHost:
                 outcome, redactor, self._ms_since(started), implementer=implementer
             )
         return None
+
+    async def _end_beating(
+        self,
+        claimed: ClaimedJob,
+        process: RunningProcess,
+        finished: asyncio.Future[ProcessOutcome],
+        state: _RunState,
+    ) -> ProcessOutcome | None:
+        """End the process while the heart keeps beating (#891): the stop of an Implementer turn
+        takes up to `IMPLEMENTER_TERMINATE_GRACE_SECONDS` (the engine, the push, the snapshot), as
+        long as the lease, and a lease that lapses meanwhile lets the sweep end the job and lose
+        the report and the head of the session."""
+        beating = asyncio.ensure_future(self._heartbeats(claimed, asyncio.Event(), state))
+        try:
+            return await self._end(process, finished)
+        finally:
+            beating.cancel()
+            await asyncio.gather(beating, return_exceptions=True)
 
     async def _end(
         self, process: RunningProcess, finished: asyncio.Future[ProcessOutcome]

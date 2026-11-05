@@ -143,9 +143,14 @@ class FakeProcess:
     # What the process printed before it went when it was terminated (a turn of the Implementer
     # prints its result on SIGTERM, #765).
     printed_on_terminate: bytes = b""
+    # A process that is slow to go (the Implementer's engine, its push): terminate returns, the
+    # process ends only when the test finishes it.
+    hang_on_terminate: bool = False
 
     async def terminate(self) -> None:
         self.terminated = True
+        if self.hang_on_terminate:
+            return
         self.finish(
             outcome(exit_code=-15, stdout=self.printed_on_terminate, stderr=b"terminated\n")
         )
