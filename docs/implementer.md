@@ -1218,7 +1218,7 @@ into the engine's configuration directory in the agent's container as `/etc/code
 
 The tool's name, description and parameters are derived from the schema (`tool_definition`: the schema itself with closed objects). In OpenCode (the
 pinned 1.19.0) an MCP tool is named after its server, so the agent's tool is `finish_submit_result`; the prompt says so, and a test holds the name,
-the config and the text together. The permission is `finish_*: allow` next to the default-deny, and nothing else of the config moves (a test
+the config and the text together. The permission is `finish_submit_result: allow` next to the default-deny, and nothing else of the config moves (a test
 compares the rest key by key). Both doors check what the agent hands in against the schema; a refusal comes back as an error result (the tool) or
 a line on standard error with exit code 2 (the command) and the agent corrects and tries again. An accepted result is written to the **result
 file**.

@@ -296,8 +296,12 @@ def test_the_permission_adds_the_finish_tools_and_keeps_the_default_deny_first()
 
     permission = config["permission"]
     assert next(iter(permission)) == "*" and permission["*"] == "deny"
-    assert permission["finish_*"] == "allow"
-    assert {k: v for k, v in permission.items() if k != "finish_*"} == permission_block()
+    # The one tool, by its exact name: another tool the server may come to offer is not allowed.
+    assert permission["finish_submit_result"] == "allow"
+    assert not any("*" in name for name in permission if name != "*")
+    assert {k: v for k, v in permission.items() if k != "finish_submit_result"} == (
+        permission_block()
+    )
 
 
 # #843-T63

@@ -49,6 +49,7 @@ DENIED_TOOLS: tuple[str, ...] = ("webfetch", "websearch", "task", "question")
 # The one MCP server of the engine, when the turn has a result schema (#843): the finish tool. The
 # engine names an MCP tool `<server>_<tool>`, so the agent's tool is `finish_submit_result`.
 FINISH_MCP_SERVER = "finish"
+FINISH_TOOL_NAME = "submit_result"
 # How long the engine waits for the server to start and to answer (the engine's default is five
 # seconds for the start; a call is a check and a file write).
 FINISH_MCP_TIMEOUT_MS = 20_000
@@ -73,8 +74,10 @@ def finish_mcp_block(
 
 
 def finish_permissions() -> dict[str, str]:
-    """The permission that lets the agent call the finish tool and nothing else of the server."""
-    return {f"{FINISH_MCP_SERVER}_*": "allow"}
+    """The permission that lets the agent call the finish tool and nothing else of the server: the
+    tool by its exact name (the engine names it after the server, `finish_submit_result`), so a
+    second tool the server came to offer would stay denied."""
+    return {f"{FINISH_MCP_SERVER}_{FINISH_TOOL_NAME}": "allow"}
 
 
 def permission_block() -> dict[str, str]:

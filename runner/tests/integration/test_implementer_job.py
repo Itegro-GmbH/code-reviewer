@@ -1796,7 +1796,7 @@ def test_the_agent_is_given_the_finish_tool_the_command_and_the_words_about_them
         "/etc/code-reviewer/factory-submit",
         "mcp",
     ]
-    assert config["permission"]["finish_*"] == "allow"
+    assert config["permission"]["finish_submit_result"] == "allow"
     assert set(options["files"]) == {"factory-submit", "result-schema.json"}
     assert json.loads(options["files"]["result-schema.json"][0]) == RESULT_SCHEMA
     assert options["environment"]["PATH"].startswith("/etc/code-reviewer:")

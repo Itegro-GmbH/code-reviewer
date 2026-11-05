@@ -453,6 +453,12 @@ def parse_result(schema: Mapping[str, Any], raw: bytes) -> Parsed:
     issues = check_value(schema, value)
     if issues:
         return Parsed(None, "invalid", tuple(issues))
+    try:
+        # Half a surrogate pair written as an escape is JSON but no text: it cannot be written to
+        # the file or kept by the app.
+        json.dumps(value, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError:
+        return Parsed(None, NOT_JSON)
     return Parsed(value, None)
 
 

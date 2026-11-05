@@ -225,6 +225,34 @@ def test_submit_writes_a_right_result_and_leaves_a_wrong_one_out(tmp_path: Path)
     assert [p.name for p in tmp_path.iterdir()] == ["result.json"], "no scratch file is left"
 
 
+# #843-T42
+def test_a_lone_surrogate_is_a_rejection_in_every_door_and_never_a_crash(tmp_path: Path) -> None:
+    # Valid as JSON text, but no text: it cannot be written to the file or stored by the app.
+    raw = b'{"findings": [{"type": "bug", "name": "\\ud800"}]}'
+    path = str(tmp_path / "result.json")
+
+    parsed = parse_result(FINDINGS, raw)
+    accepted, sentence = submit(FINDINGS, raw, path)
+    answer = handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "submit_result",
+                "arguments": {"findings": [{"type": "bug", "name": "\ud800"}]},
+            },
+        },
+        FINDINGS,
+        path,
+    )
+
+    assert parsed.value is None and parsed.problem == "not_json"
+    assert accepted is False and sentence.startswith("Rejected")
+    assert answer is not None and answer["result"]["isError"] is True
+    assert not Path(path).exists()
+
+
 # #843-T44
 def test_a_second_accepted_result_replaces_the_first(tmp_path: Path) -> None:
     path = tmp_path / "result.json"
