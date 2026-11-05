@@ -274,6 +274,25 @@ def test_the_inner_docker_has_to_say_ready_and_a_container_that_never_does_is_gi
     slow.stop()
 
 
+# #827-T03: a start that failed leaves no guard behind: it would read /proc/meminfo for the VM's life
+@pytest.mark.parametrize("how", ["not ready", "sealed wrong"])
+def test_a_failed_start_closes_the_memory_guard(rig: Rig, how: str) -> None:
+    if how == "not ready":
+        rig.ready_after = 10_000
+    else:
+        rig.engine.inspect_override[AGENT_CONTAINER_NAME] = lambda a: {
+            **a,
+            "HostConfig": {**a["HostConfig"], "Privileged": True},
+        }
+    place = AgentContainer(2560, rig.seams(ready_seconds=0.3))
+    with pytest.raises(JobError):
+        place.create()
+    looked = place.lowest_left
+    rig.set_available(300_000)  # below the floor: a guard still running would see it
+    time.sleep(0.5)  # five looks of a guard
+    assert place.lowest_left == looked
+
+
 # #745-T20: the lane without Sysbox starts the real image under runc with an entrypoint of its own
 def test_the_runtime_and_the_entrypoint_are_seams_and_production_leaves_them_alone(
     rig: Rig,

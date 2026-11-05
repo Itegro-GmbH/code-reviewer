@@ -631,6 +631,10 @@ class AgentContainer:
                 _log.warning("the agent's container could not be killed (%s)", error.status)
 
     def _remove(self) -> None:
+        # Every failed start ends here: a guard left running would read /proc/meminfo ten times a
+        # second for the VM's life and call a kill that has no container to find.
+        if self._guard is not None:
+            self._guard.close()
         container, self._container = self._container, None
         if container is None:
             return
