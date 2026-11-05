@@ -5,8 +5,9 @@
 It speaks the registration and the runner API as the app does, from the shared contract files:
 every request body the runner sends is checked against the contracts
 (`contracts/runner-registration.v1.json` and `contracts/runner-api.v1.json`), and a body that
-does not fit is answered 400 and kept in `violations`, so a test asserts there are none. It knows the rules the runner depends on: the
-registration token is good once, every other call needs a live credential (`401 RUNNER_UNAUTHORIZED`
+does not fit is answered 400 and kept in `violations`, so a test asserts there are none.
+
+It knows the rules the runner depends on: the registration token is good once, every other call needs a live credential (`401 RUNNER_UNAUTHORIZED`
 once it is revoked), a renewed credential is valid beside the previous one until it is used, a claim
 below the minimum base version is `426`, and a call about a job needs the lease token of the claim.
 """
