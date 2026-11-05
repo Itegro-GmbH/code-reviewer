@@ -8,9 +8,9 @@ workspace with versions.
 **Status (milestones 1 to 3a of epic #833).** The format, the validator, the storage, the [profiles](profiles.md) they refer to and the
 **engine core** exist: a workflow with the manual trigger can be started through the API and runs its agent and action steps one after the other
 (see [Engine](#engine)). Not yet: the three GitHub actions (they need rights of the GitHub App; milestone 3b, until then an action step ends with
-`connector_unavailable`), `if` and `loop` (milestone 5: a workflow that has one is refused at the start), the label trigger (milestone 4) and a page.
+`connector_unavailable`), `if` and `loop` (milestone 5: a workflow that has one is refused at the start), the label trigger (milestone 4) and an editor.
 The finish tool exists (see [Result schemas](#result-schemas)). The workflows exist only in
-a deployment with the capability `implementer` (the factory); there is no page, only the routes below. Every member of a workspace may
+a deployment with the capability `implementer` (the factory); there is no editor, but the routes below and, for the runs, [pages](#the-run-page). Every member of a workspace may
 use them (the permission `start_implementer_task`).
 
 The format is described by two JSON Schemas, [`contracts/workflow.v1.json`](../contracts/workflow.v1.json) and
@@ -486,19 +486,21 @@ A run looks like this (a step is `pending` when written, `running` once claimed,
 ```json
 {
   "run": {
-    "id": "7f0c…", "workflowId": "…", "workflowVersion": 3, "status": "running", "errorCode": null,
+    "id": "7f0c…", "workflowId": "…", "workflowVersion": 3, "trigger": "manual", "status": "running", "errorCode": null,
     "budgetUsd": 20, "spentUsd": 0.42, "repositoryId": "…", "baseBranch": "main", "input": {"repo": "acme/widgets", "topic": "caching"},
     "createdAt": "…", "updatedAt": "…", "finishedAt": null,
     "steps": [
       { "id": "plan", "position": 0, "kind": "agent", "status": "succeeded", "profile": {"name": "worker", "version": 1},
-        "jobId": "…", "turnId": "…", "costUsd": 0.42, "output": {"summary": "…", "costUsd": 0.42, "branch": "workflow/7f0c…/plan"},
+        "jobId": "…", "turnId": "…", "costUsd": 0.42, "costBasis": "reported", "output": {"summary": "…", "costUsd": 0.42, "branch": "workflow/7f0c…/plan"},
         "errorCode": null, "errorMessage": null, "createdAt": "…", "startedAt": "…", "finishedAt": "…" }
     ]
   }
 }
 ```
 
-`jobId` and `turnId` link an agent step to its Implementer run (the live view of that run shows what the agent does).
+`jobId` and `turnId` link an agent step to its Implementer run (the live view of that run shows what the agent does). `costBasis` says where `costUsd` comes
+from (`reported`, `estimated` or `limit`, see [The budget over all steps](#the-budget-over-all-steps)); it is null for a step that was charged nothing. `trigger` is what
+started the run: `manual` is the only one the engine starts today.
 
 ### What the engine does
 
@@ -548,7 +550,8 @@ workspace's own key that has no price) is charged by its token counts at the pri
 no price in the catalog it is charged **the whole cap it ran under**, so a run never spends more than its budget. That is conservative on purpose: with
 an unpriced model a workflow of two agent steps with a budget of 1 USD can end after step one with `budget_exhausted`, because step one was charged the
 whole of it. The engine logs `[workflow-runs] cost not reported run=… step=… charged=estimated|limit` for each such step. A price in the catalog, or a
-model that reports its cost, avoids it. When the budget cannot pay one cent for the next agent step, the run ends with `budget_exhausted`; an action step costs nothing and still runs.
+model that reports its cost, avoids it. When the budget cannot pay one cent for the next agent step, the run ends with `budget_exhausted`; an action step costs nothing and still runs. The basis a step was charged on (`reported`, `estimated`, or `limit` for the whole cap) is kept with
+the step and shown on the [run page](#the-run-page).
 
 ### Known limits of milestone 3
 
@@ -679,13 +682,13 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `template_too_large` | step | The text does not fit where it goes. |
 | `profile_not_found` | step | The profile is gone, archived or has no such version. |
 | `environment_not_found` | step | The environment is not one of the workspace. |
-| `agent_start_failed` | step | The Implementer refused the turn (the message has its code), or it could not be started for an hour. |
+| `agent_start_failed` | step | The Implementer refused the turn (the code and text of the refusal are in the log of the engine, not in the step), or it could not be started for an hour. |
 | `turn_unreadable` | step | The turn, its job or its stored schema cannot be read. |
 | `no_result` | step | No result, or one that does not fit the schema. |
 | `job_failed` | step | The job ended without success and without a code of its own. Any other code of the job (`timeout`, `cost_limit_reached`, …) is kept as it is. |
 | `connector_unavailable` | step | No connector is there for the action. |
 | `action_input_invalid` | step | The inputs of the action are not what the connector takes, once the references are resolved. |
-| `action_failed` | step | The connector failed for a reason that has no code of its own; the message is its own. |
+| `action_failed` | step | The connector failed for a reason that has no code of its own; the step says "The action failed." and the cause is in the log of the engine. |
 | `github_permission_missing` | step | The GitHub App of the workspace lacks a permission the action needs, or the installation is suspended; the message names the permission. |
 | `github_not_found` | step | GitHub has no such issue, pull request or repository, or the installation is gone. |
 | `github_validation` | step | GitHub refused the content: no commits between head and base, an archived repository, a value it does not accept. |
@@ -712,6 +715,53 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `WORKFLOW_RUN_INPUT_INVALID` | 422 | The input does not fit the trigger's `input`; `errors` lists every problem. |
 | `WORKFLOW_RUN_DOCUMENT_UNUSABLE` | 500 | The saved document cannot be read. |
 | `WORKFLOW_RUN_GITHUB_UNAVAILABLE` | 503 | GitHub could not be asked for the repository. |
+
+## The run page
+
+*Milestone 3c of epic #833; the code is [`app/src/workflow-pages/`](../app/src/workflow-pages/README.md), the pages are below `/w/<slug>/workflows`.*
+There is no editor for workflows (an AI writes them through the API), but a member can see them, start one by hand and watch a run. The pages exist
+only in a deployment with the capability `implementer`, appear in the sidebar as **Workflows**, and are open to every member (the permission
+`start_implementer_task`, like the routes). A workflow, or a run, that is none of the workspace's is the not-found page, the same as one that does
+not exist.
+
+- **Workflows** (`/w/<slug>/workflows`): the workflows of the workspace that are not archived, with their version and the time of the last save.
+- **One workflow** (`/w/<slug>/workflows/<id>`): the **Start form** and the newest 50 runs.
+  - The form has one field for each field of the `input` of the manual trigger, the repository (`repo`) first: a text, a whole number, a number, a
+    choice (a text with a list of names), a checkbox, and a box for JSON for a list or an object. It sends `{input, clientRequestId}` to
+    `POST .../workflows/<id>/runs`. The `clientRequestId` is made when the form is sent and kept for the same input: sending it again after a lost
+    answer is one run, changing the input is another. A refusal is told in words; a field the server names is marked. A workflow that is archived, or whose
+    trigger is not the manual one, shows a note instead of the form.
+  - The list of runs has the status, the start, the trigger (only "started by hand" exists today), what was spent of the budget and the version of the
+    workflow the run started with. It is updated every few seconds while a run runs.
+- **One run** (`/w/<slug>/workflows/<id>/runs/<runId>`): the page polls `GET .../runs/<runId>` every 3 seconds while the run runs, as the live view of an
+  Implementer run does, and stops when it ends.
+  - **Status.** `running`, `succeeded` or `failed`. A failed run or step is told in a sentence for its code (`budget_exhausted` is "the budget of the run is
+    used up"), never as the code itself; a code the page does not know is "failed for a reason not listed here". The message a step stored is a fixed sentence (no code,
+    nothing a runner or an exception wrote; the details go to the log of the engine) and is shown under the sentence as text, unless it contains a code
+    (`IMPLEMENTER_X`, `agent_start_failed`): then only the sentence of the `errorCode` is shown.
+  - **Budget.** What was spent of the budget, as a bar and in dollars. Each step that was charged shows its cost with its **basis**:
+    - *reported*: the runner reported the cost;
+    - *estimated*: the runner reported none, so it is the token counts at the catalog price of the model;
+    - *booked as the limit*: nothing better was known, so the step was charged the whole limit it ran under. The real cost is probably lower; the run never
+      spends more than its budget.
+
+    A step that no runner took (`no_runner_available`, cost 0) never ran: it shows "not run" instead of a basis.
+
+    The basis is kept with the step (`workflow_step_runs.cost_basis`, null for a step that was charged nothing, and for steps written before milestone 3c) and is
+    in the step of the run routes as `costBasis`.
+  - **Steps**, in the order they ran, each with its status, its failure, how long it took, the profile of an agent step and its cost. An agent step links to its
+    Implementer run (`/w/<slug>/runs/<jobId>`), where the live view shows what the agent does.
+  - **Results.** An agent step shows its branch and, collapsed, the rest of what it returned as JSON text. An action step shows what any action returns:
+    `url` (a link only if it passes the check below, else the text), `number` and `existing` (whether the action found what it would have made, so nothing new was created).
+    Everything in them is text from outside, rendered as text and never as markup.
+  - **Failed actions.** The codes of the GitHub connectors are told in a sentence, not as the code: `github_permission_missing` names the permission the App lacks
+    ("Pull requests: Read and write" or "Issues: Read and write", taken from the step's message only if it is one of these two) and says that the owner of the installation has
+    to grant it; `github_rate_limited` says the limit was reached and the action was not repeated; `github_not_found`, `github_validation` and `github_unavailable` have a
+    sentence of their own; an action that creates something and ended without an answer (`github_unavailable` with that note, `action_timeout`, `action_interrupted`) says
+    **"The action may have happened: check GitHub before starting again."** The message the step stored is shown under the sentence as text.
+  - **Links.** The only links made from a step's output go to GitHub: a value is linked only if `new URL` reads it as `https://github.com/<owner>/<name>` or
+    below it, of **the repository of the run** (`input.repo`, case ignored), with no user name or port in it; `javascript:`, another host or another
+    repository are shown as text and not linked. The link of a branch is made from the repository and the branch name, not taken from the output.
 
 ## Error codes
 

@@ -127,7 +127,11 @@ describe("a linear run of two agent steps", () => {
       ["build", "running"],
     ]);
     const [plan, build] = state.steps;
-    expect(plan).toMatchObject({ costMicroUsd: 500_000, errorCode: null });
+    expect(plan).toMatchObject({
+      costMicroUsd: 500_000,
+      costBasis: "reported",
+      errorCode: null,
+    });
     expect(JSON.parse(plan?.output ?? "null")).toEqual({
       summary: "Cache the widgets.",
       costUsd: 0.5,
@@ -520,7 +524,10 @@ describe("the result of an agent", () => {
       status: "failed",
       errorCode: "no_result",
     });
-    expect(state.steps[0]?.errorMessage).toContain("/summary wrong_type");
+    // The problems are for the log; the message is a sentence without codes.
+    expect(state.steps[0]?.errorMessage).toBe(
+      "The result of the agent does not fit the schema of the step.",
+    );
     expect(state.steps[0]?.output).toBeNull();
     expect(await app.waitingJobs()).toEqual([]);
   });
@@ -684,6 +691,7 @@ describe("the budget over all steps", () => {
     expect(state.steps[0]).toMatchObject({
       status: "succeeded",
       costMicroUsd: 1_000_000,
+      costBasis: "limit",
     });
     expect(state.run).toMatchObject({
       status: "failed",
@@ -709,6 +717,7 @@ describe("the budget over all steps", () => {
     expect(state.steps[0]).toMatchObject({
       status: "succeeded",
       costMicroUsd: 450_000,
+      costBasis: "estimated",
     });
     // The run goes on with what is left; at the cap it would have ended after step one.
     expect(stepsOf(state)).toEqual([
@@ -1041,6 +1050,7 @@ describe("actions", () => {
       status: "succeeded",
       jobId: null,
       costMicroUsd: null,
+      costBasis: null,
     });
     expect(JSON.parse(state.steps[1]?.output ?? "null")).toEqual({
       number: 12,
@@ -1103,10 +1113,11 @@ describe("actions", () => {
 
     await endTurn(app, { agentResult: { summary: "Cache it." } });
 
+    // The text of the exception is for the log; the step keeps a fixed sentence.
     expect((await app.stateOf(runId)).steps[1]).toMatchObject({
       status: "failed",
       errorCode: "action_failed",
-      errorMessage: "GitHub said no",
+      errorMessage: "The action failed.",
     });
   });
 

@@ -2,7 +2,7 @@
 
 Runs a saved [workflow](../../../docs/workflows.md#engine) version: one **run** per start, one **step run** per step, the steps one after the other.
 This slice has the **core** and the **GitHub actions** (milestone 3b: `github-connectors.ts`): linear `agent` and `action` steps, the manual trigger, no `if` and `loop`
-(milestone 5), no page yet (milestone 3c). What it does and the error codes: [`docs/workflows.md`](../../../docs/workflows.md#engine). The plan: `plans/agent-workflows.md`.
+(milestone 5). The pages (milestone 3c, #873) are in [`workflow-pages/`](../workflow-pages/README.md). What it does and the error codes: [`docs/workflows.md`](../../../docs/workflows.md#engine). The plan: `plans/agent-workflows.md`.
 
 The routes exist only in a deployment with the capability `implementer` (`src/capabilities/routes.ts`), like the workflows and the Implementer; every
 member may use them (`start_implementer_task`: a run starts tasks).
@@ -19,7 +19,7 @@ member may use them (`start_implementer_task`: a run starts tasks).
 | `service.ts`, `http.ts`, `shared.ts` | The run service (start, get, list), the handlers behind the routes, the wiring of the running server (the hook of the runner API, the reconciler of the sweep)           |
 | `errors.ts`, `limits.ts`             | The stable codes (`WORKFLOW_RUN_*` for the routes, the lower case codes of a failed run or step) and the bounds                                                          |
 
-The tables are `workflow_runs` and `workflow_step_runs` (migration `20261105130000_create_workflow_runs`), written by
+The tables are `workflow_runs` and `workflow_step_runs` (migration `20261105130000_create_workflow_runs`; `20261105170000_add_workflow_step_cost_basis` adds where a step's cost comes from), written by
 `src/db/repositories/workflow-runs-repository.ts`, scoped to a workspace. `workflow-runs-sweep.ts` is the one instance-level read (the runs that run and were
 not touched for a minute), classified in `scoping.test.ts`.
 

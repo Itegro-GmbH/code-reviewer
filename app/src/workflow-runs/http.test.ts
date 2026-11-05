@@ -22,6 +22,7 @@ const SUMMARY: RunSummaryView = {
   id: "run-1",
   workflowId: "wf-1",
   workflowVersion: 2,
+  trigger: "manual",
   status: "running",
   errorCode: null,
   budgetUsd: 20,
