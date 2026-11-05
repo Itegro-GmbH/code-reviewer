@@ -73,7 +73,11 @@ case "$1" in
   ps) [ -n "${STUB_CONTAINERS:-}" ] && echo "${STUB_CONTAINERS}" || true ;;
   run)
     case "$*" in
-      *rejected-release*) echo "${STUB_REJECTED:-}" ;;
+      *rejected-release*)
+        # The installer asks for the file with `sh -c`: 3 = there is none, else its content.
+        [ -n "${STUB_REJECTED_STATUS:-}" ] && exit "$STUB_REJECTED_STATUS"
+        [ -n "${STUB_REJECTED+x}" ] || exit 3
+        echo "$STUB_REJECTED" ;;
       *credential*show*)
         cat >"$STUB_STATE/credential-stdin"
         if [ -f "$STUB_STATE/registered" ]; then
@@ -99,6 +103,8 @@ class Machine:
     served: Path
     channel: Path
     release: Release
+    # Whether the terminal of the last `run_on_terminal` echoed what is typed when the script ended.
+    echo_after: bool | None = None
 
     def run(
         self,
@@ -199,6 +205,7 @@ class Machine:
                         time.sleep(0.3)  # the script switches the echo off right after asking
                         os.write(master, typed.encode())
             code = process.wait(timeout=30)
+            self.echo_after = bool(termios.tcgetattr(master)[3] & termios.ECHO)
         finally:
             os.close(master)
         return code, shown.decode(errors="replace")
@@ -816,6 +823,149 @@ def test_daemon_json_is_copied_before_the_sysbox_package_is_installed(
     assert done.returncode == 0, done.stderr
     assert Path(f"{daemon_json}.factory-runner-backup").read_text() == '{"log-driver": "json-file"}'
     assert machine.calls()[-2:] == ["backup existed", "apt-get install -y /x.deb"]
+
+
+# -- #890: follow-ups of the review of #887 -----------------------------------------------------
+
+
+# #890 (usage order)
+def test_the_usage_names_the_token_sources_in_the_order_the_installer_checks_them(
+    machine: Machine,
+) -> None:
+    usage = machine.run("--help", channel=False).stdout
+
+    assert usage.index("FACTORY_RUNNER_TOKEN") < usage.index("terminal")
+
+
+# #890 (usage order): the order the usage promises is the order of the code
+def test_a_token_from_the_environment_is_used_before_the_terminal_is_asked(
+    machine: Machine,
+) -> None:
+    code, shown = machine.run_on_terminal(answers={}, env={"FACTORY_RUNNER_TOKEN": TOKEN})
+
+    assert code == 0, shown
+    assert "Registration token" not in shown
+    assert (machine.state / "register-stdin").read_text() == TOKEN
+
+
+# #890 (trap)
+def test_a_signal_at_the_token_prompt_gives_the_terminal_its_echo_back(machine: Machine) -> None:
+    code, shown = machine.run_on_terminal(answers={"input is hidden): ": "\x03"})  # Ctrl-C
+
+    assert code != 0, shown
+    assert machine.echo_after is True
+    assert not (machine.state / "register-stdin").exists()
+
+
+# #890 (trap): the EXIT trap does not run on a signal in dash, so the temporary files go with it
+def test_a_signal_at_the_token_prompt_still_removes_the_temporary_files(
+    machine: Machine, tmp_path: Path
+) -> None:
+    temporary = tmp_path / "tmp"
+    temporary.mkdir()
+
+    code, shown = machine.run_on_terminal(
+        answers={"input is hidden): ": "\x03"}, env={"TMPDIR": str(temporary)}
+    )
+
+    assert code != 0, shown
+    assert list(temporary.iterdir()) == []
+
+
+# #890 (daemon.json backup)
+def test_a_second_sysbox_run_keeps_the_first_backup_of_daemon_json(
+    machine: Machine, tmp_path: Path
+) -> None:
+    daemon_json = tmp_path / "daemon.json"
+    daemon_json.write_text('{"log-driver": "json-file", "runtimes": {"sysbox-runc": {}}}')
+    backup = Path(f"{daemon_json}.factory-runner-backup")
+    backup.write_text('{"log-driver": "json-file"}')  # the file as it was before the first run
+    stub(machine.bin / "docker", 'case "$1" in info) echo \'{"sysbox-runc":{}}\' ;; esac')
+    text = install_text()
+    functions = "\n".join(
+        [
+            re.search(r"^say\(\) .*$", text, re.MULTILINE).group(0),  # type: ignore[union-attr]
+            re.search(r"^fail\(\) .*$", text, re.MULTILINE).group(0),  # type: ignore[union-attr]
+            re.search(r"^install_sysbox\(\) \{.*?^\}\n", text, re.MULTILINE | re.DOTALL).group(0),  # type: ignore[union-attr]
+        ]
+    )
+
+    done = subprocess.run(
+        [
+            "/bin/sh",
+            "-c",
+            "set -eu\n"
+            + functions
+            + '\nDOCKER_DAEMON_JSON="$DJ"\nSYSBOX_PACKAGE=/x.deb\ninstall_sysbox',
+        ],
+        env=machine.environment({"DJ": str(daemon_json)}),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert done.returncode == 0, done.stderr
+    assert backup.read_text() == '{"log-driver": "json-file"}'
+    assert "is kept" in done.stdout and "apt-get install -y /x.deb" in machine.calls()
+
+
+# #890 (rejected-release)
+def test_a_rejected_release_file_that_cannot_be_read_is_warned_about_and_the_install_goes_on(
+    machine: Machine,
+) -> None:
+    machine.install_image(release=6, image_id="id-6")
+
+    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN, "STUB_REJECTED_STATUS": "1"})
+
+    assert done.returncode == 0, done.stderr
+    assert "rejected-release" in done.stderr and "cannot be read" in done.stderr
+    assert any(call.startswith("docker pull") for call in machine.calls())  # fail-open
+
+
+# #890 (rejected-release)
+@pytest.mark.parametrize("content", ["", "seven", "7 8", "-3", "1234567890"])
+def test_a_rejected_release_file_with_garbage_is_warned_about_and_the_install_goes_on(
+    machine: Machine, content: str
+) -> None:
+    machine.install_image(release=6, image_id="id-6")
+
+    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN, "STUB_REJECTED": content})
+
+    assert done.returncode == 0, done.stderr
+    assert "rejected-release" in done.stderr and "not a release number" in done.stderr
+    assert any(call.startswith("docker pull") for call in machine.calls())
+
+
+# #890 (rejected-release): no file is the normal case and says nothing
+def test_without_a_rejected_release_file_the_installer_says_nothing_about_it(
+    machine: Machine,
+) -> None:
+    machine.install_image(release=6, image_id="id-6")
+
+    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN})
+
+    assert done.returncode == 0, done.stderr
+    assert "rejected-release" not in done.stderr
+
+
+# #890 (rejected-release): a good file is read as before
+def test_a_rejected_release_file_with_a_number_raises_no_warning(machine: Machine) -> None:
+    machine.install_image(release=6, image_id="id-6")
+
+    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN, "STUB_REJECTED": "7"})
+
+    assert "was rolled back on this machine" in done.stdout
+    assert "rejected-release" not in done.stderr
+
+
+# #890 (rejected-release, reinstall)
+def test_uninstall_without_purge_says_that_the_rolled_back_release_is_forgotten_by_a_new_install(
+    machine: Machine,
+) -> None:
+    done = machine.run("--uninstall", channel=False)
+
+    assert done.returncode == 0, done.stderr
+    assert "rejected-release" in done.stdout and "--purge" in done.stdout
 
 
 # -- what has to stay equal --------------------------------------------------------------------
