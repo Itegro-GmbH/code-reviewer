@@ -42,9 +42,14 @@ const ZERO_WIDTH_SPACE = "\u200b";
 export type TextSegment = { text: string; agent: boolean };
 
 const NAME_CHARACTER = /[A-Za-z0-9_-]/;
-const WORD_CHARACTER = /[A-Za-z0-9_]/;
-// An issue number: no leading-zero-only number (`#000` is a colour), and no letter after it (a hex colour such as `#` + `1a2b3c` is not a reference).
-const ISSUE_NUMBER = /0*[1-9][0-9]*(?![A-Za-z0-9_])/y;
+const NAME_RUN = /[A-Za-z0-9_-]*/y;
+// What GitHub does not take as part of a word in front of `@`, `#` and `GH-`: `_` is none (`_@octocat_` is emphasis around a mention).
+const WORD_CHARACTER = /[A-Za-z0-9]/;
+// An issue number: no leading-zero-only number (`#000` is a colour), and no letter after it (a hex colour such as `#` + `1a2b3c` is not a reference); `_` may follow (`_#1_`).
+const ISSUE_NUMBER = /0*[1-9][0-9]*(?![A-Za-z0-9])/y;
+const DIGITS = /[0-9]*/y;
+// The start of HTML: `<` and a letter, `/` or `!` (a tag, a closing tag, a comment, a declaration).
+const HTML_START = /<[A-Za-z\/!]/;
 const ISSUE_ADDRESS = /\/(?:issues|pull)\/(?=[0-9])/y;
 // `owner/repo` right before a `#`; not the tail of a longer path or address (`github.com/acme/api#3` is no reference).
 const REPOSITORY_BEFORE =
@@ -147,34 +152,50 @@ function spans(
  * `&amp;` for their `&`. Code (a fenced block, a code span) mentions nobody and is left out, except for `<!--`, which is read
  * from the raw text. The text reads the same to a person.
  *
- * The parts are looked at as one text: a zero-width space also goes where an agent's part begins or ends at the point of such a
- * pattern (`@` and `octocat`; `Closes #` and `12`; `<!-` and `-`). Only trigger values and literals of the workflow stay raw.
+ * The parts are looked at as one text, after `cleanText` has taken out what no text may hold (direction marks, control characters):
+ * nothing removes a character from it afterwards. A match is defused as soon as its range touches a part an agent wrote, where
+ * the zero-width space goes (`@` and `octocat`; `Closes #` and `12`; `<!-` and `-`; a literal `cc @octo` and `cat`). Literals and
+ * trigger values that touch no agent part stay raw. Where the text holds HTML (`<` and a letter, `/` or `!`), code is no longer left
+ * out: HTML can end a code span early or make a block of it, and no parser here decides which.
  */
 export function defuseSegments(
   segments: readonly TextSegment[],
   options: { plain?: boolean } = {},
 ): string {
-  const text = segments.map((segment) => segment.text).join("");
+  if (!segments.some((segment) => segment.agent && segment.text !== ""))
+    return segments.map((segment) => segment.text).join("");
+  // Nothing is removed from the text after this point.
+  const cleaned = segments.map((segment) => ({
+    text: cleanText(segment.text),
+    agent: segment.agent,
+  }));
+  const text = cleaned.map((segment) => segment.text).join("");
   const agent: Array<[number, number]> = [];
   let at = 0;
-  for (const segment of segments) {
-    if (segment.agent) agent.push([at, at + segment.text.length]);
+  for (const segment of cleaned) {
+    if (segment.agent && segment.text !== "")
+      agent.push([at, at + segment.text.length]);
     at += segment.text.length;
   }
-  if (agent.length === 0) return text;
 
   const code = new Uint8Array(text.length);
-  if (options.plain !== true)
+  // Code is left out only where no HTML can end it early or turn it into something else.
+  if (options.plain !== true && !HTML_START.test(text))
     for (const [from, to] of codeRanges(text)) code.fill(1, from, to);
   const inserts = new Map<number, string>();
-  const insert = (point: number, extra: string) => {
-    if (agent.some(([from, to]) => from <= point && point <= to))
+  // A match is defused as soon as its range touches a part an agent wrote; the zero-width space goes at `point`.
+  const insert = (from: number, to: number, point: number, extra: string) => {
+    if (agent.some(([start, end]) => start < to && from < end))
       inserts.set(point, extra);
+  };
+  const run = (pattern: RegExp, from: number): number => {
+    pattern.lastIndex = from;
+    return pattern.exec(text)?.[0].length ?? 0;
   };
   for (let i = 0; i < text.length; i += 1) {
     const character = text.charAt(i);
     if (character === "<" && text.startsWith("<!--", i)) {
-      insert(i + 3, ZERO_WIDTH_SPACE);
+      insert(i, i + 4, i + 3, ZERO_WIDTH_SPACE);
       continue;
     }
     if (code[i] === 1) continue;
@@ -184,30 +205,42 @@ export function defuseSegments(
         NAME_CHARACTER.test(text.charAt(i + 1)) &&
         !WORD_CHARACTER.test(before)
       )
-        insert(i + 1, ZERO_WIDTH_SPACE);
+        insert(i, i + 1 + run(NAME_RUN, i + 1), i + 1, ZERO_WIDTH_SPACE);
     } else if (character === "#") {
       ISSUE_NUMBER.lastIndex = i + 1;
+      const number = ISSUE_NUMBER.exec(text);
+      const repository = REPOSITORY_BEFORE.exec(
+        text.slice(Math.max(0, i - 140), i),
+      );
       if (
-        ISSUE_NUMBER.test(text) &&
+        number !== null &&
         before !== "&" &&
         text.slice(Math.max(0, i - 2), i) !== "](" &&
-        (!WORD_CHARACTER.test(before) ||
-          REPOSITORY_BEFORE.test(text.slice(Math.max(0, i - 140), i)))
+        (!WORD_CHARACTER.test(before) || repository !== null)
       )
-        insert(i + 1, ZERO_WIDTH_SPACE);
+        insert(
+          i - (repository?.[0].length ?? 0),
+          i + 1 + number[0].length,
+          i + 1,
+          ZERO_WIDTH_SPACE,
+        );
     } else if (character === "G" || character === "g") {
       if (
         /^gh-[0-9]/i.test(text.slice(i, i + 4)) &&
         !WORD_CHARACTER.test(before)
       )
-        insert(i + 3, ZERO_WIDTH_SPACE);
+        insert(i, i + 3 + run(DIGITS, i + 3), i + 3, ZERO_WIDTH_SPACE);
     } else if (character === "/") {
       ISSUE_ADDRESS.lastIndex = i;
       const found = ISSUE_ADDRESS.exec(text);
-      if (found !== null) insert(i + found[0].length, ZERO_WIDTH_SPACE);
+      if (found !== null) {
+        const point = i + found[0].length;
+        insert(i, point + run(DIGITS, point), point, ZERO_WIDTH_SPACE);
+      }
     } else if (character === "&") {
       AT_OR_NUMBER_ENTITY.lastIndex = i;
-      if (AT_OR_NUMBER_ENTITY.test(text)) insert(i + 1, "amp;");
+      const entity = AT_OR_NUMBER_ENTITY.exec(text);
+      if (entity !== null) insert(i, i + entity[0].length, i + 1, "amp;");
     }
   }
   if (inserts.size === 0) return text;
@@ -239,9 +272,18 @@ const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 const LONE_SURROGATE =
   /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
 
-/** A text without the characters no task text may hold. */
+/** The characters that reorder how a line is shown (direction marks, embeddings, overrides, isolates): a text must read as it is written. */
+export const BIDI_CONTROLS = /[\u200e\u200f\u061c\u202a-\u202e\u2066-\u2069]/g;
+
+/**
+ * A text without the characters no task text may hold. Everything that is removed is removed here, before a text is defused: a
+ * removal after it would join what the defusing had kept apart (`@`, a direction mark, `user`).
+ */
 export function cleanText(text: string): string {
-  return text.replace(CONTROL, "").replace(LONE_SURROGATE, "�");
+  return text
+    .replace(CONTROL, "")
+    .replace(BIDI_CONTROLS, "")
+    .replace(LONE_SURROGATE, "�");
 }
 
 /** The value of a reference, or `undefined` when the run has none (a missing field, a step that did not run). */

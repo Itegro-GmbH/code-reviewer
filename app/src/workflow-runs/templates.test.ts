@@ -3,6 +3,7 @@
 // #844: the references of a workflow at run time. Values are data: one pass, nothing read again, bounded, and a value that is missing
 // fails the step with the path.
 import { describe, expect, it } from "vitest";
+import { cleanBody, cleanTitle } from "./github-connectors.ts";
 import { TEMPLATE_VALUE_MAX_CHARS } from "./limits.ts";
 import {
   cleanText,
@@ -402,5 +403,113 @@ describe("workflow templates at run time", () => {
     expect(
       failure(() => renderText("{{a.x}}", run, 12, { defuse: true })).code,
     ).toBe("template_too_large");
+  });
+  // #844-T310k
+  it("takes direction marks and control characters out before it defuses, so cleaning the result changes nothing and rebuilds nothing", () => {
+    const marks = [
+      "\u200e",
+      "\u200f",
+      "\u061c",
+      ..."\u202a\u202b\u202c\u202d\u202e",
+      ..."\u2066\u2067\u2068\u2069",
+      "\u0001",
+      "\u007f",
+    ];
+    for (const mark of marks) {
+      for (const [text, pattern] of [
+        [`@${mark}user`, /@(?!\u200b)[A-Za-z]/],
+        [`Closes #${mark}1`, /#(?!\u200b)[0-9]/],
+        [`GH-${mark}1`, /GH-(?!\u200b)[0-9]/],
+        [`<!-${mark}- x -->`, /<!--/],
+      ] as const) {
+        const defused = defuseMentions(text);
+        expect(defused).toBe(cleanText(defused));
+        expect(cleanBody(defused, "body")).toBe(defused);
+        expect(cleanBody(defused, "body")).not.toMatch(pattern);
+        expect(cleanTitle(defused)).not.toMatch(pattern);
+      }
+    }
+    // A literal of the workflow is cleaned as well once an agent part is in the text; a text without an agent part is not touched.
+    const run: RunValues = {
+      trigger: { input: {} },
+      steps: { a: { x: "user" } },
+      agentSteps: new Set(["a"]),
+    };
+    expect(renderText("@\u200e{{a.x}}", run, undefined, { defuse: true })).toBe(
+      "@\u200buser",
+    );
+    expect(defuseSegments([{ text: "@\u200euser", agent: false }])).toBe(
+      "@\u200euser",
+    );
+  });
+
+  // #844-T310l
+  it("defuses a mention or a reference that an underscore touches (emphasis around it), and still leaves a mail alone", () => {
+    expect(defuseMentions("_@octocat_ __@octocat__ _#1_ _GH-1_")).toBe(
+      "_@\u200boctocat_ __@\u200boctocat__ _#\u200b1_ _GH-\u200b1_",
+    );
+    expect(defuseMentions("snake_case, a_b#1 and octocat@example.com")).toBe(
+      "snake_case, a_b#1 and octocat@example.com",
+    );
+    // A name or a number that goes on with a letter is still none.
+    expect(defuseMentions("#1a and x@octocat")).toBe("#1a and x@octocat");
+  });
+
+  // #844-T310m
+  it("leaves no code out of the defusing where the text holds HTML, and keeps leaving it out where it does not", () => {
+    for (const text of [
+      '<span title="`">@octocat</span> <span title="`">',
+      '<a href="`">x</a> @octocat <a href="`">y</a>',
+      "<div>\n```\n@octocat\n```",
+      "<!--\n```\n-->\n@octocat",
+      "</p> ```\n@octocat\n```",
+    ])
+      expect(defuseMentions(text)).toContain("@\u200boctocat");
+    // The HTML of a part that is no agent's is HTML in the text as well.
+    const run: RunValues = {
+      trigger: { input: {} },
+      steps: { a: { x: "```\n@octocat\n```" } },
+      agentSteps: new Set(["a"]),
+    };
+    expect(renderText("<b>{{a.x}}", run, undefined, { defuse: true })).toBe(
+      "<b>```\n@\u200boctocat\n```",
+    );
+    // No HTML: a `<` before a space, a digit or the end is none, and the code stays left out.
+    expect(defuseMentions("a < b, 1<2, x<\n```\n@octocat\n```")).toBe(
+      "a < b, 1<2, x<\n```\n@octocat\n```",
+    );
+  });
+
+  // #844-T310n
+  it("defuses a match as soon as its range touches a part an agent wrote, not only where the space goes", () => {
+    const run: RunValues = {
+      trigger: { input: { n: 12 } },
+      steps: {
+        a: {
+          name: "cat",
+          number: "2",
+          head: "<!",
+          dash: "-",
+          repo: "acme/api",
+          tail: "4;",
+        },
+      },
+      agentSteps: new Set(["a"]),
+    };
+    const render = (text: string) =>
+      renderText(text, run, undefined, { defuse: true });
+    expect(render("cc @octo{{a.name}}")).toBe("cc @\u200boctocat");
+    expect(render("Closes #1{{a.number}}")).toBe("Closes #\u200b12");
+    expect(render("GH-1{{a.number}}")).toBe("GH-\u200b12");
+    expect(render("see /issues/1{{a.number}}")).toBe("see /issues/\u200b12");
+    expect(render("{{a.repo}}#1{{a.number}}")).toBe("acme/api#\u200b12");
+    expect(render("{{a.head}}--")).toBe("<!-\u200b-");
+    expect(render("<!-{{a.dash}}")).toBe("<!-\u200b-");
+    expect(render("&#6{{a.tail}}bob")).toBe("&amp;#64;bob");
+    // Literals and trigger values that touch no agent part stay raw.
+    expect(render("Closes #{{trigger.input.n}}")).toBe("Closes #12");
+    expect(render("cc @octocat and Closes #1 {{a.name}}")).toBe(
+      "cc @octocat and Closes #1 cat",
+    );
   });
 });

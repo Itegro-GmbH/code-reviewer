@@ -23,6 +23,7 @@ import {
   ACTION_LABEL_MAX_CHARS,
   ACTION_TITLE_MAX_CHARS,
 } from "./limits.ts";
+import { BIDI_CONTROLS } from "./templates.ts";
 
 /** The connection and the repository an action acts on, resolved for the repository of the run. */
 export type GithubActionTarget = {
@@ -61,8 +62,6 @@ const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
 const CONTROL_EXCEPT_LINE_BREAKS =
   /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 const LINE_BREAKS = /[\u0000-\u001f\u007f\u2028\u2029]+/g;
-/** The characters that reorder how a line is shown (direction marks, embeddings, overrides, isolates): a title must read as it is written. */
-const BIDI_CONTROLS = /[\u200e\u200f\u061c\u202a-\u202e\u2066-\u2069]/g;
 /** A half of a surrogate pair on its own is no text (JSON carries it as an escape that GitHub may refuse). */
 const LONE_SURROGATE =
   /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
