@@ -256,6 +256,7 @@ describe("the runner API route files", () => {
         "vm_lifecycle",
         "implementer_steps",
         "implementer_snapshot",
+        "runner_session_snapshot",
       ],
     });
     const anonymous = await routes.version.GET(

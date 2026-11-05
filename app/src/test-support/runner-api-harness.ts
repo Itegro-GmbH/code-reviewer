@@ -831,6 +831,57 @@ export async function startRunnerApiHarness(
       jobId,
     );
 
+  /**
+   * #879: one part of the session snapshot, through the runner API. `query` is the description of the whole file, `body` the bytes of the
+   * part; the lease token goes in the header `leaseToken` names (none when it is `null`).
+   */
+  const runnerSession = (
+    jobId: string,
+    query: Record<string, string | number>,
+    body: Uint8Array,
+    request: RequestOptions & { leaseToken?: string | null } = {},
+  ) =>
+    api.session(
+      new Request(
+        `${url}/jobs/${jobId}/session?${new URLSearchParams(
+          Object.entries(query).map(([name, value]) => [name, String(value)]),
+        ).toString()}`,
+        {
+          method: "PUT",
+          headers: headers(request, {
+            "content-type": "application/octet-stream",
+            ...(request.leaseToken == null
+              ? {}
+              : { "x-lease-token": request.leaseToken }),
+          }),
+          body: body as BodyInit,
+        },
+      ),
+      jobId,
+    );
+
+  /** #879: one part of the stored session snapshot, through the runner API (`part` left out asks for the first). */
+  const runnerResumeSession = (
+    jobId: string,
+    part?: number | string,
+    request: RequestOptions & { leaseToken?: string | null } = {},
+  ) =>
+    api.resumeSession(
+      new Request(
+        `${url}/jobs/${jobId}/resume-session${part === undefined ? "" : `?part=${String(part)}`}`,
+        {
+          method: "GET",
+          headers: headers(
+            request,
+            request.leaseToken == null
+              ? {}
+              : { "x-lease-token": request.leaseToken },
+          ),
+        },
+      ),
+      jobId,
+    );
+
   /** Every row of the jobs table, for "nothing changed" assertions. */
   const snapshotJobs = () =>
     fixture.db.selectFrom("jobs").selectAll().orderBy("id").execute();
@@ -1181,6 +1232,8 @@ export async function startRunnerApiHarness(
     version,
     heartbeat,
     steps,
+    runnerSession,
+    runnerResumeSession,
     complete,
     post,
     snapshotJobs,
