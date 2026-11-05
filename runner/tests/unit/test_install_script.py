@@ -8,11 +8,15 @@ runner's) do. Nothing
 of the machine running the test is touched: no package, no unit, no daemon. What a real systemd and
 a real daemon do with the files is the job of the first install on a machine (docs/runner.md)."""
 
+import fcntl
 import json
 import os
 import re
+import select
 import stat
 import subprocess
+import termios
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,28 +35,54 @@ TOKEN = "crt_" + "T" * 43
 DOCKER = """\
 #!/bin/sh
 printf 'docker %s\\n' "$*" >>"$STUB_LOG"
+last=""
+for last; do :; done
 case "$1" in
   info) case "$*" in *SecurityOptions*) echo "[name=seccomp,profile=builtin]" ;; esac ;;
   pull) ;;
   image)
     if [ "$2" = inspect ]; then
       case "$*" in
-        *Labels*) echo "${STUB_LABEL:-7}" ;;
+        *RepoDigests*) echo "${STUB_REPODIGESTS:-}" ;;
+        *Labels*)
+          if [ "$last" = factory-runner:current ]; then
+            [ -f "$STUB_STATE/current.release" ] && cat "$STUB_STATE/current.release" || exit 1
+          else
+            echo "${STUB_LABEL:-7}"
+          fi ;;
+        *.Id*)
+          if [ "$last" = factory-runner:current ]; then
+            [ -f "$STUB_STATE/current.id" ] && cat "$STUB_STATE/current.id" || exit 1
+          else
+            echo "${STUB_NEW_ID:-id-new}"
+          fi ;;
         *) [ -f "$STUB_STATE/current" ] || exit 1 ;;
       esac
     fi ;;
   images) [ -f "$STUB_STATE/current" ] && echo abc123 || true ;;
-  tag) touch "$STUB_STATE/current" ;;
+  tag)
+    case "$3" in
+      factory-runner:current)
+        touch "$STUB_STATE/current"
+        echo "${STUB_NEW_ID:-id-new}" >"$STUB_STATE/current.id"
+        echo "${STUB_LABEL:-7}" >"$STUB_STATE/current.release" ;;
+      factory-runner:previous)
+        touch "$STUB_STATE/previous"
+        cp "$STUB_STATE/current.id" "$STUB_STATE/previous.id" ;;
+    esac ;;
   ps) [ -n "${STUB_CONTAINERS:-}" ] && echo "${STUB_CONTAINERS}" || true ;;
   run)
     case "$*" in
+      *rejected-release*) echo "${STUB_REJECTED:-}" ;;
       *credential*show*)
+        cat >"$STUB_STATE/credential-stdin"
         if [ -f "$STUB_STATE/registered" ]; then
           echo "credential: set"
         else
           echo "credential: not set"
         fi ;;
       *register*) cat >"$STUB_STATE/register-stdin"; touch "$STUB_STATE/registered" ;;
+      *config*set*) cat >"$STUB_STATE/config-stdin" ;;
     esac ;;
 esac
 exit 0
@@ -103,6 +133,81 @@ class Machine:
             # No controlling terminal: nothing can be asked, as under `curl | sh` in a cron job.
             start_new_session=True,
         )
+
+    def environment(self, env: dict[str, str] | None = None) -> dict[str, str]:
+        return {
+            "PATH": f"{self.bin}:/usr/bin:/bin",
+            "HOME": str(self.root),
+            "FACTORY_RUNNER_ROOT": str(self.root),
+            "FACTORY_RUNNER_NO_SYSTEMCTL": "",
+            "STUB_LOG": str(self.log),
+            "STUB_STATE": str(self.state),
+            "STUB_SERVED": str(self.served),
+            **(env or {}),
+        }
+
+    def run_piped(
+        self, text: str, *args: str, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        """`curl ... | sh -s -- ARGS`: the shell reads the script from its standard input."""
+        return subprocess.run(
+            ["/bin/sh", "-s", "--", "--channel-file", str(self.channel), *args],
+            env=self.environment(env),
+            input=text,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+            start_new_session=True,
+        )
+
+    def run_on_terminal(
+        self, *args: str, answers: dict[str, str], env: dict[str, str] | None = None
+    ) -> tuple[int, str]:
+        """The script with a controlling terminal, as an administrator runs it. `answers` maps a
+        text the terminal shows (a prompt) to what is typed when it appears. Returns the exit
+        code and everything the terminal showed."""
+        master, slave = os.openpty()
+        process = subprocess.Popen(
+            ["/bin/sh", str(SCRIPT), "--channel-file", str(self.channel), *args],
+            env=self.environment(env),
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            start_new_session=True,
+            preexec_fn=lambda: fcntl.ioctl(0, termios.TIOCSCTTY, 1),
+        )
+        os.close(slave)
+        shown = b""
+        pending = dict(answers)
+        deadline = time.monotonic() + 60
+        try:
+            while time.monotonic() < deadline:
+                ready, _, _ = select.select([master], [], [], 1.0)
+                if not ready:
+                    continue
+                try:
+                    chunk = os.read(master, 4096)
+                except OSError:  # the other end is closed: the script has ended
+                    break
+                if not chunk:
+                    break
+                shown += chunk
+                for prompt, typed in list(pending.items()):
+                    if prompt.encode() in shown:
+                        del pending[prompt]
+                        time.sleep(0.3)  # the script switches the echo off right after asking
+                        os.write(master, typed.encode())
+            code = process.wait(timeout=30)
+        finally:
+            os.close(master)
+        return code, shown.decode(errors="replace")
+
+    def install_image(self, *, release: int, image_id: str) -> None:
+        """An image that is `current` already."""
+        (self.state / "current").touch()
+        (self.state / "current.id").write_text(image_id)
+        (self.state / "current.release").write_text(str(release))
 
     def calls(self) -> list[str]:
         return self.log.read_text().splitlines() if self.log.exists() else []
@@ -425,6 +530,291 @@ def test_uninstall_removes_the_service_and_keeps_the_configuration_unless_purged
 
     machine.run("--uninstall", "--purge")
     assert "docker volume rm factory-runner-home factory-runner-work" in machine.calls()
+
+
+# -- F1: a download that is cut off, the terminal, the standard input ---------------------------
+
+
+def install_text() -> str:
+    return SCRIPT.read_text()
+
+
+def test_the_last_line_of_the_script_is_the_only_command_that_runs_anything() -> None:
+    assert install_text().splitlines()[-1] == 'main "$@"'
+
+
+# #855-F1 (S1)
+def test_a_script_that_is_cut_off_anywhere_before_its_last_line_changes_nothing(
+    machine: Machine,
+) -> None:
+    text = install_text()
+    last_line = text.rindex('main "$@"')
+    line_starts = [0] + [index + 1 for index, char in enumerate(text[:last_line]) if char == "\n"]
+    middles = [start + 20 for start in line_starts[::5] if start + 20 < last_line]
+    cuts = sorted({*line_starts, *middles, *range(last_line + 1, last_line + 4)})
+    assert len(cuts) > 100
+
+    for cut in cuts:
+        done = machine.run_piped(text[:cut], env={"FACTORY_RUNNER_TOKEN": TOKEN})
+
+        assert machine.calls() == [], f"cut at {cut}: {done.stderr[-200:]}"
+        assert not machine.unit.exists() and not machine.command.exists(), cut
+        assert "install: done" not in done.stdout, cut
+
+
+# #855-F1 (S1)
+def test_the_script_run_from_its_standard_input_installs_and_ends_with_the_marker(
+    machine: Machine,
+) -> None:
+    done = machine.run_piped(install_text(), env={"FACTORY_RUNNER_TOKEN": TOKEN})
+
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.splitlines()[-1] == "install: done"
+    assert machine.unit.exists() and (machine.state / "register-stdin").read_text() == TOKEN
+
+
+# #855-F1 (S2)
+def test_the_token_is_asked_for_on_the_terminal_and_is_not_shown(machine: Machine) -> None:
+    code, shown = machine.run_on_terminal(
+        "--labels", "linux", answers={"input is hidden): ": TOKEN + "\n"}
+    )
+
+    assert code == 0, shown
+    assert (machine.state / "register-stdin").read_text() == TOKEN
+    assert "Registration token" in shown and TOKEN not in shown
+
+
+# #855-F1 (S2)
+def test_a_token_from_the_environment_works_with_a_warning_that_says_why_not(
+    machine: Machine,
+) -> None:
+    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN})
+
+    assert done.returncode == 0, done.stderr
+    assert "FACTORY_RUNNER_TOKEN" in done.stderr and "history" in done.stderr
+    assert TOKEN not in done.stdout + done.stderr
+
+
+# #855-F1 (S3)
+def test_no_container_command_of_the_installer_reads_the_standard_input_it_was_given(
+    machine: Machine,
+) -> None:
+    assert machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN}).returncode == 0
+
+    done = machine.run("--labels", "linux,gpu", stdin="the rest of the script or the terminal")
+
+    assert done.returncode == 0, done.stderr
+    assert (machine.state / "config-stdin").read_text() == ""
+    assert (machine.state / "credential-stdin").read_text() == ""
+
+
+# #855-F1 (S11)
+def test_the_hint_to_register_by_hand_is_a_command_that_works_inside_the_container(
+    machine: Machine,
+) -> None:
+    done = machine.run()
+
+    assert "factory-runner register --token-file - < /path/to/token-file" in done.stdout
+    # The command passes the standard input on, so the file the shell opens is read by the runner.
+    assert " run --rm -i " in machine.command.read_text()
+
+
+# #855-F1 (N9)
+def test_a_token_file_that_cannot_be_read_is_an_error_before_anything_is_changed(
+    machine: Machine, tmp_path: Path
+) -> None:
+    done = machine.run("--token-file", str(tmp_path / "missing"))
+
+    assert done.returncode != 0 and "does not exist or cannot be read" in done.stderr
+    assert machine.calls() == [] and not machine.unit.exists()
+
+
+# #855-F1 (N9)
+def test_purge_without_uninstall_is_an_error(machine: Machine) -> None:
+    done = machine.run("--purge")
+
+    assert done.returncode != 0 and "--purge only goes with --uninstall" in done.stderr
+    assert not any(call.startswith("docker volume") for call in machine.calls())
+
+
+# -- F1: the installer never goes back --------------------------------------------------------
+
+
+# #855-F1 (S4)
+def test_the_installer_leaves_a_newer_installed_release_alone(machine: Machine) -> None:
+    machine.install_image(release=9, image_id="id-9")
+
+    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN})
+
+    assert done.returncode == 0, done.stderr
+    assert "the installed image stays" in done.stdout
+    assert not any(call.startswith(("docker pull", "docker tag")) for call in machine.calls())
+    assert (machine.state / "current.id").read_text() == "id-9"
+
+
+# #855-F1 (S4)
+def test_a_newer_release_becomes_current_and_the_one_before_it_previous(machine: Machine) -> None:
+    machine.install_image(release=5, image_id="id-5")
+
+    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN})
+
+    assert done.returncode == 0, done.stderr
+    calls = machine.calls()
+    keep = calls.index("docker tag factory-runner:current factory-runner:previous")
+    take = calls.index(f"docker tag {REPOSITORY}@{DIGEST} factory-runner:current")
+    assert keep < take
+    assert (machine.state / "previous.id").read_text() == "id-5"
+    assert (machine.state / "current.id").read_text().strip() == "id-new"
+
+
+# #855-F1 (S4)
+def test_previous_is_set_only_when_the_image_changes(machine: Machine) -> None:
+    machine.install_image(release=5, image_id="id-new")  # the very image the manifest names
+
+    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN})
+
+    assert done.returncode == 0, done.stderr
+    assert not any(call.startswith("docker tag") for call in machine.calls())
+    assert not (machine.state / "previous").exists()
+
+
+# #855-F1 (B1, installer side)
+def test_a_release_that_was_rolled_back_is_not_installed_again_until_a_higher_one_comes(
+    machine: Machine,
+) -> None:
+    machine.install_image(release=6, image_id="id-6")
+
+    rolled_back = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN, "STUB_REJECTED": "7"})
+
+    assert rolled_back.returncode == 0, rolled_back.stderr
+    assert "was rolled back on this machine" in rolled_back.stdout
+    assert not any(call.startswith(("docker pull", "docker tag")) for call in machine.calls())
+
+    write_release(Release(release=8), machine.served)
+    higher = machine.run(
+        env={"FACTORY_RUNNER_TOKEN": TOKEN, "STUB_REJECTED": "7", "STUB_LABEL": "8"}
+    )
+
+    assert higher.returncode == 0, higher.stderr
+    assert any(call.startswith("docker pull") for call in machine.calls())
+
+
+# -- F1: https only, the unit, the order of the Sysbox step -----------------------------------
+
+
+# #855-F1 (N3)
+def test_every_download_is_https_only_and_each_address_of_the_channel_is_checked(
+    machine: Machine,
+) -> None:
+    assert machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN}).returncode == 0
+    fetched = [call for call in machine.calls() if call.startswith("curl")]
+    assert fetched and all("--proto =https --proto-redir =https" in call for call in fetched)
+
+    document = machine.release.channel_document()
+    document["signatureUrl"] = "http://releases.example/runner/manifest.sig"
+    machine.channel.write_text(json.dumps(document))
+
+    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN})
+
+    assert done.returncode != 0 and "https address for the signature" in done.stderr
+
+
+# #855-F1 (N8, S7)
+def test_the_unit_rotates_the_log_and_names_the_way_back_by_hand(machine: Machine) -> None:
+    assert machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN}).returncode == 0
+
+    unit = machine.unit.read_text()
+
+    assert "--log-opt max-size=10m --log-opt max-file=3" in unit
+    assert "docker tag factory-runner:previous factory-runner:current" in unit
+
+
+# #855-F1 (S6)
+def test_uninstall_removes_the_images_by_name_and_by_the_digest_they_were_pulled_with(
+    machine: Machine,
+) -> None:
+    reference = f"{REPOSITORY}@{DIGEST}"
+    assert machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN}).returncode == 0
+
+    done = machine.run("--uninstall", env={"STUB_REPODIGESTS": f"{reference} "})
+
+    assert done.returncode == 0, done.stderr
+    removal = next(call for call in machine.calls() if call.startswith("docker rmi"))
+    assert removal.split() == [
+        "docker",
+        "rmi",
+        reference,
+        "factory-runner:current",
+        "factory-runner:previous",
+    ]
+
+
+# #855-F1 (S10)
+def test_sysbox_that_cannot_be_asked_about_stops_before_the_first_change(
+    machine: Machine,
+) -> None:
+    done = machine.run("--sysbox", env={"FACTORY_RUNNER_TOKEN": TOKEN})
+
+    assert done.returncode != 0 and "nothing was changed" in done.stderr
+    assert not any(call.startswith(("docker pull", "docker tag")) for call in machine.calls())
+    assert not machine.unit.exists() and not machine.command.exists()
+    assert not (machine.state / "registered").exists()
+
+
+# #855-F1 (S10)
+def test_a_no_to_sysbox_goes_on_with_the_base_installation(machine: Machine) -> None:
+    code, shown = machine.run_on_terminal(
+        "--sysbox",
+        answers={
+            "anything else continues without it): ": "no\n",
+            "input is hidden): ": TOKEN + "\n",
+        },
+    )
+
+    assert code == 0, shown
+    assert "continues without" in shown or "goes on without it" in shown
+    assert machine.unit.exists() and (machine.state / "registered").exists()
+    assert not any(call.startswith("apt-get") for call in machine.calls())
+    assert not any("sysbox-ce" in call for call in machine.calls())
+
+
+# #855-F1 (S10)
+def test_daemon_json_is_copied_before_the_sysbox_package_is_installed(
+    machine: Machine, tmp_path: Path
+) -> None:
+    daemon_json = tmp_path / "daemon.json"
+    daemon_json.write_text('{"log-driver": "json-file"}')
+    stub(machine.bin / "docker", 'case "$1" in info) echo \'{"sysbox-runc":{}}\' ;; esac')
+    stub(
+        machine.bin / "apt-get",
+        'if [ -f "$DJ.factory-runner-backup" ]; then echo "backup existed" >>"$STUB_LOG"; fi; '
+        'printf "apt-get %s\\n" "$*" >>"$STUB_LOG"',
+    )
+    text = install_text()
+    functions = "\n".join(
+        [
+            re.search(r"^say\(\) .*$", text, re.MULTILINE).group(0),  # type: ignore[union-attr]
+            re.search(r"^fail\(\) .*$", text, re.MULTILINE).group(0),  # type: ignore[union-attr]
+            re.search(r"^install_sysbox\(\) \{.*?^\}\n", text, re.MULTILINE | re.DOTALL).group(0),  # type: ignore[union-attr]
+        ]
+    )
+    done = subprocess.run(
+        [
+            "/bin/sh",
+            "-c",
+            "set -eu\n"
+            + functions
+            + '\nDOCKER_DAEMON_JSON="$DJ"\nSYSBOX_PACKAGE=/x.deb\ninstall_sysbox',
+        ],
+        env=machine.environment({"DJ": str(daemon_json)}),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert done.returncode == 0, done.stderr
+    assert Path(f"{daemon_json}.factory-runner-backup").read_text() == '{"log-driver": "json-file"}'
+    assert machine.calls()[-2:] == ["backup existed", "apt-get install -y /x.deb"]
 
 
 # -- what has to stay equal --------------------------------------------------------------------
