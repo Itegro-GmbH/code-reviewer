@@ -71,6 +71,8 @@ const SESSION: StoredImplementerSession = {
   createdBy: "user-1",
   createdAt: "2026-11-05T10:00:00.000Z",
   updatedAt: "2026-11-05T10:00:00.000Z",
+  queued: null,
+  discarded: null,
 };
 
 function ended(patch: Partial<EndedTurn> = {}): EndedTurn {

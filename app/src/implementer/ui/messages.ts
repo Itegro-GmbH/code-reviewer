@@ -330,6 +330,12 @@ const failureCopy = (
   IMPLEMENTER_MODEL_NOT_ALLOWED: hasReason(failure.reason)
     ? MODEL_REFUSAL_COPY[failure.reason]
     : MODEL_REFUSED_GENERIC,
+  IMPLEMENTER_SESSION_NOT_FOUND:
+    "This session is not available in this workspace any more. Reload the page.",
+  IMPLEMENTER_SESSION_BUSY:
+    "A turn is running and the next instruction is already queued. It starts when the running turn ends; you can send another one after that.",
+  IMPLEMENTER_BRANCH_GONE:
+    "The branch of this session is no longer on GitHub, so it cannot be continued. Start a new task.",
   EXCEEDS_OPERATOR_MAXIMUM:
     typeof failure.maximumCents === "number" &&
     Number.isFinite(failure.maximumCents)

@@ -54,6 +54,7 @@ import type {
   RepoRef,
   ReviewCommand,
 } from "../integrations/types.ts";
+import type { ResumeBlock } from "./resume.ts";
 import type { RunnerQueue } from "../jobs/runner-queue.ts";
 import type { ClaimResult, Job, JobErrorCode } from "../jobs/job-types.ts";
 import { REVIEW_SETTING_LIMITS } from "../review-settings/settings.ts";
@@ -243,6 +244,15 @@ export type ClaimDeps = {
     | undefined
   >;
   /**
+   * #841: what a follow-up turn (number 2 or more) is told about the turns before it: the branches they pushed, the one to check out,
+   * whether a conversation is stored, the last summary and the digest (`implementer/resume.ts`). Asked only for a turn that is not the
+   * first, in the job's own workspace.
+   */
+  implementerResume: (
+    job: Job,
+    turn: { turn: StoredImplementerTurn; session: StoredImplementerSession },
+  ) => Promise<ResumeBlock>;
+  /**
    * Notes the provider and, for a job on the operator's key, the catalog entry (id and name as they are now) the job was
    * given in its usage record (#432): never the model. The claim reserved the record already; a failure gives the job back.
    */
@@ -369,6 +379,8 @@ export type Checked = {
     } | null;
     /** #843: the result schema the turn copied when it started; null for a task without one (no finish tool). */
     resultSchema: StoredResultSchema | null;
+    /** #841: what the turns before it left, for a follow-up turn; null for the first turn of a session. */
+    resume: ResumeBlock | null;
   } | null;
 };
 
@@ -1091,6 +1103,10 @@ export async function checkJob(
                 canPush: turn.turn.profile.canPush,
               },
         resultSchema: turn.turn.resultSchema,
+        resume:
+          turn.turn.number >= 2
+            ? await deps.implementerResume(job, turn)
+            : null,
       },
     };
   }
@@ -1212,6 +1228,11 @@ export async function buildJobInput(
     !features.includes("implementer_result")
   )
     return refuse("implementer_engine_unavailable", "reason=result");
+  // #841: the same for a follow-up turn. A Worker that does not read `resume` would start from the base branch and push over the work of
+  // the earlier turns, and would never be given the conversation, the summary or the digest, which only a Worker that names the
+  // feature reads (the three fields are part of `resume`, a closed object): the turn ends here, free, before any credential exists.
+  if (implementer?.resume != null && !features.includes("implementer_resume"))
+    return refuse("implementer_engine_unavailable", "reason=resume");
   if (costLimit.enforced === "none")
     deps.logger.info(
       `[runner-api] job=${job.id} carries no cost limit: the runner names neither claim feature cost_limit nor operator_cost_limit, so a Dynamic Review is held only to the runner's own RUNNER_DYNAMIC_MAX_COST_USD and a Diff Review to none`,
@@ -1358,6 +1379,25 @@ export async function buildJobInput(
             ...(implementer.resultSchema === null
               ? {}
               : { resultSchema: implementer.resultSchema }),
+            // #841: only a follow-up turn carries `resume`, and only to a Worker that reads it (the refusal above).
+            ...(implementer.resume === null
+              ? {}
+              : {
+                  resume: {
+                    turn: implementer.resume.turn,
+                    branches: implementer.resume.branches,
+                    checkout: implementer.resume.checkout,
+                    snapshot: implementer.resume.snapshot,
+                    ...(implementer.resume.previousSummary === undefined
+                      ? {}
+                      : {
+                          previousSummary: implementer.resume.previousSummary,
+                        }),
+                    ...(implementer.resume.digest === undefined
+                      ? {}
+                      : { digest: implementer.resume.digest }),
+                  },
+                }),
           },
           git: {
             provider: "github",

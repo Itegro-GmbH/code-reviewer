@@ -6,6 +6,8 @@ import "server-only";
 import { notFound } from "next/navigation";
 import { getCapabilities } from "../capabilities/shared.ts";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
+import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
+import { createImplementerStepsRepository } from "../db/repositories/implementer-steps-repository.ts";
 import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import { createIntegrationsRepository } from "../db/repositories/integrations-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
@@ -103,6 +105,8 @@ export function implementerServiceFor(workspaceId: string): ImplementerService {
     registry: integrationRegistry,
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
     profiles: createProfilesRepository(db, workspaceId),
+    sessions: createImplementerRepository(db, workspaceId),
+    steps: createImplementerStepsRepository(db, workspaceId),
     models: implementerModelsFor(workspaceId),
     queue: jobQueueFor(workspaceId),
     operatorCostLimitCents: operatorCostLimitCentsFrom(db),

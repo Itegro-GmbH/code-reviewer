@@ -18,9 +18,12 @@ import { JobQueueError } from "./errors.ts";
 import {
   CLIENT_REQUEST_ID,
   validateEnqueueInput,
+  validateFollowUpTurnInput,
   validateImplementerTurnInput,
 } from "./job-input.ts";
 import type {
+  EnqueueFollowUpTurnInput,
+  EnqueueFollowUpTurnResult,
   EnqueueImplementerTurnInput,
   EnqueueImplementerTurnResult,
   EnqueueJobInput,
@@ -63,6 +66,16 @@ export type JobQueue = {
   enqueueImplementerTurn(
     input: EnqueueImplementerTurnInput,
   ): Promise<EnqueueImplementerTurnResult>;
+  /**
+   * #841: accepts the next turn of an existing session: in one transaction the session goes `idle` to `running`, the turn is written and its job
+   * queued (a job of the kind `implementer`, the pull request columns of the session's slot). Of two calls for one idle session one makes the
+   * turn and the other answers `busy`. The same `clientRequestId` gives the turn it made back (`status: "existing"`). Rejects with a
+   * `JobQueueError` for invalid input (`JOB_INPUT_INVALID`) or a deployment without the capability (`JOB_KIND_UNAVAILABLE`); nothing is
+   * written then.
+   */
+  enqueueFollowUpTurn(
+    input: EnqueueFollowUpTurnInput,
+  ): Promise<EnqueueFollowUpTurnResult>;
   /**
    * The turn a client request id made earlier, or undefined; reads only (#791). A request id that is no valid id (not 1 to 200
    * printable ASCII characters) has made no turn.
@@ -155,6 +168,27 @@ export function createJobQueue(
       const result = await jobs.enqueueImplementerTurn(checked.value);
       // The same hook as for a review: the Dispatcher is woken and the check notifier told (it ignores a turn). A repeat did not
       // change anything.
+      if (result.status === "created")
+        try {
+          options.onEnqueued?.({
+            status: "created",
+            job: result.job,
+            supersededJobIds: [],
+          });
+        } catch {
+          // The turn is queued; what a hook does after that is its own business.
+        }
+      return result;
+    },
+    async enqueueFollowUpTurn(input) {
+      const checked = validateFollowUpTurnInput(input);
+      if (!checked.ok)
+        throw new JobQueueError(
+          "JOB_INPUT_INVALID",
+          `The turn is not valid: ${checked.fieldErrors.map((error) => `${error.field} (${error.code})`).join(", ")}.`,
+          { fieldErrors: checked.fieldErrors },
+        );
+      const result = await jobs.enqueueFollowUpTurn(checked.value);
       if (result.status === "created")
         try {
           options.onEnqueued?.({

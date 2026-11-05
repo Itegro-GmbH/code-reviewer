@@ -10,6 +10,7 @@ import {
 import type { JobFieldError } from "./errors.ts";
 import {
   JOB_TRIGGER_KINDS,
+  type EnqueueFollowUpTurnInput,
   type EnqueueImplementerTurnInput,
   type EnqueueJobInput,
   type JobTriggerKind,
@@ -200,5 +201,46 @@ export function validateImplementerTurnInput(
       ...input,
       baseSha: (baseSha as string).toLowerCase(),
     },
+  };
+}
+
+export type FollowUpTurnInputCheck =
+  | { ok: true; value: EnqueueFollowUpTurnInput }
+  | { ok: false; fieldErrors: JobFieldError[] };
+
+/** Checks what `enqueueFollowUpTurn` is given before anything is written (#841), by the rules of the first turn's input. */
+export function validateFollowUpTurnInput(
+  input: EnqueueFollowUpTurnInput,
+): FollowUpTurnInputCheck {
+  const fields = input as Partial<
+    Record<keyof EnqueueFollowUpTurnInput, unknown>
+  >;
+  const fieldErrors: JobFieldError[] = [];
+  const refuse = (field: string, code: JobFieldError["code"]) =>
+    void fieldErrors.push({ field, code });
+
+  if (!isNonEmptyString(fields.sessionId)) refuse("sessionId", "required");
+  const headSha = fields.headSha;
+  if (typeof headSha !== "string" || !HEAD_SHA.test(headSha))
+    refuse("headSha", "invalid");
+  if (!isNonEmptyString(fields.instruction)) refuse("instruction", "required");
+  const cost = fields.costLimitCents;
+  if (
+    cost !== null &&
+    (typeof cost !== "number" || !Number.isSafeInteger(cost) || cost < 1)
+  )
+    refuse("costLimitCents", "invalid");
+  if (!isNonEmptyString(fields.createdBy)) refuse("createdBy", "required");
+  if (!isNonEmptyString(fields.actorLogin)) refuse("actorLogin", "required");
+  const requestId = fields.clientRequestId;
+  if (typeof requestId !== "string" || requestId === "")
+    refuse("clientRequestId", "required");
+  else if (!CLIENT_REQUEST_ID.test(requestId))
+    refuse("clientRequestId", requestId.length > 200 ? "too_long" : "invalid");
+
+  if (fieldErrors.length > 0) return { ok: false, fieldErrors };
+  return {
+    ok: true,
+    value: { ...input, headSha: (headSha as string).toLowerCase() },
   };
 }

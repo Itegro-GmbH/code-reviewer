@@ -102,6 +102,7 @@ function task(
     pushedNote: null,
     result: null,
     resultExpected: false,
+    resume: null,
     reported: true,
     ...overrides,
   };
@@ -938,5 +939,53 @@ describe("the network on the detail page of an implementer run (#745)", () => {
     expect(
       screen.getByText("The runner reported no connections."),
     ).toBeTruthy();
+  });
+});
+
+describe("how a follow-up turn got its conversation on the detail page (#841)", () => {
+  // #841-R04
+  it("says the conversation was imported, with the mode word", () => {
+    renderDetail(
+      detail({
+        implementer: task({
+          resume: {
+            mode: "imported",
+            reason: null,
+            text: "Continued with the whole conversation of the earlier turns.",
+          },
+        }),
+      }),
+    );
+
+    const line = document.querySelector('[data-slot="run-resume"]');
+    expect(line?.textContent).toContain("imported");
+    expect(line?.textContent).toContain("whole conversation");
+    expect(line?.textContent).not.toContain("Reason:");
+  });
+
+  // #841-R05
+  it("says a summary was used, with the reason word", () => {
+    renderDetail(
+      detail({
+        implementer: task({
+          resume: {
+            mode: "summary_only",
+            reason: "import_failed",
+            text: "Continued from a summary of the earlier turns, not their conversation. The agent engine could not take the stored conversation in.",
+          },
+        }),
+      }),
+    );
+
+    const line = document.querySelector('[data-slot="run-resume"]');
+    expect(line?.textContent).toContain("summary_only");
+    expect(line?.textContent).toContain("Reason: import_failed");
+  });
+
+  // #841-R06
+  it("shows nothing for a first turn", () => {
+    renderDetail(detail());
+
+    expect(document.querySelector('[data-slot="run-resume"]')).toBeNull();
   });
 });

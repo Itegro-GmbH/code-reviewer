@@ -29,7 +29,11 @@ function deps(holding: Job | undefined) {
   const managedModels = vi.fn(async () => ({ managed: false, models: [] }));
   const all: StepsDeps = {
     queue: { get: async () => job, holding: async () => holding },
-    steps: () => ({ recordSteps, listAfter: async () => [] }),
+    steps: () => ({
+      recordSteps,
+      listAfter: async () => [],
+      lastStep: async () => undefined,
+    }),
     logger: { info: () => undefined, error: () => undefined },
     knownSecrets,
     claimedKeys,

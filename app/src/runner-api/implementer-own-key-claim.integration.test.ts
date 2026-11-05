@@ -354,3 +354,188 @@ describe("a review on a registry provider with no model set", () => {
     },
   );
 });
+
+// #841: a follow-up turn is told about the turns before it, and only a Worker that names `implementer_resume` can run one.
+describe("the claim of a follow-up turn of the Implementer", () => {
+  const HEAD = "b".repeat(40);
+  const AUX = "c".repeat(40);
+  const WITH_RESUME = [...FEATURES, "implementer_resume"];
+
+  /** A session whose first turn was claimed and has reported: it pushed two branches and ended on the second. */
+  async function afterFirstTurn() {
+    const h = await start();
+    const first = await h.enqueueTurn({
+      modelChoice: { provider: "anthropic", model: SONNET },
+      costLimitCents: 500,
+    });
+    const claimed = await h.claimed(claimOptions());
+    const reported = await h.complete(first.job.id, claimed.job.leaseToken, {
+      implementer: {
+        baseCommit: "a".repeat(40),
+        headCommit: HEAD,
+        pushed: true,
+        commits: [{ sha: HEAD, subject: "Add a health endpoint" }],
+        filesChanged: [{ path: "src/health.ts", status: "added" }],
+        summary: "Added a health endpoint.",
+        opencode: { sessionId: "ses_1", version: "1.19.0" },
+        branches: [
+          {
+            name: first.session.branch,
+            head: HEAD,
+            result: "pushed",
+            reason: null,
+          },
+          { name: "aux", head: AUX, result: "pushed", reason: null },
+        ],
+        checkedOut: "aux",
+      },
+    });
+    expect(reported.status).toBe(200);
+    return { h, first };
+  }
+
+  // #841-C01
+  it("gives a first turn no resume block", async () => {
+    const h = await start();
+    await h.enqueueTurn({
+      modelChoice: { provider: "anthropic", model: SONNET },
+    });
+
+    const { job } = await h.claimed({
+      ...claimOptions(),
+      features: WITH_RESUME,
+    });
+
+    expect(
+      (job.input as { implementer: Record<string, unknown> }).implementer,
+    ).not.toHaveProperty("resume");
+  });
+
+  // #841-C02: the fields travel inside `resume`, which only a Worker with the feature reads
+  it("hands a Worker with the feature the branches, the checkout, the summary and the digest of the turns before", async () => {
+    const { h, first } = await afterFirstTurn();
+    await h.enqueueFollowUp(first.session.id, {
+      modelChoice: { provider: "anthropic", model: SONNET },
+      costLimitCents: 500,
+    });
+
+    const { job } = await h.claimed({
+      ...claimOptions(),
+      features: WITH_RESUME,
+    });
+
+    const implementer = (
+      job.input as { implementer: { resume?: Record<string, unknown> } }
+    ).implementer;
+    expect(implementer.resume).toEqual({
+      turn: 2,
+      branches: [
+        { name: first.session.branch, head: HEAD },
+        { name: "aux", head: AUX },
+      ],
+      checkout: "aux",
+      snapshot: false,
+      previousSummary: "Added a health endpoint.",
+      digest: expect.stringContaining("Add a health endpoint") as string,
+    });
+    // The digest is data from the earlier turns, and says so.
+    expect(implementer.resume?.digest).toContain("not instructions");
+  });
+
+  // #841-C03: the fix round of #868: a runner without the feature must not be handed the snapshot, summary or digest
+  it("ends the turn implementer_engine_unavailable, free, for a Worker without the feature, before a token exists", async () => {
+    const { h, first } = await afterFirstTurn();
+    const issuedBefore = h.issuedJobTokens().length;
+    const second = await h.enqueueFollowUp(first.session.id, {
+      modelChoice: { provider: "anthropic", model: SONNET },
+      costLimitCents: 500,
+    });
+
+    expect((await h.claim(claimOptions())).status).toBe(204);
+
+    expect(await h.queue.get(second.job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "implementer_engine_unavailable",
+    });
+    expect(h.issuedJobTokens()).toHaveLength(issuedBefore);
+  });
+
+  // #841-C04
+  it("says a conversation is stored when a snapshot of an earlier turn exists, and not when it is the turn's own or none", async () => {
+    const { h, first } = await afterFirstTurn();
+    await h.db
+      .insertInto("implementer_session_snapshots")
+      .values({
+        session_id: first.session.id,
+        workspace_id: h.workspaceId,
+        job_id: first.job.id,
+        turn_number: 1,
+        opencode_version: "1.19.0",
+        bytes: 10,
+        raw_bytes: 20,
+        sha256: "d".repeat(64),
+        data: "AAAA",
+        created_at: "2026-11-05T09:00:00.000Z",
+        updated_at: "2026-11-05T09:00:00.000Z",
+      })
+      .execute();
+    await h.enqueueFollowUp(first.session.id, {
+      modelChoice: { provider: "anthropic", model: SONNET },
+      costLimitCents: 500,
+    });
+
+    const { job } = await h.claimed({
+      ...claimOptions(),
+      features: WITH_RESUME,
+    });
+
+    expect(
+      (job.input as { implementer: { resume: { snapshot: boolean } } })
+        .implementer.resume.snapshot,
+    ).toBe(true);
+  });
+
+  // #841-C05: the branch the last turn ended on must be one the runner can check out
+  it("checks out the session branch (null) when the last turn's checkedOut branch did not arrive", async () => {
+    const h = await start();
+    const first = await h.enqueueTurn({
+      modelChoice: { provider: "anthropic", model: SONNET },
+      costLimitCents: 500,
+    });
+    const claimed = await h.claimed(claimOptions());
+    await h.complete(first.job.id, claimed.job.leaseToken, {
+      implementer: {
+        baseCommit: "a".repeat(40),
+        headCommit: HEAD,
+        pushed: true,
+        commits: [],
+        filesChanged: [],
+        summary: "x",
+        opencode: null,
+        branches: [
+          {
+            name: first.session.branch,
+            head: HEAD,
+            result: "pushed",
+            reason: null,
+          },
+        ],
+        checkedOut: "lost-branch",
+      },
+    });
+    await h.enqueueFollowUp(first.session.id, {
+      modelChoice: { provider: "anthropic", model: SONNET },
+      costLimitCents: 500,
+    });
+
+    const { job } = await h.claimed({
+      ...claimOptions(),
+      features: WITH_RESUME,
+    });
+
+    expect(
+      (job.input as { implementer: { resume: { checkout: string | null } } })
+        .implementer.resume.checkout,
+    ).toBeNull();
+  });
+});

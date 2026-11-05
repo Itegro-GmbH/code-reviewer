@@ -727,6 +727,7 @@ describe("the detail of an implementer run", () => {
         "reported",
         "result",
         "resultExpected",
+        "resume",
         "runner",
         "summary",
         "waitingForRunner",
@@ -1563,5 +1564,56 @@ describe("the result of an implementer run (#843)", () => {
 
     expect(Object.keys(view?.result ?? {})).toEqual(["__proto__"]);
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+});
+
+// #841: how a follow-up turn got its earlier conversation, as the page shows it.
+describe("the continuation mode of an implementer run (#841)", () => {
+  const viewOf = (resume: unknown) =>
+    toCustomerRunDetailView(
+      PRODUCT,
+      turn({
+        status: "succeeded",
+        result: resultWith({ resume: resume as JsonValue }),
+      }),
+      "acme/widgets",
+      NOW,
+      (text) => text,
+      false,
+      null,
+      source(),
+    ).implementer?.resume;
+
+  // #841-R01
+  it("says the whole conversation was imported", () => {
+    expect(viewOf({ mode: "imported" })).toMatchObject({
+      mode: "imported",
+      reason: null,
+    });
+  });
+
+  // #841-R02
+  it("says a summary was used instead, with the reason word and a sentence for it", () => {
+    for (const reason of [
+      "no_snapshot",
+      "download_failed",
+      "snapshot_unreadable",
+      "import_failed",
+      "version_changed",
+    ])
+      expect(viewOf({ mode: "summary_only", reason })).toMatchObject({
+        mode: "summary_only",
+        reason,
+        text: expect.stringContaining("summary") as string,
+      });
+  });
+
+  // #841-R03
+  it("shows nothing for a first turn, a block it does not know, or a reason that is not one of the five", () => {
+    expect(viewOf(undefined)).toBeNull();
+    expect(viewOf({ mode: "other" })).toBeNull();
+    expect(viewOf({ mode: "summary_only", reason: "<script>" })).toBeNull();
+    expect(viewOf({ mode: "summary_only" })).toBeNull();
+    expect(viewOf("imported")).toBeNull();
   });
 });

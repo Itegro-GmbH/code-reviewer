@@ -32,6 +32,13 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
     "result_schema",
     "result_value",
   ],
+  // #841: the next instruction of a session and the one that could not start; null for every session that exists.
+  implementer_sessions: [
+    "queued_instruction",
+    "queued_discarded",
+    "queued_attempted_at",
+    "queued_first_failed_at",
+  ],
   // #745, step 7: the environment's network rule; every environment that exists reads `off` and no hosts (`DEFAULTS_OF_COLUMNS`).
   // #854: the kind (`hosted`) and the labels (none) of every environment that exists.
   implementer_environments: ["network_mode", "network_hosts", "kind", "labels"],

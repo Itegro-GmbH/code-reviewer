@@ -10,7 +10,7 @@ import type { Database } from "../schema.ts";
 import { migrationProvider } from "./index.ts";
 import { createEmptyTestDatabase } from "../../test-support/test-database.ts";
 
-const THIS = "20261105150000_add_workflow_step_cost_basis";
+const THIS = "20261105170000_add_workflow_step_cost_basis";
 const T = "2026-11-05T08:00:00.000Z";
 
 function upTo(include: (name: string) => boolean): MigrationProvider {
@@ -113,7 +113,7 @@ describe("the workflow step cost basis migration", () => {
     expect(before).toHaveLength(1);
 
     const { migration } =
-      await import("./20261105150000_add_workflow_step_cost_basis.ts");
+      await import("./20261105170000_add_workflow_step_cost_basis.ts");
     await migration.down?.(db);
 
     const { rows: after } = await sql<{

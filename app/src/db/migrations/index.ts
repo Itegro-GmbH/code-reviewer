@@ -84,10 +84,11 @@ import { migration as createWorkflows } from "./20261104140000_create_workflows.
 import { migration as createProfiles } from "./20261104150000_create_profiles.ts";
 import { migration as createRunners } from "./20261105120000_create_runners.ts";
 import { migration as addRunnerEnvironments } from "./20261105140000_add_runner_environments.ts";
-import { migration as addWorkflowStepCostBasis } from "./20261105150000_add_workflow_step_cost_basis.ts";
+import { migration as addWorkflowStepCostBasis } from "./20261105170000_add_workflow_step_cost_basis.ts";
 import { migration as addImplementerTurnProfile } from "./20261104160000_add_implementer_turn_profile.ts";
 import { migration as addImplementerTurnResult } from "./20261105100000_add_implementer_turn_result.ts";
 import { migration as createWorkflowRuns } from "./20261105130000_create_workflow_runs.ts";
+import { migration as addImplementerSessionQueue } from "./20261105160000_add_implementer_session_queue.ts";
 import { migration as addImplementerTurnEnvironment } from "./20261102150000_add_implementer_turn_environment.ts";
 import { migration as createImplementerEnvironments } from "./20261102140000_create_implementer_environments.ts";
 import { migration as createImplementerSessionsAndTurns } from "./20261030140000_create_implementer_sessions_and_turns.ts";
@@ -200,7 +201,8 @@ const migrations: Record<string, Migration> = {
   "20261105120000_create_runners": createRunners,
   "20261105130000_create_workflow_runs": createWorkflowRuns,
   "20261105140000_add_runner_environments": addRunnerEnvironments,
-  "20261105150000_add_workflow_step_cost_basis": addWorkflowStepCostBasis,
+  "20261105160000_add_implementer_session_queue": addImplementerSessionQueue,
+  "20261105170000_add_workflow_step_cost_basis": addWorkflowStepCostBasis,
 };
 
 export const migrationProvider: MigrationProvider = {

@@ -46,3 +46,39 @@ export async function idleSessionsOfEndedTurns(
     .executeTakeFirst();
   return Number(result.numUpdatedRows);
 }
+
+/** A session whose queued instruction waits for a start (#841). */
+export type DueFollowUp = { workspaceId: string; sessionId: string };
+
+/**
+ * The idle sessions that hold a queued instruction (#841), whatever the workspace, at most `limit`: the ones never tried first, then the
+ * ones tried longest ago (oldest idle first among equals). A session tried at or after `retryAfter` is left for a later run, so one
+ * the platform keeps refusing neither crowds out the newer ones nor makes every run ask GitHub again. A turn that ends starts the
+ * instruction of its own session; this finds the ones that event did not reach (the process was stopped, the platform could not be asked,
+ * the turn ended without a report). Instance level like the sweep above: it reads nothing but the ids.
+ */
+export async function sessionsWithQueuedInstruction(
+  executor: Kysely<Database>,
+  limit: number,
+  retryAfter: string,
+): Promise<DueFollowUp[]> {
+  const rows = await executor
+    .selectFrom("implementer_sessions")
+    .select(["workspace_id", "id"])
+    .where("status", "=", sql.lit("idle"))
+    .where("queued_instruction", "is not", null)
+    .where((eb) =>
+      eb.or([
+        eb("queued_attempted_at", "is", null),
+        eb("queued_attempted_at", "<", retryAfter),
+      ]),
+    )
+    .orderBy(sql`queued_attempted_at asc nulls first`)
+    .orderBy("updated_at")
+    .limit(limit)
+    .execute();
+  return rows.map((row) => ({
+    workspaceId: row.workspace_id,
+    sessionId: row.id,
+  }));
+}

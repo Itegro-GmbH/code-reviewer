@@ -12,10 +12,14 @@ import { createUsageRecordsRepository } from "../db/repositories/usage-records-r
 import { createJobsRepository } from "../db/repositories/jobs-repository.ts";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
 import { createImplementerSnapshotsRepository } from "../db/repositories/implementer-snapshots-repository.ts";
+import { buildResume } from "../runner-api/resume.ts";
 import { createImplementerStepsRepository } from "../db/repositories/implementer-steps-repository.ts";
 import { createCapabilitySet } from "../capabilities/capability.ts";
 import { createJobQueue } from "../jobs/job-queue.ts";
-import type { EnqueueImplementerTurnInput } from "../jobs/job-types.ts";
+import type {
+  EnqueueFollowUpTurnInput,
+  EnqueueImplementerTurnInput,
+} from "../jobs/job-types.ts";
 import { createRunnerCredentialsRepository } from "../db/repositories/runner-credentials-repository.ts";
 import { createRunnersRepository } from "../db/repositories/runners-repository.ts";
 import { createRunnerRegistrationApi } from "../runner-api/registration.ts";
@@ -537,6 +541,24 @@ export async function startRunnerApiHarness(
         createImplementerRepository(fixture.db, job.workspaceId).getTurnByJob(
           job.id,
         ),
+      implementerResume: async (job, { turn, session }) => {
+        const history = await createImplementerRepository(
+          fixture.db,
+          job.workspaceId,
+        ).turnHistory(session.id);
+        const snapshot = await createImplementerSnapshotsRepository(
+          fixture.db,
+          job.workspaceId,
+        ).find(session.id);
+        return buildResume({
+          turnNumber: turn.number,
+          sessionBranch: session.branch,
+          history: history.filter((entry) => entry.number < turn.number),
+          sessionSummary: session.summary,
+          hasSnapshot:
+            snapshot !== undefined && snapshot.turnNumber < turn.number,
+        });
+      },
       claimedKeyMode: async (job) =>
         (
           await createUsageRecordsRepository(
@@ -1033,6 +1055,30 @@ export async function startRunnerApiHarness(
     return result;
   }
 
+  /** #841: the next turn of a session the harness made a turn for (the session must be idle: the first turn has ended). */
+  async function enqueueFollowUp(
+    sessionId: string,
+    overrides: Partial<EnqueueFollowUpTurnInput> = {},
+  ) {
+    turnCounter += 1;
+    fixture.clock.advance(1);
+    const result = await turnQueue.enqueueFollowUpTurn({
+      sessionId,
+      headSha: sha("b"),
+      instruction: "Now do more.",
+      modelChoice: { entryId: "entry-1" },
+      costLimitCents: null,
+      createdBy: "turn-user",
+      actorLogin: "octocat",
+      clientRequestId: `request-${String(turnCounter)}`,
+      fromQueued: false,
+      ...overrides,
+    });
+    if (result.status !== "created")
+      throw new Error(`expected a new follow-up turn, got ${result.status}`);
+    return result;
+  }
+
   /** Claims the next job and returns the parsed answer. */
   async function claimed(request?: RequestOptions) {
     const response = await claim(request);
@@ -1118,6 +1164,7 @@ export async function startRunnerApiHarness(
         github.fake.pullRequestComments(repoFullName, prNumber),
     },
     enqueueTurn,
+    enqueueFollowUp,
     /** #854: the minimum version of the base a customer's runner may have (`RUNNER_MIN_BASE_VERSION`); null for none. */
     setMinBaseVersion(version: string | null) {
       fleetSettings.minBaseVersion = version;

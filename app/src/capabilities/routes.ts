@@ -189,6 +189,12 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     class: "implementer",
   },
   { route: "/api/w/[workspace]/implementer/tasks", class: "implementer" },
+  // The next instruction of a session (#841), and the facts the "Continue" form of a run needs.
+  {
+    route: "/api/w/[workspace]/implementer/sessions/[sessionId]/turns",
+    class: "implementer",
+  },
+  { route: "/api/w/[workspace]/runs/[id]/continuation", class: "implementer" },
   // The steps of a running turn, sent by its runner or Worker for the live view (#745), and read by the Runs page; only a factory
   // runs turns.
   { route: "/api/w/[workspace]/runs/[id]/steps", class: "implementer" },
