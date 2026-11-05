@@ -469,7 +469,7 @@ describe("label, implementer, pull request, comment (#845)", () => {
       .pullRequests("acme/widgets")
       .filter((pr) => pr.headRef === `workflow/${runId}/implement`);
     expect(opened).toMatchObject({
-      number: 8,
+      number: 13,
       title: "Cache the widget list",
       baseRef: "main",
       state: "open",
@@ -479,7 +479,7 @@ describe("label, implementer, pull request, comment (#845)", () => {
     expect(
       app.h.fake.issueComments("acme/widgets", 12).map((c) => c.body),
     ).toEqual([
-      `Opened ${String(JSON.parse(state.steps[2]?.output ?? "null").url)} (pull request 8).\n\n<!-- wf-${runId}-3 -->`,
+      `Opened ${String(JSON.parse(state.steps[2]?.output ?? "null").url)} (pull request 13).\n\n<!-- wf-${runId}-3 -->`,
     ]);
   });
 
