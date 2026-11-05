@@ -362,6 +362,7 @@ class Rig:
         monkeypatch.setattr(session_module, "start_network_door", start)
         job = parse_implementer_input(job_text(environment))
         rule = OFF if environment is None else parse_rule(environment["network"])
+        assert job.implementer.model_entry is not None
         host = signed_host or model_host_of(job.implementer.model_entry.upstream_base_url)
         variables = {IMPLEMENTER_NETWORK_SWITCH_VARIABLE: switch_text(rule, host)} if switch else {}
         self.session = ImplementerSession(
@@ -400,6 +401,7 @@ def test_a_list_starts_the_door_first_and_then_narrows_the_policy_with_the_model
     assert rig.started_with[0][0] == LIST
     [body] = rig.post.bodies
     entry = rig.session.job.implementer.model_entry
+    assert entry is not None
     assert body["modelHost"] == model_host_of(entry.upstream_base_url)
     block = rig.block()
     assert block is not None and valid_block(_with_base(block)) is not None

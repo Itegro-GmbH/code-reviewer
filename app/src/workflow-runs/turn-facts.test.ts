@@ -531,4 +531,81 @@ describe("the outcome of a turn", () => {
     expect(estimateCost({ usage: tokens }, price)).toBe(180);
     expect(estimateCost({ usage: tokens }, undefined)).toBeNull();
   });
+  // #856-T41
+  describe("a turn that ran on the login of a customer's device", () => {
+    const subscription = (usage: Record<string, unknown>) => ({
+      usage: { costUsd: null, costBasis: "subscription", ...usage },
+    });
+
+    it("books the estimate at API prices with the basis subscription, not the cap", () => {
+      const outcome = outcomeOfTurn(
+        ended({ jobResult: subscription({ estimatedCostUsd: 0.42 }) }),
+        5_000_000,
+      );
+      expect(outcome).toMatchObject({
+        ok: true,
+        costMicroUsd: 420_000,
+        costBasis: "subscription",
+        output: { costUsd: 0.42 },
+      });
+    });
+
+    it("books nothing when Claude Code gave no estimate", () => {
+      for (const usage of [
+        { estimatedCostUsd: null },
+        {},
+        { estimatedCostUsd: "x" },
+      ])
+        expect(
+          outcomeOfTurn(ended({ jobResult: subscription(usage) }), 5_000_000),
+        ).toMatchObject({
+          costMicroUsd: 0,
+          costBasis: "subscription",
+          output: { costUsd: 0 },
+        });
+    });
+
+    it("books a failed or cancelled turn the same way", () => {
+      for (const jobStatus of ["failed", "cancelled"] as const)
+        expect(
+          outcomeOfTurn(
+            ended({
+              jobStatus,
+              jobErrorCode: jobStatus === "cancelled" ? "cancelled" : "x",
+              jobResult: subscription({ estimatedCostUsd: 0.1 }),
+            }),
+            5_000_000,
+          ),
+        ).toMatchObject({
+          ok: false,
+          costMicroUsd: 100_000,
+          costBasis: "subscription",
+        });
+    });
+
+    it("books a turn of the harness claude-code that left no usage at no cost, not at the cap", () => {
+      const claudeTurn = turn({
+        profile: {
+          id: "p-1",
+          name: "worker",
+          version: 1,
+          instructions: "",
+          canPush: true,
+          harness: "claude-code",
+        },
+      });
+      expect(
+        outcomeOfTurn(
+          ended({
+            turn: claudeTurn,
+            jobStatus: "cancelled",
+            jobClaimed: true,
+            jobErrorCode: "cancelled",
+            jobResult: null,
+          }),
+          5_000_000,
+        ),
+      ).toMatchObject({ costMicroUsd: 0, costBasis: "subscription" });
+    });
+  });
 });

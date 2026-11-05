@@ -40,8 +40,11 @@ export type EndedTurn = {
   price?: TokenPrice | undefined;
 };
 
-/** Where the cost of a step comes from: the runner's figure, the token counts at the catalog price, or the cap the turn ran under. */
-export type CostBasis = "reported" | "estimated" | "limit";
+/**
+ * Where the cost of a step comes from: the runner's figure, the token counts at the catalog price, the cap the turn ran under, or (#856)
+ * Claude Code's own estimate at API prices for a turn on a customer device's login, which is never billed.
+ */
+export type CostBasis = "reported" | "estimated" | "limit" | "subscription";
 
 export type TurnOutcome =
   | {
@@ -96,6 +99,30 @@ export function estimateCost(
   const micro =
     prompt * price.inputPerMillion + completion * price.outputPerMillion;
   return Number.isFinite(micro) && micro >= 0 ? Math.ceil(micro) : null;
+}
+
+/**
+ * #856: the estimate, in micro dollars, of a turn that ran on the login of a customer's device, or null for any other turn. Claude
+ * Code's figure at API prices (0 when it gave none) counts against the budget of the run, so a run cannot be driven past it by turns
+ * that cost nothing; it is not a charge and never enters a total of billing. A turn of that harness that left no usage (stopped,
+ * killed) is booked at 0 as well: there is no figure, and the cap is not what it cost.
+ */
+export function subscriptionCost(ended: EndedTurn): number | null {
+  const usage =
+    isRecord(ended.jobResult) && isRecord(ended.jobResult.usage)
+      ? ended.jobResult.usage
+      : null;
+  if (
+    usage?.costBasis !== "subscription" &&
+    ended.turn.profile?.harness !== "claude-code"
+  )
+    return null;
+  const estimate = usage?.estimatedCostUsd;
+  return typeof estimate === "number" &&
+    Number.isFinite(estimate) &&
+    estimate >= 0
+    ? Math.ceil(estimate * MICRO_USD_PER_USD)
+    : 0;
 }
 
 const COMMIT_SHA = /^[0-9a-f]{40}$/;
@@ -183,7 +210,8 @@ export function outcomeOfTurn(
       costMicroUsd: 0,
       costBasis: "reported",
     };
-  const reported = costOfResult(ended.jobResult);
+  const onSubscription = subscriptionCost(ended);
+  const reported = onSubscription ?? costOfResult(ended.jobResult);
   // Only a turn that succeeded has every call answered and counted; a failed or stopped one may have lost an open call (the
   // runner then reports no cost), so it is charged at the cap.
   const estimated =
@@ -196,7 +224,13 @@ export function outcomeOfTurn(
       ? unknownCostMicroUsd
       : Math.min(estimated, unknownCostMicroUsd));
   const costBasis: CostBasis =
-    reported !== null ? "reported" : estimated !== null ? "estimated" : "limit";
+    onSubscription !== null
+      ? "subscription"
+      : reported !== null
+        ? "reported"
+        : estimated !== null
+          ? "estimated"
+          : "limit";
   if (ended.jobStatus !== "succeeded")
     return {
       ok: false,

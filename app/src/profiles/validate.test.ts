@@ -50,6 +50,7 @@ describe("a profile document", () => {
       costLimitCents: null,
       canPush: true,
       defaultResult: null,
+      harness: "opencode",
     });
   });
 
@@ -96,23 +97,67 @@ describe("a profile document", () => {
   });
 
   // #854-T194
-  it("takes the harness opencode, the only one a profile can name today, and refuses any other", () => {
-    expect(validateProfile(profile({ harness: "opencode" })).valid).toBe(true);
-    expect(validateProfile(profile({ harness: undefined })).valid).toBe(true);
+  it("takes the harness opencode, or none, as OpenCode and refuses a name that is no harness", () => {
+    const named = validateProfile(profile({ harness: "opencode" }));
+    const none = validateProfile(profile({ harness: undefined }));
+    expect(named.profile?.harness).toBe("opencode");
+    expect(none.profile?.harness).toBe("opencode");
 
-    const other = validateProfile(profile({ harness: "claude-code" }));
+    const other = validateProfile(profile({ harness: "codex" }));
     const notText = validateProfile(profile({ harness: 3 }));
 
     expect(other.errors).toEqual([
       expect.objectContaining({
         path: "/harness",
         code: "invalid_value",
-        available: ["opencode"],
+        available: ["opencode", "claude-code"],
       }),
     ]);
     expect(notText.errors).toEqual([
       expect.objectContaining({ path: "/harness", code: "wrong_type" }),
     ]);
+  });
+
+  // #856-T40
+  it("takes the harness claude-code with a Claude Code model name", () => {
+    const result = validateProfile(
+      profile({
+        harness: "claude-code",
+        model: { provider: "claude-code", model: "claude-sonnet-5-5" },
+      }),
+    );
+
+    expect(result.errors).toEqual([]);
+    expect(result.profile).toEqual(
+      expect.objectContaining({
+        harness: "claude-code",
+        model: { provider: "claude-code", model: "claude-sonnet-5-5" },
+      }),
+    );
+  });
+
+  // #856-T40
+  it("refuses a model on the harness claude-code that is not a Claude Code model name", () => {
+    for (const model of [
+      { entryId: "e-1" },
+      { provider: "anthropic", model: "claude-sonnet-5-5" },
+      { provider: "claude-code", model: "--dangerously-skip-permissions" },
+      { provider: "claude-code", model: "a b" },
+      { provider: "claude-code", model: "x".repeat(101) },
+    ])
+      expect(
+        problems(profile({ harness: "claude-code", model })),
+        JSON.stringify(model),
+      ).toEqual([["/model", "invalid_value"]]);
+  });
+
+  // #856-T40
+  it("keeps the provider claude-code for the harness of that name", () => {
+    expect(
+      problems(
+        profile({ model: { provider: "claude-code", model: "sonnet" } }),
+      ),
+    ).toEqual([["/model", "invalid_value"]]);
   });
 
   // #843-T05

@@ -31,6 +31,7 @@ import contextlib
 import logging
 import threading
 import time
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, cast
@@ -60,7 +61,7 @@ from code_reviewer_runner.job import (
     JobError,
 )
 from code_reviewer_runner.redaction import Redactor
-from code_reviewer_runner.result import ErrorCode, Usage
+from code_reviewer_runner.result import COST_BASIS_SUBSCRIPTION, ErrorCode, Usage
 from code_reviewer_runner.resume_wire import ResumeReason
 
 from . import finish_tool
@@ -73,6 +74,9 @@ from .agent_container import (
     KILL_SECONDS,
     STOP_SECONDS,
 )
+from .claude_code.agent import ClaudeCodeAgent
+from .claude_code.gates import ANTHROPIC_HOST, subscription_rule
+from .claude_code.login import ClaudeLogin
 from .config import build_engine_config, implementer_environment
 from .door_launcher import DoorSeams, RunningDoor, start_door
 from .door_model import build_door_ledger
@@ -80,7 +84,9 @@ from .git_workspace import (
     CONFIRM_PAUSE_SECONDS,
     CONFIRM_SECONDS,
     LIST_TOO_LARGE,
+    REASON_LOGIN_SECRET,
     REASON_OUT_OF_SPACE,
+    REASON_UNCHECKED,
     BranchPush,
     GitWorkspace,
     PushReport,
@@ -340,6 +346,19 @@ def _implementer_code(code: ErrorCode) -> ErrorCode:
     return code
 
 
+def _push_failure(form: BranchPush | None) -> str:
+    """The sentence for a task branch that did not arrive. A branch the push guard stopped (#856)
+    says so, in words: the device's login was found in it, or it could not be read to its end."""
+    if form is not None and form.reason == REASON_LOGIN_SECRET:
+        return "the work holds the login of this device (login_secret) and was not pushed"
+    if form is not None and form.reason == REASON_UNCHECKED:
+        return (
+            "the work could not be checked for the login of this device (unchecked), "
+            "so it was not pushed"
+        )
+    return "the work could not be pushed"
+
+
 def _not_kept(leftover_lost: bool, rescued: str | None = None, unchecked: bool = False) -> str:
     """The sentences at the end of the summary about what of the agent's work was not kept: work
     saved from a detached HEAD, and changes in the working tree that could not be committed."""
@@ -382,8 +401,14 @@ class ImplementerSession:
         results: ResultReader | None = None,
         snapshot: SnapshotPump | None = None,
         resume: ResumeInput | None = None,
+        login: ClaudeLogin | None = None,
     ) -> None:
         self.job = job
+        # #856: a turn on the harness claude-code has no model door and no ledger; it runs on the
+        # login of the device, which the job host read from the device's file (`login`).
+        self._subscription = job.implementer.subscription
+        self._login = login
+        self._claude: ClaudeCodeAgent | None = None
         # #843: the profile version the turn started with. A turn without one pushes, as before.
         profile = job.implementer.profile
         self._can_push = profile is None or profile.can_push
@@ -423,6 +448,8 @@ class ImplementerSession:
         self._error: tuple[ErrorCode, str] | None = None
         self._session_id: str | None = None
         self._model: TurnModel | None = None
+        # The rule the agent's network was started with (#856: a subscription turn's is forced).
+        self._effective_rule: NetworkRule | None = None
         self._leftover_lost = False
         # False when the agent's container could not be confirmed gone: then nothing is run in the
         # repository for the leftover (a survivor could be racing the tree).
@@ -457,21 +484,26 @@ class ImplementerSession:
     # -- the turn -------------------------------------------------------------
 
     def run(self) -> TurnResult:
-        agent: ImplementerAgent | None = None
+        agent: ImplementerAgent | ClaudeCodeAgent | None = None
         model: TurnModel | None = None
         place: AgentPlace | None = None
         try:
-            model = self._start_model()
+            if self._subscription is None:
+                model = self._start_model()
             self._start_network(model)
             place = self._place_factory()
             for note in place.create():
                 self._note(note)
-            agent = self._agent(model, place)
-            if self._resume_input is None:
-                agent.start(ENGINE_PORT)
+            if self._subscription is not None:
+                agent = self._start_claude(place)
             else:
-                agent.start(ENGINE_PORT, self._resume_input)
-            self._session_id = agent.session_id
+                assert model is not None
+                agent = self._agent(model, place)
+                if self._resume_input is None:
+                    agent.start(ENGINE_PORT)
+                else:
+                    agent.start(ENGINE_PORT, self._resume_input)
+            self._session_id = None if self._subscription is not None else agent.session_id
             if self._resume_input is not None:
                 self._note_resume(agent.resume)
             self._start_steps(agent)
@@ -518,6 +550,50 @@ class ImplementerSession:
         self._remove_place(place)
         return result
 
+    def _start_claude(self, place: AgentPlace) -> ClaudeCodeAgent:
+        """The Claude Code agent of a subscription turn (#856): the device's login, the model name
+        and the budget of the job, the job's clock. No ledger, no door."""
+        subscription = self._subscription
+        login = self._login
+        if subscription is None or login is None:
+            raise JobError(
+                ErrorCode.IMPLEMENTER_ENGINE_UNAVAILABLE,
+                "harness_not_ready: this runner has no Claude Code login for the turn",
+            )
+
+        def check_deadline() -> None:
+            if self._deadline_seconds() <= 0:
+                raise LimitError(
+                    ErrorCode.TIME_LIMIT_REACHED, "the time limit of the turn was reached"
+                )
+
+        agent = ClaudeCodeAgent(
+            place=cast("Any", place),
+            login=login,
+            model=subscription.model,
+            session_id=str(uuid.uuid4()),
+            secrets=self.secrets(),
+            remaining_seconds=self._deadline_seconds,
+            check_deadline=check_deadline,
+            instructions=instructions_text(
+                with_setup=self._has_script(),
+                can_push=self._can_push,
+                profile_instructions=self._profile_instructions,
+                with_result=self._schema is not None,
+            ),
+            result_schema=self._schema,
+            max_budget_usd=subscription.max_budget_usd,
+        )
+        self._claude = agent
+        agent.start()
+        if self._resume_input is not None:
+            # No stored conversation of this harness yet (a follow-up): the summary of the earlier
+            # turns carries it.
+            agent.resume = ResumeOutcome(
+                ResumeMode.SUMMARY_ONLY, self._resume_input.reason or ResumeReason.NO_SNAPSHOT
+            )
+        return agent
+
     def _note_resume(self, outcome: ResumeOutcome | None) -> None:
         """How the follow-up turn got its earlier conversation, as a line of the log."""
         self._resume_outcome = outcome
@@ -539,7 +615,9 @@ class ImplementerSession:
         reason = outcome.reason or ResumeReason.IMPORT_FAILED
         return {"mode": outcome.mode.value, "reason": reason.value}
 
-    def _first_message(self, agent: ImplementerAgent) -> str | list[dict[str, Any]]:
+    def _first_message(
+        self, agent: ImplementerAgent | ClaudeCodeAgent
+    ) -> str | list[dict[str, Any]]:
         """The first message of the turn: the instruction, and on a follow-up turn the preface
         (what happened to the sandbox) in front of it, as a part of its own."""
         instruction = self.job.implementer.instruction
@@ -566,7 +644,7 @@ class ImplementerSession:
             facts, instruction, previous_summary=resume.previous_summary, digest=resume.digest
         )
 
-    def _save_session(self, agent: ImplementerAgent) -> None:
+    def _save_session(self, agent: ImplementerAgent | ClaudeCodeAgent) -> None:
         """Take the engine's session and hand it to the job host, which uploads it (#839).
         Best effort, inside a budget, and never the turn's: no failure here changes the outcome,
         the push or the bill, it is a line in the notes and the next turn starts from a summary.
@@ -574,6 +652,12 @@ class ImplementerSession:
         Skipped without a channel (an app that does not list the feature) and after a lost lease
         (the app would refuse it)."""
         pump = self._snapshot
+        if isinstance(agent, ClaudeCodeAgent):
+            # #856: no stored conversation of this harness yet (the session volume is a follow-up):
+            # nothing is exported, and the next turn continues from the summary.
+            if pump is not None:
+                pump.close()
+            return
         if pump is None or agent.session_id is None:
             return
         lost = self._error is not None and self._error[0] is ErrorCode.LEASE_LOST
@@ -599,7 +683,7 @@ class ImplementerSession:
         if not sent:
             self._note("the session was not saved for a follow-up turn: not handed to the host")
 
-    def _start_steps(self, agent: ImplementerAgent) -> None:
+    def _start_steps(self, agent: ImplementerAgent | ClaudeCodeAgent) -> None:
         """Begin to send the step records of the open session. Best effort: a fault here is the
         live view's, never the turn's."""
         feeder = getattr(agent, "steps", None)
@@ -648,7 +732,10 @@ class ImplementerSession:
 
     @property
     def rule(self) -> NetworkRule:
-        """The environment's rule for the agent's network; a task without one is `off`."""
+        """The rule the agent's network runs under: the environment's (a task without one is
+        `off`), and for a subscription turn (#856) the forced one, once it was made."""
+        if self._effective_rule is not None:
+            return self._effective_rule
         environment = self.job.implementer.environment
         return OFF if environment is None else environment.network
 
@@ -656,12 +743,21 @@ class ImplementerSession:
         environment = self.job.implementer.environment
         return environment is not None and environment.has_script
 
-    def _start_network(self, model: TurnModel) -> None:
+    def _start_network(self, model: TurnModel | None) -> None:
         """The environment's rule (#745, step 7), in force before the agent exists: the network
         door for `list` and `open` (none for `off`), then the second wall, the VM's network policy,
         narrowed to GitHub, the model provider, the app and the rule. `open` leaves the policy as
         it is. The switch ends the connections that are open, so nothing the agent could have is
         in flight yet. A door or a switch that fails ends the turn `setup_failed`, free."""
+        if self._subscription is not None:
+            # #856: the login is in the agent's container, so the exit is the guard: the door lets
+            # through api.anthropic.com and nothing else, whatever the environment says (and an
+            # environment that says more refuses the turn, free).
+            self._effective_rule = subscription_rule(self.rule)
+            model_host = ANTHROPIC_HOST
+        else:
+            assert model is not None
+            model_host = model_host_of(model.entry.upstream_base_url)
         self._network_reached = True
         rule = self.rule
         if rule.mode != MODE_OFF:
@@ -678,7 +774,7 @@ class ImplementerSession:
             narrow_policy(
                 switch,
                 rule,
-                model_host_of(model.entry.upstream_base_url),
+                model_host,
                 post=self.seams.switch_post,
                 pause_seconds=self.seams.switch_pause_seconds,
             )
@@ -711,7 +807,7 @@ class ImplementerSession:
         container of its own, and this process keeps a ledger that reads what the door counts."""
         spec = self.job.implementer
         access = self.job.model_access
-        if access is None:
+        if access is None or spec.model_entry is None or spec.cost is None:
             raise JobError(
                 ErrorCode.IMPLEMENTER_CONFIG_INVALID, "the job has no model access to hand over"
             )
@@ -821,7 +917,7 @@ class ImplementerSession:
 
         return check
 
-    def _work(self, agent: ImplementerAgent) -> None:
+    def _work(self, agent: ImplementerAgent | ClaudeCodeAgent) -> None:
         """The instruction, and the one extra message when the tree is still dirty. A profile that
         may not push gets no extra message: nothing is collected from the tree, so a second paid
         turn would only ask for a commit that nobody takes (#843)."""
@@ -839,7 +935,9 @@ class ImplementerSession:
         again: AgentTurn = agent.turn(LEFTOVER_PROMPT, check=check)
         self._summary = self._summary or again.text
 
-    def _remind_for_result(self, agent: ImplementerAgent, check: Callable[[], None]) -> None:
+    def _remind_for_result(
+        self, agent: ImplementerAgent | ClaudeCodeAgent, check: Callable[[], None]
+    ) -> None:
         """A turn with a result schema whose agent ended without a result that fits gets one more
         message, like the extra message for a dirty tree and for the same reason: the model is
         asked once. What is read now is a first look (the container is still up); the result the
@@ -874,7 +972,9 @@ class ImplementerSession:
                 self._result_problem = f"invalid: {len(parsed.issues)} problems"
         return parsed.value
 
-    def _time_for_another_turn(self, agent: ImplementerAgent) -> bool:
+    def _time_for_another_turn(self, agent: ImplementerAgent | ClaudeCodeAgent) -> bool:
+        if isinstance(agent, ClaudeCodeAgent):
+            return self._deadline_seconds() >= MIN_EXTRA_TURN_SECONDS and agent.has_budget_left()
         return agent.ledger.remaining_seconds() >= MIN_EXTRA_TURN_SECONDS
 
     def _stopped_by(self, error: BaseException) -> None:
@@ -1055,7 +1155,7 @@ class ImplementerSession:
             # that is verifiably empty, at the base commit, has none): an entry that was not pushed
             # is work that did not arrive, and a branch that is gone is not verifiably empty. Not a
             # success, whatever else was pushed.
-            error = (ErrorCode.PUSH_REJECTED, "the work could not be pushed")
+            error = (ErrorCode.PUSH_REJECTED, _push_failure(form))
         return self._turn_result(
             error,
             head,
@@ -1105,13 +1205,31 @@ class ImplementerSession:
         )
 
     def _usage(self) -> Usage:
+        subscription = self._subscription
+        if subscription is not None:
+            # #856: nothing was billed through us. What Claude Code says the turn is worth at API
+            # prices is an estimate (None when it did not price every model), shown as such.
+            claude = self._claude
+            estimate = None if claude is None else claude.estimated_cost_usd
+            return Usage(
+                subscription.model,
+                0,
+                0,
+                0,
+                0,
+                False,
+                None,
+                cost_basis=COST_BASIS_SUBSCRIPTION,
+                estimated_cost_usd=None if estimate is None else float(estimate),
+            )
         if self._model is None:
             return Usage(None, 0, 0, 0, 0, False, None)
         return self._model.ledger.usage(self.job.llm.model)
 
     def secrets(self) -> tuple[str, ...]:
         capability = () if self._model is None else (self._model.capability,)
-        return (*self.job.secrets, *capability)
+        login = () if self._login is None else (self._login.secret,)
+        return (*self.job.secrets, *capability, *login)
 
     def _note(self, text: str) -> None:
         self._notes.append(text)

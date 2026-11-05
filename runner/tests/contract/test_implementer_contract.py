@@ -168,6 +168,7 @@ def test_the_example_of_the_job_is_valid_and_the_runner_reads_it() -> None:
     assert parsed.implementer.base_branch == "main"
     assert parsed.implementer.branch == "implementer/a1b2c3"
     assert parsed.implementer.limits.time_limit_seconds == 3600
+    assert parsed.implementer.cost is not None and parsed.implementer.model_entry is not None
     assert parsed.implementer.cost.key_mode == "managed"
     assert parsed.implementer.model_entry.model_id == "deepseek/deepseek-v4.1-flash"
     assert parsed.git.token == "example-git-write-token"

@@ -4,6 +4,7 @@
 `stream-json` it reads becomes steps, and how a turn that ends badly is told. The place is a double
 that plays scripted output."""
 
+import base64
 import json
 import threading
 from collections.abc import Callable, Mapping
@@ -216,6 +217,27 @@ def test_a_secret_that_is_in_the_output_is_redacted_in_the_records() -> None:
     assert all(TOKEN not in json.dumps(r.as_json()) for r in agent.steps.drain(100))
 
 
+# #856-R01
+def test_the_text_of_a_turn_never_carries_the_login_in_any_of_its_spellings() -> None:
+    encoded = base64.b64encode(TOKEN.encode()).decode()
+    place = Place(outputs=[stream(f"token {TOKEN} and {encoded}")])
+    agent = agent_of(place)  # the login is the agent's own secret: it is not handed in twice
+
+    ended = agent.turn("Fix the bug")
+
+    assert TOKEN not in ended.text and encoded not in ended.text
+    assert ended.text.startswith("token [REDACTED]")
+
+
+# #856-R01
+def test_the_note_of_a_turn_never_carries_the_login_either() -> None:
+    place = Place(outputs=[stream("done", terminal_reason=f"stopped {TOKEN}")])
+
+    ended = agent_of(place).turn("Fix the bug")
+
+    assert TOKEN not in (ended.note or "")
+
+
 # #856-T20
 def test_the_cost_is_an_estimate_added_over_the_turns_of_the_session() -> None:
     place = Place(outputs=[stream(), stream(total_cost_usd=0.01)])
@@ -317,6 +339,79 @@ def test_a_turn_without_a_result_schema_brings_no_file_and_no_server() -> None:
     agent_of(place).turn("go")
 
     assert place.files == {} and "--mcp-config" not in place.runs[0].argv
+
+
+def budget_of(run: Run) -> Decimal:
+    return Decimal(run.argv[run.argv.index("--max-budget-usd") + 1])
+
+
+# #856-T44: the budget is the turn's, not each message's
+def test_each_message_gets_what_the_earlier_ones_of_the_turn_left_of_the_budget() -> None:
+    place = Place(outputs=[stream(total_cost_usd=0.6), stream(total_cost_usd=0.25), stream()])
+    agent = agent_of(place, max_budget_usd="1.00")
+
+    agent.turn("one")
+    agent.turn("two")
+    agent.turn("three")
+
+    assert [budget_of(run) for run in place.runs] == [
+        Decimal("1.00"),
+        Decimal("0.4"),
+        Decimal("0.15"),
+    ]
+
+
+# #856-T44
+def test_a_turn_whose_budget_is_spent_sends_no_further_message() -> None:
+    place = Place(outputs=[stream(total_cost_usd=1.0), stream()])
+    agent = agent_of(place, max_budget_usd="1.00")
+    agent.turn("one")
+
+    assert not agent.has_budget_left()
+    with pytest.raises(LimitError) as stopped:
+        agent.turn("two")
+
+    assert stopped.value.code is ErrorCode.COST_LIMIT_REACHED
+    assert len(place.runs) == 1
+
+
+# #856-T44
+def test_a_turn_without_a_budget_passes_none() -> None:
+    place = Place(outputs=[stream(), stream()])
+    agent = agent_of(place)
+
+    agent.turn("one")
+    agent.turn("two")
+
+    assert agent.has_budget_left()
+    assert all("--max-budget-usd" not in run.argv for run in place.runs)
+
+
+# #856-T44: without an estimate the leftover is not known: one extra message at most
+def test_without_an_estimate_one_extra_message_is_allowed_and_not_a_third() -> None:
+    unknown = {"made-up": {"costBasis": "unknown"}}
+    place = Place(outputs=[stream(modelUsage=unknown), stream(modelUsage=unknown), stream()])
+    agent = agent_of(place, max_budget_usd="2.00")
+
+    agent.turn("one")
+    assert agent.has_budget_left()
+    agent.turn("two")
+    assert not agent.has_budget_left()
+    with pytest.raises(LimitError) as stopped:
+        agent.turn("three")
+
+    assert stopped.value.code is ErrorCode.COST_LIMIT_REACHED
+    assert [budget_of(run) for run in place.runs] == [Decimal("2.00"), Decimal("2.00")]
+
+
+# #856-T44
+def test_a_leftover_too_small_to_be_an_amount_counts_as_spent() -> None:
+    place = Place(outputs=[stream(total_cost_usd=0.9999996), stream()])
+    agent = agent_of(place, max_budget_usd="1.00")
+
+    agent.turn("one")
+
+    assert not agent.has_budget_left()
 
 
 # #856-T23

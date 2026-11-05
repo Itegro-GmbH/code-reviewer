@@ -195,6 +195,7 @@ describe("the budget and the cost", () => {
     ["reported", COST_BASIS_COPY.reported],
     ["estimated", COST_BASIS_COPY.estimated],
     ["limit", COST_BASIS_COPY.limit],
+    ["subscription", COST_BASIS_COPY.subscription],
   ] as const)(
     "names the basis %s of a step's cost and explains it for the run",
     (basis, copy) => {

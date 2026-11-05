@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Final
 
 from .layer import CLAUDE_CODE_VERSION, LayerDaemon, LayerError, LayerSpec, ensure_layer, find_layer
-from .login import LoginProblem, load_login
+from .login import ClaudeLogin, LoginProblem, load_login
 
 HARNESS_CLAUDE_CODE: Final = "claude-code"
 # The agent image the runner starts agents from (`agent_container.AGENT_IMAGE_REFERENCE`).
@@ -89,4 +89,54 @@ def claude_code_status(
     return HarnessStatus(spec.version, True, notes)
 
 
-__all__ = ["HARNESS_CLAUDE_CODE", "HarnessStatus", "claude_code_status", "layer_spec"]
+@dataclass(frozen=True)
+class ReadyHarness:
+    """What a job that asks for Claude Code is run with: the device's login and the image of the
+    layer (the agent image with Claude Code in it)."""
+
+    login: ClaudeLogin
+    image: str
+
+
+@dataclass(frozen=True)
+class HarnessNotReady:
+    """Why this device cannot run Claude Code for the job in hand. `text` is words, never a
+    secret."""
+
+    text: str
+
+
+def ready_harness(
+    daemon: LayerDaemon,
+    environment: Mapping[str, str],
+    home: Path,
+    *,
+    agent_image: str = AGENT_IMAGE,
+) -> ReadyHarness | HarnessNotReady:
+    """The readiness of the manifest, looked at again for **this job** (#856): the login is read
+    and the layer is looked for, nothing is built. A device that cannot run Claude Code refuses the
+    job; it never runs it with another harness."""
+    login = load_login(environment, home)
+    if isinstance(login, LoginProblem):
+        return HarnessNotReady(login.text)
+    spec = layer_spec(environment)
+    if isinstance(spec, str):
+        return HarnessNotReady(spec)
+    try:
+        layer = find_layer(daemon, agent_image, spec)
+    except LayerError as error:
+        return HarnessNotReady(str(error))
+    if layer is None:
+        return HarnessNotReady(f"the layer with Claude Code {spec.version} is not on this daemon")
+    return ReadyHarness(login, layer.image)
+
+
+__all__ = [
+    "HARNESS_CLAUDE_CODE",
+    "HarnessNotReady",
+    "HarnessStatus",
+    "ReadyHarness",
+    "claude_code_status",
+    "layer_spec",
+    "ready_harness",
+]

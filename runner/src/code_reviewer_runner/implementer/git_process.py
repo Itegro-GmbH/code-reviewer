@@ -153,18 +153,20 @@ class GitProcess:
         cwd: Path | str = "/",
         spawn: Mapping[str, Any] | None = None,
         timeout: float = DEFAULT_TIMEOUT,
+        stdin: bytes | None = None,
     ) -> Outcome:
         """Run git and hand its standard output to `consume` in chunks, keeping none of it (#764):
         for output whose size the caller does not control and needs only part of. Standard error is
         dropped; the caller decides from the exit status alone. A `consume` that raises ends git's
         whole process group and the exception goes to the caller. A timeout is `unanswered`, as in
-        `run`."""
+        `run`. `stdin` is written to git's standard input (from a thread of its own, so that a
+        command that answers while it is still being told cannot block); none: nothing to read."""
         try:
             child = subprocess.Popen(
                 [self.git, *args],
                 cwd=cwd,
                 env=dict(env),
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
@@ -173,6 +175,8 @@ class GitProcess:
         except OSError as error:
             return Outcome(255, "", f"git cannot run: {error.strerror or 'error'}", unanswered=True)
         timed_out = threading.Event()
+        if stdin is not None:
+            threading.Thread(target=_write_all, args=(child, stdin), daemon=True).start()
 
         def expire() -> None:
             timed_out.set()
@@ -198,3 +202,13 @@ class GitProcess:
         if timed_out.is_set():
             return Outcome(255, "", f"git {args[0] if args else ''} timed out", unanswered=True)
         return Outcome(child.returncode, "", "")
+
+
+def _write_all(child: "subprocess.Popen[bytes]", data: bytes) -> None:
+    """Write `data` to the child's standard input and close it; a child that went first is fine."""
+    with contextlib.suppress(OSError):
+        assert child.stdin is not None  # stdin=PIPE
+        child.stdin.write(data)
+    with contextlib.suppress(OSError):
+        if child.stdin is not None:
+            child.stdin.close()

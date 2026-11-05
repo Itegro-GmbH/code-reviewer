@@ -45,14 +45,42 @@ describe("the profile snapshot of a turn", () => {
       }),
     );
 
-    expect(turn.profile).toEqual(PROFILE);
+    // A turn written without a harness is a turn on OpenCode (#856).
+    expect(turn.profile).toEqual({ ...PROFILE, harness: "opencode" });
     expect(turn.costLimitCents).toBe(250);
     expect(turn.modelChoice).toEqual({ provider: "anthropic", model: "m" });
     const read = await createImplementerRepository(
       db,
       workspaceId,
     ).getTurnByJob(turn.jobId);
-    expect(read?.turn.profile).toEqual(PROFILE);
+    expect(read?.turn.profile).toEqual({ ...PROFILE, harness: "opencode" });
+  });
+
+  // #856-T63
+  it("keeps the harness of the version, and refuses one in the database for a turn without a profile", async () => {
+    const { db, workspaceId, seed } = await setup();
+    const { turn } = await startTask(
+      db,
+      workspaceId,
+      taskOf(seed, { profile: { ...PROFILE, harness: "claude-code" } }),
+    );
+    expect(turn.profile?.harness).toBe("claude-code");
+
+    const other = await startTask(
+      db,
+      workspaceId,
+      taskOf(seed, { branch: "implementer/other" }),
+    );
+    await expect(
+      sql`update implementer_turns set profile_harness = 'claude-code' where id = ${other.turn.id}`.execute(
+        db,
+      ),
+    ).rejects.toThrow(/implementer_turns_profile_harness_check/);
+    await expect(
+      sql`update implementer_turns set profile_harness = 'codex' where id = ${turn.id}`.execute(
+        db,
+      ),
+    ).rejects.toThrow(/implementer_turns_profile_harness_check/);
   });
 
   // #843-T151

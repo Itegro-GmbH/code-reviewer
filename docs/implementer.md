@@ -229,6 +229,8 @@ gave up, a stop with the lease still held), and never after a lost lease, the ru
 | `unreadable` | The branch could not be taken over from the agent's repository (a broken repository, objects git refuses) |
 | `not_a_commit` | The branch points at a tree or a tag, not a commit |
 | `out_of_time` | The time for the final push ran out before this branch |
+| `login_secret` | (#856) The branch holds the login of the device of a runner that ran the agent on its own Claude login (the token, or one of its spellings: URL-quoted, base64) in a commit, a file, a file name, a commit message or its own name, so it was not pushed; the turn ends `push_rejected` when it is the task's branch |
+| `unchecked` | (#856) The push guard could not read the branch to its end (too large, or git failed), so it was not pushed: the guard never lets a branch through that it did not read |
 | `out_of_space` | The disk the runner takes branches over to (the reserve disk, section "The disk") had too little room left, or ran out while this one was taken over; nothing was fetched when the room was short beforehand |
 | `excluded` | The branch is in `PUSH_EXCLUDED_BRANCHES` (below) |
 

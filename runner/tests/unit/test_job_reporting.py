@@ -643,6 +643,8 @@ def _populated(ok: bool) -> JobResult:
             stopped_early="cost_limit",
             limit_exceeded_by=0.0123,
             call_trace=_trace(),
+            cost_basis="subscription",
+            estimated_cost_usd=0.5,
         ),
         error_reason="no_result_from_process",
         findings=ReviewFindings(

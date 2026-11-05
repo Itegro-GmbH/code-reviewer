@@ -48,6 +48,11 @@ export const IMPLEMENTER_ERROR_CODES = [
    * the platform's and runs on platform VMs only. Refused before anything is written, so nothing is started and nothing is charged. 422.
    */
   "IMPLEMENTER_RUNNER_NEEDS_OWN_KEY",
+  /**
+   * The profile runs on a harness a runner announces (#856: `claude-code`, on the login of a customer's device) and the environment is not a
+   * runner's. Refused before anything is written, so nothing is started and nothing is charged. 422.
+   */
+  "IMPLEMENTER_HARNESS_NEEDS_RUNNER",
   /** The profile named by the body is not one of this workspace (another workspace's looks the same), is archived, or has no such version. 404. */
   "IMPLEMENTER_PROFILE_NOT_FOUND",
   /** The model is not one the claim would run (`reason` says why). 422. */
@@ -89,6 +94,7 @@ export const IMPLEMENTER_ERROR_STATUS: Record<
   IMPLEMENTER_ENVIRONMENT_NOT_FOUND: 404,
   IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED: 422,
   IMPLEMENTER_RUNNER_NEEDS_OWN_KEY: 422,
+  IMPLEMENTER_HARNESS_NEEDS_RUNNER: 422,
   IMPLEMENTER_PROFILE_NOT_FOUND: 404,
   IMPLEMENTER_MODEL_NOT_ALLOWED: 422,
   EXCEEDS_OPERATOR_MAXIMUM: 422,

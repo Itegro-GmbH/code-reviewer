@@ -126,6 +126,7 @@ class Rig:
         timeout: float = 600.0,
         space: Callable[[Path], DiskSpace] | None = None,
         resume: ImplementerResume | None = None,
+        guard_secrets: Sequence[str] = (),
     ) -> GitWorkspace:
         spec = WorkspaceSpec(
             clone_url=url or self.origin.url,
@@ -143,6 +144,7 @@ class Rig:
             schemes=schemes,
             timeout=timeout,
             space=space or disk_space,
+            guard_secrets=guard_secrets,
         )
 
     def prepared(

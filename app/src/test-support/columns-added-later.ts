@@ -28,6 +28,8 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
     "profile_version",
     "profile_instructions",
     "profile_can_push",
+    // #856: the harness of the profile version; null for every turn that exists (it reads OpenCode).
+    "profile_harness",
     // #843: the result schema a task ran with and the result the agent handed in; null for every turn that exists.
     "result_schema",
     "result_value",

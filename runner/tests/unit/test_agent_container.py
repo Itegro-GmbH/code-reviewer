@@ -324,6 +324,21 @@ def test_the_runtime_and_the_entrypoint_are_seams_and_production_leaves_them_alo
     assert made.document["Entrypoint"] == ["/usr/bin/tini", "--", "/bin/sh"]
 
 
+# #856-P01: only the Claude Code agent's container is made with no-new-privileges
+def test_the_hosted_agent_container_is_not_sealed_against_new_privileges(rig: Rig) -> None:
+    AgentContainer(1024, rig.seams()).create()
+
+    assert "SecurityOpt" not in rig.engine.container(AGENT_CONTAINER_NAME).document["HostConfig"]
+
+
+# #856-P01
+def test_the_seam_makes_the_agent_container_without_new_privileges(rig: Rig) -> None:
+    AgentContainer(1024, rig.seams(no_new_privileges=True)).create()
+
+    host = rig.engine.container(AGENT_CONTAINER_NAME).document["HostConfig"]
+    assert host["SecurityOpt"] == ["no-new-privileges"] and host["Privileged"] is False
+
+
 # -- driving it only outward --------------------------------------------------------------------
 
 

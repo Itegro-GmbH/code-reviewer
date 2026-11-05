@@ -7,6 +7,11 @@
 // session is needed for the job's placeholder pull request number (`-slot`), and the turn needs the job.
 // A row of another workspace is simply not there. src/db/README.md, "Implementer sessions and turns".
 import "server-only";
+import {
+  CLAUDE_CODE_HARNESS,
+  OPENCODE_HARNESS,
+  type ProfileHarness,
+} from "../../runner-identity/harness.ts";
 import type { Kysely, Selectable } from "kysely";
 import { sql } from "kysely";
 import {
@@ -145,6 +150,8 @@ export type TurnProfile = {
   instructions: string;
   /** Whether Control pushes the branches the agent made when the turn ends. */
   canPush: boolean;
+  /** #856: the harness the version runs with; left out when the turn is written, OpenCode is meant. Always set when it is read. */
+  harness?: ProfileHarness;
 };
 
 export type { AgentResultValue };
@@ -494,6 +501,10 @@ function turnFrom(
             version: row.profile_version,
             instructions: row.profile_instructions,
             canPush: row.profile_can_push === 1,
+            harness:
+              row.profile_harness === CLAUDE_CODE_HARNESS
+                ? CLAUDE_CODE_HARNESS
+                : OPENCODE_HARNESS,
           },
     resultSchema: readJsonObject(
       row.result_schema,
@@ -603,6 +614,10 @@ export function createImplementerRepository(
         profile_name: task.profile?.name ?? null,
         profile_version: task.profile?.version ?? null,
         profile_instructions: task.profile?.instructions ?? null,
+        profile_harness:
+          task.profile === undefined || task.profile === null
+            ? null
+            : (task.profile.harness ?? OPENCODE_HARNESS),
         profile_can_push:
           task.profile === undefined || task.profile === null
             ? null

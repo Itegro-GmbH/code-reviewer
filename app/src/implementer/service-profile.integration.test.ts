@@ -396,3 +396,96 @@ describe("a task with a cost cap of the caller", () => {
     expect(await limitOf(app, started.sessionId)).toBe(200);
   });
 });
+
+describe("a task with a profile on the harness claude-code", () => {
+  const CLAUDE = {
+    ...CONTENT,
+    model: { provider: "claude-code", model: "claude-sonnet-5-5" },
+    canPush: true,
+    harness: "claude-code" as const,
+  };
+
+  async function claudeSetup() {
+    const app = await startImplementerHarness();
+    const made = await app.profiles.create(
+      { name: "claude", content: CLAUDE, createdBy: USER.id },
+      100,
+    );
+    if (!made.ok) throw new Error("seeding failed");
+    const environments = createImplementerEnvironmentsRepository(
+      app.h.db,
+      app.h.workspaceId,
+    );
+    const runner = await environments.create(
+      { kind: "runner", name: "My box", labels: ["box"], createdBy: USER.id },
+      50,
+    );
+    const hosted = await environments.create(
+      {
+        kind: "hosted",
+        name: "Standard",
+        vcpus: 4,
+        setupScript: "",
+        createdBy: USER.id,
+      },
+      50,
+    );
+    if (!runner.ok || !hosted.ok) throw new Error("seeding failed");
+    return { ...app, runner: runner.environment, hosted: hosted.environment };
+  }
+
+  // #856-T60
+  it("copies the harness into the turn and runs without asking the catalog for the model", async () => {
+    const app = await claudeSetup();
+
+    const started = await app.service.startTask(USER, {
+      ...withProfile(app as never, "claude"),
+      environmentId: app.runner.id,
+    });
+
+    expect(await turnOf(app as never, started.sessionId)).toMatchObject({
+      model_choice: JSON.stringify({
+        provider: "claude-code",
+        model: "claude-sonnet-5-5",
+      }),
+      profile_name: "claude",
+      profile_harness: "claude-code",
+      environment_kind: "runner",
+    });
+  });
+
+  // #856-T60
+  it("is refused with its own code in a hosted environment and in none, before anything is written", async () => {
+    const app = await claudeSetup();
+
+    for (const environmentId of [app.hosted.id, null]) {
+      const refusal = await failureOf(
+        app.service.startTask(USER, {
+          ...withProfile(app as never, "claude"),
+          environmentId,
+        }),
+      );
+      expect(refusal).toBeInstanceOf(ImplementerError);
+      expect(refusal).toMatchObject({
+        code: "IMPLEMENTER_HARNESS_NEEDS_RUNNER",
+      });
+    }
+    expect(
+      await app.h.db.selectFrom("implementer_turns").selectAll().execute(),
+    ).toEqual([]);
+  });
+
+  // #856-T61
+  it("leaves a task with an OpenCode profile exactly as it was: the harness is opencode", async () => {
+    const app = await setup();
+
+    const started = await app.service.startTask(
+      USER,
+      withProfile(app, "reviewer"),
+    );
+
+    expect(await turnOf(app, started.sessionId)).toMatchObject({
+      profile_harness: "opencode",
+    });
+  });
+});

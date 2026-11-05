@@ -24,7 +24,7 @@ conversation found" without a model call) starts a fresh session under the same 
 
 import threading
 from collections.abc import Callable, Mapping, Sequence
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from typing import Any, Final, Protocol
 
 from code_reviewer_runner.dynamic_review.adapter import EngineError
@@ -55,6 +55,11 @@ _HAND_OVER: Final = (
     'chown -R "$0" /work/repo && { [ ! -d /work/result ] || chown -R "$0" /work/result; }'
 )
 HAND_OVER_SECONDS: Final = 120.0
+# The smallest amount `--max-budget-usd` takes; a leftover below it is spent.
+_BUDGET_STEP: Final = Decimal("0.000001")
+# Without an estimate of what the earlier messages cost, the leftover of the budget is not known:
+# the turn sends at most this many messages (the instruction and one extra).
+MESSAGES_WITHOUT_ESTIMATE: Final = 2
 
 
 class ClaudePlace(Protocol):
@@ -127,6 +132,7 @@ class ClaudeCodeAgent:
         self.turn_seconds: list[float] = []
         self._cost = Decimal(0)
         self._cost_known = True
+        self._messages = 0
         self._ignored_lines = 0
         self._events = ClaudeEvents(self.session_id)
 
@@ -142,6 +148,26 @@ class ClaudeCodeAgent:
         """The cost of the session at API prices: an estimate for the display "≈ ... through a
         subscription", never billed, never added to our totals. None when a turn was not priced."""
         return self._cost if self._cost_known else None
+
+    # -- the budget -----------------------------------------------------------
+
+    def _budget_left(self) -> Decimal | None:
+        """What the turn may still spend, or None when it has no budget. Claude Code counts its
+        `--max-budget-usd` per process, and every message of the turn (the instruction, the extra
+        message for a dirty tree, the reminder for a result) is another process: each one gets the
+        cap less the estimate of the messages before it. Without that estimate the leftover is
+        unknown, and the turn allows one extra message at most."""
+        if self._budget is None:
+            return None
+        cap = Decimal(self._budget)
+        if self._cost_known:
+            return max(cap - self._cost, Decimal(0)).quantize(_BUDGET_STEP, rounding=ROUND_DOWN)
+        return cap if self._messages < MESSAGES_WITHOUT_ESTIMATE else Decimal(0)
+
+    def has_budget_left(self) -> bool:
+        """Whether another message may be sent within the budget of the turn."""
+        left = self._budget_left()
+        return left is None or left > 0
 
     # -- process --------------------------------------------------------------
 
@@ -209,13 +235,16 @@ class ClaudeCodeAgent:
         if remaining <= 0:
             self._check_deadline()
             raise LimitError(ErrorCode.TIME_LIMIT_REACHED, "no time is left for the turn")
+        left = self._budget_left()
+        if left is not None and left <= 0:
+            raise LimitError(ErrorCode.COST_LIMIT_REACHED, "the budget of the turn is spent")
         argv = ClaudeCommand(
             model=self._model,
             session=SessionChoice.resume(self.session_id)
             if self._resumes
             else SessionChoice.new(self.session_id),
             finish_command=None if self._schema is None else finish_server_command(),
-            max_budget_usd=self._budget,
+            max_budget_usd=None if left is None else _amount_of(self._budget, left),
             instructions=self._instructions,
         ).argv()
         environment = claude_environment(self._login, base_url=self._base_url)
@@ -282,6 +311,7 @@ class ClaudeCodeAgent:
 
     def _ended(self, result: ClaudeResult | None) -> AgentTurn:
         assert result is not None
+        self._messages += 1
         if result.estimated_cost_usd is None:
             self._cost_known = False
         else:
@@ -301,7 +331,16 @@ class ClaudeCodeAgent:
                 ErrorCode.IMPLEMENTER_ENGINE_UNAVAILABLE,
                 f"Claude Code ended its turn with an error ({reason})",
             )
-        return AgentTurn(text=result.text, note=result.terminal_reason or result.subtype)
+        # The login is in the environment of the agent's tools, so the agent can print it: nothing
+        # it said leaves this object with it in (the session redacts again with the job's secrets).
+        note = result.terminal_reason or result.subtype
+        return AgentTurn(text=self._redactor.redact(result.text), note=self._redactor.redact(note))
+
+
+def _amount_of(cap: str | None, left: Decimal) -> str:
+    """The leftover as the amount the flag takes: the cap itself while nothing was spent (as it
+    was written), else the leftover to the sixth place."""
+    return cap if cap is not None and Decimal(cap) == left else format(left, "f")
 
 
 def _text_of(part: Mapping[str, Any]) -> str:

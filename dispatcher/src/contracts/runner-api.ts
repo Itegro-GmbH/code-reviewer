@@ -161,7 +161,7 @@ export type KnownRunnerErrorCode =
   | "sandbox_size_unsupported"
   | "environment_setup_failed";
 /**
- * Exactly the job the runner reads on stdin (see runner/src/code_reviewer_runner/job.py). Closed: the runner refuses unknown fields. Contains secrets (git.token, llm.apiKey): only the claim response carries it. #746: for `reviewKind: implementer` the job carries the `implementer` object instead of `prUrl`, `command`, `base` and `dynamic`; `git.token` is then a token that may write the contents of exactly the repository named in `implementer.repo` and nothing else.
+ * Exactly the job the runner reads on stdin (see runner/src/code_reviewer_runner/job.py). Closed: the runner refuses unknown fields. Contains secrets (git.token, llm.apiKey): only the claim response carries it. #746: for `reviewKind: implementer` the job carries the `implementer` object instead of `prUrl`, `command`, `base` and `dynamic`; `git.token` is then a token that may write the contents of exactly the repository named in `implementer.repo` and nothing else. #856: `llm` is required for every job except a turn of the Implementer whose profile names the harness `claude-code` (a subscription turn): that turn runs on the login of the device of the runner, has no model door and no key of ours, and carries no `llm`, no `implementer.cost` and no `implementer.modelEntry`; the runner refuses a job that carries them with it, and every other job without `llm` (`invalid_job`).
  */
 export type RunnerJobInput = {
   [k: string]: unknown;
@@ -184,7 +184,7 @@ export type RunnerJobInput = {
     token: string;
     botLogin: string;
   };
-  llm: {
+  llm?: {
     /**
      * #424: the slug of an LLM provider, as in the registries of the app and of the runner. The form only: whether a slug is usable is decided by the registry of the side that reads it.
      */
@@ -218,6 +218,28 @@ export type RunnerJobInput = {
       | [string, string, string, string, string];
   };
   env: JobEnv;
+};
+/**
+ * #746: what an implementer job asks for (`reviewKind: implementer`; the factory deployment only). A closed object: there is no command, permission, executable, endpoint or upstream URL here, so a job can never widen what the agent may do. The agent works in a clone of `repo` that starts at the head of `baseBranch`, on the new branch `branch` (it must not exist yet) and only there, and pushes it. `instruction` is the user's task as literal data. `limits.timeLimitSeconds` is the wall clock the runner holds the turn to (the Dispatcher's own timeout for the kind is the backstop). `cost` and `modelEntry` are the `DynamicCostPolicy` and the `DynamicModelEntry` of the native Dynamic job, unchanged: the same passthrough proxy, price book and token cap, and a native job is the only way the Implementer runs a model. `capabilities` is optional, as for Dynamic. `resume` (#838) is present on a follow-up turn only: the branch then exists on the provider (an earlier turn pushed it) and the turn starts from the branches of `resume` instead of the base. #856: `cost` and `modelEntry` are required for every turn except one on the harness `claude-code` (the `harness` of the profile), which carries `subscription` instead and neither of them; the runner refuses a job that has both or neither.
+ */
+export type ImplementerJob = {
+  [k: string]: unknown;
+} & {
+  repo: ImplementerRepo;
+  baseBranch: ImplementerBranchName;
+  branch: ImplementerBranchName;
+  instruction: string;
+  limits: {
+    timeLimitSeconds: number;
+  };
+  cost?: DynamicCostPolicy;
+  modelEntry?: DynamicModelEntry;
+  subscription?: ImplementerSubscription;
+  capabilities?: DynamicModelCapabilities;
+  environment?: ImplementerEnvironment;
+  profile?: ImplementerProfile;
+  resultSchema?: ImplementerResultSchema;
+  resume?: ImplementerResume;
 };
 /**
  * #746: the name of a branch as a job carries it: a non-empty text of at most 255 characters without whitespace and not starting with a dash (so it can never be read as an option). Whether it is a valid git ref name is decided by the app when the turn is submitted and again by the runner before it runs git; this is the floor both share.
@@ -951,30 +973,18 @@ export interface JobEnv {
   [k: string]: string;
 }
 /**
- * #746: what an implementer job asks for (`reviewKind: implementer`; the factory deployment only). A closed object: there is no command, permission, executable, endpoint or upstream URL here, so a job can never widen what the agent may do. The agent works in a clone of `repo` that starts at the head of `baseBranch`, on the new branch `branch` (it must not exist yet) and only there, and pushes it. `instruction` is the user's task as literal data. `limits.timeLimitSeconds` is the wall clock the runner holds the turn to (the Dispatcher's own timeout for the kind is the backstop). `cost` and `modelEntry` are the `DynamicCostPolicy` and the `DynamicModelEntry` of the native Dynamic job, unchanged: the same passthrough proxy, price book and token cap, and a native job is the only way the Implementer runs a model. `capabilities` is optional, as for Dynamic. `resume` (#838) is present on a follow-up turn only: the branch then exists on the provider (an earlier turn pushed it) and the turn starts from the branches of `resume` instead of the base.
- */
-export interface ImplementerJob {
-  repo: ImplementerRepo;
-  baseBranch: ImplementerBranchName;
-  branch: ImplementerBranchName;
-  instruction: string;
-  limits: {
-    timeLimitSeconds: number;
-  };
-  cost: DynamicCostPolicy;
-  modelEntry: DynamicModelEntry;
-  capabilities?: DynamicModelCapabilities;
-  environment?: ImplementerEnvironment;
-  profile?: ImplementerProfile;
-  resultSchema?: ImplementerResultSchema;
-  resume?: ImplementerResume;
-}
-/**
  * #746: the one repository a turn works on. `fullName` is `owner/name`; `cloneUrl` is the https address the runner clones from (the host of the git provider), with no credential in it: the token is in `git.token`.
  */
 export interface ImplementerRepo {
   fullName: string;
   cloneUrl: string;
+}
+/**
+ * #856: what a turn on the harness `claude-code` is run with instead of a model door: the own Claude login of the customer, which lives on the device of the runner and is never in a job, in the app or in a log. `model` is a model name or alias as Claude Code reads it (`sonnet`, `claude-sonnet-5-5`); left out, Claude Code uses its default. `maxBudgetUsd` is the most the turn may be worth at API prices, in US dollars as a decimal string: Claude Code stops the turn after the call that crosses it (`--max-budget-usd`). It is the only brake besides the clock of the job, since there is no model door and no ledger. What a subscription turn is worth is an estimate (`usage.costBasis` is `subscription`) that is shown, never billed and never added to a total.
+ */
+export interface ImplementerSubscription {
+  model?: string;
+  maxBudgetUsd: string;
 }
 /**
  * #745, step 7: the rule for the agent's network, as the owner of the environment wrote it. `off`: the agent has no network and no network door is started. `list`: the agent reaches the host names in `hosts` through the network door and no others; an entry is a host name in its ASCII (punycode) lower-case form, either exact (`registry.npmjs.org`) or a suffix (`*.pythonhosted.org`, any name below `pythonhosted.org`, not the name itself), never an IP address, a port or a path; both have at least two labels (after the `*.` for a suffix) and a last label that starts with a letter, which no address does; at most 100 entries. `open`: the agent reaches any public name. In every mode the door refuses IP literals, names that resolve to a private, loopback, link-local, shared or metadata address, and ports other than 80 and 443. `hosts` is empty unless the mode is `list`, and not empty then.
@@ -987,13 +997,14 @@ export interface ImplementerNetworkRule {
   hosts: string[];
 }
 /**
- * #843: the profile version a turn was started with, as the turn copied it when it started. Present only for a turn started with a profile and a caller that named the claim feature `implementer_profile`; a turn without a profile carries nothing and runs with the platform's own defaults, exactly as every turn did before profiles. The model and the cost limit of the version are not here: they are the turn's own `modelEntry`, `cost` and `llm.maxCostUsd`, chosen from the version by the app. `instructions`, when present, is the system-level text the agent is given: the runner appends it to the instruction file it writes for the engine (after its own rules, so the text is the same for every turn of one version and the model provider's prompt cache hits), as literal data written by a member of the workspace; it is left out when the version has none. `canPush` says whether Control pushes the branches the agent made when the turn ends: when false the runner pushes nothing, lists no branch, reports no head commit and no commits, and the turn is a success without a push (a profile that only reads). The agent never has a remote or a credential, whatever `canPush` says. `name` and `version` are for the run's log line only.
+ * #843: the profile version a turn was started with, as the turn copied it when it started. Present only for a turn started with a profile and a caller that named the claim feature `implementer_profile`; a turn without a profile carries nothing and runs with the platform's own defaults, exactly as every turn did before profiles. The model and the cost limit of the version are not here: they are the turn's own `modelEntry`, `cost` and `llm.maxCostUsd`, chosen from the version by the app. `instructions`, when present, is the system-level text the agent is given: the runner appends it to the instruction file it writes for the engine (after its own rules, so the text is the same for every turn of one version and the model provider's prompt cache hits), as literal data written by a member of the workspace; it is left out when the version has none. `canPush` says whether Control pushes the branches the agent made when the turn ends: when false the runner pushes nothing, lists no branch, reports no head commit and no commits, and the turn is a success without a push (a profile that only reads). The agent never has a remote or a credential, whatever `canPush` says. `name` and `version` are for the run's log line only. #856: `harness` (optional, `opencode` when left out) is the harness the agent runs with. `claude-code` is run only by a runner that announces it as ready, on the login of the device of that runner (`ImplementerJob.subscription`); a runner that cannot run it refuses the turn (`implementer_engine_unavailable`, reason `harness_not_ready`) and never falls back to OpenCode.
  */
 export interface ImplementerProfile {
   name: string;
   version: number;
   instructions?: string;
   canPush: boolean;
+  harness?: "opencode" | "claude-code";
 }
 /**
  * #843: the result schema of a turn, in the format of `result-schema.v1.json` (a subset of JSON Schema: strings with optional `enum` and `maxLength`, numbers, whole numbers, booleans, lists with `items` and `maxItems`, objects with `properties` and `required`, all closed, at most 4 levels and 100 fields). Present only for a turn that has one (the task's own, or the default of its profile) and a caller that named the claim feature `implementer_result`. The agent gets a finish tool made from it and decides itself when it is done; the runner checks what it handed in against the schema, with the rules of the app's `checkResultValue`. The app holds the result to the bounds of a result and does not check it against the schema again: the workflow engine does, before it routes the value anywhere. This definition states the root only: the format, its limits and the answer to a schema that breaks them are those of `result-schema.v1.json` and of the validators on both sides (`contracts/result-check-vectors.json` holds them to the same answers).
@@ -1314,7 +1325,7 @@ export interface ImplementerAgentResult {
   [k: string]: unknown;
 }
 /**
- * #746: what a turn of the Implementer did, in `RunnerResult.implementer`. A closed object; later fields (checks, open questions, an export of the work) are additive in a later change. It is facts the runner measured in the repository, never text from the agent except `summary`, which is shown as plain text. `baseCommit` is the head of the base branch the work started from; on a follow-up turn (the job carries `resume`) it is the tip the session branch started the turn at, which `commits` and `filesChanged` count from. `headCommit` is the last commit of the branch, or null when the turn made none. `pushed` says that the branch with `headCommit` is on the remote, and is never true without a `headCommit`. The branch is the one the form named. The agent may create other branches, and the runner pushes all local branches of the agent's repository when the turn ends, each without force: `branches` has one entry for every branch the runner dealt with (at most 50, the task's branch first and then alphabetical), `pushed` or `rejected` with a reason word of the runner (`non_fast_forward`, `remote_rejected`, `workflows_not_allowed`, `provider_refused`, `provider_error`, `provider_unavailable`, `timed_out`, `unreadable`, `not_a_commit`, `out_of_time`, `excluded`; a caller treats an unknown word as a rejection without a reason). A branch with nothing new on the base commit is not listed. `branchesDropped` counts the local branches that are in no entry: `invalid` those whose name cannot be pushed, `overflow` the valid ones beyond the limit of 50 (an unreadable list of branches, or one too long to read, has no entries and the turn ends `push_rejected`). A result without `branches` comes from an older runner and means none. `commits` are the commits of the form's branch after the base commit, oldest first, at most 200 (more are cut off, the head commit is always the last); `filesChanged` are the files that differ between the base commit and the head commit, at most 500. `opencode` names the saved agent session a later turn continues, null when none was saved. `checkedOut` (#837, optional) is the local branch the agent's HEAD was on when the runner read the repository after the turn, once a detached HEAD with work on no branch was saved on a branch (`<task branch>-leftover-<id>`): a name as those of `branches` are, null when HEAD was detached and on no branch, or was not read; a follow-up turn starts on it. It names a branch of the agent's repository, which may not have arrived: `branches` says which did. A result without `checkedOut` comes from an older runner. `resume` (#840, optional) says how a follow-up turn got its earlier conversation (`ImplementerResumeResult`); a result without it is a first turn, a turn that ended before the engine started, or comes from an older runner. A failed turn carries the block too, whenever the runner got as far as the repository.
+ * #746: what a turn of the Implementer did, in `RunnerResult.implementer`. A closed object; later fields (checks, open questions, an export of the work) are additive in a later change. It is facts the runner measured in the repository, never text from the agent except `summary`, which is shown as plain text. `baseCommit` is the head of the base branch the work started from; on a follow-up turn (the job carries `resume`) it is the tip the session branch started the turn at, which `commits` and `filesChanged` count from. `headCommit` is the last commit of the branch, or null when the turn made none. `pushed` says that the branch with `headCommit` is on the remote, and is never true without a `headCommit`. The branch is the one the form named. The agent may create other branches, and the runner pushes all local branches of the agent's repository when the turn ends, each without force: `branches` has one entry for every branch the runner dealt with (at most 50, the task's branch first and then alphabetical), `pushed` or `rejected` with a reason word of the runner (`non_fast_forward`, `remote_rejected`, `workflows_not_allowed`, `provider_refused`, `provider_error`, `provider_unavailable`, `timed_out`, `unreadable`, `not_a_commit`, `out_of_time`, `excluded`, `login_secret`, `unchecked`; a caller treats an unknown word as a rejection without a reason). A branch with nothing new on the base commit is not listed. `branchesDropped` counts the local branches that are in no entry: `invalid` those whose name cannot be pushed, `overflow` the valid ones beyond the limit of 50 (an unreadable list of branches, or one too long to read, has no entries and the turn ends `push_rejected`). A result without `branches` comes from an older runner and means none. `commits` are the commits of the form's branch after the base commit, oldest first, at most 200 (more are cut off, the head commit is always the last); `filesChanged` are the files that differ between the base commit and the head commit, at most 500. `opencode` names the saved agent session a later turn continues, null when none was saved. `checkedOut` (#837, optional) is the local branch the agent's HEAD was on when the runner read the repository after the turn, once a detached HEAD with work on no branch was saved on a branch (`<task branch>-leftover-<id>`): a name as those of `branches` are, null when HEAD was detached and on no branch, or was not read; a follow-up turn starts on it. It names a branch of the agent's repository, which may not have arrived: `branches` says which did. A result without `checkedOut` comes from an older runner. `resume` (#840, optional) says how a follow-up turn got its earlier conversation (`ImplementerResumeResult`); a result without it is a first turn, a turn that ended before the engine started, or comes from an older runner. A failed turn carries the block too, whenever the runner got as far as the repository.
  */
 export interface ImplementerResult {
   baseCommit: string;
@@ -1441,6 +1452,14 @@ export interface RunnerUsage {
    */
   limitExceededBy?: number;
   callTrace?: RunnerCallTrace;
+  /**
+   * #856: present only on a turn that ran on the harness `claude-code` (a login of the customer's device): `subscription`. Such a turn is not billed through us, so `costUsd` is null; `estimatedCostUsd` is what Claude Code says the turn is worth at API prices, an estimate that is shown as such (for example as 'about 1.20 USD through a subscription') and never billed and never added to a total. A reader that does not know the field ignores it, and a turn without it is billed as before.
+   */
+  costBasis?: "subscription";
+  /**
+   * #856: see `costBasis`. Null when Claude Code did not price every model of the turn from its list (unknown).
+   */
+  estimatedCostUsd?: number | null;
   [k: string]: unknown;
 }
 /**

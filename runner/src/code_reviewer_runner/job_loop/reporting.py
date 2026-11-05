@@ -202,6 +202,18 @@ def _usage(value: object) -> dict[str, Any] | None:
         and excess > 0
     ):
         document["limitExceededBy"] = excess
+    # The cost of a turn on a login of the customer's device (#856): the basis and the estimate. A
+    # malformed one is left out and the rest of the usage is still reported.
+    if usage.get("costBasis") == "subscription":
+        estimate = usage.get("estimatedCostUsd")
+        if estimate is None or (
+            isinstance(estimate, (int, float))
+            and not isinstance(estimate, bool)
+            and math.isfinite(estimate)
+            and estimate >= 0
+        ):
+            document["costBasis"] = "subscription"
+            document["estimatedCostUsd"] = estimate
     # The per-call trace (#541) is observability: one that is not the contract's is left out, and
     # the usage, the cost and the verdict stay.
     raw_trace = usage.get("callTrace")

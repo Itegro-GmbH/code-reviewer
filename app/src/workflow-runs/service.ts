@@ -56,9 +56,10 @@ export type StepView = {
   costUsd: number | null;
   /**
    * Where `costUsd` comes from (#873): `reported` (the runner's figure), `estimated` (the token counts at the catalog price) or `limit`
-   * (the whole cap the turn ran under, because nothing better was known). null for a step that was charged nothing.
+   * (the whole cap the turn ran under, because nothing better was known), or `subscription` (#856: Claude Code's estimate at API prices
+   * of a turn on a customer device's login; it was not charged). null for a step that was charged nothing.
    */
-  costBasis: "reported" | "estimated" | "limit" | null;
+  costBasis: "reported" | "estimated" | "limit" | "subscription" | null;
   /** The values later steps refer to; null until the step succeeded. */
   output: unknown;
   errorCode: string | null;

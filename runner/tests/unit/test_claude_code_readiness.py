@@ -18,9 +18,12 @@ from code_reviewer_runner.implementer.claude_code.layer import (
 )
 from code_reviewer_runner.implementer.claude_code.readiness import (
     HARNESS_CLAUDE_CODE,
+    HarnessNotReady,
     HarnessStatus,
+    ReadyHarness,
     claude_code_status,
     layer_spec,
+    ready_harness,
 )
 from code_reviewer_runner.implementer.docker_api import DockerError
 
@@ -228,3 +231,43 @@ def test_prepare_asks_for_the_harnesses_only_when_the_base_is_proven() -> None:
     assert "claude-code" in good.announcement.manifest["harnesses"]  # type: ignore[operator]
     assert good.harness_notes == ("claude-code: a note",)
     assert "claude-code" not in bad.announcement.manifest["harnesses"]  # type: ignore[operator]
+
+
+# #856-H01
+def test_a_job_is_run_on_a_device_that_still_has_the_login_and_the_layer(tmp_path: Path) -> None:
+    daemon = Daemon(layer=True)
+
+    found = ready_harness(daemon, token_in(tmp_path), tmp_path)
+
+    assert isinstance(found, ReadyHarness)
+    assert found.login.secret == TOKEN and found.image == layer_tag(BASE, SPEC)
+    assert daemon.built == 0, "a job never builds a layer"
+
+
+# #856-H01
+def test_the_layer_gone_since_the_announcement_refuses_the_job_and_builds_nothing(
+    tmp_path: Path,
+) -> None:
+    daemon = Daemon(layer=False)
+
+    found = ready_harness(daemon, token_in(tmp_path), tmp_path)
+
+    assert isinstance(found, HarnessNotReady) and "layer" in found.text
+    assert daemon.built == 0
+
+
+# #856-H01
+def test_a_login_gone_or_loosened_since_the_announcement_refuses_the_job(tmp_path: Path) -> None:
+    gone = ready_harness(Daemon(layer=True), {}, tmp_path)
+    loose = ready_harness(Daemon(layer=True), token_in(tmp_path, mode=0o644), tmp_path)
+
+    assert isinstance(gone, HarnessNotReady) and isinstance(loose, HarnessNotReady)
+    assert TOKEN not in gone.text and TOKEN not in loose.text
+
+
+# #856-H01
+def test_an_agent_image_that_is_not_there_refuses_the_job(tmp_path: Path) -> None:
+    daemon = Daemon(layer=True)
+    daemon.images.pop("code-reviewer-agent:golden")
+
+    assert isinstance(ready_harness(daemon, token_in(tmp_path), tmp_path), HarnessNotReady)
