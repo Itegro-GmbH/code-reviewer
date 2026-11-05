@@ -63,12 +63,12 @@ from .door.protocol import (
 )
 from .door.status import parse_status
 from .door_state import DoorEnd, DoorState
+from .role_labels import role_labels
 
 _log = logging.getLogger(__name__)
 
 # What the daemon names the door's container and its network. One turn has one VM, so one door.
 DOOR_CONTAINER_NAME: Final = "code-reviewer-model-door"
-DOOR_ROLE_LABEL: Final = "code-reviewer.role"
 # The `runner` user of the image: not root, not the engine user, no home of its own to write to.
 DOOR_USER: Final = "10001:10001"
 DOOR_MEMORY_BYTES: Final = 256 * 1024 * 1024
@@ -152,7 +152,7 @@ def network_document() -> dict[str, Any]:
             "Config": [{"Subnet": MODEL_NETWORK_SUBNET, "Gateway": MODEL_NETWORK_GATEWAY}],
         },
         "Options": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
-        "Labels": {DOOR_ROLE_LABEL: "model-network"},
+        "Labels": role_labels("model-network"),
     }
 
 
@@ -165,7 +165,7 @@ def door_document(image: str) -> dict[str, Any]:
         "User": DOOR_USER,
         "Env": [],
         "Hostname": "model-door",
-        "Labels": {DOOR_ROLE_LABEL: "model-door"},
+        "Labels": role_labels("model-door"),
         "OpenStdin": True,
         "StdinOnce": True,
         "AttachStdin": True,
@@ -203,7 +203,7 @@ def rules_document(image: str, door: str) -> dict[str, Any]:
         "Cmd": [EGRESS_RULES],
         "User": "0:0",
         "Env": [],
-        "Labels": {DOOR_ROLE_LABEL: "model-door-rules"},
+        "Labels": role_labels("model-door-rules"),
         "HostConfig": {
             "NetworkMode": f"container:{door}",
             "Privileged": False,

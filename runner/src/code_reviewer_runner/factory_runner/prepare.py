@@ -19,7 +19,11 @@ from typing import Final
 from code_reviewer_runner.capabilities import ENGINE_IMPLEMENTER
 from code_reviewer_runner.factory_runner.app_client import Announcement
 from code_reviewer_runner.factory_runner.base import BASE_VERSION, HARNESS_OPENCODE
-from code_reviewer_runner.factory_runner.config import RunnerConfig, limits_document
+from code_reviewer_runner.factory_runner.config import (
+    RunnerConfig,
+    limits_document,
+    runner_identity,
+)
 from code_reviewer_runner.factory_runner.limits import (
     LimitsError,
     agent_environment,
@@ -35,6 +39,7 @@ from code_reviewer_runner.factory_runner.selftest import (
 )
 from code_reviewer_runner.implementer.agent_container import AGENT_IMAGE_REFERENCE, AGENT_RUNTIME
 from code_reviewer_runner.implementer.docker_api import DockerApi, DockerError
+from code_reviewer_runner.implementer.role_labels import RUNNER_ID_VARIABLE
 from code_reviewer_runner.implementer.runner_profile import AGENT_RUNTIME_VARIABLE
 from code_reviewer_runner.job import (
     IMPLEMENTER_AGENT_MEMORY_VARIABLE,
@@ -136,6 +141,8 @@ def job_environment(
             **agent_environment(config.limits),
         }
     )
+    if identity := runner_identity(config):
+        environment[RUNNER_ID_VARIABLE] = identity
     return environment
 
 
@@ -174,11 +181,12 @@ def prepare(
     *,
     selftest: Callable[..., SelfTestResult] = run_selftest,
     api: Callable[[], DockerApi] = DockerApi,
-    pull: Callable[[DockerApi, str], None] = pull_image,
+    pull: Callable[[DockerApi, str], None] | None = pull_image,
     machine_mb: Callable[[], int] = machine_memory_mb,
 ) -> Prepared:
     """Test the machine and decide what the runner is. Never raises for a machine that is not
-    ready: that is a `Prepared` whose base is not proven."""
+    ready: that is a `Prepared` whose base is not proven. `pull=None` only looks: an image that is
+    not here, or is not the pinned one, is reported and left alone."""
     settings = worker_settings_from_environment(source)
     settings = _implementer_settings(settings)
     reference = config.agent_image or baked_agent_image()
@@ -196,6 +204,7 @@ def prepare(
             limits=config.limits,
             agent_image=reference,
             pull=pull,
+            runner_id=runner_identity(config),
         )
         if result.base_ok:
             break

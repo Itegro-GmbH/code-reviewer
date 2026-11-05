@@ -7,6 +7,7 @@ import io
 import json
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -22,6 +23,7 @@ from code_reviewer_runner.factory_runner.base import (
     BASE_VERSION,
     DEFAULT_URL,
     EXIT_CONFIG,
+    EXIT_CREDENTIAL_UNSAVED,
     EXIT_FAILED,
     EXIT_NOT_READY,
     EXIT_OK,
@@ -165,7 +167,7 @@ def test_a_credential_that_cannot_be_saved_is_said_plainly_without_a_traceback(
 
     code, out, err = invoke(tmp_path, "register", "--token", TOKEN)
 
-    assert code == EXIT_CONFIG
+    assert code == EXIT_CREDENTIAL_UNSAVED
     assert "runner registered, but its credential could not be saved" in err
     assert "revoke it in the app" in err and "register again" in err
     assert "runner-1" in err and "Traceback" not in err
@@ -333,6 +335,29 @@ def test_selftest_as_json_is_machine_readable(tmp_path: Path) -> None:
     assert report["base"] is True
     assert report["capabilities"] == ["agent-docker"]
     assert [check["name"] for check in report["checks"]][:2] == ["docker", "canned-turn"]
+
+
+# #854-F7
+def test_selftest_only_looks_it_pulls_and_names_no_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[dict[str, Any]] = []
+
+    def prepare(config: RunnerConfig, env: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs)
+        return SimpleNamespace(selftest=_result(True))
+
+    monkeypatch.setattr(cli_module, "prepare", prepare)
+
+    got = main(
+        ["selftest"],
+        environment={"FACTORY_RUNNER_HOME": str(tmp_path / "home")},
+        out=io.StringIO(),
+        err=io.StringIO(),
+    )
+
+    assert got == EXIT_OK
+    assert seen == [{"pull": None}]
 
 
 def test_selftest_needs_no_registration(tmp_path: Path) -> None:

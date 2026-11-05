@@ -35,11 +35,11 @@ import re
 from typing import Any, Final
 
 from .docker_api import DockerApi, DockerError
+from .role_labels import role_labels
 
 _log = logging.getLogger(__name__)
 
 HELPER_NAME: Final = "code-reviewer-host-helper"
-HELPER_ROLE_LABEL: Final = "code-reviewer.role"
 HELPER_SECONDS: Final = 20.0
 NFT: Final = "/usr/sbin/nft"
 _INTERFACE_NAME = re.compile(r"[A-Za-z0-9_-]{1,15}")
@@ -89,7 +89,7 @@ def helper_document(
         "Cmd": command,
         "User": "0:0",
         "Env": [],
-        "Labels": {HELPER_ROLE_LABEL: role},
+        "Labels": role_labels(role),
         "HostConfig": {
             "NetworkMode": "host",
             "Privileged": False,

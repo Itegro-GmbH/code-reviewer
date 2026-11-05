@@ -26,6 +26,7 @@ A refusal names the variable or the field and never its value: the configuration
 """
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -92,6 +93,17 @@ class RunnerConfig:
     # `CREDENTIAL_FROM_FILE` or `CREDENTIAL_FROM_ENVIRONMENT`; not part of what a configuration is
     # (so two configurations with the same values are equal), only of where it was read from.
     credential_source: str = field(default=CREDENTIAL_FROM_ENVIRONMENT, compare=False)
+
+
+def runner_identity(config: RunnerConfig) -> str:
+    """What the containers of this runner are labelled with: the id the app gave it, else (a
+    credential from the environment, no file) a short digest of the credential, which names the
+    runner for as long as it keeps that credential and says nothing about it. Empty without both."""
+    if config.runner_id:
+        return config.runner_id
+    if config.credential:
+        return "credential-" + hashlib.sha256(config.credential.encode()).hexdigest()[:16]
+    return ""
 
 
 def home_directory(environment: Mapping[str, str]) -> Path:
@@ -315,15 +327,23 @@ def save_config(config: RunnerConfig, environment: Mapping[str, str]) -> Path:
 
 
 def update_credential(
-    environment: Mapping[str, str], *, renewed_at: float, credential: str | None = None
+    environment: Mapping[str, str],
+    *,
+    runner_id: str | None,
+    renewed_at: float,
+    credential: str | None = None,
 ) -> Path:
     """Change the credential's time (and, with `credential`, the credential itself) in the file as
     it is on disk; every other value, the address, name, labels and limits above all, stays as the
-    file has it and is never taken from the environment. `ConfigError` when there is no file."""
+    file has it and is never taken from the environment. `ConfigError` when there is no file, or
+    when the file belongs to another runner than `runner_id` (it was registered again meanwhile):
+    a credential of this runner is never written over that one's."""
     path = config_path(environment)
     document = _read_file(path)
     if not document:
         raise ConfigError("the configuration file is gone")
+    if _text(document.get("runnerId")) != runner_id:
+        raise ConfigError("the configuration file belongs to another runner")
     if credential is not None:
         document["credential"] = credential
     document["credentialRenewedAt"] = renewed_at
@@ -338,12 +358,25 @@ def _write_document(path: Path, document: Mapping[str, object]) -> Path:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump(document, handle, indent=2, sort_keys=True)
             handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temporary, path)
+        _sync_directory(path.parent)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(temporary)
         raise
     return path
+
+
+def _sync_directory(directory: Path) -> None:
+    """Make the rename durable: a crash after it must not bring the old file back (the app has
+    already put the new credential in place of the old one's successor)."""
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def redacted(config: RunnerConfig) -> dict[str, object]:

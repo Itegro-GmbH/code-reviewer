@@ -165,6 +165,7 @@ class Rig:
         limits: Limits = Limits(),  # noqa: B008
         image: str | None = None,
         pull: Callable[[Any, str], None] | None = None,
+        runner_id: str = "",
     ) -> SelfTestResult:
         return run_selftest(
             runtime=runtime,
@@ -173,6 +174,7 @@ class Rig:
             pull=pull,
             seams=self.seams,
             meminfo=self.meminfo,
+            runner_id=runner_id,
         )
 
 
@@ -233,6 +235,18 @@ def test_the_throwaway_container_has_no_network_no_volume_and_the_limits(rig: Ri
     assert document["Image"] == AGENT_IMAGE_REFERENCE
     assert "sleep infinity" in document["Entrypoint"][-1]  # the ready-only init under runc
     assert "NetworkingConfig" not in document
+
+
+# #854-R1
+def test_the_throwaway_container_carries_the_id_of_the_runner_like_the_containers_of_a_turn(
+    rig: Rig,
+) -> None:
+    rig.run(runner_id="r1")
+
+    assert rig.docker.created[0][0]["Labels"] == {
+        "code-reviewer.role": "selftest",
+        "code-reviewer.runner": "r1",
+    }
 
 
 def test_the_container_is_removed_whatever_the_checks_say(rig: Rig) -> None:

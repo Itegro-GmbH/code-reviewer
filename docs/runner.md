@@ -189,10 +189,10 @@ docker run -d --name factory-runner --restart unless-stopped --stop-timeout 150 
 
 | Command                        | What it does                                                                                                                               |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `register [--token-file F \| --token T] [--name N] [--labels a,b] [--url U] [--cpus] [--memory-mb] [--disk-gb] [--runtime] [--agent-image] [--force]` | Exchanges the token for the runner's credential (read from `--token-file`, `-`, `FACTORY_RUNNER_TOKEN` or `--token`, see above) and writes the configuration (file mode 0600, directory 0700). If the app accepted the token but the file cannot be written, it says `runner registered, but its credential could not be saved: revoke it in the app and register again` and ends with exit code 6: the credential is shown once and is lost. Refuses to replace a registration without `--force`. Without `--url` it goes to `https://code-review.com`. The manifest of the registration is empty: `run` announces what the self-test proved. |
+| `register [--token-file F \| --token T] [--name N] [--labels a,b] [--url U] [--cpus] [--memory-mb] [--disk-gb] [--runtime] [--agent-image] [--force]` | Exchanges the token for the runner's credential (read from `--token-file`, `-`, `FACTORY_RUNNER_TOKEN` or `--token`, see above) and writes the configuration (file mode 0600, directory 0700). If the app accepted the token but the file cannot be written, it says `runner registered, but its credential could not be saved: revoke it in the app and register again` and ends with exit code 8: the credential is shown once and is lost. Refuses to replace a registration without `--force`. Without `--url` it goes to `https://code-review.com`. The manifest of the registration is empty: `run` announces what the self-test proved. |
 | `run`                          | The service loop (below).                                                                                                                  |
 | `run --once [--wait SECONDS]`  | Takes **one** job and ends with its exit code. With no job within `--wait` (default 600) it ends with **exit code 0** and the line `no job for the labels of this runner within Ns: nothing to do`. |
-| `selftest [--json]`            | Proves the base (below). Exit code 0 when it holds, 5 when it does not. Needs no registration.                                             |
+| `selftest [--json]`            | Proves the base (below). Exit code 0 when it holds, 5 when it does not. Needs no registration. It only looks: it pulls and names no image, so a missing or not pinned agent image is reported as not ready (a starting `run` pulls it). It may run beside a service; its throwaway container is one more on the daemon for the seconds it takes. |
 | `config show`                  | The configuration as the runner sees it (file and environment), the credential only as `set` / `not set`.                                  |
 
 **Exit codes** (the same list is in `factory_runner/base.py`):
@@ -205,8 +205,10 @@ docker run -d --name factory-runner --restart unless-stopped --stop-timeout 150 
 | 3    | The app requires a newer base (`426`)                                                                                                           |
 | 4    | Revoked: the app does not know the credential any more                                                                                          |
 | 5    | Not ready: the self-test failed (the failed check says why)                                                                                     |
-| 6    | Configuration: a value is missing or wrong; or `register` got a credential it could not save (see below)                                       |
-| 7    | `run --once` only: **the app could not be reached** for the whole wait. Not the same as 0: the runner does not know whether a job waited       |
+| 6    | Configuration: a value is missing or wrong                                                                                                      |
+| 7    | `run --once` only: **the app never answered a claim** during the whole wait. Not the same as 0: the runner does not know whether a job waited. An app that answered once and was lost later is "no job", exit 0 |
+| 8    | `register` only: the app registered the runner, but its credential could not be saved (revoke the runner in the app and register again)        |
+| 9    | Another factory-runner uses this Docker daemon (see "One runner per daemon"); the runner announced nothing and claimed nothing                   |
 
 ### Configuration
 
@@ -231,14 +233,21 @@ older credential exists. A renewal whose file cannot be written is dropped: the 
 
 ### The service loop
 
+0. **One runner per daemon.** If a running container with `code-reviewer.role` but another (or no) `code-reviewer.runner` exists on the
+   daemon, the runner says `another factory-runner uses this Docker daemon; one runner per daemon for now`, ends with exit code 9 and
+   announces and claims nothing. Leftovers of an earlier registration (`register --force` makes a new id) look the same: remove the
+   containers with the label `code-reviewer.role` by hand if no other runner runs.
 1. **Prepare.** Check the machine (below) and decide the runtime: `auto` tries `sysbox-runc` when the daemon has it and falls back to
    `runc` when the self-test does not pass under it.
 2. **Announce** (`PUT /api/runners/v1/self`): labels, base version, the manifest (`opencode` with the version the runner pins and
    `ready`; `capabilities` such as `agent-docker`) and the limits it works within. A runner whose base is not proven announces
    `ready: false` and takes no job (exit code 5; the failed check is in the log).
-3. **Tidy**, before the first claim and again whenever a job has ended: every container and network with the label `code-reviewer.role`
-   is removed (what a killed runner left, the door with the workspace's key above all), then `/work/reserve`, `/work/repo` and
-   `/work/result` are emptied (a turn refuses to start on leftovers: `setup_failed ... exists already`). The same runs right after each
+3. **Tidy**, before the first claim and again whenever a job has ended: every container and network with the labels `code-reviewer.role`
+   and `code-reviewer.runner=<this runner's id>` is removed (what a killed runner left, the door with the workspace's key above all),
+   then `/work/reserve`, `/work/repo` and `/work/result` are emptied (a turn refuses to start on leftovers: `setup_failed ... exists
+   already`). The work volume is left alone when a container could not be removed (it may still mount it), and so is a folder with a
+   mount point below it (another device than `/work`): both are problems, so no claim. Rights are changed through opened folders
+   (`O_NOFOLLOW`, `fchmod`), never by path. The same runs right after each
    job. A runner that cannot tidy takes **no job** (it says why in the log, `run --once` ends with exit code 1, `run` tries again after a
    minute): a job it took would fail in its set-up.
 4. **Claim**, every 30 seconds with a little jitter. The claim is the runner's heartbeat: the list shows it online for two minutes after.
@@ -271,7 +280,7 @@ docker run --rm -v /var/run/docker.sock:/run/docker.sock -v /work \
 
 The VM announces itself (so the app sees an ordinary runner with these labels), takes the one job that is waiting for them, runs it,
 reports and ends; **with no job within the wait it ends with exit code 0** and says so, so a VM that was started for a job another
-runner took costs nothing more. **If the app could not be reached for the whole wait it ends with exit code 7 instead**: the runner
+runner took costs nothing more. **If the app never answered a claim during the whole wait it ends with exit code 7 instead**: the runner
 cannot know whether a job waited, so whoever started the VM can tell "nothing to do" from "never spoke to the app" and try again. The credential comes from the VM's secret store; nothing is written to disk. The anonymous volume
 `-v /work` is the work volume of the turn and goes with the container.
 
@@ -358,11 +367,21 @@ whose code the runner runs unchanged.
 
 ### Known limits
 
+- **One runner per Docker daemon.** The containers have fixed names (`code-reviewer-agent` ...) and the model network a fixed address, so a
+  second runner on the same daemon would fail every turn with a 409. Every container and network a runner's job creates carries
+  `code-reviewer.runner=<runnerId>` (a runner without an id from the file, one with a credential from the environment, uses a digest of
+  the credential), so a runner removes only its own and refuses to start beside another (exit 9). Unique names, and with them more
+  runners on one daemon, are R2. The hosted version sets no id and is unchanged.
 - **Snapshot and stored session.** `PUT .../session` and `GET .../resume-session` are Worker API routes and take the per-job
   credential alone; R1a part 2 decided that a runner credential must not reach them. Until the app lets a runner credential reach them
   for a job it holds, a turn on a runner takes **no snapshot** and a follow-up turn continues from the summary of the earlier ones (the
   fallback of the plan). The client is written (`RunnerJobApi(snapshot=True)`, tested against the fake App) and off. This resume gap
   (snapshot and resume for a customer's runner) is its own issue, **#879**; R1b does not build it.
+- **SIGTERM during the self-test** (N4) comes before the signal handlers are installed and ends the process at once; nothing is claimed.
+- **No warning for a `config.json` that is too open** (N5): the file is written 0600 in a 0700 folder, but a mode changed later is not noticed.
+- **`proven` under `runc`** (N6): the name of the sandbox proof says only that the self-test passed; under `runc` there is no Sysbox wall (see the security notes).
+- **No proxy for the app client** (N7): the runner talks to the app directly (`HTTPS_PROXY` is not read).
+- **`register --force`** (N8) replaces the local file and leaves the old runner in the app's list: revoke it there.
 - **The credential file** is as safe as the machine: whoever reads it is the runner. Revoke the runner in the app if the machine is lost.
 - **The page's command** shows `factory-runner register --token ...` without an address; the command goes to `https://code-review.com`.
   `--url` is for another app.

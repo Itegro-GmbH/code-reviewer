@@ -10,7 +10,7 @@ daemon's default runtime, `runc`, as an ordinary unprivileged container (no `--p
 mounts of the host, no socket), and the image's init, which starts the inner Docker, is replaced by
 one that only says the container is ready: the agent works, without a Docker of its own.
 
-The runner service names its choice in three variables of the job process's environment. They are
+The runner service names its choice in four variables of the job process's environment. They are
 the host's own finding (`factory_runner/service.py` decides them from the daemon and the
 configuration); nothing in a job sets them. Unset, everything is as hosted.
 
@@ -18,6 +18,9 @@ configuration); nothing in a job sets them. Unset, everything is as hosted.
   (default `sysbox-runc`).
 - `RUNNER_IMPLEMENTER_AGENT_CPUS`: the CPUs the agent's container may use, a whole number (default:
   no limit).
+
+and a fourth, `RUNNER_IMPLEMENTER_RUNNER_ID` (`role_labels.py`): the runner's id, which every
+container and network of the job carries as a label so that the runner removes only its own.
 """
 
 from collections.abc import Mapping, Sequence
@@ -26,11 +29,16 @@ from typing import Final
 
 from .agent_container import AGENT_RUNTIME, AgentSeams
 from .reader import ReaderSeams
+from .role_labels import RUNNER_ID_VARIABLE
 from .setup_container import SetupSeams
 
 AGENT_RUNTIME_VARIABLE: Final = "RUNNER_IMPLEMENTER_AGENT_RUNTIME"
 AGENT_CPUS_VARIABLE: Final = "RUNNER_IMPLEMENTER_AGENT_CPUS"
-RUNNER_PROFILE_NAMES: Final[tuple[str, ...]] = (AGENT_RUNTIME_VARIABLE, AGENT_CPUS_VARIABLE)
+RUNNER_PROFILE_NAMES: Final[tuple[str, ...]] = (
+    AGENT_RUNTIME_VARIABLE,
+    AGENT_CPUS_VARIABLE,
+    RUNNER_ID_VARIABLE,
+)
 # Under a runtime without Sysbox the image's init (which starts the inner `dockerd`) is replaced by
 # one that only says it is ready. The same entry point the test lane uses.
 READY_ONLY_ENTRYPOINT: Final[tuple[str, ...]] = (

@@ -150,6 +150,37 @@ def test_the_job_environment_names_the_proof_the_memory_and_the_runtime() -> Non
     assert "FACTORY_RUNNER_CREDENTIAL" not in environment  # the credential never leaves the loop
 
 
+# #854-R1
+def test_the_job_environment_names_the_runner_for_the_labels_of_its_containers() -> None:
+    named = job_environment({}, config(runner_id="r1"), "runc", 4096)
+    by_digest = job_environment({}, config(credential="crc_" + "A" * 43), "runc", 4096)
+    unnamed = job_environment({}, config(), "runc", 4096)
+
+    assert named["RUNNER_IMPLEMENTER_RUNNER_ID"] == "r1"
+    assert by_digest["RUNNER_IMPLEMENTER_RUNNER_ID"].startswith("credential-")
+    assert "RUNNER_IMPLEMENTER_RUNNER_ID" not in unnamed
+
+
+# #854-R1
+def test_the_self_test_is_told_the_runner_and_can_be_told_not_to_pull() -> None:
+    seen: list[dict[str, Any]] = []
+
+    def selftest(**kwargs: Any) -> SelfTestResult:
+        seen.append(kwargs)
+        return passing()
+
+    prepare(
+        config(runner_id="r1"),
+        {},
+        selftest=selftest,
+        api=lambda: Daemon({"runc"}),  # type: ignore[arg-type,return-value]
+        pull=None,
+        machine_mb=lambda: 8000,
+    )
+
+    assert seen[0]["runner_id"] == "r1" and seen[0]["pull"] is None
+
+
 # -- the announcement --------------------------------------------------------------------------
 
 

@@ -11,8 +11,11 @@ runner claims by itself instead of being handed a job by a Dispatcher.
 - `run` ends on a signal, on a revoked credential (exit 4), or, with `--once`, on an update the app
   requires (exit 3).
 - `run --once` ends when one job ran (its exit code), when no job came within the wait (exit 0
-  and a line saying so) or when the app could not be reached for the whole wait (exit 7, so a VM
-  that never spoke to the app is told from one that found nothing to do).
+  and a line saying so) or when the app never answered a claim during the whole wait (exit 7, so a
+  VM that never spoke to the app is told from one that found nothing to do; an app that answered
+  once and was lost later is "no job", exit 0).
+- A runner starts only on a daemon that no other runner uses (exit 9): the containers of a turn have
+  fixed names, so one daemon serves one runner until R2.
 
 The loop owns four things the host does not: the credential's renewal between jobs, the claim's
 rhythm and what a claim's failure means (revoked: stop for good; update needed: say so and wait;
@@ -43,16 +46,18 @@ from code_reviewer_runner.factory_runner.base import (
     EXIT_NOT_READY,
     EXIT_OK,
     EXIT_REVOKED,
+    EXIT_SHARED_DAEMON,
     EXIT_UPDATE_NEEDED,
 )
 from code_reviewer_runner.factory_runner.config import (
     CREDENTIAL_FROM_FILE,
     ConfigError,
     RunnerConfig,
+    runner_identity,
     update_credential,
     with_credential,
 )
-from code_reviewer_runner.factory_runner.housekeeping import TidySeams, tidy
+from code_reviewer_runner.factory_runner.housekeeping import TidySeams, foreign_runner, tidy
 from code_reviewer_runner.factory_runner.job_api import RunnerJobApi
 from code_reviewer_runner.factory_runner.prepare import Prepared
 from code_reviewer_runner.factory_runner.selftest import summary
@@ -122,6 +127,7 @@ class RunnerService:
         self._tidy = TidySeams(
             api=seams.docker,
             work_dir=Path(environment_work_dir(prepared.environment)),
+            runner_id=runner_identity(config),
         )
 
     # -- the run ---------------------------------------------------------------------------------
@@ -146,6 +152,14 @@ class RunnerService:
             self._host.request_hard_stop()
 
     async def _run(self, once: bool, wait_seconds: float) -> int:
+        if await asyncio.to_thread(foreign_runner, self._tidy.api(), self._tidy.runner_id):
+            # The containers of a turn have fixed names: a second runner on this daemon would fail
+            # every turn with a 409 (and, before the labels, would remove the first one's).
+            self._log.error(
+                "another factory-runner uses this Docker daemon; one runner per daemon for now "
+                "(if none is running, remove its leftover containers: label code-reviewer.role)"
+            )
+            return EXIT_SHARED_DAEMON
         refused = await self._announce()
         if refused is not None:
             return refused
@@ -160,6 +174,8 @@ class RunnerService:
         self._host = self._make_host()
         started = self._clock.monotonic()
         failures = 0
+        # The app answered a claim at least once (a job, or none, or an update it requires).
+        reached = False
         while not self._stopping.is_set():
             if self._untidy and not await self._tidy_up(before_claim=True):
                 if once:
@@ -173,6 +189,7 @@ class RunnerService:
                 self._log.error("the app does not know this runner any more (revoked): stopping")
                 return EXIT_REVOKED
             except UpdateNeeded as needed:
+                reached = True
                 self._log.error(
                     "update needed: the app requires a base of at least %s, this runner has %s",
                     needed.min_base_version or "a newer version",
@@ -189,11 +206,15 @@ class RunnerService:
                     "the app cannot be reached (%s); trying again in %gs", error, pause
                 )
                 if once and self._clock.monotonic() - started + pause > wait_seconds:
+                    if reached:
+                        self._log.warning("no job: the app answered earlier, then was lost")
+                        return EXIT_OK
                     self._log.warning("no job: the app could not be reached within the wait")
                     return EXIT_APP_UNREACHABLE
                 await self._wait(max(pause, error.retry_after or 0.0))
                 continue
             failures = 0
+            reached = True
             if claimed is None:
                 if once and self._clock.monotonic() - started >= wait_seconds:
                     self._log.info(
@@ -319,7 +340,12 @@ class RunnerService:
 
     def _write_credential(self, now: float, credential: str | None = None) -> bool:
         try:
-            update_credential(self._environment, renewed_at=now, credential=credential)
+            update_credential(
+                self._environment,
+                runner_id=self._config.runner_id,
+                renewed_at=now,
+                credential=credential,
+            )
         except (OSError, ConfigError):
             self._log.warning(
                 "the configuration file cannot be written: the credential is left as it is"

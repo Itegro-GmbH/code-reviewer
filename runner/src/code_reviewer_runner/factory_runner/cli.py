@@ -9,7 +9,10 @@
 - `run`: the service loop. `--once` takes one job and ends; with no job within `--wait` seconds it
   ends with exit code 0 and says so, and with an app that could not be reached for the whole wait
   it ends with exit code 7.
-- `selftest`: proves the base on this machine; exit code 0 when it holds.
+- `selftest`: proves the base on this machine; exit code 0 when it holds. It only looks: it pulls
+  and names no image, so a machine whose agent image is missing or not the pinned one is reported
+  as not ready (a running service pulls it at its own start). It may run beside a service, though
+  its throwaway container is one more on the daemon for as long as it takes.
 - `config show`: the configuration without its secret.
 
 The app address, the credential, the labels and the limits can come from the environment instead of
@@ -17,7 +20,8 @@ the file (`config.py`): a VM that runs one job needs no `register`.
 
 Exit codes (`base.py`): 0 done (also: no job within the wait), 1 a job failed, 2 usage, 3 the app
 requires an update, 4 revoked, 5 not ready (the self-test failed), 6 configuration, 7 `run --once`:
-the app could not be reached.
+the app never answered during the wait, 8 `register`: registered, but the credential could not be
+saved, 9 another runner uses this Docker daemon.
 """
 
 import argparse
@@ -44,6 +48,7 @@ from code_reviewer_runner.factory_runner.base import (
     BASE_VERSION,
     DEFAULT_URL,
     EXIT_CONFIG,
+    EXIT_CREDENTIAL_UNSAVED,
     EXIT_FAILED,
     EXIT_NOT_READY,
     EXIT_OK,
@@ -90,11 +95,20 @@ class CliSeams:
         url, credential=credential
     )
     prepare: Callable[[RunnerConfig, Mapping[str, str]], Prepared] = prepare
+    # What `selftest` runs: the same checks, but nothing is pulled or named in the daemon.
+    check: Callable[[RunnerConfig, Mapping[str, str]], Prepared] = lambda config, env: _look(
+        config, env
+    )
     run_selftest: Callable[[RunnerConfig, Mapping[str, str]], SelfTestResult] | None = None
     now: Callable[[], float] = time.time
     hostname: Callable[[], str] = socket.gethostname
     # The daemon the loop tidies (`housekeeping.py`).
     docker: Callable[[], DockerApi] = DockerApi
+
+
+def _look(config: RunnerConfig, env: Mapping[str, str]) -> Prepared:
+    """`prepare` that pulls and names no image."""
+    return prepare(config, env, pull=None)
 
 
 class _Parser(argparse.ArgumentParser):
@@ -259,7 +273,7 @@ def _register(
             f"({error.strerror or type(error).__name__}): revoke it in the app "
             f"(runner {registered.runner_id}) and register again\n"
         )
-        return EXIT_CONFIG
+        return EXIT_CREDENTIAL_UNSAVED
     out.write(
         f"registered as {config.name} (runner {registered.runner_id}); configuration in {written}\n"
     )
@@ -317,7 +331,7 @@ def _selftest(
     if seams.run_selftest is not None:
         result = seams.run_selftest(config, env)
     else:
-        result = seams.prepare(config, env).selftest
+        result = seams.check(config, env).selftest
     if arguments.json:
         json.dump(
             {

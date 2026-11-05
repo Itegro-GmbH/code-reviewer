@@ -6,8 +6,10 @@ failure means, the once mode a VM runs, the renewal of the credential and the st
 import asyncio
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 import pytest
 from loop_support import (
@@ -34,6 +36,7 @@ from code_reviewer_runner.factory_runner.base import (
     EXIT_NOT_READY,
     EXIT_OK,
     EXIT_REVOKED,
+    EXIT_SHARED_DAEMON,
     EXIT_UPDATE_NEEDED,
 )
 from code_reviewer_runner.factory_runner.config import (
@@ -41,7 +44,6 @@ from code_reviewer_runner.factory_runner.config import (
     load_config,
     save_config,
 )
-from code_reviewer_runner.factory_runner.housekeeping import ROLE_LABEL
 from code_reviewer_runner.factory_runner.prepare import Prepared
 from code_reviewer_runner.factory_runner.selftest import Check, SelfTestResult
 from code_reviewer_runner.factory_runner.service import (
@@ -53,6 +55,7 @@ from code_reviewer_runner.factory_runner.service import (
 )
 from code_reviewer_runner.implementer.docker_api import DockerError
 from code_reviewer_runner.implementer.result_channel import make_result_directory
+from code_reviewer_runner.implementer.role_labels import ROLE_LABEL, RUNNER_LABEL
 from code_reviewer_runner.job import IMPLEMENTER_WORK_DIR_VARIABLE
 from code_reviewer_runner.job_loop.api import ApiUnavailable, ClaimedJob
 
@@ -151,11 +154,15 @@ class FakeDaemon:
         self.removed: list[str] = []
         self.listing_fails = False
         self.filters: list[str] = []
+        # The running containers of Control that the check for another runner is shown.
+        self.running: list[dict[str, Any]] = []
 
     def request(self, method: str, path: str, *args: Any, **kwargs: Any) -> Any:
         assert method == "GET"
         if self.listing_fails:
             raise DockerError(500, "no")
+        if "running" in path:
+            return self.running
         self.filters.append(path)
         found = self.containers if path.startswith("/containers/json") else self.networks
         return [{"Id": identifier} for identifier in found]
@@ -687,3 +694,100 @@ def test_a_runner_that_cannot_be_tidied_tries_again_and_then_takes_the_job(
 
     assert waited[0] == TIDY_RETRY_SECONDS
     assert rig.api.completions  # and then it took the job
+
+
+# -- one runner per daemon (R1) -------------------------------------------------------------------
+
+
+# #854-R1
+def test_the_sweep_asks_for_the_id_of_this_runner_and_no_other_label_value(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    rig.service._tidy = replace(  # pyright: ignore[reportPrivateUsage]
+        rig.service._tidy,  # pyright: ignore[reportPrivateUsage]
+        runner_id="runner-1",
+    )
+
+    rig.go(once=True)
+
+    assert rig.daemon.filters
+    assert all(f"{RUNNER_LABEL}=runner-1" in unquote(path) for path in rig.daemon.filters)
+
+
+# #854-R1
+def test_without_an_id_in_the_config_the_runner_is_named_by_a_digest_of_its_credential(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path)
+
+    rig.go(once=True)
+
+    assert all(f"{RUNNER_LABEL}=credential-" in unquote(path) for path in rig.daemon.filters)
+    assert CREDENTIAL not in "".join(rig.daemon.filters)
+
+
+# #854-R1
+def test_a_running_container_of_another_runner_ends_the_start_before_any_claim(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    rig = Rig(tmp_path)
+    rig.daemon.running = [{"Id": container_id("f"), "Labels": {ROLE_LABEL: "agent"}}]
+    rig.client.claims = [implementer_claim()]
+
+    with caplog.at_level(logging.ERROR, logger="code_reviewer_runner.loop"):
+        assert rig.go(once=True) == EXIT_SHARED_DAEMON
+
+    assert rig.client.claim_calls == 0 and rig.client.announced == []
+    assert rig.daemon.removed == []  # and nothing of the other runner is touched
+    assert "another factory-runner uses this Docker daemon" in caplog.text
+
+
+# #854-R1
+def test_a_running_container_of_this_runner_is_not_another_runner(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    own = rig.service._tidy.runner_id  # pyright: ignore[reportPrivateUsage]
+    rig.daemon.running = [{"Id": container_id("f"), "Labels": {ROLE_LABEL: "a", RUNNER_LABEL: own}}]
+
+    assert rig.go(once=True) == EXIT_OK
+    assert rig.client.claim_calls == 1
+
+
+# #854-N3
+def test_the_once_mode_that_was_answered_once_and_then_lost_the_app_is_no_job_not_unreachable(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path)
+    rig.client.claims = [None, *[ApiUnavailable("down")] * 50]
+
+    assert rig.go(once=True, wait=100) == EXIT_OK
+
+
+# #854-R2
+def test_the_work_volume_stays_as_it_is_when_a_container_could_not_be_removed(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path)
+    (rig.work / "repo").mkdir()
+    rig.daemon.listing_fails = True
+    rig.client.claims = [implementer_claim()]
+
+    assert rig.go(once=True) == EXIT_FAILED
+
+    assert rig.client.claim_calls == 0
+    assert (rig.work / "repo").is_dir()
+
+
+# #854-F6
+def test_a_credential_file_of_another_runner_is_not_overwritten_by_a_renewal(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path)
+    old_file(rig, runner_id="runner-2")  # registered again meanwhile, as another runner
+    rig.service._config = replace(  # pyright: ignore[reportPrivateUsage]
+        load_config(rig.environment), runner_id="runner-1"
+    )
+
+    rig.go(once=True)
+
+    assert rig.client.renewals == 1 and rig.client.credentials == []  # the old one stays in use
+    stored = load_config(rig.environment)
+    assert (stored.runner_id, stored.credential) == ("runner-2", CREDENTIAL)

@@ -74,12 +74,12 @@ from .host_rules import (
     run_helper,
 )
 from .reader import REPO_SUBPATH, work_volume_of
+from .role_labels import role_labels
 from .vm_memory import MEMINFO, REASON_VM_MEMORY, MemoryGuard
 
 _log = logging.getLogger(__name__)
 
 SETUP_CONTAINER_NAME: Final = "code-reviewer-setup"
-SETUP_ROLE_LABEL: Final = "code-reviewer.role"
 SETUP_NETWORK_NAME: Final = "code-reviewer-setup"
 # The bridge's own name, so that the rules can name it before it exists (a name is matched when a
 # packet comes in).
@@ -222,7 +222,7 @@ def network_document() -> dict[str, Any]:
             "Config": [{"Subnet": SETUP_NETWORK_SUBNET, "Gateway": SETUP_NETWORK_GATEWAY}],
         },
         "Options": {"com.docker.network.bridge.name": SETUP_BRIDGE},
-        "Labels": {SETUP_ROLE_LABEL: "setup-network"},
+        "Labels": role_labels("setup-network"),
     }
 
 
@@ -245,7 +245,7 @@ def setup_document(
         "Env": [],
         "Hostname": SETUP_HOSTNAME,
         "WorkingDir": AGENT_REPO,
-        "Labels": {SETUP_ROLE_LABEL: "setup"},
+        "Labels": role_labels("setup"),
         "NetworkingConfig": {
             "EndpointsConfig": {SETUP_NETWORK_NAME: {"IPAMConfig": {"IPv4Address": SETUP_ADDRESS}}}
         },

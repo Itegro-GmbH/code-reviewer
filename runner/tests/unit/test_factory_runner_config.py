@@ -4,6 +4,7 @@
 checks, and that the secret never shows."""
 
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from code_reviewer_runner.factory_runner.config import (
     check_url,
     load_config,
     redacted,
+    runner_identity,
     save_config,
     update_credential,
 )
@@ -192,7 +194,7 @@ def test_update_credential_changes_the_credential_and_its_time_and_nothing_else(
         "FACTORY_RUNNER_CPUS": "9",
     }
 
-    path = update_credential(overriding, renewed_at=5.0, credential=OTHER)
+    path = update_credential(overriding, runner_id=None, renewed_at=5.0, credential=OTHER)
 
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     stored = json.loads(path.read_text())
@@ -206,7 +208,7 @@ def test_update_credential_with_only_a_time_keeps_the_credential(tmp_path: Path)
     environment = home(tmp_path)
     save_config(config(credential=CREDENTIAL), environment)
 
-    update_credential(environment, renewed_at=7.0)
+    update_credential(environment, runner_id=None, renewed_at=7.0)
 
     loaded = load_config(environment)
     assert (loaded.credential, loaded.credential_renewed_at) == (CREDENTIAL, 7.0)
@@ -215,6 +217,52 @@ def test_update_credential_with_only_a_time_keeps_the_credential(tmp_path: Path)
 # #854-S2
 def test_update_credential_does_not_invent_a_file(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="gone"):
-        update_credential(home(tmp_path), renewed_at=1.0, credential=CREDENTIAL)
+        update_credential(home(tmp_path), runner_id=None, renewed_at=1.0, credential=CREDENTIAL)
 
     assert not (tmp_path / "home" / "config.json").exists()
+
+
+# #854-F6
+def test_update_credential_leaves_the_file_of_another_runner_alone(tmp_path: Path) -> None:
+    environment = home(tmp_path)
+    path = save_config(config(credential=CREDENTIAL, runner_id="r2"), environment)
+    before = path.read_text()
+
+    with pytest.raises(ConfigError, match="another runner"):
+        update_credential(environment, runner_id="r1", renewed_at=5.0, credential=OTHER)
+
+    assert path.read_text() == before
+
+
+# #854-F6
+def test_update_credential_writes_the_file_and_its_directory_to_disk_around_the_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    environment = home(tmp_path)
+    save_config(config(credential=CREDENTIAL, runner_id="r1"), environment)
+    events: list[str] = []
+    real_replace, real_fsync = os.replace, os.fsync
+
+    def replace(source: str, target: Path) -> None:
+        events.append("replace")
+        real_replace(source, target)
+
+    def fsync(descriptor: int) -> None:
+        events.append("fsync")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "replace", replace)
+    monkeypatch.setattr(os, "fsync", fsync)
+
+    update_credential(environment, runner_id="r1", renewed_at=5.0, credential=OTHER)
+
+    assert events == ["fsync", "replace", "fsync"]  # the data, the rename, the rename's directory
+
+
+def test_the_identity_is_the_runner_id_else_a_digest_that_hides_the_credential() -> None:
+    assert runner_identity(config(runner_id="r1", credential=CREDENTIAL)) == "r1"
+    digest = runner_identity(config(credential=CREDENTIAL))
+    assert digest.startswith("credential-") and CREDENTIAL not in digest
+    assert digest == runner_identity(config(credential=CREDENTIAL))
+    assert digest != runner_identity(config(credential=OTHER))
+    assert runner_identity(config()) == ""

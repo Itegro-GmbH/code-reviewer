@@ -51,6 +51,7 @@ from code_reviewer_runner.implementer.agent_container import (
 from code_reviewer_runner.implementer.docker_api import DockerApi, DockerError
 from code_reviewer_runner.implementer.exec_run import run_exec
 from code_reviewer_runner.implementer.reader import work_volume_of
+from code_reviewer_runner.implementer.role_labels import RUNNER_ID_VARIABLE, role_labels
 from code_reviewer_runner.implementer.runner_profile import entrypoint_for
 from code_reviewer_runner.job import JobError
 from code_reviewer_runner.job_loop.jsonvalues import as_object
@@ -201,6 +202,8 @@ class _Run:
     # agent's container was not the pinned version (an image that is older than this runner).
     pulled: bool = False
     stale: bool = False
+    # The runner's id for the label of the throwaway container (`implementer/role_labels.py`).
+    runner_id: str = ""
 
     def record(self, name: str, ok: bool, detail: str = "") -> bool:
         self.checks.append(Check(name, ok, detail))
@@ -224,13 +227,14 @@ def run_selftest(
     pull: Callable[[DockerApi, str], None] | None = None,
     seams: SelfTestSeams = SelfTestSeams(),  # noqa: B008
     meminfo: str = "/proc/meminfo",
+    runner_id: str = "",
 ) -> SelfTestResult:
     """Run every check with the runtime `runtime` (`runc` or `sysbox-runc`); stop at the first one
     of the base that fails. `agent_image` is the reference to pull when the agent image is not in
     the daemon (None: it must already be there). `pull` is the Engine API call that does it."""
     started = seams.clock()
     api = seams.api()
-    run = _Run(api, seams)
+    run = _Run(api, seams, runner_id=runner_id)
     version = None
     memory = _memory(run, limits, meminfo) if _daemon(run, runtime) and _work_volume(run) else None
     if memory and _image(run, agent_image, pull):
@@ -376,7 +380,9 @@ def _digest_warning(reference: str | None) -> str:
     )
 
 
-def _throwaway(image: str, runtime: str, memory_mb: int, cpus: int | None) -> dict[str, object]:
+def _throwaway(
+    image: str, runtime: str, memory_mb: int, cpus: int | None, runner_id: str
+) -> dict[str, object]:
     """The agent's container as a real turn makes it, without the network and the volumes."""
     document = agent_document(
         image,
@@ -391,7 +397,7 @@ def _throwaway(image: str, runtime: str, memory_mb: int, cpus: int | None) -> di
     host["Mounts"] = []
     document.pop("NetworkingConfig", None)
     document["HostConfig"] = host
-    document["Labels"] = {"code-reviewer.role": "selftest"}
+    document["Labels"] = role_labels("selftest", {RUNNER_ID_VARIABLE: runner_id})
     return document
 
 
@@ -401,7 +407,7 @@ def _start(run: _Run, runtime: str, memory_mb: int, cpus: int | None) -> str | N
     container: str | None = None
     try:
         container = api.create_container(
-            _throwaway(run.seams.image, runtime, memory_mb, cpus), SELFTEST_CONTAINER
+            _throwaway(run.seams.image, runtime, memory_mb, cpus, run.runner_id), SELFTEST_CONTAINER
         )
         api.start_container(container)
         end = run.seams.clock() + READY_SECONDS

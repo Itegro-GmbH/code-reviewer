@@ -69,12 +69,12 @@ from .host_rules import (
 from .network_rule import MODE_OFF, OFF, NetworkRule
 from .reader import REPO_SUBPATH, work_volume_of
 from .result_channel import AGENT_RESULT_DIRECTORY, result_mount
+from .role_labels import role_labels
 from .vm_memory import MEMINFO, REASON_VM_MEMORY, MemoryGuard
 
 _log = logging.getLogger(__name__)
 
 AGENT_CONTAINER_NAME: Final = "code-reviewer-agent"
-AGENT_ROLE_LABEL: Final = "code-reviewer.role"
 AGENT_IMAGE_REFERENCE: Final = "code-reviewer-agent:golden"
 AGENT_RUNTIME: Final = "sysbox-runc"
 AGENT_REPO: Final = "/work/repo"
@@ -210,7 +210,7 @@ def agent_document(
         "Env": [f"{name}={value}" for name, value in proxy_environment(rule).items()],
         "Hostname": "agent",
         "WorkingDir": AGENT_REPO,
-        "Labels": {AGENT_ROLE_LABEL: "agent"},
+        "Labels": role_labels("agent"),
         "NetworkingConfig": {
             "EndpointsConfig": {
                 MODEL_NETWORK_NAME: {"IPAMConfig": {"IPv4Address": MODEL_AGENT_ADDRESS}}
