@@ -30,6 +30,8 @@ export type EndedTurn = {
   /** The final status of the job. */
   jobStatus: "succeeded" | "failed" | "superseded" | "cancelled";
   jobErrorCode: string | null;
+  /** The job was claimed by a runner (it has a claim time). A job that ended before that never ran. */
+  jobClaimed: boolean;
   /** What the runner reported, as stored. */
   jobResult: unknown;
   turn: StoredImplementerTurn;
@@ -147,6 +149,21 @@ export function outcomeOfTurn(
       code: "no_runner_available",
       message:
         "No runner of this workspace with the labels of the environment took the turn in time. Start a runner with these labels and run the workflow again.",
+      costMicroUsd: 0,
+      costBasis: "reported",
+    };
+  // #891: a turn a member stopped that never ran (no runner took it, or its Worker could not be started) used no model: it is booked
+  // at no cost, not at the cap. One that ran and reported nothing may have used it, and falls through to the cap below.
+  if (
+    ended.jobStatus === "cancelled" &&
+    (!ended.jobClaimed || ended.jobErrorCode === "launch_failed") &&
+    costOfResult(ended.jobResult) === null
+  )
+    return {
+      ok: false,
+      code: ended.jobErrorCode ?? "cancelled",
+      message: "The agent's task was stopped because the run was cancelled.",
+      detail: `status=${ended.jobStatus} error=${ended.jobErrorCode ?? "none"}`,
       costMicroUsd: 0,
       costBasis: "reported",
     };

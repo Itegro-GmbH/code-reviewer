@@ -425,7 +425,7 @@ the open findings on the issue. `{{review.findings}}` after the loop is the last
 ([Branches](#branches-and-what-a-step-starts-from)). It declares its `result` although the profile `reviewer` brings the same default: the example then validates and reads without the profile at hand.
 
 **When a step fails inside the loop** the run ends as `failed` at once: nothing is commented on the issue, no pull request is opened, and the issue keeps `agent working`
-([Failures inside a loop](#control-at-run-time)). Read the run page; format v1 has no failure branch yet.
+([Failures inside a loop](#control-at-run-time)). A run a member cancels ([Cancelling a run](#cancelling-a-run)) leaves it on the issue too. Read the run page; format v1 has no failure branch yet.
 
 ## The API
 
@@ -508,16 +508,16 @@ the run and its steps; the first steps start right after the answer.
 1. The run is marked (`cancelRequestedAt`) under the lock of the run. From then on the engine writes and starts no step. A step that was written and not claimed ends `skipped`; steps the walk had not reached
    are not written at all (there is no row for a branch that never began).
 2. The job of the turn that runs is asked to stop (`jobs.cancel_requested_at`). A turn that still waits for a runner ends at once (`cancelled`, nothing ran, no record counts, the hold is given back).
-   A turn that runs is told by its next heartbeat (`cancelRequested: true`, within 30 seconds): the Worker or the runner ends the agent the way it does when it is stopped (SIGTERM), pushes what is
-   committed, takes the snapshot when that is cheap, and reports `cancelled` with the usage it measured. The lease check before that push still says `held`. See [Implementer](implementer.md#cancelling-a-run-891).
+   A turn that runs is told by its next heartbeat (`cancelRequested: true`; every 30 seconds on the Worker, at most 60 on a customer's runner): the Worker or the runner ends the agent the way it does when it is stopped (SIGTERM), pushes what is
+   committed, takes the snapshot when that is cheap, and reports `cancelled` with the usage it measured. The lease check before that push still says `held`, and the heart keeps beating until the report is delivered, so the lease cannot lapse during the stop. See [Implementer](implementer.md#cancelling-a-run-891).
 3. The job ends `cancelled` (code `cancelled`, a stable code) with that report; billing charges what the turn used and nothing else. A holder that never reports (it died, it heard nothing) is not waited for for ever: the job is
    ended by the app after a grace of 4 minutes, or when its lease lapses, or when its claim is given back; none of these queues the turn again.
-4. The engine reads the end of the turn like any other: the step ends `failed` with the code `cancelled` (its cost is what the runner reported; a cost that is not known is booked as the limit, as for any step), and the run ends
+4. The engine reads the end of the turn like any other: the step ends `failed` with the code `cancelled` (its cost is what the runner reported; a turn that never ran, because no runner took it or its Worker could not be started, is booked at no cost; one that ran and reported nothing is booked as the limit, as for any step), and the run ends
    `cancelled`, without `errorCode`. A turn that finished by itself in the same moment keeps its result; the run still ends `cancelled`.
 5. A step whose turn was queued behind another instruction of its session (`session.continue`) discards that instruction first, so no turn starts later that no run reads. A turn that starts after the stop (the claimant was
    in the middle of starting it) is asked to stop by the one that started it, so no turn runs on that nobody wants.
 
-An action that runs is not interrupted (it is a call of at most 60 seconds and may have happened); the run ends after it. Stopping the task of an agent step on its own (the [Implementer route](implementer.md#cancelling-a-run-891)) ends
+An action that runs is not interrupted (it is a call of at most 60 seconds and may have happened); the run ends after it. A cancel changes no label: an issue that carries `agent working` keeps it, as after a failed run, and the label is taken off by hand. Stopping the task of an agent step on its own (the [Implementer route](implementer.md#cancelling-a-run-891)) ends
 the run `cancelled` the same way, not `failed`.
 
 A run looks like this (a step is `pending` when written, `running` once claimed, then `succeeded` or `failed`; a step of the branch an `if` did not take is written `skipped`):
@@ -629,7 +629,7 @@ node it is (`stepId`), how often that step has run (`round`, from 1) and, for a 
   the budget and the limit of the session's last turn.
 - **Failures inside a loop.** A step that fails, a budget that cannot pay the next agent step and a condition that cannot be told end the **whole run** at once as `failed`
   (`step_failed`, `budget_exhausted`, `condition_failed`): the steps after the loop do not run, so in "Issue to PR" **nothing is commented on the issue and no pull request is
-  opened**, and the issue keeps the label `agent working`. The only signals are the run page and the status of the run (`GET .../runs/<runId>`); watch them, or take the label off by hand.
+  opened**, and the issue keeps the label `agent working`. The only signals are the run page and the status of the run (`GET .../runs/<runId>`); watch them, or take the label off by hand. A run a member cancels ([Cancelling a run](#cancelling-a-run)) leaves the label on the issue the same way.
   The format has no branch for a failure yet (an `onFailure` that runs steps when a step or a loop fails); it is a follow-up. The loop's own `maxRounds` and `budget` exits are
   **not** failures: they end the loop, and the `if` after it (`{{fix.exit}}`) decides, which is what the example's comment on the issue is for.
 
@@ -650,7 +650,7 @@ node it is (`stepId`), how often that step has run (`round`, from 1) and, for a 
 
 ### Known limits
 
-- **A cancelled run ends when its agent has stopped** (#891), at the next heartbeat of its runner (30 seconds at most) plus the time the agent needs to stop and push (the stop of a turn has 115 seconds), and at the latest after the
+- **A cancelled run ends when its agent has stopped** (#891), at the next heartbeat of its runner (30 seconds on the Worker, 60 at most on a customer's runner) plus the time the agent needs to stop and push (the stop of a turn has 120 seconds, and the heart keeps beating meanwhile), and at the latest after the
   grace of 4 minutes, when the app ends the job itself. A runner of an earlier release ignores `cancelRequested`: it goes on until that grace ends the job and its claim is lost, so it stops without a push. The steps that had not
   started are not written as skipped rows (only a step that was written and not claimed is); the page shows what ran. The run page has a plain button, no confirmation.
 - **Profiles are resolved per step**, at the moment the step starts; a profile without a version can mean version 2 for step two of a run whose step one ran

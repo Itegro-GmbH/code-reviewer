@@ -270,6 +270,40 @@ describe("cancelling a turn of the Implementer", () => {
     expect(await t.fixture.queue.claimNext("r2", IMPLEMENTER)).toBeNull();
   });
 
+  // #891-T17
+  it("ends a turn whose Worker could not be started cancelled but free: a void record, no charge, never a no_result", async () => {
+    const t = await start();
+    await setBillingSwitch(t.fixture.db, true);
+    await fundWorkspace(t.fixture.db, t.fixture.workspaceId, 1_000_000);
+    const { job, leaseToken } = await t.running();
+    t.fixture.clock.advance(2 * MINUTE);
+    await t.queue.requestCancel(job.id);
+
+    const released = await t.fixture.queue.release(
+      job.id,
+      leaseToken,
+      "launch_failed",
+      { beforeStart: true },
+    );
+
+    // A failure of the platform is ours whoever asked for the stop: the job ends cancelled, never queued again, with the reason.
+    expect(released.status).toBe("cancelled");
+    expect(await t.fixture.queue.get(job.id)).toMatchObject({
+      status: "cancelled",
+      errorCode: "launch_failed",
+    });
+    expect(await t.record(job.id)).toMatchObject({ state: "void" });
+    expect((await t.record(job.id)).settled_reason).toBeNull();
+    expect(t.unknown).not.toContain(job.id);
+    const usage = await t.fixture.db
+      .selectFrom("billing_journal_entries")
+      .selectAll()
+      .where("type", "=", "usage")
+      .execute();
+    expect(usage).toHaveLength(0);
+    expect(await t.fixture.queue.claimNext("r2", IMPLEMENTER)).toBeNull();
+  });
+
   // #891-T08
   it("ends a turn that did not stop within the grace, at the sweep and at the next heartbeat, and settles its record with an unknown cost", async () => {
     const t = await start();

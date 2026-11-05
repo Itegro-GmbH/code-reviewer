@@ -79,8 +79,15 @@ describe("stopping a workflow run", () => {
 
     const state = await app.stateOf(runId);
     expect(state.run.status).toBe("cancelled");
+    // The turn never ran: it is booked at no cost, not at the cap of the step.
     expect(state.steps).toMatchObject([
-      { stepId: "plan", status: "failed", errorCode: "cancelled" },
+      {
+        stepId: "plan",
+        status: "failed",
+        errorCode: "cancelled",
+        costMicroUsd: 0,
+        costBasis: "reported",
+      },
     ]);
     // Nothing is left behind for a runner to take later.
     expect(await app.waitingJobs()).toEqual([]);

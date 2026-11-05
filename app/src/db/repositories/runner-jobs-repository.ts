@@ -354,6 +354,20 @@ function runningWhere(scope: RunningScope) {
 }
 
 /**
+ * #891: the code a job a member asked to stop ends with when its holder gave it back for a failure of the platform: the Worker could not
+ * be started or died (`launch_failed`, `worker_exited`), or it never got the input of the job (`beforeStart`). Free like any such failure,
+ * where `cancelled` is charged; undefined for any other loss, which ends `cancelled`.
+ */
+function platformFailureCode(
+  code: string,
+  beforeStart: boolean,
+): string | undefined {
+  return beforeStart || code === "launch_failed" || code === "worker_exited"
+    ? code
+    : undefined;
+}
+
+/**
  * The codes with which `expire` ends a claimed job without any word from its runner: the lease ran out, the runtime passed the
  * hard limit, the command was removed. A job that ended with one of them is no proof that a runner worked (#752), unlike a job the
  * runner finished or failed itself.
@@ -470,8 +484,16 @@ export function createRunnerJobsRepository(
     /** #753: the input of the job never reached a Worker; the rule that a turn is never run twice does not apply. */
     beforeStart = false,
   ): Promise<{ failed: number; requeued: number }> {
-    // #891: a job a member asked to stop is over with its claim, whatever else the claim lost: it is not tried again.
-    await endCancelRequested(executor, scope, new Date(timestamp), false);
+    // #891: a job a member asked to stop is over with its claim, whatever else the claim lost: it is not tried again. A failure of the
+    // platform (the Worker could not be started, or never got the input) keeps its own code: the job ends `cancelled` but free, because
+    // `cancelled` is charged and no turn ran.
+    await endCancelRequested(
+      executor,
+      scope,
+      new Date(timestamp),
+      false,
+      platformFailureCode(errorCode, beforeStart),
+    );
     let disabled = 0;
     if (!(await dynamicReviewAllowed(executor))) {
       const result = await executor
@@ -596,6 +618,8 @@ export function createRunnerJobsRepository(
     scope: RunningScope,
     current: Date,
     pastGraceOnly: boolean,
+    /** The code a failure of the platform gave the end (class free), instead of `cancelled` (charged). */
+    platformCode?: string,
   ): Promise<number> {
     const timestamp = formatTimestamp(current);
     const graceBefore = formatTimestamp(
@@ -605,7 +629,7 @@ export function createRunnerJobsRepository(
       .updateTable("jobs")
       .set({
         status: "cancelled",
-        error_code: "cancelled" satisfies JobErrorCode,
+        error_code: platformCode ?? ("cancelled" satisfies JobErrorCode),
         lease_expires_at: null,
         finished_at: timestamp,
         updated_at: timestamp,
@@ -1595,6 +1619,7 @@ export function createRunnerJobsRepository(
               { claim: { jobId, leaseToken } },
               now(),
               false,
+              platformFailureCode(reason, releaseOptions.beforeStart === true),
             )) > 0
           ) {
             endedClaims.push(jobId);
