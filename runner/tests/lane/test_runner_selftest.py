@@ -24,6 +24,7 @@ from code_reviewer_runner.factory_runner.selftest import (
     SelfTestSeams,
     run_selftest,
 )
+from code_reviewer_runner.implementer.role_labels import RUNNER_LABEL
 
 ROOT = Path(__file__).resolve().parents[3]
 CONTROL = "code-reviewer-lane-selftest-control"
@@ -119,30 +120,45 @@ def test_what_a_killed_run_left_in_the_daemon_and_the_volume_is_gone_after_a_tid
     tmp_path: Path,
 ) -> None:
     """A container and a network with the role label (the door that held a key, the model network)
-    and a turn's folders in the volume are removed, and a container without the label is not."""
+    of this runner and a turn's folders in the volume are removed; a container without the label and
+    one of another runner are not."""
     worker = lane_config().worker_image
-    labelled, bystander, network = (
+    labelled, bystander, network, other = (
         "code-reviewer-lane-leftover",
         "code-reviewer-lane-bystander",
         "code-reviewer-lane-leftover-net",
+        "code-reviewer-lane-other-runner",
     )
-    docker("rm", "-f", labelled, bystander, check=False)
+    mine = f"{RUNNER_LABEL}=lane-runner"
+    docker("rm", "-f", labelled, bystander, other, check=False)
     docker("network", "rm", network, check=False)
     try:
-        docker("network", "create", "--internal", "--label", f"{ROLE_LABEL}=model-network", network)
-        docker("create", "--name", labelled, "--label", f"{ROLE_LABEL}=model-door", worker, "true")
+        docker(
+            "network", "create", "--internal", "--label", f"{ROLE_LABEL}=model-network",
+            "--label", mine, network,
+        )  # fmt: skip
+        docker(
+            "create", "--name", labelled, "--label", f"{ROLE_LABEL}=model-door",
+            "--label", mine, worker, "true",
+        )  # fmt: skip
+        docker(
+            "create", "--name", other, "--label", f"{ROLE_LABEL}=model-door",
+            "--label", f"{RUNNER_LABEL}=someone-else", worker, "true",
+        )  # fmt: skip
         docker("create", "--name", bystander, worker, "true")
         for name in ("reserve", "repo", "result"):
             (tmp_path / name).mkdir()
             (tmp_path / name / "left").write_text("x")
 
-        assert tidy(TidySeams(work_dir=tmp_path)) == []
-        assert tidy(TidySeams(work_dir=tmp_path)) == []  # nothing to do is not a failure
+        seams = TidySeams(work_dir=tmp_path, runner_id="lane-runner")
+        assert tidy(seams) == []
+        assert tidy(seams) == []  # nothing to do is not a failure
 
         assert docker("ps", "-aq", "--filter", f"name={labelled}").stdout.strip() == ""
         assert docker("network", "ls", "-q", "--filter", f"name={network}").stdout.strip() == ""
         assert docker("ps", "-aq", "--filter", f"name={bystander}").stdout.strip() != ""
+        assert docker("ps", "-aq", "--filter", f"name={other}").stdout.strip() != ""
         assert list(tmp_path.iterdir()) == []
     finally:
-        docker("rm", "-f", labelled, bystander, check=False)
+        docker("rm", "-f", labelled, bystander, other, check=False)
         docker("network", "rm", network, check=False)
