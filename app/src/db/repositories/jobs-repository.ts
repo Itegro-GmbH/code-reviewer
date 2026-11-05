@@ -667,6 +667,7 @@ export function createJobsRepository(
         createdBy: input.createdBy,
         environment: input.environment ?? null,
         profile: input.profile ?? null,
+        resultSchema: input.resultSchema ?? null,
       };
       try {
         return await inTransaction<EnqueueImplementerTurnResult>(

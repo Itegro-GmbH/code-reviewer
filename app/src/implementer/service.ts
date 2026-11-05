@@ -33,6 +33,8 @@ import { branchConflict } from "./branch-name.ts";
 import { ImplementerError, type UnwritableReason } from "./errors.ts";
 import type { ImplementerModels, ModelOptions } from "./models.ts";
 import { validateStartInput, type StartInput } from "./start-input.ts";
+import type { ResultSchema } from "../workflows/result-schema.ts";
+import { readStoredResultSchema } from "./agent-result.ts";
 
 export type RepositoryChoice = {
   id: string;
@@ -164,6 +166,27 @@ function sameModel(stored: ModelChoice, asked: ModelChoice): boolean {
  * Whether the profile a repeated body names is the one the earlier task ran with: the same name, and the same version when the body
  * pins one (a body that names none is the newest at the time of the first request, which a new version since does not change).
  */
+/**
+ * The default result schema of a profile version (#843), stored as the validator accepted it. Should the text not be one any more
+ * (it cannot be: the table is written by the validator's own service), the task is refused instead of run without the finish
+ * tool the profile asked for.
+ */
+function resultOfProfile(stored: string | null): ResultSchema | null {
+  if (stored === null) return null;
+  const schema = readStoredResultSchema(stored);
+  if (schema === null)
+    throw new ImplementerError(
+      "IMPLEMENTER_REQUEST_INVALID",
+      "The default result schema of the profile cannot be used.",
+    );
+  return schema;
+}
+
+/** Whether the result schema a repeated body names is the one the earlier task ran with (a body that names none compares nothing). */
+function sameResult(stored: unknown, asked: StartInput["result"]): boolean {
+  return asked === null || JSON.stringify(stored) === JSON.stringify(asked);
+}
+
 function sameProfile(
   stored: TurnProfile | null,
   asked: StartInput["profile"],
@@ -195,6 +218,7 @@ function repeatOf(
     turn.instruction === task.instruction &&
     (turn.environment?.id ?? null) === task.environmentId &&
     sameProfile(turn.profile, task.profile) &&
+    sameResult(turn.resultSchema, task.result) &&
     sameChoices;
   if (!same)
     throw new ImplementerError(
@@ -370,6 +394,7 @@ export function createImplementerService(
       // A profile (#843) is read now and its version copied into the turn: what it says at this moment is what the task runs with,
       // whatever is done to it afterwards. Its model and cost limit take the place of the body's, and are checked like the body's.
       let profile: TurnProfile | null = null;
+      let profileResult: string | null = null;
       let model: ModelChoice;
       let costLimitCents: number | null;
       if (task.profile === null) {
@@ -396,7 +421,12 @@ export function createImplementerService(
         };
         model = content.model;
         costLimitCents = content.costLimitCents;
+        profileResult = content.defaultResult;
       }
+
+      // The result schema (#843): the task's own, else the default of its profile version, copied into the turn like the rest. A task
+      // with neither runs without a finish tool, as it did before result schemas.
+      const resultSchema = task.result ?? resultOfProfile(profileResult);
 
       const reason = await deps.models.check(model);
       if (reason !== null)
@@ -453,6 +483,7 @@ export function createImplementerService(
           costLimitCents,
           environment,
           profile,
+          resultSchema,
           createdBy: user.id,
           actorLogin: user.githubLogin,
           clientRequestId: task.clientRequestId,

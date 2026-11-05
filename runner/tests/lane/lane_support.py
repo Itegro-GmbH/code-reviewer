@@ -89,6 +89,7 @@ from code_reviewer_runner.implementer.reader import (
     ReaderAccess,
     ReaderSeams,
 )
+from code_reviewer_runner.implementer.result_channel import make_result_directory
 from code_reviewer_runner.implementer.session import ImplementerSession, SessionSeams
 from code_reviewer_runner.implementer.setup_container import (
     SETUP_CONTAINER_NAME,
@@ -392,11 +393,15 @@ def implementer_job(
     time_limit: int = 3600,
     max_cost_usd: float | None = None,
     instruction: str = INSTRUCTION,
+    result_schema: dict[str, Any] | None = None,
 ) -> ImplementerInput:
-    """The contract's example job with the provider, model and cost policy of the lane."""
+    """The contract's example job with the provider, model and cost policy of the lane, and the
+    result schema of the turn (#843) when it has one."""
     document: dict[str, Any] = json.loads(EXAMPLE.read_text(encoding="utf-8"))
     entry = ENTRIES[family]
     spec = document["implementer"]
+    if result_schema is not None:
+        spec["resultSchema"] = result_schema
     spec["instruction"] = instruction
     spec["limits"]["timeLimitSeconds"] = time_limit
     spec["cost"] = dict(MANAGED)
@@ -552,6 +557,7 @@ def lane_workspace(
     origin_setup: Callable[[Origin], None] | None = None,
     disk_megabytes: int | None = None,
     origin_base: Path | None = None,
+    result: bool = False,
 ) -> Generator[LaneWorkspace]:
     """The origin (a bare repository standing in for GitHub), the work volume, the stand-in of the
     Control container and the real reader; the workspace is prepared (the mirror on the reserve
@@ -585,7 +591,11 @@ def lane_workspace(
             "GIT_COMMITTER_EMAIL": IDENTITY.email,
         },
         ReaderSeams(runtime=config.runtime, hostname=lambda: control, python=sys.executable),
+        result=result,
     )
+    if result:
+        # #843: the directory both containers mount, made before the readers exist.
+        make_result_directory(work)
     workspace = GitWorkspace(
         WorkspaceSpec(origin.url, TOKEN, "main", BRANCH),
         layout,
@@ -678,6 +688,7 @@ def lane_turn(
     judge: Callable[[Mapping[str, str], Mapping[str, Any]], Refusal | None] | None = None,
     memory_mb: int = 2048,
     setup_script: str | None = None,
+    result_schema: dict[str, Any] | None = None,
     snapshot: SnapshotPump | None = None,
 ) -> Generator[Turned]:
     """Run one whole turn to its result against a model that follows `script(repo)` (the path of
@@ -685,7 +696,10 @@ def lane_turn(
     first in a Setup container (`run_environment_setup`, as `job_run` runs it) and the agent's
     container starts from the image it made; a script that fails raises: use `lane_environment`
     for those."""
-    job = implementer_job(family, time_limit=time_limit, instruction=instruction)
+    job = implementer_job(
+        family, time_limit=time_limit, instruction=instruction, result_schema=result_schema
+    )
+    with_result = result_schema is not None
     port = slot_ports({}).proxy
     messages: list[tuple[str, str]] = []
     doors: list[LaneDoor] = []
@@ -708,6 +722,7 @@ def lane_turn(
                 origin_setup=origin_setup,
                 disk_megabytes=disk_megabytes,
                 origin_base=origin_base,
+                result=with_result,
             )
         )
         config = lane.config
@@ -740,6 +755,7 @@ def lane_turn(
                     entrypoint=config.entrypoint,
                     ready_seconds=180.0,
                 ),
+                result=with_result,
             )
 
         session = ImplementerSession(
@@ -749,6 +765,7 @@ def lane_turn(
             place=place,
             environment={"RUNNER_DYNAMIC_MAX_COST_USD": limit},
             seams=SessionSeams(transport=transport),
+            results=lane.reader if with_result else None,
             snapshot=snapshot,
         )
         turned = Turned(

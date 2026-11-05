@@ -68,6 +68,7 @@ from .git_workspace import (
 from .network_rule import OFF
 from .reader import ReaderAccess
 from .report import clip_texts, escaped_size, fit_block, valid_block
+from .result_channel import ResultReader, make_result_directory
 from .session import AgentPlace, ImplementerSession, SessionSeams
 from .setup_container import SetupSeams
 from .snapshot_pump import SnapshotPump
@@ -128,6 +129,8 @@ class TurnSetup:
     command: tuple[str, ...]
     close: Callable[[], None] = lambda: None
     environment: EnvironmentHost | None = None
+    # #843: how the result file is read; None for a turn without a result schema.
+    results: ResultReader | None = None
 
 
 SetupFactory = Callable[[ImplementerInput, Mapping[str, str], Callable[[], None]], TurnSetup]
@@ -201,14 +204,20 @@ def production_setup(
     memory = int(environment.get(AGENT_MEMORY_VARIABLE, "0").strip())
     spec = job.implementer
     identity = identity_for(job)
+    # #843: a turn with a result schema has the result directory in its containers and its readers.
+    with_result = spec.result_schema is not None
     reader = ReaderAccess(
         {
             "GIT_AUTHOR_NAME": identity.name,
             "GIT_AUTHOR_EMAIL": identity.email,
             "GIT_COMMITTER_NAME": identity.name,
             "GIT_COMMITTER_EMAIL": identity.email,
-        }
+        },
+        result=with_result,
     )
+    if with_result:
+        # Before the agent's container: its mount of the directory needs the directory.
+        make_result_directory(work_dir)
     workspace = GitWorkspace(
         WorkspaceSpec(
             clone_url=spec.repo.clone_url,
@@ -244,14 +253,15 @@ def production_setup(
     rule = OFF if spec.environment is None else spec.environment.network
 
     def place_from(image: str) -> Callable[[], AgentPlace]:
-        return lambda: AgentContainer(memory, AgentSeams(image=image), rule)
+        return lambda: AgentContainer(memory, AgentSeams(image=image), rule, result=with_result)
 
     return TurnSetup(
         workspace,
-        lambda: AgentContainer(memory, rule=rule),
+        lambda: AgentContainer(memory, rule=rule, result=with_result),
         (OPENCODE,),
         close=reader.close,
         environment=EnvironmentHost(run_environment, place_from),
+        results=reader if with_result else None,
     )
 
 
@@ -521,6 +531,8 @@ def _session(
         "steps": steps,
         "snapshot": snapshot,
     }
+    if setup.results is not None:
+        options["results"] = setup.results
     if seams.session is not None:
         return seams.session(job, **options)
     return ImplementerSession(job, **options)  # type: ignore[arg-type]  # the keywords above

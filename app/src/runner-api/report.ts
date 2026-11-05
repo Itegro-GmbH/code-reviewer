@@ -21,6 +21,7 @@ import { maskModelInText } from "../llm/access.ts";
 import { maskProvidersInText } from "../llm/provider-mask.ts";
 import { withoutUnaccountedManagedSuccess } from "./managed-cost-guard.ts";
 import { implementerBlockProblems } from "./implementer-report.ts";
+import { withAgentResultOrNoResult } from "./implementer-result-guard.ts";
 import { redactResult } from "./redact.ts";
 import type { JobEndedEvent } from "../dispatch/job-ended.ts";
 import type { RunnerApiLogger } from "./logger.ts";
@@ -54,6 +55,13 @@ export type ReportDeps = {
   managedModels: (
     job: Job,
   ) => Promise<{ managed: boolean; models: readonly string[] }>;
+  /**
+   * #843: the turn a job of the Implementer runs, asked when a turn reports success without the result its schema asks for (the
+   * schema is the turn's; the report is then recorded as `no_result`). `undefined` for a job that is not a turn.
+   */
+  implementerTurn: (
+    job: Job,
+  ) => Promise<{ turn: { resultSchema: unknown } } | undefined>;
   /**
    * #395: a job ended or went back to the queue through this call. The running server uses it to send the jobs that
    * were waiting for the slot, after the response; it never throws and never delays the answer.
@@ -267,7 +275,7 @@ export async function finishJob(
   const managed = await deps.managedModels(job);
   const models = [...new Set([...remembered, ...managed.models])];
   const onManagedKey = managed.managed || remembered.length > 0;
-  const stored = redactResult(
+  const cleaned = redactResult(
     withoutManagedModel(
       // #553: a managed Dynamic run never settles with an unknown cost; a success that reports none is stored as the failure.
       withoutUnaccountedManagedSuccess(reported, {
@@ -284,6 +292,14 @@ export async function finishJob(
       ...(await deps.claimedKeys.keysOf(jobId)),
       ...extraSecrets,
     ],
+  );
+  // #843: the result of the agent is held to its bounds once more (the redaction can make it longer), and a turn with a schema that
+  // reports success without one is a `no_result`. The report stays whole in both cases.
+  const stored = await withAgentResultOrNoResult(
+    cleaned,
+    async () =>
+      job.reviewKind === "implementer" &&
+      (await deps.implementerTurn(job))?.turn.resultSchema != null,
   );
   const outcome: JobOutcome =
     stored.errorCode === null

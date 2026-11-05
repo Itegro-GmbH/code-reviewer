@@ -1,0 +1,9 @@
+{
+  "findings": [
+    {
+      "type": "bug",
+      "name": "The lease is not checked before the push",
+      "description": "push_all runs without asking the host whether the job is still ours."
+    }
+  ]
+}

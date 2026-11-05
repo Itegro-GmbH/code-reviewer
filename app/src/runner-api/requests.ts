@@ -45,6 +45,7 @@ import {
 } from "./contract.ts";
 import { WORKER_CREDENTIAL_PATTERN } from "../jobs/worker-credential.ts";
 import { checkCallTrace } from "./call-trace.ts";
+import { boundAgentResult, type AgentResultValue } from "../db/agent-result.ts";
 
 export type Parsed<T> =
   { ok: true; value: T } | { ok: false; fields: FieldError[] };
@@ -1069,6 +1070,7 @@ function parseImplementerResult(
       "setup",
       "network",
       "checkedOut",
+      "agentResult",
     ],
     prefix,
   );
@@ -1134,6 +1136,16 @@ function parseImplementerResult(
           max: MAX_BRANCH_NAME_CHARS,
           stripControls: true,
         });
+  // #843: the result the agent handed in through the finish tool: an object within the bounds of a result, or none. One that is not
+  // is left out, never refused: the runner holds a result to the same bounds before it sends it, but a request that fails for the
+  // result of an agent would lose the report with it (the branches that were pushed, the commits, the usage). A turn that has a
+  // schema and no result ends `no_result` (`implementer-result-guard.ts`, with the turn). The parser does not know the turn, and
+  // the app does not check the value against its schema (the M3 engine does, before it routes the value anywhere).
+  let agentResult: AgentResultValue | undefined;
+  if (value.agentResult !== undefined) {
+    const bounded = boundAgentResult(value.agentResult);
+    if (bounded.ok) agentResult = bounded.value;
+  }
   if (typeof pushed === "boolean" && headCommit !== undefined) {
     if (pushed && headCommit === null) check.fail(`${prefix}pushed`, "invalid");
     const last = commits?.at(-1);
@@ -1171,6 +1183,7 @@ function parseImplementerResult(
     ...(network === undefined ? {} : { network }),
     // Kept only when the runner sent it, as `branches` is.
     ...(value.checkedOut === undefined ? {} : { checkedOut }),
+    ...(agentResult === undefined ? {} : { agentResult }),
   };
 }
 

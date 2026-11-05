@@ -1,0 +1,1564 @@
+{
+ "description": "Cases both checks of a result agree on (#843): the app's `checkResultValue` and `validateResultSchema` (app/src/workflows/result-schema.ts) and the runner's `check_value` and `check_schema` (runner/src/code_reviewer_runner/implementer/finish_tool.py). `issues` are [pointer, code] pairs; the order is not part of the contract, the set is. `bounds` are values written as text by repeating parts (`[text, times]`, joined) with the bound each must break (null: none): the size of the file, the levels of lists and objects, and the number of values (what the app's `boundAgentResult` and the runner's `scan_bounds` count: the root, every entry and field, every list and object), which both are held to.",
+ "schemas": [
+  {
+   "name": "findings",
+   "schema": {
+    "type": "object",
+    "required": [
+     "findings"
+    ],
+    "properties": {
+     "findings": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+       "type": "object",
+       "required": [
+        "type",
+        "name"
+       ],
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "bug",
+          "risk",
+          "nit"
+         ]
+        },
+        "name": {
+         "type": "string",
+         "maxLength": 120
+        },
+        "description": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   },
+   "valid": true
+  },
+  {
+   "name": "caps",
+   "schema": {
+    "type": "object",
+    "properties": {
+     "s": {
+      "type": "string"
+     },
+     "l": {
+      "type": "array",
+      "items": {
+       "type": "number"
+      }
+     },
+     "t": {
+      "type": "string",
+      "maxLength": 3
+     }
+    }
+   },
+   "valid": true
+  },
+  {
+   "name": "four levels of objects",
+   "schema": {
+    "type": "object",
+    "properties": {
+     "a": {
+      "type": "object",
+      "properties": {
+       "a": {
+        "type": "object",
+        "properties": {
+         "a": {
+          "type": "object",
+          "properties": {
+           "a": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "valid": true
+  },
+  {
+   "name": "the root is not an object",
+   "schema": {
+    "type": "string"
+   },
+   "valid": false
+  },
+  {
+   "name": "the root is a list",
+   "schema": [],
+   "valid": false
+  },
+  {
+   "name": "an unknown type",
+   "schema": {
+    "type": "object",
+    "properties": {
+     "a": {
+      "type": "date"
+     }
+    }
+   },
+   "valid": false
+  },
+  {
+   "name": "an unknown keyword",
+   "schema": {
+    "type": "object",
+    "properties": {
+     "a": {
+      "type": "string",
+      "pattern": "x"
+     }
+    }
+   },
+   "valid": false
+  },
+  {
+   "name": "a required name that is no property",
+   "schema": {
+    "type": "object",
+    "required": [
+     "b"
+    ],
+    "properties": {
+     "a": {
+      "type": "string"
+     }
+    }
+   },
+   "valid": false
+  },
+  {
+   "name": "a duplicate enum value",
+   "schema": {
+    "type": "object",
+    "properties": {
+     "a": {
+      "type": "string",
+      "enum": [
+       "x",
+       "x"
+      ]
+     }
+    }
+   },
+   "valid": false
+  },
+  {
+   "name": "a maxLength of zero",
+   "schema": {
+    "type": "object",
+    "properties": {
+     "a": {
+      "type": "string",
+      "maxLength": 0
+     }
+    }
+   },
+   "valid": false
+  },
+  {
+   "name": "an array without items",
+   "schema": {
+    "type": "object",
+    "properties": {
+     "a": {
+      "type": "array"
+     }
+    }
+   },
+   "valid": false
+  },
+  {
+   "name": "a field name that starts with a digit",
+   "schema": {
+    "type": "object",
+    "properties": {
+     "1a": {
+      "type": "string"
+     }
+    }
+   },
+   "valid": false
+  },
+  {
+   "name": "no properties",
+   "schema": {
+    "type": "object",
+    "properties": {}
+   },
+   "valid": false
+  },
+  {
+   "name": "an open object",
+   "schema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {
+     "a": {
+      "type": "string"
+     }
+    }
+   },
+   "valid": false
+  },
+  {
+   "name": "five levels of objects",
+   "schema": {
+    "type": "object",
+    "properties": {
+     "a": {
+      "type": "object",
+      "properties": {
+       "a": {
+        "type": "object",
+        "properties": {
+         "a": {
+          "type": "object",
+          "properties": {
+           "a": {
+            "type": "object",
+            "properties": {
+             "a": {
+              "type": "string"
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "valid": false
+  }
+ ],
+ "values": [
+  {
+   "name": "a result of the declared shape",
+   "schema": {
+    "type": "object",
+    "required": [
+     "findings"
+    ],
+    "properties": {
+     "findings": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+       "type": "object",
+       "required": [
+        "type",
+        "name"
+       ],
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "bug",
+          "risk",
+          "nit"
+         ]
+        },
+        "name": {
+         "type": "string",
+         "maxLength": 120
+        },
+        "description": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   },
+   "value": {
+    "findings": [
+     {
+      "type": "bug",
+      "name": "Lease",
+      "description": "x"
+     }
+    ]
+   },
+   "issues": []
+  },
+  {
+   "name": "every problem with its pointer",
+   "schema": {
+    "type": "object",
+    "required": [
+     "findings"
+    ],
+    "properties": {
+     "findings": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+       "type": "object",
+       "required": [
+        "type",
+        "name"
+       ],
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "bug",
+          "risk",
+          "nit"
+         ]
+        },
+        "name": {
+         "type": "string",
+         "maxLength": 120
+        },
+        "description": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   },
+   "value": {
+    "findings": [
+     {
+      "type": "critical",
+      "name": 3
+     },
+     {
+      "name": "ok",
+      "extra": true
+     }
+    ],
+    "other": 1
+   },
+   "issues": [
+    [
+     "/findings/0/name",
+     "wrong_type"
+    ],
+    [
+     "/findings/0/type",
+     "invalid_value"
+    ],
+    [
+     "/findings/1/extra",
+     "unknown_field"
+    ],
+    [
+     "/findings/1/type",
+     "missing_field"
+    ],
+    [
+     "/other",
+     "unknown_field"
+    ]
+   ]
+  },
+  {
+   "name": "the default caps",
+   "schema": {
+    "type": "object",
+    "properties": {
+     "s": {
+      "type": "string"
+     },
+     "l": {
+      "type": "array",
+      "items": {
+       "type": "number"
+      }
+     },
+     "t": {
+      "type": "string",
+      "maxLength": 3
+     }
+    }
+   },
+   "value": {
+    "s": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "l": [
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1
+    ],
+    "t": "abcd"
+   },
+   "issues": [
+    [
+     "/l",
+     "limit_exceeded"
+    ],
+    [
+     "/s",
+     "limit_exceeded"
+    ],
+    [
+     "/t",
+     "limit_exceeded"
+    ]
+   ]
+  },
+  {
+   "name": "the wrong JSON types",
+   "schema": {
+    "type": "object",
+    "properties": {
+     "n": {
+      "type": "number"
+     },
+     "b": {
+      "type": "boolean"
+     },
+     "o": {
+      "type": "object",
+      "properties": {
+       "x": {
+        "type": "string"
+       }
+      }
+     },
+     "a": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     }
+    }
+   },
+   "value": {
+    "n": "1",
+    "b": 1,
+    "o": [],
+    "a": {}
+   },
+   "issues": [
+    [
+     "/a",
+     "wrong_type"
+    ],
+    [
+     "/b",
+     "wrong_type"
+    ],
+    [
+     "/n",
+     "wrong_type"
+    ],
+    [
+     "/o",
+     "wrong_type"
+    ]
+   ]
+  },
+  {
+   "name": "null is not an object",
+   "schema": {
+    "type": "object",
+    "properties": {
+     "n": {
+      "type": "number"
+     },
+     "b": {
+      "type": "boolean"
+     },
+     "o": {
+      "type": "object",
+      "properties": {
+       "x": {
+        "type": "string"
+       }
+      }
+     },
+     "a": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     }
+    }
+   },
+   "value": null,
+   "issues": [
+    [
+     "",
+     "wrong_type"
+    ]
+   ]
+  },
+  {
+   "name": "a list is not an object",
+   "schema": {
+    "type": "object",
+    "properties": {
+     "n": {
+      "type": "number"
+     },
+     "b": {
+      "type": "boolean"
+     },
+     "o": {
+      "type": "object",
+      "properties": {
+       "x": {
+        "type": "string"
+       }
+      }
+     },
+     "a": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     }
+    }
+   },
+   "value": [],
+   "issues": [
+    [
+     "",
+     "wrong_type"
+    ]
+   ]
+  },
+  {
+   "name": "a boolean is not a number",
+   "schema": {
+    "type": "object",
+    "properties": {
+     "n": {
+      "type": "number"
+     },
+     "b": {
+      "type": "boolean"
+     },
+     "o": {
+      "type": "object",
+      "properties": {
+       "x": {
+        "type": "string"
+       }
+      }
+     },
+     "a": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     }
+    }
+   },
+   "value": {
+    "n": true
+   },
+   "issues": [
+    [
+     "/n",
+     "wrong_type"
+    ]
+   ]
+  },
+  {
+   "name": "a whole number",
+   "schema": {
+    "type": "object",
+    "required": [
+     "n"
+    ],
+    "properties": {
+     "n": {
+      "type": "integer"
+     }
+    }
+   },
+   "value": {
+    "n": 5
+   },
+   "issues": []
+  },
+  {
+   "name": "a float that is whole is a whole number",
+   "schema": {
+    "type": "object",
+    "required": [
+     "n"
+    ],
+    "properties": {
+     "n": {
+      "type": "integer"
+     }
+    }
+   },
+   "value": {
+    "n": 1.0
+   },
+   "issues": []
+  },
+  {
+   "name": "a fraction is not whole",
+   "schema": {
+    "type": "object",
+    "required": [
+     "n"
+    ],
+    "properties": {
+     "n": {
+      "type": "integer"
+     }
+    }
+   },
+   "value": {
+    "n": 1.5
+   },
+   "issues": [
+    [
+     "/n",
+     "wrong_type"
+    ]
+   ]
+  },
+  {
+   "name": "a text is not whole",
+   "schema": {
+    "type": "object",
+    "required": [
+     "n"
+    ],
+    "properties": {
+     "n": {
+      "type": "integer"
+     }
+    }
+   },
+   "value": {
+    "n": "5"
+   },
+   "issues": [
+    [
+     "/n",
+     "wrong_type"
+    ]
+   ]
+  },
+  {
+   "name": "a boolean is not whole",
+   "schema": {
+    "type": "object",
+    "required": [
+     "n"
+    ],
+    "properties": {
+     "n": {
+      "type": "integer"
+     }
+    }
+   },
+   "value": {
+    "n": false
+   },
+   "issues": [
+    [
+     "/n",
+     "wrong_type"
+    ]
+   ]
+  },
+  {
+   "name": "the last safe integer",
+   "schema": {
+    "type": "object",
+    "required": [
+     "n"
+    ],
+    "properties": {
+     "n": {
+      "type": "integer"
+     }
+    }
+   },
+   "value": {
+    "n": 9007199254740991
+   },
+   "issues": []
+  },
+  {
+   "name": "above the safe range",
+   "schema": {
+    "type": "object",
+    "required": [
+     "n"
+    ],
+    "properties": {
+     "n": {
+      "type": "integer"
+     }
+    }
+   },
+   "value": {
+    "n": 9007199254740992
+   },
+   "issues": [
+    [
+     "/n",
+     "wrong_type"
+    ]
+   ]
+  },
+  {
+   "name": "below the safe range",
+   "schema": {
+    "type": "object",
+    "required": [
+     "n"
+    ],
+    "properties": {
+     "n": {
+      "type": "integer"
+     }
+    }
+   },
+   "value": {
+    "n": -9007199254740992
+   },
+   "issues": [
+    [
+     "/n",
+     "wrong_type"
+    ]
+   ]
+  },
+  {
+   "name": "a missing field deep inside",
+   "schema": {
+    "type": "object",
+    "required": [
+     "a"
+    ],
+    "properties": {
+     "a": {
+      "type": "object",
+      "required": [
+       "b"
+      ],
+      "properties": {
+       "b": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "required": [
+          "c"
+         ],
+         "properties": {
+          "c": {
+           "type": "integer"
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "value": {
+    "a": {
+     "b": [
+      {
+       "c": 1
+      },
+      {}
+     ]
+    }
+   },
+   "issues": [
+    [
+     "/a/b/1/c",
+     "missing_field"
+    ]
+   ]
+  },
+  {
+   "name": "an unknown field deep inside",
+   "schema": {
+    "type": "object",
+    "required": [
+     "a"
+    ],
+    "properties": {
+     "a": {
+      "type": "object",
+      "required": [
+       "b"
+      ],
+      "properties": {
+       "b": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "required": [
+          "c"
+         ],
+         "properties": {
+          "c": {
+           "type": "integer"
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "value": {
+    "a": {
+     "b": [
+      {
+       "c": 1,
+       "d": 2
+      }
+     ]
+    }
+   },
+   "issues": [
+    [
+     "/a/b/0/d",
+     "unknown_field"
+    ]
+   ]
+  },
+  {
+   "name": "a missing required object",
+   "schema": {
+    "type": "object",
+    "required": [
+     "a"
+    ],
+    "properties": {
+     "a": {
+      "type": "object",
+      "required": [
+       "b"
+      ],
+      "properties": {
+       "b": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "required": [
+          "c"
+         ],
+         "properties": {
+          "c": {
+           "type": "integer"
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "value": {},
+   "issues": [
+    [
+     "/a",
+     "missing_field"
+    ]
+   ]
+  },
+  {
+   "name": "nothing is required",
+   "schema": {
+    "type": "object",
+    "properties": {
+     "note": {
+      "type": "string"
+     }
+    }
+   },
+   "value": {},
+   "issues": []
+  },
+  {
+   "name": "a key named like a prototype is an unknown field",
+   "schema": {
+    "type": "object",
+    "properties": {
+     "note": {
+      "type": "string"
+     }
+    }
+   },
+   "value": {
+    "__proto__": 1
+   },
+   "issues": [
+    [
+     "/__proto__",
+     "unknown_field"
+    ]
+   ]
+  },
+  {
+   "name": "a text is counted in characters",
+   "schema": {
+    "type": "object",
+    "properties": {
+     "t": {
+      "type": "string",
+      "maxLength": 3
+     }
+    }
+   },
+   "value": {
+    "t": "😀😀😀"
+   },
+   "issues": []
+  },
+  {
+   "name": "four emoji are four characters",
+   "schema": {
+    "type": "object",
+    "properties": {
+     "t": {
+      "type": "string",
+      "maxLength": 3
+     }
+    }
+   },
+   "value": {
+    "t": "😀😀😀😀"
+   },
+   "issues": [
+    [
+     "/t",
+     "limit_exceeded"
+    ]
+   ]
+  },
+  {
+   "name": "a pointer escapes slash and tilde",
+   "schema": {
+    "type": "object",
+    "properties": {
+     "a": {
+      "type": "string"
+     }
+    }
+   },
+   "value": {
+    "a/b": 1,
+    "c~d": 2
+   },
+   "issues": [
+    [
+     "/a~1b",
+     "unknown_field"
+    ],
+    [
+     "/c~0d",
+     "unknown_field"
+    ]
+   ]
+  }
+ ],
+ "bounds": [
+  {
+   "name": "19999 values, the lists hold one number each",
+   "parts": [
+    [
+     "{\"a\":[",
+     1
+    ],
+    [
+     "1,",
+     1
+    ],
+    [
+     "[1],",
+     9997
+    ],
+    [
+     "[1]",
+     1
+    ],
+    [
+     "]}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "20000 values, the lists hold one number each",
+   "parts": [
+    [
+     "{\"a\":[",
+     1
+    ],
+    [
+     "1,",
+     0
+    ],
+    [
+     "[1],",
+     9998
+    ],
+    [
+     "[1]",
+     1
+    ],
+    [
+     "]}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "20001 values, the lists hold one number each",
+   "parts": [
+    [
+     "{\"a\":[",
+     1
+    ],
+    [
+     "1,",
+     1
+    ],
+    [
+     "[1],",
+     9998
+    ],
+    [
+     "[1]",
+     1
+    ],
+    [
+     "]}",
+     1
+    ]
+   ],
+   "bound": "too_many_values"
+  },
+  {
+   "name": "19999 values, the objects hold one field with a number each",
+   "parts": [
+    [
+     "{\"a\":[",
+     1
+    ],
+    [
+     "1,",
+     1
+    ],
+    [
+     "{\"k\":1},",
+     9997
+    ],
+    [
+     "{\"k\":1}",
+     1
+    ],
+    [
+     "]}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "20000 values, the objects hold one field with a number each",
+   "parts": [
+    [
+     "{\"a\":[",
+     1
+    ],
+    [
+     "1,",
+     0
+    ],
+    [
+     "{\"k\":1},",
+     9998
+    ],
+    [
+     "{\"k\":1}",
+     1
+    ],
+    [
+     "]}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "20001 values, the objects hold one field with a number each",
+   "parts": [
+    [
+     "{\"a\":[",
+     1
+    ],
+    [
+     "1,",
+     1
+    ],
+    [
+     "{\"k\":1},",
+     9998
+    ],
+    [
+     "{\"k\":1}",
+     1
+    ],
+    [
+     "]}",
+     1
+    ]
+   ],
+   "bound": "too_many_values"
+  },
+  {
+   "name": "20,000 values, the lists hold one literal each",
+   "parts": [
+    [
+     "{\"a\":[",
+     1
+    ],
+    [
+     "[true],",
+     4999
+    ],
+    [
+     "[null],",
+     4998
+    ],
+    [
+     "[false],",
+     1
+    ],
+    [
+     "[-1.5e3]",
+     1
+    ],
+    [
+     "]}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "19999 values, the lists are empty but for white space",
+   "parts": [
+    [
+     "{\"a\":[",
+     1
+    ],
+    [
+     "[ ],",
+     19996
+    ],
+    [
+     "[\n]",
+     1
+    ],
+    [
+     "]}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "20000 values, the lists are empty but for white space",
+   "parts": [
+    [
+     "{\"a\":[",
+     1
+    ],
+    [
+     "[ ],",
+     19997
+    ],
+    [
+     "[\n]",
+     1
+    ],
+    [
+     "]}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "20001 values, the lists are empty but for white space",
+   "parts": [
+    [
+     "{\"a\":[",
+     1
+    ],
+    [
+     "[ ],",
+     19998
+    ],
+    [
+     "[\n]",
+     1
+    ],
+    [
+     "]}",
+     1
+    ]
+   ],
+   "bound": "too_many_values"
+  },
+  {
+   "name": "20,000 values, pretty printed with one number per list",
+   "parts": [
+    [
+     "{\n \"a\": [\n",
+     1
+    ],
+    [
+     "  [ 1 ],\n",
+     9998
+    ],
+    [
+     "  [ 1 ]\n",
+     1
+    ],
+    [
+     " ]\n}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "20,002 values, pretty printed with one number per list",
+   "parts": [
+    [
+     "{\n \"a\": [\n",
+     1
+    ],
+    [
+     "  [ 1 ],\n",
+     10000
+    ],
+    [
+     "  [ 1 ]\n",
+     1
+    ],
+    [
+     " ]\n}",
+     1
+    ]
+   ],
+   "bound": "too_many_values"
+  },
+  {
+   "name": "eight levels of lists and objects are within the bound",
+   "parts": [
+    [
+     "{\"a\":",
+     1
+    ],
+    [
+     "[",
+     7
+    ],
+    [
+     "1",
+     1
+    ],
+    [
+     "]",
+     7
+    ],
+    [
+     "}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "nine levels of lists and objects are over the bound",
+   "parts": [
+    [
+     "{\"a\":",
+     1
+    ],
+    [
+     "[",
+     8
+    ],
+    [
+     "1",
+     1
+    ],
+    [
+     "]",
+     8
+    ],
+    [
+     "}",
+     1
+    ]
+   ],
+   "bound": "too_deep"
+  },
+  {
+   "name": "eight levels, the innermost list empty",
+   "parts": [
+    [
+     "{\"a\":",
+     1
+    ],
+    [
+     "[",
+     7
+    ],
+    [
+     "]",
+     7
+    ],
+    [
+     "}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "nine levels, the innermost list empty",
+   "parts": [
+    [
+     "{\"a\":",
+     1
+    ],
+    [
+     "[",
+     8
+    ],
+    [
+     "]",
+     8
+    ],
+    [
+     "}",
+     1
+    ]
+   ],
+   "bound": "too_deep"
+  },
+  {
+   "name": "eight levels of objects",
+   "parts": [
+    [
+     "{\"a\":",
+     8
+    ],
+    [
+     "1",
+     1
+    ],
+    [
+     "}",
+     8
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "nine levels of objects",
+   "parts": [
+    [
+     "{\"a\":",
+     9
+    ],
+    [
+     "1",
+     1
+    ],
+    [
+     "}",
+     9
+    ]
+   ],
+   "bound": "too_deep"
+  },
+  {
+   "name": "262143 bytes",
+   "parts": [
+    [
+     "{\"a\":\"",
+     1
+    ],
+    [
+     "x",
+     262135
+    ],
+    [
+     "\"}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "262144 bytes",
+   "parts": [
+    [
+     "{\"a\":\"",
+     1
+    ],
+    [
+     "x",
+     262136
+    ],
+    [
+     "\"}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "262145 bytes",
+   "parts": [
+    [
+     "{\"a\":\"",
+     1
+    ],
+    [
+     "x",
+     262137
+    ],
+    [
+     "\"}",
+     1
+    ]
+   ],
+   "bound": "too_large"
+  }
+ ]
+}

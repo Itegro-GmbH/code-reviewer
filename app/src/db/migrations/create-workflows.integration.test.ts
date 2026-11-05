@@ -14,6 +14,7 @@ import { withoutColumnsAddedLater } from "../../test-support/columns-added-later
 const THIS = "20261104140000_create_workflows";
 const T = "2026-11-04T08:00:00.000Z";
 
+// Up to and with this migration only: a later migration's tables or columns are not this one's to account for.
 const beforeThisMigration: MigrationProvider = {
   async getMigrations() {
     return Object.fromEntries(

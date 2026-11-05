@@ -29,6 +29,7 @@ from code_reviewer_runner.implementer.git_workspace import (
 from code_reviewer_runner.implementer.job_run import SIGTERM_BACKSTOP_SECONDS
 from code_reviewer_runner.implementer.limits import agent_limits
 from code_reviewer_runner.implementer.reader import RESET_SECONDS as READER_RESET_SECONDS
+from code_reviewer_runner.implementer.reader import RESULT_READ_SECONDS
 from code_reviewer_runner.implementer.session import (
     COST_LIMIT_DETAIL,
     DEADLINE_DETAIL,
@@ -469,6 +470,7 @@ def test_the_end_of_a_turn_fits_the_grace_and_a_stop_fits_the_sigterm_backstop()
         + FINAL_PUSH_SECONDS
         + reads
         + STEPS_FLUSH_SECONDS
+        + RESULT_READ_SECONDS  # #843: the read of the agent's result, after the container is gone
     )
     stop = (
         STOP_SNAPSHOT_SECONDS
@@ -481,7 +483,7 @@ def test_the_end_of_a_turn_fits_the_grace_and_a_stop_fits_the_sigterm_backstop()
     )
 
     assert SNAPSHOT_SECONDS == 5.0 and STOP_SNAPSHOT_SECONDS == 2.0
-    assert normal == 227.0 and stop == 86.0
+    assert normal == 227.0 + RESULT_READ_SECONDS and stop == 86.0
     assert normal <= 0.85 * GRACE_SECONDS
     assert stop <= 0.75 * SIGTERM_BACKSTOP_SECONDS
 

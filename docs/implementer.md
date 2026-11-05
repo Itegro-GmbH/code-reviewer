@@ -164,10 +164,10 @@ on. The watch still asks the lease every 30 seconds while the agent works, so a 
 the model.
 
 **Time.** The runner keeps the last 270 seconds (four and a half minutes) of the time limit for the end. Every step is counted at its ceiling, and the sum at a normal end is
-227 seconds: the export of the engine's session 5 s (section "The session snapshot"; it comes first, because it is read from the running engine), the end of the agent's container 25 s (the kill call 15 s at most, then the wait until the daemon says it is gone 10 s at most; the container is removed only
+229.5 seconds: the export of the engine's session 5 s (section "The session snapshot"; it comes first, because it is read from the running engine), the end of the agent's container 25 s (the kill call 15 s at most, then the wait until the daemon says it is gone 10 s at most; the container is removed only
 after the push, on a thread of its own, because removing a Sysbox container with its inner Docker can take long and nothing waits for it, which is right while one VM runs one turn), the first
 reset of the readers 10 s (below), the rescue of a detached HEAD (three git commands of 3 s at most), the look at the tree (10 s at most), the commit of what is left (40 s), the second reset
-of the readers 10 s, the final push (100 s), the two reads of the report (5 s each) and the last flush of the live view (8 s, section "Step records"). A stop (SIGTERM) commits nothing (it still saves a detached HEAD on a branch), resets the readers once, and
+of the readers 10 s, the final push (100 s), the two reads of the report (5 s each), the last flush of the live view (8 s, section "Step records") and, for a turn with a result schema, the read of the agent's result after its container is gone (2.5 s; the sum is then exactly the 85 % the test allows). A stop (SIGTERM) commits nothing (it still saves a detached HEAD on a branch), resets the readers once, and
 the process leaves itself 115 seconds, of which the sum is 86 (the last flush gets 5 s there, the export of the session 2 s) and the final push gets 25. A test holds both sums and the slack (a fifth of the grace, a quarter of the 115 s), with the real
 constants. **Why the ceilings are what they are.** Measured on a VM (2 vCPU): the kill call of the agent's container took 0.4 s idle, 2.0 s with two inner containers of a 1.5 GB image and 3.9 s
 with eight, and the wait after it 0.02 s, so the kill gets 15 s and the wait 10 s (an earlier round had 5 and 5, which a stack of a dozen inner services would have outgrown). The
@@ -1251,6 +1251,69 @@ the result, and the turn is a success when the agent ended well. The text of the
 (`implementer/prompts.py`), so it is the same for every turn of one version and the provider's prompt cache hits. It reaches the Worker as
 `implementer.profile`, only if the Worker names the claim feature `implementer_profile`.
 
+## The finish tool
+
+A turn that has a **result schema** ([`contracts/result-schema.v1.json`](../contracts/result-schema.v1.json), [`workflows.md`](workflows.md#result-schemas))
+gives its agent a finish tool and asks it for a result in that shape (#843). The schema is the task's own (`result` in the body of
+`POST /api/w/<slug>/implementer/tasks`, checked by the validator of the format: `IMPLEMENTER_REQUEST_INVALID` with `issues: [{field: "result",
+code: "invalid", detail}]`) or, when the body has none, the default result schema of its profile version. It is copied into the turn
+(`implementer_turns.result_schema`) and reaches the Worker as `implementer.resultSchema`, only if the Worker names the claim feature
+`implementer_result`; for a Worker that does not, the turn ends `implementer_engine_unavailable`, free, before any credential exists. A task with
+neither is the Implementer of before, byte for byte: no tool, no file, no reminder, the same prompt (a test compares it with the text of before
+result schemas for every combination of setup script, push right and profile text).
+
+**How the agent hands the result in, on any harness.** One program, `finish_tool.py` (standard library only), runs in two places and is written
+into the engine's configuration directory in the agent's container as `/etc/code-reviewer/factory-submit` with the schema
+(`result-schema.json`):
+
+| Door | What | Why it works for any harness |
+|---|---|---|
+| the command `factory-submit` | the JSON result on standard input; exit code 0: accepted; exit code 2: refused, every problem on standard error (`factory-submit --help`) | any harness that can run a command; `/etc/code-reviewer` is first on the `PATH` of the engine and so of the agent's shells |
+| the MCP tool `submit_result` | `factory-submit mcp`, a stdio MCP server the engine starts itself from its config (`mcp.finish`, `type: local`) | a harness with MCP sees a real tool; the server validates, because the harness does not |
+
+The tool's name, description and parameters are derived from the schema (`tool_definition`: the schema itself with closed objects). In OpenCode (the
+pinned 1.19.0) an MCP tool is named after its server, so the agent's tool is `finish_submit_result`; the prompt says so, and a test holds the name,
+the config and the text together. The permission is `finish_submit_result: allow` next to the default-deny, and nothing else of the config moves (a test
+compares the rest key by key). Both doors check what the agent hands in against the schema; a refusal comes back as an error result (the tool) or
+a line on standard error with exit code 2 (the command) and the agent corrects and tries again. An accepted result is written to the **result
+file**.
+
+**Where the result is, and how Control reads it.** The file is `/work/result/result.json` in the agent's container: the Subpath `result` of the
+work volume, a directory beside the repository, not in it (the agent's container mounts it read-write, the readers read-only at `/result`;
+only a turn with a schema has the mount, and the seal check allows exactly that destination). Control never opens it: the agent made it, and a link
+in it would be followed in Control's file system. After the agent's container is gone, a **reader** (no network, no secret, read-only root) runs
+`test -f $1 && test ! -L $1 && head -c $2 $1` on it, so a link or a missing file is no result and at most `256 KiB + 1` byte come back. Then
+`parse_result` applies, in this order and before anything is built: the size (256 KiB), a linear scan of the bytes that counts levels (8) and values
+(20,000) without parsing (strings skipped whole; a value of two million keys costs the size of its file, not a second to check), then JSON (`NaN`
+and `Infinity` are refused), then the schema with the rules of `checkResultValue` (`contracts/result-check-vectors.json` holds the two to the same
+answers). That check, not the one in the container, is the one the turn is judged by, and a result the agent changed after it was accepted is
+judged as what it is. The valid result is redacted of the job's secrets (every text, keys included) and goes to the app in
+`implementer.agentResult`; the facts Control knows (branches, commits, files, cost, `checkedOut`) stay in the result beside it, and the agent cannot
+fake them. The app bounds it again (an object; the same size, levels and values, on the compact JSON; `contracts/result-check-vectors.json` holds the
+runner's scan and the app's count to the same answers at the edges), takes the secrets out of every text and key once more, keeps it with the turn
+(`implementer_turns.result_value`) and does not read it against the schema: the runner's check is the authoritative one, and the engine of milestone 3
+re-checks the stored value with `checkResultValue` against the turn's stored schema before it routes it anywhere (see
+[`workflows.md`](workflows.md), "The finish tool"). **A result is never a reason to lose a report.** A result that is over the bounds, in the runner
+after its secrets were taken out or in the app, is left out and the turn ends `no_result`; the branches, the commits, the files and the usage are kept. The
+same holds in the app for a report of success from a turn with a schema that carries no result: it is recorded `no_result`.
+
+**An agent that ends without a valid result** gets **one reminder** (`RESULT_REMINDER_PROMPT`), in the same session, like the message for a dirty
+working tree, and also for a profile that may not push, since the reminder is about the result and not about git. The order is: the task, the reminder
+(no valid result), the message for a dirty tree (a profile that may push). A turn that has no time for it (less than 20 s) says so in its notes. Then the
+turn ends `no_result` with the detail "the agent ended without a result that fits the schema (no result file | too_large | too_deep | too_many_values |
+not_json | invalid: N problems)", never a value of the file. A turn that another limit ended (cost, time, a lost lease, a stop) keeps that code, and its
+result is not read when the end is quick (a lost lease, a stop). A container that is not confirmed gone has not been read: `no_result` with that
+reason.
+
+**Billing of `no_result`: charged**, like `agent_gave_up` (`AI_COST_FAILURE_CODES`). The code is only possible after the agent ran, so the model was
+used and the money is spent; what the agent committed is pushed all the same when the profile may push. Everything that refuses a task before it
+starts (an invalid schema, a Worker that cannot read result schemas) is free.
+
+**On the Runs page** a task with a schema has a "Result" section: the result as plain JSON text in a block that is closed, or the sentence that the agent
+handed in no result. It is in the run API (`GET /api/w/<slug>/runs/<id>`: `implementer.result`, the JSON object, and `implementer.resultExpected`),
+scoped to the workspace like the rest, with every text cleaned and stripped of known secrets. The result is data, never a command: it posts and
+merges nothing; side effects happen only in the actions of a workflow.
+
 ## Limits
 
 | Limit | Value | Where it is decided |
@@ -1286,6 +1349,7 @@ used):
 | `sandbox_unproven` | The golden snapshot's Sysbox is not proven (its build's proof did not pass, or the Dispatcher was told so). The turn ends before the clone | free | Look at the `sysbox` field of the snapshot's record and the log of its build step; rebuild the snapshot |
 | `environment_setup_failed` | The setup script of the task's environment exited with a status other than 0, ran out of its time (15 minutes, or what the turn's limit leaves), was killed for the memory of its container, filled the disk, or left a result that could not be saved as the agent's image. It runs before the model door exists, so nothing was used. The Runs page shows the exit status, the seconds, whether it timed out and the end of the output (the job's secrets removed) | free | Fix the script in Environments and send the task again |
 | `sandbox_size_unsupported` | The VM leaves the agent's container less than 1,024 MB (a 1 vCPU VM does: 512 MB). The turn ends before the clone | free | Choose a size of 2 vCPU or more |
+| `no_result` | The task had a [result schema](#the-finish-tool) and the agent ended without a result that fits it, also after the one reminder (the detail says why: no file, too large, not JSON, or N problems against the schema). What it committed is pushed when the profile may push | charged | Read its summary; make the schema or the task clearer; check the schema with `POST /workflows/validate` |
 | `agent_gave_up` | The agent ended with no new commit on any branch and nothing to commit, or its engine died, or its container ended ("the agent's container ended during the turn": killed, most likely for its memory), or the model door went away ("the model door ended during the turn"), after the model had been used (what it had committed is pushed when possible). The summary also says when files the agent wrote could not be kept, such as `opencode.json` | charged | Read its summary; try again with a clearer or smaller task |
 | `push_rejected` | The task's branch did not arrive (the branch exists with other history, a rule, a permission, a change of `.github/workflows/` which is never allowed, or GitHub could not be reached), no branch arrived although some had commits, or the agent's repository could not be read at the end. The Runs page lists every branch with its reason; branches that were pushed stay on GitHub | charged | Read the reasons, check the branches, then start again |
 | `branch_violation` | **No longer produced** (there are no rules inside the workspace to violate). Old runs keep the code and its class | charged | Look at the branch |

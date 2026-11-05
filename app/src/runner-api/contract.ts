@@ -4,7 +4,7 @@
 // these types and sets are written by hand and kept in line with it by
 // integration-tests/compatibility/runner-api-contract.integration.test.ts (the sets are compared
 // with the file, and real answers and the request checks are validated against it).
-import type { ReviewCommand } from "../integrations/types.ts";
+import type { JsonValue, ReviewCommand } from "../integrations/types.ts";
 import type { JobStatus } from "../db/job-status.ts";
 import type { CostPolicyJson } from "../native-cost/policy.ts";
 import type { JobModelEntry } from "../models-dev/job-entry.ts";
@@ -59,6 +59,10 @@ export const CLAIM_FEATURES = [
   // #843: the runner reads `implementer.profile` (the instructions and the push right of the profile version a turn started with). Sent
   // only to a caller that named it; a turn with a profile is refused (`implementer_engine_unavailable`, free) for a caller that did not.
   "implementer_profile",
+  // #843: the runner reads `implementer.resultSchema`, gives the agent the finish tool made from it and reports the result the agent
+  // handed in (`implementer.agentResult`). Sent only to a caller that named it; a turn with a result schema is refused
+  // (`implementer_engine_unavailable`, free) for a caller that did not, since a runner that did not read it would never ask the agent for it.
+  "implementer_result",
   // #838 (part of #745): the runner reads `implementer.resume`, the branches a follow-up turn starts from. Sent only to a caller that
   // named it; a follow-up turn is refused (`implementer_engine_unavailable`, free) for a caller that did not. The app sends no `resume`
   // yet: the follow-up API (the next step of #745) is what produces one.
@@ -262,6 +266,8 @@ export const RUNNER_ERROR_CODES = [
   "clone_failed",
   "setup_failed",
   "agent_gave_up",
+  // #843: the turn had a result schema and the agent ended without a result that fits it, also after the one reminder. The model was used.
+  "no_result",
   "push_rejected",
   "branch_violation",
   "time_limit_reached",
@@ -794,6 +800,14 @@ export type ImplementerResult = {
    * detached and on no branch, or was not read. Absent from a runner of the release before.
    */
   checkedOut?: string | null;
+  /**
+   * #843: the result the agent handed in through the finish tool, checked by the runner against the turn's result schema after the
+   * agent's container was gone. Data of an untrusted writer, an object within the bounds of `agent-result.ts`; the app holds it to the
+   * bounds and takes the secrets out of it, but does not check it against the turn's schema (the workflow engine does, before it routes the
+   * value anywhere). Absent when the turn has no schema, the agent handed in none that fits, or the app found it over the bounds (the turn
+   * is then recorded `no_result`).
+   */
+  agentResult?: { [key: string]: JsonValue };
 };
 
 export type CompleteRequest = { leaseToken: string; result: RunnerResult };

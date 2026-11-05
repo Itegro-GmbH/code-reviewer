@@ -188,6 +188,9 @@ export const errorCopy = (
     "The setup script of this task's environment did not finish successfully, so the task was stopped before the AI model was called and nothing was charged. The end of the script's output is shown below. Fix the script in Environments, then start the task again.",
   agent_gave_up:
     "The agent stopped without a result it could stand behind. Read its summary, then try again with a clearer or smaller task.",
+  // #843
+  no_result:
+    "The agent finished without handing in the result this task asks for, also after a reminder. Anything it committed is on its branch. Read its summary, then try again.",
   push_rejected:
     "The repository refused the new branch, so the work was not saved there.",
   branch_violation:
@@ -319,6 +322,9 @@ export const turnErrorCopy = (
   // Implementer cannot change the configuration of its own engine, such as opencode.json).
   agent_gave_up:
     "The agent stopped without a result it could stand behind, or its engine stopped before it could report one. Read its summary, if there is one: it also says when files the agent wrote could not be kept. Anything the agent committed was pushed to the branch when possible. Then try again with a clearer or smaller task.",
+  // #843: the task had a result schema and the agent ended without a result that fits it. The model was used, so the work is charged.
+  no_result:
+    "The agent finished without handing in the result this task asks for, also after one reminder, so the task counts as failed. Its summary, if it left one, is shown below. Anything it committed was pushed to the branch when the profile may push. Try again with a clearer task, or check the result schema.",
   // The table above promises a new run on the next push or review request; a task is never run again by itself.
   no_capable_runner:
     "No worker that can run tasks picked up this task within the time limit, so it was cancelled. Start it again later.",

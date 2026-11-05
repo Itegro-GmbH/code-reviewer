@@ -522,6 +522,7 @@ export interface ImplementerJob {
   capabilities?: DynamicModelCapabilities;
   environment?: ImplementerEnvironment;
   profile?: ImplementerProfile;
+  resultSchema?: ImplementerResultSchema;
   resume?: ImplementerResume;
 }
 /**
@@ -549,6 +550,16 @@ export interface ImplementerProfile {
   version: number;
   instructions?: string;
   canPush: boolean;
+}
+/**
+ * #843: the result schema of a turn, in the format of `result-schema.v1.json` (a subset of JSON Schema: strings with optional `enum` and `maxLength`, numbers, whole numbers, booleans, lists with `items` and `maxItems`, objects with `properties` and `required`, all closed, at most 4 levels and 100 fields). Present only for a turn that has one (the task's own, or the default of its profile) and a caller that named the claim feature `implementer_result`. The agent gets a finish tool made from it and decides itself when it is done; the runner checks what it handed in against the schema, with the rules of the app's `checkResultValue`. The app holds the result to the bounds of a result and does not check it against the schema again: the workflow engine does, before it routes the value anywhere. This definition states the root only: the format, its limits and the answer to a schema that breaks them are those of `result-schema.v1.json` and of the validators on both sides (`contracts/result-check-vectors.json` holds them to the same answers).
+ */
+export interface ImplementerResultSchema {
+  type: "object";
+  properties: {
+    [k: string]: unknown;
+  };
+  [k: string]: unknown;
 }
 /**
  * #838 (part of #745): what a follow-up turn of an Implementer session is told about the branches the earlier turns left on the provider. Present only on a follow-up, and only for a caller that named the claim feature `implementer_resume`; a first turn has none. Without it the turn starts from `baseBranch` as the contract says above; with it the runner asks the provider which of `branches` it still has and fetches the base branch and all of them in one fetch of depth 50 (git counts the depth from every tip: no tip has fewer than 50 commits of history where it has that many, whatever the order of `branches`; a merge base further back than 50 commits is not found), makes a local branch for each in the agent's repository (the session branch at the base tip when it is not among them) and checks out `checkout`. `turn` is the number of this turn (the first is 1, so a follow-up has 2 or more). `branches` are the branches the last turn pushed with the tip it pushed, the session branch first when it is among them, at most 20, no name twice (a rule JSON Schema cannot state; the runner refuses a repeat). The `head` is only what the earlier turn knew: the runner takes the tip the provider has now, and a branch that moved is reported to the agent, not refused. A branch the provider no longer has is left out; a session branch that is gone ends the turn (`clone_failed`, free). `checkout` is the branch the agent was on when the last turn ended: one of `branches` or the session branch (which a turn that pushed nothing still has), or null for the session branch; any other name is refused by the runner (`invalid_job`). `branches` empty means the earlier turns pushed nothing: the turn starts from the base branch like a first turn. The agent still has no remote and Control still pushes every local branch that has a commit of its own when the turn ends, without force: a branch the agent did not touch is not pushed again.
@@ -967,6 +978,7 @@ export interface ImplementerResult {
   setup?: ImplementerSetupResult;
   network?: ImplementerNetworkReport;
   checkedOut?: string | null;
+  agentResult?: ImplementerAgentResult;
 }
 /**
  * #818: what the setup script of a turn did, in `ImplementerResult.setup`; present when a script ran, absent otherwise. `ok` is whether it ended with exit status 0 within its time limit. `exitCode` is its exit status, null when it did not end by itself (the time limit, `timedOut`, or a signal). `output` is the end of what it wrote to stdout and stderr together, at most 8192 characters, with every secret known to the runner removed like every log line. A failed script ends the turn with the error code `environment_setup_failed` before the model is called.
@@ -1002,6 +1014,12 @@ export interface ImplementerNetworkReport {
     bytesIn: number;
     bytesOut: number;
   }[];
+}
+/**
+ * #843: the result the agent handed in through the finish tool, in `ImplementerResult.agentResult`. Present only for a turn that carried `resultSchema` and only when the agent's result fits it: the runner reads the file the tool wrote once the agent's container is gone, holds it to at most 256 KiB, 8 levels and 20,000 values before it parses it, and checks it against the schema. Data of an untrusted writer: the app holds it to the same bounds, takes the secrets out of every text and key in it, shows it as plain text and hands it to a workflow only as data, never as a command; it does not check it against the schema (the workflow engine does, before it routes the value anywhere). A turn that ended without a valid result has no `agentResult` and ends `no_result`. A result the app finds over the bounds (also after the secrets are taken out) is left out and the turn is recorded `no_result` as well; the rest of the report is kept, so a result is never a reason to refuse a completion.
+ */
+export interface ImplementerAgentResult {
+  [k: string]: unknown;
 }
 export interface RunnerUsage {
   model: string | null;

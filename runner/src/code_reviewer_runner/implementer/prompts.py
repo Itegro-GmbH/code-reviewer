@@ -81,6 +81,19 @@ Files and folders that the environment's setup left in the repository before you
 create inside such a folder is not committed either unless you add it by name with git add -f.
 """
 
+# Only for a turn that has a result schema (#843): how the result is handed in. The shape itself is
+# in the description and the parameters of the tool, made from the schema, not in this text, so the
+# text is the same for every schema and the prompt cache still hits across turns of one profile.
+_RESULT = """\
+This task ends with a result in a fixed shape, which the person who gave you the task gets as \
+data. Hand it in when the work is done: call the tool `finish_submit_result` (its description and \
+parameters say what the result must look like). If you do not have that tool, run the command \
+`factory-submit` with the result as JSON on its standard input (`factory-submit --help` says \
+how). Both check your result. When one refuses it, read every problem it lists, correct the \
+result and hand it in again. Hand it in only when the work is done, and end your turn after \
+it was accepted. A turn that ends without an accepted result has failed.
+"""
+
 # Before the text of a profile version: where the rules of the system end and its own text begins.
 _PROFILE_HEADING = "# Instructions of this profile"
 
@@ -91,15 +104,21 @@ anything, is left open.
 
 
 def instructions_text(
-    *, with_setup: bool = False, can_push: bool = True, profile_instructions: str = ""
+    *,
+    with_setup: bool = False,
+    can_push: bool = True,
+    profile_instructions: str = "",
+    with_result: bool = False,
 ) -> str:
     """The runner's addition to the stock prompt. `with_setup` is a turn whose environment has a
     setup script: only then there is something the setup left in the repository to tell about.
     `can_push` and `profile_instructions` are the profile version's (#843): a profile that may not
     push is told that nothing leaves the container, and the version's own text comes last, exactly
-    as written. The text is a function of these three values alone, so every turn of one profile
-    version gets the same prompt and the model provider's prompt cache hits. A turn without a
-    profile, and a profile that may push and has no text, get the text of before profiles."""
+    as written. `with_result` (#843) is a turn that has a result schema: it is told how to hand the
+    result in. The text is a function of these four values alone, so every turn of one profile
+    version and one kind gets the same prompt and the model provider's prompt cache hits. A turn
+    without a profile and without a result schema, and a profile that may push and has no text,
+    get the text of before profiles, byte for byte."""
     text = (
         _RULES_BEFORE_COMMIT
         + (_COMMIT if can_push else _COMMIT_FREE)
@@ -107,6 +126,7 @@ def instructions_text(
         + (_PUSH if can_push else _NO_PUSH)
         + _RULES_AFTER_PUSH
         + (f"\n{_SETUP_LEFTOVERS}" if with_setup else "")
+        + (f"\n{_RESULT}" if with_result else "")
         + _CLOSING
     )
     if profile_instructions == "":
@@ -120,4 +140,13 @@ LEFTOVER_PROMPT = (
     "Your turn ended, but the working tree still has changes that are not committed. Please "
     "commit your changes now (git add, then git commit with a meaningful message), then answer "
     "with one short sentence."
+)
+
+# The one reminder of a turn that has a result schema and ended without a result that fits (#843).
+# Like the extra message for a dirty tree, it is sent once; a turn that still has no result then
+# ends `no_result`. Nothing in it comes from the agent or the repository.
+RESULT_REMINDER_PROMPT = (
+    "Your turn ended, but no valid result was handed in. Hand in your result now with the tool "
+    "`finish_submit_result` (or the command `factory-submit`, the JSON on its standard input): "
+    "read what it refuses, correct the result and hand it in again."
 )

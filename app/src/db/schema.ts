@@ -1127,6 +1127,25 @@ export interface ImplementerTurnsTable {
     number | null | undefined,
     number | null
   >;
+  /**
+   * The result schema the task ran with (#843), JSON text of a schema the validator of the format accepted: the task's own, or the
+   * default of its profile version, copied when the turn was written. Null for a task without one: no finish tool.
+   */
+  result_schema: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  /**
+   * The result the agent handed in, JSON text, written when the turn ended with a result that fits `result_schema` (the runner
+   * checked it; the app held it to the bounds and did not check the schema again: the workflow engine re-checks it with
+   * `checkResultValue` against `result_schema` before it routes it anywhere). Null until then, and for a turn that ended without one.
+   */
+  result_value: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
 }
 
 /**

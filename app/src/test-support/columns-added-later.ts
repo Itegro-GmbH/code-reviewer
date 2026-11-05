@@ -25,6 +25,9 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
     "profile_version",
     "profile_instructions",
     "profile_can_push",
+    // #843: the result schema a task ran with and the result the agent handed in; null for every turn that exists.
+    "result_schema",
+    "result_value",
   ],
   // #745, step 7: the environment's network rule; every environment that exists reads `off` and no hosts (`DEFAULTS_OF_COLUMNS`).
   implementer_environments: ["network_mode", "network_hosts"],

@@ -229,6 +229,12 @@ const FIELD_COPY: Record<
     invalid: "This profile cannot be used. Choose another, or none.",
     too_long: "This profile cannot be used. Choose another, or none.",
   },
+  // The form has no field for a result schema (#843); a request that names one is the API's.
+  result: {
+    required: "A result schema is needed here.",
+    invalid: "This result schema cannot be used. Check it with the validator.",
+    too_long: "This result schema is too large.",
+  },
   costLimitCents: {
     required: "Enter an amount, for example 2.50, or leave the field empty.",
     invalid: "Enter an amount in dollars, for example 2.50.",
