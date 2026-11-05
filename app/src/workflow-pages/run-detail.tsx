@@ -32,7 +32,7 @@ import {
   type WorkflowRunsApi,
 } from "./api.ts";
 import {
-  COST_BASIS_COPY,
+  costBasisCopy,
   COST_COPY,
   CONTROL_COPY,
   COST_NOT_RUN_COPY,
@@ -115,7 +115,7 @@ function CostBasisText({
 }: {
   basis: NonNullable<StepView["costBasis"]>;
 }) {
-  const copy = COST_BASIS_COPY[basis];
+  const copy = costBasisCopy(basis);
   return (
     <span className="inline-flex items-center gap-1">
       <span data-slot="cost-basis" data-basis={basis}>
@@ -144,6 +144,46 @@ function NotRunText() {
   );
 }
 
+/**
+ * What a step cost, after the duration. A subscription turn (#856) was not billed: its figure is an estimate at API prices and reads
+ * "≈ $0.42 through a subscription", or "no estimate, through a subscription" when Claude Code gave none (booked as 0). Any other
+ * figure is "Cost $0.42 (reported)".
+ */
+function StepCost({ step, costUsd }: { step: StepView; costUsd: number }) {
+  if (step.costBasis === "subscription") {
+    return (
+      <>
+        {" · "}
+        {COST_COPY.stepCost}{" "}
+        <span data-slot="step-cost">
+          {costUsd === 0
+            ? COST_COPY.noEstimate
+            : `${COST_COPY.approximately} ${formatUsd(costUsd)}`}
+        </span>{" "}
+        <CostBasisText basis="subscription" />
+      </>
+    );
+  }
+  return (
+    <>
+      {" · "}
+      {COST_COPY.stepCost}{" "}
+      <span data-slot="step-cost">{formatUsd(costUsd)}</span>
+      {step.costBasis === null ? null : (
+        <>
+          {" ("}
+          {neverRan(step) ? (
+            <NotRunText />
+          ) : (
+            <CostBasisText basis={step.costBasis} />
+          )}
+          {")"}
+        </>
+      )}
+    </>
+  );
+}
+
 function Budget({ run }: { run: RunView }) {
   const bases = costBasesOf(run.steps);
   return (
@@ -165,9 +205,9 @@ function Budget({ run }: { run: RunView }) {
             {bases.map((basis) => (
               <li key={basis}>
                 <span className="text-foreground">
-                  {COST_BASIS_COPY[basis].label}
+                  {costBasisCopy(basis).label}
                 </span>
-                : {COST_BASIS_COPY[basis].explanation}
+                : {costBasisCopy(basis).explanation}
               </li>
             ))}
           </ul>
@@ -316,22 +356,7 @@ function Step({
           </>
         )}
         {step.costUsd === null ? null : (
-          <>
-            {" · "}
-            {COST_COPY.stepCost}{" "}
-            <span data-slot="step-cost">{formatUsd(step.costUsd)}</span>
-            {step.costBasis === null ? null : (
-              <>
-                {" ("}
-                {neverRan(step) ? (
-                  <NotRunText />
-                ) : (
-                  <CostBasisText basis={step.costBasis} />
-                )}
-                {")"}
-              </>
-            )}
-          </>
+          <StepCost step={step} costUsd={step.costUsd} />
         )}
       </p>
       {failure === null ? null : (
