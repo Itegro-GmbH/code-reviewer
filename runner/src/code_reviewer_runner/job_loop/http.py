@@ -11,6 +11,7 @@ request or the response: they hold secrets.
 import http.client
 import json
 import re
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
@@ -21,6 +22,8 @@ from code_reviewer_runner.job_loop.jsonvalues import as_object
 
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_RETRY_AFTER_SECONDS = 15 * 60
+# The body is read in pieces of this size when a deadline is given.
+READ_PIECE_BYTES = 64 * 1024
 
 
 class ApiError(Exception):
@@ -96,12 +99,25 @@ def error_code(reply: Reply) -> str | None:
 
 
 def send(
-    opener: urllib.request.OpenerDirector, request: urllib.request.Request, timeout: float
+    opener: urllib.request.OpenerDirector,
+    request: urllib.request.Request,
+    timeout: float,
+    max_bytes: int = MAX_RESPONSE_BYTES,
+    deadline: float | None = None,
 ) -> Reply:
-    """Make the request; any answer is a `Reply`, no answer is `ApiUnavailable`."""
+    """Make the request; any answer is a `Reply`, no answer is `ApiUnavailable`. At most `max_bytes`
+    of the body are read (a caller that expects more says so, and checks what it got).
+
+    `timeout` bounds each wait of the socket, not the call: a server that sends a byte now and then
+    keeps `read` going for as long as it likes. With `deadline` (a `time.monotonic` value) the body
+    is read in pieces and the call ends with `ApiUnavailable` once it has passed."""
     try:
         with opener.open(request, timeout=timeout) as response:
-            return Reply(response.status, dict(response.headers), response.read(MAX_RESPONSE_BYTES))
+            if deadline is None:
+                body = response.read(max_bytes)
+            else:
+                body = _read_until(response, max_bytes, deadline)
+            return Reply(response.status, dict(response.headers), body)
     except urllib.error.HTTPError as error:
         try:
             body_bytes = error.read(MAX_RESPONSE_BYTES)
@@ -111,3 +127,18 @@ def send(
     except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as error:
         # The class of the error is enough: its text can hold the URL.
         raise ApiUnavailable(f"no answer from the app ({type(error).__name__})") from None
+
+
+def _read_until(response: Any, max_bytes: int, deadline: float) -> bytes:
+    pieces: list[bytes] = []
+    left = max_bytes
+    while left > 0:
+        if time.monotonic() >= deadline:
+            raise ApiUnavailable("the answer did not arrive in time")
+        # `read1`: what one wait of the socket brings (`read(n)` waits for all n bytes).
+        piece: bytes = response.read1(min(READ_PIECE_BYTES, left))
+        if not piece:
+            break
+        pieces.append(piece)
+        left -= len(piece)
+    return b"".join(pieces)

@@ -56,6 +56,7 @@ from code_reviewer_runner.job import JobError
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 from code_reviewer_runner.result import ErrorCode
 
+from .agent import CommandOutcome
 from .docker_api import AttachedStreams, DockerApi, DockerError
 from .exec_run import exec_document, run_exec
 from .host_rules import (
@@ -582,6 +583,27 @@ class AgentContainer:
             )
             if done.returncode != 0 or done.unanswered:
                 raise unavailable("a file of the engine's configuration could not be written")
+
+    def run_command(
+        self, argv: list[str], environment: Mapping[str, str], timeout: float
+    ) -> CommandOutcome:
+        """Run a command in the agent's repository with `environment` and wait for it (the import
+        of a stored conversation, #840: the engine's own `import`, which reads the repository it is
+        run in). The command is a constant of the runner; what it prints is read (clipped) and the
+        answer is never raised on."""
+        container = self._container
+        if container is None:
+            return CommandOutcome(255, "", unanswered=True)
+        done = run_exec(
+            self._api,
+            container,
+            argv,
+            env=environment,
+            workdir=AGENT_REPO,
+            timeout=timeout,
+            name="a command of the engine",
+        )
+        return CommandOutcome(done.returncode, done.stdout, unanswered=done.unanswered)
 
     def start_engine(self, argv: list[str], environment: Mapping[str, str]) -> str:
         """Start the engine as a detached exec and open the tunnel to its port. Returns the address

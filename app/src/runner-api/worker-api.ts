@@ -8,6 +8,7 @@
 //   POST /jobs/:id/result      delivers the result (the same rules as the runner API's `complete`)
 //   POST /jobs/:id/steps       the live view's steps of a turn of the Implementer (#745)
 //   PUT  /jobs/:id/session     one part of the session snapshot of a turn of the Implementer (#839)
+//   GET  /jobs/:id/resume-session  one part of the stored snapshot of the session, for a follow-up turn (#840)
 //
 // The order is the contract; each step ends the request on failure:
 //
@@ -42,6 +43,7 @@ import {
 } from "./report.ts";
 import { parseJobId, parseWorkerResultRequest } from "./requests.ts";
 import { SNAPSHOT_LIMITS } from "./contract.ts";
+import { parseResumePart, readResumeSessionPart } from "./resume-session.ts";
 import { storeSnapshotPart, type SnapshotDeps } from "./snapshot.ts";
 import { parseSnapshotPartRequest } from "./snapshot-request.ts";
 import { storeSteps, type StepsDeps } from "./steps.ts";
@@ -71,6 +73,8 @@ export type WorkerApi = {
   steps(request: Request, jobId: string): Promise<Response>;
   /** #839: one part of the session snapshot of the running turn of the Implementer; proves the claim, does not extend the lease. */
   session(request: Request, jobId: string): Promise<Response>;
+  /** #840: one part of the stored session snapshot, read by the Worker of a follow-up turn; proves the claim, does not extend the lease. */
+  resumeSession(request: Request, jobId: string): Promise<Response>;
 };
 
 /** Who is asking: the job the credential belongs to, and what the queue fences the claim on. */
@@ -240,6 +244,38 @@ export function createWorkerApi(deps: WorkerApiDeps): WorkerApi {
             : ended();
       } catch (error) {
         return unexpected("session", error);
+      }
+    },
+
+    async resumeSession(request, jobId) {
+      try {
+        const who = await identify(request, jobId);
+        if (!who.ok) return who.response;
+        const asked = parseResumePart(new URL(request.url).searchParams);
+        if (!asked.ok)
+          return errorResponse(400, "RUNNER_REQUEST_INVALID", {
+            fields: asked.fields,
+          });
+        if (who.job.status !== "running") return ended();
+        const read = await readResumeSessionPart(deps, {
+          job: who.job,
+          leaseToken: who.leaseToken,
+          part: asked.part,
+          who: "worker",
+        });
+        if ("response" in read) return read.response;
+        // The job ended between the check and the read, or the claim was lost.
+        const now = await deps.queue.holding(who.job.id, who.leaseToken);
+        deps.logger.info(
+          `[worker-api] resume-session job=${who.job.id} refused`,
+        );
+        return now === undefined
+          ? workerUnauthorized()
+          : now.status === "running"
+            ? errorResponse(409, "RUNNER_LEASE_LOST")
+            : ended();
+      } catch (error) {
+        return unexpected("resume-session", error);
       }
     },
 

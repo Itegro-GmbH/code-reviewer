@@ -476,6 +476,11 @@ class GitWorkspace:
         return dict(self._starts)
 
     @property
+    def start_checkout(self) -> str | None:
+        """The branch the agent starts on, once the agent's repository is made (None before)."""
+        return self._checkout
+
+    @property
     def resume_moved(self) -> tuple[BranchMoved, ...]:
         """The branches of a follow-up that moved on the provider since the earlier turn."""
         return tuple(self._moved)
