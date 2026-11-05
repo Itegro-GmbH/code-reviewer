@@ -21,6 +21,7 @@ import type {
   StoredImplementerSession,
   TurnEnvironment,
   TurnProfile,
+  TurnRunnerEnvironment,
 } from "../db/repositories/implementer-repository.ts";
 import type { ImplementerStepsRepository } from "../db/repositories/implementer-steps-repository.ts";
 import type { IntegrationsRepository } from "../db/repositories/integrations-repository.ts";
@@ -45,6 +46,7 @@ import {
   noAccessReason,
   platformFailure,
   resolveRepository,
+  requireOwnKey,
   resultOfProfile,
   sameModel,
 } from "./service-support.ts";
@@ -151,6 +153,7 @@ type Choices = {
   model: ModelChoice;
   costLimitCents: number | null;
   environment: TurnEnvironment | null;
+  runnerEnvironment: TurnRunnerEnvironment | null;
   profile: TurnProfile | null;
   resultSchema: StoredResultSchema | null;
 };
@@ -223,6 +226,7 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
       modelChoice: ModelChoice;
       costLimitCents: number | null;
       environment: TurnEnvironment | null;
+      runnerEnvironment: TurnRunnerEnvironment | null;
       profile: TurnProfile | null;
       resultSchema: StoredResultSchema | null;
     },
@@ -246,20 +250,27 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
     }
 
     let environment: TurnEnvironment | null;
+    let runnerEnvironment: TurnRunnerEnvironment | null;
     if (input.environmentId === undefined) {
       environment = last.environment;
+      runnerEnvironment = last.runnerEnvironment;
+      // The runner environment of the last turn stays, so its model must still be one of the owner's own key (the body may change it).
+      if (runnerEnvironment !== null) requireOwnKey(model);
       // The copy of the last turn is used as it is, but a size that is no longer offered is refused as for a live environment.
       if (environment !== null && !isEnvironmentVcpus(environment.vcpus))
         throw new ImplementerError(
           "IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED",
           "The size of this environment is no longer offered.",
         );
-    } else if (input.environmentId === null) environment = null;
-    else
-      environment = await copyEnvironment(
+    } else if (input.environmentId === null) {
+      environment = null;
+      runnerEnvironment = null;
+    } else
+      ({ environment, runnerEnvironment } = await copyEnvironment(
         deps.environments,
         input.environmentId,
-      );
+        model,
+      ));
 
     const reason = await deps.models.check(model);
     if (reason !== null)
@@ -277,7 +288,14 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
           { maximumCents },
         );
     }
-    return { model, costLimitCents, environment, profile, resultSchema };
+    return {
+      model,
+      costLimitCents,
+      environment,
+      runnerEnvironment,
+      profile,
+      resultSchema,
+    };
   }
 
   /** Whether what a repeated body asks for is what the earlier turn, or the instruction still queued, was made with (left out is not compared). */
@@ -287,6 +305,7 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
       modelChoice: ModelChoice;
       costLimitCents: number | null;
       environment: TurnEnvironment | null;
+      runnerEnvironment?: TurnRunnerEnvironment | null;
       profile: TurnProfile | null;
     },
     input: ContinueInput,
@@ -297,7 +316,8 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
       (input.costLimitCents === undefined ||
         held.costLimitCents === input.costLimitCents) &&
       (input.environmentId === undefined ||
-        (held.environment?.id ?? null) === input.environmentId) &&
+        (held.environment?.id ?? held.runnerEnvironment?.id ?? null) ===
+          input.environmentId) &&
       (input.profile === undefined ||
         (input.profile === null
           ? held.profile === null
@@ -418,6 +438,7 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
         modelChoice: choices.model,
         costLimitCents: choices.costLimitCents,
         environment: choices.environment,
+        runnerEnvironment: choices.runnerEnvironment,
         profile: choices.profile,
         resultSchema: choices.resultSchema,
         createdBy: user.id,
@@ -435,6 +456,7 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
             modelChoice: choices.model,
             costLimitCents: choices.costLimitCents,
             environment: choices.environment,
+            runnerEnvironment: choices.runnerEnvironment,
             profile: choices.profile,
             resultSchema: choices.resultSchema,
             createdBy: user.id,
@@ -558,6 +580,7 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
         modelChoice: queued.modelChoice,
         costLimitCents: queued.costLimitCents,
         environment: queued.environment,
+        runnerEnvironment: queued.runnerEnvironment ?? null,
         profile: queued.profile,
         resultSchema: queued.resultSchema,
         createdBy: queued.createdBy,
@@ -597,6 +620,7 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
           ? value
           : 0;
       };
+      const chosen = turn.environment ?? turn.runnerEnvironment;
       const total =
         count("input") +
         count("cacheRead") +
@@ -611,9 +635,7 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
           model: turn.modelChoice,
           costLimitCents: turn.costLimitCents,
           environment:
-            turn.environment === null
-              ? null
-              : { id: turn.environment.id, name: turn.environment.name },
+            chosen === null ? null : { id: chosen.id, name: chosen.name },
           profile: profileRefOf(turn.profile),
         },
         queued:

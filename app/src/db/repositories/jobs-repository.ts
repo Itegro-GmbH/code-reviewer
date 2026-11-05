@@ -675,6 +675,7 @@ export function createJobsRepository(
         costLimitCents: input.costLimitCents,
         createdBy: input.createdBy,
         environment: input.environment ?? null,
+        runnerEnvironment: input.runnerEnvironment ?? null,
         profile: input.profile ?? null,
         resultSchema: input.resultSchema ?? null,
       };
@@ -793,6 +794,7 @@ export function createJobsRepository(
                 modelChoice: input.modelChoice,
                 costLimitCents: input.costLimitCents,
                 environment: input.environment ?? null,
+                runnerEnvironment: input.runnerEnvironment ?? null,
                 profile: input.profile ?? null,
                 resultSchema: input.resultSchema ?? null,
                 createdBy: input.createdBy,

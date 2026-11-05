@@ -32,7 +32,7 @@ export const PAGE_COPY = {
   revoke: "Revoke",
   revokeTitle: "Revoke this runner?",
   revokeNote:
-    "It stops getting jobs at once and cannot connect again. A job it is running is not taken from it, but it can no longer report the result.",
+    "It stops getting jobs at once and cannot connect again. A job it is running ends now as failed: the runner can no longer report anything for it, and what it already pushed stays on the branch.",
   revokeConfirm: "Revoke",
   cancel: "Cancel",
   revoked: "The runner was revoked.",

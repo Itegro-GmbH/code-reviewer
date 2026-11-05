@@ -3,6 +3,10 @@
 // The steps of a workflow in the order they run (#833): the shape of each node, and everything that depends on what ran before it.
 // `check-values.ts` checks the texts and values, `scope.ts` what a reference can reach.
 import {
+  harnessNeedsRunner,
+  harnessOfProfile,
+} from "../runner-identity/harness.ts";
+import {
   checkCondition,
   checkInput,
   checkLiteral,
@@ -398,6 +402,47 @@ function checkEnvironment(
     );
 }
 
+/**
+ * #854: what a profile and an environment can only do together. A runner works with its owner's own key, so a profile with a managed
+ * model has no place in a runner environment; and a harness the platform's catalog does not hold (any but OpenCode) exists only on a
+ * runner. Both are reported where the environment is written. A name nobody knows is reported by the checks above and not again here.
+ */
+function checkRunnerRules(
+  node: Record<string, unknown>,
+  path: string,
+  c: Checker,
+): void {
+  const environment =
+    typeof node.environment === "string"
+      ? literalText(parseTemplate(node.environment))
+      : undefined;
+  if (environment === undefined) return;
+  const known = c.resolver
+    .environments()
+    .find((e) => e.name.toLowerCase() === environment.toLowerCase());
+  const facts = findProfile(node.profile, c.resolver)?.facts;
+  if (known === undefined || facts === undefined) return;
+  const where = pointer(path, "environment");
+  const onRunner = known.kind === "runner";
+  if (onRunner && facts.managedModel === true)
+    c.report(
+      issue(
+        where,
+        "runner_needs_own_key",
+        `The environment ${shown(known.name)} runs on a runner, which works with the workspace's own key, but the profile ${shown(parseProfileRef(node.profile as string)?.name ?? "")} uses a managed model. Use a profile with a model of your own key, or a platform environment.`,
+      ),
+    );
+  const harness = harnessOfProfile(facts);
+  if (!onRunner && harnessNeedsRunner(harness))
+    c.report(
+      issue(
+        where,
+        "harness_needs_runner",
+        `The profile ${shown(parseProfileRef(node.profile as string)?.name ?? "")} runs with the harness ${shown(harness)}, which exists only on a runner. Use an environment that runs on a runner.`,
+      ),
+    );
+}
+
 function checkInstruction(
   node: Record<string, unknown>,
   path: string,
@@ -611,6 +656,7 @@ function checkAgent(
     c,
     reachOf(env, pointer(path, "environment"), state),
   );
+  checkRunnerRules(node, path, c);
   checkInstruction(node, path, c, env, state);
   checkSession(node, path, c, env, state);
   if (node.result === undefined) return;

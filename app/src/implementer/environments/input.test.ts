@@ -28,6 +28,7 @@ describe("the body of an environment", () => {
     ).toEqual({
       ok: true,
       value: {
+        kind: "hosted",
         name: "Node 22",
         vcpus: 6,
         setupScript: script,
@@ -41,6 +42,7 @@ describe("the body of an environment", () => {
     expect(validateEnvironmentInput({ name: "Bare", vcpus: 2 })).toEqual({
       ok: true,
       value: {
+        kind: "hosted",
         name: "Bare",
         vcpus: 2,
         setupScript: "",
@@ -170,6 +172,7 @@ describe("the body of an environment", () => {
     expect(checked).toEqual({
       ok: true,
       value: {
+        kind: "hosted",
         name: "Node 22",
         vcpus: 4,
         setupScript: "npm ci\n",
@@ -230,5 +233,99 @@ describe("the body of an environment", () => {
       { field: "vcpus", code: "invalid" },
       { field: "networkHosts", code: "required" },
     ]);
+  });
+});
+
+describe("the body of a runner environment (#854)", () => {
+  // #854-T190
+  it("is a name and labels, lower case and sorted, once each", () => {
+    expect(
+      validateEnvironmentInput({
+        kind: "runner",
+        name: " GPU box ",
+        labels: [" Linux", "gpu", "linux"],
+      }),
+    ).toEqual({
+      ok: true,
+      value: { kind: "runner", name: "GPU box", labels: ["gpu", "linux"] },
+    });
+  });
+
+  // #854-T191
+  it("needs at least one label, at most twenty, each of the form a runner announces", () => {
+    const issues = (labels: unknown) => {
+      const checked = validateEnvironmentInput({
+        kind: "runner",
+        name: "x",
+        labels,
+      });
+      return checked.ok ? [] : checked.issues;
+    };
+
+    expect(issues(undefined)).toEqual([{ field: "labels", code: "required" }]);
+    expect(issues([])).toEqual([{ field: "labels", code: "required" }]);
+    expect(issues("linux")).toEqual([{ field: "labels", code: "invalid" }]);
+    expect(issues(["two words"])).toEqual([
+      { field: "labels", code: "invalid" },
+    ]);
+    expect(issues([5])).toEqual([{ field: "labels", code: "invalid" }]);
+    expect(issues(["a".repeat(41)])).toEqual([
+      { field: "labels", code: "invalid" },
+    ]);
+    expect(
+      issues(Array.from({ length: 21 }, (_, index) => `l${String(index)}`)),
+    ).toEqual([{ field: "labels", code: "too_long" }]);
+    expect(
+      issues(Array.from({ length: 20 }, (_, index) => `l${String(index)}`)),
+    ).toEqual([]);
+  });
+
+  // #854-T192
+  it("has no size, script or network rule: a body that names one is refused instead of silently dropping it", () => {
+    const checked = validateEnvironmentInput({
+      kind: "runner",
+      name: "x",
+      labels: ["linux"],
+      vcpus: 4,
+      setupScript: "npm ci",
+      network: { mode: "open", hosts: [] },
+    });
+
+    expect(checked).toEqual({
+      ok: false,
+      issues: [
+        { field: "vcpus", code: "invalid" },
+        { field: "setupScript", code: "invalid" },
+        { field: "network", code: "invalid" },
+      ],
+    });
+    // An empty script is what a form that has none sends.
+    expect(
+      validateEnvironmentInput({
+        kind: "runner",
+        name: "x",
+        labels: ["a"],
+        setupScript: "",
+      }).ok,
+    ).toBe(true);
+  });
+
+  // #854-T193
+  it("refuses a kind that is neither, and labels on a hosted environment", () => {
+    expect(
+      validateEnvironmentInput({ kind: "vps", name: "x", vcpus: 2 }),
+    ).toEqual({ ok: false, issues: [{ field: "kind", code: "invalid" }] });
+    expect(
+      validateEnvironmentInput({
+        name: "x",
+        vcpus: 2,
+        labels: ["linux"],
+      }),
+    ).toEqual({ ok: false, issues: [{ field: "labels", code: "invalid" }] });
+    // Without a kind a body is hosted, as every body was before the kind.
+    expect(validateEnvironmentInput({ name: "x", vcpus: 2 })).toMatchObject({
+      ok: true,
+      value: { kind: "hosted" },
+    });
   });
 });

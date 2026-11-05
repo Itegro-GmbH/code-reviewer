@@ -7,6 +7,7 @@
 // repository, so the pages need no second lookup. The list is read without the columns it never
 // shows (the stored result with the log, the arguments, the lease): it is asked for every few seconds
 // by every open tab.
+import { labelsFromText } from "../../runner-identity/announcement.ts";
 import "server-only";
 import type { Kysely } from "kysely";
 import type { JobStatus } from "../job-status.ts";
@@ -259,6 +260,8 @@ export function createRunsRepository(
           "implementer_turns.environment_vcpus as turn_environment_vcpus",
           "implementer_turns.environment_network_mode as turn_environment_network_mode",
           "implementer_turns.environment_network_hosts as turn_environment_network_hosts",
+          "implementer_turns.environment_kind as turn_environment_kind",
+          "implementer_turns.environment_labels as turn_environment_labels",
           "usage_records.key_mode as key_mode",
           "usage_records.catalog_entry_id as catalog_entry_id",
           "usage_records.model_tier as model_tier",
@@ -285,6 +288,8 @@ export function createRunsRepository(
         turn_environment_vcpus: environmentVcpus,
         turn_environment_network_mode: networkMode,
         turn_environment_network_hosts: networkHosts,
+        turn_environment_kind: environmentKind,
+        turn_environment_labels: environmentLabels,
         ...job
       } = row;
       return {
@@ -312,6 +317,16 @@ export function createRunsRepository(
                   expected: resultSchema !== null,
                   value: readResultValue(resultValue),
                 },
+                // #854: the runner environment the turn copied, for the note of a task that waits for a runner.
+                runner:
+                  environmentKind === "runner" &&
+                  environmentName !== null &&
+                  environmentLabels !== null
+                    ? {
+                        name: environmentName,
+                        labels: labelsFromText(environmentLabels),
+                      }
+                    : null,
                 // #818: the environment the turn copied; none for a task without one.
                 environment:
                   environmentName === null || environmentVcpus === null

@@ -100,6 +100,8 @@ function fakeApi(
             {
               id: "env-a",
               name: "Node",
+              kind: "hosted" as const,
+              labels: [],
               vcpus: 2,
               memoryGb: 2,
               sizeSupported: true,

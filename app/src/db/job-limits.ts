@@ -42,6 +42,12 @@ export const IMPLEMENTER_MAX_ATTEMPTS = 1;
  */
 export const DEFAULT_IMPLEMENTER_MAX_RUNTIME_MS = 70 * 60 * 1000;
 
+/**
+ * #854: how long a turn of a runner environment waits for a runner of its workspace with its labels. After this it is cancelled with
+ * `no_runner_available`, free. The operator owns the value (`RUNNER_WAIT_DEADLINE_MINUTES`).
+ */
+export const DEFAULT_NO_RUNNER_AVAILABLE_MS = 30 * 60 * 1000;
+
 export type JobQueueLimits = {
   leaseMs: number;
   /** The hard timeout of a Diff or Dynamic job. */
@@ -52,6 +58,8 @@ export type JobQueueLimits = {
   noCapableRunnerMs: number;
   /** The age at which a queued job is cancelled although a runner of its engine is busy (#752). */
   noCapableRunnerAbsoluteMs: number;
+  /** How long a turn of a runner environment waits for a runner of its workspace (#854). */
+  noRunnerAvailableMs: number;
 };
 
 export const DEFAULT_JOB_QUEUE_LIMITS: JobQueueLimits = {
@@ -61,6 +69,7 @@ export const DEFAULT_JOB_QUEUE_LIMITS: JobQueueLimits = {
   maxAttempts: DEFAULT_MAX_ATTEMPTS,
   noCapableRunnerMs: DEFAULT_NO_CAPABLE_RUNNER_MS,
   noCapableRunnerAbsoluteMs: DEFAULT_NO_CAPABLE_RUNNER_ABSOLUTE_MS,
+  noRunnerAvailableMs: DEFAULT_NO_RUNNER_AVAILABLE_MS,
 };
 
 /** The environment variable an operator sets to own the deadline; seconds. */
@@ -79,4 +88,22 @@ export function configuredNoCapableRunnerMs(
   if (!Number.isFinite(seconds) || seconds <= 0)
     return DEFAULT_NO_CAPABLE_RUNNER_MS;
   return Math.round(seconds * 1000);
+}
+
+/** The environment variable an operator sets to own the wait for a runner of a workspace; minutes. */
+export const RUNNER_WAIT_DEADLINE_VARIABLE = "RUNNER_WAIT_DEADLINE_MINUTES";
+
+/**
+ * The operator's wait for a runner (#854). A missing, non-numeric or non-positive value keeps the default, so a typo never makes a turn
+ * wait for ever or fail at once.
+ */
+export function configuredNoRunnerAvailableMs(
+  environment: Record<string, string | undefined>,
+): number {
+  const raw = environment[RUNNER_WAIT_DEADLINE_VARIABLE]?.trim();
+  if (!raw) return DEFAULT_NO_RUNNER_AVAILABLE_MS;
+  const minutes = Number(raw);
+  if (!Number.isFinite(minutes) || minutes <= 0)
+    return DEFAULT_NO_RUNNER_AVAILABLE_MS;
+  return Math.round(minutes * 60 * 1000);
 }

@@ -15,6 +15,10 @@ import {
   ruleOf,
   type NetworkRule,
 } from "../../network-rule/network.ts";
+import {
+  labelsFromText,
+  labelsToText,
+} from "../../runner-identity/announcement.ts";
 import { formatTimestamp, tryDecodeJson } from "../codecs.ts";
 import { ImplementerStoreError } from "../implementer-errors.ts";
 import {
@@ -66,6 +70,8 @@ export type QueuedInstruction = {
   modelChoice: ModelChoice;
   costLimitCents: number | null;
   environment: TurnEnvironment | null;
+  /** #854: the runner environment, never together with `environment`; left out or null for none. */
+  runnerEnvironment?: TurnRunnerEnvironment | null;
   profile: TurnProfile | null;
   resultSchema: StoredResultSchema | null;
   createdBy: string;
@@ -104,6 +110,16 @@ export type TurnEnvironment = {
 };
 
 /**
+ * The runner environment a turn started with (#854): which one it was and the labels a runner must have to take the turn. A turn has
+ * this or a `TurnEnvironment`, never both; it has no size, script or network rule of its own, the runner decides how it works.
+ */
+export type TurnRunnerEnvironment = {
+  id: string;
+  name: string;
+  labels: string[];
+};
+
+/**
  * The profile version a turn started with, copied when the turn was written (#843). The id and the version say which one it was;
  * nothing points at it. The model and the cost limit of the version are the turn's own `modelChoice` and `costLimitCents`. A turn
  * without one runs with the platform's own defaults, as every turn did before profiles.
@@ -134,8 +150,10 @@ export type StoredImplementerTurn = {
   jobId: string;
   createdBy: string;
   createdAt: string;
-  /** The environment the person chose; null for a task without one (the standard). */
+  /** The environment the person chose; null for a task without one (the standard) and for a runner turn. */
   environment: TurnEnvironment | null;
+  /** #854: the runner environment the person chose (the turn waits for a runner with these labels); null for any other turn. */
+  runnerEnvironment: TurnRunnerEnvironment | null;
   /** The profile version the task ran with; null for a task without one (the platform's defaults). */
   profile: TurnProfile | null;
   /** The result schema the task ran with (#843): its own, or its profile's default; null for none (no finish tool). */
@@ -156,6 +174,8 @@ export type NewImplementerTask = {
   createdBy: string;
   /** A copy of the environment chosen at submit (#818); left out or null for none. */
   environment?: TurnEnvironment | null;
+  /** A copy of the runner environment chosen at submit (#854); left out or null for none. */
+  runnerEnvironment?: TurnRunnerEnvironment | null;
   /** A copy of the profile version chosen at submit (#843); left out or null for none. */
   profile?: TurnProfile | null;
   /** The result schema of the task (#843), already validated by the format's validator; left out or null for none. */
@@ -185,6 +205,8 @@ export type NewFollowUpTurn = {
   modelChoice: ModelChoice;
   costLimitCents: number | null;
   environment: TurnEnvironment | null;
+  /** #854: the runner environment, never together with `environment`; left out or null for none. */
+  runnerEnvironment?: TurnRunnerEnvironment | null;
   profile: TurnProfile | null;
   resultSchema: StoredResultSchema | null;
   createdBy: string;
@@ -404,7 +426,19 @@ function turnFrom(
     jobId: row.job_id,
     createdBy: row.created_by,
     createdAt: row.created_at,
+    runnerEnvironment:
+      row.environment_kind === "runner" &&
+      row.environment_id !== null &&
+      row.environment_name !== null &&
+      row.environment_labels !== null
+        ? {
+            id: row.environment_id,
+            name: row.environment_name,
+            labels: labelsFromText(row.environment_labels),
+          }
+        : null,
     environment:
+      row.environment_kind === "runner" ||
       row.environment_id === null ||
       row.environment_name === null ||
       row.environment_vcpus === null ||
@@ -497,6 +531,7 @@ export function createImplementerRepository(
         | "costLimitCents"
         | "createdBy"
         | "environment"
+        | "runnerEnvironment"
         | "profile"
         | "resultSchema"
       >;
@@ -516,19 +551,27 @@ export function createImplementerRepository(
         job_id: input.jobId,
         created_by: task.createdBy,
         created_at: input.timestamp,
-        environment_id: task.environment?.id ?? null,
-        environment_name: task.environment?.name ?? null,
+        environment_id:
+          task.environment?.id ?? task.runnerEnvironment?.id ?? null,
+        environment_name:
+          task.environment?.name ?? task.runnerEnvironment?.name ?? null,
         environment_vcpus: task.environment?.vcpus ?? null,
-        environment_setup_script: task.environment?.setupScript ?? null,
+        environment_setup_script:
+          task.environment?.setupScript ?? (task.runnerEnvironment ? "" : null),
         // Both or neither; a task without an environment has neither, and one without a rule has `off`.
         environment_network_mode:
-          task.environment === null || task.environment === undefined
+          (task.environment ?? task.runnerEnvironment) == null
             ? null
-            : (task.environment.network ?? NETWORK_OFF).mode,
+            : (task.environment?.network ?? NETWORK_OFF).mode,
         environment_network_hosts:
-          task.environment === null || task.environment === undefined
+          (task.environment ?? task.runnerEnvironment) == null
             ? null
-            : hostsToText((task.environment.network ?? NETWORK_OFF).hosts),
+            : hostsToText((task.environment?.network ?? NETWORK_OFF).hosts),
+        // #854: the kind and the labels of a runner environment; hosted copies keep the null of a turn written before the kind.
+        environment_kind: task.runnerEnvironment ? "runner" : null,
+        environment_labels: task.runnerEnvironment
+          ? labelsToText(task.runnerEnvironment.labels)
+          : null,
         profile_id: task.profile?.id ?? null,
         profile_name: task.profile?.name ?? null,
         profile_version: task.profile?.version ?? null,

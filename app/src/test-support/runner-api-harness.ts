@@ -20,6 +20,18 @@ import type {
   EnqueueFollowUpTurnInput,
   EnqueueImplementerTurnInput,
 } from "../jobs/job-types.ts";
+import { createRunnerCredentialsRepository } from "../db/repositories/runner-credentials-repository.ts";
+import { createRunnersRepository } from "../db/repositories/runners-repository.ts";
+import { createRunnerRegistrationApi } from "../runner-api/registration.ts";
+import {
+  normalizeLabels,
+  type Announcement,
+} from "../runner-identity/announcement.ts";
+import {
+  hashSecret,
+  newRegistrationToken,
+  newRunnerCredential,
+} from "../runner-identity/tokens.ts";
 import { addUser } from "./workspace-deletion-fixture.ts";
 import { createJobVmRunsRepository } from "../db/repositories/job-vm-runs-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
@@ -605,6 +617,14 @@ export async function startRunnerApiHarness(
       vmRuns: (workspaceId) =>
         createJobVmRunsRepository(fixture.db, workspaceId, fixture.clock.now),
       runnerToken: () => configuredRunnerToken(env),
+      // #854: the runners of customers' machines, with credentials of their own.
+      fleet: createRunnerRegistrationApi({
+        credentials: createRunnerCredentialsRepository(fixture.db, {
+          now: fixture.clock.now,
+        }),
+        settings: () => ({ minBaseVersion: fleetSettings.minBaseVersion }),
+        logger,
+      }),
       appVersion: TEST_APP_VERSION,
       noteClaimFeatures: (features) =>
         noteDispatcherClaim(fixture.db, features, fixture.clock.now()),
@@ -613,6 +633,10 @@ export async function startRunnerApiHarness(
     const workerApi = createWorkerApi(apiDeps);
     return { api, workerApi, llm, claimedKeys, writeTokens };
   }
+  /** #854: what the harness's fleet reads from the environment of a server. */
+  const fleetSettings: { minBaseVersion: string | null } = {
+    minBaseVersion: null,
+  };
   const { api, workerApi, llm, claimedKeys, writeTokens } = buildApi();
   /** Saves (or, with null, removes) the LLM key of the workspace of the jobs, for a provider (default: the first one). */
   async function setLlmKey(
@@ -1005,6 +1029,7 @@ export async function startRunnerApiHarness(
       ]).allowsReviewKind(kind),
   });
   let turnCounter = 0;
+  let runnerCounter = 0;
   /** #753: a turn of the Implementer on the harness repository, as the submit will make it (a queued job of the kind). */
   async function enqueueTurn(
     overrides: Partial<EnqueueImplementerTurnInput> = {},
@@ -1140,6 +1165,49 @@ export async function startRunnerApiHarness(
     },
     enqueueTurn,
     enqueueFollowUp,
+    /** #854: the minimum version of the base a customer's runner may have (`RUNNER_MIN_BASE_VERSION`); null for none. */
+    setMinBaseVersion(version: string | null) {
+      fleetSettings.minBaseVersion = version;
+    },
+    /**
+     * #854: registers a runner of a workspace (the harness's, or `workspaceId`) the way a member and the runner would, and returns its id
+     * and its credential. `claim({ token: credential })` is then that runner's claim.
+     */
+    async registerRunner(
+      announcement: Partial<Announcement> & { workspaceId?: string } = {},
+    ) {
+      const workspaceId = announcement.workspaceId ?? fixture.workspaceId;
+      if (runnerCounter === 0) await addUser(fixture.db, "fleet-user");
+      runnerCounter += 1;
+      const token = newRegistrationToken();
+      const made = await createRunnersRepository(fixture.db, workspaceId, {
+        now: fixture.clock.now,
+      }).createToken(
+        {
+          tokenHash: hashSecret(token),
+          createdBy: "fleet-user",
+          expiresAt: new Date(fixture.clock.now().getTime() + 3_600_000),
+        },
+        20,
+      );
+      if (!made.ok) throw new Error("token limit");
+      const credential = newRunnerCredential();
+      const redeemed = await createRunnerCredentialsRepository(fixture.db, {
+        now: fixture.clock.now,
+      }).redeem(hashSecret(token), {
+        name: `runner-${String(runnerCounter)}`,
+        labels: normalizeLabels(announcement.labels ?? ["linux"]),
+        baseVersion: announcement.baseVersion ?? "1.0.0",
+        manifest: announcement.manifest ?? {
+          harnesses: { opencode: { version: "1.19.0", ready: true } },
+          capabilities: [],
+        },
+        limits: announcement.limits ?? {},
+        credentialHash: hashSecret(credential),
+      });
+      if (!redeemed.ok) throw new Error("exchange failed");
+      return { runnerId: redeemed.runner.id, credential };
+    },
     /** #790: the write token service of the first app instance (the sweep's `retryPending`, the end of a turn). */
     writeTokens,
     /** #790: waits for the write tokens that the ends of claims (the reaper, a stop) switched off after their response. */

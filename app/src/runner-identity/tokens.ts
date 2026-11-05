@@ -33,3 +33,8 @@ export function newRunnerCredential(): string {
 export function hashSecret(secret: string): string {
   return createHash("sha256").update(secret, "utf8").digest("hex");
 }
+
+/** The id a customer's runner has in `jobs.runner_id` and in the logs: `runner:` and its id. */
+export function customerRunnerId(runnerId: string): string {
+  return `runner:${runnerId}`;
+}

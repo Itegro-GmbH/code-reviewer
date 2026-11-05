@@ -1120,6 +1120,18 @@ export interface ImplementerTurnsTable {
     string | null | undefined,
     string | null
   >;
+  /** #854: `hosted` or `runner`; null is a turn written before the kind (hosted). */
+  environment_kind: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  /** #854: the labels a runner must have, one on each line, for the kind `runner`; null otherwise. */
+  environment_labels: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
   /**
    * The profile version the task ran with, copied when the turn was written (#843): all five are null (a task without a profile: the
    * platform's own defaults, as before profiles) or all are set. No foreign key: nothing in the profile tables reaches the turn.
@@ -1241,13 +1253,17 @@ export interface ImplementerEnvironmentsTable {
   workspace_id: string;
   /** Unique within the workspace, whatever the case. */
   name: string;
-  /** A size of `contracts/environment-sizes.v1.json`; the app checks the list, the database only that it is positive. */
-  vcpus: number;
+  /** A size of `contracts/environment-sizes.v1.json`; the app checks the list, the database only that it is positive. Null for the kind `runner` (#854). */
+  vcpus: number | null;
   setup_script: string;
   /** `off`, `list` or `open` (#745, step 7): the rule for the agent's network. Existing environments read `off`. */
   network_mode: ColumnType<string, string | undefined, string>;
   /** The host names of a list, one on each line, in the form the door compares them in; empty unless the mode is `list`. */
   network_hosts: ColumnType<string, string | undefined, string>;
+  /** `hosted` (a VM of the platform: size, script, network rule) or `runner` (labels of a customer's runner instead; #854). */
+  kind: ColumnType<string, string | undefined, string>;
+  /** The labels a runner must have, one on each line, lower case and sorted; empty for the kind `hosted`. */
+  labels: ColumnType<string, string | undefined, string>;
   created_by: string;
   /** ISO 8601 UTC. */
   created_at: string;

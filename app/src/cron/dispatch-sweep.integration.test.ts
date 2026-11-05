@@ -117,6 +117,7 @@ describe("the dispatch sweep route", () => {
         leaseExpired: 0,
         timedOut: 0,
         noCapableRunner: 0,
+        noRunnerAvailable: 0,
       },
       givenUp: 0,
       revived: 0,

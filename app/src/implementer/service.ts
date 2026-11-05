@@ -10,10 +10,7 @@
 // transaction writes the session, the turn and the job (`queue.enqueueImplementerTurn`), and the queue wakes the Dispatcher.
 // Nothing is written before the last step, and a platform that cannot be asked ends the submit with 503.
 import type { ImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
-import type {
-  TurnEnvironment,
-  TurnProfile,
-} from "../db/repositories/implementer-repository.ts";
+import type { TurnProfile } from "../db/repositories/implementer-repository.ts";
 import type { ProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import type { IntegrationsRepository } from "../db/repositories/integrations-repository.ts";
 import type { RepositoriesRepository } from "../db/repositories/repositories-repository.ts";
@@ -149,7 +146,8 @@ function repeatOf(
     session.baseBranch === task.baseBranch &&
     session.branch === task.branch &&
     turn.instruction === task.instruction &&
-    (turn.environment?.id ?? null) === task.environmentId &&
+    (turn.environment?.id ?? turn.runnerEnvironment?.id ?? null) ===
+      task.environmentId &&
     sameProfile(turn.profile, task.profile) &&
     sameResult(turn.resultSchema, task.result) &&
     sameChoices;
@@ -330,10 +328,10 @@ export function createImplementerService(
 
       // The environment is read now and copied into the turn: what it says at this moment is what the task runs with, whatever
       // is done to it afterwards. An id of another workspace, or of one that is gone, is the same refusal.
-      const environment: TurnEnvironment | null =
+      const { environment, runnerEnvironment } =
         task.environmentId === null
-          ? null
-          : await copyEnvironment(deps.environments, task.environmentId);
+          ? { environment: null, runnerEnvironment: null }
+          : await copyEnvironment(deps.environments, task.environmentId, model);
 
       if (costLimitCents !== null) {
         const maximumCents = await deps.operatorCostLimitCents();
@@ -365,6 +363,7 @@ export function createImplementerService(
           modelChoice: model,
           costLimitCents,
           environment,
+          runnerEnvironment,
           profile,
           resultSchema,
           createdBy: user.id,

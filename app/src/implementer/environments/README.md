@@ -23,3 +23,12 @@ environment touches no task.
 
 Who may do what (`src/workspaces/permissions.ts`): `start_implementer_task` (any member) lists; `manage_implementer_environments`
 (Admin and up) creates, changes and deletes. The script is shown to every member who can list.
+
+## The kind `runner` (#854)
+
+An environment is `hosted` (all of the above) or `runner`: **labels instead of a size, a script and a network rule**. A task with a runner environment
+waits for a runner of the workspace that has every label (`docs/runner.md`, "Routing") and needs a model of the workspace's own key
+(`IMPLEMENTER_RUNNER_NEEDS_OWN_KEY` for a managed one). `validateEnvironmentInput` takes `kind` (hosted when it is left out) and, for `runner`, `labels`
+(1 to 20, lower case, sorted, once each); a size, a script or a network rule in a runner body is refused. The row has `kind` and `labels` and a database
+check that keeps each kind to its own columns (`vcpus` is null for a runner environment); the turn copies both (`environment_kind`, `environment_labels`)
+and is not a `TurnEnvironment`: a runner turn has `runnerEnvironment` and no `environment`, so nothing that sizes a VM ever meets one.

@@ -62,6 +62,8 @@ function task(
     branchUrl: "https://github.com/acme/widgets/tree/implementer/abc123",
     baseBranch: "main",
     instruction: { preview: "Add a health endpoint.", full: null },
+    runner: null,
+    waitingForRunner: null,
     summary: "Added a health endpoint.",
     environment: null,
     commits: {

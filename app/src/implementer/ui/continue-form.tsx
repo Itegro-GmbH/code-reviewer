@@ -227,9 +227,12 @@ export function ContinueForm({
     { id: STANDARD, label: CONTINUE_COPY.environmentNone },
     ...environmentList.map((candidate) => ({
       id: candidate.id,
-      label: candidate.sizeSupported
-        ? `${candidate.name} (${candidate.vcpus} vCPU, ${candidate.memoryGb} GB memory${candidate.hasScript ? ", setup script" : ""})`
-        : `${candidate.name} (${candidate.vcpus} vCPU, no longer offered)`,
+      label:
+        candidate.kind === "runner"
+          ? `${candidate.name} (runner: ${candidate.labels.join(", ")})`
+          : candidate.sizeSupported
+            ? `${candidate.name} (${candidate.vcpus} vCPU, ${candidate.memoryGb} GB memory${candidate.hasScript ? ", setup script" : ""})`
+            : `${candidate.name} (${candidate.vcpus} vCPU, no longer offered)`,
     })),
   ];
 

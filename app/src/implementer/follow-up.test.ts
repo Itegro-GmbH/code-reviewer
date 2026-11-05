@@ -71,6 +71,7 @@ function lastTurn(): StoredImplementerTurn {
     createdBy: "user-1",
     createdAt: T0.toISOString(),
     environment: null,
+    runnerEnvironment: null,
     profile: null,
     resultSchema: null,
     resultValue: null,
@@ -358,5 +359,67 @@ describe("the continuation of a run", () => {
 
     expect(found).toBeUndefined();
     expect(f.sessions.getTurnByJob).not.toHaveBeenCalled();
+  });
+});
+
+describe("a session whose last turn ran on a runner environment (#854)", () => {
+  const RUNNER = { id: "env-r", name: "Mac", labels: ["macos"] };
+  const OWN_KEY = { provider: "anthropic", model: "claude-sonnet-5-5" };
+  const onRunner = () => {
+    const f = fakes(session());
+    f.sessions.lastTurn.mockResolvedValue({
+      ...lastTurn(),
+      modelChoice: OWN_KEY,
+      runnerEnvironment: RUNNER,
+    });
+    f.queue.enqueueFollowUpTurn.mockResolvedValue({
+      status: "created",
+      job: { id: "job-2" },
+      session: session({ status: "running" }),
+      turn: { ...lastTurn(), number: 2 },
+    });
+    return f;
+  };
+
+  // #841-U41
+  it("keeps the runner environment of the last turn when the body names none", async () => {
+    const f = onRunner();
+
+    await createFollowUps(f.deps).continueSession(USER, "session-1", body());
+
+    expect(f.queue.enqueueFollowUpTurn).toHaveBeenCalledWith(
+      expect.objectContaining({ environment: null, runnerEnvironment: RUNNER }),
+    );
+  });
+
+  // #841-U42
+  it("refuses a managed model while the runner environment stays", async () => {
+    const f = onRunner();
+
+    const failure = await failureOf(
+      createFollowUps(f.deps).continueSession(
+        USER,
+        "session-1",
+        body({ model: { entryId: "entry-1" } }),
+      ),
+    );
+
+    expect((failure as ImplementerError).code).toBe(
+      "IMPLEMENTER_RUNNER_NEEDS_OWN_KEY",
+    );
+    expect(f.queue.enqueueFollowUpTurn).not.toHaveBeenCalled();
+  });
+
+  // #841-U43
+  it("shows the runner environment as the default of the continuation", async () => {
+    const f = onRunner();
+    f.sessions.getTurnByJob.mockResolvedValue({
+      turn: { ...lastTurn(), modelChoice: OWN_KEY, runnerEnvironment: RUNNER },
+      session: session(),
+    });
+
+    const found = await createFollowUps(f.deps).continuation("job-1");
+
+    expect(found?.defaults.environment).toEqual({ id: "env-r", name: "Mac" });
   });
 });

@@ -11,14 +11,27 @@ import {
 } from "./limits.ts";
 import type { EnvironmentIssue } from "./errors.ts";
 import { checkNetwork, type NetworkRule } from "../../network-rule/network.ts";
+import {
+  LABEL_PATTERN,
+  LABELS_MAX,
+  normalizeLabels,
+} from "../../runner-identity/announcement.ts";
 
-export type EnvironmentInput = {
-  name: string;
-  vcpus: number;
-  setupScript: string;
-  /** #745, step 7: the rule for the agent's network; `off` when the body names none. */
-  network: NetworkRule;
-};
+export type EnvironmentInput =
+  | {
+      kind: "hosted";
+      name: string;
+      vcpus: number;
+      setupScript: string;
+      /** #745, step 7: the rule for the agent's network; `off` when the body names none. */
+      network: NetworkRule;
+    }
+  | {
+      /** #854: the labels a runner must have (at least one), instead of a size, a script and a network rule. */
+      kind: "runner";
+      name: string;
+      labels: string[];
+    };
 
 export type EnvironmentInputCheck =
   | { ok: true; value: EnvironmentInput }
@@ -28,6 +41,42 @@ const LONE_SURROGATE =
   /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
 /** A name is one line without control characters. */
 const NOT_ONE_LINE = /[\u0000-\u001f\u007f]/;
+
+/** The labels of a runner environment: at least one, at most 20, each lower case of the form a runner announces; sorted, once each. */
+function checkRunnerLabels(
+  value: unknown,
+  refuse: (
+    field: EnvironmentIssue["field"],
+    code: EnvironmentIssue["code"],
+  ) => void,
+): string[] | undefined {
+  if (value === undefined || value === null) {
+    refuse("labels", "required");
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    refuse("labels", "invalid");
+    return undefined;
+  }
+  if (value.length === 0) {
+    refuse("labels", "required");
+    return undefined;
+  }
+  if (value.length > LABELS_MAX) {
+    refuse("labels", "too_long");
+    return undefined;
+  }
+  const labels: string[] = [];
+  for (const label of value) {
+    const text = typeof label === "string" ? label.trim().toLowerCase() : "";
+    if (!LABEL_PATTERN.test(text)) {
+      refuse("labels", "invalid");
+      return undefined;
+    }
+    labels.push(text);
+  }
+  return normalizeLabels(labels);
+}
 
 export function validateEnvironmentInput(body: unknown): EnvironmentInputCheck {
   const fields: Record<string, unknown> =
@@ -50,6 +99,31 @@ export function validateEnvironmentInput(body: unknown): EnvironmentInputCheck {
   else if (NOT_ONE_LINE.test(name) || LONE_SURROGATE.test(name))
     refuse("name", "invalid");
 
+  // #854: the kind. `hosted` when the body names none, as every body was before the kind.
+  const kind = fields.kind ?? "hosted";
+  if (kind !== "hosted" && kind !== "runner") {
+    refuse("kind", "invalid");
+    return { ok: false, issues };
+  }
+  if (kind === "runner") {
+    // A runner environment is its labels: a size, a script or a network rule would promise something the runner does not do.
+    if (fields.vcpus !== undefined) refuse("vcpus", "invalid");
+    if (fields.setupScript !== undefined && fields.setupScript !== "")
+      refuse("setupScript", "invalid");
+    if (fields.network !== undefined) refuse("network", "invalid");
+    const labels = checkRunnerLabels(fields.labels, refuse);
+    if (issues.length > 0 || labels === undefined) return { ok: false, issues };
+    return {
+      ok: true,
+      value: { kind: "runner", name: name as string, labels },
+    };
+  }
+  if (
+    fields.labels !== undefined &&
+    !(Array.isArray(fields.labels) && fields.labels.length === 0)
+  )
+    refuse("labels", "invalid");
+
   const vcpus = fields.vcpus;
   if (vcpus === undefined) refuse("vcpus", "required");
   else if (!isEnvironmentVcpus(vcpus)) refuse("vcpus", "invalid");
@@ -69,6 +143,7 @@ export function validateEnvironmentInput(body: unknown): EnvironmentInputCheck {
   return {
     ok: true,
     value: {
+      kind: "hosted",
       name: name as string,
       vcpus: vcpus as number,
       setupScript: script as string,

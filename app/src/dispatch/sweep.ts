@@ -295,7 +295,8 @@ export function createDispatchSweep(deps: SweepDependencies): DispatchSweep {
         expired.requeued +
           expired.leaseExpired +
           expired.timedOut +
-          expired.noCapableRunner >
+          expired.noCapableRunner +
+          expired.noRunnerAvailable >
           0) ||
       report.givenUp + report.revived + report.sent > 0;
     if (changed)

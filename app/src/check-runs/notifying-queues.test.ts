@@ -130,6 +130,7 @@ describe("the runner side of the queue", () => {
       leaseExpired: 0,
       timedOut: 0,
       noCapableRunner: 0,
+      noRunnerAvailable: 0,
     };
     const expireStaleJobs = vi
       .fn()

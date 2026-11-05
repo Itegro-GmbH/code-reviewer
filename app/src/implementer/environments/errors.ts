@@ -38,6 +38,10 @@ export const ENVIRONMENT_ISSUE_FIELDS = [
   "network",
   /** #745, step 7: the hosts of a list. */
   "networkHosts",
+  /** #854: `hosted` or `runner`. */
+  "kind",
+  /** #854: the labels of a runner environment, or the `labels[i]` that is wrong. */
+  "labels",
 ] as const;
 export const ENVIRONMENT_ISSUE_CODES = [
   "required",

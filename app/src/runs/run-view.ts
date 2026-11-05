@@ -190,6 +190,10 @@ export type ImplementerDetailView = ImplementerRowView & {
   };
   /** The environment the task started with; null for a task without one (the standard). */
   environment: ImplementerEnvironmentView | null;
+  /** #854: the runner environment the task started with (name and labels, untrusted text); null for any other task. */
+  runner: { name: string; labels: string[] } | null;
+  /** #854: "Waiting for a runner with labels gpu, linux" while a task of a runner environment is queued; null otherwise. */
+  waitingForRunner: string | null;
   /**
    * The result the agent handed in through the finish tool (#843), as the app kept it (the runner checked it against the task's
    * schema; the app held it to the bounds, it did not check the schema again): data from the agent, each text in it cleaned and stripped of known secrets, and nothing else changed. Null when there is none.
@@ -232,6 +236,8 @@ export type ImplementerDetailSource = ImplementerRowSource & {
   instruction: string;
   /** #843: whether the turn had a result schema, and the result the agent handed in once it was checked against it. */
   result?: { expected: boolean; value: Record<string, unknown> | null };
+  /** The runner environment the turn copied (#854): the task waits for a runner that has these labels. Absent or null for any other task. */
+  runner?: { name: string; labels: string[] } | null;
   /** The environment the turn copied when it started (#818); absent or null for a task without one. */
   environment?: {
     name: string;
@@ -917,6 +923,21 @@ function implementerDetailView(
     },
     summary: summary === "" ? null : summary,
     environment: environmentView(source, job.result, display),
+    runner:
+      source?.runner == null
+        ? null
+        : {
+            name: display(cleanTaskLine(head(source.runner.name, 400))),
+            labels: source.runner.labels.map((label) =>
+              display(cleanTaskLine(head(label, 160))),
+            ),
+          },
+    waitingForRunner:
+      job.status === "queued" && source?.runner != null
+        ? `Waiting for a runner with labels ${source.runner.labels
+            .map((label) => display(cleanTaskLine(head(label, 160))))
+            .join(", ")}`
+        : null,
     resultExpected: source?.result?.expected ?? false,
     resume: resumeViewOf(job.result),
     result:

@@ -19,6 +19,7 @@ function setup(
         leaseExpired: 0,
         timedOut: 0,
         noCapableRunner: 0,
+        noRunnerAvailable: 0,
       });
     }),
   };
@@ -158,6 +159,7 @@ describe("the write tokens of the Implementer in the repair work (#790)", () => 
             leaseExpired: 0,
             timedOut: 0,
             noCapableRunner: 0,
+            noRunnerAvailable: 0,
           };
         }),
       },
@@ -187,6 +189,7 @@ describe("the write tokens of the Implementer in the repair work (#790)", () => 
             leaseExpired: 1,
             timedOut: 0,
             noCapableRunner: 0,
+            noRunnerAvailable: 0,
           };
         }),
       },
@@ -220,6 +223,7 @@ describe("the write tokens of the Implementer in the repair work (#790)", () => 
           leaseExpired: 0,
           timedOut: 0,
           noCapableRunner: 0,
+          noRunnerAvailable: 0,
         }),
       },
       workflowRuns: { reconcile },

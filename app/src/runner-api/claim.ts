@@ -953,6 +953,10 @@ export async function checkJob(
   });
   if (!selected.ok) return refuse(selected.errorCode, selected.detail);
   const { selection } = selected;
+  // #854: a turn of a runner environment runs on a customer's machine with the owner's own key. The operator's key never leaves for a
+  // runner, whatever the turn says: a managed selection ends the job here, before a record, a key or a credential exists.
+  if (turn?.turn.runnerEnvironment != null && selection.keyMode === "managed")
+    return refuse("runner_needs_own_key", "kind=implementer");
   await deps.recordSelection(job, selection);
 
   // #553: the cost of a native Dynamic job. On the operator's key, which we pay, a model whose price is not confirmed ends
@@ -1695,6 +1699,8 @@ export async function handleClaim(
     maxRunning?: number;
     /** #424: the providers the caller advertised in its claim; absent means the default provider only. */
     llmProviders?: readonly string[];
+    /** #854: the claim is a customer's runner's: only the turns of its workspace's runner environments whose labels it has. */
+    customerRunner?: { workspaceId: string; labels: readonly string[] };
   } = {},
 ): Promise<Response> {
   // #320: a Dispatcher names `worker_credential` and gets a per-job credential instead of the input.
@@ -1709,6 +1715,9 @@ export async function handleClaim(
       ...(!split && features.includes("supersede")
         ? { acceptsSupersede: true }
         : {}),
+      ...(target.customerRunner === undefined
+        ? {}
+        : { customerRunner: target.customerRunner }),
       ...(target.jobId === undefined ? {} : { jobId: target.jobId }),
       ...(target.maxRunning === undefined
         ? {}

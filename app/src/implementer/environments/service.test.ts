@@ -15,8 +15,10 @@ const STORED: StoredEnvironment = {
   id: "env-1",
   workspaceId: "w-1",
   name: "Node 22",
+  kind: "hosted",
   vcpus: 4,
   setupScript: "npm ci\n",
+  labels: [],
   network: { mode: "off", hosts: [] },
   createdBy: "u-1",
   createdAt: "2026-11-02T08:00:00.000Z",
@@ -34,6 +36,8 @@ function fakeRepository(
       {
         id: STORED.id,
         name: STORED.name,
+        kind: "hosted",
+        labels: [],
         vcpus: STORED.vcpus,
         hasScript: true,
         networkMode: "off",
@@ -77,6 +81,8 @@ describe("the environment service", () => {
         {
           id: "env-1",
           name: "Node 22",
+          kind: "hosted",
+          labels: [],
           vcpus: 4,
           memoryGb: 5.7,
           sizeSupported: true,
@@ -107,6 +113,8 @@ describe("the environment service", () => {
         {
           id: "env-1",
           name: "Node 22",
+          kind: "hosted",
+          labels: [],
           vcpus: 4,
           memoryGb: 5.7,
           sizeSupported: true,
@@ -235,5 +243,87 @@ describe("the environment service", () => {
     expect((await failureOf(service.get("x".repeat(500)))).code).toBe(
       "ENVIRONMENT_NOT_FOUND",
     );
+  });
+});
+
+describe("the service for an environment that runs on a runner (#854)", () => {
+  const RUNNER: StoredEnvironment = {
+    ...STORED,
+    id: "env-box",
+    name: "GPU box",
+    kind: "runner",
+    vcpus: null,
+    setupScript: "",
+    labels: ["gpu", "linux"],
+  };
+
+  // #854-T199
+  it("shows its labels, no size and no memory, and a size that cannot be unsupported", async () => {
+    const service = createEnvironmentService({
+      environments: fakeRepository({
+        list: async () => [RUNNER],
+        listSummaries: async () => [
+          {
+            id: RUNNER.id,
+            name: RUNNER.name,
+            kind: "runner",
+            labels: RUNNER.labels,
+            vcpus: null,
+            hasScript: false,
+            networkMode: "off",
+          },
+        ],
+      }),
+    });
+
+    const list = await service.list();
+    const picker = await service.listForPicker();
+
+    expect(list.environments).toEqual([
+      expect.objectContaining({
+        kind: "runner",
+        labels: ["gpu", "linux"],
+        vcpus: null,
+        memoryGb: null,
+        sizeSupported: true,
+        setupScript: "",
+      }),
+    ]);
+    expect(picker.environments).toEqual([
+      expect.objectContaining({
+        kind: "runner",
+        labels: ["gpu", "linux"],
+        vcpus: null,
+        memoryGb: null,
+        sizeSupported: true,
+      }),
+    ]);
+  });
+
+  // #854-T200
+  it("creates it with the checked labels", async () => {
+    const created: unknown[] = [];
+    const service = createEnvironmentService({
+      environments: fakeRepository({
+        create: async (environment) => {
+          created.push(environment);
+          return { ok: true, environment: RUNNER };
+        },
+      }),
+    });
+
+    await service.create(
+      { id: "u-1" },
+      { kind: "runner", name: "GPU box", labels: ["Linux", "gpu"] },
+    );
+
+    expect(created).toEqual([
+      {
+        kind: "runner",
+        name: "GPU box",
+        labels: ["gpu", "linux"],
+        createdBy: "u-1",
+      },
+    ]);
   });
 });

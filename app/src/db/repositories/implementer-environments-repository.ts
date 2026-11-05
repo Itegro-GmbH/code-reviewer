@@ -12,6 +12,11 @@ import { UNIQUE_VIOLATION, errorCode } from "../errors.ts";
 import type { Database, ImplementerEnvironmentsTable } from "../schema.ts";
 import type { WorkspaceId } from "../workspace-scope.ts";
 import {
+  labelsFromText,
+  labelsToText,
+  normalizeLabels,
+} from "../../runner-identity/announcement.ts";
+import {
   hostsToText,
   isNetworkMode,
   NETWORK_OFF,
@@ -20,12 +25,19 @@ import {
   type NetworkRule,
 } from "../../network-rule/network.ts";
 
+/** #854: `hosted` runs on a VM of the platform; `runner` runs on a customer's runner that has every label of the environment. */
+export type EnvironmentKind = "hosted" | "runner";
+
 export type StoredEnvironment = {
   id: string;
   workspaceId: string;
   name: string;
-  vcpus: number;
+  kind: EnvironmentKind;
+  /** The size of a hosted environment; null for a runner environment. */
+  vcpus: number | null;
   setupScript: string;
+  /** The labels a runner must have (lower case, sorted); empty for a hosted environment. */
+  labels: string[];
   /** #745, step 7: the rule for the agent's network. Every environment that existed before it reads `off`. */
   network: NetworkRule;
   createdBy: string;
@@ -37,19 +49,29 @@ export type StoredEnvironment = {
 export type EnvironmentSummary = {
   id: string;
   name: string;
-  vcpus: number;
+  kind: EnvironmentKind;
+  vcpus: number | null;
+  labels: string[];
   hasScript: boolean;
   /** The mode of the network rule, not its hosts. */
   networkMode: NetworkMode;
 };
 
-export type EnvironmentFields = {
-  name: string;
-  vcpus: number;
-  setupScript: string;
-  /** Left out: `off`. */
-  network?: NetworkRule;
-};
+export type EnvironmentFields =
+  | {
+      kind?: "hosted";
+      name: string;
+      vcpus: number;
+      setupScript: string;
+      /** Left out: `off`. */
+      network?: NetworkRule;
+    }
+  | {
+      /** #854: labels instead of a size, a script and a network rule. */
+      kind: "runner";
+      name: string;
+      labels: string[];
+    };
 
 export type NewEnvironment = EnvironmentFields & { createdBy: string };
 
@@ -77,6 +99,33 @@ export type ImplementerEnvironmentsRepository = {
   remove(id: string): Promise<boolean>;
 };
 
+function kindOf(text: string): EnvironmentKind {
+  return text === "runner" ? "runner" : "hosted";
+}
+
+/** The columns an environment's fields write: a hosted one its size, script and rule, a runner one its labels. */
+function columnsOf(fields: EnvironmentFields) {
+  if (fields.kind === "runner")
+    return {
+      name: fields.name,
+      kind: "runner",
+      vcpus: null,
+      setup_script: "",
+      labels: labelsToText(normalizeLabels(fields.labels)),
+      network_mode: NETWORK_OFF.mode,
+      network_hosts: hostsToText(NETWORK_OFF.hosts),
+    };
+  return {
+    name: fields.name,
+    kind: "hosted",
+    vcpus: fields.vcpus,
+    setup_script: fields.setupScript,
+    labels: "",
+    network_mode: (fields.network ?? NETWORK_OFF).mode,
+    network_hosts: hostsToText((fields.network ?? NETWORK_OFF).hosts),
+  };
+}
+
 function environmentFrom(
   row: Selectable<ImplementerEnvironmentsTable>,
 ): StoredEnvironment {
@@ -84,8 +133,10 @@ function environmentFrom(
     id: row.id,
     workspaceId: row.workspace_id,
     name: row.name,
+    kind: kindOf(row.kind),
     vcpus: row.vcpus,
     setupScript: row.setup_script,
+    labels: labelsFromText(row.labels),
     network: ruleOf(row.network_mode, row.network_hosts),
     createdBy: row.created_by,
     createdAt: row.created_at,
@@ -120,6 +171,8 @@ export function createImplementerEnvironmentsRepository(
           "id",
           "name",
           "vcpus",
+          "kind",
+          "labels",
           sql<boolean>`octet_length(setup_script) > 0`.as("has_script"),
           "network_mode",
         ])
@@ -130,7 +183,9 @@ export function createImplementerEnvironmentsRepository(
       return rows.map((row) => ({
         id: row.id,
         name: row.name,
+        kind: kindOf(row.kind),
         vcpus: row.vcpus,
+        labels: labelsFromText(row.labels),
         hasScript: row.has_script,
         networkMode: isNetworkMode(row.network_mode) ? row.network_mode : "off",
       }));
@@ -169,13 +224,7 @@ export function createImplementerEnvironmentsRepository(
           .values({
             id: newId(),
             workspace_id: workspaceId,
-            name: environment.name,
-            vcpus: environment.vcpus,
-            setup_script: environment.setupScript,
-            network_mode: (environment.network ?? NETWORK_OFF).mode,
-            network_hosts: hostsToText(
-              (environment.network ?? NETWORK_OFF).hosts,
-            ),
+            ...columnsOf(environment),
             created_by: environment.createdBy,
             created_at: timestamp,
             updated_at: timestamp,
@@ -194,11 +243,7 @@ export function createImplementerEnvironmentsRepository(
         const row = await db
           .updateTable("implementer_environments")
           .set({
-            name: fields.name,
-            vcpus: fields.vcpus,
-            setup_script: fields.setupScript,
-            network_mode: (fields.network ?? NETWORK_OFF).mode,
-            network_hosts: hostsToText((fields.network ?? NETWORK_OFF).hosts),
+            ...columnsOf(fields),
             updated_at: formatTimestamp(now()),
           })
           .where("workspace_id", "=", workspaceId)

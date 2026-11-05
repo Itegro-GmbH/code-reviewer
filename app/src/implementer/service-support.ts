@@ -7,6 +7,7 @@ import type { ImplementerEnvironmentsRepository } from "../db/repositories/imple
 import type {
   TurnEnvironment,
   TurnProfile,
+  TurnRunnerEnvironment,
 } from "../db/repositories/implementer-repository.ts";
 import type { IntegrationsRepository } from "../db/repositories/integrations-repository.ts";
 import type { ProfilesRepository } from "../db/repositories/profiles-repository.ts";
@@ -117,31 +118,61 @@ export async function resolveRepository(
 }
 
 /**
- * The environment of the workspace as a turn copies it. An id of another workspace, or of one that is gone, is the same refusal; a size
- * that is no longer offered (1 vCPU) is shown on the page as it is and refused here, before a turn, a job or a VM exists.
+ * The environment of the workspace as a turn copies it: a hosted one (#818) or a runner one (#854), never both. An id of another
+ * workspace, or of one that is gone, is the same refusal; a size that is no longer offered (1 vCPU) is shown on the page as it is and
+ * refused here, before a turn, a job or a VM exists. A runner works with its owner's own key: a managed `model` is refused here, before a
+ * turn, a job or a charge exists.
  */
 export async function copyEnvironment(
   environments: Pick<ImplementerEnvironmentsRepository, "get">,
   environmentId: string,
-): Promise<TurnEnvironment> {
+  model: ModelChoice,
+): Promise<{
+  environment: TurnEnvironment | null;
+  runnerEnvironment: TurnRunnerEnvironment | null;
+}> {
   const found = await environments.get(environmentId);
   if (found === undefined)
     throw new ImplementerError(
       "IMPLEMENTER_ENVIRONMENT_NOT_FOUND",
       "There is no such environment in this workspace.",
     );
-  if (!isEnvironmentVcpus(found.vcpus))
+  if (found.kind === "runner") {
+    requireOwnKey(model);
+    return {
+      environment: null,
+      runnerEnvironment: {
+        id: found.id,
+        name: found.name,
+        labels: found.labels,
+      },
+    };
+  }
+  // A size that is no longer offered (1 vCPU) is shown on the page as it is and refused here, before a turn, a job or a VM exists.
+  if (found.vcpus === null || !isEnvironmentVcpus(found.vcpus))
     throw new ImplementerError(
       "IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED",
       "The size of this environment is no longer offered.",
     );
   return {
-    id: found.id,
-    name: found.name,
-    vcpus: found.vcpus,
-    setupScript: found.setupScript,
-    network: found.network,
+    environment: {
+      id: found.id,
+      name: found.name,
+      vcpus: found.vcpus,
+      setupScript: found.setupScript,
+      network: found.network,
+    },
+    runnerEnvironment: null,
   };
+}
+
+/** A runner works with its owner's own key. A managed model is the platform's and runs on platform VMs only. */
+export function requireOwnKey(model: ModelChoice): void {
+  if ("entryId" in model)
+    throw new ImplementerError(
+      "IMPLEMENTER_RUNNER_NEEDS_OWN_KEY",
+      "A runner needs a model of the workspace's own key.",
+    );
 }
 
 /** A profile version as a turn copies it, with the default result schema text of the version; the refusal when there is none. */

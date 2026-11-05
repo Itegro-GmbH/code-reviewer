@@ -26,6 +26,7 @@ import {
   type FieldIssue,
 } from "../runner-identity/announcement.ts";
 import {
+  customerRunnerId,
   hashSecret,
   newRunnerCredential,
   REGISTRATION_TOKEN_PATTERN,
@@ -41,6 +42,8 @@ export function bearerRunnerCredential(header: string | null): string | null {
   const token = bearerTokenOf(header);
   return token !== null && RUNNER_CREDENTIAL_PATTERN.test(token) ? token : null;
 }
+
+export { customerRunnerId };
 
 export type FleetSettings = { minBaseVersion: string | null };
 

@@ -2,7 +2,7 @@
 
 A workspace can register Linux machines of its own that take its jobs, like a self-hosted runner of GitHub Actions. This folder is the **app side of
 the registration**: the registration token, the exchange for a credential, the list of runners with a revoke, and the question every call of such a
-runner begins with (who is this, and is it new enough). The routing of jobs to them is the next part (R1a part 2, same issue); the runner itself, its
+runner begins with (who is this, and is it new enough). The routing of jobs to them is `runner-api/claim.ts` and `docs/runner.md` ("Routing"); the runner itself, its
 image and its service, is R1b. The plan is the owner's `plans/customer-runner.md`; what is built and why is in [`docs/runner.md`](../../../docs/runner.md)
 ("Registration and routing").
 
@@ -36,6 +36,6 @@ Three places hold the parts, split so that none of them joins the import cycle o
   `PUT /api/runners/v1/self` whenever it changes; the app keeps the last word it got. A field the format does not know is dropped, a known field that is
   wrong is refused with its name and never its value.
 - **The two doors stay apart.** The shared `RUNNER_TOKEN` (the Dispatcher's and the poll mode's) and a runner credential are different secrets with
-  different prefixes; a claim that carries `crc_...` takes this path and never the other. In this part a runner credential opens `claim` (which answers
-  204 until the routing exists), `self` and `credential` and nothing else.
+  different prefixes; a claim that carries `crc_...` takes this path and never the other. A runner credential opens `claim`, `self`, `credential` and the
+  calls about a job of its own workspace (`heartbeat`, `complete`, `release`, `steps`), and nothing of the Dispatcher's.
 - **Capability.** Every route and the page exist only in a deployment with the capability `implementer` (the 404 of a path that does not exist elsewhere).

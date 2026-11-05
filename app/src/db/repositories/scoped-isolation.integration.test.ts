@@ -2127,6 +2127,8 @@ const CASES: Case[] = [
         {
           id: a.environment.id,
           name: a.environment.name,
+          kind: "hosted",
+          labels: [],
           vcpus: a.environment.vcpus,
           hasScript: true,
           networkMode: "off",

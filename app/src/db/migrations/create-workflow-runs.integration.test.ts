@@ -24,7 +24,7 @@ const beforeThisMigration: MigrationProvider = {
   },
 };
 
-/** The migrations up to and including this one: a later migration may add columns to the tables this one leaves alone (#841). */
+/** The migrations up to and including this one: a later migration adds columns to tables this test compares. */
 const throughThisMigration: MigrationProvider = {
   async getMigrations() {
     return Object.fromEntries(

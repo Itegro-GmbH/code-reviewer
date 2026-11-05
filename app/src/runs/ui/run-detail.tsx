@@ -631,6 +631,19 @@ export function RunDetail({
       : [
           projectItem,
           { term: "Kind", description: JOB_KIND_NAMES[run.reviewKind] },
+          ...(task.runner === null
+            ? []
+            : [
+                {
+                  term: "Environment",
+                  description: (
+                    <span className="break-words">
+                      {task.runner.name} (runner:{" "}
+                      {task.runner.labels.join(", ")})
+                    </span>
+                  ),
+                },
+              ]),
           ...(task.environment === null
             ? []
             : [
@@ -727,6 +740,11 @@ export function RunDetail({
             <span className="text-sm text-muted-foreground">{run.problem}</span>
           ) : null}
         </div>
+        {task?.waitingForRunner == null ? null : (
+          <p data-slot="run-waiting-for-runner" className="text-sm break-words">
+            {task.waitingForRunner}
+          </p>
+        )}
         {task?.pushedNote == null ? null : (
           <p data-slot="run-pushed-note" className="text-sm break-words">
             {task.pushedNote}
