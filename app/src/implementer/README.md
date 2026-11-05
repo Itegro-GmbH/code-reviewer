@@ -2,7 +2,7 @@
 
 Part of the Implementer of the factory deployment (epic #745, `plans/implementer-slice.md`). This folder is the server side of
 "send off a task": which repositories, branches and models a person can pick, and the validated submit that writes a session, a
-turn and a queued job. The page that uses it is `/w/<slug>/implementer` (#756, below). It follows the pattern of `manual-reviews`.
+turn and a queued job, and (below, "Follow-up turns") the next instruction of a session. The page that uses it is `/w/<slug>/implementer` (#756, below). It follows the pattern of `manual-reviews`.
 
 The routes exist only in a deployment with the capability `implementer` (the product `factory`, switched on by
 `PRODUCT_CAPABILITIES`). Everywhere else every route below is **absent**: the access proxy answers it as a path that does not
@@ -35,9 +35,20 @@ or the database is looked at, so code-review.com hands out nothing.
 
 Routes: `POST /api/w/:workspace/implementer/sessions/:sessionId/turns` and `GET /api/w/:workspace/runs/:id/continuation`. The rules are in `docs/implementer.md`, section "Follow-up turns: the API and the form (#841)".
 
+What a session is, and is not, after the follow-ups (`docs/implementer.md`, "Session and Turn"; the owner's decisions of 2026-11-04):
+
+- **One turn after the other, never two at once.** A session is `running` or `idle`; the idle-to-running update is the one guard, and the negative slot as the
+  pull request number of the job is the second. A session may hold **exactly one queued instruction** (a second is `IMPLEMENTER_SESSION_BUSY`); it starts when
+  the running turn ends or in the cron step `follow_ups`.
+- **No close, no delete.** There is no close button, no closed column, no `IMPLEMENTER_SESSION_CLOSED` and no retention sweep. The steps of every turn and the
+  latest snapshot of a session (`../db/repositories/implementer-snapshots-repository.ts`, one per session, replaced by each turn) are kept for ever; the
+  erasure of the workspace is the only thing that removes them. A session keeps its branch name for good.
+- **The conversation comes back or a summary does.** `runner-api/resume.ts` builds what the next turn is told; the runner imports the snapshot or falls back to
+  `summary_only`. The app never reads the snapshot except to hand it to the next turn of the same session.
+
 ## Routes
 
-All four are for every member (`start_implementer_task`, minimum role `member`; one line in `workspaces/permissions.ts` raises
+The four routes of the first task (the follow-up routes are above) are for every member (`start_implementer_task`, minimum role `member`; one line in `workspaces/permissions.ts` raises
 it), run through `withWorkspace(...)` after the proxy, and answer `Cache-Control: no-store`. Every request is checked for where it
 comes from (`Sec-Fetch-Site` / `Origin`), the body of the POST for `application/json` and 64 KB. Every refusal is `{ "error": <code> }`.
 
