@@ -30,6 +30,7 @@ from code_reviewer_runner.factory_runner.config import (
     ConfigError,
     config_path,
     edit_config,
+    home_directory,
     load_config,
     redacted,
     update_credential,
@@ -41,6 +42,7 @@ from code_reviewer_runner.factory_runner.update import (
     UpdateError,
     fetch_https,
     own_image,
+    rejected_release,
     release_of,
     rollback,
     stage,
@@ -91,7 +93,9 @@ def add_parsers(commands: "argparse._SubParsersAction[Any]") -> None:  # pyright
 
     update = commands.add_parser("update", help="fetch and verify the newest runner image")
     update.add_argument(
-        "--rollback", action="store_true", help="go back to the image before the last update"
+        "--rollback",
+        action="store_true",
+        help="go back to the image before the last update; no update takes that release again",
     )
 
 
@@ -211,9 +215,15 @@ def update_image(
     is pulled by the service's hand and nothing is ended here."""
     api = docker()
     try:
+        home = home_directory(env)
         if arguments.rollback:
-            rollback(api)
+            left = rollback(api, home)
             out.write("the earlier image is `current` again; restart the service to use it\n")
+            if left > 0:
+                out.write(
+                    f"release {left} is rejected: no update, by the service or by this command, "
+                    "takes it or an older one again; the next higher release is taken\n"
+                )
             return EXIT_OK
         release_channel = channel()
         if release_channel is None:
@@ -223,12 +233,24 @@ def update_image(
             )
             return EXIT_FAILED
         running = own_image(api, hostname())
-        staged = stage(api, release_channel, running_release=release_of(running), fetch=fetch)
+        staged = stage(
+            api,
+            release_channel,
+            running_release=release_of(running),
+            rejected=rejected_release(home),
+            fetch=fetch,
+        )
     except UpdateError as error:
         err.write(f"{PROGRAM}: no update: {error}\n")
         return EXIT_FAILED
     if staged.outcome is Outcome.UP_TO_DATE:
         out.write(f"up to date (release {staged.release})\n")
+        return EXIT_OK
+    if staged.outcome is Outcome.REJECTED:
+        out.write(
+            f"release {staged.release} is announced, but a rollback rejected it: waiting for a "
+            "higher release\n"
+        )
         return EXIT_OK
     out.write(
         f"release {staged.release} is verified and staged ({staged.digest}); the service "

@@ -103,6 +103,10 @@ POLL_JITTER = 0.2
 BACKOFF_FIRST_SECONDS = 5.0
 BACKOFF_MAX_SECONDS = 300.0
 UPDATE_NEEDED_WAIT_SECONDS = 300.0
+# A service that is not ready waits this long before it ends (exit code 5), so that the unit's
+# restart (every 10 seconds) does not run the self-test over and over, which is what a bad update
+# would do. `run --once` ends at once.
+NOT_READY_WAIT_SECONDS = 300.0
 # How long a runner that cannot tidy waits before it tries again (it claims nothing meanwhile).
 TIDY_RETRY_SECONDS = 60.0
 # How long `run --once` waits for a job by default.
@@ -212,7 +216,10 @@ class RunnerService:
                 failed.name if failed else "the self-test",
                 failed.detail if failed else "",
             )
+            if not once:
+                await self._wait(NOT_READY_WAIT_SECONDS)
             return EXIT_NOT_READY
+        await asyncio.to_thread(self._updates.tidy_references)
         self._host = self._make_host()
         started = self._clock.monotonic()
         failures = 0

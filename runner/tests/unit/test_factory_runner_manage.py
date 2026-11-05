@@ -7,6 +7,9 @@ update is only ever staged: verified, and never during a job."""
 import io
 import json
 import stat
+import urllib.error
+import urllib.request
+from email.message import Message
 from pathlib import Path
 from typing import Any
 
@@ -38,8 +41,11 @@ from code_reviewer_runner.factory_runner.config import (
 from code_reviewer_runner.factory_runner.update import (
     CURRENT_REFERENCE,
     PREVIOUS_REFERENCE,
+    REJECTED_FILE,
     RELEASE_LABEL,
+    HttpsRedirects,
     UpdateError,
+    https_opener,
     load_channel,
     verified_manifest,
 )
@@ -379,6 +385,80 @@ def test_rollback_points_current_back_at_the_image_before(tmp_path: Path) -> Non
     assert invoke(tmp_path, "update", "--rollback", daemon=Daemon(release=1))[0] == (EXIT_FAILED)
 
 
+# #855-F1 (B1)
+def test_rollback_remembers_the_release_it_leaves_and_no_update_takes_it_again(
+    tmp_path: Path,
+) -> None:
+    daemon = Daemon(release=7, label=7)
+    daemon.images[CURRENT_REFERENCE] = {"Id": "bad", "Config": {"Labels": {RELEASE_LABEL: "7"}}}
+    daemon.images[PREVIOUS_REFERENCE] = {"Id": "old", "Config": {"Labels": {RELEASE_LABEL: "6"}}}
+    daemon.images["own-image"] = daemon.images[PREVIOUS_REFERENCE]
+
+    code, out, _ = invoke(tmp_path, "update", "--rollback", daemon=daemon)
+
+    assert code == EXIT_OK
+    assert daemon.images[CURRENT_REFERENCE]["Id"] == "old"
+    assert (tmp_path / "home" / REJECTED_FILE).read_text().strip() == "7"
+    assert "release 7 is rejected" in out and "service" in out
+
+    # The channel still announces 7: `current` stays and nothing is pulled.
+    code, out, _ = invoke(tmp_path, "update", daemon=daemon, release=Release(release=7))
+    assert code == EXIT_OK and "rejected" in out and "higher release" in out
+    assert daemon.images[CURRENT_REFERENCE]["Id"] == "old"
+    assert not any(path.startswith("/images/create") for _, path in daemon.calls)
+
+    # A higher release is taken.
+    daemon.label = 8
+    code, out, _ = invoke(tmp_path, "update", daemon=daemon, release=Release(release=8))
+    assert code == EXIT_OK and "release 8 is verified and staged" in out
+    assert daemon.images[CURRENT_REFERENCE] is daemon.images[f"{REPOSITORY}@{DIGEST}"]
+
+
+def test_a_second_rollback_never_lowers_what_is_rejected(tmp_path: Path) -> None:
+    daemon = Daemon(release=6)
+    daemon.images[CURRENT_REFERENCE] = {"Id": "bad", "Config": {"Labels": {RELEASE_LABEL: "7"}}}
+    daemon.images[PREVIOUS_REFERENCE] = {"Id": "old", "Config": {"Labels": {RELEASE_LABEL: "6"}}}
+    assert invoke(tmp_path, "update", "--rollback", daemon=daemon)[0] == EXIT_OK
+
+    assert invoke(tmp_path, "update", "--rollback", daemon=daemon)[0] == EXIT_OK  # current is 6
+
+    assert (tmp_path / "home" / REJECTED_FILE).read_text().strip() == "7"
+
+
+def test_a_rollback_that_cannot_be_remembered_changes_nothing(tmp_path: Path) -> None:
+    daemon = Daemon(release=7)
+    daemon.images[CURRENT_REFERENCE] = {"Id": "bad", "Config": {"Labels": {RELEASE_LABEL: "7"}}}
+    daemon.images[PREVIOUS_REFERENCE] = {"Id": "old"}
+    (tmp_path / "home").write_text("not a folder")
+
+    code, _, err = invoke(tmp_path, "update", "--rollback", daemon=daemon)
+
+    assert code == EXIT_FAILED and "cannot be remembered" in err
+    assert daemon.images[CURRENT_REFERENCE]["Id"] == "bad"
+
+
+# #855-F1 (N4)
+def test_the_opener_of_the_release_documents_speaks_https_and_follows_only_https_redirects() -> (
+    None
+):
+    opener = https_opener()
+
+    for address in ("file:///etc/hostname", "http://releases.example/m.json", "ftp://x.example/m"):
+        with pytest.raises(urllib.error.URLError):
+            opener.open(address, timeout=1)
+
+    redirect = HttpsRedirects()
+    request = urllib.request.Request("https://releases.example/m.json")
+    with pytest.raises(urllib.error.URLError, match="redirect away from https"):
+        redirect.redirect_request(
+            request, io.BytesIO(), 302, "Found", Message(), "http://x.example/"
+        )
+    followed = redirect.redirect_request(
+        request, io.BytesIO(), 302, "Found", Message(), "https://mirror.example/m.json"
+    )
+    assert followed is not None and followed.full_url == "https://mirror.example/m.json"
+
+
 # -- the proof ---------------------------------------------------------------------------------
 
 
@@ -403,6 +483,18 @@ def test_a_manifest_is_good_only_with_the_channels_key_and_for_the_channels_repo
                 {MANIFEST_URL: other.manifest(), SIGNATURE_URL: release.signature(other.manifest())}
             ),
         )
+
+
+# #855-F1: a signature that is not even a DER signature is refused like a wrong one.
+@pytest.mark.parametrize(
+    "broken", [b"", b"\x00", b"not a signature at all", b"\x30\x80" + b"\xff" * 70]
+)
+def test_signature_bytes_that_are_broken_are_refused_with_the_reason(broken: bytes) -> None:
+    release = Release(release=7)
+    served = release.served() | {SIGNATURE_URL: broken}
+
+    with pytest.raises(UpdateError, match="not our release"):
+        verified_manifest(release.channel(), fetcher(served))
 
 
 @pytest.mark.parametrize(

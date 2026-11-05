@@ -60,7 +60,9 @@ from code_reviewer_runner.factory_runner.service import (
 from code_reviewer_runner.factory_runner.update import (
     CURRENT_REFERENCE,
     IMAGE_TAG_VARIABLE,
+    PREVIOUS_REFERENCE,
     RELEASE_LABEL,
+    rollback,
 )
 from code_reviewer_runner.implementer.docker_api import DockerError
 from code_reviewer_runner.implementer.result_channel import make_result_directory
@@ -1021,10 +1023,15 @@ class ImageDaemon(FakeDaemon):
             CURRENT_REFERENCE: {"Id": "sha256:own"},
         }
         self.pulls = 0
+        # The image id the container of the service runs.
+        self.own = "sha256:own"
+        # What `GET /images/json` lists, and the references asked to be removed.
+        self.listing: list[dict[str, Any]] = []
+        self.deleted: list[str] = []
 
     def inspect_container(self, name: str) -> dict[str, Any]:
         if name == "runner-container":
-            return {"Image": "sha256:own"}
+            return {"Image": self.own}
         return super().inspect_container(name)
 
     def inspect_image(self, reference: str) -> dict[str, Any]:
@@ -1035,6 +1042,11 @@ class ImageDaemon(FakeDaemon):
     def request(self, method: str, path: str, *args: Any, **kwargs: Any) -> Any:
         if not path.startswith("/images/"):
             return super().request(method, path, *args, **kwargs)
+        if path.startswith("/images/json"):
+            return self.listing
+        if method == "DELETE":
+            self.deleted.append(path.removeprefix("/images/"))
+            return None
         if path.startswith("/images/create"):
             self.pulls += 1
             self.images[f"{REPOSITORY}@{DIGEST}"] = {
@@ -1152,3 +1164,61 @@ def test_an_update_needed_that_cannot_be_met_is_said_and_waits_as_before(
     assert CURRENT_REFERENCE in rig.daemon.images and rig.daemon.images[CURRENT_REFERENCE] == {
         "Id": "sha256:own"
     }
+
+
+# #855-F1 (B1): a rollback is not undone by the service ten minutes later.
+@pytest.mark.parametrize(("offered", "switches"), [(2, False), (3, True)])
+def test_a_rolled_back_release_is_not_taken_again_until_a_higher_one_comes(
+    tmp_path: Path, offered: int, switches: bool
+) -> None:
+    rig = UpdateRig(tmp_path, offered=offered)
+    daemon = rig.daemon
+    # Release 2 ran and was bad; the operator rolled back, and the service starts on release 1.
+    daemon.images["sha256:bad"] = {"Id": "sha256:bad", "Config": {"Labels": {RELEASE_LABEL: "2"}}}
+    daemon.images["sha256:own"]["Config"] = {"Labels": {RELEASE_LABEL: "1"}}
+    daemon.images[CURRENT_REFERENCE] = daemon.images["sha256:bad"]
+    daemon.images[PREVIOUS_REFERENCE] = daemon.images["sha256:own"]
+    assert rollback(daemon, tmp_path / "home") == 2  # type: ignore[arg-type]
+    assert daemon.images[CURRENT_REFERENCE]["Id"] == "sha256:own"
+    rig.client.claims = [*([None] * 30), Revoked("no", 401)]
+
+    assert rig.go(once=False) == (EXIT_UPDATED if switches else EXIT_REVOKED)
+
+    assert daemon.pulls == (1 if switches else 0)
+    assert (daemon.images[CURRENT_REFERENCE]["Id"] == "sha256:new") is switches
+
+
+# #855-F1 (S7): a runner that is not ready waits before it ends, so the unit does not restart it
+# every ten seconds.
+def test_a_service_that_is_not_ready_waits_before_it_ends_and_the_once_mode_does_not(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    service = Rig(tmp_path / "a", ready=False)
+    assert service.go(once=False) == EXIT_NOT_READY
+    assert sum(service.clock.slept) >= 300
+
+    once = Rig(tmp_path / "b", ready=False)
+    assert once.go(once=True) == EXIT_NOT_READY
+    assert once.clock.slept == []
+
+
+# #855-F1 (S6): the references of releases before `current` and `previous` go at the start.
+def test_the_digest_references_of_old_releases_are_removed_at_the_start(tmp_path: Path) -> None:
+    rig = UpdateRig(tmp_path)
+    daemon = rig.daemon
+    keep, old = f"{REPOSITORY}@sha256:" + "a" * 64, f"{REPOSITORY}@sha256:" + "b" * 64
+    foreign = "other.example/thing@sha256:" + "c" * 64
+    daemon.images[CURRENT_REFERENCE] = {"Id": "sha256:own", "RepoDigests": [keep]}
+    daemon.listing = [
+        {"Id": "sha256:own", "RepoDigests": [keep]},
+        {"Id": "sha256:older", "RepoDigests": [old]},
+        {"Id": "sha256:other", "RepoDigests": [foreign]},
+        {"Id": "sha256:none", "RepoDigests": None},
+    ]
+    rig.client.claims = [Revoked("no", 401)]
+
+    assert rig.go(once=False) == EXIT_REVOKED
+
+    assert daemon.deleted == [old]

@@ -24,6 +24,12 @@ and restarts it when it ends. An update is therefore two separate acts:
    way
    back. Only then is the digest named `factory-runner:current` (the one before it `previous`, for
    `--rollback`); an image that does not match is removed and nothing changes.
+
+   A rollback remembers the release it left (`rejected-release` in the configuration volume): no
+   release up to that number is taken again, by the service or by `factory-runner update`, until a
+   higher one is announced. Without that, the service would take the same release back ten minutes
+   after the operator had rolled it back. After a switch the service removes the digest references
+   of the releases before `current` and `previous`, so that old images can be freed.
 2. **Apply** (`switch_needed`): when the image behind `current` is another one than the one this
    container runs, the service ends (exit code 10) **between jobs**, never during one, and the unit
    starts it again from the new image. `factory-runner update` only stages; a running job is never
@@ -45,21 +51,24 @@ import binascii
 import contextlib
 import json
 import logging
+import os
 import random
 import re
+import tempfile
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import load_der_public_key
 
+from code_reviewer_runner.factory_runner.config import home_directory
 from code_reviewer_runner.implementer.docker_api import DockerApi, DockerError
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 
@@ -73,6 +82,9 @@ PREVIOUS_REFERENCE: Final = f"{CURRENT_REPOSITORY}:{PREVIOUS_TAG}"
 IMAGE_TAG_VARIABLE: Final = "FACTORY_RUNNER_IMAGE_TAG"
 # The number of a release, a whole number that grows with every release.
 RELEASE_LABEL: Final = "code-reviewer.runner.release"
+# The highest release an operator rolled back from, a whole number in a file of the configuration
+# volume (the service and the command see the same volume).
+REJECTED_FILE: Final = "rejected-release"
 FETCH_SECONDS: Final = 60.0
 # A manifest and a signature are a few hundred bytes; nothing bigger is read.
 MAX_DOCUMENT_BYTES: Final = 64 * 1024
@@ -93,6 +105,8 @@ class UpdateError(Exception):
 
 class Outcome(StrEnum):
     UP_TO_DATE = "up_to_date"
+    # The channel announces a release that is newer than the running one but was rolled back.
+    REJECTED = "rejected"
     STAGED = "staged"
 
 
@@ -149,12 +163,43 @@ def load_channel(path: Path = CHANNEL_FILE) -> ReleaseChannel | None:
     return ReleaseChannel(repository, manifest, signature, public_key)
 
 
+class HttpsRedirects(urllib.request.HTTPRedirectHandler):
+    """A redirect is followed only to another https address."""
+
+    def redirect_request(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        if not newurl.lower().startswith("https://"):
+            raise urllib.error.URLError("a release document does not redirect away from https")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def https_opener() -> urllib.request.OpenerDirector:
+    """An opener that knows `https` and nothing else: no `file:`, `ftp:`, `data:`, plain `http:`."""
+    opener = urllib.request.OpenerDirector()
+    for handler in (
+        urllib.request.HTTPSHandler(),
+        HttpsRedirects(),
+        urllib.request.UnknownHandler(),  # any other scheme is a `URLError`, not a silent None
+        urllib.request.HTTPDefaultErrorHandler(),
+        urllib.request.HTTPErrorProcessor(),
+    ):
+        opener.add_handler(handler)
+    return opener
+
+
 def fetch_https(url: str) -> bytes:
     """A small document from an `https` address. `UpdateError` for anything else."""
     if not url.startswith("https://"):
         raise UpdateError("a release document must come from an https address")
     try:
-        with urllib.request.urlopen(url, timeout=FETCH_SECONDS) as answer:
+        with https_opener().open(url, timeout=FETCH_SECONDS) as answer:
             data: bytes = answer.read(MAX_DOCUMENT_BYTES + 1)
     except (urllib.error.URLError, OSError, ValueError):
         raise UpdateError(
@@ -208,6 +253,33 @@ def release_of(image: Mapping[str, object]) -> int:
     return int(raw) if isinstance(raw, str) and raw.isascii() and raw.isdigit() else 0
 
 
+def rejected_release(home: Path) -> int:
+    """The highest release a rollback left, 0 when there was none or the file is unreadable."""
+    try:
+        raw = (home / REJECTED_FILE).read_text(encoding="ascii").strip()
+    except (OSError, ValueError):
+        return 0
+    return int(raw) if raw.isascii() and raw.isdigit() else 0
+
+
+def reject_release(home: Path, release: int) -> None:
+    """Remember that `release` (and every one below it) is not to be taken again. Never lowers
+    what is remembered. `OSError` when the file cannot be written."""
+    release = max(release, rejected_release(home))
+    home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".rejected-", dir=home)
+    try:
+        with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+            handle.write(f"{release}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, home / REJECTED_FILE)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
+
+
 def own_image(api: DockerApi, hostname: str) -> dict[str, object]:
     """The image this container runs, as the daemon describes it."""
     try:
@@ -222,15 +294,19 @@ def stage(
     channel: ReleaseChannel,
     *,
     running_release: int,
+    rejected: int = 0,
     fetch: Fetch = fetch_https,
     pull_seconds: float = PULL_SECONDS,
 ) -> Staged:
     """Prove the release the channel announces, and make it `current` when it is newer than
-    `running_release`. `UpdateError` for anything that stops that; nothing is tagged then, and an
-    image that does not match its manifest is removed again."""
+    `running_release` and than `rejected` (the highest release a rollback left). `UpdateError`
+    for anything that stops that; nothing is tagged then, and an image that does not match its
+    manifest is removed again."""
     manifest = verified_manifest(channel, fetch)
     if manifest.release <= running_release:
         return Staged(Outcome.UP_TO_DATE, running_release, manifest.digest)
+    if manifest.release <= rejected:
+        return Staged(Outcome.REJECTED, manifest.release, manifest.digest)
     by_digest = f"{manifest.repository}@{manifest.digest}"
     try:
         api.request(
@@ -262,8 +338,23 @@ def stage(
     return Staged(Outcome.STAGED, manifest.release, manifest.digest)
 
 
-def rollback(api: DockerApi) -> None:
-    """Point `current` back at the image before the last update. `UpdateError` without one."""
+def rollback(api: DockerApi, home: Path) -> int:
+    """Point `current` back at the image before the last update, and remember the release it
+    leaves as rejected (`rejected_release`), so that no update takes it again. Returns that
+    release. `UpdateError` without an earlier image, or when the memory cannot be written (then
+    nothing is tagged: a rollback that would be undone is no rollback)."""
+    try:
+        api.inspect_image(PREVIOUS_REFERENCE)
+    except DockerError:
+        raise UpdateError("there is no earlier image to go back to") from None
+    left = release_of(_described(api, CURRENT_REFERENCE))
+    try:
+        if left > 0:
+            reject_release(home, left)
+    except OSError:
+        raise UpdateError(
+            "the rollback cannot be remembered (the configuration folder is not writable)"
+        ) from None
     try:
         api.request(
             "POST",
@@ -272,6 +363,42 @@ def rollback(api: DockerApi) -> None:
         )
     except DockerError:
         raise UpdateError("there is no earlier image to go back to") from None
+    return left
+
+
+def _described(api: DockerApi, reference: str) -> dict[str, object]:
+    try:
+        return dict(api.inspect_image(reference))
+    except DockerError:
+        return {}
+
+
+def prune_references(api: DockerApi, repository: str) -> list[str]:
+    """Remove the digest references of `repository` that neither `current` nor `previous` is: every
+    release the installer or the service pulled by its digest leaves one, and while it stays the
+    daemon cannot free the image after the tags have moved on. Returns the references removed; a
+    daemon that does not answer removes nothing."""
+    kept: set[str] = set()
+    for reference in (CURRENT_REFERENCE, PREVIOUS_REFERENCE):
+        kept.update(_digests(_described(api, reference)))
+    try:
+        listed = api.request("GET", "/images/json?digests=1")
+    except DockerError:
+        return []
+    removed: list[str] = []
+    for item in listed if isinstance(listed, list) else []:  # pyright: ignore[reportUnknownVariableType]
+        entry = as_object(item)  # pyright: ignore[reportUnknownArgumentType]
+        for reference in _digests(entry or {}):
+            if reference in kept or not reference.startswith(f"{repository}@"):
+                continue
+            _forget(api, reference)
+            removed.append(reference)
+    return removed
+
+
+def _digests(image: Mapping[str, object]) -> list[str]:
+    raw = image.get("RepoDigests")
+    return [value for value in raw if isinstance(value, str)] if isinstance(raw, list) else []  # pyright: ignore[reportUnknownVariableType]
 
 
 def _exists(api: DockerApi, reference: str) -> bool:
@@ -312,10 +439,12 @@ class UpdatePolicy:
         jitter: Callable[[], float] = random.random,
         channel: Callable[[], ReleaseChannel | None] = load_channel,
         fetch: Fetch = fetch_https,
+        home: Path | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._api = api
         self._tag = environment.get(IMAGE_TAG_VARIABLE, "").strip()
+        self._home = home or home_directory(environment)
         self._auto = auto_update
         self._hostname = hostname
         self._now = now
@@ -358,9 +487,34 @@ class UpdatePolicy:
             return
         try:
             running = release_of(own_image(api, self._hostname()))
-            staged = stage(api, channel, running_release=running, fetch=self._fetch)
+            staged = stage(
+                api,
+                channel,
+                running_release=running,
+                rejected=rejected_release(self._home),
+                fetch=self._fetch,
+            )
         except UpdateError as error:
             self._log.warning("no update: %s", error)
             return
         if staged.outcome is Outcome.STAGED:
             self._log.info("release %d is staged (%s)", staged.release, staged.digest)
+        elif staged.outcome is Outcome.REJECTED:
+            self._log.info(
+                "release %d was rolled back by the operator: waiting for a higher one",
+                staged.release,
+            )
+
+    def tidy_references(self) -> None:
+        """At the start of the service: drop the digest references of old releases (see
+        `prune_references`). Nothing for a runner that follows no tag or has no channel."""
+        channel = self._channel() if self._tag else None
+        if channel is None:
+            return
+        try:
+            removed = prune_references(self._api(), channel.repository)
+        except Exception:  # housekeeping must never stop the service
+            self._log.warning("the references of old releases could not be removed")
+            return
+        if removed:
+            self._log.info("removed the references of %d old release(s)", len(removed))
