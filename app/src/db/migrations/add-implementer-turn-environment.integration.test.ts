@@ -43,6 +43,8 @@ async function rowsOfEveryTable(
       continue;
     // A later migration's table (#745): it does not exist before this migration is applied, and it is empty after.
     if (table.name === "implementer_turn_steps") continue;
+    if (table.name === "implementer_session_snapshots") continue;
+    if (table.name === "implementer_session_snapshot_parts") continue;
     const { rows } =
       await sql<unknown>`select * from ${sql.table(table.name)} order by 1`.execute(
         db,

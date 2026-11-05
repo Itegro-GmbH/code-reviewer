@@ -16,10 +16,11 @@ from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 EXAMPLES = Path(__file__).resolve().parents[3] / "contracts" / "examples" / "worker-api"
 CREDENTIAL = "crj_" + "Q" * 43
-_ROUTE = re.compile(r"/api/workers/v1/jobs/([^/?]+)(/heartbeat|/result|/steps)?(\?.*)?")
+_ROUTE = re.compile(r"/api/workers/v1/jobs/([^/?]+)(/heartbeat|/result|/steps|/session)?(\?.*)?")
 _VERSION = re.compile(r"/api/runners/v1/version(\?.*)?")
 
 
@@ -74,6 +75,7 @@ class FakeWorkerApp:
 
             do_GET = handle_any
             do_POST = handle_any
+            do_PUT = handle_any
 
             def log_message(self, format: str, *args: Any) -> None:
                 return
@@ -94,7 +96,9 @@ class FakeWorkerApp:
     def _handle(
         self, method: str, path: str, headers: dict[str, str], raw: bytes
     ) -> tuple[int, dict[str, str], Any]:
-        if _ROUTE.fullmatch(path) is not None and path.split("?")[0].endswith("/steps"):
+        if _ROUTE.fullmatch(path) is not None and path.split("?")[0].endswith(
+            ("/steps", "/session")
+        ):
             time.sleep(self.steps_delay)
         with self._lock:
             if self.features is not None and _VERSION.fullmatch(path) is not None:
@@ -110,10 +114,20 @@ class FakeWorkerApp:
                 "/heartbeat": "heartbeat",
                 "/result": "result",
                 "/steps": "steps",
+                "/session": "session",
             }[match.group(2)]
-            body: Any = json.loads(raw) if raw else None
+            # The session snapshot (#839) is bytes, not JSON; its description is in the query.
+            body: Any = json.loads(raw) if raw and kind != "session" else None
             self.requests.append(
-                {"kind": kind, "job": job_id, "method": method, "headers": headers, "body": body}
+                {
+                    "kind": kind,
+                    "job": job_id,
+                    "method": method,
+                    "headers": headers,
+                    "body": body,
+                    "raw": raw,
+                    "query": parse_qs(urlsplit(path).query),
+                }
             )
             if self._scripted[kind]:
                 answer = self._scripted[kind].pop(0)
@@ -127,6 +141,14 @@ class FakeWorkerApp:
                 if job_id in self.superseded:
                     answer["job"]["superseded"] = True
                 return 200, {}, answer
+            if kind == "session":
+                query = parse_qs(urlsplit(path).query)
+                part, parts = int(query["part"][0]), int(query["parts"][0])
+                return (
+                    200,
+                    {},
+                    {"version": 1, "part": part, "parts": parts, "complete": part == parts - 1},
+                )
             if kind == "steps":
                 return (
                     200,

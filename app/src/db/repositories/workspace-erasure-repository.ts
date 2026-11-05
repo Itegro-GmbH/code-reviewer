@@ -179,9 +179,12 @@ export function createWorkspaceErasureRepository(
         .where("job_id", "in", ownJobs())
         .execute();
       // The Implementer's turns point at jobs and sessions, its sessions at repositories (#751): turns first. The steps of a turn
-      // (#745, live view) point at jobs only and go before them.
+      // (#745, live view) point at jobs only and go before them, and so do the snapshots of a session and the parts of one that is
+      // still arriving (#839), which point at the session and the job.
       for (const table of [
         "implementer_turn_steps",
+        "implementer_session_snapshot_parts",
+        "implementer_session_snapshots",
         "implementer_turns",
         "implementer_sessions",
         "implementer_environments",

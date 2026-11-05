@@ -80,6 +80,8 @@ describe("the examples", () => {
         .sort();
 
     expect(names("examples/worker-api")).toStrictEqual([
+      "SessionPartQuery",
+      "SessionPartResponse",
       "WorkerErrorResponse",
       "WorkerHeartbeatRequest",
       "WorkerHeartbeatResponse",
