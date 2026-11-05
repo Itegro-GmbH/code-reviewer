@@ -117,10 +117,13 @@ def env_turn(place: Workplace, url: str, *, scrub: bool) -> Turn:
     return place.run(url, "Print your environment", scrub=scrub)
 
 
-# Ways to print the environment of a tool. Claude Code asks for approval for some of them under
-# its sandbox (a bare `env` was refused in CI, in bypass mode), so each is tried and at least one
-# has to print one.
-PRINTERS = ("printenv", "cat /proc/self/environ | tr '\\0' '\\n'", "sh -c env")
+# Ways to look at the environment of a tool. Under its sandbox Claude Code asks for approval for
+# `env`, `printenv` and `/proc/*/environ`, even in bypass mode (CI, 2026-11-05), so the commands
+# expand the variables themselves; at least one has to run.
+PRINTERS = (
+    'echo "RAN HOME=[$HOME] KEY=[$ANTHROPIC_API_KEY] TOKEN=[$CLAUDE_CODE_OAUTH_TOKEN]"',
+    "python3 -c \"import os; print('RAN', sorted(os.environ.items()))\"",
+)
 
 
 # #856-T30
@@ -140,7 +143,7 @@ def test_the_login_is_not_in_the_environment_of_the_tools_the_agent_runs(tmp_pat
         assert turn.returncode == 0 and turn.result.ok, turn.stderr[-300:]
         printed.append(printed_environment(turn))
 
-    assert any("PATH=" in seen for seen in printed), f"no command printed one: {printed}"
+    assert any("RAN" in seen for seen in printed), f"no command ran: {printed}"
     for seen in printed:
         assert FAKE_KEY not in seen and "ANTHROPIC_API_KEY" not in seen
 
