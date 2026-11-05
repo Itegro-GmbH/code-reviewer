@@ -62,6 +62,12 @@ const DISCARD_SENTENCES: Record<DiscardReason, string> = {
     "The size of the environment is no longer offered. Change it under Environments.",
   github_unavailable:
     "GitHub could not be reached for a day, so the instruction was dropped. Send it again.",
+  start_failed:
+    "The instruction could not be started for a day because of an error on our side, so it was dropped. Send it again, or tell us if it keeps failing.",
+  request_invalid:
+    "The job queue does not accept this instruction (what it asks for is not valid any more), so it was not started. Check the choices and send it again.",
+  instruction_unreadable:
+    "The stored instruction could not be read, so it was dropped. Send it again.",
 };
 
 /** The sentence for why a queued instruction did not start; an unknown word gets the general sentence. */

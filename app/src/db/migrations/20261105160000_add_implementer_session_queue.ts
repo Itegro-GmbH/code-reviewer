@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // The next instruction of an Implementer session (#841, follow-up turns): while a turn runs, a person may queue exactly one more
-// instruction, which starts when the turn ends. `implementer_sessions` gets three nullable text columns:
+// instruction, which starts when the turn ends. `implementer_sessions` gets four nullable text columns:
 //  - `queued_instruction`: JSON text of the queued instruction with the choices already checked and copied (model, cost limit,
 //    environment, profile, result schema), the client request id, who queued it and when; null when nothing is queued. The writer
 //    holds it to the bound of the check below.
@@ -9,9 +9,12 @@
 //    page can say so; null otherwise. Queueing again or starting a turn clears it.
 //  - `queued_attempted_at`: ISO 8601 text, when a start of the queued instruction was last tried; null before the first try. The sweep
 //    orders by it and spaces its tries by it. Cleared with the instruction.
+//  - `queued_first_failed_at`: ISO 8601 text, when a start of the queued instruction first failed (GitHub could not be asked, or an
+//    unexpected error); null until then. The 24 hours an instruction waits for a start count from it, not from when it was queued: an
+//    instruction behind a turn that ran for a day has not waited for GitHub at all. Cleared with the instruction.
 //
 // Expand only, safe for the version that is still running (it never reads or writes these columns) and for the live database:
-//  - three nullable columns without a default are added, which Postgres does without rewriting a table; no existing row, index or
+//  - four nullable columns without a default are added, which Postgres does without rewriting a table; no existing row, index or
 //    constraint changes, and every existing session reads null (nothing queued);
 //  - `add column` takes a short exclusive lock on `implementer_sessions`, a table of one row per task. The wait is bounded: after
 //    `LOCK_TIMEOUT` the migration gives up, the whole batch is rolled back (`MIGRATION_FAILED`) and the deployment can be run again;
@@ -40,12 +43,16 @@ export const migration: Migration = {
     await sql`alter table implementer_sessions add column queued_attempted_at text`.execute(
       db,
     );
+    await sql`alter table implementer_sessions add column queued_first_failed_at text`.execute(
+      db,
+    );
     // An instruction is at most 20,000 characters and the copies (a setup script, a profile) are bounded too: 512 KiB is far above
     // any real row and keeps a stray value out.
     await sql`alter table implementer_sessions add constraint implementer_sessions_queue_check check (
         (queued_instruction is null or char_length(queued_instruction) <= 524288)
         and (queued_discarded is null or char_length(queued_discarded) <= 524288)
         and (queued_attempted_at is null or char_length(queued_attempted_at) <= 64)
+        and (queued_first_failed_at is null or char_length(queued_first_failed_at) <= 64)
       )`.execute(db);
 
     await sql`select set_config('lock_timeout', ${before}, true)`.execute(db);
@@ -53,6 +60,9 @@ export const migration: Migration = {
 
   async down(db) {
     await sql`alter table implementer_sessions drop constraint implementer_sessions_queue_check`.execute(
+      db,
+    );
+    await sql`alter table implementer_sessions drop column queued_first_failed_at`.execute(
       db,
     );
     await sql`alter table implementer_sessions drop column queued_attempted_at`.execute(

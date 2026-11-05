@@ -618,14 +618,15 @@ migration in an earlier deployment does not have it.
 
 ### The queued instruction of a session (#841)
 
-`20261105160000_add_implementer_session_queue` (follow-up turns) adds three nullable text columns to `implementer_sessions` and one check; no table, index or link.
+`20261105160000_add_implementer_session_queue` (follow-up turns) adds four nullable text columns to `implementer_sessions` and one check; no table, index or link.
 
 - `queued_instruction`: JSON text of the one instruction a person queued while a turn runs, with the choices already checked and copied (model, cost limit, environment, profile, result schema), the client request id, who queued it and when (`QueuedInstruction` in `repositories/implementer-repository.ts`). Null when nothing waits.
   `queueInstruction` takes the row lock and writes it only for a `running` session with an empty queue (`full` otherwise), so of two calls one queues; `startFollowUpTurn` empties it when the queued instruction starts.
 - `queued_discarded`: JSON text of an instruction that could not start, with the reason word (`DISCARD_REASONS`), kept for the Runs page. Starting a turn or queueing again clears it.
 - `queued_attempted_at`: ISO 8601 text, when a start of the queued instruction was last tried (`noteQueuedAttempt`); null before the first try and once the instruction is gone. `sessionsWithQueuedInstruction` orders by it (never tried first) and skips a session tried within the backoff, so a session the platform keeps refusing neither crowds out newer ones nor makes each run ask GitHub again. It does not touch `updated_at`.
+- `queued_first_failed_at`: ISO 8601 text, when a start of the queued instruction first failed (`noteQueuedFailure` sets it once and hands it back); null until then and once the instruction is gone. The 24 hours an instruction waits for a start count from it, not from when it was queued, so an instruction behind a long turn is not dropped by the first error after that turn.
 - `startFollowUpTurn` is the one place a session goes `idle` to `running` again: it locks the session row, takes the next turn number, calls the job maker and writes the turn in the same transaction. `sessionsWithQueuedInstruction` (`implementer-sessions-sweep.ts`, instance level) lists the idle sessions that hold an instruction for the sweep.
-- **Live database.** Expand only: three columns without a default, which Postgres adds without rewriting a table, and one check; `lock_timeout` 5 s (`add-implementer-session-queue.integration.test.ts` holds a writer open and checks that the batch gives up and can be run again). Migrations of this change sort after `20261105150000`.
+- **Live database.** Expand only: four columns without a default, which Postgres adds without rewriting a table, and one check; `lock_timeout` 5 s (`add-implementer-session-queue.integration.test.ts` holds a writer open and checks that the batch gives up and can be run again). Migrations of this change sort after `20261105150000`.
 
 ### A database that ran the removed billing migrations
 

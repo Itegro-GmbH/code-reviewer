@@ -1063,6 +1063,15 @@ export interface ImplementerSessionsTable {
     string | null | undefined,
     string | null
   >;
+  /**
+   * #841: when a start of the queued instruction first failed (ISO 8601 UTC); null until then. The 24 hours it waits for a start count
+   * from it. Cleared with the instruction.
+   */
+  queued_first_failed_at: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
 }
 
 /**

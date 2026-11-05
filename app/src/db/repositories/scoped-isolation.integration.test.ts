@@ -2041,6 +2041,12 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {
+    name: "implementer.noteQueuedFailure",
+    run: (a, b) =>
+      a.implementer.noteQueuedFailure(taskOf(b).session.id, "request-a"),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
     name: "implementer.lastTurn",
     run: (a, b) => a.implementer.lastTurn(taskOf(b).session.id),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),

@@ -334,6 +334,7 @@ export function ContinueForm({
       maximumCents: result.details?.maximumCents,
     };
     const sentence = describeImplementerFailure(product, failure);
+    const field = FIELD_OF_FAILURE[result.code];
     if (
       result.code === "IMPLEMENTER_REQUEST_REUSED" &&
       typeof result.details?.runId === "string"
@@ -356,6 +357,8 @@ export function ContinueForm({
       }
       setErrors(found);
       setProblem(rest ? { sentence } : null);
+    } else if (field !== undefined) {
+      setErrors({ [field]: sentence });
     } else {
       setProblem({ sentence });
       // Somebody queued an instruction, or the turn ended: look again.
@@ -574,6 +577,12 @@ const FIELD_OF_ISSUE: Partial<Record<string, FieldKey>> = {
   model: "model",
   environmentId: "environment",
   costLimitCents: "cost",
+};
+
+/** The field a refusal of the submit belongs to; the others are a sentence on the form. */
+const FIELD_OF_FAILURE: Partial<Record<string, FieldKey>> = {
+  // The model of the last turn is kept with its runner environment, so the model is what the person can change.
+  IMPLEMENTER_RUNNER_NEEDS_OWN_KEY: "model",
 };
 
 /** A load that failed: its sentence, and a way to ask again. */

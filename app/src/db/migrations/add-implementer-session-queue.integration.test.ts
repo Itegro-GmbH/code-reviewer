@@ -91,7 +91,7 @@ async function seedPreviousRelease(db: Kysely<Database>) {
 
 describe("the migration that adds the queued instruction", () => {
   // #841-M01
-  it("adds three nullable columns to a database with data, changes no existing row, and every old session reads null", async () => {
+  it("adds four nullable columns to a database with data, changes no existing row, and every old session reads null", async () => {
     const { db } = await createEmptyTestDatabase();
     await migrateToLatest(db, before);
     await seedPreviousRelease(db);
@@ -106,7 +106,8 @@ describe("the migration that adds the queued instruction", () => {
       queued_instruction: string | null;
       queued_discarded: string | null;
       queued_attempted_at: string | null;
-    }>`select queued_instruction, queued_discarded, queued_attempted_at from implementer_sessions`.execute(
+      queued_first_failed_at: string | null;
+    }>`select queued_instruction, queued_discarded, queued_attempted_at, queued_first_failed_at from implementer_sessions`.execute(
       db,
     );
     expect(sessions).toEqual([
@@ -114,6 +115,7 @@ describe("the migration that adds the queued instruction", () => {
         queued_instruction: null,
         queued_discarded: null,
         queued_attempted_at: null,
+        queued_first_failed_at: null,
       },
     ]);
     await db.destroy();
@@ -149,13 +151,14 @@ describe("the migration that adds the queued instruction", () => {
     await migrateToLatest(db, migrationProvider);
     await seedPreviousRelease(db);
 
-    await sql`update implementer_sessions set queued_instruction = '{}', queued_discarded = '{}', queued_attempted_at = '2026-11-05T00:00:00.000Z'`.execute(
+    await sql`update implementer_sessions set queued_instruction = '{}', queued_discarded = '{}', queued_attempted_at = '2026-11-05T00:00:00.000Z', queued_first_failed_at = '2026-11-05T00:00:00.000Z'`.execute(
       db,
     );
     for (const [column, size] of [
       ["queued_instruction", 524_289],
       ["queued_discarded", 524_289],
       ["queued_attempted_at", 65],
+      ["queued_first_failed_at", 65],
     ] as const)
       await expect(
         sql`update implementer_sessions set ${sql.ref(column)} = ${"x".repeat(size)}`.execute(

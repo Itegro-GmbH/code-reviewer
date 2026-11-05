@@ -57,6 +57,8 @@ export type StoredImplementerSession = {
   queued: QueuedInstruction | null;
   /** #841: a queued instruction that could not start, kept so the Runs page can say why; null otherwise. */
   discarded: DiscardedInstruction | null;
+  /** #841: set (to true) only when a text is stored as the queued instruction that cannot be read; `queued` is null then. */
+  queuedUnreadable?: true;
 };
 
 /**
@@ -88,8 +90,14 @@ export const DISCARD_REASONS = [
   "model_not_allowed",
   "cost_limit_exceeded",
   "environment_unavailable",
-  /** The platform could not be asked for a day after the instruction was queued (`QUEUED_INSTRUCTION_TTL_MS`): it does not wait for good. */
+  /** The platform could not be asked for a day after the first failed start (`QUEUED_INSTRUCTION_TTL_MS`): it does not wait for good. */
   "github_unavailable",
+  /** The start kept failing unexpectedly for a day after the first failed start. */
+  "start_failed",
+  /** The job queue refuses the instruction for good (`JOB_INPUT_INVALID`): trying again changes nothing. */
+  "request_invalid",
+  /** The stored text of the instruction cannot be read. */
+  "instruction_unreadable",
 ] as const;
 export type DiscardReason = (typeof DISCARD_REASONS)[number];
 
@@ -288,13 +296,13 @@ export type ImplementerRepository = {
   ): Promise<QueueResult>;
   /**
    * #841: takes the queued instruction out and keeps it as discarded, with the reason. It discards the instruction that has this
-   * client request id, on an idle session, and nothing else: a caller that read instruction A, saw it start and B queued behind its
-   * turn must not remove B. Returns the session, or undefined when that instruction is not queued (it started, was discarded, or a
+   * client request id (null: a stored text that cannot be read, which has none), on an idle session, and nothing else: a caller that
+   * read instruction A, saw it start and B queued behind its turn must not remove B. Returns the session, or undefined when that instruction is not queued (it started, was discarded, or a
    * newer one replaced it): a repeated call changes nothing.
    */
   discardQueued(
     sessionId: string,
-    clientRequestId: string,
+    clientRequestId: string | null,
     reason: DiscardReason,
   ): Promise<StoredImplementerSession | undefined>;
   /**
@@ -302,6 +310,15 @@ export type ImplementerRepository = {
    * (`sessionsWithQueuedInstruction`). Changes nothing when that instruction is not queued any more.
    */
   noteQueuedAttempt(sessionId: string, clientRequestId: string): Promise<void>;
+  /**
+   * #841: notes that a start of the queued instruction with this client request id failed now, and returns when it FIRST failed (now,
+   * for the first failure; the stored time after that). The 24 hours an instruction waits for a start count from it. Undefined when that
+   * instruction is not queued any more.
+   */
+  noteQueuedFailure(
+    sessionId: string,
+    clientRequestId: string,
+  ): Promise<string | undefined>;
   /** #841: the newest turn of a session; undefined for a session without turn (it cannot be) or one that is not this workspace's. */
   lastTurn(sessionId: string): Promise<StoredImplementerTurn | undefined>;
   /** #841: the newest turns of a session, oldest first, at most `TURN_HISTORY_LIMIT`, each with its job's status and report. */
@@ -344,6 +361,7 @@ export type ImplementerRepository = {
 function sessionFrom(
   row: Selectable<ImplementerSessionsTable>,
 ): StoredImplementerSession {
+  const queued = readQueued(row.queued_instruction);
   return {
     id: row.id,
     workspaceId: row.workspace_id,
@@ -359,8 +377,11 @@ function sessionFrom(
     createdBy: row.created_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    queued: readQueued(row.queued_instruction),
+    queued,
     discarded: readDiscarded(row.queued_discarded),
+    ...(row.queued_instruction !== null && queued === null
+      ? { queuedUnreadable: true as const }
+      : {}),
   };
 }
 
@@ -374,7 +395,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** The queued instruction as this module wrote it; null for none, and for text that is not one (it cannot be: only this module writes it). */
+/** The queued instruction as this module wrote it; null for none, and for text that is not one (`queuedUnreadable` says which). */
 function readQueued(text: string | null): QueuedInstruction | null {
   if (text === null) return null;
   try {
@@ -714,6 +735,7 @@ export function createImplementerRepository(
             queued_instruction: null,
             queued_discarded: null,
             queued_attempted_at: null,
+            queued_first_failed_at: null,
             updated_at: timestamp,
           })
           .where("workspace_id", "=", workspaceId)
@@ -773,6 +795,7 @@ export function createImplementerRepository(
             queued_instruction: JSON.stringify(queued),
             queued_discarded: null,
             queued_attempted_at: null,
+            queued_first_failed_at: null,
             updated_at: formatTimestamp(now()),
           })
           .where("workspace_id", "=", workspaceId)
@@ -803,6 +826,7 @@ export function createImplementerRepository(
           .set({
             queued_instruction: null,
             queued_attempted_at: null,
+            queued_first_failed_at: null,
             queued_discarded: JSON.stringify({
               reason,
               instruction: queued?.instruction ?? "",
@@ -832,6 +856,27 @@ export function createImplementerRepository(
           .where("workspace_id", "=", workspaceId)
           .where("id", "=", sessionId)
           .execute();
+      });
+    },
+
+    async noteQueuedFailure(sessionId, clientRequestId) {
+      return inTransaction(async (trx) => {
+        const locked = await lockedSession(trx, sessionId);
+        if (locked === undefined || locked.queued_instruction === null)
+          return undefined;
+        const queued = readQueued(locked.queued_instruction);
+        if (queued !== null && queued.clientRequestId !== clientRequestId)
+          return undefined;
+        if (locked.queued_first_failed_at !== null)
+          return locked.queued_first_failed_at;
+        const first = formatTimestamp(now());
+        await trx
+          .updateTable("implementer_sessions")
+          .set({ queued_first_failed_at: first })
+          .where("workspace_id", "=", workspaceId)
+          .where("id", "=", sessionId)
+          .execute();
+        return first;
       });
     },
 

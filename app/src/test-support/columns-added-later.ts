@@ -37,6 +37,7 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
     "queued_instruction",
     "queued_discarded",
     "queued_attempted_at",
+    "queued_first_failed_at",
   ],
   // #745, step 7: the environment's network rule; every environment that exists reads `off` and no hosts (`DEFAULTS_OF_COLUMNS`).
   // #854: the kind (`hosted`) and the labels (none) of every environment that exists.

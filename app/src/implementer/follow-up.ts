@@ -66,6 +66,7 @@ export type FollowUpDependencies = {
     | "queueInstruction"
     | "discardQueued"
     | "noteQueuedAttempt"
+    | "noteQueuedFailure"
   >;
   steps: Pick<ImplementerStepsRepository, "lastStep">;
   queue: Pick<JobQueue, "enqueueFollowUpTurn" | "findImplementerTurn">;
@@ -87,7 +88,7 @@ export type ContinuedSession = {
   created: boolean;
 };
 
-/** What `startQueued` did. `retry`: the platform could not be asked; the instruction stays queued and the sweep tries again. */
+/** What `startQueued` did. `retry`: the start failed for a reason that may pass; the instruction stays queued and the sweep tries again. */
 export type StartQueuedOutcome =
   | { status: "started"; runId: string }
   | { status: "discarded"; reason: DiscardReason }
@@ -142,7 +143,10 @@ const BRANCH_GONE = () =>
     "The branch of this session is no longer on GitHub. Start a new task.",
   );
 
-/** How long a queued instruction waits for a start before it is discarded as `github_unavailable`, counted from when it was queued. */
+/**
+ * How long a queued instruction keeps failing to start before it is discarded (`github_unavailable`, `start_failed`), counted from the
+ * FIRST failed start, not from when it was queued: behind a turn that ran for a day it has not waited for GitHub at all.
+ */
 export const QUEUED_INSTRUCTION_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** Tries to attempt the write this many times when the session changes under it (it ended, or an instruction was queued by someone else). */
@@ -369,17 +373,18 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
   }
 
   /**
-   * Discards the instruction this call read, and no other: when a newer one is queued by now (this one started, and the turn ended)
+   * Discards the instruction this call read, and no other (null: the stored text that cannot be read): when a newer one is queued by
+   * now (this one started, and the turn ended)
    * nothing is discarded and the outcome is `nothing`. Says why in the log (the instruction is never logged).
    */
   async function discard(
     session: StoredImplementerSession,
-    queued: QueuedInstruction,
+    queued: QueuedInstruction | null,
     reason: DiscardReason,
   ): Promise<StartQueuedOutcome> {
     const discarded = await deps.sessions.discardQueued(
       session.id,
-      queued.clientRequestId,
+      queued?.clientRequestId ?? null,
       reason,
     );
     if (discarded === undefined) return { status: "nothing" };
@@ -389,15 +394,25 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
     return { status: "discarded", reason };
   }
 
-  /** The platform could not be asked: the instruction waits for the next try, unless it has waited for `QUEUED_INSTRUCTION_TTL_MS`. */
-  function retryOrExpire(
+  /**
+   * The start failed for a reason that may pass (the platform could not be asked, or an unexpected error): the instruction waits for
+   * the next try, unless the first failed start was `QUEUED_INSTRUCTION_TTL_MS` ago. That moment is written by the first failure, so
+   * the time the instruction waited behind its turn does not count.
+   */
+  async function retryOrExpire(
     session: StoredImplementerSession,
     queued: QueuedInstruction,
+    reason: DiscardReason,
   ): Promise<StartQueuedOutcome> {
-    const waited = now().getTime() - Date.parse(queued.queuedAt);
-    if (waited >= QUEUED_INSTRUCTION_TTL_MS)
-      return discard(session, queued, "github_unavailable");
-    return Promise.resolve({ status: "retry" });
+    const first = await deps.sessions.noteQueuedFailure(
+      session.id,
+      queued.clientRequestId,
+    );
+    // Not queued any more: another call started or discarded it.
+    if (first === undefined) return { status: "nothing" };
+    if (now().getTime() - Date.parse(first) >= QUEUED_INSTRUCTION_TTL_MS)
+      return discard(session, queued, reason);
+    return { status: "retry" };
   }
 
   return {
@@ -443,7 +458,7 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
         resultSchema: choices.resultSchema,
         createdBy: user.id,
         actorLogin: user.githubLogin,
-        queuedAt: new Date().toISOString(),
+        queuedAt: now().toISOString(),
       };
 
       for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt += 1) {
@@ -521,10 +536,13 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
 
     async startQueued(sessionId) {
       const session = await deps.sessions.getSession(sessionId);
-      const queued = session?.queued ?? null;
-      if (session === undefined || queued === null)
+      if (session === undefined || session.status !== "idle")
         return { status: "nothing" };
-      if (session.status !== "idle") return { status: "nothing" };
+      // A stored text that is no instruction would hold the first place of the sweep for good: it is dropped, with the reason.
+      if (session.queuedUnreadable === true)
+        return discard(session, null, "instruction_unreadable");
+      const queued = session.queued;
+      if (queued === null) return { status: "nothing" };
       // Before anything is asked of the platform: the sweep spaces its tries by this, whatever becomes of this one.
       await deps.sessions.noteQueuedAttempt(session.id, queued.clientRequestId);
 
@@ -549,7 +567,7 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
           )
             return discard(session, queued, "repository_unavailable");
           // The platform could not be asked: the instruction waits for the next try.
-          return retryOrExpire(session, queued);
+          return retryOrExpire(session, queued, "github_unavailable");
         }
         // A failure the platform's own error type names as "no access" is the same as a repository that is gone.
         if (
@@ -557,45 +575,63 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
           noAccessReason(error) !== undefined
         )
           return discard(session, queued, "repository_unavailable");
-        return retryOrExpire(session, queued);
-      }
-
-      if ((await deps.models.check(queued.modelChoice)) !== null)
-        return discard(session, queued, "model_not_allowed");
-      if (
-        queued.costLimitCents !== null &&
-        queued.costLimitCents > (await deps.operatorCostLimitCents())
-      )
-        return discard(session, queued, "cost_limit_exceeded");
-      if (
-        queued.environment !== null &&
-        !isEnvironmentVcpus(queued.environment.vcpus)
-      )
-        return discard(session, queued, "environment_unavailable");
-
-      const result = await deps.queue.enqueueFollowUpTurn({
-        sessionId: session.id,
-        headSha: tip,
-        instruction: queued.instruction,
-        modelChoice: queued.modelChoice,
-        costLimitCents: queued.costLimitCents,
-        environment: queued.environment,
-        runnerEnvironment: queued.runnerEnvironment ?? null,
-        profile: queued.profile,
-        resultSchema: queued.resultSchema,
-        createdBy: queued.createdBy,
-        actorLogin: queued.actorLogin,
-        clientRequestId: queued.clientRequestId,
-        fromQueued: true,
-      });
-      // `existing`: another call started this very instruction a moment ago (its request id found the turn). It is started, not by this call.
-      if (result.status === "created") {
-        log(
-          `[implementer] queued instruction started job=${result.job.id} session=${session.id} turn=${String(result.turn.number)}`,
+        return retryOrExpire(
+          session,
+          queued,
+          error instanceof IntegrationError
+            ? "github_unavailable"
+            : "start_failed",
         );
-        return { status: "started", runId: result.job.id };
       }
-      return { status: "nothing" };
+
+      // An error here that is none of the known ones (the database, the model catalog) is as unexpected as one above: it does not
+      // keep the session blocked for good, it expires like the platform's.
+      try {
+        if ((await deps.models.check(queued.modelChoice)) !== null)
+          return await discard(session, queued, "model_not_allowed");
+        if (
+          queued.costLimitCents !== null &&
+          queued.costLimitCents > (await deps.operatorCostLimitCents())
+        )
+          return await discard(session, queued, "cost_limit_exceeded");
+        if (
+          queued.environment !== null &&
+          !isEnvironmentVcpus(queued.environment.vcpus)
+        )
+          return await discard(session, queued, "environment_unavailable");
+
+        const result = await deps.queue.enqueueFollowUpTurn({
+          sessionId: session.id,
+          headSha: tip,
+          instruction: queued.instruction,
+          modelChoice: queued.modelChoice,
+          costLimitCents: queued.costLimitCents,
+          environment: queued.environment,
+          runnerEnvironment: queued.runnerEnvironment ?? null,
+          profile: queued.profile,
+          resultSchema: queued.resultSchema,
+          createdBy: queued.createdBy,
+          actorLogin: queued.actorLogin,
+          clientRequestId: queued.clientRequestId,
+          fromQueued: true,
+        });
+        // `existing`: another call started this very instruction a moment ago (its request id found the turn). It is started, not by this call.
+        if (result.status === "created") {
+          log(
+            `[implementer] queued instruction started job=${result.job.id} session=${session.id} turn=${String(result.turn.number)}`,
+          );
+          return { status: "started", runId: result.job.id };
+        }
+        return { status: "nothing" };
+      } catch (error) {
+        // The queue refuses this instruction for good: trying again changes nothing.
+        if (
+          error instanceof JobQueueError &&
+          error.code === "JOB_INPUT_INVALID"
+        )
+          return discard(session, queued, "request_invalid");
+        return retryOrExpire(session, queued, "start_failed");
+      }
     },
 
     async continuation(jobId) {

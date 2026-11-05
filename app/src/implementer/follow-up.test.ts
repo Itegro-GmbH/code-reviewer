@@ -8,6 +8,7 @@ import type {
   StoredImplementerSession,
   StoredImplementerTurn,
 } from "../db/repositories/implementer-repository.ts";
+import { JobQueueError } from "../jobs/errors.ts";
 import { ImplementerError } from "./errors.ts";
 import {
   createFollowUps,
@@ -88,6 +89,7 @@ type Fakes = {
 
 function fakes(initial: StoredImplementerSession): Fakes {
   const clock = { at: T0 };
+  const firstFailed: { at: string | null } = { at: null };
   const provider = {
     installationPermissions: vi.fn(() =>
       Promise.resolve({ contentsWrite: true }),
@@ -102,6 +104,11 @@ function fakes(initial: StoredImplementerSession): Fakes {
     queueInstruction: vi.fn(),
     discardQueued: vi.fn(() => Promise.resolve(initial)),
     noteQueuedAttempt: vi.fn(() => Promise.resolve()),
+    // As the repository does: the first failure writes the time, the later ones read it.
+    noteQueuedFailure: vi.fn(() => {
+      firstFailed.at ??= clock.at.toISOString();
+      return Promise.resolve(firstFailed.at);
+    }),
   };
   const queue = {
     enqueueFollowUpTurn: vi.fn(),
@@ -296,11 +303,30 @@ describe("starting the queued instruction", () => {
     );
   });
 
-  // #841-U37 (review of #871, S3)
-  it("keeps the instruction for a retry while the platform is unreachable and the instruction is younger than a day", async () => {
+  // #841-U37 (review of #871, S3; fix round 2, S-A)
+  it("keeps the instruction for a retry at the first failure, however long it waited behind a long turn", async () => {
     const f = fakes(session({ queued: queued() }));
     unreachable(f);
-    f.clock.at = new Date(T0.getTime() + QUEUED_INSTRUCTION_TTL_MS - 1);
+    // The turn ran for 25 hours; only now is GitHub asked, and it fails once.
+    f.clock.at = new Date(T0.getTime() + 25 * 60 * 60 * 1000);
+
+    const outcome = await createFollowUps(f.deps).startQueued("session-1");
+
+    expect(outcome).toEqual({ status: "retry" });
+    expect(f.sessions.noteQueuedFailure).toHaveBeenCalledWith(
+      "session-1",
+      "req-a",
+    );
+    expect(f.sessions.discardQueued).not.toHaveBeenCalled();
+  });
+
+  // #841-U37b (fix round 2, S-A)
+  it("keeps the instruction for a retry until a day after the first failed start", async () => {
+    const f = fakes(session({ queued: queued() }));
+    unreachable(f);
+    f.clock.at = new Date(T0.getTime() + 25 * 60 * 60 * 1000);
+    await createFollowUps(f.deps).startQueued("session-1");
+    f.clock.at = new Date(f.clock.at.getTime() + QUEUED_INSTRUCTION_TTL_MS - 1);
 
     const outcome = await createFollowUps(f.deps).startQueued("session-1");
 
@@ -309,10 +335,12 @@ describe("starting the queued instruction", () => {
   });
 
   // #841-U38
-  it("discards the instruction as github_unavailable once it has waited a day", async () => {
+  it("discards the instruction as github_unavailable a day after the first failed start", async () => {
     const f = fakes(session({ queued: queued() }));
     unreachable(f);
-    f.clock.at = new Date(T0.getTime() + QUEUED_INSTRUCTION_TTL_MS);
+    f.clock.at = new Date(T0.getTime() + 25 * 60 * 60 * 1000);
+    await createFollowUps(f.deps).startQueued("session-1");
+    f.clock.at = new Date(f.clock.at.getTime() + QUEUED_INSTRUCTION_TTL_MS);
 
     const outcome = await createFollowUps(f.deps).startQueued("session-1");
 
@@ -325,6 +353,18 @@ describe("starting the queued instruction", () => {
       "req-a",
       "github_unavailable",
     );
+  });
+
+  // #841-U38b (fix round 2, S-A)
+  it("reports nothing when the instruction is not queued any more at the failure", async () => {
+    const f = fakes(session({ queued: queued() }));
+    unreachable(f);
+    f.sessions.noteQueuedFailure.mockResolvedValue(undefined);
+
+    const outcome = await createFollowUps(f.deps).startQueued("session-1");
+
+    expect(outcome).toEqual({ status: "nothing" });
+    expect(f.sessions.discardQueued).not.toHaveBeenCalled();
   });
 
   // #841-U39
@@ -342,6 +382,122 @@ describe("starting the queued instruction", () => {
 
     expect(outcome).toEqual({ status: "started", runId: "job-2" });
     expect(f.sessions.discardQueued).not.toHaveBeenCalled();
+  });
+});
+
+describe("an unexpected failure while starting the queued instruction (fix round 2, S-B)", () => {
+  const created = () => ({
+    status: "created",
+    job: { id: "job-2" },
+    session: session({ status: "running" }),
+    turn: { ...lastTurn(), number: 2 },
+  });
+
+  // #841-U44
+  it.each([
+    [
+      "the queue throws",
+      (f: Fakes) =>
+        f.queue.enqueueFollowUpTurn.mockRejectedValue(new Error("db down")),
+    ],
+    [
+      "the model check throws",
+      (f: Fakes) => {
+        (f.deps.models.check as unknown as ReturnType<typeof vi.fn>) = vi
+          .fn()
+          .mockRejectedValue(new Error("catalog down"));
+      },
+    ],
+  ])(
+    "keeps the instruction for a retry when %s, and discards it as start_failed a day after the first failure",
+    async (_, fail) => {
+      const f = fakes(session({ queued: queued() }));
+      fail(f);
+
+      const first = await createFollowUps(f.deps).startQueued("session-1");
+      f.clock.at = new Date(T0.getTime() + QUEUED_INSTRUCTION_TTL_MS);
+      const last = await createFollowUps(f.deps).startQueued("session-1");
+
+      expect(first).toEqual({ status: "retry" });
+      expect(last).toEqual({ status: "discarded", reason: "start_failed" });
+      expect(f.sessions.discardQueued).toHaveBeenCalledWith(
+        "session-1",
+        "req-a",
+        "start_failed",
+      );
+    },
+  );
+
+  // #841-U45
+  it("discards at once, as request_invalid, an instruction the job queue refuses for good", async () => {
+    const f = fakes(session({ queued: queued() }));
+    f.queue.enqueueFollowUpTurn.mockRejectedValue(
+      new JobQueueError("JOB_INPUT_INVALID", "The input is not valid."),
+    );
+
+    const outcome = await createFollowUps(f.deps).startQueued("session-1");
+
+    expect(outcome).toEqual({ status: "discarded", reason: "request_invalid" });
+    expect(f.sessions.discardQueued).toHaveBeenCalledWith(
+      "session-1",
+      "req-a",
+      "request_invalid",
+    );
+    expect(f.sessions.noteQueuedFailure).not.toHaveBeenCalled();
+  });
+
+  // #841-U46
+  it("still starts the instruction when the queue answers on a later try", async () => {
+    const f = fakes(session({ queued: queued() }));
+    f.queue.enqueueFollowUpTurn
+      .mockRejectedValueOnce(new Error("db down"))
+      .mockResolvedValueOnce(created());
+
+    const first = await createFollowUps(f.deps).startQueued("session-1");
+    const second = await createFollowUps(f.deps).startQueued("session-1");
+
+    expect(first).toEqual({ status: "retry" });
+    expect(second).toEqual({ status: "started", runId: "job-2" });
+  });
+});
+
+describe("a stored instruction that cannot be read (fix round 2, N-A)", () => {
+  // #841-U47
+  it("is discarded with a reason, without asking the platform", async () => {
+    const f = fakes(session({ queuedUnreadable: true }));
+
+    const outcome = await createFollowUps(f.deps).startQueued("session-1");
+
+    expect(outcome).toEqual({
+      status: "discarded",
+      reason: "instruction_unreadable",
+    });
+    expect(f.sessions.discardQueued).toHaveBeenCalledWith(
+      "session-1",
+      null,
+      "instruction_unreadable",
+    );
+    expect(f.sessions.noteQueuedAttempt).not.toHaveBeenCalled();
+    expect(f.provider.getBranch).not.toHaveBeenCalled();
+  });
+});
+
+describe("the time an instruction was queued (fix round 2, N-B)", () => {
+  // #841-U48
+  it("is the injected clock's", async () => {
+    const f = fakes(session({ status: "running" }));
+    f.queue.enqueueFollowUpTurn.mockResolvedValue({ status: "busy" });
+    f.sessions.queueInstruction.mockResolvedValue({
+      status: "queued",
+      session: session({ status: "running" }),
+    });
+
+    await createFollowUps(f.deps).continueSession(USER, "session-1", body());
+
+    expect(f.sessions.queueInstruction).toHaveBeenCalledWith(
+      "session-1",
+      expect.objectContaining({ queuedAt: T0.toISOString() }),
+    );
   });
 });
 

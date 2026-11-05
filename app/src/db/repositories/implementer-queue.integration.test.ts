@@ -510,6 +510,105 @@ describe("the sessions that hold an instruction", () => {
     );
     expect((await row()).queued_attempted_at).toBeNull();
   });
+
+  // #841-D11d (fix round 2, S-A)
+  it("notes the first failure once and hands that time back after, for the instruction asked about only, and clears it with the instruction", async () => {
+    const f = await setup();
+    await f.sessionsA.queueInstruction(f.started.session.id, queued());
+    await endFirstTurn(f);
+    const stored = () =>
+      f.db
+        .selectFrom("implementer_sessions")
+        .select("queued_first_failed_at")
+        .where("id", "=", f.started.session.id)
+        .executeTakeFirstOrThrow();
+
+    expect(
+      await f.sessionsA.noteQueuedFailure(
+        f.started.session.id,
+        "request-other",
+      ),
+    ).toBeUndefined();
+    expect((await stored()).queued_first_failed_at).toBeNull();
+    const first = await f.sessionsA.noteQueuedFailure(
+      f.started.session.id,
+      "request-q",
+    );
+    expect(first).toBeDefined();
+    expect((await stored()).queued_first_failed_at).toBe(first);
+    await f.db
+      .updateTable("implementer_sessions")
+      .set({ queued_first_failed_at: "2026-11-04T00:00:00.000Z" })
+      .where("id", "=", f.started.session.id)
+      .execute();
+
+    expect(
+      await f.sessionsA.noteQueuedFailure(f.started.session.id, "request-q"),
+    ).toBe("2026-11-04T00:00:00.000Z");
+    await f.sessionsA.discardQueued(
+      f.started.session.id,
+      "request-q",
+      "github_unavailable",
+    );
+    expect((await stored()).queued_first_failed_at).toBeNull();
+    expect(
+      await f.sessionsA.noteQueuedFailure(f.started.session.id, "request-q"),
+    ).toBeUndefined();
+  });
+
+  // #841-D11e (fix round 2, N-A)
+  it("reads a stored text that is no instruction as unreadable, and discards it with a reason that no request id is needed for", async () => {
+    const f = await setup();
+    await f.sessionsA.queueInstruction(f.started.session.id, queued());
+    await endFirstTurn(f);
+    await f.db
+      .updateTable("implementer_sessions")
+      .set({ queued_instruction: "not json" })
+      .where("id", "=", f.started.session.id)
+      .execute();
+
+    const read = await f.sessionsA.getSession(f.started.session.id);
+    expect(read).toMatchObject({ queued: null, queuedUnreadable: true });
+
+    // A readable instruction is never taken by the id-less discard; the unreadable one is.
+    const dropped = await f.sessionsA.discardQueued(
+      f.started.session.id,
+      null,
+      "instruction_unreadable",
+    );
+    expect(dropped).toMatchObject({
+      queued: null,
+      discarded: { reason: "instruction_unreadable", instruction: "" },
+    });
+    expect(dropped?.queuedUnreadable).toBeUndefined();
+    expect(
+      (
+        await sessionsWithQueuedInstruction(
+          f.db,
+          10,
+          "2026-11-06T00:00:00.000Z",
+        )
+      ).map((d) => d.sessionId),
+    ).toEqual([]);
+  });
+
+  // #841-D11f (fix round 2, N-A)
+  it("does not let the id-less discard take a readable instruction", async () => {
+    const f = await setup();
+    await f.sessionsA.queueInstruction(f.started.session.id, queued());
+    await endFirstTurn(f);
+
+    expect(
+      await f.sessionsA.discardQueued(
+        f.started.session.id,
+        null,
+        "instruction_unreadable",
+      ),
+    ).toBeUndefined();
+    expect(
+      (await f.sessionsA.getSession(f.started.session.id))?.queued,
+    ).toMatchObject({ clientRequestId: "request-q" });
+  });
 });
 
 describe("the history of a session", () => {

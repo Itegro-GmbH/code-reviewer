@@ -351,6 +351,30 @@ describe("the Continue form of an idle session", () => {
     expect(ids[2]).not.toBe(ids[0]);
   });
 
+  // #841 (review of #871, fix round 2, UX)
+  it("marks the model field for IMPLEMENTER_RUNNER_NEEDS_OWN_KEY, with the sentence for it, and starts nothing", async () => {
+    const api = fakeApi(undefined, {
+      continueSession: vi
+        .fn<ContinueApi["continueSession"]>()
+        .mockResolvedValue(refused(422, "IMPLEMENTER_RUNNER_NEEDS_OWN_KEY")),
+    });
+    const user = userEvent.setup();
+    renderForm(api);
+    await shown();
+
+    await user.type(control("Next instruction"), "Go.");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    await screen.findByText(
+      describeImplementerFailure(factory, {
+        code: "IMPLEMENTER_RUNNER_NEEDS_OWN_KEY",
+        status: 422,
+      }),
+    );
+    expect(control("Model").getAttribute("aria-invalid")).toBe("true");
+    expect(navigation.push).not.toHaveBeenCalled();
+  });
+
   // #841-F09
   it("says IMPLEMENTER_BRANCH_GONE with the sentence for it and starts nothing", async () => {
     const api = fakeApi(undefined, {
