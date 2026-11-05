@@ -57,7 +57,12 @@ async function rowsOfEveryOldTable(
   for (const table of await db.introspection.getTables()) {
     if (NEW_TABLES.includes(table.name)) continue;
     // Tables of later migrations (#833) are empty and are no change to an existing row.
-    if (table.name === "workflows" || table.name === "workflow_versions")
+    if (
+      table.name === "workflows" ||
+      table.name === "workflow_versions" ||
+      table.name === "profiles" ||
+      table.name === "profile_versions"
+    )
       continue;
     const { rows } =
       await sql<unknown>`select * from ${sql.table(table.name)} order by 1`.execute(

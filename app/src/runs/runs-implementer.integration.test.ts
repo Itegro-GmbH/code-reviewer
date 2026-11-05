@@ -24,7 +24,11 @@ async function start() {
   /** A task, started and claimed; completed with `outcome` when one is given. */
   async function task(
     outcome?: Parameters<typeof f.queue.complete>[2],
-    overrides: { repositoryId?: string; instruction?: string } = {},
+    overrides: {
+      repositoryId?: string;
+      instruction?: string;
+      canPush?: boolean;
+    } = {},
   ) {
     counter += 1;
     f.clock.advance(1000);
@@ -36,6 +40,17 @@ async function start() {
       instruction: overrides.instruction ?? "Add a health endpoint.",
       modelChoice: { entryId: "entry-1" },
       costLimitCents: null,
+      ...(overrides.canPush === undefined
+        ? {}
+        : {
+            profile: {
+              id: "profile-1",
+              name: "reviewer",
+              version: 1,
+              instructions: "",
+              canPush: overrides.canPush,
+            },
+          }),
       createdBy: "user-1",
       actorLogin: "octocat",
       clientRequestId: `request-${String(counter)}`,
@@ -86,6 +101,35 @@ describe("implementer runs in the Runs pages", () => {
         branch: "implementer/b1",
         branchUrl: "https://github.com/acme/gadgets/tree/implementer/b1",
       },
+    });
+  });
+
+  // #843-T141
+  it("names the branch of a task whose profile may not push in the list and in the detail, without a link to a branch that was never pushed", async () => {
+    const { f, task } = await start();
+    const quiet = await task(
+      {
+        ok: true,
+        result: { ok: true, commentUrl: null, logTail: "", implementer: block },
+      },
+      { canPush: false },
+    );
+    const pushing = await task(undefined, { canPush: true });
+
+    const { runs } = await f.runs.list({});
+    const detail = await f.runs.get(quiet.id);
+
+    expect(runs.find((run) => run.id === quiet.id)?.implementer).toEqual({
+      branch: "implementer/b1",
+      branchUrl: null,
+    });
+    expect(runs.find((run) => run.id === pushing.id)?.implementer).toEqual({
+      branch: "implementer/b2",
+      branchUrl: "https://github.com/acme/gadgets/tree/implementer/b2",
+    });
+    expect(detail?.run.implementer).toMatchObject({
+      branch: "implementer/b1",
+      branchUrl: null,
     });
   });
 

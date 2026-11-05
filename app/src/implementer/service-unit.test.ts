@@ -41,6 +41,7 @@ function existing(
       instruction: "Add a health endpoint.",
       modelChoice: overrides.model ?? ({ entryId: "entry-1" } as ModelChoice),
       costLimitCents: overrides.costLimitCents ?? null,
+      profile: null,
     },
   };
 }

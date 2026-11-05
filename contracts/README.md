@@ -38,6 +38,13 @@ other way round, so a change to the format has to change the file and both sides
   and the removed tools' env families — is still accepted; the error code rules of a result). The implementer kind has its
   own file, `test_implementer_contract.py` (#746).
 
+## The profile of a turn (#843)
+
+`ImplementerProfile` in `runner-api.v1.json` (and the same definition in `worker-api.v1.json`, which reuses the job input) is the profile version a
+turn of the Implementer was started with: `name`, `version`, optional `instructions` (1 to 20,000 characters) and `canPush`. It is `implementer.profile` of
+the job input, sent only to a caller that names the claim feature `implementer_profile` (`KnownClaimFeature`); `examples/implementer/ImplementerProfile.json` is
+validated by all three suites, and the runner and the schema agree on a set of good and bad profiles (`runner/tests/contract/test_implementer_contract.py`).
+
 ## The steps of the live view (#745)
 
 `StepRecord`, `StepsRequest` and `StepsResponse` in `runner-api.v1.json` (and `WorkerStepsRequest`, `WorkerStepsResponse` in `worker-api.v1.json`) describe the batch of records a

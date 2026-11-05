@@ -37,6 +37,15 @@ export const IMPLEMENTER_TOKEN_PERMISSIONS: InstallationPermissions = {
   metadata: "read",
 };
 
+/**
+ * What the token of an Implementer turn whose profile may not push (#843) may do: read the contents of one repository and the
+ * metadata. The turn clones, but pushing is an exit, so the token cannot do it even if the Worker had a bug.
+ */
+export const IMPLEMENTER_READ_TOKEN_PERMISSIONS: InstallationPermissions = {
+  contents: "read",
+  metadata: "read",
+};
+
 /** What the token that reads a posted review comment (#657) may do: read the comments of one repository and the metadata. */
 export const COMMENT_READ_TOKEN_PERMISSIONS: InstallationPermissions = {
   issues: "read",

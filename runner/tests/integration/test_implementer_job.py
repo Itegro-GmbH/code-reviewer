@@ -90,8 +90,10 @@ TIP = "2" * 40
 SECOND = "3" * 40
 
 
-def job_text(*, cost_limit: bool = True) -> str:
+def job_text(*, cost_limit: bool = True, profile: dict[str, Any] | None = None) -> str:
     document: dict[str, Any] = json.loads(EXAMPLE.read_text(encoding="utf-8"))
+    if profile is not None:
+        document["implementer"]["profile"] = profile
     document["git"]["token"] = TOKEN
     document["llm"]["apiKey"] = KEY
     if cost_limit:
@@ -450,6 +452,7 @@ def play(
         steps_flush_seconds: float = 2.0,
         snapshot: SnapshotHost | None = None,
         export: Any = None,
+        profile: dict[str, Any] | None = None,
     ) -> Turn:
         events: list[str] = []
         removals: list[tuple[str, ...]] = []
@@ -512,7 +515,9 @@ def play(
         )
         monkeypatch.setattr(runner, "_stop_hard", lambda: hard_stops.append(1))
         output = io.StringIO()
-        code = runner.main([], stdin=io.StringIO(job_text(cost_limit=cost_limit)), stdout=output)
+        code = runner.main(
+            [], stdin=io.StringIO(job_text(cost_limit=cost_limit, profile=profile)), stdout=output
+        )
         git = made[0] if made else FakeGit(tmp_path, None)
         return Turn(
             git,
@@ -1704,4 +1709,143 @@ def test_the_session_is_exported_when_the_turn_ended_badly_too(play: Any) -> Non
         "the conversation is worth keeping"
     )
     assert host.wait() and host.data == snapshot_of().data
+    host.close()
+
+
+# -- #843: the profile of a turn ------------------------------------------------------------------
+
+NO_PUSH = {"name": "reviewer", "version": 3, "canPush": False, "instructions": "Review only."}
+MAY_PUSH = {"name": "writer", "version": 2, "canPush": True}
+
+
+# #843-T200
+def test_a_profile_without_the_right_to_push_pushes_nothing_though_the_agent_committed(
+    play: Any,
+) -> None:
+    turn = play(commits_then_ends(), profile=NO_PUSH)
+
+    result = turn.result
+    assert turn.exit_code == 0, turn.output
+    assert result["ok"] is True and result["errorCode"] is None
+    assert valid_result(result)
+    assert turn.git.push_calls == 0 and turn.git.pushes == []
+    assert "push" not in turn.events
+    block = result["implementer"]
+    assert block["pushed"] is False
+    assert block["headCommit"] is None
+    assert block["branches"] == [] and block["commits"] == [] and block["filesChanged"] == []
+    assert block["branchesDropped"] == {"invalid": 0, "overflow": 0}
+    assert block["baseCommit"] == START
+    assert block["summary"] == "Added the greeting."
+    assert block["opencode"]["sessionId"] == "ses_fake"
+    assert result["usage"]["aiCalls"] >= 1
+
+
+# #843-T201
+def test_a_profile_without_the_right_to_push_is_a_success_though_the_agent_made_no_commit(
+    play: Any,
+) -> None:
+    turn = play(never_commits, profile=NO_PUSH)
+
+    result = turn.result
+    assert result["ok"] is True and result["errorCode"] is None, turn.output
+    assert valid_result(result)
+    assert result["implementer"]["summary"] == "I could not do it."
+    assert result["implementer"]["pushed"] is False
+    assert turn.git.push_calls == 0
+
+
+# #843-T202
+def test_a_profile_without_the_right_to_push_does_not_commit_the_leftovers_either(
+    play: Any,
+) -> None:
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        agent.use_the_model()
+        return "Looked around."
+
+    turn = play(script, dirty=True, profile=NO_PUSH)
+
+    assert turn.result["ok"] is True
+    assert turn.git.events.count("commit_all") == 0
+    assert turn.git.push_calls == 0
+    # Nothing is collected from the tree, so a dirty tree is no reason for a second, paid message.
+    assert turn.events.count("turn") == 1
+
+
+# #843-T203
+def test_a_profile_without_the_right_to_push_asks_the_lease_no_more_than_it_needs(
+    play: Any,
+) -> None:
+    turn = play(commits_then_ends(), profile=NO_PUSH)
+
+    assert turn.lease is not None
+    # No listing and no push to guard: the lease is asked at most by the watch during the turn.
+    assert turn.git.push_calls == 0
+    assert turn.result["ok"] is True
+
+
+# #843-T204
+def test_a_profile_with_the_right_to_push_is_todays_implementer(play: Any) -> None:
+    turn = play(commits_then_ends(), profile=MAY_PUSH)
+
+    result = turn.result
+    assert result["ok"] is True and valid_result(result)
+    assert result["implementer"]["pushed"] is True
+    assert result["implementer"]["headCommit"] == TIP
+    assert turn.git.pushes == [TIP]
+    assert turn.events == ["agent.start", "turn", "stop", "quiet", "rescue", "push"]
+
+
+# #843-T205
+def test_the_agent_gets_the_text_of_the_profile_after_the_rules_of_the_workplace(
+    play: Any,
+) -> None:
+    turn = play(commits_then_ends(), profile={**MAY_PUSH, "instructions": "Use tabs.\nNo emoji."})
+
+    assert turn.agent is not None
+    _, text = turn.agent.options["instructions"]
+    assert text.index("Rules of this workplace") < text.index("Use tabs.")
+    assert text.endswith("Use tabs.\nNo emoji.")
+
+
+# #843-T206
+def test_a_profile_that_may_push_and_has_no_text_gives_the_agent_the_text_of_before(
+    play: Any,
+) -> None:
+    plain = play(commits_then_ends())
+    profiled = play(commits_then_ends(), profile=MAY_PUSH)
+
+    assert plain.agent is not None and profiled.agent is not None
+    assert profiled.agent.options["instructions"] == plain.agent.options["instructions"]
+
+
+# #843-T207
+def test_a_profile_without_the_right_to_push_tells_the_agent_nothing_leaves_the_container(
+    play: Any,
+) -> None:
+    turn = play(commits_then_ends(), profile=NO_PUSH)
+
+    assert turn.agent is not None
+    _, text = turn.agent.options["instructions"]
+    assert "Nothing you commit leaves this container" in text
+    assert "the system pushes everything" not in text
+    assert text.endswith("Review only.")
+
+
+# #843-T208
+def test_a_stop_of_a_profile_without_the_right_to_push_pushes_nothing_either(play: Any) -> None:
+    turn = play(commits_then_ends(), profile=NO_PUSH, answers=lost)
+
+    assert turn.git.push_calls == 0 and turn.git.pushes == []
+
+
+# #839-T18
+def test_a_profile_that_may_not_push_still_saves_the_session(play: Any) -> None:
+    host = SnapshotHost()
+
+    turn = play(commits_then_ends(), snapshot=host, profile=NO_PUSH)
+
+    assert turn.agent is not None and turn.agent.exports == [5.0]
+    assert host.wait() and host.data == snapshot_of().data
+    assert turn.git.pushes == []
     host.close()

@@ -5,6 +5,7 @@
 // version stays readable, and a workspace never sees the workflows of another.
 import { describe, expect, it } from "vitest";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
+import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import { createTestDatabase } from "../test-support/test-database.ts";
 import { addUser } from "../test-support/workspace-deletion-fixture.ts";
@@ -17,6 +18,14 @@ import { createWorkflowService } from "./service.ts";
 import { tiny } from "./test-fixtures.ts";
 
 const USER = { id: "u-1" };
+const PROFILE_CONTENT = {
+  description: "",
+  model: { entryId: "entry-1" },
+  instructions: "",
+  costLimitCents: null,
+  canPush: true,
+  defaultResult: null,
+};
 
 async function setup() {
   const { db } = await createTestDatabase();
@@ -30,13 +39,24 @@ async function setup() {
     createWorkflowService({
       workflows: createWorkflowsRepository(db, workspaceId),
       environments: createImplementerEnvironmentsRepository(db, workspaceId),
+      profiles: createProfilesRepository(db, workspaceId),
       ...options,
     });
-  for (const id of [idA, idB])
+  for (const id of [idA, idB]) {
     await createImplementerEnvironmentsRepository(db, id).create(
       { name: "node", vcpus: 4, setupScript: "", createdBy: USER.id },
       50,
     );
+    // The profile the documents of the tests run (#843): profiles are data, none is built in.
+    await createProfilesRepository(db, id).create(
+      {
+        name: "implementer",
+        content: PROFILE_CONTENT,
+        createdBy: USER.id,
+      },
+      100,
+    );
+  }
   return { db, a: serviceFor(idA), b: serviceFor(idB), serviceFor, idA, idB };
 }
 
@@ -73,6 +93,33 @@ describe("the workflow service", () => {
       }),
     ]);
     expect((await a.list()).workflows).toEqual([]);
+  });
+
+  // #843-T135
+  it("tells a workflow that names an archived profile that it is archived, not that it does not exist", async () => {
+    const { a, db, idA } = await setup();
+    const profiles = createProfilesRepository(db, idA);
+    const created = await profiles.create(
+      { name: "retired", content: PROFILE_CONTENT, createdBy: USER.id },
+      100,
+    );
+    if (!created.ok) throw new Error("the profile was not created");
+    await profiles.archive(created.profile.id, 50);
+    const document = tiny();
+    (document.steps as Array<Record<string, unknown>>)[0]!.profile = "retired";
+
+    const refused = await a.validate(document);
+
+    expect(refused.errors).toEqual([
+      expect.objectContaining({
+        path: "/steps/0/profile",
+        code: "profile_archived",
+        available: ["implementer"],
+      }),
+    ]);
+    const unknown = tiny();
+    (unknown.steps as Array<Record<string, unknown>>)[0]!.profile = "never";
+    expect((await a.validate(unknown)).errors[0]?.code).toBe("profile_unknown");
   });
 
   // #833-M1-T201

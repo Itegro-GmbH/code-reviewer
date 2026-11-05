@@ -1230,6 +1230,17 @@ and from nothing else, and the **script** from the job the Worker fetches:
 What does not depend on the size: the work volume is a directory of the VM's disk (64 GB on the Pro plan, whatever the vCPUs), the reserve disk
 (8 GiB), `pids` of the Control container, the steps of the volume, and a VM lives `timeoutSeconds` plus the margin whatever its size.
 
+## Profiles
+
+A task can run with a **profile** (#843, [`docs/profiles.md`](profiles.md)): a workspace's own, versioned data with the model, standing
+instructions, cost limit and **push right** a turn runs with. The task is sent with `profile` in the body of the route behind the form (the form
+on the page does not offer one yet); the version it runs with is copied into the turn (`implementer_turns.profile_*`), like the environment, and the
+model and cost limit of the version are the turn's own. A task **without** a profile is the Implementer of before: no extra text, every local branch
+pushed. A profile with `canPush: false` makes Control skip everything about the push: no leftover commit, no listing, no push, no commits or files in
+the result, and the turn is a success when the agent ended well. The text of the profile is appended last to the instruction file the runner writes
+(`implementer/prompts.py`), so it is the same for every turn of one version and the provider's prompt cache hits. It reaches the Worker as
+`implementer.profile`, only if the Worker names the claim feature `implementer_profile`.
+
 ## Limits
 
 | Limit | Value | Where it is decided |

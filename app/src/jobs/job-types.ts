@@ -14,6 +14,7 @@ import type {
   StoredImplementerSession,
   StoredImplementerTurn,
   TurnEnvironment,
+  TurnProfile,
 } from "../db/repositories/implementer-repository.ts";
 
 /**
@@ -117,6 +118,8 @@ export type EnqueueImplementerTurnInput = {
   costLimitCents: number | null;
   /** A copy of the environment the person chose (#818), made by the service from the workspace's own; null for none. */
   environment?: TurnEnvironment | null;
+  /** A copy of the profile version the person chose (#843), made by the service from the workspace's own; null for none. */
+  profile?: TurnProfile | null;
   /** The user who started the task. */
   createdBy: string;
   /** The login of that person on the provider, for the job's `actor_login`. */

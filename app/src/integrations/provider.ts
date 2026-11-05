@@ -194,10 +194,13 @@ export interface IntegrationProvider {
    * connection has not accepted the write permission yet (not retryable). It is a capability of its own (#753): a
    * deployment without `implementer` is refused with `INTEGRATION_CAPABILITY_ABSENT` before the platform is asked
    * anything, whatever the App was set to by hand. A token lives up to an hour; `revokeImplementerAccess` ends it.
+   * `readOnly` (#843, a turn whose profile may not push): the same token but with the right to read the contents and nothing
+   * else, so the turn could not push even with a bug.
    */
   implementerAccess(
     integration: Integration,
     repo: RepoRef,
+    options?: { readOnly?: boolean },
   ): Promise<GitAccess>;
 
   /**

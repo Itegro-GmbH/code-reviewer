@@ -17,6 +17,7 @@ import {
 } from "../../src/test-support/workspaces.ts";
 import { issueToPr, tiny } from "../../src/workflows/test-fixtures.ts";
 import { createImplementerEnvironmentsRepository } from "../../src/db/repositories/implementer-environments-repository.ts";
+import { createProfilesRepository } from "../../src/db/repositories/profiles-repository.ts";
 
 const session = vi.hoisted(() => ({
   currentLookup: vi.fn<() => Promise<SessionLookup>>(),
@@ -51,6 +52,38 @@ async function startRoutes(
   const db = getDatabase();
   const workspaceId = await defaultWorkspaceId(db);
   const otherId = await addWorkspace(db, "other");
+  // The profiles the documents of the tests run (#843): profiles are data of the workspace, none is built in.
+  await db
+    .insertInto("users")
+    .values({
+      id: "u-profiles",
+      name: "profiles",
+      email: "profiles@example.test",
+      email_verified: 1,
+      created_at: "2026-11-04T08:00:00.000Z",
+      updated_at: "2026-11-04T08:00:00.000Z",
+    })
+    .execute();
+  for (const id of [workspaceId, otherId])
+    for (const [name, canPush] of [
+      ["implementer", true],
+      ["reviewer", false],
+    ] as const)
+      await createProfilesRepository(db, id).create(
+        {
+          name,
+          content: {
+            description: "",
+            model: { entryId: "entry-1" },
+            instructions: "",
+            costLimitCents: null,
+            canPush,
+            defaultResult: null,
+          },
+          createdBy: "u-profiles",
+        },
+        100,
+      );
   session.currentLookup.mockResolvedValue(
     await signedInMember(db, {
       workspaceId,
@@ -177,7 +210,7 @@ describe("the workflow route files", () => {
         {
           path: "/steps/0/profile",
           code: "profile_unknown",
-          available: ["implementer"],
+          available: ["implementer", "reviewer"],
         },
       ],
     });

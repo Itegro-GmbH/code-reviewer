@@ -23,6 +23,7 @@ import { issue, listNames, pointer, shown } from "./issues.ts";
 import {
   parseProfileRef,
   type ProfileInfo,
+  type ProfileVersionFacts,
   type WorkflowResolver,
 } from "./resolver.ts";
 import {
@@ -151,12 +152,23 @@ function descriptionField(
 function findProfile(
   ref: unknown,
   resolver: WorkflowResolver,
-): { info: ProfileInfo; version?: number } | undefined {
+): { info: ProfileInfo; facts: ProfileVersionFacts | undefined } | undefined {
   if (typeof ref !== "string") return undefined;
   const parsed = parseProfileRef(ref);
   if (parsed === undefined) return undefined;
   const info = resolver.profiles().find((p) => p.name === parsed.name);
-  return info === undefined ? undefined : { info, version: parsed.version };
+  if (info === undefined) return undefined;
+  // The version the step runs: the one it names, else the newest. A version that does not exist is reported where it is written; its
+  // facts are the newest's, so one mistake is not reported at every use. A version that exists and has no facts is not known.
+  const newest = info.versions[info.versions.length - 1];
+  const version =
+    parsed.version !== undefined && info.versions.includes(parsed.version)
+      ? parsed.version
+      : newest;
+  return {
+    info,
+    facts: version === undefined ? undefined : info.facts[version],
+  };
 }
 
 /** The profile name and the environment (lower case, a literal only) an agent step is written with: what makes two steps share a session. */
@@ -183,14 +195,14 @@ export function agentBinding(
   const id = node.id as string;
   const found = findProfile(node.profile, resolver);
   // A profile nobody knows is reported where it is written; its facts stay, so one mistake is not reported at every use.
-  const canPush = found?.info.canPush ?? true;
+  const canPush = found?.facts?.canPush ?? true;
   const declared =
     node.result === undefined
       ? undefined
       : validateResultSchema(node.result).schema;
   const schema: ResultSchema | undefined =
     declared ??
-    (node.result === undefined ? found?.info.defaultResult : undefined);
+    (node.result === undefined ? found?.facts?.defaultResult : undefined);
 
   const entries: [string, FieldType][] =
     schema === undefined
@@ -315,6 +327,17 @@ function checkProfile(
   const info = c.resolver.profiles().find((p) => p.name === parsed.name);
   if (info === undefined) {
     const names = c.resolver.profiles().map((p) => p.name);
+    if (c.resolver.archivedProfiles?.().includes(parsed.name) === true) {
+      c.report(
+        issue(
+          where,
+          "profile_archived",
+          `The profile ${shown(parsed.name)} is archived and cannot be run. Profiles: ${listNames(names)}.`,
+          names,
+        ),
+      );
+      return;
+    }
     c.report(
       issue(
         where,

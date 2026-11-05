@@ -4,6 +4,7 @@
 // instance admin links the GitHub identity of an imported operator who has no other credential, and the two
 // accounts become one. Against the fake GitHub (authorization with PKCE, the token, the profile) and a real
 // database. Every refusal leaves the database exactly as it was; the merge is one transaction.
+import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import { describe, expect, it } from "vitest";
@@ -443,6 +444,47 @@ describe("merging the instance admin with an imported operator", () => {
     expect(
       await ctx.db
         .selectFrom("workflow_versions")
+        .select(["version", "created_by"])
+        .orderBy("version")
+        .execute(),
+    ).toEqual([
+      { version: 1, created_by: "operator" },
+      { version: 2, created_by: "operator" },
+    ]);
+  });
+
+  // #843-T71
+  it("keeps who made a profile: it moves to the admin when the operator is retired, and the saved versions are history that stays", async () => {
+    const ctx = await setup();
+    await adminAndImportedOperator(ctx);
+    const profiles = createProfilesRepository(ctx.db, ctx.workspace.id);
+    const content = {
+      description: "",
+      model: { entryId: "e" },
+      instructions: "",
+      costLimitCents: null,
+      canPush: false,
+      defaultResult: null,
+    };
+    const made = await profiles.create(
+      { name: "reviewer", content, createdBy: "operator" },
+      100,
+    );
+    if (!made.ok) throw new Error("seeding failed");
+    await profiles.saveVersion(
+      made.profile.id,
+      { content, createdBy: "operator" },
+      200,
+    );
+
+    expect(await ctx.link(ADMIN)).toEqual({ ok: true, outcome: "merged" });
+
+    expect(
+      await ctx.db.selectFrom("profiles").select("created_by").execute(),
+    ).toEqual([{ created_by: "admin" }]);
+    expect(
+      await ctx.db
+        .selectFrom("profile_versions")
         .select(["version", "created_by"])
         .orderBy("version")
         .execute(),

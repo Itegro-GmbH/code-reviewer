@@ -148,6 +148,44 @@ describe("the row of an implementer run", () => {
     );
   });
 
+  // #843-T140
+  it("names the branch of a turn whose profile may not push, but links nothing: the branch was never pushed", () => {
+    const quiet = {
+      branch: "implementer/abc123",
+      repositoryUrl: "https://github.com/acme/widgets",
+      canPush: false,
+    };
+
+    const row = toRunRowView(PRODUCT, turn(), "acme/widgets", NOW, quiet);
+    const detail = toCustomerRunDetailView(
+      PRODUCT,
+      turn(),
+      "acme/widgets",
+      NOW,
+      (text) => text,
+      false,
+      null,
+      { ...source(), canPush: false },
+    ).implementer;
+
+    expect(row.implementer).toEqual({
+      branch: "implementer/abc123",
+      branchUrl: null,
+    });
+    expect(detail).toMatchObject({
+      branch: "implementer/abc123",
+      branchUrl: null,
+    });
+    // A profile that may push, and a task without one, keep the link.
+    for (const canPush of [true, undefined])
+      expect(
+        toRunRowView(PRODUCT, turn(), "acme/widgets", NOW, {
+          ...quiet,
+          canPush,
+        }).implementer?.branchUrl,
+      ).toBe("https://github.com/acme/widgets/tree/implementer/abc123");
+  });
+
   // #758-T01
   it("still has the implementer variant when the turn of the job cannot be read, without a branch", () => {
     const row = toRunRowView(PRODUCT, turn(), "acme/widgets", NOW);

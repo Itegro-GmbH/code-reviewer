@@ -10,7 +10,11 @@
 // transaction writes the session, the turn and the job (`queue.enqueueImplementerTurn`), and the queue wakes the Dispatcher.
 // Nothing is written before the last step, and a platform that cannot be asked ends the submit with 503.
 import type { ImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
-import type { TurnEnvironment } from "../db/repositories/implementer-repository.ts";
+import type {
+  TurnEnvironment,
+  TurnProfile,
+} from "../db/repositories/implementer-repository.ts";
+import type { ProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import type { IntegrationsRepository } from "../db/repositories/integrations-repository.ts";
 import type { RepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { ImplementerStoreError } from "../db/implementer-errors.ts";
@@ -77,6 +81,8 @@ export type ImplementerServiceDependencies = {
   models: ImplementerModels;
   /** The workspace's environments (#818): a task may start with one, copied into the turn. */
   environments: Pick<ImplementerEnvironmentsRepository, "get">;
+  /** The workspace's profiles (#843): a task may run with one, whose version is copied into the turn. */
+  profiles: Pick<ProfilesRepository, "findByName">;
   queue: Pick<JobQueue, "enqueueImplementerTurn" | "findImplementerTurn">;
   /** The operator's maximum cost per turn in whole US cents, read for each call. */
   operatorCostLimitCents(): Promise<number>;
@@ -154,20 +160,42 @@ function sameModel(stored: ModelChoice, asked: ModelChoice): boolean {
   return stored.provider === asked.provider && stored.model === asked.model;
 }
 
+/**
+ * Whether the profile a repeated body names is the one the earlier task ran with: the same name, and the same version when the body
+ * pins one (a body that names none is the newest at the time of the first request, which a new version since does not change).
+ */
+function sameProfile(
+  stored: TurnProfile | null,
+  asked: StartInput["profile"],
+): boolean {
+  if (asked === null) return stored === null;
+  return (
+    stored !== null &&
+    stored.name === asked.name &&
+    (asked.version === null || stored.version === asked.version)
+  );
+}
+
 /** The answer for a request id that made a task before: that task when the body is the same, else the conflict. */
 function repeatOf(
   earlier: EnqueueImplementerTurnResult,
   task: StartInput,
 ): StartedTask {
   const { session, turn } = earlier;
+  // With a profile the model and the cost limit are the version's, not the body's: only the profile is compared.
+  const sameChoices =
+    task.profile !== null ||
+    (turn.costLimitCents === task.costLimitCents &&
+      task.model !== null &&
+      sameModel(turn.modelChoice, task.model));
   const same =
     session.repositoryId === task.repositoryId &&
     session.baseBranch === task.baseBranch &&
     session.branch === task.branch &&
     turn.instruction === task.instruction &&
-    turn.costLimitCents === task.costLimitCents &&
     (turn.environment?.id ?? null) === task.environmentId &&
-    sameModel(turn.modelChoice, task.model);
+    sameProfile(turn.profile, task.profile) &&
+    sameChoices;
   if (!same)
     throw new ImplementerError(
       "IMPLEMENTER_REQUEST_REUSED",
@@ -339,7 +367,38 @@ export function createImplementerService(
         throw platformFailure(error);
       }
 
-      const reason = await deps.models.check(task.model);
+      // A profile (#843) is read now and its version copied into the turn: what it says at this moment is what the task runs with,
+      // whatever is done to it afterwards. Its model and cost limit take the place of the body's, and are checked like the body's.
+      let profile: TurnProfile | null = null;
+      let model: ModelChoice;
+      let costLimitCents: number | null;
+      if (task.profile === null) {
+        // `validateStartInput` leaves the model out only when a profile is named.
+        model = task.model as ModelChoice;
+        costLimitCents = task.costLimitCents;
+      } else {
+        const found = await deps.profiles.findByName(
+          task.profile.name,
+          task.profile.version ?? undefined,
+        );
+        if (found === undefined)
+          throw new ImplementerError(
+            "IMPLEMENTER_PROFILE_NOT_FOUND",
+            "There is no such profile in this workspace, or it has no such version.",
+          );
+        const { content } = found.version;
+        profile = {
+          id: found.profile.id,
+          name: found.profile.name,
+          version: found.version.version,
+          instructions: content.instructions,
+          canPush: content.canPush,
+        };
+        model = content.model;
+        costLimitCents = content.costLimitCents;
+      }
+
+      const reason = await deps.models.check(model);
       if (reason !== null)
         throw new ImplementerError(
           "IMPLEMENTER_MODEL_NOT_ALLOWED",
@@ -372,9 +431,9 @@ export function createImplementerService(
         };
       }
 
-      if (task.costLimitCents !== null) {
+      if (costLimitCents !== null) {
         const maximumCents = await deps.operatorCostLimitCents();
-        if (task.costLimitCents > maximumCents)
+        if (costLimitCents > maximumCents)
           throw new ImplementerError(
             "EXCEEDS_OPERATOR_MAXIMUM",
             "The cost limit is above the maximum per task.",
@@ -390,9 +449,10 @@ export function createImplementerService(
           baseSha,
           branch: task.branch,
           instruction: task.instruction,
-          modelChoice: task.model,
-          costLimitCents: task.costLimitCents,
+          modelChoice: model,
+          costLimitCents,
           environment,
+          profile,
           createdBy: user.id,
           actorLogin: user.githubLogin,
           clientRequestId: task.clientRequestId,

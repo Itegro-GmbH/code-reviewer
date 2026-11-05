@@ -359,6 +359,13 @@ export type Checked = {
       /** #745, step 7: the rule for the agent's network; `off` when the turn has none. */
       network: NetworkRule;
     } | null;
+    /** #843: the profile version the turn copied when it started; null for a task without one (the platform's defaults). */
+    profile: {
+      name: string;
+      version: number;
+      instructions: string;
+      canPush: boolean;
+    } | null;
   } | null;
 };
 
@@ -373,7 +380,8 @@ export type Built = {
   native: boolean;
   /**
    * #753: the write token of a turn of the Implementer (the same value as `input.git.token`), or null. The caller remembers it
-   * before the input leaves and switches it off when the input does not (`revokeUndelivered`).
+   * before the input leaves and switches it off when the input does not (`revokeUndelivered`). For a profile that may not push (#843)
+   * it is a token that can only read: it is kept in the same ledger, so it ends with the turn like the other.
    */
   writeToken: GitTokenEntry | null;
 };
@@ -1066,6 +1074,15 @@ export async function checkJob(
                 setupScript: turn.turn.environment.setupScript,
                 network: turn.turn.environment.network ?? NETWORK_OFF,
               },
+        profile:
+          turn.turn.profile === null
+            ? null
+            : {
+                name: turn.turn.profile.name,
+                version: turn.turn.profile.version,
+                instructions: turn.turn.profile.instructions,
+                canPush: turn.turn.profile.canPush,
+              },
       },
     };
   }
@@ -1177,6 +1194,10 @@ export async function buildJobInput(
   const network = implementer?.environment?.network ?? NETWORK_OFF;
   if (network.mode !== "off" && !features.includes("implementer_network"))
     return refuse("implementer_engine_unavailable", "reason=network");
+  // #843: the same for the profile. A Worker that does not read it would push the work of a profile that may not push, and would run
+  // the agent without the instructions the person chose.
+  if (implementer?.profile != null && !features.includes("implementer_profile"))
+    return refuse("implementer_engine_unavailable", "reason=profile");
   if (costLimit.enforced === "none")
     deps.logger.info(
       `[runner-api] job=${job.id} carries no cost limit: the runner names neither claim feature cost_limit nor operator_cost_limit, so a Dynamic Review is held only to the runner's own RUNNER_DYNAMIC_MAX_COST_USD and a Diff Review to none`,
@@ -1219,7 +1240,10 @@ export async function buildJobInput(
   try {
     git = revealGitAccess(
       job.reviewKind === "implementer"
-        ? await provider.implementerAccess(integration, repo)
+        ? await provider.implementerAccess(integration, repo, {
+            // #843: a profile that may not push gets a token that cannot, whatever the Worker does.
+            readOnly: implementer?.profile?.canPush === false,
+          })
         : await provider.jobAccess(integration, repo),
     );
   } catch (error) {
@@ -1301,6 +1325,19 @@ export async function buildJobInput(
                     name: implementer.environment.name,
                     ...(script === "" ? {} : { setupScript: script }),
                     ...(network.mode === "off" ? {} : { network }),
+                  },
+                }),
+            // #843: only a turn that was started with a profile carries one, and only to a Worker that reads it (the refusal above).
+            ...(implementer.profile === null
+              ? {}
+              : {
+                  profile: {
+                    name: implementer.profile.name,
+                    version: implementer.profile.version,
+                    ...(implementer.profile.instructions === ""
+                      ? {}
+                      : { instructions: implementer.profile.instructions }),
+                    canPush: implementer.profile.canPush,
                   },
                 }),
           },
