@@ -171,9 +171,9 @@ function withTimeout<T>(
       reject(new ActionTimeout());
     }, ms);
   });
-  return Promise.race([work(abort.signal), expired]).finally(() =>
-    clearTimeout(timer),
-  );
+  // The work is started inside a promise, so that one that throws before it returns still ends the race and clears the timer.
+  const working = Promise.resolve().then(() => work(abort.signal));
+  return Promise.race([working, expired]).finally(() => clearTimeout(timer));
 }
 
 /** The micro dollars of the budget to whole cents a task's limit is made of, at least one. */
@@ -381,9 +381,11 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         // A step is never given up while its turn exists: the claimant may have died between the start of the turn and the record of
         // it, and a turn nobody reads would run on and count in no budget. The turn is attached, and the next move reads it.
         if (move.code === "agent_start_failed") {
-          const found = pre.started.has(stepRun.id)
-            ? pre.started.get(stepRun.id)
-            : await deps.turns.findByRequest(requestIdOf(run, stepRun));
+          // What was read before the lock is used when it found a turn; "none" is looked up again, because a slow claimant may have
+          // started it since.
+          const found =
+            pre.started.get(stepRun.id) ??
+            (await deps.turns.findByRequest(requestIdOf(run, stepRun)));
           if (
             found !== undefined &&
             (await lock.attachTurn(stepRun.id, {

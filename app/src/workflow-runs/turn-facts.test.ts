@@ -338,7 +338,36 @@ describe("the outcome of a turn", () => {
         }),
         777,
       ),
-    ).toMatchObject({ ok: false, costMicroUsd: 777, costBasis: "estimated" });
+    ).toMatchObject({ ok: false, costMicroUsd: 777, costBasis: "limit" });
+  });
+
+  // #844-T273
+  it("does not estimate a failed turn, nor a count of nothing", () => {
+    const price = { inputPerMillion: 1, outputPerMillion: 1 };
+    const usage = { costUsd: null, promptTokens: 10, completionTokens: 10 };
+
+    expect(
+      outcomeOfTurn(
+        ended({
+          jobStatus: "failed",
+          jobErrorCode: "timeout",
+          jobResult: { usage },
+          price,
+        }),
+        777_000,
+      ),
+    ).toMatchObject({ costMicroUsd: 777_000, costBasis: "limit" });
+    expect(
+      outcomeOfTurn(
+        ended({
+          jobResult: {
+            usage: { costUsd: null, promptTokens: 0, completionTokens: 0 },
+          },
+          price,
+        }),
+        777_000,
+      ),
+    ).toMatchObject({ costMicroUsd: 777_000, costBasis: "limit" });
   });
 
   // #844-T273

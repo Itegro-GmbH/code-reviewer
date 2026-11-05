@@ -73,9 +73,10 @@ function tokenCount(value: unknown): number | null {
 }
 
 /**
- * What a turn cost by its token counts at the catalog price, in micro dollars; null without both counts or a price. Micro dollars
- * are exactly USD per million tokens times tokens. The runner's count does not know cached or reasoning tokens, so this is an
- * estimate: it is held to the cap the turn ran under by the caller.
+ * What a turn cost by its token counts at the catalog price, in micro dollars; null without both counts or a price, and null for a
+ * count of nothing. Micro dollars are exactly USD per million tokens times tokens. The prompt count holds cached tokens at the full
+ * input price, which is mostly above what they cost; a cache write costs more than that, so this is an estimate: the caller uses it
+ * only for a turn that succeeded (every call answered) and holds it to the cap the turn ran under.
  */
 export function estimateCost(
   jobResult: unknown,
@@ -86,6 +87,7 @@ export function estimateCost(
   const prompt = tokenCount(jobResult.usage.promptTokens);
   const completion = tokenCount(jobResult.usage.completionTokens);
   if (prompt === null || completion === null) return null;
+  if (prompt === 0 && completion === 0) return null;
   const micro =
     prompt * price.inputPerMillion + completion * price.outputPerMillion;
   return Number.isFinite(micro) && micro >= 0 ? Math.ceil(micro) : null;
@@ -136,8 +138,12 @@ export function outcomeOfTurn(
   unknownCostMicroUsd: number,
 ): TurnOutcome {
   const reported = costOfResult(ended.jobResult);
+  // Only a turn that succeeded has every call answered and counted; a failed or stopped one may have lost an open call (the
+  // runner then reports no cost), so it is charged at the cap.
   const estimated =
-    reported === null ? estimateCost(ended.jobResult, ended.price) : null;
+    reported === null && ended.jobStatus === "succeeded"
+      ? estimateCost(ended.jobResult, ended.price)
+      : null;
   const costMicroUsd =
     reported ??
     (estimated === null

@@ -1234,6 +1234,53 @@ describe("an action that does not answer", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]?.aborted).toBe(true);
   });
+
+  // #844-T288
+  it("ends the step with action_failed when a connector throws before it returns, and leaves no timer behind", async () => {
+    const throwing: ActionConnector = {
+      name: "github.pullRequest.open",
+      run() {
+        throw new Error("checked before the call");
+      },
+    };
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const app = await startEngineHarness({
+        connectors: [throwing],
+        actionTimeoutMs: 50,
+      });
+      const workflow = await app.saveWorkflow({
+        version: 1,
+        name: "Open",
+        trigger: MANUAL_TRIGGER,
+        steps: [
+          {
+            id: "open",
+            kind: "action",
+            connector: "github.pullRequest.open",
+            head: "main",
+            title: "Title",
+          },
+        ],
+      });
+      const { run } = await app.start(workflow.id);
+
+      await app.engine.advance(run.id);
+      await app.engine.advance(run.id);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      const state = await app.stateOf(run.id);
+      expect(state.steps[0]).toMatchObject({
+        status: "failed",
+        errorCode: "action_failed",
+      });
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
 });
 
 describe("a failure of the engine", () => {
