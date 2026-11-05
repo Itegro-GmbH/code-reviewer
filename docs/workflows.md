@@ -619,6 +619,7 @@ node it is (`stepId`), how often that step has run (`round`, from 1) and, for a 
   branch and changes nothing that leaves its container. A profile that **may push** pushes to its own branch, which is then built on top of the other (a second branch, not a commit on
   the implementer's), and its own `{{<step>.branch}}` is that second branch. The name of the session's branch is unique whatever it starts from: it holds the run and the step.
   The Worker fetches the branch it starts from one commit deep, so a reviewer sees the code of that branch as it stands, not its history (and not the difference to the base branch).
+
 ### Known limits
 
 - **A run cannot be cancelled yet.** It ends as `succeeded` or `failed`; a person cannot stop one that runs. Stopping a run needs a way to stop the running turn of the Implementer

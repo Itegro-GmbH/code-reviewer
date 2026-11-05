@@ -10,7 +10,7 @@ import type { Database } from "../schema.ts";
 import { migrationProvider } from "./index.ts";
 import { createEmptyTestDatabase } from "../../test-support/test-database.ts";
 
-const THIS = "20261106090000_add_workflow_step_rounds";
+const THIS = "20261105200000_add_workflow_step_rounds";
 const T = "2026-11-06T08:00:00.000Z";
 
 function upTo(include: (name: string) => boolean): MigrationProvider {
@@ -126,7 +126,7 @@ describe("the workflow step rounds migration", () => {
     await migrateToLatest(db, migrationProvider);
 
     const { migration } =
-      await import("./20261106090000_add_workflow_step_rounds.ts");
+      await import("./20261105200000_add_workflow_step_rounds.ts");
     await migration.down?.(db);
 
     const { rows } = await sql<{

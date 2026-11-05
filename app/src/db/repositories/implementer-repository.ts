@@ -828,6 +828,8 @@ export function createImplementerRepository(
         // stored text that cannot be read is no instruction of anyone, and is dropped, or the session would hold it for good.
         if (queued !== null && queued.clientRequestId !== clientRequestId)
           return undefined;
+        // While a turn runs only the caller's own instruction goes: an unreadable text is left to the idle session.
+        if (queued === null && locked.status !== "idle") return undefined;
         const timestamp = formatTimestamp(now());
         const row = await trx
           .updateTable("implementer_sessions")
