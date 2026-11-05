@@ -579,4 +579,5 @@ main() {
   say "install: done"
 }
 
-main "$@"
+# In braces: a download cut off anywhere in this line is a syntax error, so nothing runs, not even `main` without its arguments.
+{ main "$@"; }

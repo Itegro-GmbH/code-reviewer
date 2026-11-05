@@ -248,8 +248,8 @@ file, the command passes it on as the container's standard input; a path the con
 `systemctl enable --now factory-runner`.
 
 **A download that is cut off changes nothing.** Under `curl | sh` the shell runs the file while it receives it. All of the script is
-functions; the last line, `main "$@"`, is the only command that does anything, and the script ends with the line `install: done`. A cut
-anywhere before that last line defines a few functions at most; a run that does not print `install: done` did not finish.
+functions; the last line, `{ main "$@"; }`, is the only command that does anything, and the script ends with the line `install: done`. A cut
+anywhere, also inside that last line, defines a few functions at most or is a syntax error; a run that does not print `install: done` did not finish.
 
 **Safe to run again.** A registered machine is not registered twice (the token is not used); a setting you pass is applied with
 `config set`; the unit is rewritten only when it differs and a running service is **never restarted** (it switches to a newer image by
@@ -560,8 +560,9 @@ docker tag factory-runner:previous factory-runner:current && sudo systemctl rest
 ```
 
 Then write the bad release into `rejected-release` so that the service does not take it again (the file holds the number and a newline):
-`docker run --rm --entrypoint sh -v factory-runner-home:/var/lib/factory-runner factory-runner:current -c 'echo N > /var/lib/factory-runner/rejected-release'` (or let `factory-runner update --rollback` do it,
-once the service runs again from `previous`). **There is no automatic watchdog** that rolls back a new image that exits with an error within
+`docker run --rm --entrypoint sh -v factory-runner-home:/var/lib/factory-runner factory-runner:current -c 'echo N > /var/lib/factory-runner/rejected-release'`. Do not leave this to `factory-runner update --rollback`
+after the handmade tag: `current` and `previous` then both are the old release, so the rollback would remember that one and not the bad one.
+Deleting the file lifts the block; a higher release than the one in the file is taken anyway. **There is no automatic watchdog** that rolls back a new image that exits with an error within
 a few minutes: a check that works when the new image cannot even start has to live outside the image (a host-side script in the unit), which
 is more than this step; it is a follow-up (see "Known limits").
 

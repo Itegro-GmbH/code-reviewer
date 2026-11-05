@@ -540,7 +540,7 @@ def install_text() -> str:
 
 
 def test_the_last_line_of_the_script_is_the_only_command_that_runs_anything() -> None:
-    assert install_text().splitlines()[-1] == 'main "$@"'
+    assert install_text().splitlines()[-1] == '{ main "$@"; }'
 
 
 # #855-F1 (S1)
@@ -548,10 +548,11 @@ def test_a_script_that_is_cut_off_anywhere_before_its_last_line_changes_nothing(
     machine: Machine,
 ) -> None:
     text = install_text()
-    last_line = text.rindex('main "$@"')
+    final = '{ main "$@"; }'
+    last_line = text.rindex(final)
     line_starts = [0] + [index + 1 for index, char in enumerate(text[:last_line]) if char == "\n"]
     middles = [start + 20 for start in line_starts[::5] if start + 20 < last_line]
-    cuts = sorted({*line_starts, *middles, *range(last_line + 1, last_line + 4)})
+    cuts = sorted({*line_starts, *middles, *range(last_line + 1, last_line + len(final))})
     assert len(cuts) > 100
 
     for cut in cuts:

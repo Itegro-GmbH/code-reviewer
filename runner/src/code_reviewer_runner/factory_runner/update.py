@@ -259,7 +259,7 @@ def rejected_release(home: Path) -> int:
         raw = (home / REJECTED_FILE).read_text(encoding="ascii").strip()
     except (OSError, ValueError):
         return 0
-    return int(raw) if raw.isascii() and raw.isdigit() else 0
+    return int(raw) if raw.isascii() and raw.isdigit() and len(raw) <= 9 else 0
 
 
 def reject_release(home: Path, release: int) -> None:
