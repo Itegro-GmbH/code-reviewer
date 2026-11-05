@@ -29,16 +29,45 @@ _PATTERNS = tuple(
 )
 
 
+# Base64 turns three bytes into four characters, so a secret that sits inside a larger value starts
+# at the first, second or third byte of a group (the alignment, 0, 1 or 2). The leading characters
+# that the bytes before the secret take part in, and the last character the bytes after it take
+# part in, say nothing about the secret and are cut off: what is left is the same wherever the
+# secret sits.
+_LEADING_CHARS_BY_ALIGNMENT = (0, 2, 3)
+# A cut form shorter than this would match everywhere (the whole encoding of a short secret is
+# kept).
+_MIN_CUT_FORM_CHARS = 8
+
+
+def _base64_forms(secret: str) -> set[str]:
+    """The base64 spellings of a secret in both alphabets, with and without padding, wherever it
+    starts in a group of three bytes."""
+    raw = secret.encode()
+    forms: set[str] = set()
+    for encode in (base64.b64encode, base64.urlsafe_b64encode):
+        forms.add(encode(raw).decode())
+        for alignment, leading in enumerate(_LEADING_CHARS_BY_ALIGNMENT):
+            padded = encode(bytes(alignment) + raw).decode()
+            unpadded = padded.rstrip("=")
+            # The last character of a group that is not full takes bits of the byte after the secret.
+            trailing = 1 if (alignment + len(raw)) % 3 else 0
+            for form in (padded[leading:], unpadded[leading : len(unpadded) - trailing]):
+                if alignment == 0 or len(form) >= _MIN_CUT_FORM_CHARS:
+                    forms.add(form)
+    return forms
+
+
 def secret_forms(secret: str) -> set[str]:
-    """The spellings a secret travels in: as it is, URL-quoted and base64 (both alphabets). The
-    redactor replaces them and the push guard (`implementer/push_guard.py`) looks for them."""
+    """The spellings a secret travels in: as it is, URL-quoted and base64 (both alphabets, with and
+    without padding, at every alignment inside a larger value). The redactor replaces them and the
+    push guard (`implementer/push_guard.py`) looks for them."""
     return {
         secret,
         quote(secret, safe=""),
         quote(secret),
         quote_plus(secret),
-        base64.b64encode(secret.encode()).decode(),
-        base64.urlsafe_b64encode(secret.encode()).decode(),
+        *_base64_forms(secret),
     }
 
 
