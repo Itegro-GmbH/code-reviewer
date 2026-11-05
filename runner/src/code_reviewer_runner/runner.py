@@ -110,6 +110,7 @@ from code_reviewer_runner.implementer.job_run import (
     SIGTERM_BACKSTOP_SECONDS as IMPLEMENTER_SIGTERM_BACKSTOP_SECONDS,
 )
 from code_reviewer_runner.implementer.job_run import run_implementer_job
+from code_reviewer_runner.implementer.resume_session import resume_input
 from code_reviewer_runner.implementer.snapshot_pump import snapshot_pump_from_environment
 from code_reviewer_runner.implementer.step_pump import step_pump_from_environment
 from code_reviewer_runner.job import (
@@ -1563,6 +1564,11 @@ def _run_implementer(
                 secrets_sink=extra,
                 steps=step_pump_from_environment(saved_env),
                 snapshot=snapshot_pump_from_environment(saved_env),
+                resume=(
+                    None
+                    if job.implementer.resume is None
+                    else resume_input(job.implementer.resume, saved_env, Path.cwd())
+                ),
             )
             return result, tuple(extra)
     except KeyboardInterrupt:

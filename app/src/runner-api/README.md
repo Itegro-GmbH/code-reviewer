@@ -131,7 +131,17 @@ so that a follow-up turn can resume the conversation in a new VM. The body is th
 - **Whole or not at all.** The parts wait in `implementer_session_snapshot_parts`. When the last is in, the repository puts them together in the transaction that proves the claim, checks the size and the digest, and swaps the snapshot in
   for the session's old one (`db/repositories/implementer-snapshots-repository.ts`); until then the old one is read. Parts that disagree or do not make the announced file are `400` and nothing of that upload is kept. The `200` answer says `complete`.
 - **One per session, kept for good.** Replaced by each turn (an older turn never replaces a newer snapshot), deleted by nothing but the erasure of the workspace. The app does not open the bytes; the runner has taken the secrets it knows out of the export,
-  and what the repository holds (a committed `.env` the agent printed) can be in it, tool outputs included. Nothing reads it yet (PR 8).
+  and what the repository holds (a committed `.env` the agent printed) can be in it, tool outputs included. The one reader is the resume-session call below.
+
+## The stored session of a follow-up turn (#840)
+
+`GET /api/workers/v1/jobs/:id/resume-session?part=n` (Worker API only; the credential in the header) reads one part of the snapshot the earlier turns stored for the session of the running turn, for the Worker of a follow-up turn
+(`implementer.resume.snapshot` true) to import into the engine (`resume-session.ts`, `readForJob` of the snapshots repository). The body is the bytes of the part, exactly as stored (the app never opens them and never logs them); a function of the platform holds a response to
+4.5 MB like a request, so the file comes in the parts the upload used (3 MiB, at most three, `part` from 0, absent is 0), and the headers `x-snapshot-parts`, `-bytes`, `-raw-bytes`, `-sha256` and `-opencode-version` describe the whole file on every part (`ResumeSessionHeaders`).
+
+- **Same rules as the write.** It proves the claim and does **not** extend the lease; `409 RUNNER_JOB_ENDED` once the job is over, `401` for a credential that is not the job's, `400` for a job that is not a turn of the Implementer or a `part` that is not 0 to 2 or is beyond the last (`fields`, never a value).
+  No app feature and no claim feature: a Worker asks only when the job's `resume.snapshot` says there is something, and an app without the call answers 404, which is a failed download and a summary.
+- **Its own session only.** The session is found from the job (`implementer_turns`), never from the query, in the transaction-free read of a repository scoped to the job's workspace; only a snapshot of an earlier turn than the job's own is read. `204` without a body: there is none, and the turn continues from a summary.
 
 ## Authentication
 

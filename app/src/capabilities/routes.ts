@@ -208,6 +208,8 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   { route: "/api/workers/v1/jobs/[id]/steps", class: "implementer" },
   // One part of the session snapshot of a turn, put by its Worker for the follow-up turns (#839).
   { route: "/api/workers/v1/jobs/[id]/session", class: "implementer" },
+  // One part of the stored session snapshot, read by the Worker of a follow-up turn (#840).
+  { route: "/api/workers/v1/jobs/[id]/resume-session", class: "implementer" },
   // The page of the form (#756).
   { route: "/w/[workspace]/implementer", class: "implementer" },
   // The environments of the Implementer, a size and a setup script (#818): the routes and their page, in the navigation between

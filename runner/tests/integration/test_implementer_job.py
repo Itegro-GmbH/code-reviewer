@@ -17,6 +17,8 @@ scripted engine to be forced (a lease lost at a given moment, a stop in the midd
 container that is not confirmed gone); it is not the proof that a turn works end to end.
 """
 
+import gzip
+import hashlib
 import io
 import json
 import os
@@ -42,14 +44,15 @@ from code_reviewer_runner.capabilities import (
     ENGINE_IMPLEMENTER,
     ENGINES_VARIABLE,
 )
-from code_reviewer_runner.dynamic_review.budget import BudgetLedger, UnitCosts
+from code_reviewer_runner.dynamic_review.budget import BudgetLedger, LimitError, UnitCosts
 from code_reviewer_runner.dynamic_review.engine_events import EventReader
 from code_reviewer_runner.dynamic_review.tool_part_audit import ToolPartAudit
 from code_reviewer_runner.implementer import session as session_module
-from code_reviewer_runner.implementer.agent import AgentTurn
+from code_reviewer_runner.implementer.agent import AgentTurn, CommandOutcome, ResumeOutcome
 from code_reviewer_runner.implementer.config import AGENT_PATH
 from code_reviewer_runner.implementer.door_state import DoorState
 from code_reviewer_runner.implementer.git_workspace import (
+    BranchMoved,
     BranchPush,
     GitIdentity,
     GitWorkspace,
@@ -66,7 +69,12 @@ from code_reviewer_runner.implementer.job_run import (
     run_implementer_job,
 )
 from code_reviewer_runner.implementer.limits import agent_limits
-from code_reviewer_runner.implementer.session import SessionSeams
+from code_reviewer_runner.implementer.preface import ResumeMode
+from code_reviewer_runner.implementer.session import (
+    COST_LIMIT_DETAIL,
+    HISTORY_OVER_LIMIT_DETAIL,
+    SessionSeams,
+)
 from code_reviewer_runner.implementer.session_export import ExportFailed, ExportReason
 from code_reviewer_runner.implementer.step_feed import StepFeeder
 from code_reviewer_runner.implementer.step_records import StepConverter
@@ -76,7 +84,14 @@ from code_reviewer_runner.job_loop.settings import WorkerSettings
 from code_reviewer_runner.lease_check import LEASE_CHECK_FD_VARIABLE
 from code_reviewer_runner.redaction import Redactor
 from code_reviewer_runner.result import ErrorCode
-from code_reviewer_runner.snapshot_wire import SNAPSHOT_FD_VARIABLE
+from code_reviewer_runner.resume_wire import (
+    RESUME_FILE_NAME,
+    RESUME_STATE_VARIABLE,
+    ResumeReason,
+    failed_state,
+    file_state,
+)
+from code_reviewer_runner.snapshot_wire import SNAPSHOT_FD_VARIABLE, SnapshotHeader
 from code_reviewer_runner.step_wire import STEPS_FD_VARIABLE
 from snapshot_support import SnapshotHost, snapshot_of
 from step_support import HostEnd, say
@@ -95,11 +110,14 @@ def job_text(
     *,
     cost_limit: bool = True,
     profile: dict[str, Any] | None = None,
+    resume: dict[str, Any] | None = None,
     result_schema: dict[str, Any] | None = None,
 ) -> str:
     document: dict[str, Any] = json.loads(EXAMPLE.read_text(encoding="utf-8"))
     if profile is not None:
         document["implementer"]["profile"] = profile
+    if resume is not None:
+        document["implementer"]["resume"] = resume
     if result_schema is not None:
         document["implementer"]["resultSchema"] = result_schema
     document["git"]["token"] = TOKEN
@@ -246,6 +264,11 @@ class FakePlace:
     def write_files(self, files: Mapping[str, tuple[bytes, int]]) -> None:
         return None
 
+    def run_command(
+        self, argv: list[str], environment: Mapping[str, str], timeout: float
+    ) -> CommandOutcome:
+        return CommandOutcome(0, "")
+
     def start_engine(self, argv: list[str], environment: Mapping[str, str]) -> str:
         return "http://127.0.0.1:4096"
 
@@ -312,7 +335,7 @@ class FakeAgent:
     options: dict[str, Any] = field(default_factory=lambda: {})
     session_id: str | None = None
     stopped: list[bool] = field(default_factory=lambda: [])
-    texts: list[str] = field(default_factory=lambda: [])
+    texts: list[Any] = field(default_factory=lambda: [])
     ends_clean: bool = True
     notes: tuple[str, ...] = ()
     notes_fail: bool = False
@@ -322,14 +345,20 @@ class FakeAgent:
     # budgets it was asked for.
     export: Any = None
     exports: list[float] = field(default_factory=lambda: [])
+    # #840: what the session handed `start` for a follow-up turn, and how the engine "got" it.
+    resume_outcome: ResumeOutcome | None = None
+    resume_input: Any = None
+    resume: ResumeOutcome | None = None
 
     @property
     def ledger(self) -> Any:
         return self.options["ledger"]
 
-    def start(self, port: int = 0) -> None:
+    def start(self, port: int = 0, resume: Any = None) -> None:
         self.events.append("agent.start")
         self.session_id = "ses_fake"
+        self.resume_input = resume
+        self.resume = self.resume_outcome
         redactor = self.options.get("redactor")
         if redactor is not None:
             self.steps = StepFeeder("ses_fake", redactor)
@@ -354,7 +383,7 @@ class FakeAgent:
         config = self.options["make_config"]("/instructions.md")
         return cast("str", config["provider"][self.options["provider_id"]]["options"]["apiKey"])
 
-    def turn(self, text: str, *, check: Callable[[], None] = lambda: None) -> AgentTurn:
+    def turn(self, text: Any, *, check: Callable[[], None] = lambda: None) -> AgentTurn:
         self.texts.append(text)
         self.events.append("turn")
         return AgentTurn(text=self.script(self, check), note="end")
@@ -483,6 +512,8 @@ def play(
         snapshot: SnapshotHost | None = None,
         export: Any = None,
         profile: dict[str, Any] | None = None,
+        resume: dict[str, Any] | None = None,
+        resume_outcome: ResumeOutcome | None = None,
         result_schema: dict[str, Any] | None = None,
         results: "FakeResults | None" = None,
     ) -> Turn:
@@ -522,7 +553,13 @@ def play(
 
         def agent_factory(**options: Any) -> FakeAgent:
             agent = FakeAgent(
-                script, events, made[0], options, ends_clean=ends_clean, export=export
+                script,
+                events,
+                made[0],
+                options,
+                ends_clean=ends_clean,
+                export=export,
+                resume_outcome=resume_outcome,
             )
             agents.append(agent)
             return agent
@@ -554,7 +591,12 @@ def play(
         code = runner.main(
             [],
             stdin=io.StringIO(
-                job_text(cost_limit=cost_limit, profile=profile, result_schema=result_schema)
+                job_text(
+                    cost_limit=cost_limit,
+                    profile=profile,
+                    resume=resume,
+                    result_schema=result_schema,
+                )
             ),
             stdout=output,
         )
@@ -2178,3 +2220,285 @@ def test_a_profile_that_may_not_push_still_saves_the_session(play: Any) -> None:
     assert host.wait() and host.data == snapshot_of().data
     assert turn.git.pushes == []
     host.close()
+
+
+# -- a follow-up turn (#840, part of #745) --------------------------------------------------------
+
+SHA_Y = "4" * 40
+FOLLOW_UP = {
+    "turn": 2,
+    "branches": [
+        {"name": "implementer/a1b2c3", "head": TIP},
+        {"name": "feature/y", "head": SHA_Y},
+    ],
+    "checkout": "feature/y",
+}
+
+
+def at_the_start_of_a_follow_up(git: FakeGit) -> None:
+    """The workspace of a follow-up turn once it is prepared: two branches, one checked out."""
+    git._starts = {"implementer/a1b2c3": TIP, "feature/y": SHA_Y}  # pyright: ignore[reportPrivateUsage]
+    git._checkout = "feature/y"  # pyright: ignore[reportPrivateUsage]
+
+
+def moved_and_missing(git: FakeGit) -> None:
+    at_the_start_of_a_follow_up(git)
+    git._moved = [BranchMoved("feature/y", TIP, SHA_Y)]  # pyright: ignore[reportPrivateUsage]
+    git._missing = ["gone/branch"]  # pyright: ignore[reportPrivateUsage]
+
+
+def example_instruction() -> str:
+    document = json.loads(EXAMPLE.read_text(encoding="utf-8"))
+    return str(document["implementer"]["instruction"])
+
+
+# #840-T130
+def test_a_follow_up_turn_sends_the_preface_in_a_part_of_its_own_in_front_of_the_instruction(
+    play: Any,
+) -> None:
+    turn = play(
+        commits_then_ends(),
+        resume={**FOLLOW_UP, "snapshot": True},
+        resume_outcome=ResumeOutcome(ResumeMode.IMPORTED),
+        configure=at_the_start_of_a_follow_up,
+    )
+
+    assert turn.agent is not None
+    first = cast("list[dict[str, Any]]", turn.agent.texts[0])
+    assert isinstance(first, list) and len(first) == 2
+    assert first[0]["synthetic"] is True
+    assert "NEW sandbox" in first[0]["text"]
+    assert f"`feature/y` (checked out, {SHA_Y[:7]})" in first[0]["text"]
+    assert f"`implementer/a1b2c3` ({TIP[:7]})" in first[0]["text"]
+    assert first[1] == {"type": "text", "text": example_instruction()}
+    result = turn.result
+    assert valid_result(result), result
+    assert result["implementer"]["resume"] == {"mode": "imported"}
+
+
+# #840-T131
+def test_the_prompt_file_of_a_follow_up_turn_is_the_one_of_a_first_turn(play: Any) -> None:
+    first = play(commits_then_ends())
+    follow_up = play(
+        commits_then_ends(),
+        resume={**FOLLOW_UP, "snapshot": True},
+        resume_outcome=ResumeOutcome(ResumeMode.IMPORTED),
+        configure=at_the_start_of_a_follow_up,
+    )
+
+    assert first.agent is not None and follow_up.agent is not None
+    assert first.agent.options["instructions"] == follow_up.agent.options["instructions"]
+
+
+# #840-T132
+def test_a_first_turn_sends_the_instruction_as_text_and_reports_no_resume(play: Any) -> None:
+    turn = play(commits_then_ends())
+
+    assert turn.agent is not None
+    assert turn.agent.texts[0] == example_instruction()
+    assert turn.agent.resume_input is None
+    assert "resume" not in turn.result["implementer"]
+
+
+# #840-T133
+@pytest.mark.parametrize("reason", list(ResumeReason))
+def test_a_follow_up_turn_that_continues_from_a_summary_says_why_and_gives_the_record_as_data(
+    play: Any, reason: ResumeReason
+) -> None:
+    turn = play(
+        commits_then_ends(),
+        resume={
+            **FOLLOW_UP,
+            "snapshot": True,
+            "previousSummary": "Added the retry.",
+            "digest": "Turn 1: add a retry.",
+        },
+        resume_outcome=ResumeOutcome(ResumeMode.SUMMARY_ONLY, reason),
+        configure=at_the_start_of_a_follow_up,
+    )
+
+    assert turn.agent is not None
+    first = turn.agent.texts[0]
+    assert [part.get("synthetic") for part in first] == [True, True, None]
+    assert "Added the retry." not in first[0]["text"]
+    assert "Turn 1: add a retry." not in first[0]["text"]
+    assert "Added the retry." in first[1]["text"] and "Turn 1: add a retry." in first[1]["text"]
+    assert first[2] == {"type": "text", "text": example_instruction()}
+    result = turn.result
+    assert valid_result(result), result
+    assert result["implementer"]["resume"] == {"mode": "summary_only", "reason": reason.value}
+    assert f"continues from a summary of the earlier turns: {reason.value}" in result["logTail"]
+
+
+# #840-T134
+def test_what_moved_and_what_is_gone_is_in_the_preface(play: Any) -> None:
+    turn = play(
+        commits_then_ends(),
+        resume={**FOLLOW_UP, "snapshot": True},
+        resume_outcome=ResumeOutcome(ResumeMode.IMPORTED),
+        configure=moved_and_missing,
+    )
+
+    assert turn.agent is not None
+    text = turn.agent.texts[0][0]["text"]
+    assert f"`feature/y` was {TIP[:7]} and is {SHA_Y[:7]}" in text
+    assert "`gone/branch`" in text
+
+
+# #840-T135
+def test_a_follow_up_turn_is_handed_what_the_job_has_of_its_conversation(
+    play: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Through the real entry point: the state the host named in the environment, and the file in
+    the directory the process starts in."""
+    raw = json.dumps({"info": {"id": "ses_stored1"}, "messages": []}).encode()
+    data = gzip.compress(raw, mtime=0)
+    header = SnapshotHeader(len(data), len(raw), hashlib.sha256(data).hexdigest(), "1.19.0")
+    (tmp_path / RESUME_FILE_NAME).write_bytes(data)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(RESUME_STATE_VARIABLE, file_state(header))
+
+    turn = play(
+        commits_then_ends(),
+        resume={**FOLLOW_UP, "snapshot": True},
+        resume_outcome=ResumeOutcome(ResumeMode.IMPORTED),
+        configure=at_the_start_of_a_follow_up,
+    )
+
+    assert turn.agent is not None
+    handed = turn.agent.resume_input
+    assert handed.reason is None
+    assert handed.snapshot is not None and handed.snapshot.session_id == "ses_stored1"
+    assert handed.snapshot.data == raw
+
+
+# #840-T136
+@pytest.mark.parametrize(
+    ("snapshot", "state", "reason"),
+    [
+        (False, None, ResumeReason.NO_SNAPSHOT),
+        (True, None, ResumeReason.DOWNLOAD_FAILED),
+        (True, failed_state(ResumeReason.NO_SNAPSHOT), ResumeReason.NO_SNAPSHOT),
+        (True, failed_state(ResumeReason.DOWNLOAD_FAILED), ResumeReason.DOWNLOAD_FAILED),
+        (True, "file 1 2 nonsense", ResumeReason.DOWNLOAD_FAILED),
+    ],
+)
+def test_a_follow_up_turn_without_a_usable_conversation_is_handed_the_reason(
+    play: Any, monkeypatch: pytest.MonkeyPatch, snapshot: bool, state: str | None, reason: Any
+) -> None:
+    if state is not None:
+        monkeypatch.setenv(RESUME_STATE_VARIABLE, state)
+
+    turn = play(
+        commits_then_ends(),
+        resume={**FOLLOW_UP, "snapshot": snapshot},
+        resume_outcome=ResumeOutcome(ResumeMode.SUMMARY_ONLY, reason),
+        configure=at_the_start_of_a_follow_up,
+    )
+
+    assert turn.agent is not None
+    assert (turn.agent.resume_input.snapshot, turn.agent.resume_input.reason) == (None, reason)
+
+
+# #840-T137
+def test_a_file_that_is_not_the_one_the_host_described_is_unreadable_for_the_turn(
+    play: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    raw = json.dumps({"info": {"id": "ses_stored1"}, "messages": []}).encode()
+    data = gzip.compress(raw, mtime=0)
+    header = SnapshotHeader(len(data), len(raw), hashlib.sha256(data).hexdigest(), "1.19.0")
+    (tmp_path / RESUME_FILE_NAME).write_bytes(b"corrupt " + data)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(RESUME_STATE_VARIABLE, file_state(header))
+
+    turn = play(
+        commits_then_ends(),
+        resume={**FOLLOW_UP, "snapshot": True},
+        resume_outcome=ResumeOutcome(ResumeMode.SUMMARY_ONLY, ResumeReason.SNAPSHOT_UNREADABLE),
+        configure=at_the_start_of_a_follow_up,
+    )
+
+    assert turn.agent is not None
+    assert turn.agent.resume_input.snapshot is None
+    assert turn.agent.resume_input.reason is ResumeReason.SNAPSHOT_UNREADABLE
+    assert turn.result["ok"] is True, "a corrupt snapshot never fails the turn"
+
+
+def refused_by_the_door(agent: FakeAgent, check: Callable[[], None]) -> str:
+    """The model door refuses the first call before any reaches the provider: the history alone is
+    over the cost limit (the cost is reserved first). Nothing was billed."""
+    raise LimitError(ErrorCode.DYNAMIC_BUDGET_EXCEEDED, COST_LIMIT_DETAIL)
+
+
+# #840-T138
+def test_an_imported_history_that_is_over_the_cost_limit_before_any_call_says_so(
+    play: Any,
+) -> None:
+    turn = play(
+        refused_by_the_door,
+        resume={**FOLLOW_UP, "snapshot": True},
+        resume_outcome=ResumeOutcome(ResumeMode.IMPORTED),
+        configure=at_the_start_of_a_follow_up,
+    )
+
+    result = turn.result
+    assert result["ok"] is False
+    assert result["errorCode"] == "cost_limit_reached"
+    assert HISTORY_OVER_LIMIT_DETAIL in result["logTail"]
+    assert "reads all of it again" in result["logTail"]
+    assert result["implementer"]["resume"] == {"mode": "imported"}
+    assert valid_result(result), result
+
+
+# #840-T139
+def test_the_same_refusal_of_a_summary_turn_or_a_first_turn_keeps_the_plain_reason(
+    play: Any,
+) -> None:
+    summary = play(
+        refused_by_the_door,
+        resume={**FOLLOW_UP, "snapshot": True},
+        resume_outcome=ResumeOutcome(ResumeMode.SUMMARY_ONLY, ResumeReason.NO_SNAPSHOT),
+        configure=at_the_start_of_a_follow_up,
+    )
+    first = play(refused_by_the_door)
+
+    for turn in (summary, first):
+        assert turn.result["errorCode"] == "cost_limit_reached"
+        assert HISTORY_OVER_LIMIT_DETAIL not in turn.result["logTail"]
+        assert "the cost limit of the turn was reached" in turn.result["logTail"]
+
+
+# #840-T140
+def test_a_follow_up_turn_that_ended_before_the_engine_started_reports_no_resume(
+    play: Any,
+) -> None:
+    turn = play(
+        commits_then_ends(),
+        resume={**FOLLOW_UP, "snapshot": True},
+        prepare_error=JobError(ErrorCode.CLONE_FAILED, "the repository cannot be cloned"),
+    )
+
+    result = turn.result
+    assert result["errorCode"] == "clone_failed"
+    assert "resume" not in (result.get("implementer") or {})
+    assert turn.agent is None
+
+
+# #840-T141
+def test_a_follow_up_job_with_the_old_fields_only_is_still_a_follow_up_without_a_conversation(
+    play: Any,
+) -> None:
+    """A job of the release before (#838): no `snapshot`, no summary, no digest."""
+    turn = play(
+        commits_then_ends(),
+        resume=FOLLOW_UP,
+        resume_outcome=ResumeOutcome(ResumeMode.SUMMARY_ONLY, ResumeReason.NO_SNAPSHOT),
+        configure=at_the_start_of_a_follow_up,
+    )
+
+    assert turn.agent is not None
+    assert turn.agent.resume_input.reason is ResumeReason.NO_SNAPSHOT
+    assert turn.result["implementer"]["resume"] == {
+        "mode": "summary_only",
+        "reason": "no_snapshot",
+    }

@@ -69,6 +69,7 @@ from .network_rule import OFF
 from .reader import ReaderAccess
 from .report import clip_texts, escaped_size, fit_block, valid_block
 from .result_channel import ResultReader, make_result_directory
+from .resume_session import ResumeInput
 from .session import AgentPlace, ImplementerSession, SessionSeams
 from .setup_container import SetupSeams
 from .snapshot_pump import SnapshotPump
@@ -386,6 +387,7 @@ def run_implementer_job(
     secrets_sink: list[str] | None = None,
     steps: StepPump | None = None,
     snapshot: SnapshotPump | None = None,
+    resume: ResumeInput | None = None,
     seams: JobSeams = JobSeams(),  # noqa: B008 - frozen, shared on purpose
 ) -> JobResult:
     """Run one turn and return its result. Never raises for a turn that failed; whatever an
@@ -396,7 +398,9 @@ def run_implementer_job(
     the last push. `secrets_sink` receives the secrets the turn made up (the capability of its model
     proxy), for the scrub of the line that is printed. `steps` is the channel the step records of
     the turn go out over (#745); None records nothing. `snapshot` is the channel the engine's
-    session leaves over at the end of the turn (#839); None takes no export."""
+    session leaves over at the end of the turn (#839); None takes no export. `resume` is what a
+    follow-up turn has of its earlier conversation (#840): the checked snapshot the job host
+    downloaded, or the reason there is none; None for a first turn."""
     clock = seams.clock
     advertised = engines_from_environment(environment) if engines is None else engines
     if ENGINE_IMPLEMENTER not in advertised:
@@ -432,7 +436,16 @@ def run_implementer_job(
             assert prepared.image is not None and setup.environment is not None
             setup = replace(setup, place=setup.environment.place(prepared.image))
         session = _session(
-            job, setup, started, environment, shutdown, seams, process_timeout, steps, snapshot
+            job,
+            setup,
+            started,
+            environment,
+            shutdown,
+            seams,
+            process_timeout,
+            steps,
+            snapshot,
+            resume,
         )
         if usage_probe is not None:
             usage_probe.watch(lambda: _usage_of(session, job))
@@ -518,6 +531,7 @@ def _session(
     process_timeout: float | None,
     steps: StepPump | None = None,
     snapshot: SnapshotPump | None = None,
+    resume: ResumeInput | None = None,
 ) -> TurnLike:
     options: dict[str, object] = {
         "workspace": setup.workspace,
@@ -531,6 +545,8 @@ def _session(
         "steps": steps,
         "snapshot": snapshot,
     }
+    if resume is not None:
+        options["resume"] = resume
     if setup.results is not None:
         options["results"] = setup.results
     if seams.session is not None:

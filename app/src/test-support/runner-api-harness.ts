@@ -912,6 +912,19 @@ export async function startRunnerApiHarness(
         }),
         jobId,
       ),
+    /** #840: one part of the stored session snapshot, read by the Worker of a follow-up turn. */
+    resumeSession: (
+      jobId: string,
+      credential: string | null,
+      part?: number | string,
+    ) =>
+      workerApi.resumeSession(
+        new Request(
+          `${workerUrl}/jobs/${jobId}/resume-session${part === undefined ? "" : `?part=${String(part)}`}`,
+          { method: "GET", headers: workerHeaders(credential) },
+        ),
+        jobId,
+      ),
     /** #839: one part of the session snapshot; `query` is the description of the whole file, `body` the bytes of the part. */
     session: (
       jobId: string,

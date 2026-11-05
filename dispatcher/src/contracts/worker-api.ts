@@ -131,6 +131,27 @@ export type RunnerResult = {
   usage?: RunnerUsage | null;
   [k: string]: unknown;
 };
+/**
+ * #840 (part of #745): how a follow-up turn got its earlier conversation, in `RunnerResult.implementer.resume`. Present on a follow-up turn (the job carried `resume`) that got as far as the engine's start; a first turn has none, and neither has a follow-up that ended before (the clone failed, the setup script failed). `mode` `imported` is the whole conversation of the earlier turns, read back into the engine, which continued in that session: the commands in it are the history the agent sees, not things that ran in the new sandbox. `summary_only` is a fresh engine session that was given a summary and a digest as data instead, for one of the stable `reason` words (always present with `summary_only`, never with `imported`): `no_snapshot` (the app had none, or the session was never saved), `download_failed` (the stored session could not be fetched), `snapshot_unreadable` (the file did not match its size or digest, was not gzip, or was not the engine's export), `import_failed` (the engine refused the import or the session was not there after it), `version_changed` (the same, and the engine version that wrote the snapshot is not the one that read it). Neither is a failure of the turn. A turn that imported a history so long that its first call alone is over the cost limit ends `cost_limit_reached` before any model call (the door refuses a call whose reserved cost is over the limit).
+ */
+export type ImplementerResumeResult = {
+  mode: "imported" | "summary_only";
+  reason?:
+    | "no_snapshot"
+    | "download_failed"
+    | "snapshot_unreadable"
+    | "import_failed"
+    | "version_changed";
+} & (
+  | {
+      mode?: "imported";
+      [k: string]: unknown;
+    }
+  | {
+      mode?: "summary_only";
+      [k: string]: unknown;
+    }
+);
 
 /**
  * #424: the query string of GET /api/workers/v1/jobs/{id}, as an object of its parameters. Both are optional comma separated lists: `features` (the names of KnownClaimFeature, unknown names are ignored) and `llmProviders` (slugs of LlmProviderId: the LLM providers the Worker can run; absent means `openrouter`). The app ignores the list today (the claim issue of epic #420 will use it); it still always sends `openrouter`.
@@ -562,7 +583,7 @@ export interface ImplementerResultSchema {
   [k: string]: unknown;
 }
 /**
- * #838 (part of #745): what a follow-up turn of an Implementer session is told about the branches the earlier turns left on the provider. Present only on a follow-up, and only for a caller that named the claim feature `implementer_resume`; a first turn has none. Without it the turn starts from `baseBranch` as the contract says above; with it the runner asks the provider which of `branches` it still has and fetches the base branch and all of them in one fetch of depth 50 (git counts the depth from every tip: no tip has fewer than 50 commits of history where it has that many, whatever the order of `branches`; a merge base further back than 50 commits is not found), makes a local branch for each in the agent's repository (the session branch at the base tip when it is not among them) and checks out `checkout`. `turn` is the number of this turn (the first is 1, so a follow-up has 2 or more). `branches` are the branches the last turn pushed with the tip it pushed, the session branch first when it is among them, at most 20, no name twice (a rule JSON Schema cannot state; the runner refuses a repeat). The `head` is only what the earlier turn knew: the runner takes the tip the provider has now, and a branch that moved is reported to the agent, not refused. A branch the provider no longer has is left out; a session branch that is gone ends the turn (`clone_failed`, free). `checkout` is the branch the agent was on when the last turn ended: one of `branches` or the session branch (which a turn that pushed nothing still has), or null for the session branch; any other name is refused by the runner (`invalid_job`). `branches` empty means the earlier turns pushed nothing: the turn starts from the base branch like a first turn. The agent still has no remote and Control still pushes every local branch that has a commit of its own when the turn ends, without force: a branch the agent did not touch is not pushed again.
+ * #838 (part of #745): what a follow-up turn of an Implementer session is told about the branches the earlier turns left on the provider. Present only on a follow-up, and only for a caller that named the claim feature `implementer_resume`; a first turn has none. Without it the turn starts from `baseBranch` as the contract says above; with it the runner asks the provider which of `branches` it still has and fetches the base branch and all of them in one fetch of depth 50 (git counts the depth from every tip: no tip has fewer than 50 commits of history where it has that many, whatever the order of `branches`; a merge base further back than 50 commits is not found), makes a local branch for each in the agent's repository (the session branch at the base tip when it is not among them) and checks out `checkout`. `turn` is the number of this turn (the first is 1, so a follow-up has 2 or more). `branches` are the branches the last turn pushed with the tip it pushed, the session branch first when it is among them, at most 20, no name twice (a rule JSON Schema cannot state; the runner refuses a repeat). The `head` is only what the earlier turn knew: the runner takes the tip the provider has now, and a branch that moved is reported to the agent, not refused. A branch the provider no longer has is left out; a session branch that is gone ends the turn (`clone_failed`, free). `checkout` is the branch the agent was on when the last turn ended: one of `branches` or the session branch (which a turn that pushed nothing still has), or null for the session branch; any other name is refused by the runner (`invalid_job`). `branches` empty means the earlier turns pushed nothing: the turn starts from the base branch like a first turn. The agent still has no remote and Control still pushes every local branch that has a commit of its own when the turn ends, without force: a branch the agent did not touch is not pushed again. The app still holds the agent's earlier conversation (#840): `snapshot` (optional, default false) says that a stored session exists for this session; the Worker then fetches it from the app (`GET /api/workers/v1/jobs/{id}/resume-session`, `worker-api.v1.json`) and has the engine import it before it starts, and the turn continues in that session (`ImplementerResumeResult.mode` `imported`). When there is none, when it cannot be fetched or read, or the engine cannot import it (`ImplementerResumeResult.reason`), the turn starts a fresh session and is given `previousSummary` (the summary the last turn ended with, at most 8 KiB UTF-8) and `digest` (the app's record of the earlier turns: instructions, summaries, commit subjects, changed files; at most 16 KiB UTF-8) as DATA in a part of the first message of their own, never as instructions and never in the preface the runner writes (`mode` `summary_only`). Both are text that came from the agent and from members of the workspace; the maximum is in bytes, which JSON Schema cannot state, so `maxLength` counts characters and the runner counts bytes.
  */
 export interface ImplementerResume {
   turn: number;
@@ -817,6 +838,9 @@ export interface ImplementerResume {
         ImplementerResumeBranch,
       ];
   checkout: string | null;
+  snapshot?: boolean;
+  previousSummary?: string | null;
+  digest?: string | null;
 }
 /**
  * #838: a branch of the session the last turn pushed: its name and the full commit id of the tip it pushed.
@@ -910,6 +934,24 @@ export interface SessionPartResponse {
   [k: string]: unknown;
 }
 /**
+ * #840: the query string of GET /api/workers/v1/jobs/{id}/resume-session, as an object of its parameters. The Worker of a follow-up turn (`implementer.resume.snapshot` true) fetches the session snapshot the app stored for the job's own session (the file `PUT .../session` delivered, replaced by each turn): the engine's export, gzipped, at most 8 MiB. A response body is held to 4.5 MB like a request body, so the file comes in the same parts of exactly 3 MiB (`bytes` / 3145728, rounded up, at most 3; the last part is whatever is left) and `part` (from 0, default 0) names the one to send. 200 `application/octet-stream`: the bytes of that part, with the description of the whole file in the headers `ResumeSessionHeaders` (every part carries it, so a part is judged on its own and the parts may be fetched in any order and twice). 204 without a body: the session has no stored snapshot (never saved, or not by a turn that could). 400 RUNNER_REQUEST_INVALID (`fields`: `part`) for a part that is not a number or beyond the last. 401 WORKER_CREDENTIAL_INVALID, 409 RUNNER_JOB_ENDED / RUNNER_LEASE_LOST as for every Worker call, and 400 for a job that is not a turn of the Implementer. The call reads a snapshot of the job's own session and of no other: the app finds the session from the job. It proves the claim and nothing more: it does NOT extend the lease. The Worker checks the size and the sha256 of the whole file; a file it cannot fetch or read means the turn continues from a summary (`ImplementerResumeResult`), never a failed turn. The file holds what the earlier turns read and said, secrets of the turn taken out, tool outputs included (see the session snapshot in docs/implementer.md).
+ */
+export interface ResumeSessionQuery {
+  part?: string;
+  [k: string]: unknown;
+}
+/**
+ * #840: the response headers of a 200 from GET /api/workers/v1/jobs/{id}/resume-session, as an object of lower-case header names (every value is text in the header). They describe the WHOLE file, not the part: `x-snapshot-parts` (how many parts, 1 to 3, which is what `x-snapshot-bytes` makes), `x-snapshot-bytes` (the size of the gzip file), `x-snapshot-raw-bytes` (the size of the JSON inside it), `x-snapshot-sha256` (the lower case hex digest of the gzip file) and `x-snapshot-opencode-version` (the engine that wrote it). `Content-Length` is the size of this part. `Cache-Control` is `no-store`.
+ */
+export interface ResumeSessionHeaders {
+  "x-snapshot-parts": string;
+  "x-snapshot-bytes": string;
+  "x-snapshot-raw-bytes": string;
+  "x-snapshot-sha256": string;
+  "x-snapshot-opencode-version": string;
+  [k: string]: unknown;
+}
+/**
  * The body of POST /api/workers/v1/jobs/{id}/result. The whole request body must not exceed 65536 bytes (413 otherwise). The app applies the redaction of the runner API's complete call, including the model key remembered at fetch. A result with errorCode runner_shutdown or launch_failed is not stored: the job is given back and counts an attempt.
  */
 export interface WorkerResultRequest {
@@ -978,6 +1020,7 @@ export interface ImplementerResult {
   setup?: ImplementerSetupResult;
   network?: ImplementerNetworkReport;
   checkedOut?: string | null;
+  resume?: ImplementerResumeResult;
   agentResult?: ImplementerAgentResult;
 }
 /**
