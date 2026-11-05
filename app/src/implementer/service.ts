@@ -28,6 +28,8 @@ import {
   BRANCH_EXISTS,
   copyEnvironment,
   copyProfile,
+  modelNeedsCatalog,
+  requireRunnerForHarness,
   noAccessReason,
   NOT_FOUND,
   platformFailure,
@@ -318,7 +320,10 @@ export function createImplementerService(
       // with neither runs without a finish tool, as it did before result schemas.
       const resultSchema = task.result ?? resultOfProfile(profileResult);
 
-      const reason = await deps.models.check(model);
+      // The model of the harness claude-code is a name Claude Code reads on the device's login: no catalog, no key of the workspace.
+      const reason = modelNeedsCatalog(profile)
+        ? await deps.models.check(model)
+        : null;
       if (reason !== null)
         throw new ImplementerError(
           "IMPLEMENTER_MODEL_NOT_ALLOWED",
@@ -332,6 +337,7 @@ export function createImplementerService(
         task.environmentId === null
           ? { environment: null, runnerEnvironment: null }
           : await copyEnvironment(deps.environments, task.environmentId, model);
+      requireRunnerForHarness(profile, runnerEnvironment);
 
       if (costLimitCents !== null) {
         const maximumCents = await deps.operatorCostLimitCents();

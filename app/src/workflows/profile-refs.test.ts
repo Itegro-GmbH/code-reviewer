@@ -91,6 +91,7 @@ describe("the profiles a workflow document names", () => {
         canPush: false,
         defaultResult: null,
         managedModel: false,
+        harness: "opencode",
       },
       {
         profileId: "p-1",
@@ -98,6 +99,7 @@ describe("the profiles a workflow document names", () => {
         canPush: true,
         defaultResult: '{"type":"object","properties":{}}',
         managedModel: false,
+        harness: "opencode",
       },
       {
         profileId: "p-2",
@@ -105,6 +107,7 @@ describe("the profiles a workflow document names", () => {
         canPush: false,
         defaultResult: null,
         managedModel: false,
+        harness: "opencode",
       },
     ]);
     expect(infos).toEqual([
@@ -112,10 +115,11 @@ describe("the profiles a workflow document names", () => {
         name: "scribe",
         versions: [1, 2, 3],
         facts: {
-          1: { canPush: false, managedModel: false },
+          1: { canPush: false, managedModel: false, harness: "opencode" },
           3: {
             canPush: true,
             managedModel: false,
+            harness: "opencode",
             defaultResult: { type: "object", properties: {} },
           },
         },
@@ -123,7 +127,9 @@ describe("the profiles a workflow document names", () => {
       {
         name: "reviewer",
         versions: [1],
-        facts: { 1: { canPush: false, managedModel: false } },
+        facts: {
+          1: { canPush: false, managedModel: false, harness: "opencode" },
+        },
       },
       { name: "unnamed", versions: [1, 2], facts: {} },
     ]);

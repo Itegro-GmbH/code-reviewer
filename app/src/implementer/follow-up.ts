@@ -42,6 +42,8 @@ import type { ImplementerModels } from "./models.ts";
 import {
   copyEnvironment,
   copyProfile,
+  modelNeedsCatalog,
+  requireRunnerForHarness,
   MAX_ID_LENGTH,
   noAccessReason,
   platformFailure,
@@ -285,7 +287,11 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
         model,
       ));
 
-    const reason = await deps.models.check(model);
+    requireRunnerForHarness(profile, runnerEnvironment);
+    // The model of the harness claude-code is a name on a device's login: no catalog, no key of the workspace (#856).
+    const reason = modelNeedsCatalog(profile)
+      ? await deps.models.check(model)
+      : null;
     if (reason !== null)
       throw new ImplementerError(
         "IMPLEMENTER_MODEL_NOT_ALLOWED",

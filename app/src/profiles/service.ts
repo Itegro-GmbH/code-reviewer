@@ -13,6 +13,10 @@ import type {
   StoredProfileVersion,
 } from "../db/repositories/profiles-repository.ts";
 import type { ImplementerModels } from "../implementer/models.ts";
+import {
+  CLAUDE_CODE_HARNESS,
+  OPENCODE_HARNESS,
+} from "../runner-identity/harness.ts";
 import { issue } from "../workflows/issues.ts";
 import type { ResultSchema } from "../workflows/result-schema.ts";
 import { ProfileError, type ProfileIssue } from "./errors.ts";
@@ -123,6 +127,7 @@ export function documentOf(
       content.defaultResult === null
         ? null
         : (JSON.parse(content.defaultResult) as ResultSchema),
+    harness: content.harness ?? OPENCODE_HARNESS,
   };
 }
 
@@ -150,7 +155,12 @@ export function createProfileService({
           message: `The cost limit is above the maximum of ${maximum} US cents per turn this deployment allows. Use ${maximum} or less.`,
         });
     }
-    const reason = await models.check(model);
+    // #856: the model of the harness claude-code is a name Claude Code reads, run on the login of a runner's device: no catalog, no
+    // enablement, no key of the workspace stands behind it, so there is nothing to check here.
+    const reason =
+      shape.profile.harness === CLAUDE_CODE_HARNESS
+        ? null
+        : await models.check(model);
     if (reason !== null)
       errors.push({
         path: "/model",
@@ -206,6 +216,7 @@ export function createProfileService({
       profile.defaultResult === null
         ? null
         : JSON.stringify(profile.defaultResult),
+    harness: profile.harness,
   });
 
   return {

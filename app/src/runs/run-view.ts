@@ -472,6 +472,10 @@ const BRANCH_REASONS: Readonly<Record<string, string>> = {
   out_of_space:
     "The disk of the workspace had no room left to take this branch over, so it was not pushed.",
   excluded: "This branch is not pushed.",
+  login_secret:
+    "The branch holds the login of the runner's device (the token of the harness), so it was not pushed. Remove it from the branch and run the task again.",
+  unchecked:
+    "The branch could not be checked for the login of the runner's device, so it was not pushed.",
 };
 
 export function describeBranchReason(reason: string | null): string {

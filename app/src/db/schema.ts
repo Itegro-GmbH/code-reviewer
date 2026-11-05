@@ -1172,6 +1172,12 @@ export interface ImplementerTurnsTable {
     number | null | undefined,
     number | null
   >;
+  /** #856: the harness of the profile version, copied when the turn was written; null reads as OpenCode, and a task without a profile has none. */
+  profile_harness: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
   /**
    * The result schema the task ran with (#843), JSON text of a schema the validator of the format accepted: the task's own, or the
    * default of its profile version, copied when the turn was written. Null for a task without one: no finish tool.
@@ -1449,6 +1455,8 @@ export interface ProfileVersionsTable {
   can_push: number;
   /** JSON text of the default result schema, or null for none. */
   default_result: string | null;
+  /** #856: `opencode` or `claude-code`; null reads as OpenCode (a version saved before harnesses were stored). */
+  harness: string | null;
   created_by: string;
   created_at: string;
 }

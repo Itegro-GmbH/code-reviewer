@@ -5,8 +5,13 @@
 // here but in the service: whether the model is one the claim would run, whether the cost limit is within the operator's maximum,
 // whether the name is free. The default result schema is checked by the validator of the workflow format (`validateResultSchema`).
 import {
-  CATALOG_HARNESSES,
+  CLAUDE_CODE_HARNESS,
+  CLAUDE_CODE_MODEL_PATTERN,
+  CLAUDE_CODE_PROVIDER,
   OPENCODE_HARNESS,
+  PROFILE_HARNESSES,
+  isProfileHarness,
+  type ProfileHarness,
 } from "../runner-identity/harness.ts";
 import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import {
@@ -38,7 +43,7 @@ export const PROFILE_FIELDS = [
   "costLimitCents",
   "canPush",
   "defaultResult",
-  /** #854: the harness the agent runs with. Profiles know only OpenCode today; the field is accepted so that a document can already name it. */
+  /** #854, #856: the harness the agent runs with: `opencode` (left out) or `claude-code`, which runs on a runner on the login of its device. */
   "harness",
 ] as const;
 
@@ -58,6 +63,8 @@ export type ProfileDocument = {
   canPush: boolean;
   /** The result schema a step takes when it declares none; null for none. */
   defaultResult: ResultSchema | null;
+  /** #856: the harness the agent runs with; a profile that names none runs OpenCode. */
+  harness: ProfileHarness;
 };
 
 export type ProfileCheck = {
@@ -261,18 +268,48 @@ export function validateProfile(body: unknown): ProfileCheck {
     } else costLimitCents = cost;
   }
 
-  // #854: the harness. Only the platform's catalog (OpenCode) is a harness a profile can name today; a harness a runner announces
-  // becomes nameable when the first one is built. Nothing is stored for it: every version runs OpenCode.
+  // #854, #856: the harness. Only the two harnesses of a profile are named; a name that is neither is refused. Whether the harness can
+  // run is not the profile's to know: `claude-code` runs on a runner environment only, which the workflow check says.
   const harness = given("harness");
-  if (harness !== undefined && harness !== OPENCODE_HARNESS)
-    report(
-      issue(
-        "/harness",
-        typeof harness === "string" ? "invalid_value" : "wrong_type",
-        `The harness is ${CATALOG_HARNESSES.map((name) => shown(name)).join(", ")}; ${typeof harness === "string" ? shown(harness) : `a ${jsonTypeName(harness)}`} is not a harness a profile can name.`,
-        CATALOG_HARNESSES,
-      ),
-    );
+  let harnessName: ProfileHarness = OPENCODE_HARNESS;
+  if (harness !== undefined) {
+    if (typeof harness === "string" && isProfileHarness(harness))
+      harnessName = harness;
+    else
+      report(
+        issue(
+          "/harness",
+          typeof harness === "string" ? "invalid_value" : "wrong_type",
+          `The harness is ${PROFILE_HARNESSES.map((name) => shown(name)).join(" or ")}; ${typeof harness === "string" ? shown(harness) : `a ${jsonTypeName(harness)}`} is not a harness a profile can name.`,
+          PROFILE_HARNESSES,
+        ),
+      );
+  }
+
+  // The provider `claude-code` is the harness's own: a model of it is a name Claude Code reads, and no other model is run by it.
+  if (model !== undefined) {
+    const claude =
+      "provider" in model && model.provider === CLAUDE_CODE_PROVIDER
+        ? model
+        : null;
+    if (harnessName === CLAUDE_CODE_HARNESS) {
+      if (claude === null || !CLAUDE_CODE_MODEL_PATTERN.test(claude.model))
+        report(
+          issue(
+            "/model",
+            "invalid_value",
+            `A profile on the harness ${shown(CLAUDE_CODE_HARNESS)} takes {"provider": "${CLAUDE_CODE_PROVIDER}", "model": "<name>"} with the name Claude Code reads (for example "sonnet" or "claude-sonnet-5-5"); its login is the runner's, so no catalog entry and no key of the workspace is used.`,
+          ),
+        );
+    } else if (claude !== null)
+      report(
+        issue(
+          "/model",
+          "invalid_value",
+          `The provider ${shown(CLAUDE_CODE_PROVIDER)} belongs to the harness ${shown(CLAUDE_CODE_HARNESS)}. Name that harness in the field "harness", or choose a model from GET .../implementer/models.`,
+        ),
+      );
+  }
 
   const push = body.canPush;
   if (push === undefined)
@@ -324,6 +361,7 @@ export function validateProfile(body: unknown): ProfileCheck {
           costLimitCents: costLimitCents as number | null,
           canPush: push as boolean,
           defaultResult,
+          harness: harnessName,
         } satisfies ProfileDocument)
       : undefined;
   return finish(errors, profile);

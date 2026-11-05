@@ -319,9 +319,14 @@ export type ClaimOptions = {
   acceptsSupersede?: boolean;
   /**
    * #854: the claim is a customer's runner's. It takes only the turns of runner environments of `workspaceId` whose labels are all in
-   * `labels`, and never a job of another kind. Without it the claim never takes a turn of a runner environment.
+   * `labels`, and never a job of another kind. Without it the claim never takes a turn of a runner environment. #856: and whose
+   * profile's harness is one of `harnesses` (the harnesses the runner announces as ready; left out: OpenCode alone).
    */
-  customerRunner?: { workspaceId: string; labels: readonly string[] };
+  customerRunner?: {
+    workspaceId: string;
+    labels: readonly string[];
+    harnesses?: readonly string[];
+  };
 };
 
 /** Which running jobs an attempt-losing statement applies to. */

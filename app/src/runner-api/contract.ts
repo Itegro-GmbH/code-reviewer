@@ -522,6 +522,33 @@ export type ImplementerJobInput = Omit<
   base?: undefined;
 };
 
+/**
+ * #856: the job of a turn on the harness `claude-code` (`ImplementerJob.subscription`): the login is the device's, so there is no `llm`
+ * and the turn carries neither `cost` nor `modelEntry`. Only a customer's runner that announced the harness as ready is handed one.
+ */
+export type SubscriptionJobInput = Omit<
+  ImplementerJobInput,
+  "llm" | "implementer"
+> & {
+  llm?: undefined;
+  implementer: Omit<ImplementerJobOptions, "cost" | "modelEntry"> & {
+    subscription: {
+      /** A model name as Claude Code reads it; left out, its default. */
+      model?: string;
+      /** The most the turn may be worth at API prices, in US dollars as a decimal string (`--max-budget-usd`). */
+      maxBudgetUsd: string;
+    };
+    /** The profile version names the harness (`ImplementerProfile` in the contract). */
+    profile: {
+      name: string;
+      version: number;
+      instructions?: string;
+      canPush: boolean;
+      harness: "claude-code";
+    };
+  };
+};
+
 /** #753: the input of a job as a claim or a Worker's fetch hands it out: a review's, or a turn's. */
 export type AnyJobInput = RunnerJobInput | ImplementerJobInput;
 
@@ -604,6 +631,12 @@ export type RunnerUsage = {
   limitExceededBy?: number;
   /** What each call was, without content (#541). Absent for a runner that sends none and for a Diff Review. */
   callTrace?: RunnerCallTrace;
+  /**
+   * #856: `subscription` for a turn that ran on the login of a customer's device. Such a turn is not billed through us (`costUsd` is
+   * null); `estimatedCostUsd` is what Claude Code says it is worth at API prices, shown as an estimate and never added to a total.
+   */
+  costBasis?: "subscription";
+  estimatedCostUsd?: number | null;
 };
 
 /** The engine's tools as the trace names them; every other tool a model called is `other` (#541). */
