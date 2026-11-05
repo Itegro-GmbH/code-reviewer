@@ -576,6 +576,41 @@ def test_waiting_for_the_call_before_does_not_block_the_event_loop() -> None:
     assert ticks >= 10
 
 
+# #890 (S8): after the wait the slot is read again, so two callers that waited for the same
+# predecessor do not both start a thread.
+def test_two_callers_that_waited_for_the_same_predecessor_do_not_both_start_a_thread() -> None:
+    api, _ = make()
+    gate = threading.Event()
+    sent: list[urllib.request.Request] = []
+
+    class Blocking:
+        def open(self, request: urllib.request.Request, timeout: float | None = None) -> Answer:
+            sent.append(request)
+            gate.wait(5)
+            return Answer(200)
+
+    api._opener = Blocking()  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
+    earlier = threading.Thread(target=time.sleep, args=(0.05,), daemon=True)
+    earlier.start()
+    api._steps_thread = earlier  # pyright: ignore[reportPrivateUsage]
+
+    async def scenario() -> list[object]:
+        calls = [asyncio.ensure_future(api.steps(JOB, b"{}")) for _ in range(2)]
+        try:
+            await asyncio.wait(calls, timeout=1.0, return_when=asyncio.FIRST_COMPLETED)
+            refused = [call for call in calls if call.done()]
+            assert len(refused) == 1
+            return [refused[0].exception()]
+        finally:
+            gate.set()
+            await asyncio.gather(*calls, return_exceptions=True)
+
+    outcome = asyncio.run(scenario())
+
+    assert len(sent) == 1
+    assert isinstance(outcome[0], ApiUnavailable) and "has not ended" in str(outcome[0])
+
+
 def test_a_call_whose_predecessor_ends_within_the_moment_goes_on() -> None:
     api, opener = make(Answer(200))
     earlier = threading.Thread(target=time.sleep, args=(0.05,), daemon=True)
