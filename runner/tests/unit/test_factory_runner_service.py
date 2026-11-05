@@ -21,6 +21,7 @@ from loop_support import (
 )
 from test_implementer_job_host import implementer_claim, line
 
+from code_reviewer_runner.factory_runner import service as service_module
 from code_reviewer_runner.factory_runner.app_client import (
     Announced,
     Announcement,
@@ -28,6 +29,7 @@ from code_reviewer_runner.factory_runner.app_client import (
     UpdateNeeded,
 )
 from code_reviewer_runner.factory_runner.base import (
+    EXIT_APP_UNREACHABLE,
     EXIT_FAILED,
     EXIT_NOT_READY,
     EXIT_OK,
@@ -39,14 +41,19 @@ from code_reviewer_runner.factory_runner.config import (
     load_config,
     save_config,
 )
+from code_reviewer_runner.factory_runner.housekeeping import ROLE_LABEL
 from code_reviewer_runner.factory_runner.prepare import Prepared
 from code_reviewer_runner.factory_runner.selftest import Check, SelfTestResult
 from code_reviewer_runner.factory_runner.service import (
     POLL_SECONDS,
     RENEW_AFTER_SECONDS,
+    TIDY_RETRY_SECONDS,
     RunnerService,
     Seams,
 )
+from code_reviewer_runner.implementer.docker_api import DockerError
+from code_reviewer_runner.implementer.result_channel import make_result_directory
+from code_reviewer_runner.job import IMPLEMENTER_WORK_DIR_VARIABLE
 from code_reviewer_runner.job_loop.api import ApiUnavailable, ClaimedJob
 
 pytestmark = pytest.mark.unit
@@ -135,7 +142,64 @@ class AutoLauncher(FakeLauncher):
         return process
 
 
-def prepared(*, ready: bool = True) -> Prepared:
+class FakeDaemon:
+    """The daemon's list of what carries the role label, and the removals asked of it."""
+
+    def __init__(self) -> None:
+        self.containers: list[str] = []
+        self.networks: list[str] = []
+        self.removed: list[str] = []
+        self.listing_fails = False
+        self.filters: list[str] = []
+
+    def request(self, method: str, path: str, *args: Any, **kwargs: Any) -> Any:
+        assert method == "GET"
+        if self.listing_fails:
+            raise DockerError(500, "no")
+        self.filters.append(path)
+        found = self.containers if path.startswith("/containers/json") else self.networks
+        return [{"Id": identifier} for identifier in found]
+
+    def remove_container(self, container: str, **_kwargs: Any) -> None:
+        self.containers.remove(container)
+        self.removed.append(container)
+
+    def remove_network(self, network: str) -> None:
+        self.networks.remove(network)
+        self.removed.append(network)
+
+
+def container_id(letter: str) -> str:
+    return letter * 64
+
+
+class TurnLauncher(AutoLauncher):
+    """A job process that makes what a turn makes in the work volume, with the code of a turn: the
+    result directory (`make_result_directory` refuses one that exists), the mirror, the agent's
+    repository with a read-only object and a link out of the volume, and a container that stays."""
+
+    def __init__(self, work: Path, daemon: FakeDaemon, *, outside: Path) -> None:
+        super().__init__()
+        self.work = work
+        self.daemon = daemon
+        self.outside = outside
+        self.turns = 0
+
+    async def start(self, spec: Any) -> FakeProcess:
+        self.turns += 1
+        (self.work / "reserve" / "mirror.git" / "objects").mkdir(parents=True)
+        object_file = self.work / "reserve" / "mirror.git" / "objects" / "pack"
+        object_file.write_text("x")
+        object_file.chmod(0o444)
+        (self.work / "reserve" / "mirror.git" / "objects").chmod(0o555)
+        (self.work / "repo").mkdir()
+        (self.work / "repo" / "out").symlink_to(self.outside)
+        make_result_directory(self.work)
+        self.daemon.containers.append(container_id("d"))  # the door the turn did not remove
+        return await super().start(spec)
+
+
+def prepared(*, ready: bool = True, work: Path | None = None) -> Prepared:
     result = SelfTestResult(
         (Check("docker", True), Check("agent-container", ready, "" if ready else "did not start")),
         "runc",
@@ -143,7 +207,11 @@ def prepared(*, ready: bool = True) -> Prepared:
     )
     return Prepared(
         make_settings(engines=("implementer",), job_command=("job",)),
-        {"PATH": "/usr/bin", "RUNNER_IMPLEMENTER_SANDBOX_PROOF": "proven"},
+        {
+            "PATH": "/usr/bin",
+            "RUNNER_IMPLEMENTER_SANDBOX_PROOF": "proven",
+            **({} if work is None else {IMPLEMENTER_WORK_DIR_VARIABLE: str(work)}),
+        },
         Announcement(("linux",), "1.0.0", {}, {}),
         result,
     )
@@ -161,6 +229,9 @@ class Rig:
         self.client = FakeClient()
         self.api = FakeJobApi()
         self.clock = clock or FastClock()
+        self.daemon = FakeDaemon()
+        self.work = tmp_path / "work"
+        self.work.mkdir()
         self.launcher = launcher or AutoLauncher()
         self.environment = {"FACTORY_RUNNER_HOME": str(tmp_path / "home")}
         self.config = RunnerConfig(
@@ -169,11 +240,14 @@ class Rig:
         self.service = RunnerService(
             self.config,
             self.environment,
-            prepared(ready=ready),
+            prepared(ready=ready, work=self.work),
             self.client,  # type: ignore[arg-type]
             self.api,  # type: ignore[arg-type]
             seams=Seams(
-                clock=self.clock, wall=self.clock.wall, launcher=lambda _grace: self.launcher
+                clock=self.clock,
+                wall=self.clock.wall,
+                launcher=lambda _grace: self.launcher,
+                docker=lambda: self.daemon,  # type: ignore[arg-type,return-value]
             ),
         )
 
@@ -289,11 +363,14 @@ def test_an_app_that_cannot_be_reached_is_tried_again_with_a_growing_pause(tmp_p
     assert rig.api.completions  # and then it took the job
 
 
-def test_the_once_mode_gives_up_quietly_when_the_app_stays_away(tmp_path: Path) -> None:
+# #854-N3
+def test_the_once_mode_tells_an_unreachable_app_from_no_job_by_its_exit_code(
+    tmp_path: Path,
+) -> None:
     rig = Rig(tmp_path)
     rig.client.claims = [ApiUnavailable("down")] * 50
 
-    assert rig.go(once=True, wait=20) == EXIT_OK
+    assert rig.go(once=True, wait=20) == EXIT_APP_UNREACHABLE != EXIT_OK
     assert rig.client.claim_calls < 10
 
 
@@ -372,6 +449,89 @@ def test_a_credential_from_the_environment_is_not_renewed_because_it_is_not_ours
     assert rig.client.renewals == 0
 
 
+def old_file(rig: Rig, **changes: Any) -> None:
+    save_config(
+        RunnerConfig(
+            url="https://file.example",
+            name="from-file",
+            labels=("file-label",),
+            credential=CREDENTIAL,
+            credential_renewed_at=1_800_000_000.0 - RENEW_AFTER_SECONDS - 1,
+            **changes,
+        ),
+        rig.environment,
+    )
+
+
+# #854-S2
+def test_a_credential_from_the_environment_is_never_renewed_even_when_a_file_exists(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path)
+    old_file(rig)  # an old credential in the file, as an earlier `register` left it
+    path = tmp_path / "home" / "config.json"
+    before = path.read_bytes()
+    other = "crc_" + "E" * 43
+    rig.environment["FACTORY_RUNNER_CREDENTIAL"] = other
+    rig.service._config = load_config(rig.environment)  # pyright: ignore[reportPrivateUsage]
+    assert rig.service._config.credential == other  # pyright: ignore[reportPrivateUsage]
+
+    rig.go(once=True)
+
+    assert rig.client.renewals == 0 and rig.client.credentials == []
+    assert path.read_bytes() == before  # the file was not touched
+
+
+# #854-S2
+def test_a_renewal_writes_the_credential_into_the_file_and_nothing_the_environment_overrides(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path)
+    old_file(rig)
+    rig.environment.update(
+        {
+            "FACTORY_RUNNER_URL": "https://env.example",
+            "FACTORY_RUNNER_NAME": "from-env",
+            "FACTORY_RUNNER_LABELS": "env-label",
+            "FACTORY_RUNNER_CPUS": "7",
+        }
+    )
+    rig.service._config = load_config(rig.environment)  # pyright: ignore[reportPrivateUsage]
+
+    rig.go(once=True)
+
+    assert rig.client.renewals == 1
+    stored = load_config({"FACTORY_RUNNER_HOME": rig.environment["FACTORY_RUNNER_HOME"]})
+    assert stored.credential == RENEWED
+    assert (stored.url, stored.name, stored.labels) == (
+        "https://file.example",
+        "from-file",
+        ("file-label",),
+    )
+    assert stored.limits.cpus is None
+
+
+# #854-S2
+def test_a_renewal_that_cannot_be_saved_keeps_the_old_credential_in_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    rig = Rig(tmp_path)
+    old_file(rig)
+    rig.service._config = load_config(rig.environment)  # pyright: ignore[reportPrivateUsage]
+
+    def refuse(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(service_module, "update_credential", refuse)
+
+    with caplog.at_level(logging.WARNING, logger="code_reviewer_runner.loop"):
+        assert rig.go(once=True) == EXIT_OK
+
+    assert rig.client.credentials == [] and rig.api.credentials == []  # the new one was not used
+    assert "cannot be written" in caplog.text
+    assert RENEWED not in caplog.text
+
+
 def test_the_credential_is_masked_in_the_log(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
 
@@ -416,3 +576,114 @@ async def until(condition: Callable[[], bool], seconds: float = 3.0) -> None:
             return
         await asyncio.sleep(0.01)
     raise AssertionError("the condition did not become true")
+
+
+# -- the machine between jobs (B1, S1) ------------------------------------------------------------
+
+
+# #854-B1
+def test_two_jobs_in_a_row_each_find_the_work_volume_empty(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("not the volume's")
+    rig = Rig(tmp_path, clock=ManualClock())  # time stands still: the wait after job 2 never ends
+    launcher = TurnLauncher(rig.work, rig.daemon, outside=outside)
+    rig.launcher = launcher
+    rig.client.claims = [implementer_claim(), implementer_claim(2)]
+    (rig.work / "other-volume-file").write_text("not a folder of a turn")
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=False))
+        await until(lambda: len(rig.api.completions) == 2)
+        rig.service.stop()
+        assert await asyncio.wait_for(task, 5) == EXIT_OK
+
+    run(scenario)
+
+    # `make_result_directory` and the mkdirs of the turn refuse leftovers: the second turn only
+    # started because the first one's work was gone.
+    assert launcher.turns == 2
+    assert [result["ok"] for _, _, result in rig.api.completions] == [True, True]
+    assert sorted(path.name for path in rig.work.iterdir()) == ["other-volume-file"]
+    assert (outside / "keep.txt").read_text() == "not the volume's"  # a link is not followed
+
+
+# #854-S1
+def test_what_a_killed_run_left_in_the_daemon_is_removed_before_the_first_claim(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path)
+    rig.daemon.containers = [container_id("a"), container_id("b")]
+    rig.daemon.networks = [container_id("c")]
+    seen: list[tuple[list[str], list[str]]] = []
+    claim = rig.client.claim
+
+    def watching() -> ClaimedJob | None:
+        seen.append((list(rig.daemon.containers), list(rig.daemon.networks)))
+        return claim()
+
+    rig.client.claim = watching  # type: ignore[method-assign]
+
+    rig.go(once=True)
+
+    assert seen == [([], [])]
+    assert rig.daemon.removed == [container_id("a"), container_id("b"), container_id("c")]
+    assert all(ROLE_LABEL in path for path in rig.daemon.filters)  # only what is labelled ours
+
+
+# #854-S1
+def test_the_containers_a_job_leaves_are_removed_right_after_it(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    rig = Rig(tmp_path)
+    rig.launcher = TurnLauncher(rig.work, rig.daemon, outside=outside)
+    rig.client.claims = [implementer_claim()]
+
+    rig.go(once=True)
+
+    assert rig.daemon.containers == []  # the door with the key did not outlive the job
+    assert list(rig.work.iterdir()) == []
+
+
+# #854-S1
+def test_a_runner_that_cannot_be_tidied_claims_nothing_and_says_why(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    rig = Rig(tmp_path)
+    rig.daemon.listing_fails = True
+    rig.client.claims = [implementer_claim()]
+
+    with caplog.at_level(logging.ERROR, logger="code_reviewer_runner.loop"):
+        assert rig.go(once=True) == EXIT_FAILED
+
+    assert rig.client.claim_calls == 0
+    assert "cannot be cleaned" in caplog.text
+
+
+# #854-S1
+def test_a_runner_that_cannot_be_tidied_tries_again_and_then_takes_the_job(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path)
+    rig.daemon.listing_fails = True
+    rig.client.claims = [implementer_claim()]
+    waited: list[float] = []
+    sleep = rig.clock.sleep
+
+    async def sleeping(seconds: float) -> None:
+        waited.append(seconds)
+        rig.daemon.listing_fails = False  # the daemon is back
+        await sleep(seconds)
+
+    rig.clock.sleep = sleeping  # type: ignore[method-assign]
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=False))
+        await until(lambda: bool(rig.api.completions))
+        rig.service.stop()
+        assert await asyncio.wait_for(task, 5) == EXIT_OK
+
+    run(scenario)
+
+    assert waited[0] == TIDY_RETRY_SECONDS
+    assert rig.api.completions  # and then it took the job

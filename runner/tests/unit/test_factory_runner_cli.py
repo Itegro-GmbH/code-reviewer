@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from code_reviewer_runner.factory_runner import cli as cli_module
 from code_reviewer_runner.factory_runner.app_client import (
     Announcement,
     ApiUnavailable,
@@ -57,7 +58,7 @@ class FakeApp:
 
 
 def invoke(
-    tmp_path: Path, *argv: str, app: FakeApp | None = None, **env: str
+    tmp_path: Path, *argv: str, app: FakeApp | None = None, stdin: str = "", **env: str
 ) -> tuple[int, str, str]:
     out, err = io.StringIO(), io.StringIO()
     seams = CliSeams(
@@ -69,6 +70,7 @@ def invoke(
         seams=seams,
         out=out,
         err=err,
+        stdin=io.StringIO(stdin),
     )
     return code, out.getvalue(), err.getvalue()
 
@@ -98,6 +100,76 @@ def test_register_exchanges_the_token_and_writes_a_private_file(tmp_path: Path) 
         1234.0,
     )
     assert CREDENTIAL not in out + err and TOKEN not in out + err
+
+
+# #854-N1
+def test_register_takes_the_token_from_a_file_from_stdin_or_the_environment(
+    tmp_path: Path,
+) -> None:
+    token_file = tmp_path / "token"
+    token_file.write_text(TOKEN + "\n")
+    app = FakeApp()
+
+    from_file = invoke(tmp_path, "register", "--token-file", str(token_file), app=app)
+    from_stdin = invoke(
+        tmp_path, "register", "--token-file", "-", "--force", stdin=TOKEN + "\n", app=app
+    )
+    from_env = invoke(tmp_path, "register", "--force", app=app, FACTORY_RUNNER_TOKEN=f" {TOKEN} ")
+
+    assert [code for code, _, _ in (from_file, from_stdin, from_env)] == [EXIT_OK] * 3
+    assert [token for token, _, _ in app.registered] == [TOKEN] * 3
+    assert all(TOKEN not in out + err for _, out, err in (from_file, from_stdin, from_env))
+
+
+# #854-N1
+def test_register_without_any_token_says_where_it_can_come_from(tmp_path: Path) -> None:
+    code, _, err = invoke(tmp_path, "register")
+
+    assert code == EXIT_USAGE
+    assert "--token-file" in err and "FACTORY_RUNNER_TOKEN" in err
+    assert not (tmp_path / "home" / "config.json").exists()
+
+
+# #854-N1
+def test_a_token_file_that_cannot_be_read_or_holds_no_token_is_refused_without_echo(
+    tmp_path: Path,
+) -> None:
+    junk = tmp_path / "junk"
+    junk.write_text("hunter2-not-a-token")
+
+    missing = invoke(tmp_path, "register", "--token-file", str(tmp_path / "nope"))
+    wrong = invoke(tmp_path, "register", "--token-file", str(junk))
+
+    assert missing[0] == wrong[0] == EXIT_CONFIG
+    assert "token file cannot be read" in missing[2]
+    assert "hunter2" not in wrong[1] + wrong[2]
+
+
+# #854-N1
+def test_the_token_on_the_command_line_and_in_a_file_together_are_a_usage_error(
+    tmp_path: Path,
+) -> None:
+    code, _, err = invoke(tmp_path, "register", "--token", TOKEN, "--token-file", "-")
+
+    assert code == EXIT_USAGE and TOKEN not in err
+
+
+# #854-N2
+def test_a_credential_that_cannot_be_saved_is_said_plainly_without_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(*_args: Any, **_kwargs: Any) -> Path:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(cli_module, "save_config", refuse)
+
+    code, out, err = invoke(tmp_path, "register", "--token", TOKEN)
+
+    assert code == EXIT_CONFIG
+    assert "runner registered, but its credential could not be saved" in err
+    assert "revoke it in the app" in err and "register again" in err
+    assert "runner-1" in err and "Traceback" not in err
+    assert CREDENTIAL not in out + err
 
 
 def test_register_goes_to_the_product_unless_told_otherwise(tmp_path: Path) -> None:

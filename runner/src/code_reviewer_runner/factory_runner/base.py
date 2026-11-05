@@ -14,7 +14,8 @@ BASE_VERSION: Final = "1.0.0"
 DEFAULT_URL: Final = "https://code-review.com"
 HARNESS_OPENCODE: Final = "opencode"
 
-# Exit codes of `factory-runner`. 0 is also "no job came in time" in `run --once`.
+# Exit codes of `factory-runner` (the list is in docs/runner.md). 0 is also "no job came in time" in
+# `run --once`; 7 is "the app could not be reached for the whole wait" there.
 EXIT_OK: Final = 0
 EXIT_FAILED: Final = 1
 EXIT_USAGE: Final = 2
@@ -22,3 +23,4 @@ EXIT_UPDATE_NEEDED: Final = 3
 EXIT_REVOKED: Final = 4
 EXIT_NOT_READY: Final = 5
 EXIT_CONFIG: Final = 6
+EXIT_APP_UNREACHABLE: Final = 7

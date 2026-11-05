@@ -35,6 +35,19 @@ from runner_app import FakeRunnerApp
 
 pytestmark = pytest.mark.integration
 
+
+class NothingLeft:
+    """A daemon with no container and no network of ours (the loop asks it, a test has none)."""
+
+    def request(self, method: str, path: str, *args: object, **kwargs: object) -> list[object]:
+        return []
+
+    def remove_container(self, *args: object, **kwargs: object) -> None:
+        raise AssertionError("there was nothing to remove")
+
+    remove_network = remove_container
+
+
 JOB = "00000000-0000-4000-8000-0000000000aa"
 HEAD = "9" * 40
 
@@ -58,6 +71,11 @@ STAND_IN = textwrap.dedent(
     import json, os, sys, time
     job = json.loads(sys.stdin.read())
     sleep, seen = float(sys.argv[1]), sys.argv[2]
+    # What a turn makes in the work volume: it refuses folders an earlier turn left (os.mkdir).
+    work = os.environ["RUNNER_IMPLEMENTER_WORK_DIR"]
+    os.makedirs(work, exist_ok=True)
+    for name in ("reserve", "repo", "result"):
+        os.mkdir(os.path.join(work, name))
     with open(seen, "w") as handle:
         json.dump({"env": sorted(os.environ), "has_token": "crc_" in json.dumps(job)}, handle)
     time.sleep(sleep)
@@ -89,6 +107,7 @@ class Machine:
             "PATH": "/usr/bin:/bin",
         }
         self.sleep = sleep
+        self.work = tmp_path / "work"
 
     def prepare(self, config: RunnerConfig, _env: object) -> Prepared:
         settings = WorkerSettings(
@@ -105,7 +124,11 @@ class Machine:
         )
         return Prepared(
             settings,
-            {"PATH": "/usr/bin:/bin", "HOME": str(self.seen.parent)},
+            {
+                "PATH": "/usr/bin:/bin",
+                "HOME": str(self.seen.parent),
+                "RUNNER_IMPLEMENTER_WORK_DIR": str(self.work),
+            },
             Announcement(
                 config.labels,
                 BASE_VERSION,
@@ -116,7 +139,8 @@ class Machine:
         )
 
     def cli(self, *argv: str) -> int:
-        return main(list(argv), environment=self.environment, seams=CliSeams(prepare=self.prepare))
+        seams = CliSeams(prepare=self.prepare, docker=NothingLeft)  # type: ignore[arg-type]
+        return main(list(argv), environment=self.environment, seams=seams)
 
     def register(self) -> None:
         code = self.cli(
@@ -161,6 +185,38 @@ def test_a_registered_runner_announces_claims_runs_a_turn_and_reports_its_result
     credential = json.loads((tmp_path / "home" / "config.json").read_text())["credential"]
     captured = capsys.readouterr()
     assert credential not in captured.err + captured.out
+
+
+# #854-B1
+def test_two_runs_in_a_row_on_one_work_volume_each_set_up_their_turn(
+    app: FakeRunnerApp, tmp_path: Path
+) -> None:
+    machine = Machine(app, tmp_path)
+    machine.register()
+    app.queue_job(JOB)
+    app.queue_job(JOB.replace("aa", "ab"))
+
+    first = machine.cli("run", "--once", "--wait", "30")
+    second = machine.cli("run", "--once", "--wait", "30")
+
+    # The stand-in job makes the turn's three folders with `os.mkdir`, which refuses leftovers.
+    assert (first, second) == (EXIT_OK, EXIT_OK)
+    assert [c["ok"] for c in app.completions] == [True, True]
+    assert list(machine.work.iterdir()) == []
+
+
+# #854-B1
+def test_a_machine_the_last_run_left_dirty_is_cleaned_before_the_first_claim(
+    app: FakeRunnerApp, tmp_path: Path
+) -> None:
+    machine = Machine(app, tmp_path)
+    machine.register()
+    (machine.work / "repo").mkdir(parents=True)  # a runner that was killed during a turn
+    app.queue_job(JOB)
+
+    assert machine.cli("run", "--once", "--wait", "30") == EXIT_OK
+
+    assert [c["ok"] for c in app.completions] == [True]
 
 
 def test_a_runner_without_a_job_ends_the_once_mode_with_zero_and_a_clear_line(

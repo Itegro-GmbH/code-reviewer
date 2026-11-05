@@ -19,6 +19,7 @@ from code_reviewer_runner.factory_runner.config import (
     load_config,
     redacted,
     save_config,
+    update_credential,
 )
 
 pytestmark = pytest.mark.unit
@@ -159,3 +160,61 @@ def test_a_broken_file_is_a_configuration_error_without_its_content(tmp_path: Pa
         load_config(environment)
 
     assert "crc_" not in str(caught.value)
+
+
+# #854-S2
+def test_a_credential_is_from_the_file_unless_the_environment_names_one(tmp_path: Path) -> None:
+    environment = home(tmp_path)
+    save_config(config(credential=CREDENTIAL), environment)
+
+    from_file = load_config(environment)
+    from_environment = load_config({**environment, "FACTORY_RUNNER_CREDENTIAL": OTHER})
+
+    assert (from_file.credential, from_file.credential_source) == (CREDENTIAL, "file")
+    assert (from_environment.credential, from_environment.credential_source) == (
+        OTHER,
+        "environment",
+    )
+
+
+# #854-S2
+def test_update_credential_changes_the_credential_and_its_time_and_nothing_else(
+    tmp_path: Path,
+) -> None:
+    environment = home(tmp_path)
+    save_config(
+        config(credential=CREDENTIAL, limits=Limits(cpus=2), credential_renewed_at=1.0), environment
+    )
+    overriding = {
+        **environment,
+        "FACTORY_RUNNER_URL": "https://other.example",
+        "FACTORY_RUNNER_LABELS": "env",
+        "FACTORY_RUNNER_CPUS": "9",
+    }
+
+    path = update_credential(overriding, renewed_at=5.0, credential=OTHER)
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    stored = json.loads(path.read_text())
+    assert (stored["credential"], stored["credentialRenewedAt"]) == (OTHER, 5.0)
+    assert stored["url"] == "https://app.example" and stored["labels"] == ["linux"]
+    assert stored["limits"]["cpus"] == 2
+
+
+# #854-S2
+def test_update_credential_with_only_a_time_keeps_the_credential(tmp_path: Path) -> None:
+    environment = home(tmp_path)
+    save_config(config(credential=CREDENTIAL), environment)
+
+    update_credential(environment, renewed_at=7.0)
+
+    loaded = load_config(environment)
+    assert (loaded.credential, loaded.credential_renewed_at) == (CREDENTIAL, 7.0)
+
+
+# #854-S2
+def test_update_credential_does_not_invent_a_file(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="gone"):
+        update_credential(home(tmp_path), renewed_at=1.0, credential=CREDENTIAL)
+
+    assert not (tmp_path / "home" / "config.json").exists()

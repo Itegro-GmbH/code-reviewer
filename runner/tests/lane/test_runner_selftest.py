@@ -18,6 +18,7 @@ import pytest
 from lane_support import docker, lane_config
 
 from code_reviewer_runner.factory_runner.config import Limits
+from code_reviewer_runner.factory_runner.housekeeping import ROLE_LABEL, TidySeams, tidy
 from code_reviewer_runner.factory_runner.selftest import (
     SELFTEST_CONTAINER,
     SelfTestSeams,
@@ -111,3 +112,37 @@ def test_a_missing_agent_image_is_pulled_by_the_reference_the_runner_was_given(
     assert pulled == ["registry.invalid/agent:1"]  # the daemon had no such image, so the pull ran
     failed = result.failed()
     assert failed is not None and failed.name == "agent-image"
+
+
+# #854-L03
+def test_what_a_killed_run_left_in_the_daemon_and_the_volume_is_gone_after_a_tidy(
+    tmp_path: Path,
+) -> None:
+    """A container and a network with the role label (the door that held a key, the model network)
+    and a turn's folders in the volume are removed, and a container without the label is not."""
+    worker = lane_config().worker_image
+    labelled, bystander, network = (
+        "code-reviewer-lane-leftover",
+        "code-reviewer-lane-bystander",
+        "code-reviewer-lane-leftover-net",
+    )
+    docker("rm", "-f", labelled, bystander, check=False)
+    docker("network", "rm", network, check=False)
+    try:
+        docker("network", "create", "--internal", "--label", f"{ROLE_LABEL}=model-network", network)
+        docker("create", "--name", labelled, "--label", f"{ROLE_LABEL}=model-door", worker, "true")
+        docker("create", "--name", bystander, worker, "true")
+        for name in ("reserve", "repo", "result"):
+            (tmp_path / name).mkdir()
+            (tmp_path / name / "left").write_text("x")
+
+        assert tidy(TidySeams(work_dir=tmp_path)) == []
+        assert tidy(TidySeams(work_dir=tmp_path)) == []  # nothing to do is not a failure
+
+        assert docker("ps", "-aq", "--filter", f"name={labelled}").stdout.strip() == ""
+        assert docker("network", "ls", "-q", "--filter", f"name={network}").stdout.strip() == ""
+        assert docker("ps", "-aq", "--filter", f"name={bystander}").stdout.strip() != ""
+        assert list(tmp_path.iterdir()) == []
+    finally:
+        docker("rm", "-f", labelled, bystander, check=False)
+        docker("network", "rm", network, check=False)

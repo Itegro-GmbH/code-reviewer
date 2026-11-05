@@ -3,9 +3,12 @@
 """`factory-runner`: the command of the Factory-Runner (#854, R1b).
 
 - `register`: exchanges a registration token for the runner's credential and writes the
-  configuration (file mode 0600).
+  configuration (file mode 0600). The token comes from a file (`--token-file`, `-` for the standard
+  input), from `FACTORY_RUNNER_TOKEN`, or from `--token`, which is the least safe (the process list
+  and the shell history show it).
 - `run`: the service loop. `--once` takes one job and ends; with no job within `--wait` seconds it
-  ends with exit code 0 and says so.
+  ends with exit code 0 and says so, and with an app that could not be reached for the whole wait
+  it ends with exit code 7.
 - `selftest`: proves the base on this machine; exit code 0 when it holds.
 - `config show`: the configuration without its secret.
 
@@ -13,7 +16,8 @@ The app address, the credential, the labels and the limits can come from the env
 the file (`config.py`): a VM that runs one job needs no `register`.
 
 Exit codes (`base.py`): 0 done (also: no job within the wait), 1 a job failed, 2 usage, 3 the app
-requires an update, 4 revoked, 5 not ready (the self-test failed), 6 configuration.
+requires an update, 4 revoked, 5 not ready (the self-test failed), 6 configuration, 7 `run --once`:
+the app could not be reached.
 """
 
 import argparse
@@ -68,11 +72,14 @@ from code_reviewer_runner.factory_runner.service import (
     DEFAULT_ONCE_WAIT_SECONDS,
     LOGGER_NAME,
     RunnerService,
+    Seams,
 )
+from code_reviewer_runner.implementer.docker_api import DockerApi
 from code_reviewer_runner.job_loop.service import configure_logging
 from code_reviewer_runner.job_loop.settings import SettingsError
 
 PROGRAM = "factory-runner"
+TOKEN_VARIABLE = "FACTORY_RUNNER_TOKEN"
 
 
 @dataclass(frozen=True)
@@ -86,6 +93,8 @@ class CliSeams:
     run_selftest: Callable[[RunnerConfig, Mapping[str, str]], SelfTestResult] | None = None
     now: Callable[[], float] = time.time
     hostname: Callable[[], str] = socket.gethostname
+    # The daemon the loop tidies (`housekeeping.py`).
+    docker: Callable[[], DockerApi] = DockerApi
 
 
 class _Parser(argparse.ArgumentParser):
@@ -107,7 +116,13 @@ def build_parser() -> argparse.ArgumentParser:
     register = commands.add_parser(
         "register", help="register this machine with a token from the app"
     )
-    register.add_argument("--token", required=True, help="the registration token (crt_...)")
+    source = register.add_mutually_exclusive_group()
+    source.add_argument("--token-file", help="a file with the registration token; - reads stdin")
+    source.add_argument(
+        "--token",
+        help="the registration token (crt_...); visible in the process list and the shell history, "
+        f"so prefer --token-file or {TOKEN_VARIABLE}",
+    )
     register.add_argument("--name", help="the name in the list of runners (default: host name)")
     register.add_argument("--labels", default="", help="comma separated labels, e.g. linux,gpu")
     register.add_argument("--url", help=f"the app (default: {DEFAULT_URL})")
@@ -142,6 +157,7 @@ def main(
     seams: CliSeams = CliSeams(),  # noqa: B008
     out: TextIO | None = None,
     err: TextIO | None = None,
+    stdin: TextIO | None = None,
 ) -> int:
     """Run the command and return the exit code."""
     stdout: TextIO = out or sys.stdout
@@ -153,7 +169,7 @@ def main(
     env = dict(os.environ if environment is None else environment)
     try:
         if arguments.command == "register":
-            return _register(arguments, env, seams, stdout, stderr)
+            return _register(arguments, env, seams, stdout, stderr, stdin or sys.stdin)
         if arguments.command == "config":
             return _config_show(env, stdout, stderr)
         if arguments.command == "selftest":
@@ -176,13 +192,21 @@ def _register(
     seams: CliSeams,
     out: TextIO,
     err: TextIO,
+    stdin: TextIO,
 ) -> int:
     path = config_path(env)
     if path.exists() and not arguments.force:
         err.write(f"{PROGRAM}: {path} exists: this machine is registered (--force replaces it)\n")
         return EXIT_CONFIG
     allow_http = env.get("FACTORY_RUNNER_ALLOW_HTTP", "").strip() == "1"
-    token = check_token(arguments.token)
+    raw_token = _token_of(arguments, env, stdin)
+    if raw_token is None:
+        err.write(
+            f"{PROGRAM}: register needs a token: --token-file FILE (- for the standard input), "
+            f"{TOKEN_VARIABLE}, or --token\n"
+        )
+        return EXIT_USAGE
+    token = check_token(raw_token)
     config = RunnerConfig(
         url=check_url(
             arguments.url or env.get("FACTORY_RUNNER_URL") or DEFAULT_URL, allow_http=allow_http
@@ -226,13 +250,39 @@ def _register(
         runner_id=registered.runner_id,
         credential_renewed_at=seams.now(),
     )
-    written = save_config(config, env)
+    try:
+        written = save_config(config, env)
+    except OSError as error:
+        # The app has the runner and the credential is shown only once: nothing here can use it.
+        err.write(
+            f"{PROGRAM}: runner registered, but its credential could not be saved "
+            f"({error.strerror or type(error).__name__}): revoke it in the app "
+            f"(runner {registered.runner_id}) and register again\n"
+        )
+        return EXIT_CONFIG
     out.write(
         f"registered as {config.name} (runner {registered.runner_id}); configuration in {written}\n"
     )
     if registered.min_base_version:
         out.write(f"the app requires a base of at least {registered.min_base_version}\n")
     return EXIT_OK
+
+
+def _token_of(arguments: argparse.Namespace, env: Mapping[str, str], stdin: TextIO) -> str | None:
+    """The registration token from where the caller put it: `--token`, `--token-file` (`-`: the
+    standard input), or `FACTORY_RUNNER_TOKEN`, in that order. None when there is none; a file that
+    cannot be read is a `ConfigError` that never says what was in it."""
+    if arguments.token is not None:
+        return arguments.token
+    if arguments.token_file is not None:
+        try:
+            if arguments.token_file == "-":
+                return stdin.read().strip()
+            with open(arguments.token_file, encoding="utf-8") as handle:
+                return handle.read().strip()
+        except (OSError, UnicodeDecodeError):
+            raise ConfigError("the token file cannot be read") from None
+    return env.get(TOKEN_VARIABLE, "").strip() or None
 
 
 def _limits(limits: Limits) -> dict[str, int]:
@@ -316,6 +366,7 @@ def _run(
         seams.client(config.url, config.credential),
         RunnerJobApi(config.url, config.credential),
         logger=logging.getLogger(LOGGER_NAME),
+        seams=Seams(docker=seams.docker),
     )
     return asyncio.run(service.run(once=arguments.once, wait_seconds=arguments.wait))
 

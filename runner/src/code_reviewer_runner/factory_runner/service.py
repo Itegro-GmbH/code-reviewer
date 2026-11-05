@@ -10,12 +10,16 @@ runner claims by itself instead of being handed a job by a Dispatcher.
 
 - `run` ends on a signal, on a revoked credential (exit 4), or, with `--once`, on an update the app
   requires (exit 3).
-- `run --once` ends when one job ran (its exit code) or when no job came within the wait (exit 0
-  and a line saying so).
+- `run --once` ends when one job ran (its exit code), when no job came within the wait (exit 0
+  and a line saying so) or when the app could not be reached for the whole wait (exit 7, so a VM
+  that never spoke to the app is told from one that found nothing to do).
 
-The loop owns three things the host does not: the credential's renewal between jobs, the claim's
+The loop owns four things the host does not: the credential's renewal between jobs, the claim's
 rhythm and what a claim's failure means (revoked: stop for good; update needed: say so and wait;
-unavailable: wait and try again, longer each time).
+unavailable: wait and try again, longer each time), and the tidying that a hosted VM gets by being
+thrown away (`housekeeping.py`): before a claim whenever a job ended (or the last tidy failed), and
+right after every job, the leftover containers and networks of Control go and `/work` is emptied.
+A runner that cannot tidy does not claim: a job it takes would end `setup_failed`.
 """
 
 import asyncio
@@ -25,6 +29,7 @@ import signal
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from pathlib import Path
 
 from code_reviewer_runner.factory_runner.app_client import (
     Announcement,
@@ -33,6 +38,7 @@ from code_reviewer_runner.factory_runner.app_client import (
     UpdateNeeded,
 )
 from code_reviewer_runner.factory_runner.base import (
+    EXIT_APP_UNREACHABLE,
     EXIT_FAILED,
     EXIT_NOT_READY,
     EXIT_OK,
@@ -40,14 +46,18 @@ from code_reviewer_runner.factory_runner.base import (
     EXIT_UPDATE_NEEDED,
 )
 from code_reviewer_runner.factory_runner.config import (
+    CREDENTIAL_FROM_FILE,
+    ConfigError,
     RunnerConfig,
-    config_path,
-    save_config,
+    update_credential,
     with_credential,
 )
+from code_reviewer_runner.factory_runner.housekeeping import TidySeams, tidy
 from code_reviewer_runner.factory_runner.job_api import RunnerJobApi
 from code_reviewer_runner.factory_runner.prepare import Prepared
 from code_reviewer_runner.factory_runner.selftest import summary
+from code_reviewer_runner.implementer.docker_api import DockerApi
+from code_reviewer_runner.job import IMPLEMENTER_WORK_DIR, IMPLEMENTER_WORK_DIR_VARIABLE
 from code_reviewer_runner.job_loop.api import ApiUnavailable, ClaimedJob
 from code_reviewer_runner.job_loop.clock import Clock, RealClock
 from code_reviewer_runner.job_loop.host import JobEnd, JobHost
@@ -61,6 +71,8 @@ POLL_JITTER = 0.2
 BACKOFF_FIRST_SECONDS = 5.0
 BACKOFF_MAX_SECONDS = 300.0
 UPDATE_NEEDED_WAIT_SECONDS = 300.0
+# How long a runner that cannot tidy waits before it tries again (it claims nothing meanwhile).
+TIDY_RETRY_SECONDS = 60.0
 # How long `run --once` waits for a job by default.
 DEFAULT_ONCE_WAIT_SECONDS = 600.0
 # A credential this old is renewed between jobs (the app keeps the previous one until the new one
@@ -76,6 +88,7 @@ class Seams:
     wall: Callable[[], float] = time.time
     jitter: Callable[[], float] = random.random
     launcher: Callable[[float], ProcessLauncher] = SubprocessLauncher
+    docker: Callable[[], DockerApi] = DockerApi
 
 
 class RunnerService:
@@ -104,6 +117,12 @@ class RunnerService:
         self._stopping = asyncio.Event()
         self._host: JobHost | None = None
         self._announced: Announcement | None = None
+        # The machine is tidied before the first claim and again whenever a job has ended.
+        self._untidy = True
+        self._tidy = TidySeams(
+            api=seams.docker,
+            work_dir=Path(environment_work_dir(prepared.environment)),
+        )
 
     # -- the run ---------------------------------------------------------------------------------
 
@@ -142,6 +161,11 @@ class RunnerService:
         started = self._clock.monotonic()
         failures = 0
         while not self._stopping.is_set():
+            if self._untidy and not await self._tidy_up(before_claim=True):
+                if once:
+                    return EXIT_FAILED
+                await self._wait(TIDY_RETRY_SECONDS)
+                continue
             await self._renew_if_due()
             try:
                 claimed = await asyncio.to_thread(self._client.claim)
@@ -166,7 +190,7 @@ class RunnerService:
                 )
                 if once and self._clock.monotonic() - started + pause > wait_seconds:
                     self._log.warning("no job: the app could not be reached within the wait")
-                    return EXIT_OK
+                    return EXIT_APP_UNREACHABLE
                 await self._wait(max(pause, error.retry_after or 0.0))
                 continue
             failures = 0
@@ -232,24 +256,49 @@ class RunnerService:
             end = await self._host.run_job(claimed)
         finally:
             self._api.forget(claimed.id)
+            # The turn's containers hold the workspace's key and its work holds the repository:
+            # neither stays until the next claim. A failure here is found again before that claim.
+            self._untidy = True
+            await self._tidy_up(before_claim=False)
         self._log.info("job %s ended: %s", claimed.id, end.value)
         return end
 
+    async def _tidy_up(self, *, before_claim: bool) -> bool:
+        """Remove the leftovers of Control and empty the work folders. True when the machine is
+        clean (`_untidy` is then off)."""
+        problems = await asyncio.to_thread(tidy, self._tidy)
+        if not problems:
+            self._untidy = False
+            return True
+        what = "; ".join(problems)
+        if before_claim:
+            self._log.error(
+                "this runner cannot be cleaned and takes no job until it can: %s "
+                "(trying again in %gs)",
+                what,
+                TIDY_RETRY_SECONDS,
+            )
+        else:
+            self._log.warning("the machine could not be cleaned after the job: %s", what)
+        return False
+
     async def _renew_if_due(self) -> None:
-        """Between jobs: a credential older than `RENEW_AFTER_SECONDS` is renewed, when it lives in
-        the configuration file (a credential from the environment belongs to whoever set it).
+        """Between jobs: a credential older than `RENEW_AFTER_SECONDS` is renewed, when it was read
+        from the configuration file. A credential from the environment belongs to whoever set it
+        (a VM that runs one job) and is never renewed, whatever the file holds.
 
         The new credential is written before it is used, so a crash cannot lose both; the app keeps
-        the old one valid until the new one is used once.
+        the old one valid until the new one is used once. Only the credential and its time are
+        written, into the file as it is: nothing the environment overrides ends up in it.
         """
         config = self._config
-        if config.credential is None or not config_path(self._environment).exists():
+        if config.credential is None or config.credential_source != CREDENTIAL_FROM_FILE:
             return
         now = self._seams.wall()
         if config.credential_renewed_at <= 0:
             # Registered before the time was recorded: record it, renew at the next due time.
-            self._config = replace(config, credential_renewed_at=now)
-            save_config(self._config, self._environment)
+            if self._write_credential(now):
+                self._config = replace(config, credential_renewed_at=now)
             return
         if now - config.credential_renewed_at < RENEW_AFTER_SECONDS:
             return
@@ -258,12 +307,25 @@ class RunnerService:
         except (Revoked, ApiUnavailable) as error:
             self._log.warning("the credential could not be renewed now (%s)", type(error).__name__)
             return
+        if not self._write_credential(now, credential):
+            # The old credential stays valid until the new one is used once: keep using it, ask
+            # again at the next job. The new one is dropped unused, so it is never lost unsaved.
+            return
         self._config = with_credential(config, credential, now)
-        save_config(self._config, self._environment)
         self._masker.add("credential", [credential])
         self._client.use_credential(credential)
         self._api.use_credential(credential)
         self._log.info("the runner's credential was renewed")
+
+    def _write_credential(self, now: float, credential: str | None = None) -> bool:
+        try:
+            update_credential(self._environment, renewed_at=now, credential=credential)
+        except (OSError, ConfigError):
+            self._log.warning(
+                "the configuration file cannot be written: the credential is left as it is"
+            )
+            return False
+        return True
 
     def _poll_pause(self) -> float:
         return POLL_SECONDS * (1 + POLL_JITTER * (self._seams.jitter() - 0.5) * 2)
@@ -278,3 +340,8 @@ class RunnerService:
             waiting.cancel()
             stopped.cancel()
             await asyncio.gather(waiting, stopped, return_exceptions=True)
+
+
+def environment_work_dir(environment: Mapping[str, str]) -> str:
+    """The work volume the job process will use (`RUNNER_IMPLEMENTER_WORK_DIR`, else `/work`)."""
+    return environment.get(IMPLEMENTER_WORK_DIR_VARIABLE) or IMPLEMENTER_WORK_DIR

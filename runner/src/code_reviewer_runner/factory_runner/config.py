@@ -56,6 +56,12 @@ MAX_LIMIT = 1_000_000
 MAX_PARALLEL_RUNS = 1
 
 
+# Where the credential of a loaded configuration came from. Only a credential of the file is the
+# runner's to renew; one from the environment belongs to whoever set it (a VM that runs one job).
+CREDENTIAL_FROM_FILE = "file"
+CREDENTIAL_FROM_ENVIRONMENT = "environment"
+
+
 class ConfigError(Exception):
     """A value is missing or unusable. The message names it, never its value."""
 
@@ -83,6 +89,9 @@ class RunnerConfig:
     runtime: str = "auto"
     # When the credential was last renewed (seconds since the epoch); 0: never recorded.
     credential_renewed_at: float = 0.0
+    # `CREDENTIAL_FROM_FILE` or `CREDENTIAL_FROM_ENVIRONMENT`; not part of what a configuration is
+    # (so two configurations with the same values are equal), only of where it was read from.
+    credential_source: str = field(default=CREDENTIAL_FROM_ENVIRONMENT, compare=False)
 
 
 def home_directory(environment: Mapping[str, str]) -> Path:
@@ -235,6 +244,7 @@ def load_config(environment: Mapping[str, str], *, require_url: bool = True) -> 
         if fresh:
             limits_raw[key] = fresh
     credential = pick("FACTORY_RUNNER_CREDENTIAL", "credential")
+    from_environment = bool(environment.get("FACTORY_RUNNER_CREDENTIAL", "").strip())
     renewed = stored.get("credentialRenewedAt")
     image = pick("FACTORY_RUNNER_AGENT_IMAGE", "agentImage")
     labels = pick("FACTORY_RUNNER_LABELS", "labels")
@@ -249,6 +259,7 @@ def load_config(environment: Mapping[str, str], *, require_url: bool = True) -> 
         agent_image=None if image in (None, "") else check_image(image),
         runtime=check_runtime(pick("FACTORY_RUNNER_RUNTIME", "runtime") or "auto"),
         credential_renewed_at=float(renewed) if isinstance(renewed, (int, float)) else 0.0,
+        credential_source=CREDENTIAL_FROM_ENVIRONMENT if from_environment else CREDENTIAL_FROM_FILE,
     )
 
 
@@ -295,15 +306,37 @@ def limits_document(limits: Limits) -> dict[str, int]:
 
 
 def save_config(config: RunnerConfig, environment: Mapping[str, str]) -> Path:
-    """Write the file: the directory 0700, the file 0600 from its first byte (a temporary file in
-    the same directory, then a rename, so a crash never leaves half a credential)."""
+    """Write the file with exactly the configuration given: the directory 0700, the file 0600 from
+    its first byte (a temporary file in the same directory, then a rename, so a crash never leaves
+    half a credential). Only `register` calls it, with a configuration made from its arguments; a
+    configuration that `load_config` returned has the environment over the file and must never be
+    written back (`update_credential` is the write of the loop)."""
+    return _write_document(config_path(environment), to_document(config))
+
+
+def update_credential(
+    environment: Mapping[str, str], *, renewed_at: float, credential: str | None = None
+) -> Path:
+    """Change the credential's time (and, with `credential`, the credential itself) in the file as
+    it is on disk; every other value, the address, name, labels and limits above all, stays as the
+    file has it and is never taken from the environment. `ConfigError` when there is no file."""
     path = config_path(environment)
+    document = _read_file(path)
+    if not document:
+        raise ConfigError("the configuration file is gone")
+    if credential is not None:
+        document["credential"] = credential
+    document["credentialRenewedAt"] = renewed_at
+    return _write_document(path, document)
+
+
+def _write_document(path: Path, document: Mapping[str, object]) -> Path:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=".config-", dir=path.parent)
     try:
         os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(to_document(config), handle, indent=2, sort_keys=True)
+            json.dump(document, handle, indent=2, sort_keys=True)
             handle.write("\n")
         os.replace(temporary, path)
     except BaseException:
