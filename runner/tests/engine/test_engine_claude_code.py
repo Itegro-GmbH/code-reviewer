@@ -130,6 +130,7 @@ def test_the_login_is_not_in_the_environment_of_the_tools_the_agent_runs(tmp_pat
     assert bubblewrap_usable() is None, bubblewrap_usable()
     printed: list[str] = []
     for number, command in enumerate(PRINTERS):
+        (tmp_path / str(number)).mkdir()
         place = Workplace(tmp_path / str(number))
         with served(
             Scripted(tool="Bash", args={"command": command, "description": "look"}),
