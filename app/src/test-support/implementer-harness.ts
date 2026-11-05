@@ -39,9 +39,12 @@ export async function startImplementerHarness(
     accepted?: FakePermissions;
     models?: ImplementerModels;
     operatorCostLimitCents?: number;
+    /** The most connections the pool of the database opens. */
+    poolMax?: number;
   } = {},
 ) {
   const h = await startWebhookHarness({
+    ...(options.poolMax === undefined ? {} : { poolMax: options.poolMax }),
     ...(options.requestTimeoutMs === undefined
       ? {}
       : { requestTimeoutMs: options.requestTimeoutMs }),
