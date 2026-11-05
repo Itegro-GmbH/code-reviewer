@@ -171,13 +171,30 @@ _HISTORY_INTRO: Final = (
 )
 
 
-def _clean(text: str) -> str:
-    """The text with its line ends made `\\n` and every control character but tab and newline
-    taken out (a text that came from outside is not a terminal)."""
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    return "".join(
-        char for char in text if char in "\n\t" or (ord(char) >= 32 and ord(char) != 127)
+def _invisible(char: str) -> bool:
+    """A character that is not shown or that changes how text is shown, so that a reader (a model
+    or a person) sees something else than what is there: the C0 and C1 controls (C1 holds U+0085),
+    DEL, the line and paragraph separators (U+2028, U+2029), the bidirectional controls (U+200E,
+    U+200F, U+202A to U+202E, U+2066 to U+2069), the zero-width characters (U+200B to U+200D,
+    U+FEFF) and the Unicode tag characters (U+E0000 to U+E007F, which spell text nobody sees)."""
+    code = ord(char)
+    return (
+        code < 32
+        or 0x7F <= code <= 0x9F
+        or code in (0x2028, 0x2029, 0xFEFF)
+        or 0x200B <= code <= 0x200F
+        or 0x202A <= code <= 0x202E
+        or 0x2066 <= code <= 0x2069
+        or 0xE0000 <= code <= 0xE007F
     )
+
+
+def _clean(text: str) -> str:
+    """The text with its line ends made `\\n` and every invisible character (`_invisible`) taken
+    out but tab and newline (a text that came from outside is not a terminal, and not a place to
+    hide words)."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return "".join(char for char in text if char in "\n\t" or not _invisible(char))
 
 
 def _fenced(title: str, text: str) -> str:

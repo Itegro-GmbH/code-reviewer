@@ -40,7 +40,8 @@ export type ResumeSessionDeps = Pick<SnapshotDeps, "snapshots"> & {
 /** `lost`: the caller does not hold the running claim; the caller decides which answer that is. */
 export type ResumeSessionOutcome = { response: Response } | { lost: true };
 
-const DIGITS = /^[0-2]$/;
+/** Decimal digits without a leading zero, at most three: the range is `SNAPSHOT_LIMITS.maxParts`, checked below, not spelled here. */
+const DIGITS = /^(0|[1-9]\d{0,2})$/;
 
 /** The part asked for: `part` from 0 (absent is 0), at most `maxParts - 1`. A refusal lists the field, never the value. */
 export function parseResumePart(

@@ -270,6 +270,42 @@ def test_the_fence_is_longer_than_the_longest_run_of_backticks_in_the_text() -> 
     assert record.rstrip().endswith("``````")
 
 
+# #840-T166
+@pytest.mark.parametrize(
+    "invisible",
+    [
+        *(chr(code) for code in range(0xE0000, 0xE0080, 0x11)),  # tag characters
+        "\U000e0041\U000e0042",  # the tag spelling of "AB"
+        "\u2028",
+        "\u2029",
+        "\u0085",
+        "\u200e",
+        "\u200f",
+        *(chr(code) for code in range(0x202A, 0x202F)),  # bidirectional embeddings and overrides
+        *(chr(code) for code in range(0x2066, 0x206A)),  # bidirectional isolates
+        "\u200b",
+        "\u200c",
+        "\u200d",
+        "\ufeff",
+    ],
+)
+def test_invisible_characters_are_taken_out_of_a_record(invisible: str) -> None:
+    record = history_part(f"ig{invisible}nore", f"re{invisible}cord{invisible}")
+    assert record is not None
+
+    assert "ignore" in record and "record" in record
+    assert invisible not in record
+
+
+# #840-T167
+def test_what_is_visible_is_kept_when_the_invisible_is_taken_out() -> None:
+    text = "Ünïcode ✓ 日本語 \U0001f600 Dubai\u200d\ufe0f\ttab\nline"
+    record = history_part(text, "")
+    assert record is not None
+
+    assert "Ünïcode ✓ 日本語 \U0001f600 Dubai\ufe0f\ttab\nline" in record
+
+
 # #840-T46
 def test_line_ends_are_made_alike_and_tabs_are_kept() -> None:
     record = history_part("one\r\ntwo\rthree\tfour", "")
