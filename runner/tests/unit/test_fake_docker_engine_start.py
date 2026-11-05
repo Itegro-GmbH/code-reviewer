@@ -9,6 +9,7 @@ on a loaded host (the flakes of #825 and #826)."""
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -58,3 +59,32 @@ def test_a_container_runs_when_its_start_is_answered_whatever_the_servers_thread
     ).start()
     assert not ended.wait(0.2), "the container was reported as ended while it runs"
     made.kill("c", exit_code=0)
+
+
+# #827-N4: an answer that cannot be sent (the client went away) leaves the container with its
+# behaviour, as the real engine's container is: running while it runs, ended when it ends
+def test_a_start_whose_answer_cannot_be_sent_still_runs_the_behaviour_of_the_container(
+    engine: tuple[FakeDockerEngine, DockerApi],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    made, api = engine
+    ran = threading.Event()
+    made.behaviour = lambda stdin, stdout, stderr: ran.set() or 0
+    real = FakeDockerEngine._reply  # pyright: ignore[reportPrivateUsage]
+
+    def broken(self: Any, connection: Any, status: int, document: Any = None) -> None:
+        if status == 204:
+            raise BrokenPipeError("the client went away")
+        real(self, connection, status, document)
+
+    monkeypatch.setattr(FakeDockerEngine, "_reply", broken)
+    container = api.create_container({"Image": IMAGE_ID}, "c")
+
+    with pytest.raises(Exception):  # noqa: B017 - the client sees a start that was not answered
+        api.start_container(container)
+
+    assert ran.wait(5.0), "the behaviour never ran"
+    deadline = time.monotonic() + 5.0
+    while made.containers[container].running and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert made.containers[container].running is False, "running with nothing behind it"

@@ -287,6 +287,12 @@ def test_a_failed_start_closes_the_memory_guard(rig: Rig, how: str) -> None:
     place = AgentContainer(2560, rig.seams(ready_seconds=0.3))
     with pytest.raises(JobError):
         place.create()
+    guard = place._guard  # pyright: ignore[reportPrivateUsage]
+    assert guard is not None
+    # A closed guard ends its thread: waited for, not guessed at by the time a look takes (the
+    # look that was running when it was closed may still write what it read).
+    guard._thread.join(timeout=5.0)  # pyright: ignore[reportPrivateUsage]
+    assert not guard._thread.is_alive(), "the guard is still looking"  # pyright: ignore[reportPrivateUsage]
     looked = place.lowest_left
     rig.set_available(300_000)  # below the floor: a guard still running would see it
     time.sleep(0.5)  # five looks of a guard
