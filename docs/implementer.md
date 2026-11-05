@@ -237,7 +237,7 @@ page).
 
 A follow-up turn is a job whose `implementer` carries `resume` (`ImplementerResume` of the contract): the number of the turn, the branches the last turn pushed with the tip it pushed (the
 session branch first when it is among them, at most 20) and the branch the agent was on when that turn ended. Only a Worker that names the claim feature `implementer_resume` gets one. The
-app does not send a `resume` yet (the follow-up API is a later step of #745); this is the runner's side.
+app does not send a `resume` yet (the follow-up API is a later step of #745); this is the runner's side. What the runner does with the stored conversation is "Follow-up turns: resume in the runner" below.
 
 The workspace (`GitWorkspace`) prepares such a turn like this:
 
@@ -608,7 +608,7 @@ the narrowed network policy, and the import of a snapshot written by another Ope
 
 A follow-up turn (#745) continues a session in a new VM, so the engine's conversation has to outlive the VM. At the end of every turn the runner takes the
 engine's session as a file and the job host uploads it to the app, which keeps **one snapshot for each session, replaced by each turn, and never deleted but by the erasure
-of the workspace** (owner's decision of 2026-11-04). Nothing reads it yet: the import on the new VM is a later step (PR 8) and the follow-up API and page another (PR 9).
+of the workspace** (owner's decision of 2026-11-04). The runner of a follow-up turn reads it back and imports it on the new VM ("Follow-up turns: resume in the runner", #840); the follow-up API and page are another step (PR 9).
 
 **Taking it** (`implementer/session_export.py`, called by `ImplementerSession` right before `ImplementerAgent.stop()`, because it is read from the running engine). Over the
 engine's HTTP API only, as the spike measured: `GET /session/<id>` and `GET /session/<id>/message` in pages of 50, newest page first with the cursor in `x-next-cursor`, put back
@@ -649,8 +649,8 @@ parts are put together in the transaction that also proves the claim (the job ro
 readable. A snapshot in one part is checked and swapped in without a row in the parts table, and the bytes of the parts are read back only by the part that completes the set. Parts that disagree, or do not make the announced file, are refused (`400`) and nothing of that upload is kept. The parts of an upload that never finished are deleted when the next upload of the session starts (or by the erasure of the workspace), not when the result is delivered: at most one unfinished upload waits for a session, which costs storage and nothing else. The call does not extend the lease,
 answers `409 RUNNER_JOB_ENDED` once the job is over, `401` for a credential that is not the job's and `400` for a job that is not a turn of the Implementer.
 
-**Who sees it.** The page never shows the snapshot, and nothing reads it yet. What it holds is what the agent read and said, with the secrets the runner knows taken out (the same ones as in the steps) and **tool outputs
-included**, which the live view does not show: a committed `.env` the agent printed is in it. The one reader will be the runner endpoint of the resume (PR 8), with the lease token of a job of the same session.
+**Who sees it.** The page never shows the snapshot. What it holds is what the agent read and said, with the secrets the runner knows taken out (the same ones as in the steps) and **tool outputs
+included**, which the live view does not show: a committed `.env` the agent printed is in it. The one reader is the resume-session call of the Worker API (#840), with the credential of a job of the same session.
 
 **Tests.** `runner/tests/unit/test_session_export.py` (the document, the redaction, the blanking, the cap and the budget), `test_snapshot_pump.py`, `test_snapshot_sender.py`, `test_process_snapshot_channel.py`,
 `test_job_loop_snapshot.py` and the sum test of the end (`test_implementer_session_parts.py`); `tests/integration/test_implementer_job.py` (the export at a normal end and at a stop, a failing export, a host that does not read);
@@ -658,6 +658,71 @@ the contract tests of both sides (`app/src/runner-api/snapshot-contract.test.ts`
 in `scoping.test.ts` and `scoped-isolation.integration.test.ts`, the erasure); and one test of the lane (`tests/lane/test_implementer_turn.py`, E20): a real turn on a real Docker daemon, the file taken from the real engine through the
 tunnel, and **`opencode import` of the pinned engine reading it** in a container with no network. Not measured on a real VM again: the budget at 4 vCPU and the upload from a VM under the narrowed network policy
 (release 2's check).
+
+## Follow-up turns: resume in the runner (#840)
+
+A follow-up turn starts in a new VM. This is what the runner does with the conversation the earlier turns stored (PR 8 of #745). The app does not send a `resume` yet (the follow-up API
+and form are PR 9), so none of this runs on the factory until then; the tests below run it.
+
+**The order.** The job host fetches the job and, when `implementer.resume.snapshot` is true, **downloads the stored session before it starts the process**: the process holds neither the lease token nor the Worker's credential.
+Then the workspace (`GitWorkspace`, the branches of #838), the setup script, the door and the agent's container as before; **`opencode import` runs in the agent's container before the engine starts**, with the engine's environment and
+in the agent's repository (the import rewrites the project and the directory to the repository it runs in); the engine starts on the imported database and the turn continues in the session the file names.
+
+**The call.** `GET /api/workers/v1/jobs/{id}/resume-session?part=n` (Worker API; the plan wrote `/api/runners/v1/...` with a lease token, but a Worker holds the per-job credential and the snapshot was put through the Worker API, so the read is there too).
+It is the upload turned round. The credential proves the claim and does not extend the lease; the session is found **from the job** (`implementer_turns`), never from anything the caller sends, so a job reads the snapshot of its own session and of no other,
+and a repository scoped to the job's workspace reads no other workspace's; only a snapshot of an **earlier** turn counts (the one a failed attempt of this very turn left is not an earlier conversation). A response body is held to 4.5 MB like a request
+body, so the file is served in the parts the upload used (3 MiB, at most three): the body is the bytes of the part and the description of the whole file (`x-snapshot-parts`, `-bytes`, `-raw-bytes`, `-sha256`, `-opencode-version`)
+is in the headers of every part, so a part is judged alone and may be fetched twice. `204` says the session has no snapshot; `409 RUNNER_JOB_ENDED`, `401` and `400` (a job that is not a turn of the Implementer, a part that is not 0 to 2 or is beyond the last) are as for the other Worker calls.
+The client (`HttpWorkerApi.resume_session`) checks every part against the description, the parts against each other, the whole against its size and digest, and everything against a total of 60 s; any other answer is a failed download.
+
+**The hand-over.** The host puts the gzip file into the directory the process starts in (`resume-session.gz`, owner-only, made new and never through a link) and names it in one variable, `RUNNER_RESUME_SESSION`: `file <size> <rawBytes> <sha256> <version>` or
+`failed <reason>` (`resume_wire.py`). The process checks it all again with its own hash. `ResumeInput` is what the turn has of its conversation: the checked snapshot or the reason it has none.
+
+**What is checked before the engine sees it** (`resume_session.py`): the size and the digest; the inflation is bounded (the announced raw size, at most the 64 MiB the export reads) and the stream must end exactly there with nothing after it; the document must be an
+object with an `info` object and a `messages` list; the session id (`info.id`, read from the file, as the spike advised) must be letters, digits, `_` and `-` of at most 128 characters, because it goes into a URL path. The bytes written into the container
+(`/etc/code-reviewer/resume.json`, 0600) are the inflated file as it is, not a re-serialisation.
+
+**The fallback, `summary_only`, for every reason.** A fresh engine session, the preface, and the record of the earlier turns as data. The reason is a stable word of the result (`implementer.resume.reason`, `ImplementerResumeResult`) and a line of the log:
+
+| Reason | When |
+| --- | --- |
+| `no_snapshot` | the app says there is none (`resume.snapshot` false, or `204`), or the job carried no `snapshot` (the release before) |
+| `download_failed` | the download failed in any way, or the host could not hand the file over (an API without the call, no word from the host) |
+| `snapshot_unreadable` | the file is not the one that was described: size, digest, gzip, bound, JSON, shape or session id |
+| `import_failed` | `opencode import` failed or did not answer, there was too little time left for it, or the engine did not know the session afterwards (`GET /session/<id>` is checked) |
+| `version_changed` | the same as `import_failed`, and the engine version that wrote the snapshot is not the one that read it (a bumped pin) |
+
+Import is tried whatever the version is; only a failure of it, after the pin moved, is `version_changed`. None of these fails the turn. The import is boxed at 60 s and at what the ledger of the turn has left; it is paid from the work window, not from the grace kept for the end of
+the turn (the sums of `test_implementer_session_parts.py` do not include it; measured 1.5 to 2.3 s, 306 to 385 MiB, the plan's box is about 25 times the largest). The imported session keeps its id: `implementer.opencode.sessionId` of the result is the first turn's.
+
+**The preface** (`preface.py`) is the first part of the first user message, marked `synthetic`, in front of the person's instruction, which is the last part, sent as given. The prompt file (the system prompt) is the same on every turn, so the provider's cache can still serve a follow-up
+that starts inside its lifetime (not promised). It is a fixed text. It says that this is a **new sandbox**; that processes, dev servers, databases, containers and images, shell state, files outside the repository and anything installed by hand are gone and only the git repository came back;
+whether the earlier conversation is above (imported) or is restored from a record that follows (summary); that the environment's setup script ran again (when the turn has one); **the branches of the repository with their heads and the one that is checked out**; which branches
+**moved** on GitHub since the last turn (someone pushed: the agent continues from the new tip) and which are **gone**; to run `git status` and `git branch`, check what runs and **start the dev tools again**; and the owner's decision (10): the agent is **warned, not stopped**, that the commits of earlier turns are
+on GitHub and that rewriting them makes the push (always without force) reject the branch.
+
+**Only checked values go into the preface.** A branch name is shown only if it matches letters, digits and `._/-` (one to 100 characters, starting with a letter or a digit); a tip only if it is 40 lower-case hex digits, shown as seven; the turn number is an integer. Any other name or tip
+is left out and counted ("N more are here", "the branch that is checked out has a name that is not shown here"), up to 20 branches. A branch name that is a sentence cannot exist (a space is not a name), and a name made of letters is one token in backticks, so nothing the agent, a member or the repository wrote reaches the
+preface as text. The record is another matter, and is kept out of it.
+
+**The summary and the digest are data, never instructions.** In the fallback only, `previousSummary` (the last turn's summary, at most 8 KiB) and `digest` (the app's record of the earlier turns, at most 16 KiB; both counted in UTF-8 bytes by the runner) go into a **part of their own** (also `synthetic`), behind a fixed sentence
+that says what they are, each inside a fence longer than any run of backticks in the text, so the text cannot close it; control characters other than tab and newline are taken out and line ends are made alike. An imported turn gets no record even if the app sent one.
+
+**The result.** `implementer.resume` is `{"mode": "imported"}` or `{"mode": "summary_only", "reason": <word>}`, present on a follow-up turn that got as far as the engine's start (a turn that failed before it has none, and neither has a first turn). The app takes and keeps it with the rest of the
+result (`runner-api/requests.ts`; closed, the reason is one of the five words, `reason` only with `summary_only`). The Runs page does not show it yet (it is in the stored result): that is a follow-up, with the form's hint (PR 9).
+
+**A large history can cost the first call.** The model door reserves the cost of a call before it makes it. A follow-up that imported a history so long that the reservation of its first call alone is over the cost limit is refused **before any call reaches the provider** (measured: 18.4 MB at 5 USD, `cost_limit_reached`).
+The turn ends with the code of any cost limit and with the detail "the cost limit of the turn was reached before the first model call: the imported conversation of the earlier turns alone costs more than the limit, because the first call reads all of it again", so the person can tell it from a turn that did work. The hint on the
+form (PR 9) is where to say it before the turn starts.
+
+**Tests.** `test_implementer_preface.py` (only checked values; hostile names, tips and records; the parts), `test_implementer_resume_session.py` (every way the file can be wrong, and the state), `test_implementer_resume_agent.py` (the import, its order, its time box, and each reason),
+`test_resume_download.py` (the client against a server on loopback), `test_job_loop_resume.py` and `test_process_files.py` (the host and the file in the process's directory), `test_implementer_job.py` (the follow-up turn through the entry point: the parts of the first message, the result, the cost-limit
+detail, the old fields only), `test_resume_contract.py`, `resume-session.integration.test.ts` (Postgres: the parts, 204, another session, another workspace, a stale credential, an ended job, the lease not extended, a part that does not exist), `resume-session-contract.test.ts`
+and the lane (`tests/lane/test_implementer_turn.py`, E21 to E23): **two turns on a real Docker daemon with the strict scripted provider**. The second turn's first request carries the first turn's instruction, its tool call and its closing text; a corrupt file and a file the real `opencode import` refuses
+(a required key of the first message taken out: the pinned engine answers `Missing key`/`Expected Message` and exits 1, checked on the pin) both fall back and finish the turn.
+
+**Not done here.** The follow-up API, the digest and the form (PR 9); the Runs page's line for `resume` and the form's hint about the cost (PR 9, or a follow-up of this one); a real model replaying a history (not measured); the time of the download and the import on a VM under the narrowed network policy
+(release 2's check: the app host has to be reachable for the new call as for the steps and the snapshot).
 
 ## The memory of the readers and the OS
 
