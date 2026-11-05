@@ -49,7 +49,7 @@ def failing(runtime: str) -> SelfTestResult:
     return SelfTestResult((Check("agent-container", False, "did not start"),), runtime)
 
 
-# -- the memory -------------------------------------------------------------------------------------
+# -- the memory --------------------------------------------------------------------------------
 
 
 def test_the_agent_gets_sixty_percent_of_the_machine_up_to_sixteen_gib() -> None:
@@ -79,7 +79,7 @@ def test_the_cpu_limit_reaches_the_job_process_as_a_variable() -> None:
     assert agent_environment(Limits()) == {}
 
 
-# -- the runtime ------------------------------------------------------------------------------------
+# -- the runtime -------------------------------------------------------------------------------
 
 
 def test_auto_tries_sysbox_first_when_the_daemon_has_it_and_falls_back_to_runc() -> None:
@@ -99,7 +99,7 @@ def test_a_daemon_that_cannot_list_its_runtimes_is_taken_for_one_without_sysbox(
     assert candidate_runtimes("auto", broken) == ("runc",)
 
 
-# -- the references ---------------------------------------------------------------------------------
+# -- the references ----------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -128,7 +128,7 @@ def test_the_agent_image_baked_into_the_runner_image_is_read_from_its_file(tmp_p
     assert baked_agent_image(tmp_path / "missing.json") is None
 
 
-# -- the environment of the job processes ---------------------------------------------------------------
+# -- the environment of the job processes ------------------------------------------------------
 
 
 def test_the_job_environment_names_the_proof_the_memory_and_the_runtime() -> None:
@@ -149,7 +149,7 @@ def test_the_job_environment_names_the_proof_the_memory_and_the_runtime() -> Non
     assert "FACTORY_RUNNER_CREDENTIAL" not in environment  # the credential never leaves the loop
 
 
-# -- the announcement ---------------------------------------------------------------------------------
+# -- the announcement --------------------------------------------------------------------------
 
 
 def test_the_announcement_says_ready_and_the_capabilities_only_when_they_were_proven() -> None:
@@ -174,7 +174,7 @@ def test_the_announced_limits_are_the_configured_ones_or_what_the_machine_gives(
     assert default.limits["memoryMb"] == 5000 and default.limits["cpus"] >= 1
 
 
-# -- prepare -----------------------------------------------------------------------------------------
+# -- prepare -----------------------------------------------------------------------------------
 
 
 class Daemon:

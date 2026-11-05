@@ -13,14 +13,14 @@ from pathlib import Path
 import pytest
 
 from code_reviewer_runner.factory_runner import canned_provider
-from code_reviewer_runner.factory_runner.canned_provider import ANSWER, USAGE, _Handler
+from code_reviewer_runner.factory_runner.canned_provider import ANSWER, USAGE, Handler
 
 pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
 def url() -> Iterator[str]:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{server.server_address[1]}/v1/chat/completions"
     server.shutdown()

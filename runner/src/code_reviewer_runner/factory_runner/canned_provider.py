@@ -22,7 +22,7 @@ USAGE = {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
 _CHUNK = {"id": "canned-1", "object": "chat.completion.chunk", "created": 1, "model": "canned"}
 
 
-class _Handler(BaseHTTPRequestHandler):
+class Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         return
 
@@ -81,7 +81,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def serve(port: int) -> None:
-    ThreadingHTTPServer(("127.0.0.1", port), _Handler).serve_forever()
+    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
 
 
 if __name__ == "__main__":

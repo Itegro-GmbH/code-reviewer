@@ -193,8 +193,14 @@ def test_a_machine_that_holds_the_base_passes_every_check(rig: Rig) -> None:
 
     assert result.base_ok and failed(result) is None
     assert names(result) == [
-        "docker", "work-volume", "memory", "agent-image", "agent-container", "opencode", "canned-turn",
-    ]  # fmt: skip
+        "docker",
+        "work-volume",
+        "memory",
+        "agent-image",
+        "agent-container",
+        "opencode",
+        "canned-turn",
+    ]
     assert result.opencode_version == "1.19.0"
     assert result.capabilities == ()  # no Sysbox: no `agent-docker`
     assert "nested" not in rig.commands.log
@@ -353,7 +359,7 @@ def test_a_turn_whose_engine_errors_fails_even_when_the_events_look_right(rig: R
     assert failed(rig.run()) == "canned-turn"
 
 
-# -- reading the events of a turn -------------------------------------------------------------------
+# -- reading the events of a turn --------------------------------------------------------------
 
 
 def test_the_events_of_a_real_turn_pass() -> None:

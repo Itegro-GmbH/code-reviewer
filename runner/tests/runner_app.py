@@ -2,10 +2,10 @@
 
 """A fake App for the Factory-Runner (#854, R1b), on the loopback. Not a test file.
 
-It speaks the registration and the runner API as the app does, from the shared contract files: every
-request body the runner sends is checked against the contract (`contracts/runner-registration.v1.json`
-and `contracts/runner-api.v1.json`) and a body that does not fit is answered 400 and kept in
-`violations`, so a test asserts there are none. It knows the rules the runner depends on: the
+It speaks the registration and the runner API as the app does, from the shared contract files:
+every request body the runner sends is checked against the contracts
+(`contracts/runner-registration.v1.json` and `contracts/runner-api.v1.json`), and a body that
+does not fit is answered 400 and kept in `violations`, so a test asserts there are none. It knows the rules the runner depends on: the
 registration token is good once, every other call needs a live credential (`401 RUNNER_UNAUTHORIZED`
 once it is revoked), a renewed credential is valid beside the previous one until it is used, a claim
 below the minimum base version is `426`, and a call about a job needs the lease token of the claim.
@@ -23,12 +23,19 @@ from urllib.parse import urlsplit
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 
-CONTRACTS = Path(__file__).resolve().parents[3] / "contracts"
+CONTRACTS = Path(__file__).resolve().parents[2] / "contracts"
 _REGISTRATION = json.loads((CONTRACTS / "runner-registration.v1.json").read_text())
 _RUNNER_API = json.loads((CONTRACTS / "runner-api.v1.json").read_text())
-_REGISTRY: Registry[Any] = Registry()
-for _schema in (_REGISTRATION, _RUNNER_API):
-    _REGISTRY = _REGISTRY.with_resource(_schema["$id"], Resource.from_contents(_schema))
+
+
+def _registry() -> Registry[Any]:
+    registry: Registry[Any] = Registry()
+    for schema in (_REGISTRATION, _RUNNER_API):
+        registry = registry.with_resource(schema["$id"], Resource.from_contents(schema))
+    return registry
+
+
+_REGISTRY = _registry()
 
 
 def _validator(schema: dict[str, Any], definition: str) -> Draft202012Validator:
@@ -73,20 +80,22 @@ class QueuedJob:
 
 @dataclass
 class FakeRunnerApp:
-    """Start with `start()`, stop with `stop()`; the state is plain attributes a test reads and sets."""
+    """Start with `start()`, stop with `stop()`; the state is plain attributes a test sets."""
 
-    registration_tokens: set[str] = field(default_factory=set)
+    registration_tokens: set[str] = field(default_factory=lambda: set[str]())
     min_base_version: str | None = None
-    credentials: dict[str, str] = field(default_factory=dict)  # credential -> runner id
-    revoked: set[str] = field(default_factory=set)  # runner ids
-    runner_base_version: dict[str, str] = field(default_factory=dict)
-    announcements: list[dict[str, Any]] = field(default_factory=list)
-    jobs: list[QueuedJob] = field(default_factory=list)
-    requests: list[Request] = field(default_factory=list)
-    violations: list[str] = field(default_factory=list)
-    heartbeats: list[str] = field(default_factory=list)
-    completions: list[dict[str, Any]] = field(default_factory=list)
-    steps: list[dict[str, Any]] = field(default_factory=list)
+    credentials: dict[str, str] = field(
+        default_factory=lambda: dict[str, str]()
+    )  # credential -> runner id
+    revoked: set[str] = field(default_factory=lambda: set[str]())  # runner ids
+    runner_base_version: dict[str, str] = field(default_factory=lambda: dict[str, str]())
+    announcements: list[dict[str, Any]] = field(default_factory=lambda: list[dict[str, Any]]())
+    jobs: list[QueuedJob] = field(default_factory=lambda: list[QueuedJob]())
+    requests: list[Request] = field(default_factory=lambda: list[Request]())
+    violations: list[str] = field(default_factory=lambda: list[str]())
+    heartbeats: list[str] = field(default_factory=lambda: list[str]())
+    completions: list[dict[str, Any]] = field(default_factory=lambda: list[dict[str, Any]]())
+    steps: list[dict[str, Any]] = field(default_factory=lambda: list[dict[str, Any]]())
     # The claim ends the job it hands out with this status when the runner completes it.
     complete_status: str = "succeeded"
     _server: ThreadingHTTPServer | None = None
@@ -160,7 +169,7 @@ class FakeRunnerApp:
         return status, {"error": {"code": code, "message": "fake", **extra}}
 
     def _check(self, key: str | tuple[str, str], body: Any) -> bool:
-        errors = [e.message for e in _VALIDATORS[key].iter_errors(body)]
+        errors = [e.message for e in _VALIDATORS[key].iter_errors(body)]  # pyright: ignore[reportUnknownMemberType]
         if errors:
             self.violations.append(f"{key}: {errors[0][:120]}")
         return not errors

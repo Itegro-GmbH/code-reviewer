@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""The loop of the Factory-Runner (#854, R1b) with doubles: what it announces, what a claim's failure
-means, the once mode a VM runs, the renewal of the credential and the stop."""
+"""The loop of the Factory-Runner (#854, R1b) with doubles: what it announces, what a claim's
+failure means, the once mode a VM runs, the renewal of the credential and the stop."""
 
 import asyncio
 import logging
@@ -247,7 +247,7 @@ def test_the_job_process_never_sees_the_credential(tmp_path: Path) -> None:
     assert CREDENTIAL.encode() not in spec.stdin
 
 
-# -- what a claim's failure means -----------------------------------------------------------------
+# -- what a claim's failure means --------------------------------------------------------------
 
 
 def test_a_revoked_runner_stops_for_good_with_its_own_exit_code(tmp_path: Path) -> None:
@@ -306,7 +306,7 @@ def test_a_failed_announcement_does_not_stop_the_runner(tmp_path: Path) -> None:
     assert rig.api.completions
 
 
-# -- ready or not -----------------------------------------------------------------------------------
+# -- ready or not ------------------------------------------------------------------------------
 
 
 def test_a_runner_whose_base_is_not_proven_announces_and_takes_no_job(
@@ -323,7 +323,7 @@ def test_a_runner_whose_base_is_not_proven_announces_and_takes_no_job(
     assert "agent-container" in caplog.text
 
 
-# -- the credential -------------------------------------------------------------------------------
+# -- the credential ----------------------------------------------------------------------------
 
 
 def test_an_old_credential_in_the_file_is_renewed_between_jobs_and_saved_first(
@@ -378,7 +378,7 @@ def test_the_credential_is_masked_in_the_log(tmp_path: Path) -> None:
     assert CREDENTIAL not in rig.service._masker.redact(f"x {CREDENTIAL} y")  # pyright: ignore[reportPrivateUsage]
 
 
-# -- the stop ---------------------------------------------------------------------------------------
+# -- the stop ----------------------------------------------------------------------------------
 
 
 def test_a_stop_gives_the_running_job_back_and_ends_the_loop(tmp_path: Path) -> None:

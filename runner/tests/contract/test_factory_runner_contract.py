@@ -18,8 +18,6 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
-from runner_app import EXAMPLE_JOB, FakeRunnerApp
-
 from code_reviewer_runner.factory_runner.app_client import (
     Announcement,
     AppClient,
@@ -34,6 +32,7 @@ from code_reviewer_runner.factory_runner.selftest import Check, SelfTestResult
 from code_reviewer_runner.job import ImplementerInput, parse_runnable_job
 from code_reviewer_runner.job_loop.api import LeaseLost
 from code_reviewer_runner.job_loop.worker_api import WORKER_FEATURES
+from runner_app import EXAMPLE_JOB, FakeRunnerApp
 
 pytestmark = pytest.mark.contract
 

@@ -5,7 +5,7 @@
 the heartbeat and delivers the result with the lease token; a revoked runner stops.
 
 What is a double: the App (`runner_app.py`, which holds every body to the contracts), the machine
-(`prepare` is replaced, since this level has no Docker: the self-test has its own tests and its lane),
+(`prepare` is replaced, since this level has no Docker: the self-test has its own tests and lane),
 and the job process (a script that prints the result a finished turn prints). The turn itself, the
 containers and the model, are the lane's (`tests/lane`).
 """
@@ -17,10 +17,6 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from runner_app import FakeRunnerApp
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "unit"))
-from test_implementer_job_host import report  # noqa: E402
 
 from code_reviewer_runner.factory_runner.app_client import Announcement
 from code_reviewer_runner.factory_runner.base import (
@@ -35,10 +31,28 @@ from code_reviewer_runner.factory_runner.config import RunnerConfig
 from code_reviewer_runner.factory_runner.prepare import Prepared
 from code_reviewer_runner.factory_runner.selftest import Check, SelfTestResult
 from code_reviewer_runner.job_loop.settings import WorkerSettings
+from runner_app import FakeRunnerApp
 
 pytestmark = pytest.mark.integration
 
 JOB = "00000000-0000-4000-8000-0000000000aa"
+HEAD = "9" * 40
+
+
+def report() -> dict[str, object]:
+    """What a finished turn reports (`ImplementerResult` of the contract)."""
+    return {
+        "baseCommit": "1" * 40,
+        "headCommit": HEAD,
+        "pushed": True,
+        "branches": [{"name": "work/b", "head": HEAD, "result": "pushed", "reason": None}],
+        "commits": [{"sha": HEAD, "subject": "Add it"}],
+        "filesChanged": [{"path": "a.ts", "status": "added"}],
+        "summary": "Done.",
+        "opencode": {"sessionId": "ses_1", "version": "1.19.0"},
+    }
+
+
 STAND_IN = textwrap.dedent(
     """
     import json, os, sys, time
@@ -80,7 +94,8 @@ class Machine:
         settings = WorkerSettings(
             engines=("implementer",),
             job_command=(
-                sys.executable, "-c", STAND_IN, str(self.sleep), str(self.seen), json.dumps(report()),
+                *(sys.executable, "-c", STAND_IN),
+                *(str(self.sleep), str(self.seen), json.dumps(report())),
             ),
             job_timeout=60.0,
             terminate_grace=2.0,
