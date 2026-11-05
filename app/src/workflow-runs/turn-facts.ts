@@ -134,6 +134,20 @@ function pushFacts(ended: EndedTurn): Record<string, unknown> {
 }
 
 /**
+ * #891: the codes with which a claimed job a member stopped ends when its Worker never got going: it could not be started, or it was
+ * given back before it had the input of the job (the release reasons of the claim, `CLAIM_RELEASE_REASONS`, but `worker_exited`, after
+ * which the turn may have run). Billing frees these; the run's budget does too.
+ */
+const NEVER_RAN_CODES: ReadonlySet<string> = new Set([
+  "launch_failed",
+  "claim_failed",
+  "git_access_unavailable",
+  "pull_request_unavailable",
+  "price_check_failed",
+  "provider_pin_check_failed",
+]);
+
+/**
  * `unknownCostMicroUsd` is the cap the turn ran under. A turn whose cost the runner did not report is charged by its token counts at
  * the catalog price (never above the cap) when both are there, and at the whole cap when not, so that a run whose cost cannot be seen
  * never spends more than its budget.
@@ -156,7 +170,9 @@ export function outcomeOfTurn(
   // at no cost, not at the cap. One that ran and reported nothing may have used it, and falls through to the cap below.
   if (
     ended.jobStatus === "cancelled" &&
-    (!ended.jobClaimed || ended.jobErrorCode === "launch_failed") &&
+    (!ended.jobClaimed ||
+      (ended.jobErrorCode !== null &&
+        NEVER_RAN_CODES.has(ended.jobErrorCode))) &&
     costOfResult(ended.jobResult) === null
   )
     return {

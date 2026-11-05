@@ -314,6 +314,13 @@ describe("the outcome of a turn", () => {
       { jobClaimed: false, jobErrorCode: "cancelled", jobResult: null },
       // The Worker could not be started: the job ends cancelled with the reason, free.
       { jobClaimed: true, jobErrorCode: "launch_failed", jobResult: null },
+      // It never got the input of the job: given back before the start, free like the launch.
+      { jobClaimed: true, jobErrorCode: "claim_failed", jobResult: null },
+      {
+        jobClaimed: true,
+        jobErrorCode: "git_access_unavailable",
+        jobResult: null,
+      },
     ])
       expect(
         outcomeOfTurn(ended({ jobStatus: "cancelled", ...patch }), 777_000),
