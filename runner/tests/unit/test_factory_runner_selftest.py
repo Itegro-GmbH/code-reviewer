@@ -56,6 +56,8 @@ class FakeDocker:
         self.created: list[tuple[dict[str, Any], str]] = []
         self.removed: list[str] = []
         self.pulled: list[str] = []
+        # The digests the daemon knows the image by (`RepoDigests`, as `name@sha256:...`).
+        self.repo_digests: list[str] = []
 
     def ping(self) -> bool:
         return self.answers
@@ -74,7 +76,7 @@ class FakeDocker:
     def inspect_image(self, _ref: str) -> dict[str, Any]:
         if not self.image:
             raise DockerError(404, "no such image")
-        return {"Id": "sha256:" + "a" * 64}
+        return {"Id": "sha256:" + "a" * 64, "RepoDigests": list(self.repo_digests)}
 
     def create_container(self, document: dict[str, Any], name: str) -> str:
         self.created.append((document, name))
@@ -310,7 +312,7 @@ def test_a_missing_agent_image_is_pulled_from_the_reference_and_checked_again(ri
     result = rig.run(image="ghcr.io/itegro-gmbh/agent:1.0", pull=pull)
 
     assert pulled == ["ghcr.io/itegro-gmbh/agent:1.0"]
-    assert result.base_ok and result.checks[3].detail == "pulled"
+    assert result.base_ok and result.checks[3].detail.startswith("pulled")
 
 
 def test_a_missing_agent_image_without_a_reference_says_what_to_set(rig: Rig) -> None:
@@ -386,3 +388,109 @@ def test_the_pinned_version_is_read_from_the_pin_file(tmp_path: Path) -> None:
     pin.write_text("{")
     assert pinned_opencode_version(pin) is None
     assert pinned_opencode_version(tmp_path / "missing.json") is None
+
+
+# -- a stale agent image (S3) ------------------------------------------------------------------
+
+PINNED = "sha256:" + "b" * 64
+OLD = "sha256:" + "c" * 64
+BY_DIGEST = f"ghcr.io/itegro-gmbh/agent@{PINNED}"
+
+
+def pulling(rig: Rig, *, version: str = "1.19.0", digest: str = PINNED) -> list[str]:
+    """A pull that gives the daemon the pinned image: the engine in it reports `version`."""
+    pulled: list[str] = []
+
+    def pull(api: FakeDocker, reference: str) -> None:
+        pulled.append(reference)
+        api.repo_digests = [f"ghcr.io/itegro-gmbh/agent@{digest}"]
+        rig.commands.version = version
+
+    rig.pull = pull  # type: ignore[attr-defined]
+    return pulled
+
+
+def test_an_image_with_another_digest_than_the_pin_is_replaced(rig: Rig) -> None:
+    rig.docker.repo_digests = [f"ghcr.io/itegro-gmbh/agent@{OLD}"]
+    pulled = pulling(rig)
+
+    result = rig.run(image=BY_DIGEST, pull=rig.pull)  # type: ignore[attr-defined]
+
+    assert pulled == [BY_DIGEST]
+    assert result.base_ok
+    assert "replaced" in result.checks[3].detail
+    assert "digest" not in result.checks[3].detail.replace("not a digest", "")  # no warning
+
+
+def test_an_image_with_the_pinned_digest_is_not_pulled_again(rig: Rig) -> None:
+    rig.docker.repo_digests = [f"mirror.example/agent@{PINNED}"]  # a mirror: the digest decides
+    pulled = pulling(rig)
+
+    result = rig.run(image=BY_DIGEST, pull=rig.pull)  # type: ignore[attr-defined]
+
+    assert pulled == [] and result.base_ok
+    assert result.checks[3].detail == ""
+
+
+def test_a_stale_image_that_cannot_be_replaced_says_why_the_runner_is_not_ready(rig: Rig) -> None:
+    rig.docker.repo_digests = [f"ghcr.io/itegro-gmbh/agent@{OLD}"]
+
+    result = rig.run(image=BY_DIGEST, pull=None)
+
+    assert failed(result) == "agent-image"
+    assert "not the one this runner pins" in result.checks[-1].detail
+    assert "FACTORY_RUNNER_AGENT_IMAGE" in result.checks[-1].detail
+
+
+def test_a_pull_that_fails_for_a_stale_image_names_both_causes(rig: Rig) -> None:
+    rig.docker.repo_digests = [f"ghcr.io/itegro-gmbh/agent@{OLD}"]
+
+    def pull(_api: Any, _reference: str) -> None:
+        raise DockerError(500, "denied")
+
+    result = rig.run(image=BY_DIGEST, pull=pull)
+
+    assert failed(result) == "agent-image"
+    detail = result.checks[-1].detail
+    assert "not the one this runner pins" in detail and "could not be pulled" in detail
+
+
+def test_an_engine_older_than_the_pin_in_a_tagged_image_is_pulled_once_and_checked_again(
+    rig: Rig,
+) -> None:
+    rig.commands.version = "1.18.0"  # the old image in the daemon
+    pulled = pulling(rig, version="1.19.0")
+
+    result = rig.run(image="ghcr.io/itegro-gmbh/agent:1.0", pull=rig.pull)  # type: ignore[attr-defined]
+
+    assert pulled == ["ghcr.io/itegro-gmbh/agent:1.0"]
+    assert result.base_ok and result.opencode_version == "1.19.0"
+    # The stale container and its failed check are not in the result; the new ones are.
+    assert names(result).count("opencode") == 1 and names(result).count("agent-container") == 1
+    assert rig.docker.removed.count("cid") == 2  # the stale container was removed
+
+
+def test_an_engine_that_is_still_wrong_after_the_pull_fails_with_the_versions(rig: Rig) -> None:
+    rig.commands.version = "1.18.0"
+    pulled = pulling(rig, version="1.18.0")  # the registry's image is stale, too
+
+    result = rig.run(image="ghcr.io/itegro-gmbh/agent:1.0", pull=rig.pull)  # type: ignore[attr-defined]
+
+    assert len(pulled) == 1  # once, not in a loop
+    assert failed(result) == "opencode"
+    assert "1.18.0" in result.checks[-1].detail and "1.19.0" in result.checks[-1].detail
+
+
+def test_a_tag_instead_of_a_digest_is_a_warning_not_a_failure(rig: Rig) -> None:
+    result = rig.run(image="ghcr.io/itegro-gmbh/agent:1.0")
+
+    assert result.base_ok
+    assert "warning" in result.checks[3].detail and "digest" in result.checks[3].detail
+
+
+def test_a_digest_reference_gives_no_warning(rig: Rig) -> None:
+    rig.docker.repo_digests = [f"ghcr.io/itegro-gmbh/agent@{PINNED}"]
+
+    result = rig.run(image=BY_DIGEST)
+
+    assert result.checks[3].detail == ""

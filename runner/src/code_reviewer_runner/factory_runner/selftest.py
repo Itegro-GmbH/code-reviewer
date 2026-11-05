@@ -33,7 +33,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from code_reviewer_runner.factory_runner import canned_provider
 from code_reviewer_runner.factory_runner.config import Limits
@@ -132,6 +132,12 @@ _NESTED_SCRIPT: Final = (
     "docker run --rm --network none selftest-probe /usr/local/bin/docker-init --version; "
     "docker rmi -f selftest-probe >/dev/null 2>&1 || true"
 )
+_DIGEST: Final = re.compile(r"sha256:[0-9a-f]{64}")
+_STALE_IMAGE: Final = (
+    "the agent image in the daemon is not the one this runner pins (its digest differs) "
+    "and this self-test cannot pull a new one; pull the pinned image or name it with "
+    "FACTORY_RUNNER_AGENT_IMAGE"
+)
 _VERSION: Final = re.compile(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?")
 
 
@@ -191,6 +197,10 @@ class _Run:
     api: DockerApi
     seams: SelfTestSeams
     checks: list[Check] = field(default_factory=lambda: list[Check]())
+    # The agent image was pulled by this self-test (it is not pulled twice), and OpenCode in the
+    # agent's container was not the pinned version (an image that is older than this runner).
+    pulled: bool = False
+    stale: bool = False
 
     def record(self, name: str, ok: bool, detail: str = "") -> bool:
         self.checks.append(Check(name, ok, detail))
@@ -224,15 +234,31 @@ def run_selftest(
     version = None
     memory = _memory(run, limits, meminfo) if _daemon(run, runtime) and _work_volume(run) else None
     if memory and _image(run, agent_image, pull):
-        container = _start(run, runtime, memory, limits.cpus)
-        if container is not None:
-            try:
-                version = _opencode(run, container)
-                if version is not None and _turn(run, container) and runtime == AGENT_RUNTIME:
-                    _nested(run, container)
-            finally:
-                _remove(api, container)
+        version = _agent(run, runtime, memory, limits.cpus)
+        if run.stale and not run.pulled and agent_image is not None and pull is not None:
+            # An image of the right name that holds another OpenCode: replace it by the one the
+            # reference names, once, and look again.
+            del run.checks[-2:]  # the container and the opencode check of the stale image
+            run.stale = False
+            if _pull(run, agent_image, pull, "the agent image is not the one this runner pins"):
+                version = _agent(run, runtime, memory, limits.cpus)
     return SelfTestResult(tuple(run.checks), runtime, version, seams.clock() - started)
+
+
+def _agent(run: _Run, runtime: str, memory: int, cpus: int | None) -> str | None:
+    """The agent's container, the engine in it, the canned turn, the nested Docker. The version
+    OpenCode reported, if it did."""
+    container = _start(run, runtime, memory, cpus)
+    if container is None:
+        return None
+    version = None
+    try:
+        version = _opencode(run, container)
+        if version is not None and _turn(run, container) and runtime == AGENT_RUNTIME:
+            _nested(run, container)
+    finally:
+        _remove(run.api, container)
+    return version
 
 
 # -- the checks ------------------------------------------------------------------------------------
@@ -275,12 +301,33 @@ def _memory(run: _Run, limits: Limits, meminfo: str) -> int | None:
     return memory
 
 
+def pinned_digest(reference: str | None) -> str | None:
+    """`sha256:...` of a reference that names its image by digest."""
+    if reference is None or "@" not in reference:
+        return None
+    digest = reference.partition("@")[2]
+    return digest if _DIGEST.fullmatch(digest) else None
+
+
 def _image(run: _Run, reference: str | None, pull: Callable[[DockerApi, str], None] | None) -> bool:
+    """The agent image is in the daemon under the runner's name, and is the one the reference pins.
+
+    A reference by digest is compared with the digests the daemon knows the image by: an image of
+    the right name with another digest is replaced (pulled and named again). A reference by tag
+    cannot be compared; it passes with a warning, and `_opencode` still holds the engine in it to
+    the version this runner pins (a mismatch there pulls once, too)."""
+    warning = _digest_warning(reference)
     try:
-        run.api.inspect_image(run.seams.image)
-        return run.record(CHECK_IMAGE, True)
+        present: dict[str, Any] | None = run.api.inspect_image(run.seams.image)
     except DockerError:
-        pass
+        present = None
+    if present is not None:
+        digest = pinned_digest(reference)
+        if digest is None or digest in _digests(present):
+            return run.record(CHECK_IMAGE, True, warning)
+        if reference is None or pull is None:
+            return run.record(CHECK_IMAGE, False, _STALE_IMAGE)
+        return _pull(run, reference, pull, "the agent image is not the one this runner pins")
     if reference is None or pull is None:
         return run.record(
             CHECK_IMAGE,
@@ -288,12 +335,45 @@ def _image(run: _Run, reference: str | None, pull: Callable[[DockerApi, str], No
             "the agent image is not in the daemon and no image reference is configured "
             "(FACTORY_RUNNER_AGENT_IMAGE)",
         )
+    return _pull(run, reference, pull, None)
+
+
+def _pull(
+    run: _Run, reference: str, pull: Callable[[DockerApi, str], None], replacing: str | None
+) -> bool:
+    """Pull `reference` and name it the runner's image. `replacing`: why an image that is there
+    is replaced. Records the check."""
     try:
         pull(run.api, reference)
         run.api.inspect_image(run.seams.image)
     except DockerError:
-        return run.record(CHECK_IMAGE, False, "the agent image could not be pulled")
-    return run.record(CHECK_IMAGE, True, "pulled")
+        what = "the agent image could not be pulled"
+        return run.record(CHECK_IMAGE, False, f"{replacing}, and {what}" if replacing else what)
+    run.pulled = True
+    detail = "replaced: " + replacing if replacing else "pulled"
+    warning = _digest_warning(reference)
+    return run.record(CHECK_IMAGE, True, f"{detail}; {warning}" if warning else detail)
+
+
+def _digests(image: dict[str, Any]) -> set[str]:
+    """The digests the daemon knows an image by (`RepoDigests`: `name@sha256:...`)."""
+    listed = image.get("RepoDigests")
+    if not isinstance(listed, list):
+        return set()
+    return {
+        entry.partition("@")[2]
+        for entry in cast("list[object]", listed)
+        if isinstance(entry, str) and "@" in entry
+    }
+
+
+def _digest_warning(reference: str | None) -> str:
+    if reference is None or pinned_digest(reference) is not None:
+        return ""
+    return (
+        "warning: the agent image reference names a tag, not a digest "
+        "(@sha256:...): the image behind a tag can change, and this runner cannot tell"
+    )
 
 
 def _throwaway(image: str, runtime: str, memory_mb: int, cpus: int | None) -> dict[str, object]:
@@ -351,7 +431,14 @@ def _opencode(run: _Run, container: str) -> str | None:
         run.record(CHECK_OPENCODE, False, "OpenCode did not report a version in the agent's image")
         return None
     if expected is not None and found != expected:
-        run.record(CHECK_OPENCODE, False, f"OpenCode reports {found}, the runner pins {expected}")
+        run.stale = True
+        run.record(
+            CHECK_OPENCODE,
+            False,
+            f"OpenCode reports {found}, the runner pins {expected}: the agent image "
+            f"{run.seams.image} in the daemon is older or newer than this runner "
+            "(name the right one with FACTORY_RUNNER_AGENT_IMAGE, ideally by digest)",
+        )
         return None
     run.record(CHECK_OPENCODE, True, found)
     return found
