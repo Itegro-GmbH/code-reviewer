@@ -197,6 +197,11 @@ export type ImplementerRowSource = {
   branch: string;
   /** The url of the repository as the repositories table holds it. */
   repositoryUrl: string;
+  /**
+   * Whether the profile the turn ran with may push (#843); absent for a turn without a profile. A turn that may not push never
+   * pushed its branch, so the page does not link to it.
+   */
+  canPush?: boolean;
 };
 
 /** And for the detail. */
@@ -584,7 +589,10 @@ function implementerRowView(
   if (source === null) return { branch: null, branchUrl: null };
   return {
     branch: display(cleanTaskLine(head(source.branch, 1000))),
-    branchUrl: githubBranchUrl(source.repositoryUrl, source.branch),
+    branchUrl:
+      source.canPush === false
+        ? null
+        : githubBranchUrl(source.repositoryUrl, source.branch),
   };
 }
 
