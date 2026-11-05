@@ -202,6 +202,18 @@ describe("a profile document", () => {
     ]);
   });
 
+  // #843-T137
+  it("refuses instructions that are only white space: the text would be a heading over nothing", () => {
+    for (const text of ["   ", "\n", " \t\r\n "])
+      expect(problems(profile({ instructions: text }))).toEqual([
+        ["/instructions", "invalid_value"],
+      ]);
+    expect(validateProfile(profile({ instructions: "" })).valid).toBe(true);
+    expect(validateProfile(profile({ instructions: " a " })).valid).toBe(true);
+    // The description may be anything the text rules allow.
+    expect(validateProfile(profile({ description: "  " })).valid).toBe(true);
+  });
+
   // #843-T11
   it("refuses control characters and lone surrogates in the texts, but not tabs and line breaks", () => {
     expect(validateProfile(profile({ instructions: "a\r\nb\tc" })).valid).toBe(

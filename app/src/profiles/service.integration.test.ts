@@ -266,6 +266,19 @@ describe("the profile service", () => {
     expect((await a.create(USER, REVIEWER)).name).toBe("reviewer");
   });
 
+  // #843-T138
+  it("answers PROFILE_ARCHIVED for an update of an archived profile before it reads the body", async () => {
+    const { a } = await setup();
+    const created = await a.create(USER, REVIEWER);
+    await a.archive(created.id);
+
+    const failure = await failureOf(
+      a.update(USER, created.id, { name: 5, junk: true }),
+    );
+
+    expect(failure.code).toBe("PROFILE_ARCHIVED");
+  });
+
   // #843-T90
   it("holds a workspace to its maximum of archived profiles", async () => {
     const { serviceFor, idA } = await setup();

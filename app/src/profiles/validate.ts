@@ -188,6 +188,16 @@ export function validateProfile(body: unknown): ProfileCheck {
       );
       return undefined;
     }
+    if (key === "instructions" && value !== "" && value.trim() === "") {
+      report(
+        issue(
+          pointer("", key),
+          "invalid_value",
+          `The field "instructions" holds only white space. Write the instructions, or leave the field out.`,
+        ),
+      );
+      return undefined;
+    }
     return value;
   };
   const description = text("description", DESCRIPTION_MAX_LENGTH);

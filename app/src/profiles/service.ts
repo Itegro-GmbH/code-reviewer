@@ -287,6 +287,12 @@ export function createProfileService({
       // An id that is not there is not found whatever the body says.
       const existing = await profiles.get(id);
       if (existing === undefined) throw notFound();
+      // An archived profile takes no new version, whatever the body says.
+      if (existing.profile.archivedAt !== null)
+        throw new ProfileError(
+          "PROFILE_ARCHIVED",
+          "The profile is archived and takes no new version.",
+        );
       const profile = await acceptable(body);
       if (existing.profile.name !== profile.name)
         throw new ProfileError(

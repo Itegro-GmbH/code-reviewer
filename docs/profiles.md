@@ -2,7 +2,7 @@
 
 A **profile** says how an agent works: which model, which standing instructions, how much a turn may cost, whether it may push
 branches, and (optionally) what its result looks like when a step does not say. A run gets a profile **and** an environment, separately:
-the profile is _who works_, the [environment](implementer.md#environments) is _where_ (setup script, size, network rule). The environment is
+the profile is *who works*, the [environment](implementer.md#environments) is *where* (setup script, size, network rule). The environment is
 never part of a profile.
 
 Profiles are data. Nothing is built in: people create them, change them and reuse them, through the API (there is no page yet), and an
@@ -34,15 +34,15 @@ use of it at run time is the next change.
 }
 ```
 
-| Field            | Needed | What                                                                                                                                                                                                                                                                                                                                                                                                             |
-| ---------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`           | yes    | What a workflow writes in a step (`"profile": "reviewer"` or `"reviewer@2"`): lower case letters, digits, `_` and `-`, starting with a letter or digit, 64 characters at most. Once per workspace among the profiles that are not archived. **The name of a profile never changes**: a new version carries the same name (`PROFILE_NAME_CHANGED`); to use another name, create another profile.                  |
-| `description`    | no     | A note for people, 1,000 characters at most.                                                                                                                                                                                                                                                                                                                                                                     |
-| `model`          | yes    | The model a turn runs on, in the two shapes the Implementer form takes: `{"entryId": "<id>"}` (a released catalog entry, for a workspace on the operator's key) or `{"provider": "<slug>", "model": "<id>"}` (a model of the workspace's own key). `GET /api/w/<slug>/implementer/models` lists what this workspace can use. A model the workspace cannot run is refused (`model_not_allowed`, with the reason). |
-| `instructions`   | no     | The standing, system-level text the agent is given, 20,000 characters at most. It is **not** the task: the task is what a person (or a workflow step) sends with each run. Tabs and line breaks are kept as written.                                                                                                                                                                                             |
-| `costLimitCents` | no     | The most one turn may cost, in whole US cents (1 to 10,000), the brake of the turn. Left out (or `null`), the operator's maximum alone applies. Above the operator's maximum it is refused (`cost_limit_above_maximum`), and it is checked again when a task starts, because the maximum can change.                                                                                                             |
-| `canPush`        | yes    | `true` if a turn of this profile may push branches, `false` if not. See [the push right](#the-push-right). Required on purpose: decide it.                                                                                                                                                                                                                                                                       |
-| `defaultResult`  | no     | A [result schema](workflows.md#result-schemas) (the same format and the same validator as a step's `result`). A workflow step that declares no `result` yields this one, and the validator uses it for the references in the workflow. It is stored and checked now; the finish tool that asks the agent for it at run time comes next.                                                                          |
+| Field | Needed | What |
+| --- | --- | --- |
+| `name` | yes | What a workflow writes in a step (`"profile": "reviewer"` or `"reviewer@2"`): lower case letters, digits, `_` and `-`, starting with a letter or digit, 64 characters at most. Once per workspace among the profiles that are not archived. **The name of a profile never changes**: a new version carries the same name (`PROFILE_NAME_CHANGED`); to use another name, create another profile. |
+| `description` | no | A note for people, 1,000 characters at most. |
+| `model` | yes | The model a turn runs on, in the two shapes the Implementer form takes: `{"entryId": "<id>"}` (a released catalog entry, for a workspace on the operator's key) or `{"provider": "<slug>", "model": "<id>"}` (a model of the workspace's own key). `GET /api/w/<slug>/implementer/models` lists what this workspace can use. A model the workspace cannot run is refused (`model_not_allowed`, with the reason). |
+| `instructions` | no | The standing, system-level text the agent is given, 20,000 characters at most. It is **not** the task: the task is what a person (or a workflow step) sends with each run. Tabs and line breaks are kept as written. Text that is only white space is refused (`invalid_value`); leave the field out instead. |
+| `costLimitCents` | no | The most one turn may cost, in whole US cents (1 to 10,000), the brake of the turn. Left out (or `null`), the operator's maximum alone applies. Above the operator's maximum it is refused (`cost_limit_above_maximum`), and it is checked again when a task starts, because the maximum can change. |
+| `canPush` | yes | `true` if a turn of this profile may push branches, `false` if not. See [the push right](#the-push-right). Required on purpose: decide it. |
+| `defaultResult` | no | A [result schema](workflows.md#result-schemas) (the same format and the same validator as a step's `result`). A workflow step that declares no `result` yields this one, and the validator uses it for the references in the workflow. It is stored and checked now; the finish tool that asks the agent for it at run time comes next. |
 
 A body with a field not in the table is refused (`unknown_field`, with the names that exist).
 
@@ -67,14 +67,14 @@ archived profiles.
 All under `/api/w/<slug>/profiles`, JSON, `Cache-Control: no-store`. A refusal is `{"error": "<code>", "message": "..."}`; a body that does not
 pass the validator is `422 PROFILE_INVALID` with `errors` (every problem; see below) and `truncated`.
 
-| Call                                     | What                                                                                                                                                                                        |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /profiles/validate`                | Checks a profile (the body) and stores nothing. `200` with `{"valid", "errors", "truncated"}`; a profile with problems is a normal answer.                                                  |
-| `POST /profiles`                         | Saves a new profile as version 1. `201` with `{"profile": {...}}`.                                                                                                                          |
-| `GET /profiles`                          | The profiles that are not archived, by name: `{"profiles": [{id, name, version, createdAt, updatedAt, archivedAt}], "maximum": 100}`.                                                       |
-| `GET /profiles/<id>[?version=n]`         | The profile with the version asked for (default: the current one) as `document` (the body shape, every optional field filled in), `documentVersion`, and every saved version in `versions`. |
-| `PUT /profiles/<id>[?expectedVersion=n]` | Saves the body as the next version.                                                                                                                                                         |
-| `DELETE /profiles/<id>`                  | Archives.                                                                                                                                                                                   |
+| Call | What |
+| --- | --- |
+| `POST /profiles/validate` | Checks a profile (the body) and stores nothing. `200` with `{"valid", "errors", "truncated"}`; a profile with problems is a normal answer. |
+| `POST /profiles` | Saves a new profile as version 1. `201` with `{"profile": {...}}`. |
+| `GET /profiles` | The profiles that are not archived, by name: `{"profiles": [{id, name, version, createdAt, updatedAt, archivedAt}], "maximum": 100}`. |
+| `GET /profiles/<id>[?version=n]` | The profile with the version asked for (default: the current one) as `document` (the body shape, every optional field filled in), `documentVersion`, and every saved version in `versions`. |
+| `PUT /profiles/<id>[?expectedVersion=n]` | Saves the body as the next version. |
+| `DELETE /profiles/<id>` | Archives. |
 
 ### How an AI should write one: validate, fix, save
 
@@ -90,36 +90,36 @@ pass the validator is `422 PROFILE_INVALID` with `errors` (every problem; see be
 
 Of the body (the same list in `validate` and in a refused save):
 
-| Code                       | When                                                                                                                                      | What to do                                  |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
-| `wrong_type`               | A field of the wrong JSON type, or a body that is not an object.                                                                          | Use the type the message names.             |
-| `missing_field`            | `name`, `model` or `canPush` is missing.                                                                                                  | Add it.                                     |
-| `unknown_field`            | A key the format does not have.                                                                                                           | Use one of `available`.                     |
-| `invalid_value`            | A name that is not a profile name, a model that is not one of the two shapes, a cost limit out of range, a text with a control character. | See the message.                            |
-| `limit_exceeded`           | A text longer than its bound, or a result schema over its caps.                                                                           | Shorten it.                                 |
-| `model_not_allowed`        | The workspace cannot run that model (the message gives the reason).                                                                       | Pick one from `GET .../implementer/models`. |
-| `cost_limit_above_maximum` | The cost limit is above the operator's maximum per turn (the message says it).                                                            | Use that or less.                           |
+| Code | When | What to do |
+| --- | --- | --- |
+| `wrong_type` | A field of the wrong JSON type, or a body that is not an object. | Use the type the message names. |
+| `missing_field` | `name`, `model` or `canPush` is missing. | Add it. |
+| `unknown_field` | A key the format does not have. | Use one of `available`. |
+| `invalid_value` | A name that is not a profile name, a model that is not one of the two shapes, a cost limit out of range, a text with a control character. | See the message. |
+| `limit_exceeded` | A text longer than its bound, or a result schema over its caps. | Shorten it. |
+| `model_not_allowed` | The workspace cannot run that model (the message gives the reason). | Pick one from `GET .../implementer/models`. |
+| `cost_limit_above_maximum` | The cost limit is above the operator's maximum per turn (the message says it). | Use that or less. |
 
 The result schema's own codes (`unknown_kind`, `required_field_unknown`, `nesting_too_deep`, ...) are those of the [workflow format](workflows.md#result-schemas).
 
 Of the routes:
 
-| Code                               | Status | When                                                                          |
-| ---------------------------------- | ------ | ----------------------------------------------------------------------------- |
-| `PROFILE_REQUEST_INVALID`          | 400    | The body is not JSON, or `version` / `expectedVersion` is not a whole number. |
-| `PROFILE_CROSS_SITE_REQUEST`       | 403    | The request is from another site.                                             |
-| `PROFILE_NOT_FOUND`                | 404    | No such profile in this workspace (another workspace's looks the same).       |
-| `PROFILE_VERSION_NOT_FOUND`        | 404    | The profile has no such version.                                              |
-| `PROFILE_BODY_TOO_LARGE`           | 413    | A body over 128 KB.                                                           |
-| `PROFILE_CONTENT_TYPE_UNSUPPORTED` | 415    | A body that is not `application/json`.                                        |
-| `PROFILE_INVALID`                  | 422    | The body does not pass the validator; `errors` lists every problem.           |
-| `PROFILE_NAME_CHANGED`             | 422    | A new version carries another name than the profile has.                      |
-| `PROFILE_NAME_TAKEN`               | 409    | The workspace has a profile of that name that is not archived.                |
-| `PROFILE_LIMIT_REACHED`            | 409    | The workspace holds 100 profiles (`maximum`).                                 |
-| `PROFILE_ARCHIVE_LIMIT_REACHED`    | 409    | The workspace holds 1,000 archived profiles (`maximum`).                      |
-| `PROFILE_VERSION_LIMIT_REACHED`    | 409    | The profile holds 500 versions (`maximum`).                                   |
-| `PROFILE_VERSION_CONFLICT`         | 409    | `expectedVersion` is not the current version; `current` says which is.        |
-| `PROFILE_ARCHIVED`                 | 409    | The profile is archived and takes no new version.                             |
+| Code | Status | When |
+| --- | --- | --- |
+| `PROFILE_REQUEST_INVALID` | 400 | The body is not JSON, or `version` / `expectedVersion` is not a whole number. |
+| `PROFILE_CROSS_SITE_REQUEST` | 403 | The request is from another site. |
+| `PROFILE_NOT_FOUND` | 404 | No such profile in this workspace (another workspace's looks the same). |
+| `PROFILE_VERSION_NOT_FOUND` | 404 | The profile has no such version. |
+| `PROFILE_BODY_TOO_LARGE` | 413 | A body over 128 KB. |
+| `PROFILE_CONTENT_TYPE_UNSUPPORTED` | 415 | A body that is not `application/json`. |
+| `PROFILE_INVALID` | 422 | The body does not pass the validator; `errors` lists every problem. |
+| `PROFILE_NAME_CHANGED` | 422 | A new version carries another name than the profile has. |
+| `PROFILE_NAME_TAKEN` | 409 | The workspace has a profile of that name that is not archived. |
+| `PROFILE_LIMIT_REACHED` | 409 | The workspace holds 100 profiles (`maximum`). |
+| `PROFILE_ARCHIVE_LIMIT_REACHED` | 409 | The workspace holds 1,000 archived profiles (`maximum`). |
+| `PROFILE_VERSION_LIMIT_REACHED` | 409 | The profile holds 500 versions (`maximum`). |
+| `PROFILE_VERSION_CONFLICT` | 409 | `expectedVersion` is not the current version; `current` says which is. |
+| `PROFILE_ARCHIVED` | 409 | The profile is archived and takes no new version. |
 
 ## The push right
 
