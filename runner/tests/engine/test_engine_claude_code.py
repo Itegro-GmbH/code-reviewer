@@ -12,7 +12,7 @@ import sys
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from claude_code_support import (
@@ -99,6 +99,24 @@ def test_a_turn_is_headless_free_inside_the_sandbox_and_ends_with_a_priced_resul
     assert "Rules of this workplace" in json.dumps(first["system"])
 
 
+def printed_environment(turn: Turn) -> str:
+    """What the agent's `env` command printed, as the tool result of the stream says it."""
+    texts: list[str] = []
+    for event in turn.events:
+        if event.get("type") != "user":
+            continue
+        message = cast("dict[str, Any]", event.get("message") or {})
+        content = cast("list[Any]", message.get("content") or [])
+        for item in content:
+            if isinstance(item, dict) and cast("dict[str, Any]", item).get("type") == "tool_result":
+                texts.append(json.dumps(cast("dict[str, Any]", item).get("content")))
+    return "\n".join(texts)
+
+
+def env_turn(place: Workplace, url: str, *, scrub: bool) -> Turn:
+    return place.run(url, "Print your environment", scrub=scrub)
+
+
 # #856-T30
 def test_the_login_is_not_in_the_environment_of_the_tools_the_agent_runs(tmp_path: Path) -> None:
     """Claude Code scrubs its credentials from the environment of its subprocesses
@@ -106,15 +124,30 @@ def test_the_login_is_not_in_the_environment_of_the_tools_the_agent_runs(tmp_pat
     assert bubblewrap_usable() is None, bubblewrap_usable()
     place = Workplace(tmp_path)
     with served(
-        Scripted(tool="Bash", args={"command": "env > seen-env.txt", "description": "look"}),
+        Scripted(tool="Bash", args={"command": "env", "description": "look"}),
         Scripted(text="Looked."),
     ) as (_fake, url):
-        turn = place.run(url, "Print your environment", scrub=True)
+        turn = env_turn(place, url, scrub=True)
 
-    seen = (place.repo / "seen-env.txt").read_text()
+    seen = printed_environment(turn)
     assert turn.returncode == 0 and turn.result.ok, turn.stderr[-300:]
-    assert seen.count("=") > 3, "the command ran and printed an environment"
+    assert "PATH=" in seen, f"the command ran and printed an environment: {seen[:300]}"
     assert FAKE_KEY not in seen and "ANTHROPIC_API_KEY" not in seen
+
+
+# #856-T30
+def test_control_without_the_scrub_the_login_is_in_the_environment_of_the_tools(
+    tmp_path: Path,
+) -> None:
+    """What the test above would see if the scrub did nothing: the same command, the switch off."""
+    place = Workplace(tmp_path)
+    with served(
+        Scripted(tool="Bash", args={"command": "env", "description": "look"}),
+        Scripted(text="Looked."),
+    ) as (_fake, url):
+        turn = env_turn(place, url, scrub=False)
+
+    assert FAKE_KEY in printed_environment(turn)
 
 
 # #856-T31
