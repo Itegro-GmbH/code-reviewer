@@ -1385,7 +1385,7 @@ export interface WorkflowStepRunsTable {
   turn_id: string | null;
   cap_micro_usd: number | null;
   cost_micro_usd: number | null;
-  /** Where `cost_micro_usd` comes from: `reported`, `estimated` or `limit` (#873); null for a step that was charged nothing. */
+  /** Where `cost_micro_usd` comes from: `reported`, `estimated`, `limit` (#873) or `subscription` (#856: an estimate of a turn that is not billed); null for a step that was charged nothing. */
   cost_basis: string | null;
   /** JSON text: the values later steps refer to. */
   output: string | null;

@@ -506,6 +506,16 @@ function parseUsage(
     value.callTrace === undefined ? undefined : checkCallTrace(value.callTrace);
   if (value.callTrace !== undefined && callTrace === undefined)
     check.dropped.push(`${prefix}callTrace`);
+  // #856: a turn on a device's login says so, and what Claude Code thinks it is worth at API prices. A basis this contract does not
+  // name is left out with its estimate; an estimate that is no cost is read as none. The usage, the cost and the verdict are kept.
+  const onSubscription = value.costBasis === "subscription";
+  if (value.costBasis !== undefined && !onSubscription)
+    check.dropped.push(`${prefix}costBasis`);
+  const estimate = value.estimatedCostUsd;
+  const estimatedCostUsd =
+    typeof estimate === "number" && Number.isFinite(estimate) && estimate >= 0
+      ? estimate
+      : null;
   if (
     check.fields.length > before ||
     model === undefined ||
@@ -532,6 +542,7 @@ function parseUsage(
       ? {}
       : { limitExceededBy: limitExceededBy as number }),
     ...(callTrace === undefined ? {} : { callTrace }),
+    ...(onSubscription ? { costBasis: "subscription", estimatedCostUsd } : {}),
   };
 }
 

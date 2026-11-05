@@ -27,8 +27,11 @@ export type StepRunStatus =
 export type StepRunKind = "agent" | "action" | "if" | "loop";
 /** What started a run: a person by hand, or a label on an issue (#845). */
 export type RunTriggerKind = "manual" | "github.issueLabeled";
-/** Where the cost charged to a step comes from: the runner's figure, an estimate from the token counts, or the cap the turn ran under. */
-export type StepCostBasis = "reported" | "estimated" | "limit";
+/**
+ * Where the cost charged to a step comes from: the runner's figure, an estimate from the token counts, the cap the turn ran under, or
+ * (#856) Claude Code's estimate for a turn on a customer device's login, which is not billed.
+ */
+export type StepCostBasis = "reported" | "estimated" | "limit" | "subscription";
 
 export type StoredWorkflowRun = {
   id: string;

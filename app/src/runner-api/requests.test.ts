@@ -369,6 +369,71 @@ describe("the complete body", () => {
     }
   });
 
+  // #856-T40
+  it("keeps the basis and the estimate of a turn that ran on a device's login", () => {
+    for (const estimatedCostUsd of [0.42, 0, null]) {
+      const parsed = parseCompleteRequest({
+        leaseToken: TOKEN,
+        result: {
+          ...GOOD_RESULT,
+          usage: {
+            ...GOOD_RESULT.usage,
+            costUsd: null,
+            costBasis: "subscription",
+            estimatedCostUsd,
+          },
+        },
+      });
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      expect(parsed.value.result.usage).toMatchObject({
+        costUsd: null,
+        costBasis: "subscription",
+        estimatedCostUsd,
+      });
+    }
+  });
+
+  // #856-T40
+  it("leaves out a basis it does not know and an estimate that is no cost, and keeps the rest of the usage", () => {
+    const unknownBasis = parseCompleteRequest({
+      leaseToken: TOKEN,
+      result: {
+        ...GOOD_RESULT,
+        usage: {
+          ...GOOD_RESULT.usage,
+          costBasis: "free",
+          estimatedCostUsd: 3,
+        },
+      },
+    });
+    expect(unknownBasis.ok).toBe(true);
+    if (!unknownBasis.ok) return;
+    expect(unknownBasis.value.result.usage).not.toHaveProperty("costBasis");
+    expect(unknownBasis.value.result.usage).not.toHaveProperty(
+      "estimatedCostUsd",
+    );
+    for (const estimatedCostUsd of [-1, Number.NaN, "1", true]) {
+      const parsed = parseCompleteRequest({
+        leaseToken: TOKEN,
+        result: {
+          ...GOOD_RESULT,
+          usage: {
+            ...GOOD_RESULT.usage,
+            costBasis: "subscription",
+            estimatedCostUsd,
+          },
+        },
+      });
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      expect(parsed.value.result.usage).toMatchObject({
+        costBasis: "subscription",
+        estimatedCostUsd: null,
+      });
+    }
+  });
+
   // #541-T07
   describe("the per-call trace of a Dynamic Review", () => {
     const modelCall = {

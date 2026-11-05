@@ -211,6 +211,11 @@ export const COST_BASIS_COPY = {
     explanation:
       "The cost could not be determined, so the step is charged the whole limit it ran under. The real cost is probably lower, but the run never spends more than its budget.",
   },
+  subscription: {
+    label: "estimated, not billed",
+    explanation:
+      "This turn ran on the Claude subscription of a runner's device, so nothing is billed for the model. The figure is Claude Code's estimate of what it would cost at API prices (nothing when it gave none); it counts against the budget of the run.",
+  },
 } as const;
 
 /** A step that no runner took: not a cost basis, the step never ran. */
