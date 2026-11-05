@@ -232,6 +232,28 @@ rejected_release() {
   fi
 }
 
+# Pull the image by its digest and name it `current` (the one before it `previous`). Returns 1 when a
+# call after the pull finds the digest reference gone (see the caller); every other failure ends the
+# script. In a list (`if !`) `set -e` does not apply: each call that may fail says `|| return 1`.
+pull_and_name() { # pull_and_name IMAGE RELEASE
+  say "pulling $1 (release $2)"
+  docker pull -q "$1" >/dev/null </dev/null || fail "the image could not be pulled"
+  label="$(docker image inspect --format '{{index .Config.Labels "code-reviewer.runner.release"}}' "$1" 2>/dev/null </dev/null)" || return 1
+  if [ "$label" != "$2" ]; then
+    docker rmi "$1" >/dev/null 2>&1 </dev/null || true
+    fail "the image is not the release its manifest names: nothing was installed"
+  fi
+  new_id="$(docker image inspect --format '{{.Id}}' "$1" 2>/dev/null </dev/null)" || return 1
+  old_id="$(docker image inspect --format '{{.Id}}' "$CURRENT" 2>/dev/null </dev/null || true)"
+  # `previous` is the image before this one: it changes only when `current` does.
+  if [ -n "$old_id" ] && [ "$old_id" != "$new_id" ]; then
+    docker tag "$CURRENT" "$PREVIOUS" </dev/null || return 1
+  fi
+  if [ "$old_id" != "$new_id" ]; then
+    docker tag "$1" "$CURRENT" </dev/null || return 1
+  fi
+}
+
 # Download the channel and the signed manifest, prove the manifest, and name the image it announces
 # `current`, unless the installed one is that release or a newer one, or a rollback rejected the
 # announced one. The image is pulled by the digest the verified manifest names: nothing unproven
@@ -289,21 +311,12 @@ stage_image() {
       return
     fi
   fi
-  say "pulling $repository@$digest (release $release)"
-  docker pull -q "$repository@$digest" >/dev/null </dev/null || fail "the image could not be pulled"
-  label="$(docker image inspect --format '{{index .Config.Labels "code-reviewer.runner.release"}}' "$repository@$digest")"
-  if [ "$label" != "$release" ]; then
-    docker rmi "$repository@$digest" >/dev/null 2>&1 </dev/null || true
-    fail "the image is not the release its manifest names: nothing was installed"
-  fi
-  new_id="$(docker image inspect --format '{{.Id}}' "$repository@$digest")"
-  old_id="$(docker image inspect --format '{{.Id}}' "$CURRENT" 2>/dev/null </dev/null || true)"
-  # `previous` is the image before this one: it changes only when `current` does.
-  if [ -n "$old_id" ] && [ "$old_id" != "$new_id" ]; then
-    docker tag "$CURRENT" "$PREVIOUS"
-  fi
-  if [ "$old_id" != "$new_id" ]; then
-    docker tag "$repository@$digest" "$CURRENT"
+  if ! pull_and_name "$repository@$digest" "$release"; then
+    # A runner that starts at this moment removes the digest references of the images that are
+    # neither `current` nor `previous` (update.py, `prune_references`): the image just pulled too.
+    # The pull is by digest, so a second one brings the very same image.
+    warn "the pulled image was removed before it was named: pulling it again"
+    pull_and_name "$repository@$digest" "$release" || fail "the image could not be named (is a runner starting? run the installer again): nothing was installed"
   fi
   say "verified release $release ($digest)"
 }

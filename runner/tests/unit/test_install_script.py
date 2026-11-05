@@ -61,6 +61,14 @@ case "$1" in
     fi ;;
   images) [ -f "$STUB_STATE/current" ] && echo abc123 || true ;;
   tag)
+    # A service that starts prunes the digest reference of a pulled image before it is named.
+    if [ "$3" = factory-runner:current ] && [ -n "${STUB_LOSE_REFERENCE:-}" ]; then
+      if [ "$STUB_LOSE_REFERENCE" = always ] || [ ! -f "$STUB_STATE/lost" ]; then
+        touch "$STUB_STATE/lost"
+        echo "Error: No such image: $2" >&2
+        exit 1
+      fi
+    fi
     case "$3" in
       factory-runner:current)
         touch "$STUB_STATE/current"
@@ -966,6 +974,35 @@ def test_uninstall_without_purge_says_that_the_rolled_back_release_is_forgotten_
 
     assert done.returncode == 0, done.stderr
     assert "rejected-release" in done.stdout and "--purge" in done.stdout
+
+
+# #890 (S6)
+def test_a_digest_reference_that_is_pruned_before_it_is_named_is_pulled_again(
+    machine: Machine,
+) -> None:
+    machine.install_image(release=5, image_id="id-5")
+
+    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN, "STUB_LOSE_REFERENCE": "once"})
+
+    assert done.returncode == 0, done.stderr
+    assert len([call for call in machine.calls() if call.startswith("docker pull")]) == 2
+    assert (machine.state / "current.id").read_text().strip() == "id-new"
+    assert (machine.state / "previous.id").read_text() == "id-5"
+    assert "pulling it again" in done.stderr and "verified release 7" in done.stdout
+
+
+# #890 (S6): one more pull, not a loop
+def test_a_digest_reference_that_is_pruned_again_is_an_error_after_the_second_pull(
+    machine: Machine,
+) -> None:
+    machine.install_image(release=5, image_id="id-5")
+
+    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN, "STUB_LOSE_REFERENCE": "always"})
+
+    assert done.returncode != 0
+    assert "could not be named" in done.stderr
+    assert len([call for call in machine.calls() if call.startswith("docker pull")]) == 2
+    assert (machine.state / "current.id").read_text() == "id-5"
 
 
 # -- what has to stay equal --------------------------------------------------------------------
