@@ -185,17 +185,21 @@ class Rig:
         # Set when the script's exec begins, so that a stop is asked for while it runs and not at
         # a time.
         self.script_started = threading.Event()
+        # The file the VM's memory is read from; None: the VM's own.
+        self.meminfo: Path | None = None
 
     def api(self) -> DockerApi:
         return DockerApi(str(self.directory / "docker.sock"), timeout=5.0)
 
     def seams(self) -> sc.SetupSeams:
+        options: dict[str, Any] = {} if self.meminfo is None else {"meminfo": str(self.meminfo)}
         return sc.SetupSeams(
             api=self.api,
             hostname=lambda: HOSTNAME,
             ready_seconds=5.0,
             finish_seconds=5.0,
             commit_seconds=5.0,
+            **options,
         )
 
     def behave(self, made: FakeExec, stdin: BinaryIO, stdout: Any) -> int:
@@ -370,6 +374,31 @@ def test_a_commit_the_disk_cannot_hold_is_the_environments_failure_and_names_the
         .startswith("[setup] the setup result could not be saved")
     )
     assert "no space left" in done.block["output"].splitlines()[-1]
+
+
+# #827-T04: the reason of a container that went away under the script is on the page, in words
+def test_a_container_the_guard_killed_says_why_on_the_page_not_only_by_a_status(rig: Rig) -> None:
+    rig.meminfo = rig.directory / "meminfo"
+    rig.meminfo.write_text(
+        "MemTotal: 8000000 kB\nMemFree: 6000000 kB\nActive(file): 1 kB\nInactive(file): 1 kB\n"
+    )
+    rig.waits = True
+
+    def squeeze() -> None:
+        rig.script_started.wait(30)
+        assert rig.meminfo is not None
+        rig.meminfo.write_text(
+            "MemTotal: 8000000 kB\nMemFree: 300000 kB\nActive(file): 1 kB\nInactive(file): 1 kB\n"
+        )
+
+    threading.Thread(target=squeeze, daemon=True).start()
+    done = step(rig, Workspace())
+    assert done.error is not None and done.error.code is ErrorCode.ENVIRONMENT_SETUP_FAILED
+    assert done.error.detail.startswith("vm_memory: ")
+    assert done.error.detail != "vm_memory:" and "running out of memory" in done.error.detail
+    assert done.block is not None
+    last = done.block["output"].splitlines()[-1]
+    assert last == f"[setup] {done.error.detail}", "the page names the reason in a whole sentence"
 
 
 # #818-DISK-05
