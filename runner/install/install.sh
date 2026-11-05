@@ -45,7 +45,6 @@ SYSTEMCTL=1
 if [ "${FACTORY_RUNNER_NO_SYSTEMCTL:-}" = 1 ]; then SYSTEMCTL=0; fi
 UNIT="$ROOT/etc/systemd/system/factory-runner.service"
 COMMAND="$ROOT/usr/local/bin/factory-runner"
-LIBDIR="$ROOT/usr/local/lib/factory-runner"
 
 DRY_RUN=0
 ASSUME_YES=0
