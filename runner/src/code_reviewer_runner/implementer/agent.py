@@ -68,6 +68,16 @@ RESUME_NAME = "resume.json"
 # the turn's own time (the work window), not against the grace kept for its end.
 IMPORT_SECONDS = 60.0
 MIN_IMPORT_SECONDS = 5.0
+# The import is wrapped in `timeout -s KILL` (coreutils, in the agent image) so that the container,
+# not the exec's clock, ends it: the exec's clock only stops the wait, never the process, and a
+# second engine process (the server starts next) next to a stuck import risks the memory guard
+# killing the container. The kill comes this long before the exec's own limit, so the exec still
+# reports how the import ended. `pkill` (procps, in the same image) is the second try when the exec
+# says nothing.
+IMPORT_KILL_MARGIN_SECONDS = 2.0
+TIMEOUT_BINARY = "/usr/bin/timeout"
+PKILL_BINARY = "/usr/bin/pkill"
+KILL_IMPORT_SECONDS = 10.0
 
 
 class EngineRuntime(Protocol):
@@ -260,21 +270,42 @@ class ImplementerAgent:
         if seconds < MIN_IMPORT_SECONDS:
             self.resume = ResumeOutcome(ResumeMode.SUMMARY_ONLY, ResumeReason.IMPORT_FAILED)
             return None
+        path = f"{CONFIG_DIRECTORY}/{RESUME_NAME}"
         try:
             self._runtime.write_files({RESUME_NAME: (snapshot.data, 0o600)})
             done = self._runtime.run_command(
-                [*self.command, "import", f"{CONFIG_DIRECTORY}/{RESUME_NAME}"],
+                [
+                    TIMEOUT_BINARY,
+                    "-s",
+                    "KILL",
+                    f"{seconds - IMPORT_KILL_MARGIN_SECONDS:g}",
+                    *self.command,
+                    "import",
+                    path,
+                ],
                 environment,
                 seconds,
             )
         except Exception as error:  # the runtime raises its own errors; none of them ends the turn
             _log.warning("the stored conversation could not be imported (%s)", type(error).__name__)
             done = None
+        if done is None or done.unanswered:
+            # Nothing is known of the import: it may still run. It ends before the engine starts.
+            self._end_import(path, environment)
         if done is None or not done.ok:
             self.resume = ResumeOutcome(ResumeMode.SUMMARY_ONLY, self._import_failure(snapshot))
             return None
         self.resume = ResumeOutcome(ResumeMode.IMPORTED)
         return snapshot.session_id
+
+    def _end_import(self, path: str, environment: Mapping[str, str]) -> None:
+        """Kill an import that may still be running (best effort; the answer is not read)."""
+        try:
+            self._runtime.run_command(
+                [PKILL_BINARY, "-KILL", "-f", f" import {path}$"], environment, KILL_IMPORT_SECONDS
+            )
+        except Exception as error:
+            _log.warning("the import could not be ended (%s)", type(error).__name__)
 
     @staticmethod
     def _import_failure(snapshot: ResumeSnapshot) -> ResumeReason:

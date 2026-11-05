@@ -5,10 +5,13 @@ before the engine starts, with the engine's environment, then checked; and every
 can fail for, each ending in a fresh session and a reason word. None of them fails the turn."""
 
 import json
+import shutil
+import subprocess
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -167,7 +170,9 @@ def test_the_file_is_owner_only_and_the_import_runs_with_the_environment_of_the_
     assert data == snapshot().data
     assert mode == 0o600
     argv, environment, _ = place.commands[0]
-    assert argv == ["opencode", "import", f"{CONFIG_DIRECTORY}/resume.json"]
+    # Wrapped in `timeout -s KILL`: the container ends a stuck import, not only the exec's clock.
+    assert argv[:3] == ["/usr/bin/timeout", "-s", "KILL"]
+    assert argv[4:] == ["opencode", "import", f"{CONFIG_DIRECTORY}/resume.json"]
     assert environment["HOME"] == "/root"
     assert environment["XDG_DATA_HOME"] == "/root/.local/share"
     assert environment["OPENCODE_CONFIG"] == f"{CONFIG_DIRECTORY}/opencode.json"
@@ -177,7 +182,10 @@ def test_the_file_is_owner_only_and_the_import_runs_with_the_environment_of_the_
 def test_the_import_is_time_boxed() -> None:
     _, place, _ = start(input=ResumeInput(snapshot(), None))
 
-    assert 5.0 <= place.commands[0][2] <= 60.0
+    argv, _, exec_seconds = place.commands[0]
+    assert 5.0 <= exec_seconds <= 60.0
+    # The kill of the container comes before the exec gives up, so the exec still sees the end.
+    assert 0 < float(argv[3]) < exec_seconds
 
 
 # #840-T73
@@ -324,3 +332,52 @@ def test_the_import_is_paid_from_the_work_window_and_never_from_the_grace_of_the
     assert shortest < IMPORT_SECONDS, "a short job has less than the full box"
     assert place.commands[0][2] <= shortest
     assert deadline_seconds(3600.0, 0.0) == 3600.0 - GRACE_SECONDS
+
+
+# #840-T163
+def test_an_import_that_hangs_is_killed_and_the_engine_starts_only_after_that() -> None:
+    hung = CommandOutcome(255, "", unanswered=True)
+    agent, place, _ = start(input=ResumeInput(snapshot(), None), outcome=hung)
+
+    assert agent.resume == ResumeOutcome(ResumeMode.SUMMARY_ONLY, ResumeReason.IMPORT_FAILED)
+    assert agent.session_id == FRESH_ID
+    kill = [argv for argv, _, _ in place.commands if argv[0] == "/usr/bin/pkill"]
+    assert kill == [["/usr/bin/pkill", "-KILL", "-f", f" import {CONFIG_DIRECTORY}/resume.json$"]]
+    # run (import), run (kill), and only then the engine.
+    assert place.events[place.events.index("run") :][:3] == ["run", "run", "start_engine"]
+
+
+# #840-T164
+def test_an_import_that_ended_by_itself_needs_no_kill() -> None:
+    for outcome in (CommandOutcome(0, "ok"), CommandOutcome(137, ""), CommandOutcome(1, "bad")):
+        _, place, _ = start(input=ResumeInput(snapshot(), None), outcome=outcome)
+
+        assert [argv[0] for argv, _, _ in place.commands] == ["/usr/bin/timeout"]
+
+
+# #840-T165
+@pytest.mark.skipif(shutil.which("timeout") is None, reason="coreutils timeout is not here")
+def test_the_wrapper_kills_a_command_that_ignores_the_term_signal_and_its_children(
+    tmp_path: Path,
+) -> None:
+    # What the container's `timeout -s KILL` does to a stuck import: the command and the process it
+    # started both end (the status is that of a kill: 137 as an exec reports it, -9 as Python does).
+    child = tmp_path / "child.pid"
+    started = time.monotonic()
+    done = subprocess.run(
+        [
+            "timeout", "-s", "KILL", "1",
+            "sh", "-c", f"trap '' TERM; sleep 30 & echo $! > {child}; sleep 30; wait",
+        ],
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )  # fmt: skip
+
+    assert done.returncode in (137, -9)
+    assert time.monotonic() - started < 10
+    pid = int(child.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and Path(f"/proc/{pid}").exists():
+        time.sleep(0.05)
+    assert not Path(f"/proc/{pid}").exists() or "Z" in Path(f"/proc/{pid}/stat").read_text()
