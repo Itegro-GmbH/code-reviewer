@@ -542,13 +542,19 @@ def test_the_doors_own_rules_drop_the_model_network_and_the_private_ranges(
 def test_the_log_the_door_reports_is_what_happened_with_the_bytes_and_nothing_of_the_content(
     lane: RunningNetDoor,
 ) -> None:
+    # (#827) The door of the module is shared: the log holds the connections of every test before
+    # this one, `other.test:443` among them (refused by another test), and the door says its status
+    # at most once a second, so the log this test reads can lag behind its own connections. A name
+    # that no other test uses is counted once, whichever status this test reads, and the wait is
+    # for that name, never for names the earlier tests left in the log.
+    alone = "only-in-the-log-test.test"
     client("https", "https://allowed.test/logged")
-    client("connect", "other.test:443")
+    client("connect", f"{alone}:443")
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         log = lane.snapshot()
         hosts = {c["host"] for c in (log or {}).get("connections", [])}
-        if {"allowed.test", "other.test"} <= hosts:
+        if {"allowed.test", alone} <= hosts:
             break
         time.sleep(0.3)
 
@@ -557,7 +563,7 @@ def test_the_log_the_door_reports_is_what_happened_with_the_bytes_and_nothing_of
     entries = {(c["host"], c["port"], c["outcome"], c["reason"]): c for c in log["connections"]}
     allowed = entries[("allowed.test", 443, "allowed", None)]
     assert allowed["count"] >= 1 and allowed["bytesIn"] > 0 and allowed["bytesOut"] > 0
-    assert entries[("other.test", 443, "refused", "not_listed")]["count"] == 1
+    assert entries[(alone, 443, "refused", "not_listed")]["count"] == 1
     assert ("a.pkg.test", 443, "allowed", None) in entries
     assert log["refused"] >= 1 and log["allowed"] >= 1
     text = json.dumps(log)

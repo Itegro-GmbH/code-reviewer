@@ -917,7 +917,8 @@ class GitWorkspace:
             set(starts),
         )
         # `update-ref` takes a branch a linked worktree of the script has checked out, `branch -D`
-        # does not; the listing is streamed into it, so no count or length of names is limited.
+        # does not; the listing is streamed into it, so no length of one name is limited, but the
+        # count of the refs and the bytes of their names are (`MAX_REFS`, `MAX_REF_BYTES`).
         try:
             removed = self._access.update_refs(
                 [arg for setting in _LEFTOVER_OPTIONS for arg in ("-c", setting)],

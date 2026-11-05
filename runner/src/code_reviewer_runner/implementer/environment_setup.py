@@ -182,6 +182,10 @@ def run_environment_setup(
     closing = ""
     if run.outcome == OUTCOME_SCRIPT_FAILED:
         detail = run.detail or f"the setup script ended with exit status {run.exit_code}"
+        if run.detail:
+            # A container that went away under the script (its memory, the VM's): the page shows
+            # the exit status (137) and the output, so the reason is the last line of the output.
+            closing = _closing_line(run.detail, secrets)
     elif run.outcome == OUTCOME_TIMED_OUT:
         detail = f"the setup script ran past its time limit of {seconds / 60:.0f} minutes"
     elif run.outcome == OUTCOME_NO_ROOM:
