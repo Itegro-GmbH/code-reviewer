@@ -273,6 +273,26 @@ describe("a profile document", () => {
     ]);
   });
 
+  // #844-T270
+  it("refuses a default result field that is named like a fact of the platform, as a step's own result does", () => {
+    const schema = (names: string[]) => ({
+      type: "object",
+      properties: Object.fromEntries(names.map((n) => [n, { type: "string" }])),
+    });
+
+    expect(
+      problems(
+        profile({ defaultResult: schema(["branch", "summary", "costUsd"]) }),
+      ),
+    ).toEqual([
+      ["/defaultResult/properties/branch", "result_field_reserved"],
+      ["/defaultResult/properties/costUsd", "result_field_reserved"],
+    ]);
+    expect(
+      validateProfile(profile({ defaultResult: schema(["summary"]) })).valid,
+    ).toBe(true);
+  });
+
   // #843-T13
   it("takes null for the optional fields as left out", () => {
     const result = validateProfile(

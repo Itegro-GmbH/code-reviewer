@@ -6,6 +6,21 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * The JSON text of a value with the keys of every object in order, so that two texts of the same content are the same text, whatever
+ * order the keys were written in. A list keeps its order; it is part of its content.
+ */
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value))
+    return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  if (isRecord(value))
+    return `{${Object.keys(value)
+      .toSorted()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  return JSON.stringify(value) ?? "null";
+}
+
 /** The JSON type of a value in the words of a message: `a text`, `a number`, `true/false`, `a list`, `an object`, `null`. */
 export function jsonTypeName(value: unknown): string {
   if (value === null) return "null";

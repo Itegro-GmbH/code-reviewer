@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: LicenseRef-Proprietary
+
+// The bounds of the workflow engine (#844).
+
+/** The input of a manual trigger as JSON text, the bound of the column. */
+export const TRIGGER_INPUT_MAX_CHARS = 64 * 1024;
+/** The longest value that is put into a text (an instruction, a comment) as it is; a longer one is cut and says so. */
+export const TEMPLATE_VALUE_MAX_CHARS = 10_000;
+/** The longest text a step may build in all, for a target that sets no bound of its own. */
+export const TEMPLATE_TEXT_MAX_CHARS = 20_000;
+/** Money in the unit of the tables: millionths of a US dollar. */
+export const MICRO_USD_PER_USD = 1_000_000;
+export const MICRO_USD_PER_CENT = 10_000;
+/** The most a column of micro dollars holds (`integer`); a budget and a spend are held below it. */
+export const MICRO_USD_COLUMN_MAX = 2_000_000_000;
+/** The runs of one workflow a list answers. */
+export const RUNS_LISTED_MAX = 50;
+/** A step that was claimed and has no job after this long was not finished by whoever claimed it. */
+export const STEP_STALE_MS = 2 * 60 * 1000;
+/**
+ * The most a connector may take for one call (#844): well under `STEP_STALE_MS`, so that a step still being worked on is never taken
+ * for abandoned and run a second time while its action is still running. A connector of milestone 3b keeps to it (`docs/workflows.md`).
+ */
+export const ACTION_TIMEOUT_MS = 60 * 1000;
+/** An agent step that has no job this long after it was written is given up (`agent_start_failed`). */
+export const STEP_GIVE_UP_MS = 60 * 60 * 1000;
+/** The sweep looks at a run that nobody touched for this long. */
+export const RUN_QUIET_MS = 60 * 1000;
+/** The most runs one sweep works through. */
+export const SWEEP_RUNS_MAX = 25;
+/** The most moves one call makes for one run: every step is written once and ended once, plus one more look. */
+export const MOVES_PER_CALL_MAX = 200;
+/** Words of an error message kept with a step. */
+export const ERROR_MESSAGE_MAX_CHARS = 1000;

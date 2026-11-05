@@ -182,6 +182,9 @@ export function createWorkspaceErasureRepository(
       // (#745, live view) point at jobs only and go before them, and so do the snapshots of a session and the parts of one that is
       // still arriving (#839), which point at the session and the job.
       for (const table of [
+        // The steps of a workflow run point at jobs and turns, the runs at the workflow versions (#844): steps first, runs next.
+        "workflow_step_runs",
+        "workflow_runs",
         "implementer_turn_steps",
         "implementer_session_snapshot_parts",
         "implementer_session_snapshots",

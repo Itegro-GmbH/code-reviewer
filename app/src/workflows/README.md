@@ -1,8 +1,8 @@
 # Agent workflows: format v1 and validator (#833, milestone 1)
 
 A workflow is a JSON document: a trigger and a list of steps. This folder is the **format**, the **validator** and the **API** behind it. There is
-no engine yet: nothing runs a workflow (milestone 2 of the plan added the [profiles](../profiles/README.md) the steps refer to; the finish tool, the engine, the label trigger and the
-review loop follow). What the format is, every error code and how an AI should use it: [`docs/workflows.md`](../../../docs/workflows.md). The two JSON
+no engine here: this folder is pure (milestone 2 of the plan added the [profiles](../profiles/README.md) the steps refer to; the engine that runs a
+document is [`src/workflow-runs/`](../workflow-runs/README.md), milestone 3a; the label trigger and the review loop follow). What the format is, every error code and how an AI should use it: [`docs/workflows.md`](../../../docs/workflows.md). The two JSON
 Schemas are [`contracts/workflow.v1.json`](../../../contracts/workflow.v1.json) and
 [`contracts/result-schema.v1.json`](../../../contracts/result-schema.v1.json), checked by
 `integration-tests/compatibility/workflow-contract.integration.test.ts`.

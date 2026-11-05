@@ -33,6 +33,8 @@ const LATER_TABLES = [
   "implementer_environments",
   "workflows",
   "workflow_versions",
+  "workflow_runs",
+  "workflow_step_runs",
   "profiles",
   "profile_versions",
   "runners",

@@ -16,6 +16,7 @@ import {
   sortIssues,
   type Issue,
 } from "../workflows/issues.ts";
+import { FACT_NAMES } from "../workflows/facts.ts";
 import { ERRORS_MAX } from "../workflows/limits.ts";
 import { isRecord, jsonTypeName, textLength } from "../workflows/json.ts";
 import {
@@ -297,6 +298,20 @@ export function validateProfile(body: unknown): ProfileCheck {
     const checked = validateResultSchema(schema, "/defaultResult");
     for (const found of checked.issues) report(found);
     if (checked.schema !== undefined) defaultResult = checked.schema;
+    // The same names a step's own `result` may not use: the platform's facts of an agent step (a profile that may not push has no
+    // `branch` fact, and a field of that name would be read as one).
+    const properties =
+      isRecord(schema) && isRecord(schema.properties) ? schema.properties : {};
+    for (const field of Object.keys(properties))
+      if (FACT_NAMES.includes(field))
+        report(
+          issue(
+            pointer("/defaultResult/properties", field),
+            "result_field_reserved",
+            `${shown(field)} is filled in by the platform for every agent step. Name the field of the result differently.`,
+            FACT_NAMES,
+          ),
+        );
   }
 
   const profile =

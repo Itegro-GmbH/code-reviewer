@@ -14,6 +14,7 @@ import { integrationRegistry } from "../integrations/registry.ts";
 import { jobQueueFor } from "../jobs/shared.ts";
 import { keyModeForJob } from "../llm/resolve.ts";
 import { getWorkspaceLlm } from "../llm/shared.ts";
+import { llmProviderDescriptors } from "../llm/providers/index.ts";
 import { getCatalogService } from "../model-catalog/shared.ts";
 import { getImplementerCatalog } from "../native-providers/shared.ts";
 import { getNativeCost } from "../native-cost/shared.ts";
@@ -25,6 +26,7 @@ import {
   type ResolvedEntitlements,
 } from "../workspaces/entitlements.ts";
 import { configuredKeyProviders } from "./key-providers.ts";
+import { createTurnPricer } from "./turn-price.ts";
 import { createImplementerModels, type ImplementerModels } from "./models.ts";
 import {
   createImplementerService,
@@ -78,6 +80,17 @@ export function implementerModelsFor(workspaceId: string): ImplementerModels {
       if (!(await nativeCost.policyFor("managed", ref)).ok) return false;
       return (await nativeCost.entryFor(ref)).ok;
     },
+  });
+}
+
+/**
+ * The catalog price of the model of a turn, for the workflow engine's charge of a turn whose cost the runner did not report (#844): the
+ * price table of the provider adapter, reached through the catalog entry or the provider of the turn's model choice.
+ */
+export function implementerTurnPricer() {
+  return createTurnPricer({
+    catalog: getCatalogService(),
+    providers: llmProviderDescriptors,
   });
 }
 

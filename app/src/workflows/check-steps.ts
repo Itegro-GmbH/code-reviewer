@@ -221,12 +221,14 @@ export function agentBinding(
       { type: FACT_TYPES[name] as FieldType["type"], required: true },
     ]);
   const fields: Record<string, FieldType> = Object.fromEntries(entries);
-  const reason = `The profile ${shown(String(node.profile))} may not push, so ${shown(id)} yields no branch and no commits. Use a profile that may push, or reference the result of the step.`;
+  const reason = `The profile ${shown(String(node.profile))} may not push, so ${shown(id)} yields no branch, no commits, no head commit and no push state. Use a profile that may push, or reference the result of the step.`;
   return {
     id,
     kind: "agent",
     type: { kind: "object", fields },
-    unavailable: canPush ? {} : { branch: reason, commits: reason },
+    unavailable: canPush
+      ? {}
+      : Object.fromEntries(PUSH_FACTS.map((name) => [name, reason])),
     // A result that failed its check is reported where it is written; its fields are unknown, not missing.
     ...(node.result !== undefined && declared === undefined
       ? { open: true }

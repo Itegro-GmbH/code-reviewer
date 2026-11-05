@@ -17,6 +17,7 @@ import { cleanUpExpiredRows } from "../maintenance/cleanup.ts";
 import { getMailSender } from "../mail/shared.ts";
 import { getModelsDevService } from "../models-dev/shared.ts";
 import { getRefusalNoticeService } from "../refusal-notices/shared.ts";
+import { reconcileWorkflowRuns } from "../workflow-runs/shared.ts";
 import { DispatchConfigError, getDispatchService } from "./shared.ts";
 import { createDispatchSweep, type DispatchSweep } from "./sweep.ts";
 import { loadSweepSettings } from "./sweep-settings.ts";
@@ -47,7 +48,13 @@ export function getDispatchSweep(
     checks: getCheckRunService(),
     // #790: the write tokens of ended turns of the Implementer that could not be switched off are tried again.
     ...(capabilities.has("implementer")
-      ? { writeTokens: getWriteTokens() }
+      ? {
+          writeTokens: getWriteTokens(),
+          // #844: the runs of workflows that wait for a job which ended without a report.
+          workflowRuns: {
+            reconcile: (options) => reconcileWorkflowRuns(options),
+          },
+        }
       : {}),
     // #548: the daily fetch of the models.dev catalog, last.
     modelsDev: getModelsDevService(),

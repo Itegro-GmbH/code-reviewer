@@ -141,6 +141,7 @@ export function addressesOf(
         case "environmentId":
         case "workflowId":
         case "profileId":
+        case "runId":
         case "runnerId":
         case "integrationId":
         case "invitationId":

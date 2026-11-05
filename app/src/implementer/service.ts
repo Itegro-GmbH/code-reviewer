@@ -74,7 +74,20 @@ export type ImplementerService = {
   startTask(
     user: { id: string; githubLogin: string },
     input: unknown,
+    options?: StartTaskOptions,
   ): Promise<StartedTask>;
+};
+
+/**
+ * What only code inside the app can ask for, never a request body (#844): the workflow engine starts a step with the rest of the
+ * workflow's budget as the most the step may cost.
+ */
+export type StartTaskOptions = {
+  /**
+   * The most the task may cost, in whole US cents. It lowers the cost limit of the task (the profile version's, or none) and never
+   * raises it; it is held to the operator's maximum like any limit, but a cap above that maximum is lowered to it instead of refused.
+   */
+  costCapCents?: number;
 };
 
 export type ImplementerServiceDependencies = {
@@ -337,7 +350,7 @@ export function createImplementerService(
 
     listModels: () => deps.models.options(),
 
-    async startTask(user, input) {
+    async startTask(user, input, options = {}) {
       const checked = validateStartInput(input);
       if (!checked.ok)
         throw new ImplementerError(
@@ -487,6 +500,15 @@ export function createImplementerService(
             "The cost limit is above the maximum per task.",
             { maximumCents },
           );
+      }
+      // The cap of the caller (#844) only lowers: the smaller of it, the limit above and the operator's maximum.
+      if (options.costCapCents !== undefined) {
+        const maximumCents = await deps.operatorCostLimitCents();
+        costLimitCents = Math.min(
+          costLimitCents ?? Number.POSITIVE_INFINITY,
+          Math.max(1, Math.floor(options.costCapCents)),
+          maximumCents,
+        );
       }
 
       let result;
