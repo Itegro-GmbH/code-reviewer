@@ -828,3 +828,98 @@ describe("the corrections the reviews asked for", () => {
     }
   });
 });
+
+describe("the follow-up turns in the operator guide (#842)", () => {
+  const session = flat(section(guide, "## Session and Turn"));
+
+  // #842-T01
+  it("explains session and turn, the one queued instruction, the snapshot and the fallback with its reasons", () => {
+    for (const phrase of [
+      "A **Session** is one branch of one repository",
+      "A **Turn** is one instruction",
+      "Exactly one instruction can wait",
+      "`IMPLEMENTER_SESSION_BUSY`",
+      "**same OpenCode session**",
+      "`summary_only`",
+      "a fresh sandbox",
+      "**all** the branches the earlier turns left on GitHub",
+      "first call read all of it again",
+      "`cost_limit_reached`",
+      "#879",
+      "`implementer_resume`",
+      "**together**",
+      'section "Release 2: live test"',
+    ])
+      expect(session, phrase).toContain(phrase);
+    // Every reason of the fallback is named, and each one is a word the runner has.
+    const reasons = readText(
+      "runner/src/code_reviewer_runner/implementer/report.py",
+    );
+    for (const reason of [
+      "no_snapshot",
+      "download_failed",
+      "snapshot_unreadable",
+      "import_failed",
+      "version_changed",
+    ]) {
+      expect(session, reason).toContain(`\`${reason}\``);
+      expect(reasons, reason).toContain(`"${reason}"`);
+    }
+  });
+
+  // #842-T02 (owner's decisions 4 and 8 of 2026-11-04)
+  it("keeps steps and snapshot for ever and promises no close, no delete and no retention sweep", () => {
+    const keeping = flat(section(guide, "### Keeping it: for ever, no close"));
+    expect(keeping).toContain("Nothing is closed, and nothing is deleted");
+    expect(keeping).toContain("**kept for ever**");
+    expect(keeping).toContain("erasure of the workspace");
+    // No text of the guide or of the code's README offers what the owner dropped.
+    for (const [file, text] of [
+      ["docs/implementer.md", flat(guide)],
+      [
+        "app/src/implementer/README.md",
+        flat(readText("app/src/implementer/README.md")),
+      ],
+    ] as const) {
+      expect(text, file).not.toMatch(/30[- ]day/i);
+      expect(text, file).not.toContain("a session is closed");
+      expect(text, file).not.toContain("Close the session");
+      expect(text, file).not.toMatch(/a second turn on the same branch/i);
+      expect(text, file).not.toMatch(/none of that is built yet/i);
+    }
+    // And the code has none of it either: no close column, no close code.
+    const migrations = listTrackedFiles(repoRoot)
+      .filter((path) => path.startsWith("app/src/db/migrations/"))
+      .map((path) => readText(path))
+      .join("\n");
+    expect(migrations).not.toContain("closed_at");
+    expect(readText("app/src/implementer/errors.ts")).not.toContain(
+      "SESSION_CLOSED",
+    );
+  });
+
+  // #842-T03
+  it("has a live test for release 2 with a pass and a failure for every check, and the deploy order", () => {
+    const live = section(guide, "## Release 2: live test");
+    const rows = live.split("\n").filter((line) => /^\| R\d+\s+\|/.test(line));
+    expect(rows.length).toBeGreaterThanOrEqual(8);
+    for (const row of rows) {
+      const cells = row.split("|").map((cell) => cell.trim());
+      // "", number, check, pass, failure, "".
+      expect(cells.length, row).toBe(6);
+      expect(cells[3], row).not.toBe("");
+      expect(cells[4], row).not.toBe("");
+    }
+    const text = flat(live);
+    for (const phrase of [
+      "dev server",
+      "second branch",
+      "narrowed",
+      "2 and 4 vCPU",
+      "the App first",
+      "the Dispatcher last",
+      "the owner's go",
+    ])
+      expect(text, phrase).toContain(phrase);
+  });
+});
