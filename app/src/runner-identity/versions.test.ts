@@ -25,6 +25,8 @@ describe("the minimum version of the base", () => {
     expect(meetsMinimum("1.4.0", "1.4.0-rc1")).toBe(true);
     expect(meetsMinimum("1.4.1-rc1", "1.4.0")).toBe(true);
     expect(meetsMinimum("1.4.0-rc2", "1.4.0-rc1")).toBe(true);
+    expect(meetsMinimum("1.4.0-rc1", "1.4.0-rc2")).toBe(false);
+    expect(meetsMinimum("1.4.0-rc1", "1.4.0-rc1")).toBe(true);
   });
 
   // #854-T22
