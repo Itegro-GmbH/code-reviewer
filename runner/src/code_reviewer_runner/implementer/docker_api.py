@@ -19,15 +19,19 @@ from constants of the runner and from the identifiers Docker itself answered wit
 import contextlib
 import http.client
 import json
+import re
 import socket
 from collections.abc import Iterator
 from typing import Any, Final
+from urllib.parse import quote
 
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 
 DOCKER_SOCKET: Final = "/run/docker.sock"
 DEFAULT_TIMEOUT_SECONDS: Final = 15.0
 _MAX_BODY_BYTES: Final = 4 * 1024 * 1024
+# `repository:tag`, the name of an image the runner builds (never from a job).
+_BUILD_TAG: Final = re.compile(r"[a-z0-9][a-z0-9._/-]{0,127}:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
 _STDOUT: Final = 1
 _STDERR: Final = 2
 _FRAME_HEADER: Final = 8
@@ -327,6 +331,34 @@ class DockerApi:
         if not isinstance(identifier, str) or not identifier.startswith("sha256:"):
             raise DockerError(0, "the daemon's answer has no image id")
         return identifier
+
+    def build_image(self, context: bytes, tag: str, *, timeout: float) -> None:
+        """Build an image from a tar (`context`, a Dockerfile and what it copies) and name it
+        `tag`: no pull of the base (it is a local image), intermediate containers removed. The
+        daemon answers 200 and reports a failed step as an `error` line of its stream, so the
+        stream is read to its end; `DockerError` carries that line's text."""
+        if not _BUILD_TAG.fullmatch(tag):
+            raise ValueError("an image tag is a plain name")
+        connection = _UnixConnection(self._path, timeout)
+        path = f"/build?t={quote(tag, safe='')}&rm=1&forcerm=1&pull=0"
+        try:
+            connection.request("POST", path, context, {"Content-Type": "application/x-tar"})
+            response = connection.getresponse()
+            data = response.read(_MAX_BODY_BYTES + 1)
+        except (OSError, http.client.HTTPException) as error:
+            raise DockerError(0, f"the daemon did not answer ({type(error).__name__})") from None
+        finally:
+            connection.close()
+        if response.status != 200:
+            raise DockerError(response.status, _message_of(data))
+        for line in data.splitlines():
+            try:
+                document = as_object(json.loads(line))
+            except ValueError:
+                continue
+            failure = None if document is None else document.get("error")
+            if isinstance(failure, str) and failure:
+                raise DockerError(0, failure[:500])
 
     def remove_image(self, reference: str) -> None:
         """Remove the name `reference` and, when no other name or container holds them, the layers.
