@@ -196,7 +196,71 @@ machine (Linux, Docker)
 | Session snapshot and stored session      | The runner API (`/api/runners/v1/jobs/{id}/session`, `/resume-session`) with the runner's credential and the lease token in `X-Lease-Token`, **if the app lists `runner_session_snapshot`** (see "Resume on customer runners"); otherwise none, and a follow-up continues from the summary. |
 | Sizing                                   | The configured memory and CPUs, not the VM size the Dispatcher computes. One run at a time.                                                           |
 
-### Install (developer, one machine)
+### Install (one line, R2)
+
+For a Linux machine with **Docker** (the engine, not rootless), **systemd** and x86_64. Create a registration token in the app
+(Owner or Admin: Runners, "Add a runner"; it is valid for an hour and works once), then, as root:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Itegro-GmbH/code-reviewer/main/runner/install/install.sh \
+  | sudo FACTORY_RUNNER_TOKEN=crt_... sh -s -- --labels linux,gpu --disk-gb 50
+```
+
+or with the token out of the environment and out of the shell history (save the script first: under `curl | sh` the standard input *is* the
+script, so `--token-file -` cannot read the token from it):
+
+```sh
+curl -fsSLo install.sh https://raw.githubusercontent.com/Itegro-GmbH/code-reviewer/main/runner/install/install.sh
+sudo sh install.sh --token-file /root/runner-token --labels linux,gpu
+```
+
+[`runner/install/install.sh`](../runner/install/install.sh) is one POSIX shell file. In this order it:
+
+1. **checks** Linux, x86_64, root, Docker (the daemon answers, not rootless), systemd, `curl` and `sha256sum`;
+2. gets **cosign** (the pinned version `runner/cosign-pin.json`, checked against its SHA-256; or the one in `COSIGN` / `PATH`);
+3. **pulls the newest runner image** (`ghcr.io/itegro-gmbh/code-reviewer-factory-runner:stable`, or the one you name with
+   `--image-digest sha256:...`), **verifies its signature** (see "Updates") and names the verified digest `factory-runner:current`. An image
+   that does not verify is removed and nothing is installed;
+4. writes the **command** `/usr/local/bin/factory-runner` (a throwaway container of `factory-runner:current` with the socket, the
+   configuration volume and `/work`) and the **systemd unit** `/etc/systemd/system/factory-runner.service`: the container `run --rm
+   --stop-timeout 150` with the host's Docker socket (for the runner only: the agent never gets it), the volumes `factory-runner-home`
+   (the configuration, the credential) and `factory-runner-work` (`/work`), `FACTORY_RUNNER_IMAGE_TAG=factory-runner:current`,
+   `Restart=always` (but not after exit codes 4 revoked, 6 configuration, 9 shared daemon) and `TimeoutStopSec=170`;
+5. **registers** the machine with the token and applies `--name --labels --url --cpus --memory-mb --disk-gb`;
+6. enables and **starts** the service.
+
+The token is **never an argument** (`--token` is refused, it would be in the process list and the shell history): it comes from
+`--token-file FILE` (`-`: standard input), from `FACTORY_RUNNER_TOKEN`, or is asked for on the terminal without echo. It reaches the
+registration on the standard input of a container, in no argument and no environment of it. With no token the service is installed and
+not started, and the script says how to register by hand.
+
+**Safe to run again.** A registered machine is not registered twice (the token is not used); a setting you pass is applied with
+`config set`; the unit is rewritten only when it differs and a running service is **never restarted** (it switches to a newer image by
+itself between two jobs, and reads a changed configuration when it next starts: `systemctl restart factory-runner` after its job). A second
+run also finds the newer release and stages it, as `factory-runner update` does.
+
+`--dry-run` says what it would do and changes nothing. `--uninstall` removes the service, the command and the images and keeps the
+configuration and `/work`; `--uninstall --purge` removes those too (revoke the runner in the app: its credential keeps working
+until then). Afterwards the firewall tables Control left in the machine's network namespace (the security notes below) are deleted
+by `nft delete table ...` or at the next restart of the machine.
+
+**Sysbox is a separate step, `--sysbox`, never part of the base install.** It prints what it does and asks you to type `yes` on the
+terminal (`--yes` accepts the warnings when there is none):
+
+- it installs the package `sysbox-ce 0.7.1` (the version of the golden snapshot, checked against its SHA-256);
+- the package **rewrites `/etc/docker/daemon.json`**: the `sysbox-runc` runtime, `bip` 172.20.0.1/16 and `default-address-pools`
+  172.25.0.0/16, so the network ranges of your other containers can change;
+- it **restarts Docker** when no container is running (so none may be: the step refuses otherwise, stop the runner first);
+- it needs `jq` and `systemctl`, runs `sysbox-mgr` and `sysbox-fs` as services, and is officially supported on Ubuntu 22.04 and 24.04
+  (26.04 was tested, not supported; see "Spikes R0");
+- what you get is the capability `agent-docker`: the agent may run its own Docker. Without Sysbox the runner works and the agent has none.
+
+Restart the service afterwards so that the runtime `auto` finds Sysbox.
+
+What the script cannot know: whether a real systemd and a real daemon behave as its tests assume. The first install on a machine is the
+test of that; `factory-runner selftest` is the proof of the base (below).
+
+### Install from source (developer, one machine)
 
 Needs Docker (the engine, not rootless) and a Linux machine; Sysbox is optional (it only adds `agent-docker`).
 
@@ -253,6 +317,10 @@ docker run -d --name factory-runner --restart unless-stopped --stop-timeout 150 
 | `run --once [--wait SECONDS]`  | Takes **one** job and ends with its exit code. With no job within `--wait` (default 600) it ends with **exit code 0** and the line `no job for the labels of this runner within Ns: nothing to do`. |
 | `selftest [--json]`            | Proves the base (below). Exit code 0 when it holds, 5 when it does not. Needs no registration. It only looks: it pulls and names no image, so a missing or not pinned agent image is reported as not ready (a starting `run` pulls it). It may run beside a service; its throwaway container is one more on the daemon for the seconds it takes. |
 | `config show`                  | The configuration as the runner sees it (file and environment), the credential only as `set` / `not set`.                                  |
+| `config set [--name N] [--labels a,b] [--cpus N\|none] [--memory-mb N\|none] [--disk-gb N\|none] [--parallel N] [--runtime R] [--agent-image I\|none] [--auto-update on\|off]` | Changes the file **on the device** (labels, limits, parallelism, name, runtime, image, automatic updates). Every value goes through the check of `register`; one wrong value changes nothing. `none` removes a limit. The credential and everything not named stay as they are, and the environment is never written into the file; when a variable overrides a setting that was changed, it says so. A running service reads the file when it starts: restart it after its job. `--parallel` accepts 1: this runner takes one job at a time. |
+| `credential show`              | `credential: set (from the file)` or `not set`, and how old it is. Never the value.                                                         |
+| `credential renew`             | Asks the app for a new credential and saves it **before** anything uses it (the app keeps the old one valid until the new one was used once, so a failed write loses nothing). Not for a credential from the environment. Exit code 4 when the runner was revoked. |
+| `update [--rollback]`          | Fetches the newest release, **verifies it** and stages it (see "Updates"). Never touches a running job. `--rollback` points `current` back at the image before the last update. |
 
 **Exit codes** (the same list is in `factory_runner/base.py`):
 
@@ -268,6 +336,7 @@ docker run -d --name factory-runner --restart unless-stopped --stop-timeout 150 
 | 7    | `run --once` only: **the app never answered a claim** during the whole wait. Not the same as 0: the runner does not know whether a job waited. An app that answered once and was lost later is "no job", exit 0 |
 | 8    | `register` only: the app registered the runner, but its credential could not be saved (revoke the runner in the app and register again)        |
 | 9    | Another factory-runner uses this Docker daemon (see "One runner per daemon"); the log names the first container or network found; the runner announced nothing and claimed nothing |
+| 10   | The service switched to an updated image between two jobs and ended so that its supervisor (systemd, `Restart=always`) starts it again from `factory-runner:current` (see "Updates") |
 
 ### Configuration
 
@@ -281,6 +350,7 @@ from the environment instead, and the environment wins**, which is how a VM that
 | `FACTORY_RUNNER_NAME`, `FACTORY_RUNNER_LABELS` | The name, and the labels (comma separated, lower case)                                 |
 | `FACTORY_RUNNER_CPUS`, `_MEMORY_MB`, `_DISK_GB` | The limits (below)                                                                    |
 | `FACTORY_RUNNER_AGENT_IMAGE`, `FACTORY_RUNNER_RUNTIME` | The agent image to pull; `auto` (default), `runc` or `sysbox-runc`                |
+| `FACTORY_RUNNER_AUTO_UPDATE`             | `1` (default) or `0`: the service updates itself between jobs (see "Updates"); `factory-runner update` works either way |
 | `FACTORY_RUNNER_TOKEN`                   | `register` only: the registration token, an alternative to `--token-file` (not read by `run`) |
 
 A wrong value is refused with the name of the field and never its value (the file holds a secret). The credential is **renewed**
@@ -374,24 +444,90 @@ Sysbox wall by a VM with Sysbox.
 
 ### Limits
 
-Enforced on the containers of a turn, through the host's Docker (`limits.py`): **memory** (`Memory` = `MemorySwap` of the agent's
-container; below 1024 MB the runner is not ready), **CPUs** (`NanoCpus`), **one run at a time**. Announced to the app and shown in its
-list: the same, plus `diskGb`.
+Enforced through the host's Docker (`limits.py`, `disk_budget.py`):
 
-What is **not** limited (S4, follow-up R2): the **CPU limit applies to the agent's container only**. The model door, the reader, the
-rule helpers, the setup container and the runner's own git processes run without one (they are small and short, but they are not
-capped). **Disk is not limited at all**: `diskGb` is announced (the free space of `/work` when not set) and shown in the list, nothing
-enforces it. The work folders of a turn are emptied after the job (above), but the Docker images, the session volumes and whatever
-the agent writes into its container during a turn are the machine's to bound: size the machine's disk for the largest job you accept,
-and watch `docker system df`.
+| Limit                | Setting                  | What is enforced                                                                                                                                                                                                                         |
+| -------------------- | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Memory               | `memoryMb`               | `Memory` = `MemorySwap` of the **agent's container and of the setup container** (#855; below 1024 MB the runner is not ready). The default is 60% of the machine up to 16 GiB.                                                              |
+| CPUs                 | `cpus`                   | `NanoCpus` of the **agent's container and of the setup container** (#855: the container that runs the environment's script is as free as the agent, so it had no business being the one that ran without a limit).                            |
+| Jobs at a time       | `parallelRuns`           | One. A second would collide on the fixed names and the fixed model network (R3 or later).                                                                                                                                                |
+| **Disk**             | `diskGb`                 | A **budget per job**, below.                                                                                                                                                                                                             |
 
-**R2** (not done): a disk budget for the work and session volumes with cleanup; limits for the containers beside the agent (reader,
-doors); more than one run at a time (needs per-run names and networks); the install script, `update` and the signed self-update;
-the Sysbox install step.
+**The disk budget** (#855). `diskGb` is what one job may hold on the machine's disk. While a job runs (every 20 seconds) the runner measures
+what the job made: the folders of the turn in `/work` (`reserve`, `repo`, `result`, by the allocated blocks of their files, a file with
+several links once, links not followed), the **writable layer of every container of this runner** (the agent's, the setup container's, the
+door's: this is where what an agent writes into its container, its session files among it, is), and the image the setup container's result
+is committed as (`code-reviewer-agent:environment`). The Docker images of the runner itself and the images and containers of other things
+on the daemon are not the job's and not counted. When the measure passes the budget:
+
+1. the job process is ended the way a shutdown ends it (`JobHost`, the `guard`), and the job is **reported as failed**, not given back (it
+   would fill the disk again): error code `runner_error`, error reason `disk_budget_exceeded`, and a text that names the budget and what
+   was in use;
+2. the cleaning that follows every job removes everything it made: the containers and networks of this runner, the folders of `/work`
+   and the environment image (the name `code-reviewer-agent:environment`, so the daemon frees its layers). A hosted VM loses all of this
+   with the VM; a machine would keep it, and without this step a run of jobs that commit an environment image would fill the disk.
+
+Without `diskGb` there is no budget and the machine's disk is the limit; the app still shows the free space of `/work` as the disk of the
+runner. Choose the budget for the largest job you accept, and keep the rest of the machine's disk free for the images of the runner
+(`docker system df` shows them). A measure that fails (a daemon that does not answer) counts for nothing and never ends a job.
+
+What is **still not limited** (a follow-up): the CPU of the model door, the reader, the rule helpers and the runner's own git processes (they
+have a memory limit and are small and short), and more than one run at a time.
+
+### Updates (R2)
+
+A runner updates itself between jobs, or on the device (`factory-runner update`); **never from the app** (decision 9). The app may require a
+minimum base version: a runner below it gets no job, says "update needed" (claim answer `426`) and, if it can, updates at once.
+
+**Where the release comes from.** `ghcr.io/itegro-gmbh/code-reviewer-factory-runner`; the tag `stable` is the channel. The workflow
+[`runner-image.yml`](../.github/workflows/runner-image.yml) builds the agent image and the runner image from `main`, pushes them by digest, **signs
+them with cosign, keyless** (the workflow's own GitHub OIDC identity: there is **no key** to keep, rotate or lose), verifies what a runner will
+verify, and moves `stable` last. The runner image carries the number of its release (`code-reviewer.runner.release`, the run number of the
+workflow).
+
+**What is checked** (`factory_runner/update.py`, the same in `install.sh`):
+
+1. the image is pulled by the tag (a download, nothing runs), then **verified by its digest**: `cosign verify` with the certificate identity
+   `https://github.com/Itegro-GmbH/code-reviewer/.github/workflows/runner-image.yml@refs/(heads/main|tags/...)` and the issuer
+   `https://token.actions.githubusercontent.com`. The identity is **in the code, not in the configuration**. An image that does not verify is
+   removed and nothing changes;
+2. the release number must be **higher** than the running one's: a signed older image that somebody puts behind `stable` is no way back;
+3. only then is the digest named `factory-runner:current` (the one before it `factory-runner:previous`, for `update --rollback`).
+
+**Between jobs.** The unit starts the container from `factory-runner:current` and restarts it when it ends. The service looks for a release
+ten minutes after its start and then every six hours, **only between two jobs**; and when the image behind `current` is another one than the
+one the container runs (staged by the service or by `factory-runner update`), it ends with exit code **10** before its next claim and the unit
+starts it again from the new image. A job that is running is never touched. Both only apply when the unit says so
+(`FACTORY_RUNNER_IMAGE_TAG`): a runner somebody started by hand with `docker run` never ends itself for an update, and `run --once` never
+updates. `factory-runner config set --auto-update off` stops the looking by itself; an update the app requires is looked for anyway.
+
+**On the device.** `factory-runner update` stages the newest verified release and says so; the service switches to it after the job it is
+running. `factory-runner update --rollback` and a restart of the service go back one release. A new image that does not pass its own
+self-test is not ready (exit code 5) and takes no job: roll back.
+
+**What has to be done once by the owner, and is not done by this repository.** Nothing is published, and no runner can verify or update,
+until a person has:
+
+1. reviewed the distribution (`THIRD_PARTY_LICENSES.md`, "Copyleft and distribution"): publishing the runner image delivers the Worker
+   image's copyleft packages to customers, which the policy says needs a review first. The workflow refuses to run without the confirmation
+   `reviewed` as input;
+2. started the workflow once from `main` (Actions, "Runner image", Run workflow), which creates the two packages in the registry;
+3. set the two packages (`code-reviewer-factory-runner`, `code-reviewer-agent`) to **public** in their settings: GitHub creates them private, a
+   runner on a customer's machine pulls without a login.
+
+The first release is also the first real test of the signature check (the workflow verifies what a runner verifies, so a failure shows
+there, before `stable` moves) and of `cosign` against the registry; the unit tests cover the logic with stand-ins.
+
+### Uninstall
+
+`sudo sh install.sh --uninstall` (see "Install"), then revoke the runner in the app. By hand: `systemctl disable --now factory-runner`, remove
+the unit and `/usr/local/bin/factory-runner`, `docker rm -f factory-runner`, `docker rmi factory-runner:current factory-runner:previous`,
+and with the configuration and the work volume gone, `docker volume rm factory-runner-home factory-runner-work`. The firewall tables of
+the security notes (`nft delete table ip setup_egress`, and so on) go with the next restart of the machine.
 
 ### Tests
 
-Unit (`tests/unit/test_factory_runner_*.py`, `test_runner_profile.py`): configuration, command, loop with doubles, once mode, self-test
+Unit (`tests/unit/test_factory_runner_*.py`, `test_runner_profile.py`, `test_install_script.py`): configuration, command, loop with doubles, once mode, self-test
 with a double daemon (also: a stale agent image), limits, the cleaning between jobs (two turns in a row over the service, with the
 code of a turn's own directory set-up), the credential's source and the Dockerfile's promises. Contract (`tests/contract/test_factory_runner_contract.py`): the runner's real client against
 a fake App (`tests/runner_app.py`) that holds every body to `runner-registration.v1.json` and `runner-api.v1.json`. Integration
@@ -399,8 +535,18 @@ a fake App (`tests/runner_app.py`) that holds every body to `runner-registration
 stand-in job process, heartbeat, report; no job in time; the once mode with the environment alone; a revoked runner (before a claim
 and during a turn); an app that requires an update. Lane (`tests/lane/test_runner_selftest.py`): the self-test on a real
 daemon with the real agent image, and the removal of what a killed run left (a labelled container and network; an unlabelled container
-stays). The whole turn with a model and a repository is the Implementer's lane (`test_implementer_turn.py`),
-whose code the runner runs unchanged.
+stays), and the disk budget (`tests/lane/test_runner_disk_budget.py`: what a container writes into its layer is
+measured, a budget that is passed is noticed, the tidy frees the layer and the environment image). The whole turn with a model and a
+repository is the Implementer's lane (`test_implementer_turn.py`), whose code the runner runs unchanged.
+
+R2 (#855): `tests/unit/test_factory_runner_manage.py` (`config set`, `credential`, `update`, the proof), `test_factory_runner_disk_budget.py`
+(the measure, the guard, the host ending a job), the update cases in `test_factory_runner_service.py` (switch between jobs only, never during
+one, never in `--once`, update needed looks at once), and `test_install_script.py`, which runs `install.sh` against stand-ins for `docker`,
+`systemctl`, `cosign` and `curl` in a directory that plays the root of the machine: the verified digest, the unit, the token only on
+standard input, idempotence, no restart of a running service, a signature that does not verify, the dry run, the Sysbox warnings and its
+refusal without a terminal, uninstall, and that the installer, `update.py`, `cosign-pin.json`, the Dockerfile and the golden snapshot name the
+same signer, release and versions. CI also runs `shellcheck` on the installer. **No test starts a real systemd unit or installs a package:**
+nothing runs on a machine of ours; the first install on a real machine is the test of that.
 
 ### Security notes
 
@@ -425,9 +571,9 @@ whose code the runner runs unchanged.
   (`nft delete table ip setup_egress`, `nft delete table inet implementer_ipv6_agent`, and so on). The `inet` tables are flushed
   when a job installs them again, so they stay one table of the same rules. `setup_egress` is not: each job that runs a Setup
   container appends the same rules once more, which blocks nothing new and accumulates until the table is deleted or the machine
-  restarts (R2 deletes it after the job). (The tables of the model door and the network door, `door_egress` and `netdoor_egress`,
+  restarts (a follow-up of R2). (The tables of the model door and the network door, `door_egress` and `netdoor_egress`,
   live in the door container's own network namespace and go with the container.) Removing the host tables with the leftovers of a
-  job is R2.
+  job is a follow-up.
 
 ### Known limits
 
@@ -437,7 +583,7 @@ whose code the runner runs unchanged.
   the credential), so a runner removes only its own and refuses to start beside another (exit 9). **The operator must run one runner per
   daemon.** Another runner is recognised only while it has a container or a network on the daemon, or holds the lock; two runners with the
   same id (one configuration copied to two machines on one daemon) are not told apart. The lock closes the window of two different runners
-  that start in the same moment. Unique names, and with them more runners on one daemon, are R2. The hosted version sets no id and is
+  that start in the same moment. Unique names, and with them more runners on one daemon, are a later step. The hosted version sets no id and is
   unchanged.
 - **Snapshot and stored session.** Resume works on customer runners (#879, "Resume on customer runners"): the runner sends `PUT .../session` and `GET .../resume-session` to the runner API's routes when
   the app lists `runner_session_snapshot`. Against an app that does not list it (an older release) a turn on a runner takes **no snapshot** and a follow-up turn continues from the summary of the earlier ones
