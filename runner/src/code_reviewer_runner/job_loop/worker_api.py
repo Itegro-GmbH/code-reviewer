@@ -79,6 +79,14 @@ STEPS_REQUEST_TIMEOUT_SECONDS = 5.0
 SNAPSHOT_REQUEST_TIMEOUT_SECONDS = 20.0
 
 
+def snapshot_query(part: SnapshotPart) -> str:
+    """The query of one part of the snapshot (`SessionPartQuery` in the Worker contract)."""
+    return (
+        f"part={part.index}&parts={part.count}&bytes={part.size}&rawBytes={part.raw_bytes}"
+        f"&sha256={part.sha256}&opencodeVersion={part.version}"
+    )
+
+
 class CredentialInvalid(LeaseLost):
     """401: the credential is not the job's (unknown, from an earlier claim, expired)."""
 
@@ -235,11 +243,7 @@ class HttpWorkerApi:
         on its own and a part sent twice is the same call; the body is the bytes of the part.
 
         On a thread of its own like `steps`, one at a time."""
-        query = (
-            f"part={part.index}&parts={part.count}&bytes={part.size}&rawBytes={part.raw_bytes}"
-            f"&sha256={part.sha256}&opencodeVersion={part.version}"
-        )
-        path = f"/api/workers/v1/jobs/{self._safe_id(job_id)}/session?{query}"
+        path = f"/api/workers/v1/jobs/{self._safe_id(job_id)}/session?{snapshot_query(part)}"
         reply = await self._call_alone(
             "_snapshot_thread",
             "snapshot-call",
