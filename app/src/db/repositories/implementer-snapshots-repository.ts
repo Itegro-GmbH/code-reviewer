@@ -56,7 +56,7 @@ export type ReadForJobResult =
   | { status: "not_holder" }
   /** The job has no turn (never the case for a turn of the Implementer). */
   | { status: "no_session" }
-  /** The session has no snapshot of an earlier turn. */
+  /** The session has no snapshot of the directly preceding turn. */
   | { status: "none" }
   | {
       status: "ok";
@@ -80,6 +80,19 @@ export type StoredSessionSnapshot = {
   updatedAt: string;
 };
 
+/**
+ * Whether a snapshot stored for turn `stored` is offered to turn `turn` of its session (#885): only when it was written by the directly
+ * preceding turn. A turn that uploads none (the hosted export failed, the snapshot was over the cap, a customer runner without the feature)
+ * leaves the older snapshot in place, and that holds the conversation of the turn before last while the branch already has the later work.
+ * The claim (`resume.snapshot`) and the download (`readForJob`) both ask this, so a snapshot is never offered and then not served.
+ */
+export function isDirectPredecessorSnapshot(
+  stored: number,
+  turn: number,
+): boolean {
+  return stored === turn - 1;
+}
+
 export type ImplementerSnapshotsRepository = {
   /**
    * Stores one part of the snapshot of the running turn `jobId` held with `leaseToken`. When it is the last one missing, the snapshot is
@@ -92,9 +105,10 @@ export type ImplementerSnapshotsRepository = {
   ): Promise<RecordPartResult>;
   /**
    * The snapshot of the session that the running turn `jobId`, held with `leaseToken`, belongs to, for the follow-up turn to import
-   * (#840). Only that session's, found from the job: a job reads no other session's snapshot. Only a snapshot of an EARLIER turn
-   * counts (a turn that is running has none of its own until it ends; one left by an earlier attempt of this very turn is not an
-   * earlier conversation). Reads only; it neither locks the job nor extends the lease.
+   * (#840). Only that session's, found from the job: a job reads no other session's snapshot. Only the snapshot of the DIRECTLY
+   * PRECEDING turn counts (#885; `isDirectPredecessorSnapshot`): a turn that is running has none of its own until it ends, one left by
+   * an earlier attempt of this very turn is not an earlier conversation, and one older than the preceding turn is behind the branch.
+   * That one stays stored and is not offered. Reads only; it neither locks the job nor extends the lease.
    */
   readForJob(jobId: string, leaseToken: string): Promise<ReadForJobResult>;
   /** The snapshot of a session without its bytes, or undefined. */
@@ -386,7 +400,7 @@ export function createImplementerSnapshotsRepository(
         .selectAll()
         .where("session_id", "=", turn.session_id)
         .where("workspace_id", "=", workspaceId)
-        .where("turn_number", "<", turn.number)
+        .where("turn_number", "=", turn.number - 1)
         .executeTakeFirst();
       if (row === undefined) return { status: "none" };
       return {

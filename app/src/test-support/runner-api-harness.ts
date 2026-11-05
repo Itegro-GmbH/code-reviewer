@@ -11,7 +11,10 @@ import { managedModelsOf } from "../runner-api/managed-models.ts";
 import { createUsageRecordsRepository } from "../db/repositories/usage-records-repository.ts";
 import { createJobsRepository } from "../db/repositories/jobs-repository.ts";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
-import { createImplementerSnapshotsRepository } from "../db/repositories/implementer-snapshots-repository.ts";
+import {
+  createImplementerSnapshotsRepository,
+  isDirectPredecessorSnapshot,
+} from "../db/repositories/implementer-snapshots-repository.ts";
 import { buildResume } from "../runner-api/resume.ts";
 import { createImplementerStepsRepository } from "../db/repositories/implementer-steps-repository.ts";
 import { createCapabilitySet } from "../capabilities/capability.ts";
@@ -556,7 +559,8 @@ export async function startRunnerApiHarness(
           history: history.filter((entry) => entry.number < turn.number),
           sessionSummary: session.summary,
           hasSnapshot:
-            snapshot !== undefined && snapshot.turnNumber < turn.number,
+            snapshot !== undefined &&
+            isDirectPredecessorSnapshot(snapshot.turnNumber, turn.number),
         });
       },
       claimedKeyMode: async (job) =>

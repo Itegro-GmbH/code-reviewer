@@ -167,8 +167,12 @@ async function start() {
       credential: claimed.credential ?? "",
     };
   }
-  /** The follow-up turn of `earlier`'s session, running on `runner`: the first turn has to be over, one turn runs at a time. */
-  async function followUp(earlier: Held, runner: Runner = earlier.runner) {
+  /** The follow-up turn (number `number`, 2 unless said) of `earlier`'s session, running on `runner`: the turn before has to be over, one turn runs at a time. */
+  async function followUp(
+    earlier: Held,
+    runner: Runner = earlier.runner,
+    number = 2,
+  ) {
     await h.db
       .updateTable("jobs")
       .set({ status: "failed" })
@@ -177,20 +181,24 @@ async function start() {
     const next = await running(runner);
     await h.db
       .updateTable("implementer_turns")
-      .set({ session_id: earlier.sessionId, number: 2 })
+      .set({ session_id: earlier.sessionId, number })
       .where("job_id", "=", next.jobId)
       .execute();
     return { ...next, sessionId: earlier.sessionId };
   }
-  /** The snapshot of the session of `turn`, as that turn's upload leaves it. */
-  async function store(turn: Held, whole: Uint8Array) {
+  /** The snapshot of the session of `turn`, as that turn's upload (turn `number`, 1 unless said) leaves it: it replaces the session's older one. */
+  async function store(turn: Held, whole: Uint8Array, number = 1) {
+    await h.db
+      .deleteFrom("implementer_session_snapshots")
+      .where("session_id", "=", turn.sessionId)
+      .execute();
     await h.db
       .insertInto("implementer_session_snapshots")
       .values({
         session_id: turn.sessionId,
         workspace_id: h.workspaceId,
         job_id: turn.jobId,
-        turn_number: 1,
+        turn_number: number,
         opencode_version: "1.19.0",
         bytes: whole.byteLength,
         raw_bytes: whole.byteLength * 4,
@@ -477,6 +485,42 @@ describe("the resume-session call of the runner API", () => {
         },
       });
     }
+  });
+
+  // #885-T03
+  it("gives turn 3 nothing when turn 2 uploaded none: the snapshot of turn 1 stays stored and is not offered", async () => {
+    const { h, running, store, followUp, get, stored } = await start();
+    const runner = await h.registerRunner({ labels: LABELS });
+    const first = await running(runner);
+    await store(first, randomBytes(100));
+    const second = await followUp(first);
+    const third = await followUp(second, runner, 3);
+
+    const answer = await get(third);
+
+    expect(answer.status).toBe(204);
+    expect(await bytesOf(answer)).toHaveLength(0);
+    expect(
+      (await stored()).map(({ job_id, turn_number }) => [job_id, turn_number]),
+    ).toEqual([[first.jobId, 1]]);
+  });
+
+  // #885-T04
+  it("serves turn 3 the snapshot of turn 2 when turn 2 uploaded one", async () => {
+    const { h, running, store, followUp, get } = await start();
+    const runner = await h.registerRunner({ labels: LABELS });
+    const first = await running(runner);
+    await store(first, randomBytes(100));
+    const second = await followUp(first);
+    const whole = randomBytes(300);
+    await store(second, whole, 2);
+    const third = await followUp(second, runner, 3);
+
+    const answer = await get(third);
+
+    expect(answer.status).toBe(200);
+    expect(answer.headers.get("x-snapshot-sha256")).toBe(digest(whole));
+    expect(Buffer.from(await bytesOf(answer)).equals(whole)).toBe(true);
   });
 
   // #879-T13

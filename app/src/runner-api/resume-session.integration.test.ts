@@ -71,6 +71,11 @@ async function start() {
     number = 1,
     version = "1.19.0",
   ) {
+    // One snapshot for each session: the upload of a later turn replaces the earlier one.
+    await h.db
+      .deleteFrom("implementer_session_snapshots")
+      .where("session_id", "=", turn.sessionId)
+      .execute();
     await h.db
       .insertInto("implementer_session_snapshots")
       .values({
@@ -90,9 +95,12 @@ async function start() {
   }
   /**
    * The follow-up turn of `earlier`'s session, running: a second turn is queued (the follow-up API does not exist yet) and its turn row
-   * is moved into the session as turn 2. The first turn has to be over, one turn runs at a time.
+   * is moved into the session as turn `number` (2 unless said). The turn before has to be over, one turn runs at a time.
    */
-  async function followUp(earlier: { sessionId: string; jobId: string }) {
+  async function followUp(
+    earlier: { sessionId: string; jobId: string },
+    number = 2,
+  ) {
     await h.db
       .updateTable("jobs")
       .set({ status: "failed" })
@@ -101,7 +109,7 @@ async function start() {
     const next = await running();
     await h.db
       .updateTable("implementer_turns")
-      .set({ session_id: earlier.sessionId, number: 2 })
+      .set({ session_id: earlier.sessionId, number })
       .where("job_id", "=", next.jobId)
       .execute();
     return { ...next, sessionId: earlier.sessionId };
@@ -242,6 +250,43 @@ describe("the resume-session call of the Worker API", () => {
     const answer = await h.worker.resumeSession(turn.jobId, turn.credential);
 
     expect(answer.status).toBe(204);
+  });
+
+  // #885-T01
+  it("gives turn 3 nothing when turn 2 uploaded none: the snapshot of turn 1 stays stored and is not offered", async () => {
+    const { h, running, store, followUp } = await start();
+    const first = await running();
+    await store(first, randomBytes(100), 1);
+    const second = await followUp(first);
+    const third = await followUp(second, 3);
+
+    const answer = await h.worker.resumeSession(third.jobId, third.credential);
+
+    expect(answer.status).toBe(204);
+    expect(await bytesOf(answer)).toHaveLength(0);
+    const kept = await h.db
+      .selectFrom("implementer_session_snapshots")
+      .select(["job_id", "turn_number"])
+      .where("session_id", "=", first.sessionId)
+      .execute();
+    expect(kept).toEqual([{ job_id: first.jobId, turn_number: 1 }]);
+  });
+
+  // #885-T02
+  it("serves turn 3 the snapshot of turn 2 when turn 2 uploaded one", async () => {
+    const { h, running, store, followUp } = await start();
+    const first = await running();
+    await store(first, randomBytes(100), 1);
+    const second = await followUp(first);
+    const whole = randomBytes(300);
+    await store(second, whole, 2);
+    const third = await followUp(second, 3);
+
+    const answer = await h.worker.resumeSession(third.jobId, third.credential);
+
+    expect(answer.status).toBe(200);
+    expect(answer.headers.get("x-snapshot-sha256")).toBe(digest(whole));
+    expect(Buffer.from(await bytesOf(answer)).equals(whole)).toBe(true);
   });
 
   // #840-T07
