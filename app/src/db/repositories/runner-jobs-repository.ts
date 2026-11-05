@@ -621,7 +621,7 @@ export function createRunnerJobsRepository(
 
   /** #854: the same for the `jobs as served` row of a subquery. */
   function servedIsARunnerTurn(
-    eb: ExpressionBuilder<Database, "jobs" | "served">,
+    eb: ExpressionBuilder<Database & { served: Database["jobs"] }, "served">,
   ) {
     return eb.exists(
       eb

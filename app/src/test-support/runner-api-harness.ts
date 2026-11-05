@@ -19,7 +19,10 @@ import type { EnqueueImplementerTurnInput } from "../jobs/job-types.ts";
 import { createRunnerCredentialsRepository } from "../db/repositories/runner-credentials-repository.ts";
 import { createRunnersRepository } from "../db/repositories/runners-repository.ts";
 import { createRunnerRegistrationApi } from "../runner-api/registration.ts";
-import type { Announcement } from "../runner-identity/announcement.ts";
+import {
+  normalizeLabels,
+  type Announcement,
+} from "../runner-identity/announcement.ts";
 import {
   hashSecret,
   newRegistrationToken,
@@ -1146,7 +1149,7 @@ export async function startRunnerApiHarness(
         now: fixture.clock.now,
       }).redeem(hashSecret(token), {
         name: `runner-${String(runnerCounter)}`,
-        labels: announcement.labels ?? ["linux"],
+        labels: normalizeLabels(announcement.labels ?? ["linux"]),
         baseVersion: announcement.baseVersion ?? "1.0.0",
         manifest: announcement.manifest ?? {
           harnesses: { opencode: { version: "1.19.0", ready: true } },

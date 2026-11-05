@@ -42,6 +42,7 @@ function turn(
     createdBy: "user-1",
     createdAt: "2026-11-05T10:00:00.000Z",
     environment: null,
+    runnerEnvironment: null,
     profile: {
       id: "p-1",
       name: "worker",

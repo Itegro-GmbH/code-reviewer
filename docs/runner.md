@@ -46,7 +46,7 @@ POST /api/w/:ws/runners/tokens   ->  token crt_... (1 hour, once, hash kept)
 - **Last seen.** Every authenticated call of the runner is its heartbeat; the claim, which it makes every 30 seconds or so, is the one that matters. The
   list shows a runner as _online_ when it was heard from within two minutes and _offline_ otherwise.
 - **Revoking.** Owners and Admins revoke a runner on the page (`POST /api/w/:workspace/runners/:id/revoke`). The next call of that runner is
-  `401 RUNNER_UNAUTHORIZED`, the answer for any credential the app does not know. The same holds for every report about the job it was running (`heartbeat`, `complete`, `release`, `steps`; the session snapshot is the Worker API's and takes the per-job credential alone). Revoking also **ends the runner's running jobs at once**: their leases are cut to now and the queue's expiry runs, so a turn (one attempt) fails with `lease_expired` and its write token and record are dealt with as for any lost lease. What it already pushed stays on the branch.
+  `401 RUNNER_UNAUTHORIZED`, the answer for any credential the app does not know. The same holds for every report about the job it was running (`heartbeat`, `complete`, `release`, `steps`; the session snapshot is the Worker API's and takes the per-job credential alone). Revoking also **ends the runner's running jobs at once**: their leases are cut to now and the queue's expiry runs, so a turn (one attempt) fails with its own code, `runner_revoked` (free, with its own text on the run page: the runner was removed, not "ran out of retries"), and its write token and record are dealt with as for any lost lease. What it already pushed stays on the branch.
 - **The minimum version of the base** (decision 9). `RUNNER_MIN_BASE_VERSION` (unset: none) is the oldest base that gets jobs. A claim by a runner below
   it is `426 RUNNER_UPDATE_NEEDED` with `minBaseVersion`, the list shows _update needed_, and the runner says so on the machine. The app never updates a runner.
 - **Two doors.** The shared `RUNNER_TOKEN` (the Dispatcher's, and the poll mode's) and a runner credential are different secrets; a request that carries a
@@ -95,6 +95,14 @@ its model is managed and which harness it runs with:
 
 Profiles know only OpenCode today. The field `harness` is accepted in a profile document (`"opencode"` and nothing else: no other value is a harness a profile
 can name), nothing is stored for it, and the second rule is prepared for the first harness a runner announces; this change adds none.
+
+### Known limits and follow-ups
+
+- **Harness filter in the claim.** The claim checks that the runner announces `opencode` as ready, because profiles name no other harness. When the
+  first second harness exists, the claim must filter on the harness of the turn's profile version (stored with it, see the follow-up in
+  [`profiles.md`](profiles.md)); until then a runner with a ready OpenCode is eligible for every runner turn.
+- **Waiting turn and a workflow step.** A workflow step that runs in a runner environment waits like any turn, up to `RUNNER_WAIT_DEADLINE_MINUTES`; if no
+  runner takes it, the step fails with `no_runner_available` and a text, at no cost, and the run fails with `step_failed`.
 
 ## Spikes R0 (#853)
 

@@ -23,6 +23,9 @@ import { addWorkspace } from "../test-support/workspaces.ts";
 import { createRunnersRepository } from "../db/repositories/runners-repository.ts";
 import { createRunnerFleetService } from "../runner-fleet/service.ts";
 import { customerRunnerId } from "../runner-identity/tokens.ts";
+import { createDispatchSweep } from "../dispatch/sweep.ts";
+import { createAppMetaRepository } from "../db/repositories/app-meta-repository.ts";
+import { createJobDispatchesRepository } from "../db/repositories/job-dispatches-repository.ts";
 
 const NOW = new Date("2026-11-02T10:00:00.000Z");
 const KEY = "dummy-anthropic-key-0123456789-implementer";
@@ -183,6 +186,23 @@ describe("the claim of a customer's runner", () => {
     });
   });
 
+  // #854-T150
+  it("hands a runner that announced its labels in mixed case the turn: the labels are stored in lower case", async () => {
+    const h = await start();
+    const { credential } = await h.registerRunner({
+      labels: ["GPU", " Linux "],
+    });
+    const turn = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+    });
+
+    const response = await h.claim(claimOf(credential));
+
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as ClaimResponse).job.id).toBe(turn.job.id);
+  });
+
   // #854-T151
   it("hands a runner that lacks one label nothing, and the turn stays queued for one that has them all", async () => {
     const h = await start();
@@ -332,7 +352,53 @@ describe("the claim of a customer's runner", () => {
   });
 
   // #854-T157
-  it("does not end a turn of a runner environment with no_capable_runner while other runners are busy", async () => {
+  it("does not end a turn of a runner environment with no_capable_runner while another runner is running a job of the same kind", async () => {
+    const h = await start();
+    const busy = await h.registerRunner({ labels: ["cpu"] });
+    const busyTurn = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: { id: "env-cpu", name: "CPU box", labels: ["cpu"] },
+    });
+    const { job: busyJob } = (await (
+      await h.claim(claimOf(busy.credential))
+    ).json()) as ClaimResponse;
+    expect(busyJob.id).toBe(busyTurn.job.id);
+    const waiting = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+    });
+
+    // The runner of the busy job keeps its lease alive for the whole wait; nobody has the labels of the waiting turn.
+    for (let minute = 0; minute < 29; minute += 1) {
+      h.clock.advance(60 * 1000);
+      expect(
+        (
+          await h.heartbeat(busyJob.id, busyJob.leaseToken, {
+            token: busy.credential,
+          })
+        ).status,
+      ).toBe(200);
+    }
+    expect((await h.claim(claimOptions())).status).toBe(204);
+    expect(await h.queue.get(waiting.job.id)).toMatchObject({
+      status: "queued",
+    });
+
+    // At its own deadline it ends as no_runner_available while the other runner still works.
+    h.clock.advance(2 * 60 * 1000);
+    await h.heartbeat(busyJob.id, busyJob.leaseToken, {
+      token: busy.credential,
+    });
+    expect((await h.claim(claimOptions())).status).toBe(204);
+    expect(await h.queue.get(waiting.job.id)).toMatchObject({
+      status: "cancelled",
+      errorCode: "no_runner_available",
+    });
+    expect(await h.queue.get(busyJob.id)).toMatchObject({ status: "running" });
+  });
+
+  // #854-T157
+  it("does not end a turn of a runner environment with no_capable_runner when no runner works either", async () => {
     const h = await start();
     const turn = await h.enqueueTurn({
       modelChoice: OWN_MODEL,
@@ -345,6 +411,85 @@ describe("the claim of a customer's runner", () => {
 
     expect(await h.queue.get(turn.job.id)).toMatchObject({
       errorCode: "no_runner_available",
+    });
+  });
+
+  // #854-T159
+  it("lets a hosted deployment's give-up step spare a turn that waits for a runner, which then ends as no_runner_available", async () => {
+    const h = await start();
+    const sweep = createDispatchSweep({
+      now: h.clock.now,
+      queue: h.queue,
+      dispatches: createJobDispatchesRepository(h.db, h.clock.now),
+      meta: createAppMetaRepository(h.db, h.clock.now),
+      cleanup: async () => ({
+        rateLimits: 0,
+        unverifiedAccounts: 0,
+        verificationTokens: 0,
+        passwordResetTokens: 0,
+        jobClaimedKeys: 0,
+        jobDispatches: 0,
+      }),
+      // The give-up time is shorter than the wait for a runner (30 minutes).
+      settings: { giveUpMs: 5 * 60 * 1000, maxRunning: null },
+      log: { info: () => undefined, error: () => undefined },
+    });
+    const waiting = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+    });
+    const hosted = await h.enqueueNew({});
+
+    h.clock.advance(10 * 60 * 1000);
+    const report = await sweep.run();
+
+    // The step ran: the hosted job nobody dispatched is given up. The turn for a runner is not a job for a VM.
+    expect(report.failedSteps).toEqual([]);
+    expect(report.givenUp).toBe(1);
+    expect(await h.queue.get(hosted.id)).toMatchObject({
+      status: "failed",
+      errorCode: "dispatch_unavailable",
+    });
+    expect(await h.queue.get(waiting.job.id)).toMatchObject({
+      status: "queued",
+    });
+
+    h.clock.advance(21 * 60 * 1000);
+    await sweep.run();
+    expect(await h.queue.get(waiting.job.id)).toMatchObject({
+      status: "cancelled",
+      errorCode: "no_runner_available",
+    });
+  });
+
+  // #854-T160
+  it("does not hold a hosted Implementer turn in the queue because a customer's runner is running a turn", async () => {
+    const h = await start();
+    const runner = await h.registerRunner({ labels: ["gpu", "linux"] });
+    await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+    });
+    const { job: runnerJob } = (await (
+      await h.claim(claimOf(runner.credential))
+    ).json()) as ClaimResponse;
+    // A hosted turn that no Dispatcher claims (no hosted pool is alive): the running turn of the customer's runner is no sign of one.
+    const hosted = await h.enqueueTurn({ modelChoice: OWN_MODEL });
+
+    for (let minute = 0; minute < 31; minute += 1) {
+      h.clock.advance(60 * 1000);
+      await h.heartbeat(runnerJob.id, runnerJob.leaseToken, {
+        token: runner.credential,
+      });
+    }
+    expect((await h.queue.expireStaleJobs()).noCapableRunner).toBe(1);
+
+    expect(await h.queue.get(hosted.job.id)).toMatchObject({
+      status: "cancelled",
+      errorCode: "no_capable_runner",
+    });
+    expect(await h.queue.get(runnerJob.id)).toMatchObject({
+      status: "running",
     });
   });
 
@@ -459,6 +604,7 @@ describe("revoking a runner that is running a turn (#854)", () => {
   // #854-T240
   it("refuses it every report about the job it was running, and ends the job at once as failed", async () => {
     const { h, runner, turn, job, fleet } = await runningTurn();
+    const issued = h.issuedJobTokens();
     expect(
       (await h.heartbeat(job.id, job.leaseToken, { token: runner.credential }))
         .status,
@@ -493,9 +639,15 @@ describe("revoking a runner that is running a turn (#854)", () => {
     // The job is over now, not when its lease would have run out: one attempt, so it failed, and it was not put back in the queue.
     expect(await h.queue.get(turn.job.id)).toMatchObject({
       status: "failed",
-      errorCode: "lease_expired",
+      errorCode: "runner_revoked",
     });
     expect(job.id).toBe(turn.job.id);
+    // The GitHub token the turn was given is switched off with the claim.
+    await h.writeTokensSettled();
+    expect(issued.length).toBeGreaterThan(0);
+    expect(h.fake.revokedInstallationTokens()).toEqual(
+      expect.arrayContaining(issued),
+    );
   });
 
   // #854-T241
