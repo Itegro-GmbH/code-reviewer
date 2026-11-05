@@ -128,6 +128,11 @@ PUSH_TIMEOUT = 120.0
 # paths) and the content is read up to 4 GiB. A branch beyond any of them is not pushed
 # (`unchecked`): the guard does not let through what it could not read.
 GUARD_SECONDS = 300.0
+# Of the seconds the final push has, this share is kept for the guard (#856): the fetch of a branch,
+# the question to the lease and the push stop before it, so a stop (which gives the push 25 s) or a
+# slow fetch cannot leave the guard one second and turn committed work into `unchecked`. What the
+# guard does not use goes back to the push of the last branch.
+GUARD_SHARE = 0.4
 GUARD_LISTING_MAX_BYTES = 64 * 1024 * 1024
 GUARD_READ_MAX_BYTES = 4 * 1024**3
 # The wait before the one new try of a push the provider could not take.
@@ -412,6 +417,8 @@ class _Progress:
     form_listed: bool = True
     # The scratch ref the form's branch was taken over into (None: it was not).
     form_ref: str | None = None
+    # The seconds still kept for the push guard (`GUARD_SHARE`): nothing for a turn without a login.
+    guard_tank: float = 0.0
 
 
 class GitWorkspace:
@@ -1040,7 +1047,9 @@ class GitWorkspace:
         done until then is in `push_report()`."""
         deadline = self._clock() + seconds
         self._progress = _Progress()
-        self._ask_lease(deadline, confirm_seconds, confirm_pause)
+        if SecretScanner(self._guard_secrets).active:
+            self._progress.guard_tank = seconds * GUARD_SHARE
+        self._ask_lease(self._work_deadline(deadline), confirm_seconds, confirm_pause)
         self._clear_stale_locks()
         listed = self._local_branches()
         if listed is None:
@@ -1061,10 +1070,11 @@ class GitWorkspace:
                 self._progress.branches.append(BranchPush(name, None, False, REASON_OUT_OF_SPACE))
             return self.push_report()
         for index, name in enumerate(selection.names):
-            if self._clock() >= deadline:
+            if self._clock() >= self._work_deadline(deadline):
                 self._progress.branches.append(BranchPush(name, None, False, REASON_OUT_OF_TIME))
                 continue
-            self._push_one(index, name, deadline, confirm_seconds, confirm_pause)
+            last = index == len(selection.names) - 1
+            self._push_one(index, name, deadline, confirm_seconds, confirm_pause, last=last)
         return self.push_report()
 
     def push_report(self) -> PushReport:
@@ -1254,11 +1264,23 @@ class GitWorkspace:
         name = ref.removeprefix("refs/heads/")
         self.checked_out = None if branch_name_problem(name) is not None else name
 
+    def _work_deadline(self, deadline: float) -> float:
+        """Where the fetch, the question to the lease and the push stop: before the seconds that are
+        still kept for the guard."""
+        return deadline - self._progress.guard_tank
+
     def _push_one(
-        self, index: int, name: str, deadline: float, confirm_seconds: float, confirm_pause: float
+        self,
+        index: int,
+        name: str,
+        deadline: float,
+        confirm_seconds: float,
+        confirm_pause: float,
+        *,
+        last: bool,
     ) -> None:
         scratch = f"{SCRATCH_PREFIX}{index}"
-        tip, problem = self._take_over(name, scratch, deadline)
+        tip, problem = self._take_over(name, scratch, self._work_deadline(deadline))
         if problem is not None or tip is None:
             self._record(name, tip, problem or REASON_UNREADABLE)
             return
@@ -1273,8 +1295,10 @@ class GitWorkspace:
         if held is not None:
             self._record(name, tip, held)
             return
-        self._ask_lease(deadline, confirm_seconds, confirm_pause)
-        reason = self._push(scratch, name, deadline)
+        # What the guard left of its slice goes to the push when no branch comes after this one.
+        pushing = deadline if last else self._work_deadline(deadline)
+        self._ask_lease(pushing, confirm_seconds, confirm_pause)
+        reason = self._push(scratch, name, pushing)
         self._record(name, tip, reason)
 
     def _login_secret_in(self, scratch: str, name: str, deadline: float) -> str | None:
@@ -1288,6 +1312,18 @@ class GitWorkspace:
             return None
         if scanner.holds(name):
             return REASON_LOGIN_SECRET
+        began = self._clock()
+        # The guard reads within its slice; with the slice used up by earlier branches it reads
+        # within what the push has left (it never reads past the deadline).
+        slice_ = self._progress.guard_tank
+        ends = min(deadline, began + slice_) if slice_ > 0 else deadline
+        try:
+            return self._read_for_login(scanner, scratch, ends)
+        finally:
+            self._progress.guard_tank = max(slice_ - (self._clock() - began), 0.0)
+
+    def _read_for_login(self, scanner: SecretScanner, scratch: str, deadline: float) -> str | None:
+        """The two reads of the guard, each within what is left until `deadline`."""
         starts = sorted(set(self._starts.values()))
         listing = bytearray()
 

@@ -12,6 +12,7 @@ from urllib.parse import quote
 
 import pytest
 
+from code_reviewer_runner.implementer import git_workspace
 from code_reviewer_runner.implementer.git_process import Outcome
 from code_reviewer_runner.implementer.git_workspace import (
     REASON_LOGIN_SECRET,
@@ -182,6 +183,162 @@ def test_a_scan_that_cannot_finish_refuses_the_push_it_does_not_let_it_through(
 
     assert reason_of(report) == REASON_UNCHECKED
     assert rig.origin.tip(BRANCH) is None
+
+
+# #856-G05
+def test_a_list_of_objects_beyond_what_the_guard_keeps_is_not_pushed(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = guarded(rig)
+    commit(workspace, "a.txt")
+    monkeypatch.setattr(git_workspace, "GUARD_LISTING_MAX_BYTES", 16)
+
+    report = push(workspace)
+
+    assert reason_of(report) == REASON_UNCHECKED
+    assert rig.origin.tip(BRANCH) is None
+
+
+# #856-G05
+def test_content_beyond_what_the_guard_reads_is_not_pushed(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = guarded(rig)
+    commit(workspace, "a.txt", "x" * 4096)
+    monkeypatch.setattr(git_workspace, "GUARD_READ_MAX_BYTES", 1024)
+
+    report = push(workspace)
+
+    assert reason_of(report) == REASON_UNCHECKED
+    assert rig.origin.tip(BRANCH) is None
+
+
+# #856-G05
+def test_a_branch_within_both_limits_is_still_pushed(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = guarded(rig)
+    tip = commit(workspace, "a.txt")
+    monkeypatch.setattr(git_workspace, "GUARD_LISTING_MAX_BYTES", 4096)
+    monkeypatch.setattr(git_workspace, "GUARD_READ_MAX_BYTES", 4096)
+
+    assert reason_of(push(workspace)) is None and rig.origin.tip(BRANCH) == tip
+
+
+class Clock:
+    """A clock the test moves; the workspace asks it instead of the real one."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class Seen:
+    """What the final push gave each of its phases: the deadline of the fetch, the seconds of each
+    read of the guard, the deadline of the push."""
+
+    def __init__(self) -> None:
+        self.fetch: list[float] = []
+        self.guard: list[float] = []
+        self.push: list[float] = []
+
+
+def timed(workspace: GitWorkspace, clock: Clock, monkeypatch: pytest.MonkeyPatch) -> Seen:
+    """Run the phases with the clock under the test's hand: the fetch of a branch uses all the time
+    it was given, the guard's reads and the push use none. Records what each was given."""
+    seen = Seen()
+    workspace._clock = clock  # pyright: ignore[reportPrivateUsage]
+    take_over = GitWorkspace._take_over  # pyright: ignore[reportPrivateUsage]
+    real_stream = GitWorkspace._mirror_stream  # pyright: ignore[reportPrivateUsage]
+    push_one = GitWorkspace._push  # pyright: ignore[reportPrivateUsage]
+
+    def fetch(self: GitWorkspace, name: str, scratch: str, deadline: float) -> Any:
+        seen.fetch.append(deadline)
+        taken = take_over(self, name, scratch, deadline)
+        clock.now = max(clock.now, deadline - 0.5)
+        return taken
+
+    def stream(self: GitWorkspace, args: list[str], consume: Any, **options: Any) -> Outcome:
+        if "rev-list" in args or "cat-file" in args:
+            seen.guard.append(options["timeout"])
+        return real_stream(self, args, consume, **options)
+
+    def push(self: GitWorkspace, scratch: str, name: str, deadline: float) -> Any:
+        seen.push.append(deadline)
+        return push_one(self, scratch, name, deadline)
+
+    monkeypatch.setattr(GitWorkspace, "_take_over", fetch)
+    monkeypatch.setattr(GitWorkspace, "_mirror_stream", stream)
+    monkeypatch.setattr(GitWorkspace, "_push", push)
+    return seen
+
+
+# #856-G09
+def test_the_guard_keeps_a_slice_of_the_push_time_that_the_fetch_cannot_use(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = guarded(rig)
+    tip = commit(workspace, "a.txt")
+    clock = Clock()
+    seen = timed(workspace, clock, monkeypatch)
+    start = clock.now
+
+    report = workspace.push_all(seconds=20.0)
+
+    slice_ = 20.0 * git_workspace.GUARD_SHARE
+    assert seen.fetch == [pytest.approx(start + 20.0 - slice_)]  # pyright: ignore[reportUnknownMemberType]
+    # The fetch used everything it had, and the guard still has its whole slice to read with.
+    assert seen.guard and all(seconds >= slice_ - 0.6 for seconds in seen.guard[:1])
+    assert reason_of(report) is None and rig.origin.tip(BRANCH) == tip
+
+
+# #856-G09
+def test_what_the_guard_did_not_use_goes_back_to_the_push_of_the_last_branch(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = guarded(rig)
+    commit(workspace, "a.txt")
+    clock = Clock()
+    seen = timed(workspace, clock, monkeypatch)
+    start = clock.now
+
+    workspace.push_all(seconds=20.0)
+
+    assert seen.push == [pytest.approx(start + 20.0)]  # pyright: ignore[reportUnknownMemberType]
+
+
+# #856-G09
+def test_a_turn_without_a_login_keeps_no_slice(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = rig.prepared()
+    commit(workspace, "a.txt")
+    clock = Clock()
+    seen = timed(workspace, clock, monkeypatch)
+    start = clock.now
+
+    workspace.push_all(seconds=20.0)
+
+    assert seen.fetch == [pytest.approx(start + 20.0)]  # pyright: ignore[reportUnknownMemberType]
+    assert seen.guard == []
+
+
+# #856-G09
+def test_the_guard_of_a_stop_has_a_slice_that_fits_the_pushing_time_of_a_stop(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from code_reviewer_runner.implementer.session import STOP_PUSH_SECONDS
+
+    workspace = guarded(rig)
+    commit(workspace, "a.txt")
+    clock = Clock()
+    seen = timed(workspace, clock, monkeypatch)
+
+    workspace.push_all(seconds=STOP_PUSH_SECONDS)
+
+    # A branch with one commit is read in well under a second; the slice is there for a large one.
+    assert seen.guard[0] >= STOP_PUSH_SECONDS * git_workspace.GUARD_SHARE - 0.6
+    assert STOP_PUSH_SECONDS * (1 - git_workspace.GUARD_SHARE) >= 10.0
 
 
 # #856-G06
