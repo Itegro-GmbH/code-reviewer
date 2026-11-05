@@ -110,12 +110,6 @@ def dockerfile(base_id: str, spec: LayerSpec) -> str:
     return (
         f"FROM {base_id}\n"
         "USER 0:0\n"
-        # Claude Code runs its tools under bubblewrap to scrub the login from their environment
-        # (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`, `command.py`) and refuses to start without it.
-        "RUN set -eu; \\\n"
-        "    apt-get update; \\\n"
-        "    apt-get install --yes --no-install-recommends bubblewrap; \\\n"
-        "    rm -rf /var/lib/apt/lists/*\n"
         f'LABEL {VERSION_LABEL}="{spec.version}" {INTEGRITY_LABEL}="{_integrity_word(spec)}"\n'
         "RUN set -eu; \\\n"
         "    cd /tmp; \\\n"

@@ -127,11 +127,16 @@ def _amount(value: str) -> str:
 
 def claude_environment(login: ClaudeLogin, *, base_url: str | None = None) -> dict[str, str]:
     """The environment of the exec, built from names and never by inheriting. Telemetry, updates
-    and error reports are off; the login is scrubbed from the environment of the tools the agent
-    runs (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`, in the pinned 2.1.311: it runs them under bubblewrap
-    and Claude Code refuses to start without it, so the layer installs it); the tool schema is in
-    the first request (`ENABLE_TOOL_SEARCH`: otherwise a model must find the finish tool through a
-    search tool first)."""
+    and error reports are off; the tool schema is in the first request (`ENABLE_TOOL_SEARCH`:
+    otherwise a model must find the finish tool through a search tool first).
+
+    **Not set: `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`.** It exists in 2.1.311 and would keep the login
+    out of the environment of the agent's tools, but it makes Claude Code run its tools under
+    bubblewrap (and refuse to start without it) and **forces the permission mode to `default`**
+    ("Declare allowedTools explicitly"): every tool then waits for an approval that never comes in
+    a headless run. That is the opposite of "the agent is free inside the sandbox", and a closed
+    list of tools is a decision the owner has not made (`docs/runner.md`, "What is left", 7). An
+    engine test pins the behaviour, so that nobody sets it by accident."""
     environment = {
         "HOME": AGENT_HOME,
         "CLAUDE_CONFIG_DIR": CONFIG_DIRECTORY,
@@ -145,7 +150,6 @@ def claude_environment(login: ClaudeLogin, *, base_url: str | None = None) -> di
         "GIT_TERMINAL_PROMPT": "0",
         "PATH": f"/etc/code-reviewer:{AGENT_PATH}",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-        "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1",
         "DISABLE_AUTOUPDATER": "1",
         "ENABLE_TOOL_SEARCH": "false",
     }

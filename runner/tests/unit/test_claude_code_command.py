@@ -152,9 +152,9 @@ def test_the_environment_is_built_from_names_and_keeps_every_other_door_shut() -
     assert environment["ENABLE_TOOL_SEARCH"] == "false"
     assert environment["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
     assert environment["DISABLE_AUTOUPDATER"] == "1"
-    # The login is scrubbed from the environment of the tools the agent runs (the engine test
-    # proves it with the real program).
-    assert environment["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "1"
+    # It would keep the login out of the agent's tools, but forces the permission mode to
+    # `default` (the engine test pins it on the real program): not set.
+    assert "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB" not in environment
     assert environment["CLAUDE_CONFIG_DIR"] == CONFIG_DIRECTORY
     assert environment["HOME"].startswith("/home/")
     # The undocumented switch that lets root run in bypass mode is not relied on.
@@ -163,7 +163,6 @@ def test_the_environment_is_built_from_names_and_keeps_every_other_door_shut() -
         "ANTHROPIC_BASE_URL",
         "CLAUDE_CODE_OAUTH_TOKEN",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-        "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB",
         "CLAUDE_CONFIG_DIR",
         "CI",
         "DISABLE_AUTOUPDATER",

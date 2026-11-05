@@ -93,14 +93,6 @@ def test_the_layer_makes_the_user_the_exec_runs_as_and_leaves_the_base_alone() -
 
 
 # #856-T14
-def test_the_layer_has_the_bubblewrap_claude_code_needs_to_scrub_the_login_from_its_tools() -> None:
-    text = dockerfile(BASE, SPEC)
-
-    assert "apt-get install --yes --no-install-recommends bubblewrap" in text
-    assert text.index("bubblewrap") < text.index("npm install"), "before the program"
-
-
-# #856-T14
 def test_the_build_context_is_the_dockerfile_alone() -> None:
     with tarfile.open(fileobj=io.BytesIO(build_context(dockerfile(BASE, SPEC)))) as archive:
         names = archive.getnames()
