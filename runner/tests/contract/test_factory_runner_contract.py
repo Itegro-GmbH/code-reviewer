@@ -102,6 +102,21 @@ def test_the_claim_names_the_implementer_and_only_features_the_contract_knows(
     assert set(body["features"]) == set(WORKER_FEATURES)
 
 
+def test_the_claim_names_what_the_apps_own_runner_claim_test_names(app: FakeRunnerApp) -> None:
+    # `claimOf` in app/src/runner-api/runner-routing.integration.test.ts (#870): the engine of the
+    # turns, the features that make the app send the profile and the environment, and the providers
+    # a turn on the workspace's own key can use.
+    client, _ = registered(app)
+    client.claim()
+
+    body = next(r.body for r in app.requests if r.path.endswith("/claim"))
+    assert body["engines"] == ["implementer"]
+    assert {"implementer_profile", "implementer_environment", "implementer_result"} <= set(
+        body["features"]
+    )
+    assert {"openrouter", "anthropic"} <= set(body["llmProviders"])
+
+
 def test_the_job_a_claim_hands_over_is_one_the_job_host_runs(app: FakeRunnerApp) -> None:
     client, _ = registered(app)
     app.queue_job(JOB)

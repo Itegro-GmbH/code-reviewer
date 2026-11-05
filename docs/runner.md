@@ -220,6 +220,11 @@ set it and is never renewed.
 **Revoking** a runner in the app ends the job it is running at once (the app cuts the lease; the runner's next heartbeat is a `401`, the
 host ends the process, nothing more is sent) and the next claim stops the service.
 
+What the runner meets of the routing above (R1a part 2): it is offered a turn only when the turn's environment labels are all among its
+own, its workspace is the turn's and it announces a **ready** OpenCode; below `RUNNER_MIN_BASE_VERSION` the claim is the `426` it
+reads as "update needed". A revoked runner's turn ends in the app as `runner_revoked` (the runner learns it from the `401` of its
+next call and does not report); a turn that no runner takes ends as `no_runner_available` in the app, and the runner is not involved.
+
 ### `run --once`: a VM that runs one job and ends
 
 ```sh
