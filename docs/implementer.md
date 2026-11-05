@@ -164,11 +164,11 @@ on. The watch still asks the lease every 30 seconds while the agent works, so a 
 the model.
 
 **Time.** The runner keeps the last 270 seconds (four and a half minutes) of the time limit for the end. Every step is counted at its ceiling, and the sum at a normal end is
-222 seconds: the end of the agent's container 25 s (the kill call 15 s at most, then the wait until the daemon says it is gone 10 s at most; the container is removed only
+227 seconds: the export of the engine's session 5 s (section "The session snapshot"; it comes first, because it is read from the running engine), the end of the agent's container 25 s (the kill call 15 s at most, then the wait until the daemon says it is gone 10 s at most; the container is removed only
 after the push, on a thread of its own, because removing a Sysbox container with its inner Docker can take long and nothing waits for it, which is right while one VM runs one turn), the first
 reset of the readers 10 s (below), the rescue of a detached HEAD (three git commands of 3 s at most), the look at the tree (10 s at most), the commit of what is left (40 s), the second reset
 of the readers 10 s, the final push (100 s), the two reads of the report (5 s each) and the last flush of the live view (8 s, section "Step records"). A stop (SIGTERM) commits nothing (it still saves a detached HEAD on a branch), resets the readers once, and
-the process leaves itself 115 seconds, of which the sum is 84 (the last flush gets 5 s there) and the final push gets 25. A test holds both sums and the slack (a fifth of the grace, a quarter of the 115 s), with the real
+the process leaves itself 115 seconds, of which the sum is 86 (the last flush gets 5 s there, the export of the session 2 s) and the final push gets 25. A test holds both sums and the slack (a fifth of the grace, a quarter of the 115 s), with the real
 constants. **Why the ceilings are what they are.** Measured on a VM (2 vCPU): the kill call of the agent's container took 0.4 s idle, 2.0 s with two inner containers of a 1.5 GB image and 3.9 s
 with eight, and the wait after it 0.02 s, so the kill gets 15 s and the wait 10 s (an earlier round had 5 and 5, which a stack of a dozen inner services would have outgrown). The
 steps do not take their ceilings together except when the Docker daemon hangs, and then the push fails anyway and the report says what was and was not done; the slack is for the steps that
@@ -592,8 +592,8 @@ on the engine's event stream, the export just before `ImplementerAgent.stop()`, 
 | Does the stream say anything about old parts? | In the second turn the stream carried 42 `message.part.updated` events for tool parts of the first turn, as many as the prune marked, so the engine most likely re-sends a part when it marks it. The step feeder keys a record by part id, so they are upserts of rows the page already has; they must not move them. |
 
 **The end of the turn.** The export is cheap, so its budget can be small. The sums of the end (the sum test of `runner/tests/unit/test_implementer_session_parts.py`)
-are 222 of 270 s at a normal end (the test holds them to 85 %, 229.5 s) and 84 of 115 s at a stop (75 %, 86.25 s). The 20 s and 8 s of the plan would make
-242 and 92 and fail both limits; the measured path takes 1.7 s at 18.4 MB, so **5 s at a normal end (227 s) and 2 s at a stop (86 s)** fit the sums and are about three
+were 222 of 270 s at a normal end (the test holds them to 85 %, 229.5 s) and 84 of 115 s at a stop (75 %, 86.25 s). The 20 s and 8 s of the plan would have made
+242 and 92 and failed both limits; the measured path takes 1.7 s at 18.4 MB, so **5 s at a normal end (227 s) and 2 s at a stop (86 s)**, which is what #839 built, fit the sums and are about three
 and 1.2 times the largest measurement. The upload of the file goes through the job host before `complete` and is not part of the grace.
 
 **Rerun.** On a `spike-` VM from a snapshot built from the branch (`docs/golden-snapshot.md`, `--skip-retention`), as root, with the repository's
@@ -603,6 +603,51 @@ LANE_AGENT_IMAGE=code-reviewer-agent:golden .venv/bin/python scripts/follow_up_s
 
 **Not measured.** A real model (what a provider says to a replayed history, or to reasoning parts of another model), the clock of the VM against the first turn's, 4 vCPU,
 the narrowed network policy, and the import of a snapshot written by another OpenCode version.
+
+## The session snapshot (#839)
+
+A follow-up turn (#745) continues a session in a new VM, so the engine's conversation has to outlive the VM. At the end of every turn the runner takes the
+engine's session as a file and the job host uploads it to the app, which keeps **one snapshot for each session, replaced by each turn, and never deleted but by the erasure
+of the workspace** (owner's decision of 2026-11-04). Nothing reads it yet: the import on the new VM is a later step (PR 8) and the follow-up API and page another (PR 9).
+
+**Taking it** (`implementer/session_export.py`, called by `ImplementerSession` right before `ImplementerAgent.stop()`, because it is read from the running engine). Over the
+engine's HTTP API only, as the spike measured: `GET /session/<id>` and `GET /session/<id>/message` in pages of 50, newest page first with the cursor in `x-next-cursor`, put back
+in order, over one connection (each connection through the exec tunnel costs an exec). Then, in this order: the output of every tool part the engine's prune marked as compacted
+and the long strings (over 256 characters) of that part's metadata are emptied (the model is sent a fixed text in their place: the same 137 messages in the spike); the redactor of the
+turn is applied to **every string value and key**, never to the JSON text (its `Bearer ...` shape runs up to a quote and broke the document); the result is compact JSON with ASCII
+escapes (a lone surrogate cannot be encoded otherwise), gzipped with no time in the header. **Over 8 MiB gzipped there is no snapshot** (a note, `too_large`); a document is read up to
+32 MiB raw (the worst transcript of the spike, 18.4 MB, took 70 MiB of memory, about four times its size). The whole path, the hand-over to the job host included, is held to **5 s
+at a normal end and 2 s at a stop** (or when the lease or the runner is going away), which is what the sums above count; the measured path takes 1.7 s at 18.4 MB. A lost lease takes no
+export. Best effort: any failure is one note in the turn's notes (`the session was not saved for a follow-up turn: <word>`, the words `engine_unreachable`, `bad_answer`, `out_of_time`,
+`too_large`, `export_failed`, or `not handed to the host`) and changes nothing about the outcome, the push or the billing; the next turn then starts from a summary (the plan's fallback).
+A turn that ended badly is exported too: the conversation is worth keeping.
+
+**Getting it to the app** (`snapshot_wire.py`, `implementer/snapshot_pump.py`, `job_loop/snapshot_sender.py`, `job_loop/worker_api.py`). The job process holds neither the lease token nor the Worker's
+credential, so, like the steps, the file leaves over one more descriptor the host hands it (`RUNNER_SNAPSHOT_FD`, a third socket pair), only when the app lists the feature
+`implementer_snapshot` of `GET /api/runners/v1/version`: a header line (`S <size> <rawBytes> <sha256> <version>`) and the bytes. The host never reads a path from the process. It checks the digest
+and uploads the file to `PUT /api/workers/v1/jobs/{id}/session` with the Worker's credential, **in parts of exactly 3 MiB** (the last one is what is left). **The decision on the
+request size:** a function of the platform refuses a request body over 4.5 MB before the app is called, so a single request cannot carry the 8 MiB cap; 3 MiB leaves room, and the largest
+snapshot is three parts. Every part carries the description of the whole file in its query (`part`, `parts`, `bytes`, `rawBytes`, `sha256`, `opencodeVersion`), so a part is judged on its own,
+may arrive in any order and may arrive twice. The upload runs **beside the final push and before the result is delivered**: the process handle waits for it after the process has ended, for at most 50 s, and a
+dead app costs the sender its own 40 s and nothing else (it is not in the sums of the end of the turn). A lost claim (409, 404, 401) stops it for good, a snapshot the app refuses (another 4xx) is not sent
+again, anything else pauses 2 s and tries the same part again. The session therefore is never idle without its snapshot unless the app was away for the whole time.
+
+**Keeping it** (`db/repositories/implementer-snapshots-repository.ts`, scoped; `20261105090000_create_implementer_session_snapshots`). `implementer_session_snapshots` has one row for each session
+(its turn, the engine version, the sizes, the digest and the data) and `implementer_session_snapshot_parts` holds an upload until it is whole. The data is **base64 text**: the schema holds
+text and integers only (`src/db/README.md`, "Portable schema conventions"), so the plan's `bytea` is not used, and 8 MiB gzipped is at most about 10.7 MB of text, which the database TOASTs. When the last part is in, the
+parts are put together in the transaction that also proves the claim (the job row is locked `FOR NO KEY UPDATE`, as for the steps), the size and the digest are checked, and the old snapshot is replaced; until then it stays
+readable. Parts that disagree, or do not make the announced file, are refused (`400`) and nothing of that upload is kept. The parts of an upload that never finished are deleted when the next upload of the session starts. The call does not extend the lease,
+answers `409 RUNNER_JOB_ENDED` once the job is over, `401` for a credential that is not the job's and `400` for a job that is not a turn of the Implementer.
+
+**Who sees it.** The page never shows the snapshot, and nothing reads it yet. What it holds is what the agent read and said, with the secrets the runner knows taken out (the same ones as in the steps) and **tool outputs
+included**, which the live view does not show: a committed `.env` the agent printed is in it. The one reader will be the runner endpoint of the resume (PR 8), with the lease token of a job of the same session.
+
+**Tests.** `runner/tests/unit/test_session_export.py` (the document, the redaction, the blanking, the cap and the budget), `test_snapshot_pump.py`, `test_snapshot_sender.py`, `test_process_snapshot_channel.py`,
+`test_job_loop_snapshot.py` and the sum test of the end (`test_implementer_session_parts.py`); `tests/integration/test_implementer_job.py` (the export at a normal end and at a stop, a failing export, a host that does not read);
+the contract tests of both sides (`app/src/runner-api/snapshot-contract.test.ts`, `runner/tests/contract/test_snapshot_contract.py`); the app's integration tests (`snapshot.integration.test.ts`, the migration, the scoped repository
+in `scoping.test.ts` and `scoped-isolation.integration.test.ts`, the erasure); and one test of the lane (`tests/lane/test_implementer_turn.py`, E20): a real turn on a real Docker daemon, the file taken from the real engine through the
+tunnel, and **`opencode import` of the pinned engine reading it** in a container with no network. Not measured on a real VM again: the budget at 4 vCPU and the upload from a VM under the narrowed network policy
+(release 2's check).
 
 ## The memory of the readers and the OS
 

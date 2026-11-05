@@ -47,6 +47,15 @@ a turn of the Implementer"). The app lists the feature `implementer_steps` in `K
 body to the schema's verdict on a set of good and bad bodies (`app/src/runner-api/steps-contract.test.ts`), and the runner holds the records its converter makes to the schema, at the
 size of its caps (`runner/tests/contract/test_steps_contract.py`). A record of a kind not in `KnownStepKind` is dropped, not refused, and only its common fields (`kind`, `partId`, `seq`, `startedAt`, `endedAt`) are checked (`KnownStepFields` bounds the rest for the known kinds); a field the schema does not know is ignored.
 
+## The session snapshot (#839)
+
+`SessionPartQuery` and `SessionPartResponse` in `worker-api.v1.json` describe `PUT /api/workers/v1/jobs/{id}/session`: one part of the session snapshot of a running turn of the
+Implementer (the engine's export, gzipped, at most 8 MiB, kept for the follow-up turns). A function of the platform takes no request body over 4.5 MB, so the file is cut into parts of exactly 3 MiB (the last
+is what is left, at most three parts); the body is the bytes of the part and the description of the whole file (`part`, `parts`, `bytes`, `rawBytes`, `sha256`, `opencodeVersion`) is in the query of every part.
+The app lists the feature `implementer_snapshot` in `KnownAppFeature` (an app feature, not a claim feature: the call adds nothing to the job input). `examples/worker-api/SessionPartQuery.json` and `SessionPartResponse.json`
+are validated by both suites; the app also holds its hand-written reading of a query to the schema's verdict on a set of good and bad queries (`app/src/runner-api/snapshot-contract.test.ts`), and the runner holds the query it builds for every part of
+a file, up to the cap, to the schema (`runner/tests/contract/test_snapshot_contract.py`).
+
 ## The job model entry contract
 
 `job-model-entry.v1.json` (#548) is written by the app (`app/src/models-dev/job-entry.ts`) and read by the runner

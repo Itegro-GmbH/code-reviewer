@@ -601,6 +601,20 @@ migration in an earlier deployment does not have it.
   last, with `lock_timeout` 5 s for its own statements (`create-implementer-turn-steps.integration.test.ts` holds a writer open and checks that the batch gives up and can be
   run again).
 
+### Implementer session snapshots (#839)
+
+`20261105090000_create_implementer_session_snapshots` (follow-up turns) adds two tables and one index; no existing table changes.
+
+- `implementer_session_snapshots` (`repositories/implementer-snapshots-repository.ts`, scoped): ONE row for each session, replaced by the snapshot of each turn and never deleted but by the erasure of the workspace
+  (owner's decision of 2026-11-04). `data` is the engine's export as the runner made it (JSON, secrets taken out, gzipped) as **base64 text**: the schema holds text and integers only, see "Portable schema conventions" (the plan's `bytea` is
+  not used), and 8 MiB gzipped is at most about 10.7 MB of text, TOASTed. `turn_number` and `job_id` say which turn it came from, `opencode_version` which engine wrote it, `bytes`, `raw_bytes` and `sha256` describe the file.
+- `implementer_session_snapshot_parts`: where an upload waits until it is whole (keyed by `(job_id, part_index)`; every part repeats the description of the file). `recordPart(jobId, leaseToken, part)` proves the claim in the transaction (the job row
+  locked `FOR NO KEY UPDATE`, the lease **not** extended), stores the part, and when it is the last missing puts the parts together, checks size and digest, swaps the snapshot in and deletes the parts, all in that transaction, so a reader sees the
+  old snapshot or the new one. Parts that disagree or do not add up are deleted and refused; the parts of an upload that never finished are deleted when the next upload of the session starts.
+- Composite keys `(session_id, workspace_id)` to `implementer_sessions` and `(job_id, workspace_id)` to `jobs` keep the workspaces apart. The erasure of a workspace deletes both tables before the turns, the sessions and the jobs.
+- **Live database.** Expand only, like the steps: the tables are created first, the index, then the four links as `alter table` last, with `lock_timeout` 5 s for its own statements
+  (`create-implementer-session-snapshots.integration.test.ts` holds a writer open and checks that the batch gives up and can be run again).
+
 ### A database that ran the removed billing migrations
 
 Three migrations of an earlier billing design existed on `development` for a few days and are deleted (#491):
