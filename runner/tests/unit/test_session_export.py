@@ -10,6 +10,8 @@ import gzip
 import hashlib
 import json
 import os
+import threading
+import time
 from collections.abc import Mapping
 from typing import Any
 
@@ -17,6 +19,7 @@ import pytest
 
 from code_reviewer_runner.implementer.session_export import (
     CAP_BYTES,
+    MAX_RAW_BYTES,
     PAGE_SIZE,
     ExportFailed,
     ExportReason,
@@ -471,3 +474,284 @@ def test_an_agent_without_a_session_has_nothing_to_export() -> None:
         an_agent().export_session(Redactor([]), 5.0)
 
     assert caught.value.reason is ExportReason.UNREACHABLE
+
+
+# -- the budget holds against an engine that is not the engine ------------------------------------
+
+
+class TricklingServer:
+    """A loopback server that answers the session and then sends a message page one byte at a
+    time (the agent can replace the engine on its port). `closed` is set when the client's end
+    goes away."""
+
+    def __init__(self, *, pause: float = 0.1, length: int = 80) -> None:
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        outer = self
+        self.closed = threading.Event()
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self) -> None:
+                body = b"{}" if "/message" not in self.path else b"[" + b" " * (length - 2) + b"]"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                if "/message" not in self.path:
+                    self.wfile.write(body)
+                    return
+                try:
+                    for index in range(len(body)):
+                        self.wfile.write(body[index : index + 1])
+                        self.wfile.flush()
+                        time.sleep(pause)
+                except OSError:
+                    outer.closed.set()
+
+            def log_message(self, format: str, *args: Any) -> None:
+                return
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    def stop(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+
+# #839-T07
+def test_an_engine_that_trickles_its_body_costs_the_budget_and_not_more() -> None:
+    from code_reviewer_runner.implementer.session_export import EngineFetch
+
+    # 80 bytes at 0.1 s each: 8 s of body, and every read of it is inside the socket timeout.
+    server = TricklingServer(pause=0.1, length=80)
+    fetch = EngineFetch(server.url, "/work/repo")
+    began = time.monotonic()
+    try:
+        with pytest.raises(ExportFailed) as caught:
+            take_snapshot(
+                fetch,
+                SESSION,
+                redactor=Redactor([]),
+                seconds=1.0,
+                abort=fetch.close,
+            )
+        elapsed = time.monotonic() - began
+        # The connection is closed, so the server sees it go.
+        assert server.closed.wait(2.0)
+    finally:
+        fetch.close()
+        server.stop()
+
+    assert caught.value.reason is ExportReason.OUT_OF_TIME
+    assert elapsed < 1.5
+
+
+# #839-T07
+def test_the_agent_gives_up_on_a_trickling_engine_within_its_budget() -> None:
+    from code_reviewer_runner.dynamic_review.adapter import EngineClient
+
+    server = TricklingServer(pause=0.1, length=80)
+    agent = an_agent()
+    agent._client = EngineClient(server.url, "/work/repo")  # pyright: ignore[reportPrivateUsage]
+    agent.session_id = SESSION
+    began = time.monotonic()
+    try:
+        with pytest.raises(ExportFailed) as caught:
+            agent.export_session(Redactor([]), 1.0)
+        elapsed = time.monotonic() - began
+    finally:
+        server.stop()
+
+    assert caught.value.reason is ExportReason.OUT_OF_TIME
+    assert elapsed < 1.5
+
+
+# #839-T07
+def test_the_export_leaves_no_thread_behind_when_it_finishes() -> None:
+    import threading
+
+    before = {t.ident for t in threading.enumerate()}
+    snapshot_of(Engine([message(1, [tool_part(1)])]))
+
+    assert {t.ident for t in threading.enumerate()} <= before
+
+
+# #839-T07
+def test_a_slow_computation_is_given_up_on_at_the_deadline_and_stops() -> None:
+    # The redactor is the slow part here: the budget is held while it works, and it is told to stop.
+    release = threading.Event()
+    calls = [0]
+
+    class Slow(Redactor):
+        def redact(self, text: str) -> str:
+            calls[0] += 1
+            release.wait(5.0)
+            return text
+
+    began = time.monotonic()
+    with pytest.raises(ExportFailed) as caught:
+        snapshot_of(Engine([message(1, [tool_part(1)])]), redactor=Slow([]), seconds=0.3)
+    elapsed = time.monotonic() - began
+    release.set()
+
+    assert caught.value.reason is ExportReason.OUT_OF_TIME
+    assert elapsed < 1.0
+
+
+# -- a document made to be expensive ----------------------------------------------------------------
+
+
+def hostile_page(strings: int) -> bytes:
+    """One page that is a message whose single text part holds `strings` tiny strings."""
+    body = ",".join(['""'] * strings)
+    return (
+        '[{"info":{"id":"msg_1","role":"assistant"},"parts":[{"id":"p","type":"text","x":['
+        + body
+        + "]}]}]"
+    ).encode()
+
+
+# #839-T07
+def test_a_document_of_millions_of_tiny_strings_is_refused_before_it_is_parsed() -> None:
+    import tracemalloc
+
+    page = hostile_page(7_500_000)
+    assert len(page) < MAX_RAW_BYTES
+
+    def hostile(path: str, timeout: float) -> tuple[int, dict[str, str], bytes]:
+        return 200, {}, b"{}" if "/message" not in path else page
+
+    tracemalloc.start()
+    began = time.monotonic()
+    try:
+        with pytest.raises(ExportFailed) as caught:
+            take_snapshot(hostile, SESSION, redactor=Redactor([]), seconds=30.0)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    elapsed = time.monotonic() - began
+
+    assert caught.value.reason is ExportReason.TOO_LARGE
+    assert elapsed < 2.0
+    # Nothing of the document was built: far less than the 680 MB it took to process.
+    assert peak < 64 * 1024 * 1024
+
+
+# #839-T07
+def test_a_document_nested_deeper_than_any_transcript_is_refused() -> None:
+    deep = b"[" * 200 + b"]" * 200
+    page = b'[{"info":{"id":"m"},"parts":[{"type":"text","x":' + deep + b"}]}]"
+
+    def hostile(path: str, timeout: float) -> tuple[int, dict[str, str], bytes]:
+        return 200, {}, b"{}" if "/message" not in path else page
+
+    with pytest.raises(ExportFailed) as caught:
+        take_snapshot(hostile, SESSION, redactor=Redactor([]), seconds=10.0)
+
+    assert caught.value.reason is ExportReason.TOO_LARGE
+
+
+# #839-T07
+def test_a_document_nested_past_the_parsers_own_limit_is_a_bad_answer() -> None:
+    page = b"[" * 200_000 + b"]" * 200_000
+
+    def hostile(path: str, timeout: float) -> tuple[int, dict[str, str], bytes]:
+        return 200, {}, b"{}" if "/message" not in path else page
+
+    with pytest.raises(ExportFailed) as caught:
+        take_snapshot(hostile, SESSION, redactor=Redactor([]), seconds=10.0)
+
+    assert caught.value.reason in (ExportReason.BAD_ANSWER, ExportReason.TOO_LARGE)
+
+
+# #839-T07
+def test_the_production_fetch_stops_reading_past_its_limit_across_all_calls() -> None:
+    from code_reviewer_runner.implementer.session_export import EngineFetch
+
+    server = EngineServer([message(1, [tool_part(1, output="x" * 5000)])])
+    fetch = EngineFetch(server.url, "/work/repo", limit=1000)
+    try:
+        first = fetch(f"/session/{SESSION}", 2.0)
+        second = fetch(f"/session/{SESSION}/message?limit=50", 2.0)
+    finally:
+        fetch.close()
+        server.stop()
+
+    assert 0 < len(first[2]) < 200
+    # What the first call read counts for the second: one byte past what is left of the limit,
+    # which is what says the document is too large.
+    assert len(second[2]) == 1000 - len(first[2]) + 1
+
+
+# -- tool metadata that nests its copies of the content ---------------------------------------------
+
+
+def edit_part(number: int, size: int, *, compacted: int | None) -> dict[str, Any]:
+    """An edit tool part the way the engine reports one: the diff and, nested in the metadata, the
+    whole file before and after."""
+    part = tool_part(number, output="Edit applied", compacted=compacted)
+    part["tool"] = "edit"
+    part["state"]["input"] = {"filePath": f"/work/f{number}.py", "oldString": "a", "newString": "b"}
+    part["state"]["metadata"] = {
+        "diff": "d" * size,
+        "filediff": {
+            "file": f"/work/f{number}.py",
+            "before": "b" * size,
+            "after": "a" * size,
+            "additions": 1,
+            "deletions": 1,
+        },
+        "files": [{"relativePath": "f.py", "before": "x" * size, "after": "y" * size}],
+        "diagnostics": {},
+    }
+    return part
+
+
+# #839-T03
+def test_the_long_strings_nested_in_the_metadata_of_a_compacted_part_are_blanked_too() -> None:
+    messages = [message(1, [edit_part(1, 5000, compacted=7), edit_part(2, 5000, compacted=None)])]
+
+    document = document_of(snapshot_of(Engine(messages)))
+
+    compacted, live = document["messages"][0]["parts"]
+    found = compacted["state"]["metadata"]
+    assert found["diff"] == ""
+    assert found["filediff"] == {
+        "file": "/work/f1.py",
+        "before": "",
+        "after": "",
+        "additions": 1,
+        "deletions": 1,
+    }
+    assert found["files"] == [{"relativePath": "f.py", "before": "", "after": ""}]
+    # The short strings and the shape stay; the input the model is sent is untouched.
+    assert found["diagnostics"] == {}
+    assert compacted["state"]["input"]["filePath"] == "/work/f1.py"
+    # A part the model still reads in full is not changed.
+    assert live["state"]["metadata"]["filediff"]["before"] == "b" * 5000
+
+
+# #839-T05
+def test_an_edit_heavy_session_stays_well_under_the_cap_once_its_old_diffs_are_blanked() -> None:
+    # 300 edits of 30 KB files, random so that gzip does not help: 36 MB of metadata, far over
+    # the cap of what is stored, and inside what the export reads.
+    noise = base64.b64encode(os.urandom(30_000)).decode()
+    parts = []
+    for number in range(300):
+        part = edit_part(number, 0, compacted=number + 1 if number < 290 else None)
+        part["state"]["metadata"]["filediff"]["before"] = noise
+        part["state"]["metadata"]["filediff"]["after"] = noise
+        part["state"]["metadata"]["diff"] = noise
+        parts.append(part)
+    messages = [message(n, parts[n * 10 : n * 10 + 10]) for n in range(30)]
+
+    snapshot = snapshot_of(Engine(messages))
+
+    assert snapshot.blanked == 290
+    # Only the ten edits the model still reads in full are left at size: 3 copies of 40 KB each.
+    assert snapshot.raw_bytes < 3 * 1024 * 1024
+    assert len(snapshot.data) < CAP_BYTES // 4

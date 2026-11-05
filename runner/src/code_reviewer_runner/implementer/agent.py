@@ -228,7 +228,9 @@ class ImplementerAgent:
             raise ExportFailed(ExportReason.UNREACHABLE)
         fetch = EngineFetch(client.base_url, client.directory)
         try:
-            return take_snapshot(fetch, session_id, redactor=redactor, seconds=seconds)
+            return take_snapshot(
+                fetch, session_id, redactor=redactor, seconds=seconds, abort=fetch.close
+            )
         finally:
             fetch.close()
 

@@ -25,18 +25,36 @@ What is done to it, in this order:
    the turn goes on and says so in its notes.
 
 **The time.** The whole path is held to the seconds it is given (5 at a normal end, 2 at a stop;
-the measured path takes 1.7 s at 18.4 MB). Every call gets the seconds that are left, and the work
-between calls looks at the clock, so a slow engine costs the budget and not more. A document is
-read up to `MAX_RAW_BYTES` (the spike's worst transcript is 18.4 MB and took 70 MiB of Control's
-memory, about four times the document).
+the measured path takes 1.7 s at 18.4 MB). The engine runs in the agent's container, so the agent
+can put anything on its port: a server that sends its body a byte at a time never trips a socket
+timeout. So the export (fetch, redaction, blanking, dump, gzip) runs in a daemon thread that the
+caller `join`s for the seconds it was given; at the deadline the thread is told to stop, the
+connection is shut (`abort`) and the export gives up with `out_of_time`. The turn's push never waits
+behind it.
+
+**What it will take.** A document is read up to `MAX_RAW_BYTES`, summed over the pages (the
+spike's worst transcript is 18.4 MB and took 70 MiB of Control's memory, about four times the
+document), and the reading stops at the cap. Before a page is parsed its commas are counted (an
+upper bound of its elements; a page of millions of tiny strings is refused without building it), and
+the walk of the parsed document counts elements and depth (`MAX_NODES`, `MAX_DEPTH`); a transcript
+never comes near them (about 20 bytes an element, nesting of about ten).
+
+**What the redaction costs.** The redactor of the turn also knows the *shapes* of secrets
+(`sk-` followed by 20 or more characters, `Bearer <token>`), so it rewrites an ordinary path or word
+that looks like one. The snapshot is the model's history: a follow-up agent may see `[REDACTED]`
+where an old tool input had such a path or word. That is the price of never storing a secret; the
+turn itself is redacted the same way.
 
 Best effort: every failure is an `ExportFailed` with a stable reason, never the engine's text.
 """
 
+import contextlib
 import gzip
 import hashlib
 import http.client
 import json
+import socket
+import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -51,8 +69,20 @@ from code_reviewer_runner.snapshot_wire import MAX_SNAPSHOT_BYTES
 CAP_BYTES: Final = MAX_SNAPSHOT_BYTES
 # Messages per page; the engine answers the newest `limit` and a cursor for the older ones.
 PAGE_SIZE: Final = 50
-# The most raw JSON read from the engine, summed over the pages. About twice the worst measured.
-MAX_RAW_BYTES: Final = 32 * 1024 * 1024
+# The most raw JSON read from the engine, summed over the pages, before anything is blanked: three
+# or four times the worst measured, so that an edit-heavy session (the metadata of an edit repeats
+# the file before, after and as a diff) still fits once its old copies are emptied. The reading is
+# what bounds the memory (a few times this at worst); the 8 MiB gzipped cap decides what is stored.
+MAX_RAW_BYTES: Final = 64 * 1024 * 1024
+# The most elements (values of lists and objects, at any depth) a document may have, counted as the
+# commas of a page before it is parsed (an upper bound: a comma in a string counts) and as the walk
+# of the parsed document. A transcript has an element for 20 bytes or more (an estimate from the
+# fixtures; the spike's 18.4 MB is about 0.9 M), a page made of tiny strings has one for 4 (7.5 M in
+# 30 MB took 680 MB of memory and 11 s to go through).
+MAX_NODES: Final = 2_000_000
+# The deepest nesting a document may have: a transcript's is about ten (message, part, state,
+# metadata, a diff, ...), a tool's own JSON input a few more.
+MAX_DEPTH: Final = 100
 # A page count no real session reaches (50,000 messages); a cursor that never ends is a bad answer.
 MAX_PAGES: Final = 1000
 # A metadata string longer than this is a copy of an output; the spike emptied these.
@@ -90,6 +120,28 @@ class SessionSnapshot:
     blanked: int
 
 
+class _Work:
+    """What the thread of the export shares with the caller: the stop signal, and the elements
+    counted so far."""
+
+    def __init__(self) -> None:
+        self.cancelled = threading.Event()
+        self.announced = 0
+        self.nodes = 0
+
+    def announce(self, upper_bound: int) -> None:
+        """Elements a page may hold, from its bytes, before it is parsed."""
+        self.announced += upper_bound
+        if self.announced > MAX_NODES:
+            raise ExportFailed(ExportReason.TOO_LARGE)
+
+    def count(self, more: int) -> None:
+        """Elements of the parsed document, as the walk meets them."""
+        self.nodes += more
+        if self.nodes > MAX_NODES:
+            raise ExportFailed(ExportReason.TOO_LARGE)
+
+
 def take_snapshot(
     fetch: Fetch,
     session_id: str,
@@ -97,24 +149,58 @@ def take_snapshot(
     redactor: Redactor,
     seconds: float,
     clock: Callable[[], float] = time.monotonic,
+    abort: Callable[[], None] | None = None,
 ) -> SessionSnapshot:
-    """The snapshot of `session_id`, or `ExportFailed`. `seconds` is the whole budget."""
+    """The snapshot of `session_id`, or `ExportFailed`. `seconds` is the whole budget, held while
+    the engine trickles its answer or the document is slow to go through: the work is done in a
+    daemon thread and given up on at the deadline, when `abort` (shut the connection) is called."""
     deadline = clock() + seconds
+    work = _Work()
+    outcome: list[SessionSnapshot | BaseException] = []
 
+    def run() -> None:
+        try:
+            outcome.append(_export(fetch, session_id, redactor, deadline, clock, work))
+        except BaseException as error:  # noqa: BLE001 - handed to the caller's thread
+            outcome.append(error)
+
+    worker = threading.Thread(target=run, name="session-export", daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive():
+        work.cancelled.set()
+        if abort is not None:
+            with contextlib.suppress(Exception):
+                abort()
+        raise ExportFailed(ExportReason.OUT_OF_TIME)
+    result = outcome[0]
+    if isinstance(result, BaseException):
+        raise result
+    return result
+
+
+def _export(
+    fetch: Fetch,
+    session_id: str,
+    redactor: Redactor,
+    deadline: float,
+    clock: Callable[[], float],
+    work: _Work,
+) -> SessionSnapshot:
     def left() -> float:
         remaining = deadline - clock()
-        if remaining <= 0:
+        if remaining <= 0 or work.cancelled.is_set():
             raise ExportFailed(ExportReason.OUT_OF_TIME)
         return remaining
 
     safe = quote(session_id, safe="")
     info = _json(_get(fetch, f"/session/{safe}", left()))
-    messages = _messages(fetch, safe, left)
+    messages = _messages(fetch, safe, left, work)
     left()
     document: dict[str, Any] = {"info": info, "messages": messages}
     blanked = _blank_compacted(messages)
     left()
-    clean = _redact(document, redactor)
+    clean = _redact(document, redactor, work, 0)
     left()
     raw = json.dumps(clean, separators=(",", ":")).encode("ascii")
     left()
@@ -148,11 +234,13 @@ def _get(fetch: Fetch, path: str, seconds: float) -> tuple[Mapping[str, str], by
 def _json(answer: tuple[Mapping[str, str], bytes]) -> Any:
     try:
         return json.loads(answer[1])
-    except ValueError:
+    except (ValueError, RecursionError):
         raise ExportFailed(ExportReason.BAD_ANSWER) from None
 
 
-def _messages(fetch: Fetch, safe: str, left: Callable[[], float]) -> list[Any]:
+def _messages(
+    fetch: Fetch, safe: str, left: Callable[[], float], work: _Work
+) -> list[Any]:
     """Every message, oldest first. The engine answers the newest `PAGE_SIZE` and, while there are
     older ones, the cursor for them in a header; the pages are put back in order."""
     pages: list[list[Any]] = []
@@ -164,6 +252,8 @@ def _messages(fetch: Fetch, safe: str, left: Callable[[], float]) -> list[Any]:
         received += len(body)
         if received > MAX_RAW_BYTES:
             raise ExportFailed(ExportReason.TOO_LARGE)
+        # An upper bound of the page's elements, before a single one is built.
+        work.announce(body.count(b",") + 1)
         page = _json((headers, body))
         if not isinstance(page, list):
             raise ExportFailed(ExportReason.BAD_ANSWER)
@@ -179,8 +269,8 @@ def _messages(fetch: Fetch, safe: str, left: Callable[[], float]) -> list[Any]:
 
 
 def _blank_compacted(messages: list[Any]) -> int:
-    """Empty the output of every compacted tool part and the long strings of its metadata, in place.
-    Returns how many parts were changed."""
+    """Empty the output of every compacted tool part and the long strings of its metadata (at any
+    depth: a diff is nested there), in place. Returns how many parts were changed."""
     changed = 0
     for message in messages:
         if not isinstance(message, dict):
@@ -197,14 +287,26 @@ def _blank_compacted(messages: list[Any]) -> int:
             found = cast("dict[str, Any]", state)
             if isinstance(found.get("output"), str):
                 found["output"] = ""
-            metadata = found.get("metadata")
-            if isinstance(metadata, dict):
-                values = cast("dict[str, Any]", metadata)
-                for key, value in values.items():
-                    if isinstance(value, str) and len(value) > LONG_METADATA_CHARS:
-                        values[key] = ""
+            found["metadata"] = _without_long_strings(found.get("metadata"), 0)
             changed += 1
     return changed
+
+
+def _without_long_strings(value: Any, depth: int) -> Any:
+    """The metadata with every string over `LONG_METADATA_CHARS` emptied, at any depth up to
+    `MAX_DEPTH`."""
+    if isinstance(value, str):
+        return "" if len(value) > LONG_METADATA_CHARS else value
+    if not isinstance(value, (list, dict)):
+        return value
+    if depth >= MAX_DEPTH:
+        raise ExportFailed(ExportReason.TOO_LARGE)
+    if isinstance(value, list):
+        return [_without_long_strings(item, depth + 1) for item in cast("list[Any]", value)]
+    return {
+        key: _without_long_strings(item, depth + 1)
+        for key, item in cast("dict[str, Any]", value).items()
+    }
 
 
 def _compacted(state: dict[str, Any]) -> bool:
@@ -212,16 +314,28 @@ def _compacted(state: dict[str, Any]) -> bool:
     return isinstance(moments, dict) and bool(cast("dict[str, Any]", moments).get("compacted"))
 
 
-def _redact(value: Any, redactor: Redactor) -> Any:
-    """The same document with the redactor applied to every string value and key."""
+def _redact(value: Any, redactor: Redactor, work: _Work, depth: int) -> Any:
+    """The same document with the redactor applied to every string value and key. It is also the
+    walk that counts the elements and the depth, so a document made to be expensive is refused here
+    and the stop signal of the caller is seen on every element."""
+    if work.cancelled.is_set():
+        raise ExportFailed(ExportReason.OUT_OF_TIME)
     if isinstance(value, str):
         return redactor.redact(value)
     if isinstance(value, list):
-        return [_redact(item, redactor) for item in cast("list[Any]", value)]
+        if depth >= MAX_DEPTH:
+            raise ExportFailed(ExportReason.TOO_LARGE)
+        items = cast("list[Any]", value)
+        work.count(len(items))
+        return [_redact(item, redactor, work, depth + 1) for item in items]
     if isinstance(value, dict):
+        if depth >= MAX_DEPTH:
+            raise ExportFailed(ExportReason.TOO_LARGE)
+        pairs = cast("dict[str, Any]", value)
+        work.count(len(pairs))
         return {
-            redactor.redact(str(key)): _redact(item, redactor)
-            for key, item in cast("dict[str, Any]", value).items()
+            redactor.redact(str(key)): _redact(item, redactor, work, depth + 1)
+            for key, item in pairs.items()
         }
     return value
 
@@ -230,30 +344,50 @@ class EngineFetch:
     """The production `Fetch`: GET requests to the engine's address over one connection (each
     connection through the exec tunnel costs an exec, so the calls share one), scoped to the
     engine's directory by the runner's own header. Loopback only: `http.client` never uses a proxy
-    of the environment and never follows a redirect. A body is read up to one byte past
-    `MAX_RAW_BYTES`, which `take_snapshot` takes for a document that is too large."""
+    of the environment and never follows a redirect. What is read is bounded by `limit`, summed over
+    the calls, and a body is read up to one byte past what is left of it, which `take_snapshot`
+    takes for a document that is too large. `close` may be called from another thread while a read
+    blocks (the deadline of the export): it shuts the socket, which ends the read, and nothing
+    connects again afterwards."""
 
-    def __init__(self, base_url: str, directory: str) -> None:
+    def __init__(self, base_url: str, directory: str, *, limit: int = MAX_RAW_BYTES) -> None:
         parts = urlsplit(base_url)
         self._host = parts.hostname or "127.0.0.1"
         self._port = parts.port
         self._directory = directory
+        self._limit = limit
+        self._read = 0
+        self._closed = False
+        self._lock = threading.Lock()
         self._connection: http.client.HTTPConnection | None = None
 
     def __call__(self, path: str, timeout: float) -> tuple[int, Mapping[str, str], bytes]:
-        connection = self._connection
-        if connection is None:
-            connection = self._connection = http.client.HTTPConnection(
-                self._host, self._port, timeout=timeout
-            )
-        elif connection.sock is not None:
-            connection.sock.settimeout(timeout)
+        with self._lock:
+            if self._closed:
+                raise ConnectionError("closed")
+            connection = self._connection
+            if connection is None:
+                connection = self._connection = http.client.HTTPConnection(
+                    self._host, self._port, timeout=timeout
+                )
+            elif connection.sock is not None:
+                connection.sock.settimeout(timeout)
         connection.request("GET", path, headers={"x-opencode-directory": self._directory})
         response = connection.getresponse()
-        body = response.read(MAX_RAW_BYTES + 1)
+        body = response.read(max(self._limit - self._read, 0) + 1)
+        self._read += len(body)
         return response.status, {k.lower(): v for k, v in response.getheaders()}, body
 
     def close(self) -> None:
-        connection, self._connection = self._connection, None
-        if connection is not None:
-            connection.close()
+        with self._lock:
+            self._closed = True
+            connection, self._connection = self._connection, None
+        if connection is None:
+            return
+        # `shutdown` is what wakes a read that is blocked in another thread; `close` alone leaves
+        # the descriptor open while a reader holds the socket's file.
+        sock = connection.sock
+        if sock is not None:
+            with contextlib.suppress(OSError):
+                sock.shutdown(socket.SHUT_RDWR)
+        connection.close()
