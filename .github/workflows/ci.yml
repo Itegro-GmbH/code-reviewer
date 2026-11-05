@@ -809,11 +809,7 @@ jobs:
           --build-arg AGENT_IMAGE_REF=registry.example/code-reviewer-agent:ci
           --tag factory-runner:ci runner
       - name: Smoke test the Factory-Runner image
-        run: |
-          docker run --rm factory-runner:ci --version
-          docker run --rm factory-runner:ci register --help > /dev/null
-          docker run --rm --env FACTORY_RUNNER_URL=https://app.example factory-runner:ci config show | grep '"credential": "not set"'
-          docker run --rm --entrypoint cat factory-runner:ci /opt/code-reviewer/agent-image.json | grep 'code-reviewer-agent:ci'
+        run: docker/smoke/factory-runner.sh factory-runner:ci
 
   actionlint:
     name: Lint workflow files
