@@ -10,7 +10,7 @@ import type { Database } from "../schema.ts";
 import { migrationProvider } from "./index.ts";
 import { createEmptyTestDatabase } from "../../test-support/test-database.ts";
 
-const THIS = "20261106090000_add_run_cancellation";
+const THIS = "20261105210000_add_run_cancellation";
 const T = "2026-11-06T08:00:00.000Z";
 
 function upTo(include: (name: string) => boolean): MigrationProvider {
@@ -117,7 +117,7 @@ describe("the run cancellation migration", () => {
     await migrateToLatest(db, migrationProvider);
 
     const { migration } =
-      await import("./20261106090000_add_run_cancellation.ts");
+      await import("./20261105210000_add_run_cancellation.ts");
     await migration.up(db);
     await migration.down?.(db);
 
