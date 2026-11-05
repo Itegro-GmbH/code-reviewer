@@ -116,7 +116,7 @@ case "${1:-}" in
             exit 125
           fi ;;
         --user | --cap-drop | --cap-add | --security-opt | --tmpfs | --memory | --memory-reservation | \
-          --memory-swap | --pids-limit | --stop-timeout | --network | --sysctl)
+          --memory-swap | --pids-limit | --stop-timeout | --network | --sysctl | --oom-score-adj)
           shift 2 ;;
         -*)
           echo "docker-worker: unknown flag $1" >&2

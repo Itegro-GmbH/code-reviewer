@@ -136,6 +136,13 @@ export const WORK_VOLUME_PATH = "/work";
 const WORK_VOLUME_OPTIONS = ["rw", "nosuid", "nodev"] as const;
 const WORK_VOLUME_SOURCE = "named-volume";
 const IMPLEMENTER_PIDS_LIMIT = 2048;
+/**
+ * The OOM score of the Implementer's Control container (#827): the lowest there is, so that the VM's kernel never picks it while
+ * the agent's container (score 1000) is there. Root in the agent's container can lower its own score to -999 (not to -1000), and
+ * the kernel compares scores, so Control at -1000 is out of the choice whatever the agent does. Only this profile: a review's
+ * container has none of this and its flags stay as they were.
+ */
+export const IMPLEMENTER_OOM_SCORE_ADJ = -1000;
 /** The VM's Docker socket and where the Implementer's Control container sees it (the contract's `DockerSocket`). */
 export const DOCKER_SOCKET_SOURCE = "/var/run/docker.sock";
 export const DOCKER_SOCKET_TARGET = "/run/docker.sock";
@@ -584,6 +591,9 @@ export function renderDockerRunArguments(
           "--mount",
           `type=bind,source=${hardened.dockerSocket.source},target=${hardened.dockerSocket.target},readonly`,
         ]
+      : []),
+    ...("dockerSocket" in hardened
+      ? ["--oom-score-adj", String(IMPLEMENTER_OOM_SCORE_ADJ)]
       : []),
     "--memory",
     memory.limit,
