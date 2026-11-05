@@ -3,8 +3,11 @@
 "use client";
 // The form that sends a task to the Implementer (#756): the repository (of those linked, one without write permission is listed
 // but cannot be chosen), the base branch (the repository's default branch is preselected), the name of the new branch, the task, the
-// model and an optional cost limit. It talks to the four routes of #755 only (`api.ts`), reads no secret and no token, and shows no
-// text of GitHub: every refusal is a fixed sentence for its code (`messages.ts`).
+// model and an optional cost limit. It talks to the routes of #755 (`api.ts`) and reads the profiles of the workspace (#843), reads no
+// secret and no token, and shows no text of GitHub: every refusal is a fixed sentence for its code (`messages.ts`).
+//
+// A profile is optional. With one, the model and the cost limit are the profile's version: they are shown, not editable, and the
+// request names the profile (the version shown) and neither of the two. The environment stays a choice of its own.
 //
 // One body is one task: the client request id belongs to what is sent. A send of the same body again (after a failed or a lost
 // answer) carries the same id, so a retry that reaches the server twice starts one task; a body that was edited since is another
@@ -48,6 +51,7 @@ import {
   FORM_COPY,
 } from "./messages.ts";
 import {
+  describeModelChoice,
   hasModels,
   ModelPicker,
   modelChoiceOf,
@@ -62,6 +66,7 @@ type FieldKey =
   | "instruction"
   | "model"
   | "environment"
+  | "profile"
   | "cost";
 type Errors = Partial<Record<FieldKey, string>>;
 /** A sentence on the form that is no field's; for a request id that made another task it brings the link to that task. */
@@ -75,7 +80,7 @@ const FIELD_OF_ISSUE: Record<ImplementerIssue["field"], FieldKey | null> = {
   model: "model",
   costLimitCents: "cost",
   environmentId: "environment",
-  profile: null,
+  profile: "profile",
   result: null,
   clientRequestId: null,
 };
@@ -88,6 +93,7 @@ const FIELD_OF_FAILURE: Record<string, FieldKey> = {
   IMPLEMENTER_MODEL_NOT_ALLOWED: "model",
   IMPLEMENTER_ENVIRONMENT_NOT_FOUND: "environment",
   IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED: "environment",
+  IMPLEMENTER_PROFILE_NOT_FOUND: "profile",
   EXCEEDS_OPERATOR_MAXIMUM: "cost",
 };
 
@@ -95,9 +101,14 @@ const FIELD_OF_FAILURE: Record<string, FieldKey> = {
 const loadRepositories = (api: ImplementerApi) => api.repositories();
 const loadModels = (api: ImplementerApi) => api.models();
 const loadEnvironments = (api: ImplementerApi) => api.environments();
+const loadProfiles = (api: ImplementerApi) => api.profiles();
+const loadProfile = (api: ImplementerApi, profileId: string) =>
+  api.profile(profileId);
 
 /** What the picker's "no environment" option is called; an environment's id can never be this (they are UUIDs). */
 const STANDARD = "__standard";
+/** What the picker's "no profile" option is called; a profile's id can never be this (they are UUIDs). */
+const NO_PROFILE = "__none";
 const loadBranches = (api: ImplementerApi, repositoryId: string) =>
   api.branches(repositoryId);
 
@@ -156,6 +167,7 @@ export function ImplementerForm({
     model: "",
   });
   const [environmentPick, setEnvironmentPick] = useState(STANDARD);
+  const [profilePick, setProfilePick] = useState(NO_PROFILE);
   const [cost, setCost] = useState("");
   const [errors, setErrors] = useState<Errors>({});
   const [problem, setProblem] = useState<Problem | null>(null);
@@ -181,6 +193,7 @@ export function ImplementerForm({
     "all",
     loadEnvironments,
   );
+  const [profiles, reloadProfiles] = useRequest(api, "all", loadProfiles);
   const [branches, reloadBranches] = useRequest(
     api,
     repositoryId === "" ? null : repositoryId,
@@ -230,6 +243,37 @@ export function ImplementerForm({
     (candidate) => candidate.id === environmentPick,
   );
 
+  // The list holds no archived profile; one that is archived since (or never listed) is not one to choose. A pick that is gone falls
+  // back to none.
+  const profileList =
+    profiles.state === "ready"
+      ? profiles.data.profiles.filter(
+          (candidate) => candidate.archivedAt === null,
+        )
+      : [];
+  const profile = profileList.find((candidate) => candidate.id === profilePick);
+  const [profileDetail, reloadProfileDetail] = useRequest(
+    api,
+    profile?.id ?? null,
+    loadProfile,
+  );
+  const profileDocument =
+    profileDetail.state === "ready"
+      ? profileDetail.data.profile.document
+      : undefined;
+  // The form sends the version it shows (`name@version`): a newer one made since would bring another model and cost limit.
+  const profileRef =
+    profile !== undefined && profileDetail.state === "ready"
+      ? `${profile.name}@${profileDetail.data.profile.documentVersion}`
+      : undefined;
+  // A model of the profile that the loaded options do not offer (the key is gone, the model is not served any more) is refused at
+  // the start. A list that is loading, failed or unreadable says nothing about it.
+  const profileModelGone =
+    profileDocument !== undefined &&
+    modelOptions !== undefined &&
+    modelOptions.keyMode !== "unreadable" &&
+    describeModelChoice(modelOptions, profileDocument.model) === undefined;
+
   function clear(...keys: FieldKey[]) {
     setErrors((current) => {
       const next = { ...current };
@@ -250,7 +294,11 @@ export function ImplementerForm({
   function check():
     { body: Omit<StartTaskRequest, "clientRequestId"> } | { errors: Errors } {
     const found: Errors = {};
-    const costLimit = parseCostLimit(cost, operatorMaximumCents);
+    // The cost limit is the profile's when there is one: what is typed in the field does not count.
+    const costLimit =
+      profile === undefined
+        ? parseCostLimit(cost, operatorMaximumCents)
+        : ({ ok: true, cents: null } as const);
     if (!costLimit.ok)
       found.cost =
         costLimit.code === "invalid"
@@ -259,12 +307,15 @@ export function ImplementerForm({
               code: "EXCEEDS_OPERATOR_MAXIMUM",
               maximumCents: costLimit.maximumCents,
             });
+    if (profileModelGone) found.model = FORM_COPY.profileModelGone;
     const body = {
       repositoryId,
       baseBranch,
       branch,
       instruction,
-      model: choice,
+      ...(profile === undefined
+        ? { model: choice }
+        : { profile: profileRef ?? profile.name }),
       ...(environment === undefined ? {} : { environmentId: environment.id }),
       ...(costLimit.ok && costLimit.cents !== null
         ? { costLimitCents: costLimit.cents }
@@ -389,8 +440,9 @@ export function ImplementerForm({
   const canSend =
     repositories.state === "ready" &&
     eligible.length > 0 &&
-    models.state === "ready" &&
-    hasModels(models.data) &&
+    (profile === undefined
+      ? models.state === "ready" && hasModels(models.data)
+      : profileDetail.state === "ready") &&
     branches.state !== "loading" &&
     branches.state !== "failed" &&
     !pending;
@@ -442,6 +494,14 @@ export function ImplementerForm({
     }),
   );
 
+  const profileOptions: ModelOption[] = [
+    { id: NO_PROFILE, label: FORM_COPY.profileNone },
+    ...profileList.map((candidate) => ({
+      id: candidate.id,
+      label: candidate.name,
+      note: `${FORM_COPY.profileVersion} ${candidate.version}`,
+    })),
+  ];
   const environmentOptions: ModelOption[] = [
     { id: STANDARD, label: FORM_COPY.environmentStandard },
     ...environmentList.map((candidate) => ({
@@ -587,18 +647,79 @@ export function ImplementerForm({
             />
           )}
         </FormField>
-        <ModelPicker
-          workspaceSlug={workspaceSlug}
-          options={modelOptions}
-          pick={modelPick}
-          error={errors.model}
-          loading={models.state === "loading"}
-          onPick={(next) => {
-            setModelPick(next);
-            clear("model");
+        <ModelSelect
+          name="profile"
+          label={FORM_COPY.profile}
+          value={profile?.id ?? NO_PROFILE}
+          options={profileOptions}
+          onChange={(id) => {
+            setProfilePick(id);
+            clear("profile", "model", "cost");
           }}
+          error={errors.profile}
+          disabled={profiles.state === "loading"}
+          placeholder={FORM_COPY.profilePlaceholder}
         />
-        {models.state === "failed" ? (
+        <p className="-mt-3 text-sm text-muted-foreground">
+          {FORM_COPY.profileHint}
+        </p>
+        {profiles.state === "failed" ? (
+          <LoadFailure
+            sentence={FORM_COPY.profileLoadFailed}
+            onRetry={reloadProfiles}
+          />
+        ) : null}
+        {profile !== undefined && profileDetail.state === "failed" ? (
+          <LoadFailure
+            sentence={FORM_COPY.profileDetailLoadFailed}
+            onRetry={reloadProfileDetail}
+          />
+        ) : null}
+        {profile !== undefined && profileDocument?.canPush === false ? (
+          <Alert variant="info" role="status">
+            {FORM_COPY.profileNoPush}
+          </Alert>
+        ) : null}
+        {profile !== undefined ? (
+          <FormField
+            name="model"
+            label={FORM_COPY.model}
+            hint={FORM_COPY.profileModelHint}
+            error={
+              errors.model ??
+              (profileModelGone ? FORM_COPY.profileModelGone : undefined)
+            }
+          >
+            {(control) => (
+              <Input
+                {...control}
+                type="text"
+                readOnly
+                value={
+                  profileDocument === undefined
+                    ? FORM_COPY.loading
+                    : (describeModelChoice(
+                        modelOptions,
+                        profileDocument.model,
+                      ) ?? FORM_COPY.profileModelUnknown)
+                }
+              />
+            )}
+          </FormField>
+        ) : (
+          <ModelPicker
+            workspaceSlug={workspaceSlug}
+            options={modelOptions}
+            pick={modelPick}
+            error={errors.model}
+            loading={models.state === "loading"}
+            onPick={(next) => {
+              setModelPick(next);
+              clear("model");
+            }}
+          />
+        )}
+        {profile === undefined && models.state === "failed" ? (
           <LoadFailure
             sentence={describeImplementerFailure(product, {
               code: models.failure.code,
@@ -653,28 +774,52 @@ export function ImplementerForm({
             onRetry={reloadEnvironments}
           />
         ) : null}
-        <FormField
-          name="cost"
-          label={FORM_COPY.costLimit}
-          hint={FORM_COPY.costLimitHint}
-          error={errors.cost}
-        >
-          {(control) => (
-            <Input
-              {...control}
-              type="text"
-              inputMode="decimal"
-              autoComplete="off"
-              spellCheck={false}
-              placeholder={costLimitPlaceholder(operatorMaximumCents)}
-              value={cost}
-              onChange={(event) => {
-                setCost(event.target.value);
-                clear("cost");
-              }}
-            />
-          )}
-        </FormField>
+        {profile === undefined ? (
+          <FormField
+            name="cost"
+            label={FORM_COPY.costLimit}
+            hint={FORM_COPY.costLimitHint}
+            error={errors.cost}
+          >
+            {(control) => (
+              <Input
+                {...control}
+                type="text"
+                inputMode="decimal"
+                autoComplete="off"
+                spellCheck={false}
+                placeholder={costLimitPlaceholder(operatorMaximumCents)}
+                value={cost}
+                onChange={(event) => {
+                  setCost(event.target.value);
+                  clear("cost");
+                }}
+              />
+            )}
+          </FormField>
+        ) : (
+          <FormField
+            name="cost"
+            label={FORM_COPY.costLimit}
+            hint={FORM_COPY.profileCostHint}
+            error={errors.cost}
+          >
+            {(control) => (
+              <Input
+                {...control}
+                type="text"
+                readOnly
+                value={
+                  profileDocument === undefined
+                    ? FORM_COPY.loading
+                    : profileDocument.costLimitCents === null
+                      ? `${FORM_COPY.profileCostMaximum} (${costLimitPlaceholder(operatorMaximumCents)})`
+                      : `$${(profileDocument.costLimitCents / 100).toFixed(2)}`
+                }
+              />
+            )}
+          </FormField>
+        )}
       </fieldset>
       {started !== null ? (
         <Alert variant="success" role="status">

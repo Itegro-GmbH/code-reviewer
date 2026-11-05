@@ -45,6 +45,24 @@ export const FORM_COPY = {
   providerPlaceholder: "Choose a provider",
   model: "Model",
   modelPlaceholder: "Choose a model",
+  profile: "Profile",
+  profileNone: "No profile",
+  profilePlaceholder: "Choose a profile",
+  profileHint:
+    "A profile brings the model, the cost limit and the standing instructions. Without one, you choose the model and cost limit below.",
+  profileLoadFailed:
+    "The profiles could not be loaded. A task can still be sent without a profile.",
+  profileDetailLoadFailed:
+    "This profile could not be loaded. Try again, or choose another.",
+  profileVersion: "version",
+  profileModelHint:
+    "The model of the profile. To use another, choose another profile or none.",
+  profileModelUnknown: "A model of this profile",
+  profileModelGone:
+    "The model of this profile is not available in this workspace, so the task would be refused. Choose another profile or none.",
+  profileCostHint: "The cost limit of the profile.",
+  profileCostMaximum: "The operator's maximum",
+  profileNoPush: "This profile does not push: the result stays in the run.",
   environment: "Environment",
   environmentPlaceholder: "Choose an environment",
   environmentHint:

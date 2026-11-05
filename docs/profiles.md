@@ -5,7 +5,7 @@ branches, and (optionally) what its result looks like when a step does not say. 
 the profile is *who works*, the [environment](implementer.md#environments) is *where* (setup script, size, network rule). The environment is
 never part of a profile.
 
-Profiles are data. Nothing is built in: people create them, change them and reuse them, through the API (there is no page yet), and an
+Profiles are data. Nothing is built in: people create them, change them and reuse them, through the API (there is no page to manage them yet; the Implementer form can pick one), and an
 AI can write one. Every member of a workspace may do all of it (the permission `start_implementer_task`, like environments). The profiles
 exist only in a deployment with the capability `implementer` (the factory).
 
@@ -143,7 +143,13 @@ differs is what Control does with the branches the agent made in its container:
 `name@version`. With a profile the body names **neither `model` nor `costLimitCents`** (`not_with_profile`): the version brings both, and
 they are checked at the start like the form's (`IMPLEMENTER_MODEL_NOT_ALLOWED`, `EXCEEDS_OPERATOR_MAXIMUM`). A profile that is not there, is
 archived, or has no such version is `IMPLEMENTER_PROFILE_NOT_FOUND`. The environment is chosen separately (`environmentId`), as before.
-The form on the page does not offer a profile yet; the API does.
+The Implementer form offers it too: an optional **Profile** select lists the workspace's profiles that are not archived (by name, with the
+newest version) and **No profile**, the default, which leaves the form as it always was. With a profile chosen, the form shows the model and
+the cost limit of its newest version at the time of loading and does not let them be edited, says in one sentence when the profile does not push ("This profile
+does not push: the result stays in the run."), and sends `profile: "<name>@<version>"` without `model` and `costLimitCents`. The form pins
+the version it shows, so a version made after the page loaded does not change what the task runs with. When the model of that version is
+not among the models the workspace offers, the model field says so and the form does not send the task. The environment stays a
+choice of its own. The form reads the profile with `GET /profiles` and `GET /profiles/<id>`; it needs no route of its own.
 
 A repeated request (same `clientRequestId`) with a profile gets the first task back, also if the profile got a new version in between; a
 request that names another profile, or a version other than the one the task ran with, is `IMPLEMENTER_REQUEST_REUSED`.
