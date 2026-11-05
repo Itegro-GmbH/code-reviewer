@@ -1671,4 +1671,54 @@ describe("the profile of a turn (#843)", () => {
       implementer: { profile: { name: "reviewer", version: 3 } },
     });
   });
+
+  // #843-T197
+  it("hands a turn that may not push a token that can only read the contents, and no token that can write", async () => {
+    const h = await start();
+    await h.turn({ profile: PROFILE });
+
+    const { input } = await fetched(h, WITH_PROFILE);
+
+    expect(h.fake.tokenRequests()).toEqual([
+      expect.objectContaining({
+        repositoryIds: [Number(h.repository.externalId)],
+        permissions: { contents: "read", metadata: "read" },
+      }),
+    ]);
+    expect(writeTokens(h)).toEqual([]);
+    expect(input.git.token).toBe(h.fake.issuedInstallationTokens()[0]);
+  });
+
+  // #843-T198
+  it("still switches the read-only token of a turn that may not push off when the Worker reports the result", async () => {
+    const h = await start();
+    await h.turn({ profile: PROFILE });
+    const first = await fetched(h, WITH_PROFILE);
+    const made = h.fake.issuedInstallationTokens();
+    expect(made).toHaveLength(1);
+    expect(h.fake.revokedInstallationTokens()).toEqual([]);
+
+    const response = await h.worker.result(
+      first.jobId,
+      first.credential,
+      turnResult(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(h.fake.revokedInstallationTokens()).toEqual(made);
+  });
+
+  // #843-T199
+  it("hands a turn whose profile may push the token that writes, as before", async () => {
+    const h = await start();
+    await h.turn({ profile: { ...PROFILE, canPush: true } });
+
+    await fetched(h, WITH_PROFILE);
+
+    expect(h.fake.tokenRequests()).toEqual([
+      expect.objectContaining({
+        permissions: { contents: "write", metadata: "read" },
+      }),
+    ]);
+  });
 });

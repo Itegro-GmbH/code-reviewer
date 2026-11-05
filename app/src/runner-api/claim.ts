@@ -380,7 +380,8 @@ export type Built = {
   native: boolean;
   /**
    * #753: the write token of a turn of the Implementer (the same value as `input.git.token`), or null. The caller remembers it
-   * before the input leaves and switches it off when the input does not (`revokeUndelivered`).
+   * before the input leaves and switches it off when the input does not (`revokeUndelivered`). For a profile that may not push (#843)
+   * it is a token that can only read: it is kept in the same ledger, so it ends with the turn like the other.
    */
   writeToken: GitTokenEntry | null;
 };
@@ -1239,7 +1240,10 @@ export async function buildJobInput(
   try {
     git = revealGitAccess(
       job.reviewKind === "implementer"
-        ? await provider.implementerAccess(integration, repo)
+        ? await provider.implementerAccess(integration, repo, {
+            // #843: a profile that may not push gets a token that cannot, whatever the Worker does.
+            readOnly: implementer?.profile?.canPush === false,
+          })
         : await provider.jobAccess(integration, repo),
     );
   } catch (error) {

@@ -323,14 +323,14 @@ export function fakeIntegrationProvider(
       });
     },
 
-    async implementerAccess(integration, repo) {
-      record("implementerAccess", integration, repo);
+    async implementerAccess(integration, repo, accessOptions) {
+      record("implementerAccess", integration, repo, accessOptions);
       if (options.implementerAccessFailure)
         throw options.implementerAccessFailure;
       return createGitAccess({
         provider: "github",
         baseUrl: "https://fake.test/api",
-        token: `fake-write-token-for-${repo.fullName}`,
+        token: `fake-${accessOptions?.readOnly === true ? "read" : "write"}-token-for-${repo.fullName}`,
         authType: "token",
         botLogin: "fake-reviewer[bot]",
         expiresAt: "2026-10-10T13:00:00.000Z",

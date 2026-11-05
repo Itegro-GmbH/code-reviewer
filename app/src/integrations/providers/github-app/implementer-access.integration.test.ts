@@ -114,6 +114,20 @@ describe("the token of the Implementer", () => {
     ]);
   });
 
+  // #843-T197
+  it("asks for contents read and metadata read, and no write, for a turn that may not push", async () => {
+    const { fake, provider } = await setup();
+
+    await provider.implementerAccess(integration, widgets, { readOnly: true });
+
+    expect(fake.tokenRequests()).toEqual([
+      expect.objectContaining({
+        repositoryIds: [7001],
+        permissions: { contents: "read", metadata: "read" },
+      }),
+    ]);
+  });
+
   // #749-T05 (the fake enforces what the request asked for)
   it("issues a token that reaches that repository only", async () => {
     const { fake, provider } = await setup();
