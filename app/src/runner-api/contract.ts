@@ -794,7 +794,35 @@ export type ImplementerResult = {
    * detached and on no branch, or was not read. Absent from a runner of the release before.
    */
   checkedOut?: string | null;
+  /**
+   * #840: how a follow-up turn got its earlier conversation. Present on a follow-up turn that got as far as the engine's start; absent
+   * on a first turn and from a runner of the release before.
+   */
+  resume?: ImplementerResumeResult;
 };
+
+/** #840: the two ways a follow-up turn gets its earlier conversation (`ImplementerResumeResult.mode` in the contract). */
+export const IMPLEMENTER_RESUME_MODES = ["imported", "summary_only"] as const;
+export type ImplementerResumeMode = (typeof IMPLEMENTER_RESUME_MODES)[number];
+
+/**
+ * #840: why a follow-up turn continued from a summary and not from the conversation (`ImplementerResumeResult.reason`). The words of the
+ * runner (`resume_wire.py`): none of them fails the turn.
+ */
+export const IMPLEMENTER_RESUME_REASONS = [
+  "no_snapshot",
+  "download_failed",
+  "snapshot_unreadable",
+  "import_failed",
+  "version_changed",
+] as const;
+export type ImplementerResumeReason =
+  (typeof IMPLEMENTER_RESUME_REASONS)[number];
+
+/** `reason` is there exactly when `mode` is `summary_only`. */
+export type ImplementerResumeResult =
+  | { mode: "imported" }
+  | { mode: "summary_only"; reason: ImplementerResumeReason };
 
 export type CompleteRequest = { leaseToken: string; result: RunnerResult };
 

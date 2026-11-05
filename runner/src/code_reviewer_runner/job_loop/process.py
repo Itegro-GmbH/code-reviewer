@@ -25,7 +25,7 @@ import subprocess
 import tempfile
 import threading
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Protocol
 
@@ -104,6 +104,9 @@ class ProcessSpec:
     # have passed), so the snapshot is stored before the result is delivered.
     snapshot: SnapshotHandler | None = None
     snapshot_settle_seconds: float = SNAPSHOT_SETTLE_SECONDS
+    # #840: files the process starts with, in the directory it starts in (name -> bytes, owner-only,
+    # the process's own): the stored session of a follow-up turn the host downloaded for it.
+    files: Mapping[str, bytes] = field(default_factory=dict[str, bytes])
     # How much of the end of its stdout is kept. The result line of an Implementer turn carries
     # its commits and files and can be megabytes; every other job prints a line of a few KB.
     stdout_keep_bytes: int = STDOUT_KEEP_BYTES
@@ -380,6 +383,8 @@ class SubprocessLauncher:
         try:
             if uid is not None and gid is not None:
                 os.chown(workdir, uid, gid)
+            for name, content in spec.files.items():
+                _put_file(workdir / name, content, uid, gid)
             pass_fds: tuple[int, ...] = ()
             if ends is not None:
                 pass_fds = (ends[1].fileno(),)
@@ -450,6 +455,16 @@ class SubprocessLauncher:
             snapshot=snapshot,
             snapshot_settle_seconds=spec.snapshot_settle_seconds,
         )
+
+
+def _put_file(path: Path, content: bytes, uid: int | None, gid: int | None) -> None:
+    """One file for the process, owner-only: made new (never through a link), owned by the user the
+    process drops to."""
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(content)
+    if uid is not None and gid is not None:
+        os.chown(path, uid, gid)
 
 
 async def _connect_pipes(process: subprocess.Popen[bytes]) -> _Pipes:

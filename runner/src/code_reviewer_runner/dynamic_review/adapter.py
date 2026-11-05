@@ -355,12 +355,31 @@ class EngineClient:
             raise EngineError(ErrorCode.RUNNER_ERROR, "the engine returned no session id")
         return session_id
 
+    def has_session(self, session_id: str) -> bool:
+        """True when the engine knows the session (`GET /session/<id>` answers 200 with that id):
+        the check after an import (#840). Any failure, an answer of the wrong shape included, is
+        False."""
+        try:
+            status, body = self._call(
+                "GET", f"/session/{session_id}", timeout=SESSION_TIMEOUT_SECONDS
+            )
+        except EngineError:
+            return False
+        if status != 200:
+            return False
+        try:
+            value: Any = json.loads(body)
+        except ValueError:
+            return False
+        document = as_object(value)
+        return document is not None and document.get("id") == session_id
+
     def send_message(
         self,
         session_id: str,
         *,
         model: str,
-        parts: list[dict[str, str]],
+        parts: list[dict[str, Any]],
         schema: Any | None,
         timeout: float = MAX_TURN_TIMEOUT_SECONDS,
     ) -> None:

@@ -63,6 +63,14 @@ The app lists the feature `implementer_snapshot` in `KnownAppFeature` (an app fe
 are validated by both suites; the app also holds its hand-written reading of a query to the schema's verdict on a set of good and bad queries (`app/src/runner-api/snapshot-contract.test.ts`), and the runner holds the query it builds for every part of
 a file, up to the cap, to the schema (`runner/tests/contract/test_snapshot_contract.py`).
 
+## The stored session of a follow-up turn (#840)
+
+`ResumeSessionQuery` and `ResumeSessionHeaders` in `worker-api.v1.json` describe `GET /api/workers/v1/jobs/{id}/resume-session?part=n`: the Worker of a follow-up turn (`implementer.resume.snapshot` true in the job input)
+reads back the session snapshot `PUT .../session` stored for the job's own session. A response body is held to 4.5 MB like a request body, so the file comes in the same parts of exactly 3 MiB, the body is the bytes
+of the part, and the description of the whole file is in the headers of every part (`ResumeSessionHeaders`); 204 without a body says the session has none. The job input's `implementer.resume` (`ImplementerResume` in `runner-api.v1.json`) gains the optional `snapshot`,
+`previousSummary` and `digest`, and the result's `implementer.resume` (`ImplementerResumeResult`) says whether the conversation was `imported` or the turn continued from a summary (`summary_only`, with a stable `reason`). `examples/worker-api/ResumeSessionQuery.json` and `ResumeSessionHeaders.json`,
+`examples/implementer/ImplementerResume.json` and `RunnerResult.json` are validated by all suites.
+
 ## The job model entry contract
 
 `job-model-entry.v1.json` (#548) is written by the app (`app/src/models-dev/job-entry.ts`) and read by the runner

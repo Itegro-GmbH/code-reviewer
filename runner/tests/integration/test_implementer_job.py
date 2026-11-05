@@ -46,7 +46,7 @@ from code_reviewer_runner.dynamic_review.budget import BudgetLedger, UnitCosts
 from code_reviewer_runner.dynamic_review.engine_events import EventReader
 from code_reviewer_runner.dynamic_review.tool_part_audit import ToolPartAudit
 from code_reviewer_runner.implementer import session as session_module
-from code_reviewer_runner.implementer.agent import AgentTurn
+from code_reviewer_runner.implementer.agent import AgentTurn, CommandOutcome
 from code_reviewer_runner.implementer.door_state import DoorState
 from code_reviewer_runner.implementer.git_workspace import (
     BranchPush,
@@ -237,6 +237,11 @@ class FakePlace:
 
     def write_files(self, files: Mapping[str, tuple[bytes, int]]) -> None:
         return None
+
+    def run_command(
+        self, argv: list[str], environment: Mapping[str, str], timeout: float
+    ) -> CommandOutcome:
+        return CommandOutcome(0, "")
 
     def start_engine(self, argv: list[str], environment: Mapping[str, str]) -> str:
         return "http://127.0.0.1:4096"

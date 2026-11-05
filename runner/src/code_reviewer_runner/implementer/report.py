@@ -55,6 +55,7 @@ _BLOCK_KEYS = frozenset(
         "setup",
         "network",
         "checkedOut",
+        "resume",
     }
 )
 MAX_BRANCHES = 50
@@ -62,7 +63,13 @@ MAX_BRANCH_NAME_CHARS = 255
 MAX_REASON_CHARS = 40
 _REASON = re.compile(r"[a-z][a-z_]*")
 # Not required: a block without the count (an older shape) is still one the app reads.
-_OPTIONAL_KEYS = frozenset({"branchesDropped", "setup", "network", "checkedOut"})
+_OPTIONAL_KEYS = frozenset({"branchesDropped", "setup", "network", "checkedOut", "resume"})
+_RESUME_KEYS = frozenset({"mode", "reason"})
+_RESUME_MODES = frozenset({"imported", "summary_only"})
+# The words of `ResumeReason` (`resume_wire.py`); a test pins them against it.
+_RESUME_REASONS = frozenset(
+    {"no_snapshot", "download_failed", "snapshot_unreadable", "import_failed", "version_changed"}
+)
 MAX_SETUP_OUTPUT_CHARS = 8192
 _SETUP_KEYS = frozenset({"ok", "exitCode", "timedOut", "durationSeconds", "output"})
 MAX_DROPPED = 1_000_000_000
@@ -235,6 +242,19 @@ def _checked_out_ok(value: object) -> bool:
     return value is None or _is_string(value, MAX_BRANCH_NAME_CHARS, minimum=1)
 
 
+def _resume_ok(value: object) -> bool:
+    """`resume` (#840): the mode the follow-up turn got its conversation by, and for the summary
+    only the reason, one of the runner's words."""
+    if not isinstance(value, dict):
+        return False
+    given = cast("dict[str, object]", value)
+    if not set(given) <= _RESUME_KEYS or given.get("mode") not in _RESUME_MODES:
+        return False
+    if given["mode"] == "imported":
+        return "reason" not in given
+    return given.get("reason") in _RESUME_REASONS
+
+
 def _sha_or_none(value: object, *, allow_none: bool) -> bool:
     if value is None:
         return allow_none
@@ -254,6 +274,8 @@ def valid_block(value: object) -> dict[str, Any] | None:
     if "network" in block and not _network_ok(block["network"]):
         return None
     if "checkedOut" in block and not _checked_out_ok(block["checkedOut"]):
+        return None
+    if "resume" in block and not _resume_ok(block["resume"]):
         return None
     base, head, pushed = block["baseCommit"], block["headCommit"], block["pushed"]
     commits, files, branches = block["commits"], block["filesChanged"], block["branches"]

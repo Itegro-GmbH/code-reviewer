@@ -106,12 +106,22 @@ _IMPLEMENTER_ENVIRONMENT_FIELDS = {"name", "setupScript", "network"}
 _IMPLEMENTER_PROFILE_FIELDS = {"name", "version", "instructions", "canPush"}
 _PROFILE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 MAX_PROFILE_INSTRUCTION_CHARS = 20_000
-_IMPLEMENTER_RESUME_FIELDS = {"turn", "branches", "checkout"}
+_IMPLEMENTER_RESUME_REQUIRED = {"turn", "branches", "checkout"}
+_IMPLEMENTER_RESUME_FIELDS = {
+    *_IMPLEMENTER_RESUME_REQUIRED,
+    "snapshot",
+    "previousSummary",
+    "digest",
+}
 _IMPLEMENTER_RESUME_BRANCH_FIELDS = {"name", "head"}
 # The bounds of the contract (`ImplementerResume`): the branches a session carries over, and the
 # number of the turn.
 MAX_RESUME_BRANCHES = 20
 MAX_RESUME_TURN = 100_000
+# The most of the earlier turn's summary and of the digest a follow-up turn carries, in UTF-8 bytes
+# (#840): both are the app's words about earlier turns, data for the fallback and never a command.
+MAX_RESUME_SUMMARY_BYTES = 8 * 1024
+MAX_RESUME_DIGEST_BYTES = 16 * 1024
 # The bounds of the contract (`contracts/environment-sizes.v1.json`): a script is text of at most
 # 64 KB.
 MAX_SETUP_SCRIPT_BYTES = 64 * 1024
@@ -367,6 +377,13 @@ class ImplementerResume:
     turn: int
     branches: tuple[ResumeBranch, ...]
     checkout: str | None
+    # #840: whether the app holds the engine's conversation of the session (the runner then asks for
+    # it and imports it), the last turn's summary and the digest of the earlier turns. The last two
+    # are used only when the conversation cannot be: text that came from the agent and from members,
+    # so data, never instructions (`preface.py`).
+    snapshot: bool = False
+    previous_summary: str = ""
+    digest: str = ""
 
 
 @dataclass(frozen=True)
@@ -1066,7 +1083,7 @@ def _implementer_resume(spec: dict[str, Any], session_branch: str) -> Implemente
         return None
     given = _object(spec["resume"], "implementer.resume")
     _check_fields(given, _IMPLEMENTER_RESUME_FIELDS, "implementer.resume.")
-    for name in _IMPLEMENTER_RESUME_FIELDS:
+    for name in _IMPLEMENTER_RESUME_REQUIRED:
         if name not in given:
             raise _invalid(f"implementer.resume.{name} is required")
     turn = given["turn"]
@@ -1110,7 +1127,39 @@ def _implementer_resume(spec: dict[str, Any], session_branch: str) -> Implemente
                 "implementer.resume.checkout must be one of the branches or the session branch"
             )
     assert checkout is None or isinstance(checkout, str)
-    return ImplementerResume(turn=turn, branches=tuple(branches), checkout=checkout)
+    snapshot = given.get("snapshot", False)
+    if not isinstance(snapshot, bool):
+        raise _invalid("implementer.resume.snapshot must be true or false")
+    return ImplementerResume(
+        turn=turn,
+        branches=tuple(branches),
+        checkout=checkout,
+        snapshot=snapshot,
+        previous_summary=_resume_text(
+            given.get("previousSummary"),
+            "implementer.resume.previousSummary",
+            MAX_RESUME_SUMMARY_BYTES,
+        ),
+        digest=_resume_text(
+            given.get("digest"), "implementer.resume.digest", MAX_RESUME_DIGEST_BYTES
+        ),
+    )
+
+
+def _resume_text(value: object, field: str, max_bytes: int) -> str:
+    """An optional text of the resume (absent or null is empty): a string of at most `max_bytes`
+    in UTF-8, so a lone surrogate is refused with the rest. The value is never in the message."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise _invalid(f"{field} must be a string or null")
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise _invalid(f"{field} is not valid text") from None
+    if size > max_bytes:
+        raise _invalid(f"{field} is longer than {max_bytes} bytes")
+    return value
 
 
 def _implementer_environment(spec: dict[str, Any]) -> ImplementerEnvironment | None:

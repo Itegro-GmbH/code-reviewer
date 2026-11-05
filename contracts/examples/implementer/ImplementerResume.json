@@ -4,5 +4,8 @@
     { "name": "implementer/a1b2c3", "head": "1111111111111111111111111111111111111111" },
     { "name": "feature/retry-docs", "head": "2222222222222222222222222222222222222222" }
   ],
-  "checkout": "feature/retry-docs"
+  "checkout": "feature/retry-docs",
+  "snapshot": true,
+  "previousSummary": "Added the retry with backoff to the webhook sender; the test for the give-up path is still open.",
+  "digest": "Turn 1 (instruction): Add a retry with backoff to the webhook sender.\nTurn 1 (summary): Added the retry. Commits: Add retry with backoff.\nChanged files: src/webhooks/sender.ts, src/webhooks/sender.test.ts"
 }

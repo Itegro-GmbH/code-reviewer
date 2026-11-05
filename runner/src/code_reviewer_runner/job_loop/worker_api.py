@@ -20,9 +20,11 @@ What a caller has to tell apart is the same small set as in the runner API (`api
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import re
 import threading
+import time
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -43,10 +45,26 @@ from code_reviewer_runner.job_loop.http import (
     send,
 )
 from code_reviewer_runner.job_loop.jsonvalues import as_object
+from code_reviewer_runner.job_loop.resume_download import ResumeFile, ResumeUnavailable
 from code_reviewer_runner.job_loop.snapshot_sender import SnapshotPart
 from code_reviewer_runner.job_loop.worker_errors import WorkerFailure, WorkerSetupError
 from code_reviewer_runner.llm_providers import registered_provider_ids
-from code_reviewer_runner.snapshot_wire import FEATURE_IMPLEMENTER_SNAPSHOT
+from code_reviewer_runner.resume_wire import (
+    HEADER_BYTES,
+    HEADER_PARTS,
+    HEADER_RAW_BYTES,
+    HEADER_SHA256,
+    HEADER_VERSION,
+    ResumeReason,
+)
+from code_reviewer_runner.snapshot_wire import (
+    CHUNK_BYTES,
+    FEATURE_IMPLEMENTER_SNAPSHOT,
+    MAX_SNAPSHOT_BYTES,
+    SnapshotHeader,
+    parse_header,
+    parts_of,
+)
 from code_reviewer_runner.step_wire import FEATURE_IMPLEMENTER_STEPS
 
 _JOB_ID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
@@ -79,6 +97,12 @@ STEPS_REQUEST_TIMEOUT_SECONDS = 5.0
 # One part of the session snapshot (#839): up to 3 MiB, so the socket may be slower than for a batch
 # of steps; the sender bounds the call by its own clock as well (`snapshot_sender.REQUEST_SECONDS`).
 SNAPSHOT_REQUEST_TIMEOUT_SECONDS = 20.0
+
+
+# One part of the stored session of a follow-up turn (#840), and the whole download: the file is at
+# most 8 MiB, three requests, and the turn's clock is already running.
+RESUME_REQUEST_TIMEOUT_SECONDS = 30.0
+RESUME_TOTAL_SECONDS = 60.0
 
 
 def snapshot_query(part: SnapshotPart) -> str:
@@ -260,6 +284,56 @@ class HttpWorkerApi:
         if reply.status != 200:
             raise self._failure(reply)
 
+    async def resume_session(self, job_id: str) -> ResumeFile:
+        """Get the stored session of the follow-up turn this job is (`GET /api/workers/v1/jobs/{id}/
+        resume-session?part=n`, #840), in the parts the app serves it in (a response is held to 4.5
+        MB like a request, so the file comes in parts of at most 3 MiB). Checks every part against
+        the description of the whole and the whole against its size and digest. Raises
+        `ResumeUnavailable`; nothing it raises carries a value of the answer."""
+        path = f"/api/workers/v1/jobs/{self._safe_id(job_id)}/resume-session"
+        return await asyncio.to_thread(self._download_resume, path)
+
+    def _download_resume(self, path: str) -> ResumeFile:
+        failed = ResumeUnavailable(ResumeReason.DOWNLOAD_FAILED)
+        deadline = time.monotonic() + RESUME_TOTAL_SECONDS
+        header: SnapshotHeader | None = None
+        chunks: list[bytes] = []
+        count = 1
+        index = 0
+        while index < count:
+            left = deadline - time.monotonic()
+            if left < 1.0:
+                raise failed
+            try:
+                reply = self._send_bytes(
+                    "GET",
+                    f"{path}?part={index}",
+                    None,
+                    min(RESUME_REQUEST_TIMEOUT_SECONDS, left),
+                    max_bytes=CHUNK_BYTES + 1,
+                )
+            except ApiError:
+                raise failed from None
+            if reply.status == 204:  # the session has no stored conversation
+                raise ResumeUnavailable(ResumeReason.NO_SNAPSHOT)
+            if reply.status != 200:
+                raise failed
+            described = _resume_header(reply.headers)
+            if described is None or (header is not None and described != (header, count)):
+                raise failed
+            header, count = described
+            wanted = min(CHUNK_BYTES, header.size - index * CHUNK_BYTES)
+            if count != parts_of(header.size) or len(reply.body) != wanted:
+                raise failed
+            chunks.append(reply.body)
+            index += 1
+        data = b"".join(chunks)
+        if header is None or len(data) != header.size:
+            raise failed
+        if hashlib.sha256(data).hexdigest() != header.sha256:
+            raise failed
+        return ResumeFile(header, data)
+
     async def _call_alone(self, slot: str, name: str, call: Callable[[], Reply]) -> Reply:
         """Run `call` on a daemon thread kept in `slot`, and refuse (`ApiUnavailable`) while the
         call before it on the same slot has not ended."""
@@ -309,6 +383,7 @@ class HttpWorkerApi:
         timeout: float,
         *,
         content_type: str = "application/json",
+        max_bytes: int | None = None,
     ) -> Reply:
         request = urllib.request.Request(
             f"{self._base_url}{path}",
@@ -321,7 +396,9 @@ class HttpWorkerApi:
                 "User-Agent": f"code-reviewer-worker/{__version__}",
             },
         )
-        return send(self._opener, request, timeout)
+        if max_bytes is None:
+            return send(self._opener, request, timeout)
+        return send(self._opener, request, timeout, max_bytes)
 
     @staticmethod
     def _failure(reply: Reply) -> ApiError:
@@ -369,3 +446,26 @@ class HttpWorkerApi:
             heartbeat_interval=float(min(interval, MAX_HEARTBEAT_INTERVAL_SECONDS)),
             input=job_input,
         )
+
+
+def _resume_header(headers: Mapping[str, str]) -> tuple[SnapshotHeader, int] | None:
+    """The description of the whole file in the headers of one part, and how many parts there are;
+    None when a header is missing or is not what the contract says."""
+    lower = {name.lower(): value for name, value in headers.items()}
+    try:
+        parts = lower[HEADER_PARTS]
+        line = (
+            f"S {lower[HEADER_BYTES]} {lower[HEADER_RAW_BYTES]} {lower[HEADER_SHA256]} "
+            f"{lower[HEADER_VERSION]}\n"
+        )
+    except KeyError:
+        return None
+    header = parse_header(line.encode("ascii", "replace"))
+    if (
+        header is None
+        or not parts.isascii()
+        or not parts.isdigit()
+        or header.size > MAX_SNAPSHOT_BYTES
+    ):
+        return None
+    return header, int(parts)

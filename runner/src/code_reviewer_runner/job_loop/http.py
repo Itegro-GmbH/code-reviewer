@@ -96,12 +96,16 @@ def error_code(reply: Reply) -> str | None:
 
 
 def send(
-    opener: urllib.request.OpenerDirector, request: urllib.request.Request, timeout: float
+    opener: urllib.request.OpenerDirector,
+    request: urllib.request.Request,
+    timeout: float,
+    max_bytes: int = MAX_RESPONSE_BYTES,
 ) -> Reply:
-    """Make the request; any answer is a `Reply`, no answer is `ApiUnavailable`."""
+    """Make the request; any answer is a `Reply`, no answer is `ApiUnavailable`. At most `max_bytes`
+    of the body are read (a caller that expects more says so, and checks what it got)."""
     try:
         with opener.open(request, timeout=timeout) as response:
-            return Reply(response.status, dict(response.headers), response.read(MAX_RESPONSE_BYTES))
+            return Reply(response.status, dict(response.headers), response.read(max_bytes))
     except urllib.error.HTTPError as error:
         try:
             body_bytes = error.read(MAX_RESPONSE_BYTES)

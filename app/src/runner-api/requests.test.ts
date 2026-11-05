@@ -3,6 +3,7 @@
 // Pins down the checks on what a runner sends: the job id in the path, the runner id header and the
 // bodies of heartbeat and complete. A refusal names fields and reasons, never the values.
 import { describe, expect, it } from "vitest";
+import { IMPLEMENTER_RESUME_REASONS } from "./contract.ts";
 import {
   callerLlmProviders,
   parseClaimRequest,
@@ -1173,6 +1174,71 @@ describe("the implementer block of a result (#754)", () => {
       expect(!done.ok && done.fields.map((entry) => entry.field)).toContain(
         "result.implementer.checkedOut",
       );
+    });
+  });
+
+  describe("how a follow-up turn got its conversation (#840)", () => {
+    const parsed = (resume: unknown) =>
+      parseCompleteRequest(bodyWith({ ...block(), resume }));
+
+    it("keeps `imported`, and `summary_only` with its reason, as sent", () => {
+      const imported = parsed({ mode: "imported" });
+      const summary = parsed({
+        mode: "summary_only",
+        reason: "version_changed",
+      });
+
+      expect(imported.ok && imported.value.result.implementer?.resume).toEqual({
+        mode: "imported",
+      });
+      expect(summary.ok && summary.value.result.implementer?.resume).toEqual({
+        mode: "summary_only",
+        reason: "version_changed",
+      });
+    });
+
+    it.each(IMPLEMENTER_RESUME_REASONS)("takes the reason %s", (reason) => {
+      const done = parsed({ mode: "summary_only", reason });
+
+      expect(done.ok && done.value.result.implementer?.resume).toEqual({
+        mode: "summary_only",
+        reason,
+      });
+    });
+
+    it("leaves the field out when the runner sent none (a first turn, an older runner)", () => {
+      const absent = parseCompleteRequest(bodyWith(block()));
+
+      expect(
+        absent.ok && "resume" in (absent.value.result.implementer ?? {}),
+      ).toBe(false);
+    });
+
+    it.each<[string, unknown]>([
+      ["a mode that is not one", { mode: "copied" }],
+      ["no mode", {}],
+      ["a summary without its reason", { mode: "summary_only" }],
+      [
+        "a reason that is not a word of the runner",
+        { mode: "summary_only", reason: "x" },
+      ],
+      [
+        "an import with a reason",
+        { mode: "imported", reason: "import_failed" },
+      ],
+      ["an unknown key", { mode: "imported", note: "x" }],
+      ["null", null],
+      ["a string", "imported"],
+    ])("refuses %s", (_, value) => {
+      const done = parsed(value);
+
+      expect(done.ok).toBe(false);
+      expect(
+        !done.ok &&
+          done.fields.some((entry) =>
+            entry.field.startsWith("result.implementer.resume"),
+          ),
+      ).toBe(true);
     });
   });
 

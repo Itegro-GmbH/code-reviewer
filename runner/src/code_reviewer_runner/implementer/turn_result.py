@@ -66,6 +66,10 @@ class TurnResult:
     # #837: the local branch HEAD was on when the agent's work was read, after the rescue of a
     # detached HEAD (`GitWorkspace.checked_out`); None: detached and on no branch, or not read.
     checked_out: str | None = None
+    # #840: how a follow-up turn got its earlier conversation (`ImplementerResumeResult`):
+    # `{"mode": "imported"}` or `{"mode": "summary_only", "reason": <word>}`. None: a first turn, or
+    # a turn that ended before the engine started.
+    resume: dict[str, Any] | None = None
 
     @property
     def ok(self) -> bool:
@@ -100,6 +104,7 @@ class TurnResult:
             "summary": self.summary,
             "opencode": opencode,
             **({} if self.checked_out is None else {"checkedOut": self.checked_out}),
+            **({} if self.resume is None else {"resume": self.resume}),
             **({} if self.setup is None else {"setup": self.setup}),
             **({} if self.network is None else {"network": self.network}),
         }

@@ -1925,6 +1925,12 @@ const CASES: Case[] = [
       }),
     expectAnswer: (answer) => expect(answer).toEqual({ status: "not_holder" }),
   },
+  // #840: B's turn is not A's to read the snapshot for, not even with B's lease token
+  {
+    name: "snapshots.readForJob",
+    run: (a, b) => a.snapshots.readForJob(taskOf(b).turn.jobId, `lease-b`),
+    expectAnswer: (answer) => expect(answer).toEqual({ status: "not_holder" }),
+  },
   {
     name: "snapshots.find",
     run: (a, b) => a.snapshots.find(taskOf(b).session.id),

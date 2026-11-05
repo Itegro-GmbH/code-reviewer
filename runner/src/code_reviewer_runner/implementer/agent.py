@@ -27,6 +27,7 @@ from typing import Any, Protocol
 from code_reviewer_runner.dynamic_review.adapter import (
     DEADLINE_TOLERANCE_SECONDS,
     EVENTS_CONNECT_SECONDS,
+    PINNED_ENGINE_VERSION,
     REASON_EXITED,
     STARTUP_SECONDS,
     TURN_TIMEOUT_MARGIN_SECONDS,
@@ -44,8 +45,11 @@ from code_reviewer_runner.dynamic_review.tool_part_audit import ToolPartAudit
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 from code_reviewer_runner.redaction import Redactor
 from code_reviewer_runner.result import ErrorCode
+from code_reviewer_runner.resume_wire import ResumeReason
 
 from .config import IMPLEMENTER_AGENT, SESSION_TITLE
+from .preface import ResumeMode
+from .resume_session import ResumeInput, ResumeSnapshot
 from .session_export import EngineFetch, ExportFailed, ExportReason, SessionSnapshot, take_snapshot
 from .step_feed import StepFeeder
 
@@ -56,6 +60,14 @@ SETTLE_SECONDS = 3.0
 # Where the engine's configuration goes in the agent's container, and the port it serves on.
 CONFIG_DIRECTORY = "/etc/code-reviewer"
 CONFIG_NAME = "opencode.json"
+# Where the stored conversation of a follow-up turn is written before the engine imports it (#840):
+# next to the config, owner-only.
+RESUME_NAME = "resume.json"
+# The most the import may take, and the least left of the clock to try it at all. Measured 1.5 to
+# 2.3 s on a real VM, 306 to 385 MiB, so a minute is about 25 times the largest; it counts against
+# the turn's own time (the work window), not against the grace kept for its end.
+IMPORT_SECONDS = 60.0
+MIN_IMPORT_SECONDS = 5.0
 
 
 class EngineRuntime(Protocol):
@@ -64,6 +76,13 @@ class EngineRuntime(Protocol):
 
     def write_files(self, files: Mapping[str, tuple[bytes, int]]) -> None:
         """Put files (name -> (bytes, mode)) into the engine's configuration directory."""
+        ...
+
+    def run_command(
+        self, argv: list[str], environment: Mapping[str, str], timeout: float
+    ) -> "CommandOutcome":
+        """Run a command to its end in the place and say how it ended (the import of a stored
+        conversation, #840). Never raises for a command that fails or does not answer."""
         ...
 
     def start_engine(self, argv: list[str], environment: Mapping[str, str]) -> str:
@@ -85,6 +104,28 @@ class EngineRuntime(Protocol):
     def stop(self) -> bool:
         """End the engine and everything of the agent's, and say whether nothing is left."""
         ...
+
+
+@dataclass(frozen=True)
+class CommandOutcome:
+    """How a command run in the place ended: its exit status and what it printed (clipped), or
+    `unanswered` when it could not be run or did not end in time (nothing is concluded from it)."""
+
+    returncode: int
+    output: str
+    unanswered: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return self.returncode == 0 and not self.unanswered
+
+
+@dataclass(frozen=True)
+class ResumeOutcome:
+    """How the follow-up turn got its earlier conversation: imported, or from a summary and why."""
+
+    mode: ResumeMode
+    reason: ResumeReason | None = None
 
 
 @dataclass(frozen=True)
@@ -146,12 +187,20 @@ class ImplementerAgent:
         self.steps: StepFeeder | None = None
         # How long each message call took, in seconds on the ledger's clock.
         self.turn_seconds: list[float] = []
+        # #840: set by `start` on a follow-up turn; None on a first turn.
+        self.resume: ResumeOutcome | None = None
 
     # -- process --------------------------------------------------------------
 
-    def start(self, port: int) -> None:
+    def start(self, port: int, resume: ResumeInput | None = None) -> None:
         """Write the trusted config, start the engine, wait for it to be healthy and open the one
-        session. Raises `EngineError` or `LimitError`; the caller calls `stop()`."""
+        session. Raises `EngineError` or `LimitError`; the caller calls `stop()`.
+
+        A follow-up turn (`resume`, #840) first imports the stored conversation, before the engine
+        starts (the engine reads its database when it opens, and the import is a second process of
+        it), and continues in that session. Anything that goes wrong with that, the file, the
+        import or the session it should have made, is a fresh session and a reason in
+        `self.resume`: the turn goes on from a summary and is never failed by it."""
         self.ledger.check_deadline()
         name, text = self._instructions
         config = dict(self._make_config(f"{CONFIG_DIRECTORY}/{name}"))
@@ -167,6 +216,7 @@ class ImplementerAgent:
         # The one file the engine reads its configuration from; `OPENCODE_CONFIG_DIR` is never set
         # (it makes the engine install a plugin package from the registry).
         environment["OPENCODE_CONFIG"] = f"{CONFIG_DIRECTORY}/{CONFIG_NAME}"
+        imported = None if resume is None else self._import(resume, environment)
         url = self._runtime.start_engine(
             [
                 *self.command,
@@ -189,8 +239,60 @@ class ImplementerAgent:
         )
         client.wait_healthy(self._startup_seconds, self._is_running)
         self._client = client
-        self.session_id = client.create_session()
+        self.session_id = self._open_session(client, resume, imported)
         self._open_audit(client, self.session_id)
+
+    def _import(self, resume: ResumeInput, environment: Mapping[str, str]) -> str | None:
+        """Write the stored conversation into the place and have the engine import it, with the
+        environment the engine runs in. Returns the id of the imported session, or None with the
+        reason in `self.resume`. Time boxed, and never longer than the turn has left."""
+        snapshot = resume.snapshot
+        if snapshot is None:
+            self.resume = ResumeOutcome(
+                ResumeMode.SUMMARY_ONLY, resume.reason or ResumeReason.DOWNLOAD_FAILED
+            )
+            return None
+        seconds = min(IMPORT_SECONDS, self.ledger.remaining_seconds())
+        if seconds < MIN_IMPORT_SECONDS:
+            self.resume = ResumeOutcome(ResumeMode.SUMMARY_ONLY, ResumeReason.IMPORT_FAILED)
+            return None
+        try:
+            self._runtime.write_files({RESUME_NAME: (snapshot.data, 0o600)})
+            done = self._runtime.run_command(
+                [*self.command, "import", f"{CONFIG_DIRECTORY}/{RESUME_NAME}"],
+                environment,
+                seconds,
+            )
+        except Exception as error:  # the runtime raises its own errors; none of them ends the turn
+            _log.warning("the stored conversation could not be imported (%s)", type(error).__name__)
+            done = None
+        if done is None or not done.ok:
+            self.resume = ResumeOutcome(ResumeMode.SUMMARY_ONLY, self._import_failure(snapshot))
+            return None
+        self.resume = ResumeOutcome(ResumeMode.IMPORTED)
+        return snapshot.session_id
+
+    @staticmethod
+    def _import_failure(snapshot: ResumeSnapshot) -> ResumeReason:
+        """A conversation written by another engine version than the one that reads it is the likely
+        reason an import fails after a pin moved; any other is the import's."""
+        if snapshot.version != PINNED_ENGINE_VERSION:
+            return ResumeReason.VERSION_CHANGED
+        return ResumeReason.IMPORT_FAILED
+
+    def _open_session(
+        self, client: EngineClient, resume: ResumeInput | None, imported: str | None
+    ) -> str:
+        """The imported session when the engine knows it, a fresh one otherwise."""
+        if imported is not None:
+            if client.has_session(imported):
+                return imported
+            snapshot = None if resume is None else resume.snapshot
+            reason = (
+                ResumeReason.IMPORT_FAILED if snapshot is None else self._import_failure(snapshot)
+            )
+            self.resume = ResumeOutcome(ResumeMode.SUMMARY_ONLY, reason)
+        return client.create_session()
 
     def _open_audit(self, client: EngineClient, session_id: str) -> None:
         """The audit of the engine's tool parts runs on its event stream beside the turns: it
@@ -259,8 +361,14 @@ class ImplementerAgent:
         if self._client is not None and self.session_id is not None:
             self._client.abort(self.session_id)
 
-    def turn(self, text: str, *, check: Callable[[], None] = lambda: None) -> AgentTurn:
-        """Send `text` as one user message and wait for the end of the turn.
+    def turn(
+        self,
+        text: str | Sequence[Mapping[str, Any]],
+        *,
+        check: Callable[[], None] = lambda: None,
+    ) -> AgentTurn:
+        """Send `text` (or the list of text parts, the first message of a follow-up turn) as one
+        user message and wait for the end of the turn.
 
         The message call blocks until the engine is done, so it runs beside a watch that ends the
         turn the moment the proxy records a limit or a provider refusal, the clock runs out, the
@@ -270,6 +378,9 @@ class ImplementerAgent:
         client, session_id = self._client, self.session_id
         if client is None or session_id is None:
             raise EngineError(ErrorCode.RUNNER_ERROR, "the engine is not started")
+        parts: list[dict[str, Any]] = (
+            [{"type": "text", "text": text}] if isinstance(text, str) else [dict(p) for p in text]
+        )
         outcome: list[Exception] = []
         finished = threading.Event()
 
@@ -278,7 +389,7 @@ class ImplementerAgent:
                 client.send_message(
                     session_id,
                     model=self.model,
-                    parts=[{"type": "text", "text": text}],
+                    parts=parts,
                     schema=None,
                     timeout=self.ledger.remaining_seconds() + TURN_TIMEOUT_MARGIN_SECONDS,
                 )

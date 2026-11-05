@@ -110,6 +110,35 @@ describe("the completion of a turn", () => {
     });
   });
 
+  // #840-T20
+  it("stores how a follow-up turn got its conversation with the result, and refuses a reason that is not the runner's", async () => {
+    const { h, running } = await start();
+    const turn = await running();
+
+    const refused = await h.complete(turn.job.id, turn.leaseToken, {
+      implementer: block({
+        // @ts-expect-error a word the runner does not use
+        resume: { mode: "summary_only", reason: "free text of the agent" },
+      }),
+    });
+    const kept = await h.queue.get(turn.job.id);
+    const answer = await h.complete(turn.job.id, turn.leaseToken, {
+      implementer: block({
+        resume: { mode: "summary_only", reason: "snapshot_unreadable" },
+      }),
+    });
+
+    expect(refused.status).toBe(400);
+    expect(kept?.status).toBe("running");
+    expect(answer.status).toBe(200);
+    const job = await h.queue.get(turn.job.id);
+    expect(job?.result).toMatchObject({
+      implementer: {
+        resume: { mode: "summary_only", reason: "snapshot_unreadable" },
+      },
+    });
+  });
+
   // #754-T02
   it("keeps the block of a turn that stopped at its cost limit after it pushed: a failed job with visible work", async () => {
     const { h, running, sessionOf } = await start();

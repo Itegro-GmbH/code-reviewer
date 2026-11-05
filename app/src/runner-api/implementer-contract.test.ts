@@ -18,6 +18,8 @@ import {
 } from "../test-support/runner-contract.ts";
 import {
   IMPLEMENTER_ENVIRONMENT_NAMES,
+  IMPLEMENTER_RESUME_MODES,
+  IMPLEMENTER_RESUME_REASONS,
   RUNNER_ERROR_CODES,
   RUNNER_REVIEW_KINDS,
 } from "./contract.ts";
@@ -510,6 +512,66 @@ describe("the implementer result", () => {
       const refused = example("RunnerResult");
       refused.implementer.checkedOut = bad;
       expect(accepts("RunnerResult", refused)).toBe(false);
+    }
+  });
+
+  // #840
+  it("takes how a follow-up turn got its conversation: optional, `imported`, or `summary_only` with one of the runner's reasons", () => {
+    const result = example("RunnerResult");
+    expect(result.implementer.resume).toStrictEqual({
+      mode: "summary_only",
+      reason: "version_changed",
+    });
+    expect(accepts("RunnerResult", result)).toBe(true);
+    result.implementer.resume = { mode: "imported" };
+    expect(accepts("RunnerResult", result)).toBe(true);
+    delete result.implementer.resume;
+    expect(accepts("RunnerResult", result)).toBe(true);
+
+    for (const bad of [
+      {},
+      { mode: "copied" },
+      { mode: "summary_only", reason: "unknown" },
+      { mode: "imported", note: "x" },
+      "imported",
+      null,
+    ]) {
+      const refused = example("RunnerResult");
+      refused.implementer.resume = bad;
+      expect(accepts("RunnerResult", refused)).toBe(false);
+    }
+  });
+
+  // #840
+  it("holds the words the app keeps for the resume result equal to the contract's", () => {
+    const properties = readContract().$defs.ImplementerResumeResult
+      ?.properties as Record<string, { enum?: string[] }> | undefined;
+
+    expect(properties?.mode?.enum).toStrictEqual([...IMPLEMENTER_RESUME_MODES]);
+    expect(properties?.reason?.enum).toStrictEqual([
+      ...IMPLEMENTER_RESUME_REASONS,
+    ]);
+  });
+
+  // #840
+  it("takes the stored-conversation fields of a follow-up job: `snapshot`, `previousSummary` and `digest`", () => {
+    const resume = example("ImplementerResume");
+    expect(resume.snapshot).toBe(true);
+    expect(accepts("ImplementerResume", resume)).toBe(true);
+    for (const name of ["snapshot", "previousSummary", "digest"]) {
+      const without = example("ImplementerResume");
+      delete without[name];
+      expect(accepts("ImplementerResume", without)).toBe(true);
+    }
+    for (const edit of [
+      (r: Document) => (r.snapshot = "yes"),
+      (r: Document) => (r.previousSummary = "x".repeat(8193)),
+      (r: Document) => (r.digest = "x".repeat(16385)),
+      (r: Document) => (r.digest = 3),
+    ]) {
+      const refused = example("ImplementerResume");
+      edit(refused);
+      expect(accepts("ImplementerResume", refused)).toBe(false);
     }
   });
 
