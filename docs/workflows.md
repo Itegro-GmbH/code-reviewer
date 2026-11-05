@@ -258,6 +258,11 @@ agent corrects it and calls again), and by Control after the container is gone (
 cases that both implementations are tested against). A result is data of an untrusted writer and is bounded before it is parsed: 256 KiB, 8
 levels, 20,000 values. See [`implementer.md`](implementer.md#the-finish-tool) for how the tool reaches the agent, and what a turn without a result is.
 
+The app keeps the value as data (`implementer_turns.result_value`, with `result_schema` beside it) and holds it to the bounds, but it does **not** check
+it against the schema. **The engine of milestone 3 re-checks `result_value` with `checkResultValue` against the turn's stored schema before it routes
+the value anywhere** (to a condition, a step input, a workflow's output): a stored value is the agent's data, and the runner's verdict is not the
+engine's. A value that fails is treated as a step without a result.
+
 ## The first workflow
 
 The plan's "Issue to PR", as version 1 states it (with the profile `implementer` for both steps: create it first, it is the example at the end of

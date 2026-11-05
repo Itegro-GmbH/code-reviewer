@@ -20,6 +20,7 @@ import {
 } from "../test-support/runner-api-harness.ts";
 import { addUser } from "../test-support/workspace-deletion-fixture.ts";
 import type { Job } from "../jobs/job-types.ts";
+import type { StoredResultSchema } from "../db/agent-result.ts";
 import type { ImplementerResult, RunnerResult } from "./contract.ts";
 
 const IMPLEMENTER = ["implementer"] as const;
@@ -39,13 +40,20 @@ const block = (
   ...overrides,
 });
 
-async function start() {
-  const h = await startRunnerApiHarness();
+const SCHEMA: StoredResultSchema = {
+  type: "object",
+  properties: { summary: { type: "string" } },
+};
+
+async function start(
+  options: Parameters<typeof startRunnerApiHarness>[0] = {},
+) {
+  const h = await startRunnerApiHarness(options);
   await addUser(h.db, "user-1");
   const sessions = createImplementerRepository(h.db, h.workspaceId);
   let counter = 0;
   /** A turn that a runner holds: queued by the queue, claimed with the engine `implementer`. */
-  async function running() {
+  async function running(resultSchema?: StoredResultSchema) {
     counter += 1;
     h.clock.advance(1);
     const enqueued = await h.queue.enqueueImplementerTurn({
@@ -56,6 +64,7 @@ async function start() {
       instruction: "Add a health endpoint.",
       modelChoice: { entryId: "entry-1" },
       costLimitCents: null,
+      ...(resultSchema === undefined ? {} : { resultSchema }),
       createdBy: "user-1",
       actorLogin: "octocat",
       clientRequestId: `request-${String(counter)}`,
@@ -818,5 +827,159 @@ describe("the size of a report (#754)", () => {
 
     expect(answer.status).toBe(413);
     expect(await h.queue.get(diff.id)).toMatchObject({ status: "running" });
+  });
+});
+
+describe("the result the agent handed in, at the completion of a turn (#843)", () => {
+  const stored = async (
+    t: Awaited<ReturnType<typeof start>>,
+    jobId: string,
+  ) => {
+    const job = await t.h.queue.get(jobId);
+    const turn = await t.sessions.getTurnByJob(jobId);
+    return { job, value: turn?.turn.resultValue };
+  };
+
+  // #843-T130
+  it("keeps a result within the bounds with the turn and succeeds", async () => {
+    const t = await start();
+    const turn = await t.running(SCHEMA);
+
+    const answer = await t.h.complete(turn.job.id, turn.leaseToken, {
+      implementer: block({ agentResult: { summary: "Done." } }),
+    });
+
+    expect(answer.status).toBe(200);
+    const { job, value } = await stored(t, turn.job.id);
+    expect(job).toMatchObject({ status: "succeeded", errorCode: null });
+    expect(value).toEqual({ summary: "Done." });
+  });
+
+  // #843-T131
+  it("records a turn with a schema that reports success and no result as no_result, and keeps its report", async () => {
+    const t = await start();
+    const turn = await t.running(SCHEMA);
+
+    const answer = await t.h.complete(turn.job.id, turn.leaseToken, {
+      implementer: block(),
+    });
+
+    expect(answer.status).toBe(200);
+    const { job, value } = await stored(t, turn.job.id);
+    expect(job).toMatchObject({ status: "failed", errorCode: "no_result" });
+    expect(job?.result).toMatchObject({ implementer: block() });
+    expect(value).toBeNull();
+    expect(await t.sessionOf(turn.sessionId)).toMatchObject({
+      status: "idle",
+      headCommit: HEAD,
+    });
+  });
+
+  // #843-T131
+  it("does not ask a turn without a schema for a result", async () => {
+    const t = await start();
+    const turn = await t.running();
+
+    await t.h.complete(turn.job.id, turn.leaseToken, { implementer: block() });
+
+    const { job, value } = await stored(t, turn.job.id);
+    expect(job).toMatchObject({ status: "succeeded", errorCode: null });
+    expect(value).toBeNull();
+  });
+
+  // #843-T131
+  it("keeps the code of a turn that failed for its own reasons", async () => {
+    const t = await start();
+    const turn = await t.running(SCHEMA);
+
+    await t.h.complete(turn.job.id, turn.leaseToken, {
+      ok: false,
+      errorCode: "cost_limit_reached",
+      implementer: block(),
+    });
+
+    const { job } = await stored(t, turn.job.id);
+    expect(job).toMatchObject({
+      status: "failed",
+      errorCode: "cost_limit_reached",
+    });
+  });
+
+  // #843-T132
+  it.each<[string, unknown]>([
+    ["more than 20,000 values", { a: [1, ...Array(9_998).fill([1]), [1]] }],
+    ["more than 256 KiB", { summary: "x".repeat(256 * 1024) }],
+    [
+      "more than eight levels",
+      JSON.parse('{"a":'.repeat(9) + "1" + "}".repeat(9)),
+    ],
+    ["a list", []],
+  ])(
+    "does not fail the completion for a result with %s: the result is lost as no_result, the report is not",
+    async (_, agentResult) => {
+      const t = await start();
+      const turn = await t.running(SCHEMA);
+
+      const answer = await t.h.complete(turn.job.id, turn.leaseToken, {
+        implementer: { ...block(), agentResult } as ImplementerResult,
+      });
+
+      expect(answer.status).toBe(200);
+      const { job, value } = await stored(t, turn.job.id);
+      expect(job).toMatchObject({ status: "failed", errorCode: "no_result" });
+      expect(job?.result).toMatchObject({ implementer: block() });
+      expect(value).toBeNull();
+      expect(await t.sessionOf(turn.sessionId)).toMatchObject({
+        status: "idle",
+        headCommit: HEAD,
+        summary: "Added a health endpoint.",
+      });
+    },
+  );
+
+  // #843-T133
+  it("takes the secrets out of the text and the keys of the result before it is kept", async () => {
+    const t = await start({
+      currentKeysFor: () => Promise.resolve(["k3y-4bcd"]),
+    });
+    const turn = await t.running(SCHEMA);
+
+    await t.h.complete(turn.job.id, turn.leaseToken, {
+      implementer: block({
+        agentResult: {
+          summary: `see ${GHS}`,
+          "k3y-4bcd": ["k3y-4bcd", { deeper: `Bearer ${"q".repeat(24)}` }],
+        },
+      }),
+    });
+
+    const { job, value } = await stored(t, turn.job.id);
+    expect(job).toMatchObject({ status: "succeeded" });
+    expect(JSON.stringify(value)).not.toMatch(/k3y-4bcd|ghs_|q{24}/);
+    expect(value).toEqual({
+      summary: "see [redacted]",
+      "[redacted]": ["[redacted]", { deeper: "[redacted]" }],
+    });
+    expect(JSON.stringify(job?.result)).not.toMatch(/k3y-4bcd|ghs_|q{24}/);
+  });
+
+  // #843-T133
+  it("drops a result that the redaction made larger than the bound and records no_result", async () => {
+    const t = await start({
+      currentKeysFor: () => Promise.resolve(["k3y-4bcd"]),
+    });
+    const turn = await t.running(SCHEMA);
+    const agentResult = { summary: "k3y-4bcd".repeat(29_000) };
+    expect(JSON.stringify(agentResult).length).toBeLessThan(256 * 1024);
+
+    const answer = await t.h.complete(turn.job.id, turn.leaseToken, {
+      implementer: block({ agentResult }),
+    });
+
+    expect(answer.status).toBe(200);
+    const { job, value } = await stored(t, turn.job.id);
+    expect(job).toMatchObject({ status: "failed", errorCode: "no_result" });
+    expect(job?.result).toMatchObject({ implementer: block() });
+    expect(value).toBeNull();
   });
 });

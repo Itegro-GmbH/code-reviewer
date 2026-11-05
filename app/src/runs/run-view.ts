@@ -182,8 +182,8 @@ export type ImplementerDetailView = ImplementerRowView & {
   /** The environment the task started with; null for a task without one (the standard). */
   environment: ImplementerEnvironmentView | null;
   /**
-   * The result the agent handed in through the finish tool (#843), as the app kept it after it checked it against the task's schema:
-   * data from the agent, each text in it cleaned and stripped of known secrets, and nothing else changed. Null when there is none.
+   * The result the agent handed in through the finish tool (#843), as the app kept it (the runner checked it against the task's
+   * schema; the app held it to the bounds, it did not check the schema again): data from the agent, each text in it cleaned and stripped of known secrets, and nothing else changed. Null when there is none.
    */
   result: Record<string, unknown> | null;
   /** The task had a result schema (the agent was given a finish tool), so a settled task without `result` ended without one. */

@@ -101,9 +101,10 @@ async function recordTurnOfJob(
   const turn = await sessions.getTurnByJob(job.id);
   if (turn === undefined) return;
   await sessions.recordTurnResult(turn.session.id, turnResultOf(result));
-  // #843: the result the agent handed in is kept with the turn, which has a schema. The report path (`runner-api/report.ts`) checked it
-  // against that schema and took out one that does not fit before it got here; the bounds are held again, because this is the last
-  // place before it is stored.
+  // #843: the result the agent handed in is kept with the turn, which has a schema. The runner checked it against that schema; the
+  // app does not (the workflow engine re-checks it with `checkResultValue` before it routes it anywhere). The report path
+  // (`runner-api/report.ts`) took out a result over the bounds and recorded the turn `no_result`; the bounds are held again here,
+  // because this is the last place before it is stored.
   if (turn.turn.resultSchema === null) return;
   const handed = agentResultOf(result);
   if (handed === undefined) return;

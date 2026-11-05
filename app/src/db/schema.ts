@@ -1138,7 +1138,8 @@ export interface ImplementerTurnsTable {
   >;
   /**
    * The result the agent handed in, JSON text, written when the turn ended with a result that fits `result_schema` (the runner
-   * checked it and the app checked it again). Null until then, and for a turn that ended without one.
+   * checked it; the app held it to the bounds and did not check the schema again: the workflow engine re-checks it with
+   * `checkResultValue` against `result_schema` before it routes it anywhere). Null until then, and for a turn that ended without one.
    */
   result_value: ColumnType<
     string | null,

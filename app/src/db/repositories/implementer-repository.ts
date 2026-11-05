@@ -173,8 +173,9 @@ export type ImplementerRepository = {
   ): Promise<StoredImplementerSession | undefined>;
   /**
    * Keeps the result the agent handed in with the turn (#843): only a turn of this workspace that has a schema and no result yet takes
-   * one, so a repeated completion writes nothing new. Returns whether it was written. The caller has checked the value against the
-   * turn's schema; the database holds only the bound of its size.
+   * one, so a repeated completion writes nothing new. Returns whether it was written. The runner checked the value against the turn's
+   * schema; the caller held it to the bounds (`boundAgentResult`), and the database holds only the bound of its size. Nothing here checks
+   * the schema: the workflow engine re-checks `result_value` against `result_schema` before it routes it anywhere.
    */
   recordTurnAgentResult(
     turnId: string,

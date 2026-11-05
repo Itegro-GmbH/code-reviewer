@@ -1208,14 +1208,24 @@ describe("the implementer block of a result (#754)", () => {
         "an object of more than 20,000 values",
         { list: Array.from({ length: 20_000 }, () => 1) },
       ],
-    ])("refuses %s", (_, value) => {
-      const done = parsed(value);
+      [
+        "an object of 20,001 values in lists of one number",
+        JSON.parse(`{"a":[1,${"[1],".repeat(9_998)}[1]]}`),
+      ],
+    ])(
+      "leaves out %s and keeps the rest of the report: it is the result that is lost, not the work",
+      (_, value) => {
+        const done = parsed(value);
 
-      expect(done.ok).toBe(false);
-      expect(!done.ok && done.fields.map((entry) => entry.field)).toContain(
-        "result.implementer.agentResult",
-      );
-    });
+        expect(done.ok).toBe(true);
+        const implementer = done.ok ? done.value.result.implementer : undefined;
+        expect(implementer).toMatchObject({
+          headCommit: block().headCommit,
+          commits: block().commits,
+        });
+        expect(implementer && "agentResult" in implementer).toBe(false);
+      },
+    );
   });
 
   // #754-T03

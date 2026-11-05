@@ -1234,9 +1234,13 @@ and `Infinity` are refused), then the schema with the rules of `checkResultValue
 answers). That check, not the one in the container, is the one the turn is judged by, and a result the agent changed after it was accepted is
 judged as what it is. The valid result is redacted of the job's secrets (every text, keys included) and goes to the app in
 `implementer.agentResult`; the facts Control knows (branches, commits, files, cost, `checkedOut`) stay in the result beside it, and the agent cannot
-fake them. The app bounds it again (an object; the same size, levels and values, on the compact JSON), keeps it with the turn
-(`implementer_turns.result_value`) and does not read it against the schema: the runner's check is the authoritative one (the app's code of the
-schema's rules, `checkResultValue`, is what the engine of milestone 3 reads results with).
+fake them. The app bounds it again (an object; the same size, levels and values, on the compact JSON; `contracts/result-check-vectors.json` holds the
+runner's scan and the app's count to the same answers at the edges), takes the secrets out of every text and key once more, keeps it with the turn
+(`implementer_turns.result_value`) and does not read it against the schema: the runner's check is the authoritative one, and the engine of milestone 3
+re-checks the stored value with `checkResultValue` against the turn's stored schema before it routes it anywhere (see
+[`workflows.md`](workflows.md), "The finish tool"). **A result is never a reason to lose a report.** A result that is over the bounds, in the runner
+after its secrets were taken out or in the app, is left out and the turn ends `no_result`; the branches, the commits, the files and the usage are kept. The
+same holds in the app for a report of success from a turn with a schema that carries no result: it is recorded `no_result`.
 
 **An agent that ends without a valid result** gets **one reminder** (`RESULT_REMINDER_PROMPT`), in the same session, like the message for a dirty
 working tree, and also for a profile that may not push, since the reminder is about the result and not about git. The order is: the task, the reminder

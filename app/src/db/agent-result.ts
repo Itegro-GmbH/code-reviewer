@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// The result an agent hands in through the finish tool (#843), as far as it can be judged without its schema: an object of JSON within
-// the bounds of a result. This is the part the database layer, the runner API and the schema check share, so it imports nothing: the
-// check against the schema of the turn is `implementer/agent-result.ts`. Pure.
+// The result an agent hands in through the finish tool (#843), as far as the app judges it: an object of JSON within the bounds of a
+// result. This is the part the database layer and the runner API share, so it imports nothing. The app does not check the value against
+// the schema of the turn: the runner did, and the workflow engine re-checks it with `checkResultValue` before it routes it anywhere.
+// The same bounds are held by the runner (`scan_bounds`, `contracts/result-check-vectors.json`). Pure.
 
 /** JSON as the app holds it; kept here so that this module needs no other. */
 export type AgentJson =
@@ -31,11 +32,6 @@ export const AGENT_RESULT_MAX_VALUES = 20_000;
 
 export type AgentResultBound =
   "not_an_object" | "too_large" | "too_deep" | "too_many_values" | "not_json";
-
-/** What the check of a result against its schema answers: the value and the compact JSON it is stored as, or why it is refused. */
-export type AgentResultCheck =
-  | { ok: true; value: AgentResultValue; text: string }
-  | { ok: false; reason: AgentResultBound | "does_not_fit" };
 
 /**
  * Counts what a value holds without recursion and stops at the first bound it breaks, so a value of two million keys or of a

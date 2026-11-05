@@ -59,7 +59,9 @@ describe("the vectors of the result check, shared with the runner", () => {
   it.each(VECTORS.bounds)("bounds the value: $name", (vector) => {
     // The runner scans these same texts (`scan_bounds`); an agent result the runner lets through and the app refuses would be lost with
     // the report it arrives in.
-    const text = vector.parts.map(([part, times]) => part.repeat(times)).join("");
+    const text = vector.parts
+      .map(([part, times]) => part.repeat(times))
+      .join("");
 
     const bounded = boundAgentResult(JSON.parse(text));
 

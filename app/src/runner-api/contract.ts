@@ -801,8 +801,10 @@ export type ImplementerResult = {
   checkedOut?: string | null;
   /**
    * #843: the result the agent handed in through the finish tool, checked by the runner against the turn's result schema after the
-   * agent's container was gone. Data of an untrusted writer, an object within the bounds of `agent-result.ts`; the app checks it against the
-   * turn's schema again before it keeps it. Absent when the turn has no schema or the agent handed in none that fits.
+   * agent's container was gone. Data of an untrusted writer, an object within the bounds of `agent-result.ts`; the app holds it to the
+   * bounds and takes the secrets out of it, but does not check it against the turn's schema (the workflow engine does, before it routes the
+   * value anywhere). Absent when the turn has no schema, the agent handed in none that fits, or the app found it over the bounds (the turn
+   * is then recorded `no_result`).
    */
   agentResult?: { [key: string]: JsonValue };
 };
