@@ -110,8 +110,9 @@ type Decision =
   | { kind: "fetch"; read: (pre: Prefetched) => Promise<void> };
 
 /**
- * How many times one move may leave the lock to read what it lacked. Each read fills one value that the next try finds, and a move
- * needs four at most (document, turn, profile, request); more means the state keeps changing, and the sweep looks at the run again.
+ * How many times one move may leave the lock to read what it lacked. Each read fills one value that the next try finds, and one state
+ * of the run needs two at most (the document, then one of turn, profile or request); the rest is room for a state that changes between
+ * tries. More means it keeps changing: the move ends without writing, and the sweep looks at the run again.
  */
 const FETCHES_PER_MOVE_MAX = 8;
 
@@ -304,7 +305,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       )
         pre.profiles.set(next.profile, await resolveProfile(next));
     } catch {
-      // What is missing is read under the lock instead, where a failure is the decision's to deal with.
+      // What is missing is read again after the lock, by the decision's own fetch, where a failure is the move's to deal with.
     }
     return pre;
   }
@@ -635,7 +636,12 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           return decide(lock, pre);
         });
         if (decision?.kind !== "fetch") break;
-        if (fetches >= FETCHES_PER_MOVE_MAX) return;
+        if (fetches >= FETCHES_PER_MOVE_MAX) {
+          log(
+            `[workflow-runs] FETCH_LIMIT run=${runId}: the move kept lacking a value, the sweep looks at the run again`,
+          );
+          return;
+        }
         // Outside the lock: the connection of the decision is released, so this read takes any connection the pool has.
         await decision.read(pre);
       }
