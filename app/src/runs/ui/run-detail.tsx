@@ -153,6 +153,22 @@ function MaybeLink({
   );
 }
 
+/** How a follow-up turn got its earlier conversation (#841): `implementer.resume` of the result, as two modes and a reason. */
+function TaskResume({ task }: { task: ImplementerDetailView }) {
+  if (task.resume === null) return null;
+  return (
+    <p data-slot="run-resume" className="text-sm break-words">
+      <span className="font-semibold">Continuation:</span>{" "}
+      <code className="font-mono">{task.resume.mode}</code>. {task.resume.text}
+      {task.resume.reason === null ? null : (
+        <span className="block text-xs text-muted-foreground">
+          Reason: <code className="font-mono">{task.resume.reason}</code>
+        </span>
+      )}
+    </p>
+  );
+}
+
 /** The task of a run of the Implementer: its instruction. Text from the person who started it, rendered as text. */
 function TaskInstruction({ task }: { task: ImplementerDetailView }) {
   return (
@@ -750,6 +766,7 @@ export function RunDetail({
       ) : (
         <>
           <TaskInstruction task={task} />
+          <TaskResume task={task} />
           <TaskSetup task={task} />
           <Section title={STEPS_COPY.title}>
             {/* Rides on the poll of the run: a new snapshot (`generatedAt`) is one request for the steps after the cursor. */}

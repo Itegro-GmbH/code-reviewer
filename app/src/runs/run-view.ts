@@ -162,6 +162,15 @@ export type ImplementerBranchView = {
   isTaskBranch: boolean;
 };
 
+/** #841: the resume mode of a follow-up turn as the page shows it. */
+export type ImplementerResumeView = {
+  mode: "imported" | "summary_only";
+  /** The runner's word for why the conversation was not imported; null for `imported`. */
+  reason: string | null;
+  /** One sentence for the page. */
+  text: string;
+};
+
 /** What the detail page shows of a task besides the facts every run has. Built only from the fields listed here. */
 export type ImplementerDetailView = ImplementerRowView & {
   /** The branch the new one started from; null when the turn of the job cannot be read. Untrusted text. */
@@ -188,6 +197,12 @@ export type ImplementerDetailView = ImplementerRowView & {
   result: Record<string, unknown> | null;
   /** The task had a result schema (the agent was given a finish tool), so a settled task without `result` ended without one. */
   resultExpected: boolean;
+  /**
+   * How a follow-up turn got its earlier conversation (#841, from `implementer.resume` of the result): `imported` is the whole
+   * conversation, `summary_only` a fresh session given a summary, with the stable `reason` word and a sentence for it. Null for a first
+   * turn, a turn that ended before the engine started, and a report without the block.
+   */
+  resume: ImplementerResumeView | null;
   /** The last commit on the branch after the turn, when the turn pushed. */
   head: { shortSha: string; url: string | null } | null;
   /** For a task that did not succeed but pushed work: "N commits were pushed to <branch>."; null otherwise. */
@@ -780,6 +795,39 @@ function cleanedValue(
   return value;
 }
 
+const RESUME_REASON_TEXT: Record<string, string> = {
+  no_snapshot: "No stored conversation was available.",
+  download_failed: "The stored conversation could not be fetched.",
+  snapshot_unreadable: "The stored conversation could not be read.",
+  import_failed: "The agent engine could not take the stored conversation in.",
+  version_changed:
+    "The agent engine changed since the conversation was stored, and could not read it.",
+};
+
+/** `implementer.resume` of a stored result (#841): only the two modes and the five reason words are shown; anything else reads as none. */
+function resumeViewOf(result: JsonValue | null): ImplementerResumeView | null {
+  if (!isRecord(result) || !isRecord(result.implementer)) return null;
+  const block = result.implementer.resume;
+  if (!isRecord(block)) return null;
+  if (block.mode === "imported")
+    return {
+      mode: "imported",
+      reason: null,
+      text: "Continued with the whole conversation of the earlier turns.",
+    };
+  if (
+    block.mode === "summary_only" &&
+    typeof block.reason === "string" &&
+    Object.hasOwn(RESUME_REASON_TEXT, block.reason)
+  )
+    return {
+      mode: "summary_only",
+      reason: block.reason,
+      text: `Continued from a summary of the earlier turns, not their conversation. ${RESUME_REASON_TEXT[block.reason] ?? ""}`.trimEnd(),
+    };
+  return null;
+}
+
 function implementerDetailView(
   job: Job,
   source: ImplementerDetailSource | null,
@@ -870,6 +918,7 @@ function implementerDetailView(
     summary: summary === "" ? null : summary,
     environment: environmentView(source, job.result, display),
     resultExpected: source?.result?.expected ?? false,
+    resume: resumeViewOf(job.result),
     result:
       source?.result?.value == null
         ? null

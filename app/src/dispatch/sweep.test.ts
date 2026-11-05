@@ -85,6 +85,9 @@ function setup(
       checked: 0,
     })),
     retryWriteTokens: vi.fn<() => Promise<void>>(async () => undefined),
+    startFollowUps: vi.fn<() => Promise<{ started: number }>>(async () => ({
+      started: 0,
+    })),
     info: vi.fn<(line: string) => void>(),
     error: vi.fn<(line: string) => void>(),
   };
@@ -106,6 +109,7 @@ function setup(
     balanceMails: { deliverDue: mocks.deliverDue },
     journalCheck: { run: mocks.checkJournal },
     writeTokens: { retryPending: mocks.retryWriteTokens },
+    followUps: { startDue: mocks.startFollowUps },
     settings: options.settings ?? { giveUpMs: 3_600_000, maxRunning: null },
     ...(options.capabilities === undefined
       ? {}
@@ -675,6 +679,66 @@ describe("the write tokens of the Implementer in a run of the sweep (#790)", () 
     const report = await t.sweep.run();
 
     expect(report.failedSteps).toEqual(["write_tokens"]);
+    expect(t.cleanup).toHaveBeenCalledOnce();
+  });
+});
+
+describe("the queued instructions of the Implementer in a run of the sweep (#841)", () => {
+  const implementer = createCapabilitySet([
+    "review",
+    "dynamic-review",
+    "implementer",
+  ]);
+
+  // #841
+  it("starts the instructions whose turn ended without an event reaching them, and reports how many", async () => {
+    const t = setup({ capabilities: implementer });
+    t.startFollowUps.mockResolvedValueOnce({ started: 2 });
+
+    const report = await t.sweep.run();
+
+    expect(t.startFollowUps).toHaveBeenCalledOnce();
+    expect(report.followUpsStarted).toBe(2);
+    expect(report.failedSteps).toEqual([]);
+  });
+
+  // #841
+  it("runs after the step that expires leases, which ends turns without a report", async () => {
+    const t = setup({ capabilities: implementer });
+    const order: string[] = [];
+    t.expireStaleJobs.mockImplementationOnce(async () => {
+      order.push("expire");
+      return expiry;
+    });
+    t.startFollowUps.mockImplementationOnce(async () => {
+      order.push("follow_ups");
+      return { started: 0 };
+    });
+
+    await t.sweep.run();
+
+    expect(order).toEqual(["expire", "follow_ups"]);
+  });
+
+  // #841
+  it("does not run in a deployment without the capability", async () => {
+    const t = setup({
+      capabilities: createCapabilitySet(["review", "dynamic-review"]),
+    });
+
+    await t.sweep.run();
+
+    expect(t.startFollowUps).not.toHaveBeenCalled();
+  });
+
+  // #841: an error must never stop the sweep
+  it("goes on with the other steps, and names the step, when starting fails", async () => {
+    const t = setup({ capabilities: implementer });
+    t.startFollowUps.mockRejectedValueOnce(new Error("down"));
+
+    const report = await t.sweep.run();
+
+    expect(report.failedSteps).toEqual(["follow_ups"]);
     expect(t.cleanup).toHaveBeenCalledOnce();
   });
 });

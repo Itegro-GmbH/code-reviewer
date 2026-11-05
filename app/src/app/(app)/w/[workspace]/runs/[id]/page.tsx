@@ -2,6 +2,7 @@
 
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
+import { operatorMaximumCents } from "@/implementer/shared";
 import { runsServiceFor } from "@/runs/shared";
 import {
   loadRunDetailPage,
@@ -44,5 +45,14 @@ async function RunContent({
     runs: runsServiceFor(workspaceId),
   });
   if (data.kind === "not_found") notFound();
-  return <RunDetailPageContent workspaceSlug={workspaceSlug} data={data} />;
+  // #841: the "Continue" form under a task needs the operator's maximum for its cost field; a review has no such form.
+  return (
+    <RunDetailPageContent
+      workspaceSlug={workspaceSlug}
+      data={data}
+      {...(data.snapshot.run.implementer === undefined
+        ? {}
+        : { operatorMaximumCents: await operatorMaximumCents() })}
+    />
+  );
 }
