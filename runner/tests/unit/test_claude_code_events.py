@@ -255,20 +255,27 @@ def test_a_turn_that_ended_on_its_budget_is_a_failed_turn_with_its_reason() -> N
 
 # #856-T04
 def test_an_empty_session_volume_is_told_from_any_other_failure() -> None:
+    # What Claude Code 2.1.304 prints (the engine test pins it on the real program): the sentence
+    # is in `errors`, the `result` text is empty.
     missing = parse_result(
         a_result(
             subtype="error_during_execution",
             is_error=True,
-            result="No conversation found with session ID: 5b6c",
+            result="",
+            errors=["No conversation found with session ID: 5b6c"],
             total_cost_usd=0,
             modelUsage={},
         )
     )
+    in_text = parse_result(
+        a_result(is_error=True, result="No conversation found with session ID: 5")
+    )
     other = parse_result(a_result(is_error=True, result="Not logged in · Please run /login"))
 
-    assert missing.missing_conversation
+    assert missing.missing_conversation and in_text.missing_conversation
     assert not other.missing_conversation
-    assert other.not_logged_in
+    # Claude Code says `success` with `is_error` true for a device that is not logged in.
+    assert other.not_logged_in and not other.ok
 
 
 # #856-T03

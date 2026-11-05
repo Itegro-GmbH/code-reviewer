@@ -67,6 +67,15 @@ jobs:
         with:
           path: ~/.cache/code-reviewer/opencode
           key: opencode-${{ hashFiles('runner/opencode-pin.json') }}
+      # The pinned Claude Code (#856: the version and the tarball digest in
+      # runner/src/code_reviewer_runner/implementer/claude_code/layer.py) is installed with npm by
+      # scripts/fetch_claude_code.py, which accepts the tarball only with the pinned digest; the
+      # cache just saves the download. Anthropic's software, fetched for the tests only.
+      - name: Restore the pinned Claude Code
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/code-reviewer/claude-code
+          key: claude-code-${{ hashFiles('runner/src/code_reviewer_runner/implementer/claude_code/layer.py') }}
       # Fills the caches if needed (with retries), then runs `pytest -m engine` for this half of the
       # suite on four workers in a network namespace that has a loopback interface and nothing else.
       - name: Engine tests without network

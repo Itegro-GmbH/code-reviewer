@@ -258,6 +258,8 @@ class ClaudeResult:
     session_id: str | None
     terminal_reason: str | None
     permission_denials: int
+    # The sentences of `errors` (an empty session volume is only said there, not in `result`).
+    errors: tuple[str, ...]
     # The turn's cost at Anthropic's list prices, only when Claude Code priced **every** model of
     # the turn from its list (`costBasis: list`). Otherwise None: unknown. It is an estimate for
     # the display "≈ ... through a subscription"; it is never billed and never added to our totals.
@@ -271,13 +273,18 @@ class ClaudeResult:
     def budget_exhausted(self) -> bool:
         return self.subtype == SUBTYPE_BUDGET
 
+    def _says(self, sentence: str) -> bool:
+        return self.is_error and any(
+            sentence in words.lower() for words in (self.text, *self.errors)
+        )
+
     @property
     def missing_conversation(self) -> bool:
-        return self.is_error and _NO_CONVERSATION in self.text.lower()
+        return self._says(_NO_CONVERSATION)
 
     @property
     def not_logged_in(self) -> bool:
-        return self.is_error and _NOT_LOGGED_IN in self.text.lower()
+        return self._says(_NOT_LOGGED_IN)
 
 
 def estimated_cost(result: Mapping[str, Any]) -> Decimal | None:
@@ -298,6 +305,7 @@ def parse_result(event: Mapping[str, Any]) -> ClaudeResult:
     text, session = event.get("result"), event.get("session_id")
     denials = event.get("permission_denials")
     reason = event.get("terminal_reason")
+    errors = event.get("errors")
     return ClaudeResult(
         subtype=str(event.get("subtype") or ""),
         is_error=event.get("is_error") is not False,
@@ -305,5 +313,8 @@ def parse_result(event: Mapping[str, Any]) -> ClaudeResult:
         session_id=session if isinstance(session, str) and session else None,
         terminal_reason=reason if isinstance(reason, str) else None,
         permission_denials=len(cast("list[Any]", denials)) if isinstance(denials, list) else 0,
+        errors=tuple(e for e in cast("list[Any]", errors) if isinstance(e, str))
+        if isinstance(errors, list)
+        else (),
         estimated_cost_usd=estimated_cost(event),
     )
