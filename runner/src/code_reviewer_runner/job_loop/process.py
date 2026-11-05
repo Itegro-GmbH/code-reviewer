@@ -384,7 +384,10 @@ class SubprocessLauncher:
             if uid is not None and gid is not None:
                 os.chown(workdir, uid, gid)
             for name, content in spec.files.items():
-                _put_file(workdir / name, content, uid, gid)
+                # Never the job's failure: a file that cannot be written (a full disk) is a file the
+                # process does not find, and it says so in its own words (`resume_session.py`).
+                with contextlib.suppress(OSError):
+                    _put_file(workdir / name, content, uid, gid)
             pass_fds: tuple[int, ...] = ()
             if ends is not None:
                 pass_fds = (ends[1].fileno(),)

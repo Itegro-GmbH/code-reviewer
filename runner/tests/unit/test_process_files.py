@@ -73,3 +73,17 @@ def test_a_file_is_made_new_and_never_through_a_link(tmp_path: Path) -> None:
     assert stat.S_IMODE(plain.stat().st_mode) == 0o600
     with pytest.raises(FileExistsError):
         _put_file(plain, b"two", None, None)
+
+
+# #840-T123
+def test_a_file_that_cannot_be_written_is_not_a_failed_start() -> None:
+    listing = run(
+        ProcessSpec(
+            argv=(sys.executable, "-c", LISTING),
+            env={},
+            stdin=b"",
+            files={"no-such-directory/resume-session.gz": b"x", "kept.bin": b"y"},
+        )
+    )
+
+    assert list(listing) == ["kept.bin"]
