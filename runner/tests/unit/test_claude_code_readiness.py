@@ -15,26 +15,27 @@ from code_reviewer_runner.factory_runner.selftest import Check, SelfTestResult
 from code_reviewer_runner.implementer.claude_code.layer import (
     CLAUDE_CODE_VERSION,
     LayerSpec,
+    layer_labels,
     layer_tag,
 )
 from code_reviewer_runner.implementer.claude_code.readiness import (
     HARNESS_CLAUDE_CODE,
     HarnessStatus,
     claude_code_status,
+    layer_spec,
 )
 from code_reviewer_runner.implementer.docker_api import DockerError
 
 TOKEN = "sk-" + "ant-" + "oat01-made-up-token-not-real-0000000000000000"
 BASE = "sha256:" + "ab" * 32
 SPEC = LayerSpec()
-LABEL = "com.code-reviewer.claude-code"
 
 
 class Daemon:
     def __init__(self, *, layer: bool = False, refuse: str | None = None) -> None:
         self.images: dict[str, dict[str, Any]] = {"code-reviewer-agent:golden": {"Id": BASE}}
         if layer:
-            self.images[layer_tag(BASE, SPEC)] = {"Config": {"Labels": {LABEL: SPEC.version}}}
+            self.images[layer_tag(BASE, SPEC)] = {"Config": {"Labels": layer_labels(SPEC)}}
         self.refuse = refuse
         self.built = 0
 
@@ -47,7 +48,7 @@ class Daemon:
         if self.refuse:
             raise DockerError(0, self.refuse)
         self.built += 1
-        self.images[tag] = {"Config": {"Labels": {LABEL: SPEC.version}}}
+        self.images[tag] = {"Config": {"Labels": layer_labels(SPEC)}}
 
     def runtimes(self) -> set[str]:
         return {"runc"}
@@ -91,6 +92,31 @@ def test_a_start_builds_a_missing_layer_once(tmp_path: Path) -> None:
 
     assert first is not None and first.ready and second is not None and second.ready
     assert daemon.built == 1
+
+
+# #856-T26
+def test_the_pinned_version_chosen_on_the_device_is_still_the_verified_layer(
+    tmp_path: Path,
+) -> None:
+    """Setting the variable to the pin must not build the layer without the SHA-512 check under
+    the tag of the verified one."""
+    daemon = Daemon()
+    environment = {**token_in(tmp_path), "FACTORY_RUNNER_CLAUDE_CODE_VERSION": CLAUDE_CODE_VERSION}
+
+    found = status(daemon, environment, tmp_path)
+
+    assert found is not None and found.ready
+    assert layer_spec(environment) == LayerSpec()
+    assert list(daemon.images) == ["code-reviewer-agent:golden", layer_tag(BASE, SPEC)]
+
+
+# #856-T26
+def test_another_version_chosen_on_the_device_is_an_unverified_layer(tmp_path: Path) -> None:
+    environment = {**token_in(tmp_path), "FACTORY_RUNNER_CLAUDE_CODE_VERSION": "2.1.318"}
+    chosen = layer_spec(environment)
+
+    assert isinstance(chosen, LayerSpec) and chosen.integrity is None
+    assert layer_tag(BASE, chosen) != layer_tag(BASE, SPEC)
 
 
 # #856-T27

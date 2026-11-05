@@ -12,7 +12,13 @@ The version is pinned here (`CLAUDE_CODE_VERSION`, the npm `stable` tag of 2026-
 spike measured) together with the SHA-512 of its npm tarball (`CLAUDE_CODE_INTEGRITY`): the build
 fetches the tarball, accepts it only with that digest and installs it from the file. The device may
 choose another exact version (`LayerSpec(version=...)`): then there is no digest to compare, and the
-choice is the device's. A version, never a tag such as `latest`: the adapter's event shapes and the
+choice is the device's. **Verified and unverified layers never share a tag or a label** (`layer_tag`,
+`layer_labels`): a device that names the pinned version itself still gets the pinned spec with its
+digest, and a layer built without the check is never taken for the pinned one.
+
+The digest covers the npm package, which is a stub with the platform binary as an optional
+dependency that npm fetches from the registry on its own: the platform binary is **not** pinned by
+a digest of ours (follow-up in `docs/runner.md`). A version, never a tag such as `latest`: the adapter's event shapes and the
 behaviours it relies on (`--include-partial-messages`, the tool search switch) are those of a
 version.
 
@@ -39,9 +45,12 @@ CLAUDE_CODE_VERSION: Final = "2.1.311"
 # `npm view @anthropic-ai/claude-code@2.1.311 dist.integrity`.
 CLAUDE_CODE_INTEGRITY: Final = "sha512-7SgBitii1ZscdbRJXLcub7Vv2pfvH3wo7RrCKg4vZpklIfz9HgigJFFJGIjCY6jzoPDvbQcwwugvm3A8PTejzw=="  # noqa: E501
 LAYER_REPOSITORY: Final = "code-reviewer-agent-claude-code"
-# The label that says which version a layer holds; a layer under the right tag with another label
-# is not trusted.
+# The labels that say which version a layer holds and whether its tarball was checked against a
+# digest (the hex of it, or `UNVERIFIED_LABEL`); a layer under the right tag with other labels is
+# not trusted.
 VERSION_LABEL: Final = "com.code-reviewer.claude-code"
+INTEGRITY_LABEL: Final = "com.code-reviewer.claude-code.integrity"
+UNVERIFIED_LABEL: Final = "unverified"
 # Fetching the package and installing it; a slow link is the device's.
 BUILD_SECONDS: Final = 1200.0
 _VERSION: Final = re.compile(r"\d{1,4}\.\d{1,4}\.\d{1,4}")
@@ -76,6 +85,17 @@ def _hex_digest(integrity: str) -> str | None:
     return raw.hex() if len(raw) == 64 else None
 
 
+def _integrity_word(spec: LayerSpec) -> str:
+    """The hex digest the layer is checked against, or `unverified`."""
+    digest = None if spec.integrity is None else _hex_digest(spec.integrity)
+    return UNVERIFIED_LABEL if digest is None else digest
+
+
+def layer_labels(spec: LayerSpec) -> dict[str, str]:
+    """The labels the layer carries (`find_layer` compares them all)."""
+    return {VERSION_LABEL: spec.version, INTEGRITY_LABEL: _integrity_word(spec)}
+
+
 def dockerfile(base_id: str, spec: LayerSpec) -> str:
     """The text of the layer. `base_id` is the image **id** of the agent image, so the layer is
     exactly on what its tag names."""
@@ -89,7 +109,7 @@ def dockerfile(base_id: str, spec: LayerSpec) -> str:
     return (
         f"FROM {base_id}\n"
         "USER 0:0\n"
-        f'LABEL {VERSION_LABEL}="{spec.version}"\n'
+        f'LABEL {VERSION_LABEL}="{spec.version}" {INTEGRITY_LABEL}="{_integrity_word(spec)}"\n'
         "RUN set -eu; \\\n"
         "    cd /tmp; \\\n"
         f'    npm pack "{PACKAGE}@{spec.version}" --silent > /tmp/claude-code.name; \\\n'
@@ -120,8 +140,11 @@ def build_context(text: str) -> bytes:
 
 
 def layer_tag(base_id: str, spec: LayerSpec) -> str:
-    """`code-reviewer-agent-claude-code:<version>-<first 12 hex digits of the base image id>`."""
-    return f"{LAYER_REPOSITORY}:{spec.version}-{base_id.removeprefix('sha256:')[:12]}"
+    """`code-reviewer-agent-claude-code:<version>-<sha512-<first 12 hex digits of the digest> or
+    unverified>-<first 12 hex digits of the base image id>`."""
+    word = _integrity_word(spec)
+    checked = word if word == UNVERIFIED_LABEL else f"sha512-{word[:12]}"
+    return f"{LAYER_REPOSITORY}:{spec.version}-{checked}-{base_id.removeprefix('sha256:')[:12]}"
 
 
 class LayerDaemon(Protocol):
@@ -139,11 +162,13 @@ class Layer:
     built: bool
 
 
-def _version_of(image: dict[str, Any]) -> object:
-    """The version label of an image, None when it has none."""
+def _is_layer_of(image: dict[str, Any], spec: LayerSpec) -> bool:
+    """Whether the labels of an image are exactly those of the layer `spec` asks for."""
     config = as_object(image.get("Config"))
     labels = None if config is None else as_object(config.get("Labels"))
-    return None if labels is None else labels.get(VERSION_LABEL)
+    if labels is None:
+        return False
+    return all(labels.get(name) == value for name, value in layer_labels(spec).items())
 
 
 def find_layer(
@@ -156,7 +181,7 @@ def find_layer(
     base_id = _base_id(daemon, agent_image)
     tag = layer_tag(base_id, spec)
     try:
-        if _version_of(daemon.inspect_image(tag)) == spec.version:
+        if _is_layer_of(daemon.inspect_image(tag), spec):
             return Layer(tag, False)
     except DockerError:
         pass

@@ -4,9 +4,12 @@
 published by us), cached by the base image and the version. A double stands in for the daemon."""
 
 import base64
+import hashlib
 import io
 import re
+import subprocess
 import tarfile
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -21,6 +24,8 @@ from code_reviewer_runner.implementer.claude_code.layer import (
     build_context,
     dockerfile,
     ensure_layer,
+    find_layer,
+    layer_labels,
     layer_tag,
 )
 from code_reviewer_runner.implementer.docker_api import DockerError
@@ -45,7 +50,7 @@ class Daemon:
         if self.refuse:
             raise DockerError(0, self.refuse)
         self.built.append((tag, context))
-        self.images[tag] = {"Config": {"Labels": {"com.code-reviewer.claude-code": SPEC.version}}}
+        self.images[tag] = {"Config": {"Labels": layer_labels(SPEC)}}
 
 
 SPEC = LayerSpec()
@@ -99,7 +104,10 @@ def test_the_build_context_is_the_dockerfile_alone() -> None:
 def test_the_tag_names_the_version_and_the_base_it_was_built_on() -> None:
     other = "sha256:" + "cd" * 32
 
-    assert layer_tag(BASE, SPEC) == f"{LAYER_REPOSITORY}:{CLAUDE_CODE_VERSION}-{'ab' * 6}"
+    digest = base64.b64decode(CLAUDE_CODE_INTEGRITY.removeprefix("sha512-")).hex()[:12]
+    assert layer_tag(BASE, SPEC) == (
+        f"{LAYER_REPOSITORY}:{CLAUDE_CODE_VERSION}-sha512-{digest}-{'ab' * 6}"
+    )
     assert layer_tag(BASE, SPEC) != layer_tag(other, SPEC)
     assert layer_tag(BASE, SPEC) != layer_tag(BASE, LayerSpec(version="2.1.318", integrity=None))
 
@@ -110,7 +118,7 @@ def test_a_layer_that_exists_is_used_and_nothing_is_built() -> None:
     daemon = Daemon(
         have={
             "agent:golden": {"Id": BASE},
-            tag: {"Config": {"Labels": {"com.code-reviewer.claude-code": SPEC.version}}},
+            tag: {"Config": {"Labels": layer_labels(SPEC)}},
         }
     )
 
@@ -158,3 +166,78 @@ def test_a_build_the_daemon_refuses_is_a_layer_error_with_the_reason() -> None:
 def test_no_agent_image_is_a_layer_error_too() -> None:
     with pytest.raises(LayerError):
         ensure_layer(Daemon(), "agent:golden", SPEC)
+
+
+UNVERIFIED = LayerSpec(version=CLAUDE_CODE_VERSION, integrity=None)
+
+
+# #856-T15
+def test_an_unverified_layer_of_the_pinned_version_has_another_tag_than_the_verified_one() -> None:
+    assert layer_tag(BASE, UNVERIFIED) != layer_tag(BASE, SPEC)
+    assert "unverified" in layer_tag(BASE, UNVERIFIED)
+    other = LayerSpec(version=CLAUDE_CODE_VERSION, integrity="sha512-" + "A" * 86 + "==")
+    assert layer_tag(BASE, other) != layer_tag(BASE, SPEC)
+    assert layer_labels(UNVERIFIED) != layer_labels(SPEC)
+
+
+# #856-T15
+def test_a_layer_built_without_the_digest_is_never_taken_as_the_pinned_one() -> None:
+    """The device set the pinned version itself and built it without the SHA-512 check; even
+    when it sits under the pinned tag and carries the right version label, the pin does not
+    accept it."""
+    tag = layer_tag(BASE, SPEC)
+    unverified_labels = layer_labels(UNVERIFIED)
+    daemon = Daemon(
+        have={
+            "agent:golden": {"Id": BASE},
+            tag: {"Config": {"Labels": unverified_labels}},
+            layer_tag(BASE, UNVERIFIED): {"Config": {"Labels": unverified_labels}},
+        }
+    )
+
+    assert find_layer(daemon, "agent:golden", SPEC) is None
+    built = ensure_layer(daemon, "agent:golden", SPEC)
+    assert built.built is True
+    assert [t for t, _ in daemon.built] == [layer_tag(BASE, SPEC)]
+    # And the other way round: the verified layer is not the unverified request's either.
+    found = find_layer(daemon, "agent:golden", UNVERIFIED)
+    assert found is not None and found.image == layer_tag(BASE, UNVERIFIED)
+
+
+# #856-T15
+def test_a_layer_with_another_digest_label_is_not_taken_as_the_pin() -> None:
+    wrong = {**layer_labels(SPEC), "com.code-reviewer.claude-code.integrity": "0" * 128}
+    daemon = Daemon(
+        have={"agent:golden": {"Id": BASE}, layer_tag(BASE, SPEC): {"Config": {"Labels": wrong}}}
+    )
+
+    assert find_layer(daemon, "agent:golden", SPEC) is None
+
+
+def _check_lines(text: str) -> str:
+    return "\n".join(
+        line.strip().rstrip("\\").strip().removesuffix(";").strip()
+        for line in text.splitlines()
+        if "sha512sum -c" in line
+    )
+
+
+# #856-T13
+def test_the_build_script_fails_when_the_tarball_does_not_have_the_digest(tmp_path: Path) -> None:
+    """The check line of the build script, run on a file: the digest of the file passes, any
+    other digest fails the build (`set -e`)."""
+    tarball = tmp_path / "claude-code.tgz"
+    tarball.write_bytes(b"not the pinned tarball")
+    good = "sha512-" + base64.b64encode(hashlib.sha512(tarball.read_bytes()).digest()).decode()
+    bad = "sha512-" + base64.b64encode(hashlib.sha512(b"another").digest()).decode()
+
+    def run(integrity: str) -> int:
+        script = _check_lines(dockerfile(BASE, LayerSpec(integrity=integrity)))
+        script = script.replace("/tmp/${tarball}", str(tarball))
+        assert "sha512sum -c" in script
+        return subprocess.run(
+            ["/bin/sh", "-c", script], check=False, capture_output=True
+        ).returncode
+
+    assert run(good) == 0
+    assert run(bad) != 0

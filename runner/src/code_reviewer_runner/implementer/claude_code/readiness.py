@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from .layer import LayerDaemon, LayerError, LayerSpec, ensure_layer, find_layer
+from .layer import CLAUDE_CODE_VERSION, LayerDaemon, LayerError, LayerSpec, ensure_layer, find_layer
 from .login import LoginProblem, load_login
 
 HARNESS_CLAUDE_CODE: Final = "claude-code"
@@ -46,6 +46,8 @@ def layer_spec(environment: Mapping[str, str]) -> LayerSpec | str:
     chosen = environment.get(VERSION_VARIABLE, "").strip()
     if not chosen:
         return LayerSpec()
+    if chosen == CLAUDE_CODE_VERSION:
+        return LayerSpec()  # the pin itself keeps its digest check
     try:
         return LayerSpec(version=chosen, integrity=None)
     except ValueError:
