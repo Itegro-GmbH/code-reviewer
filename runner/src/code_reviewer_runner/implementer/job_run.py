@@ -214,6 +214,7 @@ def production_setup(
             token=job.git.token,
             base_branch=spec.base_branch,
             branch=spec.branch,
+            resume=spec.resume,
         ),
         WorkspaceLayout(work_dir=work_dir),
         identity,

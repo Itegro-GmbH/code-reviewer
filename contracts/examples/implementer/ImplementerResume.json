@@ -1,0 +1,8 @@
+{
+  "turn": 2,
+  "branches": [
+    { "name": "implementer/a1b2c3", "head": "1111111111111111111111111111111111111111" },
+    { "name": "feature/retry-docs", "head": "2222222222222222222222222222222222222222" }
+  ],
+  "checkout": "feature/retry-docs"
+}
