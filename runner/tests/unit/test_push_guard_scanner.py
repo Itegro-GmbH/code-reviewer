@@ -9,7 +9,7 @@ from code_reviewer_runner.implementer.push_guard import MIN_SECRET_CHARS, Secret
 
 pytestmark = pytest.mark.unit
 
-SECRET = "sk-ant-oat01-abcdefghijklmnop"
+SECRET = "sk-" + "ant-" + "oat01-abcdefghijklmnop"
 
 
 # #856-G07

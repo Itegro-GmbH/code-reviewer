@@ -1226,7 +1226,7 @@ the lease held), never after a lost lease, `push_all(seconds=...)`:
    before the commit and before this push (`quiet_readers`), so nothing a filter left behind is alive;
 4. classifies each failure into a reason word from the exit status and the `!` lines of the porcelain (`non_fast_forward`,
    `remote_rejected`, `workflows_not_allowed`, `provider_refused`, `provider_error`, `provider_unavailable`, `timed_out`,
-   `unreadable`, `not_a_commit`, `out_of_time`, `out_of_space`, `excluded`); `workflows_not_allowed` is found only in the reason in the
+   `unreadable`, `not_a_commit`, `out_of_time`, `out_of_space`, `excluded`, and, for a turn on a device's login, `login_secret` and `unchecked` from the push guard, which reads what a branch adds before it is pushed); `workflows_not_allowed` is found only in the reason in the
    parentheses of the status line (or at the start of a `remote:` line), never in the branch name; a git command killed at its
    time limit is `timed_out`; a hiccup of the provider (a 5xx, a reset, `internal error`) is tried once more; a client error is
    not (a 401, 403 or 404 is `provider_refused`, any other one `provider_error`).

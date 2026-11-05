@@ -39,7 +39,7 @@ from code_reviewer_runner.implementer.network_rule import MODE_LIST, NetworkRule
 from code_reviewer_runner.implementer.session import SessionSeams
 from code_reviewer_runner.lease_check import LEASE_CHECK_FD_VARIABLE
 
-LOGIN = "sk-ant-oat01-Zq9Lm3XvTn8Rk5Wc2-integrationtestintegrationtest"
+LOGIN = "sk-" + "ant-" + "oat01-Zq9Lm3XvTn8Rk5Wc2-integrationtestintegrationtest"
 SESSION = "d847dcf5-e741-4252-98b0-d73cbc39f2c0"
 IMAGE = "code-reviewer-agent-claude-code:2.1.311-sha512-abcdef012345-0123456789ab"
 PROFILE = {"name": "claude", "version": 1, "canPush": True, "harness": "claude-code"}

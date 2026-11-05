@@ -256,6 +256,13 @@ Engine suite (`runner/tests/engine/`, `uv run pytest -m engine`, `make test-engi
   `implementer/claude_code/layer.py` with npm and accepts the npm stub tarball only with the pinned SHA-512 (the platform binary is not covered, a follow-up of #856; a cached install is reused only with the verified tarball kept beside it; `CLAUDE_CODE_BIN` overrides the
   cache `~/.cache/code-reviewer/claude-code`); a missing program fails loudly with the command to run, never a skip. It is Anthropic's
   proprietary software, fetched for the tests only. `engine.yml` caches it.
+- Claude Code jobs on a customer's runner (#856, second slice) are proven at the lowest level that can: the push guard on real git
+  (`tests/integration/test_implementer_push_guard.py`), the whole turn through `runner.main` with the real adapter over a double of the
+  container (`test_implementer_subscription_turn.py`: no model door, the forced network rule, the readiness re-check, the redaction, the
+  subscription estimate), the job contract and the profile harness (`test_implementer_subscription_job.py`, `contracts/runner-api.v1.json`),
+  and in the app the migration, the validator, the claim routing by harness and the claim of a turn without a model
+  (`runner-subscription.integration.test.ts`). What needs a Docker daemon (the layer, a turn as the user `agent` behind the real network
+  door with `no-new-privileges`) is `tests/lane/test_implementer_subscription.py` in CI.
 - The OpenCode half (#197, `test_engine_opencode.py` and `opencode_support.py`) needs the pinned
   executable and a trusted `rg`. `runner/scripts/fetch_opencode.py` downloads the release named by
   `runner/opencode-pin.json` over https, accepts it only with the pinned size and SHA-256, unpacks

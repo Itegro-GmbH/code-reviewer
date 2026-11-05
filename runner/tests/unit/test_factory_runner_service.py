@@ -650,6 +650,24 @@ def test_the_credential_is_masked_in_the_log(tmp_path: Path) -> None:
     assert CREDENTIAL not in rig.service._masker.redact(f"x {CREDENTIAL} y")  # pyright: ignore[reportPrivateUsage]
 
 
+# #856-L02
+def test_a_login_that_only_the_environment_holds_is_masked_in_the_log(tmp_path: Path) -> None:
+    login = "sk-" + "ant-" + "oat01-made-up-token-not-real-0000000000000000"
+    rig = Rig(tmp_path)
+    handed = prepared(work=rig.work)
+    service = RunnerService(
+        rig.config,
+        rig.environment,
+        replace(handed, environment={**handed.environment, "CLAUDE_CODE_OAUTH_TOKEN": login}),
+        rig.client,  # type: ignore[arg-type]
+        rig.api,  # type: ignore[arg-type]
+    )
+
+    masked = service._masker.redact(f"x {login} y")  # pyright: ignore[reportPrivateUsage]
+
+    assert login not in masked and CREDENTIAL not in masked
+
+
 # -- the stop ----------------------------------------------------------------------------------
 
 

@@ -22,7 +22,7 @@ from code_reviewer_runner.implementer.git_workspace import (
 from workspace_support import BRANCH, Rig, agent_git, commit
 
 # A made-up token of the shape `claude setup-token` prints; it is the guard's secret in these tests.
-LOGIN = "sk-ant-oat01-Zq9+/Lm3Xv_Tn8Rk5Wc2-guardtestguardtestguardtest=="
+LOGIN = "sk-" + "ant-" + "oat01-Zq9+/Lm3Xv_Tn8Rk5Wc2-guardtestguardtestguardtest=="
 SECONDS = 120.0
 
 
