@@ -7,11 +7,13 @@ update is only ever staged: verified, and never during a job."""
 import io
 import json
 import stat
+import threading
 import urllib.error
 import urllib.request
 from email.message import Message
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from release_support import (
@@ -78,6 +80,9 @@ class Daemon:
         }
         # The release number the image carries that a pull of the digest brings (None: nothing).
         self.label = label
+        # How many times the digest reference is gone when a tag asks for it (a service that starts
+        # prunes the references of images that are not `current` or `previous`: update.py).
+        self.references_lost = 0
         self.calls: list[tuple[str, str]] = []
 
     def inspect_container(self, name: str) -> dict[str, Any]:
@@ -100,6 +105,9 @@ class Daemon:
         if method == "POST" and "/tag?" in path:
             source = path.split("/images/")[1].split("/tag?")[0]
             target = path.split("repo=")[1].replace("&tag=", ":")
+            if source == f"{REPOSITORY}@{DIGEST}" and self.references_lost > 0:
+                self.references_lost -= 1
+                self.images.pop(source, None)
             if source not in self.images:
                 raise DockerError(404, "no such image")
             self.images[target] = self.images[source]
@@ -312,6 +320,38 @@ def test_update_stages_a_newer_signed_release_and_keeps_the_one_before(tmp_path:
     assert "release 7" in out and "after the job" in out
 
 
+# #890 (S6): the digest reference of a fresh pull can be pruned before `tag` uses it
+def test_a_digest_reference_that_is_pruned_before_it_is_named_is_pulled_again(
+    tmp_path: Path,
+) -> None:
+    daemon = Daemon(release=4, label=7)
+    daemon.images[CURRENT_REFERENCE] = {"Id": "old"}
+    daemon.references_lost = 1
+
+    code, out, _ = invoke(tmp_path, "update", daemon=daemon, release=Release(release=7))
+
+    assert code == EXIT_OK and "release 7" in out
+    pulls = [path for _, path in daemon.calls if path.startswith("/images/create")]
+    assert len(pulls) == 2
+    assert daemon.images[CURRENT_REFERENCE] is daemon.images[f"{REPOSITORY}@{DIGEST}"]
+    assert daemon.images[PREVIOUS_REFERENCE] == {"Id": "old"}
+
+
+# #890 (S6): one more pull, not a loop
+def test_a_digest_reference_that_is_pruned_again_is_an_error_after_the_second_pull(
+    tmp_path: Path,
+) -> None:
+    daemon = Daemon(release=4, label=7)
+    daemon.images[CURRENT_REFERENCE] = {"Id": "old"}
+    daemon.references_lost = 5
+
+    code, _, err = invoke(tmp_path, "update", daemon=daemon, release=Release(release=7))
+
+    assert code == EXIT_FAILED and "could not be named" in err
+    assert len([1 for _, path in daemon.calls if path.startswith("/images/create")]) == 2
+    assert daemon.images[CURRENT_REFERENCE] == {"Id": "old"}
+
+
 def test_update_with_nothing_newer_pulls_and_stages_nothing(tmp_path: Path) -> None:
     daemon = Daemon(release=7, label=7)
 
@@ -457,6 +497,58 @@ def test_the_opener_of_the_release_documents_speaks_https_and_follows_only_https
         request, io.BytesIO(), 302, "Found", Message(), "https://mirror.example/m.json"
     )
     assert followed is not None and followed.full_url == "https://mirror.example/m.json"
+
+
+# #890 (proxy): a runner behind a proxy fetches its release documents through it, as the
+# installer's `curl` does; without the variables nothing changes.
+def test_the_opener_of_the_release_documents_uses_the_proxy_of_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in ("https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    seen: list[str] = []
+
+    class Proxy(BaseHTTPRequestHandler):
+        def do_CONNECT(self) -> None:
+            seen.append(self.requestline)
+            self.send_error(502)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setenv("https_proxy", f"http://127.0.0.1:{server.server_address[1]}")
+        with pytest.raises(urllib.error.URLError):
+            https_opener().open("https://releases.example/m.json", timeout=5)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert seen == ["CONNECT releases.example:443 HTTP/1.1"]
+
+
+def test_without_proxy_variables_the_opener_of_the_release_documents_has_no_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "http_proxy",
+        "HTTP_PROXY",
+        "https_proxy",
+        "HTTPS_PROXY",
+        "all_proxy",
+        "ALL_PROXY",
+        "REQUEST_METHOD",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    # A `ProxyHandler` without proxies has no `*_open` method, so the opener does not take it up.
+    handlers = cast("list[object]", vars(https_opener())["handlers"])
+
+    assert not any(isinstance(handler, urllib.request.ProxyHandler) for handler in handlers)
 
 
 # -- the proof ---------------------------------------------------------------------------------
