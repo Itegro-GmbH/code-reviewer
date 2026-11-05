@@ -135,6 +135,7 @@ export async function startEngineHarness(
   const jobs = createJobsRepository(h.db, workspaceId);
   const turns = createImplementerRepository(h.db, workspaceId);
 
+  const turnReader = createTurnReader({ jobs, turns });
   const engineLines: string[] = [];
   const engine = createWorkflowEngine({
     runs,
@@ -142,7 +143,7 @@ export async function startEngineHarness(
     profiles: app.profiles,
     environments,
     implementer: app.service,
-    turns: createTurnReader({ jobs, turns }),
+    turns: turnReader,
     connectors: createConnectorRegistry(options.connectors ?? []),
     repositoryName: async (id) => (await h.repositories.get(id))?.fullName,
     now,
@@ -277,6 +278,9 @@ export async function startEngineHarness(
     workspaceId,
     workflows,
     runs,
+    environments,
+    turnReader,
+    implementerService: app.service,
     engine,
     service,
     kicked,

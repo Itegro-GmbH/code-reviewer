@@ -173,4 +173,33 @@ describe("the write tokens of the Implementer in the repair work (#790)", () => 
 
     expect(order).toEqual(["expire", "tokens"]);
   });
+
+  // #844-T263
+  it("looks again at the workflow runs after the expiry, which ended jobs nobody reported", async () => {
+    const order: string[] = [];
+    const maintenance = createOpportunisticMaintenance({
+      withLock: async (work) => ({ acquired: true, value: await work() }),
+      queue: {
+        expireStaleJobs: vi.fn(async () => {
+          order.push("expire");
+          return {
+            requeued: 0,
+            leaseExpired: 1,
+            timedOut: 0,
+            noCapableRunner: 0,
+          };
+        }),
+      },
+      workflowRuns: {
+        reconcile: vi.fn(async () => {
+          order.push("workflow runs");
+        }),
+      },
+      log: { error: vi.fn() },
+    });
+
+    expect(await maintenance.run()).toBe("ran");
+
+    expect(order).toEqual(["expire", "workflow runs"]);
+  });
 });

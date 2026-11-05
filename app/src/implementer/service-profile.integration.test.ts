@@ -315,3 +315,84 @@ describe("a task with a profile", () => {
     });
   });
 });
+
+describe("a task with a cost cap of the caller", () => {
+  const limitOf = async (
+    app: Awaited<ReturnType<typeof setup>>,
+    sessionId: string,
+  ) => (await turnOf(app, sessionId)).cost_limit_cents;
+
+  // #844-T250
+  it("lowers the cost limit of the profile's version and never raises it", async () => {
+    const app = await setup();
+
+    const lower = await app.service.startTask(
+      USER,
+      withProfile(app, "reviewer"),
+      {
+        costCapCents: 150,
+      },
+    );
+    const higher = await app.service.startTask(
+      USER,
+      withProfile(app, "reviewer", {
+        branch: "implementer/other",
+        clientRequestId: "request-2",
+      }),
+      { costCapCents: 900 },
+    );
+
+    expect(await limitOf(app, lower.sessionId)).toBe(150);
+    expect(await limitOf(app, higher.sessionId)).toBe(200);
+  });
+
+  // #844-T251
+  it("sets the limit of a profile without one, held to the operator's maximum instead of refused", async () => {
+    const app = await setup({ operatorCostLimitCents: 500 });
+    const made = await app.profiles.saveVersion(
+      app.profile.id,
+      { content: { ...CONTENT, costLimitCents: null }, createdBy: USER.id },
+      100,
+    );
+    if (!made.ok) throw new Error("seeding failed");
+
+    const capped = await app.service.startTask(
+      USER,
+      withProfile(app, "reviewer"),
+      {
+        costCapCents: 120,
+      },
+    );
+    const aboveMaximum = await app.service.startTask(
+      USER,
+      withProfile(app, "reviewer", {
+        branch: "implementer/other",
+        clientRequestId: "request-2",
+      }),
+      { costCapCents: 9000 },
+    );
+    const uncapped = await app.service.startTask(
+      USER,
+      withProfile(app, "reviewer", {
+        branch: "implementer/third",
+        clientRequestId: "request-3",
+      }),
+    );
+
+    expect(await limitOf(app, capped.sessionId)).toBe(120);
+    expect(await limitOf(app, aboveMaximum.sessionId)).toBe(500);
+    expect(await limitOf(app, uncapped.sessionId)).toBeNull();
+  });
+
+  // #844-T252
+  it("is no field of the body: a request cannot ask for it", async () => {
+    const app = await setup();
+
+    const started = await app.service.startTask(
+      USER,
+      withProfile(app, "reviewer", { costCapCents: 1 }),
+    );
+
+    expect(await limitOf(app, started.sessionId)).toBe(200);
+  });
+});

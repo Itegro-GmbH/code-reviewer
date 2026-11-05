@@ -38,6 +38,7 @@ import { createBillingNotificationsRepository } from "./billing-notifications-re
 import { createBillingWorkspaceSettingsRepository } from "./billing-workspace-settings-repository.ts";
 import { createImplementerEnvironmentsRepository } from "./implementer-environments-repository.ts";
 import { createWorkflowsRepository } from "./workflows-repository.ts";
+import { createWorkflowRunsRepository } from "./workflow-runs-repository.ts";
 import { createProfilesRepository } from "./profiles-repository.ts";
 import { createImplementerRepository } from "./implementer-repository.ts";
 import { createImplementerSnapshotsRepository } from "./implementer-snapshots-repository.ts";
@@ -74,6 +75,7 @@ function reposOf(db: Kysely<Database>, workspaceId: string) {
     snapshots: createImplementerSnapshotsRepository(db, workspaceId),
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
     workflows: createWorkflowsRepository(db, workspaceId),
+    workflowRuns: createWorkflowRunsRepository(db, workspaceId),
     agentProfiles: createProfilesRepository(db, workspaceId),
     erasure: createWorkspaceErasureRepository(db, workspaceId),
   };
@@ -477,6 +479,30 @@ async function seed(
     200,
   );
   if (!secondVersion.ok) throw new Error("seeding failed");
+  // A run of that workflow with one step (#844) in every workspace.
+  const workflowRun = await repos.workflowRuns.createRun({
+    workflowId: workflow.workflow.id,
+    workflowVersion: 1,
+    repositoryId: repository.id,
+    baseBranch: "main",
+    triggerInput: `{"repo":"acme/${tag}"}`,
+    budgetMicroUsd: 20_000_000,
+    clientRequestId: `run-${tag}`,
+    createdBy: `user-${tag}`,
+    actorLogin: "octocat",
+  });
+  const workflowStep = await repos.workflowRuns.lockRun(
+    workflowRun.run.id,
+    (lock) =>
+      lock.addStep({
+        position: 0,
+        stepId: "work",
+        kind: "action",
+        profile: null,
+        capMicroUsd: null,
+      }),
+  );
+  if (workflowStep === undefined) throw new Error("seeding failed");
   // A profile with a second version (#843) in every workspace, under the same name.
   const profileContent = {
     description: "",
@@ -507,6 +533,8 @@ async function seed(
   return {
     environment: created.environment,
     workflow: secondVersion.workflow,
+    workflowRun: workflowRun.run,
+    workflowStep,
     agentProfile: secondProfileVersion.profile,
     implementer: started,
     topUpIntentId: topUpIntent.id,
@@ -682,6 +710,18 @@ async function rowsOf(db: Kysely<Database>, workspaceId: string) {
       .where("workspace_id", "=", workspaceId)
       .orderBy("workflow_id")
       .orderBy("version")
+      .execute(),
+    workflowRuns: await db
+      .selectFrom("workflow_runs")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("id")
+      .execute(),
+    workflowStepRuns: await db
+      .selectFrom("workflow_step_runs")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("id")
       .execute(),
     agentProfiles: await db
       .selectFrom("profiles")
@@ -2044,6 +2084,80 @@ const CASES: Case[] = [
     run: (a, b) => a.workflows.archive(b.workflow.id, 1000),
     expectAnswer: (answer) =>
       expect(answer).toEqual({ ok: false, reason: "not_found" }),
+  },
+  // workflow runs (#844-T140): B's runs and steps are not A's to read, lock, claim or end
+  {
+    name: "workflowRuns.getRun",
+    run: (a, b) => a.workflowRuns.getRun(b.workflowRun.id),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "workflowRuns.findByRequest",
+    run: (a, b) => a.workflowRuns.findByRequest(b.workflowRun.clientRequestId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "workflowRuns.listRuns",
+    run: (a, b) => a.workflowRuns.listRuns(b.workflow.id, 10),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    name: "workflowRuns.listSteps",
+    run: (a, b) => a.workflowRuns.listSteps(b.workflowRun.id),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    name: "workflowRuns.findStepByJob",
+    run: (a, b) => a.workflowRuns.findStepByJob(b.job.id),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    // B's request id is no request id of A: A makes its own run.
+    name: "workflowRuns.createRun",
+    run: (a, b) =>
+      a.workflowRuns.createRun({
+        workflowId: b.workflow.id,
+        workflowVersion: 1,
+        repositoryId: b.repository.id,
+        baseBranch: "main",
+        triggerInput: "{}",
+        budgetMicroUsd: 1_000_000,
+        clientRequestId: b.workflowRun.clientRequestId,
+        createdBy: b.userId,
+        actorLogin: "octocat",
+      }),
+    expectAnswer: (answer) =>
+      expect(answer).toMatchObject({ status: "created" }),
+  },
+  {
+    name: "workflowRuns.lockRun",
+    run: (a, b) =>
+      a.workflowRuns.lockRun(b.workflowRun.id, async () => "worked"),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "workflowRuns.claimStep",
+    run: (a, b) => a.workflowRuns.claimStep(b.workflowStep.id),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "workflowRuns.attachTurn",
+    run: (a, b) =>
+      a.workflowRuns.attachTurn(b.workflowStep.id, {
+        jobId: b.job.id,
+        turnId: null,
+      }),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "workflowRuns.settleOwnStep",
+    run: (a, b) =>
+      a.workflowRuns.settleOwnStep(b.workflowStep.id, {
+        status: "failed",
+        errorCode: "action_failed",
+        errorMessage: null,
+      }),
+    expectAnswer: (answer) => expect(answer).toBe(false),
   },
   // profiles (#843-T70): B's profiles and versions are not A's to read, find, start from or save over
   {

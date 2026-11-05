@@ -218,6 +218,8 @@ describe("starting the database", () => {
       "users",
       "verifications",
       "webhook_deliveries",
+      "workflow_runs",
+      "workflow_step_runs",
       "workflow_versions",
       "workflows",
       "workspace_entitlements",

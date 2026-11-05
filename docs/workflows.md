@@ -5,8 +5,11 @@ run in order. A GitHub issue gets a label, an agent implements it, another revie
 request is opened. Workflows are written by an AI through the API (there is no editor), checked by a strict validator, and saved per
 workspace with versions.
 
-**Status (milestones 1 and 2 of epic #833).** The format, the validator, the storage and the [profiles](profiles.md) they refer to exist.
-**Nothing runs a workflow yet**: the engine comes in the next milestone. The finish tool exists (see [Result schemas](#result-schemas)). A saved workflow is a checked document. The workflows exist only in
+**Status (milestones 1 to 3a of epic #833).** The format, the validator, the storage, the [profiles](profiles.md) they refer to and the
+**engine core** exist: a workflow with the manual trigger can be started through the API and runs its agent and action steps one after the other
+(see [Engine](#engine)). Not yet: the three GitHub actions (they need rights of the GitHub App; milestone 3b, until then an action step ends with
+`connector_unavailable`), `if` and `loop` (milestone 5: a workflow that has one is refused at the start), the label trigger (milestone 4) and a page.
+The finish tool exists (see [Result schemas](#result-schemas)). The workflows exist only in
 a deployment with the capability `implementer` (the factory); there is no page, only the routes below. Every member of a workspace may
 use them (the permission `start_implementer_task`).
 
@@ -132,10 +135,11 @@ A run of an agent step gets a **profile** and an **environment**, separately: wh
 | `description` | no | A note. |
 
 **What an agent step yields**, for `{{<id>.<field>}}`: the fields of its `result`, and the **facts** the platform knows without the agent
-reporting them: `costUsd` (always), and `branch` and `commits` (a list of commit ids) **only if the profile may push**. For a profile that
-may push, `branch` is **always there**: the platform creates the branch when the turn starts, so it exists even when the agent made no commit
-(`commits` is then an empty list). A step run with a profile that may not push has no branch and no commits, and a reference to them is
-refused (`reference_fact_unavailable`). Result fields named `costUsd`, `branch` or `commits` are refused (`result_field_reserved`). A `result`
+reporting them: `costUsd` (always), and, **only if the profile may push**, `branch`, `commits` (a list of commit ids, oldest first), `headCommit`
+(the last commit of the branch, or the commit the branch started from when the agent made none) and `pushed` (true/false: whether the branch reached
+the remote). For a profile that may push, `branch` is **always there**: the platform creates the branch when the turn starts, so it exists even when
+the agent made no commit (`commits` is then an empty list). A step run with a profile that may not push has none of these four, and a reference to
+them is refused (`reference_fact_unavailable`). Result fields named `costUsd`, `branch`, `commits`, `headCommit` or `pushed` are refused (`result_field_reserved`). A `result`
 that fails its own check binds its fields as unknown: you get the errors of the schema, not one for every use of a field.
 
 ### The action (`"kind": "action"`)
@@ -151,7 +155,9 @@ command; consequences (a comment, a pull request) happen only here. The inputs s
 
 The action works on the repository of the run. `head`, `base`, `issue`, `add` and `remove` are [targets](#one-repository-per-run-and-targets). With
 the trigger `github.issueLabeled` an action may **not add the label that starts the workflow** (case ignored): the workflow would start itself
-again (`label_retriggers_workflow`); removing it is fine. A connector that does not exist is refused (`unknown_connector`). Nothing here executes yet.
+again (`label_retriggers_workflow`); removing it is fine. A connector that does not exist is refused (`unknown_connector`). The engine runs an action
+through a connector it has; the three GitHub connectors come with milestone 3b, and a step whose connector is not there ends with
+`connector_unavailable` (see [Engine](#engine)).
 
 ### Control: `if` and `loop`
 
@@ -259,7 +265,7 @@ cases that both implementations are tested against). A result is data of an untr
 levels, 20,000 values. See [`implementer.md`](implementer.md#the-finish-tool) for how the tool reaches the agent, and what a turn without a result is.
 
 The app keeps the value as data (`implementer_turns.result_value`, with `result_schema` beside it) and holds it to the bounds, but it does **not** check
-it against the schema. **The engine of milestone 3 re-checks `result_value` with `checkResultValue` against the turn's stored schema before it routes
+it against the schema. **The engine re-checks `result_value` with `checkResultValue` against the turn's stored schema before it routes
 the value anywhere** (to a condition, a step input, a workflow's output): a stored value is the agent's data, and the runner's verdict is not the
 engine's. A value that fails is treated as a step without a result.
 
@@ -440,7 +446,7 @@ the count, not a role, is the bound; there is no way to remove archived workflow
 
 ### For the engine (milestone 3)
 
-What the engine, which runs a workflow later, must keep to; the validator and the routes already assume it.
+What the engine keeps to (milestone 3a keeps all of it); the validator and the routes assume it.
 
 - **An archived workflow is never started**: the engine refuses it (it reads `archivedAt`), and a trigger lookup (which workflow does this
   label start?) filters the archived ones out.
@@ -453,6 +459,139 @@ What the engine, which runs a workflow later, must keep to; the validator and th
 - **The engine never expands a template inside a default value.** The default of a reference is a JSON value written out, taken as it is:
   `{{a.t | default "{{b.x}}"}}` yields the text `{{b.x}}`, not the value of `b.x`, and the validator does not look for references in it
   either. A default that must hold a value of a step is not possible; give the field a value in the step that makes it, or branch with `if`.
+
+## Engine
+
+*Milestone 3a of epic #833; the code is [`app/src/workflow-runs/`](../app/src/workflow-runs/README.md).* The engine takes a saved workflow
+version and runs it: one **run** per start, one **step run** per step. In this slice it runs **linear** workflows (`agent` and `action` steps, one
+after the other) that start with the **manual** trigger. `if` and `loop` are valid in the format but are refused when a run is started
+(`WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED`, with the step named), before anything costs money; they come with milestone 5.
+
+### Starting a run
+
+`POST /api/w/<slug>/workflows/<id>/runs` with `{"input": {...}, "clientRequestId": "..."}`, for every member (the permission to start an Implementer
+task, `start_implementer_task`: a run starts tasks). `input` must fit the `input` schema of the trigger (checked again here with the same rules as a
+result: a start knows the values) and names the repository (`input.repo`, `owner/name`) of the workspace. The answer is `201 {"run": {...}}`, with
+the run and its steps; the first steps start right after the answer.
+
+- **Idempotent.** The same `clientRequestId` with the same workflow and input answers `200` with the run it made before and writes nothing;
+  another workflow or input under that id is `409 WORKFLOW_RUN_REQUEST_REUSED` (with `runId`). The id is 1 to 200 printable ASCII characters
+  without a space.
+- **The version is pinned.** The run uses the version the workflow has at the start; saving a new version later changes nothing under it.
+- `GET /api/w/<slug>/workflows/<id>/runs/<runId>` answers `200 {"run": {...}}` with the steps; `GET .../runs` lists the newest 50 runs of the workflow
+  (without steps). A run of another workspace, or of another workflow, is `404`.
+
+A run looks like this (a step is `pending` when written, `running` once claimed, then `succeeded` or `failed`):
+
+```json
+{
+  "run": {
+    "id": "7f0c…", "workflowId": "…", "workflowVersion": 3, "status": "running", "errorCode": null,
+    "budgetUsd": 20, "spentUsd": 0.42, "repositoryId": "…", "baseBranch": "main", "input": {"repo": "acme/widgets", "topic": "caching"},
+    "createdAt": "…", "updatedAt": "…", "finishedAt": null,
+    "steps": [
+      { "id": "plan", "position": 0, "kind": "agent", "status": "succeeded", "profile": {"name": "worker", "version": 1},
+        "jobId": "…", "turnId": "…", "costUsd": 0.42, "output": {"summary": "…", "costUsd": 0.42, "branch": "workflow/7f0c…/plan"},
+        "errorCode": null, "errorMessage": null, "createdAt": "…", "startedAt": "…", "finishedAt": "…" }
+    ]
+  }
+}
+```
+
+`jobId` and `turnId` link an agent step to its Implementer run (the live view of that run shows what the agent does).
+
+### What the engine does
+
+- **An agent step starts an Implementer turn** through the same service as a task started by hand (`startTask`), as the person who started the
+  run. The **profile** is the version the step pins; a profile **without a version** means the newest version **at the moment the step starts**,
+  and that version is stored with the step run. The **environment** is found by name (case ignored). The **instruction** is the step's text with its
+  references filled in. The step's `result` schema (or the default of the profile version) becomes the finish tool. The turn works on a branch
+  the platform names, `workflow/<run id>/<step id>`, from the default branch of the repository at the start of the run.
+- **A turn that ends moves the run on.** The runner API tells the engine when the job of a turn ends; the engine then reads the job, the turn and
+  its session **from the database** (the event only says which run to look at) and ends the step. A job that ends without anybody reporting it (its lease
+  ran out) is found by the sweep, which looks again at every run that was not touched for a minute.
+- **Idempotent, also in parallel.** A doubled or late event, a sweep and an event at the same time, or two servers: every decision is made under a lock
+  on the run, from the state the lock shows, so the second one finds what the first did and changes nothing. A step is claimed by a guarded update, so one
+  worker does it; an agent step is started under a request id made from the run and the position, so starting it twice yields one turn. An action
+  that was interrupted is **not** repeated (it may have happened): its step ends as `action_interrupted`.
+- **A failure of the engine never fails the end of a turn.** The hook runs after the completion is stored; if it throws, the completion is
+  answered and stored as it would have been, the failure is logged by its code only, and the sweep picks the run up again.
+
+### Results and facts
+
+An agent step yields the **result** of the agent and the **facts** the platform measured (`costUsd`, and, if the profile may push, `branch`, `commits`,
+`headCommit`, `pushed`). Before any part of the result is used, **the engine checks `result_value` against the turn's stored `result_schema` again**
+with `checkResultValue`; a value that fails, a missing value or a turn that ended with `no_result` makes the step fail with `no_result`. A result is
+data: it can be put into a text (an instruction, a comment), never into a target, and nothing in it is read again as a template.
+
+### References at run time
+
+`{{trigger.input.x}}`, `{{step.field}}`, `{{step.branch}}` and the rest are resolved as the validator defines them.
+
+- A text that is exactly one reference keeps the type of the value; in any other text a value becomes text (a list: one entry per line starting with `- `).
+- **Values are data.** A text is built in one pass; what a reference yields is inserted as it is and never parsed again, so `{{` in a result does nothing.
+  The default of a reference is taken as written. Control characters are removed from an inserted value (the Implementer refuses them).
+- **Sizes.** A value longer than 10,000 characters is cut with a note that says so (`… [cut: the value was N characters long]`). The finished text must fit
+  where it goes (an instruction: 20,000 characters), else the step fails with `template_too_large`.
+- **A missing value fails the step** with `template_missing_value` and the path that was missing, unless the reference has a `| default`.
+- The targets are checked again: an issue number from the input must be a whole number from 1 to 2147483647.
+
+### The budget over all steps
+
+A run has a budget: `budgetUsd` of the document (20 when left out), held to the operator's maximum (100 USD today) once more at the start. Every agent
+step gets as its cost limit **at most what is left of the budget**, in whole cents, and not more than the limit of its profile version or the operator's
+maximum per task. A turn is charged what the runner reported; a turn whose cost is not known is charged the cap it ran under, so a run never spends more
+than its budget. When the budget cannot pay one cent for the next agent step, the run ends with `budget_exhausted`; an action step costs nothing and still runs.
+
+### Actions
+
+An action step is a **connector**: an interface (`name`, `run(call)`) and a registry the engine asks. The inputs are the node's, with references resolved and
+held to the connector's types again. The three connectors of the format (`github.pullRequest.open`, `github.issue.comment`, `github.issue.labels`)
+need rights of the GitHub App that the owner grants first, so they come with milestone 3b; a step whose connector is not available ends with
+`connector_unavailable` and the run with `step_failed`. The tests use a fake connector.
+
+### Failure codes
+
+A run that ends failed has `errorCode`; a step that failed has `errorCode` and a short `errorMessage`.
+
+| Code | Of | Meaning |
+| --- | --- | --- |
+| `step_failed` | run | A step failed; the step says why. |
+| `budget_exhausted` | run | The budget does not cover another agent step. |
+| `step_kind_not_supported` | run | The pinned document holds a step this engine does not run (`if`, `loop`). |
+| `document_unusable` | run | The pinned version cannot be read. |
+| `template_missing_value` | step | A reference points at a value the run does not have, and has no default. |
+| `template_invalid` | step | A reference holds an object, or the text is not a template. |
+| `template_too_large` | step | The text does not fit where it goes. |
+| `profile_not_found` | step | The profile is gone, archived or has no such version. |
+| `environment_not_found` | step | The environment is not one of the workspace. |
+| `agent_start_failed` | step | The Implementer refused the turn (the message has its code), or it could not be started for an hour. |
+| `turn_unreadable` | step | The turn, its job or its stored schema cannot be read. |
+| `no_result` | step | No result, or one that does not fit the schema. |
+| `job_failed` | step | The job ended without success and without a code of its own. Any other code of the job (`timeout`, `cost_limit_reached`, …) is kept as it is. |
+| `connector_unavailable` | step | No connector is there for the action. |
+| `action_input_invalid` | step | The inputs of the action are not what the connector takes, once the references are resolved. |
+| `action_failed` | step | The connector failed; the message is its own. |
+| `action_interrupted` | step | The engine was interrupted while the action ran; it is not repeated. |
+
+### Errors of the run routes (`error`)
+
+| Code | Status | Meaning |
+| --- | --- | --- |
+| `WORKFLOW_RUN_REQUEST_INVALID` | 400 | The body is not JSON or not `{input, clientRequestId}`, or the request id is not usable. |
+| `WORKFLOW_RUN_CROSS_SITE_REQUEST` | 403 | The request comes from another site. |
+| `WORKFLOW_RUN_WORKFLOW_NOT_FOUND` | 404 | No such workflow in this workspace. |
+| `WORKFLOW_RUN_NOT_FOUND` | 404 | No such run of this workflow in this workspace. |
+| `WORKFLOW_RUN_REPOSITORY_NOT_FOUND` | 404 | `input.repo` is none of the workspace's repositories (or not `owner/name`). |
+| `WORKFLOW_RUN_WORKFLOW_ARCHIVED` | 409 | The workflow is archived and is not started. |
+| `WORKFLOW_RUN_REQUEST_REUSED` | 409 | The request id made another run (`runId` is the first). |
+| `WORKFLOW_RUN_BODY_TOO_LARGE` | 413 | The body is over 128 KB. |
+| `WORKFLOW_RUN_CONTENT_TYPE_UNSUPPORTED` | 415 | The body is not `application/json`. |
+| `WORKFLOW_RUN_TRIGGER_NOT_MANUAL` | 422 | Only a workflow with the manual trigger is started by hand. |
+| `WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED` | 422 | A step is an `if` or a `loop` (`step` names it). |
+| `WORKFLOW_RUN_INPUT_INVALID` | 422 | The input does not fit the trigger's `input`; `errors` lists every problem. |
+| `WORKFLOW_RUN_DOCUMENT_UNUSABLE` | 500 | The saved document cannot be read. |
+| `WORKFLOW_RUN_GITHUB_UNAVAILABLE` | 503 | GitHub could not be asked for the repository. |
 
 ## Error codes
 
@@ -483,7 +622,7 @@ Beyond the form:
 | `reference_not_in_scope` | The step ran earlier but not on every path to here (inside a branch). | Use it inside its branch, or restructure. |
 | `reference_unknown_field` | The step has no such field. | Use one of `available`. |
 | `reference_optional_field` | The field is not required, so it may be missing. | Make it `required` in the result schema, or add `\| default <JSON>`. |
-| `reference_fact_unavailable` | `branch` or `commits` of a step whose profile may not push. | Use a profile that may push, or another value. |
+| `reference_fact_unavailable` | `branch`, `commits`, `headCommit` or `pushed` of a step whose profile may not push. | Use a profile that may push, or another value. |
 | `reference_type_mismatch` | The value does not fit where it is used. | Use a value of the type the message names, or a field of an object. |
 | `default_type_mismatch` | The default does not fit the field's type. | Give a default of that type. |
 | `previous_outside_loop` | `previous.` outside a loop body. | Use it inside a loop. |
@@ -497,7 +636,7 @@ Beyond the form:
 | `profile_archived` | The profile exists but is archived: no step may run it. | Use one of `available`. |
 | `profile_version_unknown` | The profile has no such version. | Use one of `available`, or leave the version out. |
 | `environment_unknown` | No such environment in the workspace. | Use one of `available`, or create it on the Environments page. |
-| `result_field_reserved` | A result field named like a platform fact (`costUsd`, `branch`, `commits`). | Rename it. |
+| `result_field_reserved` | A result field named like a platform fact (`costUsd`, `branch`, `commits`, `headCommit`, `pushed`). | Rename it. |
 | `required_field_unknown` | `required` of a result schema names a field that is not in `properties`. | Fix the name or add the property. |
 | `repo_required` | A manual trigger without `input` that declares `repo` as a required text: the run has no repository. | Declare `repo` in `properties` and `required` of the trigger's `input`. |
 | `target_from_untrusted_value` | An input that decides a target (`issue`, `head`, `base`, `add`, `remove`, `environment`) holds more than a literal or one reference of the kind the input takes (see the table under "targets": a field of the trigger such as the title or the body of the issue is not one). | Use a literal, or exactly one reference the message names. |

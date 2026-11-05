@@ -1052,7 +1052,7 @@ describe("a failure of the engine", () => {
       workflows: app.workflows,
       profiles: app.profiles,
       environments: { listSummaries: async () => [] },
-      implementer: app.service,
+      implementer: app.implementerService,
       turns: { read: async () => undefined },
       connectors: createConnectorRegistry(),
       repositoryName: async () => undefined,
@@ -1063,6 +1063,66 @@ describe("a failure of the engine", () => {
 
     expect(lines).toEqual(["[workflow-runs] ENGINE_EVENT_FAILED job=job-1"]);
     expect(lines.join("\n")).not.toContain("secret");
+  });
+
+  // #844-T112
+  it("reads nothing from another table while it holds the lock of a run: a second connection from inside a transaction would starve the pool", async () => {
+    const app = await startEngineHarness();
+    let inLock = false;
+    const inside: string[] = [];
+    const watched =
+      <A extends unknown[], R>(
+        name: string,
+        call: (...args: A) => Promise<R>,
+      ) =>
+      async (...args: A): Promise<R> => {
+        if (inLock) inside.push(name);
+        return call(...args);
+      };
+    const engine = createWorkflowEngine({
+      runs: {
+        ...app.runs,
+        lockRun: (runId, work) =>
+          app.runs.lockRun(runId, async (lock) => {
+            inLock = true;
+            try {
+              return await work(lock);
+            } finally {
+              inLock = false;
+            }
+          }),
+      },
+      workflows: {
+        getVersion: watched("document", (...args) =>
+          app.workflows.getVersion(...args),
+        ),
+      },
+      profiles: {
+        findByName: watched("profile", (...args) =>
+          app.profiles.findByName(...args),
+        ),
+      },
+      environments: app.environments,
+      implementer: app.implementerService,
+      turns: {
+        read: watched("turn", (jobId) => app.turnReader.read(jobId)),
+      },
+      connectors: createConnectorRegistry(),
+      repositoryName: async () => undefined,
+      now: () => new Date("2026-11-05T10:00:00.000Z"),
+    });
+    const workflow = await app.saveWorkflow(twoAgentSteps());
+    const { run } = await app.start(workflow.id);
+    await engine.advance(run.id);
+    const jobId = await app.finishTurn({ agentResult: { summary: "Plan." } });
+
+    await engine.jobEnded(jobId);
+
+    expect(stepsOf(await app.stateOf(run.id))).toEqual([
+      ["plan", "succeeded"],
+      ["build", "running"],
+    ]);
+    expect(inside).toEqual([]);
   });
 
   // #844-T111
@@ -1088,7 +1148,7 @@ describe("a failure of the engine", () => {
       },
       profiles: app.profiles,
       environments: { listSummaries: async () => [] },
-      implementer: app.service,
+      implementer: app.implementerService,
       turns: { read: async () => undefined },
       connectors: createConnectorRegistry(),
       repositoryName: async () => undefined,

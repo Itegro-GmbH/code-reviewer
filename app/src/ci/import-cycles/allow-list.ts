@@ -5,6 +5,11 @@ import type { AllowList } from "./graph.ts";
 // The import cycles that exist today (#715). Each cut of the plan (#715) removes entries; none is ever added
 // without a reason in the pull request. `import-cycles.test.ts` fails when a cycle is missing here and when an
 // entry here is no longer a cycle, so the lists only shrink.
+//
+// #844 added the edges of `workflow-runs`, `implementer` and `workflows`: the runner API (the end of a turn) and the dispatch sweep
+// (a job that ended unreported) have to reach the workflow engine, and the engine starts its steps through the Implementer service,
+// which reaches back into the job queue and the dispatch code. Taking the engine out of the module cycle means wiring the hook and
+// the reconciler in every route file of the runner API and the cron, which is a cut of its own (#715).
 
 export const ALLOWED_IMPORT_CYCLES: AllowList = {
   fileGroups: [
@@ -105,6 +110,7 @@ export const ALLOWED_IMPORT_CYCLES: AllowList = {
     "dispatch -> models-dev",
     "dispatch -> refusal-notices",
     "dispatch -> runner-api",
+    "dispatch -> workflow-runs",
     "github-config -> admin",
     "github-config -> auth",
     "github-config -> db",
@@ -122,6 +128,19 @@ export const ALLOWED_IMPORT_CYCLES: AllowList = {
     "github-signin -> signed-state",
     "github-signin -> signup",
     "http -> webhooks",
+    "implementer -> auth",
+    "implementer -> db",
+    "implementer -> http",
+    "implementer -> integrations",
+    "implementer -> jobs",
+    "implementer -> llm",
+    "implementer -> model-catalog",
+    "implementer -> native-cost",
+    "implementer -> native-providers",
+    "implementer -> review-settings",
+    "implementer -> webhooks",
+    "implementer -> workflows",
+    "implementer -> workspaces",
     "installation-binding -> admin",
     "installation-binding -> auth",
     "installation-binding -> config-status",
@@ -255,6 +274,7 @@ export const ALLOWED_IMPORT_CYCLES: AllowList = {
     "runner-api -> review-settings",
     "runner-api -> usage",
     "runner-api -> webhooks",
+    "runner-api -> workflow-runs",
     "runner-api -> workspaces",
     "runs -> auth",
     "runs -> billing",
@@ -298,6 +318,19 @@ export const ALLOWED_IMPORT_CYCLES: AllowList = {
     "webhooks -> jobs",
     "webhooks -> projects",
     "webhooks -> review-settings",
+    "workflow-runs -> auth",
+    "workflow-runs -> db",
+    "workflow-runs -> dispatch",
+    "workflow-runs -> http",
+    "workflow-runs -> implementer",
+    "workflow-runs -> integrations",
+    "workflow-runs -> jobs",
+    "workflow-runs -> webhooks",
+    "workflow-runs -> workflows",
+    "workflows -> auth",
+    "workflows -> db",
+    "workflows -> http",
+    "workflows -> webhooks",
     "workspace-billing -> workspaces",
     "workspaces -> auth",
     "workspaces -> billing",

@@ -76,6 +76,19 @@ export type WorkflowEngine = {
   jobEnded(jobId: string): Promise<void>;
 };
 
+type Resolved = { name: string; version: number } | undefined;
+
+/**
+ * What the decision under the lock needs from other tables, read BEFORE the lock is taken. A decision runs inside a transaction that
+ * holds a connection; reading through a second connection from inside it would let `poolMax` concurrent decisions each hold one and wait
+ * for another, which starves the pool. A value missing here is read inside as a fallback (the state changed between the two reads, rare).
+ */
+type Prefetched = {
+  document?: { value: RunDocument | undefined };
+  turns: Map<string, TurnRead | undefined>;
+  profiles: Map<string, Resolved>;
+};
+
 type Decision =
   | { kind: "done" }
   | { kind: "again" }
@@ -151,9 +164,12 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
   async function endAgentStep(
     lock: RunLock,
     step: StoredStepRun,
+    pre: Prefetched,
   ): Promise<"ended" | "waiting"> {
     if (step.jobId === null) return "waiting";
-    const read = await deps.turns.read(step.jobId);
+    const read = pre.turns.has(step.jobId)
+      ? pre.turns.get(step.jobId)
+      : await deps.turns.read(step.jobId);
     if (read === undefined) {
       await lock.finishStep(
         step.id,
@@ -183,7 +199,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
   /** The profile an agent step runs with: the version it names, or the newest one at this moment (and then that one for good). */
   async function resolveProfile(
     node: RunDocument["steps"][number],
-  ): Promise<{ name: string; version: number } | undefined> {
+  ): Promise<Resolved> {
     const ref =
       typeof node.profile === "string"
         ? parseProfileRef(node.profile)
@@ -195,10 +211,37 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       : { name: found.profile.name, version: found.version.version };
   }
 
-  async function decide(lock: RunLock): Promise<Decision> {
+  /** Reads what the next decision about a run will need, outside the lock; see `Prefetched`. Never throws. */
+  async function prefetch(runId: string): Promise<Prefetched> {
+    const pre: Prefetched = { turns: new Map(), profiles: new Map() };
+    try {
+      const run = await deps.runs.getRun(runId);
+      if (run === undefined || run.status !== "running") return pre;
+      const document = await documentOf(run);
+      pre.document = { value: document };
+      if (document === undefined) return pre;
+      const steps = await deps.runs.listSteps(runId);
+      const last = steps[steps.length - 1];
+      if (last?.status === "running" && last.jobId !== null)
+        pre.turns.set(last.jobId, await deps.turns.read(last.jobId));
+      const next = document.steps[steps.length];
+      if (
+        (last === undefined || last.status === "succeeded") &&
+        next?.kind === "agent" &&
+        typeof next.profile === "string"
+      )
+        pre.profiles.set(next.profile, await resolveProfile(next));
+    } catch {
+      // What is missing is read under the lock instead, where a failure is the decision's to deal with.
+    }
+    return pre;
+  }
+
+  async function decide(lock: RunLock, pre: Prefetched): Promise<Decision> {
     const { run } = lock;
     if (run.status !== "running") return { kind: "done" };
-    const document = await documentOf(run);
+    const document =
+      pre.document === undefined ? await documentOf(run) : pre.document.value;
     if (document === undefined) {
       await lock.finishRun({
         status: "failed",
@@ -239,7 +282,11 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         const node = document.steps[move.position];
         if (node === undefined) return { kind: "done" };
         const profile =
-          move.kind === "agent" ? await resolveProfile(node) : undefined;
+          move.kind !== "agent"
+            ? undefined
+            : typeof node.profile === "string" && pre.profiles.has(node.profile)
+              ? pre.profiles.get(node.profile)
+              : await resolveProfile(node);
         const stepRun = await lock.addStep({
           position: move.position,
           stepId: node.id,
@@ -268,7 +315,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       case "read_job": {
         const stepRun = lock.steps[move.position];
         if (stepRun === undefined) return { kind: "done" };
-        return (await endAgentStep(lock, stepRun)) === "ended"
+        return (await endAgentStep(lock, stepRun, pre)) === "ended"
           ? { kind: "again" }
           : { kind: "done" };
       }
@@ -443,9 +490,10 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
   async function advance(runId: string): Promise<void> {
     for (let moves = 0; moves < MOVES_PER_CALL_MAX; moves += 1) {
       let latest: StoredWorkflowRun | undefined;
+      const pre = await prefetch(runId);
       const decision = await deps.runs.lockRun(runId, async (lock) => {
         latest = lock.run;
-        return decide(lock);
+        return decide(lock, pre);
       });
       if (decision === undefined || decision.kind === "done") return;
       if (decision.kind === "execute" && latest !== undefined)
