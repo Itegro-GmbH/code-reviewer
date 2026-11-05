@@ -387,7 +387,7 @@ def test_a_turn_without_a_budget_passes_none() -> None:
     assert all("--max-budget-usd" not in run.argv for run in place.runs)
 
 
-# #856-T44: without an estimate of the earlier messages the leftover is not known: one extra message at most
+# #856-T44: without an estimate the leftover is not known: one extra message at most
 def test_without_an_estimate_one_extra_message_is_allowed_and_not_a_third() -> None:
     unknown = {"made-up": {"costBasis": "unknown"}}
     place = Place(outputs=[stream(modelUsage=unknown), stream(modelUsage=unknown), stream()])
