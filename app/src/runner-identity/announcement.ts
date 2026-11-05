@@ -63,7 +63,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 const LONE_SURROGATE =
   /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
-const CONTROL = /[\u0000-\u001f\u007f]/;
+// Control and format characters (bidi overrides, zero-width marks), private use and the line and paragraph separators: a name in the
+// list and in the revoke dialog must look like what it is.
+const CONTROL = /[\p{C}\p{Zl}\p{Zp}]/u;
 
 /** A name for the list: one line of text, at most 80 characters. Null when it is not one. */
 export function checkRunnerName(value: unknown): string | null {
@@ -127,8 +129,13 @@ function checkManifest(
     issues.push({ field: "manifest.harnesses", code: "invalid" });
   else
     for (const [name, entry] of Object.entries(announced)) {
-      const where = `manifest.harnesses.${name.slice(0, 40)}`;
-      if (!HARNESS_NAME_PATTERN.test(name) || !isRecord(entry)) {
+      // A name that is not of the form is not echoed: the field names only what the app itself would accept.
+      if (!HARNESS_NAME_PATTERN.test(name)) {
+        issues.push({ field: "manifest.harnesses", code: "invalid" });
+        continue;
+      }
+      const where = `manifest.harnesses.${name}`;
+      if (!isRecord(entry)) {
         issues.push({ field: where, code: "invalid" });
         continue;
       }

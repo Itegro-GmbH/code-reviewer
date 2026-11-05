@@ -123,6 +123,9 @@ export function createRunnerCredentialsRepository(
       return Number(result.numUpdatedRows) > 0;
     },
 
+    // The previous credential may renew too, so that a renewal whose answer was lost locks nobody out. The price, accepted: until the
+    // new credential is first used, whoever holds a leaked previous one can renew as well (and lock the runner out). Revoking the
+    // runner in the app ends both at once.
     async renew(runnerId, presentedHash, newHash) {
       const result = await db
         .updateTable("runners")

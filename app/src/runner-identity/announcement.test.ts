@@ -80,7 +80,7 @@ describe("the announcement of a runner", () => {
     [
       "a harness with a name in capitals",
       { manifest: { harnesses: { OpenCode: { version: "1", ready: true } } } },
-      "manifest.harnesses.OpenCode",
+      "manifest.harnesses",
     ],
     [
       "a capability with a space",
@@ -135,6 +135,9 @@ describe("a runner's name", () => {
     expect(checkRunnerName("a".repeat(81))).toBeNull();
     expect(checkRunnerName("two\nlines")).toBeNull();
     expect(checkRunnerName("lone \ud800 half")).toBeNull();
+    for (const hidden of ["\u202e", "\u200b", "\u0085", "\u2028", "\ufeff"]) {
+      expect(checkRunnerName(`box${hidden}1`)).toBeNull();
+    }
     expect(checkRunnerName(7)).toBeNull();
   });
 });
