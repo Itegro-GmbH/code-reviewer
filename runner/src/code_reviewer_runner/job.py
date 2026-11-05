@@ -97,6 +97,7 @@ _IMPLEMENTER_FIELDS = {
     "limits",
     "cost",
     "modelEntry",
+    "subscription",
     "capabilities",
     "environment",
     "profile",
@@ -105,7 +106,15 @@ _IMPLEMENTER_FIELDS = {
 }
 _IMPLEMENTER_ENVIRONMENT_FIELDS = {"name", "setupScript", "network"}
 # The profile version a turn was started with (#843, `ImplementerProfile` of the contract).
-_IMPLEMENTER_PROFILE_FIELDS = {"name", "version", "instructions", "canPush"}
+_IMPLEMENTER_PROFILE_FIELDS = {"name", "version", "instructions", "canPush", "harness"}
+# The harnesses a profile can name (#856, `ImplementerProfile.harness` of the contract). OpenCode is
+# the base of every runner; Claude Code runs on the login of the device (`subscription`).
+HARNESS_OPENCODE = "opencode"
+HARNESS_CLAUDE_CODE = "claude-code"
+HARNESSES = (HARNESS_OPENCODE, HARNESS_CLAUDE_CODE)
+_IMPLEMENTER_SUBSCRIPTION_FIELDS = {"model", "maxBudgetUsd"}
+_SUBSCRIPTION_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,99}")
+_SUBSCRIPTION_BUDGET = re.compile(r"[0-9]{1,6}(?:\.[0-9]{1,6})?")
 _PROFILE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 MAX_PROFILE_INSTRUCTION_CHARS = 20_000
 _IMPLEMENTER_RESUME_REQUIRED = {"turn", "branches", "checkout"}
@@ -358,6 +367,19 @@ class ImplementerProfile:
     version: int
     can_push: bool
     instructions: str = ""
+    # #856: the harness the agent runs with; a profile that names none runs OpenCode.
+    harness: str = HARNESS_OPENCODE
+
+
+@dataclass(frozen=True)
+class SubscriptionTurn:
+    """What a turn on the harness `claude-code` is run with instead of a model door (#856,
+    `ImplementerSubscription` of the contract): the model name Claude Code reads (None: its
+    default) and the most the turn may be worth at API prices, a positive decimal in dollars.
+    The login itself is the device's and is never in a job."""
+
+    max_budget_usd: str
+    model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -401,8 +423,11 @@ class ImplementerSpec:
     branch: str
     instruction: str
     limits: ImplementerLimits
-    cost: CostPolicy
-    model_entry: JobModelEntry
+    # The cost policy and the model entry of a turn through the model door; both None exactly when
+    # the turn is a subscription turn (#856), which has `subscription` instead.
+    cost: CostPolicy | None = None
+    model_entry: JobModelEntry | None = None
+    subscription: SubscriptionTurn | None = None
     capabilities: JobCapabilities | None = None
     environment: ImplementerEnvironment | None = None
     profile: ImplementerProfile | None = None
@@ -488,8 +513,9 @@ class ImplementerInput:
 
     @property
     def secrets(self) -> tuple[str, ...]:
-        """Every value that must never appear in an output."""
-        return (self.git.token, self.llm.api_key)
+        """Every value that must never appear in an output. A subscription turn (#856) has no key of
+        ours: its placeholder `llm` holds an empty one, which is not a secret."""
+        return tuple(value for value in (self.git.token, self.llm.api_key) if value)
 
 
 def _invalid(detail: str) -> JobError:
@@ -1055,12 +1081,17 @@ def _implementer_spec(data: dict[str, Any], git: GitAccess) -> ImplementerSpec:
         raise _invalid(
             f"implementer.instruction must be a string of 1 to {MAX_INSTRUCTION_CHARS} characters"
         )
-    for name in ("cost", "modelEntry"):
-        if name not in spec:
-            raise _invalid(f"implementer.{name} is required")
-    cost = _job_cost_policy(spec)
-    entry = _job_model_entry(spec)
-    assert cost is not None and entry is not None  # both keys are present, so both parse or raise
+    profile = _implementer_profile(spec)
+    subscription = _implementer_subscription(spec, profile)
+    cost: CostPolicy | None = None
+    entry: JobModelEntry | None = None
+    if subscription is None:
+        for name in ("cost", "modelEntry"):
+            if name not in spec:
+                raise _invalid(f"implementer.{name} is required")
+        cost = _job_cost_policy(spec)
+        entry = _job_model_entry(spec)
+        assert cost is not None and entry is not None  # both are present, so both parse or raise
     base_branch = _branch_name(spec.get("baseBranch"), "implementer.baseBranch")
     branch = _pushable_branch_name(spec.get("branch"), "implementer.branch")
     if branch == base_branch:
@@ -1073,9 +1104,10 @@ def _implementer_spec(data: dict[str, Any], git: GitAccess) -> ImplementerSpec:
         limits=_implementer_limits(spec),
         cost=cost,
         model_entry=entry,
+        subscription=subscription,
         capabilities=_job_capabilities(spec),
         environment=_implementer_environment(spec),
-        profile=_implementer_profile(spec),
+        profile=profile,
         result_schema=_implementer_result_schema(spec),
         resume=_implementer_resume(spec, branch),
     )
@@ -1231,9 +1263,48 @@ def _implementer_profile(spec: dict[str, Any]) -> ImplementerProfile | None:
                 f"{MAX_PROFILE_INSTRUCTION_CHARS} characters"
             )
         instructions = text
+    harness = given.get("harness", HARNESS_OPENCODE)
+    if harness not in HARNESSES:
+        raise _invalid(f"implementer.profile.harness must be one of {', '.join(HARNESSES)}")
     return ImplementerProfile(
-        name=name, version=version, can_push=can_push, instructions=instructions
+        name=name, version=version, can_push=can_push, instructions=instructions, harness=harness
     )
+
+
+def _implementer_subscription(
+    spec: dict[str, Any], profile: ImplementerProfile | None
+) -> SubscriptionTurn | None:
+    """The `implementer.subscription` object (#856). Present exactly when the profile names the
+    harness `claude-code`; such a turn has neither `cost` nor `modelEntry`. Closed; a refusal names
+    the field and never a value."""
+    subscribes = profile is not None and profile.harness == HARNESS_CLAUDE_CODE
+    if not subscribes:
+        if "subscription" in spec:
+            raise _invalid("implementer.subscription needs a profile on the harness claude-code")
+        return None
+    for name in ("cost", "modelEntry"):
+        if name in spec:
+            raise _invalid(
+                f"implementer.{name} is not accepted for a turn on the harness claude-code"
+            )
+    if "subscription" not in spec:
+        raise _invalid("implementer.subscription is required for a turn on the harness claude-code")
+    given = _object(spec["subscription"], "implementer.subscription")
+    _check_fields(given, _IMPLEMENTER_SUBSCRIPTION_FIELDS, "implementer.subscription.")
+    budget = given.get("maxBudgetUsd")
+    if (
+        not isinstance(budget, str)
+        or _SUBSCRIPTION_BUDGET.fullmatch(budget) is None
+        or Decimal(budget) <= 0
+    ):
+        raise _invalid("implementer.subscription.maxBudgetUsd must be a positive amount in dollars")
+    model: str | None = None
+    if "model" in given:
+        raw = given["model"]
+        if not isinstance(raw, str) or _SUBSCRIPTION_MODEL.fullmatch(raw) is None:
+            raise _invalid("implementer.subscription.model is not a model name")
+        model = raw
+    return SubscriptionTurn(max_budget_usd=budget, model=model)
 
 
 def _implementer_result_schema(spec: dict[str, Any]) -> dict[str, Any] | None:
@@ -1252,11 +1323,28 @@ def _implementer_input(job: dict[str, Any]) -> ImplementerInput:
     _check_fields(job, _IMPLEMENTER_TOP_LEVEL_FIELDS, "")
     git = _git_access(job)
     spec = _implementer_spec(job, git)
+    raw_spec = _section(job, "implementer")
+    if spec.subscription is not None:
+        # #856: no key of ours and no model door; the login is the device's. The placeholder only
+        # names the model for the report: it holds no key.
+        if "llm" in job:
+            raise _invalid("llm is not accepted for a turn on the harness claude-code")
+        return ImplementerInput(
+            git=git,
+            llm=LlmAccess(
+                provider=HARNESS_CLAUDE_CODE,
+                model=spec.subscription.model or HARNESS_CLAUDE_CODE,
+                api_key="",
+                require_parameters=False,
+            ),
+            implementer=spec,
+            env=_env(job),
+        )
     # A native job only: its provider may be a provider of the catalog, and the key goes to the
     # address of the entry and to no other.
     llm = _llm_access(job, catalog=True, catalog_model_id=True)
+    assert spec.model_entry is not None  # a turn without a subscription has its entry
     _entry_is_of_llm(spec.model_entry, llm, "implementer.modelEntry")
-    raw_spec = _section(job, "implementer")
     return ImplementerInput(
         git=git,
         llm=llm,

@@ -4,7 +4,7 @@
 // `make verify` fails while this file differs from what the schema generates.
 
 /**
- * Exactly the job the runner reads on stdin (see runner/src/code_reviewer_runner/job.py). Closed: the runner refuses unknown fields. Contains secrets (git.token, llm.apiKey): only the claim response carries it. #746: for `reviewKind: implementer` the job carries the `implementer` object instead of `prUrl`, `command`, `base` and `dynamic`; `git.token` is then a token that may write the contents of exactly the repository named in `implementer.repo` and nothing else.
+ * Exactly the job the runner reads on stdin (see runner/src/code_reviewer_runner/job.py). Closed: the runner refuses unknown fields. Contains secrets (git.token, llm.apiKey): only the claim response carries it. #746: for `reviewKind: implementer` the job carries the `implementer` object instead of `prUrl`, `command`, `base` and `dynamic`; `git.token` is then a token that may write the contents of exactly the repository named in `implementer.repo` and nothing else. #856: `llm` is required for every job except a turn of the Implementer whose profile names the harness `claude-code` (a subscription turn): that turn runs on the login of the device of the runner, has no model door and no key of ours, and carries no `llm`, no `implementer.cost` and no `implementer.modelEntry`; the runner refuses a job that carries them with it, and every other job without `llm` (`invalid_job`).
  */
 export type RunnerJobInput = {
   [k: string]: unknown;
@@ -33,7 +33,7 @@ export type RunnerJobInput = {
     token: string;
     botLogin: string;
   };
-  llm: {
+  llm?: {
     /**
      * #424: the slug of an LLM provider, checked against the registry of the runner (`runner/src/code_reviewer_runner/llm_providers.py`), which refuses one it has none for with invalid_job. The app sends a provider only to a caller that advertised it in `llmProviders`; this release knows KnownLlmProvider. #555: the one exception is a native job (`dynamic.modelEntry` present): its provider may be a provider of the models.dev catalog outside the registry, named by its slug (the hyphen of the catalog id is an underscore); its key goes only to the address of the entry, which the runner accepts only as a plain public https address in exactly one spelling (`contracts/key-destination-vectors.json`), and the job then carries no `llm.baseUrl`, `llm.requireParameters` or `llm.fallbackModels`.
      */
@@ -67,6 +67,47 @@ export type RunnerJobInput = {
       | [string, string, string, string, string];
   };
   env: JobEnv;
+};
+/**
+ * #746: what an implementer job asks for (`reviewKind: implementer`; the factory deployment only). A closed object: there is no command, permission, executable, endpoint or upstream URL here, so a job can never widen what the agent may do. The agent works in a clone of `repo` that starts at the head of `baseBranch`, on the new branch `branch` (it must not exist yet) and only there, and pushes it. `instruction` is the user's task as literal data. `limits.timeLimitSeconds` is the wall clock the runner holds the turn to (the Dispatcher's own timeout for the kind is the backstop). `cost` and `modelEntry` are the `DynamicCostPolicy` and the `DynamicModelEntry` of the native Dynamic job, unchanged: the same passthrough proxy, price book and token cap, and a native job is the only way the Implementer runs a model. `capabilities` is optional, as for Dynamic. `resume` (#838) is present on a follow-up turn only: the branch then exists on the provider (an earlier turn pushed it) and the turn starts from the branches of `resume` instead of the base. #856: `cost` and `modelEntry` are required for every turn except one on the harness `claude-code` (the `harness` of the profile), which carries `subscription` instead and neither of them; the runner refuses a job that has both or neither.
+ */
+export type ImplementerJob = {
+  [k: string]: unknown;
+} & {
+  repo: ImplementerRepo;
+  /**
+   * #746: the name of a branch as a job carries it: a non-empty text of at most 255 characters without whitespace and not starting with a dash (so it can never be read as an option). Whether it is a valid git ref name is decided by the app when the turn is submitted and again by the runner before it runs git; this is the floor both share.
+   */
+  baseBranch: string;
+  /**
+   * #746: the name of a branch as a job carries it: a non-empty text of at most 255 characters without whitespace and not starting with a dash (so it can never be read as an option). Whether it is a valid git ref name is decided by the app when the turn is submitted and again by the runner before it runs git; this is the floor both share.
+   */
+  branch: string;
+  instruction: string;
+  limits: {
+    timeLimitSeconds: number;
+  };
+  /**
+   * #553: whose key pays for a native job (a job that runs through the passthrough proxy) and what bounds its cost. Optional, additive, and sent only to a caller that named the claim feature `dynamic_cost_policy`; a job without it is a job of today. A closed object. `managed` (the instance operator's key, which we pay): `priceBook` is the confirmed price of the model (the app's price confirmation, #549) and is the runner's **only** price source, never the engine's own cost and never models.dev; an unknown cost ends the run with `dynamic_accounting_failed`, which billing treats as our fault; there is no token cap. `own` (the workspace's key, the user pays the provider): `priceBook` is the catalog's price when it states one, else null; an unknown cost does not end the run, it is bound by `maxTotalTokens` (prompt, cache and completion tokens in all) and the clock, and the result reports `costUsd: null`, which billing charges as minutes only. A call that stated no usage at all still fails the run.
+   */
+  cost?:
+    | {
+        keyMode: "managed";
+        priceBook: DynamicPriceBook;
+        maxTotalTokens: null;
+      }
+    | {
+        keyMode: "own";
+        priceBook: DynamicPriceBook | null;
+        maxTotalTokens: number;
+      };
+  modelEntry?: DynamicModelEntry;
+  subscription?: ImplementerSubscription;
+  capabilities?: DynamicModelCapabilities;
+  environment?: ImplementerEnvironment;
+  profile?: ImplementerProfile;
+  resultSchema?: ImplementerResultSchema;
+  resume?: ImplementerResume;
 };
 /**
  * #818: the environment a turn was started with, as the turn copied it when it started: the setup script the runner runs once in the repository's folder after the clone and before the model is called, and (#745, step 7) the rule for the agent's network. Present only when the environment has a script or a network rule other than `off`, and the caller named the claim feature `implementer_environment` (and `implementer_network` for a rule); a turn with neither carries nothing (the size of the VM is the Dispatcher's business, it reaches the Worker as the VM it runs in). `setupScript`, when present, is literal text of at most 64 KB of UTF-8, written by a member of the workspace: it is data to run, never a command of the app, and it holds no secret by design (there is no field for one). `network`, when present, is the rule the network door enforces; absent means `off`. At least one of the two is present. `name` is for the run's log line only.
@@ -509,49 +550,18 @@ export interface ClaimBase {
   comparison: "full" | "incremental";
 }
 /**
- * #746: what an implementer job asks for (`reviewKind: implementer`; the factory deployment only). A closed object: there is no command, permission, executable, endpoint or upstream URL here, so a job can never widen what the agent may do. The agent works in a clone of `repo` that starts at the head of `baseBranch`, on the new branch `branch` (it must not exist yet) and only there, and pushes it. `instruction` is the user's task as literal data. `limits.timeLimitSeconds` is the wall clock the runner holds the turn to (the Dispatcher's own timeout for the kind is the backstop). `cost` and `modelEntry` are the `DynamicCostPolicy` and the `DynamicModelEntry` of the native Dynamic job, unchanged: the same passthrough proxy, price book and token cap, and a native job is the only way the Implementer runs a model. `capabilities` is optional, as for Dynamic. `resume` (#838) is present on a follow-up turn only: the branch then exists on the provider (an earlier turn pushed it) and the turn starts from the branches of `resume` instead of the base.
- */
-export interface ImplementerJob {
-  repo: ImplementerRepo;
-  /**
-   * #746: the name of a branch as a job carries it: a non-empty text of at most 255 characters without whitespace and not starting with a dash (so it can never be read as an option). Whether it is a valid git ref name is decided by the app when the turn is submitted and again by the runner before it runs git; this is the floor both share.
-   */
-  baseBranch: string;
-  /**
-   * #746: the name of a branch as a job carries it: a non-empty text of at most 255 characters without whitespace and not starting with a dash (so it can never be read as an option). Whether it is a valid git ref name is decided by the app when the turn is submitted and again by the runner before it runs git; this is the floor both share.
-   */
-  branch: string;
-  instruction: string;
-  limits: {
-    timeLimitSeconds: number;
-  };
-  /**
-   * #553: whose key pays for a native job (a job that runs through the passthrough proxy) and what bounds its cost. Optional, additive, and sent only to a caller that named the claim feature `dynamic_cost_policy`; a job without it is a job of today. A closed object. `managed` (the instance operator's key, which we pay): `priceBook` is the confirmed price of the model (the app's price confirmation, #549) and is the runner's **only** price source, never the engine's own cost and never models.dev; an unknown cost ends the run with `dynamic_accounting_failed`, which billing treats as our fault; there is no token cap. `own` (the workspace's key, the user pays the provider): `priceBook` is the catalog's price when it states one, else null; an unknown cost does not end the run, it is bound by `maxTotalTokens` (prompt, cache and completion tokens in all) and the clock, and the result reports `costUsd: null`, which billing charges as minutes only. A call that stated no usage at all still fails the run.
-   */
-  cost:
-    | {
-        keyMode: "managed";
-        priceBook: DynamicPriceBook;
-        maxTotalTokens: null;
-      }
-    | {
-        keyMode: "own";
-        priceBook: DynamicPriceBook | null;
-        maxTotalTokens: number;
-      };
-  modelEntry: DynamicModelEntry;
-  capabilities?: DynamicModelCapabilities;
-  environment?: ImplementerEnvironment;
-  profile?: ImplementerProfile;
-  resultSchema?: ImplementerResultSchema;
-  resume?: ImplementerResume;
-}
-/**
  * #746: the one repository a turn works on. `fullName` is `owner/name`; `cloneUrl` is the https address the runner clones from (the host of the git provider), with no credential in it: the token is in `git.token`.
  */
 export interface ImplementerRepo {
   fullName: string;
   cloneUrl: string;
+}
+/**
+ * #856: what a turn on the harness `claude-code` is run with instead of a model door: the own Claude login of the customer, which lives on the device of the runner and is never in a job, in the app or in a log. `model` is a model name or alias as Claude Code reads it (`sonnet`, `claude-sonnet-5-5`); left out, Claude Code uses its default. `maxBudgetUsd` is the most the turn may be worth at API prices, in US dollars as a decimal string: Claude Code stops the turn after the call that crosses it (`--max-budget-usd`). It is the only brake besides the clock of the job, since there is no model door and no ledger. What a subscription turn is worth is an estimate (`usage.costBasis` is `subscription`) that is shown, never billed and never added to a total.
+ */
+export interface ImplementerSubscription {
+  model?: string;
+  maxBudgetUsd: string;
 }
 /**
  * #745, step 7: the rule for the agent's network, as the owner of the environment wrote it. `off`: the agent has no network and no network door is started. `list`: the agent reaches the host names in `hosts` through the network door and no others; an entry is a host name in its ASCII (punycode) lower-case form, either exact (`registry.npmjs.org`) or a suffix (`*.pythonhosted.org`, any name below `pythonhosted.org`, not the name itself), never an IP address, a port or a path; both have at least two labels (after the `*.` for a suffix) and a last label that starts with a letter, which no address does; at most 100 entries. `open`: the agent reaches any public name. In every mode the door refuses IP literals, names that resolve to a private, loopback, link-local, shared or metadata address, and ports other than 80 and 443. `hosts` is empty unless the mode is `list`, and not empty then.
@@ -564,13 +574,14 @@ export interface ImplementerNetworkRule {
   hosts: string[];
 }
 /**
- * #843: the profile version a turn was started with, as the turn copied it when it started. Present only for a turn started with a profile and a caller that named the claim feature `implementer_profile`; a turn without a profile carries nothing and runs with the platform's own defaults, exactly as every turn did before profiles. The model and the cost limit of the version are not here: they are the turn's own `modelEntry`, `cost` and `llm.maxCostUsd`, chosen from the version by the app. `instructions`, when present, is the system-level text the agent is given: the runner appends it to the instruction file it writes for the engine (after its own rules, so the text is the same for every turn of one version and the model provider's prompt cache hits), as literal data written by a member of the workspace; it is left out when the version has none. `canPush` says whether Control pushes the branches the agent made when the turn ends: when false the runner pushes nothing, lists no branch, reports no head commit and no commits, and the turn is a success without a push (a profile that only reads). The agent never has a remote or a credential, whatever `canPush` says. `name` and `version` are for the run's log line only.
+ * #843: the profile version a turn was started with, as the turn copied it when it started. Present only for a turn started with a profile and a caller that named the claim feature `implementer_profile`; a turn without a profile carries nothing and runs with the platform's own defaults, exactly as every turn did before profiles. The model and the cost limit of the version are not here: they are the turn's own `modelEntry`, `cost` and `llm.maxCostUsd`, chosen from the version by the app. `instructions`, when present, is the system-level text the agent is given: the runner appends it to the instruction file it writes for the engine (after its own rules, so the text is the same for every turn of one version and the model provider's prompt cache hits), as literal data written by a member of the workspace; it is left out when the version has none. `canPush` says whether Control pushes the branches the agent made when the turn ends: when false the runner pushes nothing, lists no branch, reports no head commit and no commits, and the turn is a success without a push (a profile that only reads). The agent never has a remote or a credential, whatever `canPush` says. `name` and `version` are for the run's log line only. #856: `harness` (optional, `opencode` when left out) is the harness the agent runs with. `claude-code` is run only by a runner that announces it as ready, on the login of the device of that runner (`ImplementerJob.subscription`); a runner that cannot run it refuses the turn (`implementer_engine_unavailable`, reason `harness_not_ready`) and never falls back to OpenCode.
  */
 export interface ImplementerProfile {
   name: string;
   version: number;
   instructions?: string;
   canPush: boolean;
+  harness?: "opencode" | "claude-code";
 }
 /**
  * #843: the result schema of a turn, in the format of `result-schema.v1.json` (a subset of JSON Schema: strings with optional `enum` and `maxLength`, numbers, whole numbers, booleans, lists with `items` and `maxItems`, objects with `properties` and `required`, all closed, at most 4 levels and 100 fields). Present only for a turn that has one (the task's own, or the default of its profile) and a caller that named the claim feature `implementer_result`. The agent gets a finish tool made from it and decides itself when it is done; the runner checks what it handed in against the schema, with the rules of the app's `checkResultValue`. The app holds the result to the bounds of a result and does not check it against the schema again: the workflow engine does, before it routes the value anywhere. This definition states the root only: the format, its limits and the answer to a schema that breaks them are those of `result-schema.v1.json` and of the validators on both sides (`contracts/result-check-vectors.json` holds them to the same answers).
