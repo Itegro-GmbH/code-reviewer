@@ -11,6 +11,7 @@ import {
   parseJobId,
   parseReleaseRequest,
   parseRunnerId,
+  parseWorkerFeatures,
   parseWorkerLlmProviders,
   parseWorkerResultRequest,
 } from "./requests.ts";
@@ -683,6 +684,18 @@ describe("the features of a claim (#279)", () => {
       value: { engines: ["pr-agent"] },
     });
     expect(parseClaimRequest({})).toEqual({ ok: true, value: {} });
+  });
+
+  // #838-T75
+  it("knows the feature a follow-up turn of the Implementer needs", () => {
+    expect(
+      parseClaimRequest({
+        features: ["implementer_resume", "a_future_feature"],
+      }),
+    ).toEqual({ ok: true, value: { features: ["implementer_resume"] } });
+    expect(
+      parseWorkerFeatures("implementer_environment, implementer_resume"),
+    ).toEqual(["implementer_environment", "implementer_resume"]);
   });
 
   it("refuses features that are not a list of plain names", () => {

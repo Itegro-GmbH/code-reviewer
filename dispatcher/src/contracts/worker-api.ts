@@ -488,7 +488,7 @@ export interface ClaimBase {
   comparison: "full" | "incremental";
 }
 /**
- * #746: what an implementer job asks for (`reviewKind: implementer`; the factory deployment only). A closed object: there is no command, permission, executable, endpoint or upstream URL here, so a job can never widen what the agent may do. The agent works in a clone of `repo` that starts at the head of `baseBranch`, on the new branch `branch` (it must not exist yet) and only there, and pushes it. `instruction` is the user's task as literal data. `limits.timeLimitSeconds` is the wall clock the runner holds the turn to (the Dispatcher's own timeout for the kind is the backstop). `cost` and `modelEntry` are the `DynamicCostPolicy` and the `DynamicModelEntry` of the native Dynamic job, unchanged: the same passthrough proxy, price book and token cap, and a native job is the only way the Implementer runs a model. `capabilities` is optional, as for Dynamic.
+ * #746: what an implementer job asks for (`reviewKind: implementer`; the factory deployment only). A closed object: there is no command, permission, executable, endpoint or upstream URL here, so a job can never widen what the agent may do. The agent works in a clone of `repo` that starts at the head of `baseBranch`, on the new branch `branch` (it must not exist yet) and only there, and pushes it. `instruction` is the user's task as literal data. `limits.timeLimitSeconds` is the wall clock the runner holds the turn to (the Dispatcher's own timeout for the kind is the backstop). `cost` and `modelEntry` are the `DynamicCostPolicy` and the `DynamicModelEntry` of the native Dynamic job, unchanged: the same passthrough proxy, price book and token cap, and a native job is the only way the Implementer runs a model. `capabilities` is optional, as for Dynamic. `resume` (#838) is present on a follow-up turn only: the branch then exists on the provider (an earlier turn pushed it) and the turn starts from the branches of `resume` instead of the base.
  */
 export interface ImplementerJob {
   repo: ImplementerRepo;
@@ -522,6 +522,7 @@ export interface ImplementerJob {
   capabilities?: DynamicModelCapabilities;
   environment?: ImplementerEnvironment;
   profile?: ImplementerProfile;
+  resume?: ImplementerResume;
 }
 /**
  * #746: the one repository a turn works on. `fullName` is `owner/name`; `cloneUrl` is the https address the runner clones from (the host of the git provider), with no credential in it: the token is in `git.token`.
@@ -548,6 +549,273 @@ export interface ImplementerProfile {
   version: number;
   instructions?: string;
   canPush: boolean;
+}
+/**
+ * #838 (part of #745): what a follow-up turn of an Implementer session is told about the branches the earlier turns left on the provider. Present only on a follow-up, and only for a caller that named the claim feature `implementer_resume`; a first turn has none. Without it the turn starts from `baseBranch` as the contract says above; with it the runner asks the provider which of `branches` it still has and fetches the base branch and all of them in one fetch of depth 50 (git counts the depth from every tip: no tip has fewer than 50 commits of history where it has that many, whatever the order of `branches`; a merge base further back than 50 commits is not found), makes a local branch for each in the agent's repository (the session branch at the base tip when it is not among them) and checks out `checkout`. `turn` is the number of this turn (the first is 1, so a follow-up has 2 or more). `branches` are the branches the last turn pushed with the tip it pushed, the session branch first when it is among them, at most 20, no name twice (a rule JSON Schema cannot state; the runner refuses a repeat). The `head` is only what the earlier turn knew: the runner takes the tip the provider has now, and a branch that moved is reported to the agent, not refused. A branch the provider no longer has is left out; a session branch that is gone ends the turn (`clone_failed`, free). `checkout` is the branch the agent was on when the last turn ended: one of `branches` or the session branch (which a turn that pushed nothing still has), or null for the session branch; any other name is refused by the runner (`invalid_job`). `branches` empty means the earlier turns pushed nothing: the turn starts from the base branch like a first turn. The agent still has no remote and Control still pushes every local branch that has a commit of its own when the turn ends, without force: a branch the agent did not touch is not pushed again.
+ */
+export interface ImplementerResume {
+  turn: number;
+  /**
+   * @maxItems 20
+   */
+  branches:
+    | []
+    | [ImplementerResumeBranch]
+    | [ImplementerResumeBranch, ImplementerResumeBranch]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ];
+  checkout: string | null;
+}
+/**
+ * #838: a branch of the session the last turn pushed: its name and the full commit id of the tip it pushed.
+ */
+export interface ImplementerResumeBranch {
+  /**
+   * #746: the name of a branch as a job carries it: a non-empty text of at most 255 characters without whitespace and not starting with a dash (so it can never be read as an option). Whether it is a valid git ref name is decided by the app when the turn is submitted and again by the runner before it runs git; this is the floor both share.
+   */
+  name: string;
+  head: string;
 }
 /**
  * Extra options of the PR-Agent tools, as strings. The review tool's options (PR_REVIEWER__*) are used; a previous release's option families for the removed tools (PR_DESCRIPTION__*, PR_CODE_SUGGESTIONS__*, PR_QUESTIONS__*) are accepted for v1 compatibility and ignored. Nothing else is allowed here (credentials, endpoints and the model have their own fields).

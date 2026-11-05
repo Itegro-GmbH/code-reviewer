@@ -133,7 +133,9 @@ differs is what Control does with the branches the agent made in its container:
   push); its result carries no branch, no head commit, no commits and no files, and `pushed: false`. The agent is told that nothing it
   commits leaves the container, so its closing answer is what the person gets. A step of a workflow with such a profile yields no `branch`
   and no `commits`, and a reference to them is refused by the validator (`reference_fact_unavailable`). The cost limit and the time limit
-  still apply.
+  still apply. The turn gets no extra message about uncommitted changes (one agent turn only), and its GitHub token can only read the
+  contents (`contents: read`), so the Worker could not push even with a bug. The Runs page shows its branch name but does not link to it,
+  because the branch was never pushed.
 
 ## Running a task with a profile
 

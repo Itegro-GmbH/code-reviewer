@@ -345,7 +345,13 @@ Worker's input carries `implementer.profile {name, version, instructions?, canPu
 **only to a caller that names the claim feature `implementer_profile`**: for any other the job ends `implementer_engine_unavailable` (free) before any
 credential exists, since a Worker that did not read it would push the work of a profile that may not push, and would run the agent without the
 instructions the person chose. A turn without a profile carries nothing and is the turn of before. What the runner does with it:
-[`docs/profiles.md`](../../../docs/profiles.md#the-push-right).
+[`docs/profiles.md`](../../../docs/profiles.md#the-push-right). A profile that may not push also gets a token that can only read the
+contents (`implementerAccess(..., { readOnly: true })`, `contents: read`), so the Worker could not push even with a bug; the token is kept in the same
+ledger and ends with the turn like the write token.
+
+**The branches of a follow-up turn (#838, part of #745).** The claim feature `implementer_resume` is the Worker's way to say it reads `implementer.resume` (`ImplementerResume`: the number of the turn, the branches the
+last turn pushed with their tips, the branch to check out). The App knows the feature name (`CLAIM_FEATURES`) and builds no `resume` yet: a turn that carries one, and the refusal of a caller that did not name the
+feature (`implementer_engine_unavailable`, free, before any credential exists, as for the environment), arrive with the follow-up API. Until then every job is a first turn.
 
 A failure that may pass (GitHub down while the installation is read or the token is made) gives the job back with `Retry-After`.
 A turn is never run twice (`maxAttempts` 1), so it is put back in the queue only while **no input was ever handed to a Worker**: the
