@@ -2,6 +2,7 @@
 
 // The `resume` block of a follow-up turn (#841): built from the stored reports of the earlier turns, bounded, and data only.
 import { describe, expect, it } from "vitest";
+import { createContractValidator } from "../test-support/runner-contract.ts";
 import type { TurnHistoryEntry } from "../db/repositories/implementer-repository.ts";
 import {
   MAX_DIGEST_BYTES,
@@ -289,5 +290,49 @@ describe("cutting by bytes", () => {
     expect(cutBytes("aäb", 2)).toBe("a");
     expect(cutBytes("aäb", 3)).toBe("aä");
     expect(cutBytes("😀😀", 5)).toBe("😀");
+  });
+});
+
+describe("the block against the contract", () => {
+  const contract = createContractValidator();
+
+  // #841-U17: the closed object `ImplementerResume` of contracts/runner-api.v1.json takes what the builder makes, also at its bounds
+  it("is accepted by ImplementerResume, also with 20 branches, a summary of 8 KiB and a digest of 16 KiB", () => {
+    const branches = Array.from({ length: 25 }, (_, index) =>
+      pushed(`branch-${String(index)}`, sha("a")),
+    );
+    const history = Array.from({ length: 6 }, (_, index) =>
+      turn(
+        index + 1,
+        {
+          summary: "s".repeat(3000),
+          branches,
+          checkedOut: "branch-3",
+          commits: Array.from({ length: 100 }, (_, c) => ({
+            sha: `${String(c).padStart(2, "0")}${"b".repeat(38)}`,
+            subject: "subject ".repeat(30),
+          })),
+        },
+        "i".repeat(2500),
+      ),
+    );
+
+    const resume = build(history, {
+      sessionSummary: "ä".repeat(9000),
+      hasSnapshot: true,
+    });
+
+    expect(resume.branches).toHaveLength(MAX_RESUME_BRANCHES);
+    expect(contract.check("ImplementerResume", resume)).toStrictEqual({
+      valid: true,
+      errors: "",
+    });
+  });
+
+  // #841-U18
+  it("is accepted without the optional fields", () => {
+    expect(
+      contract.check("ImplementerResume", build([turn(1, {})], {})),
+    ).toStrictEqual({ valid: true, errors: "" });
   });
 });
