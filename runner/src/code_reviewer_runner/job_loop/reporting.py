@@ -408,8 +408,11 @@ def stopped_result(
     measured_ms: int,
     *,
     implementer: bool,
+    code: str = RUNNER_SHUTDOWN,
+    detail: str = "the runner was shut down before the job finished",
 ) -> Result:
-    """The result of a job the host ended because the runner was stopped: always `runner_shutdown`.
+    """The result of a job the host ended because the runner was stopped: always `runner_shutdown`
+    (`code` says otherwise for a run a member stopped: `cancelled`, #891).
 
     A turn of the Implementer that was stopped has pushed what was committed and printed its result
     before it went (`runner_shutdown`, the block with the head and the summary, and what the model
@@ -420,8 +423,8 @@ def stopped_result(
     """
     stderr = "" if outcome is None else outcome.stderr.decode("utf-8", errors="replace")
     result = failure_result(
-        RUNNER_SHUTDOWN,
-        "the runner was shut down before the job finished",
+        code,
+        detail,
         duration_ms=measured_ms,
         log_tail=stderr,
         redactor=redactor,
@@ -430,7 +433,7 @@ def stopped_result(
     if line is None:
         return result
     kept = _sanitize(
-        {**line, "ok": False, "errorCode": RUNNER_SHUTDOWN}, redactor, measured_ms, implementer=True
+        {**line, "ok": False, "errorCode": code}, redactor, measured_ms, implementer=True
     )
     for name in ("usage", "implementer"):
         if kept.get(name) is not None:

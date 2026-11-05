@@ -183,6 +183,8 @@ class FakeApi:
         self.heartbeat_errors: list[ApiError] = []
         # #396: the heartbeats answer `superseded` from this many heartbeats on (None: never).
         self.superseded_from: int | None = None
+        # #891: the heartbeats answer `cancelRequested` from this many heartbeats on (None: never).
+        self.cancel_from: int | None = None
         # The lease end the superseded answer names, in seconds from the clock's zero (None: it
         # does not name one, as a mixed-version app).
         self.lease_expires_after: float | None = None
@@ -213,7 +215,10 @@ class FakeApi:
         lease = (
             WALL_EPOCH + self.lease_expires_after if self.lease_expires_after is not None else None
         )
-        return HeartbeatReply(superseded=superseded, lease_expires_at=lease)
+        cancel = self.cancel_from is not None and len(self.heartbeats) >= self.cancel_from
+        return HeartbeatReply(
+            superseded=superseded, lease_expires_at=lease, cancel_requested=cancel
+        )
 
     async def complete(
         self, job_id: str, lease_token: str, result: Mapping[str, Any]

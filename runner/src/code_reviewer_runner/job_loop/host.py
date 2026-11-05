@@ -30,6 +30,12 @@ Rules the code below follows (see the CR-29 decisions):
   answer named, is ended and its usage is reported as unknown. Whatever ends it, the result of a
   run that was told is `superseded` (not `runner_error` or `timeout`). The numbers are in
   `supersede_timing.py`.
+- A heartbeat answer that says a member asked for the run to stop (#891, `cancelRequested`) ends the
+  process the way a stop of the Worker does (SIGTERM: a turn of the Implementer pushes what is
+  committed, takes its snapshot and prints its result), but the host reports it `cancelled`, with
+  what the process printed (the usage, the report of the turn), delivers it and ends `CANCELLED`:
+  the job is not given back. The lease check before a push still says `held`. A run that ends by
+  itself first keeps its own result.
 - A hard stop (the end of the grace period, or a SIGTERM of a Worker) ends the process and reports
   `runner_shutdown`, which the app gives back to the queue (a repeated report may be answered with
   409, which is fine).
@@ -227,6 +233,9 @@ class JobEnd(StrEnum):
     # A newer push replaced the run (#396): it stopped gracefully, its result and usage were
     # delivered.
     SUPERSEDED = "superseded"
+    # A member asked for the run to stop (#891): the turn was ended, what was committed was pushed,
+    # and its result and usage were delivered under the code `cancelled`.
+    CANCELLED = "cancelled"
 
 
 class Delivery(StrEnum):
@@ -245,6 +254,9 @@ class _RunState:
     # The end of the lease as the answer that said so named it (seconds since the epoch); the drain
     # ends before it.
     lease_expires_at: float | None = None
+    # The app said a member asked for the run to stop (#891): a heartbeat answer, or the lease check
+    # before a push (which still says `held`: the push of what is committed is part of the stop).
+    cancelled: asyncio.Event = field(default_factory=asyncio.Event)
 
     def learn_of_supersede(self, lease_expires_at: float | None) -> None:
         """The app said the run was superseded; the first answer's lease bounds the drain."""
@@ -301,6 +313,8 @@ def _end_of(result: Result, delivery: Delivery, superseded: bool = False) -> Job
         return JobEnd.GIVEN_BACK
     if superseded or result["errorCode"] == ErrorCode.SUPERSEDED.value:
         return JobEnd.SUPERSEDED
+    if result["errorCode"] == ErrorCode.CANCELLED.value:
+        return JobEnd.CANCELLED
     return JobEnd.OK if result["ok"] else JobEnd.FAILED
 
 
@@ -666,8 +680,9 @@ class JobHost:
             ),
             asyncio.ensure_future(self._hard_stop.wait()),
             asyncio.ensure_future(self._drain(claimed, process, state)),
+            asyncio.ensure_future(state.cancelled.wait()),
         ]
-        _, lost_wait, timeout, shutdown, drained = helpers
+        _, lost_wait, timeout, shutdown, drained, cancelled = helpers
         guarded = asyncio.ensure_future(self._guard()) if self._guard is not None else None
         if guarded is not None:
             helpers.append(guarded)
@@ -727,6 +742,21 @@ class JobHost:
                 log_tail=tail,
                 redactor=redactor,
                 reason=DISK_BUDGET_REASON,
+            )
+        if cancelled.done() and not cancelled.cancelled():
+            # A member asked for the stop (#891): the process got SIGTERM like at a stop of the
+            # Worker, pushed what is committed and printed its result. The job is not given back:
+            # the result is delivered under `cancelled`, with what the process printed.
+            self._log.warning(
+                "job %s: a member cancelled the run, the process was ended", claimed.id
+            )
+            return stopped_result(
+                outcome,
+                redactor,
+                self._ms_since(started),
+                implementer=implementer,
+                code=ErrorCode.CANCELLED.value,
+                detail="the run was cancelled by a member of the workspace",
             )
         if shutdown.done() and not shutdown.cancelled():
             self._log.warning(
@@ -790,6 +820,8 @@ class JobHost:
                 reply = await self._api.heartbeat(claimed.id, claimed.lease_token)
                 if reply.superseded and state is not None:
                     state.learn_of_supersede(reply.lease_expires_at)
+                if reply.cancel_requested and state is not None:
+                    state.cancelled.set()
             except LeaseLost:
                 lost.set()
                 return
@@ -848,6 +880,10 @@ class JobHost:
             if reply.superseded:
                 state.learn_of_supersede(reply.lease_expires_at)
                 return LeaseState.SUPERSEDED
+            # #891: a stop a member asked for is learned here too; the claim is still ours, so the
+            # push of what is committed is allowed.
+            if reply.cancel_requested:
+                state.cancelled.set()
             return LeaseState.HELD
         return LeaseState.UNCONFIRMED  # pragma: no cover  (the last attempt returns above)
 
