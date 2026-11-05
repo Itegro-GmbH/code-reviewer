@@ -139,6 +139,7 @@ def play(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Callable[.
         commit: str | None = TIP,
         subject: str = "Add it",
         form_rejected: tuple[str, str | None] | None = None,
+        dirty: bool = False,
     ) -> Played:
         played = Played()
         lease = LeaseChannel(held)
@@ -151,6 +152,7 @@ def play(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Callable[.
             git = FakeGit(tmp_path, gate)
             git.events = played.events
             git.form_rejected = form_rejected
+            git.is_dirty = dirty
             played.git = git
             if commit is not None:
                 real_script = script
@@ -243,6 +245,28 @@ def test_a_turn_that_claude_code_did_not_price_says_unknown_not_zero(
     usage = play(says("Done.", cost=None)).result["usage"]
 
     assert usage["costBasis"] == "subscription" and usage["estimatedCostUsd"] is None
+
+
+# #856-W02
+def test_the_extra_message_for_a_dirty_tree_gets_what_the_first_one_left_of_the_budget(
+    play: Callable[..., Played],
+) -> None:
+    played = play(says("Done.", cost=0.5), dirty=True)
+
+    [place] = played.places
+    amounts = [run["argv"][run["argv"].index("--max-budget-usd") + 1] for run in place.runs]
+    assert amounts == ["2.50", "2.000000"], played.output
+
+
+# #856-W02
+def test_a_turn_that_spent_its_budget_sends_no_extra_message_for_a_dirty_tree(
+    play: Callable[..., Played],
+) -> None:
+    played = play(says("Done.", cost=2.5), dirty=True)
+
+    [place] = played.places
+    assert len(place.runs) == 1, played.output
+    assert played.result["ok"] is True
 
 
 # #856-W01

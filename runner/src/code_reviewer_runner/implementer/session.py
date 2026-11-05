@@ -974,7 +974,7 @@ class ImplementerSession:
 
     def _time_for_another_turn(self, agent: ImplementerAgent | ClaudeCodeAgent) -> bool:
         if isinstance(agent, ClaudeCodeAgent):
-            return self._deadline_seconds() >= MIN_EXTRA_TURN_SECONDS
+            return self._deadline_seconds() >= MIN_EXTRA_TURN_SECONDS and agent.has_budget_left()
         return agent.ledger.remaining_seconds() >= MIN_EXTRA_TURN_SECONDS
 
     def _stopped_by(self, error: BaseException) -> None:

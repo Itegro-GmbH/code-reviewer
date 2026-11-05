@@ -341,6 +341,79 @@ def test_a_turn_without_a_result_schema_brings_no_file_and_no_server() -> None:
     assert place.files == {} and "--mcp-config" not in place.runs[0].argv
 
 
+def budget_of(run: Run) -> Decimal:
+    return Decimal(run.argv[run.argv.index("--max-budget-usd") + 1])
+
+
+# #856-T44: the budget is the turn's, not each message's
+def test_each_message_gets_what_the_earlier_ones_of_the_turn_left_of_the_budget() -> None:
+    place = Place(outputs=[stream(total_cost_usd=0.6), stream(total_cost_usd=0.25), stream()])
+    agent = agent_of(place, max_budget_usd="1.00")
+
+    agent.turn("one")
+    agent.turn("two")
+    agent.turn("three")
+
+    assert [budget_of(run) for run in place.runs] == [
+        Decimal("1.00"),
+        Decimal("0.4"),
+        Decimal("0.15"),
+    ]
+
+
+# #856-T44
+def test_a_turn_whose_budget_is_spent_sends_no_further_message() -> None:
+    place = Place(outputs=[stream(total_cost_usd=1.0), stream()])
+    agent = agent_of(place, max_budget_usd="1.00")
+    agent.turn("one")
+
+    assert not agent.has_budget_left()
+    with pytest.raises(LimitError) as stopped:
+        agent.turn("two")
+
+    assert stopped.value.code is ErrorCode.COST_LIMIT_REACHED
+    assert len(place.runs) == 1
+
+
+# #856-T44
+def test_a_turn_without_a_budget_passes_none() -> None:
+    place = Place(outputs=[stream(), stream()])
+    agent = agent_of(place)
+
+    agent.turn("one")
+    agent.turn("two")
+
+    assert agent.has_budget_left()
+    assert all("--max-budget-usd" not in run.argv for run in place.runs)
+
+
+# #856-T44: without an estimate of the earlier messages the leftover is not known: one extra message at most
+def test_without_an_estimate_one_extra_message_is_allowed_and_not_a_third() -> None:
+    unknown = {"made-up": {"costBasis": "unknown"}}
+    place = Place(outputs=[stream(modelUsage=unknown), stream(modelUsage=unknown), stream()])
+    agent = agent_of(place, max_budget_usd="2.00")
+
+    agent.turn("one")
+    assert agent.has_budget_left()
+    agent.turn("two")
+    assert not agent.has_budget_left()
+    with pytest.raises(LimitError) as stopped:
+        agent.turn("three")
+
+    assert stopped.value.code is ErrorCode.COST_LIMIT_REACHED
+    assert [budget_of(run) for run in place.runs] == [Decimal("2.00"), Decimal("2.00")]
+
+
+# #856-T44
+def test_a_leftover_too_small_to_be_an_amount_counts_as_spent() -> None:
+    place = Place(outputs=[stream(total_cost_usd=0.9999996), stream()])
+    agent = agent_of(place, max_budget_usd="1.00")
+
+    agent.turn("one")
+
+    assert not agent.has_budget_left()
+
+
 # #856-T23
 def test_a_turn_that_ran_out_of_budget_is_the_cost_limit() -> None:
     place = Place(outputs=[stream("", subtype="error_max_budget_usd", is_error=True)], returncode=1)
