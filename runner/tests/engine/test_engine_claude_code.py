@@ -117,22 +117,31 @@ def env_turn(place: Workplace, url: str, *, scrub: bool) -> Turn:
     return place.run(url, "Print your environment", scrub=scrub)
 
 
+# Ways to print the environment of a tool. Claude Code asks for approval for some of them under
+# its sandbox (a bare `env` was refused in CI, in bypass mode), so each is tried and at least one
+# has to print one.
+PRINTERS = ("printenv", "cat /proc/self/environ | tr '\\0' '\\n'", "sh -c env")
+
+
 # #856-T30
 def test_the_login_is_not_in_the_environment_of_the_tools_the_agent_runs(tmp_path: Path) -> None:
     """Claude Code scrubs its credentials from the environment of its subprocesses
     (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`): a command the agent runs cannot print the login."""
     assert bubblewrap_usable() is None, bubblewrap_usable()
-    place = Workplace(tmp_path)
-    with served(
-        Scripted(tool="Bash", args={"command": "env", "description": "look"}),
-        Scripted(text="Looked."),
-    ) as (_fake, url):
-        turn = env_turn(place, url, scrub=True)
+    printed: list[str] = []
+    for number, command in enumerate(PRINTERS):
+        place = Workplace(tmp_path / str(number))
+        with served(
+            Scripted(tool="Bash", args={"command": command, "description": "look"}),
+            Scripted(text="Looked."),
+        ) as (_fake, url):
+            turn = env_turn(place, url, scrub=True)
+        assert turn.returncode == 0 and turn.result.ok, turn.stderr[-300:]
+        printed.append(printed_environment(turn))
 
-    seen = printed_environment(turn)
-    assert turn.returncode == 0 and turn.result.ok, turn.stderr[-300:]
-    assert "PATH=" in seen, f"the command ran and printed an environment: {seen[:300]}"
-    assert FAKE_KEY not in seen and "ANTHROPIC_API_KEY" not in seen
+    assert any("PATH=" in seen for seen in printed), f"no command printed one: {printed}"
+    for seen in printed:
+        assert FAKE_KEY not in seen and "ANTHROPIC_API_KEY" not in seen
 
 
 # #856-T30
