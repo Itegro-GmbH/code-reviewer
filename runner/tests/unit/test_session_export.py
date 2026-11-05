@@ -418,3 +418,56 @@ def test_the_production_fetch_of_a_dead_engine_is_an_unreachable_engine() -> Non
         take_snapshot(fetch, SESSION, redactor=Redactor([]), seconds=5.0)
 
     assert caught.value.reason is ExportReason.UNREACHABLE
+
+
+# -- the agent's own call -------------------------------------------------------------------------
+
+
+def an_agent() -> Any:
+    from decimal import Decimal
+
+    from code_reviewer_runner.dynamic_review.budget import BudgetLedger, UnitCosts
+    from code_reviewer_runner.implementer.agent import ImplementerAgent
+    from code_reviewer_runner.implementer.limits import agent_limits
+
+    return ImplementerAgent(
+        ledger=BudgetLedger(
+            agent_limits(600.0, Decimal("5"), "cost_limit"),
+            unit_costs=UnitCosts(input_usd_per_mtok=Decimal(1), output_usd_per_mtok=Decimal(4)),
+        ),
+        runtime=None,  # type: ignore[arg-type]  # never used by the export
+        command=["opencode"],
+        directory="/work/repo",
+        make_config=lambda path: {},
+        instructions=("instructions.md", "text"),
+        environment={},
+        model="m",
+        provider_id="p",
+    )
+
+
+# #839-T19
+def test_the_agent_exports_the_session_it_opened_from_its_engine() -> None:
+    from code_reviewer_runner.dynamic_review.adapter import EngineClient
+
+    server = EngineServer([message(n, [tool_part(n, output=f"secret {SECRET}")]) for n in range(3)])
+    agent = an_agent()
+    agent._client = EngineClient(server.url, "/work/repo")  # pyright: ignore[reportPrivateUsage]
+    agent.session_id = SESSION
+    try:
+        snapshot = agent.export_session(Redactor([SECRET]), 5.0)
+    finally:
+        server.stop()
+
+    document = document_of(snapshot)
+    assert [m["info"]["id"] for m in document["messages"]] == [f"msg_{n:04d}" for n in range(3)]
+    assert SECRET not in json.dumps(document)
+    assert {directory for _, directory in server.requests} == {"/work/repo"}
+
+
+# #839-T19
+def test_an_agent_without_a_session_has_nothing_to_export() -> None:
+    with pytest.raises(ExportFailed) as caught:
+        an_agent().export_session(Redactor([]), 5.0)
+
+    assert caught.value.reason is ExportReason.UNREACHABLE
