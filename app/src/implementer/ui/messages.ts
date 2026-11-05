@@ -206,6 +206,11 @@ const FIELD_COPY: Record<
     too_long:
       "This environment cannot be used. Reload the page and choose another.",
   },
+  profile: {
+    required: "Choose a profile, or none.",
+    invalid: "This profile cannot be used. Choose another, or none.",
+    too_long: "This profile cannot be used. Choose another, or none.",
+  },
   costLimitCents: {
     required: "Enter an amount, for example 2.50, or leave the field empty.",
     invalid: "Enter an amount in dollars, for example 2.50.",
@@ -292,6 +297,8 @@ const failureCopy = (
     "This environment does not exist any more. Choose another, or the standard.",
   IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED:
     "The size of this environment is no longer offered (1 vCPU leaves the agent no memory), so the task was not started and nothing was charged. Change the size under Environments to 2 vCPU or more, or choose another environment.",
+  IMPLEMENTER_PROFILE_NOT_FOUND:
+    "This profile does not exist any more, is archived, or has no such version. Choose another, or none.",
   IMPLEMENTER_MODEL_NOT_ALLOWED: hasReason(failure.reason)
     ? MODEL_REFUSAL_COPY[failure.reason]
     : MODEL_REFUSED_GENERIC,

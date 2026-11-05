@@ -1,8 +1,8 @@
 # Agent workflows: format v1 and validator (#833, milestone 1)
 
 A workflow is a JSON document: a trigger and a list of steps. This folder is the **format**, the **validator** and the **API** behind it. There is
-no engine yet: nothing runs a workflow (milestones 2 to 5 of the plan add profiles and the finish tool, the engine, the label trigger and the
-review loop). What the format is, every error code and how an AI should use it: [`docs/workflows.md`](../../../docs/workflows.md). The two JSON
+no engine yet: nothing runs a workflow (milestone 2 of the plan added the [profiles](../profiles/README.md) the steps refer to; the finish tool, the engine, the label trigger and the
+review loop follow). What the format is, every error code and how an AI should use it: [`docs/workflows.md`](../../../docs/workflows.md). The two JSON
 Schemas are [`contracts/workflow.v1.json`](../../../contracts/workflow.v1.json) and
 [`contracts/result-schema.v1.json`](../../../contracts/result-schema.v1.json), checked by
 `integration-tests/compatibility/workflow-contract.integration.test.ts`.
@@ -24,7 +24,8 @@ No database, no I/O: a document and a `WorkflowResolver` go in, a list of proble
 | `result-schema.ts`                                | The result schema subset: `validateResultSchema`, `objectTypeOf`, `checkResultValue` (the finish tool of M2 reuses the last one)                                                                                |
 | `value-type.ts`                                   | The types of values that flow, assignability                                                                                                                                                                    |
 | `connectors.ts`, `triggers.ts`, `facts.ts`        | What the three actions take and yield, what each trigger hands over, the facts every agent step yields without the agent                                                                                        |
-| `resolver.ts`                                     | `WorkflowResolver`: which profiles, environments and connectors exist, as plain data                                                                                                                            |
+| `resolver.ts`                                     | `WorkflowResolver`: which profiles (with the facts of the versions a document runs), environments and connectors exist, as plain data                                                                           |
+| `profile-refs.ts`                                 | Which profiles and versions a document names (an iterative walk), and the resolver's profile list built from the rows read for exactly those versions                                                           |
 | `issues.ts`, `limits.ts`                          | The issue shape and its stable codes (form codes are the ones the JSON Schema states too), the bounds                                                                                                           |
 | `service.ts`, `http.ts`, `errors.ts`, `shared.ts` | The workspace service (validate, list, get, create, save a version, archive), the handlers, the route codes, the wiring                                                                                         |
 
@@ -37,9 +38,12 @@ deleted: hidden from the list, no new version, free name, versions kept.
 - **The resolver is data, not calls.** The validator asks for lists (`profiles()`, `environments()`, `connectors()`) so the same list gives the
   "available" names of an error, tests use fakes, and nothing in the core awaits. The service reads the workspace's environments and builds the
   resolver per request.
-- **Profiles: a name no list knows is an error.** Until M2 the one profile is `implementer` (today's Implementer: version 1, may push). It is the same
-  question M2 will ask of the profiles table (exists? version? may push? default result schema?), so M2 replaces `BUILT_IN_PROFILES` by the rows and nothing
-  else changes. Accepting any name as "well formed, unresolved" would leave the push facts and the version unchecked for exactly the profiles that matter.
+- **Profiles: a name no list knows is an error.** Profiles are user data (#843): the rows of the workspace's profiles table that are not archived. The
+  resolver answers per version: the versions that exist (1 to the current, without a gap) and, for the versions the document runs, whether the version may
+  push and its default result schema. A pinned version has its own facts; a reference without a version has the newest's; a version that does not exist is
+  reported where it is written and takes the newest's facts, so one mistake is not reported at every use. The service reads only those versions
+  (`profile-refs.ts`), not every version of every profile. Accepting any name as "well formed, unresolved" would leave the push facts and the version
+  unchecked for exactly the profiles that matter.
 - **Scope after an `if`**: only the `if` itself (`taken`). Ids are unique in the document, so no step is produced by both branches; nothing a branch made is
   certain to exist afterwards. After a **loop**: the body's own steps with the last round's values (a body runs at least once and a round runs to its
   end; the budget is checked between rounds). `previous.*`: direct steps of the innermost loop body only, from round two.

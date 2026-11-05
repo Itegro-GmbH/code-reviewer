@@ -29,6 +29,7 @@ import { parseGithubEvent } from "./events.ts";
 import {
   BRANCH_READ_TOKEN_PERMISSIONS,
   CHECK_TOKEN_PERMISSIONS,
+  IMPLEMENTER_READ_TOKEN_PERMISSIONS,
   IMPLEMENTER_TOKEN_PERMISSIONS,
   JOB_TOKEN_PERMISSIONS,
   COMMENT_READ_TOKEN_PERMISSIONS,
@@ -264,7 +265,7 @@ export function createGithubAppProvider(
       }
     },
 
-    async implementerAccess(integration, repo) {
+    async implementerAccess(integration, repo, accessOptions) {
       // The gate of this method itself (#753), before the settings or GitHub are touched: the manifest is a second wall,
       // not the first. Asked on every call.
       if (options.capabilities?.().allowsReviewKind("implementer") !== true)
@@ -287,7 +288,10 @@ export function createGithubAppProvider(
           await getClient()
         ).mintInstallationToken(integration.externalId, {
           repositoryIds,
-          permissions: IMPLEMENTER_TOKEN_PERMISSIONS,
+          permissions:
+            accessOptions?.readOnly === true
+              ? IMPLEMENTER_READ_TOKEN_PERMISSIONS
+              : IMPLEMENTER_TOKEN_PERMISSIONS,
         });
         return createGitAccess({
           provider: "github",

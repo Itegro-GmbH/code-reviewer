@@ -19,6 +19,7 @@ import {
 import { validateResultSchema } from "../../src/workflows/result-schema.ts";
 import { createResolver } from "../../src/workflows/resolver.ts";
 import { REFERENCE_PATTERN } from "../../src/workflows/template.ts";
+import { FAKE_RESOLVER } from "../../src/workflows/test-fixtures.ts";
 import { TRIGGER_KINDS } from "../../src/workflows/triggers.ts";
 import { validateWorkflow } from "../../src/workflows/validate.ts";
 import {
@@ -29,7 +30,10 @@ import {
 
 const workflowContract = createContractValidator("workflow.v1.json");
 const resultContract = createContractValidator("result-schema.v1.json");
-const resolver = createResolver({ environments: [{ name: "node" }] });
+const resolver = createResolver({
+  environments: [{ name: "node" }],
+  profiles: FAKE_RESOLVER.profiles(),
+});
 
 type Json = Record<string, unknown>;
 

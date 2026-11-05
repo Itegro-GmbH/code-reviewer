@@ -188,6 +188,9 @@ export function createWorkspaceErasureRepository(
         // The versions point at their workflow: versions first (#833).
         "workflow_versions",
         "workflows",
+        // The versions point at their profile: versions first (#843).
+        "profile_versions",
+        "profiles",
         "job_check_runs",
         "job_vm_runs",
         "usage_records",

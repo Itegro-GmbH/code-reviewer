@@ -70,6 +70,8 @@ export const SEMANTIC_ISSUE_CODES = [
   "session_target_invalid",
   /** The profile does not exist (`available` names those that do). */
   "profile_unknown",
+  /** The profile was archived (`available` names those that can be run). */
+  "profile_archived",
   /** The profile exists, that version does not. */
   "profile_version_unknown",
   /** No environment of that name in the workspace. */

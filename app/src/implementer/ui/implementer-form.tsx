@@ -75,6 +75,7 @@ const FIELD_OF_ISSUE: Record<ImplementerIssue["field"], FieldKey | null> = {
   model: "model",
   costLimitCents: "cost",
   environmentId: "environment",
+  profile: null,
   clientRequestId: null,
 };
 

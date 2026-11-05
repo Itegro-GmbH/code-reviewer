@@ -150,6 +150,7 @@ export function createRunsRepository(
           "repositories.full_name as project",
           "repositories.url as repository_url",
           "implementer_sessions.branch as session_branch",
+          "implementer_turns.profile_can_push as turn_profile_can_push",
         ])
         .where("jobs.workspace_id", "=", workspaceId);
       if (filter.repositoryId !== undefined)
@@ -174,6 +175,9 @@ export function createRunsRepository(
                   implementer: {
                     branch: row.session_branch,
                     repositoryUrl: row.repository_url,
+                    ...(row.turn_profile_can_push === null
+                      ? {}
+                      : { canPush: row.turn_profile_can_push === 1 }),
                   },
                 }),
             job: {
@@ -233,6 +237,7 @@ export function createRunsRepository(
           "implementer_sessions.branch as session_branch",
           "implementer_sessions.base_branch as session_base_branch",
           "implementer_turns.instruction as turn_instruction",
+          "implementer_turns.profile_can_push as turn_profile_can_push",
           "implementer_turns.environment_name as turn_environment_name",
           "implementer_turns.environment_vcpus as turn_environment_vcpus",
           "implementer_turns.environment_network_mode as turn_environment_network_mode",
@@ -256,6 +261,7 @@ export function createRunsRepository(
         session_branch: branch,
         session_base_branch: baseBranch,
         turn_instruction: instruction,
+        turn_profile_can_push: profileCanPush,
         turn_environment_name: environmentName,
         turn_environment_vcpus: environmentVcpus,
         turn_environment_network_mode: networkMode,
@@ -279,6 +285,9 @@ export function createRunsRepository(
                 baseBranch,
                 instruction,
                 repositoryUrl,
+                ...(profileCanPush === null
+                  ? {}
+                  : { canPush: profileCanPush === 1 }),
                 // #818: the environment the turn copied; none for a task without one.
                 environment:
                   environmentName === null || environmentVcpus === null

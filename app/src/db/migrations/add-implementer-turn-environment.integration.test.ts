@@ -34,7 +34,12 @@ async function rowsOfEveryTable(
   const result: Record<string, unknown[]> = {};
   for (const table of await db.introspection.getTables()) {
     // Tables of later migrations (#833) are empty and are no change to an existing row.
-    if (table.name === "workflows" || table.name === "workflow_versions")
+    if (
+      table.name === "workflows" ||
+      table.name === "workflow_versions" ||
+      table.name === "profiles" ||
+      table.name === "profile_versions"
+    )
       continue;
     // A later migration's table (#745): it does not exist before this migration is applied, and it is empty after.
     if (table.name === "implementer_turn_steps") continue;

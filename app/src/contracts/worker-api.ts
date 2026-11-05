@@ -521,6 +521,7 @@ export interface ImplementerJob {
   modelEntry: DynamicModelEntry;
   capabilities?: DynamicModelCapabilities;
   environment?: ImplementerEnvironment;
+  profile?: ImplementerProfile;
   resume?: ImplementerResume;
 }
 /**
@@ -539,6 +540,15 @@ export interface ImplementerNetworkRule {
    * @maxItems 100
    */
   hosts: string[];
+}
+/**
+ * #843: the profile version a turn was started with, as the turn copied it when it started. Present only for a turn started with a profile and a caller that named the claim feature `implementer_profile`; a turn without a profile carries nothing and runs with the platform's own defaults, exactly as every turn did before profiles. The model and the cost limit of the version are not here: they are the turn's own `modelEntry`, `cost` and `llm.maxCostUsd`, chosen from the version by the app. `instructions`, when present, is the system-level text the agent is given: the runner appends it to the instruction file it writes for the engine (after its own rules, so the text is the same for every turn of one version and the model provider's prompt cache hits), as literal data written by a member of the workspace; it is left out when the version has none. `canPush` says whether Control pushes the branches the agent made when the turn ends: when false the runner pushes nothing, lists no branch, reports no head commit and no commits, and the turn is a success without a push (a profile that only reads). The agent never has a remote or a credential, whatever `canPush` says. `name` and `version` are for the run's log line only.
+ */
+export interface ImplementerProfile {
+  name: string;
+  version: number;
+  instructions?: string;
+  canPush: boolean;
 }
 /**
  * #838 (part of #745): what a follow-up turn of an Implementer session is told about the branches the earlier turns left on the provider. Present only on a follow-up, and only for a caller that named the claim feature `implementer_resume`; a first turn has none. Without it the turn starts from `baseBranch` as the contract says above; with it the runner asks the provider which of `branches` it still has and fetches the base branch and all of them in one fetch of depth 50 (git counts the depth from every tip: no tip has fewer than 50 commits of history where it has that many, whatever the order of `branches`; a merge base further back than 50 commits is not found), makes a local branch for each in the agent's repository (the session branch at the base tip when it is not among them) and checks out `checkout`. `turn` is the number of this turn (the first is 1, so a follow-up has 2 or more). `branches` are the branches the last turn pushed with the tip it pushed, the session branch first when it is among them, at most 20, no name twice (a rule JSON Schema cannot state; the runner refuses a repeat). The `head` is only what the earlier turn knew: the runner takes the tip the provider has now, and a branch that moved is reported to the agent, not refused. A branch the provider no longer has is left out; a session branch that is gone ends the turn (`clone_failed`, free). `checkout` is the branch the agent was on when the last turn ended: one of `branches` or the session branch (which a turn that pushed nothing still has), or null for the session branch; any other name is refused by the runner (`invalid_job`). `branches` empty means the earlier turns pushed nothing: the turn starts from the base branch like a first turn. The agent still has no remote and Control still pushes every local branch that has a commit of its own when the turn ends, without force: a branch the agent did not touch is not pushed again.

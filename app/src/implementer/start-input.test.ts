@@ -26,6 +26,7 @@ const parsed: StartInput = {
   model: { entryId: "entry-1" },
   costLimitCents: null,
   environmentId: null,
+  profile: null,
   clientRequestId: "req-1",
 };
 
@@ -247,5 +248,78 @@ describe("the body that starts a task", () => {
     expect(issuesOf({ ...VALID, environmentId })).toEqual([
       { field: "environmentId", code },
     ]);
+  });
+});
+
+describe("the body that starts a task with a profile (#843)", () => {
+  const { model: _model, ...WITHOUT_MODEL } = VALID;
+  void _model;
+
+  // #843-T160
+  it("takes a profile by name, newest version, or pinned to a version, in place of the model and the cost limit", () => {
+    expect(
+      validateStartInput({ ...WITHOUT_MODEL, profile: "reviewer" }),
+    ).toEqual({
+      ok: true,
+      value: {
+        ...parsed,
+        model: null,
+        profile: { name: "reviewer", version: null },
+      },
+    });
+    expect(
+      validateStartInput({ ...WITHOUT_MODEL, profile: "code-reviewer@12" }),
+    ).toMatchObject({
+      ok: true,
+      value: { profile: { name: "code-reviewer", version: 12 }, model: null },
+    });
+  });
+
+  // #843-T161
+  it("takes null or no profile as none: the model is required as before", () => {
+    for (const profile of [undefined, null])
+      expect(validateStartInput({ ...VALID, profile })).toEqual({
+        ok: true,
+        value: parsed,
+      });
+    expect(issuesOf(WITHOUT_MODEL)).toEqual([
+      { field: "model", code: "required" },
+    ]);
+    expect(issuesOf({ ...WITHOUT_MODEL, profile: null })).toEqual([
+      { field: "model", code: "required" },
+    ]);
+  });
+
+  // #843-T162
+  it.each([
+    ["Reviewer", "invalid"],
+    ["reviewer@0", "invalid"],
+    ["reviewer@latest", "invalid"],
+    ["", "required"],
+    ["a b", "invalid"],
+    [7, "invalid"],
+    [{ name: "reviewer" }, "invalid"],
+    ["x".repeat(65), "invalid"],
+  ])("refuses the profile %j: %s", (profile, code) => {
+    expect(issuesOf({ ...WITHOUT_MODEL, profile })).toEqual([
+      { field: "profile", code },
+    ]);
+  });
+
+  // #843-T163
+  it("refuses a model or a cost limit next to a profile: the profile's version brings both", () => {
+    expect(issuesOf({ ...VALID, profile: "reviewer" })).toEqual([
+      { field: "model", code: "not_with_profile" },
+    ]);
+    expect(
+      issuesOf({ ...WITHOUT_MODEL, profile: "reviewer", costLimitCents: 100 }),
+    ).toEqual([{ field: "costLimitCents", code: "not_with_profile" }]);
+    expect(
+      validateStartInput({
+        ...WITHOUT_MODEL,
+        profile: "reviewer",
+        costLimitCents: null,
+      }).ok,
+    ).toBe(true);
   });
 });

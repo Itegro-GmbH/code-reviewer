@@ -20,6 +20,7 @@ import {
   WORKFLOWS_PER_WORKSPACE_MAX,
 } from "./limits.ts";
 import { createResolver } from "./resolver.ts";
+import { FAKE_RESOLVER } from "./test-fixtures.ts";
 import { TRIGGER_KINDS } from "./triggers.ts";
 import { validateWorkflow } from "./validate.ts";
 
@@ -56,7 +57,10 @@ describe("docs/workflows.md", () => {
     expect(
       validateWorkflow(
         example,
-        createResolver({ environments: [{ name: "node" }] }),
+        createResolver({
+          environments: [{ name: "node" }],
+          profiles: FAKE_RESOLVER.profiles(),
+        }),
       ).errors,
     ).toEqual([]);
   });

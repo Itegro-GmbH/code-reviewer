@@ -38,6 +38,7 @@ import {
 } from "../../src/test-support/github-app.ts";
 import { signedInMember } from "../../src/test-support/session-lookup.ts";
 import { createImplementerEnvironmentsRepository } from "../../src/db/repositories/implementer-environments-repository.ts";
+import { createProfilesRepository } from "../../src/db/repositories/profiles-repository.ts";
 import { createWorkflowsRepository } from "../../src/db/repositories/workflows-repository.ts";
 import { openRouteTestDatabase } from "../../src/test-support/test-database.ts";
 import { discoverRoutes } from "../../src/test-support/routes.ts";
@@ -70,6 +71,7 @@ type Ids = {
   invitationId: string;
   environmentId: string;
   workflowId: string;
+  profileId: string;
 };
 
 /** What a row of the table needs to make a request: the parts of the address and the body. */
@@ -549,6 +551,74 @@ const ENTRIES: Entry[] = [
     implementer: true,
   },
   {
+    // #843-T120: every member lists the profiles of their own workspace; the other workspace's are not reachable.
+    name: "GET profiles",
+    route: "/api/w/[workspace]/profiles",
+    method: "GET",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/profiles",
+    params: () => ({}),
+    file: "profiles/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    name: "POST profiles",
+    route: "/api/w/[workspace]/profiles",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/profiles",
+    body: () => ({}),
+    params: () => ({}),
+    file: "profiles/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    name: "POST profiles/validate",
+    route: "/api/w/[workspace]/profiles/validate",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/profiles/validate",
+    body: () => ({}),
+    params: () => ({}),
+    file: "profiles/validate/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    name: "GET profiles/[profileId]",
+    route: "/api/w/[workspace]/profiles/[profileId]",
+    method: "GET",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) => `/profiles/${ids.profileId}`,
+    params: (ids) => ({ profileId: ids.profileId }),
+    file: "profiles/[profileId]/route.ts",
+    implementer: true,
+  },
+  {
+    name: "PUT profiles/[profileId]",
+    route: "/api/w/[workspace]/profiles/[profileId]",
+    method: "PUT",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) => `/profiles/${ids.profileId}`,
+    body: () => ({}),
+    params: (ids) => ({ profileId: ids.profileId }),
+    file: "profiles/[profileId]/route.ts",
+    implementer: true,
+  },
+  {
+    // #843-T121: every member archives a profile of their own workspace; the other workspace's is not reachable.
+    name: "DELETE profiles/[profileId]",
+    route: "/api/w/[workspace]/profiles/[profileId]",
+    method: "DELETE",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) => `/profiles/${ids.profileId}`,
+    params: (ids) => ({ profileId: ids.profileId }),
+    file: "profiles/[profileId]/route.ts",
+    implementer: true,
+  },
+  {
     name: "POST plan-handoff",
     route: "/api/w/[workspace]/plan-handoff",
     method: "POST",
@@ -918,6 +988,23 @@ async function seedWorkspace(
     100,
   );
   if (!workflow.ok) throw new Error("seeding failed");
+  // A profile (#843): the workflows of the matrix run it, and the other workspace's must not be reachable through this one's address.
+  const profile = await createProfilesRepository(db, workspace.id).create(
+    {
+      name: "implementer",
+      content: {
+        description: `Profile of ${slug}`,
+        model: { entryId: `entry-${slug}` },
+        instructions: "",
+        costLimitCents: null,
+        canPush: true,
+        defaultResult: null,
+      },
+      createdBy: names.owner,
+    },
+    100,
+  );
+  if (!profile.ok) throw new Error("seeding failed");
   return {
     workspace,
     owner,
@@ -925,6 +1012,7 @@ async function seedWorkspace(
     ids: {
       environmentId: environment.environment.id,
       workflowId: workflow.workflow.id,
+      profileId: profile.profile.id,
       integrationId: integration.id,
       repositoryId: repository.id,
       runId: job.job.id,
@@ -1063,7 +1151,9 @@ async function start() {
         | "billing_workspace_settings"
         | "implementer_environments"
         | "workflows"
-        | "workflow_versions",
+        | "workflow_versions"
+        | "profiles"
+        | "profile_versions",
     ) =>
       db
         .selectFrom(table)
@@ -1086,6 +1176,8 @@ async function start() {
       implementerEnvironments: await select("implementer_environments"),
       workflows: await select("workflows"),
       workflowVersions: await select("workflow_versions"),
+      profiles: await select("profiles"),
+      profileVersions: await select("profile_versions"),
       projects: await db
         .selectFrom("projects")
         .innerJoin("repositories", "repositories.id", "projects.repository_id")

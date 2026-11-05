@@ -1096,6 +1096,37 @@ export interface ImplementerTurnsTable {
     string | null | undefined,
     string | null
   >;
+  /**
+   * The profile version the task ran with, copied when the turn was written (#843): all five are null (a task without a profile: the
+   * platform's own defaults, as before profiles) or all are set. No foreign key: nothing in the profile tables reaches the turn.
+   * `profile_instructions` is the system-level text of that version, empty for none.
+   */
+  profile_id: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  profile_name: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  profile_version: ColumnType<
+    number | null,
+    number | null | undefined,
+    number | null
+  >;
+  profile_instructions: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  /** 1 when the profile version may push, 0 when not. */
+  profile_can_push: ColumnType<
+    number | null,
+    number | null | undefined,
+    number | null
+  >;
 }
 
 /**
@@ -1170,6 +1201,45 @@ export interface WorkflowVersionsTable {
   created_at: string;
 }
 
+/**
+ * A profile of a workspace (#843): a name and which saved version is the current one. What the profile says is in `profile_versions`;
+ * a save adds a version and moves `current_version`. The name never changes.
+ */
+export interface ProfilesTable {
+  id: string;
+  workspace_id: string;
+  /** The name a workflow refers to: lower case, unique within the workspace among the profiles that are not archived. */
+  name: string;
+  current_version: number;
+  created_by: string;
+  /** ISO 8601 UTC. */
+  created_at: string;
+  updated_at: string;
+  /** Set when the profile was archived: hidden from the list, takes no new version, is not started, its name is free. */
+  archived_at: string | null;
+}
+
+/** One saved version of a profile (#843). Immutable: the database refuses an update. */
+export interface ProfileVersionsTable {
+  profile_id: string;
+  version: number;
+  /** The workspace of the profile, repeated so that every query filters by it. */
+  workspace_id: string;
+  description: string;
+  /** JSON text of a `ModelChoice` (`src/db/implementer-model-choice.ts`). */
+  model_choice: string;
+  /** The system-level text the agent is given; empty for none. */
+  instructions: string;
+  /** Whole US cents per turn; null: the operator's maximum alone. */
+  cost_limit_cents: number | null;
+  /** 1 when a turn of this version may push, 0 when not. */
+  can_push: number;
+  /** JSON text of the default result schema, or null for none. */
+  default_result: string | null;
+  created_by: string;
+  created_at: string;
+}
+
 export interface Database {
   app_meta: AppMetaTable;
   users: UsersTable;
@@ -1204,6 +1274,8 @@ export interface Database {
   implementer_environments: ImplementerEnvironmentsTable;
   workflows: WorkflowsTable;
   workflow_versions: WorkflowVersionsTable;
+  profiles: ProfilesTable;
+  profile_versions: ProfileVersionsTable;
   plan_handoff_tokens: PlanHandoffTokensTable;
   model_catalog_entries: ModelCatalogEntriesTable;
   models_dev_providers: ModelsDevProvidersTable;

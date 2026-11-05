@@ -666,6 +666,7 @@ export function createJobsRepository(
         costLimitCents: input.costLimitCents,
         createdBy: input.createdBy,
         environment: input.environment ?? null,
+        profile: input.profile ?? null,
       };
       try {
         return await inTransaction<EnqueueImplementerTurnResult>(

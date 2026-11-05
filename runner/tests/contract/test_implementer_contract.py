@@ -126,6 +126,34 @@ JOB_REFUSALS: dict[str, Callable[[Document], None]] = {
     "base branch with a space": _set(("implementer", "baseBranch"), "has space"),
     "full name without owner": _set(("implementer", "repo", "fullName"), "no-owner"),
     "clone url that is not https": _set(("implementer", "repo", "cloneUrl"), "file:///etc/passwd"),
+    # #843: the profile version a turn started with
+    "profile that is a string": _set(("implementer", "profile"), "reviewer"),
+    "unknown profile field": _set(
+        ("implementer", "profile"), {"name": "r", "version": 1, "canPush": True, "model": "m"}
+    ),
+    "profile without a push right": _set(("implementer", "profile"), {"name": "r", "version": 1}),
+    "profile without a name": _set(("implementer", "profile"), {"version": 1, "canPush": True}),
+    "profile without a version": _set(("implementer", "profile"), {"name": "r", "canPush": True}),
+    "push right that is not a boolean": _set(
+        ("implementer", "profile"), {"name": "r", "version": 1, "canPush": "yes"}
+    ),
+    "profile version zero": _set(
+        ("implementer", "profile"), {"name": "r", "version": 0, "canPush": True}
+    ),
+    "profile version fraction": _set(
+        ("implementer", "profile"), {"name": "r", "version": 1.5, "canPush": True}
+    ),
+    "profile name in capitals": _set(
+        ("implementer", "profile"), {"name": "Reviewer", "version": 1, "canPush": True}
+    ),
+    "empty profile instructions": _set(
+        ("implementer", "profile"),
+        {"name": "r", "version": 1, "canPush": True, "instructions": ""},
+    ),
+    "profile instructions too long": _set(
+        ("implementer", "profile"),
+        {"name": "r", "version": 1, "canPush": True, "instructions": "x" * 20_001},
+    ),
 }
 
 
@@ -153,6 +181,56 @@ def test_the_schema_and_the_runner_both_refuse(name: str) -> None:
     with pytest.raises(runner_job.JobError) as refused:
         runner_job.parse_implementer_input(json.dumps(job))
     assert refused.value.code is ErrorCode.INVALID_JOB
+
+
+def test_the_example_of_the_profile_is_valid_and_the_runner_reads_it_in_a_job() -> None:
+    profile = _load(EXAMPLES / "ImplementerProfile.json")
+    assert _accepts("ImplementerProfile", profile)
+    job = _job()
+    job["implementer"]["profile"] = profile
+    assert _accepts("RunnerJobInput", job)
+
+    parsed = runner_job.parse_implementer_input(json.dumps(job)).implementer.profile
+
+    assert parsed is not None
+    assert (parsed.name, parsed.version, parsed.can_push) == ("reviewer", 3, False)
+    assert parsed.instructions == profile["instructions"]
+
+
+def test_a_job_without_a_profile_is_the_job_of_before_profiles() -> None:
+    job = _job()
+    assert "profile" not in job["implementer"]
+
+    assert runner_job.parse_implementer_input(json.dumps(job)).implementer.profile is None
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        {"name": "r", "version": 1, "canPush": True},
+        {"name": "r", "version": 1, "canPush": False},
+        {"name": "x" * 64, "version": 999999, "canPush": True, "instructions": "x" * 20_000},
+        {"name": "a_b-9", "version": 2, "canPush": False, "instructions": "ä😀\n\ttext"},
+    ],
+)
+def test_the_smallest_and_the_largest_profile_are_accepted_by_both(profile: Document) -> None:
+    job = _job()
+    job["implementer"]["profile"] = profile
+
+    assert _accepts("RunnerJobInput", job)
+    parsed = runner_job.parse_implementer_input(json.dumps(job)).implementer.profile
+    assert parsed is not None and parsed.can_push is profile["canPush"]
+    assert parsed.instructions == profile.get("instructions", "")
+
+
+def test_the_feature_that_reads_the_profile_is_in_the_contract_and_named_by_the_worker() -> None:
+    from code_reviewer_runner.job_loop.worker_api import WORKER_FEATURES
+
+    features = _schema()["$defs"]["KnownClaimFeature"]["enum"]
+
+    assert "implementer_profile" in features
+    assert "implementer_profile" in WORKER_FEATURES
+    assert set(WORKER_FEATURES) <= set(features)
 
 
 def _with_resume(resume: Any) -> Document:

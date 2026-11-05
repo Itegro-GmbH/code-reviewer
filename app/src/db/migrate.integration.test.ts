@@ -128,6 +128,8 @@ describe("the migrations of both epics", () => {
       "20261103100000_add_environment_network",
       "20261104100000_create_implementer_turn_steps",
       "20261104140000_create_workflows",
+      "20261104150000_create_profiles",
+      "20261104160000_add_implementer_turn_profile",
     ]);
   });
 
@@ -196,6 +198,8 @@ describe("starting the database", () => {
       "models_dev_providers",
       "password_reset_tokens",
       "plan_handoff_tokens",
+      "profile_versions",
+      "profiles",
       "projects",
       "rate_limits",
       "refusal_notices",

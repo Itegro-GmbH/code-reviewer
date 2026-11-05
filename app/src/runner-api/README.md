@@ -339,6 +339,16 @@ when an environment was chosen; the Dispatcher launches the VM before any Worker
 script that is silently skipped would run the task on a base the person did not choose. The Worker reports what the script did in
 `result.implementer.setup`; a script that fails ends the turn with `environment_setup_failed` (free, `billing/outcome.ts`).
 
+**The profile of a turn (#843).** A task started with a profile holds a copy of the version it runs with (`implementer_turns.profile_*`: id, name,
+version, instructions, push right; the model and the cost limit are the turn's own columns, filled from the version when the task was written). The
+Worker's input carries `implementer.profile {name, version, instructions?, canPush}` (`instructions` left out when empty; the id stays in the app),
+**only to a caller that names the claim feature `implementer_profile`**: for any other the job ends `implementer_engine_unavailable` (free) before any
+credential exists, since a Worker that did not read it would push the work of a profile that may not push, and would run the agent without the
+instructions the person chose. A turn without a profile carries nothing and is the turn of before. What the runner does with it:
+[`docs/profiles.md`](../../../docs/profiles.md#the-push-right). A profile that may not push also gets a token that can only read the
+contents (`implementerAccess(..., { readOnly: true })`, `contents: read`), so the Worker could not push even with a bug; the token is kept in the same
+ledger and ends with the turn like the write token.
+
 **The branches of a follow-up turn (#838, part of #745).** The claim feature `implementer_resume` is the Worker's way to say it reads `implementer.resume` (`ImplementerResume`: the number of the turn, the branches the
 last turn pushed with their tips, the branch to check out). The App knows the feature name (`CLAIM_FEATURES`) and builds no `resume` yet: a turn that carries one, and the refusal of a caller that did not name the
 feature (`implementer_engine_unavailable`, free, before any credential exists, as for the environment), arrive with the follow-up API. Until then every job is a first turn.

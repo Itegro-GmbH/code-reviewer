@@ -31,6 +31,8 @@ const LATER_TABLES = [
   "implementer_environments",
   "workflows",
   "workflow_versions",
+  "profiles",
+  "profile_versions",
 ];
 
 const beforeThisMigration: MigrationProvider = {

@@ -56,6 +56,9 @@ export const CLAIM_FEATURES = [
   // named it; a turn whose environment has a rule other than `off` is refused (`implementer_engine_unavailable`, free) for a
   // caller that did not.
   "implementer_network",
+  // #843: the runner reads `implementer.profile` (the instructions and the push right of the profile version a turn started with). Sent
+  // only to a caller that named it; a turn with a profile is refused (`implementer_engine_unavailable`, free) for a caller that did not.
+  "implementer_profile",
   // #838 (part of #745): the runner reads `implementer.resume`, the branches a follow-up turn starts from. Sent only to a caller that
   // named it; a follow-up turn is refused (`implementer_engine_unavailable`, free) for a caller that did not. The app sends no `resume`
   // yet: the follow-up API (the next step of #745) is what produces one.
