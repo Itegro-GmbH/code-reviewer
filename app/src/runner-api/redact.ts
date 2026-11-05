@@ -4,6 +4,12 @@
 // output (that is the first line of defense); this is the second one, for a runner that got it
 // wrong: strings that look like credentials, and the secrets the app itself holds.
 import "server-only";
+import {
+  AGENT_RESULT_MAX_DEPTH,
+  AGENT_RESULT_MAX_VALUES,
+  type AgentJson,
+  type AgentResultValue,
+} from "../db/agent-result.ts";
 import { maskSecretInText } from "../llm/access.ts";
 import type { ImplementerResult, RunnerResult } from "./contract.ts";
 
@@ -71,8 +77,36 @@ export function redactBlockText(
 }
 
 /**
+ * The result the agent handed in (#843), with the secrets taken out of every text in it, keys included (the runner did the same; this
+ * is the second look). The walk is bounded like the value is (`agent-result.ts`): it goes no deeper than the levels a result may
+ * have and visits no more values than it may hold, and what lies beyond that is replaced, not walked. The keys are made into data
+ * properties, so a key named `__proto__` stays a key.
+ */
+export function redactAgentResult(
+  value: AgentResultValue,
+  secrets: readonly string[],
+): AgentResultValue {
+  const budget = { left: AGENT_RESULT_MAX_VALUES };
+  const walk = (at: AgentJson, depth: number): AgentJson => {
+    budget.left -= 1;
+    if (budget.left < 0) return REDACTED;
+    if (typeof at === "string") return redactBlockText(at, secrets);
+    if (at === null || typeof at !== "object") return at;
+    if (depth >= AGENT_RESULT_MAX_DEPTH) return REDACTED;
+    if (Array.isArray(at)) return at.map((item) => walk(item, depth + 1));
+    return Object.fromEntries(
+      Object.entries(at).map(([key, item]) => [
+        redactBlockText(key, secrets),
+        walk(item, depth + 1),
+      ]),
+    );
+  };
+  return walk(value, 0) as AgentResultValue;
+}
+
+/**
  * The text of an implementer block that a person or an agent wrote: the summary, the subjects of the commits and the paths of the
- * files (#754). The shas, the statuses, the flag and the saved agent session are not text of that kind and stay as they are. The names of the branches are the agent's text too.
+ * files (#754), and the result the agent handed in (#843). The shas, the statuses, the flag and the saved agent session are not text of that kind and stay as they are. The names of the branches are the agent's text too.
  */
 function redactImplementer(
   block: ImplementerResult,
@@ -97,6 +131,10 @@ function redactImplementer(
       ...file,
       path: redactBlockText(file.path, secrets),
     })),
+    // #843: the result the agent handed in is the agent's text too, every string and every key of it.
+    ...(block.agentResult === undefined
+      ? {}
+      : { agentResult: redactAgentResult(block.agentResult, secrets) }),
     // #745, step 7: the hosts are what the agent asked the network door for, text the agent chose.
     ...(block.network === undefined
       ? {}

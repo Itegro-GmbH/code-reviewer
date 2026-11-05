@@ -66,6 +66,10 @@ class TurnResult:
     # #837: the local branch HEAD was on when the agent's work was read, after the rescue of a
     # detached HEAD (`GitWorkspace.checked_out`); None: detached and on no branch, or not read.
     checked_out: str | None = None
+    # #843: the result the agent handed in through the finish tool, checked by Control against the
+    # turn's result schema once the agent's container was gone; None: the turn has no result schema,
+    # or the agent handed in none that fits. Data of an untrusted writer, never a command.
+    agent_result: dict[str, Any] | None = None
 
     @property
     def ok(self) -> bool:
@@ -100,6 +104,7 @@ class TurnResult:
             "summary": self.summary,
             "opencode": opencode,
             **({} if self.checked_out is None else {"checkedOut": self.checked_out}),
+            **({} if self.agent_result is None else {"agentResult": self.agent_result}),
             **({} if self.setup is None else {"setup": self.setup}),
             **({} if self.network is None else {"network": self.network}),
         }

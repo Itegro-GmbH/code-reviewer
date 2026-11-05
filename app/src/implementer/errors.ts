@@ -89,10 +89,16 @@ export type ImplementerIssue = {
     | "costLimitCents"
     | "environmentId"
     | "profile"
+    | "result"
     | "clientRequestId";
   /** `not_with_profile`: a model or a cost limit next to a profile, whose version brings both. */
   code:
     "required" | "invalid" | "too_long" | "not_with_profile" | BranchNameIssue;
+  /**
+   * For `result` (#843): the first problem the validator of the result-schema format found, `<pointer> <code>`: enough to start from;
+   * `POST /workflows/validate` lists every problem of a schema written in a workflow.
+   */
+  detail?: string;
 };
 
 /** Why a model is not allowed. The picker never lists such a model; a submit that names one is refused with the reason. */

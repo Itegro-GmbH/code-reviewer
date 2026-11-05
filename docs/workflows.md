@@ -6,7 +6,7 @@ request is opened. Workflows are written by an AI through the API (there is no e
 workspace with versions.
 
 **Status (milestones 1 and 2 of epic #833).** The format, the validator, the storage and the [profiles](profiles.md) they refer to exist.
-**Nothing runs a workflow yet**: the engine and the finish tool come in the next milestones. A saved workflow is a checked document. The workflows exist only in
+**Nothing runs a workflow yet**: the engine comes in the next milestone. The finish tool exists (see [Result schemas](#result-schemas)). A saved workflow is a checked document. The workflows exist only in
 a deployment with the capability `implementer` (the factory); there is no page, only the routes below. Every member of a workspace may
 use them (the permission `start_implementer_task`).
 
@@ -248,8 +248,20 @@ the root is an object; a field is a `string` (optionally with `enum`, a list of 
 ```
 
 Caps: a string is held to `maxLength` (10000 characters when not given, 100000 at most), a list to `maxItems` (100 when not given, 1000 at most), an
-`enum` has 50 values at most, an object 50 fields, a schema 100 fields in all and 4 levels of objects and lists. The agent's finish tool
-(next milestone) is made from the same schema and checks what the agent hands in with the same code (`checkResultValue`, `app/src/workflows/result-schema.ts`).
+`enum` has 50 values at most, an object 50 fields, a schema 100 fields in all and 4 levels of objects and lists.
+
+**The finish tool (#843).** A task (and, with the engine, an agent step) that has a result schema gives its agent a tool made from it: the name, the
+description and the parameters are derived from the schema, and the agent decides itself when it is done. What the agent hands in is checked
+against the schema twice with the same rules: in its container, for fast feedback (a wrong result is refused with every problem listed and the
+agent corrects it and calls again), and by Control after the container is gone (the runner's `finish_tool.py`, which is held to
+`checkResultValue` of `app/src/workflows/result-schema.ts` by [`contracts/result-check-vectors.json`](../contracts/result-check-vectors.json),
+cases that both implementations are tested against). A result is data of an untrusted writer and is bounded before it is parsed: 256 KiB, 8
+levels, 20,000 values. See [`implementer.md`](implementer.md#the-finish-tool) for how the tool reaches the agent, and what a turn without a result is.
+
+The app keeps the value as data (`implementer_turns.result_value`, with `result_schema` beside it) and holds it to the bounds, but it does **not** check
+it against the schema. **The engine of milestone 3 re-checks `result_value` with `checkResultValue` against the turn's stored schema before it routes
+the value anywhere** (to a condition, a step input, a workflow's output): a stored value is the agent's data, and the runner's verdict is not the
+engine's. A value that fails is treated as a step without a result.
 
 ## The first workflow
 

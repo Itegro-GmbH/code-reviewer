@@ -37,6 +37,7 @@ NEW_ERROR_CODES = (
     "clone_failed",
     "setup_failed",
     "agent_gave_up",
+    "no_result",
     "push_rejected",
     "branch_violation",
     "cost_limit_reached",
@@ -367,6 +368,76 @@ def test_every_recorded_job_of_the_earlier_kinds_is_still_valid_and_parses(name:
     assert _accepts("RunnerJobInput", job)
     parsed = runner_job.parse_job(json.dumps(job))
     assert parsed.review_kind is not runner_job.ReviewKind.IMPLEMENTER
+
+
+# #843-T50
+def test_the_example_of_the_result_schema_is_valid_and_the_runner_reads_it_in_a_job() -> None:
+    schema = _load(EXAMPLES / "ImplementerResultSchema.json")
+    assert _accepts("ImplementerResultSchema", schema)
+    job = _job()
+    job["implementer"]["resultSchema"] = schema
+    assert _accepts("RunnerJobInput", job)
+
+    parsed = runner_job.parse_implementer_input(json.dumps(job)).implementer.result_schema
+
+    assert parsed == schema
+
+
+# #843-T50
+def test_a_job_without_a_result_schema_has_none() -> None:
+    assert "resultSchema" not in _job()["implementer"]
+
+    assert runner_job.parse_implementer_input(json.dumps(_job())).implementer.result_schema is None
+
+
+# #843-T50
+@pytest.mark.parametrize(
+    "schema",
+    [
+        [],
+        {"type": "string"},
+        {"type": "object", "properties": {}},
+        {"type": "object", "properties": {"a": {"type": "date"}}},
+        {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["b"]},
+    ],
+)
+def test_the_runner_refuses_a_result_schema_it_cannot_make_a_tool_from(schema: Any) -> None:
+    job = _job()
+    job["implementer"]["resultSchema"] = schema
+
+    with pytest.raises(runner_job.JobError) as refused:
+        runner_job.parse_implementer_input(json.dumps(job))
+
+    assert refused.value.code is ErrorCode.INVALID_JOB
+
+
+# #843-T50
+def test_the_example_of_the_agent_result_is_valid_in_the_result_and_fits_the_example_schema() -> (
+    None
+):
+    from code_reviewer_runner.implementer import finish_tool
+
+    value = _load(EXAMPLES / "ImplementerAgentResult.json")
+    assert _accepts("ImplementerAgentResult", value)
+    schema = _load(EXAMPLES / "ImplementerResultSchema.json")
+    assert finish_tool.check_value(schema, value) == []
+    result = _result()
+    result["implementer"]["agentResult"] = value
+    assert _accepts("RunnerResult", result)
+    result["implementer"]["agentResult"] = []
+    assert not _accepts("RunnerResult", result)
+
+
+# #843-T50
+def test_the_feature_that_reads_the_result_schema_is_in_the_contract_and_named_by_the_worker() -> (
+    None
+):
+    from code_reviewer_runner.job_loop.worker_api import WORKER_FEATURES
+
+    features = _schema()["$defs"]["KnownClaimFeature"]["enum"]
+
+    assert "implementer_result" in features
+    assert "implementer_result" in WORKER_FEATURES
 
 
 def test_the_example_of_the_result_is_valid() -> None:

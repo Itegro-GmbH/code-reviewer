@@ -37,3 +37,8 @@ export function turnResultOf(result: unknown): TurnResult {
       : null;
   return { headCommit, opencode, summary };
 }
+
+/** The result the agent handed in, as the stored report of the turn has it (#843); undefined for a report without one. */
+export function agentResultOf(result: unknown): unknown {
+  return recordOf(recordOf(result)?.implementer)?.agentResult;
+}

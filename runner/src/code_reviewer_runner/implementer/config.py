@@ -19,7 +19,7 @@ send a request to other than the door's. The runner's own configuration below is
 `OPENCODE_CONFIG` file; a repository's file is merged over it and cannot take those away.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from code_reviewer_runner.dynamic_review.config import checked_native_provider
@@ -46,6 +46,40 @@ ALLOWED_TOOLS: tuple[str, ...] = (
 DENIED_TOOLS: tuple[str, ...] = ("webfetch", "websearch", "task", "question")
 
 
+# The one MCP server of the engine, when the turn has a result schema (#843): the finish tool. The
+# engine names an MCP tool `<server>_<tool>`, so the agent's tool is `finish_submit_result`.
+FINISH_MCP_SERVER = "finish"
+FINISH_TOOL_NAME = "submit_result"
+# How long the engine waits for the server to start and to answer (the engine's default is five
+# seconds for the start; a call is a check and a file write).
+FINISH_MCP_TIMEOUT_MS = 20_000
+
+
+def finish_mcp_block(
+    command: Sequence[str], environment: Mapping[str, str] | None = None
+) -> dict[str, Any]:
+    """The `mcp` section of the engine's config with the finish tool: a local (stdio) server the
+    engine starts itself, inside the agent's container, from the runner's own file. Control writes
+    the file and the schema next to the engine's configuration; the server checks what the agent
+    hands in against the schema and writes the result file (`finish_tool.py`)."""
+    server: dict[str, Any] = {
+        "type": "local",
+        "command": list(command),
+        "enabled": True,
+        "timeout": FINISH_MCP_TIMEOUT_MS,
+    }
+    if environment:
+        server["environment"] = dict(environment)
+    return {FINISH_MCP_SERVER: server}
+
+
+def finish_permissions() -> dict[str, str]:
+    """The permission that lets the agent call the finish tool and nothing else of the server: the
+    tool by its exact name (the engine names it after the server, `finish_submit_result`), so a
+    second tool the server came to offer would stay denied."""
+    return {f"{FINISH_MCP_SERVER}_{FINISH_TOOL_NAME}": "allow"}
+
+
 def permission_block() -> dict[str, str]:
     """Default-deny first, then the explicit allows and denies (the wildcard is read first)."""
     permissions = {"*": "deny"}
@@ -63,6 +97,7 @@ def build_engine_config(
     capability: str,
     instructions_path: str,
     door_host: str | None = None,
+    finish_command: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """The whole engine configuration of one turn, as data the runner writes itself.
 
@@ -72,14 +107,21 @@ def build_engine_config(
     **asserted**, not trusted (`checked_native_provider`): a key the proxy did not expect, such as
     `headers`, would be the one way around it. The real key and the upstream address are not
     parameters of this function.
+
+    `finish_command` (#843) is the finish tool of a turn that has a result schema: the one MCP
+    server of the engine, a stdio process it starts itself in the agent's container, and the
+    permission to call it. Without it the config is what it was before result schemas.
     """
     checked_native_provider(
         provider, model_reference, family, proxy_url, capability, door_host=door_host
     )
     if not instructions_path.startswith("/"):
         raise ValueError("the instruction file must be an absolute path the runner wrote")
+    permission = permission_block()
+    if finish_command is not None:
+        permission.update(finish_permissions())
     return {
-        "permission": permission_block(),
+        "permission": permission,
         "agent": {
             IMPLEMENTER_AGENT: {
                 "description": "Implementer: carries out one task in the repository",
@@ -96,7 +138,7 @@ def build_engine_config(
         "instructions": [instructions_path],
         "skills": {"paths": []},
         "plugin": [],
-        "mcp": {},
+        "mcp": {} if finish_command is None else finish_mcp_block(finish_command),
         "lsp": False,
         "formatter": False,
         "snapshot": False,
@@ -128,11 +170,14 @@ _ENGINE_FLAGS: dict[str, str] = {
 AGENT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
-def implementer_environment(*, home: str, scratch_dir: str) -> dict[str, str]:
+def implementer_environment(
+    *, home: str, scratch_dir: str, config_directory: str | None = None
+) -> dict[str, str]:
     """The environment of the engine, which its tools inherit: the flags above, the agent's home and
     scratch directory, `PATH` and the few variables that make tools behave in a place nobody
     watches. Built from names, never by inheriting. It carries no credential of any kind; the
-    container has none to give."""
+    container has none to give. `config_directory` (#843) is put first on `PATH` when the turn has
+    a finish tool, so that the command `factory-submit` in it is found."""
     environment = dict(_ENGINE_FLAGS)
     environment["HOME"] = home
     environment["XDG_CONFIG_HOME"] = f"{home}/.config"
@@ -143,5 +188,7 @@ def implementer_environment(*, home: str, scratch_dir: str) -> dict[str, str]:
     environment["CI"] = "1"
     environment["NO_COLOR"] = "1"
     environment["GIT_TERMINAL_PROMPT"] = "0"
-    environment["PATH"] = AGENT_PATH
+    environment["PATH"] = (
+        AGENT_PATH if config_directory is None else f"{config_directory}:{AGENT_PATH}"
+    )
     return environment

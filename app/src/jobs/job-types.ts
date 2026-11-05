@@ -10,6 +10,7 @@ import type { JsonValue } from "../integrations/types.ts";
 import type { JobKind, ProjectReviewKind } from "../job-kind/job-kind.ts";
 import type { JobStatus } from "../db/job-status.ts";
 import type { ModelChoice } from "../db/implementer-model-choice.ts";
+import type { StoredResultSchema } from "../db/agent-result.ts";
 import type {
   StoredImplementerSession,
   StoredImplementerTurn,
@@ -120,6 +121,8 @@ export type EnqueueImplementerTurnInput = {
   environment?: TurnEnvironment | null;
   /** A copy of the profile version the person chose (#843), made by the service from the workspace's own; null for none. */
   profile?: TurnProfile | null;
+  /** The result schema of the task (#843), already validated; null for none. */
+  resultSchema?: StoredResultSchema | null;
   /** The user who started the task. */
   createdBy: string;
   /** The login of that person on the provider, for the job's `actor_login`. */

@@ -96,6 +96,14 @@ the server. So the finish tool for Claude Code is a **stdio shim inside the cont
 schema (delivered with the config, like the OpenCode config) and hands the result to the runner through the exec channel,
 as the command does; or the door grows a per-run capability endpoint.
 
+**Built in #843.** The finish tool of the hosted Implementer is this shim: one standard-library program, `finish_tool.py`, is `factory-submit` (the
+command) and `factory-submit mcp` (the stdio MCP server with the tool `submit_result`) in the agent's container, and Control imports the same file for
+its own check; see [`implementer.md`](implementer.md#the-finish-tool). OpenCode 1.19.0 takes the server from its config (`mcp.finish`, `type: local`,
+the command the engine starts itself) and names the tool `finish_submit_result`; a test with the real binary and the strict fake provider hands in a
+wrong result and a right one through the tool and through the command (`runner/tests/engine/test_engine_implementer_finish.py`, and the Docker lane
+`runner/tests/lane/test_implementer_finish.py`). The result goes to a file on a directory of the work volume that Control reads through a reader, not
+over the exec channel; a harness of a runner reads the same directory.
+
 #### (c) `factory-submit` as a command through the Bash tool
 
 `echo '<json>' | factory-submit` on `PATH`: a rejected result is exit code 2 and a line on stderr; Claude Code returns

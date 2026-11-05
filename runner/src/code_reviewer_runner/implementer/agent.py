@@ -118,6 +118,7 @@ class ImplementerAgent:
         events_connect_seconds: float = EVENTS_CONNECT_SECONDS,
         transport: Transport = _http_request,
         redactor: Redactor | None = None,
+        files: Mapping[str, tuple[bytes, int]] | None = None,
     ) -> None:
         self.ledger = ledger
         self.command = tuple(command)
@@ -132,6 +133,8 @@ class ImplementerAgent:
         self._make_config = make_config
         # (file name, text): the runner's addition to the stock prompt, written next to the config.
         self._instructions = instructions
+        # #843: further files for the engine's configuration directory (the finish tool).
+        self._files = dict(files or {})
         self._environment = dict(environment)
         self._provider_id = provider_id
         self._startup_seconds = startup_seconds
@@ -161,6 +164,7 @@ class ImplementerAgent:
                 name: (text.encode("utf-8"), 0o644),
                 # The config carries the job's bearer for the model door: owner-only.
                 CONFIG_NAME: (json.dumps(config).encode("utf-8"), 0o600),
+                **self._files,
             }
         )
         environment = dict(self._environment)
