@@ -40,6 +40,7 @@ from code_reviewer_runner.factory_runner.base import (
     EXIT_REVOKED,
     EXIT_SHARED_DAEMON,
     EXIT_UPDATE_NEEDED,
+    EXIT_UPDATED,
 )
 from code_reviewer_runner.factory_runner.config import (
     RunnerConfig,
@@ -54,6 +55,13 @@ from code_reviewer_runner.factory_runner.service import (
     TIDY_RETRY_SECONDS,
     RunnerService,
     Seams,
+)
+from code_reviewer_runner.factory_runner.update import (
+    CURRENT_REFERENCE,
+    IMAGE_TAG_VARIABLE,
+    RELEASE_LABEL,
+    REPOSITORY,
+    UpdateError,
 )
 from code_reviewer_runner.implementer.docker_api import DockerError
 from code_reviewer_runner.implementer.result_channel import make_result_directory
@@ -266,6 +274,9 @@ class Rig:
         launcher: FakeLauncher | None = None,
         ready: bool = True,
         clock: Any = None,
+        environment: dict[str, str] | None = None,
+        auto_update: bool = True,
+        verify: Any = None,
     ) -> None:
         self.client = FakeClient()
         self.api = FakeJobApi()
@@ -274,9 +285,12 @@ class Rig:
         self.work = tmp_path / "work"
         self.work.mkdir()
         self.launcher = launcher or AutoLauncher()
-        self.environment = {"FACTORY_RUNNER_HOME": str(tmp_path / "home")}
+        self.environment = {"FACTORY_RUNNER_HOME": str(tmp_path / "home"), **(environment or {})}
         self.config = RunnerConfig(
-            url="https://app.example", credential=CREDENTIAL, labels=("linux",)
+            url="https://app.example",
+            credential=CREDENTIAL,
+            labels=("linux",),
+            auto_update=auto_update,
         )
         self.service = RunnerService(
             self.config,
@@ -289,6 +303,8 @@ class Rig:
                 wall=self.clock.wall,
                 launcher=lambda _grace: self.launcher,
                 docker=lambda: self.daemon,  # type: ignore[arg-type,return-value]
+                hostname=lambda: "runner-container",
+                verify=verify,
             ),
         )
 
@@ -984,3 +1000,156 @@ def test_a_credential_file_of_another_runner_is_not_overwritten_by_a_renewal(
     assert rig.client.renewals == 1 and rig.client.credentials == []  # the old one stays in use
     stored = load_config(rig.environment)
     assert (stored.runner_id, stored.credential) == ("runner-2", CREDENTIAL)
+
+
+# -- the update between jobs (#855) -----------------------------------------------------------
+
+
+UPDATE_DIGEST = "sha256:" + "c" * 64
+
+
+class ImageDaemon(FakeDaemon):
+    """A daemon that also knows images: the one this container runs (release 1) and, once pulled,
+    the release behind `stable`."""
+
+    def __init__(self, *, offered: int) -> None:
+        super().__init__()
+        self.offered = offered
+        self.images: dict[str, dict[str, Any]] = {
+            "sha256:own": {"Id": "sha256:own", "Config": {"Labels": {RELEASE_LABEL: "1"}}},
+            CURRENT_REFERENCE: {"Id": "sha256:own"},
+        }
+        self.pulls = 0
+
+    def inspect_container(self, name: str) -> dict[str, Any]:
+        if name == "runner-container":
+            return {"Image": "sha256:own"}
+        return super().inspect_container(name)
+
+    def inspect_image(self, reference: str) -> dict[str, Any]:
+        if reference not in self.images:
+            raise DockerError(404, "no such image")
+        return self.images[reference]
+
+    def request(self, method: str, path: str, *args: Any, **kwargs: Any) -> Any:
+        if not path.startswith("/images/"):
+            return super().request(method, path, *args, **kwargs)
+        if path.startswith("/images/create"):
+            self.pulls += 1
+            image = {
+                "Id": "sha256:new",
+                "RepoDigests": [f"{REPOSITORY}@{UPDATE_DIGEST}"],
+                "Config": {"Labels": {RELEASE_LABEL: str(self.offered)}},
+            }
+            self.images[f"{REPOSITORY}:stable"] = image
+            self.images[f"{REPOSITORY}@{UPDATE_DIGEST}"] = image
+        elif "/tag?" in path and path.endswith("repo=factory-runner&tag=current"):
+            self.images[CURRENT_REFERENCE] = self.images[
+                path.split("/images/")[1].split("/tag?")[0]
+            ]
+        return None
+
+
+class UpdateRig(Rig):
+    def __init__(self, tmp_path: Path, *, offered: int = 2, **kwargs: Any) -> None:
+        self.verified: list[str] = []
+        self.refuse = False
+        super().__init__(
+            tmp_path,
+            environment={IMAGE_TAG_VARIABLE: CURRENT_REFERENCE},
+            verify=self._verify,
+            **kwargs,
+        )
+        self.daemon = ImageDaemon(offered=offered)
+        self.service._tidy = replace(self.service._tidy, api=lambda: self.daemon)  # type: ignore[arg-type,return-value]
+        self.service._updates._api = lambda: self.daemon  # type: ignore[assignment,return-value]
+
+    def _verify(self, reference: str) -> None:
+        self.verified.append(reference)
+        if self.refuse:
+            raise UpdateError("the signature of the image could not be verified: not our release")
+
+
+def test_a_staged_image_is_switched_to_between_jobs_and_nothing_is_claimed_first(
+    tmp_path: Path,
+) -> None:
+    rig = UpdateRig(tmp_path)
+    rig.daemon.images[CURRENT_REFERENCE] = {"Id": "sha256:new"}  # `factory-runner update` did it
+    rig.client.claims = [implementer_claim()]
+
+    assert rig.go(once=False) == EXIT_UPDATED
+    assert rig.client.claim_calls == 0
+
+
+def test_a_job_that_is_running_is_never_interrupted_by_an_update(tmp_path: Path) -> None:
+    rig = UpdateRig(tmp_path)
+    daemon = rig.daemon
+
+    class Staging(AutoLauncher):
+        async def start(self, spec: Any) -> Any:
+            daemon.images[CURRENT_REFERENCE] = {"Id": "sha256:new"}  # staged during the job
+            return await super().start(spec)
+
+    rig.launcher = Staging()
+    rig.client.claims = [implementer_claim(), implementer_claim(2)]
+
+    assert rig.go(once=False) == EXIT_UPDATED
+    assert rig.client.claim_calls == 1
+    assert rig.api.completions[0][2]["ok"] is True  # the job ended and was reported first
+
+
+def test_the_once_mode_and_a_runner_without_a_supervisor_never_switch(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    once = UpdateRig(tmp_path / "a")
+    once.daemon.images[CURRENT_REFERENCE] = {"Id": "sha256:new"}
+    assert once.go(once=True, wait=0) == EXIT_OK
+
+    # No FACTORY_RUNNER_IMAGE_TAG: somebody's `docker run`, nobody would start it again.
+    free = Rig(tmp_path / "b")
+    assert free.go(once=True, wait=0) == EXIT_OK
+
+
+def test_the_first_look_for_a_release_comes_minutes_after_the_start_not_at_it(
+    tmp_path: Path,
+) -> None:
+    rig = UpdateRig(tmp_path)
+    rig.client.claims = [*([None] * 30), Revoked("no", 401)]
+
+    assert rig.go(once=False) == EXIT_UPDATED  # the release 2 behind `stable` was staged
+    # 30 s polls: the check was due after 600 s, i.e. after about 20 of them.
+    assert 15 <= rig.client.claim_calls <= 25
+    assert rig.daemon.pulls == 1
+    assert rig.verified == [f"{REPOSITORY}@{UPDATE_DIGEST}"]
+
+
+def test_a_runner_with_automatic_updates_off_does_not_look_by_itself(tmp_path: Path) -> None:
+    rig = UpdateRig(tmp_path, auto_update=False)
+    rig.client.claims = [*([None] * 30), Revoked("no", 401)]
+
+    assert rig.go(once=False) == EXIT_REVOKED
+    assert rig.daemon.pulls == 0
+
+
+def test_update_needed_looks_at_once_even_with_automatic_updates_off(tmp_path: Path) -> None:
+    rig = UpdateRig(tmp_path, auto_update=False)
+    rig.client.claims = [UpdateNeeded("1.4.0")]
+
+    assert rig.go(once=False) == EXIT_UPDATED
+    assert rig.daemon.pulls == 1
+
+
+def test_an_update_needed_that_cannot_be_met_is_said_and_waits_as_before(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    rig = UpdateRig(tmp_path)
+    rig.refuse = True
+    rig.client.claims = [UpdateNeeded("1.4.0"), Revoked("no", 401)]
+
+    with caplog.at_level(logging.WARNING):
+        assert rig.go(once=False) == EXIT_REVOKED
+
+    assert "no update: the signature of the image could not be verified" in caplog.text
+    assert CURRENT_REFERENCE in rig.daemon.images and rig.daemon.images[CURRENT_REFERENCE] == {
+        "Id": "sha256:own"
+    }

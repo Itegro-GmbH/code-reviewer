@@ -32,6 +32,7 @@ import asyncio
 import logging
 import random
 import signal
+import socket
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -52,6 +53,7 @@ from code_reviewer_runner.factory_runner.base import (
     EXIT_REVOKED,
     EXIT_SHARED_DAEMON,
     EXIT_UPDATE_NEEDED,
+    EXIT_UPDATED,
 )
 from code_reviewer_runner.factory_runner.config import (
     CREDENTIAL_FROM_FILE,
@@ -72,6 +74,7 @@ from code_reviewer_runner.factory_runner.housekeeping import (
 from code_reviewer_runner.factory_runner.job_api import RunnerJobApi
 from code_reviewer_runner.factory_runner.prepare import Prepared
 from code_reviewer_runner.factory_runner.selftest import summary
+from code_reviewer_runner.factory_runner.update import UpdatePolicy
 from code_reviewer_runner.implementer.agent_container import AGENT_IMAGE_REFERENCE
 from code_reviewer_runner.implementer.docker_api import DockerApi
 from code_reviewer_runner.job import IMPLEMENTER_WORK_DIR, IMPLEMENTER_WORK_DIR_VARIABLE
@@ -106,6 +109,9 @@ class Seams:
     jitter: Callable[[], float] = random.random
     launcher: Callable[[float], ProcessLauncher] = SubprocessLauncher
     docker: Callable[[], DockerApi] = DockerApi
+    hostname: Callable[[], str] = socket.gethostname
+    # What proves an image for the self-update (`cosign verify` in production).
+    verify: Callable[[str], None] | None = None
 
 
 class RunnerService:
@@ -142,6 +148,16 @@ class RunnerService:
             api=seams.docker,
             work_dir=Path(environment_work_dir(prepared.environment)),
             runner_id=runner_identity(config),
+        )
+        self._updates = UpdatePolicy(
+            seams.docker,
+            environment,
+            auto_update=config.auto_update,
+            hostname=seams.hostname,
+            now=seams.wall,
+            jitter=seams.jitter,
+            verify=seams.verify,
+            logger=self._logger,
         )
 
     # -- the run ---------------------------------------------------------------------------------
@@ -193,6 +209,9 @@ class RunnerService:
                 await self._wait(TIDY_RETRY_SECONDS)
                 continue
             await self._renew_if_due()
+            # Between jobs, never during one: a staged image is switched to here (`update.py`).
+            if not once and await asyncio.to_thread(self._updates.switch_due):
+                return EXIT_UPDATED
             try:
                 claimed = await asyncio.to_thread(self._client.claim)
             except Revoked:
@@ -207,6 +226,10 @@ class RunnerService:
                 )
                 if once:
                     return EXIT_UPDATE_NEEDED
+                # The minimum version is the app's: look for the release at once, whatever the
+                # setting for automatic updates says.
+                if await asyncio.to_thread(self._updates.switch_due, needed=True):
+                    return EXIT_UPDATED
                 await self._wait(UPDATE_NEEDED_WAIT_SECONDS)
                 continue
             except ApiUnavailable as error:
