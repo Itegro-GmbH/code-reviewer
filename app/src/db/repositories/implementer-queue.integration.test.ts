@@ -321,10 +321,12 @@ describe("the one queued instruction", () => {
 
     const discarded = await f.sessionsA.discardQueued(
       f.started.session.id,
+      "request-q",
       "branch_gone",
     );
     const again = await f.sessionsA.discardQueued(
       f.started.session.id,
+      "request-q",
       "branch_gone",
     );
 
@@ -344,6 +346,78 @@ describe("the one queued instruction", () => {
   });
 });
 
+describe("discarding the queued instruction", () => {
+  // #841-D10b (review of #871, S1): a caller that read instruction A must not discard B, which was queued after A started
+  it("leaves a newer instruction alone when the caller's one has started and ended, and a newer one waits", async () => {
+    const f = await setup();
+    await f.sessionsA.queueInstruction(f.started.session.id, queued());
+    await endFirstTurn(f);
+    // A: read by the caller, then started by someone else.
+    const startedA = await f.sessionsA.startFollowUpTurn(
+      turn(f.started.session.id, { fromQueued: true }),
+      jobOf(f.idA, f.a.repositoryId, f.a.repoUrl, "a-turn"),
+    );
+    if (startedA.status !== "started") throw new Error("A did not start");
+    // B is queued behind A's turn, and A's turn ends.
+    await f.sessionsA.queueInstruction(
+      f.started.session.id,
+      queued({ clientRequestId: "request-b", instruction: "B words." }),
+    );
+    await f.db
+      .updateTable("jobs")
+      .set({ status: "succeeded", finished_at: T })
+      .where("id", "=", startedA.turn.jobId)
+      .execute();
+    await f.sessionsA.recordTurnResult(f.started.session.id, {
+      headCommit: null,
+      opencode: null,
+      summary: null,
+    });
+
+    // The stale discard of A, with the reason A's caller found.
+    const stale = await f.sessionsA.discardQueued(
+      f.started.session.id,
+      "request-q",
+      "branch_gone",
+    );
+
+    expect(stale).toBeUndefined();
+    expect(await f.sessionsA.getSession(f.started.session.id)).toMatchObject({
+      status: "idle",
+      queued: { clientRequestId: "request-b", instruction: "B words." },
+      discarded: null,
+    });
+    // B's own caller still discards B.
+    expect(
+      await f.sessionsA.discardQueued(
+        f.started.session.id,
+        "request-b",
+        "github_unavailable",
+      ),
+    ).toMatchObject({
+      queued: null,
+      discarded: { reason: "github_unavailable", instruction: "B words." },
+    });
+  });
+
+  // #841-D10c
+  it("discards nothing while the session runs: a queued instruction waits for the end of the turn", async () => {
+    const f = await setup();
+    await f.sessionsA.queueInstruction(f.started.session.id, queued());
+
+    expect(
+      await f.sessionsA.discardQueued(
+        f.started.session.id,
+        "request-q",
+        "branch_gone",
+      ),
+    ).toBeUndefined();
+    expect(
+      (await f.sessionsA.getSession(f.started.session.id))?.queued,
+    ).toMatchObject({ clientRequestId: "request-q" });
+  });
+});
+
 describe("the sessions that hold an instruction", () => {
   // #841-D11
   it("are found whatever the workspace, when idle with an instruction queued, and not while the turn runs", async () => {
@@ -353,13 +427,88 @@ describe("the sessions that hold an instruction", () => {
     await f.sessionsA.queueInstruction(f.started.session.id, queued());
     await sessionsB.queueInstruction(startedB.session.id, queued());
 
-    expect(await sessionsWithQueuedInstruction(f.db, 10)).toEqual([]);
+    expect(await sessionsWithQueuedInstruction(f.db, 10, T)).toEqual([]);
 
     await endFirstTurn(f);
-    expect(await sessionsWithQueuedInstruction(f.db, 10)).toEqual([
+    expect(await sessionsWithQueuedInstruction(f.db, 10, T)).toEqual([
       { workspaceId: f.idA, sessionId: f.started.session.id },
     ]);
-    expect(await sessionsWithQueuedInstruction(f.db, 0)).toEqual([]);
+    expect(await sessionsWithQueuedInstruction(f.db, 0, T)).toEqual([]);
+  });
+
+  // #841-D11b (review of #871, S2): never tried first, then the longest ago; a session tried lately waits for the backoff
+  it("are ordered by the last try, never tried first, and one tried since the cut-off is left out", async () => {
+    const f = await setup();
+    const second = await startTask(
+      f.db,
+      f.idA,
+      { ...taskOf(f.a), branch: "implementer/second" },
+      f.a.repoUrl,
+    );
+    const third = await startTask(
+      f.db,
+      f.idA,
+      { ...taskOf(f.a), branch: "implementer/third" },
+      f.a.repoUrl,
+    );
+    for (const session of [f.started.session, second.session, third.session])
+      await f.sessionsA.queueInstruction(session.id, queued());
+    await f.db
+      .updateTable("implementer_sessions")
+      .set({ status: "idle" })
+      .execute();
+    const triedAt = (id: string, at: string) =>
+      f.db
+        .updateTable("implementer_sessions")
+        .set({ queued_attempted_at: at })
+        .where("id", "=", id)
+        .execute();
+    await triedAt(f.started.session.id, "2026-11-05T11:00:00.000Z");
+    await triedAt(second.session.id, "2026-11-05T09:00:00.000Z");
+
+    const due = await sessionsWithQueuedInstruction(
+      f.db,
+      10,
+      "2026-11-05T10:30:00.000Z",
+    );
+
+    expect(due.map((d) => d.sessionId)).toEqual([
+      third.session.id,
+      second.session.id,
+    ]);
+    expect(
+      (
+        await sessionsWithQueuedInstruction(f.db, 1, "2026-11-05T10:30:00.000Z")
+      ).map((d) => d.sessionId),
+    ).toEqual([third.session.id]);
+  });
+
+  // #841-D11c
+  it("notes the try without touching updated_at, for the instruction asked about only, and clears it with the instruction", async () => {
+    const f = await setup();
+    await f.sessionsA.queueInstruction(f.started.session.id, queued());
+    await endFirstTurn(f);
+    const before = await f.sessionsA.getSession(f.started.session.id);
+    const row = () =>
+      f.db
+        .selectFrom("implementer_sessions")
+        .select(["queued_attempted_at", "updated_at"])
+        .where("id", "=", f.started.session.id)
+        .executeTakeFirstOrThrow();
+
+    await f.sessionsA.noteQueuedAttempt(f.started.session.id, "request-other");
+    expect((await row()).queued_attempted_at).toBeNull();
+    await f.sessionsA.noteQueuedAttempt(f.started.session.id, "request-q");
+
+    const noted = await row();
+    expect(noted.queued_attempted_at).not.toBeNull();
+    expect(noted.updated_at).toBe(before?.updatedAt);
+    await f.sessionsA.discardQueued(
+      f.started.session.id,
+      "request-q",
+      "branch_gone",
+    );
+    expect((await row()).queued_attempted_at).toBeNull();
   });
 });
 

@@ -301,8 +301,16 @@ export function ContinueForm({
     if (result.ok && result.data.status === "started" && result.data.runId) {
       // Stay "sending" until the page changes: a second click on the way must not start a second turn.
       setAccepted({ runId: result.data.runId });
-      router.push(runPath(result.data.runId));
-      return;
+      try {
+        router.push(runPath(result.data.runId));
+        return;
+      } catch {
+        // The navigation failed: the run exists, so the link under the form stays, and the form is released again (a send of the same
+        // body finds that run by its request id).
+        sending.current = false;
+        setPending(false);
+        return;
+      }
     }
     sending.current = false;
     setPending(false);

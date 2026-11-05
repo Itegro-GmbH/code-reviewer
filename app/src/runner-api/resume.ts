@@ -33,6 +33,12 @@ const COMMIT_SHA = /^[0-9a-f]{40}$/;
 // Control characters other than tab and line feed. They have no place in text the runner hands on, and a NUL ends a C string.
 const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f]/g;
 
+// A surrogate half with no partner: not text (UTF-8 cannot hold it, and a JSON encoder may write it as an escape the reader refuses).
+const LONE_SURROGATE =
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+// The line breaks of a text, with the Unicode ones: in the digest an entry is one line.
+const LINE_BREAKS = /[\r\n\u0085\u2028\u2029]+/g;
+
 export type ResumeBlock = ImplementerJobResume;
 
 export type ResumeInput = {
@@ -50,9 +56,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** The text without control characters, cut to at most `max` bytes of UTF-8 on a character boundary. */
+/** The text without control characters and lone surrogates, cut to at most `max` bytes of UTF-8 on a character boundary. */
 export function cutBytes(text: string, max: number): string {
-  const clean = text.replace(CONTROL, " ");
+  const clean = text.replace(CONTROL, " ").replace(LONE_SURROGATE, "");
   if (Buffer.byteLength(clean, "utf8") <= max) return clean;
   let out = "";
   let used = 0;
@@ -145,6 +151,11 @@ function branchesOf(
   return ordered.slice(0, MAX_RESUME_BRANCHES);
 }
 
+/** `cutBytes` of one line: a line break becomes a space, so that a text cannot start an entry of its own in the digest. */
+function cutLine(text: string, max: number): string {
+  return cutBytes(text.replace(LINE_BREAKS, " ").trim(), max);
+}
+
 function digestOf(
   history: readonly TurnHistoryEntry[],
   reports: ReadonlyArray<Reported | null>,
@@ -157,7 +168,7 @@ function digestOf(
     lines.push("", "Earlier instructions, oldest first:");
     for (const entry of lastInstructions)
       lines.push(
-        `- turn ${String(entry.number)}: ${cutBytes(entry.instruction, DIGEST_INSTRUCTION_BYTES)}`,
+        `- turn ${String(entry.number)}: ${cutLine(entry.instruction, DIGEST_INSTRUCTION_BYTES)}`,
       );
   }
   const summaries: string[] = [];
@@ -165,7 +176,7 @@ function digestOf(
     const summary = reports[index]?.summary;
     if (summary !== null && summary !== undefined)
       summaries.push(
-        `- turn ${String(entry.number)}: ${cutBytes(summary, DIGEST_SUMMARY_BYTES)}`,
+        `- turn ${String(entry.number)}: ${cutLine(summary, DIGEST_SUMMARY_BYTES)}`,
       );
   });
   if (summaries.length > 0)
@@ -183,7 +194,7 @@ function digestOf(
       if (!seen.has(commit.sha)) {
         seen.add(commit.sha);
         subjects.push(
-          `- ${commit.sha.slice(0, 7)} ${cutBytes(commit.subject, DIGEST_SUBJECT_BYTES)}`,
+          `- ${commit.sha.slice(0, 7)} ${cutLine(commit.subject, DIGEST_SUBJECT_BYTES)}`,
         );
       }
     for (const file of report.files)
@@ -195,7 +206,7 @@ function digestOf(
     lines.push(
       "",
       `Changed files (the first ${String(DIGEST_FILES)}):`,
-      ...[...files].map((file) => `- ${cutBytes(file, DIGEST_PATH_BYTES)}`),
+      ...[...files].map((file) => `- ${cutLine(file, DIGEST_PATH_BYTES)}`),
     );
   return cutBytes(lines.join("\n"), MAX_DIGEST_BYTES);
 }

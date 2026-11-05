@@ -6,8 +6,10 @@
 // import it back (`src/ci/import-cycles`).
 import "server-only";
 import { getCapabilities } from "../capabilities/shared.ts";
+import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
 import { sessionsWithQueuedInstruction } from "../db/repositories/implementer-sessions-sweep.ts";
 import { getDatabase } from "../db/startup.ts";
+import type { Job } from "../jobs/job-types.ts";
 import {
   createQueuedFollowUpStarter,
   type QueuedFollowUpStarter,
@@ -16,7 +18,15 @@ import { implementerServiceFor } from "./shared.ts";
 
 export function getQueuedFollowUpStarter(): QueuedFollowUpStarter {
   return createQueuedFollowUpStarter({
-    due: (limit) => sessionsWithQueuedInstruction(getDatabase(), limit),
+    due: (limit, retryAfter) =>
+      sessionsWithQueuedInstruction(getDatabase(), limit, retryAfter),
+    sessionOfJob: async (workspaceId, jobId) =>
+      (
+        await createImplementerRepository(
+          getDatabase(),
+          workspaceId,
+        ).getTurnByJob(jobId)
+      )?.session.id,
     // The service of the instruction's workspace on that workspace's job queue, which wakes the Dispatcher like any submit.
     start: (workspaceId, sessionId) =>
       implementerServiceFor(workspaceId).startQueued(sessionId),
@@ -24,10 +34,13 @@ export function getQueuedFollowUpStarter(): QueuedFollowUpStarter {
 }
 
 /**
- * Starts the instructions that waited for a turn which has just ended. Called by the hook at the end of a turn, after the response, and
- * never rejects (a failure is counted and logged by the starter). A deployment without the capability has none.
+ * Starts the instruction that waited for the turn which has just ended: the one of that turn's session and no other (the sweep takes
+ * the rest, with its backoff, so a rate-limited platform is not asked once per event). Called by the hook at the end of a turn, after
+ * the response, and never rejects (a failure is counted and logged by the starter). A deployment without the capability has none.
  */
-export async function startQueuedFollowUps(): Promise<void> {
+export async function startQueuedFollowUps(
+  job: Pick<Job, "id" | "workspaceId">,
+): Promise<void> {
   if (!getCapabilities().has("implementer")) return;
-  await getQueuedFollowUpStarter().startDue();
+  await getQueuedFollowUpStarter().startForJob(job);
 }

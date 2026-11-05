@@ -6,7 +6,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const hoisted = vi.hoisted(() => ({
-  startQueuedFollowUps: vi.fn<() => Promise<void>>(),
+  startQueuedFollowUps:
+    vi.fn<(job: { id: string; workspaceId: string }) => Promise<void>>(),
   database: vi.fn<() => unknown>(),
   scheduled: [] as Array<Promise<void>>,
 }));
@@ -46,6 +47,21 @@ describe("the hook at the end of a turn", () => {
     await Promise.all(hoisted.scheduled);
 
     expect(hoisted.startQueuedFollowUps).toHaveBeenCalledOnce();
+  });
+
+  // #841-W03 (review of #871, S2): the hook starts the session of the job that ended, not every session with a queue
+  it("hands the starter the job that ended", async () => {
+    hoisted.database.mockImplementation(() => {
+      throw new Error("the database is down");
+    });
+
+    turnEnded({ id: "job-7", workspaceId: "w-3" });
+    await Promise.all(hoisted.scheduled);
+
+    expect(hoisted.startQueuedFollowUps).toHaveBeenCalledWith({
+      id: "job-7",
+      workspaceId: "w-3",
+    });
   });
 
   // #841-W02

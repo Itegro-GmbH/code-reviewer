@@ -2027,7 +2027,17 @@ const CASES: Case[] = [
   {
     name: "implementer.discardQueued",
     run: (a, b) =>
-      a.implementer.discardQueued(taskOf(b).session.id, "branch_gone"),
+      a.implementer.discardQueued(
+        taskOf(b).session.id,
+        "request-a",
+        "branch_gone",
+      ),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "implementer.noteQueuedAttempt",
+    run: (a, b) =>
+      a.implementer.noteQueuedAttempt(taskOf(b).session.id, "request-a"),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {

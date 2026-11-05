@@ -63,12 +63,15 @@ export type FollowUpDependencies = {
     | "lastTurn"
     | "queueInstruction"
     | "discardQueued"
+    | "noteQueuedAttempt"
   >;
   steps: Pick<ImplementerStepsRepository, "lastStep">;
   queue: Pick<JobQueue, "enqueueFollowUpTurn" | "findImplementerTurn">;
   /** The operator's maximum cost per turn in whole US cents, read for each call. */
   operatorCostLimitCents(): Promise<number>;
   log?: (line: string) => void;
+  /** The clock, for how long an instruction has waited. */
+  now?: () => Date;
 };
 
 /** What the submit did. `queued`: a turn runs, and the instruction starts when it ends. */
@@ -137,6 +140,9 @@ const BRANCH_GONE = () =>
     "The branch of this session is no longer on GitHub. Start a new task.",
   );
 
+/** How long a queued instruction waits for a start before it is discarded as `github_unavailable`, counted from when it was queued. */
+export const QUEUED_INSTRUCTION_TTL_MS = 24 * 60 * 60 * 1000;
+
 /** Tries to attempt the write this many times when the session changes under it (it ended, or an instruction was queued by someone else). */
 const WRITE_ATTEMPTS = 3;
 
@@ -149,12 +155,23 @@ type Choices = {
   resultSchema: StoredResultSchema | null;
 };
 
+/** An id that can be looked up: a string without a NUL byte, not empty and not longer than any id of ours. */
+function isPlausibleId(id: unknown): id is string {
+  return (
+    typeof id === "string" &&
+    id !== "" &&
+    id.length <= MAX_ID_LENGTH &&
+    !id.includes("\u0000")
+  );
+}
+
 function profileRefOf(profile: TurnProfile | null): string | null {
   return profile === null ? null : `${profile.name}@${String(profile.version)}`;
 }
 
 export function createFollowUps(deps: FollowUpDependencies): FollowUps {
   const log = deps.log ?? ((line) => console.info(line));
+  const now = deps.now ?? (() => new Date());
 
   /**
    * The tip a turn is accepted at: the session's branch when it has pushed one (it must still be there), else the base branch. A
@@ -263,6 +280,34 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
     return { model, costLimitCents, environment, profile, resultSchema };
   }
 
+  /** Whether what a repeated body asks for is what the earlier turn, or the instruction still queued, was made with (left out is not compared). */
+  function sameAsked(
+    held: {
+      instruction: string;
+      modelChoice: ModelChoice;
+      costLimitCents: number | null;
+      environment: TurnEnvironment | null;
+      profile: TurnProfile | null;
+    },
+    input: ContinueInput,
+  ): boolean {
+    return (
+      held.instruction === input.instruction &&
+      (input.model === undefined || sameModel(held.modelChoice, input.model)) &&
+      (input.costLimitCents === undefined ||
+        held.costLimitCents === input.costLimitCents) &&
+      (input.environmentId === undefined ||
+        (held.environment?.id ?? null) === input.environmentId) &&
+      (input.profile === undefined ||
+        (input.profile === null
+          ? held.profile === null
+          : held.profile !== null &&
+            held.profile.name === input.profile.name &&
+            (input.profile.version === null ||
+              held.profile.version === input.profile.version)))
+    );
+  }
+
   /** The answer for a request id that made a turn before: that turn when it is the same instruction on the same session, else the conflict. */
   function repeatOfTurn(
     earlier: EnqueueImplementerTurnResult,
@@ -270,23 +315,7 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
     input: ContinueInput,
   ): ContinuedSession {
     const { session, turn } = earlier;
-    const same =
-      session.id === sessionId &&
-      turn.number >= 2 &&
-      turn.instruction === input.instruction &&
-      (input.model === undefined || sameModel(turn.modelChoice, input.model)) &&
-      (input.costLimitCents === undefined ||
-        turn.costLimitCents === input.costLimitCents) &&
-      (input.environmentId === undefined ||
-        (turn.environment?.id ?? null) === input.environmentId) &&
-      (input.profile === undefined ||
-        (input.profile === null
-          ? turn.profile === null
-          : turn.profile !== null &&
-            turn.profile.name === input.profile.name &&
-            (input.profile.version === null ||
-              turn.profile.version === input.profile.version)));
-    if (!same)
+    if (session.id !== sessionId || turn.number < 2 || !sameAsked(turn, input))
       throw new ImplementerError(
         "IMPLEMENTER_REQUEST_REUSED",
         "This request id made another task.",
@@ -305,7 +334,7 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
     session: StoredImplementerSession,
     input: ContinueInput,
   ): ContinuedSession {
-    if (session.queued?.instruction !== input.instruction)
+    if (session.queued === null || !sameAsked(session.queued, input))
       throw new ImplementerError(
         "IMPLEMENTER_REQUEST_REUSED",
         "This request id made another task.",
@@ -319,16 +348,36 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
     };
   }
 
-  /** Discards the queued instruction and says why in the log (the instruction is never logged). */
+  /**
+   * Discards the instruction this call read, and no other: when a newer one is queued by now (this one started, and the turn ended)
+   * nothing is discarded and the outcome is `nothing`. Says why in the log (the instruction is never logged).
+   */
   async function discard(
     session: StoredImplementerSession,
+    queued: QueuedInstruction,
     reason: DiscardReason,
   ): Promise<StartQueuedOutcome> {
-    await deps.sessions.discardQueued(session.id, reason);
+    const discarded = await deps.sessions.discardQueued(
+      session.id,
+      queued.clientRequestId,
+      reason,
+    );
+    if (discarded === undefined) return { status: "nothing" };
     log(
       `[implementer] queued instruction discarded session=${session.id} reason=${reason}`,
     );
     return { status: "discarded", reason };
+  }
+
+  /** The platform could not be asked: the instruction waits for the next try, unless it has waited for `QUEUED_INSTRUCTION_TTL_MS`. */
+  function retryOrExpire(
+    session: StoredImplementerSession,
+    queued: QueuedInstruction,
+  ): Promise<StartQueuedOutcome> {
+    const waited = now().getTime() - Date.parse(queued.queuedAt);
+    if (waited >= QUEUED_INSTRUCTION_TTL_MS)
+      return discard(session, queued, "github_unavailable");
+    return Promise.resolve({ status: "retry" });
   }
 
   return {
@@ -341,13 +390,7 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
           { issues: checked.issues },
         );
       const input = checked.value;
-      if (
-        typeof sessionId !== "string" ||
-        sessionId === "" ||
-        sessionId.length > MAX_ID_LENGTH ||
-        sessionId.includes("\u0000")
-      )
-        throw SESSION_NOT_FOUND();
+      if (!isPlausibleId(sessionId)) throw SESSION_NOT_FOUND();
       const session = await deps.sessions.getSession(sessionId);
       if (session === undefined) throw SESSION_NOT_FOUND();
 
@@ -426,9 +469,8 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
         if (result.status === "existing")
           return repeatOfTurn(result, session.id, input);
         if (result.status === "session_not_found") throw SESSION_NOT_FOUND();
-        if (result.status === "nothing_queued") continue;
 
-        // `busy`: a turn runs, or the turn that ended has an instruction that is about to start.
+        // `busy` (`nothing_queued` is only for `fromQueued`): a turn runs, or the turn that ended has an instruction that is about to start.
         const placed = await deps.sessions.queueInstruction(session.id, queued);
         if (placed.status === "queued") {
           log(
@@ -461,6 +503,8 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
       if (session === undefined || queued === null)
         return { status: "nothing" };
       if (session.status !== "idle") return { status: "nothing" };
+      // Before anything is asked of the platform: the sweep spaces its tries by this, whatever becomes of this one.
+      await deps.sessions.noteQueuedAttempt(session.id, queued.clientRequestId);
 
       // What could have changed since the instruction was queued: the repository, the installation, the branch, the model.
       let tip: string;
@@ -473,39 +517,39 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
       } catch (error) {
         if (error instanceof ImplementerError) {
           if (error.code === "IMPLEMENTER_BRANCH_GONE")
-            return discard(session, "branch_gone");
+            return discard(session, queued, "branch_gone");
           if (error.code === "IMPLEMENTER_WRITE_NOT_GRANTED")
-            return discard(session, "write_not_granted");
+            return discard(session, queued, "write_not_granted");
           if (
             error.code === "IMPLEMENTER_REPOSITORY_NOT_FOUND" ||
             error.code === "IMPLEMENTER_APP_NOT_INSTALLED" ||
             error.code === "IMPLEMENTER_BASE_BRANCH_NOT_FOUND"
           )
-            return discard(session, "repository_unavailable");
+            return discard(session, queued, "repository_unavailable");
           // The platform could not be asked: the instruction waits for the next try.
-          return { status: "retry" };
+          return retryOrExpire(session, queued);
         }
         // A failure the platform's own error type names as "no access" is the same as a repository that is gone.
         if (
           error instanceof IntegrationError &&
           noAccessReason(error) !== undefined
         )
-          return discard(session, "repository_unavailable");
-        return { status: "retry" };
+          return discard(session, queued, "repository_unavailable");
+        return retryOrExpire(session, queued);
       }
 
       if ((await deps.models.check(queued.modelChoice)) !== null)
-        return discard(session, "model_not_allowed");
+        return discard(session, queued, "model_not_allowed");
       if (
         queued.costLimitCents !== null &&
         queued.costLimitCents > (await deps.operatorCostLimitCents())
       )
-        return discard(session, "cost_limit_exceeded");
+        return discard(session, queued, "cost_limit_exceeded");
       if (
         queued.environment !== null &&
         !isEnvironmentVcpus(queued.environment.vcpus)
       )
-        return discard(session, "environment_unavailable");
+        return discard(session, queued, "environment_unavailable");
 
       const result = await deps.queue.enqueueFollowUpTurn({
         sessionId: session.id,
@@ -532,6 +576,8 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
     },
 
     async continuation(jobId) {
+      // An id the database would refuse (a NUL byte) or that is no id at all is a run that is not there, not a failure.
+      if (!isPlausibleId(jobId)) return undefined;
       const found = await deps.sessions.getTurnByJob(jobId);
       if (found === undefined) return undefined;
       const { turn, session } = found;

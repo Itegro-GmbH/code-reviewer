@@ -181,6 +181,30 @@ describe("the Continue form of an idle session", () => {
     );
   });
 
+  // #841-F20 (review of #871, N10): a navigation that fails releases the form, and the run stays linked
+  it("releases the form when the navigation to the new run fails, and sends the same request id again", async () => {
+    const api = fakeApi();
+    navigation.push.mockImplementation(() => {
+      throw new Error("navigation failed");
+    });
+    const user = userEvent.setup();
+    renderForm(api);
+    await shown();
+
+    await user.type(control("Next instruction"), "Now add a test.");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    await screen.findByRole("link", { name: CONTINUE_COPY.startedLink });
+    const again = await screen.findByRole("button", { name: "Continue" });
+    expect(again).toHaveProperty("disabled", false);
+    await user.click(again);
+
+    await waitFor(() => expect(api.continueSession).toHaveBeenCalledTimes(2));
+    expect(api.continueSession.mock.calls[1]?.[1]).toEqual(
+      api.continueSession.mock.calls[0]?.[1],
+    );
+  });
+
   // #841-F02: owner decisions 6 and 7: the model and the environment may change
   it("sends the model, the cost limit and the environment the person changed, and no other", async () => {
     const api = fakeApi();

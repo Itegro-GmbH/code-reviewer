@@ -60,6 +60,8 @@ const DISCARD_SENTENCES: Record<DiscardReason, string> = {
     "The cost limit you chose is above the maximum the operator allows now.",
   environment_unavailable:
     "The size of the environment is no longer offered. Change it under Environments.",
+  github_unavailable:
+    "GitHub could not be reached for a day, so the instruction was dropped. Send it again.",
 };
 
 /** The sentence for why a queued instruction did not start; an unknown word gets the general sentence. */

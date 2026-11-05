@@ -82,6 +82,8 @@ export const DISCARD_REASONS = [
   "model_not_allowed",
   "cost_limit_exceeded",
   "environment_unavailable",
+  /** The platform could not be asked for a day after the instruction was queued (`QUEUED_INSTRUCTION_TTL_MS`): it does not wait for good. */
+  "github_unavailable",
 ] as const;
 export type DiscardReason = (typeof DISCARD_REASONS)[number];
 
@@ -263,13 +265,21 @@ export type ImplementerRepository = {
     queued: QueuedInstruction,
   ): Promise<QueueResult>;
   /**
-   * #841: takes the queued instruction out and keeps it as discarded, with the reason. Returns the session, or undefined when nothing
-   * was queued (it started, or was discarded already): a repeated call changes nothing.
+   * #841: takes the queued instruction out and keeps it as discarded, with the reason. It discards the instruction that has this
+   * client request id, on an idle session, and nothing else: a caller that read instruction A, saw it start and B queued behind its
+   * turn must not remove B. Returns the session, or undefined when that instruction is not queued (it started, was discarded, or a
+   * newer one replaced it): a repeated call changes nothing.
    */
   discardQueued(
     sessionId: string,
+    clientRequestId: string,
     reason: DiscardReason,
   ): Promise<StoredImplementerSession | undefined>;
+  /**
+   * #841: notes that a start of the queued instruction with this client request id was tried now, for the sweep's order and backoff
+   * (`sessionsWithQueuedInstruction`). Changes nothing when that instruction is not queued any more.
+   */
+  noteQueuedAttempt(sessionId: string, clientRequestId: string): Promise<void>;
   /** #841: the newest turn of a session; undefined for a session without turn (it cannot be) or one that is not this workspace's. */
   lastTurn(sessionId: string): Promise<StoredImplementerTurn | undefined>;
   /** #841: the newest turns of a session, oldest first, at most `TURN_HISTORY_LIMIT`, each with its job's status and report. */
@@ -660,6 +670,7 @@ export function createImplementerRepository(
             status: "running",
             queued_instruction: null,
             queued_discarded: null,
+            queued_attempted_at: null,
             updated_at: timestamp,
           })
           .where("workspace_id", "=", workspaceId)
@@ -718,6 +729,7 @@ export function createImplementerRepository(
           .set({
             queued_instruction: JSON.stringify(queued),
             queued_discarded: null,
+            queued_attempted_at: null,
             updated_at: formatTimestamp(now()),
           })
           .where("workspace_id", "=", workspaceId)
@@ -728,19 +740,26 @@ export function createImplementerRepository(
       });
     },
 
-    async discardQueued(sessionId, reason) {
+    async discardQueued(sessionId, clientRequestId, reason) {
       return inTransaction(async (trx) => {
         const locked = await lockedSession(trx, sessionId);
-        const queued =
-          locked === undefined ? null : readQueued(locked.queued_instruction);
-        // A stored text that cannot be read is dropped as well, or the session would hold it for good.
-        if (locked === undefined || locked.queued_instruction === null)
+        if (
+          locked === undefined ||
+          locked.status !== "idle" ||
+          locked.queued_instruction === null
+        )
+          return undefined;
+        const queued = readQueued(locked.queued_instruction);
+        // Another instruction is queued now: the caller's has started (or was discarded) and must not take the newer one with it. A
+        // stored text that cannot be read is no instruction of anyone, and is dropped, or the session would hold it for good.
+        if (queued !== null && queued.clientRequestId !== clientRequestId)
           return undefined;
         const timestamp = formatTimestamp(now());
         const row = await trx
           .updateTable("implementer_sessions")
           .set({
             queued_instruction: null,
+            queued_attempted_at: null,
             queued_discarded: JSON.stringify({
               reason,
               instruction: queued?.instruction ?? "",
@@ -753,6 +772,23 @@ export function createImplementerRepository(
           .returningAll()
           .executeTakeFirstOrThrow();
         return sessionFrom(row);
+      });
+    },
+
+    async noteQueuedAttempt(sessionId, clientRequestId) {
+      return inTransaction(async (trx) => {
+        const locked = await lockedSession(trx, sessionId);
+        if (locked === undefined || locked.queued_instruction === null) return;
+        const queued = readQueued(locked.queued_instruction);
+        if (queued !== null && queued.clientRequestId !== clientRequestId)
+          return;
+        // Not `updated_at`: that is when the session became idle, which the Runs page may show.
+        await trx
+          .updateTable("implementer_sessions")
+          .set({ queued_attempted_at: formatTimestamp(now()) })
+          .where("workspace_id", "=", workspaceId)
+          .where("id", "=", sessionId)
+          .execute();
       });
     },
 

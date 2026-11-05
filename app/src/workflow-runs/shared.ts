@@ -111,7 +111,7 @@ export function turnEnded(job: Pick<Job, "id" | "workspaceId">): void {
   // wait for the engine, and neither can fail the other (`runAfterResponse` swallows what its work throws, and the starter counts and logs
   // its own failures). It lives here and not in the runner API because this module already depends on the Implementer; the runner API
   // importing it would be a new import cycle.
-  runAfterResponse(startQueuedFollowUps);
+  runAfterResponse(() => startQueuedFollowUps(job));
 }
 
 /**

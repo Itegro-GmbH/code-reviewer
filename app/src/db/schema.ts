@@ -1054,6 +1054,15 @@ export interface ImplementerSessionsTable {
     string | null | undefined,
     string | null
   >;
+  /**
+   * #841: when the sweep or the end of a turn last tried to start the queued instruction (ISO 8601 UTC); null before the first try.
+   * Orders the sweep and spaces its tries. Cleared with the instruction.
+   */
+  queued_attempted_at: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
 }
 
 /**
