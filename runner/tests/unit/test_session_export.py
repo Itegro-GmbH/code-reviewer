@@ -19,6 +19,8 @@ import pytest
 
 from code_reviewer_runner.implementer.session_export import (
     CAP_BYTES,
+    MAX_DEPTH,
+    MAX_INFO_BYTES,
     MAX_RAW_BYTES,
     PAGE_SIZE,
     ExportFailed,
@@ -203,6 +205,18 @@ def test_short_metadata_strings_of_a_compacted_part_are_kept() -> None:
     document = document_of(snapshot_of(Engine(messages)))
 
     assert document["messages"][0]["parts"][0]["state"]["metadata"]["output"] == "short"
+
+
+# #839-T03
+def test_a_compacted_part_without_metadata_stays_without_the_key() -> None:
+    part = tool_part(1, output="x", compacted=5)
+    del part["state"]["metadata"]
+
+    document = document_of(snapshot_of(Engine([message(1, [part])])))
+
+    state = document["messages"][0]["parts"][0]["state"]
+    assert "metadata" not in state
+    assert state["output"] == ""
 
 
 # #839-T03
@@ -596,10 +610,16 @@ def test_a_slow_computation_is_given_up_on_at_the_deadline_and_stops() -> None:
     with pytest.raises(ExportFailed) as caught:
         snapshot_of(Engine([message(1, [tool_part(1)])]), redactor=Slow([]), seconds=0.3)
     elapsed = time.monotonic() - began
+    at_deadline = calls[0]
     release.set()
 
     assert caught.value.reason is ExportReason.OUT_OF_TIME
     assert elapsed < 1.0
+    # The thread really ends once the call it was in returns, and starts no other.
+    for worker in [t for t in threading.enumerate() if t.name == "session-export"]:
+        worker.join(2.0)
+        assert not worker.is_alive()
+    assert calls[0] == at_deadline
 
 
 # -- a document made to be expensive ----------------------------------------------------------
@@ -666,6 +686,131 @@ def test_a_document_nested_past_the_parsers_own_limit_is_a_bad_answer() -> None:
         take_snapshot(hostile, SESSION, redactor=Redactor([]), seconds=10.0)
 
     assert caught.value.reason in (ExportReason.BAD_ANSWER, ExportReason.TOO_LARGE)
+
+
+# #839-T07
+@pytest.mark.parametrize(("extra", "reason"), [(0, None), (1, ExportReason.TOO_LARGE)])
+def test_the_depth_cap_lets_exactly_max_depth_levels_through(
+    extra: int, reason: ExportReason | None
+) -> None:
+    # The document, its messages, a message, its parts and a part are five levels already.
+    levels = MAX_DEPTH - 5 + extra
+    page = (
+        b'[{"info":{"id":"m"},"parts":[{"type":"text","x":'
+        + b"[" * levels
+        + b"]" * levels
+        + b"}]}]"
+    )
+
+    def deep(path: str, timeout: float) -> tuple[int, dict[str, str], bytes]:
+        return 200, {}, b"{}" if "/message" not in path else page
+
+    if reason is None:
+        assert document_of(take_snapshot(deep, SESSION, redactor=Redactor([]), seconds=10.0))
+        return
+    with pytest.raises(ExportFailed) as caught:
+        take_snapshot(deep, SESSION, redactor=Redactor([]), seconds=10.0)
+    assert caught.value.reason is reason
+
+
+# #839-T07
+def test_a_session_record_over_its_own_limit_is_refused_without_parsing_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parsed: list[int] = []
+    real = json.loads
+
+    def spy(text: Any, *args: Any, **kwargs: Any) -> Any:
+        parsed.append(len(text))
+        return real(text, *args, **kwargs)
+
+    monkeypatch.setattr(json, "loads", spy)
+    # Far below the 64 MiB of the messages, far over what a session record is: 700k empty lists.
+    info = b"[" + b",".join([b"[]"] * 700_000) + b"]"
+    assert MAX_INFO_BYTES < len(info) < MAX_RAW_BYTES
+
+    def hostile(path: str, timeout: float) -> tuple[int, dict[str, str], bytes]:
+        return 200, {}, info if "/message" not in path else b"[]"
+
+    with pytest.raises(ExportFailed) as caught:
+        take_snapshot(hostile, SESSION, redactor=Redactor([]), seconds=10.0)
+
+    assert caught.value.reason is ExportReason.TOO_LARGE
+    assert parsed == []
+
+
+# #839-T07
+def test_the_elements_of_the_session_record_are_counted_before_it_is_parsed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from code_reviewer_runner.implementer import session_export
+
+    parsed: list[int] = []
+    real = json.loads
+
+    def spy(text: Any, *args: Any, **kwargs: Any) -> Any:
+        parsed.append(len(text))
+        return real(text, *args, **kwargs)
+
+    monkeypatch.setattr(json, "loads", spy)
+    monkeypatch.setattr(session_export, "MAX_NODES", 2)
+
+    def hostile(path: str, timeout: float) -> tuple[int, dict[str, str], bytes]:
+        return 200, {}, b"[1,2,3]" if "/message" not in path else b"[]"
+
+    with pytest.raises(ExportFailed) as caught:
+        take_snapshot(hostile, SESSION, redactor=Redactor([]), seconds=10.0)
+
+    assert caught.value.reason is ExportReason.TOO_LARGE
+    assert parsed == []
+
+
+# #839-T07
+def test_a_document_cut_at_the_limit_of_the_production_fetch_is_too_large(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from code_reviewer_runner.implementer import session_export
+    from code_reviewer_runner.implementer.session_export import EngineFetch
+
+    monkeypatch.setattr(session_export, "MAX_RAW_BYTES", 4000)
+    server = EngineServer([message(n, [tool_part(n, output="x" * 500)]) for n in range(20)])
+    fetch = EngineFetch(server.url, "/work/repo", limit=4000)
+    try:
+        with pytest.raises(ExportFailed) as caught:
+            take_snapshot(fetch, SESSION, redactor=Redactor([]), seconds=10.0)
+    finally:
+        fetch.close()
+        server.stop()
+
+    assert caught.value.reason is ExportReason.TOO_LARGE
+
+
+# #839-T07
+def test_a_close_between_the_lock_and_the_request_sends_nothing_to_the_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import http.client
+
+    from code_reviewer_runner.implementer.session_export import EngineFetch
+
+    server = EngineServer([])
+    fetch = EngineFetch(server.url, "/work/repo")
+    original = http.client.HTTPConnection.request
+
+    def closed_in_the_window(self: http.client.HTTPConnection, *args: Any, **kwargs: Any) -> None:
+        fetch.close()
+        original(self, *args, **kwargs)
+
+    monkeypatch.setattr(http.client.HTTPConnection, "request", closed_in_the_window)
+    try:
+        with pytest.raises((OSError, http.client.HTTPException)):
+            fetch(f"/session/{SESSION}", 2.0)
+        time.sleep(0.2)
+        assert server.requests == []
+        assert server.connections <= 1
+    finally:
+        fetch.close()
+        server.stop()
 
 
 # #839-T07

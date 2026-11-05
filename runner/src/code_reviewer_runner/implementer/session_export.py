@@ -30,14 +30,19 @@ can put anything on its port: a server that sends its body a byte at a time neve
 timeout. So the export (fetch, redaction, blanking, dump, gzip) runs in a daemon thread that the
 caller `join`s for the seconds it was given; at the deadline the thread is told to stop, the
 connection is shut (`abort`) and the export gives up with `out_of_time`. The turn's push never waits
-behind it.
+behind it. The deadline is not hard: the thread looks at the stop signal between its phases, after
+every page and at every element of the redaction, but one `json.loads` or `json.dumps` of a large
+document holds the GIL and can overrun it by a second or two before the thread stops. For a large
+document the time is the effective cap, not `MAX_RAW_BYTES`.
 
 **What it will take.** A document is read up to `MAX_RAW_BYTES`, summed over the pages (the
 spike's worst transcript is 18.4 MB and took 70 MiB of Control's memory, about four times the
 document), and the reading stops at the cap. Before a page is parsed its commas are counted (an
 upper bound of its elements; a page of millions of tiny strings is refused without building it), and
 the walk of the parsed document counts elements and depth (`MAX_NODES`, `MAX_DEPTH`); a transcript
-never comes near them (about 20 bytes an element, nesting of about ten).
+never comes near them (about 20 bytes an element, nesting of about ten). The session's own record
+is held to `MAX_INFO_BYTES` and counted the same way. A comma inside a string counts too, so
+dense data (a page of mostly commas) can be `too_large` from about 16 MB on; a known limit.
 
 **What the redaction costs.** The redactor of the turn also knows the *shapes* of secrets
 (`sk-` followed by 20 or more characters, `Bearer <token>`), so it rewrites an ordinary path or word
@@ -74,6 +79,9 @@ PAGE_SIZE: Final = 50
 # the file before, after and as a diff) still fits once its old copies are emptied. The reading is
 # what bounds the memory (a few times this at worst); the 8 MiB gzipped cap decides what is stored.
 MAX_RAW_BYTES: Final = 64 * 1024 * 1024
+# The session's own record (`GET /session/<id>`) is a title, a few ids and times; a megabyte is
+# far more than the engine writes, and it is read and counted like a page, not left to the 64 MiB.
+MAX_INFO_BYTES: Final = 1024 * 1024
 # The most elements (values of lists and objects, at any depth) a document may have, counted as the
 # commas of a page before it is parsed (an upper bound: a comma in a string counts) and as the walk
 # of the parsed document. A transcript has an element for 20 bytes or more (an estimate from the
@@ -126,8 +134,21 @@ class _Work:
 
     def __init__(self) -> None:
         self.cancelled = threading.Event()
+        self.received = 0
         self.announced = 0
         self.nodes = 0
+
+    def check(self) -> None:
+        """Stop at once when the caller has given up."""
+        if self.cancelled.is_set():
+            raise ExportFailed(ExportReason.OUT_OF_TIME)
+
+    def receive(self, size: int) -> None:
+        """Bytes read from the engine, over every call. `EngineFetch` reads one byte past what is
+        left of its limit, so a document cut at the limit adds up to more than `MAX_RAW_BYTES`."""
+        self.received += size
+        if self.received > MAX_RAW_BYTES:
+            raise ExportFailed(ExportReason.TOO_LARGE)
 
     def announce(self, upper_bound: int) -> None:
         """Elements a page may hold, from its bytes, before it is parsed."""
@@ -194,11 +215,11 @@ def _export(
         return remaining
 
     safe = quote(session_id, safe="")
-    info = _json(_get(fetch, f"/session/{safe}", left()))
+    info = _info(fetch, safe, left, work)
     messages = _messages(fetch, safe, left, work)
     left()
     document: dict[str, Any] = {"info": info, "messages": messages}
-    blanked = _blank_compacted(messages)
+    blanked = _blank_compacted(messages, work)
     left()
     clean = _redact(document, redactor, work, 0)
     left()
@@ -238,18 +259,26 @@ def _json(answer: tuple[Mapping[str, str], bytes]) -> Any:
         raise ExportFailed(ExportReason.BAD_ANSWER) from None
 
 
+def _info(fetch: Fetch, safe: str, left: Callable[[], float], work: _Work) -> Any:
+    """The session's record, held to its own small limit and counted before it is parsed, like a
+    page of messages."""
+    headers, body = _get(fetch, f"/session/{safe}", left())
+    work.receive(len(body))
+    if len(body) > MAX_INFO_BYTES:
+        raise ExportFailed(ExportReason.TOO_LARGE)
+    work.announce(body.count(b",") + 1)
+    return _json((headers, body))
+
+
 def _messages(fetch: Fetch, safe: str, left: Callable[[], float], work: _Work) -> list[Any]:
     """Every message, oldest first. The engine answers the newest `PAGE_SIZE` and, while there are
     older ones, the cursor for them in a header; the pages are put back in order."""
     pages: list[list[Any]] = []
     query = f"limit={PAGE_SIZE}"
-    received = 0
     previous: str | None = None
     for _ in range(MAX_PAGES):
         headers, body = _get(fetch, f"/session/{safe}/message?{query}", left())
-        received += len(body)
-        if received > MAX_RAW_BYTES:
-            raise ExportFailed(ExportReason.TOO_LARGE)
+        work.receive(len(body))
         # An upper bound of the page's elements, before a single one is built.
         work.announce(body.count(b",") + 1)
         page = _json((headers, body))
@@ -266,11 +295,12 @@ def _messages(fetch: Fetch, safe: str, left: Callable[[], float], work: _Work) -
     raise ExportFailed(ExportReason.BAD_ANSWER)
 
 
-def _blank_compacted(messages: list[Any]) -> int:
+def _blank_compacted(messages: list[Any], work: _Work) -> int:
     """Empty the output of every compacted tool part and the long strings of its metadata (at any
     depth: a diff is nested there), in place. Returns how many parts were changed."""
     changed = 0
     for message in messages:
+        work.check()
         if not isinstance(message, dict):
             continue
         parts = cast("dict[str, Any]", message).get("parts")
@@ -285,7 +315,8 @@ def _blank_compacted(messages: list[Any]) -> int:
             found = cast("dict[str, Any]", state)
             if isinstance(found.get("output"), str):
                 found["output"] = ""
-            found["metadata"] = _without_long_strings(found.get("metadata"), 0)
+            if "metadata" in found:
+                found["metadata"] = _without_long_strings(found["metadata"], 0)
             changed += 1
     return changed
 
@@ -316,8 +347,7 @@ def _redact(value: Any, redactor: Redactor, work: _Work, depth: int) -> Any:
     """The same document with the redactor applied to every string value and key. It is also the
     walk that counts the elements and the depth, so a document made to be expensive is refused here
     and the stop signal of the caller is seen on every element."""
-    if work.cancelled.is_set():
-        raise ExportFailed(ExportReason.OUT_OF_TIME)
+    work.check()
     if isinstance(value, str):
         return redactor.redact(value)
     if isinstance(value, list):
@@ -331,10 +361,12 @@ def _redact(value: Any, redactor: Redactor, work: _Work, depth: int) -> Any:
             raise ExportFailed(ExportReason.TOO_LARGE)
         pairs = cast("dict[str, Any]", value)
         work.count(len(pairs))
-        return {
-            redactor.redact(str(key)): _redact(item, redactor, work, depth + 1)
-            for key, item in pairs.items()
-        }
+        redacted: dict[str, Any] = {}
+        for key, item in pairs.items():
+            work.check()
+            name = redactor.redact(str(key))
+            redacted[name] = _redact(item, redactor, work, depth + 1)
+        return redacted
     return value
 
 
@@ -368,7 +400,13 @@ class EngineFetch:
                 connection = self._connection = http.client.HTTPConnection(
                     self._host, self._port, timeout=timeout
                 )
-            elif connection.sock is not None:
+                # Never let `request` connect by itself: that happens outside the lock, where a
+                # `close` has already looked at an empty socket.
+                connection.auto_open = 0
+            connection.timeout = timeout
+            if connection.sock is None:
+                connection.connect()
+            else:
                 connection.sock.settimeout(timeout)
         connection.request("GET", path, headers={"x-opencode-directory": self._directory})
         response = connection.getresponse()
