@@ -29,6 +29,7 @@ import type {
 import type { WorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import type { WorkspaceMembersRepository } from "../db/repositories/workspace-members-repository.ts";
 import { ImplementerError } from "../implementer/errors.ts";
+import type { JobQueue } from "../jobs/job-queue.ts";
 import type { ImplementerService } from "../implementer/service.ts";
 import { INSTRUCTION_MAX_LENGTH } from "../implementer/start-input.ts";
 import { canonicalJson, isRecord } from "../workflows/json.ts";
@@ -89,6 +90,11 @@ export type EngineDependencies = {
     ImplementerService,
     "startTask" | "continueSession" | "discardRequested"
   >;
+  /**
+   * #891: asks the job of a turn to stop (a waiting one ends at once, a running one is told by its next heartbeat). Repeating it is harmless.
+   * The `JobQueue` of the workspace does this.
+   */
+  jobs: Pick<JobQueue, "requestCancel">;
   /** The turn a job runs, or undefined for a job that is no turn of this workspace. `ended` is set once the job is over. */
   turns: {
     read(jobId: string): Promise<TurnRead | undefined>;
@@ -140,6 +146,8 @@ type Decision =
   | { kind: "done" }
   | { kind: "again" }
   | { kind: "execute"; stepRun: StoredStepRun; takeOver: boolean }
+  /** #891: the run was asked to stop and the turn of this step still runs: its job is asked to stop, after the lock is released. */
+  | { kind: "cancel_job"; jobId: string }
   /** The decision needs a value that was not read; `read` puts it into `Prefetched`. Nothing was written. */
   | { kind: "fetch"; read: (pre: Prefetched) => Promise<void> };
 
@@ -239,6 +247,7 @@ function machineStepsOf(steps: readonly StoredStepRun[]): MachineStep[] {
       hasJob: step.jobId !== null,
       createdAt: step.createdAt,
       startedAt: step.startedAt,
+      errorCode: step.errorCode,
       ...(taken === undefined ? {} : { taken }),
     };
   });
@@ -359,6 +368,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     const byId = nodesById(document);
     return {
       runStatus: run.status,
+      cancelRequested: run.cancelRequestedAt !== null,
       budgetMicroUsd: run.budgetMicroUsd,
       spentMicroUsd: run.spentMicroUsd,
       steps: machineStepsOf(steps),
@@ -655,12 +665,28 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         if (typeof ended === "object") return ended;
         return ended === "ended" ? { kind: "again" } : { kind: "done" };
       }
+      case "cancel_job": {
+        const stepRun = lock.steps[move.position];
+        if (stepRun?.jobId == null) return { kind: "done" };
+        // A turn that is over already ends its step (as it would for any run); one that runs is asked to stop once the lock is released.
+        const ended = await endAgentStep(lock, stepRun, pre);
+        if (typeof ended === "object") return ended;
+        return ended === "ended"
+          ? { kind: "again" }
+          : { kind: "cancel_job", jobId: stepRun.jobId };
+      }
+      case "skip_step": {
+        const stepRun = lock.steps[move.position];
+        if (stepRun === undefined) return { kind: "done" };
+        await lock.finishStep(stepRun.id, { status: "skipped" });
+        return { kind: "again" };
+      }
       case "fail_step": {
         const stepRun = lock.steps[move.position];
         if (stepRun === undefined) return { kind: "done" };
         // A step is never given up while its turn exists: the claimant may have died between the start of the turn and the record of
         // it, and a turn nobody reads would run on and count in no budget. The turn is attached, and the next move reads it.
-        if (move.code === "agent_start_failed") {
+        if (move.code === "agent_start_failed" || move.code === "cancelled") {
           // What was read before the lock is used as it is: a lookup here would take a second connection while the lock holds one,
           // and parallel claimants would starve the pool.
           if (!pre.started.has(stepRun.id))
@@ -713,7 +739,9 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
             move.code,
             move.code === "action_interrupted"
               ? "The engine was interrupted while the action ran; whether it happened is not known, so it was not repeated."
-              : "The turn of this step could not be started.",
+              : move.code === "cancelled"
+                ? "The run was stopped before the turn of this step started."
+                : "The turn of this step could not be started.",
           ),
         );
         return { kind: "again" };
@@ -984,6 +1012,19 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       log(
         `[workflow-runs] STEP_TURN_ORPHANED run=${run.id} step=${step.stepId} job=${begun.runId}`,
       );
+    // #891: a stop that was asked for while the turn was being started could not find the job, which did not exist for the run yet. It is asked
+    // now, so no turn runs on that no run wants: one a stopped run left without a step (it was not attached), or one that started after the stop.
+    const current = await deps.runs.getRun(run.id);
+    if (
+      current === undefined ||
+      current.cancelRequestedAt !== null ||
+      current.status !== "running"
+    ) {
+      await deps.jobs.requestCancel(begun.runId);
+      log(
+        `[workflow-runs] STEP_TURN_CANCELLED run=${run.id} step=${step.stepId} job=${begun.runId}`,
+      );
+    }
     return undefined;
   }
 
@@ -1074,6 +1115,11 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         : undefined,
     );
     if (claimed === undefined) return;
+    // #891: a stop that was asked for between the decision and the claim: the step does not start.
+    if ((await deps.runs.getRun(run.id))?.cancelRequestedAt != null) {
+      await deps.runs.settleOwnStep(claimed.id, { status: "skipped" });
+      return;
+    }
     let outcome: StepOutcome | undefined;
     // The step whose session this one goes on in: its instruction may be queued there, whatever ends the step.
     let target: StoredStepRun | undefined;
@@ -1179,6 +1225,20 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         await decision.read(pre);
       }
       if (decision === undefined || decision.kind === "done") return;
+      if (decision.kind === "cancel_job") {
+        // Outside the lock: the queue takes its own. A turn that was waiting ends at once and the run goes on; one that runs is told by its
+        // next heartbeat, and its end reaches the engine like any end of a turn.
+        const asked = await deps.jobs.requestCancel(decision.jobId);
+        log(
+          `[workflow-runs] cancel asked run=${runId} job=${decision.jobId} outcome=${asked.status}`,
+        );
+        if (
+          asked.status === "requested" ||
+          asked.status === "already_requested"
+        )
+          return;
+        continue;
+      }
       if (decision.kind === "execute" && latest !== undefined)
         await execute(latest, decision.stepRun, decision.takeOver);
     }

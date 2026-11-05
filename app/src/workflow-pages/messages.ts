@@ -37,6 +37,11 @@ export const RUN_STATUS_COPY = {
     label: "Failed",
     description: "A step failed or the budget ran out. The steps say why.",
   },
+  cancelled: {
+    label: "Cancelled",
+    description:
+      "A member of the workspace stopped the run. What the agent had committed was pushed to its branch when possible; the steps that had not started did not run.",
+  },
 } as const;
 
 export const STEP_STATUS_COPY = {
@@ -129,6 +134,8 @@ const STEP_FAILURE_TEXT: Record<
   cost_limit_reached: "The agent reached its cost limit.",
   no_runner_available:
     "No runner of this workspace with the labels of the environment took the task in time.",
+  cancelled:
+    "A member of the workspace stopped the run, so the agent of this step was ended.",
 };
 type JobFailureCode = "timeout" | "cost_limit_reached" | "no_runner_available";
 
@@ -261,6 +268,12 @@ export const PAGE_COPY = {
   stepCreated: "This was created by the step.",
   profile: "Profile",
   openRun: "Open the run",
+  cancelRun: "Cancel run",
+  cancelling: "Stopping the run",
+  cancelHint:
+    "Stops the agent that is working and starts no further step. What it has committed is pushed to its branch; only what it used until it stopped is charged.",
+  cancelRequested:
+    "The run is stopping: the agent is told to stop, which takes up to a minute or two, and the run ends when it has. This page updates by itself.",
 } as const;
 
 export const START_COPY = {

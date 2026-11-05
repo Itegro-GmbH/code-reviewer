@@ -431,6 +431,7 @@ describe("a turn that was started and not recorded", () => {
       members: app.members,
       profiles: app.profiles,
       environments: app.environments,
+      jobs: app.queue,
       implementer: {
         startTask: async () => {
           throw new ImplementerError(
@@ -1354,6 +1355,7 @@ describe("a failure of the engine", () => {
       members: app.members,
       profiles: app.profiles,
       environments: { listSummaries: async () => [] },
+      jobs: app.queue,
       implementer: app.implementerService,
       turns: {
         read: async () => undefined,
@@ -1409,6 +1411,7 @@ describe("a failure of the engine", () => {
         ),
       },
       environments: app.environments,
+      jobs: app.queue,
       implementer: app.implementerService,
       turns: {
         read: watched("turn", (jobId) => app.turnReader.read(jobId)),
@@ -1458,6 +1461,7 @@ describe("a failure of the engine", () => {
       },
       profiles: app.profiles,
       environments: { listSummaries: async () => [] },
+      jobs: app.queue,
       implementer: app.implementerService,
       turns: {
         read: async () => undefined,

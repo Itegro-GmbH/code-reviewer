@@ -168,7 +168,11 @@ export function outcomeOfTurn(
     return {
       ok: false,
       code: ended.jobErrorCode ?? "job_failed",
-      message: "The agent's task ended without success.",
+      message:
+        // #891: stopped by a member; what it had pushed stays on its branch.
+        ended.jobErrorCode === "cancelled"
+          ? "The agent's task was stopped because the run was cancelled."
+          : "The agent's task ended without success.",
       detail: `status=${ended.jobStatus} error=${ended.jobErrorCode ?? "none"}`,
       costMicroUsd,
       costBasis,

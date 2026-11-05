@@ -8,7 +8,7 @@ workspace with versions.
 **Status (milestones 1 to 5 of epic #833).** The format, the validator, the storage, the [profiles](profiles.md) they refer to, the
 **engine**, the three GitHub actions, the **label trigger** and the **control steps** `if` and `loop` exist: a workflow with the manual trigger can be started through the API, and a
 workflow with the trigger `github.issueLabeled` starts when somebody puts its label on an issue (see [Engine](#engine), [Control at run time](#control-at-run-time) and [The label trigger](#the-label-trigger));
-either runs its steps in the order the document says, in rounds where there is a loop. Not yet: cancelling a run (see [Known limits](#known-limits)) and an editor.
+either runs its steps in the order the document says, in rounds where there is a loop. A member can [cancel a run](#cancelling-a-run). Not yet: an editor.
 The finish tool exists (see [Result schemas](#result-schemas)). The workflows exist only in
 a deployment with the capability `implementer` (the factory); there is no editor, but the routes below and, for the runs, [pages](#the-run-page). Every member of a workspace may
 use them (the permission `start_implementer_task`).
@@ -492,6 +492,34 @@ the run and its steps; the first steps start right after the answer.
 - `GET /api/w/<slug>/workflows/<id>/runs/<runId>` answers `200 {"run": {...}}` with the steps; `GET .../runs` lists the newest 50 runs of the workflow
   (without steps). A run of another workspace, or of another workflow, is `404`.
 
+### Cancelling a run
+
+`POST /api/w/<slug>/workflows/<id>/runs/<runId>/cancel` (no body), for every member (`start_implementer_task`: whoever may start a run may stop one). The answer says what the call did
+(`outcome`) and carries the run:
+
+| Outcome | Status | Meaning |
+| --- | --- | --- |
+| `requested` | 202 | The run runs and is marked. The turn of its step is asked to stop; the run ends `cancelled` when that turn has ended. |
+| `already_requested` | 200 | Somebody asked before; nothing changed (the engine is told again, which is harmless). |
+| `already_ended` | 200 | The run is over (`succeeded`, `failed` or `cancelled`); nothing changed, the run shows how it ended. |
+
+`404 WORKFLOW_RUN_NOT_FOUND` for a run of another workspace or workflow. What happens, in this order:
+
+1. The run is marked (`cancelRequestedAt`) under the lock of the run. From then on the engine writes and starts no step. A step that was written and not claimed ends `skipped`; steps the walk had not reached
+   are not written at all (there is no row for a branch that never began).
+2. The job of the turn that runs is asked to stop (`jobs.cancel_requested_at`). A turn that still waits for a runner ends at once (`cancelled`, nothing ran, no record counts, the hold is given back).
+   A turn that runs is told by its next heartbeat (`cancelRequested: true`, within 30 seconds): the Worker or the runner ends the agent the way it does when it is stopped (SIGTERM), pushes what is
+   committed, takes the snapshot when that is cheap, and reports `cancelled` with the usage it measured. The lease check before that push still says `held`. See [Implementer](implementer.md#cancelling-a-run-891).
+3. The job ends `cancelled` (code `cancelled`, a stable code) with that report; billing charges what the turn used and nothing else. A holder that never reports (it died, it heard nothing) is not waited for for ever: the job is
+   ended by the app after a grace of 4 minutes, or when its lease lapses, or when its claim is given back; none of these queues the turn again.
+4. The engine reads the end of the turn like any other: the step ends `failed` with the code `cancelled` (its cost is what the runner reported; a cost that is not known is booked as the limit, as for any step), and the run ends
+   `cancelled`, without `errorCode`. A turn that finished by itself in the same moment keeps its result; the run still ends `cancelled`.
+5. A step whose turn was queued behind another instruction of its session (`session.continue`) discards that instruction first, so no turn starts later that no run reads. A turn that starts after the stop (the claimant was
+   in the middle of starting it) is asked to stop by the one that started it, so no turn runs on that nobody wants.
+
+An action that runs is not interrupted (it is a call of at most 60 seconds and may have happened); the run ends after it. Stopping the task of an agent step on its own (the [Implementer route](implementer.md#cancelling-a-run-891)) ends
+the run `cancelled` the same way, not `failed`.
+
 A run looks like this (a step is `pending` when written, `running` once claimed, then `succeeded` or `failed`; a step of the branch an `if` did not take is written `skipped`):
 
 ```json
@@ -622,9 +650,9 @@ node it is (`stepId`), how often that step has run (`round`, from 1) and, for a 
 
 ### Known limits
 
-- **A run cannot be cancelled yet.** It ends as `succeeded` or `failed`; a person cannot stop one that runs. Stopping a run needs a way to stop the running turn of the Implementer
-  (a turn that is claimed by a Worker cannot be ended from the app today: only a Worker's own report, its lease running out, or a newer push of a pull request ends it), and that is a
-  change of the job queue, the billing of the turn and the Worker, not of the engine. Until then the cost limit of the step and the budget of the run bound what a run costs.
+- **A cancelled run ends when its agent has stopped** (#891), at the next heartbeat of its runner (30 seconds at most) plus the time the agent needs to stop and push (the stop of a turn has 115 seconds), and at the latest after the
+  grace of 4 minutes, when the app ends the job itself. A runner of an earlier release ignores `cancelRequested`: it goes on until that grace ends the job and its claim is lost, so it stops without a push. The steps that had not
+  started are not written as skipped rows (only a step that was written and not claimed is); the page shows what ran. The run page has a plain button, no confirmation.
 - **Profiles are resolved per step**, at the moment the step starts; a profile without a version can mean version 2 for step two of a run whose step one ran
   with version 1.
 - **The sweep has a time budget** (40 seconds, 10 for the maintenance after a request), checked between two runs; a run is looked at as a whole.
@@ -852,6 +880,7 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `github_unavailable` | step | GitHub could not be reached or did not answer in time. For an action that creates something the message adds that the action may have happened. |
 | `action_timeout` | step | The connector did not answer within 60 seconds; the action is not repeated, and for an action that is not idempotent the message says it may have happened. |
 | `action_interrupted` | step | The engine was interrupted while the action ran; it is not repeated. |
+| `cancelled` | step | A member stopped the run (or the task of the step) before the turn of the step started, or while it ran. The run ends `cancelled` (status, no `errorCode`). The job of the turn has the same code. |
 
 ### Errors of the run routes (`error`)
 
@@ -891,7 +920,7 @@ not exist.
     workflow the run started with. It is updated every few seconds while a run runs.
 - **One run** (`/w/<slug>/workflows/<id>/runs/<runId>`): the page polls `GET .../runs/<runId>` every 3 seconds while the run runs, as the live view of an
   Implementer run does, and stops when it ends.
-  - **Status.** `running`, `succeeded` or `failed`. A failed run or step is told in a sentence for its code (`budget_exhausted` is "the budget of the run is
+  - **Status.** `running`, `succeeded`, `failed` or `cancelled`. A run that runs has a button **Cancel run** ([Cancelling a run](#cancelling-a-run)); once asked, the page says the run is stopping. A failed run or step is told in a sentence for its code (`budget_exhausted` is "the budget of the run is
     used up"), never as the code itself; a code the page does not know is "failed for a reason not listed here". The message a step stored is a fixed sentence (no code,
     nothing a runner or an exception wrote; the details go to the log of the engine) and is shown under the sentence as text, unless it contains a code
     (`IMPLEMENTER_X`, `agent_start_failed`): then only the sentence of the `errorCode` is shown.

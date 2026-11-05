@@ -25,6 +25,7 @@ const SUMMARY: RunSummaryView = {
   trigger: "manual",
   status: "running",
   errorCode: null,
+  cancelRequestedAt: null,
   actorLogin: "octocat",
   budgetUsd: 20,
   spentUsd: 0,
@@ -57,6 +58,10 @@ function setup(overrides: Partial<WorkflowRunService> = {}) {
       calls.push(`list ${workflowId}`),
       { runs: [SUMMARY] }
     ),
+    cancel: async (workflowId, runId) => (
+      calls.push(`cancel ${workflowId} ${runId}`),
+      { run: VIEW, outcome: "requested" }
+    ),
     ...overrides,
   };
   const requireUser = vi.fn(async () => USER);
@@ -81,6 +86,8 @@ describe("the workflow run handlers", () => {
       () => handlers.start(json({}), "wf-1"),
       () => handlers.list(new Request(url), "wf-1"),
       () => handlers.get(new Request(url), "wf-1", "run-1"),
+      () =>
+        handlers.cancel(new Request(url, { method: "POST" }), "wf-1", "run-1"),
     ])
       await expect(call()).rejects.toThrow("signed out");
   });
@@ -151,6 +158,14 @@ describe("the workflow run handlers", () => {
       ),
       await handlers.get(
         new Request(url, { headers: { "sec-fetch-site": "cross-site" } }),
+        "wf-1",
+        "run-1",
+      ),
+      await handlers.cancel(
+        new Request(url, {
+          method: "POST",
+          headers: { "sec-fetch-site": "cross-site" },
+        }),
         "wf-1",
         "run-1",
       ),
@@ -258,5 +273,51 @@ describe("the workflow run handlers", () => {
     await expect(handlers.start(json({}), "wf-1")).rejects.toThrow(
       "database is down",
     );
+  });
+});
+
+describe("cancelling a run", () => {
+  const post = (url: string) => new Request(url, { method: "POST" });
+
+  // #891-T50
+  it("asks the service and answers 202 for a run that is told to stop, 200 for a repeat and for a run that is over, with the run", async () => {
+    for (const [outcome, status] of [
+      ["requested", 202],
+      ["already_requested", 200],
+      ["already_ended", 200],
+    ] as const) {
+      const { handlers, calls, url } = setup({
+        cancel: async () => ({ run: VIEW, outcome }),
+      });
+
+      const response = await handlers.cancel(post(url), "wf-1", "run-1");
+
+      expect(response.status).toBe(status);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(await response.json()).toEqual({ run: VIEW, outcome });
+      expect(calls).toEqual([]);
+    }
+    const { handlers, calls, url } = setup();
+    await handlers.cancel(post(url), "wf-1", "run-1");
+    expect(calls).toEqual(["cancel wf-1 run-1"]);
+  });
+
+  // #891-T51
+  it("answers the stable code for a run that is not there", async () => {
+    const { handlers, url } = setup({
+      cancel: async () => {
+        throw new WorkflowRunError(
+          "WORKFLOW_RUN_NOT_FOUND",
+          "There is no such run of this workflow.",
+        );
+      },
+    });
+
+    const response = await handlers.cancel(post(url), "wf-1", "run-9");
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({
+      error: "WORKFLOW_RUN_NOT_FOUND",
+    });
   });
 });

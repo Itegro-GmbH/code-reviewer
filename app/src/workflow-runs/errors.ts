@@ -111,5 +111,7 @@ export const STEP_FAILURE_CODES = [
   "action_timeout",
   /** The engine was interrupted while an action ran; whether it happened is not known, and it is not repeated. */
   "action_interrupted",
+  /** A member stopped the run (or the task of the step) before the turn of the step started or while it ran (#891). */
+  "cancelled",
 ] as const;
 export type StepFailureCode = (typeof STEP_FAILURE_CODES)[number];

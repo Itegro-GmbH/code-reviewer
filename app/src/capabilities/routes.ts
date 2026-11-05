@@ -253,6 +253,11 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]",
     class: "implementer",
   },
+  // Stops a run (#891).
+  {
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/cancel",
+    class: "implementer",
+  },
   { route: "/w/[workspace]/workflows", class: "implementer" },
   { route: "/w/[workspace]/workflows/[workflowId]", class: "implementer" },
   {

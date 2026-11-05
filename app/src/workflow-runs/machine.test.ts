@@ -56,6 +56,7 @@ const skipped = (stepId: string, kind: MachineStep["kind"] = "action") =>
 function state(patch: Partial<MachineState> = {}): MachineState {
   return {
     runStatus: "running",
+    cancelRequested: false,
     budgetMicroUsd: 20_000_000,
     spentMicroUsd: 0,
     steps: [],
@@ -685,5 +686,120 @@ describe("what the replay tells about a row", () => {
       round: 2,
       skipped: [{ stepId: "say", kind: "action", round: 2 }],
     });
+  });
+});
+
+// #891: a member asked for the run to stop. No step is written or started any more; a turn that runs is asked to stop, the step that did
+// not start is skipped, and the run ends `cancelled` once nothing runs.
+describe("a run a member asked to stop", () => {
+  const asked = (patch: Partial<MachineState> = {}) =>
+    state({ cancelRequested: true, ...patch });
+
+  // #891-T30
+  it("ends cancelled when no step has been written", () => {
+    expect(nextMove(asked())).toEqual({
+      move: "finish_run",
+      status: "cancelled",
+      errorCode: null,
+    });
+  });
+
+  // #891-T30
+  it("ends cancelled after a step that is over, writes nothing more and starts nothing, whatever the document says next", () => {
+    for (const last of [
+      done("plan"),
+      step("plan", { status: "failed" }),
+      skipped("plan"),
+    ])
+      expect(nextMove(asked({ steps: [last] }))).toEqual({
+        move: "finish_run",
+        status: "cancelled",
+        errorCode: null,
+      });
+  });
+
+  // #891-T31
+  it("skips a step that is written and not claimed", () => {
+    expect(
+      nextMove(
+        asked({
+          steps: [
+            done("plan"),
+            step("build", {
+              status: "pending",
+              hasJob: false,
+              startedAt: null,
+            }),
+          ],
+        }),
+      ),
+    ).toEqual({ move: "skip_step", position: 1 });
+  });
+
+  // #891-T32
+  it("asks the turn of a running agent step to stop, however often it looks", () => {
+    const running = asked({
+      steps: [done("plan"), step("build", { status: "running" })],
+    });
+
+    expect(nextMove(running)).toEqual({ move: "cancel_job", position: 1 });
+    expect(nextMove(running)).toEqual({ move: "cancel_job", position: 1 });
+  });
+
+  // #891-T33
+  it("ends an agent step that has no turn yet, so no turn starts later that nobody reads", () => {
+    expect(
+      nextMove(
+        asked({
+          steps: [
+            step("plan", {
+              status: "running",
+              hasJob: false,
+              startedAt: at(5),
+            }),
+          ],
+        }),
+      ),
+    ).toEqual({ move: "fail_step", position: 0, code: "cancelled" });
+  });
+
+  // #891-T34
+  it("lets an action that runs finish, and still never repeats one that was interrupted", () => {
+    const running = (secondsAgo: number) =>
+      asked({
+        steps: [
+          step("open", {
+            kind: "action",
+            status: "running",
+            hasJob: false,
+            startedAt: at(secondsAgo),
+          }),
+        ],
+      });
+
+    expect(nextMove(running(5))).toEqual({ move: "idle" });
+    expect(nextMove(running(600))).toEqual({
+      move: "fail_step",
+      position: 0,
+      code: "action_interrupted",
+    });
+  });
+
+  // #891-T35
+  it("ends a run cancelled when its last step is the one that the stop ended, and does not fail it for that step", () => {
+    expect(
+      nextMove(
+        state({
+          steps: [step("plan", { status: "failed", errorCode: "cancelled" })],
+        }),
+      ),
+    ).toEqual({ move: "finish_run", status: "cancelled", errorCode: null });
+  });
+
+  // #891-T36
+  it("does nothing for a run that is over", () => {
+    expect(
+      nextMove(asked({ runStatus: "cancelled", steps: [done("plan")] })),
+    ).toEqual({ move: "idle" });
   });
 });
