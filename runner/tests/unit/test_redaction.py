@@ -147,7 +147,7 @@ def test_base64_of_a_larger_value_that_holds_the_secret_is_replaced_at_any_align
     text = redactor.redact(f"value={encoded};")
 
     assert REDACTED in text
-    # What is left of the encoded value is the prefix, the suffix and the edges the secret did not decide.
+    # What is left of the encoded value is the prefix, the suffix and the edges.
     left = len(text.replace(REDACTED, "")) - len("value=;")
     assert left <= (len(prefix) + 2) // 3 * 4 + (len(suffix) + 2) // 3 * 4 + 4
 

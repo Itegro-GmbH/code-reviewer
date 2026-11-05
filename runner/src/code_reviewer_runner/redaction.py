@@ -50,7 +50,7 @@ def _base64_forms(secret: str) -> set[str]:
         for alignment, leading in enumerate(_LEADING_CHARS_BY_ALIGNMENT):
             padded = encode(bytes(alignment) + raw).decode()
             unpadded = padded.rstrip("=")
-            # The last character of a group that is not full takes bits of the byte after the secret.
+            # The last character of a group that is not full takes bits of the next byte.
             trailing = 1 if (alignment + len(raw)) % 3 else 0
             for form in (padded[leading:], unpadded[leading : len(unpadded) - trailing]):
                 if alignment == 0 or len(form) >= _MIN_CUT_FORM_CHARS:
