@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from code_reviewer_runner.implementer import control_memory
 from code_reviewer_runner.implementer.control_memory import (
     HITS,
     PERCENT,
@@ -217,8 +218,12 @@ def test_a_limit_of_max_says_no_limit_once_and_not_that_the_watch_is_blind(
         time.sleep(0.1)
         watch.close()
 
-    assert caplog.text.count("no limit") == 1
-    assert "blind" not in caplog.text and "could not be read" not in caplog.text
+    # Only what the watch itself logged: another logger's line is not the watch going blind.
+    own = "\n".join(
+        record.getMessage() for record in caplog.records if record.name == control_memory.__name__
+    )
+    assert own.count("no limit") == 1
+    assert "blind" not in own and "could not be read" not in own
 
 
 # #827-S1
