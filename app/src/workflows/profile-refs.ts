@@ -58,6 +58,8 @@ export type ProfileFactsRow = {
   canPush: boolean;
   /** The JSON text of the default result schema, or null. */
   defaultResult: string | null;
+  /** Whether the version's model is a managed one (a catalog entry; #854). */
+  managedModel: boolean;
 };
 
 /**
@@ -100,6 +102,7 @@ export function profileInfosOf(
               row.version,
               {
                 canPush: row.canPush,
+                managedModel: row.managedModel,
                 ...(row.defaultResult === null
                   ? {}
                   : {

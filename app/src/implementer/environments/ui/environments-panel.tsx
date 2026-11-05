@@ -223,7 +223,14 @@ function Environments({
                   <h2 className="text-lg leading-7 font-semibold break-words">
                     {item.name}
                   </h2>
-                  {item.sizeSupported ? (
+                  {item.kind === "runner" ? (
+                    <p className="text-sm text-muted-foreground">
+                      {PAGE_COPY.labelsShown}{" "}
+                      <span className="font-mono">
+                        {item.labels.join(", ")}
+                      </span>
+                    </p>
+                  ) : item.vcpus !== null && item.sizeSupported ? (
                     <p className="text-sm text-muted-foreground">
                       {sizeLabel(item.vcpus)}
                     </p>
@@ -258,26 +265,33 @@ function Environments({
                   </div>
                 ) : null}
               </div>
-              <div className="text-sm text-muted-foreground">
-                <p>
-                  {item.network.mode === "off"
-                    ? PAGE_COPY.networkShownOff
-                    : item.network.mode === "open"
-                      ? PAGE_COPY.networkShownOpen
-                      : PAGE_COPY.networkShownList}
+              {item.kind === "runner" ? (
+                <p className="text-sm text-muted-foreground">
+                  {PAGE_COPY.runnerNote}
                 </p>
-                {item.network.mode === "list" ? (
-                  <ul
-                    aria-label={`${PAGE_COPY.networkHosts}: ${item.name}`}
-                    className="mt-1 flex flex-wrap gap-x-4 gap-y-1 font-mono"
-                  >
-                    {item.network.hosts.map((host) => (
-                      <li key={host}>{host}</li>
-                    ))}
-                  </ul>
-                ) : null}
-              </div>
-              {item.setupScript === "" ? (
+              ) : null}
+              {item.kind === "runner" ? null : (
+                <div className="text-sm text-muted-foreground">
+                  <p>
+                    {item.network.mode === "off"
+                      ? PAGE_COPY.networkShownOff
+                      : item.network.mode === "open"
+                        ? PAGE_COPY.networkShownOpen
+                        : PAGE_COPY.networkShownList}
+                  </p>
+                  {item.network.mode === "list" ? (
+                    <ul
+                      aria-label={`${PAGE_COPY.networkHosts}: ${item.name}`}
+                      className="mt-1 flex flex-wrap gap-x-4 gap-y-1 font-mono"
+                    >
+                      {item.network.hosts.map((host) => (
+                        <li key={host}>{host}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+              )}
+              {item.kind === "runner" ? null : item.setupScript === "" ? (
                 <p className="text-sm text-muted-foreground">
                   {PAGE_COPY.noScript}
                 </p>
@@ -337,6 +351,8 @@ function EnvironmentForm({
 }) {
   const product = useProductIdentity();
   const [name, setName] = useState(item?.name ?? "");
+  const [kind, setKind] = useState<"hosted" | "runner">(item?.kind ?? "hosted");
+  const [labelsText, setLabelsText] = useState((item?.labels ?? []).join(", "));
   const [vcpus, setVcpus] = useState<number>(item?.vcpus ?? DEFAULT_VCPUS);
   const [script, setScript] = useState(item?.setupScript ?? "");
   const [mode, setMode] = useState<NetworkMode>(item?.network.mode ?? "off");
@@ -358,7 +374,9 @@ function EnvironmentForm({
         issue.field === "vcpus" ||
         issue.field === "setupScript" ||
         issue.field === "network" ||
-        issue.field === "networkHosts"
+        issue.field === "networkHosts" ||
+        issue.field === "kind" ||
+        issue.field === "labels"
       )
         next[issue.field] = describeFieldIssue(issue.field, issue.code);
     setErrors(next);
@@ -368,16 +386,27 @@ function EnvironmentForm({
   async function submit(event: FormEvent) {
     event.preventDefault();
     setProblem(null);
-    const body: EnvironmentBody = {
-      name,
-      vcpus,
-      setupScript: script,
-      network: {
-        mode,
-        // One host on each line; the server brings each to its form and refuses the line that is not a host name.
-        hosts: mode === "list" ? hostsText.split("\n") : [],
-      },
-    };
+    const body: EnvironmentBody =
+      kind === "runner"
+        ? {
+            kind: "runner",
+            name,
+            // Comma separated; the server brings each to its form and refuses the one that is not a label.
+            labels: labelsText
+              .split(",")
+              .map((label) => label.trim())
+              .filter((label) => label !== ""),
+          }
+        : {
+            name,
+            vcpus,
+            setupScript: script,
+            network: {
+              mode,
+              // One host on each line; the server brings each to its form and refuses the line that is not a host name.
+              hosts: mode === "list" ? hostsText.split("\n") : [],
+            },
+          };
     const checked = validateEnvironmentInput(body);
     if (!checked.ok) {
       showIssues(checked.issues);
@@ -426,125 +455,182 @@ function EnvironmentForm({
         )}
       </FormField>
 
-      <fieldset data-field="vcpus" className="flex flex-col gap-2">
-        <legend className="mb-2 text-sm font-semibold">{PAGE_COPY.size}</legend>
-        {item !== undefined && !isEnvironmentVcpus(item.vcpus) ? (
-          <p className="text-sm text-destructive">
-            {PAGE_COPY.sizeUnsupported}
-          </p>
-        ) : null}
+      <fieldset data-field="kind" className="flex flex-col gap-2">
+        <legend className="mb-2 text-sm font-semibold">{PAGE_COPY.kind}</legend>
         <RadioGroup
-          value={String(vcpus)}
-          onValueChange={(value) => setVcpus(Number(value))}
-          aria-invalid={errors.vcpus !== undefined}
-          aria-describedby={sizeMessageId}
+          value={kind}
+          onValueChange={(value) => setKind(value as "hosted" | "runner")}
+          aria-invalid={errors.kind !== undefined}
           className="grid-cols-1 sm:grid-cols-2"
         >
-          {ENVIRONMENT_VCPUS.map((size) => (
-            <label key={size} className="flex items-center gap-3 text-sm">
-              <RadioGroupItem
-                value={String(size)}
-                aria-label={sizeLabel(size)}
-              />
-              <span aria-hidden="true">{sizeLabel(size)}</span>
+          {(
+            [
+              ["hosted", PAGE_COPY.kindHosted],
+              ["runner", PAGE_COPY.kindRunner],
+            ] as const
+          ).map(([value, label]) => (
+            <label key={value} className="flex items-center gap-3 text-sm">
+              <RadioGroupItem value={value} aria-label={label} />
+              <span aria-hidden="true">{label}</span>
             </label>
           ))}
         </RadioGroup>
-        {errors.vcpus !== undefined ? (
-          <p id={sizeMessageId} className="text-sm text-destructive">
-            {errors.vcpus}
-          </p>
-        ) : (
-          <p id={sizeMessageId} className="text-sm text-muted-foreground">
-            {PAGE_COPY.sizeHint}
-          </p>
-        )}
+        <p className="text-sm text-muted-foreground">
+          {errors.kind ?? PAGE_COPY.kindHint}
+        </p>
       </fieldset>
 
-      <FormField
-        name="setupScript"
-        label={PAGE_COPY.script}
-        hint={PAGE_COPY.scriptHint}
-        error={errors.setupScript}
-        aside={
-          <span className="text-sm text-muted-foreground">
-            {kb(scriptBytes)} / {kb(SETUP_SCRIPT_MAX_BYTES)}
-          </span>
-        }
-      >
-        {(control) => (
-          <Textarea
-            {...control}
-            value={script}
-            spellCheck={false}
-            autoCapitalize="off"
-            autoCorrect="off"
-            className="min-h-40 font-mono text-sm"
-            onChange={(event) => setScript(event.target.value)}
-          />
-        )}
-      </FormField>
-
-      <fieldset data-field="network" className="flex flex-col gap-2">
-        <legend className="mb-2 text-sm font-semibold">
-          {PAGE_COPY.network}
-        </legend>
-        <RadioGroup
-          value={mode}
-          onValueChange={(value) => setMode(value as NetworkMode)}
-          aria-invalid={errors.network !== undefined}
-          aria-describedby={networkMessageId}
-          className="grid-cols-1"
-        >
-          {NETWORK_MODES.map((option) => (
-            <label key={option} className="flex items-center gap-3 text-sm">
-              <RadioGroupItem
-                value={option}
-                aria-label={PAGE_COPY.networkModeLabels[option]}
-              />
-              <span aria-hidden="true">
-                {PAGE_COPY.networkModeLabels[option]}
-              </span>
-            </label>
-          ))}
-        </RadioGroup>
-        {errors.network !== undefined ? (
-          <p id={networkMessageId} className="text-sm text-destructive">
-            {errors.network}
-          </p>
-        ) : (
-          <p id={networkMessageId} className="text-sm text-muted-foreground">
-            {PAGE_COPY.networkHint}
-          </p>
-        )}
-        {mode !== "off" ? (
-          <p className="text-sm text-muted-foreground">
-            {PAGE_COPY.networkRisk}
-          </p>
-        ) : null}
-      </fieldset>
-
-      {mode === "list" ? (
+      {kind === "runner" ? (
         <FormField
-          name="networkHosts"
-          label={PAGE_COPY.networkHosts}
-          hint={PAGE_COPY.networkHostsHint}
-          error={errors.networkHosts}
+          name="labels"
+          label={PAGE_COPY.labels}
+          hint={PAGE_COPY.labelsHint}
+          error={errors.labels}
         >
           {(control) => (
-            <Textarea
+            <Input
               {...control}
-              value={hostsText}
+              value={labelsText}
+              autoComplete="off"
               spellCheck={false}
               autoCapitalize="off"
-              autoCorrect="off"
-              placeholder={"registry.npmjs.org\n*.pythonhosted.org"}
-              className="min-h-28 font-mono text-sm"
-              onChange={(event) => setHostsText(event.target.value)}
+              placeholder="linux, gpu"
+              onChange={(event) => setLabelsText(event.target.value)}
             />
           )}
         </FormField>
       ) : null}
+
+      {kind === "runner" ? null : (
+        <>
+          <fieldset data-field="vcpus" className="flex flex-col gap-2">
+            <legend className="mb-2 text-sm font-semibold">
+              {PAGE_COPY.size}
+            </legend>
+            {item !== undefined &&
+            item.vcpus !== null &&
+            !isEnvironmentVcpus(item.vcpus) ? (
+              <p className="text-sm text-destructive">
+                {PAGE_COPY.sizeUnsupported}
+              </p>
+            ) : null}
+            <RadioGroup
+              value={String(vcpus)}
+              onValueChange={(value) => setVcpus(Number(value))}
+              aria-invalid={errors.vcpus !== undefined}
+              aria-describedby={sizeMessageId}
+              className="grid-cols-1 sm:grid-cols-2"
+            >
+              {ENVIRONMENT_VCPUS.map((size) => (
+                <label key={size} className="flex items-center gap-3 text-sm">
+                  <RadioGroupItem
+                    value={String(size)}
+                    aria-label={sizeLabel(size)}
+                  />
+                  <span aria-hidden="true">{sizeLabel(size)}</span>
+                </label>
+              ))}
+            </RadioGroup>
+            {errors.vcpus !== undefined ? (
+              <p id={sizeMessageId} className="text-sm text-destructive">
+                {errors.vcpus}
+              </p>
+            ) : (
+              <p id={sizeMessageId} className="text-sm text-muted-foreground">
+                {PAGE_COPY.sizeHint}
+              </p>
+            )}
+          </fieldset>
+
+          <FormField
+            name="setupScript"
+            label={PAGE_COPY.script}
+            hint={PAGE_COPY.scriptHint}
+            error={errors.setupScript}
+            aside={
+              <span className="text-sm text-muted-foreground">
+                {kb(scriptBytes)} / {kb(SETUP_SCRIPT_MAX_BYTES)}
+              </span>
+            }
+          >
+            {(control) => (
+              <Textarea
+                {...control}
+                value={script}
+                spellCheck={false}
+                autoCapitalize="off"
+                autoCorrect="off"
+                className="min-h-40 font-mono text-sm"
+                onChange={(event) => setScript(event.target.value)}
+              />
+            )}
+          </FormField>
+
+          <fieldset data-field="network" className="flex flex-col gap-2">
+            <legend className="mb-2 text-sm font-semibold">
+              {PAGE_COPY.network}
+            </legend>
+            <RadioGroup
+              value={mode}
+              onValueChange={(value) => setMode(value as NetworkMode)}
+              aria-invalid={errors.network !== undefined}
+              aria-describedby={networkMessageId}
+              className="grid-cols-1"
+            >
+              {NETWORK_MODES.map((option) => (
+                <label key={option} className="flex items-center gap-3 text-sm">
+                  <RadioGroupItem
+                    value={option}
+                    aria-label={PAGE_COPY.networkModeLabels[option]}
+                  />
+                  <span aria-hidden="true">
+                    {PAGE_COPY.networkModeLabels[option]}
+                  </span>
+                </label>
+              ))}
+            </RadioGroup>
+            {errors.network !== undefined ? (
+              <p id={networkMessageId} className="text-sm text-destructive">
+                {errors.network}
+              </p>
+            ) : (
+              <p
+                id={networkMessageId}
+                className="text-sm text-muted-foreground"
+              >
+                {PAGE_COPY.networkHint}
+              </p>
+            )}
+            {mode !== "off" ? (
+              <p className="text-sm text-muted-foreground">
+                {PAGE_COPY.networkRisk}
+              </p>
+            ) : null}
+          </fieldset>
+
+          {mode === "list" ? (
+            <FormField
+              name="networkHosts"
+              label={PAGE_COPY.networkHosts}
+              hint={PAGE_COPY.networkHostsHint}
+              error={errors.networkHosts}
+            >
+              {(control) => (
+                <Textarea
+                  {...control}
+                  value={hostsText}
+                  spellCheck={false}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  placeholder={"registry.npmjs.org\n*.pythonhosted.org"}
+                  className="min-h-28 font-mono text-sm"
+                  onChange={(event) => setHostsText(event.target.value)}
+                />
+              )}
+            </FormField>
+          ) : null}
+        </>
+      )}
 
       {problem !== null ? (
         <Alert variant="destructive">

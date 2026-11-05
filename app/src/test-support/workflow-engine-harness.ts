@@ -101,9 +101,12 @@ export async function startEngineHarness(
     /** The catalog price of the model of a turn; left out: no turn has a price. */
     priceOf?: () => Promise<TokenPrice | undefined>;
     actionTimeoutMs?: number;
+    /** The most connections the pool of the database opens; a test of the engine under a small pool sets it. */
+    poolMax?: number;
   } = {},
 ) {
   const app = await startImplementerHarness({
+    ...(options.poolMax === undefined ? {} : { poolMax: options.poolMax }),
     ...(options.operatorCostLimitCents === undefined
       ? {}
       : { operatorCostLimitCents: options.operatorCostLimitCents }),

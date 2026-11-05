@@ -38,6 +38,8 @@ function task(): ImplementerDetailView {
     branchUrl: null,
     baseBranch: "main",
     instruction: { preview: "Add a health endpoint.", full: null },
+    runner: null,
+    waitingForRunner: null,
     summary: null,
     environment: null,
     commits: { shown: [], more: 0 },

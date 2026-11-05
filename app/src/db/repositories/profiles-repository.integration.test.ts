@@ -334,10 +334,49 @@ describe("the profiles repository", () => {
         { profileId: "nope", version: 1 },
       ]),
     ).toEqual([
-      { profileId: "pr-1", version: 1, canPush: false, defaultResult: SCHEMA },
-      { profileId: "pr-1", version: 2, canPush: true, defaultResult: null },
+      {
+        profileId: "pr-1",
+        version: 1,
+        canPush: false,
+        defaultResult: SCHEMA,
+        managedModel: true,
+      },
+      {
+        profileId: "pr-1",
+        version: 2,
+        canPush: true,
+        defaultResult: null,
+        managedModel: true,
+      },
     ]);
     expect(await a.versionFacts([])).toEqual([]);
+  });
+
+  // #854-T230
+  it("says whether the model of a version is a managed one (an entry of the catalog) or one of the workspace's own key", async () => {
+    const { a } = await setup();
+    await a.create({ ...NEW, name: "managed" }, 100);
+    await a.create(
+      {
+        ...NEW,
+        name: "own",
+        content: {
+          ...CONTENT,
+          model: { provider: "anthropic", model: "claude-sonnet-5-5" },
+        },
+      },
+      100,
+    );
+
+    const facts = await a.versionFacts([
+      { profileId: "pr-1", version: 1 },
+      { profileId: "pr-2", version: 1 },
+    ]);
+
+    expect(facts.map((fact) => [fact.profileId, fact.managedModel])).toEqual([
+      ["pr-1", true],
+      ["pr-2", false],
+    ]);
   });
 
   // #843-T62

@@ -91,8 +91,10 @@ type Resolved = { name: string; version: number } | undefined;
 
 /**
  * What the decision under the lock needs from other tables, read BEFORE the lock is taken. A decision runs inside a transaction that
- * holds a connection; reading through a second connection from inside it would let `poolMax` concurrent decisions each hold one and wait
- * for another, which starves the pool. A value missing here is read inside as a fallback (the state changed between the two reads, rare).
+ * holds a connection; reading through a second connection from inside it would let `poolMax` concurrent decisions each hold one (the
+ * others wait for the row lock, and hold one too) and wait for another, which starves the pool until the connect times out (#875). A
+ * value missing here is never read inside: the decision answers `fetch` before it wrote anything, the value is read after the lock was
+ * released, and the decision is made again (the state changed between the two reads).
  */
 type Prefetched = {
   document?: { value: RunDocument | undefined };
@@ -105,7 +107,16 @@ type Prefetched = {
 type Decision =
   | { kind: "done" }
   | { kind: "again" }
-  | { kind: "execute"; stepRun: StoredStepRun; takeOver: boolean };
+  | { kind: "execute"; stepRun: StoredStepRun; takeOver: boolean }
+  /** The decision needs a value that was not read; `read` puts it into `Prefetched`. Nothing was written. */
+  | { kind: "fetch"; read: (pre: Prefetched) => Promise<void> };
+
+/**
+ * How many times one move may leave the lock to read what it lacked. Each read fills one value that the next try finds, and one state
+ * of the run needs two at most (the document, then one of turn, profile or request); the rest is room for a state that changes between
+ * tries. More means it keeps changing: the move ends without writing, and the sweep looks at the run again.
+ */
+const FETCHES_PER_MOVE_MAX = 8;
 
 const clip = (text: string): string =>
   text.length <= ERROR_MESSAGE_MAX_CHARS
@@ -207,11 +218,17 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     lock: RunLock,
     step: StoredStepRun,
     pre: Prefetched,
-  ): Promise<"ended" | "waiting"> {
+  ): Promise<"ended" | "waiting" | Decision> {
     if (step.jobId === null) return "waiting";
-    const read = pre.turns.has(step.jobId)
-      ? pre.turns.get(step.jobId)
-      : await deps.turns.read(step.jobId);
+    const { jobId } = step;
+    if (!pre.turns.has(jobId))
+      return {
+        kind: "fetch",
+        read: async (into) => {
+          into.turns.set(jobId, await deps.turns.read(jobId));
+        },
+      };
+    const read = pre.turns.get(jobId);
     if (read === undefined) {
       await lock.finishStep(
         step.id,
@@ -293,7 +310,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       )
         pre.profiles.set(next.profile, await resolveProfile(next));
     } catch {
-      // What is missing is read under the lock instead, where a failure is the decision's to deal with.
+      // What is missing is read again after the lock, by the decision's own fetch, where a failure is the move's to deal with.
     }
     return pre;
   }
@@ -301,8 +318,14 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
   async function decide(lock: RunLock, pre: Prefetched): Promise<Decision> {
     const { run } = lock;
     if (run.status !== "running") return { kind: "done" };
-    const document =
-      pre.document === undefined ? await documentOf(run) : pre.document.value;
+    if (pre.document === undefined)
+      return {
+        kind: "fetch",
+        read: async (into) => {
+          into.document = { value: await documentOf(run) };
+        },
+      };
+    const document = pre.document.value;
     if (document === undefined) {
       await lock.finishRun({
         status: "failed",
@@ -342,12 +365,24 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       case "add_step": {
         const node = document.steps[move.position];
         if (node === undefined) return { kind: "done" };
+        const ref = node.profile;
+        if (
+          move.kind === "agent" &&
+          typeof ref === "string" &&
+          !pre.profiles.has(ref)
+        )
+          return {
+            kind: "fetch",
+            read: async (into) => {
+              into.profiles.set(ref, await resolveProfile(node));
+            },
+          };
         const profile =
           move.kind !== "agent"
             ? undefined
-            : typeof node.profile === "string" && pre.profiles.has(node.profile)
-              ? pre.profiles.get(node.profile)
-              : await resolveProfile(node);
+            : typeof ref === "string"
+              ? pre.profiles.get(ref)
+              : undefined;
         const stepRun = await lock.addStep({
           position: move.position,
           stepId: node.id,
@@ -376,9 +411,9 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       case "read_job": {
         const stepRun = lock.steps[move.position];
         if (stepRun === undefined) return { kind: "done" };
-        return (await endAgentStep(lock, stepRun, pre)) === "ended"
-          ? { kind: "again" }
-          : { kind: "done" };
+        const ended = await endAgentStep(lock, stepRun, pre);
+        if (typeof ended === "object") return ended;
+        return ended === "ended" ? { kind: "again" } : { kind: "done" };
       }
       case "fail_step": {
         const stepRun = lock.steps[move.position];
@@ -388,9 +423,17 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         if (move.code === "agent_start_failed") {
           // What was read before the lock is used as it is: a lookup here would take a second connection while the lock holds one,
           // and parallel claimants would starve the pool.
-          const found = pre.started.has(stepRun.id)
-            ? pre.started.get(stepRun.id)
-            : await deps.turns.findByRequest(requestIdOf(run, stepRun));
+          if (!pre.started.has(stepRun.id))
+            return {
+              kind: "fetch",
+              read: async (into) => {
+                into.started.set(
+                  stepRun.id,
+                  await deps.turns.findByRequest(requestIdOf(run, stepRun)),
+                );
+              },
+            };
+          const found = pre.started.get(stepRun.id);
           if (
             found !== undefined &&
             (await lock.attachTurn(stepRun.id, {
@@ -599,10 +642,22 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     for (let moves = 0; moves < MOVES_PER_CALL_MAX; moves += 1) {
       let latest: StoredWorkflowRun | undefined;
       const pre = await prefetch(runId);
-      const decision = await deps.runs.lockRun(runId, async (lock) => {
-        latest = lock.run;
-        return decide(lock, pre);
-      });
+      let decision: Decision | undefined;
+      for (let fetches = 0; ; fetches += 1) {
+        decision = await deps.runs.lockRun(runId, async (lock) => {
+          latest = lock.run;
+          return decide(lock, pre);
+        });
+        if (decision?.kind !== "fetch") break;
+        if (fetches >= FETCHES_PER_MOVE_MAX) {
+          log(
+            `[workflow-runs] FETCH_LIMIT run=${runId}: the move kept lacking a value, the sweep looks at the run again`,
+          );
+          return;
+        }
+        // Outside the lock: the connection of the decision is released, so this read takes any connection the pool has.
+        await decision.read(pre);
+      }
       if (decision === undefined || decision.kind === "done") return;
       if (decision.kind === "execute" && latest !== undefined)
         await execute(latest, decision.stepRun, decision.takeOver);

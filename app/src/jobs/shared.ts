@@ -20,7 +20,10 @@ import { getWriteTokens } from "../runner-api/claimed-keys-shared.ts";
 import { endedClaimsReaction } from "../runner-api/write-token.ts";
 import { deliverBalanceMails, recordWallClocks } from "../billing/shared.ts";
 import { createJobQueue, type JobQueue } from "./job-queue.ts";
-import { configuredNoCapableRunnerMs } from "../db/job-limits.ts";
+import {
+  configuredNoCapableRunnerMs,
+  configuredNoRunnerAvailableMs,
+} from "../db/job-limits.ts";
 import { noticeOfRefusal } from "../refusal-notices/shared.ts";
 import { unknownCostAlertLine } from "../usage/unknown-cost-alert.ts";
 import { createRunnerQueue, type RunnerQueue } from "./runner-queue.ts";
@@ -78,7 +81,11 @@ function createRunnerQueueOfTheServer(): RunnerQueue {
   const checkOfRefusal = notifyingRunnerQueue.onRefused(checkNotifier);
   return createRunnerQueue(getDatabase(), {
     // #195: how long a job no capable runner claims may wait; the operator owns the value.
-    limits: { noCapableRunnerMs: configuredNoCapableRunnerMs(process.env) },
+    limits: {
+      noCapableRunnerMs: configuredNoCapableRunnerMs(process.env),
+      // #854: how long a turn of a runner environment waits for a runner of its workspace.
+      noRunnerAvailableMs: configuredNoRunnerAvailableMs(process.env),
+    },
     // #277: a job refused for the entitlements of its workspace is failed inside the claim; this is its log line
     // (ids and codes only, never a name or a number of the plan).
     onRefused: (refusal) => {

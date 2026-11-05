@@ -5,6 +5,7 @@
 import "server-only";
 import { createRunnersRepository } from "../db/repositories/runners-repository.ts";
 import { getDatabase } from "../db/startup.ts";
+import { getRunnerQueue } from "../jobs/shared.ts";
 import {
   minimumBaseVersion,
   ONLINE_WITHIN_SECONDS,
@@ -18,6 +19,9 @@ import {
 export function runnerFleetServiceFor(workspaceId: string): RunnerFleetService {
   return createRunnerFleetService({
     runners: createRunnersRepository(getDatabase(), workspaceId),
+    endClaimsOf: async (customerRunnerId) => {
+      await getRunnerQueue().expireClaimsOf(customerRunnerId);
+    },
     settings: () => ({
       minBaseVersion: minimumBaseVersion(process.env),
       onlineWithinSeconds: ONLINE_WITHIN_SECONDS,

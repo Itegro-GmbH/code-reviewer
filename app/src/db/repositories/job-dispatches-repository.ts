@@ -16,6 +16,7 @@ import {
 import { jobKindOf, type JobKind } from "../../job-kind/job-kind.ts";
 import { formatTimestamp } from "../codecs.ts";
 import type { Database } from "../schema.ts";
+import type { ExpressionBuilder } from "kysely";
 
 export type DispatchRow = {
   jobId: string;
@@ -63,6 +64,23 @@ export type DueDispatchJob = {
   /** The job's lost attempts so far; the call carries the number of the attempt it is on (this plus one). */
   jobAttempts: number;
 };
+
+/**
+ * #854: the turn of a runner environment is not for the Dispatcher: it waits for a runner of its workspace, which polls. It gets no
+ * dispatch row and is in no listing of the sender, so the Dispatcher is never woken for it and the sweep never counts it as a job
+ * nobody answered for.
+ */
+function notARunnerTurn(eb: ExpressionBuilder<Database, "jobs">) {
+  return eb.not(
+    eb.exists(
+      eb
+        .selectFrom("implementer_turns")
+        .select("implementer_turns.id")
+        .whereRef("implementer_turns.job_id", "=", "jobs.id")
+        .where("implementer_turns.environment_kind", "=", "runner"),
+    ),
+  );
+}
 
 export type JobDispatchesRepository = {
   get(jobId: string): Promise<DispatchRow | undefined>;
@@ -177,6 +195,14 @@ export function createJobDispatchesRepository(
 
     async create(jobId, nextDispatchAt) {
       const timestamp = formatTimestamp(now());
+      // #854: no row for the turn of a runner environment; the answer is "this call made none".
+      const dispatched = await db
+        .selectFrom("jobs")
+        .select("jobs.id")
+        .where("jobs.id", "=", jobId)
+        .where(notARunnerTurn)
+        .executeTakeFirst();
+      if (dispatched === undefined) return false;
       const result = await db
         .insertInto("job_dispatches")
         .values({
@@ -275,6 +301,7 @@ export function createJobDispatchesRepository(
           "jobs.attempts as job_attempts",
         ])
         .where("jobs.status", "=", "queued")
+        .where(notARunnerTurn)
         .where("jobs.run_after", "<=", timestamp)
         .where("job_dispatches.state", "=", "pending")
         .where("job_dispatches.attempts", ">", 0)
@@ -320,6 +347,7 @@ export function createJobDispatchesRepository(
         ])
         .where("jobs.id", "=", jobId)
         .where("jobs.status", "=", "queued")
+        .where(notARunnerTurn)
         .where("jobs.run_after", "<=", formatTimestamp(at))
         .executeTakeFirst();
       return row === undefined ? undefined : toDueJob(row);
@@ -373,6 +401,7 @@ export function createJobDispatchesRepository(
           "jobs.attempts as job_attempts",
         ])
         .where("jobs.status", "=", "queued")
+        .where(notARunnerTurn)
         .where("jobs.run_after", "<=", timestamp)
         .where(
           "jobs.updated_at",

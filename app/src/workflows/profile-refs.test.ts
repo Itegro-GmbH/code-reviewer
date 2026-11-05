@@ -85,28 +85,46 @@ describe("the profiles a workflow document names", () => {
       { profileId: "p-2", version: 1 },
     ]);
     const infos = profileInfosOf(live, refs).build([
-      { profileId: "p-1", version: 1, canPush: false, defaultResult: null },
+      {
+        profileId: "p-1",
+        version: 1,
+        canPush: false,
+        defaultResult: null,
+        managedModel: false,
+      },
       {
         profileId: "p-1",
         version: 3,
         canPush: true,
         defaultResult: '{"type":"object","properties":{}}',
+        managedModel: false,
       },
-      { profileId: "p-2", version: 1, canPush: false, defaultResult: null },
+      {
+        profileId: "p-2",
+        version: 1,
+        canPush: false,
+        defaultResult: null,
+        managedModel: false,
+      },
     ]);
     expect(infos).toEqual([
       {
         name: "scribe",
         versions: [1, 2, 3],
         facts: {
-          1: { canPush: false },
+          1: { canPush: false, managedModel: false },
           3: {
             canPush: true,
+            managedModel: false,
             defaultResult: { type: "object", properties: {} },
           },
         },
       },
-      { name: "reviewer", versions: [1], facts: { 1: { canPush: false } } },
+      {
+        name: "reviewer",
+        versions: [1],
+        facts: { 1: { canPush: false, managedModel: false } },
+      },
       { name: "unnamed", versions: [1, 2], facts: {} },
     ]);
   });

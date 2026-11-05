@@ -21,6 +21,8 @@ const USER = {
 const VIEW: EnvironmentView = {
   id: "env-1",
   name: "Node 22",
+  kind: "hosted",
+  labels: [],
   vcpus: 4,
   memoryGb: 6,
   sizeSupported: true,
@@ -43,6 +45,8 @@ function setup(overrides: Partial<EnvironmentService> = {}) {
         environments: [
           {
             id: "env-1",
+            kind: "hosted" as const,
+            labels: [],
             name: "Node 22",
             vcpus: 4,
             memoryGb: 6,
@@ -111,6 +115,8 @@ describe("the environment handlers", () => {
         {
           id: "env-1",
           name: "Node 22",
+          kind: "hosted",
+          labels: [],
           vcpus: 4,
           memoryGb: 6,
           sizeSupported: true,

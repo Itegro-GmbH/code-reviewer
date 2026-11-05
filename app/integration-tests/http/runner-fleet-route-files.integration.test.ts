@@ -530,8 +530,29 @@ describe("a registered runner's calls", () => {
     expect((await claim(SHARED_TOKEN)).status).toBe(204);
     // It is no runner credential.
     expect((await announce(SHARED_TOKEN, ANNOUNCEMENT)).status).toBe(401);
-    // The runner credential does not open the job calls (they come with the routing of the next part).
-    expect((await heartbeat(credential)).status).toBe(401);
+    // The runner credential opens the calls about a job of its own workspace (a job that is not there is one that is not its own) ...
+    const unknownJob = await heartbeat(credential);
+    expect(unknownJob.status).toBe(404);
+    expect(await unknownJob.json()).toMatchObject({
+      error: { code: "RUNNER_JOB_NOT_FOUND" },
+    });
+    // ... and nothing of the Dispatcher's: the VM of a job is reported with the shared token alone.
+    const vm = await (
+      await import("../../src/app/api/runners/v1/jobs/[id]/vm/route.ts")
+    ).POST(
+      new Request("https://app.test/api/runners/v1/jobs/x/vm", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${credential}`,
+        },
+        body: "{}",
+      }),
+      {
+        params: Promise.resolve({ id: "00000000-0000-4000-8000-000000000001" }),
+      } as never,
+    );
+    expect(vm.status).toBe(401);
     // And nothing opens the claim without a credential.
     expect((await claim(undefined)).status).toBe(401);
     expect((await claim(`crc_${"B".repeat(43)}`)).status).toBe(401);

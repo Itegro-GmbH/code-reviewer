@@ -61,9 +61,12 @@ export async function startWebhookHarness(
     wrapProvider?: (provider: IntegrationProvider) => IntegrationProvider;
     /** The review settings every project uses; default: the built-in values (everything on). */
     reviewSettings?: Partial<ReviewSettings>;
+    /** The most connections the pool of the database opens. */
+    poolMax?: number;
   } = {},
 ) {
   const base = await startSyncHarness({
+    ...(options.poolMax === undefined ? {} : { poolMax: options.poolMax }),
     ...(options.env === undefined ? {} : { env: options.env }),
     ...(options.credentialsFromDatabase === undefined
       ? {}
