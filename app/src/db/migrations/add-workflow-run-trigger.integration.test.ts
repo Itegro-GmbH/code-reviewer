@@ -127,7 +127,7 @@ describe("the workflow run trigger migration", () => {
     await run("hand-1", "u-1").execute(db);
     await run("hand-2", "u-1").execute(db);
     // The run ends: the key is free for the next one.
-    await sql`update workflow_runs set status = 'failed' where id = 'run-2'`.execute(
+    await sql`update workflow_runs set status = 'failed', error_code = 'step_failed', finished_at = ${T} where id = 'run-2'`.execute(
       db,
     );
     await keyed("run-3").execute(db);
