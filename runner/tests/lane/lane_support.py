@@ -97,6 +97,7 @@ from code_reviewer_runner.implementer.setup_container import (
     SETUP_NETWORK_NAME,
     SetupSeams,
 )
+from code_reviewer_runner.implementer.snapshot_pump import SnapshotPump
 from code_reviewer_runner.implementer.turn_result import TurnResult
 from code_reviewer_runner.job import (
     ImplementerEnvironment,
@@ -677,6 +678,7 @@ def lane_turn(
     judge: Callable[[Mapping[str, str], Mapping[str, Any]], Refusal | None] | None = None,
     memory_mb: int = 2048,
     setup_script: str | None = None,
+    snapshot: SnapshotPump | None = None,
 ) -> Generator[Turned]:
     """Run one whole turn to its result against a model that follows `script(repo)` (the path of
     the repository in the agent's container). With `setup_script`, the environment's script runs
@@ -747,6 +749,7 @@ def lane_turn(
             place=place,
             environment={"RUNNER_DYNAMIC_MAX_COST_USD": limit},
             seams=SessionSeams(transport=transport),
+            snapshot=snapshot,
         )
         turned = Turned(
             config=config,
