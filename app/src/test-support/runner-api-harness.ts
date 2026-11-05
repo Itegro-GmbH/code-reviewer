@@ -139,7 +139,7 @@ export async function startRunnerApiHarness(
     /** Wraps the job queue the API uses, for example to make one call fail. */
     wrapQueue?: (queue: TestQueue) => TestQueue;
     /** #395: what the running server does when a job ends or a call touched the database. */
-    hooks?: Pick<ReportDeps, "jobEnded" | "activity">;
+    hooks?: Pick<ReportDeps, "jobEnded" | "activity" | "turnEnded">;
     limits?: Partial<JobQueueLimits>;
     /** Replaces or (with undefined) removes variables of the app's environment. */
     env?: Record<string, string | undefined>;

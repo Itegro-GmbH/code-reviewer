@@ -27,6 +27,7 @@ import { createInvitationsRepository } from "../../src/db/repositories/invitatio
 import { createProjectsRepository } from "../../src/db/repositories/projects-repository.ts";
 import { createRepositoriesRepository } from "../../src/db/repositories/repositories-repository.ts";
 import { createSecretsRepository } from "../../src/db/repositories/secrets-repository.ts";
+import { createWorkflowRunsRepository } from "../../src/db/repositories/workflow-runs-repository.ts";
 import { createWorkspacesRepository } from "../../src/db/repositories/workspaces-repository.ts";
 import { closeDatabase, getDatabase } from "../../src/db/startup.ts";
 import { jobQueueFor } from "../../src/jobs/shared.ts";
@@ -75,6 +76,7 @@ type Ids = {
   invitationId: string;
   environmentId: string;
   workflowId: string;
+  workflowRunId: string;
   profileId: string;
   runnerId: string;
 };
@@ -579,6 +581,45 @@ const ENTRIES: Entry[] = [
     path: (ids) => `/workflows/${ids.workflowId}`,
     params: (ids) => ({ workflowId: ids.workflowId }),
     file: "workflows/[workflowId]/route.ts",
+    implementer: true,
+  },
+  {
+    // #844-T156: every member lists the runs of a workflow of their own workspace; another workspace's workflow is not reachable.
+    name: "GET workflows/[workflowId]/runs",
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs",
+    method: "GET",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) => `/workflows/${ids.workflowId}/runs`,
+    params: (ids) => ({ workflowId: ids.workflowId }),
+    file: "workflows/[workflowId]/runs/route.ts",
+    implementer: true,
+  },
+  {
+    // The body names a repository that is none of the workspace's, so the start ends before it asks GitHub or writes anything.
+    name: "POST workflows/[workflowId]/runs",
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) => `/workflows/${ids.workflowId}/runs`,
+    body: () => ({
+      input: { repo: "nobody/nothing" },
+      clientRequestId: "matrix-request",
+    }),
+    params: (ids) => ({ workflowId: ids.workflowId }),
+    file: "workflows/[workflowId]/runs/route.ts",
+    implementer: true,
+  },
+  {
+    name: "GET workflows/[workflowId]/runs/[runId]",
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]",
+    method: "GET",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) => `/workflows/${ids.workflowId}/runs/${ids.workflowRunId}`,
+    params: (ids) => ({
+      workflowId: ids.workflowId,
+      runId: ids.workflowRunId,
+    }),
+    file: "workflows/[workflowId]/runs/[runId]/route.ts",
     implementer: true,
   },
   {
@@ -1095,6 +1136,21 @@ async function seedWorkspace(
     100,
   );
   if (!workflow.ok) throw new Error("seeding failed");
+  // A run of that workflow (#844): the other workspace's must not be reachable through this one's address.
+  const workflowRun = await createWorkflowRunsRepository(
+    db,
+    workspace.id,
+  ).createRun({
+    workflowId: workflow.workflow.id,
+    workflowVersion: 1,
+    repositoryId: repository.id,
+    baseBranch: "main",
+    triggerInput: `{"of":"${slug}"}`,
+    budgetMicroUsd: 20_000_000,
+    clientRequestId: `run-${slug}`,
+    createdBy: names.owner,
+    actorLogin: "octocat",
+  });
   // A profile (#843): the workflows of the matrix run it, and the other workspace's must not be reachable through this one's address.
   const profile = await createProfilesRepository(db, workspace.id).create(
     {
@@ -1137,6 +1193,7 @@ async function seedWorkspace(
     ids: {
       environmentId: environment.environment.id,
       workflowId: workflow.workflow.id,
+      workflowRunId: workflowRun.run.id,
       profileId: profile.profile.id,
       runnerId: `runner-${slug}`,
       integrationId: integration.id,
@@ -1281,6 +1338,8 @@ async function start() {
         | "implementer_sessions"
         | "workflows"
         | "workflow_versions"
+        | "workflow_runs"
+        | "workflow_step_runs"
         | "profiles"
         | "profile_versions",
     ) =>
@@ -1306,6 +1365,8 @@ async function start() {
       implementerSessions: await select("implementer_sessions"),
       workflows: await select("workflows"),
       workflowVersions: await select("workflow_versions"),
+      workflowRuns: await select("workflow_runs"),
+      workflowStepRuns: await select("workflow_step_runs"),
       profiles: await select("profiles"),
       profileVersions: await select("profile_versions"),
       projects: await db

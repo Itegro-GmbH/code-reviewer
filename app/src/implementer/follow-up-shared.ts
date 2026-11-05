@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // The starter of queued instructions as the running server has it (#841): the real database and the Implementer service of each
-// workspace. The routes that end a turn call `startQueuedFollowUps()` after their response, and the cron route hands the starter to the
+// workspace. The hook at the end of a turn (`workflow-runs/shared.ts`, beside the workflow engine's) calls `startQueuedFollowUps()` after the response, and the cron route hands the starter to the
 // sweep as a step. Only routes (`src/app`) import this module: the queues and the sweep are imported by the Implementer, so they cannot
 // import it back (`src/ci/import-cycles`).
 import "server-only";
@@ -24,7 +24,7 @@ export function getQueuedFollowUpStarter(): QueuedFollowUpStarter {
 }
 
 /**
- * Starts the instructions that waited for a turn which has just ended. Called by the routes that end a turn, after their response, and
+ * Starts the instructions that waited for a turn which has just ended. Called by the hook at the end of a turn, after the response, and
  * never rejects (a failure is counted and logged by the starter). A deployment without the capability has none.
  */
 export async function startQueuedFollowUps(): Promise<void> {

@@ -57,6 +57,8 @@ export const CLEANUP_HOUR_KEY = "maintenance.sweep_cleanup_hour";
 const HOUR_MS = 60 * 60 * 1000;
 /** The sweep runs in an internal route (five minutes), so the check runs may have most of a minute (#405). */
 export const CHECKS_BUDGET_MS = 40_000;
+/** The same for the workflow runs (#844): a run is looked at as a whole, so the budget is checked between two runs. */
+export const WORKFLOW_RUNS_BUDGET_MS = 40_000;
 /**
  * The deadline of the models.dev run: the fetch, the lookups and the write together (#548). The route has 300 seconds; the
  * check runs take 40 of them at most, the other steps are single queries and calls with limits of their own, and this
@@ -72,6 +74,7 @@ export const SWEEP_STEPS = [
   "notices",
   "checks",
   "write_tokens",
+  "workflow_runs",
   "follow_ups",
   "cleanup",
   "billing_holds",
@@ -133,6 +136,12 @@ export type SweepDependencies = {
   };
   /** #790: tries again to switch off the write tokens of ended turns that could not be switched off. Left out, none is tried. */
   writeTokens?: { retryPending(): Promise<void> };
+  /** #844: looks again at the workflow runs that wait for a job which may have ended without a report. Left out, none is looked at. */
+  workflowRuns?: {
+    reconcile(options?: {
+      budgetMs?: number;
+    }): Promise<{ looked: number; failed: number }>;
+  };
   /** #841: starts the queued instructions of sessions whose turn has ended and found no event. Left out, none is. */
   followUps?: { startDue(): Promise<{ started: number }> };
   /** #591: releases the holds of ended jobs while billing is on (the step reads only the switch while it is off). Left out, none is. */
@@ -233,7 +242,16 @@ export function createDispatchSweep(deps: SweepDependencies): DispatchSweep {
       await step("write_tokens", async () => {
         await writeTokens.retryPending();
       });
-    // After `expire`, which ends turns without a report, and before the next `send` of a later run: the turns it starts are queued now.
+    const workflowRuns = has("implementer") ? deps.workflowRuns : undefined;
+    if (workflowRuns !== undefined)
+      await step("workflow_runs", async () => {
+        const { failed } = await workflowRuns.reconcile({
+          budgetMs: WORKFLOW_RUNS_BUDGET_MS,
+        });
+        if (failed > 0) throw new Error("workflow runs could not be advanced");
+      });
+    // Beside the workflow runs, not in them: a failure of one never stops the other. After `expire`, which ends turns without a report:
+    // the instruction a person queued behind such a turn starts now.
     const followUps = has("implementer") ? deps.followUps : undefined;
     if (followUps !== undefined)
       await step("follow_ups", async () => {

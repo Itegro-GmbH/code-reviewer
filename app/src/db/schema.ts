@@ -1276,6 +1276,62 @@ export interface WorkflowVersionsTable {
 }
 
 /**
+ * One start of a saved workflow version (#844, milestone 3). It names the version it started with, the repository it works on and the
+ * input of its trigger; the money is counted in millionths of a US dollar. `status` is `running`, `succeeded` or `failed`.
+ */
+export interface WorkflowRunsTable {
+  id: string;
+  workspace_id: string;
+  workflow_id: string;
+  workflow_version: number;
+  repository_id: string;
+  /** The branch the agent steps start from. */
+  base_branch: string;
+  /** JSON text: what the caller of the manual trigger handed in. */
+  trigger_input: string;
+  status: string;
+  /** A stable code of `src/workflow-runs/errors.ts` for a failed run; null otherwise. */
+  error_code: string | null;
+  budget_micro_usd: number;
+  spent_micro_usd: ColumnType<number, number | undefined, number>;
+  /** One run per request id and workspace: makes the start idempotent. */
+  client_request_id: string;
+  created_by: string;
+  /** The login the agent steps are started as. */
+  actor_login: string;
+  created_at: string;
+  updated_at: string;
+  /** Set when the run ends. */
+  finished_at: string | null;
+}
+
+/** One step of a run (#844), in the order the steps run. `status` is `pending`, `running`, `succeeded` or `failed`. */
+export interface WorkflowStepRunsTable {
+  id: string;
+  run_id: string;
+  workspace_id: string;
+  position: number;
+  step_id: string;
+  /** `agent` or `action`. */
+  kind: string;
+  status: string;
+  profile_name: string | null;
+  profile_version: number | null;
+  /** The job of the Implementer turn an agent step started. */
+  job_id: string | null;
+  turn_id: string | null;
+  cap_micro_usd: number | null;
+  cost_micro_usd: number | null;
+  /** JSON text: the values later steps refer to. */
+  output: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+/**
  * A profile of a workspace (#843): a name and which saved version is the current one. What the profile says is in `profile_versions`;
  * a save adds a version and moves `current_version`. The name never changes.
  */
@@ -1389,6 +1445,8 @@ export interface Database {
   implementer_environments: ImplementerEnvironmentsTable;
   workflows: WorkflowsTable;
   workflow_versions: WorkflowVersionsTable;
+  workflow_runs: WorkflowRunsTable;
+  workflow_step_runs: WorkflowStepRunsTable;
   profiles: ProfilesTable;
   profile_versions: ProfileVersionsTable;
   runners: RunnersTable;

@@ -72,6 +72,12 @@ export type ReportDeps = {
    * Implementer (the review of #776). Never rejects; does nothing for another kind. Left out, nothing is switched off here.
    */
   revokeWriteTokens?: WriteTokenRevoker;
+  /**
+   * #844: a turn of the Implementer is over (its result was stored, or the job failed for good): the workflow engine goes on with the run
+   * whose step it was. Called after the completion is stored, so it can never fail or undo it: a hook that throws or rejects is logged by
+   * its code and nothing else (`turnEndedSafely`). Left out, no workflow reacts; the sweep finds a job that ended without a report.
+   */
+  turnEnded?: (job: Job) => void | Promise<void>;
   /** #395: an authenticated call touched the database (a heartbeat, a result): the running server may do repair work. */
   activity?: () => void;
 };
@@ -142,6 +148,24 @@ export function withoutManagedModel(
           },
         }),
   };
+}
+
+/**
+ * Tells the workflow engine that a turn is over (#844). Whatever the engine does or fails to do, the completion that called this one
+ * has been stored and is answered as it would have been without the engine.
+ */
+export function turnEndedSafely(
+  deps: { turnEnded?: ReportDeps["turnEnded"] },
+  job: Job,
+): void {
+  if (deps.turnEnded === undefined || job.reviewKind !== "implementer") return;
+  const failed = () =>
+    console.error(`[runner-api] WORKFLOW_ENGINE_HOOK_FAILED job=${job.id}`);
+  try {
+    void Promise.resolve(deps.turnEnded(job)).catch(failed);
+  } catch {
+    failed();
+  }
 }
 
 function invalid(parsed: Extract<Parsed<unknown>, { ok: false }>): Response {
@@ -332,6 +356,8 @@ export async function finishJob(
     );
     deps.jobEnded?.(endOf(released.job, released.status === "requeued"));
     await deps.revokeWriteTokens?.(released.job);
+    // A job that went back to the queue is not over; one that failed on its last attempt is.
+    if (released.status !== "requeued") turnEndedSafely(deps, released.job);
     return jsonResponse(200, {
       version: RUNNER_API_VERSION,
       job: {
@@ -371,6 +397,8 @@ export async function finishJob(
         deps.jobEnded?.(endOf(result.job, false));
       // Also a repeated report: a token a first call could not switch off is tried again, and none is revoked twice.
       await deps.revokeWriteTokens?.(result.job);
+      // Also a repeated report: an engine that missed the first one gets another chance, and a second one finds nothing to do.
+      turnEndedSafely(deps, result.job);
       deps.activity?.();
       return jsonResponse(200, {
         version: RUNNER_API_VERSION,

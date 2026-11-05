@@ -133,6 +133,7 @@ describe("the migrations of both epics", () => {
       "20261105090000_create_implementer_session_snapshots",
       "20261105100000_add_implementer_turn_result",
       "20261105120000_create_runners",
+      "20261105130000_create_workflow_runs",
       "20261105160000_add_implementer_session_queue",
     ]);
   });
@@ -221,6 +222,8 @@ describe("starting the database", () => {
       "users",
       "verifications",
       "webhook_deliveries",
+      "workflow_runs",
+      "workflow_step_runs",
       "workflow_versions",
       "workflows",
       "workspace_entitlements",
