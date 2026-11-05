@@ -7,9 +7,12 @@ import {
   agentResultOf,
   costBasesOf,
   formatUsd,
+  neverRan,
+  readableMessageOf,
   repositoryOfRun,
   spentShare,
   stepDurationMs,
+  URL_TEXT_MAX_CHARS,
 } from "./view.ts";
 
 const REPO = "acme/widgets";
@@ -58,13 +61,62 @@ describe("what the workflow pages take from a run", () => {
   it("lists each cost basis of a run once, in the order the steps used them", () => {
     expect(
       costBasesOf([
-        { costBasis: "limit" },
-        { costBasis: null },
-        { costBasis: "reported" },
-        { costBasis: "limit" },
+        { costBasis: "limit", errorCode: null, costUsd: 5 },
+        { costBasis: null, errorCode: null, costUsd: null },
+        { costBasis: "reported", errorCode: null, costUsd: 1 },
+        { costBasis: "limit", errorCode: null, costUsd: 5 },
       ]),
     ).toEqual(["limit", "reported"]);
     expect(costBasesOf([])).toEqual([]);
+  });
+
+  it("does not count a step that no runner took as a reported cost", () => {
+    const free = {
+      costBasis: "reported",
+      errorCode: "no_runner_available",
+      costUsd: 0,
+    } as const;
+    expect(neverRan(free)).toBe(true);
+    expect(neverRan({ ...free, costUsd: 0.1 })).toBe(false);
+    expect(neverRan({ ...free, errorCode: "timeout" })).toBe(false);
+    expect(costBasesOf([free])).toEqual([]);
+  });
+
+  it("shows a stored message only when it carries no code", () => {
+    expect(readableMessageOf(null)).toBeNull();
+    expect(readableMessageOf("")).toBeNull();
+    expect(readableMessageOf("The agent ended without a result.")).toBe(
+      "The agent ended without a result.",
+    );
+    expect(readableMessageOf("IMPLEMENTER_X: the thing broke")).toBeNull();
+    expect(readableMessageOf("failed with agent_start_failed")).toBeNull();
+    expect(readableMessageOf("GITHUB_PERMISSION_MISSING")).toBeNull();
+    // Names a person can read stay.
+    expect(
+      readableMessageOf(
+        'Needs the permission "Pull requests: Read and write".',
+      ),
+    ).not.toBeNull();
+    expect(
+      readableMessageOf("The action github.pullRequest.open is not there."),
+    ).not.toBeNull();
+  });
+
+  it("cuts a long address that is shown as text", () => {
+    const long = `https://example.com/${"a".repeat(500)}`;
+    const result = actionResultOf(
+      { kind: "action", output: { url: long } },
+      REPO,
+    );
+    expect(result?.url).toBeUndefined();
+    expect(result?.urlText).toHaveLength(URL_TEXT_MAX_CHARS);
+    expect(result?.urlText?.endsWith("…")).toBe(true);
+    expect(
+      actionResultOf(
+        { kind: "action", output: { url: "https://example.com/x" } },
+        REPO,
+      )?.urlText,
+    ).toBe("https://example.com/x");
   });
 
   // #873-T12

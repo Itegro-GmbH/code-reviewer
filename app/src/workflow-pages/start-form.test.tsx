@@ -191,6 +191,44 @@ describe("the same request", () => {
   });
 
   // #873-T54
+  it("releases the form after a start and makes the next start with the same input another request", async () => {
+    const user = userEvent.setup();
+    const api = apiAnswering(
+      ok(run({ id: "run-1" })),
+      ok(run({ id: "run-2" })),
+    );
+    const { container } = renderForm(api);
+
+    await user.type(screen.getByLabelText("Repository"), "acme/widgets");
+    await user.click(screen.getByRole("button", { name: START_COPY.start }));
+    await waitFor(() =>
+      expect(navigation.push).toHaveBeenCalledWith(
+        "/w/acme/workflows/wf-1/runs/run-1",
+      ),
+    );
+
+    // The page stays mounted when the person comes back with "back": the form is usable again, with what was typed.
+    const button = container.querySelector("button[type=submit]");
+    await waitFor(() => expect(button?.hasAttribute("disabled")).toBe(false));
+    expect(
+      (screen.getByLabelText("Repository") as HTMLInputElement).disabled,
+    ).toBe(false);
+    await user.click(screen.getByRole("button", { name: START_COPY.start }));
+    await waitFor(() => expect(api.start).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(navigation.push).toHaveBeenLastCalledWith(
+        "/w/acme/workflows/wf-1/runs/run-2",
+      ),
+    );
+
+    const ids = api.start.mock.calls.map((call) => call[1].clientRequestId);
+    expect(api.start.mock.calls[1]?.[1].input).toEqual(
+      api.start.mock.calls[0]?.[1].input,
+    );
+    expect(ids[1]).not.toBe(ids[0]);
+  });
+
+  // #873-T54
   it("does not send twice while the first answer is on its way", async () => {
     const user = userEvent.setup();
     let release: (value: RequestResult<{ run: RunView }>) => void = () => {};
@@ -311,5 +349,17 @@ describe("the input made from the values", () => {
     expect(inputOf(fields, { n: "99999999999999999999" })).toEqual({
       errors: { n: START_COPY.notInteger },
     });
+  });
+
+  it("takes numbers in decimal notation only", () => {
+    const fields: StartField[] = [
+      { name: "x", required: false, kind: "number" },
+    ];
+    expect(inputOf(fields, { x: "-0.5" })).toEqual({ input: { x: -0.5 } });
+    expect(inputOf(fields, { x: ".5" })).toEqual({ input: { x: 0.5 } });
+    for (const text of ["0x10", "1e3", "Infinity", "1_000", "1,5", "0b1"])
+      expect(inputOf(fields, { x: text }), text).toEqual({
+        errors: { x: START_COPY.notNumber },
+      });
   });
 });

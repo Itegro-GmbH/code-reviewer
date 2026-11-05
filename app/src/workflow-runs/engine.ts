@@ -260,6 +260,10 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
             costBasis: outcome.costBasis,
           }),
     );
+    if (!outcome.ok && outcome.detail !== undefined)
+      log(
+        `[workflow-runs] STEP_TURN_FAILED run=${step.runId} step=${step.stepId} code=${outcome.code} detail=${outcome.detail}`,
+      );
     return "ended";
   }
 
@@ -515,8 +519,13 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       if (!(error instanceof ImplementerError)) throw error;
       // The step is about to be given up: not while a turn exists under its request id (a repeat of the request that no longer fits it).
       const existing = await deps.turns.findByRequest(requestIdOf(run, step));
-      if (existing === undefined)
-        return failed("agent_start_failed", `${error.code}: ${error.message}`);
+      if (existing === undefined) {
+        // The code and the message are for the log: the step keeps a sentence, and the code is its `errorCode`.
+        log(
+          `[workflow-runs] STEP_START_FAILED run=${run.id} step=${step.stepId} code=${error.code} message=${error.message}`,
+        );
+        return failed("agent_start_failed", "The agent could not be started.");
+      }
       started = { runId: existing.jobId };
     }
     const turn = await deps.turns.read(started.runId);
@@ -594,10 +603,11 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         return failed(error.code, error.message);
       if (error instanceof ActionInputError)
         return failed("action_input_invalid", error.message);
-      return failed(
-        "action_failed",
-        error instanceof Error ? error.message : "The connector failed.",
+      // Whatever else the connector threw is not for people to read: it goes to the log, the step keeps a sentence.
+      log(
+        `[workflow-runs] ACTION_FAILED run=${run.id} step=${step.stepId} connector=${connectorName} error=${error instanceof Error ? error.message : String(error)}`,
       );
+      return failed("action_failed", "The action failed.");
     }
   }
 

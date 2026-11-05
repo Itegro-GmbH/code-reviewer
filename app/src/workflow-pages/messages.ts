@@ -16,6 +16,7 @@ import {
   GENERIC_FAILURE,
   UNEXPECTED_RESPONSE_COPY,
 } from "../ui/transport-messages.ts";
+import { RUNS_LISTED_MAX } from "../workflow-runs/limits.ts";
 import {
   RUN_FAILURE_CODES,
   STEP_FAILURE_CODES,
@@ -180,15 +181,18 @@ export const COST_BASIS_COPY = {
   },
 } as const;
 
+/** A step that no runner took: not a cost basis, the step never ran. */
+export const COST_NOT_RUN_COPY = {
+  label: "not run",
+  explanation: "No runner took this step, so it never ran and cost nothing.",
+} as const;
+
 export const COST_COPY = {
   budget: "Budget",
-  spent: "Spent",
   of: "of",
   spentOfBudget: "spent of the budget",
-  notCharged: "No cost",
   stepCost: "Cost",
   basisHeading: "Where the costs come from",
-  noBasis: "Steps that cost nothing are not listed.",
 } as const;
 
 export const PAGE_COPY = {
@@ -201,7 +205,7 @@ export const PAGE_COPY = {
   workflowUpdated: "Last saved",
   runsHeading: "Runs",
   runsEmpty: "This workflow has not been run yet.",
-  runsShowing: "The newest 50 runs are shown.",
+  runsShowing: `The newest ${String(RUNS_LISTED_MAX)} runs are shown.`,
   columnStatus: "Status",
   columnStarted: "Started",
   columnTrigger: "Trigger",
@@ -216,7 +220,6 @@ export const PAGE_COPY = {
   runTrigger: "Trigger",
   runWorkflowVersion: "Workflow version",
   runRepository: "Repository",
-  runInput: "Input",
   runBaseBranch: "Base branch",
   runWhy: "Why it failed",
   stepsHeading: "Steps",
@@ -224,17 +227,13 @@ export const PAGE_COPY = {
   stepAgentRun: "Open the agent's run (live view)",
   stepFinished: "Took",
   stepNotStarted: "Not started",
-  stepResultHeading: "Result",
   stepResultJson: "Show everything the step returned (JSON)",
   stepBranch: "Branch",
-  stepPullRequest: "Pull request",
   stepLink: "Open on GitHub",
   stepNumber: "Number",
   stepExisting: "This already existed, so nothing new was created.",
   stepCreated: "This was created by the step.",
   profile: "Profile",
-  unknownTime: "unknown time",
-  openWorkflow: "Open the workflow",
   openRun: "Open the run",
 } as const;
 
@@ -245,8 +244,6 @@ export const START_COPY = {
   start: "Start",
   starting: "Starting",
   notManual: "This workflow is not started by hand.",
-  roleNotAllowed:
-    "Your role in this workspace does not allow starting a workflow.",
   started: "The run has started.",
   openRun: "Open the run",
   openThatRun: "Open the run that this request already made",
@@ -256,10 +253,8 @@ export const START_COPY = {
   notJson: "Enter valid JSON.",
   invalidValue: "This value does not fit what the workflow asks for.",
   choose: "Choose",
-  yes: "Yes",
   fieldRepo: "Repository",
   repoHint: "owner/name, one of the repositories of this workspace.",
-  jsonHint: "JSON",
 } as const;
 
 const START_FAILURE_TEXT: Record<WorkflowRunErrorCode, string> = {

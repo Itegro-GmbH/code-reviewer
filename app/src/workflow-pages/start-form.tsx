@@ -57,7 +57,11 @@ export function inputOf(
         errors[field.name] = START_COPY.notInteger;
       else input[field.name] = Number(text);
     } else if (field.kind === "number") {
-      if (!Number.isFinite(Number(text)))
+      // Decimal notation only: `Number()` would also take `0x10`, `1e3` and `Infinity`.
+      if (
+        !/^-?(\d+\.?\d*|\.\d+)$/.test(text.trim()) ||
+        !Number.isFinite(Number(text))
+      )
         errors[field.name] = START_COPY.notNumber;
       else input[field.name] = Number(text);
     } else {
@@ -140,6 +144,7 @@ export function StartForm({
     setPending(true);
     setErrors({});
     setProblem(null);
+    setStarted(null);
     const fingerprint = JSON.stringify(checked.input);
     const clientRequestId =
       requestIds.current.get(fingerprint) ?? newClientRequestId();
@@ -149,8 +154,12 @@ export function StartForm({
       clientRequestId,
     });
     if (result.ok) {
-      // Stay "sending" until the page changes (a second click on the way must not start a second run), and show the way to the run
-      // in case the page does not change.
+      // With Cache Components this page stays mounted when the person goes on to the run and comes back, so the form is released
+      // here, not left "sending" for a page change that may never unmount it. The next start is another request, even with the
+      // same input: the ids of the finished one are dropped, or it would be answered with the run that was started before.
+      sending.current = false;
+      setPending(false);
+      requestIds.current.clear();
       setStarted(result.data.run.id);
       router.push(runPath(result.data.run.id));
       return;

@@ -17,6 +17,7 @@ import type {
 } from "../workflows/service.ts";
 import { workspacePath } from "../workspaces/paths.ts";
 import { WorkflowRunError } from "../workflow-runs/errors.ts";
+import { RUNS_LISTED_MAX } from "../workflow-runs/limits.ts";
 import type {
   RunSummaryView,
   RunView,
@@ -121,6 +122,9 @@ function StartSection({
   mayStart: boolean;
 }) {
   const { workflow, form } = data;
+  // Every role of a workspace may start today, so `mayStart` is true on every request the app makes. The branch stays so that a role
+  // that loses the right (the permission table is where that is decided) gets this sentence and no form, not a form whose every
+  // start the server refuses; #873-T73 holds it.
   const notice =
     workflow.archivedAt !== null
       ? "This workflow is archived and cannot be started."
@@ -196,7 +200,7 @@ export function WorkflowPageContent({
           initial={{ runs: data.runs }}
           {...(api === undefined ? {} : { api })}
         />
-        {data.runs.length < 50 ? null : (
+        {data.runs.length < RUNS_LISTED_MAX ? null : (
           <p className="text-sm text-muted-foreground">
             {PAGE_COPY.runsShowing}
           </p>

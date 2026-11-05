@@ -43,16 +43,43 @@ export function spentShare(
   return Math.min(1, Math.max(0, run.spentUsd / run.budgetUsd));
 }
 
-/** The bases that appear in a run's steps, once each, in the order the steps first used them. */
+/**
+ * A step of a runner environment that no runner took: it never ran and cost nothing. The engine stores it as a cost of 0 "reported"
+ * (there is no figure to estimate and no limit to charge), which would read as a measurement; the page says what happened instead.
+ */
+export function neverRan(
+  step: Pick<StepView, "errorCode" | "costUsd">,
+): boolean {
+  return step.errorCode === "no_runner_available" && step.costUsd === 0;
+}
+
+/** The bases that appear in a run's steps, once each, in the order the steps first used them. A step that never ran has none. */
 export function costBasesOf(
-  steps: readonly Pick<StepView, "costBasis">[],
+  steps: readonly Pick<StepView, "costBasis" | "errorCode" | "costUsd">[],
 ): NonNullable<StepView["costBasis"]>[] {
   const seen: NonNullable<StepView["costBasis"]>[] = [];
   for (const step of steps)
-    if (step.costBasis !== null && !seen.includes(step.costBasis))
+    if (
+      step.costBasis !== null &&
+      !neverRan(step) &&
+      !seen.includes(step.costBasis)
+    )
       seen.push(step.costBasis);
   return seen;
 }
+
+/** A code or an internal name in a text (`IMPLEMENTER_X`, `agent_start_failed`): such a text is not shown to people. */
+const CODE_IN_TEXT = /[A-Z_]{4,}|\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/;
+
+/** The message a failed step stored, or null when it has none or it contains a code: the sentence of the `errorCode` says it then. */
+export function readableMessageOf(message: string | null): string | null {
+  return message === null || message === "" || CODE_IN_TEXT.test(message)
+    ? null
+    : message;
+}
+
+/** The longest address of an action that is shown as text (it is not a link, and it came from outside). */
+export const URL_TEXT_MAX_CHARS = 200;
 
 /** What an action step returned that the page shows, whatever the action is. A value of another type is left out. */
 export type ActionResult = {
@@ -74,7 +101,11 @@ export function actionResultOf(
   if (typeof url === "string") {
     const link = githubLinkInRepository(url, repository);
     if (link !== undefined) result.url = link;
-    else result.urlText = url;
+    else
+      result.urlText =
+        url.length <= URL_TEXT_MAX_CHARS
+          ? url
+          : `${url.slice(0, URL_TEXT_MAX_CHARS - 1)}…`;
   }
   if (typeof number === "number" && Number.isInteger(number))
     result.number = number;

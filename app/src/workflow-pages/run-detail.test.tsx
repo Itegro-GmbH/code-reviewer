@@ -10,7 +10,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RequestResult } from "../ui/json-request.ts";
 import type { RunView } from "../workflow-runs/service.ts";
 import { WORKFLOW_RUN_POLL_MS, type WorkflowRunsApi } from "./api.ts";
-import { COST_BASIS_COPY, RUN_POLL_FAILED_TEXT } from "./messages.ts";
+import {
+  COST_BASIS_COPY,
+  COST_NOT_RUN_COPY,
+  RUN_POLL_FAILED_TEXT,
+} from "./messages.ts";
 import { WorkflowRunDetail } from "./run-detail.tsx";
 import { JOB_ID, run, step } from "./test-fixtures.ts";
 
@@ -96,6 +100,41 @@ describe("the status of a run", () => {
     expect(container.textContent).not.toContain("step_failed");
   });
 
+  // #873-T40
+  it("leaves out a stored message that carries a code, and keeps the sentence of the error code", () => {
+    const { container } = renderRun(
+      run({
+        status: "failed",
+        errorCode: "step_failed",
+        finishedAt: "2026-11-05T10:05:00.000Z",
+        steps: [
+          step({
+            status: "failed",
+            errorCode: "agent_start_failed",
+            errorMessage: "IMPLEMENTER_X: the thing broke",
+            output: null,
+          }),
+          step({
+            id: "second",
+            status: "failed",
+            errorCode: "action_failed",
+            errorMessage: "agent_start_failed went wrong",
+            output: null,
+          }),
+        ],
+      }),
+    );
+
+    const failures = container.querySelectorAll("[data-slot=step-failure]");
+    expect(failures[0]?.textContent).toBe("The agent could not be started.");
+    expect(failures[1]?.textContent).toBe("The action failed.");
+    expect(
+      container.querySelector("[data-slot=step-error-message]"),
+    ).toBeNull();
+    expect(container.textContent).not.toContain("IMPLEMENTER_X");
+    expect(container.textContent).not.toContain("agent_start_failed");
+  });
+
   it("shows a run that is running without a failure", () => {
     const { container } = renderRun(run());
 
@@ -159,6 +198,45 @@ describe("the budget and the cost", () => {
     expect(container.querySelector("[data-slot=cost-basis]")).toBeNull();
     expect(container.querySelector("[data-slot=run-cost-bases]")).toBeNull();
     expect(container.querySelector("[data-slot=step-cost]")).toBeNull();
+  });
+});
+
+describe("a step that no runner took", () => {
+  // #873-T42
+  it("says the step never ran instead of explaining its zero cost as reported by the runner", () => {
+    const { container } = renderRun(
+      run({
+        status: "failed",
+        errorCode: "step_failed",
+        finishedAt: "2026-11-05T10:05:00.000Z",
+        spentUsd: 0,
+        steps: [
+          step({
+            status: "failed",
+            errorCode: "no_runner_available",
+            errorMessage:
+              "No runner of this workspace with the labels of the environment took the turn in time.",
+            costUsd: 0,
+            costBasis: "reported",
+            output: null,
+          }),
+        ],
+      }),
+    );
+
+    expect(container.querySelector("[data-slot=cost-basis]")?.textContent).toBe(
+      COST_NOT_RUN_COPY.label,
+    );
+    expect(
+      container
+        .querySelector("[data-slot=cost-basis]")
+        ?.getAttribute("data-basis"),
+    ).toBe("not_run");
+    // The explanation of "reported" is not given for it, nor is the basis listed for the run.
+    expect(container.textContent).not.toContain(
+      COST_BASIS_COPY.reported.explanation,
+    );
+    expect(container.querySelector("[data-slot=run-cost-bases]")).toBeNull();
   });
 });
 

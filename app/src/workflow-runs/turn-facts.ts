@@ -52,7 +52,10 @@ export type TurnOutcome =
   | {
       ok: false;
       code: string;
+      /** A fixed sentence, stored with the step and shown to people: no code, nothing a runner or an agent wrote. */
       message: string;
+      /** What went wrong in more detail (codes included). For the log of the engine only, never stored with the step. */
+      detail?: string;
       costMicroUsd: number;
       costBasis: CostBasis;
     };
@@ -165,7 +168,8 @@ export function outcomeOfTurn(
     return {
       ok: false,
       code: ended.jobErrorCode ?? "job_failed",
-      message: `The turn ended as ${ended.jobStatus}${ended.jobErrorCode === null ? "" : ` (${ended.jobErrorCode})`}.`,
+      message: "The agent's task ended without success.",
+      detail: `status=${ended.jobStatus} error=${ended.jobErrorCode ?? "none"}`,
       costMicroUsd,
       costBasis,
     };
@@ -195,7 +199,8 @@ export function outcomeOfTurn(
         message:
           value === null
             ? "The agent ended without a result."
-            : `The result does not fit the schema of the step: ${problems.slice(0, 5).join(", ")}.`,
+            : "The result of the agent does not fit the schema of the step.",
+        detail: problems.slice(0, 5).join(", "),
         costMicroUsd,
         costBasis,
       };

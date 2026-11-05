@@ -135,6 +135,60 @@ describe("the outcome of a turn", () => {
     expect((outcome as { message: string }).message).toMatch(/runner/);
   });
 
+  // #873-T42: the page tells a free step that never ran from a measured cost by this code with a cost of 0; the basis stays "reported"
+  it("charges nothing for no_runner_available whatever the cap, and keeps the basis the page relies on", () => {
+    for (const cap of [0, 1, 5_000_000]) {
+      expect(
+        outcomeOfTurn(
+          ended({
+            jobStatus: "cancelled",
+            jobErrorCode: "no_runner_available",
+            jobResult: null,
+          }),
+          cap,
+        ),
+      ).toMatchObject({
+        ok: false,
+        code: "no_runner_available",
+        costMicroUsd: 0,
+        costBasis: "reported",
+      });
+    }
+  });
+
+  // #873-T40: a stored message is a sentence for people: the codes stay in the code of the step and in the detail for the log
+  it("tells a failed job in a fixed sentence, with the status and code only in the detail", () => {
+    const outcome = outcomeOfTurn(
+      ended({ jobStatus: "failed", jobErrorCode: "implementer_x_broke" }),
+      1_000_000,
+    );
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      code: "implementer_x_broke",
+      message: "The agent's task ended without success.",
+      detail: "status=failed error=implementer_x_broke",
+    });
+    expect((outcome as { message: string }).message).not.toMatch(
+      /implementer_x_broke|failed/,
+    );
+  });
+
+  // #873-T40
+  it("keeps the problems of a result that does not fit out of the message", () => {
+    const outcome = outcomeOfTurn(
+      ended({ turn: turn({ resultValue: { summary: 5 } }) }),
+      0,
+    );
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      code: "no_result",
+      message: "The result of the agent does not fit the schema of the step.",
+      detail: "/summary wrong_type",
+    });
+  });
+
   // #844-T31
   it("gives a profile that may not push the cost only: no branch, no commits, no head, no push state", () => {
     const outcome = outcomeOfTurn(

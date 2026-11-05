@@ -524,7 +524,10 @@ describe("the result of an agent", () => {
       status: "failed",
       errorCode: "no_result",
     });
-    expect(state.steps[0]?.errorMessage).toContain("/summary wrong_type");
+    // The problems are for the log; the message is a sentence without codes.
+    expect(state.steps[0]?.errorMessage).toBe(
+      "The result of the agent does not fit the schema of the step.",
+    );
     expect(state.steps[0]?.output).toBeNull();
     expect(await app.waitingJobs()).toEqual([]);
   });

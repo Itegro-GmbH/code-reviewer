@@ -682,13 +682,13 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `template_too_large` | step | The text does not fit where it goes. |
 | `profile_not_found` | step | The profile is gone, archived or has no such version. |
 | `environment_not_found` | step | The environment is not one of the workspace. |
-| `agent_start_failed` | step | The Implementer refused the turn (the message has its code), or it could not be started for an hour. |
+| `agent_start_failed` | step | The Implementer refused the turn (the code and text of the refusal are in the log of the engine, not in the step), or it could not be started for an hour. |
 | `turn_unreadable` | step | The turn, its job or its stored schema cannot be read. |
 | `no_result` | step | No result, or one that does not fit the schema. |
 | `job_failed` | step | The job ended without success and without a code of its own. Any other code of the job (`timeout`, `cost_limit_reached`, …) is kept as it is. |
 | `connector_unavailable` | step | No connector is there for the action. |
 | `action_input_invalid` | step | The inputs of the action are not what the connector takes, once the references are resolved. |
-| `action_failed` | step | The connector failed for a reason that has no code of its own; the message is its own. |
+| `action_failed` | step | The connector failed for a reason that has no code of its own; the step says "The action failed." and the cause is in the log of the engine. |
 | `github_permission_missing` | step | The GitHub App of the workspace lacks a permission the action needs, or the installation is suspended; the message names the permission. |
 | `github_not_found` | step | GitHub has no such issue, pull request or repository, or the installation is gone. |
 | `github_validation` | step | GitHub refused the content: no commits between head and base, an archived repository, a value it does not accept. |
@@ -736,13 +736,16 @@ not exist.
 - **One run** (`/w/<slug>/workflows/<id>/runs/<runId>`): the page polls `GET .../runs/<runId>` every 3 seconds while the run runs, as the live view of an
   Implementer run does, and stops when it ends.
   - **Status.** `running`, `succeeded` or `failed`. A failed run or step is told in a sentence for its code (`budget_exhausted` is "the budget of the run is
-    used up"), never as the code itself; a code the page does not know is "failed for a reason not listed here". The message a step stored is shown under the
-    sentence as text.
+    used up"), never as the code itself; a code the page does not know is "failed for a reason not listed here". The message a step stored is a fixed sentence (no code,
+    nothing a runner or an exception wrote; the details go to the log of the engine) and is shown under the sentence as text, unless it contains a code
+    (`IMPLEMENTER_X`, `agent_start_failed`): then only the sentence of the `errorCode` is shown.
   - **Budget.** What was spent of the budget, as a bar and in dollars. Each step that was charged shows its cost with its **basis**:
     - *reported*: the runner reported the cost;
     - *estimated*: the runner reported none, so it is the token counts at the catalog price of the model;
     - *booked as the limit*: nothing better was known, so the step was charged the whole limit it ran under. The real cost is probably lower; the run never
       spends more than its budget.
+
+    A step that no runner took (`no_runner_available`, cost 0) never ran: it shows "not run" instead of a basis.
 
     The basis is kept with the step (`workflow_step_runs.cost_basis`, null for a step that was charged nothing, and for steps written before milestone 3c) and is
     in the step of the run routes as `costBasis`.

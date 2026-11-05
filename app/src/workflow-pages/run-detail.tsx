@@ -33,6 +33,7 @@ import {
 import {
   COST_BASIS_COPY,
   COST_COPY,
+  COST_NOT_RUN_COPY,
   describeRunFailure,
   describeRunPollFailure,
   describeStepFailure,
@@ -46,6 +47,8 @@ import {
   agentResultOf,
   costBasesOf,
   formatUsd,
+  neverRan,
+  readableMessageOf,
   repositoryOfRun,
   spentShare,
   stepDurationMs,
@@ -116,6 +119,22 @@ function CostBasisText({
       </span>
       <InfoHint label={`About the cost basis ${copy.label}`}>
         {copy.explanation}
+      </InfoHint>
+    </span>
+  );
+}
+
+/** The cost of a step that no runner took: it never ran, so the basis of a figure does not apply. */
+function NotRunText() {
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span data-slot="cost-basis" data-basis="not_run">
+        {COST_NOT_RUN_COPY.label}
+      </span>
+      <InfoHint
+        label={`About the cost of a step that ${COST_NOT_RUN_COPY.label}`}
+      >
+        {COST_NOT_RUN_COPY.explanation}
       </InfoHint>
     </span>
   );
@@ -232,6 +251,7 @@ function Step({
 }) {
   const duration = stepDurationMs(step);
   const failure = describeStepFailure(step.errorCode, step.errorMessage);
+  const message = readableMessageOf(step.errorMessage);
   return (
     <li
       data-slot="run-step"
@@ -269,7 +289,11 @@ function Step({
             {step.costBasis === null ? null : (
               <>
                 {" ("}
-                <CostBasisText basis={step.costBasis} />
+                {neverRan(step) ? (
+                  <NotRunText />
+                ) : (
+                  <CostBasisText basis={step.costBasis} />
+                )}
                 {")"}
               </>
             )}
@@ -281,13 +305,14 @@ function Step({
           {failure}
         </p>
       )}
-      {/* The message of a failed step is the engine's own text or a connector's: kept as text, under the sentence. */}
-      {step.errorMessage === null ? null : (
+      {/* The message of a failed step is the engine's own text or a connector's: kept as text, under the sentence, and left out when it
+          carries a code (the sentence of the code says it then). */}
+      {message === null ? null : (
         <p
           data-slot="step-error-message"
           className="text-xs break-words whitespace-pre-wrap text-muted-foreground"
         >
-          {step.errorMessage}
+          {message}
         </p>
       )}
       {step.kind === "agent" && step.jobId !== null ? (
