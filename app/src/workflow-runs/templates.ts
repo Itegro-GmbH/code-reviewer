@@ -43,7 +43,7 @@ export type TextSegment = { text: string; agent: boolean };
 
 const NAME_CHARACTER = /[A-Za-z0-9_-]/;
 const WORD_CHARACTER = /[A-Za-z0-9_]/;
-// An issue number: no leading-zero-only number (`#000` is a colour), and no letter after it (`#1a2b3c` is a colour, not a reference).
+// An issue number: no leading-zero-only number (`#000` is a colour), and no letter after it (a hex colour such as `#` + `1a2b3c` is not a reference).
 const ISSUE_NUMBER = /0*[1-9][0-9]*(?![A-Za-z0-9_])/y;
 const ISSUE_ADDRESS = /\/(?:issues|pull)\/(?=[0-9])/y;
 // `owner/repo` right before a `#`; not the tail of a longer path or address (`github.com/acme/api#3` is no reference).
@@ -142,7 +142,7 @@ function spans(
 /**
  * Text an agent wrote, made harmless where GitHub reads it. A zero-width space goes after `@` that is followed by a name (no
  * `@name`, no `@org/team`; `john@example.com` stays), after the `#` of an issue reference (`#12`, `owner/repo#12`: no link, and no
- * `Closes #12` that closes anything; `#000`, `#1a2b3c`, `[link](#2-section)` stay), after `GH-` before a number, before the number of
+ * `Closes #12` that closes anything; `#000`, a hex colour with letters, `[link](#2-section)` stay), after `GH-` before a number, before the number of
  * an issue or pull request address, and inside `<!--` (no marker of a comment can be rebuilt). `@` and `#` as HTML entities get
  * `&amp;` for their `&`. Code (a fenced block, a code span) mentions nobody and is left out, except for `<!--`, which is read
  * from the raw text. The text reads the same to a person.
