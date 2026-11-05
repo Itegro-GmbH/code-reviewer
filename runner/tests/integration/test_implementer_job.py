@@ -284,12 +284,15 @@ class FakeResults:
 
     files: list[bytes | None] = field(default_factory=lambda: [None])
     calls: list[int] = field(default_factory=lambda: [])
+    # The events of the turn (`play` shares its list), so a read has its place in the order.
+    events: list[str] = field(default_factory=lambda: [])
 
     def write(self, *files: bytes | None) -> None:
         self.files = list(files)
 
     def read_result(self, max_bytes: int) -> bytes | None:
         self.calls.append(max_bytes)
+        self.events.append("read_result")
         current = self.files[0]
         if len(self.files) > 1:
             self.files.pop(0)
@@ -486,6 +489,8 @@ def play(
                 raise setup_error
             git = FakeGit(tmp_path, gate)
             git.events = events
+            if results is not None:
+                results.events = events
             git.dirty_error = dirty_error
             git.is_dirty = dirty
             if prepare_error is not None:
@@ -1887,8 +1892,10 @@ def test_the_result_the_turn_is_judged_by_is_the_one_read_after_the_container_is
     assert turn.result["errorCode"] == "no_result"
     assert "invalid: 3 problems" in turn.result["logTail"]
     assert "agentResult" not in turn.result["implementer"]
-    assert turn.events.index("stop") < len(turn.events)
     assert len(results.calls) == 2, "one look before the agent ended, one after its container"
+    stopped = turn.events.index("stop")
+    reads = [at for at, event in enumerate(turn.events) if event == "read_result"]
+    assert reads[0] < stopped < reads[1], "the file the turn is judged by is read after the stop"
 
 
 # #843-T78

@@ -7,7 +7,10 @@ What these prove that the engine suite (`tests/engine/test_engine_implementer_fi
 unit tests cannot: that the result directory is mounted in the agent's container and in the reader
 (the Subpath `result` of the work volume), that the program written into `/etc/code-reviewer` runs
 under the image's own `python3`, that the real OpenCode finds the MCP server and the command on the
-agent's `PATH`, and that Control reads what the agent wrote only after the container is gone."""
+agent's `PATH`, and that the result of the turn is the file as it is at the end (a write after an
+accepted result counts). That Control reads it only once the agent's container is gone is held by
+the session (`_collect_result`) and its integration tests, where the order of the calls is
+recorded; a lane cannot observe it without a race."""
 
 import json
 from pathlib import Path
@@ -41,7 +44,7 @@ def tool_names(request: dict[str, Any]) -> list[str]:
 
 
 # #843-E01
-def test_the_real_engine_offers_the_mcp_tool_and_the_result_it_accepts_is_read_after_the_container(
+def test_the_real_engine_offers_the_mcp_tool_and_the_result_it_accepts_ends_the_turn(
     tmp_path: Path,
 ) -> None:
     def script(repo: Path) -> list[Turn]:
@@ -106,7 +109,7 @@ def test_an_agent_that_hands_in_nothing_is_reminded_once_and_the_turn_ends_no_re
 
 
 # #843-E04
-def test_a_file_the_agent_changes_after_it_was_accepted_is_judged_when_the_container_is_gone(
+def test_a_file_the_agent_changes_after_it_was_accepted_is_judged_as_it_is_at_the_end(
     tmp_path: Path,
 ) -> None:
     def script(repo: Path) -> list[Turn]:
