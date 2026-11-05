@@ -86,6 +86,9 @@ class ErrorCode(StrEnum):
     CLONE_FAILED = "clone_failed"
     SETUP_FAILED = "setup_failed"
     AGENT_GAVE_UP = "agent_gave_up"
+    # #843: the turn had a result schema, and the agent ended without a result that fits it, also
+    # after the one reminder. The model was used, so it is charged like `agent_gave_up`.
+    NO_RESULT = "no_result"
     PUSH_REJECTED = "push_rejected"
     BRANCH_VIOLATION = "branch_violation"
     TIME_LIMIT_REACHED = "time_limit_reached"

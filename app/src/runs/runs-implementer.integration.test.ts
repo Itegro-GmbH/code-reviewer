@@ -5,6 +5,7 @@
 // real service and routes. The list stays ordered and filtered as before, and the runs of the other kinds are untouched.
 import { sql } from "kysely";
 import { describe, expect, it } from "vitest";
+import type { StoredResultSchema } from "../db/agent-result.ts";
 import { sha } from "../test-support/jobs.ts";
 import { sessionUser } from "../test-support/session-lookup.ts";
 import { createRunsFixture } from "../test-support/runs.ts";
@@ -28,6 +29,7 @@ async function start() {
       repositoryId?: string;
       instruction?: string;
       canPush?: boolean;
+      resultSchema?: StoredResultSchema;
     } = {},
   ) {
     counter += 1;
@@ -51,6 +53,9 @@ async function start() {
               canPush: overrides.canPush,
             },
           }),
+      ...(overrides.resultSchema === undefined
+        ? {}
+        : { resultSchema: overrides.resultSchema }),
       createdBy: "user-1",
       actorLogin: "octocat",
       clientRequestId: `request-${String(counter)}`,
@@ -131,6 +136,69 @@ describe("implementer runs in the Runs pages", () => {
       branch: "implementer/b1",
       branchUrl: null,
     });
+  });
+
+  // #843-T130
+  it("shows the result the agent handed in, kept with the turn, in the detail and in the run API", async () => {
+    const { f, task } = await start();
+    const schema: StoredResultSchema = {
+      type: "object",
+      properties: { summary: { type: "string" } },
+    };
+    const handedIn = await task(
+      {
+        ok: true,
+        result: {
+          ok: true,
+          commentUrl: null,
+          logTail: "",
+          implementer: { ...block, agentResult: { summary: "Done <b>." } },
+        },
+      },
+      { resultSchema: schema },
+    );
+    const without = await task(
+      {
+        ok: false,
+        errorCode: "no_result",
+        result: {
+          ok: false,
+          commentUrl: null,
+          logTail: "",
+          implementer: block,
+        },
+      },
+      { resultSchema: schema },
+    );
+    const plain = await task({
+      ok: true,
+      result: { ok: true, commentUrl: null, logTail: "", implementer: block },
+    });
+
+    const kept = (await f.runs.get(handedIn.id))?.run.implementer;
+    const missing = (await f.runs.get(without.id))?.run.implementer;
+    const unasked = (await f.runs.get(plain.id))?.run.implementer;
+
+    expect(kept).toMatchObject({
+      resultExpected: true,
+      result: { summary: "Done <b>." },
+    });
+    expect(missing).toMatchObject({ resultExpected: true, result: null });
+    expect(unasked).toMatchObject({ resultExpected: false, result: null });
+    const route = createRunsRouteHandlers({
+      requireUser: () => Promise.resolve(sessionUser("member")),
+      service: f.runs,
+    });
+    const response = await route.detail(
+      new Request(`https://app.test/api/w/default/runs/${handedIn.id}`),
+      handedIn.id,
+    );
+    const body = (await response.json()) as {
+      run: { implementer: { result: unknown; resultExpected: boolean } };
+    };
+    expect(response.status).toBe(200);
+    expect(body.run.implementer.resultExpected).toBe(true);
+    expect(body.run.implementer.result).toEqual({ summary: "Done <b>." });
   });
 
   // #758-T07

@@ -7,12 +7,18 @@ import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import { BRANCH_NAME, CLIENT_REQUEST_ID } from "../jobs/job-input.ts";
 import { REVIEW_SETTING_LIMITS } from "../review-settings/settings.ts";
 import { parseProfileRef } from "../workflows/resolver.ts";
+import {
+  validateResultSchema,
+  type ResultSchema,
+} from "../workflows/result-schema.ts";
 import { checkBranchName } from "./branch-name.ts";
 import type { ImplementerIssue } from "./errors.ts";
 
 /** The instruction the agent is given: at most this many characters (the same bound as the form's text area). */
 export const INSTRUCTION_MAX_LENGTH = 20_000;
 const ID_MAX_LENGTH = 128;
+/** A result schema of a task, as compact JSON: the bound of a body that holds a profile (`docs/profiles.md`). */
+export const RESULT_SCHEMA_MAX_CHARS = 128 * 1024;
 const MODEL_FIELD_MAX_LENGTH = 200;
 
 export type StartInput = {
@@ -28,6 +34,11 @@ export type StartInput = {
   environmentId: string | null;
   /** The profile of the workspace to run the task with (#843): its name and a version, or null for the newest; null for none. */
   profile: { name: string; version: number | null } | null;
+  /**
+   * The result schema of the task (#843): the agent gets a finish tool made from it. Null: the task has none of its own, and the
+   * default of its profile (if it has one) applies; a task with neither runs without a finish tool, as before.
+   */
+  result: ResultSchema | null;
   clientRequestId: string;
 };
 
@@ -168,6 +179,25 @@ export function validateStartInput(body: unknown): StartInputCheck {
       refuse("environmentId", "invalid");
   }
 
+  // The result schema (#843) is checked by the validator of the format; the task keeps the schema it returns.
+  let result: ResultSchema | null = null;
+  const resultRaw = fields.result ?? null;
+  if (resultRaw !== null) {
+    const checked = validateResultSchema(resultRaw);
+    const problem = checked.issues[0];
+    if (problem !== undefined || checked.schema === undefined)
+      issues.push({
+        field: "result",
+        code: "invalid",
+        ...(problem === undefined
+          ? {}
+          : { detail: `${problem.path || "/"} ${problem.code}` }),
+      });
+    else if (JSON.stringify(checked.schema).length > RESULT_SCHEMA_MAX_CHARS)
+      refuse("result", "too_long");
+    else result = checked.schema;
+  }
+
   const requestId = fields.clientRequestId;
   if (requestId === undefined || requestId === "")
     refuse("clientRequestId", "required");
@@ -189,6 +219,7 @@ export function validateStartInput(body: unknown): StartInputCheck {
       costLimitCents: cost as number | null,
       environmentId: environmentId as string | null,
       profile,
+      result,
       clientRequestId: requestId as string,
     },
   };

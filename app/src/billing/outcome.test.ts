@@ -512,6 +512,8 @@ describe("the failures that incurred AI cost", () => {
       "dynamic_policy_violation",
       "llm_bad_request",
       "llm_context_length_exceeded",
+      // #843: the agent ended without a result that fits the schema of its task; the model was used.
+      "no_result",
       "push_rejected",
       "time_limit_reached",
     ]);
@@ -521,6 +523,7 @@ describe("the failures that incurred AI cost", () => {
   it("charges the failures of a turn after the agent ran, and nothing that ended before it", () => {
     for (const code of [
       "agent_gave_up",
+      "no_result",
       "push_rejected",
       "branch_violation",
       "time_limit_reached",
@@ -583,5 +586,24 @@ describe("a model door that does not work (#745)", () => {
       AI_COST_FAILURE_CLASS,
     );
     expect(AI_COST_FAILURE_CLASS).toBe("charged");
+  });
+});
+
+// #843: a turn with a result schema whose agent ended without a result that fits it. The model was used, so the turn is charged like
+// one that gave up; the claim refusals around the same feature are free, as every refusal at claim is.
+describe("a turn that ended without the result it was asked for (#843)", () => {
+  // #843-T97
+  it("is charged: the model was used", () => {
+    expect(classifyOutcome(failed("no_result"))).toBe(AI_COST_FAILURE_CLASS);
+    expect(classifyOutcome(failed("no_result"))).toBe(
+      classifyOutcome(failed("agent_gave_up")),
+    );
+  });
+
+  // #843-T97
+  it("is free when a Worker that cannot read result schemas is refused at claim", () => {
+    expect(classifyOutcome(failed("implementer_engine_unavailable"))).toBe(
+      "free",
+    );
   });
 });

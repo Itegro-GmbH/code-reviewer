@@ -64,6 +64,12 @@ from code_reviewer_runner.result import ErrorCode
 from .docker_api import DockerApi, DockerError
 from .exec_run import run_exec
 from .git_process import Outcome
+from .result_channel import (
+    READ_RESULT_SCRIPT,
+    READER_RESULT_DIRECTORY,
+    RESULT_FILE,
+    result_mount,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -98,6 +104,8 @@ READER_DROP_CAPABILITIES: Final = (
 READER_MEMORY_BYTES: Final = 256 * 1024 * 1024
 READER_PIDS_LIMIT: Final = 256
 READER_TMPFS: Final = "rw,noexec,nosuid,nodev,size=64m,mode=1777"
+# The most a read of the result file takes (#843).
+RESULT_READ_SECONDS: Final = 2.5
 # The most a reset of the readers takes, all of them together (`ReaderAccess.reset`).
 RESET_SECONDS: Final = 10.0
 READER_ENTRYPOINT: Final = ["/usr/bin/tini", "--", "/usr/bin/sleep", "infinity"]
@@ -162,11 +170,28 @@ def reader_environment(identity: Mapping[str, str] | None = None) -> dict[str, s
 
 
 def reader_document(
-    image: str, work_volume: str, *, writable: bool = False, runtime: str = READER_RUNTIME
+    image: str,
+    work_volume: str,
+    *,
+    writable: bool = False,
+    runtime: str = READER_RUNTIME,
+    result: bool = False,
 ) -> dict[str, Any]:
     """The reader's container: constants, the image id and the volume name the daemon gave. The
     repository is read-only unless `writable`. The runtime is `sysbox-runc`; only a test lane
-    without Sysbox names another."""
+    without Sysbox names another. A turn with a result schema (#843) has the result directory in
+    it too, read-only at `/result`."""
+    mounts: list[dict[str, Any]] = [
+        {
+            "Type": "volume",
+            "Source": work_volume,
+            "Target": READER_REPO,
+            "ReadOnly": not writable,
+            "VolumeOptions": {"Subpath": REPO_SUBPATH, "NoCopy": True},
+        }
+    ]
+    if result:
+        mounts.append(result_mount(work_volume, READER_RESULT_DIRECTORY, read_only=True))
     return {
         "Image": image,
         "Entrypoint": READER_ENTRYPOINT,
@@ -190,15 +215,7 @@ def reader_document(
             "Tmpfs": {"/tmp": READER_TMPFS},
             "RestartPolicy": {"Name": "no"},
             "PublishAllPorts": False,
-            "Mounts": [
-                {
-                    "Type": "volume",
-                    "Source": work_volume,
-                    "Target": READER_REPO,
-                    "ReadOnly": not writable,
-                    "VolumeOptions": {"Subpath": REPO_SUBPATH, "NoCopy": True},
-                }
-            ],
+            "Mounts": mounts,
         },
     }
 
@@ -240,8 +257,12 @@ class ReaderAccess:
         self,
         environment: Mapping[str, str] | None = None,
         seams: ReaderSeams = ReaderSeams(),  # noqa: B008
+        *,
+        result: bool = False,
     ) -> None:
         self._api = seams.api()
+        # #843: the readers see the result directory (read-only) when the turn has a result schema.
+        self._result = result
         self._seams = seams
         self._environment = reader_environment(environment)
         self._containers: dict[bool, str] = {}
@@ -273,6 +294,36 @@ class ReaderAccess:
             timeout=timeout,
             name=f"git {args[0] if args else ''}",
         )
+
+    def read_result(self, max_bytes: int, *, timeout: float = RESULT_READ_SECONDS) -> bytes | None:
+        """The first `max_bytes` bytes of the agent's result file (#843), read in the reader that
+        cannot write: a plain file, not a link, else None. The bytes are the agent's and are
+        judged by `finish_tool.parse_result`; nothing here looks at them."""
+        container = self._ensure(False)
+        if container is None:
+            return None
+        kept = bytearray()
+
+        def keep(chunk: bytes) -> None:
+            kept.extend(chunk[: max_bytes - len(kept)])
+
+        done = run_exec(
+            self._api,
+            container,
+            [
+                *READER_DROP_CAPABILITIES,
+                "/bin/sh",
+                "-c",
+                READ_RESULT_SCRIPT,
+                "read",
+                f"{READER_RESULT_DIRECTORY}/{RESULT_FILE}",
+                str(max_bytes),
+            ],
+            timeout=timeout,
+            consume=keep,
+            name="read the result",
+        )
+        return bytes(kept) if done.returncode == 0 and not done.unanswered else None
 
     def append_exclude(self, data: bytes, *, timeout: float) -> Outcome:
         """Append lines to the repository's `info/exclude` (git's local ignore file, never
@@ -379,7 +430,13 @@ class ReaderAccess:
             volume = work_volume_of(own)
             name = READER_WRITER_CONTAINER_NAME if writable else READER_CONTAINER_NAME
             container = self._api.create_container(
-                reader_document(image, volume, writable=writable, runtime=self._seams.runtime),
+                reader_document(
+                    image,
+                    volume,
+                    writable=writable,
+                    runtime=self._seams.runtime,
+                    result=self._result,
+                ),
                 name,
             )
             self._containers[writable] = container

@@ -25,6 +25,7 @@ from code_reviewer_runner.implementer.report import (
     fit_block,
     valid_block,
 )
+from code_reviewer_runner.implementer.result_channel import redacted_value
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 from code_reviewer_runner.job_loop.process import ProcessOutcome
 from code_reviewer_runner.redaction import Redactor
@@ -69,6 +70,7 @@ class DroppedValue(StrEnum):
     STOPPED_EARLY_INVALID = "RESULT_STOPPED_EARLY_INVALID"
     CALL_TRACE_INVALID = "RESULT_CALL_TRACE_INVALID"
     IMPLEMENTER_INVALID = "RESULT_IMPLEMENTER_INVALID"
+    AGENT_RESULT_INVALID = "RESULT_AGENT_RESULT_INVALID"
 
 
 def _log_dropped(code: DroppedValue) -> None:
@@ -269,6 +271,9 @@ def _redacted_block(block: Mapping[str, Any], redactor: TextRedactor) -> Result:
     # The name of a branch the agent ended on is the agent's too (#837).
     if isinstance(block.get("checkedOut"), str):
         redacted["checkedOut"] = redactor.redact(block["checkedOut"])
+    # So is the result the agent handed in (#843): every text in it, keys included.
+    if "agentResult" in block:
+        redacted["agentResult"] = redacted_value(block["agentResult"], redactor.redact)
     # Redaction can make a text longer: a text the bound now refuses would cost the whole result.
     return clip_texts(redacted)
 
@@ -339,6 +344,15 @@ def _with_implementer_block(
         # out rather than costing the report, the verdict and the usage of the turn.
         block = valid_block(_cleaned(_without_network(sent)))
     redacted = None if block is None else valid_block(_redacted_block(block, redactor))
+    if block is not None and redacted is None and "agentResult" in block:
+        # Taking secrets out can make the result of the agent longer than the bounds allow. It is
+        # that result that is given up, not the report: the turn ends without one (`no_result`).
+        _log_dropped(DroppedValue.AGENT_RESULT_INVALID)
+        without = {key: value for key, value in block.items() if key != "agentResult"}
+        redacted = valid_block(_redacted_block(without, redactor))
+        if redacted is not None and result["ok"]:
+            result["ok"] = False
+            result["errorCode"] = ErrorCode.NO_RESULT.value
     if sent is not None and redacted is None:
         _log_dropped(DroppedValue.IMPLEMENTER_INVALID)
     if redacted is not None:

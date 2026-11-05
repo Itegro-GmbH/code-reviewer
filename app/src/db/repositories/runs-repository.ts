@@ -108,6 +108,21 @@ function isManagedKey(usage: {
   );
 }
 
+/** The result kept with a turn (#843), written by this app as JSON text of an object; null for none. */
+function readResultValue(text: string | null): Record<string, unknown> | null {
+  if (text === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === "object" &&
+      parsed !== null &&
+      !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function createRunsRepository(
   db: Kysely<Database>,
   workspaceId: WorkspaceId,
@@ -238,6 +253,8 @@ export function createRunsRepository(
           "implementer_sessions.base_branch as session_base_branch",
           "implementer_turns.instruction as turn_instruction",
           "implementer_turns.profile_can_push as turn_profile_can_push",
+          "implementer_turns.result_schema as turn_result_schema",
+          "implementer_turns.result_value as turn_result_value",
           "implementer_turns.environment_name as turn_environment_name",
           "implementer_turns.environment_vcpus as turn_environment_vcpus",
           "implementer_turns.environment_network_mode as turn_environment_network_mode",
@@ -262,6 +279,8 @@ export function createRunsRepository(
         session_base_branch: baseBranch,
         turn_instruction: instruction,
         turn_profile_can_push: profileCanPush,
+        turn_result_schema: resultSchema,
+        turn_result_value: resultValue,
         turn_environment_name: environmentName,
         turn_environment_vcpus: environmentVcpus,
         turn_environment_network_mode: networkMode,
@@ -288,6 +307,11 @@ export function createRunsRepository(
                 ...(profileCanPush === null
                   ? {}
                   : { canPush: profileCanPush === 1 }),
+                // #843: whether the turn had a result schema, and the result that was kept for it.
+                result: {
+                  expected: resultSchema !== null,
+                  value: readResultValue(resultValue),
+                },
                 // #818: the environment the turn copied; none for a task without one.
                 environment:
                   environmentName === null || environmentVcpus === null

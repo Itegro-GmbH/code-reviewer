@@ -324,6 +324,43 @@ function TaskNetwork({ task }: { task: ImplementerDetailView }) {
   );
 }
 
+/**
+ * The result the agent handed in through the finish tool (#843), as plain JSON text in a collapsed block: the texts in it are from
+ * the agent, rendered as text and never as markup. Shown only for a task that was given a result schema.
+ */
+function AgentResult({
+  task,
+  settled,
+}: {
+  task: ImplementerDetailView;
+  settled: boolean;
+}) {
+  if (!task.resultExpected) return null;
+  return (
+    <Section title="Result">
+      {task.result !== null ? (
+        <details data-slot="run-agent-result" className="text-sm">
+          <summary className="cursor-pointer text-muted-foreground">
+            Show the result the agent handed in (JSON)
+          </summary>
+          <pre className="mt-2 max-h-96 overflow-auto font-mono text-xs break-words whitespace-pre-wrap">
+            {JSON.stringify(task.result, null, 2)}
+          </pre>
+        </details>
+      ) : (
+        <p
+          data-slot="run-agent-result-none"
+          className="text-sm text-muted-foreground"
+        >
+          {settled
+            ? "The agent handed in no result."
+            : "The agent has not handed in a result yet."}
+        </p>
+      )}
+    </Section>
+  );
+}
+
 /** What the agent did: its own summary, the commits and the files. Every text here is from the agent or the repository. */
 function TaskResult({
   task,
@@ -370,6 +407,7 @@ function TaskResult({
           </p>
         )}
       </Section>
+      <AgentResult task={task} settled={settled} />
       {task.branches.shown.length === 0 &&
       task.branches.dropped.invalid === 0 &&
       task.branches.dropped.overflow === 0 ? null : (

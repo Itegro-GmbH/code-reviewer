@@ -89,6 +89,7 @@ from code_reviewer_runner.implementer.reader import (
     ReaderAccess,
     ReaderSeams,
 )
+from code_reviewer_runner.implementer.result_channel import make_result_directory
 from code_reviewer_runner.implementer.resume_session import ResumeInput
 from code_reviewer_runner.implementer.session import ImplementerSession, SessionSeams
 from code_reviewer_runner.implementer.setup_container import (
@@ -395,12 +396,16 @@ def implementer_job(
     max_cost_usd: float | None = None,
     instruction: str = INSTRUCTION,
     resume: Mapping[str, Any] | None = None,
+    result_schema: dict[str, Any] | None = None,
 ) -> ImplementerInput:
-    """The contract's example job with the provider, model and cost policy of the lane. With
-    `resume`, the job is a follow-up turn (#840)."""
+    """The contract's example job with the provider, model and cost policy of the lane, and the
+    result schema of the turn (#843) when it has one. With `resume`, the job is a follow-up turn
+    (#840)."""
     document: dict[str, Any] = json.loads(EXAMPLE.read_text(encoding="utf-8"))
     entry = ENTRIES[family]
     spec = document["implementer"]
+    if result_schema is not None:
+        spec["resultSchema"] = result_schema
     spec["instruction"] = instruction
     if resume is not None:
         spec["resume"] = dict(resume)
@@ -564,6 +569,7 @@ def lane_workspace(
     origin_base: Path | None = None,
     origin_of_earlier_turn: Origin | None = None,
     resume: ImplementerResume | None = None,
+    result: bool = False,
 ) -> Generator[LaneWorkspace]:
     """The origin (a bare repository standing in for GitHub), the work volume, the stand-in of the
     Control container and the real reader; the workspace is prepared (the mirror on the reserve
@@ -598,7 +604,11 @@ def lane_workspace(
             "GIT_COMMITTER_EMAIL": IDENTITY.email,
         },
         ReaderSeams(runtime=config.runtime, hostname=lambda: control, python=sys.executable),
+        result=result,
     )
+    if result:
+        # #843: the directory both containers mount, made before the readers exist.
+        make_result_directory(work)
     workspace = GitWorkspace(
         WorkspaceSpec(origin.url, TOKEN, "main", BRANCH, resume),
         layout,
@@ -691,6 +701,7 @@ def lane_turn(
     judge: Callable[[Mapping[str, str], Mapping[str, Any]], Refusal | None] | None = None,
     memory_mb: int = 2048,
     setup_script: str | None = None,
+    result_schema: dict[str, Any] | None = None,
     snapshot: SnapshotPump | None = None,
     origin_of_earlier_turn: Origin | None = None,
     resume: Mapping[str, Any] | None = None,
@@ -705,7 +716,14 @@ def lane_turn(
     A follow-up turn (#840) is `resume` (the job's `implementer.resume`), the
     `origin_of_earlier_turn` it continues on and the `resume_input` the job host and the process
     would have made of the stored session."""
-    job = implementer_job(family, time_limit=time_limit, instruction=instruction, resume=resume)
+    job = implementer_job(
+        family,
+        time_limit=time_limit,
+        instruction=instruction,
+        resume=resume,
+        result_schema=result_schema,
+    )
+    with_result = result_schema is not None
     port = slot_ports({}).proxy
     messages: list[tuple[str, str]] = []
     message_parts: list[tuple[str, list[dict[str, Any]]]] = []
@@ -732,6 +750,7 @@ def lane_turn(
                 origin_base=origin_base,
                 origin_of_earlier_turn=origin_of_earlier_turn,
                 resume=job.implementer.resume,
+                result=with_result,
             )
         )
         config = lane.config
@@ -764,6 +783,7 @@ def lane_turn(
                     entrypoint=config.entrypoint,
                     ready_seconds=180.0,
                 ),
+                result=with_result,
             )
 
         session = ImplementerSession(
@@ -773,6 +793,7 @@ def lane_turn(
             place=place,
             environment={"RUNNER_DYNAMIC_MAX_COST_USD": limit},
             seams=SessionSeams(transport=transport),
+            results=lane.reader if with_result else None,
             snapshot=snapshot,
             resume=resume_input,
         )

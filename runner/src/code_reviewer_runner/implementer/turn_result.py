@@ -70,6 +70,10 @@ class TurnResult:
     # `{"mode": "imported"}` or `{"mode": "summary_only", "reason": <word>}`. None: a first turn, or
     # a turn that ended before the engine started.
     resume: dict[str, Any] | None = None
+    # #843: the result the agent handed in through the finish tool, checked by Control against the
+    # turn's result schema once the agent's container was gone; None: the turn has no result schema,
+    # or the agent handed in none that fits. Data of an untrusted writer, never a command.
+    agent_result: dict[str, Any] | None = None
 
     @property
     def ok(self) -> bool:
@@ -105,6 +109,7 @@ class TurnResult:
             "opencode": opencode,
             **({} if self.checked_out is None else {"checkedOut": self.checked_out}),
             **({} if self.resume is None else {"resume": self.resume}),
+            **({} if self.agent_result is None else {"agentResult": self.agent_result}),
             **({} if self.setup is None else {"setup": self.setup}),
             **({} if self.network is None else {"network": self.network}),
         }

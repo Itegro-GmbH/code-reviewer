@@ -15,6 +15,7 @@ or the database is looked at, so code-review.com hands out nothing.
 | `service.ts`                            | `createImplementerService`: `listRepositories()`, `listBranches(id)`, `listModels()`, `startTask(user, body)`; every rule is here                                                                                                                                                        |
 | `models.ts`                             | `createImplementerModels`: the options of the model picker and the check at submit, one rule for both                                                                                                                                                                                    |
 | `start-input.ts`                        | `validateStartInput`: the body, field by field, with `INSTRUCTION_MAX_LENGTH` (20,000)                                                                                                                                                                                                   |
+| `agent-result.ts` (#843)                | `readStoredResultSchema`: the default result schema of a profile version, read back as the validator reads it. The bounds of the result an agent hands in are `../db/agent-result.ts`; the schema is checked by the runner (`finish_tool.py`)                                            |
 | `branch-name.ts`                        | `checkBranchName`: the rules of `git check-ref-format --branch` plus 200 characters, 255 bytes, no leading `+` and "not the base branch"; one code per rule                                                                                                                              |
 | `errors.ts`                             | `ImplementerError` with the stable codes, their HTTP status, the field `issues` and the model refusal `reason`s                                                                                                                                                                          |
 | `http.ts`                               | The handlers behind the four routes: user first, then the origin, content type and body, then the service                                                                                                                                                                                |
@@ -36,7 +37,7 @@ comes from (`Sec-Fetch-Site` / `Origin`), the body of the POST for `application/
 - `GET /api/w/:workspace/implementer/repositories/:repositoryId/branches`: `{ defaultBranch, branches, truncated }`, the default
   branch first, at most 100 names (`getRepositoryFacts` and `listBranches`).
 - `GET /api/w/:workspace/implementer/models`: the options of the picker (below).
-- `POST /api/w/:workspace/implementer/tasks` with `{ repositoryId, baseBranch, branch, instruction, model, costLimitCents?, environmentId?, profile?,
+- `POST /api/w/:workspace/implementer/tasks` with `{ repositoryId, baseBranch, branch, instruction, model, costLimitCents?, environmentId?, profile?, result?,
 clientRequestId }`: `201 { runId, sessionId }`, `200` with the same ids for a client request id that was accepted before (nothing
   is written then). `model` is `{ entryId }` (operator's key) or `{ provider, model }` (own key).
 
@@ -83,7 +84,9 @@ In this order, each step ends the request on failure, and **nothing is written b
    task whose branch is not on GitHub yet. Git finds those at the push (`push_rejected`);
 6. with a `profile` (#843): the profile is read (`profiles.findByName`, the newest version or the one pinned) and its version brings the model and
    the cost limit, in place of the body's (the body then names neither: `not_with_profile`); then the model is allowed (`models.check`, the rule of
-   the picker);
+   the picker); the result schema of the task (#843) is the body's `result` (checked by `validateResultSchema`, `IMPLEMENTER_REQUEST_INVALID` with
+   `issues: [{field: "result", code: "invalid", detail}]`) or else the default of the profile version (`agent-result.ts`, `readStoredResultSchema`), copied
+   into the turn with the rest; with one, the agent gets a finish tool (`docs/implementer.md`, "The finish tool");
 7. a cost limit (the body's, or the profile version's) is at most the operator's maximum (`review_max_cost_cents`); none asked for is stored as
    none, and the maximum applies at the claim;
 8. `queue.enqueueImplementerTurn`: session, turn and job in one transaction, then the Dispatcher is woken as for any job. A lost

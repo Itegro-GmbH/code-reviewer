@@ -232,6 +232,58 @@ describe("the implementer block of a result (#754)", () => {
     expect(cleaned?.filesChanged[2]?.path).toBe("src/plain.ts");
   });
 
+  // #843-T133
+  it("removes the secrets from every string and every key of the result the agent handed in, and nothing else", () => {
+    const agentResult = {
+      summary: `used ${GHS}`,
+      [`k-${LLM_KEY}`]: [LLM_KEY, { deeper: [`Bearer ${CAPABILITY}`] }, 3],
+      plain: { ok: true, none: null, n: 1.5, text: "fine" },
+      __proto__: "kept as a key",
+    };
+    const parsed = JSON.parse(
+      JSON.stringify(agentResult),
+    ) as typeof agentResult;
+    Object.defineProperty(parsed, "__proto__", {
+      value: "kept as a key",
+      enumerable: true,
+    });
+
+    const cleaned = redactResult(
+      { ...result, implementer: { ...block, agentResult: parsed } },
+      [LLM_KEY],
+    ).implementer?.agentResult;
+
+    const stored = JSON.stringify(cleaned);
+    for (const secret of [GHS, LLM_KEY, CAPABILITY, CAPABILITY.slice(4)])
+      expect(stored).not.toContain(secret);
+    expect(cleaned).toMatchObject({
+      summary: `used ${REDACTED}`,
+      [`k-${REDACTED}`]: [REDACTED, { deeper: [`Bearer ${REDACTED}`] }, 3],
+      plain: { ok: true, none: null, n: 1.5, text: "fine" },
+    });
+    expect(Object.keys(cleaned ?? {})).toContain("__proto__");
+    expect(Object.getPrototypeOf(cleaned)).toBe(Object.prototype);
+  });
+
+  // #843-T133
+  it("walks a result no deeper and no wider than the bounds allow, and replaces what lies beyond", () => {
+    const deep = JSON.parse('{"a":'.repeat(12) + `"${GHS}"` + "}".repeat(12));
+    const wide = { list: Array.from({ length: 30_000 }, () => GHS) };
+
+    const cleanedDeep = redactResult(
+      { ...result, implementer: { ...block, agentResult: deep } },
+      [],
+    ).implementer?.agentResult;
+    const cleanedWide = redactResult(
+      { ...result, implementer: { ...block, agentResult: wide } },
+      [],
+    ).implementer?.agentResult;
+
+    expect(JSON.stringify(cleanedDeep)).not.toContain(GHS);
+    expect(JSON.stringify(cleanedDeep)).toContain(REDACTED);
+    expect(JSON.stringify(cleanedWide)).not.toContain(GHS);
+  });
+
   // #745, step 7: a host is what the agent asked the network door for.
   it("removes a secret from a host of the network block and keeps the counts and the other hosts", () => {
     const connection = {

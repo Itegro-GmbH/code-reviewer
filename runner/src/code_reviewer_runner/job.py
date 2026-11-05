@@ -60,6 +60,7 @@ from code_reviewer_runner.dynamic_review.passthrough.destination import (
     key_destination,
 )
 from code_reviewer_runner.dynamic_review.prompts import MAX_SKILL_BYTES as MAX_DYNAMIC_SKILL_BYTES
+from code_reviewer_runner.implementer import finish_tool
 from code_reviewer_runner.implementer.network_rule import OFF, NetworkRule, RuleError, parse_rule
 from code_reviewer_runner.implementer.push_policy import branch_name_problem
 from code_reviewer_runner.llm_providers import (
@@ -99,6 +100,7 @@ _IMPLEMENTER_FIELDS = {
     "capabilities",
     "environment",
     "profile",
+    "resultSchema",
     "resume",
 }
 _IMPLEMENTER_ENVIRONMENT_FIELDS = {"name", "setupScript", "network"}
@@ -404,6 +406,10 @@ class ImplementerSpec:
     capabilities: JobCapabilities | None = None
     environment: ImplementerEnvironment | None = None
     profile: ImplementerProfile | None = None
+    # #843: the result schema of the turn (`contracts/result-schema.v1.json`): the agent gets a
+    # finish tool made from it and the turn needs a result that fits. None: no finish tool, and
+    # the turn runs as it did before result schemas.
+    result_schema: dict[str, Any] | None = None
     # #838: set on a follow-up turn, the branches of the session; None on the first turn.
     resume: ImplementerResume | None = None
 
@@ -1070,6 +1076,7 @@ def _implementer_spec(data: dict[str, Any], git: GitAccess) -> ImplementerSpec:
         capabilities=_job_capabilities(spec),
         environment=_implementer_environment(spec),
         profile=_implementer_profile(spec),
+        result_schema=_implementer_result_schema(spec),
         resume=_implementer_resume(spec, branch),
     )
 
@@ -1227,6 +1234,18 @@ def _implementer_profile(spec: dict[str, Any]) -> ImplementerProfile | None:
     return ImplementerProfile(
         name=name, version=version, can_push=can_push, instructions=instructions
     )
+
+
+def _implementer_result_schema(spec: dict[str, Any]) -> dict[str, Any] | None:
+    """The `implementer.resultSchema` object (#843): a result schema the finish tool is made from.
+    It is the same format the app validates before it sends it; a schema this runner does not
+    understand is refused up front, free, rather than handed to an agent that cannot use it."""
+    if "resultSchema" not in spec:
+        return None
+    schema = spec["resultSchema"]
+    if finish_tool.check_schema(schema):
+        raise _invalid("implementer.resultSchema is not a valid result schema")
+    return cast("dict[str, Any]", schema)
 
 
 def _implementer_input(job: dict[str, Any]) -> ImplementerInput:

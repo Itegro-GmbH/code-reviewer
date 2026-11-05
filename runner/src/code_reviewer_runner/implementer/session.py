@@ -63,6 +63,7 @@ from code_reviewer_runner.redaction import Redactor
 from code_reviewer_runner.result import ErrorCode, Usage
 from code_reviewer_runner.resume_wire import ResumeReason
 
+from . import finish_tool
 from .agent import AgentTurn, EngineRuntime, ImplementerAgent, ResumeOutcome
 from .agent_container import (
     AGENT_HOME,
@@ -100,8 +101,16 @@ from .network_report import (
 from .network_rule import MODE_OFF, MODE_OPEN, OFF, NetworkRule
 from .network_switch import Post, model_host_of, narrow_policy, parse_switch, urllib_post
 from .preface import MovedBranch, PrefaceFacts, ResumeMode, message_parts
-from .prompts import LEFTOVER_PROMPT, instructions_text
+from .prompts import LEFTOVER_PROMPT, RESULT_REMINDER_PROMPT, instructions_text
 from .reader import RESET_SECONDS as READER_RESET_SECONDS
+from .report import agent_result_ok
+from .result_channel import (
+    CONFIG_DIRECTORY,
+    ResultReader,
+    finish_files,
+    finish_server_command,
+    redacted_value,
+)
 from .resume_session import ResumeInput
 from .session_export import ExportFailed
 from .snapshot_pump import SnapshotPump
@@ -127,7 +136,8 @@ GRACE_SECONDS = 270.0
 # the second reset of the readers (the commit ran the repository's filters in a reader that can
 # write), the final push, the two reads of the report (`REPORT_READ_TIMEOUT` each) and the last
 # flush of the live view (`STEPS_FLUSH_SECONDS`, #745: after the push, before the result, bounded in
-# all of its parts). The sum is 227 s of the 270; a test holds it, and holds the slack. The upload
+# all of its parts). The sum is 227 s of the 270, 229.5 s with the read of the agent's result
+# (`RESULT_READ_SECONDS`, #843); a test holds it, and holds the slack. The upload
 # of the snapshot to the app is not in the sum: the job host does it beside the push and before the
 # result is delivered (`job_loop/snapshot_sender.py`).
 SNAPSHOT_SECONDS = 5.0
@@ -369,6 +379,7 @@ class ImplementerSession:
         should_stop: Callable[[], bool] = lambda: False,
         max_seconds: float | None = None,
         steps: StepPump | None = None,
+        results: ResultReader | None = None,
         snapshot: SnapshotPump | None = None,
         resume: ResumeInput | None = None,
     ) -> None:
@@ -377,6 +388,12 @@ class ImplementerSession:
         profile = job.implementer.profile
         self._can_push = profile is None or profile.can_push
         self._profile_instructions = "" if profile is None else profile.instructions
+        # #843: the result schema of the turn (None: no finish tool, the turn is what it was before
+        # result schemas), where the result file is read, and what was read from it.
+        self._schema = job.implementer.result_schema
+        self._results = results
+        self._agent_result: dict[str, Any] | None = None
+        self._result_problem = "no result file"
         self.workspace = workspace
         self.command = tuple(command)
         self._place_factory = place
@@ -750,6 +767,7 @@ class ImplementerSession:
                 capability=model.capability,
                 instructions_path=instructions_path,
                 door_host=MODEL_DOOR_ADDRESS,
+                finish_command=None if self._schema is None else finish_server_command(),
             )
 
         options: dict[str, Any] = {}
@@ -767,14 +785,20 @@ class ImplementerSession:
                     with_setup=self._has_script(),
                     can_push=self._can_push,
                     profile_instructions=self._profile_instructions,
+                    with_result=self._schema is not None,
                 ),
             ),
-            environment=implementer_environment(home=AGENT_HOME, scratch_dir=AGENT_TMP),
+            environment=implementer_environment(
+                home=AGENT_HOME,
+                scratch_dir=AGENT_TMP,
+                config_directory=None if self._schema is None else CONFIG_DIRECTORY,
+            ),
             model=entry.model_id,
             provider_id=entry.provider_id,
             transport=self.seams.transport,
             # Without a channel nothing is recorded, so nothing is queued to be "not taken in time".
             redactor=Redactor(self.secrets()) if self._steps is not None else None,
+            files=None if self._schema is None else finish_files(self._schema),
             **options,
         )
 
@@ -805,6 +829,8 @@ class ImplementerSession:
         ended = agent.turn(self._first_message(agent), check=check)
         self._summary = ended.text
         self._note("the agent ended its turn")
+        if self._schema is not None:
+            self._remind_for_result(agent, check)
         if not self._can_push:
             return
         if not self.workspace.dirty() or not self._time_for_another_turn(agent):
@@ -812,6 +838,41 @@ class ImplementerSession:
         self._note("the working tree is dirty: one extra message")
         again: AgentTurn = agent.turn(LEFTOVER_PROMPT, check=check)
         self._summary = self._summary or again.text
+
+    def _remind_for_result(self, agent: ImplementerAgent, check: Callable[[], None]) -> None:
+        """A turn with a result schema whose agent ended without a result that fits gets one more
+        message, like the extra message for a dirty tree and for the same reason: the model is
+        asked once. What is read now is a first look (the container is still up); the result the
+        turn is judged by is read after the container is gone (`_collect_result`)."""
+        if self._read_agent_result() is not None:
+            return
+        if not self._time_for_another_turn(agent):
+            self._note("no valid result was handed in, and there is no time for a reminder")
+            return
+        self._note("no valid result was handed in: one reminder")
+        again: AgentTurn = agent.turn(RESULT_REMINDER_PROMPT, check=check)
+        self._summary = self._summary or again.text
+
+    def _read_agent_result(self) -> dict[str, Any] | None:
+        """The result file as the schema judges it: bounded before it is parsed, then checked
+        (`finish_tool.parse_result`). None when there is no file, it cannot be read, or it does not
+        fit; `_result_problem` says which, in a word (never a value of the file)."""
+        schema = self._schema
+        if schema is None or self._results is None:
+            return None
+        try:
+            raw = self._results.read_result(finish_tool.MAX_RESULT_BYTES + 1)
+        except Exception:
+            raw = None
+        if raw is None:
+            self._result_problem = "no result file"
+            return None
+        parsed = finish_tool.parse_result(schema, raw)
+        if parsed.value is None:
+            self._result_problem = parsed.problem or "invalid"
+            if parsed.problem == "invalid":
+                self._result_problem = f"invalid: {len(parsed.issues)} problems"
+        return parsed.value
 
     def _time_for_another_turn(self, agent: ImplementerAgent) -> bool:
         return agent.ledger.remaining_seconds() >= MIN_EXTRA_TURN_SECONDS
@@ -838,6 +899,7 @@ class ImplementerSession:
         A failure of the push is the turn's error only when nothing ended the turn before; a
         leftover that cannot be committed is a note (the branches that are committed are pushed
         all the same)."""
+        self._collect_result()
         if not self._can_push:
             # #843: a profile without the right to push. Nothing leaves the container, so nothing
             # is rescued, committed, listed or pushed, and the repository is not read after it.
@@ -883,6 +945,38 @@ class ImplementerSession:
             self._stopped_by(error)
         self._note_branches(self.workspace.push_report())
         self._note_disk()
+
+    def _collect_result(self) -> None:
+        """The result of the agent, once its container is gone: nothing in it can change the file
+        now. Read in a reader, bounded, parsed and checked against the schema of the turn; that is
+        the one the turn is judged by, whatever the first look said. A turn without a result that
+        fits ends `no_result` (the model was used, so it is the charged code), unless something
+        ended it before. Not read when the end is quick (a lost lease, a stop) or the container is
+        not confirmed gone."""
+        if self._schema is None or self._ends_quickly():
+            return
+        if not self._engine_ended:
+            self._result_problem = "the agent's container is not confirmed gone"
+            self._note("the result was not read: the agent's container is not confirmed gone")
+        else:
+            read = self._read_agent_result()
+            if read is not None:
+                # The agent wrote it, and anything it was shown can be in it: the job's secrets
+                # are taken out of every text before the result leaves this process.
+                cleaned = redacted_value(read, Redactor(self.secrets()).redact)
+                # Taking secrets out can make the texts longer. A result over the bounds now would
+                # cost the whole report, so it is the result that is left out.
+                if agent_result_ok(cleaned):
+                    self._agent_result = cleaned
+                else:
+                    self._result_problem = "too_large once the secrets were taken out"
+                    self._note("the result was left out: it is over the bounds without its secrets")
+        if self._agent_result is None and self._error is None:
+            self._error = (
+                ErrorCode.NO_RESULT,
+                f"the agent ended without a result that fits the schema ({self._result_problem})",
+            )
+            self._note("the turn ended: no_result")
 
     def _quiet(self) -> None:
         """Kill what runs in the readers and start them again (`GitWorkspace.quiet_readers`):
@@ -1006,6 +1100,7 @@ class ImplementerSession:
             notes=tuple(self._notes),
             network=self._network_block(),
             checked_out=workspace.checked_out,
+            agent_result=self._agent_result,
             resume=self._resume_block(),
         )
 

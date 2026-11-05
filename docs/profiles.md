@@ -5,14 +5,14 @@ branches, and (optionally) what its result looks like when a step does not say. 
 the profile is *who works*, the [environment](implementer.md#environments) is *where* (setup script, size, network rule). The environment is
 never part of a profile.
 
-Profiles are data. Nothing is built in: people create them, change them and reuse them, through the API (there is no page yet), and an
+Profiles are data. Nothing is built in: people create them, change them and reuse them, through the API (there is no page to manage them yet; the Implementer form can pick one), and an
 AI can write one. Every member of a workspace may do all of it (the permission `start_implementer_task`, like environments). The profiles
 exist only in a deployment with the capability `implementer` (the factory).
 
 **Status (milestone 2 of epic #833, first half).** Profiles are stored with versions, the workflow validator resolves `profile` against them,
 and a task can run with one: the version's model and cost limit become the task's, its instructions go into the agent's prompt, and a version
-without the right to push is not pushed. The profile's default result schema is stored and used by the validator; the finish tool that makes
-use of it at run time is the next change.
+without the right to push is not pushed. The profile's default result schema is stored, used by the validator and, when a task runs with the
+profile, becomes the task's [result schema](implementer.md#the-finish-tool): the agent gets a finish tool made from it.
 
 ## A profile
 
@@ -42,7 +42,7 @@ use of it at run time is the next change.
 | `instructions` | no | The standing, system-level text the agent is given, 20,000 characters at most. It is **not** the task: the task is what a person (or a workflow step) sends with each run. Tabs and line breaks are kept as written. Text that is only white space is refused (`invalid_value`); leave the field out instead. |
 | `costLimitCents` | no | The most one turn may cost, in whole US cents (1 to 10,000), the brake of the turn. Left out (or `null`), the operator's maximum alone applies. Above the operator's maximum it is refused (`cost_limit_above_maximum`), and it is checked again when a task starts, because the maximum can change. |
 | `canPush` | yes | `true` if a turn of this profile may push branches, `false` if not. See [the push right](#the-push-right). Required on purpose: decide it. |
-| `defaultResult` | no | A [result schema](workflows.md#result-schemas) (the same format and the same validator as a step's `result`). A workflow step that declares no `result` yields this one, and the validator uses it for the references in the workflow. It is stored and checked now; the finish tool that asks the agent for it at run time comes next. |
+| `defaultResult` | no | A [result schema](workflows.md#result-schemas) (the same format and the same validator as a step's `result`). A workflow step that declares no `result` yields this one, and the validator uses it for the references in the workflow. A task that runs with the profile and brings no `result` of its own gets this one as the schema of its turn, and with it a finish tool ([`implementer.md`](implementer.md#the-finish-tool)). |
 
 A body with a field not in the table is refused (`unknown_field`, with the names that exist).
 
@@ -143,7 +143,13 @@ differs is what Control does with the branches the agent made in its container:
 `name@version`. With a profile the body names **neither `model` nor `costLimitCents`** (`not_with_profile`): the version brings both, and
 they are checked at the start like the form's (`IMPLEMENTER_MODEL_NOT_ALLOWED`, `EXCEEDS_OPERATOR_MAXIMUM`). A profile that is not there, is
 archived, or has no such version is `IMPLEMENTER_PROFILE_NOT_FOUND`. The environment is chosen separately (`environmentId`), as before.
-The form on the page does not offer a profile yet; the API does.
+The Implementer form offers it too: an optional **Profile** select lists the workspace's profiles that are not archived (by name, with the
+newest version) and **No profile**, the default, which leaves the form as it always was. With a profile chosen, the form shows the model and
+the cost limit of its newest version at the time of loading and does not let them be edited, says in one sentence when the profile does not push ("This profile
+does not push: the result stays in the run."), and sends `profile: "<name>@<version>"` without `model` and `costLimitCents`. The form pins
+the version it shows, so a version made after the page loaded does not change what the task runs with. When the model of that version is
+not among the models the workspace offers, the model field says so and the form does not send the task. The environment stays a
+choice of its own. The form reads the profile with `GET /profiles` and `GET /profiles/<id>`; it needs no route of its own.
 
 A repeated request (same `clientRequestId`) with a profile gets the first task back, also if the profile got a new version in between; a
 request that names another profile, or a version other than the one the task ran with, is `IMPLEMENTER_REQUEST_REUSED`.

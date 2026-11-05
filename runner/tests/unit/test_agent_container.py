@@ -987,3 +987,160 @@ def test_a_model_network_that_cannot_be_closed_to_ipv6_ends_the_turn_free(rig: R
     assert refused.value.code is ErrorCode.SETUP_FAILED
     assert "IPv6" in refused.value.detail
     assert not any(c.name == AGENT_CONTAINER_NAME for c in rig.engine.containers.values())
+
+
+# -- the result directory of a turn with a result schema (#843) ---------------------------------
+
+RESULT_MOUNT = {
+    "Type": "volume",
+    "Source": WORK_VOLUME,
+    "Target": "/work/result",
+    "ReadOnly": False,
+    "VolumeOptions": {"Subpath": "result", "NoCopy": True},
+}
+
+
+# #843-T60
+def test_a_turn_without_a_result_schema_gets_the_container_of_before() -> None:
+    document = agent_document(AGENT_IMAGE_ID, WORK_VOLUME, 1024)
+
+    assert [m["Target"] for m in document["HostConfig"]["Mounts"]] == ["/work/repo"]
+    assert document == agent_document(AGENT_IMAGE_ID, WORK_VOLUME, 1024, result=False)
+
+
+# #843-T60
+def test_a_turn_with_a_result_schema_gets_the_result_directory_beside_the_repository() -> None:
+    document = agent_document(AGENT_IMAGE_ID, WORK_VOLUME, 1024, result=True)
+
+    mounts = document["HostConfig"]["Mounts"]
+    assert [m["Target"] for m in mounts] == ["/work/repo", "/work/result"]
+    assert mounts[1] == RESULT_MOUNT, "the Subpath `result` of the volume, nothing else of it"
+    assert "Binds" not in document["HostConfig"]
+
+
+# #843-T60
+def test_the_container_is_made_with_the_result_directory_and_the_seal_check_allows_it(
+    rig: Rig,
+) -> None:
+    AgentContainer(2560, rig.seams(), result=True).create()
+
+    made = rig.engine.container(AGENT_CONTAINER_NAME)
+    assert made.document == agent_document(
+        AGENT_IMAGE_ID, WORK_VOLUME, 2560 * 1024 * 1024, result=True
+    )
+
+
+# #843-T60
+def test_a_result_mount_nobody_asked_for_is_refused_by_the_seal_check(rig: Rig) -> None:
+    rig.engine.inspect_override[AGENT_CONTAINER_NAME] = lambda answer: {
+        **answer,
+        "Mounts": [*answer["Mounts"], {"Destination": "/work/result", "Type": "volume"}],
+    }
+
+    with pytest.raises(JobError):
+        container(rig).create()
+
+
+# #843-T61
+def test_the_reader_sees_the_result_directory_read_only_when_the_turn_has_a_schema() -> None:
+    plain = reader_document(IMAGE_ID, WORK_VOLUME)
+    with_result = reader_document(IMAGE_ID, WORK_VOLUME, result=True)
+    writer = reader_document(IMAGE_ID, WORK_VOLUME, writable=True, result=True)
+
+    assert len(plain["HostConfig"]["Mounts"]) == 1
+    for document in (with_result, writer):
+        mount = document["HostConfig"]["Mounts"][1]
+        assert mount == {**RESULT_MOUNT, "Target": "/result", "ReadOnly": True}
+    assert with_result["HostConfig"]["Mounts"][0] == plain["HostConfig"]["Mounts"][0]
+
+
+# #843-T61
+def test_the_result_is_read_in_the_read_only_reader_by_a_constant_script_that_bounds_the_bytes(
+    rig: Rig,
+) -> None:
+    def printing(made: FakeExec, stdin: BinaryIO, stdout: Any) -> int:
+        stdout.write('{"findings": []}' + "x" * 100)
+        return 0
+
+    rig.engine.exec_behaviour = printing
+    access = ReaderAccess(None, ReaderSeams(rig.api, lambda: HOSTNAME), result=True)
+
+    raw = access.read_result(20)
+
+    assert raw == b'{"findings": []}xxxx', "at most the bytes asked for are kept"
+    argv = next(iter(rig.engine.execs.values())).document["Cmd"]
+    assert argv[-6:] == [
+        "/bin/sh",
+        "-c",
+        'test -f "$1" && test ! -L "$1" && head -c "$2" "$1"',
+        "read",
+        "/result/result.json",
+        "20",
+    ]
+    assert argv[: len(ac_reader.READER_DROP_CAPABILITIES)] == list(
+        ac_reader.READER_DROP_CAPABILITIES
+    )
+    names = {c.name for c in rig.engine.containers.values()}
+    assert names == {READER_CONTAINER_NAME}, "the reader that cannot write"
+    assert rig.engine.container(READER_CONTAINER_NAME).document["HostConfig"]["Mounts"][1][
+        "ReadOnly"
+    ]
+    access.close()
+
+
+# #843-T61
+def test_a_missing_file_a_link_and_a_reader_that_cannot_run_are_no_result(rig: Rig) -> None:
+    rig.engine.exec_behaviour = lambda made, stdin, stdout: 1
+    access = ReaderAccess(None, ReaderSeams(rig.api, lambda: HOSTNAME), result=True)
+    assert access.read_result(100) is None
+    access.close()
+
+    rig.engine.runtimes.pop("sysbox-runc")
+    broken = ReaderAccess(None, ReaderSeams(rig.api, lambda: HOSTNAME), result=True)
+    assert broken.read_result(100) is None
+
+
+# #843-T62
+def test_the_result_directory_is_made_by_control_once_and_not_through_a_link(
+    tmp_path: Path,
+) -> None:
+    from code_reviewer_runner.implementer.result_channel import make_result_directory
+
+    make_result_directory(tmp_path)
+
+    assert (tmp_path / "result").is_dir() and (tmp_path / "result").stat().st_mode & 0o777 == 0o755
+    with pytest.raises(FileExistsError):
+        make_result_directory(tmp_path)
+
+
+# #843-T62
+def test_the_places_of_the_result_agree_across_the_finish_tool_and_the_containers() -> None:
+    from code_reviewer_runner.implementer import agent as engine_agent
+    from code_reviewer_runner.implementer import finish_tool
+    from code_reviewer_runner.implementer import result_channel as rc
+
+    assert f"{rc.AGENT_RESULT_DIRECTORY}/{rc.RESULT_FILE}" == finish_tool.RESULT_PATH
+    assert rc.CONFIG_DIRECTORY == ac.AGENT_CONFIG_DIRECTORY == engine_agent.CONFIG_DIRECTORY
+    assert rc.INTERPRETER == ac.PYTHON
+    assert rc.READER_RESULT_DIRECTORY == "/result"
+
+
+# #843-T62
+def test_the_finish_files_are_the_module_under_an_isolated_shebang_and_the_schema() -> None:
+    from code_reviewer_runner.implementer import finish_tool
+    from code_reviewer_runner.implementer import result_channel as rc
+
+    schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+
+    files = rc.finish_files(schema)
+
+    program, mode = files["factory-submit"]
+    assert mode == 0o755 and program.startswith(b"#!/usr/local/bin/python3 -I\n")
+    assert program.split(b"\n", 1)[1] == Path(finish_tool.__file__).read_bytes()
+    assert files["result-schema.json"] == (json.dumps(schema).encode(), 0o644)
+    assert rc.finish_server_command() == (
+        "/usr/local/bin/python3",
+        "-I",
+        "/etc/code-reviewer/factory-submit",
+        "mcp",
+    )
