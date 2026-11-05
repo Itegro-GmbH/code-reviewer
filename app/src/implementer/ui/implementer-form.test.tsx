@@ -1912,7 +1912,7 @@ describe("the profile picker (#843)", () => {
     expect(sent).toMatchObject({
       repositoryId: "r1",
       instruction: "Add a health endpoint",
-      profile: "implementer",
+      profile: "implementer@2",
     });
     expect(sent).not.toHaveProperty("model");
     expect(sent).not.toHaveProperty("costLimitCents");
@@ -1965,12 +1965,15 @@ describe("the profile picker (#843)", () => {
     renderForm(api);
     await fillIn(user);
     await chooseOption(user, control("Profile"), /^implementer/);
-    await waitFor(() => expect(control("Model")).toHaveProperty("readOnly"));
+    await waitFor(() =>
+      expect(control("Model")).toHaveProperty("readOnly", true),
+    );
 
     await chooseOption(user, control("Profile"), "No profile");
 
     await waitFor(() => expect(control("Provider")).toBeTruthy());
     expect(control("Model").textContent).toContain("DeepSeek Chat");
+    expect(control("Model")).not.toHaveProperty("readOnly", true);
     await user.click(startButton());
     await waitFor(() => expect(api.startTask).toHaveBeenCalledTimes(1));
     expect(api.startTask.mock.calls[0]?.[0]).not.toHaveProperty("profile");
@@ -2031,7 +2034,7 @@ describe("the profile picker (#843)", () => {
 
     await waitFor(() => expect(api.startTask).toHaveBeenCalledTimes(1));
     expect(api.startTask.mock.calls[0]?.[0]).toMatchObject({
-      profile: "implementer",
+      profile: "implementer@2",
       environmentId: "env-node",
     });
   });
@@ -2097,5 +2100,147 @@ describe("the profile picker (#843)", () => {
       await screen.findByText(/This profile does not exist any more/),
     ).toBeTruthy();
     expect(control("Profile").getAttribute("aria-invalid")).toBe("true");
+  });
+
+  // #843-T48
+  it("sends the version it shows, also when the list names another", async () => {
+    const user = userEvent.setup();
+    const api = withProfiles({
+      profile: vi.fn<ImplementerApi["profile"]>(() =>
+        Promise.resolve(
+          ok({
+            profile: {
+              ...profileView(IMPLEMENTER_PROFILE),
+              documentVersion: 3,
+            },
+          }),
+        ),
+      ),
+    });
+    renderForm(api);
+    await fillInWithoutModel(user);
+    await chooseOption(user, control("Profile"), /^implementer/);
+    await waitFor(() =>
+      expect(control("Model")).toHaveProperty("value", "Kimi K2 (Moonshot)"),
+    );
+
+    await user.click(startButton());
+
+    await waitFor(() => expect(api.startTask).toHaveBeenCalledTimes(1));
+    expect(api.startTask.mock.calls[0]?.[0]).toMatchObject({
+      profile: "implementer@3",
+    });
+  });
+
+  // #843-T49
+  it("shows the sentence of the server at the model when the model of the profile is refused", async () => {
+    const user = userEvent.setup();
+    const api = withProfiles({
+      startTask: vi.fn<ImplementerApi["startTask"]>(() =>
+        Promise.resolve(
+          refused(422, "IMPLEMENTER_MODEL_NOT_ALLOWED", {
+            details: { reason: "no_key" },
+          }),
+        ),
+      ),
+    });
+    renderForm(api);
+    await fillInWithoutModel(user);
+    await chooseOption(user, control("Profile"), /^implementer/);
+    await waitFor(() =>
+      expect(control("Model")).toHaveProperty("value", "Kimi K2 (Moonshot)"),
+    );
+
+    await user.click(startButton());
+
+    expect(
+      await screen.findByText(describeModelRefusal("no_key")),
+    ).toBeTruthy();
+    expect(control("Model").getAttribute("aria-invalid")).toBe("true");
+    await waitFor(() => expect(document.activeElement).toBe(control("Model")));
+  });
+
+  // #843-T49
+  it("shows the sentence of the server at the cost limit when the limit of the profile is above the maximum", async () => {
+    const user = userEvent.setup();
+    const api = withProfiles({
+      startTask: vi.fn<ImplementerApi["startTask"]>(() =>
+        Promise.resolve(
+          refused(422, "EXCEEDS_OPERATOR_MAXIMUM", {
+            details: { maximumCents: 200 },
+          }),
+        ),
+      ),
+    });
+    renderForm(api);
+    await fillInWithoutModel(user);
+    await chooseOption(user, control("Profile"), /^implementer/);
+    await waitFor(() =>
+      expect(control(/^Cost limit/)).toHaveProperty("value", "$2.50"),
+    );
+
+    await user.click(startButton());
+
+    expect(await screen.findByText(/maximum of \$2\.00 per task/)).toBeTruthy();
+    expect(control(/^Cost limit/).getAttribute("aria-invalid")).toBe("true");
+    await waitFor(() =>
+      expect(document.activeElement).toBe(control(/^Cost limit/)),
+    );
+  });
+
+  // #843-T50
+  it("says at the model that it is not available and does not send, when the options do not list the model of the profile", async () => {
+    const user = userEvent.setup();
+    const api = withProfiles({
+      profile: vi.fn<ImplementerApi["profile"]>(() =>
+        Promise.resolve(
+          ok({
+            profile: profileView(IMPLEMENTER_PROFILE, {
+              model: { provider: "moonshot", model: "kimi-gone" },
+            }),
+          }),
+        ),
+      ),
+    });
+    renderForm(api);
+    await fillInWithoutModel(user);
+
+    await chooseOption(user, control("Profile"), /^implementer/);
+
+    expect(
+      await screen.findByText(
+        "The model of this profile is not available in this workspace, so the task would be refused. Choose another profile or none.",
+      ),
+    ).toBeTruthy();
+    expect(control("Model").getAttribute("aria-invalid")).toBe("true");
+    await user.click(startButton());
+    expect(api.startTask).not.toHaveBeenCalled();
+    await waitFor(() => expect(document.activeElement).toBe(control("Model")));
+  });
+
+  // #843-T50
+  it("does not say the model is gone while the options load or when they failed", async () => {
+    const user = userEvent.setup();
+    const api = withProfiles({
+      models: vi.fn<ImplementerApi["models"]>(() =>
+        Promise.resolve(refused(500, "MODELS_UNAVAILABLE")),
+      ),
+    });
+    renderForm(api);
+    await chooseRepository(user, "acme/widgets");
+    setTask("Add a health endpoint");
+    await waitFor(() =>
+      expect(control("Profile")).not.toHaveProperty("disabled", true),
+    );
+
+    await chooseOption(user, control("Profile"), /^implementer/);
+    await waitFor(() =>
+      expect(control("Model")).toHaveProperty("readOnly", true),
+    );
+    await waitFor(() => expect(api.models).toHaveBeenCalled());
+
+    expect(screen.queryByText(/not available in this workspace/)).toBeNull();
+    await user.click(startButton());
+    await waitFor(() => expect(api.startTask).toHaveBeenCalledTimes(1));
   });
 });

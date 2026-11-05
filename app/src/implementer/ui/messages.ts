@@ -49,7 +49,7 @@ export const FORM_COPY = {
   profileNone: "No profile",
   profilePlaceholder: "Choose a profile",
   profileHint:
-    "A profile brings the model, the cost limit and the standing instructions of a task. Without one, the model and cost limit below apply.",
+    "A profile brings the model, the cost limit and the standing instructions. Without one, you choose the model and cost limit below.",
   profileLoadFailed:
     "The profiles could not be loaded. A task can still be sent without a profile.",
   profileDetailLoadFailed:
@@ -58,6 +58,8 @@ export const FORM_COPY = {
   profileModelHint:
     "The model of the profile. To use another, choose another profile or none.",
   profileModelUnknown: "A model of this profile",
+  profileModelGone:
+    "The model of this profile is not available in this workspace, so the task would be refused. Choose another profile or none.",
   profileCostHint: "The cost limit of the profile.",
   profileCostMaximum: "The operator's maximum",
   profileNoPush: "This profile does not push: the result stays in the run.",

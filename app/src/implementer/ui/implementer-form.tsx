@@ -7,7 +7,7 @@
 // secret and no token, and shows no text of GitHub: every refusal is a fixed sentence for its code (`messages.ts`).
 //
 // A profile is optional. With one, the model and the cost limit are the profile's version: they are shown, not editable, and the
-// request names the profile (its newest version) and neither of the two. The environment stays a choice of its own.
+// request names the profile (the version shown) and neither of the two. The environment stays a choice of its own.
 //
 // One body is one task: the client request id belongs to what is sent. A send of the same body again (after a failed or a lost
 // answer) carries the same id, so a retry that reaches the server twice starts one task; a body that was edited since is another
@@ -260,6 +260,18 @@ export function ImplementerForm({
     profileDetail.state === "ready"
       ? profileDetail.data.profile.document
       : undefined;
+  // The form sends the version it shows (`name@version`): a newer one made since would bring another model and cost limit.
+  const profileRef =
+    profile !== undefined && profileDetail.state === "ready"
+      ? `${profile.name}@${profileDetail.data.profile.documentVersion}`
+      : undefined;
+  // A model of the profile that the loaded options do not offer (the key is gone, the model is not served any more) is refused at
+  // the start. A list that is loading, failed or unreadable says nothing about it.
+  const profileModelGone =
+    profileDocument !== undefined &&
+    modelOptions !== undefined &&
+    modelOptions.keyMode !== "unreadable" &&
+    describeModelChoice(modelOptions, profileDocument.model) === undefined;
 
   function clear(...keys: FieldKey[]) {
     setErrors((current) => {
@@ -294,6 +306,7 @@ export function ImplementerForm({
               code: "EXCEEDS_OPERATOR_MAXIMUM",
               maximumCents: costLimit.maximumCents,
             });
+    if (profileModelGone) found.model = FORM_COPY.profileModelGone;
     const body = {
       repositoryId,
       baseBranch,
@@ -301,7 +314,7 @@ export function ImplementerForm({
       instruction,
       ...(profile === undefined
         ? { model: choice }
-        : { profile: profile.name }),
+        : { profile: profileRef ?? profile.name }),
       ...(environment === undefined ? {} : { environmentId: environment.id }),
       ...(costLimit.ok && costLimit.cents !== null
         ? { costLimitCents: costLimit.cents }
@@ -671,6 +684,10 @@ export function ImplementerForm({
             name="model"
             label={FORM_COPY.model}
             hint={FORM_COPY.profileModelHint}
+            error={
+              errors.model ??
+              (profileModelGone ? FORM_COPY.profileModelGone : undefined)
+            }
           >
             {(control) => (
               <Input
@@ -784,6 +801,7 @@ export function ImplementerForm({
             name="cost"
             label={FORM_COPY.costLimit}
             hint={FORM_COPY.profileCostHint}
+            error={errors.cost}
           >
             {(control) => (
               <Input

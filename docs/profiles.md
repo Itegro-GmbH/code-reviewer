@@ -145,8 +145,10 @@ they are checked at the start like the form's (`IMPLEMENTER_MODEL_NOT_ALLOWED`, 
 archived, or has no such version is `IMPLEMENTER_PROFILE_NOT_FOUND`. The environment is chosen separately (`environmentId`), as before.
 The Implementer form offers it too: an optional **Profile** select lists the workspace's profiles that are not archived (by name, with the
 newest version) and **No profile**, the default, which leaves the form as it always was. With a profile chosen, the form shows the model and
-the cost limit of its newest version and does not let them be edited, says in one sentence when the profile does not push ("This profile
-does not push: the result stays in the run."), and sends `profile: "<name>"` without `model` and `costLimitCents`. The environment stays a
+the cost limit of its newest version at the time of loading and does not let them be edited, says in one sentence when the profile does not push ("This profile
+does not push: the result stays in the run."), and sends `profile: "<name>@<version>"` without `model` and `costLimitCents`. The form pins
+the version it shows, so a version made after the page loaded does not change what the task runs with. When the model of that version is
+not among the models the workspace offers, the model field says so and the form does not send the task. The environment stays a
 choice of its own. The form reads the profile with `GET /profiles` and `GET /profiles/<id>`; it needs no route of its own.
 
 A repeated request (same `clientRequestId`) with a profile gets the first task back, also if the profile got a new version in between; a
