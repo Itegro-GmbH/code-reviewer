@@ -1103,6 +1103,24 @@ const CASES: Case[] = [
       }),
   },
   {
+    // #841: the next turn of B's session cannot be queued from A's scope; nothing is written
+    name: "jobs.enqueueFollowUpTurn",
+    run: (a, b) =>
+      a.jobs.enqueueFollowUpTurn({
+        sessionId: taskOf(b).session.id,
+        headSha: SHA,
+        instruction: "Hijacked.",
+        modelChoice: { entryId: "entry-1" },
+        costLimitCents: null,
+        createdBy: "user-a",
+        actorLogin: "octocat",
+        clientRequestId: "foreign-follow-up",
+        fromQueued: false,
+      }),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ status: "session_not_found" }),
+  },
+  {
     // #791: a request id is looked up in the workspace of the scope; a turn of B is never found under A (the delivery id carries the workspace)
     name: "jobs.findImplementerTurn",
     run: (a) => a.jobs.findImplementerTurn("request-of-b"),
@@ -1969,6 +1987,75 @@ const CASES: Case[] = [
       ),
     expectAnswer: notFound("IMPLEMENTER_REPOSITORY_NOT_FOUND"),
   },
+  // follow-up turns (#841): B's session is not A's to continue, to queue an instruction on, or to read the turns of
+  {
+    name: "implementer.startFollowUpTurn",
+    run: (a, b) =>
+      a.implementer.startFollowUpTurn(
+        {
+          sessionId: taskOf(b).session.id,
+          instruction: "Hijacked.",
+          modelChoice: { entryId: "entry-a" },
+          costLimitCents: null,
+          environment: null,
+          profile: null,
+          resultSchema: null,
+          createdBy: "user-a",
+          fromQueued: false,
+        },
+        async () => b.job.id,
+      ),
+    expectAnswer: (answer) => expect(answer).toEqual({ status: "not_found" }),
+  },
+  {
+    name: "implementer.queueInstruction",
+    run: (a, b) =>
+      a.implementer.queueInstruction(taskOf(b).session.id, {
+        clientRequestId: "request-a",
+        instruction: "Hijacked.",
+        modelChoice: { entryId: "entry-a" },
+        costLimitCents: null,
+        environment: null,
+        profile: null,
+        resultSchema: null,
+        createdBy: "user-a",
+        actorLogin: "octocat",
+        queuedAt: "2026-11-05T09:00:00.000Z",
+      }),
+    expectAnswer: (answer) => expect(answer).toEqual({ status: "not_found" }),
+  },
+  {
+    name: "implementer.discardQueued",
+    run: (a, b) =>
+      a.implementer.discardQueued(
+        taskOf(b).session.id,
+        "request-a",
+        "branch_gone",
+      ),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "implementer.noteQueuedAttempt",
+    run: (a, b) =>
+      a.implementer.noteQueuedAttempt(taskOf(b).session.id, "request-a"),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "implementer.noteQueuedFailure",
+    run: (a, b) =>
+      a.implementer.noteQueuedFailure(taskOf(b).session.id, "request-a"),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "implementer.lastTurn",
+    run: (a, b) => a.implementer.lastTurn(taskOf(b).session.id),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "implementer.turnHistory",
+    run: (a, b) => a.implementer.turnHistory(taskOf(b).session.id),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
   // implementer steps (#745): B's steps are not A's to read or write, not even with B's lease token
   {
     name: "steps.recordSteps",
@@ -1988,6 +2075,11 @@ const CASES: Case[] = [
         },
       ]),
     expectAnswer: (answer) => expect(answer).toEqual({ status: "not_holder" }),
+  },
+  {
+    name: "steps.lastStep",
+    run: (a, b) => a.steps.lastStep(taskOf(b).turn.jobId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {
     name: "steps.listAfter",

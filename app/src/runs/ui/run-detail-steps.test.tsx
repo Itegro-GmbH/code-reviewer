@@ -49,6 +49,7 @@ function task(): ImplementerDetailView {
     pushedNote: null,
     result: null,
     resultExpected: false,
+    resume: null,
     reported: false,
   };
 }

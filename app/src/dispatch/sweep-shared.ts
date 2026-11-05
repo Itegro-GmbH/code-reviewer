@@ -24,6 +24,11 @@ import { loadSweepSettings } from "./sweep-settings.ts";
 
 export function getDispatchSweep(
   env: Readonly<Record<string, string | undefined>> = process.env,
+  /**
+   * #841: the starter of the instructions queued while a turn ran. The route hands it in: building it needs the Implementer, which
+   * imports the queues this module is part of.
+   */
+  extra: { followUps?: { startDue(): Promise<{ started: number }> } } = {},
 ): DispatchSweep {
   const db = getDatabase();
   const capabilities = getCapabilities(env);
@@ -56,6 +61,8 @@ export function getDispatchSweep(
           },
         }
       : {}),
+    // #841: the instructions queued while a turn ran, for the turns that ended without an event reaching them.
+    ...(extra.followUps === undefined ? {} : { followUps: extra.followUps }),
     // #548: the daily fetch of the models.dev catalog, last.
     modelsDev: getModelsDevService(),
     // #591: the holds of jobs that ended while billing was off, while billing is on.

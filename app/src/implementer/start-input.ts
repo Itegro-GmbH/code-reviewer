@@ -16,7 +16,7 @@ import type { ImplementerIssue } from "./errors.ts";
 
 /** The instruction the agent is given: at most this many characters (the same bound as the form's text area). */
 export const INSTRUCTION_MAX_LENGTH = 20_000;
-const ID_MAX_LENGTH = 128;
+export const ID_MAX_LENGTH = 128;
 /** A result schema of a task, as compact JSON: the bound of a body that holds a profile (`docs/profiles.md`). */
 export const RESULT_SCHEMA_MAX_CHARS = 128 * 1024;
 const MODEL_FIELD_MAX_LENGTH = 200;
@@ -51,14 +51,14 @@ const LONE_SURROGATE =
   /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
 
 /** Every control character, tab and line breaks included: an id or a model name is one line. */
-const CONTROL_OR_NEWLINE = /[\u0000-\u001f\u007f]/;
+export const CONTROL_OR_NEWLINE = /[\u0000-\u001f\u007f]/;
 
 function isText(value: unknown): value is string {
   return typeof value === "string" && value.trim() !== "";
 }
 
 /** The model choice if the value is exactly one of the two shapes of a turn's `model_choice`. */
-function readModel(value: unknown): ModelChoice | undefined {
+export function readModel(value: unknown): ModelChoice | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     return undefined;
   const record = value as Record<string, unknown>;
@@ -79,6 +79,19 @@ function readModel(value: unknown): ModelChoice | undefined {
       model: record.model as string,
     };
   return undefined;
+}
+
+/** The issue code the instruction has, or "ok": the one rule for the first turn and every follow-up. */
+export function readInstruction(
+  instruction: unknown,
+): "ok" | "required" | "invalid" | "too_long" {
+  if (instruction === undefined || instruction === null) return "required";
+  if (typeof instruction !== "string") return "invalid";
+  if (instruction.trim() === "") return "required";
+  if (instruction.length > INSTRUCTION_MAX_LENGTH) return "too_long";
+  if (CONTROL.test(instruction) || LONE_SURROGATE.test(instruction))
+    return "invalid";
+  return "ok";
 }
 
 export function validateStartInput(body: unknown): StartInputCheck {
@@ -125,14 +138,8 @@ export function validateStartInput(body: unknown): StartInputCheck {
   }
 
   const instruction = fields.instruction;
-  if (instruction === undefined || instruction === null)
-    refuse("instruction", "required");
-  else if (typeof instruction !== "string") refuse("instruction", "invalid");
-  else if (instruction.trim() === "") refuse("instruction", "required");
-  else if (instruction.length > INSTRUCTION_MAX_LENGTH)
-    refuse("instruction", "too_long");
-  else if (CONTROL.test(instruction) || LONE_SURROGATE.test(instruction))
-    refuse("instruction", "invalid");
+  const checkedInstruction = readInstruction(instruction);
+  if (checkedInstruction !== "ok") refuse("instruction", checkedInstruction);
 
   // A profile (#843) brings the model and the cost limit of its version: the body then names neither.
   let profile: StartInput["profile"] = null;

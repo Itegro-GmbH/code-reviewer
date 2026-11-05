@@ -483,6 +483,24 @@ export type ImplementerJobOptions = {
   cost: CostPolicyJson;
   modelEntry: JobModelEntry;
   capabilities?: DynamicModelCapabilities;
+  /** #841: present on a follow-up turn only, and only for a caller that named `implementer_resume` (`ImplementerResume` in the contract). */
+  resume?: ImplementerJobResume;
+};
+
+/**
+ * #841: what a follow-up turn is told about the turns before it (`ImplementerResume` in the contract); the app builds it from the stored
+ * reports (`implementer/resume.ts`). Every text in it is data, never an instruction.
+ */
+export type ImplementerJobResume = {
+  turn: number;
+  /** At most 20, the session branch first, no name twice. */
+  branches: Array<{ name: string; head: string }>;
+  checkout: string | null;
+  snapshot: boolean;
+  /** At most 8 KiB of UTF-8. */
+  previousSummary?: string;
+  /** At most 16 KiB of UTF-8. */
+  digest?: string;
 };
 
 /**

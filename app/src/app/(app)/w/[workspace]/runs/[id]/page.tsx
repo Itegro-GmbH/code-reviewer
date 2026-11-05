@@ -2,6 +2,8 @@
 
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
+import { operatorMaximumCents } from "@/implementer/shared";
+import { ContinueForm } from "@/implementer/ui/continue-form";
 import { runsServiceFor } from "@/runs/shared";
 import {
   loadRunDetailPage,
@@ -44,5 +46,22 @@ async function RunContent({
     runs: runsServiceFor(workspaceId),
   });
   if (data.kind === "not_found") notFound();
-  return <RunDetailPageContent workspaceSlug={workspaceSlug} data={data} />;
+  // #841: the "Continue" form under a task, for the newest turn of its session (the form asks for it and shows nothing for another run).
+  // It is mounted here and not in the run page content: the Runs importing the Implementer would be a new import cycle (`src/ci/import-cycles`).
+  const task = data.snapshot.run.implementer;
+  return (
+    <>
+      <RunDetailPageContent workspaceSlug={workspaceSlug} data={data} />
+      {task === undefined ? null : (
+        <div className="mt-8">
+          <ContinueForm
+            key={data.snapshot.run.id}
+            workspaceSlug={workspaceSlug}
+            runId={data.snapshot.run.id}
+            operatorMaximumCents={await operatorMaximumCents()}
+          />
+        </div>
+      )}
+    </>
+  );
 }

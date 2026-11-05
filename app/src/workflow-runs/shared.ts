@@ -15,6 +15,7 @@ import { dueWorkflowRuns } from "../db/repositories/workflow-runs-sweep.ts";
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import { getDatabase } from "../db/startup.ts";
 import { runAfterResponse } from "../dispatch/shared.ts";
+import { startQueuedFollowUps } from "../implementer/follow-up-shared.ts";
 import {
   implementerServiceFor,
   implementerTurnPricer,
@@ -106,6 +107,11 @@ export function workflowRunServiceFor(workspaceId: string): WorkflowRunService {
  */
 export function turnEnded(job: Pick<Job, "id" | "workspaceId">): void {
   runAfterResponse(() => workflowEngineFor(job.workspaceId).jobEnded(job.id));
+  // #841: the instruction a person queued behind this turn starts now. A second, independent reaction to the same event: it does not
+  // wait for the engine, and neither can fail the other (`runAfterResponse` swallows what its work throws, and the starter counts and logs
+  // its own failures). It lives here and not in the runner API because this module already depends on the Implementer; the runner API
+  // importing it would be a new import cycle.
+  runAfterResponse(() => startQueuedFollowUps(job));
 }
 
 /**
