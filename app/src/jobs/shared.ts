@@ -16,7 +16,6 @@ import {
   runAfterResponse,
   stopEndedClaims,
 } from "../dispatch/shared.ts";
-import { startQueuedFollowUps } from "../implementer/follow-up-shared.ts";
 import { getWriteTokens } from "../runner-api/claimed-keys-shared.ts";
 import { endedClaimsReaction } from "../runner-api/write-token.ts";
 import { deliverBalanceMails, recordWallClocks } from "../billing/shared.ts";
@@ -111,8 +110,6 @@ function createRunnerQueueOfTheServer(): RunnerQueue {
       // #790: the write tokens of an ended turn of the Implementer, however it ended (a result, the reaper, a stop, the timeout).
       revokeTokensOfEndedClaims(jobIds);
       recordWallClocks(jobIds);
-      // #841: the instruction a person queued while a turn ran starts now that a claim ended. The turn's report is committed already.
-      runAfterResponse(startQueuedFollowUps);
       // #506: the settlement of these jobs may have taken a balance below the threshold; the mail goes out after the response.
       deliverBalanceMails();
     },

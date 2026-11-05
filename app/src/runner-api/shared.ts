@@ -22,7 +22,7 @@ import { createImplementerStepsRepository } from "../db/repositories/implementer
 import { createJobVmRunsRepository } from "../db/repositories/job-vm-runs-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { getDatabase } from "../db/startup.ts";
-import { buildResume } from "../implementer/resume.ts";
+import { buildResume } from "./resume.ts";
 import { integrationRegistry } from "../integrations/registry.ts";
 import { jobEnded, touched } from "../dispatch/maintenance-shared.ts";
 import { getRunnerQueue } from "../jobs/shared.ts";

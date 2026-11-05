@@ -54,7 +54,7 @@ import type {
   RepoRef,
   ReviewCommand,
 } from "../integrations/types.ts";
-import type { ResumeBlock } from "../implementer/resume.ts";
+import type { ResumeBlock } from "./resume.ts";
 import type { RunnerQueue } from "../jobs/runner-queue.ts";
 import type { ClaimResult, Job, JobErrorCode } from "../jobs/job-types.ts";
 import { REVIEW_SETTING_LIMITS } from "../review-settings/settings.ts";

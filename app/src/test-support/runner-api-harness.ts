@@ -12,7 +12,7 @@ import { createUsageRecordsRepository } from "../db/repositories/usage-records-r
 import { createJobsRepository } from "../db/repositories/jobs-repository.ts";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
 import { createImplementerSnapshotsRepository } from "../db/repositories/implementer-snapshots-repository.ts";
-import { buildResume } from "../implementer/resume.ts";
+import { buildResume } from "../runner-api/resume.ts";
 import { createImplementerStepsRepository } from "../db/repositories/implementer-steps-repository.ts";
 import { createCapabilitySet } from "../capabilities/capability.ts";
 import { createJobQueue } from "../jobs/job-queue.ts";

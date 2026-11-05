@@ -16,7 +16,7 @@
 //  - `digest`: built here, at most 16 KiB: the last 5 instructions (2 KiB each), the last 3 summaries, the commit subjects since the
 //    base and the first 50 changed files.
 import type { TurnHistoryEntry } from "../db/repositories/implementer-repository.ts";
-import type { ImplementerJobResume } from "../runner-api/contract.ts";
+import type { ImplementerJobResume } from "./contract.ts";
 
 export const MAX_RESUME_BRANCHES = 20;
 export const MAX_PREVIOUS_SUMMARY_BYTES = 8 * 1024;

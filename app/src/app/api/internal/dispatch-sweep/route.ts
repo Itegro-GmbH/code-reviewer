@@ -7,12 +7,15 @@ import { connection } from "next/server";
 import { handleDispatchSweepCron } from "../../../../cron/dispatch-sweep.ts";
 import { getDatabase } from "../../../../db/startup.ts";
 import { getDispatchSweep } from "../../../../dispatch/sweep-shared.ts";
+import { getQueuedFollowUpStarter } from "../../../../implementer/follow-up-shared.ts";
 
 export async function GET(request: Request): Promise<Response> {
   await connection();
   return handleDispatchSweepCron(request, {
     env: process.env,
     db: getDatabase,
-    sweep: getDispatchSweep,
+    // #841: the starter of the instructions queued while a turn ran is built here: only a route may import both.
+    sweep: () =>
+      getDispatchSweep(process.env, { followUps: getQueuedFollowUpStarter() }),
   });
 }
