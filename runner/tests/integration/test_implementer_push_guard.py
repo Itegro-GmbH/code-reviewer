@@ -382,7 +382,7 @@ def test_the_slice_is_shared_by_the_branches_what_one_reads_the_next_does_not_ge
     assert seen.listing[0] == pytest.approx(slice_)  # pyright: ignore[reportUnknownMemberType]
     # The second branch reads with what the first left of the slice, not with a slice of its own.
     assert seen.listing[1] == pytest.approx(slice_ - 3.0)  # pyright: ignore[reportUnknownMemberType]
-    # The fetch and the push of the first branch stop before what is still kept; the last has it all.
+    # The first branch fetches and pushes before what is still kept; the last has it all.
     assert seen.fetch[1] == pytest.approx(start + 20.0 - (slice_ - 3.0))  # pyright: ignore[reportUnknownMemberType]
     assert seen.push[0] == pytest.approx(start + 20.0 - (slice_ - 3.0))  # pyright: ignore[reportUnknownMemberType]
     assert seen.push[1] == pytest.approx(start + 20.0)  # pyright: ignore[reportUnknownMemberType]
