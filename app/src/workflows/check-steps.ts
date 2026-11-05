@@ -327,6 +327,17 @@ function checkProfile(
   const info = c.resolver.profiles().find((p) => p.name === parsed.name);
   if (info === undefined) {
     const names = c.resolver.profiles().map((p) => p.name);
+    if (c.resolver.archivedProfiles?.().includes(parsed.name) === true) {
+      c.report(
+        issue(
+          where,
+          "profile_archived",
+          `The profile ${shown(parsed.name)} is archived and cannot be run. Profiles: ${listNames(names)}.`,
+          names,
+        ),
+      );
+      return;
+    }
     c.report(
       issue(
         where,

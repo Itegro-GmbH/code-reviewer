@@ -33,6 +33,8 @@ export type EnvironmentInfo = { name: string };
 
 export type WorkflowResolver = {
   profiles(): readonly ProfileInfo[];
+  /** The names of the profiles of the workspace that are archived: a reference to one is not "unknown" (#843). */
+  archivedProfiles?(): readonly string[];
   environments(): readonly EnvironmentInfo[];
   connectors(): readonly ConnectorSpec[];
 };
@@ -40,10 +42,12 @@ export type WorkflowResolver = {
 /** The resolver of the running server: the workspace's profiles and environments, and the built-in connectors. */
 export function createResolver(options: {
   profiles: readonly ProfileInfo[];
+  archivedProfiles?: readonly string[];
   environments: readonly EnvironmentInfo[];
 }): WorkflowResolver {
   return {
     profiles: () => options.profiles,
+    archivedProfiles: () => options.archivedProfiles ?? [],
     environments: () => options.environments,
     connectors: () => BUILT_IN_CONNECTORS,
   };

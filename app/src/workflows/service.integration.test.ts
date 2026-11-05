@@ -95,6 +95,33 @@ describe("the workflow service", () => {
     expect((await a.list()).workflows).toEqual([]);
   });
 
+  // #843-T135
+  it("tells a workflow that names an archived profile that it is archived, not that it does not exist", async () => {
+    const { a, db, idA } = await setup();
+    const profiles = createProfilesRepository(db, idA);
+    const created = await profiles.create(
+      { name: "retired", content: PROFILE_CONTENT, createdBy: USER.id },
+      100,
+    );
+    if (!created.ok) throw new Error("the profile was not created");
+    await profiles.archive(created.profile.id, 50);
+    const document = tiny();
+    (document.steps as Array<Record<string, unknown>>)[0]!.profile = "retired";
+
+    const refused = await a.validate(document);
+
+    expect(refused.errors).toEqual([
+      expect.objectContaining({
+        path: "/steps/0/profile",
+        code: "profile_archived",
+        available: ["implementer"],
+      }),
+    ]);
+    const unknown = tiny();
+    (unknown.steps as Array<Record<string, unknown>>)[0]!.profile = "never";
+    expect((await a.validate(unknown)).errors[0]?.code).toBe("profile_unknown");
+  });
+
   // #833-M1-T201
   it("does not see the environments of another workspace", async () => {
     const { a, b, db, idB } = await setup();

@@ -5,14 +5,24 @@
 // the service reads the names first, asks the database for exactly those versions, and builds the resolver's list from the answer.
 // Pure: no database. The document is untrusted, so the walk is iterative (no depth to overflow) and takes no key but `profile`.
 import { isRecord } from "./json.ts";
+import { STEPS_MAX } from "./limits.ts";
 import { parseProfileRef, type ProfileInfo } from "./resolver.ts";
 import type { ResultSchema } from "./result-schema.ts";
+
+/**
+ * The most distinct (profile, version) references read from one document. The document is untrusted and every key named `profile` in
+ * it counts, steps or not, so the service would otherwise ask the database for as many versions as the sender cares to write. A
+ * document may hold `STEPS_MAX` steps, so twice that is more than any real one names. What lies beyond is not read: the validator
+ * then knows no such profile or version (`profileInfosOf`).
+ */
+export const PROFILE_REFS_MAX = STEPS_MAX * 2;
 
 /** `profile` of every object in the document that has one that is a reference: the name, and the versions named or `latest`. */
 export function profileRefsIn(
   document: unknown,
 ): Map<string, Set<number | "latest">> {
   const found = new Map<string, Set<number | "latest">>();
+  let count = 0;
   const pending: unknown[] = [document];
   while (pending.length > 0) {
     const value = pending.pop();
@@ -26,7 +36,11 @@ export function profileRefsIn(
         const parsed = parseProfileRef(child);
         if (parsed === undefined) continue;
         const versions = found.get(parsed.name) ?? new Set();
-        versions.add(parsed.version ?? "latest");
+        const version = parsed.version ?? "latest";
+        if (versions.has(version)) continue;
+        if (count >= PROFILE_REFS_MAX) return found;
+        count++;
+        versions.add(version);
         found.set(parsed.name, versions);
       } else if (typeof child === "object" && child !== null) {
         pending.push(child);
@@ -49,7 +63,9 @@ export type ProfileFactsRow = {
 /**
  * The versions whose facts the validator can ask for (`wanted`: the newest of every profile the document names, and each version it
  * pins that exists), and the function that makes the resolver's list from the rows read for them. Versions are numbered from 1 without
- * a gap, so a profile at version 3 has the versions 1, 2 and 3.
+ * a gap, so a profile at version 3 has the versions 1, 2 and 3. A document that named `PROFILE_REFS_MAX` references was cut off while it
+ * was read (a real one names at most `STEPS_MAX`): the resolver then holds only the profiles and versions that were read, so what
+ * was not read is reported as unknown instead of being taken on trust.
  */
 export function profileInfosOf(
   live: readonly LiveProfile[],
@@ -59,6 +75,9 @@ export function profileInfosOf(
   build(rows: readonly ProfileFactsRow[]): ProfileInfo[];
 } {
   const wanted: { profileId: string; version: number }[] = [];
+  let read = 0;
+  for (const versions of refs.values()) read += versions.size;
+  const cutOff = read >= PROFILE_REFS_MAX;
   for (const profile of live) {
     const named = refs.get(profile.name);
     if (named === undefined) continue;
@@ -72,7 +91,8 @@ export function profileInfosOf(
   return {
     wanted,
     build(rows) {
-      return live.map((profile) => {
+      const shown = cutOff ? live.filter((p) => refs.has(p.name)) : live;
+      return shown.map((profile) => {
         const facts: ProfileInfo["facts"] = Object.fromEntries(
           rows
             .filter((row) => row.profileId === profile.id)
@@ -90,9 +110,15 @@ export function profileInfosOf(
               },
             ]),
         );
+        const numbers = Array.from(
+          { length: profile.version },
+          (_, i) => i + 1,
+        );
         return {
           name: profile.name,
-          versions: Array.from({ length: profile.version }, (_, i) => i + 1),
+          versions: cutOff
+            ? numbers.filter((n) => n === profile.version || n in facts)
+            : numbers,
           facts,
         };
       });

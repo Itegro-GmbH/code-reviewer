@@ -77,7 +77,7 @@ export type WorkflowServiceDependencies = {
   workflows: WorkflowsRepository;
   environments: ImplementerEnvironmentsRepository;
   /** The profiles of the workspace (#843): the names and versions a step may run, and what a version is (may it push, its default result). */
-  profiles: Pick<ProfilesRepository, "list" | "versionFacts">;
+  profiles: Pick<ProfilesRepository, "list" | "versionFacts" | "archivedNames">;
   /** The most a workflow may be given to spend. Until the operator can set it: `BUDGET_OPERATOR_MAX_USD`. */
   maxBudgetUsd?: number;
   /** The most archived workflows a workspace may hold: `ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX`. */
@@ -114,7 +114,11 @@ export function createWorkflowService({
     const facts = await profiles.versionFacts(wanted);
     return validateWorkflow(
       body,
-      createResolver({ environments: known, profiles: build(facts) }),
+      createResolver({
+        environments: known,
+        profiles: build(facts),
+        archivedProfiles: await profiles.archivedNames(),
+      }),
       { maxBudgetUsd },
     );
   }

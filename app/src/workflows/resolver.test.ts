@@ -95,6 +95,38 @@ describe("the resolver reads profiles as data", () => {
     });
   });
 
+  // #843-T44
+  it("says a profile is archived, with a code of its own, and still lists the profiles that can be run", () => {
+    const withArchived = createResolver({
+      environments: [{ name: "node" }],
+      profiles: [SCRIBE],
+      archivedProfiles: ["old"],
+    });
+
+    const result = validateWorkflow(document("old@1", "x"), withArchived, {
+      maxBudgetUsd: 100,
+    });
+
+    expect(result.errors).toEqual([
+      expect.objectContaining({
+        path: "/steps/0/profile",
+        code: "profile_archived",
+        available: ["scribe"],
+        message: expect.stringContaining("archived"),
+      }),
+    ]);
+    // A name that is live wins over an archived one of the same name.
+    const both = createResolver({
+      environments: [{ name: "node" }],
+      profiles: [SCRIBE],
+      archivedProfiles: ["scribe"],
+    });
+    expect(
+      validateWorkflow(document("scribe", "x"), both, { maxBudgetUsd: 100 })
+        .errors,
+    ).toEqual([]);
+  });
+
   // #843-T42
   it("takes the push right of the version the step names, and of the newest when it names none", () => {
     expect(codes("scribe@1", "{{work.branch}}")).toEqual([

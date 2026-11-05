@@ -115,6 +115,22 @@ describe("the profiles repository", () => {
     ]);
   });
 
+  // #843-T136
+  it("lists the names of the archived profiles, each once, and only of its own workspace", async () => {
+    const { a, b } = await setup();
+    for (const name of ["pipeline", "build", "deploy"])
+      await a.create({ ...NEW, name }, 100);
+    await b.create({ ...NEW, name: "theirs" }, 100);
+    await a.archive("pr-3", 100);
+    await a.archive("pr-1", 100);
+    // The name is free again, and archived twice.
+    await a.create({ ...NEW, name: "deploy" }, 100);
+    await a.archive("pr-5", 100);
+
+    expect(await a.archivedNames()).toEqual(["deploy", "pipeline"]);
+    expect(await b.archivedNames()).toEqual([]);
+  });
+
   // #843-T52
   it("keeps a name once per workspace among the live, and allows it in another workspace or after an archive", async () => {
     const { a, b } = await setup();

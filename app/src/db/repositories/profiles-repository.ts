@@ -105,6 +105,8 @@ export type ProfileVersionFactsRow = {
 export type ProfilesRepository = {
   /** The profiles of the workspace that are not archived, by name, without their versions' content. */
   list(): Promise<StoredProfile[]>;
+  /** The names of the archived profiles, each once, by name: what the validator of a workflow says is archived and not unknown. */
+  archivedNames(): Promise<string[]>;
   /** The profile with its current version, also when it is archived (its versions stay readable). */
   get(
     id: string,
@@ -226,6 +228,18 @@ export function createProfilesRepository(
         .orderBy("id")
         .execute();
       return rows.map(profileFrom);
+    },
+
+    async archivedNames() {
+      const rows = await db
+        .selectFrom("profiles")
+        .select("name")
+        .distinct()
+        .where("workspace_id", "=", workspaceId)
+        .where("archived_at", "is not", null)
+        .orderBy("name")
+        .execute();
+      return rows.map((row) => row.name);
     },
 
     async get(id) {
