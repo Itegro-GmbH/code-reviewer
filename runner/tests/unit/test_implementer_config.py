@@ -36,6 +36,7 @@ INSTRUCTIONS = "/run/engine/implementer-instructions.md"
 
 def make_config(**overrides: Any) -> dict[str, Any]:
     entry = parse_implementer_input(EXAMPLE.read_text(encoding="utf-8")).implementer.model_entry
+    assert entry is not None
     family = WireFamily(entry.family)
     options: dict[str, Any] = {
         "provider": native_provider_config(
@@ -155,6 +156,7 @@ def test_nothing_that_discovers_or_installs_is_on_and_no_key_is_in_the_config() 
 # #764-T01
 def test_the_provider_block_is_asserted_like_the_native_dynamic_one() -> None:
     entry = parse_implementer_input(EXAMPLE.read_text(encoding="utf-8")).implementer.model_entry
+    assert entry is not None
     block = native_provider_config(
         entry,
         base_url=spec_of(WireFamily(entry.family)).proxy_base_url(PROXY_URL),
