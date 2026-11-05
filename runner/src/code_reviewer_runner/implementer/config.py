@@ -19,7 +19,7 @@ send a request to other than the door's. The runner's own configuration below is
 `OPENCODE_CONFIG` file; a repository's file is merged over it and cannot take those away.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from code_reviewer_runner.dynamic_review.config import checked_native_provider
@@ -44,6 +44,37 @@ ALLOWED_TOOLS: tuple[str, ...] = (
 )
 # Denied by name as well as by the wildcard, so a reader of the file sees the decision.
 DENIED_TOOLS: tuple[str, ...] = ("webfetch", "websearch", "task", "question")
+
+
+# The one MCP server of the engine, when the turn has a result schema (#843): the finish tool. The
+# engine names an MCP tool `<server>_<tool>`, so the agent's tool is `finish_submit_result`.
+FINISH_MCP_SERVER = "finish"
+# How long the engine waits for the server to start and to answer (the engine's default is five
+# seconds for the start; a call is a check and a file write).
+FINISH_MCP_TIMEOUT_MS = 20_000
+
+
+def finish_mcp_block(
+    command: Sequence[str], environment: Mapping[str, str] | None = None
+) -> dict[str, Any]:
+    """The `mcp` section of the engine's config with the finish tool: a local (stdio) server the
+    engine starts itself, inside the agent's container, from the runner's own file. Control writes
+    the file and the schema next to the engine's configuration; the server checks what the agent
+    hands in against the schema and writes the result file (`finish_tool.py`)."""
+    server: dict[str, Any] = {
+        "type": "local",
+        "command": list(command),
+        "enabled": True,
+        "timeout": FINISH_MCP_TIMEOUT_MS,
+    }
+    if environment:
+        server["environment"] = dict(environment)
+    return {FINISH_MCP_SERVER: server}
+
+
+def finish_permissions() -> dict[str, str]:
+    """The permission that lets the agent call the finish tool and nothing else of the server."""
+    return {f"{FINISH_MCP_SERVER}_*": "allow"}
 
 
 def permission_block() -> dict[str, str]:
