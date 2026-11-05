@@ -4,9 +4,17 @@
 imported from the module that holds them: a text compared with itself pins nothing, and a deleted
 sentence must turn a test red."""
 
+import json
+from pathlib import Path
+from typing import Any
+
 import pytest
 
-from code_reviewer_runner.implementer.prompts import LEFTOVER_PROMPT, instructions_text
+from code_reviewer_runner.implementer.prompts import (
+    LEFTOVER_PROMPT,
+    RESULT_REMINDER_PROMPT,
+    instructions_text,
+)
 
 # What the stock prompt of the engine gets wrong for this place, and what the system guarantees.
 REQUIRED = [
@@ -207,3 +215,76 @@ def test_the_text_is_a_function_of_the_version_alone_so_the_providers_cache_hits
     # What differs between two versions is at the end, so the start of the prompt stays the same.
     shared = instructions_text(with_setup=True, can_push=False)
     assert first.startswith(shared) and other.startswith(shared)
+
+
+GOLDEN = json.loads(
+    (Path(__file__).parent / "golden" / "implementer-instructions-before-result.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+
+# #843-T64
+@pytest.mark.parametrize(
+    "case", GOLDEN["cases"], ids=lambda c: json.dumps(c["withSetup"]) + str(c["canPush"])
+)
+def test_a_turn_without_a_result_schema_gets_the_prompt_of_before_byte_for_byte(
+    case: dict[str, Any],
+) -> None:
+    text = instructions_text(
+        with_setup=case["withSetup"],
+        can_push=case["canPush"],
+        profile_instructions=case["profileInstructions"],
+    )
+
+    assert text == case["text"]
+    assert text == instructions_text(
+        with_setup=case["withSetup"],
+        can_push=case["canPush"],
+        profile_instructions=case["profileInstructions"],
+        with_result=False,
+    )
+    assert "factory-submit" not in text and "finish_submit_result" not in text
+
+
+# #843-T64
+@pytest.mark.parametrize(
+    "case", GOLDEN["cases"], ids=lambda c: json.dumps(c["withSetup"]) + str(c["canPush"])
+)
+def test_a_turn_with_a_result_schema_adds_one_section_and_leaves_the_rest_and_the_profile_last(
+    case: dict[str, Any],
+) -> None:
+    text = instructions_text(
+        with_setup=case["withSetup"],
+        can_push=case["canPush"],
+        profile_instructions=case["profileInstructions"],
+        with_result=True,
+    )
+
+    assert "`finish_submit_result`" in text and "`factory-submit`" in text
+    assert "A turn that ends without an accepted result has failed." in text
+    if case["profileInstructions"]:
+        assert text.endswith(case["profileInstructions"])
+        assert text.index("A turn that ends without") < text.index("# Instructions of this profile")
+    last = "A turn that ends without an accepted result has failed.\n"
+    start = text.index("This task ends with a result")
+    stop = text.index(last) + len(last)
+    # Take the section (and the blank line in front of it) out: what is left is the text of before.
+    assert text[: start - 1] + text[stop:] == case["text"]
+
+
+# #843-T64
+def test_the_text_of_a_turn_with_a_result_schema_does_not_depend_on_the_schema() -> None:
+    # The shape is in the tool's description and parameters; the prompt is the same for every
+    # schema, so the model provider's prompt cache hits across the turns of one profile version.
+    assert instructions_text(with_result=True) == instructions_text(with_result=True)
+    assert "findings" not in instructions_text(with_result=True)
+
+
+# #843-T65
+def test_the_reminder_asks_for_the_result_once_and_names_both_ways() -> None:
+    assert RESULT_REMINDER_PROMPT == (
+        "Your turn ended, but no valid result was handed in. Hand in your result now with the tool "
+        "`finish_submit_result` (or the command `factory-submit`, the JSON on its standard input): "
+        "read what it refuses, correct the result and hand it in again."
+    )

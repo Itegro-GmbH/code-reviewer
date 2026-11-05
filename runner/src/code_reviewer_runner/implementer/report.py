@@ -26,6 +26,7 @@ from typing import Any, cast
 
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 
+from .finish_tool import MAX_RESULT_BYTES, scan_bounds
 from .history import MAX_COMMITS, MAX_FILES, MAX_PATH_CHARS, MAX_SUBJECT_CHARS, ChangeKind
 
 MAX_SUMMARY_CHARS = 8192
@@ -55,6 +56,7 @@ _BLOCK_KEYS = frozenset(
         "setup",
         "network",
         "checkedOut",
+        "agentResult",
     }
 )
 MAX_BRANCHES = 50
@@ -62,7 +64,7 @@ MAX_BRANCH_NAME_CHARS = 255
 MAX_REASON_CHARS = 40
 _REASON = re.compile(r"[a-z][a-z_]*")
 # Not required: a block without the count (an older shape) is still one the app reads.
-_OPTIONAL_KEYS = frozenset({"branchesDropped", "setup", "network", "checkedOut"})
+_OPTIONAL_KEYS = frozenset({"branchesDropped", "setup", "network", "checkedOut", "agentResult"})
 MAX_SETUP_OUTPUT_CHARS = 8192
 _SETUP_KEYS = frozenset({"ok", "exitCode", "timedOut", "durationSeconds", "output"})
 MAX_DROPPED = 1_000_000_000
@@ -235,6 +237,21 @@ def _checked_out_ok(value: object) -> bool:
     return value is None or _is_string(value, MAX_BRANCH_NAME_CHARS, minimum=1)
 
 
+def _agent_result_ok(value: object) -> bool:
+    """`agentResult` (#843): an object the app takes as data. The bounds of a result hold again
+    here, on the compact UTF-8 form the app measures (which is never longer than the file the
+    finish tool was read from), so a block with a result over them is refused and never sent."""
+    if as_object(value) is None:
+        return False
+    try:
+        text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError, RecursionError):
+        return False
+    return (
+        scan_bounds(text.encode("utf-8", "surrogatepass")) is None and len(text) <= MAX_RESULT_BYTES
+    )
+
+
 def _sha_or_none(value: object, *, allow_none: bool) -> bool:
     if value is None:
         return allow_none
@@ -254,6 +271,8 @@ def valid_block(value: object) -> dict[str, Any] | None:
     if "network" in block and not _network_ok(block["network"]):
         return None
     if "checkedOut" in block and not _checked_out_ok(block["checkedOut"]):
+        return None
+    if "agentResult" in block and not _agent_result_ok(block["agentResult"]):
         return None
     base, head, pushed = block["baseCommit"], block["headCommit"], block["pushed"]
     commits, files, branches = block["commits"], block["filesChanged"], block["branches"]

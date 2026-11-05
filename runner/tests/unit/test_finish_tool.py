@@ -217,14 +217,22 @@ def call(name: str, arguments: Any, ident: int = 7) -> dict[str, Any]:
 def test_the_mcp_server_answers_the_handshake_and_lists_one_tool(tmp_path: Path) -> None:
     path = str(tmp_path / "result.json")
     hello = handle_message(
-        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18"},
+        },
         FINDINGS,
         path,
     )
     assert hello is not None
     assert hello["result"]["protocolVersion"] == "2025-06-18"
     assert hello["result"]["capabilities"] == {"tools": {"listChanged": False}}
-    assert handle_message({"jsonrpc": "2.0", "method": "notifications/initialized"}, FINDINGS, path) is None
+    assert (
+        handle_message({"jsonrpc": "2.0", "method": "notifications/initialized"}, FINDINGS, path)
+        is None
+    )
     listed = handle_message({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, FINDINGS, path)
     assert listed is not None
     assert [t["name"] for t in listed["result"]["tools"]] == ["submit_result"]
@@ -238,7 +246,12 @@ def test_the_mcp_server_answers_the_handshake_and_lists_one_tool(tmp_path: Path)
 # #843-T46
 def test_a_protocol_version_it_does_not_know_gets_the_newest() -> None:
     answer = handle_message(
-        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "1999-01-01"}},
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": "1999-01-01"},
+        },
         FINDINGS,
         "/nowhere",
     )
@@ -274,7 +287,9 @@ def test_arguments_that_are_no_object_are_refused(arguments: Any, tmp_path: Path
 # #843-T47
 def test_another_tool_and_another_method_are_protocol_errors() -> None:
     other = handle_message(call("rm_rf", {}), FINDINGS, "/nowhere")
-    method = handle_message({"jsonrpc": "2.0", "id": 9, "method": "resources/list"}, FINDINGS, "/nowhere")
+    method = handle_message(
+        {"jsonrpc": "2.0", "id": 9, "method": "resources/list"}, FINDINGS, "/nowhere"
+    )
 
     assert other is not None and other["error"]["code"] == -32602
     assert method is not None and method["error"]["code"] == -32601
@@ -360,7 +375,12 @@ def test_the_command_explains_itself(tmp_path: Path) -> None:
 # #843-T49
 def test_the_mcp_mode_of_the_command_speaks_over_standard_input_and_output(tmp_path: Path) -> None:
     lines = [
-        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}},
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": "2025-11-25"},
+        },
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
         call("submit_result", WRONG, 3),

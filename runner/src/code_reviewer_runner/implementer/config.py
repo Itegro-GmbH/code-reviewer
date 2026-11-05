@@ -94,6 +94,7 @@ def build_engine_config(
     capability: str,
     instructions_path: str,
     door_host: str | None = None,
+    finish_command: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """The whole engine configuration of one turn, as data the runner writes itself.
 
@@ -103,14 +104,21 @@ def build_engine_config(
     **asserted**, not trusted (`checked_native_provider`): a key the proxy did not expect, such as
     `headers`, would be the one way around it. The real key and the upstream address are not
     parameters of this function.
+
+    `finish_command` (#843) is the finish tool of a turn that has a result schema: the one MCP
+    server of the engine, a stdio process it starts itself in the agent's container, and the
+    permission to call it. Without it the config is what it was before result schemas.
     """
     checked_native_provider(
         provider, model_reference, family, proxy_url, capability, door_host=door_host
     )
     if not instructions_path.startswith("/"):
         raise ValueError("the instruction file must be an absolute path the runner wrote")
+    permission = permission_block()
+    if finish_command is not None:
+        permission.update(finish_permissions())
     return {
-        "permission": permission_block(),
+        "permission": permission,
         "agent": {
             IMPLEMENTER_AGENT: {
                 "description": "Implementer: carries out one task in the repository",
@@ -127,7 +135,7 @@ def build_engine_config(
         "instructions": [instructions_path],
         "skills": {"paths": []},
         "plugin": [],
-        "mcp": {},
+        "mcp": {} if finish_command is None else finish_mcp_block(finish_command),
         "lsp": False,
         "formatter": False,
         "snapshot": False,
@@ -159,11 +167,14 @@ _ENGINE_FLAGS: dict[str, str] = {
 AGENT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
-def implementer_environment(*, home: str, scratch_dir: str) -> dict[str, str]:
+def implementer_environment(
+    *, home: str, scratch_dir: str, config_directory: str | None = None
+) -> dict[str, str]:
     """The environment of the engine, which its tools inherit: the flags above, the agent's home and
     scratch directory, `PATH` and the few variables that make tools behave in a place nobody
     watches. Built from names, never by inheriting. It carries no credential of any kind; the
-    container has none to give."""
+    container has none to give. `config_directory` (#843) is put first on `PATH` when the turn has
+    a finish tool, so that the command `factory-submit` in it is found."""
     environment = dict(_ENGINE_FLAGS)
     environment["HOME"] = home
     environment["XDG_CONFIG_HOME"] = f"{home}/.config"
@@ -174,5 +185,7 @@ def implementer_environment(*, home: str, scratch_dir: str) -> dict[str, str]:
     environment["CI"] = "1"
     environment["NO_COLOR"] = "1"
     environment["GIT_TERMINAL_PROMPT"] = "0"
-    environment["PATH"] = AGENT_PATH
+    environment["PATH"] = (
+        AGENT_PATH if config_directory is None else f"{config_directory}:{AGENT_PATH}"
+    )
     return environment

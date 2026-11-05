@@ -25,6 +25,7 @@ from code_reviewer_runner.implementer.report import (
     fit_block,
     valid_block,
 )
+from code_reviewer_runner.implementer.result_channel import redacted_value
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 from code_reviewer_runner.job_loop.process import ProcessOutcome
 from code_reviewer_runner.redaction import Redactor
@@ -269,6 +270,9 @@ def _redacted_block(block: Mapping[str, Any], redactor: TextRedactor) -> Result:
     # The name of a branch the agent ended on is the agent's too (#837).
     if isinstance(block.get("checkedOut"), str):
         redacted["checkedOut"] = redactor.redact(block["checkedOut"])
+    # So is the result the agent handed in (#843): every text in it, keys included.
+    if "agentResult" in block:
+        redacted["agentResult"] = redacted_value(block["agentResult"], redactor.redact)
     # Redaction can make a text longer: a text the bound now refuses would cost the whole result.
     return clip_texts(redacted)
 

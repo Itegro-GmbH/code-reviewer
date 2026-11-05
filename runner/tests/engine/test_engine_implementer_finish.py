@@ -27,7 +27,6 @@ from fakes.wire.formats import Turn
 from fakes.wire.relay import KeySwapRelay
 from fakes.wire.upstream import ScriptedUpstream
 from opencode_native import (
-    BASE_PATH,
     DEFAULT_IDS,
     DUMMY_KEY,
     REAL_KEY,
@@ -76,9 +75,7 @@ def command_line(command: Path, payload: Any) -> str:
 
 
 @contextmanager
-def finish_engine(
-    scratch: Path, make_script: Callable[[Path], list[Turn]]
-) -> Generator[Finish]:
+def finish_engine(scratch: Path, make_script: Callable[[Path], list[Turn]]) -> Generator[Finish]:
     """One engine whose agent has the finish tool, and a model that plays the script made for the
     path of the command."""
     schema_file = scratch / "result-schema.json"
@@ -103,7 +100,9 @@ def finish_engine(
             KeySwapRelay("chat", upstream.url, dummy_key=DUMMY_KEY, real_key=REAL_KEY)
         )
         block = provider_block(provider, relay.url)
-        config = engine_config({provider.provider_id: block}, f"{provider.provider_id}/{provider.model_id}")
+        config = engine_config(
+            {provider.provider_id: block}, f"{provider.provider_id}/{provider.model_id}"
+        )
         config["mcp"] = finish_mcp_block(
             command=[sys.executable, "-I", finish_tool.__file__, "mcp"],
             environment={
@@ -152,7 +151,10 @@ def test_the_real_engine_offers_the_mcp_tool_and_the_model_hands_in_a_wrong_resu
 def test_the_real_engine_runs_the_command_and_the_model_reads_its_refusal(tmp_path: Path) -> None:
     def script(command: Path) -> list[Turn]:
         return [
-            Turn(tool="bash", args={"command": command_line(command, payload), "description": "hand in"})
+            Turn(
+                tool="bash",
+                args={"command": command_line(command, payload), "description": "hand in"},
+            )
             for payload in (WRONG, RIGHT)
         ] + [Turn(text="Done.")]
 

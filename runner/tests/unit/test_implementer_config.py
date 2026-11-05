@@ -19,9 +19,11 @@ from code_reviewer_runner.dynamic_review.job_model_entry import (
 )
 from code_reviewer_runner.dynamic_review.passthrough.families import WireFamily, spec_of
 from code_reviewer_runner.implementer.config import (
+    AGENT_PATH,
     IMPLEMENTER_AGENT,
     build_engine_config,
     implementer_environment,
+    permission_block,
 )
 from code_reviewer_runner.job import parse_implementer_input
 
@@ -254,3 +256,71 @@ def test_the_agents_home_and_path_are_the_roots() -> None:
     assert environment["XDG_DATA_HOME"] == "/root/.local/share"
     assert environment["TMPDIR"] == "/tmp"
     assert environment["PATH"] == "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+FINISH_COMMAND = ("/usr/local/bin/python3", "-I", "/etc/code-reviewer/factory-submit", "mcp")
+
+
+# #843-T63
+def test_a_turn_without_a_finish_tool_gets_the_config_and_the_environment_of_before() -> None:
+    config = make_config()
+
+    assert config["mcp"] == {}
+    assert config["permission"] == permission_block()
+    assert not any(name.startswith("finish") for name in config["permission"])
+    assert implementer_environment(home="/root", scratch_dir="/tmp")["PATH"] == AGENT_PATH
+
+
+# #843-T63
+def test_a_turn_with_a_finish_tool_has_exactly_one_mcp_server_the_engine_starts_itself() -> None:
+    config = make_config(finish_command=FINISH_COMMAND)
+
+    assert config["mcp"] == {
+        "finish": {
+            "type": "local",
+            "command": list(FINISH_COMMAND),
+            "enabled": True,
+            "timeout": 20_000,
+        }
+    }
+    # Nothing else of the config moves: the same providers, the same one agent, the same switches.
+    other = make_config()
+    for key in config:
+        if key not in ("mcp", "permission"):
+            assert config[key] == other[key], key
+
+
+# #843-T63
+def test_the_permission_adds_the_finish_tools_and_keeps_the_default_deny_first() -> None:
+    config = make_config(finish_command=FINISH_COMMAND)
+
+    permission = config["permission"]
+    assert next(iter(permission)) == "*" and permission["*"] == "deny"
+    assert permission["finish_*"] == "allow"
+    assert {k: v for k, v in permission.items() if k != "finish_*"} == permission_block()
+
+
+# #843-T63
+def test_the_tool_the_engine_offers_is_named_after_its_server_and_the_prompt_says_so() -> None:
+    from code_reviewer_runner.implementer.config import FINISH_MCP_SERVER
+    from code_reviewer_runner.implementer.finish_tool import TOOL_NAME
+    from code_reviewer_runner.implementer.prompts import RESULT_REMINDER_PROMPT, instructions_text
+
+    name = f"{FINISH_MCP_SERVER}_{TOOL_NAME}"
+
+    assert name == "finish_submit_result"
+    assert f"`{name}`" in instructions_text(with_result=True)
+    assert f"`{name}`" in RESULT_REMINDER_PROMPT
+
+
+# #843-T63
+def test_the_command_is_found_on_the_path_only_when_the_turn_has_the_finish_tool() -> None:
+    plain = implementer_environment(home="/root", scratch_dir="/tmp")
+    finish = implementer_environment(
+        home="/root", scratch_dir="/tmp", config_directory="/etc/code-reviewer"
+    )
+
+    assert finish["PATH"] == f"/etc/code-reviewer:{AGENT_PATH}"
+    assert {k: v for k, v in finish.items() if k != "PATH"} == {
+        k: v for k, v in plain.items() if k != "PATH"
+    }

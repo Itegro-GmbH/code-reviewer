@@ -412,7 +412,9 @@ def test_the_runner_refuses_a_result_schema_it_cannot_make_a_tool_from(schema: A
 
 
 # #843-T50
-def test_the_example_of_the_agent_result_is_valid_in_the_result_block_and_fits_the_example_schema() -> None:
+def test_the_example_of_the_agent_result_is_valid_in_the_result_and_fits_the_example_schema() -> (
+    None
+):
     from code_reviewer_runner.implementer import finish_tool
 
     value = _load(EXAMPLES / "ImplementerAgentResult.json")
@@ -427,7 +429,9 @@ def test_the_example_of_the_agent_result_is_valid_in_the_result_block_and_fits_t
 
 
 # #843-T50
-def test_the_feature_that_reads_the_result_schema_is_in_the_contract_and_named_by_the_worker() -> None:
+def test_the_feature_that_reads_the_result_schema_is_in_the_contract_and_named_by_the_worker() -> (
+    None
+):
     from code_reviewer_runner.job_loop.worker_api import WORKER_FEATURES
 
     features = _schema()["$defs"]["KnownClaimFeature"]["enum"]

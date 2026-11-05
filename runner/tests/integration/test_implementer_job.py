@@ -47,6 +47,7 @@ from code_reviewer_runner.dynamic_review.engine_events import EventReader
 from code_reviewer_runner.dynamic_review.tool_part_audit import ToolPartAudit
 from code_reviewer_runner.implementer import session as session_module
 from code_reviewer_runner.implementer.agent import AgentTurn
+from code_reviewer_runner.implementer.config import AGENT_PATH
 from code_reviewer_runner.implementer.door_state import DoorState
 from code_reviewer_runner.implementer.git_workspace import (
     BranchPush,
@@ -87,10 +88,17 @@ TIP = "2" * 40
 SECOND = "3" * 40
 
 
-def job_text(*, cost_limit: bool = True, profile: dict[str, Any] | None = None) -> str:
+def job_text(
+    *,
+    cost_limit: bool = True,
+    profile: dict[str, Any] | None = None,
+    result_schema: dict[str, Any] | None = None,
+) -> str:
     document: dict[str, Any] = json.loads(EXAMPLE.read_text(encoding="utf-8"))
     if profile is not None:
         document["implementer"]["profile"] = profile
+    if result_schema is not None:
+        document["implementer"]["resultSchema"] = result_schema
     document["git"]["token"] = TOKEN
     document["llm"]["apiKey"] = KEY
     if cost_limit:
@@ -270,6 +278,25 @@ class FakeDoor:
 
 
 @dataclass
+class FakeResults:
+    """The result file of the test, as the reader would show it: what the agent has written so far.
+    Each read takes the next of `files` (the last one stays), and counts."""
+
+    files: list[bytes | None] = field(default_factory=lambda: [None])
+    calls: list[int] = field(default_factory=lambda: [])
+
+    def write(self, *files: bytes | None) -> None:
+        self.files = list(files)
+
+    def read_result(self, max_bytes: int) -> bytes | None:
+        self.calls.append(max_bytes)
+        current = self.files[0]
+        if len(self.files) > 1:
+            self.files.pop(0)
+        return current
+
+
+@dataclass
 class FakeAgent:
     """The engine of the test: `script(agent, check)` plays one turn."""
 
@@ -437,6 +464,8 @@ def play(
         steps: HostEnd | None = None,
         steps_flush_seconds: float = 2.0,
         profile: dict[str, Any] | None = None,
+        result_schema: dict[str, Any] | None = None,
+        results: "FakeResults | None" = None,
     ) -> Turn:
         events: list[str] = []
         removals: list[tuple[str, ...]] = []
@@ -464,7 +493,9 @@ def play(
             if configure is not None:
                 configure(git)
             made.append(git)
-            return TurnSetup(git, lambda: FakePlace(events, removals), ("opencode",))
+            return TurnSetup(
+                git, lambda: FakePlace(events, removals), ("opencode",), results=results
+            )
 
         def agent_factory(**options: Any) -> FakeAgent:
             agent = FakeAgent(script, events, made[0], options, ends_clean=ends_clean)
@@ -496,7 +527,11 @@ def play(
         monkeypatch.setattr(runner, "_stop_hard", lambda: hard_stops.append(1))
         output = io.StringIO()
         code = runner.main(
-            [], stdin=io.StringIO(job_text(cost_limit=cost_limit, profile=profile)), stdout=output
+            [],
+            stdin=io.StringIO(
+                job_text(cost_limit=cost_limit, profile=profile, result_schema=result_schema)
+            ),
+            stdout=output,
         )
         git = made[0] if made else FakeGit(tmp_path, None)
         return Turn(
@@ -1682,3 +1717,271 @@ def test_a_stop_of_a_profile_without_the_right_to_push_pushes_nothing_either(pla
     turn = play(commits_then_ends(), profile=NO_PUSH, answers=lost)
 
     assert turn.git.push_calls == 0 and turn.git.pushes == []
+
+
+# -- #843: the finish tool ------------------------------------------------------------------------
+
+RESULT_SCHEMA = json.loads(
+    (ROOT / "contracts" / "examples" / "implementer" / "ImplementerResultSchema.json").read_text(
+        encoding="utf-8"
+    )
+)
+RIGHT_RESULT = json.dumps(
+    {"findings": [{"type": "bug", "name": "Lease", "description": "Not checked."}]}
+).encode()
+WRONG_RESULT = json.dumps({"findings": [{"type": "critical", "name": 3}]}).encode()
+
+
+def hands_in(results: FakeResults, when: int, *files: bytes | None) -> Callable[..., str]:
+    """A turn whose agent commits and hands in `files` (in the order the reads will see them)
+    during its `when`th message (0: the task, 1: the first message after it)."""
+
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        if len(agent.texts) - 1 == when:
+            results.write(*files)
+        return commits_then_ends()(agent, check)
+
+    return script
+
+
+# #843-T70
+def test_an_agent_that_hands_in_a_result_that_fits_ends_the_turn_with_it_in_the_result(
+    play: Any,
+) -> None:
+    results = FakeResults()
+
+    turn = play(hands_in(results, 0, RIGHT_RESULT), result_schema=RESULT_SCHEMA, results=results)
+
+    result = turn.result
+    assert turn.exit_code == 0 and result["ok"] is True, turn.output
+    assert valid_result(result)
+    assert result["implementer"]["agentResult"] == json.loads(RIGHT_RESULT)
+    assert turn.agent is not None and len(turn.agent.texts) == 1, (
+        "no reminder: the result was there"
+    )
+
+
+# #843-T71
+def test_the_facts_control_knows_stay_in_the_result_beside_the_agents_result(play: Any) -> None:
+    results = FakeResults()
+
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        results.write(RIGHT_RESULT)
+        return commits_then_ends()(agent, check)
+
+    turn = play(script, result_schema=RESULT_SCHEMA, results=results)
+
+    block = turn.result["implementer"]
+    assert block["agentResult"] == json.loads(RIGHT_RESULT)
+    assert (block["baseCommit"], block["headCommit"], block["pushed"]) == (START, TIP, True)
+    assert block["commits"] == [{"sha": TIP, "subject": "Add it"}]
+    assert turn.result["usage"]["aiCalls"] >= 1
+    assert turn.git.pushes == [TIP]
+
+
+# #843-T72
+def test_the_agent_is_given_the_finish_tool_the_command_and_the_words_about_them(
+    play: Any,
+) -> None:
+    results = FakeResults()
+
+    turn = play(hands_in(results, 0, RIGHT_RESULT), result_schema=RESULT_SCHEMA, results=results)
+
+    assert turn.agent is not None
+    options = turn.agent.options
+    config = options["make_config"]("/etc/code-reviewer/implementer-instructions.md")
+    assert config["mcp"]["finish"]["command"] == [
+        "/usr/local/bin/python3",
+        "-I",
+        "/etc/code-reviewer/factory-submit",
+        "mcp",
+    ]
+    assert config["permission"]["finish_*"] == "allow"
+    assert set(options["files"]) == {"factory-submit", "result-schema.json"}
+    assert json.loads(options["files"]["result-schema.json"][0]) == RESULT_SCHEMA
+    assert options["environment"]["PATH"].startswith("/etc/code-reviewer:")
+    _, text = options["instructions"]
+    assert "`finish_submit_result`" in text and "`factory-submit`" in text
+
+
+# #843-T73
+def test_an_agent_that_ends_without_a_result_gets_one_reminder_and_may_then_hand_it_in(
+    play: Any,
+) -> None:
+    from code_reviewer_runner.implementer.prompts import RESULT_REMINDER_PROMPT
+
+    results = FakeResults()
+
+    turn = play(hands_in(results, 1, RIGHT_RESULT), result_schema=RESULT_SCHEMA, results=results)
+
+    assert turn.agent is not None
+    assert turn.agent.texts[1:] == [RESULT_REMINDER_PROMPT]
+    assert turn.result["ok"] is True and turn.result["implementer"]["agentResult"] == json.loads(
+        RIGHT_RESULT
+    )
+    assert "no valid result was handed in: one reminder" in turn.result["logTail"]
+
+
+# #843-T74
+def test_an_agent_that_still_has_no_result_after_the_reminder_ends_the_turn_no_result(
+    play: Any,
+) -> None:
+    results = FakeResults()
+
+    turn = play(commits_then_ends(), result_schema=RESULT_SCHEMA, results=results)
+
+    result = turn.result
+    assert turn.exit_code == 1 and result["ok"] is False
+    assert result["errorCode"] == "no_result", turn.output
+    assert valid_result(result)
+    assert "agentResult" not in result["implementer"]
+    assert turn.agent is not None and len(turn.agent.texts) == 2, "one reminder and no more"
+    # The model was used, so the usage is reported (the app charges the code like agent_gave_up),
+    # and what the agent committed is pushed all the same.
+    assert result["usage"]["aiCalls"] >= 1 and turn.git.pushes == [TIP]
+    assert "no result file" in result["logTail"]
+
+
+# #843-T75
+def test_a_profile_that_may_not_push_is_reminded_too_because_the_reminder_is_about_the_result(
+    play: Any,
+) -> None:
+    results = FakeResults()
+    profile = {"name": "reviewer", "version": 1, "canPush": False}
+
+    turn = play(
+        hands_in(results, 1, RIGHT_RESULT),
+        profile=profile,
+        result_schema=RESULT_SCHEMA,
+        results=results,
+    )
+
+    assert turn.agent is not None and len(turn.agent.texts) == 2
+    assert turn.result["ok"] is True
+    assert turn.result["implementer"]["agentResult"] == json.loads(RIGHT_RESULT)
+    assert turn.git.pushes == [] and turn.result["implementer"]["pushed"] is False
+
+
+# #843-T76
+def test_a_profile_that_may_not_push_and_hands_in_nothing_ends_no_result_and_pushes_nothing(
+    play: Any,
+) -> None:
+    results = FakeResults()
+    profile = {"name": "reviewer", "version": 1, "canPush": False}
+
+    turn = play(never_commits, profile=profile, result_schema=RESULT_SCHEMA, results=results)
+
+    assert turn.result["errorCode"] == "no_result" and turn.git.pushes == []
+
+
+# #843-T77
+def test_the_result_the_turn_is_judged_by_is_the_one_read_after_the_container_is_gone(
+    play: Any,
+) -> None:
+    results = FakeResults()
+    # Valid while the agent still ran (the first look), spoiled by the time it is gone.
+    script = hands_in(results, 0, RIGHT_RESULT, WRONG_RESULT)
+
+    turn = play(script, result_schema=RESULT_SCHEMA, results=results)
+
+    assert turn.result["errorCode"] == "no_result"
+    assert "invalid: 3 problems" in turn.result["logTail"]
+    assert "agentResult" not in turn.result["implementer"]
+    assert turn.events.index("stop") < len(turn.events)
+    assert len(results.calls) == 2, "one look before the agent ended, one after its container"
+
+
+# #843-T78
+@pytest.mark.parametrize(
+    ("file", "word"),
+    [
+        (b"x" * (256 * 1024 + 1), "too_large"),
+        (b"[" * 20, "too_deep"),
+        (b"not json", "not_json"),
+        (b'{"findings": NaN}', "not_json"),
+    ],
+)
+def test_a_file_that_is_too_large_too_deep_or_not_json_is_no_result_and_is_not_echoed(
+    play: Any, file: bytes, word: str
+) -> None:
+    results = FakeResults([file])
+
+    turn = play(commits_then_ends(), result_schema=RESULT_SCHEMA, results=results)
+
+    assert turn.result["errorCode"] == "no_result"
+    assert word in turn.result["logTail"]
+    assert file[:20].decode() not in turn.output or file[:1] == b"["
+    assert max(results.calls) == 256 * 1024 + 1, "the read is bounded one byte past the limit"
+
+
+# #843-T79
+def test_a_turn_without_a_result_schema_reads_no_file_sends_no_reminder_and_has_no_tool(
+    play: Any,
+) -> None:
+    results = FakeResults()
+
+    turn = play(commits_then_ends(), results=results)
+
+    assert turn.agent is not None
+    options = turn.agent.options
+    assert results.calls == [] and len(turn.agent.texts) == 1
+    assert options["files"] is None
+    assert options["make_config"]("/x.md")["mcp"] == {}
+    assert options["environment"]["PATH"] == AGENT_PATH
+    assert "agentResult" not in turn.result["implementer"]
+    assert turn.result["ok"] is True
+
+
+# #843-T80
+def test_the_reminder_and_the_message_for_a_dirty_tree_both_come_in_that_order(play: Any) -> None:
+    from code_reviewer_runner.implementer.prompts import LEFTOVER_PROMPT, RESULT_REMINDER_PROMPT
+
+    results = FakeResults()
+
+    turn = play(
+        hands_in(results, 1, RIGHT_RESULT),
+        result_schema=RESULT_SCHEMA,
+        results=results,
+        dirty=True,
+    )
+
+    assert turn.agent is not None
+    assert turn.agent.texts[1:] == [RESULT_REMINDER_PROMPT, LEFTOVER_PROMPT]
+
+
+# #843-T81
+def test_a_turn_that_ended_by_a_lost_lease_reads_no_file_and_keeps_its_own_code(play: Any) -> None:
+    results = FakeResults([RIGHT_RESULT])
+
+    turn = play(commits_then_ends(), result_schema=RESULT_SCHEMA, results=results, answers=lost)
+
+    assert turn.result["errorCode"] == "lease_lost"
+    assert results.calls == [] or turn.result["errorCode"] != "no_result"
+
+
+# #843-T82
+def test_a_turn_that_another_limit_ended_keeps_that_code_and_not_no_result(play: Any) -> None:
+    results = FakeResults()
+
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        agent.use_the_model()
+        raise JobError(ErrorCode.TIME_LIMIT_REACHED, "the time limit of the turn was reached")
+
+    turn = play(script, result_schema=RESULT_SCHEMA, results=results)
+
+    assert turn.result["errorCode"] == "time_limit_reached"
+    assert turn.agent is not None and len(turn.agent.texts) == 1, "no reminder after a limit"
+
+
+# #843-T83
+def test_an_agent_container_not_confirmed_gone_is_no_result_and_the_file_is_not_trusted(
+    play: Any,
+) -> None:
+    results = FakeResults([RIGHT_RESULT])
+
+    turn = play(commits_then_ends(), result_schema=RESULT_SCHEMA, results=results, ends_clean=False)
+
+    assert turn.result["errorCode"] == "no_result"
+    assert "not confirmed gone" in turn.result["logTail"]
+    assert "agentResult" not in turn.result["implementer"]
+    assert len(results.calls) == 1, "only the first look; the final one waits for a quiet place"

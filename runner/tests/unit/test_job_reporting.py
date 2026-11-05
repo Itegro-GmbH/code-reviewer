@@ -1001,3 +1001,23 @@ def test_a_branch_checked_out_of_null_stays_null_through_the_host() -> None:
     result = _reported_turn(_turn_block(checkedOut=None))
 
     assert result["implementer"]["checkedOut"] is None
+
+
+# #843-T67: the agent wrote the result, and anything it was shown can be in it.
+def test_the_job_secrets_in_the_result_of_the_agent_are_taken_out_of_every_text() -> None:
+    result = _reported_turn(
+        _turn_block(agentResult={f"k-{TOKEN}": [f"see {TOKEN}", {"n": 1}], "ok": True})
+    )
+
+    assert TOKEN not in json.dumps(result)
+    assert result["implementer"]["agentResult"] == {
+        "k-[REDACTED]": ["see [REDACTED]", {"n": 1}],
+        "ok": True,
+    }
+
+
+# #843-T67
+def test_a_result_of_the_agent_over_the_bounds_costs_the_report_and_not_the_turns_end() -> None:
+    result = _reported_turn(_turn_block(agentResult={"text": "x" * (300 * 1024)}))
+
+    assert "implementer" not in result or "agentResult" not in result["implementer"]

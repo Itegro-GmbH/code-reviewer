@@ -67,6 +67,7 @@ from .host_rules import (
 )
 from .network_rule import MODE_OFF, OFF, NetworkRule
 from .reader import REPO_SUBPATH, work_volume_of
+from .result_channel import AGENT_RESULT_DIRECTORY, result_mount
 from .vm_memory import MEMINFO, REASON_VM_MEMORY, MemoryGuard
 
 _log = logging.getLogger(__name__)
@@ -181,10 +182,23 @@ def agent_document(
     runtime: str = AGENT_RUNTIME,
     entrypoint: Sequence[str] | None = None,
     rule: NetworkRule = OFF,
+    result: bool = False,
 ) -> dict[str, Any]:
     """The agent's container. Constants, the image id and the volume name the daemon gave, and the
     memory limit the Dispatcher computed for the size of the VM. The runtime is Sysbox and the
-    entrypoint the image's init; only the test lane without Sysbox names others (`AgentSeams`)."""
+    entrypoint the image's init; only the test lane without Sysbox names others (`AgentSeams`).
+    A turn with a result schema (#843) has the result directory beside the repository."""
+    mounts: list[dict[str, Any]] = [
+        {
+            "Type": "volume",
+            "Source": work_volume,
+            "Target": AGENT_REPO,
+            "ReadOnly": False,
+            "VolumeOptions": {"Subpath": REPO_SUBPATH, "NoCopy": True},
+        }
+    ]
+    if result:
+        mounts.append(result_mount(work_volume, AGENT_RESULT_DIRECTORY, read_only=False))
     return {
         "Image": image,
         "Entrypoint": list(AGENT_ENTRYPOINT if entrypoint is None else entrypoint),
@@ -209,15 +223,7 @@ def agent_document(
             "OomScoreAdj": AGENT_OOM_SCORE_ADJ,
             "RestartPolicy": {"Name": "no"},
             "PublishAllPorts": False,
-            "Mounts": [
-                {
-                    "Type": "volume",
-                    "Source": work_volume,
-                    "Target": AGENT_REPO,
-                    "ReadOnly": False,
-                    "VolumeOptions": {"Subpath": REPO_SUBPATH, "NoCopy": True},
-                }
-            ],
+            "Mounts": mounts,
         },
     }
 
@@ -368,10 +374,13 @@ class AgentContainer:
         memory_mb: int,
         seams: AgentSeams = AgentSeams(),  # noqa: B008
         rule: NetworkRule = OFF,
+        result: bool = False,
     ) -> None:
         self._api = seams.api()
         self._seams = seams
         self._rule = rule
+        # #843: the result directory is mounted too (a turn with a result schema).
+        self._result = result
         self._memory_bytes = memory_mb * 1024 * 1024
         self._container: str | None = None
         self._tunnel: Tunnel | None = None
@@ -424,6 +433,7 @@ class AgentContainer:
                     runtime=self._seams.runtime,
                     entrypoint=self._seams.entrypoint,
                     rule=self._rule,
+                    result=self._result,
                 ),
                 AGENT_CONTAINER_NAME,
             )
@@ -489,7 +499,8 @@ class AgentContainer:
         for mount in cast("list[Any]", mounts) if isinstance(mounts, list) else []:
             given = as_object(mount)
             destinations.add(None if given is None else given.get("Destination"))
-        if destinations - {AGENT_REPO}:
+        allowed = {AGENT_REPO, AGENT_RESULT_DIRECTORY} if self._result else {AGENT_REPO}
+        if destinations - allowed:
             problems.append("mounts")
         if problems:
             self._kill()

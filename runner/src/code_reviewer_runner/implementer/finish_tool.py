@@ -19,7 +19,8 @@ One file, standard library only, no import of this package, because it runs in t
   same answers.
 
 The format of a result schema is `contracts/result-schema.v1.json`: fields are strings (optionally
-one of a list of names), numbers, whole numbers, booleans, lists and objects; every object is closed.
+one of a list of names), numbers, whole numbers, booleans, lists and objects; every object is
+closed.
 """
 
 import json
@@ -28,7 +29,7 @@ import os
 import re
 import sys
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 TOOL_NAME = "submit_result"
 COMMAND_NAME = "factory-submit"
@@ -137,6 +138,14 @@ def _sorted(issues: list[Issue]) -> list[Issue]:
     return sorted(issues, key=lambda found: (_order(found.path), found.code))
 
 
+def _as_object(value: object) -> dict[str, Any] | None:
+    return cast("dict[str, Any]", value) if isinstance(value, dict) else None
+
+
+def _as_list(value: object) -> list[Any] | None:
+    return cast("list[Any]", value) if isinstance(value, list) else None
+
+
 def _is_number(value: object) -> bool:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return False
@@ -151,8 +160,11 @@ def _is_safe_integer(value: object) -> bool:
         return False
     if isinstance(value, int):
         return abs(value) <= SAFE_INTEGER
-    return isinstance(value, float) and math.isfinite(value) and value.is_integer() and (
-        abs(value) <= SAFE_INTEGER
+    return (
+        isinstance(value, float)
+        and math.isfinite(value)
+        and value.is_integer()
+        and (abs(value) <= SAFE_INTEGER)
     )
 
 
@@ -170,10 +182,10 @@ def check_schema(schema: object) -> list[Issue]:
         if len(issues) < ERRORS_COLLECT_MAX:
             issues.append(_issue(path, code, message))
 
-    def node(value: object, path: str, depth: int) -> None:
-        nonlocal fields
-        if not isinstance(value, dict):
-            add(path, "wrong_type", "A field schema is an object like {\"type\": \"string\"}.")
+    def node(raw: object, path: str, depth: int) -> None:
+        value = _as_object(raw)
+        if value is None:
+            add(path, "wrong_type", 'A field schema is an object like {"type": "string"}.')
             return
         kind = value.get("type")
         if not isinstance(kind, str) or kind not in _NODE_KEYS:
@@ -201,11 +213,12 @@ def check_schema(schema: object) -> list[Issue]:
         cap = value.get("maxLength")
         if cap is not None and not whole(cap, 1, STRING_MAX_LENGTH_LIMIT):
             add(_pointer(path, "maxLength"), "invalid_value", "maxLength is out of range.")
-        names = value.get("enum")
-        if names is None:
+        raw_names = value.get("enum")
+        if raw_names is None:
             return
+        names = _as_list(raw_names)
         if (
-            not isinstance(names, list)
+            names is None
             or not 1 <= len(names) <= RESULT_ENUM_VALUES_MAX
             or len(set(map(str, names))) != len(names)
             or not all(
@@ -233,21 +246,22 @@ def check_schema(schema: object) -> list[Issue]:
         if depth > RESULT_DEPTH_MAX:
             add(path, "nesting_too_deep", "The schema nests too deep.")
             return
-        properties = value.get("properties")
-        if not isinstance(properties, dict) or not 1 <= len(properties) <= RESULT_PROPERTIES_MAX:
+        properties = _as_object(value.get("properties"))
+        if properties is None or not 1 <= len(properties) <= RESULT_PROPERTIES_MAX:
             add(_pointer(path, "properties"), "invalid_value", "An object needs 1 to 50 fields.")
             return
         fields += len(properties)
         for name, child in properties.items():
-            if not isinstance(name, str) or _FIELD_NAME.fullmatch(name) is None:
+            if _FIELD_NAME.fullmatch(name) is None:
                 add(_pointer(path, "properties", str(name)), "invalid_value", "Not a field name.")
                 continue
             node(child, _pointer(path, "properties", name), depth + 1)
-        required = value.get("required")
-        if required is None:
+        raw_required = value.get("required")
+        if raw_required is None:
             return
+        required = _as_list(raw_required)
         if (
-            not isinstance(required, list)
+            required is None
             or len(set(map(str, required))) != len(required)
             or not all(isinstance(name, str) and name in properties for name in required)
         ):
@@ -257,11 +271,14 @@ def check_schema(schema: object) -> list[Issue]:
                 "required lists names of properties, each once.",
             )
 
-    if not isinstance(schema, dict):
+    root = _as_object(schema)
+    if root is None:
         return [_issue("", "wrong_type", "A result schema is an object.")]
-    if schema.get("type") != "object":
-        return [_issue("/type", "invalid_value", 'The root of a result schema is "type": "object".')]
-    node(schema, "", 1)
+    if root.get("type") != "object":
+        return [
+            _issue("/type", "invalid_value", 'The root of a result schema is "type": "object".')
+        ]
+    node(root, "", 1)
     if fields > RESULT_PROPERTIES_TOTAL_MAX:
         add("", "result_schema_too_large", "The schema has more than 100 fields in all.")
     return _sorted(issues)
@@ -273,8 +290,9 @@ def check_schema(schema: object) -> list[Issue]:
 def check_value(schema: Mapping[str, Any], value: object) -> list[Issue]:
     """The problems of `value` against `schema`, none when it fits. The rules of `checkResultValue`
     in the app: every object is closed, a string or a list that sets no cap gets the default, a
-    number is finite and a whole number is a safe integer. The value is untrusted: the list stops at
-    `ERRORS_COLLECT_MAX` and the unknown keys of an object are looked at only while it is not full."""
+    number is finite and a whole number is a safe integer. The value is untrusted: the list stops
+    at `ERRORS_COLLECT_MAX` and the unknown keys of an object are looked at only while it is not
+    full."""
     issues: list[Issue] = []
 
     def full() -> bool:
@@ -307,33 +325,35 @@ def check_value(schema: Mapping[str, Any], value: object) -> list[Issue]:
             if not isinstance(at, bool):
                 add(path, "wrong_type", f"Expected true or false, got {_type_name(at)}.")
         elif kind == "array":
-            if not isinstance(at, list):
+            items = _as_list(at)
+            if items is None:
                 add(path, "wrong_type", f"Expected a list, got {_type_name(at)}.")
                 return
             limit = node.get("maxItems", LIST_MAX_ITEMS_DEFAULT)
-            if len(at) > limit:
-                add(path, "limit_exceeded", f"The list has {len(at)} entries; at most {limit}.")
-            for index, item in enumerate(at[: limit + 1]):
+            if len(items) > limit:
+                add(path, "limit_exceeded", f"The list has {len(items)} entries; at most {limit}.")
+            for index, item in enumerate(items[: limit + 1]):
                 check(node["items"], item, _pointer(path, index))
         else:
             check_object(node, at, path)
 
     def check_object(node: Mapping[str, Any], at: object, path: str) -> None:
-        if not isinstance(at, dict):
+        given = _as_object(at)
+        if given is None:
             add(path, "wrong_type", f"Expected an object, got {_type_name(at)}.")
             return
         properties: Mapping[str, Mapping[str, Any]] = node["properties"]
         required = set(node.get("required", ()))
         for name, child in properties.items():
-            if name in at:
-                check(child, at[name], _pointer(path, name))
+            if name in given:
+                check(child, given[name], _pointer(path, name))
             elif name in required:
                 add(
                     _pointer(path, name),
                     "missing_field",
                     f"The required field {_shown(name)} is missing.",
                 )
-        for key in at:
+        for key in given:
             if full():
                 return
             if key not in properties:
@@ -503,13 +523,13 @@ def handle_message(
     message: object, schema: Mapping[str, Any], result_path: str
 ) -> dict[str, Any] | None:
     """One JSON-RPC message of a stdio MCP client; the answer, or None for a notification."""
-    if not isinstance(message, dict):
+    request = _as_object(message)
+    if request is None:
         return _error(None, -32600, "invalid request")
-    ident = message.get("id")
-    method = message.get("method")
-    params = message.get("params")
-    arguments: dict[str, Any] = params if isinstance(params, dict) else {}
-    if "id" not in message:
+    ident = request.get("id")
+    method = request.get("method")
+    arguments = _as_object(request.get("params")) or {}
+    if "id" not in request:
         return None  # a notification (`notifications/initialized`, `notifications/cancelled`)
     if method == "initialize":
         asked = arguments.get("protocolVersion")
