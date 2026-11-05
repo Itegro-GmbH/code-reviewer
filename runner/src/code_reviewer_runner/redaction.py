@@ -29,7 +29,9 @@ _PATTERNS = tuple(
 )
 
 
-def _forms(secret: str) -> set[str]:
+def secret_forms(secret: str) -> set[str]:
+    """The spellings a secret travels in: as it is, URL-quoted and base64 (both alphabets). The
+    redactor replaces them and the push guard (`implementer/push_guard.py`) looks for them."""
     return {
         secret,
         quote(secret, safe=""),
@@ -45,7 +47,7 @@ class Redactor:
         values: set[str] = set()
         for secret in secrets:
             if secret.strip():
-                values |= _forms(secret)
+                values |= secret_forms(secret)
         # Longest first, so a secret that contains another one is replaced as a whole.
         self._values = sorted(values, key=len, reverse=True)
         self.longest = len(self._values[0]) if self._values else 0

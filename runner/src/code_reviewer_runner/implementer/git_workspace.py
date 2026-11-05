@@ -90,6 +90,7 @@ from .history import (
     parse_commits,
     parse_name_status,
 )
+from .push_guard import SecretScanner
 from .push_policy import branch_name_problem, select_branches
 from .ref_drop import RefDeletions, RefListingFailed
 
@@ -122,6 +123,13 @@ RESUME_FETCH_SECONDS = 300.0
 # deep: its branch starts at the tip.
 RESUME_DEPTH = 50
 PUSH_TIMEOUT = 120.0
+# The push guard (#856) reads the objects a branch adds, twice (the list, then the content): each
+# read gets this long at most, the list is kept up to 64 MiB (about 700,000 objects with their
+# paths) and the content is read up to 4 GiB. A branch beyond any of them is not pushed
+# (`unchecked`): the guard does not let through what it could not read.
+GUARD_SECONDS = 300.0
+GUARD_LISTING_MAX_BYTES = 64 * 1024 * 1024
+GUARD_READ_MAX_BYTES = 4 * 1024**3
 # The wait before the one new try of a push the provider could not take.
 TRANSIENT_PAUSE_SECONDS = 3.0
 # The room the mirror's file system must have left before the final push takes a branch over: the
@@ -169,6 +177,10 @@ REASON_OUT_OF_SPACE = "out_of_space"
 REASON_TIMED_OUT = "timed_out"
 # GitHub answered the push with an error that is neither a refusal of the access nor a hiccup.
 REASON_PROVIDER_ERROR = "provider_error"
+# The branch holds the login of the device (#856, `push_guard.py`), or the guard could not read it
+# to its end: in both the branch is not pushed.
+REASON_LOGIN_SECRET = "login_secret"
+REASON_UNCHECKED = "unchecked"
 # Why the list of branches could not be had (`PushReport.list_problem`).
 LIST_UNREADABLE = "unreadable"
 LIST_TOO_LARGE = "too_large"
@@ -359,6 +371,14 @@ def _is_client_error(detail: str) -> bool:
     return status is not None and 400 <= status < 500 and status not in _RETRYABLE_CLIENT_ERRORS
 
 
+class _LoginFound(Exception):
+    """The push guard found the login in what a branch adds (ends the read of it)."""
+
+
+class _GuardOverrun(Exception):
+    """What a branch adds is larger than the push guard reads (ends the read of it)."""
+
+
 class _ListingTooLarge(Exception):
     """The agent's list of branches is longer than `LIST_MAX_BYTES`."""
 
@@ -409,6 +429,7 @@ class GitWorkspace:
         schemes: Collection[str] = ("https",),
         timeout: float = DEFAULT_TIMEOUT,
         before_push: Callable[[], None] | None = None,
+        guard_secrets: Sequence[str] = (),
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         space: Callable[[Path], DiskSpace] = disk_space,
@@ -422,6 +443,9 @@ class GitWorkspace:
         # raises to refuse. The job asks the lease here, so that nothing is pushed for a job that is
         # not ours (#765).
         self._before_push = before_push
+        # #856: the values no branch may carry to the provider (the login of the device); none: no
+        # branch is read for them.
+        self._guard_secrets = tuple(guard_secrets)
         self.layout = layout
         self.identity = identity
         self._access = access
@@ -1245,9 +1269,73 @@ class GitWorkspace:
         if name == self.spec.branch:
             self._progress.form_head = tip
             self._progress.form_ref = scratch
+        held = self._login_secret_in(scratch, name, deadline)
+        if held is not None:
+            self._record(name, tip, held)
+            return
         self._ask_lease(deadline, confirm_seconds, confirm_pause)
         reason = self._push(scratch, name, deadline)
         self._record(name, tip, reason)
+
+    def _login_secret_in(self, scratch: str, name: str, deadline: float) -> str | None:
+        """The push guard (#856, `push_guard.py`): None when nothing the branch adds holds the
+        device's login, `REASON_LOGIN_SECRET` when something does, `REASON_UNCHECKED` when it could
+        not be read to its end (a branch is never let through on a guess). What is read is what the
+        branch has on top of where the turn started: its commits, trees (the names), blobs, and the
+        name of the branch itself. The objects are in the mirror already."""
+        scanner = SecretScanner(self._guard_secrets)
+        if not scanner.active:
+            return None
+        if scanner.holds(name):
+            return REASON_LOGIN_SECRET
+        starts = sorted(set(self._starts.values()))
+        listing = bytearray()
+
+        def list_objects(chunk: bytes) -> None:
+            if scanner.feed(chunk):
+                raise _LoginFound
+            listing.extend(chunk)
+            if len(listing) > GUARD_LISTING_MAX_BYTES:
+                raise _GuardOverrun
+
+        try:
+            listed = self._mirror_stream(
+                ["rev-list", "--objects", scratch, "--not", *starts],
+                list_objects,
+                timeout=self._left(GUARD_SECONDS, deadline),
+            )
+        except _LoginFound:
+            return REASON_LOGIN_SECRET
+        except _GuardOverrun:
+            return REASON_UNCHECKED
+        if listed.returncode != 0 or listed.unanswered:
+            return REASON_UNCHECKED
+        wanted = b"".join(
+            line[:40] + b"\n" for line in bytes(listing).split(b"\n") if len(line) >= 40
+        )
+        scanner.reset()
+        read = 0
+
+        def read_objects(chunk: bytes) -> None:
+            nonlocal read
+            read += len(chunk)
+            if scanner.feed(chunk):
+                raise _LoginFound
+            if read > GUARD_READ_MAX_BYTES:
+                raise _GuardOverrun
+
+        try:
+            done = self._mirror_stream(
+                ["cat-file", "--batch"],
+                read_objects,
+                timeout=self._left(GUARD_SECONDS, deadline),
+                stdin=wanted,
+            )
+        except _LoginFound:
+            return REASON_LOGIN_SECRET
+        except _GuardOverrun:
+            return REASON_UNCHECKED
+        return REASON_UNCHECKED if done.returncode != 0 or done.unanswered else None
 
     def _unchanged(self, name: str, tip: str) -> bool:
         """Whether a local branch is where the turn started it. A branch with a start tip of its own
@@ -1450,13 +1538,21 @@ class GitWorkspace:
             timeout=timeout,
         )
 
-    def _mirror_stream(self, args: list[str], consume: Callable[[bytes], None]) -> Outcome:
+    def _mirror_stream(
+        self,
+        args: list[str],
+        consume: Callable[[bytes], None],
+        *,
+        timeout: float | None = None,
+        stdin: bytes | None = None,
+    ) -> Outcome:
         """`_mirror` for output that is read as a stream and not kept (see `GitProcess.stream`)."""
         return self._process.stream(
             ["--git-dir", str(self.mirror), *_MIRROR_OPTIONS, *args],
             env=self._process.base_environment("file"),
             consume=consume,
-            timeout=min(self._timeout, REPORT_READ_TIMEOUT),
+            timeout=min(self._timeout, timeout or REPORT_READ_TIMEOUT),
+            stdin=stdin,
         )
 
     def _reader(
