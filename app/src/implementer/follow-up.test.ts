@@ -270,6 +270,29 @@ describe("starting the queued instruction", () => {
     );
   });
 
+  // #846-T141
+  it("discards the instruction of a workflow step that gave up, also while a turn runs, and says so", async () => {
+    const f = fakes(session({ status: "running", queued: queued() }));
+
+    const discarded = await createFollowUps(f.deps).discardRequested(
+      "session-1",
+      "req-a",
+    );
+    f.sessions.discardQueued.mockResolvedValue(undefined);
+    const gone = await createFollowUps(f.deps).discardRequested(
+      "session-1",
+      "req-a",
+    );
+
+    expect([discarded, gone]).toEqual([true, false]);
+    expect(f.sessions.discardQueued).toHaveBeenCalledWith(
+      "session-1",
+      "req-a",
+      "workflow_gave_up",
+      { whileRunning: true },
+    );
+  });
+
   // #841-U35
   it("reports nothing when the repository found no instruction of that request id to discard", async () => {
     const f = fakes(session({ queued: queued() }));

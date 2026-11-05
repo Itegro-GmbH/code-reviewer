@@ -1,8 +1,8 @@
-# Workflow engine (#844, milestone 3a of epic #833)
+# Workflow engine (#844, milestones 3 and 5 of epic #833)
 
-Runs a saved [workflow](../../../docs/workflows.md#engine) version: one **run** per start, one **step run** per step, the steps one after the other.
-This slice has the **core** and the **GitHub actions** (milestone 3b: `github-connectors.ts`): linear `agent` and `action` steps, the manual trigger, no `if` and `loop`
-(milestone 5). The pages (milestone 3c, #873) are in [`workflow-pages/`](../workflow-pages/README.md). What it does and the error codes: [`docs/workflows.md`](../../../docs/workflows.md#engine). The plan: `plans/agent-workflows.md`.
+Runs a saved [workflow](../../../docs/workflows.md#engine) version: one **run** per start, one **step run** per time a step runs, in the order they run.
+It has the **core** and the **GitHub actions** (milestone 3b: `github-connectors.ts`): `agent` and `action` steps, and since milestone 5 (#846) the control steps `if` (a branch is
+taken, the other is written as skipped) and `loop` (rounds, `until`, `maxRounds`, `previous.*`, `session.continue`: `conditions.ts`, and the replay of the rows in `machine.ts`). The pages (milestone 3c, #873) are in [`workflow-pages/`](../workflow-pages/README.md). What it does and the error codes: [`docs/workflows.md`](../../../docs/workflows.md#engine). The plan: `plans/agent-workflows.md`.
 
 The routes exist only in a deployment with the capability `implementer` (`src/capabilities/routes.ts`), like the workflows and the Implementer; every
 member may use them (`start_implementer_task`: a run starts tasks).
@@ -58,4 +58,5 @@ the filter: [`docs/workflows.md`](../../../docs/workflows.md#the-label-trigger).
 - **Cap, not a copy.** `startTask` takes `costCapCents` as an option (`implementer/service.ts`), not as a field of the body: only code inside the app can ask for it. It
   lowers the cost limit of the task (the profile version's) and is held to the operator's maximum.
 - **Facts.** The validator knows `headCommit` and `pushed` besides `costUsd`, `branch` and `commits` (`workflows/facts.ts`); only a profile that may push has the four.
-- **The run's repository and base branch are fixed at the start** (`input.repo`, its default branch then), so every agent step of a run starts from the same branch.
+- **The run's repository and base branch are fixed at the start** (`input.repo`, its default branch then), so every agent step of a run starts from the same branch, unless the step names a `branch` (#846: a target the validator held to a literal, a trigger value or the branch fact of an earlier agent step), which `beginSession` hands to `startTask` as the base branch. The session always works on a branch of its own, `sessionBranchOf`: `workflow/<run>/<step>`, and `<step>.r<round>` from the second session of a step on (a step id has no `.`, so two steps cannot be named alike).
+- **A step that waits.** A `session.continue` step whose session holds an instruction (a turn runs; or somebody else's instruction is queued, `IMPLEMENTER_SESSION_BUSY`) stays claimed without a job and asks again when its claim is stale (`STEP_STALE_MS`). Given up after `STEP_GIVE_UP_MS`, it first discards its own queued instruction (`discardRequested`) and looks for the turn that may have started in that moment, so no turn starts later without a step to read it.

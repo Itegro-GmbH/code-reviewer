@@ -188,6 +188,12 @@
             }
           ]
         },
+        "branch": {
+          "description": "The branch a session of its own starts from, instead of the base branch of the run: a literal, `{{trigger.repo.defaultBranch}}`, an input of a manual trigger or `{{<agent step>.branch}}` (the branch of an earlier agent step that may push). A target, so no other reference (`target_from_untrusted_value`); not with `session.continue` (checked by the validator: a session that goes on keeps its branch).",
+          "type": "string",
+          "pattern": "\\S",
+          "maxLength": 20000
+        },
         "result": {
           "description": "What the agent's result looks like; the finish tool is made from it. Without one the step yields the facts only (and the result schema of the profile, once profiles bring one).",
           "$ref": "result-schema.v1.json#/$defs/ResultSchema"

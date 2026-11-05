@@ -44,11 +44,31 @@ export const STEP_STATUS_COPY = {
   running: { label: "Running" },
   succeeded: { label: "Succeeded" },
   failed: { label: "Failed" },
+  skipped: { label: "Skipped" },
 } as const;
 
 export const STEP_KIND_COPY = {
   agent: "Agent",
   action: "Action",
+  if: "Condition",
+  loop: "Loop",
+} as const;
+
+/** What a condition or a loop decided, in a sentence (#846). */
+export const CONTROL_COPY = {
+  round: "Round",
+  taken: {
+    then: "The condition held, so the steps of its first branch ran. The others are shown as skipped.",
+    else: "The condition did not hold, so the steps of its other branch ran. The first branch is shown as skipped.",
+  },
+  exit: {
+    until:
+      "The loop ended because its condition held after the round that just ran.",
+    maxRounds: "The loop ended because it ran its last allowed round.",
+    budget:
+      "The loop ended because the budget cannot pay for another agent step.",
+  },
+  rounds: "Rounds",
 } as const;
 
 export const TRIGGER_COPY = {
@@ -62,7 +82,9 @@ const RUN_FAILURE_TEXT: Record<(typeof RUN_FAILURE_CODES)[number], string> = {
   budget_exhausted:
     "The budget of the run is used up, so the next agent step could not start.",
   step_kind_not_supported:
-    "The workflow has a step that this version of the engine does not run yet.",
+    "The workflow has a step that this version of the engine does not run.",
+  condition_failed:
+    "A condition of the workflow could not be evaluated, because a value it needs does not exist.",
   document_unusable: "The saved version of the workflow cannot be read.",
   workflow_owner_gone: WORKFLOW_OWNER_GONE_TEXT,
 };
@@ -276,7 +298,7 @@ const START_FAILURE_TEXT: Record<WorkflowRunErrorCode, string> = {
   WORKFLOW_RUN_CONTENT_TYPE_UNSUPPORTED: REQUEST_NOT_UNDERSTOOD,
   WORKFLOW_RUN_TRIGGER_NOT_MANUAL: "This workflow is not started by hand.",
   WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED:
-    "The workflow has a step that the engine does not run yet, so it cannot be started.",
+    "The workflow has a step of a kind the engine does not run (a reserved one), so it cannot be started.",
   WORKFLOW_RUN_INPUT_INVALID: INVALID_VALUES,
   WORKFLOW_RUN_DOCUMENT_UNUSABLE: "The saved workflow cannot be read.",
   WORKFLOW_RUN_GITHUB_UNAVAILABLE:

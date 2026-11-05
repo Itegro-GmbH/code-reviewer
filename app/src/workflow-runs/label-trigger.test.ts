@@ -363,10 +363,7 @@ describe("which workflows a label starts", () => {
       {
         id: "wf-1",
         document: workflowDocument(READY, {
-          steps: [
-            ...STEPS,
-            { id: "again", kind: "loop", maxRounds: 3, body: [], until: {} },
-          ],
+          steps: [...STEPS, { id: "each", kind: "forEach" }],
         }),
       },
       { id: "wf-2", document: workflowDocument(READY) },
@@ -384,8 +381,72 @@ describe("which workflows a label starts", () => {
     expect(created.map((run) => run.workflowId)).toEqual(["wf-2"]);
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain("wf-1");
-    expect(lines[0]).toContain("again");
+    expect(lines[0]).toContain("each");
     expect(lines[0]).not.toContain(LABELED.issue.title);
+  });
+
+  // #846-T70
+  it("starts a workflow with a loop and an if, however deep: the engine runs both", async () => {
+    const { trigger, created, kicked } = harness([
+      {
+        id: "wf-1",
+        document: workflowDocument(READY, {
+          steps: [
+            {
+              id: "fix",
+              kind: "loop",
+              maxRounds: 3,
+              body: STEPS,
+              until: { empty: "{{implement.summary}}" },
+            },
+            {
+              id: "done",
+              kind: "if",
+              when: { equals: ["{{fix.exit}}", "until"] },
+              then: [{ id: "pr", kind: "action" }],
+              else: [{ id: "stuck", kind: "action" }],
+            },
+          ],
+        }),
+      },
+    ]);
+
+    const result = await trigger.start("delivery-1", LABELED);
+
+    expect(result).toEqual({
+      matched: 1,
+      started: 1,
+      existing: 0,
+      skipped: 0,
+      busy: 0,
+    });
+    expect(created.map((run) => run.workflowId)).toEqual(["wf-1"]);
+    expect(kicked).toEqual(["run-1"]);
+  });
+
+  // #846-T71
+  it("leaves out a workflow that holds a step the engine does not run inside a branch or a loop", async () => {
+    const { trigger, created } = harness([
+      {
+        id: "wf-1",
+        document: workflowDocument(READY, {
+          steps: [
+            {
+              id: "fix",
+              kind: "loop",
+              maxRounds: 2,
+              body: [{ id: "each", kind: "forEach" }],
+              until: {},
+            },
+          ],
+        }),
+      },
+    ]);
+
+    const result = await trigger.start("delivery-1", LABELED);
+
+    expect(result).toMatchObject({ matched: 1, started: 0, skipped: 1 });
+    expect(created).toEqual([]);
   });
 
   // #845-T18

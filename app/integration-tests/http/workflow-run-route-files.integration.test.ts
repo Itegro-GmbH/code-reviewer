@@ -125,6 +125,7 @@ async function startRoutes(
         position: 0,
         stepId: "work",
         kind: "action",
+        round: 1,
         profile: null,
         capMicroUsd: null,
       }),

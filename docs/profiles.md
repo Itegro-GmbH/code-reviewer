@@ -21,18 +21,35 @@ profile, becomes the task's [result schema](implementer.md#the-finish-tool): the
   "name": "reviewer",
   "description": "Reads a branch and reports what is wrong. Changes nothing that leaves the container.",
   "model": { "entryId": "..." },
-  "instructions": "You review code. Read the branch the user names, run its tests, and report findings.",
-  "costLimitCents": 200,
+  "instructions": "You review code. Read the task and the work, run the tests if there are any, and report each problem as a finding. Do not change any file.",
+  "costLimitCents": 300,
   "canPush": false,
   "defaultResult": {
     "type": "object",
     "required": ["findings"],
     "properties": {
-      "findings": { "type": "array", "items": { "type": "string" } }
+      "findings": {
+        "type": "array",
+        "maxItems": 20,
+        "items": {
+          "type": "object",
+          "required": ["type", "name", "description"],
+          "properties": {
+            "type": { "type": "string", "enum": ["bug", "risk", "nit"] },
+            "name": { "type": "string", "maxLength": 120 },
+            "description": { "type": "string" }
+          }
+        }
+      }
     }
   }
 }
 ```
+
+This is the reviewer of the workflow ["Issue to PR"](workflows.md#the-first-workflow), and it is data like any other: created through the API, nothing is seeded. It may not push
+(`canPush: false`: Control never pushes for it, and a step that runs it yields no `branch` or `commits`), it has a cost limit of its own, and its default result is a list of findings, so
+a review step may leave out its `result` and take this one (the example of the workflow declares it anyway, so that it validates and reads without the profile at hand). A finding is a `bug`, a `risk` or a `nit`, with a name and a description; an empty list means the reviewer found nothing, which is what ends
+the loop of the workflow.
 
 | Field | Needed | What |
 | --- | --- | --- |

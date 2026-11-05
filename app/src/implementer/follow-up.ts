@@ -125,6 +125,15 @@ export type FollowUps = {
   startQueued(sessionId: string): Promise<StartQueuedOutcome>;
   /** The "Continue" facts of a run (its job id); undefined when the run is not the newest turn of a session of this workspace. */
   continuation(jobId: string): Promise<Continuation | undefined>;
+  /**
+   * Discards the instruction a request id queued (#846: a workflow step gave up waiting), whether the session is idle or a turn runs.
+   * Only that instruction: one a newer request queued stays. Returns whether one was discarded; false is also the answer when it has
+   * started meanwhile, which the caller finds out by the turn under its request id.
+   */
+  discardRequested(
+    sessionId: string,
+    clientRequestId: string,
+  ): Promise<boolean>;
 };
 
 const SESSION_NOT_FOUND = () =>
@@ -532,6 +541,20 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
         // `idle`: the turn ended between the two writes; the next attempt starts it.
       }
       throw SESSION_BUSY();
+    },
+
+    async discardRequested(sessionId, clientRequestId) {
+      const discarded = await deps.sessions.discardQueued(
+        sessionId,
+        clientRequestId,
+        "workflow_gave_up",
+        { whileRunning: true },
+      );
+      if (discarded === undefined) return false;
+      log(
+        `[implementer] queued instruction discarded session=${sessionId} reason=workflow_gave_up`,
+      );
+      return true;
     },
 
     async startQueued(sessionId) {

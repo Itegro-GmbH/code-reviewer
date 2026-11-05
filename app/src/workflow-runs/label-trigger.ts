@@ -7,8 +7,8 @@
 //  - A workflow starts when its trigger is `github.issueLabeled` with exactly this label (the spelling GitHub reports; case counts) and
 //    the repository of the issue is an active repository of the workspace. The format has no repository of its own for an issue
 //    trigger: the run works on the repository the issue is in (`trigger.repo`), so every active repository of the workspace fits.
-//    A workflow with a step the engine does not run yet (`if`, `loop`: milestone 5) is left out and says so in the log: a run that
-//    ends halfway through, after its first action already changed the issue, is worse than none.
+//    A workflow with a step the engine does not run (a kind the validator refuses, so none that was saved) is left out and says so in
+//    the log: a run that ends halfway through, after its first action already changed the issue, is worse than none.
 //  - There is no check of our own about who put the label on (owner decision 2 of the plan): GitHub decides who may label. The login
 //    of the person is stored as the run's `actor_login`, to be shown, and decides nothing. A label from a bot never gets here (the
 //    parser of the webhook leaves it out: the connectors label issues with the App's token, and a label would start the next run).
@@ -189,7 +189,7 @@ export function createLabelTrigger(
         if (unsupported !== undefined) {
           result.skipped += 1;
           log(
-            `[label-trigger] workflow=${workflow.id} starts no run: the step ${unsupported.id.slice(0, 64)} is of the kind ${unsupported.kind.slice(0, 20)}, which the engine does not run yet`,
+            `[label-trigger] workflow=${workflow.id} starts no run: the step ${unsupported.id.slice(0, 64)} is of the kind ${unsupported.kind.slice(0, 20)}, which the engine does not run`,
           );
           continue;
         }

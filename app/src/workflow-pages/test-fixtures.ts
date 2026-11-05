@@ -15,6 +15,7 @@ export function step(overrides: Partial<StepView> = {}): StepView {
     position: 0,
     kind: "agent",
     status: "succeeded",
+    round: 1,
     profile: { name: "worker", version: 1 },
     jobId: JOB_ID,
     turnId: "turn-1",

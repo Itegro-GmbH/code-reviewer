@@ -560,3 +560,61 @@ describe("workflow templates at run time", () => {
     );
   });
 });
+
+describe("previous.* in a loop", () => {
+  const round2: RunValues = {
+    ...values,
+    steps: {
+      ...values.steps,
+      review: { findings: ["@octocat closes #5"], note: "second" },
+    },
+    previous: { review: { findings: ["@acme/team see #12"], note: "first" } },
+    agentSteps: new Set(["review"]),
+  };
+
+  // #846-T60
+  it("reads the value a step of the loop body had in the round before, apart from the latest", () => {
+    expect(
+      renderText("{{previous.review.note}} then {{review.note}}", round2),
+    ).toBe("first then second");
+    expect(resolveValue("{{previous.review.findings}}", round2)).toEqual([
+      "@acme/team see #12",
+    ]);
+  });
+
+  // #846-T61
+  it("has nothing in round one and outside a loop: a default applies, and without one the step fails with the path", () => {
+    expect(
+      renderText('{{previous.review.note | default "none"}}', values),
+    ).toBe("none");
+    const missing = failure(() =>
+      renderText("{{previous.review.note}}", values),
+    );
+    expect(missing.code).toBe("template_missing_value");
+    expect(missing.message).toContain("previous.review.note");
+    expect(
+      failure(() =>
+        renderText("{{previous.work.summary}}", { ...round2, previous: {} }),
+      ).code,
+    ).toBe("template_missing_value");
+  });
+
+  // #846-T62
+  it("treats what an agent wrote in the round before as an agent's text: defused in the text of an action", () => {
+    expect(
+      renderText("Open: {{previous.review.findings}}", round2, 1000, {
+        defuse: true,
+      }),
+    ).toBe("Open: - @\u200bacme/team see #\u200b12");
+  });
+
+  // #846-T63
+  it("does not fall back to the latest value of the step when the round before has none", () => {
+    expect(
+      renderText('{{previous.work.summary | default "none"}}', {
+        ...values,
+        previous: {},
+      }),
+    ).toBe("none");
+  });
+});

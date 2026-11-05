@@ -313,6 +313,50 @@ describe("the one queued instruction", () => {
     ).toEqual({ status: "nothing_queued" });
   });
 
+  // #846-T140
+  it("is discarded while a turn runs only when the caller asks for it and names the request id of the instruction", async () => {
+    const f = await setup();
+    await f.sessionsA.queueInstruction(f.started.session.id, queued());
+
+    const idleOnly = await f.sessionsA.discardQueued(
+      f.started.session.id,
+      "request-q",
+      "workflow_gave_up",
+    );
+    const other = await f.sessionsA.discardQueued(
+      f.started.session.id,
+      "request-other",
+      "workflow_gave_up",
+      { whileRunning: true },
+    );
+    const unnamed = await f.sessionsA.discardQueued(
+      f.started.session.id,
+      null,
+      "workflow_gave_up",
+      { whileRunning: true },
+    );
+    const discarded = await f.sessionsA.discardQueued(
+      f.started.session.id,
+      "request-q",
+      "workflow_gave_up",
+      { whileRunning: true },
+    );
+
+    expect([idleOnly, other, unnamed]).toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    expect(discarded).toMatchObject({
+      status: "running",
+      queued: null,
+      discarded: {
+        reason: "workflow_gave_up",
+        instruction: "Queued words.",
+      },
+    });
+  });
+
   // #841-D10
   it("is kept as discarded with the reason, once, and queueing again or starting a turn clears the note", async () => {
     const f = await setup();

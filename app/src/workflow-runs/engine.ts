@@ -12,6 +12,10 @@
 //  - What ends a step is read from the database, not from the event: the event only says which run to look at (`jobEnded`). A job that
 //    ended without anybody reporting it is found by the sweep (`advance` for the runs that were not touched for a while).
 //
+// Control (#846): the steps of a run are written one row each in the order they run, and `nextMove` replays the rows against the
+// document (machine.ts), so a `loop` that runs its body again and an `if` that leaves a branch out need nothing but rows. The engine
+// evaluates the condition of a control step under the lock, from the values the rows hold, and writes what it decided.
+//
 // A failure of the engine never reaches the code that ended the turn: `jobEnded` catches everything and logs a code.
 import type { ProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import type { ImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
@@ -27,7 +31,7 @@ import type { WorkspaceMembersRepository } from "../db/repositories/workspace-me
 import { ImplementerError } from "../implementer/errors.ts";
 import type { ImplementerService } from "../implementer/service.ts";
 import { INSTRUCTION_MAX_LENGTH } from "../implementer/start-input.ts";
-import { isRecord } from "../workflows/json.ts";
+import { canonicalJson, isRecord } from "../workflows/json.ts";
 import { parseProfileRef } from "../workflows/resolver.ts";
 import {
   ActionInputError,
@@ -37,7 +41,13 @@ import {
   specOf,
   type ConnectorRegistry,
 } from "./connectors.ts";
-import { readRunDocument, type RunDocument } from "./document.ts";
+import { conditionHolds } from "./conditions.ts";
+import {
+  machineNodes,
+  nodesById,
+  readRunDocument,
+  type RunDocument,
+} from "./document.ts";
 import {
   ACTION_TIMEOUT_MS,
   ERROR_MESSAGE_MAX_CHARS,
@@ -47,9 +57,20 @@ import {
   STEP_GIVE_UP_MS,
   STEP_STALE_MS,
 } from "./limits.ts";
-import { nextMove, type MachineState } from "./machine.ts";
+import {
+  nextMove,
+  replay,
+  type MachineState,
+  type MachineStep,
+  type RoundContext,
+} from "./machine.ts";
 import { WORKFLOW_OWNER_GONE_TEXT } from "./errors.ts";
-import { renderText, TemplateError, type RunValues } from "./templates.ts";
+import {
+  renderText,
+  resolveValue,
+  TemplateError,
+  type RunValues,
+} from "./templates.ts";
 import { outcomeOfTurn, type CostBasis, type EndedTurn } from "./turn-facts.ts";
 
 /** A turn as the engine reads it: its id, and the whole of it once its job is over. */
@@ -64,7 +85,10 @@ export type EngineDependencies = {
   members: Pick<WorkspaceMembersRepository, "get">;
   profiles: Pick<ProfilesRepository, "findByName">;
   environments: Pick<ImplementerEnvironmentsRepository, "listSummaries">;
-  implementer: Pick<ImplementerService, "startTask">;
+  implementer: Pick<
+    ImplementerService,
+    "startTask" | "continueSession" | "discardRequested"
+  >;
   /** The turn a job runs, or undefined for a job that is no turn of this workspace. `ended` is set once the job is over. */
   turns: {
     read(jobId: string): Promise<TurnRead | undefined>;
@@ -107,6 +131,8 @@ type Prefetched = {
   ownerGone?: boolean;
   /** For an agent step with no job that has been claimed for a while: the turn its request id started, if any (by step id). */
   started: Map<string, RequestedTurn | undefined>;
+  /** The agent steps (by step run id) whose queued instruction was discarded before the step was given up. */
+  discarded: Set<string>;
   profiles: Map<string, Resolved>;
 };
 
@@ -152,12 +178,15 @@ function parseOutput(text: string | null): unknown {
 }
 
 /**
- * What a reference can reach: the trigger and the output of every step that succeeded. A run started by hand has `trigger.input`, what
- * the caller handed in; a run a label started has `trigger.issue` and `trigger.repo`, stored as they are (`label-trigger.ts`).
+ * What a reference can reach: the trigger and the output of every step that succeeded (of a step that ran in several rounds, the
+ * latest), and `previous.<step>`, what a direct step of the loop body had in the round before (`context`). A run started by hand has
+ * `trigger.input`, what the caller handed in; a run a label started has `trigger.issue` and `trigger.repo`, stored as they are
+ * (`label-trigger.ts`).
  */
 function valuesOf(
   run: StoredWorkflowRun,
   steps: readonly StoredStepRun[],
+  context?: RoundContext,
 ): RunValues {
   const input = parseOutput(run.triggerInput);
   const record = isRecord(input) ? input : {};
@@ -170,6 +199,14 @@ function valuesOf(
           : [],
       ),
     ),
+    previous: Object.fromEntries(
+      Object.entries(context?.previous ?? {}).flatMap(([stepId, index]) => {
+        const step = steps[index];
+        return step?.status === "succeeded"
+          ? [[stepId, parseOutput(step.output) ?? {}] as const]
+          : [];
+      }),
+    ),
     agentSteps: new Set(
       steps.filter((step) => step.kind === "agent").map((step) => step.stepId),
     ),
@@ -181,6 +218,95 @@ const requestIdOf = (
   run: Pick<StoredWorkflowRun, "id">,
   step: Pick<StoredStepRun, "position">,
 ): string => `wf-${run.id}-${step.position}`;
+
+/** The branch an `if` row took, from its output. */
+function takenOf(step: StoredStepRun): "then" | "else" | undefined {
+  const output = parseOutput(step.output);
+  return isRecord(output) &&
+    (output.taken === "then" || output.taken === "else")
+    ? output.taken
+    : undefined;
+}
+
+/** The rows as the state machine reads them. */
+function machineStepsOf(steps: readonly StoredStepRun[]): MachineStep[] {
+  return steps.map((step) => {
+    const taken = takenOf(step);
+    return {
+      stepId: step.stepId,
+      status: step.status,
+      kind: step.kind,
+      hasJob: step.jobId !== null,
+      createdAt: step.createdAt,
+      startedAt: step.startedAt,
+      ...(taken === undefined ? {} : { taken }),
+    };
+  });
+}
+
+/**
+ * The earlier run of the agent step whose session this step goes on in (`session.continue`), or undefined: the step starts a new session
+ * (it names none, or it is the first round of a step that continues itself, and no run of the target is over yet). Of several runs of the
+ * target the latest wins. `before`: only the rows written before this one count.
+ */
+function continuedStep(
+  node: RunDocument["steps"][number],
+  steps: readonly StoredStepRun[],
+  before: number,
+): StoredStepRun | undefined {
+  const target = isRecord(node.session) ? node.session.continue : undefined;
+  if (typeof target !== "string") return undefined;
+  return steps
+    .slice(0, before)
+    .findLast(
+      (step) =>
+        step.stepId === target &&
+        step.kind === "agent" &&
+        step.status === "succeeded" &&
+        step.jobId !== null,
+    );
+}
+
+/** The text of the instruction for this round: `first` in round one and outside a loop, `next` from round two on. */
+function instructionOf(
+  node: RunDocument["steps"][number],
+  context: RoundContext,
+): string {
+  const { instruction } = node;
+  if (typeof instruction === "string") return instruction;
+  if (!isRecord(instruction)) return "";
+  const text =
+    context.loopRound >= 2 && typeof instruction.next === "string"
+      ? instruction.next
+      : instruction.first;
+  return typeof text === "string" ? text : "";
+}
+
+/**
+ * The branch of a session of its own: one for each run of each step, so nothing else can hold the name. A step that runs again in a later
+ * round gets its own, `<step id>.r<round>`: a step id never holds a `.`, so no step can be named like another step's later round.
+ */
+export function sessionBranchOf(
+  run: Pick<StoredWorkflowRun, "id">,
+  step: Pick<StoredStepRun, "stepId" | "round">,
+): string {
+  return `workflow/${run.id}/${step.stepId}${step.round > 1 ? `.r${String(step.round)}` : ""}`;
+}
+
+/** The `branch` of an agent step with its reference filled in: a text, else the step ends. A missing value fails the step (`TemplateError`). */
+function startBranchOf(
+  branch: unknown,
+  values: RunValues,
+): string | StepOutcome {
+  const resolved =
+    typeof branch === "string" ? resolveValue(branch, values) : undefined;
+  return typeof resolved === "string" && resolved !== ""
+    ? resolved
+    : failed(
+        "template_invalid",
+        "The branch of this step is not the name of a branch.",
+      );
+}
 
 class ActionTimeout extends Error {}
 
@@ -221,6 +347,44 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     return version === undefined
       ? undefined
       : readRunDocument(version.document);
+  }
+
+  /** The state the machine decides from: the rows, the nodes of the document, and how a condition is told from the values of the run. */
+  function machineStateOf(
+    run: StoredWorkflowRun,
+    steps: readonly StoredStepRun[],
+    document: RunDocument,
+    logFailures: boolean,
+  ): MachineState {
+    const byId = nodesById(document);
+    return {
+      runStatus: run.status,
+      budgetMicroUsd: run.budgetMicroUsd,
+      spentMicroUsd: run.spentMicroUsd,
+      steps: machineStepsOf(steps),
+      nodes: machineNodes(document.steps),
+      holds(nodeId, context) {
+        const node = byId.get(nodeId);
+        const condition =
+          node?.kind === "if"
+            ? node.when
+            : node?.kind === "loop"
+              ? node.until
+              : undefined;
+        try {
+          return conditionHolds(condition, valuesOf(run, steps, context));
+        } catch (error) {
+          if (logFailures)
+            log(
+              `[workflow-runs] CONDITION_FAILED run=${run.id} step=${nodeId}: ${error instanceof Error ? error.message : "unknown"}`,
+            );
+          throw error;
+        }
+      },
+      now: now(),
+      staleMs: STEP_STALE_MS,
+      giveUpMs: STEP_GIVE_UP_MS,
+    };
   }
 
   /** Ends a step the engine looked at under the lock because its turn is over. */
@@ -297,6 +461,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     const pre: Prefetched = {
       turns: new Map(),
       started: new Map(),
+      discarded: new Set(),
       profiles: new Map(),
     };
     try {
@@ -320,13 +485,18 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           last.id,
           await deps.turns.findByRequest(requestIdOf(run, last)),
         );
-      const next = document.steps[steps.length];
+      // The profile of the step the next move writes, if it is an agent step that starts a session of its own.
+      const move = nextMove(machineStateOf(run, steps, document, false));
+      const node =
+        move.move === "add_step" && move.kind === "agent"
+          ? nodesById(document).get(move.stepId)
+          : undefined;
       if (
-        (last === undefined || last.status === "succeeded") &&
-        next?.kind === "agent" &&
-        typeof next.profile === "string"
+        node !== undefined &&
+        typeof node.profile === "string" &&
+        continuedStep(node, steps, steps.length) === undefined
       )
-        pre.profiles.set(next.profile, await resolveProfile(next));
+        pre.profiles.set(node.profile, await resolveProfile(node));
     } catch {
       // What is missing is read again after the lock, by the decision's own fetch, where a failure is the move's to deal with.
     }
@@ -372,23 +542,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         return { kind: "done" };
       }
     }
-    const state: MachineState = {
-      runStatus: run.status,
-      budgetMicroUsd: run.budgetMicroUsd,
-      spentMicroUsd: run.spentMicroUsd,
-      steps: lock.steps.map((step) => ({
-        status: step.status,
-        kind: step.kind,
-        hasJob: step.jobId !== null,
-        createdAt: step.createdAt,
-        startedAt: step.startedAt,
-      })),
-      nodes: document.steps.map((node) => node.kind),
-      now: now(),
-      staleMs: STEP_STALE_MS,
-      giveUpMs: STEP_GIVE_UP_MS,
-    };
-    const move = nextMove(state);
+    const move = nextMove(machineStateOf(run, lock.steps, document, true));
     switch (move.move) {
       case "idle":
         return { kind: "done" };
@@ -402,11 +556,17 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         );
         return { kind: "done" };
       case "add_step": {
-        const node = document.steps[move.position];
+        const node = nodesById(document).get(move.stepId);
         if (node === undefined) return { kind: "done" };
+        // A step that goes on in an earlier session runs with the profile that session had.
+        const continued =
+          move.kind === "agent"
+            ? continuedStep(node, lock.steps, lock.steps.length)
+            : undefined;
         const ref = node.profile;
         if (
           move.kind === "agent" &&
+          continued === undefined &&
           typeof ref === "string" &&
           !pre.profiles.has(ref)
         )
@@ -419,13 +579,16 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         const profile =
           move.kind !== "agent"
             ? undefined
-            : typeof ref === "string"
-              ? pre.profiles.get(ref)
-              : undefined;
+            : continued !== undefined
+              ? (continued.profile ?? undefined)
+              : typeof ref === "string"
+                ? pre.profiles.get(ref)
+                : undefined;
         const stepRun = await lock.addStep({
           position: move.position,
           stepId: node.id,
           kind: move.kind,
+          round: move.round,
           profile: profile ?? null,
           capMicroUsd: move.capMicroUsd,
         });
@@ -440,6 +603,44 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           return { kind: "again" };
         }
         return { kind: "execute", stepRun, takeOver: false };
+      }
+      case "add_if": {
+        await lock.addFinished([
+          {
+            position: move.position,
+            stepId: move.stepId,
+            kind: "if",
+            round: move.round,
+            status: "succeeded",
+            output: JSON.stringify({ taken: move.taken }),
+          },
+          // The steps of the branch that was not taken are written as skipped, so the run shows what did not run.
+          ...move.skipped.map((skipped, index) => ({
+            position: move.position + 1 + index,
+            stepId: skipped.stepId,
+            kind: skipped.kind,
+            round: skipped.round,
+            status: "skipped" as const,
+            output: null,
+          })),
+        ]);
+        return { kind: "again" };
+      }
+      case "end_loop": {
+        await lock.addFinished([
+          {
+            position: move.position,
+            stepId: move.stepId,
+            kind: "loop",
+            round: move.round,
+            status: "succeeded",
+            output: JSON.stringify({ exit: move.exit, rounds: move.rounds }),
+          },
+        ]);
+        log(
+          `[workflow-runs] loop ended run=${run.id} step=${move.stepId} exit=${move.exit} rounds=${String(move.rounds)}`,
+        );
+        return { kind: "again" };
       }
       case "execute": {
         const stepRun = lock.steps[move.position];
@@ -485,6 +686,26 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
             );
             return { kind: "again" };
           }
+          // A step that waited behind a turn of its session has its instruction queued there. Given up, it must not start later with
+          // no step to read it and no budget behind it: the instruction is discarded first, and the turn it may have started in that
+          // moment is looked for again.
+          const node = nodesById(document).get(stepRun.stepId);
+          const target =
+            found === undefined && node !== undefined
+              ? continuedStep(node, lock.steps, stepRun.position)
+              : undefined;
+          if (target !== undefined && !pre.discarded.has(stepRun.id))
+            return {
+              kind: "fetch",
+              read: async (into) => {
+                await discardQueuedInstruction(run, stepRun, target);
+                into.started.set(
+                  stepRun.id,
+                  await deps.turns.findByRequest(requestIdOf(run, stepRun)),
+                );
+                into.discarded.add(stepRun.id);
+              },
+            };
         }
         await lock.finishStep(
           stepRun.id,
@@ -539,14 +760,33 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     return { id: owner, githubLogin: run.actorLogin };
   }
 
-  async function startAgent(
+  /** Takes the instruction a waiting step queued out of the session it was queued in (the session of `target`, a step that ended). */
+  async function discardQueuedInstruction(
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+    target: StoredStepRun,
+  ): Promise<void> {
+    const read =
+      target.jobId === null ? undefined : await deps.turns.read(target.jobId);
+    if (read?.ended === undefined) return;
+    await deps.implementer.discardRequested(
+      read.ended.session.id,
+      requestIdOf(run, step),
+    );
+  }
+
+  /** What starting an agent step came to: a turn (its job), an instruction that waits behind a running turn, or the end of the step. */
+  type Begun = { runId: string } | { queued: true } | { outcome: StepOutcome };
+
+  /** A turn in a session of its own: the profile, the environment and the instruction of the step, on a branch the platform names. */
+  async function beginSession(
     run: StoredWorkflowRun,
     step: StoredStepRun,
     node: RunDocument["steps"][number],
     values: RunValues,
-  ): Promise<StepOutcome | undefined> {
-    if (step.profile === null)
-      return failed("profile_not_found", "The step has no profile version.");
+    context: RoundContext,
+    profile: { name: string; version: number },
+  ): Promise<Begun> {
     const environmentName =
       typeof node.environment === "string" ? node.environment : "";
     const environment = (await deps.environments.listSummaries()).find(
@@ -554,67 +794,195 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         candidate.name.toLowerCase() === environmentName.toLowerCase(),
     );
     if (environment === undefined)
-      return failed(
-        "environment_not_found",
-        "The environment of this step is not one of the workspace.",
-      );
+      return {
+        outcome: failed(
+          "environment_not_found",
+          "The environment of this step is not one of the workspace.",
+        ),
+      };
     // The instruction is built from the values of earlier steps. They are text in it and nothing else: the profile, the environment,
     // the repository and the branch are not.
-    const text =
-      typeof node.instruction === "string"
-        ? node.instruction
-        : isRecord(node.instruction) &&
-            typeof node.instruction.first === "string"
-          ? node.instruction.first
-          : "";
-    const instruction = renderText(text, values, INSTRUCTION_MAX_LENGTH);
+    const instruction = renderText(
+      instructionOf(node, context),
+      values,
+      INSTRUCTION_MAX_LENGTH,
+    );
+    // The branch the session starts from: the step's own (`branch`, a target the validator held to a literal, a trigger value or the
+    // branch of an earlier agent step), else the base branch of the run.
+    const base =
+      node.branch === undefined
+        ? run.baseBranch
+        : startBranchOf(node.branch, values);
+    if (typeof base === "object") return { outcome: base };
     const owner = await sessionOwner(run);
     if ("missing" in owner)
-      return failed(
-        "agent_start_failed",
-        owner.missing === "membership"
-          ? WORKFLOW_OWNER_GONE_TEXT
-          : "The workflow that started this run no longer has an account the turn can belong to.",
-      );
-    let started: { runId: string };
+      return { outcome: failed("agent_start_failed", ownerMissingText(owner)) };
     try {
-      started = await deps.implementer.startTask(
+      const started = await deps.implementer.startTask(
         owner,
         {
           repositoryId: run.repositoryId,
-          baseBranch: run.baseBranch,
-          // One branch for each step of each run: nothing else can hold the name.
-          branch: `workflow/${run.id}/${step.stepId}`,
+          baseBranch: base,
+          branch: sessionBranchOf(run, step),
           instruction,
           environmentId: environment.id,
-          profile: `${step.profile.name}@${step.profile.version}`,
+          profile: `${profile.name}@${profile.version}`,
           ...(node.result === undefined ? {} : { result: node.result }),
           clientRequestId: requestIdOf(run, step),
         },
         { costCapCents: capCents(step.capMicroUsd) },
       );
+      return { runId: started.runId };
     } catch (error) {
-      if (!(error instanceof ImplementerError)) throw error;
-      // The step is about to be given up: not while a turn exists under its request id (a repeat of the request that no longer fits it).
-      const existing = await deps.turns.findByRequest(requestIdOf(run, step));
-      if (existing === undefined) {
-        // The code and the message are for the log: the step keeps a sentence, and the code is its `errorCode`.
-        log(
-          `[workflow-runs] STEP_START_FAILED run=${run.id} step=${step.stepId} code=${error.code} message=${error.message}`,
-        );
-        return failed("agent_start_failed", "The agent could not be started.");
-      }
-      started = { runId: existing.jobId };
+      return resolvedStartFailure(error, run, step);
     }
-    const turn = await deps.turns.read(started.runId);
+  }
+
+  /**
+   * The next turn of a session an earlier run of a step started (`session.continue`): the Implementer's follow-up, the same path as the
+   * "Continue" form. It refuses a second turn while one runs (the instruction is queued, one at most). The turn keeps the model, the
+   * environment, the profile and the result schema of the session's last turn; only the cost limit is held to what is left of the budget.
+   */
+  async function continueSessionOf(
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+    node: RunDocument["steps"][number],
+    values: RunValues,
+    context: RoundContext,
+    target: StoredStepRun,
+    byId: ReadonlyMap<string, RunDocument["steps"][number]>,
+  ): Promise<Begun> {
+    // A session keeps the result schema of its last turn, so a step that goes on in another step's session must ask for the same result.
+    if (
+      target.stepId !== node.id &&
+      canonicalJson(node.result ?? null) !==
+        canonicalJson(byId.get(target.stepId)?.result ?? null)
+    )
+      return {
+        outcome: failed(
+          "agent_start_failed",
+          "This step goes on in the session of another step, and a session keeps the result of its last turn: both steps must declare the same result.",
+        ),
+      };
+    const instruction = renderText(
+      instructionOf(node, context),
+      values,
+      INSTRUCTION_MAX_LENGTH,
+    );
+    const read =
+      target.jobId === null ? undefined : await deps.turns.read(target.jobId);
+    if (read?.ended === undefined)
+      return {
+        outcome: failed(
+          "turn_unreadable",
+          "The session of the step to go on with cannot be read.",
+        ),
+      };
+    const owner = await sessionOwner(run);
+    if ("missing" in owner)
+      return { outcome: failed("agent_start_failed", ownerMissingText(owner)) };
+    try {
+      const continued = await deps.implementer.continueSession(
+        owner,
+        read.ended.session.id,
+        {
+          instruction,
+          clientRequestId: requestIdOf(run, step),
+          costLimitCents: Math.max(
+            1,
+            Math.min(
+              capCents(step.capMicroUsd),
+              read.ended.turn.costLimitCents ?? Number.MAX_SAFE_INTEGER,
+            ),
+          ),
+        },
+      );
+      return continued.runId === null
+        ? { queued: true }
+        : { runId: continued.runId };
+    } catch (error) {
+      // The session holds an instruction somebody else queued (the Continue form): this step waits its turn like one behind a running
+      // turn, and asks again later, instead of failing. It is given up after `STEP_GIVE_UP_MS` like any step that cannot start.
+      if (
+        error instanceof ImplementerError &&
+        error.code === "IMPLEMENTER_SESSION_BUSY"
+      ) {
+        const existing = await deps.turns.findByRequest(requestIdOf(run, step));
+        if (existing !== undefined) return { runId: existing.jobId };
+        return { queued: true };
+      }
+      return resolvedStartFailure(error, run, step);
+    }
+  }
+
+  /** The Implementer refused: the step is about to be given up, not while a turn exists under its request id (a repeat of the request that no longer fits it). */
+  async function resolvedStartFailure(
+    error: unknown,
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+  ): Promise<Begun> {
+    if (!(error instanceof ImplementerError)) throw error;
+    const existing = await deps.turns.findByRequest(requestIdOf(run, step));
+    if (existing !== undefined) return { runId: existing.jobId };
+    // The code and the message are for the log: the step keeps a sentence, and the code is its `errorCode`.
+    log(
+      `[workflow-runs] STEP_START_FAILED run=${run.id} step=${step.stepId} code=${error.code} message=${error.message}`,
+    );
+    return {
+      outcome: failed("agent_start_failed", "The agent could not be started."),
+    };
+  }
+
+  function ownerMissingText(owner: {
+    missing: "account" | "membership";
+  }): string {
+    return owner.missing === "membership"
+      ? WORKFLOW_OWNER_GONE_TEXT
+      : "The workflow that started this run no longer has an account the turn can belong to.";
+  }
+
+  async function startAgent(
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+    node: RunDocument["steps"][number],
+    values: RunValues,
+    context: RoundContext,
+    steps: readonly StoredStepRun[],
+    byId: ReadonlyMap<string, RunDocument["steps"][number]>,
+  ): Promise<StepOutcome | undefined> {
+    if (step.profile === null)
+      return failed("profile_not_found", "The step has no profile version.");
+    const target = continuedStep(node, steps, step.position);
+    const begun =
+      target === undefined
+        ? await beginSession(run, step, node, values, context, step.profile)
+        : await continueSessionOf(
+            run,
+            step,
+            node,
+            values,
+            context,
+            target,
+            byId,
+          );
+    if ("outcome" in begun) return begun.outcome;
+    // An instruction behind a turn that still runs starts when that turn ends. The step stays as it is, claimed and without a job; a
+    // later look repeats the request, which is the same one, and finds the turn once it exists.
+    if ("queued" in begun) {
+      log(
+        `[workflow-runs] STEP_CONTINUE_QUEUED run=${run.id} step=${step.stepId}`,
+      );
+      return undefined;
+    }
+    const turn = await deps.turns.read(begun.runId);
     const attached = await deps.runs.attachTurn(step.id, {
-      jobId: started.runId,
+      jobId: begun.runId,
       turnId: turn?.turnId ?? null,
     });
     // Somebody ended the step while the turn was started; the turn runs on, and no step reads it.
     if (!attached)
       log(
-        `[workflow-runs] STEP_TURN_ORPHANED run=${run.id} step=${step.stepId} job=${started.runId}`,
+        `[workflow-runs] STEP_TURN_ORPHANED run=${run.id} step=${step.stepId} job=${begun.runId}`,
       );
     return undefined;
   }
@@ -709,14 +1077,42 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     let outcome: StepOutcome | undefined;
     try {
       const document = await documentOf(run);
-      const node = document?.steps[claimed.position];
-      if (node === undefined) {
+      const byId = document === undefined ? undefined : nodesById(document);
+      const node = byId?.get(claimed.stepId);
+      if (document === undefined || byId === undefined || node === undefined) {
         outcome = failed("turn_unreadable", "The step is not in the document.");
       } else {
-        const values = valuesOf(run, await deps.runs.listSteps(run.id));
+        const steps = await deps.runs.listSteps(run.id);
+        // Where in its loop the step is, from the rows: its round, and the rows of the round before that `previous.*` reads.
+        const context = replay(
+          machineNodes(document.steps),
+          machineStepsOf(steps),
+        ).contexts[claimed.position];
+        // The rows do not match the document (the machine found the same before it wrote this row): a guess at round one would run the
+        // step with the wrong `previous` and the wrong instruction, so the run ends instead.
+        if (context === undefined) {
+          await deps.runs.lockRun(run.id, async (lock) => {
+            await lock.finishStep(
+              claimed.id,
+              failed(
+                "turn_unreadable",
+                "The step does not fit the document of the run.",
+              ),
+            );
+            await lock.finishRun({
+              status: "failed",
+              errorCode: "document_unusable",
+            });
+          });
+          log(
+            `[workflow-runs] run failed run=${run.id} code=document_unusable`,
+          );
+          return;
+        }
+        const values = valuesOf(run, steps, context);
         outcome =
           claimed.kind === "agent"
-            ? await startAgent(run, claimed, node, values)
+            ? await startAgent(run, claimed, node, values, context, steps, byId)
             : await runAction(run, claimed, node, values);
       }
     } catch (error) {

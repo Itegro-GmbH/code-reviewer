@@ -25,7 +25,10 @@ import { TEMPLATE_TEXT_MAX_CHARS, TEMPLATE_VALUE_MAX_CHARS } from "./limits.ts";
 /** What a reference can reach: the trigger (`trigger.input.…`) and the output of each step that ended, by step id. */
 export type RunValues = {
   trigger: Record<string, unknown>;
+  /** The output of each step that succeeded; of a step that ran in several rounds, the latest. */
   steps: Readonly<Record<string, unknown>>;
+  /** `previous.<step>`: the output a direct step of the innermost loop body had in the round before; empty in round one and outside loops. */
+  previous?: Readonly<Record<string, unknown>>;
   /** The ids of the steps in `steps` that an agent produced: what they report is text an agent wrote, not a literal of the workflow. */
   agentSteps?: ReadonlySet<string>;
 };
@@ -58,6 +61,12 @@ function isOutsiderText(path: readonly string[]): boolean {
     path[2] !== undefined &&
     OUTSIDER_TRIGGER_FIELDS.has(path[2])
   );
+}
+
+/** Whether a reference reaches what an agent step wrote: a step by its id, or `previous.<step>` of the round before. */
+function isAgentText(path: readonly string[], values: RunValues): boolean {
+  const step = path[0] === "previous" ? path[1] : path[0];
+  return values.agentSteps?.has(step ?? "") === true;
 }
 
 /** A part of a text that is put together; `agent` for what an agent step reported or an outsider wrote. */
@@ -312,11 +321,23 @@ export function cleanText(text: string): string {
 function lookup(path: readonly string[], values: RunValues): unknown {
   const [root, ...rest] = path;
   let at: unknown;
+  let names = rest;
   if (root === "trigger") at = values.trigger;
-  else if (root !== undefined && Object.hasOwn(values.steps, root))
+  else if (root === "previous") {
+    // `previous.<step>.…` starts at the output of that step in the round before.
+    const [step, ...inner] = rest;
+    names = inner;
+    if (
+      step === undefined ||
+      values.previous === undefined ||
+      !Object.hasOwn(values.previous, step)
+    )
+      return undefined;
+    at = values.previous[step];
+  } else if (root !== undefined && Object.hasOwn(values.steps, root))
     at = values.steps[root];
   else return undefined;
-  for (const name of rest) {
+  for (const name of names) {
     if (!isRecord(at) || !Object.hasOwn(at, name)) return undefined;
     at = at[name];
   }
@@ -386,8 +407,7 @@ function renderParts(
             part.ref.path.join("."),
           ),
           agent:
-            values.agentSteps?.has(part.ref.path[0] ?? "") === true ||
-            isOutsiderText(part.ref.path),
+            isAgentText(part.ref.path, values) || isOutsiderText(part.ref.path),
         },
   );
   const text =

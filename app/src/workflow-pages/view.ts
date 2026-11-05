@@ -116,6 +116,28 @@ export function actionResultOf(
   return Object.keys(result).length === 0 ? undefined : result;
 }
 
+/** What a condition or a loop decided, as the engine wrote it into the step: the branch it took, or how a loop ended and after how many rounds. */
+export type ControlResult = {
+  taken?: "then" | "else";
+  exit?: "until" | "maxRounds" | "budget";
+  rounds?: number;
+};
+
+export function controlResultOf(
+  step: Pick<StepView, "kind" | "output">,
+): ControlResult | undefined {
+  if ((step.kind !== "if" && step.kind !== "loop") || !isRecord(step.output))
+    return undefined;
+  const { taken, exit, rounds } = step.output;
+  const result: ControlResult = {};
+  if (taken === "then" || taken === "else") result.taken = taken;
+  if (exit === "until" || exit === "maxRounds" || exit === "budget")
+    result.exit = exit;
+  if (typeof rounds === "number" && Number.isInteger(rounds))
+    result.rounds = rounds;
+  return Object.keys(result).length === 0 ? undefined : result;
+}
+
 /** What an agent step returned: the branch it pushed to (a link when the repository is known), and the rest of the output as data. */
 export type AgentResult = {
   branch?: string;

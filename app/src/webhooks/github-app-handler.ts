@@ -112,7 +112,7 @@ export type WorkflowStarter = {
     started: number;
     /** The runs an earlier try of the same delivery had written. */
     existing: number;
-    /** Matched workflows that start nothing (a step the engine does not run yet). */
+    /** Matched workflows that start nothing (a step of a kind the engine does not run, a reserved one). */
     skipped: number;
     /** Matched workflows that already have a running run for the issue. */
     busy: number;

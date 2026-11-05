@@ -8,7 +8,7 @@
 //  1. the body: `{ input, clientRequestId }`, nothing else;
 //  2. a request id that made a run before answers that run, if the body is the same (`created: false`), else `WORKFLOW_RUN_REQUEST_REUSED`;
 //  3. the workflow exists in this workspace and is not archived;
-//  4. its trigger is the manual one, and every step is one the engine runs (`if` and `loop` come with milestone 5 and are refused
+//  4. its trigger is the manual one, and every step is one the engine runs (only a kind the engine does not run is refused
 //     here, with the step named, rather than failing halfway through a run that already cost money);
 //  5. the input fits the trigger's `input` schema (checked again here with `checkResultValue`: the validator knows the schema, only a
 //     start knows the values);
@@ -45,8 +45,10 @@ import {
 export type StepView = {
   id: string;
   position: number;
-  kind: "agent" | "action";
+  kind: StoredStepRun["kind"];
   status: StoredStepRun["status"];
+  /** How often the step has run in the run, counting this time, from 1: the rounds of a loop. */
+  round: number;
   profile: { name: string; version: number } | null;
   jobId: string | null;
   turnId: string | null;
@@ -164,6 +166,7 @@ function stepView(step: StoredStepRun): StepView {
     position: step.position,
     kind: step.kind,
     status: step.status,
+    round: step.round,
     profile: step.profile,
     jobId: step.jobId,
     turnId: step.turnId,
@@ -290,7 +293,7 @@ export function createWorkflowRunService(
       if (unsupported !== undefined)
         throw new WorkflowRunError(
           "WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED",
-          `The step ${unsupported.id.slice(0, 64)} is of the kind ${unsupported.kind.slice(0, 20)}, which the engine does not run yet (only agent and action steps).`,
+          `The step ${unsupported.id.slice(0, 64)} is of the kind ${unsupported.kind.slice(0, 20)}, which the engine does not run (agent, action, if and loop).`,
           { step: { id: unsupported.id, kind: unsupported.kind } },
         );
 

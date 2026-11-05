@@ -5,11 +5,10 @@ run in order. A GitHub issue gets a label, an agent implements it, another revie
 request is opened. Workflows are written by an AI through the API (there is no editor), checked by a strict validator, and saved per
 workspace with versions.
 
-**Status (milestones 1 to 4 of epic #833).** The format, the validator, the storage, the [profiles](profiles.md) they refer to, the
-**engine core**, the three GitHub actions and the **label trigger** exist: a workflow with the manual trigger can be started through the API, and a
-workflow with the trigger `github.issueLabeled` starts when somebody puts its label on an issue (see [Engine](#engine) and [The label trigger](#the-label-trigger));
-either runs its agent and action steps one after the other. Not yet: `if` and `loop` (milestone 5: a workflow that has one is refused at a manual start and
-left out by a label) and an editor.
+**Status (milestones 1 to 5 of epic #833).** The format, the validator, the storage, the [profiles](profiles.md) they refer to, the
+**engine**, the three GitHub actions, the **label trigger** and the **control steps** `if` and `loop` exist: a workflow with the manual trigger can be started through the API, and a
+workflow with the trigger `github.issueLabeled` starts when somebody puts its label on an issue (see [Engine](#engine), [Control at run time](#control-at-run-time) and [The label trigger](#the-label-trigger));
+either runs its steps in the order the document says, in rounds where there is a loop. Not yet: cancelling a run (see [Known limits](#known-limits)) and an editor.
 The finish tool exists (see [Result schemas](#result-schemas)). The workflows exist only in
 a deployment with the capability `implementer` (the factory); there is no editor, but the routes below and, for the runs, [pages](#the-run-page). Every member of a workspace may
 use them (the permission `start_implementer_task`).
@@ -132,6 +131,7 @@ A run of an agent step gets a **profile** and an **environment**, separately: wh
 | `environment` | yes | The name of an environment of the workspace (the Environments page; case is ignored), as a literal: a [target](#one-repository-per-run-and-targets), so no reference (`target_from_untrusted_value`). |
 | `instruction` | yes | The task: a text, or `{"first": "...", "next": "..."}` in a loop body (`first` in round one, `next` from round two on, where `previous.*` exists). |
 | `session` | no | `"new"` (the default) or `{"continue": "<step id>"}`: go on in the session of an agent step that ran before on every path with **the same profile name and the same environment**, or of **this step itself** when it is a direct step of a loop body (round two continues round one; not inside an `if` of the body, where the step may not have run). |
+| `branch` | no | The branch a session of its own **starts from**, instead of the base branch of the run: a literal, `{{trigger.repo.defaultBranch}}`, an input of a manual trigger, or `{{<agent step>.branch}}`, the branch of an earlier agent step that may push (it ran before on every path; a profile that may not push yields no branch, `reference_fact_unavailable`). It decides what the agent works on, so it is a [target](#one-repository-per-run-and-targets): nothing an agent wrote (`target_from_untrusted_value`). Not together with `session.continue` (`session_target_invalid`): a session that goes on keeps its branch. See [Branches](#branches-and-what-a-step-starts-from). |
 | `result` | no | What the agent's result looks like, a [result schema](#result-schemas). The agent gets a finish tool made from it. Without one the step yields the facts and the fields of the default result schema of its profile (if the profile version has one). |
 | `description` | no | A note. |
 
@@ -272,9 +272,10 @@ engine's. A value that fails is treated as a step without a result.
 
 ## The first workflow
 
-The plan's "Issue to PR", as version 1 states it (with the profile `implementer` for both steps: create it first, it is the example at the end of
-[`profiles.md`](profiles.md#todays-implementer-as-a-profile); the review step is told not to change anything. Replace `node` by the name of
-an environment of your workspace). It validates
+The plan's "Issue to PR", as version 1 states it, with the two profiles it needs: `implementer` (may push; the example at the end of
+[`profiles.md`](profiles.md#todays-implementer-as-a-profile)) and `reviewer` (may not push, and answers with `findings`; the example at the
+start of [`profiles.md`](profiles.md#a-profile)). Create both first. The review step is told not to change anything as well. Replace `node` by the name of
+an environment of your workspace. It validates
 clean; this block is checked against [`contracts/examples/workflow/Workflow.json`](../contracts/examples/workflow/Workflow.json) by a test.
 
 ```json
@@ -333,9 +334,10 @@ clean; this block is checked against [`contracts/examples/workflow/Workflow.json
         {
           "id": "review",
           "kind": "agent",
-          "profile": "implementer@1",
+          "profile": "reviewer@1",
           "environment": "node",
           "session": "new",
+          "branch": "{{implement.branch}}",
           "instruction": "Review branch {{implement.branch}} against the issue. Do not change anything.",
           "result": {
             "type": "object",
@@ -416,7 +418,14 @@ clean; this block is checked against [`contracts/examples/workflow/Workflow.json
 How it reads: label the issue `ready for agent`, and `start` swaps the labels. The loop `fix` (3 rounds at most): `implement` works (in
 round two it continues its own session and is told the findings of the review before), `review` looks at the branch and returns
 `findings`; the loop ends when there are none. `done` then opens the pull request when the loop ended with `until`, and otherwise comments
-the open findings on the issue. `{{review.findings}}` after the loop is the last round's.
+the open findings on the issue. `{{review.findings}}` after the loop is the last round's. The engine runs this workflow end to end ([Control at run time](#control-at-run-time)); a label starts it
+([The label trigger](#the-label-trigger)).
+
+`review` is a session of its own (`"session": "new"`) and starts **from the branch of `implement`** (`"branch": "{{implement.branch}}"`), so it reads the code the implementer wrote, in every round
+([Branches](#branches-and-what-a-step-starts-from)). It declares its `result` although the profile `reviewer` brings the same default: the example then validates and reads without the profile at hand.
+
+**When a step fails inside the loop** the run ends as `failed` at once: nothing is commented on the issue, no pull request is opened, and the issue keeps `agent working`
+([Failures inside a loop](#control-at-run-time)). Read the run page; format v1 has no failure branch yet.
 
 ## The API
 
@@ -463,11 +472,11 @@ What the engine keeps to (milestone 3a keeps all of it); the validator and the r
 
 ## Engine
 
-*Milestone 3a of epic #833; the code is [`app/src/workflow-runs/`](../app/src/workflow-runs/README.md).* The engine takes a saved workflow
-version and runs it: one **run** per start, one **step run** per step. In this slice it runs **linear** workflows (`agent` and `action` steps, one
-after the other) that start with the **manual** trigger or a **label** on an issue (milestone 4, [The label trigger](#the-label-trigger)). `if` and `loop` are valid in the
-format but are refused when a run is started by hand (`WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED`, with the step named) and left out when a label would start them, before
-anything costs money; they come with milestone 5.
+*Milestones 3 and 5 of epic #833; the code is [`app/src/workflow-runs/`](../app/src/workflow-runs/README.md).* The engine takes a saved workflow
+version and runs it: one **run** per start, one **step run** per time a step runs (a step in a loop has one for every round). It runs `agent` and `action` steps in the order the
+document says, and the control steps `if` and `loop` ([Control at run time](#control-at-run-time)). A workflow starts with the **manual** trigger or a **label** on an issue
+(milestone 4, [The label trigger](#the-label-trigger)). A node of a kind the engine does not run (the reserved kinds, which the validator refuses anyway) is refused when a
+run is started by hand (`WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED`, with the step named) and left out when a label would start it, before anything costs money.
 
 ### Starting a run
 
@@ -483,7 +492,7 @@ the run and its steps; the first steps start right after the answer.
 - `GET /api/w/<slug>/workflows/<id>/runs/<runId>` answers `200 {"run": {...}}` with the steps; `GET .../runs` lists the newest 50 runs of the workflow
   (without steps). A run of another workspace, or of another workflow, is `404`.
 
-A run looks like this (a step is `pending` when written, `running` once claimed, then `succeeded` or `failed`):
+A run looks like this (a step is `pending` when written, `running` once claimed, then `succeeded` or `failed`; a step of the branch an `if` did not take is written `skipped`):
 
 ```json
 {
@@ -492,7 +501,7 @@ A run looks like this (a step is `pending` when written, `running` once claimed,
     "budgetUsd": 20, "spentUsd": 0.42, "repositoryId": "…", "baseBranch": "main", "input": {"repo": "acme/widgets", "topic": "caching"},
     "createdAt": "…", "updatedAt": "…", "finishedAt": null,
     "steps": [
-      { "id": "plan", "position": 0, "kind": "agent", "status": "succeeded", "profile": {"name": "worker", "version": 1},
+      { "id": "plan", "position": 0, "kind": "agent", "status": "succeeded", "round": 1, "profile": {"name": "worker", "version": 1},
         "jobId": "…", "turnId": "…", "costUsd": 0.42, "costBasis": "reported", "output": {"summary": "…", "costUsd": 0.42, "branch": "workflow/7f0c…/plan"},
         "errorCode": null, "errorMessage": null, "createdAt": "…", "startedAt": "…", "finishedAt": "…" }
     ]
@@ -511,7 +520,8 @@ For a run a label started, `input` is `{"issue": {...}, "repo": {...}}` ([The la
   run (a run a label started has no person: its turns belong to the account that owns the workflow, see [The label trigger](#the-label-trigger)). The **profile** is the version the step pins; a profile **without a version** means the newest version **at the moment the step starts**,
   and that version is stored with the step run. The **environment** is found by name (case ignored). The **instruction** is the step's text with its
   references filled in. The step's `result` schema (or the default of the profile version) becomes the finish tool. The turn works on a branch
-  the platform names, `workflow/<run id>/<step id>`, from the default branch of the repository at the start of the run.
+  the platform names, `workflow/<run id>/<step id>`, which starts from the base branch of the run (the default branch of the repository at the start of the run) or, when the step names
+  one, from its `branch` ([Branches](#branches-and-what-a-step-starts-from)).
 - **A turn that ends moves the run on.** The runner API tells the engine when the job of a turn ends; the engine then reads the job, the turn and
   its session **from the database** (the event only says which run to look at) and ends the step. A job that ends without anybody reporting it (its lease
   ran out) is found by the sweep, which looks again at every run that was not touched for a minute.
@@ -522,6 +532,10 @@ For a run a label started, `input` is `{"issue": {...}, "repo": {...}}` ([The la
 - **A turn that exists is never lost.** The engine can die after the turn was started and before the step recorded it. Before a step is given up
   (`agent_start_failed`, after an hour without a job), and whenever the Implementer refuses the repeat of its request, the engine looks for a turn under
   the request id of the step (`wf-<run id>-<position>`). A turn it finds is attached to the step, read like any other, and its cost is charged to the run.
+- **A step can wait for its session.** A `session.continue` step asks the Implementer for the next turn of the session. While a turn of that session runs, its instruction is queued behind it
+  (one place); when a person has queued an instruction there already (`IMPLEMENTER_SESSION_BUSY`), the step does **not** fail: it stays claimed without a job and asks again about every two minutes
+  (when its claim is stale), until its turn exists or it is given up after an hour (`agent_start_failed`). When it is given up, its own queued instruction is **discarded** (reason
+  `workflow_gave_up`, [`implementer.md`](implementer.md#follow-ups)), so that no turn starts later with no step to read it and no budget behind it; a turn that started in that moment is attached to the step instead.
 - **A failure of the engine never fails the end of a turn.** The hook runs after the completion is stored; if it throws, the completion is
   answered and stored as it would have been, the failure is logged by its code only, and the sweep picks the run up again.
 
@@ -556,12 +570,61 @@ whole of it. The engine logs `[workflow-runs] cost not reported run=… step=…
 model that reports its cost, avoids it. When the budget cannot pay one cent for the next agent step, the run ends with `budget_exhausted`; an action step costs nothing and still runs. The basis a step was charged on (`reported`, `estimated`, or `limit` for the whole cap) is kept with
 the step and shown on the [run page](#the-run-page).
 
-### Known limits of milestone 3
+### Control at run time
 
-- **The unique constraint `(run_id, step_id)` and the check on `kind` of the step table need a migration in milestone 5.** A loop runs one step several times
-  (the constraint on `(run_id, step_id)` refuses the second round) and `if` and `loop` are other kinds. (`created_by` of a run is nullable since milestone 4: a run
-  started by a label has no person who started it.)
-- **A run cannot be cancelled yet.** It ends as `succeeded` or `failed`; a person cannot stop one that runs.
+*Milestone 5 (#846).* The rows of a run are written in the order the steps run, and the engine decides the next move by **replaying the rows against the document**
+(`machine.ts`): there is no cursor to lose, so a doubled event or a sweep that comes at the same time finds what the first one wrote and changes nothing. A row says which
+node it is (`stepId`), how often that step has run (`round`, from 1) and, for a control step, what it decided.
+
+- **`round`** counts how often the step has run in the run. In a loop the steps of the body get 1, 2, 3 in the rounds; in a loop inside a loop the count goes on across the
+  rounds of the outer loop, so that `(run, step, round)` is unique. The run page tells the round of a step that ran more than once.
+- **`loop`.** The body runs at least once. After each round the engine asks, in this order: does `until` hold (exit `until`); was that the last allowed round (`maxRounds`); can the
+  budget pay one more agent step, that is at least one cent (`budget`); else the body runs again. The decision is written as one row of the loop (kind `loop`, output
+  `{"exit": "until", "rounds": 2}`), which is what `{{fix.exit}}` and `{{fix.rounds}}` read. The budget is asked **only between two rounds**: inside a round an agent step the budget
+  cannot pay ends the run with `budget_exhausted`, as anywhere. The budget is one for the whole run: every round is charged to it, and the cost limit of an agent step is what is left.
+  `until` is looked at with the values of the round that just ended, so `{{review.findings}}` in it is the findings of that round.
+- **`previous.<step>.<field>`** is what a direct step of the innermost loop body had in the round before. In round one there is nothing: an `instruction.first` has none (the
+  validator refuses it), a reference elsewhere uses its `| default`, and without one the step fails with `template_missing_value`. Text an agent wrote in the round before is
+  an agent's text like any other: it is defused where it goes into the text of an action.
+- **`instruction`.** An agent step with `{"first", "next"}` uses `first` in round one and `next` from round two of its innermost loop on; a plain text is used every round.
+- **`if`.** The engine evaluates `when` under the lock of the run, from the outputs of the rows, and writes one row of kind `if` with `{"taken": "then"}` (or `"else"`) as its output,
+  and **one row with the status `skipped` for every step of the branch that was not taken**, at any depth, in the same write. The run page shows them, so a person sees what did not
+  run. A skipped step has no output: a reference to it is refused by the validator, because nothing a branch made is certain to exist outside it.
+- **Conditions** are evaluated as the validator checked them: `empty` / `notEmpty` of a list or a text, `equals` / `notEquals` of two texts, two numbers or two true/false values, and
+  `all`, `any`, `not`. A value is only compared or measured, never read again as a template. A condition that cannot be told (a value it needs does not exist and the reference has
+  no default) ends the run with `condition_failed`; the log says which step.
+- **`session.continue`.** A step that names an agent step goes on in the session of its **latest earlier run** (for itself in a loop: the round before; round one has none and starts
+  a session of its own). The engine does not start a new task but a follow-up turn of that session, the same path as the "Continue" form of the Runs page
+  ([`implementer.md`](implementer.md#follow-ups)): **no second turn starts while one runs** (the instruction waits behind it, one at most), the request id of the step makes it
+  idempotent, and the turn keeps the model, the environment, the profile and the **result schema** of the session's last turn. So a step that goes on in the session of **another**
+  step must declare the same `result` as that step, else it ends with `agent_start_failed` before anything is started. The cost limit of the turn is the smaller of what is left of
+  the budget and the limit of the session's last turn.
+- **Failures inside a loop.** A step that fails, a budget that cannot pay the next agent step and a condition that cannot be told end the **whole run** at once as `failed`
+  (`step_failed`, `budget_exhausted`, `condition_failed`): the steps after the loop do not run, so in "Issue to PR" **nothing is commented on the issue and no pull request is
+  opened**, and the issue keeps the label `agent working`. The only signals are the run page and the status of the run (`GET .../runs/<runId>`); watch them, or take the label off by hand.
+  The format has no branch for a failure yet (an `onFailure` that runs steps when a step or a loop fails); it is a follow-up. The loop's own `maxRounds` and `budget` exits are
+  **not** failures: they end the loop, and the `if` after it (`{{fix.exit}}`) decides, which is what the example's comment on the issue is for.
+
+### Branches and what a step starts from
+
+- **The branch a session works on.** A step in a session of its own works on `workflow/<run id>/<step id>`; a step that runs again in a new session (a reviewer in round two) on
+  `workflow/<run id>/<step id>.r<round>`. A step id never holds a `.` (a letter, then letters, digits, `_` or `-`), so no step can be named like the later round of another
+  (`review` in round two is `review.r2`; a step called `review-r2` is `review-r2`). A continued session keeps its branch.
+- **A reviewer needs the code: `branch`.** A session of its own starts from the base branch of the run, so a reviewer would not see what the implementer did. The agent step takes
+  `"branch": "{{implement.branch}}"`: the new session starts from that branch (the Implementer's `baseBranch`; the branch must exist on GitHub, which it does once the turn that
+  made it started, and the step ends with `agent_start_failed` if it was deleted). In a loop the value is the one of the latest round of `implement`, which in round two holds
+  the commits of the session that went on. The value is a [target](#one-repository-per-run-and-targets): a literal, a trigger value or the branch **fact** of an agent step, never text an agent wrote.
+- **Push rights and the branch of the reviewer.** `branch` only chooses where the session **starts**. The session always works on a branch of its own, `workflow/<run id>/<step id>`
+  (with `.r<round>` from the second session of the step on), created from that start; it never pushes to the branch it started from. A profile that **may not push** (the reviewer) reads the
+  branch and changes nothing that leaves its container. A profile that **may push** pushes to its own branch, which is then built on top of the other (a second branch, not a commit on
+  the implementer's), and its own `{{<step>.branch}}` is that second branch. The name of the session's branch is unique whatever it starts from: it holds the run and the step.
+  The Worker fetches the branch it starts from one commit deep, so a reviewer sees the code of that branch as it stands, not its history (and not the difference to the base branch).
+
+### Known limits
+
+- **A run cannot be cancelled yet.** It ends as `succeeded` or `failed`; a person cannot stop one that runs. Stopping a run needs a way to stop the running turn of the Implementer
+  (a turn that is claimed by a Worker cannot be ended from the app today: only a Worker's own report, its lease running out, or a newer push of a pull request ends it), and that is a
+  change of the job queue, the billing of the turn and the Worker, not of the engine. Until then the cost limit of the step and the budget of the run bound what a run costs.
 - **Profiles are resolved per step**, at the moment the step starts; a profile without a version can mean version 2 for step two of a run whose step one ran
   with version 1.
 - **The sweep has a time budget** (40 seconds, 10 for the maintenance after a request), checked between two runs; a run is looked at as a whole.
@@ -688,8 +751,8 @@ workspace of the installation decides which workflows start ([`label-trigger.ts`
   removed from it, starts nothing). No project is needed;
 - the workflow is **not archived**, its **current version** has the trigger `github.issueLabeled`, and its `label` is **exactly** the label that was put on: the same
   characters, case and spaces included (GitHub keeps the spelling a label was created with, and the payload carries it);
-- every step is one the engine runs (`agent` and `action`). A workflow with an `if` or a `loop` (milestone 5) is **left out** and the log says which step: a run that
-  ends halfway, after its first action changed the issue, is worse than none;
+- every step is one the engine runs (`agent`, `action`, `if` and `loop`, at any depth). A workflow with a node of another kind is **left out** and the log says which step: a run that
+  ends halfway, after its first action changed the issue, is worse than none (the validator refuses the reserved kinds, so no saved workflow has one);
 - the workflow has **no running run for this issue**. A workflow has at most one running run for one issue (the repository and the issue number): the label put on,
   taken off and put on again while the first run goes on starts nothing, and the log says why; a person (or a script) cannot start a run with a full budget as often as
   they like. When the run has ended (`succeeded` or `failed`), the next label starts the next one. The database holds the rule (a partial unique index on the workflow and
@@ -766,8 +829,9 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | --- | --- | --- |
 | `step_failed` | run | A step failed; the step says why. |
 | `budget_exhausted` | run | The budget does not cover another agent step. |
-| `step_kind_not_supported` | run | The pinned document holds a step this engine does not run (`if`, `loop`). |
-| `document_unusable` | run | The pinned version cannot be read. |
+| `step_kind_not_supported` | run | The pinned document holds a node this engine does not run (a reserved kind, or a node that is not well formed). |
+| `condition_failed` | run | The `when` of an `if` or the `until` of a `loop` could not be evaluated: a value it needs does not exist and has no default. |
+| `document_unusable` | run | The pinned version cannot be read, or the steps written so far are not what it says they should be. |
 | `workflow_owner_gone` | run | A run a label started: the account that owns the workflow (the author of the version the run uses) is no longer a member of the workspace. The run ends before its first step. The message: "The person who owns this workflow is no longer a member of the workspace; save the workflow again to take it over." The failed run frees the issue. If the owner leaves while the run goes on, the agent step that cannot start fails with `agent_start_failed` and the same sentence. |
 | `template_missing_value` | step | A reference points at a value the run does not have, and has no default. |
 | `template_invalid` | step | A reference holds an object, or the text is not a template. |
@@ -803,7 +867,7 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `WORKFLOW_RUN_BODY_TOO_LARGE` | 413 | The body is over 128 KB. |
 | `WORKFLOW_RUN_CONTENT_TYPE_UNSUPPORTED` | 415 | The body is not `application/json`. |
 | `WORKFLOW_RUN_TRIGGER_NOT_MANUAL` | 422 | Only a workflow with the manual trigger is started by hand. |
-| `WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED` | 422 | A step is an `if` or a `loop` (`step` names it). |
+| `WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED` | 422 | A node is of a kind the engine does not run (`step` names it). |
 | `WORKFLOW_RUN_INPUT_INVALID` | 422 | The input does not fit the trigger's `input`; `errors` lists every problem. |
 | `WORKFLOW_RUN_DOCUMENT_UNUSABLE` | 500 | The saved document cannot be read. |
 | `WORKFLOW_RUN_GITHUB_UNAVAILABLE` | 503 | GitHub could not be asked for the repository. |
@@ -843,6 +907,9 @@ not exist.
     in the step of the run routes as `costBasis`.
   - **Steps**, in the order they ran, each with its status, its failure, how long it took, the profile of an agent step and its cost. An agent step links to its
     Implementer run (`/w/<slug>/runs/<jobId>`), where the live view shows what the agent does.
+  - **Rounds and control (#846).** Every run of a step is listed on its own, and a step that ran more than once says its round ("round 2"). A **condition** and a **loop** are steps
+    of their own: the condition says which branch it took, the loop how it ended (its condition held, its last round ran, or the budget could not pay another agent step) and after how many rounds.
+    A step in a branch that was not taken is listed with the status **Skipped**.
   - **Results.** An agent step shows its branch and, collapsed, the rest of what it returned as JSON text. An action step shows what any action returns:
     `url` (a link only if it passes the check below, else the text), `number` and `existing` (whether the action found what it would have made, so nothing new was created).
     Everything in them is text from outside, rendered as text and never as markup.
@@ -893,7 +960,7 @@ Beyond the form:
 | `condition_operand_type` | An operand of the wrong type, or two that cannot be compared. | Compare like with like; `empty` takes a list or a text. |
 | `condition_value_not_in_enum` | A text compared with a choice of names that can never hold it. | Use one of `available`. |
 | `instruction_next_outside_loop` | `instruction.next` in a step that is not in a loop. | Use a plain text, or put the step in a loop. |
-| `session_target_invalid` | `session.continue` names no agent step that ran before on every path, or one with another profile name or environment, or the step itself where it is not a direct step of a loop body. | Use one of `available`, with the same profile and environment. |
+| `session_target_invalid` | `session.continue` names no agent step that ran before on every path, or one with another profile name or environment, or the step itself where it is not a direct step of a loop body; or a step with both `session.continue` and `branch`. | Use one of `available`, with the same profile and environment; or drop `branch` (a session that goes on keeps its branch). |
 | `profile_unknown` | No such profile. | Use one of `available`. |
 | `profile_archived` | The profile exists but is archived: no step may run it. | Use one of `available`. |
 | `profile_version_unknown` | The profile has no such version. | Use one of `available`, or leave the version out. |

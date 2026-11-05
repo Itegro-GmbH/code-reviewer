@@ -20,8 +20,10 @@ import type {
 import type { WorkspaceId } from "../workspace-scope.ts";
 
 export type WorkflowRunStatus = "running" | "succeeded" | "failed";
-export type StepRunStatus = "pending" | "running" | "succeeded" | "failed";
-export type StepRunKind = "agent" | "action";
+export type StepRunStatus =
+  "pending" | "running" | "succeeded" | "failed" | "skipped";
+/** `if` and `loop` are written by the engine when it decides them: the row holds the decision as its output (#846). */
+export type StepRunKind = "agent" | "action" | "if" | "loop";
 /** What started a run: a person by hand, or a label on an issue (#845). */
 export type RunTriggerKind = "manual" | "github.issueLabeled";
 /** Where the cost charged to a step comes from: the runner's figure, an estimate from the token counts, or the cap the turn ran under. */
@@ -59,6 +61,8 @@ export type StoredStepRun = {
   stepId: string;
   kind: StepRunKind;
   status: StepRunStatus;
+  /** How often the step has run in the run, from 1: the rounds of a loop. */
+  round: number;
   profile: { name: string; version: number } | null;
   jobId: string | null;
   turnId: string | null;
@@ -105,8 +109,21 @@ export type NewStepRun = {
   position: number;
   stepId: string;
   kind: StepRunKind;
+  /** How often the step has run in the run, counting this time (1 for its first). */
+  round: number;
   profile: { name: string; version: number } | null;
   capMicroUsd: number | null;
+};
+
+/** A step that is over when it is written: a decision of a control step, or a step in a branch that was not taken. */
+export type NewFinishedStep = {
+  position: number;
+  stepId: string;
+  kind: StepRunKind;
+  round: number;
+  status: "succeeded" | "skipped";
+  /** JSON text: what a control step decided; null for a skipped step. */
+  output: string | null;
 };
 
 export type StepOutcome =
@@ -131,6 +148,8 @@ export type RunLock = {
   /** The steps written so far, by position. */
   steps: StoredStepRun[];
   addStep(input: NewStepRun): Promise<StoredStepRun>;
+  /** Writes steps that are over at once (one write, one touch): the decision of an `if` with the steps it skips, or the end of a `loop`. */
+  addFinished(inputs: readonly NewFinishedStep[]): Promise<StoredStepRun[]>;
   /**
    * Records a turn found for a step under the lock: the step then reads that turn instead of being given up. Only a `running` step
    * without a job takes one; returns whether it was written.
@@ -223,6 +242,7 @@ function stepFrom(row: Selectable<WorkflowStepRunsTable>): StoredStepRun {
     stepId: row.step_id,
     kind: row.kind as StepRunKind,
     status: row.status as StepRunStatus,
+    round: row.round,
     profile:
       row.profile_name === null || row.profile_version === null
         ? null
@@ -402,6 +422,7 @@ export function createWorkflowRunsRepository(
               step_id: input.stepId,
               kind: input.kind,
               status: "pending",
+              round: input.round,
               profile_name: input.profile?.name ?? null,
               profile_version: input.profile?.version ?? null,
               job_id: null,
@@ -427,6 +448,45 @@ export function createWorkflowRunsRepository(
             lock.steps.push(added);
             await lock.touch();
             return added;
+          },
+          async addFinished(inputs) {
+            if (inputs.length === 0) return [];
+            const at = formatTimestamp(now());
+            const rows = inputs.map((input) => ({
+              id: newId(),
+              run_id: runId,
+              workspace_id: workspaceId,
+              position: input.position,
+              step_id: input.stepId,
+              kind: input.kind,
+              status: input.status,
+              round: input.round,
+              profile_name: null,
+              profile_version: null,
+              job_id: null,
+              turn_id: null,
+              cap_micro_usd: null,
+              cost_micro_usd: null,
+              cost_basis: null,
+              output: input.output,
+              error_code: null,
+              error_message: null,
+              created_at: at,
+              started_at: null,
+              finished_at: at,
+            }));
+            const written = (
+              await trx
+                .insertInto("workflow_step_runs")
+                .values(rows)
+                .returningAll()
+                .execute()
+            )
+              .map(stepFrom)
+              .toSorted((a, b) => a.position - b.position);
+            lock.steps.push(...written);
+            await lock.touch();
+            return written;
           },
           async attachTurn(stepRunId, turn) {
             const attached = await trx
