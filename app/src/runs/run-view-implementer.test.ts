@@ -727,7 +727,9 @@ describe("the detail of an implementer run", () => {
         "reported",
         "result",
         "resultExpected",
+        "runner",
         "summary",
+        "waitingForRunner",
       ].sort(),
     );
     expect(Object.keys(row.implementer ?? {}).sort()).toEqual([

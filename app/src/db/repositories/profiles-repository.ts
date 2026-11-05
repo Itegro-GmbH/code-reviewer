@@ -100,6 +100,8 @@ export type ProfileVersionFactsRow = {
   canPush: boolean;
   /** The JSON text of the default result schema, or null. */
   defaultResult: string | null;
+  /** Whether the version's model is a managed one: a catalog entry on the platform's key (#854). */
+  managedModel: boolean;
 };
 
 export type ProfilesRepository = {
@@ -311,7 +313,13 @@ export function createProfilesRepository(
       if (versions.length === 0) return [];
       const rows = await db
         .selectFrom("profile_versions")
-        .select(["profile_id", "version", "can_push", "default_result"])
+        .select([
+          "profile_id",
+          "version",
+          "can_push",
+          "default_result",
+          "model_choice",
+        ])
         .where("workspace_id", "=", workspaceId)
         .where((eb) =>
           eb.or(
@@ -331,6 +339,7 @@ export function createProfilesRepository(
         version: row.version,
         canPush: row.can_push === 1,
         defaultResult: row.default_result,
+        managedModel: "entryId" in decodeModelChoice(row.model_choice),
       }));
     },
 

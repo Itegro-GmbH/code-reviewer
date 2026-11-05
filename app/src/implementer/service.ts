@@ -12,6 +12,7 @@
 import type { ImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import type {
   TurnEnvironment,
+  TurnRunnerEnvironment,
   TurnProfile,
 } from "../db/repositories/implementer-repository.ts";
 import type { ProfilesRepository } from "../db/repositories/profiles-repository.ts";
@@ -229,7 +230,8 @@ function repeatOf(
     session.baseBranch === task.baseBranch &&
     session.branch === task.branch &&
     turn.instruction === task.instruction &&
-    (turn.environment?.id ?? null) === task.environmentId &&
+    (turn.environment?.id ?? turn.runnerEnvironment?.id ?? null) ===
+      task.environmentId &&
     sameProfile(turn.profile, task.profile) &&
     sameResult(turn.resultSchema, task.result) &&
     sameChoices;
@@ -452,6 +454,7 @@ export function createImplementerService(
       // The environment is read now and copied into the turn: what it says at this moment is what the task runs with, whatever
       // is done to it afterwards. An id of another workspace, or of one that is gone, is the same refusal.
       let environment: TurnEnvironment | null = null;
+      let runnerEnvironment: TurnRunnerEnvironment | null = null;
       if (task.environmentId !== null) {
         const found = await deps.environments.get(task.environmentId);
         if (found === undefined)
@@ -459,19 +462,34 @@ export function createImplementerService(
             "IMPLEMENTER_ENVIRONMENT_NOT_FOUND",
             "There is no such environment in this workspace.",
           );
-        // A size that is no longer offered (1 vCPU) is shown on the page as it is and refused here, before a turn, a job or a VM exists.
-        if (!isEnvironmentVcpus(found.vcpus))
-          throw new ImplementerError(
-            "IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED",
-            "The size of this environment is no longer offered.",
-          );
-        environment = {
-          id: found.id,
-          name: found.name,
-          vcpus: found.vcpus,
-          setupScript: found.setupScript,
-          network: found.network,
-        };
+        if (found.kind === "runner") {
+          // A runner works with its owner's own key. A managed model is the platform's and runs on platform VMs only: refused here,
+          // before a turn, a job or a charge exists. (A model of the workspace's own key was checked above, with the key it needs.)
+          if ("entryId" in model)
+            throw new ImplementerError(
+              "IMPLEMENTER_RUNNER_NEEDS_OWN_KEY",
+              "A runner needs a model of the workspace's own key.",
+            );
+          runnerEnvironment = {
+            id: found.id,
+            name: found.name,
+            labels: found.labels,
+          };
+        } else {
+          // A size that is no longer offered (1 vCPU) is shown on the page as it is and refused here, before a turn, a job or a VM exists.
+          if (found.vcpus === null || !isEnvironmentVcpus(found.vcpus))
+            throw new ImplementerError(
+              "IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED",
+              "The size of this environment is no longer offered.",
+            );
+          environment = {
+            id: found.id,
+            name: found.name,
+            vcpus: found.vcpus,
+            setupScript: found.setupScript,
+            network: found.network,
+          };
+        }
       }
 
       if (costLimitCents !== null) {
@@ -504,6 +522,7 @@ export function createImplementerService(
           modelChoice: model,
           costLimitCents,
           environment,
+          runnerEnvironment,
           profile,
           resultSchema,
           createdBy: user.id,

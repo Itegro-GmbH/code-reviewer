@@ -33,6 +33,8 @@ const refused = (
 const NODE: EnvironmentView = {
   id: "env-1",
   name: "Node 22",
+  kind: "hosted",
+  labels: [],
   vcpus: 4,
   memoryGb: 5.7,
   sizeSupported: true,
@@ -76,14 +78,19 @@ function fakeApi(
           ...NODE,
           id: "env-3",
           ...body,
-          memoryGb: body.vcpus * 2 - 2,
+          memoryGb: (body as { vcpus: number }).vcpus * 2 - 2,
         },
       });
     },
     update: async (id, body) => {
       updated.push([id, body]);
       return ok({
-        environment: { ...NODE, id, ...body, memoryGb: body.vcpus * 2 - 2 },
+        environment: {
+          ...NODE,
+          id,
+          ...body,
+          memoryGb: (body as { vcpus: number }).vcpus * 2 - 2,
+        },
       });
     },
     remove: async (id) => {
@@ -176,6 +183,7 @@ describe("creating an environment", () => {
     await waitFor(() =>
       expect(created).toEqual([
         {
+          kind: "hosted",
           name: "Rust",
           vcpus: 8,
           setupScript: "  cargo fetch  ",
@@ -315,6 +323,7 @@ describe("changing and deleting", () => {
         [
           "env-1",
           {
+            kind: "hosted",
             name: "Node 24",
             vcpus: 6,
             setupScript: "pnpm install\n",
@@ -458,7 +467,7 @@ describe("an environment with a size that is no longer offered (1 vCPU)", () => 
     await userEvent.click(screen.getByRole("radio", { name: /^4 vCPU/ }));
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(updated).toHaveLength(1));
-    expect(updated[0]?.[1].vcpus).toBe(4);
+    expect((updated[0]?.[1] as { vcpus?: number } | undefined)?.vcpus).toBe(4);
   });
 });
 
@@ -588,7 +597,7 @@ describe("the size group (#819 review)", () => {
     await userEvent.click(
       screen.getByRole("button", { name: /new environment/i }),
     );
-    const group = screen.getAllByRole("radiogroup")[0] as HTMLElement;
+    const group = screen.getAllByRole("radiogroup")[1] as HTMLElement;
     const describedBy = () =>
       (group.getAttribute("aria-describedby") ?? "")
         .split(" ")
@@ -706,7 +715,7 @@ describe("the network setting of an environment (#745)", () => {
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(created).toHaveLength(1));
-    expect(created[0]?.network).toEqual({
+    expect((created[0] as { network?: unknown } | undefined)?.network).toEqual({
       mode: "list",
       hosts: ["pypi.org", "*.pythonhosted.org"],
     });
@@ -781,7 +790,9 @@ describe("the network setting of an environment (#745)", () => {
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(updated).toHaveLength(1));
-    expect(updated[0]?.[1].network).toEqual({ mode: "open", hosts: [] });
+    expect(
+      (updated[0]?.[1] as { network?: unknown } | undefined)?.network,
+    ).toEqual({ mode: "open", hosts: [] });
   });
 
   // #745-T42
@@ -806,5 +817,97 @@ describe("the network setting of an environment (#745)", () => {
     expect(
       await screen.findByText(describeFieldIssue("networkHosts", "invalid")),
     ).toBeTruthy();
+  });
+});
+
+// #854: the environment kind `runner`
+describe("an environment that runs on a runner (#854)", () => {
+  const BOX: EnvironmentView = {
+    ...NODE,
+    id: "env-box",
+    name: "GPU box",
+    kind: "runner",
+    labels: ["gpu", "linux"],
+    vcpus: null,
+    memoryGb: null,
+    setupScript: "",
+  };
+
+  // #854-T195
+  it("shows its labels instead of a size, a script and a network rule", async () => {
+    show(fakeApi([BOX]).api, true);
+
+    const box = (await screen.findByText("GPU box")).closest(
+      "li",
+    ) as HTMLElement;
+    expect(within(box).getByText("gpu, linux")).toBeTruthy();
+    expect(within(box).getByText(/own API key/)).toBeTruthy();
+    expect(within(box).queryByText(/vCPU/)).toBeNull();
+    expect(within(box).queryByText("No setup script")).toBeNull();
+    expect(within(box).queryByText(/network/i)).toBeNull();
+  });
+
+  // #854-T196
+  it("is made with a name and labels only: the form for it has no size, script or network", async () => {
+    const { api, created } = fakeApi([]);
+    show(api, true);
+    await screen.findByText(/standard/);
+    await userEvent.click(
+      screen.getByRole("button", { name: /new environment/i }),
+    );
+
+    await userEvent.click(
+      screen.getByRole("radio", { name: "A runner of the workspace" }),
+    );
+    expect(screen.queryByRole("radio", { name: /^4 vCPU/ })).toBeNull();
+    expect(screen.queryByLabelText(/Setup script/)).toBeNull();
+    expect(screen.queryByRole("radio", { name: /^No network/ })).toBeNull();
+    await userEvent.type(screen.getByLabelText("Name"), "GPU box");
+    await userEvent.type(screen.getByLabelText("Labels"), "Linux, gpu ,");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(created).toEqual([
+        { kind: "runner", name: "GPU box", labels: ["gpu", "linux"] },
+      ]),
+    );
+  });
+
+  // #854-T197
+  it("asks for at least one label before anything is sent", async () => {
+    const { api, created } = fakeApi([]);
+    show(api, true);
+    await screen.findByText(/standard/);
+    await userEvent.click(
+      screen.getByRole("button", { name: /new environment/i }),
+    );
+    await userEvent.click(
+      screen.getByRole("radio", { name: "A runner of the workspace" }),
+    );
+    await userEvent.type(screen.getByLabelText("Name"), "GPU box");
+
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(
+      await screen.findByText(describeFieldIssue("labels", "required")),
+    ).toBeTruthy();
+    expect(created).toEqual([]);
+  });
+
+  // #854-T198
+  it("loads into the form as a runner environment with its labels", async () => {
+    show(fakeApi([BOX]).api, true);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit GPU box" }),
+    );
+
+    expect((screen.getByLabelText("Labels") as HTMLInputElement).value).toBe(
+      "gpu, linux",
+    );
+    expect(
+      screen
+        .getByRole("radio", { name: "A runner of the workspace" })
+        .getAttribute("aria-checked"),
+    ).toBe("true");
   });
 });

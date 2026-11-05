@@ -14,6 +14,7 @@ import type {
 import { RunnerFleetError } from "./errors.ts";
 import {
   hashSecret,
+  customerRunnerId,
   newRegistrationToken,
   REGISTRATION_TOKEN_TTL_SECONDS,
 } from "../runner-identity/tokens.ts";
@@ -82,6 +83,11 @@ export function createRunnerFleetService(deps: {
     minBaseVersion: string | null;
     onlineWithinSeconds: number;
   };
+  /**
+   * Ends the running claims of a revoked runner, by the id the runner has in `jobs.runner_id`. Called after the revoke has taken effect,
+   * so the runner can report nothing more; absent, the claims end when their leases run out (two minutes).
+   */
+  endClaimsOf?: (customerRunnerId: string) => Promise<void>;
   now?: () => Date;
 }): RunnerFleetService {
   const now = deps.now ?? (() => new Date());
@@ -138,6 +144,9 @@ export function createRunnerFleetService(deps: {
           "RUNNER_FLEET_NOT_FOUND",
           "There is no such runner in this workspace.",
         );
+      // From here the runner is refused on every call, so it can report nothing for the job it is running. The job is ended now and not
+      // left to run out its lease: a turn has one attempt, so it fails, and its token and its record are dealt with as for any lost lease.
+      await deps.endClaimsOf?.(customerRunnerId(id));
     },
   };
 }

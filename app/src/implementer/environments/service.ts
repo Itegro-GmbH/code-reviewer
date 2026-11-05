@@ -5,6 +5,7 @@
 // here. An environment is a start configuration: nothing points at it from a task (a task copies size and script when it
 // starts), so changing or deleting one touches no turn.
 import type {
+  EnvironmentKind,
   ImplementerEnvironmentsRepository,
   StoredEnvironment,
 } from "../../db/repositories/implementer-environments-repository.ts";
@@ -21,9 +22,14 @@ import {
 export type EnvironmentView = {
   id: string;
   name: string;
-  vcpus: number;
-  /** The memory the agent's container gets at this size, in GB (0 for a size that leaves it none). */
-  memoryGb: number;
+  /** #854: `hosted` (a VM of the platform) or `runner` (a customer's runner with every label below). */
+  kind: EnvironmentKind;
+  /** The labels a runner must have; empty for a hosted environment. */
+  labels: string[];
+  /** The size of a hosted environment; null for a runner environment. */
+  vcpus: number | null;
+  /** The memory the agent's container gets at this size, in GB (0 for a size that leaves it none); null for a runner environment. */
+  memoryGb: number | null;
   /** Whether a task can be started with this size. False for a size that is no longer offered (1 vCPU): shown as it is, refused at submit. */
   sizeSupported: boolean;
   setupScript: string;
@@ -43,8 +49,10 @@ export type EnvironmentList = {
 export type EnvironmentPickerView = {
   id: string;
   name: string;
-  vcpus: number;
-  memoryGb: number;
+  kind: EnvironmentKind;
+  labels: string[];
+  vcpus: number | null;
+  memoryGb: number | null;
   sizeSupported: boolean;
   hasScript: boolean;
   /** The mode of the network rule (the hosts are on the environment itself). */
@@ -72,9 +80,13 @@ function viewOf(environment: StoredEnvironment): EnvironmentView {
   return {
     id: environment.id,
     name: environment.name,
+    kind: environment.kind,
+    labels: environment.labels,
     vcpus: environment.vcpus,
-    memoryGb: memoryGbOf(environment.vcpus),
-    sizeSupported: isEnvironmentVcpus(environment.vcpus),
+    memoryGb: environment.vcpus === null ? null : memoryGbOf(environment.vcpus),
+    // A runner environment has no size to be unsupported.
+    sizeSupported:
+      environment.vcpus === null || isEnvironmentVcpus(environment.vcpus),
     setupScript: environment.setupScript,
     network: environment.network,
     createdAt: environment.createdAt,
@@ -129,8 +141,9 @@ export function createEnvironmentService({
       return {
         environments: (await environments.listSummaries()).map((summary) => ({
           ...summary,
-          memoryGb: memoryGbOf(summary.vcpus),
-          sizeSupported: isEnvironmentVcpus(summary.vcpus),
+          memoryGb: summary.vcpus === null ? null : memoryGbOf(summary.vcpus),
+          sizeSupported:
+            summary.vcpus === null || isEnvironmentVcpus(summary.vcpus),
         })),
         maximum: ENVIRONMENTS_PER_WORKSPACE_MAX,
       };

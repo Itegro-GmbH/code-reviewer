@@ -137,6 +137,16 @@ export function outcomeOfTurn(
   ended: EndedTurn,
   unknownCostMicroUsd: number,
 ): TurnOutcome {
+  // #854: a turn of a runner environment that no runner took within the deadline never ran: it is free, and the step says why.
+  if (ended.jobErrorCode === "no_runner_available")
+    return {
+      ok: false,
+      code: "no_runner_available",
+      message:
+        "No runner of this workspace with the labels of the environment took the turn in time. Start a runner with these labels and run the workflow again.",
+      costMicroUsd: 0,
+      costBasis: "reported",
+    };
   const reported = costOfResult(ended.jobResult);
   // Only a turn that succeeded has every call answered and counted; a failed or stopped one may have lost an open call (the
   // runner then reports no cost), so it is charged at the cap.
