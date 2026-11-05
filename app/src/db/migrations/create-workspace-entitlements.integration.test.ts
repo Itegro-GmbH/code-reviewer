@@ -55,6 +55,8 @@ async function snapshot(
       table.name === "workflow_step_runs" ||
       table.name === "profiles" ||
       table.name === "profile_versions" ||
+      table.name === "runners" ||
+      table.name === "runner_registration_tokens" ||
       table.name === "implementer_turn_steps" ||
       table.name === "implementer_session_snapshots" ||
       table.name === "implementer_session_snapshot_parts" ||

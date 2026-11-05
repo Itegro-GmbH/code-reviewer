@@ -61,9 +61,10 @@ from code_reviewer_runner.job import (
 )
 from code_reviewer_runner.redaction import Redactor
 from code_reviewer_runner.result import ErrorCode, Usage
+from code_reviewer_runner.resume_wire import ResumeReason
 
 from . import finish_tool
-from .agent import AgentTurn, EngineRuntime, ImplementerAgent
+from .agent import AgentTurn, EngineRuntime, ImplementerAgent, ResumeOutcome
 from .agent_container import (
     AGENT_HOME,
     AGENT_REPO,
@@ -99,6 +100,7 @@ from .network_report import (
 )
 from .network_rule import MODE_OFF, MODE_OPEN, OFF, NetworkRule
 from .network_switch import Post, model_host_of, narrow_policy, parse_switch, urllib_post
+from .preface import MovedBranch, PrefaceFacts, ResumeMode, message_parts
 from .prompts import LEFTOVER_PROMPT, RESULT_REMINDER_PROMPT, instructions_text
 from .reader import RESET_SECONDS as READER_RESET_SECONDS
 from .report import agent_result_ok
@@ -109,6 +111,7 @@ from .result_channel import (
     finish_server_command,
     redacted_value,
 )
+from .resume_session import ResumeInput
 from .session_export import ExportFailed
 from .snapshot_pump import SnapshotPump
 from .step_pump import FLUSH_SECONDS as STEPS_FLUSH_SECONDS
@@ -163,6 +166,15 @@ INSTRUCTIONS_FILE = "implementer-instructions.md"
 DEADLINE_DETAIL = "the whole-job deadline was reached"
 COST_LIMIT_DETAIL = "the cost limit is used up"
 TOKEN_CAP_DETAIL = "the token cap is used up"
+# #840: a follow-up turn that imported a long conversation can be refused by the model door before
+# any call reaches the provider: the door reserves the cost of a call first, and the history alone
+# (the first call reads all of it again) is more than the limit (measured: 18.4 MB at 5 USD). The
+# code is the same as for any cost limit; the sentence says why this one came before any work.
+HISTORY_OVER_LIMIT_DETAIL = (
+    "the cost limit of the turn was reached before the first model call: the imported conversation "
+    "of the earlier turns alone costs more than the limit, because the first call reads all of it "
+    "again"
+)
 
 
 def deadline_seconds(time_limit: float, elapsed: float) -> float:
@@ -369,6 +381,7 @@ class ImplementerSession:
         steps: StepPump | None = None,
         results: ResultReader | None = None,
         snapshot: SnapshotPump | None = None,
+        resume: ResumeInput | None = None,
     ) -> None:
         self.job = job
         # #843: the profile version the turn started with. A turn without one pushes, as before.
@@ -396,6 +409,15 @@ class ImplementerSession:
         self._steps = steps
         # The channel the engine's session leaves over at the end (#839): None takes no export.
         self._snapshot = snapshot
+        # #840: the stored conversation of a follow-up turn (or the reason there is none), and how
+        # the engine got it once it started. A follow-up that was handed none has no conversation.
+        follow_up = job.implementer.resume
+        self._resume_input: ResumeInput | None = None
+        if follow_up is not None:
+            self._resume_input = resume or ResumeInput.without(
+                ResumeReason.DOWNLOAD_FAILED if follow_up.snapshot else ResumeReason.NO_SNAPSHOT
+            )
+        self._resume_outcome: ResumeOutcome | None = None
         self._notes: list[str] = []
         self._summary = ""
         self._error: tuple[ErrorCode, str] | None = None
@@ -445,8 +467,13 @@ class ImplementerSession:
             for note in place.create():
                 self._note(note)
             agent = self._agent(model, place)
-            agent.start(ENGINE_PORT)
+            if self._resume_input is None:
+                agent.start(ENGINE_PORT)
+            else:
+                agent.start(ENGINE_PORT, self._resume_input)
             self._session_id = agent.session_id
+            if self._resume_input is not None:
+                self._note_resume(agent.resume)
             self._start_steps(agent)
             self._work(agent)
         except Exception as error:
@@ -490,6 +517,54 @@ class ImplementerSession:
         result = self._result()
         self._remove_place(place)
         return result
+
+    def _note_resume(self, outcome: ResumeOutcome | None) -> None:
+        """How the follow-up turn got its earlier conversation, as a line of the log."""
+        self._resume_outcome = outcome
+        if outcome is None:
+            return
+        if outcome.mode is ResumeMode.IMPORTED:
+            self._note("the conversation of the earlier turns was imported")
+        else:
+            reason = "" if outcome.reason is None else f": {outcome.reason.value}"
+            self._note(f"the turn continues from a summary of the earlier turns{reason}")
+
+    def _resume_block(self) -> dict[str, Any] | None:
+        """`ImplementerResumeResult`: set once the engine started on a follow-up turn."""
+        outcome = self._resume_outcome
+        if outcome is None:
+            return None
+        if outcome.mode is ResumeMode.IMPORTED:
+            return {"mode": outcome.mode.value}
+        reason = outcome.reason or ResumeReason.IMPORT_FAILED
+        return {"mode": outcome.mode.value, "reason": reason.value}
+
+    def _first_message(self, agent: ImplementerAgent) -> str | list[dict[str, Any]]:
+        """The first message of the turn: the instruction, and on a follow-up turn the preface
+        (what happened to the sandbox) in front of it, as a part of its own."""
+        instruction = self.job.implementer.instruction
+        resume = self.job.implementer.resume
+        if resume is None:
+            return instruction
+        outcome = agent.resume or ResumeOutcome(ResumeMode.SUMMARY_ONLY, ResumeReason.IMPORT_FAILED)
+        workspace = self.workspace
+        tips = workspace.start_tips
+        # The session branch first, then the others in alphabetical order.
+        session = self.job.implementer.branch
+        names = sorted(tips, key=lambda name: (name != session, name))
+        checkout = workspace.start_checkout or session
+        facts = PrefaceFacts(
+            turn=resume.turn,
+            mode=outcome.mode,
+            branches=[(name, tips[name]) for name in names],
+            checkout=checkout,
+            moved=[MovedBranch(m.name, m.was, m.now) for m in workspace.resume_moved],
+            missing=workspace.resume_missing,
+            setup_ran=self._has_script(),
+        )
+        return message_parts(
+            facts, instruction, previous_summary=resume.previous_summary, digest=resume.digest
+        )
 
     def _save_session(self, agent: ImplementerAgent) -> None:
         """Take the engine's session and hand it to the job host, which uploads it (#839).
@@ -751,7 +826,7 @@ class ImplementerSession:
         may not push gets no extra message: nothing is collected from the tree, so a second paid
         turn would only ask for a commit that nobody takes (#843)."""
         check = self._watch()
-        ended = agent.turn(self.job.implementer.instruction, check=check)
+        ended = agent.turn(self._first_message(agent), check=check)
         self._summary = ended.text
         self._note("the agent ended its turn")
         if self._schema is not None:
@@ -807,9 +882,15 @@ class ImplementerSession:
         used = model is not None and model.ledger.model_used
         failed = None if model is None else model.upstream_error()
         code, detail = classify(error, used_model=used, provider_error=failed)
+        if code is ErrorCode.COST_LIMIT_REACHED and not used and self._history_imported():
+            detail = HISTORY_OVER_LIMIT_DETAIL
         if self._error is None:
             self._error = (code, detail)
         self._note(f"the turn ended: {code.value}")
+
+    def _history_imported(self) -> bool:
+        outcome = self._resume_outcome
+        return outcome is not None and outcome.mode is ResumeMode.IMPORTED
 
     # -- the end --------------------------------------------------------------
 
@@ -1020,6 +1101,7 @@ class ImplementerSession:
             network=self._network_block(),
             checked_out=workspace.checked_out,
             agent_result=self._agent_result,
+            resume=self._resume_block(),
         )
 
     def _usage(self) -> Usage:

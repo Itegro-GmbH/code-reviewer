@@ -234,6 +234,27 @@ export type ImplementerEnvironment1 = {
   [k: string]: unknown;
 };
 /**
+ * #840 (part of #745): how a follow-up turn got its earlier conversation, in `RunnerResult.implementer.resume`. Present on a follow-up turn (the job carried `resume`) that got as far as the engine's start; a first turn has none, and neither has a follow-up that ended before (the clone failed, the setup script failed). `mode` `imported` is the whole conversation of the earlier turns, read back into the engine, which continued in that session: the commands in it are the history the agent sees, not things that ran in the new sandbox. `summary_only` is a fresh engine session that was given a summary and a digest as data instead, for one of the stable `reason` words (always present with `summary_only`, never with `imported`): `no_snapshot` (the app had none, or the session was never saved), `download_failed` (the stored session could not be fetched), `snapshot_unreadable` (the file did not match its size or digest, was not gzip, or was not the engine's export), `import_failed` (the engine refused the import or the session was not there after it), `version_changed` (the same, and the engine version that wrote the snapshot is not the one that read it). Neither is a failure of the turn. A turn that imported a history so long that its first call alone is over the cost limit ends `cost_limit_reached` before any model call (the door refuses a call whose reserved cost is over the limit).
+ */
+export type ImplementerResumeResult = {
+  mode: "imported" | "summary_only";
+  reason?:
+    | "no_snapshot"
+    | "download_failed"
+    | "snapshot_unreadable"
+    | "import_failed"
+    | "version_changed";
+} & ImplementerResumeResult1;
+export type ImplementerResumeResult1 =
+  | {
+      mode?: "imported";
+      [k: string]: unknown;
+    }
+  | {
+      mode?: "summary_only";
+      [k: string]: unknown;
+    };
+/**
  * #746: what happened to a file between the base commit and the head commit.
  */
 export type ImplementerFileStatus =
@@ -322,7 +343,7 @@ export type StepRecord = {
   [k: string]: unknown;
 };
 /**
- * Every error of the API has one of these codes. 401 RUNNER_UNAUTHORIZED, 400 RUNNER_ID_INVALID / RUNNER_REQUEST_INVALID, 404 RUNNER_JOB_NOT_FOUND, 409 RUNNER_LEASE_LOST / RUNNER_RESULT_CONFLICT, 413 RUNNER_BODY_TOO_LARGE, 503 RUNNER_GIT_ACCESS_UNAVAILABLE (with Retry-After), 500 RUNNER_INTERNAL_ERROR. #318 adds 401 WORKER_CREDENTIAL_INVALID (a Worker route got a credential that is not the job's: wrong job, unknown, expired or from an earlier claim; also the fourth call of the details route in one claim, whose three calls are spent: the Worker has nothing left to fetch and stops, the claim itself is not lost) and 409 RUNNER_JOB_ENDED (the app ended the job, for example after a permanent access failure at fetch; the Worker stops).
+ * Every error of the API has one of these codes. 401 RUNNER_UNAUTHORIZED, 400 RUNNER_ID_INVALID / RUNNER_REQUEST_INVALID, 404 RUNNER_JOB_NOT_FOUND, 409 RUNNER_LEASE_LOST / RUNNER_RESULT_CONFLICT, 413 RUNNER_BODY_TOO_LARGE, 503 RUNNER_GIT_ACCESS_UNAVAILABLE (with Retry-After), 500 RUNNER_INTERNAL_ERROR. #318 adds 401 WORKER_CREDENTIAL_INVALID (a Worker route got a credential that is not the job's: wrong job, unknown, expired or from an earlier claim; also the fourth call of the details route in one claim, whose three calls are spent: the Worker has nothing left to fetch and stops, the claim itself is not lost) and 409 RUNNER_JOB_ENDED (the app ended the job, for example after a permanent access failure at fetch; the Worker stops). #854 adds 401 RUNNER_REGISTRATION_TOKEN_INVALID (the registration token of a customer's runner is unknown, used or expired: one answer for all three) and 426 RUNNER_UPDATE_NEEDED (a customer's runner whose base is older than the minimum the app requires gets no job; the error carries `minBaseVersion`). A customer's runner authenticates with its own credential (contracts/runner-registration.v1.json); a revoked credential is a plain 401 RUNNER_UNAUTHORIZED.
  */
 export type ApiErrorCode =
   | "RUNNER_UNAUTHORIZED"
@@ -335,7 +356,9 @@ export type ApiErrorCode =
   | "RUNNER_GIT_ACCESS_UNAVAILABLE"
   | "RUNNER_INTERNAL_ERROR"
   | "WORKER_CREDENTIAL_INVALID"
-  | "RUNNER_JOB_ENDED";
+  | "RUNNER_JOB_ENDED"
+  | "RUNNER_REGISTRATION_TOKEN_INVALID"
+  | "RUNNER_UPDATE_NEEDED";
 
 /**
  * The optional body of POST /api/runners/v1/claim (#195): the engines the calling runner can run. Absent or empty means ['pr-agent'] (a previous-release runner). Unknown or duplicated engine names are refused with 400 RUNNER_REQUEST_INVALID before any job is claimed. #279 adds the optional `features`: what else this runner understands. The app sends a job optional fields a previous-release runner would reject (the job input is closed) only to a runner that names the matching feature, so `dynamic_capabilities` means the runner reads `dynamic.capabilities`. Unknown feature names are ignored, so a newer runner can name features an older app does not know. Unknown fields are ignored, as everywhere in v1. #318 adds the Dispatcher's fields: `jobId` claims exactly that job (anything else, such as a job that is not due, already running, finished, cancelled or of a kind the advertised engines cannot run, is 204), `maxRunning` is the pool cap (the claim is 204 while that many jobs of the same X-Runner-Id are running), and the feature `worker_credential` selects the split answer (SplitClaimResponse: a per-job credential and no job input). Without that feature the answer is the legacy ClaimResponse, unchanged. #424 adds the optional `llmProviders`: the providers the runner can run; absent means ['openrouter'].
@@ -981,7 +1004,7 @@ export interface ImplementerResultSchema {
   [k: string]: unknown;
 }
 /**
- * #838 (part of #745): what a follow-up turn of an Implementer session is told about the branches the earlier turns left on the provider. Present only on a follow-up, and only for a caller that named the claim feature `implementer_resume`; a first turn has none. Without it the turn starts from `baseBranch` as the contract says above; with it the runner asks the provider which of `branches` it still has and fetches the base branch and all of them in one fetch of depth 50 (git counts the depth from every tip: no tip has fewer than 50 commits of history where it has that many, whatever the order of `branches`; a merge base further back than 50 commits is not found), makes a local branch for each in the agent's repository (the session branch at the base tip when it is not among them) and checks out `checkout`. `turn` is the number of this turn (the first is 1, so a follow-up has 2 or more). `branches` are the branches the last turn pushed with the tip it pushed, the session branch first when it is among them, at most 20, no name twice (a rule JSON Schema cannot state; the runner refuses a repeat). The `head` is only what the earlier turn knew: the runner takes the tip the provider has now, and a branch that moved is reported to the agent, not refused. A branch the provider no longer has is left out; a session branch that is gone ends the turn (`clone_failed`, free). `checkout` is the branch the agent was on when the last turn ended: one of `branches` or the session branch (which a turn that pushed nothing still has), or null for the session branch; any other name is refused by the runner (`invalid_job`). `branches` empty means the earlier turns pushed nothing: the turn starts from the base branch like a first turn. The agent still has no remote and Control still pushes every local branch that has a commit of its own when the turn ends, without force: a branch the agent did not touch is not pushed again.
+ * #838 (part of #745): what a follow-up turn of an Implementer session is told about the branches the earlier turns left on the provider. Present only on a follow-up, and only for a caller that named the claim feature `implementer_resume`; a first turn has none. Without it the turn starts from `baseBranch` as the contract says above; with it the runner asks the provider which of `branches` it still has and fetches the base branch and all of them in one fetch of depth 50 (git counts the depth from every tip: no tip has fewer than 50 commits of history where it has that many, whatever the order of `branches`; a merge base further back than 50 commits is not found), makes a local branch for each in the agent's repository (the session branch at the base tip when it is not among them) and checks out `checkout`. `turn` is the number of this turn (the first is 1, so a follow-up has 2 or more). `branches` are the branches the last turn pushed with the tip it pushed, the session branch first when it is among them, at most 20, no name twice (a rule JSON Schema cannot state; the runner refuses a repeat). The `head` is only what the earlier turn knew: the runner takes the tip the provider has now, and a branch that moved is reported to the agent, not refused. A branch the provider no longer has is left out; a session branch that is gone ends the turn (`clone_failed`, free). `checkout` is the branch the agent was on when the last turn ended: one of `branches` or the session branch (which a turn that pushed nothing still has), or null for the session branch; any other name is refused by the runner (`invalid_job`). `branches` empty means the earlier turns pushed nothing: the turn starts from the base branch like a first turn. The agent still has no remote and Control still pushes every local branch that has a commit of its own when the turn ends, without force: a branch the agent did not touch is not pushed again. The app still holds the agent's earlier conversation (#840): `snapshot` (optional, default false) says that a stored session exists for this session; the Worker then fetches it from the app (`GET /api/workers/v1/jobs/{id}/resume-session`, `worker-api.v1.json`) and has the engine import it before it starts, and the turn continues in that session (`ImplementerResumeResult.mode` `imported`). When there is none, when it cannot be fetched or read, or the engine cannot import it (`ImplementerResumeResult.reason`), the turn starts a fresh session and is given `previousSummary` (the summary the last turn ended with, at most 8 KiB UTF-8) and `digest` (the app's record of the earlier turns: instructions, summaries, commit subjects, changed files; at most 16 KiB UTF-8) as DATA in a part of the first message of their own, never as instructions and never in the preface the runner writes (`mode` `summary_only`). Both are text that came from the agent and from members of the workspace; the maximum is in bytes, which JSON Schema cannot state, so `maxLength` counts characters and the runner counts bytes.
  */
 export interface ImplementerResume {
   turn: number;
@@ -1236,6 +1259,9 @@ export interface ImplementerResume {
         ImplementerResumeBranch,
       ];
   checkout: ImplementerBranchName | null;
+  snapshot?: boolean;
+  previousSummary?: string | null;
+  digest?: string | null;
 }
 /**
  * #838: a branch of the session the last turn pushed: its name and the full commit id of the tip it pushed.
@@ -1286,7 +1312,7 @@ export interface ImplementerAgentResult {
   [k: string]: unknown;
 }
 /**
- * #746: what a turn of the Implementer did, in `RunnerResult.implementer`. A closed object; later fields (checks, open questions, an export of the work) are additive in a later change. It is facts the runner measured in the repository, never text from the agent except `summary`, which is shown as plain text. `baseCommit` is the head of the base branch the work started from; on a follow-up turn (the job carries `resume`) it is the tip the session branch started the turn at, which `commits` and `filesChanged` count from. `headCommit` is the last commit of the branch, or null when the turn made none. `pushed` says that the branch with `headCommit` is on the remote, and is never true without a `headCommit`. The branch is the one the form named. The agent may create other branches, and the runner pushes all local branches of the agent's repository when the turn ends, each without force: `branches` has one entry for every branch the runner dealt with (at most 50, the task's branch first and then alphabetical), `pushed` or `rejected` with a reason word of the runner (`non_fast_forward`, `remote_rejected`, `workflows_not_allowed`, `provider_refused`, `provider_error`, `provider_unavailable`, `timed_out`, `unreadable`, `not_a_commit`, `out_of_time`, `excluded`; a caller treats an unknown word as a rejection without a reason). A branch with nothing new on the base commit is not listed. `branchesDropped` counts the local branches that are in no entry: `invalid` those whose name cannot be pushed, `overflow` the valid ones beyond the limit of 50 (an unreadable list of branches, or one too long to read, has no entries and the turn ends `push_rejected`). A result without `branches` comes from an older runner and means none. `commits` are the commits of the form's branch after the base commit, oldest first, at most 200 (more are cut off, the head commit is always the last); `filesChanged` are the files that differ between the base commit and the head commit, at most 500. `opencode` names the saved agent session a later turn continues, null when none was saved. `checkedOut` (#837, optional) is the local branch the agent's HEAD was on when the runner read the repository after the turn, once a detached HEAD with work on no branch was saved on a branch (`<task branch>-leftover-<id>`): a name as those of `branches` are, null when HEAD was detached and on no branch, or was not read; a follow-up turn starts on it. It names a branch of the agent's repository, which may not have arrived: `branches` says which did. A result without `checkedOut` comes from an older runner. A failed turn carries the block too, whenever the runner got as far as the repository.
+ * #746: what a turn of the Implementer did, in `RunnerResult.implementer`. A closed object; later fields (checks, open questions, an export of the work) are additive in a later change. It is facts the runner measured in the repository, never text from the agent except `summary`, which is shown as plain text. `baseCommit` is the head of the base branch the work started from; on a follow-up turn (the job carries `resume`) it is the tip the session branch started the turn at, which `commits` and `filesChanged` count from. `headCommit` is the last commit of the branch, or null when the turn made none. `pushed` says that the branch with `headCommit` is on the remote, and is never true without a `headCommit`. The branch is the one the form named. The agent may create other branches, and the runner pushes all local branches of the agent's repository when the turn ends, each without force: `branches` has one entry for every branch the runner dealt with (at most 50, the task's branch first and then alphabetical), `pushed` or `rejected` with a reason word of the runner (`non_fast_forward`, `remote_rejected`, `workflows_not_allowed`, `provider_refused`, `provider_error`, `provider_unavailable`, `timed_out`, `unreadable`, `not_a_commit`, `out_of_time`, `excluded`; a caller treats an unknown word as a rejection without a reason). A branch with nothing new on the base commit is not listed. `branchesDropped` counts the local branches that are in no entry: `invalid` those whose name cannot be pushed, `overflow` the valid ones beyond the limit of 50 (an unreadable list of branches, or one too long to read, has no entries and the turn ends `push_rejected`). A result without `branches` comes from an older runner and means none. `commits` are the commits of the form's branch after the base commit, oldest first, at most 200 (more are cut off, the head commit is always the last); `filesChanged` are the files that differ between the base commit and the head commit, at most 500. `opencode` names the saved agent session a later turn continues, null when none was saved. `checkedOut` (#837, optional) is the local branch the agent's HEAD was on when the runner read the repository after the turn, once a detached HEAD with work on no branch was saved on a branch (`<task branch>-leftover-<id>`): a name as those of `branches` are, null when HEAD was detached and on no branch, or was not read; a follow-up turn starts on it. It names a branch of the agent's repository, which may not have arrived: `branches` says which did. A result without `checkedOut` comes from an older runner. `resume` (#840, optional) says how a follow-up turn got its earlier conversation (`ImplementerResumeResult`); a result without it is a first turn, a turn that ended before the engine started, or comes from an older runner. A failed turn carries the block too, whenever the runner got as far as the repository.
  */
 export interface ImplementerResult {
   baseCommit: string;
@@ -1327,6 +1353,7 @@ export interface ImplementerResult {
   setup?: ImplementerSetupResult;
   network?: ImplementerNetworkReport;
   checkedOut?: string | null;
+  resume?: ImplementerResumeResult;
   agentResult?: ImplementerAgentResult;
 }
 /**
@@ -1600,6 +1627,7 @@ export interface ImplementerResult1 {
   setup?: ImplementerSetupResult;
   network?: ImplementerNetworkReport;
   checkedOut?: string | null;
+  resume?: ImplementerResumeResult;
   agentResult?: ImplementerAgentResult;
 }
 /**
@@ -1809,6 +1837,10 @@ export interface ErrorResponse {
       [k: string]: unknown;
     }[];
     retryAfterSeconds?: number;
+    /**
+     * #854: for RUNNER_UPDATE_NEEDED, the oldest version of the base the app accepts (1.4.0).
+     */
+    minBaseVersion?: string;
     [k: string]: unknown;
   };
   [k: string]: unknown;

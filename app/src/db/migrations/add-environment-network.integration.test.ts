@@ -40,7 +40,9 @@ async function rowsOfEveryTable(
       table.name === "workflow_runs" ||
       table.name === "workflow_step_runs" ||
       table.name === "profiles" ||
-      table.name === "profile_versions"
+      table.name === "profile_versions" ||
+      table.name === "runners" ||
+      table.name === "runner_registration_tokens"
     )
       continue;
     // A later migration's table (#745): it does not exist before this migration is applied, and it is empty after.

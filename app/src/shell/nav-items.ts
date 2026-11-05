@@ -37,6 +37,7 @@ const NAV_GROUPS: readonly { items: readonly NavPlace[] }[] = [
         label: "Environments",
         capability: "implementer",
       },
+      { path: "/runners", label: "Runners", capability: "implementer" },
       { path: "/runs", label: "Runs", capability: "review" },
     ],
   },

@@ -92,11 +92,23 @@ from code_reviewer_runner.job_loop.reporting import (
     result_from_outcome,
     stopped_result,
 )
+from code_reviewer_runner.job_loop.resume_download import (
+    RESUME_TOTAL_SECONDS,
+    ResumeSessionApi,
+    ResumeUnavailable,
+)
 from code_reviewer_runner.job_loop.snapshot_sender import SnapshotApi, SnapshotSender
 from code_reviewer_runner.job_loop.step_sender import StepsApi, StepSender
 from code_reviewer_runner.lease_check import LeaseState
 from code_reviewer_runner.pr_agent_config import PASSTHROUGH_VARIABLES
 from code_reviewer_runner.result import ErrorCode
+from code_reviewer_runner.resume_wire import (
+    RESUME_FILE_NAME,
+    RESUME_STATE_VARIABLE,
+    ResumeReason,
+    failed_state,
+    file_state,
+)
 from code_reviewer_runner.supersede_timing import (
     KILL_MARGIN_SECONDS,
     SUPERSEDED_DRAIN_SECONDS,
@@ -236,6 +248,15 @@ class _RunState:
         if not self.superseded.is_set():
             self.lease_expires_at = lease_expires_at
             self.superseded.set()
+
+
+@dataclass(frozen=True)
+class _Resumed:
+    """What the host hands a follow-up turn's process of its stored session: the file, and the line
+    for `RESUME_STATE_VARIABLE` (None: the turn is not a follow-up that has a conversation)."""
+
+    files: Mapping[str, bytes] = field(default_factory=dict[str, bytes])
+    state: str | None = None
 
 
 def _kind_of(job: Job | ImplementerInput) -> ReviewKind:
@@ -426,6 +447,37 @@ class JobHost:
             return None
         return SnapshotSender(self._api, claimed.id, clock=self._clock, log=self._log).serve
 
+    async def _resume_session(self, claimed: ClaimedJob, job: Job | ImplementerInput) -> _Resumed:
+        """The stored session of a follow-up turn (#840), downloaded for the process, which holds no
+        credential for the app. Nothing here is the job's failure: whatever goes wrong is the word
+        the process puts in its result, and the turn continues from a summary. A turn that has no
+        conversation (the app says so) gets nothing."""
+        resume = job.implementer.resume if isinstance(job, ImplementerInput) else None
+        if resume is None or not resume.snapshot:
+            return _Resumed()
+        try:
+            if not isinstance(self._api, ResumeSessionApi):
+                raise ResumeUnavailable(ResumeReason.DOWNLOAD_FAILED)
+            # No heartbeat runs yet (it starts with the process), and the lease is four heartbeat
+            # intervals: whatever the API does, the wait ends at the total and the turn goes on
+            # from the summary (`resume_download.RESUME_TOTAL_SECONDS`).
+            received = await asyncio.wait_for(
+                self._api.resume_session(claimed.id), RESUME_TOTAL_SECONDS
+            )
+        except ResumeUnavailable as unavailable:
+            return _Resumed(state=failed_state(unavailable.reason))
+        except TimeoutError:
+            self._log.warning("job %s: the stored session did not arrive in time", claimed.id)
+            return _Resumed(state=failed_state(ResumeReason.DOWNLOAD_FAILED))
+        except Exception as error:
+            self._log.warning(
+                "job %s: the stored session could not be fetched (%s)",
+                claimed.id,
+                type(error).__name__,
+            )
+            return _Resumed(state=failed_state(ResumeReason.DOWNLOAD_FAILED))
+        return _Resumed(files={RESUME_FILE_NAME: received.data}, state=file_state(received.header))
+
     def _ms_since(self, started: float) -> int:
         return int((self._clock.monotonic() - started) * 1000)
 
@@ -463,13 +515,18 @@ class JobHost:
             return await self._refuse(claimed, result)
         self._log.info("job %s claimed: %s", claimed.id, _label_of(job))
         state = _RunState()
+        resumed = await self._resume_session(claimed, job)
         try:
             # ASCII escapes: a lone surrogate in a text cannot break the encoding, and the job
             # process reads the same JSON.
             spec = ProcessSpec(
                 argv=self._settings.job_command,
-                env=self._child_environment(job),
+                env={
+                    **self._child_environment(job),
+                    **({} if resumed.state is None else {RESUME_STATE_VARIABLE: resumed.state}),
+                },
                 stdin=json.dumps(claimed.input).encode("ascii"),
+                files=resumed.files,
                 # A Dynamic job is the root supervisor (it drops the engine to its own user); every
                 # other job drops to the unprivileged job user when the loop itself is root.
                 run_as=(None if _supervises_an_engine(kind) else self._settings.diff_job_user),

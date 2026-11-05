@@ -11,7 +11,7 @@ import { migrationProvider } from "./index.ts";
 import { createEmptyTestDatabase } from "../../test-support/test-database.ts";
 import { withoutColumnsAddedLater } from "../../test-support/columns-added-later.ts";
 
-const THIS = "20261105110000_create_workflow_runs";
+const THIS = "20261105130000_create_workflow_runs";
 const T = "2026-11-05T08:00:00.000Z";
 
 const beforeThisMigration: MigrationProvider = {

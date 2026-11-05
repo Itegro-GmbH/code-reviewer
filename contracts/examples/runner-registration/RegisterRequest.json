@@ -1,0 +1,11 @@
+{
+  "token": "crt_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "name": "build-box-1",
+  "labels": ["linux", "gpu", "team-a"],
+  "baseVersion": "1.0.0",
+  "manifest": {
+    "harnesses": { "opencode": { "version": "1.19.0", "ready": true } },
+    "capabilities": ["agent-docker"]
+  },
+  "limits": { "cpus": 8, "memoryMb": 16384, "diskGb": 100, "parallelRuns": 2 }
+}

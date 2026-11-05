@@ -323,6 +323,9 @@ export const RUNNER_API_ERROR_CODES = [
   // The Worker API (#318, served from #320): a credential that is not the job's, and a job the app ended.
   "WORKER_CREDENTIAL_INVALID",
   "RUNNER_JOB_ENDED",
+  // A customer's runner (#854): a registration token that cannot be exchanged, and a base older than the minimum.
+  "RUNNER_REGISTRATION_TOKEN_INVALID",
+  "RUNNER_UPDATE_NEEDED",
 ] as const;
 export type RunnerApiErrorCode = (typeof RUNNER_API_ERROR_CODES)[number];
 
@@ -335,6 +338,8 @@ export type ErrorResponse = {
     message: string;
     fields?: FieldError[];
     retryAfterSeconds?: number;
+    /** #854: with `RUNNER_UPDATE_NEEDED`, the oldest version of the base the app accepts. */
+    minBaseVersion?: string;
   };
 };
 
@@ -801,6 +806,11 @@ export type ImplementerResult = {
    */
   checkedOut?: string | null;
   /**
+   * #840: how a follow-up turn got its earlier conversation. Present on a follow-up turn that got as far as the engine's start; absent
+   * on a first turn and from a runner of the release before.
+   */
+  resume?: ImplementerResumeResult;
+  /**
    * #843: the result the agent handed in through the finish tool, checked by the runner against the turn's result schema after the
    * agent's container was gone. Data of an untrusted writer, an object within the bounds of `agent-result.ts`; the app holds it to the
    * bounds and takes the secrets out of it, but does not check it against the turn's schema (the workflow engine does, before it routes the
@@ -809,6 +819,29 @@ export type ImplementerResult = {
    */
   agentResult?: { [key: string]: JsonValue };
 };
+
+/** #840: the two ways a follow-up turn gets its earlier conversation (`ImplementerResumeResult.mode` in the contract). */
+export const IMPLEMENTER_RESUME_MODES = ["imported", "summary_only"] as const;
+export type ImplementerResumeMode = (typeof IMPLEMENTER_RESUME_MODES)[number];
+
+/**
+ * #840: why a follow-up turn continued from a summary and not from the conversation (`ImplementerResumeResult.reason`). The words of the
+ * runner (`resume_wire.py`): none of them fails the turn.
+ */
+export const IMPLEMENTER_RESUME_REASONS = [
+  "no_snapshot",
+  "download_failed",
+  "snapshot_unreadable",
+  "import_failed",
+  "version_changed",
+] as const;
+export type ImplementerResumeReason =
+  (typeof IMPLEMENTER_RESUME_REASONS)[number];
+
+/** `reason` is there exactly when `mode` is `summary_only`. */
+export type ImplementerResumeResult =
+  | { mode: "imported" }
+  | { mode: "summary_only"; reason: ImplementerResumeReason };
 
 export type CompleteRequest = { leaseToken: string; result: RunnerResult };
 

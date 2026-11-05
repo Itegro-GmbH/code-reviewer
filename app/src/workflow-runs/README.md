@@ -18,7 +18,7 @@ member may use them (`start_implementer_task`: a run starts tasks).
 | `service.ts`, `http.ts`, `shared.ts` | The run service (start, get, list), the handlers behind the routes, the wiring of the running server (the hook of the runner API, the reconciler of the sweep)           |
 | `errors.ts`, `limits.ts`             | The stable codes (`WORKFLOW_RUN_*` for the routes, the lower case codes of a failed run or step) and the bounds                                                          |
 
-The tables are `workflow_runs` and `workflow_step_runs` (migration `20261105110000_create_workflow_runs`), written by
+The tables are `workflow_runs` and `workflow_step_runs` (migration `20261105130000_create_workflow_runs`), written by
 `src/db/repositories/workflow-runs-repository.ts`, scoped to a workspace. `workflow-runs-sweep.ts` is the one instance-level read (the runs that run and were
 not touched for a minute), classified in `scoping.test.ts`.
 

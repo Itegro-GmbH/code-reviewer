@@ -51,6 +51,20 @@ export type RecordPartResult =
       complete: boolean;
     };
 
+export type ReadForJobResult =
+  /** The job is not a running turn of the Implementer of this workspace with this lease token. */
+  | { status: "not_holder" }
+  /** The job has no turn (never the case for a turn of the Implementer). */
+  | { status: "no_session" }
+  /** The session has no snapshot of an earlier turn. */
+  | { status: "none" }
+  | {
+      status: "ok";
+      snapshot: StoredSessionSnapshot;
+      /** The gzip file. */
+      data: Uint8Array;
+    };
+
 /** A stored snapshot without its bytes. Timestamps are ISO 8601 text in UTC. */
 export type StoredSessionSnapshot = {
   sessionId: string;
@@ -76,6 +90,13 @@ export type ImplementerSnapshotsRepository = {
     leaseToken: string,
     part: SnapshotPartWrite,
   ): Promise<RecordPartResult>;
+  /**
+   * The snapshot of the session that the running turn `jobId`, held with `leaseToken`, belongs to, for the follow-up turn to import
+   * (#840). Only that session's, found from the job: a job reads no other session's snapshot. Only a snapshot of an EARLIER turn
+   * counts (a turn that is running has none of its own until it ends; one left by an earlier attempt of this very turn is not an
+   * earlier conversation). Reads only; it neither locks the job nor extends the lease.
+   */
+  readForJob(jobId: string, leaseToken: string): Promise<ReadForJobResult>;
   /** The snapshot of a session without its bytes, or undefined. */
   find(sessionId: string): Promise<StoredSessionSnapshot | undefined>;
   /** The snapshot of a session with its gzip file, or undefined. */
@@ -340,6 +361,39 @@ export function createImplementerSnapshotsRepository(
         .where("workspace_id", "=", workspaceId)
         .executeTakeFirst();
       return row === undefined ? undefined : describe(row);
+    },
+
+    async readForJob(jobId, leaseToken) {
+      const held = await db
+        .selectFrom("jobs")
+        .select("id")
+        .where("id", "=", jobId)
+        .where("workspace_id", "=", workspaceId)
+        .where("lease_token", "=", leaseToken)
+        .where("status", "=", "running")
+        .where("review_kind", "=", "implementer")
+        .executeTakeFirst();
+      if (held === undefined) return { status: "not_holder" };
+      const turn = await db
+        .selectFrom("implementer_turns")
+        .select(["session_id", "number"])
+        .where("job_id", "=", jobId)
+        .where("workspace_id", "=", workspaceId)
+        .executeTakeFirst();
+      if (turn === undefined) return { status: "no_session" };
+      const row = await db
+        .selectFrom("implementer_session_snapshots")
+        .selectAll()
+        .where("session_id", "=", turn.session_id)
+        .where("workspace_id", "=", workspaceId)
+        .where("turn_number", "<", turn.number)
+        .executeTakeFirst();
+      if (row === undefined) return { status: "none" };
+      return {
+        status: "ok",
+        snapshot: describe(row),
+        data: Buffer.from(row.data, "base64"),
+      };
     },
 
     async read(sessionId) {

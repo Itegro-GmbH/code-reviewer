@@ -68,6 +68,8 @@ type WorkerSteps =
   typeof import("../../src/app/api/workers/v1/jobs/[id]/steps/route.ts");
 type WorkerSession =
   typeof import("../../src/app/api/workers/v1/jobs/[id]/session/route.ts");
+type WorkerResumeSession =
+  typeof import("../../src/app/api/workers/v1/jobs/[id]/resume-session/route.ts");
 
 const fakes: FakeGithub[] = [];
 
@@ -129,6 +131,8 @@ async function startRoutes() {
       (await import("../../src/app/api/workers/v1/jobs/[id]/steps/route.ts")) as WorkerSteps,
     workerSession:
       (await import("../../src/app/api/workers/v1/jobs/[id]/session/route.ts")) as WorkerSession,
+    workerResumeSession:
+      (await import("../../src/app/api/workers/v1/jobs/[id]/resume-session/route.ts")) as WorkerResumeSession,
   };
 }
 
@@ -464,6 +468,52 @@ describe("the runner API route files", () => {
     const noCredential = await put();
     const runnerToken = await put(RUNNER_TOKEN);
     const diffJob = await put(job.credential);
+
+    expect(noCredential.status).toBe(401);
+    expect(runnerToken.status).toBe(401);
+    expect(diffJob.status).toBe(400);
+    expect(diffJob.headers.get("cache-control")).toBe("no-store");
+    expect(await diffJob.json()).toMatchObject({
+      error: { fields: [{ field: "jobId", code: "invalid" }] },
+    });
+  });
+
+  // #840-T50
+  it("answers the resume-session call of the Worker API in the usual form: a credential is needed, and a diff job reads no snapshot", async () => {
+    const routes = await startRoutes();
+    await queueJobThroughWebhook(routes);
+    const claim = await routes.claim.POST(
+      new Request("https://app.test/api/runners/v1/claim", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${RUNNER_TOKEN}`,
+          "x-runner-id": "dispatcher-a",
+        },
+        body: JSON.stringify({
+          engines: ["pr-agent"],
+          features: ["worker_credential"],
+        }),
+      }),
+    );
+    const { job } = await claim.json();
+    const context = { params: Promise.resolve({ id: job.id }) };
+    const url = `https://app.test/api/workers/v1/jobs/${job.id}/resume-session?part=0`;
+    const get = (credential?: string) =>
+      routes.workerResumeSession.GET(
+        new Request(url, {
+          method: "GET",
+          headers:
+            credential === undefined
+              ? {}
+              : { authorization: `Bearer ${credential}` },
+        }),
+        context,
+      );
+
+    const noCredential = await get();
+    const runnerToken = await get(RUNNER_TOKEN);
+    const diffJob = await get(job.credential);
 
     expect(noCredential.status).toBe(401);
     expect(runnerToken.status).toBe(401);

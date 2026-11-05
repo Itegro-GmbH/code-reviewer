@@ -18,6 +18,8 @@ import type {
   FindingPriority,
   ImplementerNetworkReport,
   ImplementerResult,
+  ImplementerResumeReason,
+  ImplementerResumeResult,
   ImplementerSetupResult,
   ReviewFindings,
   RunnerResult,
@@ -31,6 +33,7 @@ import {
   FINDING_PRIORITIES,
   IMPLEMENTER_FILE_STATUSES,
   IMPLEMENTER_RESULT_LIMITS,
+  IMPLEMENTER_RESUME_REASONS,
   IMPLEMENTER_SETUP_OUTPUT_CHARS,
   LLM_PROVIDER_ID_PATTERN,
   MAX_FINDING_COUNT,
@@ -1070,6 +1073,7 @@ function parseImplementerResult(
       "setup",
       "network",
       "checkedOut",
+      "resume",
       "agentResult",
     ],
     prefix,
@@ -1136,6 +1140,10 @@ function parseImplementerResult(
           max: MAX_BRANCH_NAME_CHARS,
           stripControls: true,
         });
+  const resume =
+    value.resume === undefined
+      ? undefined
+      : parseImplementerResume(check, value.resume, `${prefix}resume`);
   // #843: the result the agent handed in through the finish tool: an object within the bounds of a result, or none. One that is not
   // is left out, never refused: the runner holds a result to the same bounds before it sends it, but a request that fails for the
   // result of an agent would lose the report with it (the branches that were pushed, the commits, the usage). A turn that has a
@@ -1165,6 +1173,7 @@ function parseImplementerResult(
     opencode === undefined ||
     (value.setup !== undefined && setup === undefined) ||
     (value.network !== undefined && network === undefined) ||
+    (value.resume !== undefined && resume === undefined) ||
     checkedOut === undefined
   )
     return undefined;
@@ -1183,8 +1192,43 @@ function parseImplementerResult(
     ...(network === undefined ? {} : { network }),
     // Kept only when the runner sent it, as `branches` is.
     ...(value.checkedOut === undefined ? {} : { checkedOut }),
+    ...(resume === undefined ? {} : { resume }),
     ...(agentResult === undefined ? {} : { agentResult }),
   };
+}
+
+/** #840: how a follow-up turn got its conversation: `imported`, or `summary_only` with one of the runner's reasons (and only then). */
+function parseImplementerResume(
+  check: Checker,
+  value: unknown,
+  field: string,
+): ImplementerResumeResult | undefined {
+  if (!isRecord(value)) return check.fail(field, "invalid");
+  const before = check.fields.length;
+  refuseUnknownKeys(check, value, ["mode", "reason"], `${field}.`);
+  const mode = value.mode;
+  if (mode === "imported") {
+    if (value.reason !== undefined) check.fail(`${field}.reason`, "invalid");
+    return check.fields.length > before ? undefined : { mode };
+  }
+  if (mode !== "summary_only") {
+    check.fail(`${field}.mode`, mode === undefined ? "required" : "invalid");
+    return undefined;
+  }
+  const reason = value.reason;
+  if (
+    typeof reason !== "string" ||
+    !(IMPLEMENTER_RESUME_REASONS as readonly string[]).includes(reason)
+  ) {
+    check.fail(
+      `${field}.reason`,
+      reason === undefined ? "required" : "invalid",
+    );
+    return undefined;
+  }
+  return check.fields.length > before
+    ? undefined
+    : { mode, reason: reason as ImplementerResumeReason };
 }
 
 function parseResult(check: Checker, value: unknown): RunnerResult | undefined {

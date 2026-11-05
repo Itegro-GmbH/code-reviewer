@@ -74,6 +74,7 @@ type Ids = {
   workflowId: string;
   workflowRunId: string;
   profileId: string;
+  runnerId: string;
 };
 
 /** What a row of the table needs to make a request: the parts of the address and the body. */
@@ -660,6 +661,41 @@ const ENTRIES: Entry[] = [
     implementer: true,
   },
   {
+    // #854-T140: every member lists the runners of their own workspace; the other workspace's are not reachable.
+    name: "GET runners",
+    route: "/api/w/[workspace]/runners",
+    method: "GET",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/runners",
+    params: () => ({}),
+    file: "runners/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    // #854-T141: an Owner or an Admin makes a registration token for their own workspace.
+    name: "POST runners/tokens",
+    route: "/api/w/[workspace]/runners/tokens",
+    method: "POST",
+    minRole: MINIMUM_ROLE.manage_runners,
+    path: () => "/runners/tokens",
+    params: () => ({}),
+    file: "runners/tokens/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    // #854-T142: an Owner or an Admin revokes a runner of their own workspace; the other workspace's is not reachable.
+    name: "POST runners/[runnerId]/revoke",
+    route: "/api/w/[workspace]/runners/[runnerId]/revoke",
+    method: "POST",
+    minRole: MINIMUM_ROLE.manage_runners,
+    path: (ids) => `/runners/${ids.runnerId}/revoke`,
+    params: (ids) => ({ runnerId: ids.runnerId }),
+    file: "runners/[runnerId]/revoke/route.ts",
+    implementer: true,
+  },
+  {
     name: "POST plan-handoff",
     route: "/api/w/[workspace]/plan-handoff",
     method: "POST",
@@ -1061,6 +1097,24 @@ async function seedWorkspace(
     100,
   );
   if (!profile.ok) throw new Error("seeding failed");
+  // A runner on a customer's machine (#854): the other workspace's must not be revocable through this one's address.
+  await db
+    .insertInto("runners")
+    .values({
+      id: `runner-${slug}`,
+      workspace_id: workspace.id,
+      name: `box ${slug}`,
+      labels: "linux",
+      base_version: "1.0.0",
+      manifest: "{}",
+      limits: "{}",
+      credential_hash: `hash-${slug}`,
+      previous_credential_hash: null,
+      created_at: "2026-11-05T08:00:00.000Z",
+      last_seen_at: "2026-11-05T08:00:00.000Z",
+      revoked_at: null,
+    })
+    .execute();
   return {
     workspace,
     owner,
@@ -1070,6 +1124,7 @@ async function seedWorkspace(
       workflowId: workflow.workflow.id,
       workflowRunId: workflowRun.run.id,
       profileId: profile.profile.id,
+      runnerId: `runner-${slug}`,
       integrationId: integration.id,
       repositoryId: repository.id,
       runId: job.job.id,

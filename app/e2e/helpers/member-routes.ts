@@ -105,6 +105,8 @@ export function addressesOf(
         route.pattern.startsWith("/api/w/:workspace/environments") ||
         route.pattern.startsWith("/api/w/:workspace/workflows") ||
         route.pattern.startsWith("/api/w/:workspace/profiles") ||
+        route.pattern.startsWith("/api/w/:workspace/runners") ||
+        route.pattern === "/w/:workspace/runners" ||
         route.pattern === "/w/:workspace/settings/billing",
     },
   ];
@@ -140,6 +142,7 @@ export function addressesOf(
         case "workflowId":
         case "profileId":
         case "runId":
+        case "runnerId":
         case "integrationId":
         case "invitationId":
         case "userId":

@@ -75,6 +75,11 @@ export const USER_REFERENCES: ReadonlyArray<{
   { table: "workflows", column: "created_by", handling: "move" },
   { table: "workflow_runs", column: "created_by", handling: "move" },
   { table: "profiles", column: "created_by", handling: "move" },
+  {
+    table: "runner_registration_tokens",
+    column: "created_by",
+    handling: "move",
+  },
   { table: "invitations", column: "invited_by", handling: "move" },
   { table: "invitations", column: "accepted_by", handling: "move" },
   {
@@ -278,6 +283,12 @@ export async function mergeImportedUser(
     // Who made a profile (#843). Who saved each version is history, kept as text and not moved (see the migration).
     await trx
       .updateTable("profiles")
+      .set({ created_by: actingUserId })
+      .where("created_by", "=", source.id)
+      .execute();
+    // Who made a registration token for a runner (#854).
+    await trx
+      .updateTable("runner_registration_tokens")
       .set({ created_by: actingUserId })
       .where("created_by", "=", source.id)
       .execute();
