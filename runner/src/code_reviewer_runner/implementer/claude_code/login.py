@@ -125,3 +125,17 @@ def load_login(environment: Mapping[str, str], home: Path) -> ClaudeLogin | Logi
     return LoginProblem(
         f"no Claude Code login on this device: {_HOW}, or set {OAUTH_VARIABLE}", configured=False
     )
+
+
+def login_source(environment: Mapping[str, str], home: Path) -> dict[str, str]:
+    """What the job process of the runner needs to find the same login again (#856): the path of
+    the token file (never its content), or, for a login that only the runner's environment holds,
+    that variable. Nothing for a device without a login. It does not judge the login."""
+    named = environment.get(TOKEN_FILE_VARIABLE, "").strip()
+    if named:
+        return {TOKEN_FILE_VARIABLE: named}
+    default = home / TOKEN_FILE_NAME
+    if os.path.lexists(default):
+        return {TOKEN_FILE_VARIABLE: str(default)}
+    held = environment.get(OAUTH_VARIABLE)
+    return {} if held is None else {OAUTH_VARIABLE: held}

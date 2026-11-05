@@ -497,6 +497,8 @@ def run_implementer_job(
                 duration_ms=_elapsed_ms(clock, started),
             )
         ready = looked
+        if secrets_sink is not None:
+            secrets_sink.append(ready.login.secret)
     # No answer is no lease: a process started without the channel never pushes.
     gate = lease_gate(lease_check or (lambda: LeaseState.UNCONFIRMED))
     setup: TurnSetup | None = None

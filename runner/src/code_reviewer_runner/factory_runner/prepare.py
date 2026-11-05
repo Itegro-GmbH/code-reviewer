@@ -39,6 +39,7 @@ from code_reviewer_runner.factory_runner.selftest import (
     run_selftest,
 )
 from code_reviewer_runner.implementer.agent_container import AGENT_IMAGE_REFERENCE, AGENT_RUNTIME
+from code_reviewer_runner.implementer.claude_code.login import login_source
 from code_reviewer_runner.implementer.claude_code.readiness import (
     HARNESS_CLAUDE_CODE,
     HarnessStatus,
@@ -151,6 +152,8 @@ def job_environment(
     )
     if identity := runner_identity(config):
         environment[RUNNER_ID_VARIABLE] = identity
+    # #856: a job that asks for Claude Code reads the login of this device in its own process.
+    environment.update(login_source(source, home_directory(source)))
     return environment
 
 

@@ -150,6 +150,33 @@ def test_the_job_environment_names_the_proof_the_memory_and_the_runtime() -> Non
     assert "FACTORY_RUNNER_CREDENTIAL" not in environment  # the credential never leaves the loop
 
 
+# #856-L01
+def test_the_job_environment_hands_the_job_the_path_of_the_token_file_and_not_the_token(
+    tmp_path: Path,
+) -> None:
+    token = tmp_path / "claude-code-token"
+    token.write_text("sk-ant-oat01-not-a-real-token-0000000000000000")
+    named = job_environment(
+        {"FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE": str(token)}, config(), "runc", 4096
+    )
+    by_default = job_environment({"FACTORY_RUNNER_HOME": str(tmp_path)}, config(), "runc", 4096)
+    none = job_environment({"FACTORY_RUNNER_HOME": str(tmp_path / "empty")}, config(), "runc", 4096)
+
+    assert named["FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE"] == str(token)
+    assert by_default["FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE"] == str(token)
+    assert "FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE" not in none
+    assert "not-a-real-token" not in " ".join(named.values())
+
+
+# #856-L01
+def test_a_login_from_the_runners_environment_is_handed_over_for_the_job_to_use() -> None:
+    token = "sk-ant-oat01-not-a-real-token-0000000000000000"
+
+    environment = job_environment({"CLAUDE_CODE_OAUTH_TOKEN": token}, config(), "runc", 4096)
+
+    assert environment["CLAUDE_CODE_OAUTH_TOKEN"] == token
+
+
 # #854-R1
 def test_the_job_environment_names_the_runner_for_the_labels_of_its_containers() -> None:
     named = job_environment({}, config(runner_id="r1"), "runc", 4096)
