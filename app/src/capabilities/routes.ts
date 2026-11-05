@@ -195,6 +195,11 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     class: "implementer",
   },
   { route: "/api/w/[workspace]/runs/[id]/continuation", class: "implementer" },
+  // A member stops a run of the Implementer (#891).
+  {
+    route: "/api/w/[workspace]/implementer/runs/[runId]/cancel",
+    class: "implementer",
+  },
   // The steps of a running turn, sent by its runner or Worker for the live view (#745), and read by the Runs page; only a factory
   // runs turns.
   { route: "/api/w/[workspace]/runs/[id]/steps", class: "implementer" },

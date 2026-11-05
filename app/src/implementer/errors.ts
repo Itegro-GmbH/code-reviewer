@@ -61,6 +61,8 @@ export const IMPLEMENTER_ERROR_CODES = [
    * session takes one next instruction at a time. 409.
    */
   "IMPLEMENTER_SESSION_BUSY",
+  /** No run of the Implementer of this workspace has this id (a review's or another workspace's looks the same). 404. */
+  "IMPLEMENTER_RUN_NOT_FOUND",
   /** The session's branch is no longer on the platform (deleted there): a follow-up cannot continue it; the person starts a new task. 409. */
   "IMPLEMENTER_BRANCH_GONE",
   /** The platform could not be asked, answered with an error, or answered with something unusable. 503 (never a 502, #690). */
@@ -92,6 +94,7 @@ export const IMPLEMENTER_ERROR_STATUS: Record<
   EXCEEDS_OPERATOR_MAXIMUM: 422,
   IMPLEMENTER_SESSION_NOT_FOUND: 404,
   IMPLEMENTER_SESSION_BUSY: 409,
+  IMPLEMENTER_RUN_NOT_FOUND: 404,
   IMPLEMENTER_BRANCH_GONE: 409,
   IMPLEMENTER_GITHUB_UNAVAILABLE: 503,
 };
