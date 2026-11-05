@@ -286,8 +286,12 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           await deps.turns.findByRequest(requestIdOf(run, last)),
         );
       const next = document.steps[steps.length];
+      // Also while the last step runs: its turn may be found ended under the lock, and the next step is added there; the profile is
+      // read here so that the lock holds no second connection of the pool.
       if (
-        (last === undefined || last.status === "succeeded") &&
+        (last === undefined ||
+          last.status === "succeeded" ||
+          last.status === "running") &&
         next?.kind === "agent" &&
         typeof next.profile === "string"
       )
