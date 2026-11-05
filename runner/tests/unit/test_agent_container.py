@@ -274,7 +274,7 @@ def test_the_inner_docker_has_to_say_ready_and_a_container_that_never_does_is_gi
     slow.stop()
 
 
-# #827-T03: a start that failed leaves no guard behind: it would read /proc/meminfo for the VM's life
+# #827-T03: a start that failed leaves no guard behind (it would read /proc/meminfo for ever)
 @pytest.mark.parametrize("how", ["not ready", "sealed wrong"])
 def test_a_failed_start_closes_the_memory_guard(rig: Rig, how: str) -> None:
     if how == "not ready":

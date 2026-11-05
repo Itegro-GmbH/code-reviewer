@@ -8,7 +8,12 @@ from collections.abc import Callable
 import pytest
 
 from code_reviewer_runner.implementer.git_process import Outcome
-from code_reviewer_runner.implementer.ref_drop import MAX_REFS, RefDeletions, RefListingFailed, TooManyRefs
+from code_reviewer_runner.implementer.ref_drop import (
+    MAX_REFS,
+    RefDeletions,
+    RefListingFailed,
+    TooManyRefs,
+)
 
 pytestmark = pytest.mark.unit
 

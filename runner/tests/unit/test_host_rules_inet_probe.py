@@ -39,7 +39,12 @@ def status(tmp_path: Path, mode: str, message: str) -> tuple[int, str]:
     script = host_rules.INET_SCRIPT.replace(host_rules.NFT, str(nft))
     done = subprocess.run(
         ["/bin/sh", "-c", script, "inet-rules", "add table inet t"],
-        env={"FAKE_MODE": mode, "FAKE_MESSAGE": message, "FAKE_LOG": str(log), "PATH": "/usr/bin:/bin"},
+        env={
+            "FAKE_MODE": mode,
+            "FAKE_MESSAGE": message,
+            "FAKE_LOG": str(log),
+            "PATH": "/usr/bin:/bin",
+        },
         capture_output=True,
         timeout=20,
         check=False,
