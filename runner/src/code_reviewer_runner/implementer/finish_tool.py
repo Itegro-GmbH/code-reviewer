@@ -370,38 +370,56 @@ def check_value(schema: Mapping[str, Any], value: object) -> list[Issue]:
 
 # -- the bytes ------------------------------------------------------------------------------------
 
-_SCAN = re.compile(rb'"(?:[^"\\]|\\.)*"|[\[\]{},]', re.DOTALL)
+_JSON_SPACE = frozenset(b" \t\n\r")
+_BACKSLASH, _QUOTE, _COMMA = 0x5C, 0x22, 0x2C
+_OPENERS = frozenset(b"[{")
+_CLOSERS = frozenset(b"]}")
 
 
 def scan_bounds(raw: bytes) -> str | None:
     """Whether `raw` is within the bounds of a result, found without parsing it: its size, how deep
     its lists and objects nest, and how many values it holds (the root, every entry and field, every
-    list and object: what the app counts too). None when it is. The scan is linear and builds
-    nothing, and the strings are skipped whole, so a hostile file costs what its size costs.
+    list and object: what the app counts too). None when it is. One pass over the bytes that keeps
+    three numbers and two flags and builds nothing: a backslash in a text skips one byte and a quote
+    ends it, so a hostile file costs what its size costs (a pattern for the texts backtracks, and an
+    unclosed text of escaped quotes cost minutes).
 
     The values are counted from the structure: one for the root, one for each comma, and one for
-    each list or object that is not empty (the commas of a container count its entries but one)."""
+    each list or object that is not empty (the commas of a container count its entries but one). A
+    container is empty when only white space lies between its brackets."""
     if len(raw) > MAX_RESULT_BYTES:
         return TOO_LARGE
     depth = 0
     values = 1
-    previous = 0
-    for token in _SCAN.finditer(raw):
-        first = token.group()[0]
-        if first == 0x22:  # a string
-            previous = first
+    empty = False  # the last thing seen, white space apart, is the bracket that opened the container
+    in_text = False
+    escaped = False
+    for byte in raw:
+        if in_text:
+            if escaped:
+                escaped = False
+            elif byte == _BACKSLASH:
+                escaped = True
+            elif byte == _QUOTE:
+                in_text = False
             continue
-        if first in b"[{":
+        if byte in _JSON_SPACE:
+            continue
+        if byte in _OPENERS:
             depth += 1
             if depth > MAX_VALUE_DEPTH:
                 return TOO_DEEP
-        elif first in b"]}":
+            empty = True
+            continue
+        if byte in _CLOSERS:
             depth -= 1
-            if previous not in b"[{":
+            if not empty:
                 values += 1
-        else:
+        elif byte == _COMMA:
             values += 1
-        previous = first
+        elif byte == _QUOTE:
+            in_text = True
+        empty = False
         if values > MAX_VALUE_ITEMS:
             return TOO_MANY_VALUES
     return None

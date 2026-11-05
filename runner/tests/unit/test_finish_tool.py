@@ -144,6 +144,41 @@ def test_brackets_and_commas_inside_a_text_are_not_counted() -> None:
     assert scan_bounds(raw) is None
 
 
+def _built(vector: dict[str, Any]) -> bytes:
+    return "".join(text * times for text, times in vector["parts"]).encode()
+
+
+# #843-T42
+@pytest.mark.parametrize("vector", VECTORS["bounds"], ids=lambda v: v["name"])
+def test_the_bounds_are_the_ones_the_app_holds_a_result_to(vector: dict[str, Any]) -> None:
+    # The same texts the app's `boundAgentResult` is run on: a result one side accepts and the
+    # other refuses would lose the whole report of a turn.
+    assert scan_bounds(_built(vector)) == vector["bound"]
+
+
+# #843-T42
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(b'"\\"' * (MAX_RESULT_BYTES // 4), id="strings of escaped quotes, closed"),
+        pytest.param(b'"\\"' * (MAX_RESULT_BYTES // 4) + b'"', id="escaped quotes, one open"),
+        pytest.param(b'{"a":"' + b'\\"' * (MAX_RESULT_BYTES // 2 - 4), id="an unclosed string"),
+        pytest.param(b'"' * MAX_RESULT_BYTES, id="quotes only"),
+        pytest.param(b"\\" * MAX_RESULT_BYTES, id="backslashes only"),
+        pytest.param(b"[" * 8 + b'"' * (MAX_RESULT_BYTES - 8), id="a list of quotes"),
+        pytest.param(b'{"a":"' + b"\\\\" * (MAX_RESULT_BYTES // 2 - 4), id="escaped backslashes"),
+        pytest.param(b'["' + b'a\\"' * (MAX_RESULT_BYTES // 3 - 2), id="text and escaped quotes"),
+    ],
+)
+def test_a_hostile_file_of_the_largest_size_is_scanned_in_well_under_a_second(raw: bytes) -> None:
+    assert len(raw) <= MAX_RESULT_BYTES
+    started = time.monotonic()
+
+    scan_bounds(raw)
+
+    assert time.monotonic() - started < 0.5
+
+
 # #843-T42
 @pytest.mark.parametrize("raw", [b"", b"nope", b'{"a": 1,}', b"\xff\xfe", b'{"findings": NaN}'])
 def test_what_is_not_json_is_not_json(raw: bytes) -> None:

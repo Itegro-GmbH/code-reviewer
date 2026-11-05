@@ -1,5 +1,5 @@
 {
- "description": "Cases both checks of a result agree on (#843): the app's `checkResultValue` and `validateResultSchema` (app/src/workflows/result-schema.ts) and the runner's `check_value` and `check_schema` (runner/src/code_reviewer_runner/implementer/finish_tool.py). `issues` are [pointer, code] pairs; the order is not part of the contract, the set is.",
+ "description": "Cases both checks of a result agree on (#843): the app's `checkResultValue` and `validateResultSchema` (app/src/workflows/result-schema.ts) and the runner's `check_value` and `check_schema` (runner/src/code_reviewer_runner/implementer/finish_tool.py). `issues` are [pointer, code] pairs; the order is not part of the contract, the set is. `bounds` are values written as text by repeating parts (`[text, times]`, joined) with the bound each must break (null: none): the size of the file, the levels of lists and objects, and the number of values (what the app's `boundAgentResult` and the runner's `scan_bounds` count: the root, every entry and field, every list and object), which both are held to.",
  "schemas": [
   {
    "name": "findings",
@@ -1075,6 +1075,490 @@
      "unknown_field"
     ]
    ]
+  }
+ ],
+ "bounds": [
+  {
+   "name": "19999 values, the lists hold one number each",
+   "parts": [
+    [
+     "{\"a\":[",
+     1
+    ],
+    [
+     "1,",
+     1
+    ],
+    [
+     "[1],",
+     9997
+    ],
+    [
+     "[1]",
+     1
+    ],
+    [
+     "]}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "20000 values, the lists hold one number each",
+   "parts": [
+    [
+     "{\"a\":[",
+     1
+    ],
+    [
+     "1,",
+     0
+    ],
+    [
+     "[1],",
+     9998
+    ],
+    [
+     "[1]",
+     1
+    ],
+    [
+     "]}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "20001 values, the lists hold one number each",
+   "parts": [
+    [
+     "{\"a\":[",
+     1
+    ],
+    [
+     "1,",
+     1
+    ],
+    [
+     "[1],",
+     9998
+    ],
+    [
+     "[1]",
+     1
+    ],
+    [
+     "]}",
+     1
+    ]
+   ],
+   "bound": "too_many_values"
+  },
+  {
+   "name": "19999 values, the objects hold one field with a number each",
+   "parts": [
+    [
+     "{\"a\":[",
+     1
+    ],
+    [
+     "1,",
+     1
+    ],
+    [
+     "{\"k\":1},",
+     9997
+    ],
+    [
+     "{\"k\":1}",
+     1
+    ],
+    [
+     "]}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "20000 values, the objects hold one field with a number each",
+   "parts": [
+    [
+     "{\"a\":[",
+     1
+    ],
+    [
+     "1,",
+     0
+    ],
+    [
+     "{\"k\":1},",
+     9998
+    ],
+    [
+     "{\"k\":1}",
+     1
+    ],
+    [
+     "]}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "20001 values, the objects hold one field with a number each",
+   "parts": [
+    [
+     "{\"a\":[",
+     1
+    ],
+    [
+     "1,",
+     1
+    ],
+    [
+     "{\"k\":1},",
+     9998
+    ],
+    [
+     "{\"k\":1}",
+     1
+    ],
+    [
+     "]}",
+     1
+    ]
+   ],
+   "bound": "too_many_values"
+  },
+  {
+   "name": "20,000 values, the lists hold one literal each",
+   "parts": [
+    [
+     "{\"a\":[",
+     1
+    ],
+    [
+     "[true],",
+     4999
+    ],
+    [
+     "[null],",
+     4998
+    ],
+    [
+     "[false],",
+     1
+    ],
+    [
+     "[-1.5e3]",
+     1
+    ],
+    [
+     "]}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "19999 values, the lists are empty but for white space",
+   "parts": [
+    [
+     "{\"a\":[",
+     1
+    ],
+    [
+     "[ ],",
+     19996
+    ],
+    [
+     "[\n]",
+     1
+    ],
+    [
+     "]}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "20000 values, the lists are empty but for white space",
+   "parts": [
+    [
+     "{\"a\":[",
+     1
+    ],
+    [
+     "[ ],",
+     19997
+    ],
+    [
+     "[\n]",
+     1
+    ],
+    [
+     "]}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "20001 values, the lists are empty but for white space",
+   "parts": [
+    [
+     "{\"a\":[",
+     1
+    ],
+    [
+     "[ ],",
+     19998
+    ],
+    [
+     "[\n]",
+     1
+    ],
+    [
+     "]}",
+     1
+    ]
+   ],
+   "bound": "too_many_values"
+  },
+  {
+   "name": "20,000 values, pretty printed with one number per list",
+   "parts": [
+    [
+     "{\n \"a\": [\n",
+     1
+    ],
+    [
+     "  [ 1 ],\n",
+     9998
+    ],
+    [
+     "  [ 1 ]\n",
+     1
+    ],
+    [
+     " ]\n}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "20,002 values, pretty printed with one number per list",
+   "parts": [
+    [
+     "{\n \"a\": [\n",
+     1
+    ],
+    [
+     "  [ 1 ],\n",
+     10000
+    ],
+    [
+     "  [ 1 ]\n",
+     1
+    ],
+    [
+     " ]\n}",
+     1
+    ]
+   ],
+   "bound": "too_many_values"
+  },
+  {
+   "name": "eight levels of lists and objects are within the bound",
+   "parts": [
+    [
+     "{\"a\":",
+     1
+    ],
+    [
+     "[",
+     7
+    ],
+    [
+     "1",
+     1
+    ],
+    [
+     "]",
+     7
+    ],
+    [
+     "}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "nine levels of lists and objects are over the bound",
+   "parts": [
+    [
+     "{\"a\":",
+     1
+    ],
+    [
+     "[",
+     8
+    ],
+    [
+     "1",
+     1
+    ],
+    [
+     "]",
+     8
+    ],
+    [
+     "}",
+     1
+    ]
+   ],
+   "bound": "too_deep"
+  },
+  {
+   "name": "eight levels, the innermost list empty",
+   "parts": [
+    [
+     "{\"a\":",
+     1
+    ],
+    [
+     "[",
+     7
+    ],
+    [
+     "]",
+     7
+    ],
+    [
+     "}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "nine levels, the innermost list empty",
+   "parts": [
+    [
+     "{\"a\":",
+     1
+    ],
+    [
+     "[",
+     8
+    ],
+    [
+     "]",
+     8
+    ],
+    [
+     "}",
+     1
+    ]
+   ],
+   "bound": "too_deep"
+  },
+  {
+   "name": "eight levels of objects",
+   "parts": [
+    [
+     "{\"a\":",
+     8
+    ],
+    [
+     "1",
+     1
+    ],
+    [
+     "}",
+     8
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "nine levels of objects",
+   "parts": [
+    [
+     "{\"a\":",
+     9
+    ],
+    [
+     "1",
+     1
+    ],
+    [
+     "}",
+     9
+    ]
+   ],
+   "bound": "too_deep"
+  },
+  {
+   "name": "262143 bytes",
+   "parts": [
+    [
+     "{\"a\":\"",
+     1
+    ],
+    [
+     "x",
+     262135
+    ],
+    [
+     "\"}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "262144 bytes",
+   "parts": [
+    [
+     "{\"a\":\"",
+     1
+    ],
+    [
+     "x",
+     262136
+    ],
+    [
+     "\"}",
+     1
+    ]
+   ],
+   "bound": null
+  },
+  {
+   "name": "262145 bytes",
+   "parts": [
+    [
+     "{\"a\":\"",
+     1
+    ],
+    [
+     "x",
+     262137
+    ],
+    [
+     "\"}",
+     1
+    ]
+   ],
+   "bound": "too_large"
   }
  ]
 }
