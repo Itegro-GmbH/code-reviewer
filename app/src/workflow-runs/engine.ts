@@ -46,7 +46,7 @@ import {
 } from "./limits.ts";
 import { nextMove, type MachineState } from "./machine.ts";
 import { renderText, TemplateError, type RunValues } from "./templates.ts";
-import { outcomeOfTurn, type EndedTurn } from "./turn-facts.ts";
+import { outcomeOfTurn, type CostBasis, type EndedTurn } from "./turn-facts.ts";
 
 /** A turn as the engine reads it: its id, and the whole of it once its job is over. */
 export type TurnRead = { turnId: string; ended: EndedTurn | undefined };
@@ -124,7 +124,7 @@ const clip = (text: string): string =>
 function failed(
   errorCode: string,
   errorMessage: string,
-  extra: { costMicroUsd?: number } = {},
+  extra: { costMicroUsd?: number; costBasis?: CostBasis } = {},
 ): StepOutcome {
   return {
     status: "failed",
@@ -248,8 +248,12 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
             status: "succeeded",
             output: JSON.stringify(outcome.output),
             costMicroUsd: cost,
+            costBasis: outcome.costBasis,
           }
-        : failed(outcome.code, outcome.message, { costMicroUsd: cost }),
+        : failed(outcome.code, outcome.message, {
+            costMicroUsd: cost,
+            costBasis: outcome.costBasis,
+          }),
     );
     return "ended";
   }

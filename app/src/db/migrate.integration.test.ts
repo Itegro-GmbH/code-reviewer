@@ -135,6 +135,7 @@ describe("the migrations of both epics", () => {
       "20261105120000_create_runners",
       "20261105130000_create_workflow_runs",
       "20261105140000_add_runner_environments",
+      "20261105150000_add_workflow_step_cost_basis",
     ]);
   });
 

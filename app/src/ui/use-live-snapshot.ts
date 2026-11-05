@@ -34,6 +34,9 @@ export const PERMANENT_FAILURE_CODES = [
   "UNAUTHENTICATED",
   "ACCESS_DENIED",
   "RUN_NOT_FOUND",
+  /** A run of a workflow, or its workflow, that is gone (#873). */
+  "WORKFLOW_RUN_NOT_FOUND",
+  "WORKFLOW_RUN_WORKFLOW_NOT_FOUND",
   /** The answer of a workspace route for a person who is not (or no longer) a member (src/workspaces/access-response.ts). */
   "not_found",
 ] as const;

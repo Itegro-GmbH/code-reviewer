@@ -1,0 +1,393 @@
+// SPDX-License-Identifier: LicenseRef-Proprietary
+
+// @vitest-environment jsdom
+// The page of one workflow run (#873): the status with a failure told in words, the budget and what was spent with where the cost
+// figures come from, the steps with status, failure and duration, the link of an agent step to its Implementer run, what an action
+// step returned (links only to the run's own repository on github.com), values from an agent rendered as text, and the polling that
+// stops once the run has ended.
+import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { RequestResult } from "../ui/json-request.ts";
+import type { RunView } from "../workflow-runs/service.ts";
+import { WORKFLOW_RUN_POLL_MS, type WorkflowRunsApi } from "./api.ts";
+import { COST_BASIS_COPY, RUN_POLL_FAILED_TEXT } from "./messages.ts";
+import { WorkflowRunDetail } from "./run-detail.tsx";
+import { JOB_ID, run, step } from "./test-fixtures.ts";
+
+beforeEach(() => {
+  vi.useFakeTimers();
+});
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
+
+const ok = (value: RunView): RequestResult<{ run: RunView }> => ({
+  ok: true,
+  data: { run: value },
+});
+const failure = (code: string): RequestResult<{ run: RunView }> => ({
+  ok: false,
+  status: 500,
+  code,
+  issues: [],
+});
+
+function apiAnswering(answers: RequestResult<{ run: RunView }>[]) {
+  const fake = {
+    run: vi.fn(async () => answers.shift() ?? failure("UNEXPECTED_RESPONSE")),
+  };
+  return fake as unknown as WorkflowRunsApi & { run: typeof fake.run };
+}
+
+function renderRun(value: RunView, api = apiAnswering([])) {
+  const view = render(
+    <WorkflowRunDetail
+      workspaceSlug="acme"
+      workflowId="wf-1"
+      initial={{ run: value }}
+      api={api}
+    />,
+  );
+  return { ...view, api };
+}
+
+describe("the status of a run", () => {
+  // #873-T40
+  it("tells a run that ran out of budget in words, not as its code", () => {
+    const { container } = renderRun(
+      run({
+        status: "failed",
+        errorCode: "budget_exhausted",
+        finishedAt: "2026-11-05T10:05:00.000Z",
+      }),
+    );
+
+    expect(screen.getByText("Failed")).toBeTruthy();
+    const alert = container.querySelector("[data-slot=run-failure]");
+    expect(alert?.textContent).toContain("budget of the run is used up");
+    expect(container.textContent).not.toContain("budget_exhausted");
+  });
+
+  // #873-T40
+  it("tells why a step failed in words, keeps the engine's message under it, and never shows the code", () => {
+    const { container } = renderRun(
+      run({
+        status: "failed",
+        errorCode: "step_failed",
+        finishedAt: "2026-11-05T10:05:00.000Z",
+        steps: [
+          step({
+            status: "failed",
+            errorCode: "no_result",
+            errorMessage: "The agent ended without a result.",
+            output: null,
+          }),
+        ],
+      }),
+    );
+
+    const failed = container.querySelector("[data-slot=step-failure]");
+    expect(failed?.textContent).toContain("without a result that fits");
+    expect(
+      container.querySelector("[data-slot=step-error-message]")?.textContent,
+    ).toBe("The agent ended without a result.");
+    expect(container.textContent).not.toContain("no_result");
+    expect(container.textContent).not.toContain("step_failed");
+  });
+
+  it("shows a run that is running without a failure", () => {
+    const { container } = renderRun(run());
+
+    expect(screen.getByText("Running")).toBeTruthy();
+    expect(container.querySelector("[data-slot=run-failure]")).toBeNull();
+    expect(container.textContent).toContain("Started by hand");
+    expect(container.textContent).toContain("acme/widgets");
+  });
+});
+
+describe("the budget and the cost", () => {
+  // #873-T41
+  it("shows what was spent of the budget", () => {
+    const { container } = renderRun(run({ budgetUsd: 20, spentUsd: 0.42 }));
+
+    expect(container.querySelector("[data-slot=run-spent]")?.textContent).toBe(
+      "$0.42 of $20.00 spent of the budget",
+    );
+    expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe(
+      "2",
+    );
+  });
+
+  // #873-T42
+  it.each([
+    ["reported", COST_BASIS_COPY.reported],
+    ["estimated", COST_BASIS_COPY.estimated],
+    ["limit", COST_BASIS_COPY.limit],
+  ] as const)(
+    "names the basis %s of a step's cost and explains it for the run",
+    (basis, copy) => {
+      const { container } = renderRun(
+        run({ steps: [step({ costBasis: basis, costUsd: 1 })] }),
+      );
+
+      const cost = container.querySelector("[data-slot=cost-basis]");
+      expect(cost?.textContent).toBe(copy.label);
+      expect(cost?.getAttribute("data-basis")).toBe(basis);
+      const explained = container.querySelector("[data-slot=run-cost-bases]");
+      expect(explained?.textContent).toContain(copy.explanation);
+    },
+  );
+
+  // #873-T42
+  it("shows no basis for a step that cost nothing", () => {
+    const { container } = renderRun(
+      run({
+        steps: [
+          step({
+            kind: "action",
+            jobId: null,
+            profile: null,
+            costUsd: null,
+            costBasis: null,
+            output: null,
+          }),
+        ],
+      }),
+    );
+
+    expect(container.querySelector("[data-slot=cost-basis]")).toBeNull();
+    expect(container.querySelector("[data-slot=run-cost-bases]")).toBeNull();
+    expect(container.querySelector("[data-slot=step-cost]")).toBeNull();
+  });
+});
+
+describe("the steps", () => {
+  // #873-T43
+  it("shows each step with its status and how long it took, in the order they ran", () => {
+    const { container } = renderRun(
+      run({
+        steps: [
+          step({ id: "plan" }),
+          step({
+            id: "build",
+            position: 1,
+            status: "running",
+            finishedAt: null,
+            costUsd: null,
+            costBasis: null,
+            output: null,
+            jobId: null,
+          }),
+        ],
+      }),
+    );
+
+    const rows = container.querySelectorAll("[data-slot=run-step]");
+    expect([...rows].map((row) => row.getAttribute("data-step-id"))).toEqual([
+      "plan",
+      "build",
+    ]);
+    expect(rows[0]?.getAttribute("data-status")).toBe("succeeded");
+    expect(
+      rows[0]?.querySelector("[data-slot=step-duration]")?.textContent,
+    ).toBe("2 min 05 s");
+    expect(rows[1]?.getAttribute("data-status")).toBe("running");
+    expect(rows[1]?.querySelector("[data-slot=step-duration]")).toBeNull();
+  });
+
+  // #873-T44
+  it("links an agent step to its Implementer run, where the live view is", () => {
+    renderRun(run());
+
+    const link = screen.getByRole("link", { name: /agent's run/ });
+    expect(link.getAttribute("href")).toBe(`/w/acme/runs/${JOB_ID}`);
+  });
+
+  it("has no link for an agent step that has no run yet", () => {
+    renderRun(run({ steps: [step({ jobId: null, status: "running" })] }));
+
+    expect(screen.queryByRole("link", { name: /agent's run/ })).toBeNull();
+  });
+});
+
+describe("what an action returned", () => {
+  const action = (output: unknown) =>
+    step({
+      id: "open-pr",
+      kind: "action",
+      jobId: null,
+      profile: null,
+      costUsd: null,
+      costBasis: null,
+      output,
+    });
+
+  // #873-T45
+  it("links the pull request when it is in the run's repository on github.com, and shows number and existing", () => {
+    const { container } = renderRun(
+      run({
+        status: "succeeded",
+        steps: [
+          action({
+            url: "https://github.com/acme/widgets/pull/12",
+            number: 12,
+            existing: true,
+          }),
+        ],
+      }),
+    );
+
+    const result = container.querySelector("[data-slot=step-action-result]");
+    const link = within(result as HTMLElement).getByRole("link");
+    expect(link.getAttribute("href")).toBe(
+      "https://github.com/acme/widgets/pull/12",
+    );
+    expect(link.getAttribute("rel")).toContain("noopener");
+    expect(result?.textContent).toContain("Number: 12");
+    expect(result?.textContent).toContain("already existed");
+  });
+
+  // #873-T45
+  it.each([
+    "javascript:alert(document.cookie)",
+    "https://evil.example/acme/widgets/pull/12",
+    "https://github.com/other/repo/pull/12",
+    "https://github.com.evil.example/acme/widgets/pull/12",
+  ])("shows the address %s as text and makes no link of it", (url) => {
+    const { container } = renderRun(
+      run({ steps: [action({ url, number: 12 })] }),
+    );
+
+    const result = container.querySelector("[data-slot=step-action-result]");
+    expect(within(result as HTMLElement).queryByRole("link")).toBeNull();
+    expect(result?.textContent).toContain(url);
+  });
+});
+
+describe("values that come from outside", () => {
+  // #873-T46
+  it("renders what an agent returned as text, never as markup", () => {
+    const hostile = '<img src=x onerror="alert(1)"><script>alert(2)</script>';
+    const { container } = renderRun(
+      run({
+        steps: [
+          step({
+            id: '<b id="hostile">plan</b>',
+            output: {
+              summary: hostile,
+              costUsd: 0.1,
+              branch: "workflow/run-1/<i>x</i>",
+            },
+            errorMessage: hostile,
+            status: "failed",
+            errorCode: "action_failed",
+          }),
+        ],
+      }),
+    );
+
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector("script")).toBeNull();
+    expect(container.querySelector("#hostile")).toBeNull();
+    expect(container.querySelector("b")).toBeNull();
+    // The values are in the page as text.
+    expect(container.textContent).toContain(hostile);
+    expect(container.textContent).toContain('<b id="hostile">plan</b>');
+  });
+});
+
+describe("while the run runs", () => {
+  // #873-T47
+  it("asks for newer data, shows it, and stops asking once the run has ended", async () => {
+    const api = apiAnswering([
+      ok(run({ spentUsd: 1.5 })),
+      ok(
+        run({
+          status: "succeeded",
+          spentUsd: 2,
+          finishedAt: "2026-11-05T10:09:00.000Z",
+        }),
+      ),
+    ]);
+    const { container } = renderRun(run(), api);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORKFLOW_RUN_POLL_MS);
+    });
+    expect(api.run).toHaveBeenCalledTimes(1);
+    expect(api.run).toHaveBeenCalledWith("wf-1", "run-1");
+    expect(
+      container.querySelector("[data-slot=run-spent]")?.textContent,
+    ).toContain("$1.50");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORKFLOW_RUN_POLL_MS);
+    });
+    expect(screen.queryByText("Running")).toBeNull();
+    expect(screen.getAllByText("Succeeded")).toHaveLength(2);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORKFLOW_RUN_POLL_MS * 5);
+    });
+    expect(api.run).toHaveBeenCalledTimes(2);
+  });
+
+  // #873-T47
+  it("does not ask at all for a run that has already ended", async () => {
+    const api = apiAnswering([]);
+    renderRun(
+      run({ status: "succeeded", finishedAt: "2026-11-05T10:09:00.000Z" }),
+      api,
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORKFLOW_RUN_POLL_MS * 5);
+    });
+    expect(api.run).not.toHaveBeenCalled();
+  });
+
+  // #873-T48
+  it("keeps the last data and says so when an update fails, and goes on asking", async () => {
+    const api = apiAnswering([
+      failure("NETWORK_ERROR"),
+      ok(run({ spentUsd: 3 })),
+    ]);
+    const { container } = renderRun(run(), api);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORKFLOW_RUN_POLL_MS);
+    });
+    expect(
+      screen.getByRole("status", { name: "Updating the run" }).textContent,
+    ).toBe(RUN_POLL_FAILED_TEXT);
+    expect(
+      container.querySelector("[data-slot=run-spent]")?.textContent,
+    ).toContain("$0.42");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORKFLOW_RUN_POLL_MS * 2);
+    });
+    expect(
+      container.querySelector("[data-slot=run-spent]")?.textContent,
+    ).toContain("$3.00");
+  });
+
+  // #873-T48
+  it("stops for good, and says so, when the run is gone", async () => {
+    const api = apiAnswering([failure("WORKFLOW_RUN_NOT_FOUND")]);
+    renderRun(run(), api);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORKFLOW_RUN_POLL_MS);
+    });
+    expect(
+      screen.getByRole("status", { name: "Updating the run" }).textContent,
+    ).toContain("no longer exists");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORKFLOW_RUN_POLL_MS * 10);
+    });
+    expect(api.run).toHaveBeenCalledTimes(1);
+  });
+});

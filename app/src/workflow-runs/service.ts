@@ -49,6 +49,11 @@ export type StepView = {
   turnId: string | null;
   /** What the step was charged, in US dollars; null while it runs. */
   costUsd: number | null;
+  /**
+   * Where `costUsd` comes from (#873): `reported` (the runner's figure), `estimated` (the token counts at the catalog price) or `limit`
+   * (the whole cap the turn ran under, because nothing better was known). null for a step that was charged nothing.
+   */
+  costBasis: "reported" | "estimated" | "limit" | null;
   /** The values later steps refer to; null until the step succeeded. */
   output: unknown;
   errorCode: string | null;
@@ -62,6 +67,8 @@ export type RunSummaryView = {
   id: string;
   workflowId: string;
   workflowVersion: number;
+  /** What started the run. The engine starts runs by hand only today, so this is always `manual`; the label trigger (milestone 4) adds more. */
+  trigger: "manual";
   status: StoredWorkflowRun["status"];
   errorCode: string | null;
   budgetUsd: number;
@@ -134,6 +141,7 @@ function summaryOf(run: StoredWorkflowRun): RunSummaryView {
     id: run.id,
     workflowId: run.workflowId,
     workflowVersion: run.workflowVersion,
+    trigger: "manual",
     status: run.status,
     errorCode: run.errorCode,
     budgetUsd: usd(run.budgetMicroUsd),
@@ -154,6 +162,7 @@ function stepView(step: StoredStepRun): StepView {
     jobId: step.jobId,
     turnId: step.turnId,
     costUsd: step.costMicroUsd === null ? null : usd(step.costMicroUsd),
+    costBasis: step.costBasis,
     output: jsonOrNull(step.output),
     errorCode: step.errorCode,
     errorMessage: step.errorMessage,

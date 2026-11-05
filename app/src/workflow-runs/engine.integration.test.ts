@@ -127,7 +127,11 @@ describe("a linear run of two agent steps", () => {
       ["build", "running"],
     ]);
     const [plan, build] = state.steps;
-    expect(plan).toMatchObject({ costMicroUsd: 500_000, errorCode: null });
+    expect(plan).toMatchObject({
+      costMicroUsd: 500_000,
+      costBasis: "reported",
+      errorCode: null,
+    });
     expect(JSON.parse(plan?.output ?? "null")).toEqual({
       summary: "Cache the widgets.",
       costUsd: 0.5,
@@ -684,6 +688,7 @@ describe("the budget over all steps", () => {
     expect(state.steps[0]).toMatchObject({
       status: "succeeded",
       costMicroUsd: 1_000_000,
+      costBasis: "limit",
     });
     expect(state.run).toMatchObject({
       status: "failed",
@@ -709,6 +714,7 @@ describe("the budget over all steps", () => {
     expect(state.steps[0]).toMatchObject({
       status: "succeeded",
       costMicroUsd: 450_000,
+      costBasis: "estimated",
     });
     // The run goes on with what is left; at the cap it would have ended after step one.
     expect(stepsOf(state)).toEqual([
@@ -1041,6 +1047,7 @@ describe("actions", () => {
       status: "succeeded",
       jobId: null,
       costMicroUsd: null,
+      costBasis: null,
     });
     expect(JSON.parse(state.steps[1]?.output ?? "null")).toEqual({
       number: 12,
