@@ -22,6 +22,7 @@ import {
 import { integrationRegistry } from "../integrations/registry.ts";
 import type { Job } from "../jobs/job-types.ts";
 import { createConnectorRegistry } from "./connectors.ts";
+import { createGithubConnectors } from "./github-connectors.ts";
 import { createTurnReader } from "./turn-reader.ts";
 import { reconcileRuns, type ReconcileReport } from "./reconcile.ts";
 import { WorkflowRunError } from "./errors.ts";
@@ -33,10 +34,37 @@ import {
 } from "./service.ts";
 
 /**
- * The actions this server can do. None yet: the three GitHub actions need rights of the GitHub App that the owner grants first
- * (milestone 3b), and a step whose action is not here ends as `connector_unavailable`.
+ * The actions this server can do: the three GitHub actions, through the GitHub App of the workspace. They need rights of the App the
+ * owner grants (Issues and Pull requests: read and write); where the App lacks one, the step ends as `github_permission_missing`.
  */
-const connectors = createConnectorRegistry();
+const connectors = createConnectorRegistry(
+  createGithubConnectors({
+    async targetOf(call) {
+      const db = getDatabase();
+      const repository = await createRepositoriesRepository(
+        db,
+        call.workspaceId,
+      ).get(call.repository.id);
+      if (repository === undefined) return undefined;
+      const integration = await createIntegrationsRepository(
+        db,
+        call.workspaceId,
+      ).get(repository.integrationId);
+      if (integration === undefined || integration.status !== "active")
+        return undefined;
+      return {
+        provider: integrationRegistry.resolve(integration.type),
+        integration,
+        repo: {
+          integrationId: repository.integrationId,
+          externalId: repository.externalId,
+          fullName: repository.fullName,
+          url: repository.url,
+        },
+      };
+    },
+  }),
+);
 
 /** The engine of one workspace. */
 export function workflowEngineFor(workspaceId: string): WorkflowEngine {

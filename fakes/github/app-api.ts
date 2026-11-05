@@ -29,6 +29,7 @@ import {
   type FakeCheckRun,
   type FakePullRequestReview,
 } from "./checks-api.ts";
+import { createActionsApi, type FakeIssue } from "./actions-api.ts";
 import {
   BASE_SHA,
   createReviewApi,
@@ -37,6 +38,7 @@ import {
 } from "./review-api.ts";
 
 export type { FakeChangedFile, FakeComment } from "./review-api.ts";
+export type { FakeIssue } from "./actions-api.ts";
 export type { FakeCheckRun, FakePullRequestReview } from "./checks-api.ts";
 
 export type FakeInstallation = {
@@ -198,6 +200,20 @@ export type FakeGithubAppControls = {
     login: string,
     permission: FakeCollaboratorPermission,
   ): void;
+  /**
+   * Adds a branch with its head commit to a repository that is not served as Git (`addGitRepository`): what `POST /pulls` takes as
+   * `head` or `base` (#844). The default branch and the heads of the added pull requests are there anyway.
+   */
+  addBranch(repoFullName: string, name: string, sha: string): void;
+  /** Adds an issue (a number, a title, labels); numbers are shared with the pull requests of the repository (#844). */
+  addIssue(repoFullName: string, issue: FakeIssue): void;
+  /** The labels an issue or pull request has now, in the order they were added (#844). */
+  issueLabels(repoFullName: string, number: number): string[];
+  /** The comments below an issue that is no pull request, oldest first (#844). */
+  issueComments(
+    repoFullName: string,
+    number: number,
+  ): { id: number; body: string; login: string }[];
   /** The comments below a pull request, oldest first. */
   pullRequestComments(repoFullName: string, number: number): FakeComment[];
   /** Writes a comment below a pull request, by default as the bot of the app. */
@@ -359,6 +375,14 @@ export function createAppPart(
     botLogin: `${options.appSlug ?? "fake-app"}[bot]`,
   });
 
+  const actions = createActionsApi({
+    webBase,
+    apiBase,
+    botLogin: `${options.appSlug ?? "fake-app"}[bot]`,
+  });
+  /** Branches a test added (`addBranch`), by repository. */
+  const addedBranches = new Map<string, Map<string, string>>();
+
   const checks = createChecksApi({
     webBase,
     apiBase,
@@ -492,6 +516,8 @@ export function createAppPart(
       if (!byName.has(pr.baseRef)) byName.set(pr.baseRef, BASE_SHA);
       byName.set(pr.headRef, pr.headSha);
     }
+    for (const [name, sha] of addedBranches.get(repo.fullName) ?? [])
+      byName.set(name, sha);
     return [...byName]
       .map(([name, sha]) => ({ name, sha }))
       .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
@@ -905,8 +931,18 @@ export function createAppPart(
       if (rest === "/pulls" && method === "GET") {
         if (!mayDo(issued, "pull_requests", "read")) return forbidden();
         const state = url.searchParams.get("state") ?? "open";
+        // `head=owner:branch` and `base=branch` narrow the list, as on GitHub (#844).
+        const head = url.searchParams
+          .get("head")
+          ?.split(":")
+          .slice(1)
+          .join(":");
+        const base = url.searchParams.get("base");
         const matching = prs.filter(
-          (pr) => state === "all" || pr.state === state,
+          (pr) =>
+            (state === "all" || pr.state === state) &&
+            (head === undefined || pr.headRef === head) &&
+            (base === null || pr.baseRef === base),
         );
         return send(
           200,
@@ -928,6 +964,42 @@ export function createAppPart(
           user: { login },
         });
       }
+
+      // Opening a pull request, issues and their labels (#844).
+      const actionsAnswer = await actions.handle({
+        method,
+        rest,
+        query: url.searchParams,
+        repository,
+        pullRequestNumbers: prs.map((pr) => pr.number),
+        openPullRequest: (head, base) =>
+          prs.find(
+            (pr) =>
+              pr.state === "open" && pr.headRef === head && pr.baseRef === base,
+          )?.number,
+        branches: () => branchesOf(repository, prs),
+        defaultBranch: repository.defaultBranch ?? "main",
+        body: () => readBody(request),
+        mayDo: (names, level) =>
+          names.some((name) => mayDo(issued, name, level)),
+        createPullRequest(fields) {
+          const pullRequest: FakePullRequest = {
+            number: fields.number,
+            title: fields.title,
+            body: fields.body,
+            state: "open",
+            draft: fields.draft,
+            headSha: fields.headSha,
+            headRef: fields.headRef,
+            baseRef: fields.baseRef,
+            author: { login: `${options.appSlug ?? "fake-app"}[bot]`, id: 1 },
+          };
+          controls.addPullRequest(fullName, pullRequest);
+          return review.pullRequestJson(repository, pullRequest);
+        },
+      });
+      if (actionsAnswer !== undefined)
+        return send(actionsAnswer.status, actionsAnswer.body);
 
       // Check runs and pull request reviews (#405).
       const checksAnswer = await checks.handle({
@@ -1070,6 +1142,15 @@ export function createAppPart(
     setCollaboratorPermission(repoFullName, login, permission) {
       permissions.set(`${repoFullName}#${login.toLowerCase()}`, permission);
     },
+    addBranch(repoFullName, name, sha) {
+      const branches = addedBranches.get(repoFullName) ?? new Map();
+      branches.set(name, sha);
+      addedBranches.set(repoFullName, branches);
+    },
+    addIssue: (repoFullName, issue) => actions.addIssue(repoFullName, issue),
+    issueLabels: (repoFullName, number) => actions.labels(repoFullName, number),
+    issueComments: (repoFullName, number) =>
+      actions.issueComments(repoFullName, number),
     pullRequestComments: (repoFullName, number) =>
       review.comments(repoFullName, number),
     addPullRequestComment: (repoFullName, number, body, login) =>
@@ -1114,6 +1195,8 @@ export function createAppPart(
       gitRepositories.clear();
       permissions.clear();
       review.reset();
+      actions.reset();
+      addedBranches.clear();
       checks.reset();
       omitted.clear();
       rawInstallationRecords.length = 0;

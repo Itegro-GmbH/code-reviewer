@@ -156,8 +156,8 @@ command; consequences (a comment, a pull request) happen only here. The inputs s
 The action works on the repository of the run. `head`, `base`, `issue`, `add` and `remove` are [targets](#one-repository-per-run-and-targets). With
 the trigger `github.issueLabeled` an action may **not add the label that starts the workflow** (case ignored): the workflow would start itself
 again (`label_retriggers_workflow`); removing it is fine. A connector that does not exist is refused (`unknown_connector`). The engine runs an action
-through a connector it has; the three GitHub connectors come with milestone 3b, and a step whose connector is not there ends with
-`connector_unavailable` (see [Engine](#engine)).
+through a connector it has: the three GitHub connectors run on a server that has the GitHub App, and a step whose connector is not there ends with
+`connector_unavailable` (see [Engine](#engine) and [GitHub actions](#github-actions)).
 
 ### Control: `if` and `loop`
 
@@ -564,14 +564,52 @@ model that reports its cost, avoids it. When the budget cannot pay one cent for 
 
 An action step is a **connector**: an interface (`name`, `run(call)`) and a registry the engine asks. The inputs are the node's, with references resolved and
 held to the connector's types again. The three connectors of the format (`github.pullRequest.open`, `github.issue.comment`, `github.issue.labels`)
-need rights of the GitHub App that the owner grants first, so they come with milestone 3b; a step whose connector is not available ends with
-`connector_unavailable` and the run with `step_failed`. The tests use a fake connector.
+are real connectors of the GitHub App ([GitHub actions](#github-actions)); a step whose connector is not available ends with
+`connector_unavailable` and the run with `step_failed`. The engine's own tests use a fake connector.
 
 **A call takes 60 seconds at most** (`ACTION_TIMEOUT_MS`), which is well under the two minutes after which a step that was claimed and has no outcome is taken
 for abandoned (`STEP_STALE_MS`). A call that takes longer ends its step with `action_timeout` and is not repeated (it may have happened); the call gets an
-`AbortSignal` that is aborted then. **The connectors of milestone 3b must keep to it**: pass `call.signal` to every request they make and set no longer
-time limit or retry of their own. A connector that outlasts the limit could otherwise run twice, once for the engine that waits for it and once for the
+`AbortSignal` that is aborted then. **A connector keeps to it** (the three GitHub connectors do): it passes `call.signal` to every request it makes and sets no longer
+time limit or retry of its own. A connector that outlasts the limit could otherwise run twice, once for the engine that waits for it and once for the
 one that took the step over. Use `call.idempotencyKey` for what the platform supports.
+
+### GitHub actions
+
+The three connectors act through the **GitHub App of the workspace**, on **the repository of the run** and nothing else: the repository is never an input, so
+no value (a branch, a reference, an agent's text) can name another one. Each makes its requests with a token of its own, limited to that
+repository and to the one permission it needs, and switched off afterwards. The inputs are data: they are cleaned and bounded here, after the
+references are resolved.
+
+| Connector | App permission it needs (as the App's settings page words it) | Idempotent? |
+| --- | --- | --- |
+| `github.pullRequest.open` | Pull requests: Read and write | Yes: an open pull request for the same head and base is the result (`number` and `url` of it), not an error. It is looked for first, and again when GitHub answers that one exists. |
+| `github.issue.comment` | Issues: Read and write | No (GitHub has no way to say "this comment once"). The engine never repeats an action (`action_timeout`, `action_interrupted`), which is what keeps a comment from being written twice. |
+| `github.issue.labels` | Issues: Read and write | Yes: an added label that is on the issue stays, a removed one that is not on it is skipped. A label the repository lacks is created by the add. `labels` is what the issue has afterwards. |
+
+GitHub files the comments and labels of a pull request under issues, so `Issues` covers a pull request too.
+
+| Input | Bound |
+| --- | --- |
+| `title` | One line (line breaks and control characters become a space), at most 256 characters; a longer title is cut. Empty after cleaning is `action_input_invalid`. |
+| `body` (pull request, comment) | Control characters other than line breaks and tabs are dropped; at most 60 000 characters, a longer text is cut and ends with a note saying how much was left out. A comment must not be empty. |
+| `head`, `base` | A plain branch name of the repository (`A-Za-z0-9._/-`, at most 255 characters, no `..`, no `owner:` prefix that would reach into a fork). `base` is the branch the run's agent steps started from (the default branch of the repository when the run began) when the node names none. |
+| `issue` | A whole number from 1. |
+| `add`, `remove` | At most 20 names each, 50 characters at most, no control characters, no empty name; duplicates are dropped. |
+
+**Failures.** What GitHub refuses ends the step with a code of its own and a message for the run page that names no token, no answer of GitHub and no text of the action:
+
+| What GitHub answered | Code |
+| --- | --- |
+| The App lacks the permission (the token request is refused with 422, or the call with 403 "Resource not accessible by integration"), or the installation is suspended | `github_permission_missing` |
+| 404 for the issue or pull request; the repository is not (or no longer) part of the installation; the installation is gone | `github_not_found` |
+| 422: no commits between head and base, a branch that does not exist; 403 for an archived repository | `github_validation` |
+| 429, or 403 with a rate-limit header | `github_rate_limited` |
+| 5xx, no connection, no answer in time | `github_unavailable` |
+
+**Permissions the owner grants.** The App of a deployment has no Issues and Pull requests write at first. Until the owner of the App adds **Issues: Read and write**
+and **Pull requests: Read and write** to it and the owner of each installation accepts the change, every one of these steps ends with
+`github_permission_missing` and a sentence that names the permission ("The GitHub App of this workspace may not open pull requests: it needs the permission
+"Pull requests: Read and write". …"). Nothing in the app changes the App's configuration at GitHub.
 
 ### Failure codes
 
@@ -594,7 +632,12 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `job_failed` | step | The job ended without success and without a code of its own. Any other code of the job (`timeout`, `cost_limit_reached`, …) is kept as it is. |
 | `connector_unavailable` | step | No connector is there for the action. |
 | `action_input_invalid` | step | The inputs of the action are not what the connector takes, once the references are resolved. |
-| `action_failed` | step | The connector failed; the message is its own. |
+| `action_failed` | step | The connector failed for a reason that has no code of its own; the message is its own. |
+| `github_permission_missing` | step | The GitHub App of the workspace lacks a permission the action needs, or the installation is suspended; the message names the permission. |
+| `github_not_found` | step | GitHub has no such issue, pull request or repository, or the installation is gone. |
+| `github_validation` | step | GitHub refused the content: no commits between head and base, an archived repository, a value it does not accept. |
+| `github_rate_limited` | step | GitHub's rate limit was reached; the action is not repeated. |
+| `github_unavailable` | step | GitHub could not be reached or did not answer in time. |
 | `action_timeout` | step | The connector did not answer within 60 seconds; the action is not repeated. |
 | `action_interrupted` | step | The engine was interrupted while the action ran; it is not repeated. |
 

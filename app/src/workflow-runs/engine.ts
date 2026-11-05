@@ -30,6 +30,7 @@ import { isRecord } from "../workflows/json.ts";
 import { parseProfileRef } from "../workflows/resolver.ts";
 import {
   ActionInputError,
+  ConnectorError,
   resolveActionInputs,
   specOf,
   type ConnectorRegistry,
@@ -517,6 +518,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
             runId: run.id,
             stepId: step.stepId,
             repository: { id: run.repositoryId, fullName },
+            baseBranch: run.baseBranch,
             inputs,
             idempotencyKey: requestIdOf(run, step),
             signal,
@@ -534,6 +536,10 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           "action_timeout",
           "The connector did not answer in time; whether the action happened is not known, so it was not repeated.",
         );
+      if (error instanceof ConnectorError)
+        return failed(error.code, error.message);
+      if (error instanceof ActionInputError)
+        return failed("action_input_invalid", error.message);
       return failed(
         "action_failed",
         error instanceof Error ? error.message : "The connector failed.",

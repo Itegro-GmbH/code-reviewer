@@ -46,6 +46,21 @@ export const IMPLEMENTER_READ_TOKEN_PERMISSIONS: InstallationPermissions = {
   metadata: "read",
 };
 
+/**
+ * What the token of a workflow action on an issue (#844, a comment or a label) may do: write issues of one repository and the metadata.
+ * GitHub files the comments and labels of a pull request under issues too.
+ */
+export const ISSUE_ACTION_TOKEN_PERMISSIONS: InstallationPermissions = {
+  issues: "write",
+  metadata: "read",
+};
+
+/** What the token that opens a pull request for a workflow (#844) may do: write pull requests of one repository and the metadata. */
+export const PULL_REQUEST_ACTION_TOKEN_PERMISSIONS: InstallationPermissions = {
+  pull_requests: "write",
+  metadata: "read",
+};
+
 /** What the token that reads a posted review comment (#657) may do: read the comments of one repository and the metadata. */
 export const COMMENT_READ_TOKEN_PERMISSIONS: InstallationPermissions = {
   issues: "read",
@@ -169,7 +184,7 @@ export const VERDICT_TOKEN_PERMISSIONS: InstallationPermissions = {
  *   (`INTEGRATION_REPOSITORY_ARCHIVED`), a repository outside the installation
  *   (`INTEGRATION_REPOSITORY_NOT_ACCESSIBLE`) and a refusal for another reason (the normal retry path);
  * - 422 on the call itself: the platform refuses what was sent (a review of the app's own pull request):
- *   `INTEGRATION_REQUEST_REFUSED`.
+ *   `INTEGRATION_REQUEST_REFUSED`; for a pull request with nothing to compare, `INTEGRATION_NO_CHANGES_TO_COMPARE`.
  */
 export function toWriteError(error: unknown): IntegrationError {
   if (!(error instanceof GithubAppError)) return toReadError(error);
@@ -202,6 +217,16 @@ export function toWriteError(error: unknown): IntegrationError {
       {
         cause: error,
       },
+    );
+  if (
+    error.code === "GITHUB_APP_REQUEST_FAILED" &&
+    error.status === 422 &&
+    error.refusal === "no_commits_between"
+  )
+    return new IntegrationError(
+      "INTEGRATION_NO_CHANGES_TO_COMPARE",
+      error.message,
+      { cause: error },
     );
   if (error.code === "GITHUB_APP_REQUEST_FAILED" && error.status === 422)
     return new IntegrationError("INTEGRATION_REQUEST_REFUSED", error.message, {

@@ -25,6 +25,8 @@ export type ActionCall = {
   stepId: string;
   /** The repository of the run. */
   repository: { id: string; fullName: string };
+  /** The branch the run's agent steps started from (the default branch of the repository when the run began): the base of a pull request that names none. */
+  baseBranch: string;
   /** The inputs of the node, references resolved and checked against the connector's spec. */
   inputs: Record<string, unknown>;
   /** The same for a call that is made again, so a connector can recognise a repeat. Stable per step of a run. */
@@ -35,7 +37,7 @@ export type ActionCall = {
 
 export type ActionConnector = {
   name: string;
-  /** Does the action; the output has the fields the spec's `output` names. A throw ends the step with `action_failed`; an answer later than `ACTION_TIMEOUT_MS` is not waited for (`action_timeout`). */
+  /** Does the action; the output has the fields the spec's `output` names. A `ConnectorError` ends the step with its code, an `ActionInputError` with `action_input_invalid`, any other throw with `action_failed`; an answer later than `ACTION_TIMEOUT_MS` is not waited for (`action_timeout`). */
   run(call: ActionCall): Promise<Record<string, unknown>>;
 };
 
@@ -50,6 +52,27 @@ export function createConnectorRegistry(
     connectors.map((connector) => [connector.name, connector]),
   );
   return { get: (name) => byName.get(name) };
+}
+
+/** The codes a connector fails with (a subset of the step failure codes, `errors.ts`): the step ends with the connector's own code. */
+export const CONNECTOR_FAILURE_CODES = [
+  "github_permission_missing",
+  "github_not_found",
+  "github_validation",
+  "github_rate_limited",
+  "github_unavailable",
+] as const;
+export type ConnectorFailureCode = (typeof CONNECTOR_FAILURE_CODES)[number];
+
+/** A connector's failure with a stable code; the message is for the run page (no token, no text of the action). */
+export class ConnectorError extends Error {
+  readonly code: ConnectorFailureCode;
+
+  constructor(code: ConnectorFailureCode, message: string) {
+    super(message);
+    this.name = "ConnectorError";
+    this.code = code;
+  }
 }
 
 export class ActionInputError extends Error {

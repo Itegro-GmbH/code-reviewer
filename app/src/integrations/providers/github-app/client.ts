@@ -99,6 +99,22 @@ export type CheckRunFields = {
 
 export type NewCheckRun = CheckRunFields & { name: string; headSha: string };
 
+/** A pull request to open (#844): `head` is a branch of the repository itself. */
+export type NewPullRequest = {
+  head: string;
+  base: string;
+  title: string;
+  body?: string;
+  draft?: boolean;
+};
+
+/** A pull request as the engine's action reports it; `existing` when it was open before the call. */
+export type OpenedPullRequest = {
+  number: number;
+  url: string;
+  existing: boolean;
+};
+
 /** A review of a pull request (#405), as far as the app needs it. */
 export type PullRequestReview = {
   id: string;
@@ -220,7 +236,34 @@ export type GithubAppClient = {
     repoFullName: string,
     prNumber: number,
     body: string,
-  ): Promise<{ id: string }>;
+    signal?: AbortSignal,
+  ): Promise<{ id: string; url: string }>;
+  /**
+   * Opens a pull request as the app (#844), with a token of its own limited to `scope`, switched off after the call. An open pull
+   * request from `head` into `base` is the result (`existing`) instead of a second one or an error: it is looked for first, and again
+   * when GitHub answers 422 because one exists. Other failures reject with the stable code of the answer; a 422 says why in `refusal`
+   * (`no_commits_between`). Aborts like `getPullRequest`.
+   */
+  openPullRequest(
+    installationId: string,
+    scope: JobTokenScope,
+    repoFullName: string,
+    input: NewPullRequest,
+    signal?: AbortSignal,
+  ): Promise<OpenedPullRequest>;
+  /**
+   * Adds and removes labels of an issue or pull request (#844), with a token limited to `scope`. Both are idempotent: an added label
+   * that is on the issue stays, a removed one that is not on it is skipped; a label the repository lacks is created by the add.
+   * Answers every label on the issue afterwards. 404 when there is no such issue. Aborts like `getPullRequest`.
+   */
+  changeIssueLabels(
+    installationId: string,
+    scope: JobTokenScope,
+    repoFullName: string,
+    issueNumber: number,
+    change: { add: readonly string[]; remove: readonly string[] },
+    signal?: AbortSignal,
+  ): Promise<string[]>;
   /**
    * Creates the check run of a review on a commit (#405), as the app, with a token of its own limited to `scope`
    * (minted for this call and switched off after it, also when the call fails). Rejects with the stable code of
@@ -630,9 +673,21 @@ export function createGithubAppClient(
       const json: unknown = JSON.parse((await response.text()).slice(0, 4000));
       if (isRecord(json) && typeof json.message === "string")
         message = json.message;
+      // A 422 says what is wrong in `errors` (opening a pull request: the pull request exists, there is nothing to compare).
+      if (isRecord(json) && Array.isArray(json.errors))
+        message += ` ${json.errors
+          .map((entry: unknown) =>
+            isRecord(entry) && typeof entry.message === "string"
+              ? entry.message
+              : "",
+          )
+          .join(" ")}`;
     } catch {
       // An answer that is not JSON says nothing.
     }
+    if (/pull request already exists/i.test(message))
+      return "pull_request_exists";
+    if (/no commits between/i.test(message)) return "no_commits_between";
     if (/archived/i.test(message)) return "repository_archived";
     if (
       /resource not accessible by integration|permissions? .*not granted/i.test(
@@ -684,7 +739,7 @@ export function createGithubAppClient(
 
   async function request(
     credential: string,
-    method: "GET" | "POST" | "PATCH" | "PUT",
+    method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE",
     path: string,
     body?: unknown,
     signal?: AbortSignal,
@@ -1264,16 +1319,161 @@ export function createGithubAppClient(
       repoFullName,
       prNumber,
       body,
+      signal,
     ) {
       checkInstallationId(installationId);
       checkPullRequestNumber(prNumber);
       const path = `${repoPath(repoFullName)}/issues/${prNumber}/comments`;
-      return withScopedToken(installationId, scope, async (token) => {
-        const json = await request(token, "POST", path, { body });
-        if (!isRecord(json) || typeof json.id !== "number")
-          throw shapeError("POST /repos/{owner}/{repo}/issues/{n}/comments");
-        return { id: String(json.id) };
-      });
+      return withScopedToken(
+        installationId,
+        scope,
+        async (token) => {
+          const json = await request(token, "POST", path, { body }, signal);
+          if (
+            !isRecord(json) ||
+            typeof json.id !== "number" ||
+            typeof json.html_url !== "string"
+          )
+            throw shapeError("POST /repos/{owner}/{repo}/issues/{n}/comments");
+          return { id: String(json.id), url: json.html_url };
+        },
+        signal,
+      );
+    },
+
+    async openPullRequest(installationId, scope, repoFullName, input, signal) {
+      checkInstallationId(installationId);
+      checkBranchName(input.head);
+      checkBranchName(input.base);
+      const path = `${repoPath(repoFullName)}/pulls`;
+      const owner = repoFullName.split("/")[0] as string;
+      const lookup = `${path}?state=open&head=${encodeURIComponent(`${owner}:${input.head}`)}&base=${encodeURIComponent(input.base)}`;
+      const toOpened = (
+        json: unknown,
+        existing: boolean,
+      ): OpenedPullRequest => {
+        const pr = toPullRequestRef(json);
+        if (pr === null) throw shapeError("POST /repos/{owner}/{repo}/pulls");
+        return { number: pr.number, url: pr.url, existing };
+      };
+      return withScopedToken(
+        installationId,
+        scope,
+        async (token) => {
+          const found = async (): Promise<OpenedPullRequest | null> => {
+            const json = await request(token, "GET", lookup, undefined, signal);
+            if (!Array.isArray(json))
+              throw shapeError("GET /repos/{owner}/{repo}/pulls");
+            const [first] = json;
+            return first === undefined ? null : toOpened(first, true);
+          };
+          const before = await found();
+          if (before !== null) return before;
+          try {
+            return toOpened(
+              await request(
+                token,
+                "POST",
+                path,
+                {
+                  head: input.head,
+                  base: input.base,
+                  title: input.title,
+                  ...(input.body === undefined ? {} : { body: input.body }),
+                  ...(input.draft === undefined ? {} : { draft: input.draft }),
+                },
+                signal,
+              ),
+              false,
+            );
+          } catch (error) {
+            // Somebody opened it between the look and the call.
+            if (
+              !(error instanceof GithubAppError) ||
+              error.refusal !== "pull_request_exists"
+            )
+              throw error;
+            const raced = await found();
+            if (raced === null) throw error;
+            return raced;
+          }
+        },
+        signal,
+      );
+    },
+
+    async changeIssueLabels(
+      installationId,
+      scope,
+      repoFullName,
+      issueNumber,
+      change,
+      signal,
+    ) {
+      checkInstallationId(installationId);
+      checkPullRequestNumber(issueNumber);
+      const path = `${repoPath(repoFullName)}/issues/${issueNumber}/labels`;
+      return withScopedToken(
+        installationId,
+        scope,
+        async (token) => {
+          const labelsOf = async (): Promise<string[]> => {
+            const names: string[] = [];
+            for (let page = 1; page <= MAX_PAGES; page += 1) {
+              const json = await request(
+                token,
+                "GET",
+                `${path}?per_page=${PAGE_SIZE}&page=${page}`,
+                undefined,
+                signal,
+              );
+              if (!Array.isArray(json))
+                throw shapeError("GET /repos/{owner}/{repo}/issues/{n}/labels");
+              for (const item of json) {
+                if (!isRecord(item) || typeof item.name !== "string")
+                  throw shapeError(
+                    "GET /repos/{owner}/{repo}/issues/{n}/labels",
+                  );
+                names.push(item.name);
+              }
+              if (json.length < PAGE_SIZE) return names;
+            }
+            throw new GithubAppError(
+              "GITHUB_APP_REQUEST_FAILED",
+              "GitHub listed more labels than the app reads.",
+            );
+          };
+          // The first read is also what tells a missing issue (404) from a label that is not on it.
+          const present = await labelsOf();
+          const toAdd = change.add.filter((name) => !present.includes(name));
+          if (toAdd.length > 0)
+            await request(token, "POST", path, { labels: toAdd }, signal);
+          for (const name of change.remove) {
+            if (!present.includes(name)) continue;
+            try {
+              await request(
+                token,
+                "DELETE",
+                `${path}/${encodeURIComponent(name)}`,
+                undefined,
+                signal,
+              );
+            } catch (error) {
+              // Gone since the read.
+              if (
+                !(error instanceof GithubAppError) ||
+                error.code !== "GITHUB_APP_NOT_FOUND"
+              )
+                throw error;
+            }
+          }
+          return toAdd.length === 0 &&
+            change.remove.every((name) => !present.includes(name))
+            ? present
+            : labelsOf();
+        },
+        signal,
+      );
     },
 
     async createCheckRun(installationId, scope, repoFullName, input, signal) {

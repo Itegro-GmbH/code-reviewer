@@ -38,6 +38,14 @@ export type FakeGithubAppClientData = {
   listPullRequestsFailure?: Error;
   /** Makes `createIssueComment` reject with this error. */
   commentFailure?: Error;
+  /** Makes `openPullRequest` reject with this error (#844). */
+  openPullRequestFailure?: Error;
+  /** The pull request `openPullRequest` answers (#844); `existing` is true when it was open before. Default: number 12, new. */
+  openedPullRequest?: { number: number; url: string; existing: boolean };
+  /** Makes `changeIssueLabels` reject with this error (#844). */
+  labelsFailure?: Error;
+  /** The labels `changeIssueLabels` answers (#844). Default: the added ones. */
+  labelsAfter?: string[];
   /** Makes `listIssueComments` reject with this error. */
   listCommentsFailure?: Error;
   /** What `listIssueComments` answers, by "owner/name#number". */
@@ -253,6 +261,7 @@ export function fakeGithubAppClient(
       repoFullName,
       prNumber,
       body,
+      signal,
     ) {
       record(
         "createIssueComment",
@@ -261,9 +270,54 @@ export function fakeGithubAppClient(
         repoFullName,
         prNumber,
         body,
+        ...(signal === undefined ? [] : [signal]),
       );
+      throwIfAborted(signal);
       if (data.commentFailure) throw data.commentFailure;
-      return { id: "5001" };
+      return {
+        id: "5001",
+        url: `https://github.com/${repoFullName}/pull/${String(prNumber)}#issuecomment-5001`,
+      };
+    },
+    async openPullRequest(installationId, scope, repoFullName, input, signal) {
+      record(
+        "openPullRequest",
+        installationId,
+        scope,
+        repoFullName,
+        input,
+        ...(signal === undefined ? [] : [signal]),
+      );
+      throwIfAborted(signal);
+      if (data.openPullRequestFailure) throw data.openPullRequestFailure;
+      return (
+        data.openedPullRequest ?? {
+          number: 12,
+          url: `https://github.com/${repoFullName}/pull/12`,
+          existing: false,
+        }
+      );
+    },
+    async changeIssueLabels(
+      installationId,
+      scope,
+      repoFullName,
+      issueNumber,
+      change,
+      signal,
+    ) {
+      record(
+        "changeIssueLabels",
+        installationId,
+        scope,
+        repoFullName,
+        issueNumber,
+        change,
+        ...(signal === undefined ? [] : [signal]),
+      );
+      throwIfAborted(signal);
+      if (data.labelsFailure) throw data.labelsFailure;
+      return data.labelsAfter ?? [...change.add];
     },
     async createCheckRun(installationId, scope, repoFullName, input) {
       record("createCheckRun", installationId, scope, repoFullName, input);

@@ -1,0 +1,312 @@
+// SPDX-License-Identifier: LicenseRef-Proprietary
+
+// The three GitHub actions of the engine (#844, milestone 3b): `github.pullRequest.open`, `github.issue.comment` and `github.issue.labels`.
+// They act through the GitHub App of the workspace, on the repository of the run and on nothing else: the repository is never an input,
+// so no value can name another one. The inputs are data: the title is one line, texts and lists are bounded, a branch is a plain branch
+// name of this repository (no `owner:` prefix that would reach into a fork). Every call passes `call.signal` on and keeps to
+// `ACTION_TIMEOUT_MS`; there are no retries of their own. What GitHub refuses becomes a `ConnectorError` with a stable code
+// (`docs/workflows.md`, "GitHub actions").
+import { IntegrationError } from "../integrations/errors.ts";
+import type { IntegrationProvider } from "../integrations/provider.ts";
+import type { Integration, RepoRef } from "../integrations/types.ts";
+import {
+  ActionInputError,
+  ConnectorError,
+  type ActionCall,
+  type ActionConnector,
+} from "./connectors.ts";
+import {
+  ACTION_BODY_MAX_CHARS,
+  ACTION_BRANCH_MAX_CHARS,
+  ACTION_LABELS_MAX,
+  ACTION_LABEL_MAX_CHARS,
+  ACTION_TITLE_MAX_CHARS,
+} from "./limits.ts";
+
+/** The connection and the repository an action acts on, resolved for the repository of the run. */
+export type GithubActionTarget = {
+  provider: IntegrationProvider;
+  integration: Integration;
+  repo: RepoRef;
+};
+
+export type GithubConnectorDeps = {
+  /** The target of a run's repository; undefined when the repository or its connection is gone. */
+  targetOf(call: ActionCall): Promise<GithubActionTarget | undefined>;
+};
+
+/** What each action needs of the App, as the settings page of the GitHub App words it. */
+export const GITHUB_PERMISSION_NEEDED = {
+  "github.pullRequest.open": "Pull requests: Read and write",
+  "github.issue.comment": "Issues: Read and write",
+  "github.issue.labels": "Issues: Read and write",
+} as const;
+
+const ACTION_VERB = {
+  "github.pullRequest.open": "open pull requests",
+  "github.issue.comment": "write comments",
+  "github.issue.labels": "change labels",
+} as const;
+
+type GithubConnectorName = keyof typeof GITHUB_PERMISSION_NEEDED;
+
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
+const CONTROL_EXCEPT_LINE_BREAKS =
+  /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+const LINE_BREAKS = /[\u0000-\u001f\u007f\u2028\u2029]+/g;
+/** A branch of this repository: the characters Git allows without surprises, no `owner:` part, no `..`. */
+const BRANCH_NAME = /^[A-Za-z0-9._/-]+$/;
+
+/** A title is one line: every run of line breaks and control characters becomes one space; it is cut at GitHub's bound. */
+export function cleanTitle(value: unknown): string {
+  if (typeof value !== "string")
+    throw new ActionInputError("title must be a text.");
+  const line = value.replace(LINE_BREAKS, " ").replace(/ {2,}/g, " ").trim();
+  if (line === "") throw new ActionInputError("title must not be empty.");
+  return line.length <= ACTION_TITLE_MAX_CHARS
+    ? line
+    : `${line.slice(0, ACTION_TITLE_MAX_CHARS - 1).trimEnd()}…`;
+}
+
+/** A text of a comment or a description: control characters other than line breaks and tabs are dropped, a long text is cut and says so. */
+export function cleanBody(value: unknown, name: string): string {
+  if (typeof value !== "string")
+    throw new ActionInputError(`${name} must be a text.`);
+  const text = value.replace(CONTROL_EXCEPT_LINE_BREAKS, "");
+  if (text.length <= ACTION_BODY_MAX_CHARS) return text;
+  const left = text.length - ACTION_BODY_MAX_CHARS;
+  return `${text.slice(0, ACTION_BODY_MAX_CHARS)}\n\n… (${String(left)} more characters were left out.)`;
+}
+
+function branchName(value: unknown, name: string): string {
+  if (
+    typeof value !== "string" ||
+    value === "" ||
+    value.length > ACTION_BRANCH_MAX_CHARS ||
+    !BRANCH_NAME.test(value) ||
+    value.startsWith("-") ||
+    value.startsWith("/") ||
+    value.endsWith("/") ||
+    value.endsWith(".lock") ||
+    value.includes("..") ||
+    value.includes("//")
+  )
+    throw new ActionInputError(
+      `${name} must be the name of a branch of the repository.`,
+    );
+  return value;
+}
+
+function labelNames(value: unknown, name: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value))
+    throw new ActionInputError(`${name} must be a list of texts.`);
+  const names = new Set<string>();
+  for (const entry of value) {
+    const label = typeof entry === "string" ? entry.trim() : "";
+    if (
+      label === "" ||
+      label.length > ACTION_LABEL_MAX_CHARS ||
+      CONTROL_CHARACTERS.test(label)
+    )
+      throw new ActionInputError(
+        `${name} holds a label that is empty, longer than ${String(ACTION_LABEL_MAX_CHARS)} characters or has control characters.`,
+      );
+    names.add(label);
+  }
+  if (names.size > ACTION_LABELS_MAX)
+    throw new ActionInputError(
+      `${name} holds more than ${String(ACTION_LABELS_MAX)} labels.`,
+    );
+  return [...names];
+}
+
+function issueNumber(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1)
+    throw new ActionInputError("issue must be a whole number from 1.");
+  return value;
+}
+
+function permissionText(name: GithubConnectorName): string {
+  return `The GitHub App of this workspace may not ${ACTION_VERB[name]}: it needs the permission "${GITHUB_PERMISSION_NEEDED[name]}". The owner of the GitHub installation has to grant it in the App's settings and accept the change on the installation; then run the workflow again.`;
+}
+
+/**
+ * What GitHub's refusal means for the step. The message never carries the answer of GitHub or an input of the action; the permission
+ * the action needs is named so that the run page can say what to change.
+ */
+export function toConnectorError(
+  name: GithubConnectorName,
+  error: unknown,
+): Error {
+  if (error instanceof ConnectorError || error instanceof ActionInputError)
+    return error;
+  if (!(error instanceof IntegrationError)) return error as Error;
+  switch (error.code) {
+    case "INTEGRATION_ACCESS_SCOPE_REFUSED":
+      return new ConnectorError(
+        "github_permission_missing",
+        permissionText(name),
+      );
+    case "INTEGRATION_ACCESS_CONNECTION_SUSPENDED":
+      return new ConnectorError(
+        "github_permission_missing",
+        `GitHub refuses the App of this workspace access to its installation: the installation may be suspended, or the App lacks the permission "${GITHUB_PERMISSION_NEEDED[name]}".`,
+      );
+    case "INTEGRATION_ACCESS_CONNECTION_GONE":
+      return new ConnectorError(
+        "github_not_found",
+        "GitHub has no such issue, pull request or repository, or the GitHub installation of this workspace no longer exists.",
+      );
+    case "INTEGRATION_REPOSITORY_NOT_ACCESSIBLE":
+      return new ConnectorError(
+        "github_not_found",
+        "The repository of the run is not part of the GitHub installation any more.",
+      );
+    case "INTEGRATION_REPOSITORY_ARCHIVED":
+      return new ConnectorError(
+        "github_validation",
+        "The repository is archived, so GitHub accepts no change to it.",
+      );
+    case "INTEGRATION_NO_CHANGES_TO_COMPARE":
+      return new ConnectorError(
+        "github_validation",
+        "There are no commits between the head and the base branch, so there is nothing to open a pull request for.",
+      );
+    case "INTEGRATION_REQUEST_REFUSED":
+      return new ConnectorError(
+        "github_validation",
+        "GitHub refused the request: one of the values is not accepted (for example a branch that does not exist).",
+      );
+    case "INTEGRATION_ACCESS_RATE_LIMITED":
+      return new ConnectorError(
+        "github_rate_limited",
+        error.retryAfterSeconds === null
+          ? "GitHub's rate limit was reached. The action was not repeated."
+          : `GitHub's rate limit was reached; it asks to wait ${String(error.retryAfterSeconds)} seconds. The action was not repeated.`,
+      );
+    case "INTEGRATION_ACCESS_UNAVAILABLE":
+      return new ConnectorError(
+        "github_unavailable",
+        "GitHub could not be reached or did not answer in time.",
+      );
+    default:
+      return error;
+  }
+}
+
+async function targetOrFail(
+  deps: GithubConnectorDeps,
+  call: ActionCall,
+): Promise<GithubActionTarget> {
+  const target = await deps.targetOf(call);
+  if (target === undefined)
+    throw new ConnectorError(
+      "github_not_found",
+      "The repository of the run has no active GitHub connection.",
+    );
+  return target;
+}
+
+function unavailable(name: GithubConnectorName): ConnectorError {
+  return new ConnectorError(
+    "github_unavailable",
+    `The GitHub connection of this workspace cannot ${ACTION_VERB[name]} (${name} is not supported by its provider).`,
+  );
+}
+
+export function createGithubConnectors(
+  deps: GithubConnectorDeps,
+): ActionConnector[] {
+  const pullRequestOpen: ActionConnector = {
+    name: "github.pullRequest.open",
+    async run(call) {
+      const name = "github.pullRequest.open";
+      const head = branchName(call.inputs.head, "head");
+      const base = branchName(call.inputs.base ?? call.baseBranch, "base");
+      if (head === base)
+        throw new ActionInputError("head and base are the same branch.");
+      const title = cleanTitle(call.inputs.title);
+      const body =
+        call.inputs.body === undefined
+          ? undefined
+          : cleanBody(call.inputs.body, "body");
+      const draft =
+        typeof call.inputs.draft === "boolean" ? call.inputs.draft : undefined;
+      const { provider, integration, repo } = await targetOrFail(deps, call);
+      if (provider.openPullRequest === undefined) throw unavailable(name);
+      try {
+        const opened = await provider.openPullRequest(
+          integration,
+          repo,
+          {
+            head,
+            base,
+            title,
+            ...(body === undefined ? {} : { body }),
+            ...(draft === undefined ? {} : { draft }),
+          },
+          call.signal,
+        );
+        return { number: opened.number, url: opened.url };
+      } catch (error) {
+        throw toConnectorError(name, error);
+      }
+    },
+  };
+
+  const issueComment: ActionConnector = {
+    name: "github.issue.comment",
+    async run(call) {
+      const name = "github.issue.comment";
+      const issue = issueNumber(call.inputs.issue);
+      const body = cleanBody(call.inputs.body, "body");
+      if (body.trim() === "")
+        throw new ActionInputError("body must not be empty.");
+      const { provider, integration, repo } = await targetOrFail(deps, call);
+      if (provider.commentOnIssue === undefined) throw unavailable(name);
+      try {
+        const { url } = await provider.commentOnIssue(
+          integration,
+          repo,
+          issue,
+          body,
+          call.signal,
+        );
+        return { url };
+      } catch (error) {
+        throw toConnectorError(name, error);
+      }
+    },
+  };
+
+  const issueLabels: ActionConnector = {
+    name: "github.issue.labels",
+    async run(call) {
+      const name = "github.issue.labels";
+      const issue = issueNumber(call.inputs.issue);
+      const add = labelNames(call.inputs.add, "add");
+      const remove = labelNames(call.inputs.remove, "remove");
+      if (add.length === 0 && remove.length === 0)
+        throw new ActionInputError(
+          "At least one label to add or remove is needed.",
+        );
+      const { provider, integration, repo } = await targetOrFail(deps, call);
+      if (provider.changeIssueLabels === undefined) throw unavailable(name);
+      try {
+        const { labels } = await provider.changeIssueLabels(
+          integration,
+          repo,
+          issue,
+          { add, remove },
+          call.signal,
+        );
+        return { labels };
+      } catch (error) {
+        throw toConnectorError(name, error);
+      }
+    },
+  };
+
+  return [pullRequestOpen, issueComment, issueLabels];
+}
