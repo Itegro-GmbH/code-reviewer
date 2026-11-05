@@ -16,9 +16,9 @@ One message per channel, fire and forget:
   `<sha256>` the hex digest of the gzip file and `<version>` the engine's version.
 
 The host reads it into memory (at most `MAX_SNAPSHOT_BYTES`), checks the digest and uploads it to
-the app in parts of at most `CHUNK_BYTES` before the job's result is sent. The host never reads a path
-from the process: a process that is compromised can only hand over bytes, which the app stores for
-the job's own session and nothing else.
+the app in parts of at most `CHUNK_BYTES` before the job's result is sent. The host never reads
+a path from the process: a process that is compromised can only hand over bytes, which the app
+stores for the job's own session and nothing else.
 """
 
 import re
