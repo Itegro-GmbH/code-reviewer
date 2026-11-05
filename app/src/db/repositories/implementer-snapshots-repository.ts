@@ -11,7 +11,11 @@
 //
 // The write proves the claim in the transaction that stores: the job must be a running turn of the Implementer of this workspace with
 // this lease token (the job row is locked `FOR NO KEY UPDATE`, like the steps), and it does NOT extend the lease. The parts of one
-// turn therefore take turns. The data is base64 text (the schema holds text and integers only); a part's base64 is decoded when the
+// turn therefore take turns. A snapshot of one part is checked and swapped in without a row in the parts table, and for a larger one
+// the parts are read back (their bytes) only by the part that completes the set. The parts of an upload that never finished stay
+// until the next upload of the session starts (or the workspace is erased): at most one unfinished upload for a session, up to the
+// size of one snapshot; they are not deleted when the turn's result is delivered, which would put a delete on the result's path
+// for a case that only costs storage. The data is base64 text (the schema holds text and integers only); a part's base64 is decoded when the
 // parts are put together, so nothing depends on where a part is cut.
 import "server-only";
 import { createHash } from "node:crypto";
@@ -104,6 +108,19 @@ function describe(row: {
   };
 }
 
+/** Whether the bytes are the file the part describes: put together in order, of the announced size and digest. */
+function isWhole(
+  whole: Buffer,
+  part: SnapshotPartWrite,
+  inOrder: boolean,
+): boolean {
+  return (
+    inOrder &&
+    whole.byteLength === part.size &&
+    createHash("sha256").update(whole).digest("hex") === part.sha256
+  );
+}
+
 export function createImplementerSnapshotsRepository(
   db: Kysely<Database>,
   workspaceId: WorkspaceId,
@@ -165,71 +182,94 @@ export function createImplementerSnapshotsRepository(
           .execute();
 
         const timestamp = formatTimestamp(now());
-        await trx
-          .insertInto("implementer_session_snapshot_parts")
-          .values({
-            job_id: jobId,
-            part_index: part.index,
-            workspace_id: workspaceId,
-            session_id: turn.session_id,
-            part_count: part.count,
-            opencode_version: part.opencodeVersion,
-            bytes: part.size,
-            raw_bytes: part.rawBytes,
-            sha256: part.sha256,
-            data: Buffer.from(part.data).toString("base64"),
-            created_at: timestamp,
-          })
-          .onConflict((conflict) =>
-            conflict.columns(["job_id", "part_index"]).doUpdateSet((eb) => ({
-              part_count: eb.ref("excluded.part_count"),
-              opencode_version: eb.ref("excluded.opencode_version"),
-              bytes: eb.ref("excluded.bytes"),
-              raw_bytes: eb.ref("excluded.raw_bytes"),
-              sha256: eb.ref("excluded.sha256"),
-              data: eb.ref("excluded.data"),
-            })),
-          )
-          .execute();
+        let whole: Buffer;
+        if (part.count === 1) {
+          // A snapshot in one part is checked as it stands: no row waits for the rest, and no bytes are read back.
+          whole = Buffer.from(part.data);
+          if (!isWhole(whole, part, part.index === 0)) return { status: "invalid" };
+        } else {
+          await trx
+            .insertInto("implementer_session_snapshot_parts")
+            .values({
+              job_id: jobId,
+              part_index: part.index,
+              workspace_id: workspaceId,
+              session_id: turn.session_id,
+              part_count: part.count,
+              opencode_version: part.opencodeVersion,
+              bytes: part.size,
+              raw_bytes: part.rawBytes,
+              sha256: part.sha256,
+              data: Buffer.from(part.data).toString("base64"),
+              created_at: timestamp,
+            })
+            .onConflict((conflict) =>
+              conflict.columns(["job_id", "part_index"]).doUpdateSet((eb) => ({
+                part_count: eb.ref("excluded.part_count"),
+                opencode_version: eb.ref("excluded.opencode_version"),
+                bytes: eb.ref("excluded.bytes"),
+                raw_bytes: eb.ref("excluded.raw_bytes"),
+                sha256: eb.ref("excluded.sha256"),
+                data: eb.ref("excluded.data"),
+              })),
+            )
+            .execute();
 
-        const parts = await trx
-          .selectFrom("implementer_session_snapshot_parts")
-          .selectAll()
-          .where("job_id", "=", jobId)
-          .where("workspace_id", "=", workspaceId)
-          .orderBy("part_index")
-          .execute();
-        const agree = parts.every(
-          (row) =>
-            row.part_count === part.count &&
-            row.bytes === part.size &&
-            row.raw_bytes === part.rawBytes &&
-            row.sha256 === part.sha256 &&
-            row.opencode_version === part.opencodeVersion,
-        );
-        if (!agree) {
+          // The description of the parts first, without their bytes (up to 4 MB of text each): the bytes are read once, by the part that
+          // completes the set.
+          const described = await trx
+            .selectFrom("implementer_session_snapshot_parts")
+            .select([
+              "part_index",
+              "part_count",
+              "bytes",
+              "raw_bytes",
+              "sha256",
+              "opencode_version",
+            ])
+            .where("job_id", "=", jobId)
+            .where("workspace_id", "=", workspaceId)
+            .orderBy("part_index")
+            .execute();
+          const agree = described.every(
+            (row) =>
+              row.part_count === part.count &&
+              row.bytes === part.size &&
+              row.raw_bytes === part.rawBytes &&
+              row.sha256 === part.sha256 &&
+              row.opencode_version === part.opencodeVersion,
+          );
+          if (!agree) {
+            await trx
+              .deleteFrom("implementer_session_snapshot_parts")
+              .where("job_id", "=", jobId)
+              .where("workspace_id", "=", workspaceId)
+              .execute();
+            return { status: "invalid" };
+          }
+          if (described.length < part.count)
+            return { status: "ok", complete: false };
+
+          const rows = await trx
+            .selectFrom("implementer_session_snapshot_parts")
+            .select(["part_index", "data"])
+            .where("job_id", "=", jobId)
+            .where("workspace_id", "=", workspaceId)
+            .orderBy("part_index")
+            .execute();
+          whole = Buffer.concat(
+            rows.map((row) => Buffer.from(row.data, "base64")),
+          );
+          const inOrder = rows.every(
+            (row, position) => row.part_index === position,
+          );
           await trx
             .deleteFrom("implementer_session_snapshot_parts")
             .where("job_id", "=", jobId)
             .where("workspace_id", "=", workspaceId)
             .execute();
-          return { status: "invalid" };
+          if (!isWhole(whole, part, inOrder)) return { status: "invalid" };
         }
-        if (parts.length < part.count) return { status: "ok", complete: false };
-
-        const whole = Buffer.concat(
-          parts.map((row) => Buffer.from(row.data, "base64")),
-        );
-        const sound =
-          parts.every((row, position) => row.part_index === position) &&
-          whole.byteLength === part.size &&
-          createHash("sha256").update(whole).digest("hex") === part.sha256;
-        await trx
-          .deleteFrom("implementer_session_snapshot_parts")
-          .where("job_id", "=", jobId)
-          .where("workspace_id", "=", workspaceId)
-          .execute();
-        if (!sound) return { status: "invalid" };
 
         // An older turn never replaces a newer snapshot (a session has one running turn, so this is a second line of defence).
         if (stored === undefined || stored.turn_number <= turn.number)

@@ -5,6 +5,7 @@
 // session's old snapshot; the claim is proved on every call without extending the lease; only a turn of the Implementer takes a
 // snapshot; nothing is ever deleted but by the erasure of the workspace. The runner side (the transport) is tested on its own.
 import { createHash, randomBytes } from "node:crypto";
+import { PostgresQueryCompiler, type KyselyPlugin } from "kysely";
 import { describe, expect, it } from "vitest";
 import { createImplementerSnapshotsRepository } from "../db/repositories/implementer-snapshots-repository.ts";
 import { sha } from "../test-support/jobs.ts";
@@ -519,5 +520,74 @@ describe("the snapshot call of the Worker API", () => {
         whole,
       ),
     ).toBe(true);
+  });
+
+  // #839-T23
+  it("reads no stored bytes before the last part is in, and stores no part row for a one-part snapshot", async () => {
+    const { h, running } = await start();
+    const statements: string[] = [];
+    const compiler = new PostgresQueryCompiler();
+    const spy: KyselyPlugin = {
+      transformQuery: ({ node, queryId }) => {
+        statements.push(compiler.compileQuery(node, queryId).sql);
+        return node;
+      },
+      transformResult: (args) => Promise.resolve(args.result),
+    };
+    const watched = createImplementerSnapshotsRepository(
+      h.db.withPlugin(spy),
+      h.workspaceId,
+      h.clock.now,
+    );
+    const send = (
+      turn: { jobId: string; leaseToken: string },
+      whole: Uint8Array,
+      index: number,
+    ) => {
+      const d = describeFile(whole, index);
+      return watched.recordPart(turn.jobId, turn.leaseToken, {
+        index,
+        count: d.parts,
+        size: d.bytes,
+        rawBytes: d.rawBytes,
+        sha256: d.sha256,
+        opencodeVersion: d.opencodeVersion,
+        data: slice(whole, index),
+      });
+    };
+    const readsPartBytes = (sql: string) =>
+      /^select/i.test(sql) &&
+      sql.includes('from "implementer_session_snapshot_parts"') &&
+      /select \*|select "implementer_session_snapshot_parts"\.\*|"data"/i.test(
+        sql.split(" from ")[0] ?? "",
+      );
+    const writesPart = (sql: string) =>
+      sql.startsWith('insert into "implementer_session_snapshot_parts"');
+
+    const small = await running();
+    expect(await send(small, randomBytes(5_000), 0)).toEqual({
+      status: "ok",
+      complete: true,
+    });
+    expect(statements.some(writesPart)).toBe(false);
+
+    const large = await running();
+    const whole = randomBytes(2 * PART + 10);
+    statements.length = 0;
+    await send(large, whole, 0);
+    await send(large, whole, 1);
+    expect(statements.some(writesPart)).toBe(true);
+    expect(statements.some(readsPartBytes)).toBe(false);
+
+    expect(await send(large, whole, 2)).toEqual({
+      status: "ok",
+      complete: true,
+    });
+    expect(statements.some(readsPartBytes)).toBe(true);
+    const read = await createImplementerSnapshotsRepository(
+      h.db,
+      h.workspaceId,
+    ).read(large.sessionId);
+    expect(Buffer.from(read?.data ?? []).equals(whole)).toBe(true);
   });
 });

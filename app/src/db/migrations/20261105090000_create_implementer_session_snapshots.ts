@@ -5,13 +5,14 @@
 //  - `implementer_session_snapshots`: ONE row for each session, replaced by the snapshot of each turn. `data` is the engine's
 //    export as the runner made it (JSON, secrets taken out, gzipped), as base64 text: the schema is text and integers only, the same
 //    on both engines (`src/db/README.md`, "Portable schema conventions"); a snapshot is at most 8 MiB gzipped, so at most about 10.7 MB
-//    of text, TOASTed by the database. `turn_number` and `job_id` say which turn it came from and `opencode_version` which engine
+//    of text, TOASTed by the database (out of line and uncompressed: `set storage external`). `turn_number` and `job_id` say which turn it came from and `opencode_version` which engine
 //    wrote it (the import is tried whatever the version is; the version is what a failed import is explained with). `bytes` is the
 //    size of the gzip file, `raw_bytes` of the JSON inside it, `sha256` the digest of the gzip file.
 //  - `implementer_session_snapshot_parts`: where an upload waits until it is whole. A snapshot arrives in parts (a function of the
 //    platform takes no request body over 4.5 MB, and a snapshot can be 8 MiB), and the old snapshot stays readable until the new one
 //    is whole and checked, so the parts of a running upload are kept apart, keyed by the job and the index of the part. They are
-//    deleted when the snapshot is swapped in; the parts of an upload that never finished are deleted by the next upload of the session.
+//    deleted when the snapshot is swapped in; the parts of an upload that never finished are deleted by the next upload of the session (or the erasure of the workspace); they
+//    are not deleted when the turn's result is delivered.
 //
 // Nothing here is ever deleted for its age (owner's decision of 2026-11-04: the stored conversation is kept for good); the erasure of
 // a workspace removes both tables before the turns, the sessions and the jobs.
@@ -99,6 +100,15 @@ export const migration: Migration = {
         sql`part_index >= 0 and part_count >= 1 and part_index < part_count`,
       )
       .execute();
+
+    // The bytes are base64 of a gzip file: the database's own compression (pglz) would spend CPU for nothing, so they are kept
+    // out of line and as they are (`external`), which also makes a read of a part's description never touch them.
+    await sql`alter table implementer_session_snapshots alter column data set storage external`.execute(
+      db,
+    );
+    await sql`alter table implementer_session_snapshot_parts alter column data set storage external`.execute(
+      db,
+    );
 
     // Deleting the parts of the other uploads of a session when a new one starts.
     await db.schema

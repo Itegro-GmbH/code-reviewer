@@ -151,6 +151,24 @@ describe("the implementer session snapshots migration", () => {
   });
 
   // #839-T20
+  it("keeps the base64 bytes out of line and uncompressed (they are gzip already)", async () => {
+    const { db } = await createEmptyTestDatabase();
+    await migrateToLatest(db, migrationProvider);
+
+    const { rows } = await sql<{ relname: string; attstorage: string }>`
+      select c.relname, a.attstorage
+      from pg_attribute a join pg_class c on c.oid = a.attrelid
+      where a.attname = 'data' and c.relname = any(${sql.val(NEW_TABLES)})
+      order by c.relname`.execute(db);
+
+    expect(rows).toEqual([
+      { relname: "implementer_session_snapshot_parts", attstorage: "e" },
+      { relname: "implementer_session_snapshots", attstorage: "e" },
+    ]);
+    await db.destroy();
+  });
+
+  // #839-T20
   it("refuses a snapshot for a session that is not there and a bad turn, version, size or digest", async () => {
     const { db } = await createEmptyTestDatabase();
     await migrateToLatest(db, migrationProvider);
