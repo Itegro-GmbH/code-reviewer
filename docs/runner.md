@@ -126,6 +126,8 @@ GET /api/runners/v1/jobs/{id}/resume-session?part=n
   - *The switch is read for every job.* The service asks the version call (`check_app`, with the runner's credential, `GET /api/runners/v1/version?jobId=...`) after it holds the claim and before the host starts the job.
     The features of an earlier job are forgotten first: an app that does not answer, or lists nothing, is an app without the snapshot for this job. A runner's job is not a Worker API job, so `worker_api` is not asked for.
     `supports_snapshot` is true if and only if `runner_session_snapshot` is listed; `implementer_snapshot` (the Worker routes) does not count.
+    The call is bounded as a whole (10 s, `VERSION_CALL_TOTAL_SECONDS`, part of the lease budget in `resume_download.py`). A call that fails, is too slow or gives no list never stops the job: it runs without the snapshot and
+    the runner logs one warning with the class of the failure (nothing of the answer). An app that answers with a list that leaves out `implementer_steps` switches the steps off for the job; only an app that gave no list at all keeps the default (steps on).
   - *Off means off.* The host opens no snapshot channel for a turn on such an app, so the process takes no export, and does not download a stored session either: the turn runs as before and a follow-up continues from the
     summary (`summary_only`). This also fixes the fault of #874 in which an app that listed `implementer_snapshot` made the host open the channel while the runner could only call routes that refuse its credential.
     The constructor switch `RunnerJobApi(snapshot=...)` is gone: the app decides.

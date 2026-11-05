@@ -58,6 +58,8 @@ class RunnerJobApi(HttpWorkerApi):
         super().__init__(base_url, credential, request_timeout=request_timeout)
         self._lease_tokens: dict[str, str] = {}
         self._features = _DEFAULT_FEATURES
+        # Whether the last `check_app` got a list of features from the app.
+        self.features_listed = False
 
     def use_credential(self, credential: str) -> None:
         """A renewed credential, for the calls after it (a job in flight keeps working)."""
@@ -84,9 +86,11 @@ class RunnerJobApi(HttpWorkerApi):
         """Read the features the app lists (`GET /api/runners/v1/version`, the runner's credential)
         for the job about to run, and nothing else: a runner's job is not a Worker API job, so
         `worker_api` is not asked for. What an earlier job found is forgotten first, so an app that
-        does not answer now is treated as one that lists nothing."""
+        does not answer now is treated as one that lists nothing. The call is bounded as a whole
+        (`VERSION_CALL_TOTAL_SECONDS`): an app that is too slow is one that gave no list."""
         self._features = _DEFAULT_FEATURES
-        await self._read_features(job_id)
+        self.features_listed = False
+        self.features_listed = await self._read_features(job_id) is not None
 
     async def heartbeat(self, job_id: str, lease_token: str) -> HeartbeatReply:
         path = f"{RUNNER_JOBS}/{self._safe_id(job_id)}/heartbeat"

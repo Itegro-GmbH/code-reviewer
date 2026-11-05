@@ -85,7 +85,9 @@ def retry_after(headers: Mapping[str, str]) -> float | None:
 def parse_json(reply: Reply) -> Any:
     try:
         return json.loads(reply.body.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError, MemoryError):
+        # A body nested deeper than the parser's stack, or too large for its memory, is an answer
+        # that is not the contract, like any other that is not JSON.
         return None
 
 

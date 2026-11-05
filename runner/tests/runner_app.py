@@ -67,6 +67,8 @@ _VALIDATORS = {
     "resume-headers": _validator(_RUNNER_API, "RunnerResumeSessionHeaders"),
 }
 PART_BYTES = 3 * 1024 * 1024
+# The fields of a part's query that describe the whole file; the parts of one upload agree on them.
+_DESCRIPTION = ("parts", "bytes", "rawBytes", "sha256", "opencodeVersion")
 DEFAULT_FEATURES = (
     "worker_api",
     "implementer_steps",
@@ -137,8 +139,11 @@ class FakeRunnerApp:
     snapshots: dict[str, tuple[dict[str, str], bytes]] = field(
         default_factory=lambda: dict[str, tuple[dict[str, str], bytes]]()
     )
-    _parts: dict[str, dict[int, bytes]] = field(
-        default_factory=lambda: dict[str, dict[int, bytes]]()
+    # session -> the job whose turn stored its snapshot.
+    snapshot_jobs: dict[str, str] = field(default_factory=lambda: dict[str, str]())
+    # session -> (the job the waiting parts belong to, part index -> (query, bytes)).
+    _parts: dict[str, tuple[str, dict[int, tuple[dict[str, str], bytes]]]] = field(
+        default_factory=lambda: dict[str, tuple[str, dict[int, tuple[dict[str, str], bytes]]]]()
     )
     # The claim ends the job it hands out with this status when the runner completes it.
     complete_status: str = "succeeded"
@@ -279,15 +284,39 @@ class FakeRunnerApp:
             PART_BYTES, size - part * PART_BYTES
         ):
             return error(400, "RUNNER_REQUEST_INVALID", fields=[{"field": "body"}])
-        waiting = self._parts.setdefault(job.session, {})
-        waiting[part] = raw
+        stored = self.snapshots.get(job.session)
+        if (
+            stored is not None
+            and self.snapshot_jobs.get(job.session) == job.job_id
+            and stored[0]["sha256"] == query["sha256"]
+        ):
+            # The snapshot of this very turn is in already: a part sent again after it is whole.
+            return self._part_answer(record, part, count, True)
+        holder, waiting = self._parts.get(job.session, (job.job_id, {}))
+        if holder != job.job_id:
+            # What a turn that ended in the middle of its upload left behind is dropped with the
+            # first part of another job of the session (a session has one running turn).
+            waiting = {}
+        self._parts[job.session] = (job.job_id, waiting)
+        waiting[part] = (query, raw)
+        described = {tuple(q[key] for key in _DESCRIPTION) for q, _ in waiting.values()}
+        if len(described) > 1:
+            # Parts that do not describe the same file: nothing of this upload is kept.
+            del self._parts[job.session]
+            return error(400, "RUNNER_REQUEST_INVALID", fields=[{"field": "sha256"}])
         complete = len(waiting) == count
         if complete:
-            whole = b"".join(waiting[index] for index in range(count))
-            waiting.clear()
+            whole = b"".join(waiting[index][1] for index in range(count))
+            del self._parts[job.session]
             if hashlib.sha256(whole).hexdigest() != query["sha256"]:
                 return error(400, "RUNNER_REQUEST_INVALID", fields=[{"field": "sha256"}])
             self.snapshots[job.session] = (query, whole)
+            self.snapshot_jobs[job.session] = job.job_id
+        return self._part_answer(record, part, count, complete)
+
+    def _part_answer(
+        self, record: SessionCall, part: int, count: int, complete: bool
+    ) -> tuple[int, bytes, dict[str, str]]:
         answer = {"version": 1, "part": part, "parts": count, "complete": complete}
         self._check("session-response", answer)
         record.status = 200

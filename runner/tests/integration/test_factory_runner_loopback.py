@@ -401,8 +401,16 @@ def test_a_follow_up_turn_continues_from_the_snapshot_the_first_turn_stored(
         f"/api/runners/v1/jobs/{JOB.replace('aa', 'ab')}/session",
     ]
     assert all("/api/workers/" not in r.path for r in app.requests)
-    order = [(r.method, r.path.rsplit("/", 1)[1]) for r in app.requests if "/jobs/" in r.path]
-    assert order.index(("PUT", "session")) < order.index(("POST", "complete"))
+    # For every job, all of its snapshot parts are in before its result is.
+    for job in (JOB, JOB.replace("aa", "ab")):
+        calls = [
+            (r.method, r.path.rsplit("/", 1)[1])
+            for r in app.requests
+            if r.path.startswith(f"/api/runners/v1/jobs/{job}/")
+        ]
+        puts = [index for index, call in enumerate(calls) if call == ("PUT", "session")]
+        assert puts and ("POST", "complete") in calls
+        assert max(puts) < calls.index(("POST", "complete"))
 
 
 # #879-T11

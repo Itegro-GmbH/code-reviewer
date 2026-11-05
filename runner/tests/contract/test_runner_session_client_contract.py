@@ -128,6 +128,45 @@ def test_a_later_turn_of_the_session_reads_what_an_earlier_one_stored(app: FakeR
     assert app.violations == []
 
 
+# #879-T07
+def test_an_upload_that_broke_off_leaves_the_stored_snapshot_and_the_next_upload_alone(
+    app: FakeRunnerApp,
+) -> None:
+    first = Claim(app)
+    first.switch_on()
+    put_whole(first.api, JOB, b"the conversation of turn one")
+    session = app.jobs[0].session
+    stored = app.snapshots[session]
+    # Turn two sends two of the three parts of its file and then loses its lease.
+    broken = Claim(app, NEXT_JOB)
+    broken.switch_on()
+    data = (b"turn-two-" * CHUNK_BYTES)[: 2 * CHUNK_BYTES + 77]
+    digest = hashlib.sha256(data).hexdigest()
+
+    def part(index: int) -> SnapshotPart:
+        body = data[index * CHUNK_BYTES : (index + 1) * CHUNK_BYTES]
+        return SnapshotPart(index, 3, len(data), digest, 4 * len(data), "1.19.0", body)
+
+    async def upload_until_the_lease_is_lost() -> None:
+        await broken.api.snapshot(NEXT_JOB, part(0))
+        await broken.api.snapshot(NEXT_JOB, part(1))
+        broken.api.hold(NEXT_JOB, "not-the-lease-token")
+        await broken.api.snapshot(NEXT_JOB, part(2))
+
+    with pytest.raises(LeaseLost):
+        asyncio.run(upload_until_the_lease_is_lost())
+
+    assert app.snapshots[session] == stored  # the old one is untouched
+    # The next turn's file of two parts is judged on its own parts, not mixed with the two left
+    # behind (which would make it whole after its first part and fail the digest).
+    later = Claim(app, "00000000-0000-4000-8000-000000000003")
+    later.switch_on()
+    put_whole(later.api, later.job, (b"turn-three-" * CHUNK_BYTES)[: CHUNK_BYTES + 5])
+    received = asyncio.run(later.api.resume_session(later.job))
+    assert received.data == (b"turn-three-" * CHUNK_BYTES)[: CHUNK_BYTES + 5]
+    assert app.violations == []
+
+
 # #879-T08
 def test_a_lease_token_that_is_not_the_claims_is_a_lost_lease(app: FakeRunnerApp) -> None:
     claim = Claim(app)

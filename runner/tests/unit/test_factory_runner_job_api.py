@@ -9,20 +9,32 @@ client sent. The wire against the fake App is the contract level's, a whole turn
 """
 
 import asyncio
+import contextlib
 import hashlib
 import io
 import json
 import logging
+import threading
+import time
+import traceback
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from email.message import Message
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.error import HTTPError
 
 import pytest
 
 from code_reviewer_runner.factory_runner.job_api import RunnerJobApi
-from code_reviewer_runner.job_loop.http import ApiRejected, ApiUnavailable, LeaseLost
+from code_reviewer_runner.job_loop import worker_api
+from code_reviewer_runner.job_loop.http import (
+    ApiRejected,
+    ApiUnavailable,
+    LeaseLost,
+    Reply,
+    parse_json,
+)
 from code_reviewer_runner.job_loop.resume_download import ResumeUnavailable
 from code_reviewer_runner.job_loop.snapshot_sender import SnapshotApi, SnapshotPart
 from code_reviewer_runner.job_loop.worker_api import CredentialInvalid
@@ -323,28 +335,212 @@ def test_a_job_the_runner_does_not_hold_sends_nothing() -> None:
     assert opener.requests == []
 
 
+# #879-T08
+def test_a_version_answer_nested_beyond_the_parsers_stack_is_no_list_and_no_error() -> None:
+    api, _ = make(Answer(200, b"[" * 200_000))
+
+    asyncio.run(api.check_app(JOB))
+
+    assert api.features_listed is False
+    assert api.supports_snapshot is False
+
+
+# #879-T08
+def test_the_json_reader_gives_none_for_a_body_too_deep_or_too_large_for_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert parse_json(Reply(200, {}, b"[" * 200_000)) is None
+
+    def out_of_memory(*_: object) -> None:
+        raise MemoryError
+
+    monkeypatch.setattr(json, "loads", out_of_memory)
+    assert parse_json(Reply(200, {}, b"{}")) is None
+
+
+# #879-T08
+def test_an_app_that_lists_features_is_noted_and_one_that_does_not_is_not() -> None:
+    api, _ = make(version("runner_session_snapshot"), Answer(200, b"{}"), ApiUnavailable("x"))
+    seen: list[bool] = []
+
+    async def go() -> None:
+        for _ in range(3):
+            await api.check_app(JOB)
+            seen.append(api.features_listed)
+
+    asyncio.run(go())
+
+    assert seen == [True, False, False]
+
+
+class Trickle(BaseHTTPRequestHandler):
+    """A version answer that arrives a hundred bytes at a time, each well inside the socket
+    timeout, for much longer than the call may take."""
+
+    def log_message(self, format: str, *args: Any) -> None:
+        return None
+
+    def do_GET(self) -> None:
+        body = json.dumps(
+            {"version": 1, "features": ["runner_session_snapshot"], "pad": "x" * 3000}
+        ).encode()
+        self.send_response(200)
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        for start in range(0, len(body), 100):
+            try:
+                self.wfile.write(body[start : start + 100])
+                self.wfile.flush()
+            except OSError:
+                return
+            time.sleep(0.2)
+
+
+class EchoFailure(BaseHTTPRequestHandler):
+    """A 500 whose body repeats the request, headers included: an app that echoes what it got."""
+
+    def log_message(self, format: str, *args: Any) -> None:
+        return None
+
+    def _answer(self) -> None:
+        length = int(self.headers.get("content-length") or 0)
+        self.rfile.read(length)
+        body = json.dumps(
+            {
+                "error": {
+                    "code": "RUNNER_UNAVAILABLE",
+                    "message": f"{self.requestline}\n{self.headers}",
+                }
+            }
+        ).encode()
+        self.send_response(500)
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    do_GET = do_PUT = do_POST = _answer
+
+
+@contextlib.contextmanager
+def local_app(handler: type[BaseHTTPRequestHandler]) -> Generator[str]:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+# #879-T08
+def test_a_server_that_trickles_the_version_answer_is_no_list_at_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(worker_api, "VERSION_CALL_TOTAL_SECONDS", 1.0)
+    with local_app(Trickle) as url:
+        # The socket timeout (5 s) never trips: only the call's own deadline can end it.
+        api = RunnerJobApi(url, CREDENTIAL, request_timeout=5.0)
+        started = time.monotonic()
+
+        asyncio.run(api.check_app(JOB))
+
+        elapsed = time.monotonic() - started
+
+    assert elapsed < 2.5  # the whole answer would take six seconds
+    assert api.features_listed is False
+    assert api.supports_snapshot is False
+    assert api.supports_steps is True  # the default, as for an app that does not answer
+
+
+# #879-T08
+def test_a_version_call_that_does_not_end_is_no_list_at_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(worker_api, "VERSION_CALL_TOTAL_SECONDS", 0.5)
+    api, _ = make()
+
+    def hangs(*args: object, **kwargs: object) -> Reply:
+        time.sleep(3.0)
+        raise AssertionError("nobody waits for this answer")
+
+    monkeypatch.setattr(api, "_send_bytes", hangs)
+    started = time.monotonic()
+
+    asyncio.run(api.check_app(JOB))
+
+    assert time.monotonic() - started < 2.0
+    assert api.features_listed is False and api.supports_snapshot is False
+
+
+def exposed(error: BaseException | None) -> list[str]:
+    """Every text an error shows: its own and the chain's, and the traceback as it is printed."""
+    texts: list[str] = []
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        texts += [repr(error), str(error), "".join(traceback.format_exception(error))]
+        texts += [repr(error.__cause__), repr(error.__context__)]
+        error = error.__cause__ or error.__context__
+    return texts
+
+
+async def snapshot_call(api: RunnerJobApi) -> None:
+    await api.snapshot(JOB, PART)
+
+
+async def resume_call(api: RunnerJobApi) -> None:
+    await api.resume_session(JOB)
+
+
+def assert_no_secret_in(error: BaseException | None, log: str) -> None:
+    texts = [*exposed(error), log]
+    assert not [s for s in SECRET_PARTS for text in texts if s in text]
+
+
 # #879-T06
-@pytest.mark.parametrize("failure", ["snapshot", "resume", "lost", "version"])
+@pytest.mark.parametrize(
+    ("answers", "call", "raised"),
+    [
+        ([Answer(409, error_body("RUNNER_LEASE_LOST"))], snapshot_call, LeaseLost),
+        ([Answer(409, error_body("RUNNER_LEASE_LOST"))], resume_call, ResumeUnavailable),
+        ([Answer(500, f"{CREDENTIAL} {LEASE}".encode())], snapshot_call, ApiUnavailable),
+        ([ConnectionResetError(104, "Connection reset by peer")], snapshot_call, ApiUnavailable),
+    ],
+    ids=["lease-lost", "resume-failed", "hostile-500-body", "socket-error"],
+)
 def test_neither_the_credential_nor_the_lease_token_reaches_a_log_or_an_error(
-    failure: str, caplog: pytest.LogCaptureFixture
+    answers: list[Answer | Exception],
+    call: Callable[[RunnerJobApi], Any],
+    raised: type[Exception],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.DEBUG)
-    leaked: list[str] = []
-    api, _ = switched_on(Answer(409, error_body("RUNNER_LEASE_LOST")))
-    calls: dict[str, Callable[[], Any]] = {
-        "snapshot": lambda: api.snapshot(JOB, PART),
-        "resume": lambda: api.resume_session(JOB),
-        "lost": lambda: api.snapshot(JOB, PART),
-        "version": lambda: api.check_app(JOB),
-    }
-    if failure == "version":
-        api, _ = make(ApiUnavailable("no answer (URLError)"))
-        calls["version"] = lambda: api.check_app(JOB)
+    api, _ = switched_on(*answers)
 
-    try:
-        asyncio.run(calls[failure]())
-    except Exception as error:
-        leaked.append(f"{error!r} {error}")
+    with pytest.raises(raised) as caught:
+        asyncio.run(call(api))
 
-    leaked.append(caplog.text)
-    assert not any(secret in text for secret in SECRET_PARTS for text in leaked)
+    assert_no_secret_in(caught.value, caplog.text)
+
+
+# #879-T06
+def test_no_secret_is_in_an_error_or_a_log_when_the_app_answers_500_over_a_real_socket(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    with local_app(EchoFailure) as url:
+        api = RunnerJobApi(url, CREDENTIAL, request_timeout=5.0)
+        api.hold(JOB, LEASE)
+        api._features = frozenset({"runner_session_snapshot"})  # pyright: ignore[reportPrivateUsage]
+        errors: list[BaseException] = []
+        for call in (snapshot_call, resume_call):
+            with pytest.raises((ApiUnavailable, ResumeUnavailable)) as caught:
+                asyncio.run(call(api))
+            errors.append(caught.value)
+        asyncio.run(api.check_app(JOB))  # swallows the 500: nothing raised, nothing logged
+
+    # The echo does repeat both secrets: that is what makes the test mean something.
+    assert api.features_listed is False
+    for error in errors:
+        assert_no_secret_in(error, caplog.text)

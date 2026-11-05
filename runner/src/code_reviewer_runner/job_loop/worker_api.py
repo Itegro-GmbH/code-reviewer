@@ -33,6 +33,7 @@ from typing import Any, Protocol, TypeVar, cast
 from code_reviewer_runner import __version__
 from code_reviewer_runner.job_loop.api import CompleteReply, HeartbeatReply, parse_heartbeat
 from code_reviewer_runner.job_loop.http import (
+    MAX_RESPONSE_BYTES,
     ApiError,
     ApiRejected,
     ApiUnavailable,
@@ -106,6 +107,10 @@ STEPS_REQUEST_TIMEOUT_SECONDS = 5.0
 # One part of the session snapshot (#839): up to 3 MiB, so the socket may be slower than for a batch
 # of steps; the sender bounds the call by its own clock as well (`snapshot_sender.REQUEST_SECONDS`).
 SNAPSHOT_REQUEST_TIMEOUT_SECONDS = 20.0
+# The whole version call, which runs before the host takes the job: the answer is a few hundred
+# bytes, so a server that keeps it going longer is treated as one that gave no list. It counts
+# against the lease (see the budget in `resume_download.py`).
+VERSION_CALL_TOTAL_SECONDS = 10.0
 
 
 def snapshot_query(part: SnapshotPart) -> str:
@@ -185,13 +190,28 @@ class HttpWorkerApi:
 
     async def _read_features(self, job_id: str) -> list[str] | None:
         """Ask the version call which features the app lists and keep them in `_features`. None
-        when the app gave no list (no answer, an app from before, a 401): `_features` is then what
-        it was."""
+        when the app gave no list (no answer within `VERSION_CALL_TOTAL_SECONDS`, an app from
+        before, a 401): `_features` is then what it was."""
+        path = f"/api/runners/v1/version?jobId={self._safe_id(job_id)}"
+        deadline = time.monotonic() + VERSION_CALL_TOTAL_SECONDS
         try:
-            reply = await asyncio.to_thread(
-                self._send, "GET", f"/api/runners/v1/version?jobId={self._safe_id(job_id)}", None
+            # The deadline ends a read that trickles; `wait_for` ends a connect or a thread that
+            # does not (a daemon thread, left to end by itself).
+            reply = await asyncio.wait_for(
+                self._run_on_thread(
+                    "version-call",
+                    lambda: self._send_bytes(
+                        "GET",
+                        path,
+                        None,
+                        min(self._timeout, VERSION_CALL_TOTAL_SECONDS),
+                        max_bytes=MAX_RESPONSE_BYTES,
+                        deadline=deadline,
+                    ),
+                ),
+                VERSION_CALL_TOTAL_SECONDS,
             )
-        except ApiUnavailable:
+        except (ApiUnavailable, TimeoutError):
             return None
         body = as_object(parse_json(reply)) if reply.status == 200 else None
         features = body.get("features") if body and body.get("version") == 1 else None
