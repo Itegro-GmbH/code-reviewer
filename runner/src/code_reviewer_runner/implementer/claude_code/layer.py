@@ -146,21 +146,41 @@ def _version_of(image: dict[str, Any]) -> object:
     return None if labels is None else labels.get(VERSION_LABEL)
 
 
-def ensure_layer(daemon: LayerDaemon, agent_image: str, spec: LayerSpec = LayerSpec()) -> Layer:  # noqa: B008
-    """The agent image with Claude Code in it: found by its tag, built when it is not there (or is
-    not what its tag says). Raises `LayerError`."""
-    try:
-        base_id = str(daemon.inspect_image(agent_image).get("Id", ""))
-    except DockerError:
-        raise LayerError("the agent image is not on this daemon") from None
-    if not _IMAGE_ID.fullmatch(base_id):
-        raise LayerError("the agent image has no usable id")
+def find_layer(
+    daemon: LayerDaemon,
+    agent_image: str,
+    spec: LayerSpec = LayerSpec(),  # noqa: B008
+) -> Layer | None:
+    """The layer if it is on the daemon (`built` False), else None. Raises `LayerError` when the
+    agent image itself is not there."""
+    base_id = _base_id(daemon, agent_image)
     tag = layer_tag(base_id, spec)
     try:
         if _version_of(daemon.inspect_image(tag)) == spec.version:
             return Layer(tag, False)
     except DockerError:
         pass
+    return None
+
+
+def _base_id(daemon: LayerDaemon, agent_image: str) -> str:
+    try:
+        base_id = str(daemon.inspect_image(agent_image).get("Id", ""))
+    except DockerError:
+        raise LayerError("the agent image is not on this daemon") from None
+    if not _IMAGE_ID.fullmatch(base_id):
+        raise LayerError("the agent image has no usable id")
+    return base_id
+
+
+def ensure_layer(daemon: LayerDaemon, agent_image: str, spec: LayerSpec = LayerSpec()) -> Layer:  # noqa: B008
+    """The agent image with Claude Code in it: found by its tag, built when it is not there (or is
+    not what its tag says). Raises `LayerError`."""
+    found = find_layer(daemon, agent_image, spec)
+    if found is not None:
+        return found
+    base_id = _base_id(daemon, agent_image)
+    tag = layer_tag(base_id, spec)
     try:
         daemon.build_image(build_context(dockerfile(base_id, spec)), tag, timeout=BUILD_SECONDS)
     except DockerError as error:

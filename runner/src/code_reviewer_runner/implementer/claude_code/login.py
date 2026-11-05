@@ -38,9 +38,11 @@ _HOW: Final = "make one with `claude setup-token` and save it (mode 0600)"
 
 @dataclass(frozen=True)
 class LoginProblem:
-    """Why there is no login to use. `text` never holds a secret."""
+    """Why there is no login to use. `text` never holds a secret. `configured` is False when the
+    device has none at all (it does not use Claude Code), True when it has one that is unusable."""
 
     text: str
+    configured: bool = True
 
 
 @dataclass(frozen=True)
@@ -115,4 +117,6 @@ def load_login(environment: Mapping[str, str], home: Path) -> ClaudeLogin | Logi
         if token is None:
             return LoginProblem(f"{OAUTH_VARIABLE} does not hold exactly one token: {_HOW}")
         return ClaudeLogin.oauth_token(token)
-    return LoginProblem(f"no Claude Code login on this device: {_HOW}, or set {OAUTH_VARIABLE}")
+    return LoginProblem(
+        f"no Claude Code login on this device: {_HOW}, or set {OAUTH_VARIABLE}", configured=False
+    )
