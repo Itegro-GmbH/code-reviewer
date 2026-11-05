@@ -15,7 +15,7 @@ import {
   ruleOf,
   type NetworkRule,
 } from "../../network-rule/network.ts";
-import { formatTimestamp } from "../codecs.ts";
+import { formatTimestamp, tryDecodeJson } from "../codecs.ts";
 import { ImplementerStoreError } from "../implementer-errors.ts";
 import {
   decodeModelChoice,
@@ -49,6 +49,46 @@ export type StoredImplementerSession = {
   createdBy: string;
   createdAt: string;
   updatedAt: string;
+  /** #841: the one instruction queued while a turn runs; it starts when the turn ends. Null when nothing is queued. */
+  queued: QueuedInstruction | null;
+  /** #841: a queued instruction that could not start, kept so the Runs page can say why; null otherwise. */
+  discarded: DiscardedInstruction | null;
+};
+
+/**
+ * #841: the next instruction of a session, queued while a turn runs. The choices are already checked and copied, as a turn holds them:
+ * what it says at the moment it was queued is what the turn runs with, whatever is done to the environment or the profile afterwards.
+ * The client request id becomes the delivery id of the turn's job, so a repeat of the request finds the turn once it has started.
+ */
+export type QueuedInstruction = {
+  clientRequestId: string;
+  instruction: string;
+  modelChoice: ModelChoice;
+  costLimitCents: number | null;
+  environment: TurnEnvironment | null;
+  profile: TurnProfile | null;
+  resultSchema: StoredResultSchema | null;
+  createdBy: string;
+  /** The login of that person on the provider, for the job's `actor_login`. */
+  actorLogin: string;
+  queuedAt: string;
+};
+
+/** Why a queued instruction did not start. Stable words: the Runs page has a sentence for each, and a stored word is never renamed. */
+export const DISCARD_REASONS = [
+  "branch_gone",
+  "repository_unavailable",
+  "write_not_granted",
+  "model_not_allowed",
+  "cost_limit_exceeded",
+  "environment_unavailable",
+] as const;
+export type DiscardReason = (typeof DISCARD_REASONS)[number];
+
+export type DiscardedInstruction = {
+  reason: DiscardReason;
+  instruction: string;
+  at: string;
 };
 
 /** The environment a turn started with, copied when the turn was written (#818). The id is kept to say which one; nothing points at it. */
@@ -136,6 +176,59 @@ export type TurnResult = {
   summary: string | null;
 };
 
+/** What a follow-up turn is made from (#841): the choices are those of `QueuedInstruction`, checked and copied by the service. */
+export type NewFollowUpTurn = {
+  sessionId: string;
+  instruction: string;
+  modelChoice: ModelChoice;
+  costLimitCents: number | null;
+  environment: TurnEnvironment | null;
+  profile: TurnProfile | null;
+  resultSchema: StoredResultSchema | null;
+  createdBy: string;
+  /** True when the turn is the queued instruction of the session: the queue is emptied by it, and only it may start while one is queued. */
+  fromQueued: boolean;
+};
+
+/** Makes the job of a follow-up turn and returns its id; runs inside the transaction, like `CreateTurnJob`. */
+export type CreateFollowUpJob = (
+  trx: Kysely<Database>,
+  context: { slot: number; sessionId: string; number: number },
+) => Promise<string>;
+
+export type StartFollowUpResult =
+  | {
+      status: "started";
+      session: StoredImplementerSession;
+      turn: StoredImplementerTurn;
+    }
+  /** The session is not idle, or it is idle with a queued instruction that has not started yet. Nothing was written. */
+  | { status: "busy" }
+  /** `fromQueued` and nothing is queued (it started already, or was discarded). Nothing was written. */
+  | { status: "nothing_queued" }
+  | { status: "not_found" };
+
+export type QueueResult =
+  | { status: "queued"; session: StoredImplementerSession }
+  /** The session is idle: the instruction is to be started, not queued. */
+  | { status: "idle" }
+  /** An instruction is queued already. */
+  | { status: "full" }
+  | { status: "not_found" };
+
+/** A turn as the history of a session shows it: the instruction and what its job reported. */
+export type TurnHistoryEntry = {
+  number: number;
+  instruction: string;
+  jobId: string;
+  jobStatus: string;
+  /** The stored report of the job (`jobs.result`); null until the job has one. Untrusted: it came from the runner and the agent. */
+  result: unknown;
+};
+
+/** At most this many of the newest turns are read for the history of a session. */
+export const TURN_HISTORY_LIMIT = 100;
+
 export type ImplementerRepository = {
   /**
    * Starts a session with its first turn in one transaction: locks the repository row (as the enqueue of a review does, so
@@ -154,6 +247,33 @@ export type ImplementerRepository = {
     turn: StoredImplementerTurn;
   }>;
   getSession(sessionId: string): Promise<StoredImplementerSession | undefined>;
+  /**
+   * #841: starts the next turn of a session in one transaction: locks the session row, requires `idle` (and an empty queue unless the
+   * turn is the queued one), sets it `running`, clears the queue and the discarded note, takes the next turn number, calls `createJob`
+   * and writes the turn. Two calls for one idle session make one turn; the other answers `busy`. Rejects with
+   * `IMPLEMENTER_JOB_NOT_FOUND` or `IMPLEMENTER_JOB_MISMATCH` as `createSessionWithTurn` does (nothing is written then).
+   */
+  startFollowUpTurn(
+    turn: NewFollowUpTurn,
+    createJob: CreateFollowUpJob,
+  ): Promise<StartFollowUpResult>;
+  /** #841: queues the one next instruction of a RUNNING session. Atomic: of two calls, one queues and the other answers `full`. */
+  queueInstruction(
+    sessionId: string,
+    queued: QueuedInstruction,
+  ): Promise<QueueResult>;
+  /**
+   * #841: takes the queued instruction out and keeps it as discarded, with the reason. Returns the session, or undefined when nothing
+   * was queued (it started, or was discarded already): a repeated call changes nothing.
+   */
+  discardQueued(
+    sessionId: string,
+    reason: DiscardReason,
+  ): Promise<StoredImplementerSession | undefined>;
+  /** #841: the newest turn of a session; undefined for a session without turn (it cannot be) or one that is not this workspace's. */
+  lastTurn(sessionId: string): Promise<StoredImplementerTurn | undefined>;
+  /** #841: the newest turns of a session, oldest first, at most `TURN_HISTORY_LIMIT`, each with its job's status and report. */
+  turnHistory(sessionId: string): Promise<TurnHistoryEntry[]>;
   /** The turn that a job runs, with its session; undefined for a job that is not a turn of this workspace. */
   getTurnByJob(
     jobId: string,
@@ -207,7 +327,57 @@ function sessionFrom(
     createdBy: row.created_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    queued: readQueued(row.queued_instruction),
+    discarded: readDiscarded(row.queued_discarded),
   };
+}
+
+function readResult(text: string | null): unknown {
+  if (text === null) return null;
+  const decoded = tryDecodeJson(text);
+  return decoded.ok ? decoded.value : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The queued instruction as this module wrote it; null for none, and for text that is not one (it cannot be: only this module writes it). */
+function readQueued(text: string | null): QueuedInstruction | null {
+  if (text === null) return null;
+  try {
+    const value: unknown = JSON.parse(text);
+    if (
+      !isRecord(value) ||
+      typeof value.clientRequestId !== "string" ||
+      typeof value.instruction !== "string" ||
+      typeof value.createdBy !== "string" ||
+      typeof value.actorLogin !== "string" ||
+      typeof value.queuedAt !== "string" ||
+      !isRecord(value.modelChoice)
+    )
+      return null;
+    return value as unknown as QueuedInstruction;
+  } catch {
+    return null;
+  }
+}
+
+function readDiscarded(text: string | null): DiscardedInstruction | null {
+  if (text === null) return null;
+  try {
+    const value: unknown = JSON.parse(text);
+    if (
+      !isRecord(value) ||
+      typeof value.instruction !== "string" ||
+      typeof value.at !== "string" ||
+      !(DISCARD_REASONS as readonly unknown[]).includes(value.reason)
+    )
+      return null;
+    return value as unknown as DiscardedInstruction;
+  } catch {
+    return null;
+  }
 }
 
 function turnFrom(
@@ -302,6 +472,83 @@ export function createImplementerRepository(
     return row === undefined ? undefined : sessionFrom(row);
   }
 
+  /** Writes the row of a turn; the first turn of a session and every follow-up are written the same way. */
+  async function insertTurn(
+    trx: Kysely<Database>,
+    input: {
+      sessionId: string;
+      number: number;
+      jobId: string;
+      timestamp: string;
+      task: Pick<
+        NewImplementerTask,
+        | "instruction"
+        | "modelChoice"
+        | "costLimitCents"
+        | "createdBy"
+        | "environment"
+        | "profile"
+        | "resultSchema"
+      >;
+    },
+  ): Promise<Selectable<ImplementerTurnsTable>> {
+    const { task } = input;
+    return trx
+      .insertInto("implementer_turns")
+      .values({
+        id: newId(),
+        session_id: input.sessionId,
+        workspace_id: workspaceId,
+        number: input.number,
+        instruction: task.instruction,
+        model_choice: encodeModelChoice(task.modelChoice),
+        cost_limit_cents: task.costLimitCents,
+        job_id: input.jobId,
+        created_by: task.createdBy,
+        created_at: input.timestamp,
+        environment_id: task.environment?.id ?? null,
+        environment_name: task.environment?.name ?? null,
+        environment_vcpus: task.environment?.vcpus ?? null,
+        environment_setup_script: task.environment?.setupScript ?? null,
+        // Both or neither; a task without an environment has neither, and one without a rule has `off`.
+        environment_network_mode:
+          task.environment === null || task.environment === undefined
+            ? null
+            : (task.environment.network ?? NETWORK_OFF).mode,
+        environment_network_hosts:
+          task.environment === null || task.environment === undefined
+            ? null
+            : hostsToText((task.environment.network ?? NETWORK_OFF).hosts),
+        profile_id: task.profile?.id ?? null,
+        profile_name: task.profile?.name ?? null,
+        profile_version: task.profile?.version ?? null,
+        profile_instructions: task.profile?.instructions ?? null,
+        profile_can_push:
+          task.profile === undefined || task.profile === null
+            ? null
+            : task.profile.canPush
+              ? 1
+              : 0,
+        result_schema:
+          task.resultSchema === undefined || task.resultSchema === null
+            ? null
+            : JSON.stringify(task.resultSchema),
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+  }
+
+  /** The row of a session of this workspace, locked until the transaction ends. */
+  function lockedSession(trx: Kysely<Database>, sessionId: string) {
+    return trx
+      .selectFrom("implementer_sessions")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .where("id", "=", sessionId)
+      .forUpdate()
+      .executeTakeFirst();
+  }
+
   return {
     createSessionWithTurn(task, createJob) {
       return inTransaction(async (trx) => {
@@ -375,51 +622,179 @@ export function createImplementerRepository(
             "The job of the turn is of another repository or does not carry the negative slot as its pull request number.",
           );
 
-        const turn = await trx
-          .insertInto("implementer_turns")
-          .values({
-            id: newId(),
-            session_id: inserted.id,
-            workspace_id: workspaceId,
-            number: 1,
-            instruction: task.instruction,
-            model_choice: encodeModelChoice(task.modelChoice),
-            cost_limit_cents: task.costLimitCents,
-            job_id: jobId,
-            created_by: task.createdBy,
-            created_at: timestamp,
-            environment_id: task.environment?.id ?? null,
-            environment_name: task.environment?.name ?? null,
-            environment_vcpus: task.environment?.vcpus ?? null,
-            environment_setup_script: task.environment?.setupScript ?? null,
-            // Both or neither; a task without an environment has neither, and one without a rule has `off`.
-            environment_network_mode:
-              task.environment === null || task.environment === undefined
-                ? null
-                : (task.environment.network ?? NETWORK_OFF).mode,
-            environment_network_hosts:
-              task.environment === null || task.environment === undefined
-                ? null
-                : hostsToText((task.environment.network ?? NETWORK_OFF).hosts),
-            profile_id: task.profile?.id ?? null,
-            profile_name: task.profile?.name ?? null,
-            profile_version: task.profile?.version ?? null,
-            profile_instructions: task.profile?.instructions ?? null,
-            profile_can_push:
-              task.profile === undefined || task.profile === null
-                ? null
-                : task.profile.canPush
-                  ? 1
-                  : 0,
-            result_schema:
-              task.resultSchema === undefined || task.resultSchema === null
-                ? null
-                : JSON.stringify(task.resultSchema),
-          })
-          .returningAll()
-          .executeTakeFirstOrThrow();
+        const turn = await insertTurn(trx, {
+          sessionId: inserted.id,
+          number: 1,
+          jobId,
+          timestamp,
+          task,
+        });
         return { session: sessionFrom(inserted), turn: turnFrom(turn) };
       });
+    },
+
+    async startFollowUpTurn(next, createJob) {
+      return inTransaction<StartFollowUpResult>(async (trx) => {
+        const timestamp = formatTimestamp(now());
+        const locked = await lockedSession(trx, next.sessionId);
+        if (locked === undefined) return { status: "not_found" };
+        if (locked.status !== "idle") return { status: "busy" };
+        // An instruction waits and the turn that ends has handed the session over: only the queued one may start now, so a person
+        // who submits in that moment does not jump the queue.
+        if (next.fromQueued && locked.queued_instruction === null)
+          return { status: "nothing_queued" };
+        if (!next.fromQueued && locked.queued_instruction !== null)
+          return { status: "busy" };
+
+        const { max } = await trx
+          .selectFrom("implementer_turns")
+          .select((eb) => eb.fn.max("number").as("max"))
+          .where("workspace_id", "=", workspaceId)
+          .where("session_id", "=", next.sessionId)
+          .executeTakeFirstOrThrow();
+        const number = (max ?? 0) + 1;
+
+        const session = await trx
+          .updateTable("implementer_sessions")
+          .set({
+            status: "running",
+            queued_instruction: null,
+            queued_discarded: null,
+            updated_at: timestamp,
+          })
+          .where("workspace_id", "=", workspaceId)
+          .where("id", "=", next.sessionId)
+          .returningAll()
+          .executeTakeFirstOrThrow();
+
+        const jobId = await createJob(trx, {
+          slot: locked.slot,
+          sessionId: next.sessionId,
+          number,
+        });
+        const job = await trx
+          .selectFrom("jobs")
+          .select(["repository_id", "pr_number"])
+          .where("workspace_id", "=", workspaceId)
+          .where("id", "=", jobId)
+          .executeTakeFirst();
+        if (job === undefined)
+          throw new ImplementerStoreError(
+            "IMPLEMENTER_JOB_NOT_FOUND",
+            "The job of the turn is not a job of this workspace.",
+          );
+        if (
+          job.repository_id !== locked.repository_id ||
+          job.pr_number !== -locked.slot
+        )
+          throw new ImplementerStoreError(
+            "IMPLEMENTER_JOB_MISMATCH",
+            "The job of the turn is of another repository or does not carry the negative slot as its pull request number.",
+          );
+
+        const turn = await insertTurn(trx, {
+          sessionId: next.sessionId,
+          number,
+          jobId,
+          timestamp,
+          task: next,
+        });
+        return {
+          status: "started",
+          session: sessionFrom(session),
+          turn: turnFrom(turn),
+        };
+      });
+    },
+
+    async queueInstruction(sessionId, queued) {
+      return inTransaction<QueueResult>(async (trx) => {
+        const locked = await lockedSession(trx, sessionId);
+        if (locked === undefined) return { status: "not_found" };
+        if (locked.status === "idle") return { status: "idle" };
+        if (locked.queued_instruction !== null) return { status: "full" };
+        const row = await trx
+          .updateTable("implementer_sessions")
+          .set({
+            queued_instruction: JSON.stringify(queued),
+            queued_discarded: null,
+            updated_at: formatTimestamp(now()),
+          })
+          .where("workspace_id", "=", workspaceId)
+          .where("id", "=", sessionId)
+          .returningAll()
+          .executeTakeFirstOrThrow();
+        return { status: "queued", session: sessionFrom(row) };
+      });
+    },
+
+    async discardQueued(sessionId, reason) {
+      return inTransaction(async (trx) => {
+        const locked = await lockedSession(trx, sessionId);
+        const queued =
+          locked === undefined ? null : readQueued(locked.queued_instruction);
+        // A stored text that cannot be read is dropped as well, or the session would hold it for good.
+        if (locked === undefined || locked.queued_instruction === null)
+          return undefined;
+        const timestamp = formatTimestamp(now());
+        const row = await trx
+          .updateTable("implementer_sessions")
+          .set({
+            queued_instruction: null,
+            queued_discarded: JSON.stringify({
+              reason,
+              instruction: queued?.instruction ?? "",
+              at: timestamp,
+            } satisfies DiscardedInstruction),
+            updated_at: timestamp,
+          })
+          .where("workspace_id", "=", workspaceId)
+          .where("id", "=", sessionId)
+          .returningAll()
+          .executeTakeFirstOrThrow();
+        return sessionFrom(row);
+      });
+    },
+
+    async lastTurn(sessionId) {
+      const row = await db
+        .selectFrom("implementer_turns")
+        .selectAll()
+        .where("workspace_id", "=", workspaceId)
+        .where("session_id", "=", sessionId)
+        .orderBy("number", "desc")
+        .limit(1)
+        .executeTakeFirst();
+      return row === undefined ? undefined : turnFrom(row);
+    },
+
+    async turnHistory(sessionId) {
+      const rows = await db
+        .selectFrom("implementer_turns")
+        .innerJoin("jobs", (join) =>
+          join
+            .onRef("jobs.id", "=", "implementer_turns.job_id")
+            .onRef("jobs.workspace_id", "=", "implementer_turns.workspace_id"),
+        )
+        .select([
+          "implementer_turns.number as number",
+          "implementer_turns.instruction as instruction",
+          "implementer_turns.job_id as job_id",
+          "jobs.status as job_status",
+          "jobs.result as job_result",
+        ])
+        .where("implementer_turns.workspace_id", "=", workspaceId)
+        .where("implementer_turns.session_id", "=", sessionId)
+        .orderBy("implementer_turns.number", "desc")
+        .limit(TURN_HISTORY_LIMIT)
+        .execute();
+      return rows.reverse().map((row) => ({
+        number: row.number,
+        instruction: row.instruction,
+        jobId: row.job_id,
+        jobStatus: row.job_status,
+        result: readResult(row.job_result),
+      }));
     },
 
     getSession(sessionId) {

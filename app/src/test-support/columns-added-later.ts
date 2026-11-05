@@ -29,6 +29,8 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
     "result_schema",
     "result_value",
   ],
+  // #841: the next instruction of a session and the one that could not start; null for every session that exists.
+  implementer_sessions: ["queued_instruction", "queued_discarded"],
   // #745, step 7: the environment's network rule; every environment that exists reads `off` and no hosts (`DEFAULTS_OF_COLUMNS`).
   implementer_environments: ["network_mode", "network_hosts"],
   // #818: the size of the VM where the Dispatcher reported it; null for every VM that exists.

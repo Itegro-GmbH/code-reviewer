@@ -8,6 +8,7 @@ import { createAppMetaRepository } from "../db/repositories/app-meta-repository.
 import { createJobDispatchesRepository } from "../db/repositories/job-dispatches-repository.ts";
 import { getDatabase } from "../db/startup.ts";
 import { getCheckRunService } from "../check-runs/shared.ts";
+import { getQueuedFollowUpStarter } from "../implementer/follow-up-shared.ts";
 import { getRunnerQueue } from "../jobs/shared.ts";
 import { deliverDueBalanceMailsNow } from "../billing/shared.ts";
 import { runJournalCheckWhileBillingOn } from "../billing/journal-check.ts";
@@ -48,6 +49,10 @@ export function getDispatchSweep(
     // #790: the write tokens of ended turns of the Implementer that could not be switched off are tried again.
     ...(capabilities.has("implementer")
       ? { writeTokens: getWriteTokens() }
+      : {}),
+    // #841: the instructions queued while a turn ran, for the turns that ended without an event reaching them.
+    ...(capabilities.has("implementer")
+      ? { followUps: getQueuedFollowUpStarter() }
       : {}),
     // #548: the daily fetch of the models.dev catalog, last.
     modelsDev: getModelsDevService(),

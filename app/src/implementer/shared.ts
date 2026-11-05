@@ -1,35 +1,17 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // The wiring of the running server: the real database, registry, key store, model catalogs and job queue behind the Implementer
-// form (#755).
+// form (#755). The service itself is put together in `service-wiring.ts`.
 import "server-only";
 import { notFound } from "next/navigation";
 import { getCapabilities } from "../capabilities/shared.ts";
-import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
-import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
-import { createIntegrationsRepository } from "../db/repositories/integrations-repository.ts";
-import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { getDatabase } from "../db/startup.ts";
-import { integrationRegistry } from "../integrations/registry.ts";
 import { jobQueueFor } from "../jobs/shared.ts";
-import { keyModeForJob } from "../llm/resolve.ts";
-import { getWorkspaceLlm } from "../llm/shared.ts";
-import { getCatalogService } from "../model-catalog/shared.ts";
-import { getImplementerCatalog } from "../native-providers/shared.ts";
-import { getNativeCost } from "../native-cost/shared.ts";
-import { catalogSelectionFrom } from "../review-settings/catalog-selection.ts";
 import { operatorCostLimitCentsFrom } from "../review-settings/operator-cost-limit-source.ts";
-import { readEffectiveEntitlements } from "../workspaces/effective-entitlements.ts";
-import {
-  entryAllowed,
-  type ResolvedEntitlements,
-} from "../workspaces/entitlements.ts";
-import { configuredKeyProviders } from "./key-providers.ts";
-import { createImplementerModels, type ImplementerModels } from "./models.ts";
-import {
-  createImplementerService,
-  type ImplementerService,
-} from "./service.ts";
+import type { ImplementerService } from "./service.ts";
+import { implementerServiceWith } from "./service-wiring.ts";
+
+export { implementerModelsFor } from "./service-wiring.ts";
 
 /**
  * The 404 of a path that does not exist, in a deployment without the capability `implementer`. The access proxy answers such a
@@ -45,55 +27,9 @@ export function requireImplementerCapability(): void {
   if (!getCapabilities().has("implementer")) notFound();
 }
 
-/**
- * The models a workspace can run a task on, as the claim would: the rule of the picker and of the submit. The profiles of the
- * workspace (#843) check their model with the same rule when they are saved.
- */
-export function implementerModelsFor(workspaceId: string): ImplementerModels {
-  const db = getDatabase();
-  const catalog = getCatalogService();
-  const nativeCost = getNativeCost();
-  const keys = getWorkspaceLlm().keyServiceFor(workspaceId);
-  // The key mode and every entry of the picker ask about the same entitlements, so they are read once, on first use.
-  let entitlements: Promise<ResolvedEntitlements> | undefined;
-  const readEntitlements = () =>
-    (entitlements ??= readEffectiveEntitlements(db, workspaceId));
-  return createImplementerModels({
-    keyMode: async () => keyModeForJob(await readEntitlements()),
-    configuredProviders: () => configuredKeyProviders(keys),
-    nativeCatalog: getImplementerCatalog(),
-    catalog: catalogSelectionFrom(catalog, async (id) =>
-      entryAllowed(await readEntitlements(), { id }),
-    ),
-    // What the claim does with the entry of a job on the operator's key (src/runner-api/claim.ts, `costOf`): the model
-    // must be one the native path knows, have a confirmed price, and have an entry the catalog can describe.
-    entryUsable: async (id) => {
-      const entry = await catalog.get(id);
-      if (entry === undefined) return false;
-      const ref = nativeCost.refOf({
-        provider: entry.provider,
-        model: entry.modelId,
-      });
-      if (ref === null) return false;
-      if (!(await nativeCost.policyFor("managed", ref)).ok) return false;
-      return (await nativeCost.entryFor(ref)).ok;
-    },
-  });
-}
-
 /** The Implementer service of one workspace. */
 export function implementerServiceFor(workspaceId: string): ImplementerService {
-  const db = getDatabase();
-  return createImplementerService({
-    repositories: createRepositoriesRepository(db, workspaceId),
-    integrations: createIntegrationsRepository(db, workspaceId),
-    registry: integrationRegistry,
-    environments: createImplementerEnvironmentsRepository(db, workspaceId),
-    profiles: createProfilesRepository(db, workspaceId),
-    models: implementerModelsFor(workspaceId),
-    queue: jobQueueFor(workspaceId),
-    operatorCostLimitCents: operatorCostLimitCentsFrom(db),
-  });
+  return implementerServiceWith(workspaceId, jobQueueFor(workspaceId));
 }
 
 /** The operator's maximum cost per task in whole US cents: the page shows it as the bound of the cost limit field (#756). */

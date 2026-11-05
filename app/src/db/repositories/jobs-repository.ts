@@ -49,6 +49,8 @@ import {
 } from "../job-status.ts";
 import {
   JOB_TRIGGER_KINDS,
+  type EnqueueFollowUpTurnInput,
+  type EnqueueFollowUpTurnResult,
   type EnqueueImplementerTurnInput,
   type EnqueueImplementerTurnResult,
   type EnqueueResult,
@@ -138,6 +140,13 @@ export type JobsRepository = {
   findImplementerTurn(
     clientRequestId: string,
   ): Promise<EnqueueImplementerTurnResult | undefined>;
+  /**
+   * #841: the next turn of an existing session; see `JobQueue.enqueueFollowUpTurn`. A request id seen before gives the turn it made,
+   * whatever else the request says. Rejects with an `ImplementerStoreError` (`IMPLEMENTER_JOB_*`), writing nothing.
+   */
+  enqueueFollowUpTurn(
+    input: EnqueueFollowUpTurnInput,
+  ): Promise<EnqueueFollowUpTurnResult>;
   /** Cancels every waiting job of a repository (its project was deactivated); returns how many. */
   cancelWaitingForRepository(repositoryId: string): Promise<number>;
   /**
@@ -752,6 +761,128 @@ export function createJobsRepository(
             error.code === "IMPLEMENTER_BRANCH_TAKEN") ||
           errorCode(error) === UNIQUE_VIOLATION
         ) {
+          const raced = await findImplementerTurn(input.clientRequestId);
+          if (raced !== undefined) return raced;
+        }
+        throw error;
+      }
+    },
+
+    async enqueueFollowUpTurn(input) {
+      if (options.kindAllowed?.("implementer") === false)
+        throw new JobQueueError(
+          "JOB_KIND_UNAVAILABLE",
+          "This deployment has no capability for review kind implementer.",
+        );
+      const repeated = await findImplementerTurn(input.clientRequestId);
+      if (repeated !== undefined) return repeated;
+
+      try {
+        const result = await inTransaction<EnqueueFollowUpTurnResult>(
+          async (trx) => {
+            const timestamp = formatTimestamp(now());
+            const started = await createImplementerRepository(
+              trx,
+              workspaceId,
+              now,
+              newId,
+            ).startFollowUpTurn(
+              {
+                sessionId: input.sessionId,
+                instruction: input.instruction,
+                modelChoice: input.modelChoice,
+                costLimitCents: input.costLimitCents,
+                environment: input.environment ?? null,
+                profile: input.profile ?? null,
+                resultSchema: input.resultSchema ?? null,
+                createdBy: input.createdBy,
+                fromQueued: input.fromQueued,
+              },
+              async (inner, { slot, sessionId }) => {
+                const session = await inner
+                  .selectFrom("implementer_sessions")
+                  .innerJoin(
+                    "repositories",
+                    "repositories.id",
+                    "implementer_sessions.repository_id",
+                  )
+                  .select([
+                    "implementer_sessions.repository_id as repository_id",
+                    "implementer_sessions.branch as branch",
+                    "repositories.url as url",
+                  ])
+                  .where("implementer_sessions.workspace_id", "=", workspaceId)
+                  .where("implementer_sessions.id", "=", sessionId)
+                  .executeTakeFirstOrThrow();
+                const shape = implementerJobShape({
+                  workspaceId,
+                  repositoryUrl: session.url,
+                  branch: session.branch,
+                  slot,
+                  baseSha: input.headSha,
+                  clientRequestId: input.clientRequestId,
+                });
+                const id = newId();
+                await inner
+                  .insertInto("jobs")
+                  .values({
+                    id,
+                    workspace_id: workspaceId,
+                    repository_id: session.repository_id,
+                    pr_number: shape.prNumber,
+                    pr_url: shape.prUrl,
+                    head_sha: shape.headSha,
+                    command: shape.command,
+                    review_kind: "implementer",
+                    args: shape.args,
+                    trigger_kind: "manual",
+                    actor_login: input.actorLogin,
+                    delivery_id: shape.deliveryId,
+                    status: "queued",
+                    run_after: timestamp,
+                    attempts: 0,
+                    runner_id: null,
+                    lease_token: null,
+                    claimed_at: null,
+                    heartbeat_at: null,
+                    lease_expires_at: null,
+                    result: null,
+                    error_code: null,
+                    superseded_by: null,
+                    created_at: timestamp,
+                    updated_at: timestamp,
+                    finished_at: null,
+                  })
+                  .execute();
+                return id;
+              },
+            );
+            if (started.status === "not_found")
+              return { status: "session_not_found" };
+            if (started.status !== "started") return started;
+            const job = await trx
+              .selectFrom("jobs")
+              .selectAll()
+              .where("id", "=", started.turn.jobId)
+              .executeTakeFirstOrThrow();
+            return {
+              status: "created",
+              job: toJob(job),
+              session: started.session,
+              turn: started.turn,
+            };
+          },
+        );
+        // Two requests with one id: the one that took the lock first made the turn, and the other found the session running. It is
+        // the same request, so it gets that turn and not "busy".
+        if (result.status === "busy") {
+          const raced = await findImplementerTurn(input.clientRequestId);
+          if (raced !== undefined) return raced;
+        }
+        return result;
+      } catch (error) {
+        // Two requests with one id raced past the lookup: the unique index of the delivery id refuses the second job.
+        if (errorCode(error) === UNIQUE_VIOLATION) {
           const raced = await findImplementerTurn(input.clientRequestId);
           if (raced !== undefined) return raced;
         }

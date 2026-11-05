@@ -8,7 +8,8 @@
 // the start, its content type and its body, then the service. Every answer is `Cache-Control: no-store`. Every refusal is `{
 // "error": <code> }` with a stable code from `errors.ts`; an unusable body adds `"issues": [{ "field", "code" }]`, a model that
 // is not allowed its `reason`, a cost limit above the maximum `maximumCents`, a request id that made another task its `runId`. A new task answers 201 with `{ runId, sessionId }`,
-// the same request again 200 with the same ids.
+// the same request again 200 with the same ids. #841: `POST .../sessions/:sessionId/turns` answers 201 `{ status: "started", runId, ... }` for
+// a new turn, 202 `{ status: "queued" }` for the one instruction that waits for the running turn, 200 for a request accepted before.
 import { actorName, type SessionUser } from "../auth/access-policy.ts";
 import { isCrossSite, isJsonRequest } from "../http/request-checks.ts";
 import { readLimitedBody } from "../webhooks/limited-body.ts";
@@ -32,6 +33,10 @@ export type ImplementerRouteHandlers = {
   branches(request: Request, repositoryId: string): Promise<Response>;
   models(request: Request): Promise<Response>;
   start(request: Request): Promise<Response>;
+  /** #841: the next instruction of a session. */
+  continueSession(request: Request, sessionId: string): Promise<Response>;
+  /** #841: what the "Continue" form of a run needs; 404 for a run that is not the newest turn of a session. */
+  continuation(request: Request, runId: string): Promise<Response>;
 };
 
 const NO_STORE = { "cache-control": "no-store" };
@@ -127,6 +132,41 @@ export function createImplementerRouteHandlers({
           { runId: started.runId, sessionId: started.sessionId },
           { status: started.created ? 201 : 200, headers: NO_STORE },
         );
+      }),
+    continueSession: (request, sessionId) =>
+      answer(request, async (user) => {
+        const continued = await service.continueSession(
+          { id: user.id, githubLogin: actorName(user) },
+          sessionId,
+          await readBody(request),
+        );
+        return Response.json(
+          {
+            status: continued.status,
+            sessionId: continued.sessionId,
+            runId: continued.runId,
+            turnNumber: continued.turnNumber,
+          },
+          {
+            // A turn was made (201), the instruction waits for the running turn (202), or the request was accepted before (200).
+            status: !continued.created
+              ? 200
+              : continued.status === "queued"
+                ? 202
+                : 201,
+            headers: NO_STORE,
+          },
+        );
+      }),
+    continuation: (request, runId) =>
+      answer(request, async () => {
+        const continuation = await service.continuation(runId);
+        if (continuation === undefined)
+          throw new ImplementerError(
+            "IMPLEMENTER_SESSION_NOT_FOUND",
+            "This run is not the newest turn of a session of this workspace.",
+          );
+        return Response.json(continuation, { headers: NO_STORE });
       }),
   };
 }

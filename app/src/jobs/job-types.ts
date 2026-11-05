@@ -142,6 +142,35 @@ export type EnqueueImplementerTurnResult = {
   turn: StoredImplementerTurn;
 };
 
+/**
+ * #841: the next turn of an existing session. The pull request columns of the job are made as for the first turn; `headSha` is the tip of
+ * the session branch (or of the base branch when the session pushed nothing) read when the instruction was accepted.
+ */
+export type EnqueueFollowUpTurnInput = {
+  sessionId: string;
+  headSha: string;
+  instruction: string;
+  modelChoice: ModelChoice;
+  costLimitCents: number | null;
+  environment?: TurnEnvironment | null;
+  profile?: TurnProfile | null;
+  resultSchema?: StoredResultSchema | null;
+  createdBy: string;
+  actorLogin: string;
+  /** As for the first turn: the same id gives the same turn back and writes nothing new. */
+  clientRequestId: string;
+  /** The turn is the queued instruction of the session (`implementer-repository.ts`, `NewFollowUpTurn`). */
+  fromQueued: boolean;
+};
+
+export type EnqueueFollowUpTurnResult =
+  | EnqueueImplementerTurnResult
+  /** The session is running, or idle with a queued instruction that has not started. Nothing was written. */
+  | { status: "busy" }
+  /** `fromQueued` and nothing is queued any more. Nothing was written. */
+  | { status: "nothing_queued" }
+  | { status: "session_not_found" };
+
 /** Why `enqueue` returned an existing job instead of creating one. */
 export const ENQUEUE_EXISTING_REASONS = [
   /** The same delivery was enqueued before (a redelivery or a second request). */

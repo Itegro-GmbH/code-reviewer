@@ -1039,6 +1039,21 @@ export interface ImplementerSessionsTable {
   /** ISO 8601 UTC. */
   created_at: string;
   updated_at: string;
+  /**
+   * #841: the one instruction queued while a turn runs, as JSON text (`QueuedInstruction` in repositories/implementer-repository.ts);
+   * null when nothing is queued. It starts when the turn ends and is then cleared.
+   */
+  queued_instruction: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  /** #841: a queued instruction that could not start, with the reason, as JSON text; null otherwise. */
+  queued_discarded: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
 }
 
 /**

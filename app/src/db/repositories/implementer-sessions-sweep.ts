@@ -46,3 +46,29 @@ export async function idleSessionsOfEndedTurns(
     .executeTakeFirst();
   return Number(result.numUpdatedRows);
 }
+
+/** A session whose queued instruction waits for a start (#841). */
+export type DueFollowUp = { workspaceId: string; sessionId: string };
+
+/**
+ * The idle sessions that hold a queued instruction (#841), whatever the workspace, oldest first, at most `limit`. A turn that ends
+ * starts the instruction itself, right after its report; this finds the ones that event did not reach (the process was stopped, the
+ * platform could not be asked, the turn ended without a report). Instance level like the sweep above: it reads nothing but the ids.
+ */
+export async function sessionsWithQueuedInstruction(
+  executor: Kysely<Database>,
+  limit: number,
+): Promise<DueFollowUp[]> {
+  const rows = await executor
+    .selectFrom("implementer_sessions")
+    .select(["workspace_id", "id"])
+    .where("status", "=", sql.lit("idle"))
+    .where("queued_instruction", "is not", null)
+    .orderBy("updated_at")
+    .limit(limit)
+    .execute();
+  return rows.map((row) => ({
+    workspaceId: row.workspace_id,
+    sessionId: row.id,
+  }));
+}

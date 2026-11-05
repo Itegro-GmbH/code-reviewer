@@ -7,6 +7,8 @@
 import type { FakePermissions } from "../../../fakes/github/server.ts";
 import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
+import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
+import { createImplementerStepsRepository } from "../db/repositories/implementer-steps-repository.ts";
 import { createImplementerService } from "../implementer/service.ts";
 import type { ImplementerModels } from "../implementer/models.ts";
 import { createTestQueue } from "./jobs.ts";
@@ -70,6 +72,8 @@ export async function startImplementerHarness(
     registry: h.registry,
     environments: createImplementerEnvironmentsRepository(h.db, h.workspaceId),
     profiles: createProfilesRepository(h.db, h.workspaceId),
+    sessions: createImplementerRepository(h.db, h.workspaceId),
+    steps: createImplementerStepsRepository(h.db, h.workspaceId),
     models: options.models ?? ALLOW_ALL,
     queue,
     operatorCostLimitCents: async () => options.operatorCostLimitCents ?? 500,

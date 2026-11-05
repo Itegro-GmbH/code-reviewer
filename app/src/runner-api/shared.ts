@@ -22,6 +22,7 @@ import { createImplementerStepsRepository } from "../db/repositories/implementer
 import { createJobVmRunsRepository } from "../db/repositories/job-vm-runs-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { getDatabase } from "../db/startup.ts";
+import { buildResume } from "../implementer/resume.ts";
 import { integrationRegistry } from "../integrations/registry.ts";
 import { jobEnded, touched } from "../dispatch/maintenance-shared.ts";
 import { getRunnerQueue } from "../jobs/shared.ts";
@@ -114,6 +115,26 @@ function sharedDeps(): WorkerApiDeps {
       createImplementerRepository(getDatabase(), job.workspaceId).getTurnByJob(
         job.id,
       ),
+    // #841: what a follow-up turn is told about the turns before it, from the job's own workspace: the stored reports, the session's
+    // summary and whether a conversation of an earlier turn is stored.
+    implementerResume: async (job, { turn, session }) => {
+      const history = await createImplementerRepository(
+        getDatabase(),
+        job.workspaceId,
+      ).turnHistory(session.id);
+      const snapshot = await createImplementerSnapshotsRepository(
+        getDatabase(),
+        job.workspaceId,
+      ).find(session.id);
+      return buildResume({
+        turnNumber: turn.number,
+        sessionBranch: session.branch,
+        history: history.filter((entry) => entry.number < turn.number),
+        sessionSummary: session.summary,
+        hasSnapshot:
+          snapshot !== undefined && snapshot.turnNumber < turn.number,
+      });
+    },
     claimedKeyMode: async (job) =>
       (await createUsageRecordsRepository(db, job.workspaceId).get(job.id))
         ?.keyMode,

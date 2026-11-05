@@ -49,6 +49,15 @@ export const IMPLEMENTER_ERROR_CODES = [
   "IMPLEMENTER_MODEL_NOT_ALLOWED",
   /** The cost limit is above the operator's maximum per turn; the answer carries `maximumCents`. 422. */
   "EXCEEDS_OPERATOR_MAXIMUM",
+  /** No session of this workspace has this id (another workspace's looks the same). 404. */
+  "IMPLEMENTER_SESSION_NOT_FOUND",
+  /**
+   * A turn runs and an instruction is queued already, or the turn that ended has a queued instruction that is about to start (#841): the
+   * session takes one next instruction at a time. 409.
+   */
+  "IMPLEMENTER_SESSION_BUSY",
+  /** The session's branch is no longer on the platform (deleted there): a follow-up cannot continue it; the person starts a new task. 409. */
+  "IMPLEMENTER_BRANCH_GONE",
   /** The platform could not be asked, answered with an error, or answered with something unusable. 503 (never a 502, #690). */
   "IMPLEMENTER_GITHUB_UNAVAILABLE",
 ] as const;
@@ -75,6 +84,9 @@ export const IMPLEMENTER_ERROR_STATUS: Record<
   IMPLEMENTER_PROFILE_NOT_FOUND: 404,
   IMPLEMENTER_MODEL_NOT_ALLOWED: 422,
   EXCEEDS_OPERATOR_MAXIMUM: 422,
+  IMPLEMENTER_SESSION_NOT_FOUND: 404,
+  IMPLEMENTER_SESSION_BUSY: 409,
+  IMPLEMENTER_BRANCH_GONE: 409,
   IMPLEMENTER_GITHUB_UNAVAILABLE: 503,
 };
 
