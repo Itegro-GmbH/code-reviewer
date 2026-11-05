@@ -806,7 +806,7 @@ jobs:
           docker buildx build --builder default --load
           --file runner/Dockerfile.factory-runner
           --build-arg WORKER_IMAGE=code-reviewer-runner-sandbox:ci
-          --build-arg AGENT_IMAGE_REF=ghcr.io/itegro-gmbh/code-reviewer-agent:ci
+          --build-arg AGENT_IMAGE_REF=registry.example/code-reviewer-agent:ci
           --tag factory-runner:ci runner
       - name: Smoke test the Factory-Runner image
         run: |
