@@ -24,7 +24,12 @@ import { chooseOption } from "../../test-support/settings-sections.ts";
 import type { BranchChoices, RepositoryChoice } from "../service.ts";
 import type { ModelOptions } from "../models.ts";
 import { INSTRUCTION_MAX_LENGTH } from "../start-input.ts";
-import type { ImplementerApi, StartTaskRequest } from "./api.ts";
+import type {
+  ImplementerApi,
+  ProfileChoice,
+  ProfileDetail,
+  StartTaskRequest,
+} from "./api.ts";
 import { ImplementerForm } from "./implementer-form.tsx";
 import {
   describeBranchIssue,
@@ -144,6 +149,12 @@ function fakeApi(overrides: Partial<FakeApi> = {}): FakeApi {
     models: vi.fn<ImplementerApi["models"]>(() => Promise.resolve(ok(OWN))),
     environments: vi.fn<ImplementerApi["environments"]>(() =>
       Promise.resolve(ok({ environments: [], maximum: 50 })),
+    ),
+    profiles: vi.fn<ImplementerApi["profiles"]>(() =>
+      Promise.resolve(ok({ profiles: [] })),
+    ),
+    profile: vi.fn<ImplementerApi["profile"]>(() =>
+      Promise.resolve(refused(404, "PROFILE_NOT_FOUND")),
     ),
     startTask: vi.fn<ImplementerApi["startTask"]>(() =>
       Promise.resolve(ok({ runId: "run-1", sessionId: "session-1" })),
@@ -1509,6 +1520,7 @@ describe("labels and order", () => {
       "Base branch",
       "New branch name",
       "Task",
+      "Profile",
       "Provider",
       "Model",
       "Environment",
@@ -1523,7 +1535,7 @@ describe("labels and order", () => {
     );
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
-    expect(within(form).getAllByRole("combobox").length).toBe(5);
+    expect(within(form).getAllByRole("combobox").length).toBe(6);
   });
 });
 
@@ -1776,5 +1788,314 @@ describe("the environment picker (#818)", () => {
     ).toBeTruthy();
     expect(control("Environment").getAttribute("aria-invalid")).toBe("true");
     await waitFor(() => expect(api.environments).toHaveBeenCalledTimes(2));
+  });
+});
+
+const summary = (
+  id: string,
+  name: string,
+  version: number,
+  archivedAt: string | null = null,
+): ProfileChoice => ({ id, name, version, archivedAt });
+const profileView = (
+  base: ProfileChoice,
+  document: Partial<ProfileDetail["document"]> = {},
+): ProfileDetail => ({
+  documentVersion: base.version,
+  document: {
+    model: { provider: "moonshot", model: "kimi-k2" },
+    costLimitCents: 250,
+    canPush: true,
+    ...document,
+  },
+});
+const IMPLEMENTER_PROFILE = summary("p-impl", "implementer", 2);
+const REVIEWER_PROFILE = summary("p-rev", "reviewer", 1);
+const OLD_PROFILE = summary("p-old", "retired", 3, "2026-11-03T10:00:00.000Z");
+const PROFILE_VIEWS: Record<string, ProfileDetail> = {
+  "p-impl": profileView(IMPLEMENTER_PROFILE),
+  "p-rev": profileView(REVIEWER_PROFILE, {
+    canPush: false,
+    costLimitCents: null,
+    model: { provider: "deepseek", model: "deepseek-chat" },
+  }),
+};
+
+function withProfiles(overrides: Partial<FakeApi> = {}) {
+  return fakeApi({
+    profiles: vi.fn<ImplementerApi["profiles"]>(() =>
+      Promise.resolve(
+        ok({
+          profiles: [IMPLEMENTER_PROFILE, OLD_PROFILE, REVIEWER_PROFILE],
+        }),
+      ),
+    ),
+    profile: vi.fn<ImplementerApi["profile"]>((id) => {
+      const view = PROFILE_VIEWS[id];
+      return Promise.resolve(
+        view === undefined
+          ? refused(404, "PROFILE_NOT_FOUND")
+          : ok({ profile: view }),
+      );
+    }),
+    ...overrides,
+  });
+}
+
+/** The form with a repository and a task, but no model: a profile brings it. */
+async function fillInWithoutModel(user: ReturnType<typeof userEvent.setup>) {
+  await chooseRepository(user, "acme/widgets");
+  setTask("Add a health endpoint");
+  await waitFor(() =>
+    expect(control("Profile")).not.toHaveProperty("disabled", true),
+  );
+}
+
+describe("the profile picker (#843)", () => {
+  // #843-T40
+  it("offers no profile first, then the newest version of each profile that is not archived", async () => {
+    const user = userEvent.setup();
+    renderForm(withProfiles());
+    await fillInWithoutModel(user);
+
+    await user.click(control("Profile"));
+    const options = await screen.findAllByRole("option");
+
+    expect(options.map((option) => option.textContent)).toEqual([
+      "No profile",
+      "implementer (version 2)",
+      "reviewer (version 1)",
+    ]);
+    expect(control("Profile").textContent).toContain("No profile");
+  });
+
+  // #843-T40
+  it("sends exactly the request of before when no profile is chosen", async () => {
+    const user = userEvent.setup();
+    const api = withProfiles();
+    renderForm(api);
+    await fillIn(user);
+
+    await user.click(startButton());
+
+    await waitFor(() => expect(api.startTask).toHaveBeenCalledTimes(1));
+    const sent = api.startTask.mock.calls[0]?.[0];
+    expect(sent).not.toHaveProperty("profile");
+    expect(sent).toMatchObject({
+      model: { provider: "deepseek", model: "deepseek-chat" },
+    });
+    expect(api.profile).not.toHaveBeenCalled();
+  });
+
+  // #843-T41
+  it("shows the model and the cost limit of the chosen profile, not editable, and sends the profile instead of both", async () => {
+    const user = userEvent.setup();
+    const api = withProfiles();
+    renderForm(api);
+    await fillInWithoutModel(user);
+
+    await chooseOption(user, control("Profile"), /^implementer/);
+
+    await waitFor(() =>
+      expect(control("Model")).toHaveProperty("value", "Kimi K2 (Moonshot)"),
+    );
+    expect(control("Model")).toHaveProperty("readOnly", true);
+    expect(control(/^Cost limit/)).toHaveProperty("value", "$2.50");
+    expect(control(/^Cost limit/)).toHaveProperty("readOnly", true);
+    expect(screen.queryByLabelText("Provider")).toBeNull();
+    expect(api.profile).toHaveBeenCalledWith("p-impl");
+
+    await user.click(startButton());
+
+    await waitFor(() => expect(api.startTask).toHaveBeenCalledTimes(1));
+    const sent = api.startTask.mock.calls[0]?.[0];
+    expect(sent).toMatchObject({
+      repositoryId: "r1",
+      instruction: "Add a health endpoint",
+      profile: "implementer",
+    });
+    expect(sent).not.toHaveProperty("model");
+    expect(sent).not.toHaveProperty("costLimitCents");
+  });
+
+  // #843-T41
+  it("ignores what was typed in the cost field before the profile was chosen", async () => {
+    const user = userEvent.setup();
+    const api = withProfiles();
+    renderForm(api);
+    await fillIn(user);
+    await user.type(control(/^Cost limit/), "99999");
+
+    await chooseOption(user, control("Profile"), /^implementer/);
+    await waitFor(() =>
+      expect(control(/^Cost limit/)).toHaveProperty("value", "$2.50"),
+    );
+    await user.click(startButton());
+
+    await waitFor(() => expect(api.startTask).toHaveBeenCalledTimes(1));
+    expect(api.startTask.mock.calls[0]?.[0]).not.toHaveProperty(
+      "costLimitCents",
+    );
+  });
+
+  // #843-T41
+  it("says the operator's maximum applies when the profile sets no cost limit", async () => {
+    const user = userEvent.setup();
+    renderForm(withProfiles());
+    await fillInWithoutModel(user);
+
+    await chooseOption(user, control("Profile"), /^reviewer/);
+
+    await waitFor(() =>
+      expect(control(/^Cost limit/)).toHaveProperty(
+        "value",
+        "The operator's maximum (Max $5.00)",
+      ),
+    );
+    expect(control("Model")).toHaveProperty(
+      "value",
+      "DeepSeek Chat (DeepSeek)",
+    );
+  });
+
+  // #843-T42
+  it("gives the model back after choosing no profile again", async () => {
+    const user = userEvent.setup();
+    const api = withProfiles();
+    renderForm(api);
+    await fillIn(user);
+    await chooseOption(user, control("Profile"), /^implementer/);
+    await waitFor(() => expect(control("Model")).toHaveProperty("readOnly"));
+
+    await chooseOption(user, control("Profile"), "No profile");
+
+    await waitFor(() => expect(control("Provider")).toBeTruthy());
+    expect(control("Model").textContent).toContain("DeepSeek Chat");
+    await user.click(startButton());
+    await waitFor(() => expect(api.startTask).toHaveBeenCalledTimes(1));
+    expect(api.startTask.mock.calls[0]?.[0]).not.toHaveProperty("profile");
+    expect(api.startTask.mock.calls[0]?.[0]).toHaveProperty("model");
+  });
+
+  // #843-T43
+  it("lists no archived profile even when the route sent one", async () => {
+    const user = userEvent.setup();
+    renderForm(withProfiles());
+    await fillInWithoutModel(user);
+
+    await user.click(control("Profile"));
+    const options = await screen.findAllByRole("option");
+
+    expect(options.map((option) => option.textContent)).not.toContain(
+      "retired (version 3)",
+    );
+  });
+
+  // #843-T44
+  it("says in one sentence that a profile without the push right keeps the result in the run, and not for one with it", async () => {
+    const user = userEvent.setup();
+    renderForm(withProfiles());
+    await fillInWithoutModel(user);
+
+    await chooseOption(user, control("Profile"), /^reviewer/);
+    expect(
+      await screen.findByText(
+        "This profile does not push: the result stays in the run.",
+      ),
+    ).toBeTruthy();
+
+    await chooseOption(user, control("Profile"), /^implementer/);
+    await waitFor(() =>
+      expect(control("Model")).toHaveProperty("value", "Kimi K2 (Moonshot)"),
+    );
+    expect(screen.queryByText(/does not push/)).toBeNull();
+  });
+
+  // #843-T45
+  it("keeps the environment a choice of its own next to the profile", async () => {
+    const user = userEvent.setup();
+    const api = withProfiles({
+      environments: vi.fn<ImplementerApi["environments"]>(() =>
+        Promise.resolve(ok({ environments: [NODE_ENV], maximum: 50 })),
+      ),
+    });
+    renderForm(api);
+    await fillInWithoutModel(user);
+    await chooseOption(user, control("Profile"), /^implementer/);
+    await waitFor(() =>
+      expect(control("Model")).toHaveProperty("value", "Kimi K2 (Moonshot)"),
+    );
+
+    await chooseOption(user, control("Environment"), /^Node 22/);
+    await user.click(startButton());
+
+    await waitFor(() => expect(api.startTask).toHaveBeenCalledTimes(1));
+    expect(api.startTask.mock.calls[0]?.[0]).toMatchObject({
+      profile: "implementer",
+      environmentId: "env-node",
+    });
+  });
+
+  // #843-T46
+  it("cannot be sent before the profile has arrived, and says so when it cannot be loaded", async () => {
+    const user = userEvent.setup();
+    const api = withProfiles({
+      profile: vi.fn<ImplementerApi["profile"]>(() =>
+        Promise.resolve(refused(500, "PROFILE_UNAVAILABLE")),
+      ),
+    });
+    renderForm(api);
+    await fillInWithoutModel(user);
+
+    await chooseOption(user, control("Profile"), /^implementer/);
+
+    expect(
+      await screen.findByText(/This profile could not be loaded/),
+    ).toBeTruthy();
+    expect(startButton()).toHaveProperty("disabled", true);
+    expect(api.startTask).not.toHaveBeenCalled();
+  });
+
+  // #843-T46
+  it("does not stop a task without a profile when the profiles cannot be loaded, and says so", async () => {
+    const user = userEvent.setup();
+    const api = withProfiles({
+      profiles: vi.fn<ImplementerApi["profiles"]>(() =>
+        Promise.resolve(refused(500, "PROFILE_UNAVAILABLE")),
+      ),
+    });
+    renderForm(api);
+    await fillIn(user);
+
+    expect(
+      await screen.findByText(/profiles could not be loaded/),
+    ).toBeTruthy();
+    await user.click(startButton());
+
+    await waitFor(() => expect(api.startTask).toHaveBeenCalledTimes(1));
+    expect(api.startTask.mock.calls[0]?.[0]).not.toHaveProperty("profile");
+  });
+
+  // #843-T47
+  it("marks the profile field with the sentence when the server says the profile is gone", async () => {
+    const user = userEvent.setup();
+    const api = withProfiles({
+      startTask: vi.fn<ImplementerApi["startTask"]>(() =>
+        Promise.resolve(refused(404, "IMPLEMENTER_PROFILE_NOT_FOUND")),
+      ),
+    });
+    renderForm(api);
+    await fillInWithoutModel(user);
+    await chooseOption(user, control("Profile"), /^implementer/);
+    await waitFor(() =>
+      expect(control("Model")).toHaveProperty("value", "Kimi K2 (Moonshot)"),
+    );
+
+    await user.click(startButton());
+
+    expect(
+      await screen.findByText(/This profile does not exist any more/),
+    ).toBeTruthy();
+    expect(control("Profile").getAttribute("aria-invalid")).toBe("true");
   });
 });

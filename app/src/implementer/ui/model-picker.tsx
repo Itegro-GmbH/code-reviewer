@@ -46,6 +46,28 @@ export function modelChoiceOf(
     : undefined;
 }
 
+/** The name a model choice goes by in these options (a profile's model, #843), or undefined when the options do not list it. */
+export function describeModelChoice(
+  options: ModelOptions | undefined,
+  choice: ModelChoice,
+): string | undefined {
+  if (options === undefined || options.keyMode === "unreadable")
+    return undefined;
+  if (options.keyMode === "managed") {
+    if (!("entryId" in choice)) return undefined;
+    const entry = options.entries.find((entry) => entry.id === choice.entryId);
+    return entry === undefined
+      ? undefined
+      : `${entry.name} (${entry.providerLabel})`;
+  }
+  if (!("provider" in choice)) return undefined;
+  const provider = options.providers.find((p) => p.id === choice.provider);
+  const found = provider?.models.find((model) => model.id === choice.model);
+  return provider === undefined || found === undefined
+    ? undefined
+    : `${found.name} (${provider.label})`;
+}
+
 /** Whether the options offer something to choose. */
 export function hasModels(options: ModelOptions): boolean {
   if (options.keyMode === "own") return options.providers.length > 0;
