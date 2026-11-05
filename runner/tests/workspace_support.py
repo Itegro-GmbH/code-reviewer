@@ -18,6 +18,7 @@ from code_reviewer_runner.implementer.git_workspace import (
     WorkspaceSpec,
     disk_space,
 )
+from code_reviewer_runner.job import ImplementerResume
 from git_support import TOKEN, Origin, raw
 
 IDENTITY = GitIdentity(name="Code Review Implementer", email="implementer@example.invalid")
@@ -124,9 +125,14 @@ class Rig:
         token: str = TOKEN,
         timeout: float = 600.0,
         space: Callable[[Path], DiskSpace] | None = None,
+        resume: ImplementerResume | None = None,
     ) -> GitWorkspace:
         spec = WorkspaceSpec(
-            clone_url=url or self.origin.url, token=token, base_branch=base_branch, branch=branch
+            clone_url=url or self.origin.url,
+            token=token,
+            base_branch=base_branch,
+            branch=branch,
+            resume=resume,
         )
         return GitWorkspace(
             spec,
@@ -144,8 +150,11 @@ class Rig:
         base_branch: str = "main",
         branch: str = BRANCH,
         space: Callable[[Path], DiskSpace] | None = None,
+        resume: ImplementerResume | None = None,
     ) -> GitWorkspace:
-        workspace = self.workspace(base_branch=base_branch, branch=branch, space=space)
+        workspace = self.workspace(
+            base_branch=base_branch, branch=branch, space=space, resume=resume
+        )
         workspace.prepare()
         return workspace
 

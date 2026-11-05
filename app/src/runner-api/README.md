@@ -339,6 +339,10 @@ when an environment was chosen; the Dispatcher launches the VM before any Worker
 script that is silently skipped would run the task on a base the person did not choose. The Worker reports what the script did in
 `result.implementer.setup`; a script that fails ends the turn with `environment_setup_failed` (free, `billing/outcome.ts`).
 
+**The branches of a follow-up turn (#838, part of #745).** The claim feature `implementer_resume` is the Worker's way to say it reads `implementer.resume` (`ImplementerResume`: the number of the turn, the branches the
+last turn pushed with their tips, the branch to check out). The App knows the feature name (`CLAIM_FEATURES`) and builds no `resume` yet: a turn that carries one, and the refusal of a caller that did not name the
+feature (`implementer_engine_unavailable`, free, before any credential exists, as for the environment), arrive with the follow-up API. Until then every job is a first turn.
+
 A failure that may pass (GitHub down while the installation is read or the token is made) gives the job back with `Retry-After`.
 A turn is never run twice (`maxAttempts` 1), so it is put back in the queue only while **no input was ever handed to a Worker**: the
 write tokens are remembered before an input leaves, so a turn whose ledger is empty has handed out none (`noInputHandedOut`, asked

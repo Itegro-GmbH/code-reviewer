@@ -61,6 +61,7 @@ from code_reviewer_runner.dynamic_review.passthrough.destination import (
 )
 from code_reviewer_runner.dynamic_review.prompts import MAX_SKILL_BYTES as MAX_DYNAMIC_SKILL_BYTES
 from code_reviewer_runner.implementer.network_rule import OFF, NetworkRule, RuleError, parse_rule
+from code_reviewer_runner.implementer.push_policy import branch_name_problem
 from code_reviewer_runner.llm_providers import (
     LlmProviderSpec,
     provider_for,
@@ -97,8 +98,15 @@ _IMPLEMENTER_FIELDS = {
     "modelEntry",
     "capabilities",
     "environment",
+    "resume",
 }
 _IMPLEMENTER_ENVIRONMENT_FIELDS = {"name", "setupScript", "network"}
+_IMPLEMENTER_RESUME_FIELDS = {"turn", "branches", "checkout"}
+_IMPLEMENTER_RESUME_BRANCH_FIELDS = {"name", "head"}
+# The bounds of the contract (`ImplementerResume`): the branches a session carries over, and the
+# number of the turn.
+MAX_RESUME_BRANCHES = 20
+MAX_RESUME_TURN = 100_000
 # The bounds of the contract (`contracts/environment-sizes.v1.json`): a script is text of at most
 # 64 KB.
 MAX_SETUP_SCRIPT_BYTES = 64 * 1024
@@ -322,6 +330,27 @@ class ImplementerEnvironment:
 
 
 @dataclass(frozen=True)
+class ResumeBranch:
+    """A branch the earlier turn pushed and the tip it pushed."""
+
+    name: str
+    head: str
+
+
+@dataclass(frozen=True)
+class ImplementerResume:
+    """What a follow-up turn is told about the session's branches (#838, `ImplementerResume` of the
+    contract): the branches the last turn left on the provider with their last pushed tips, the
+    session branch first when it is among them, and the branch the agent was on when that turn
+    ended (None: the session branch). The runner fetches them from the provider and takes the
+    provider's tip when it moved; the tips here are only what the earlier turn knew."""
+
+    turn: int
+    branches: tuple[ResumeBranch, ...]
+    checkout: str | None
+
+
+@dataclass(frozen=True)
 class ImplementerSpec:
     """What an implementer job asks for (#746, `ImplementerJob` of the contract). Closed.
 
@@ -338,6 +367,8 @@ class ImplementerSpec:
     model_entry: JobModelEntry
     capabilities: JobCapabilities | None = None
     environment: ImplementerEnvironment | None = None
+    # #838: set on a follow-up turn, the branches of the session; None on the first turn.
+    resume: ImplementerResume | None = None
 
 
 class JobError(Exception):
@@ -911,6 +942,27 @@ def _matching(value: object, pattern: re.Pattern[str], path: str, what: str) -> 
     return value
 
 
+def _branch_name(value: object, path: str, what: str = "a branch name") -> str:
+    """A branch name as the contract bounds it that also survives the command line: a lone
+    surrogate (JSON allows one) cannot be encoded and would end in a bare `UnicodeEncodeError` in
+    the first git command that gets it."""
+    name = _matching(value, _BRANCH_NAME, path, what)
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:
+        raise _invalid(f"{path} must be {what} in valid UTF-8") from None
+    return name
+
+
+def _pushable_branch_name(value: object, path: str, what: str = "a branch name") -> str:
+    """A branch name of a follow-up's session: one the final push would take (`push_policy`), so
+    that a name that could never be pushed is refused here and not after the work is done."""
+    name = _branch_name(value, path, what)
+    if branch_name_problem(name) is not None:
+        raise _invalid(f"{path} must be {what} that can be pushed")
+    return name
+
+
 def _implementer_repo(spec: dict[str, Any], git: GitAccess) -> ImplementerRepo:
     """The repository of a turn. The job carries a token that may write it and the runner sends that
     token to `cloneUrl`: the address must be the provider's web host and exactly this repository,
@@ -966,10 +1018,8 @@ def _implementer_spec(data: dict[str, Any], git: GitAccess) -> ImplementerSpec:
     cost = _job_cost_policy(spec)
     entry = _job_model_entry(spec)
     assert cost is not None and entry is not None  # both keys are present, so both parse or raise
-    base_branch = _matching(
-        spec.get("baseBranch"), _BRANCH_NAME, "implementer.baseBranch", "a branch name"
-    )
-    branch = _matching(spec.get("branch"), _BRANCH_NAME, "implementer.branch", "a branch name")
+    base_branch = _branch_name(spec.get("baseBranch"), "implementer.baseBranch")
+    branch = _pushable_branch_name(spec.get("branch"), "implementer.branch")
     if branch == base_branch:
         raise _invalid("implementer.branch must differ from implementer.baseBranch")
     return ImplementerSpec(
@@ -982,7 +1032,64 @@ def _implementer_spec(data: dict[str, Any], git: GitAccess) -> ImplementerSpec:
         model_entry=entry,
         capabilities=_job_capabilities(spec),
         environment=_implementer_environment(spec),
+        resume=_implementer_resume(spec, branch),
     )
+
+
+def _implementer_resume(spec: dict[str, Any], session_branch: str) -> ImplementerResume | None:
+    """The `implementer.resume` object (#838). Closed. Absent is a first turn. The branches are
+    distinct, at most `MAX_RESUME_BRANCHES`, each a branch name with the tip as 40 lower-case hex
+    digits; `checkout` is one of them, or the session branch (the one a turn that pushed nothing
+    still has), or null (the session branch). A value is never put into the message."""
+    if "resume" not in spec:
+        return None
+    given = _object(spec["resume"], "implementer.resume")
+    _check_fields(given, _IMPLEMENTER_RESUME_FIELDS, "implementer.resume.")
+    for name in _IMPLEMENTER_RESUME_FIELDS:
+        if name not in given:
+            raise _invalid(f"implementer.resume.{name} is required")
+    turn = given["turn"]
+    if isinstance(turn, bool) or not isinstance(turn, int) or not 2 <= turn <= MAX_RESUME_TURN:
+        raise _invalid(
+            f"implementer.resume.turn must be an integer between 2 and {MAX_RESUME_TURN}"
+        )
+    raw: object = given["branches"]
+    if not isinstance(raw, list) or len(cast("list[object]", raw)) > MAX_RESUME_BRANCHES:
+        raise _invalid(
+            f"implementer.resume.branches must be a list of at most {MAX_RESUME_BRANCHES} branches"
+        )
+    branches: list[ResumeBranch] = []
+    for item in cast("list[object]", raw):
+        entry = _object(item, "implementer.resume.branches[]")
+        _check_fields(entry, _IMPLEMENTER_RESUME_BRANCH_FIELDS, "implementer.resume.branches[].")
+        for name in _IMPLEMENTER_RESUME_BRANCH_FIELDS:
+            if name not in entry:
+                raise _invalid(f"implementer.resume.branches[].{name} is required")
+        branches.append(
+            ResumeBranch(
+                name=_pushable_branch_name(entry["name"], "implementer.resume.branches[].name"),
+                head=_matching(
+                    entry["head"],
+                    _LOWER_SHA,
+                    "implementer.resume.branches[].head",
+                    "a commit id of 40 lower-case hex digits",
+                ),
+            )
+        )
+    names = [branch.name for branch in branches]
+    if len(set(names)) != len(names):
+        raise _invalid("implementer.resume.branches must not name a branch twice")
+    checkout: object = given["checkout"]
+    if checkout is not None:
+        checkout = _pushable_branch_name(
+            checkout, "implementer.resume.checkout", "a branch name or null"
+        )
+        if checkout not in names and checkout != session_branch:
+            raise _invalid(
+                "implementer.resume.checkout must be one of the branches or the session branch"
+            )
+    assert checkout is None or isinstance(checkout, str)
+    return ImplementerResume(turn=turn, branches=tuple(branches), checkout=checkout)
 
 
 def _implementer_environment(spec: dict[str, Any]) -> ImplementerEnvironment | None:

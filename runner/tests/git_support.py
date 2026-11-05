@@ -106,6 +106,38 @@ class Origin:
         raw("checkout", "-q", "main", cwd=self.seed, git=self.git)
         return sha
 
+    def many_commits_on(self, branch: str, count: int) -> str:
+        """`count` commits one after the other on a branch, made in the seed clone and pushed (a
+        history longer than a shallow clone takes); the tip."""
+        if self.tip(branch) is None:
+            raw("checkout", "-q", "-b", branch, "main", cwd=self.seed, git=self.git)
+        else:
+            raw("fetch", "-q", "origin", cwd=self.seed, git=self.git)
+            raw("checkout", "-q", "-B", branch, f"origin/{branch}", cwd=self.seed, git=self.git)
+        for number in range(count):
+            (self.seed / "history.txt").write_text(f"{number}\n")
+            raw("add", "-A", cwd=self.seed, git=self.git)
+            raw("commit", "-qm", f"step {number}", cwd=self.seed, git=self.git)
+        raw("push", "-q", "origin", branch, cwd=self.seed, git=self.git)
+        sha = raw("rev-parse", "HEAD", cwd=self.seed, git=self.git)
+        raw("checkout", "-q", "main", cwd=self.seed, git=self.git)
+        return sha
+
+    def commits_from(self, branch: str, start: str, count: int) -> str:
+        """`count` commits on a new or existing branch, made in the seed clone on top of `start`
+        (any revision of the origin, `origin/main~5` say) and pushed: a branch that forked from the
+        history of another before its tip; the tip."""
+        raw("fetch", "-q", "origin", cwd=self.seed, git=self.git)
+        raw("checkout", "-q", "-B", branch, start, cwd=self.seed, git=self.git)
+        for number in range(count):
+            (self.seed / f"{branch.replace('/', '_')}.txt").write_text(f"{number}\n")
+            raw("add", "-A", cwd=self.seed, git=self.git)
+            raw("commit", "-qm", f"{branch} {number}", cwd=self.seed, git=self.git)
+        raw("push", "-q", "origin", branch, cwd=self.seed, git=self.git)
+        sha = raw("rev-parse", "HEAD", cwd=self.seed, git=self.git)
+        raw("checkout", "-q", "main", cwd=self.seed, git=self.git)
+        return sha
+
     def branches(self) -> list[str]:
         """The names of the branches the origin has."""
         done = subprocess.run(
