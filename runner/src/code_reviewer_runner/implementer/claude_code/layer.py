@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from typing import Any, Final, Protocol
 
 from code_reviewer_runner.implementer.docker_api import DockerError
+from code_reviewer_runner.job_loop.jsonvalues import as_object
 
 from .command import AGENT_HOME, AGENT_UID
 
@@ -138,10 +139,11 @@ class Layer:
     built: bool
 
 
-def _labels(image: dict[str, Any]) -> dict[str, Any]:
-    config = image.get("Config")
-    labels = config.get("Labels") if isinstance(config, dict) else None
-    return labels if isinstance(labels, dict) else {}  # pyright: ignore[reportUnknownVariableType]
+def _version_of(image: dict[str, Any]) -> object:
+    """The version label of an image, None when it has none."""
+    config = as_object(image.get("Config"))
+    labels = None if config is None else as_object(config.get("Labels"))
+    return None if labels is None else labels.get(VERSION_LABEL)
 
 
 def ensure_layer(daemon: LayerDaemon, agent_image: str, spec: LayerSpec = LayerSpec()) -> Layer:  # noqa: B008
@@ -155,7 +157,7 @@ def ensure_layer(daemon: LayerDaemon, agent_image: str, spec: LayerSpec = LayerS
         raise LayerError("the agent image has no usable id")
     tag = layer_tag(base_id, spec)
     try:
-        if _labels(daemon.inspect_image(tag)).get(VERSION_LABEL) == spec.version:
+        if _version_of(daemon.inspect_image(tag)) == spec.version:
             return Layer(tag, False)
     except DockerError:
         pass

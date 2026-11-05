@@ -7,7 +7,7 @@ status is 200. Against a small daemon on a Unix socket."""
 import json
 import socketserver
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -26,7 +26,7 @@ class _Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
 @contextmanager
 def daemon(
     tmp_path: Path, status: int, lines: list[dict[str, str]]
-) -> Iterator[tuple[DockerApi, list[tuple[str, str, bytes]]]]:
+) -> Generator[tuple[DockerApi, list[tuple[str, str, bytes]]]]:
     seen: list[tuple[str, str, bytes]] = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -79,9 +79,11 @@ def test_an_error_line_in_the_stream_is_a_failed_build_with_its_text(tmp_path: P
 
 # #856-T17
 def test_a_status_other_than_200_is_a_failed_build(tmp_path: Path) -> None:
-    with daemon(tmp_path, 500, [{"message": "the daemon is unwell"}]) as (api, _):
-        with pytest.raises(DockerError) as failed:
-            api.build_image(CONTEXT, "x:y", timeout=5)
+    with (
+        daemon(tmp_path, 500, [{"message": "the daemon is unwell"}]) as (api, _),
+        pytest.raises(DockerError) as failed,
+    ):
+        api.build_image(CONTEXT, "x:y", timeout=5)
 
     assert failed.value.status == 500
 
