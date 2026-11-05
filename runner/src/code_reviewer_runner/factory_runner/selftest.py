@@ -178,6 +178,8 @@ class SelfTestSeams:
     sleep: Callable[[float], None] = time.sleep
     pin_file: Path = PIN_FILE
     work_dir: Path = Path("/work")
+    # The name the agent image has in the daemon (the lane names its own).
+    image: str = AGENT_IMAGE_REFERENCE
     # The file of this very module's canned model, copied into the container.
     canned_source: Path = Path(canned_provider.__file__)
 
@@ -275,7 +277,7 @@ def _memory(run: _Run, limits: Limits, meminfo: str) -> int | None:
 
 def _image(run: _Run, reference: str | None, pull: Callable[[DockerApi, str], None] | None) -> bool:
     try:
-        run.api.inspect_image(AGENT_IMAGE_REFERENCE)
+        run.api.inspect_image(run.seams.image)
         return run.record(CHECK_IMAGE, True)
     except DockerError:
         pass
@@ -288,16 +290,16 @@ def _image(run: _Run, reference: str | None, pull: Callable[[DockerApi, str], No
         )
     try:
         pull(run.api, reference)
-        run.api.inspect_image(AGENT_IMAGE_REFERENCE)
+        run.api.inspect_image(run.seams.image)
     except DockerError:
         return run.record(CHECK_IMAGE, False, "the agent image could not be pulled")
     return run.record(CHECK_IMAGE, True, "pulled")
 
 
-def _throwaway(runtime: str, memory_mb: int, cpus: int | None) -> dict[str, object]:
+def _throwaway(image: str, runtime: str, memory_mb: int, cpus: int | None) -> dict[str, object]:
     """The agent's container as a real turn makes it, without the network and the volumes."""
     document = agent_document(
-        AGENT_IMAGE_REFERENCE,
+        image,
         "selftest",
         memory_mb * 1024 * 1024,
         runtime=runtime,
@@ -318,7 +320,9 @@ def _start(run: _Run, runtime: str, memory_mb: int, cpus: int | None) -> str | N
     _remove(api, SELFTEST_CONTAINER)
     container: str | None = None
     try:
-        container = api.create_container(_throwaway(runtime, memory_mb, cpus), SELFTEST_CONTAINER)
+        container = api.create_container(
+            _throwaway(run.seams.image, runtime, memory_mb, cpus), SELFTEST_CONTAINER
+        )
         api.start_container(container)
         end = run.seams.clock() + READY_SECONDS
         while True:

@@ -24,6 +24,7 @@ from code_reviewer_runner.factory_runner.prepare import (
     candidate_runtimes,
     job_environment,
     prepare,
+    pull_image,
     split_reference,
 )
 from code_reviewer_runner.factory_runner.selftest import Check, SelfTestResult
@@ -253,3 +254,21 @@ def test_the_host_of_a_runner_advertises_the_implementer_engine_and_nothing_else
     assert prepared.settings.implementer_docker is True
     assert prepared.settings.implementer_work_dir == Path("/work")
     assert prepared.settings.diff_job_user is None and prepared.settings.dynamic_engine_user is None
+
+
+def test_pulling_an_image_is_one_engine_api_pull_and_one_tag() -> None:
+    calls: list[tuple[str, str]] = []
+
+    class Api:
+        def request(self, method: str, path: str, **_: object) -> None:
+            calls.append((method, path))
+
+    pull_image(Api(), "ghcr.io/itegro-gmbh/agent:1.2")  # type: ignore[arg-type]
+
+    assert calls == [
+        ("POST", "/images/create?fromImage=ghcr.io/itegro-gmbh/agent&tag=1.2"),
+        (
+            "POST",
+            "/images/ghcr.io/itegro-gmbh/agent:1.2/tag?repo=code-reviewer-agent&tag=golden",
+        ),
+    ]
