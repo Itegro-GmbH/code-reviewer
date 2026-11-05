@@ -123,6 +123,7 @@ def snapshot_query(part: SnapshotPart) -> str:
 
 # How long a call waits for the thread of the one before it, which has answered, to end.
 ENDING_THREAD_SECONDS = 0.25
+ENDING_THREAD_POLL_SECONDS = 0.01
 
 
 class CredentialInvalid(LeaseLost):
@@ -403,8 +404,12 @@ class HttpWorkerApi:
         if running is not None and running.is_alive():
             # The thread of the call before this one hands its answer to the loop and ends a moment
             # later: a caller that goes on at once (the next part of a snapshot) finds it alive.
-            # A call that is really still running is not waited for beyond this moment.
-            running.join(timeout=ENDING_THREAD_SECONDS)
+            # A call that is really still running is not waited for beyond this moment. The wait
+            # gives the loop back (a `join` here would stop the heartbeat for the moment).
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + ENDING_THREAD_SECONDS
+            while running.is_alive() and loop.time() < deadline:
+                await asyncio.sleep(ENDING_THREAD_POLL_SECONDS)
         if running is not None and running.is_alive():
             raise ApiUnavailable(f"an earlier {name} has not ended")
         return await self._run_on_thread(name, call, slot=slot)

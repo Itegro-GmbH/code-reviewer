@@ -544,3 +544,44 @@ def test_no_secret_is_in_an_error_or_a_log_when_the_app_answers_500_over_a_real_
     assert api.features_listed is False
     for error in errors:
         assert_no_secret_in(error, caplog.text)
+
+
+# #855-F1 (S8): the short wait for the thread of the call before must not stop the event loop.
+def test_waiting_for_the_call_before_does_not_block_the_event_loop() -> None:
+    api, _ = make()
+    release = threading.Event()
+    earlier = threading.Thread(target=release.wait, daemon=True)
+    earlier.start()
+    api._steps_thread = earlier  # pyright: ignore[reportPrivateUsage]
+    ticks = 0
+
+    async def ticker() -> None:
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    async def scenario() -> None:
+        task = asyncio.ensure_future(ticker())
+        try:
+            with pytest.raises(ApiUnavailable, match="has not ended"):
+                await api.steps(JOB, b"{}")
+        finally:
+            task.cancel()
+            release.set()
+
+    asyncio.run(scenario())
+
+    # The wait is a quarter of a second: a loop that was free ticked a good part of 25 times.
+    assert ticks >= 10
+
+
+def test_a_call_whose_predecessor_ends_within_the_moment_goes_on() -> None:
+    api, opener = make(Answer(200))
+    earlier = threading.Thread(target=time.sleep, args=(0.05,), daemon=True)
+    earlier.start()
+    api._steps_thread = earlier  # pyright: ignore[reportPrivateUsage]
+
+    asyncio.run(api.steps(JOB, b"{}"))
+
+    assert len(opener.requests) == 1
