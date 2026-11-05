@@ -113,54 +113,48 @@ def printed_environment(turn: Turn) -> str:
     return "\n".join(texts)
 
 
-def env_turn(place: Workplace, url: str, *, scrub: bool) -> Turn:
-    return place.run(url, "Print your environment", scrub=scrub)
+# Under its sandbox Claude Code holds commands that print the environment (`env`, `printenv`,
+# `/proc/*/environ`, a `$VARIABLE` in the command line) for approval, even in bypass mode (CI,
+# 2026-11-05), so the agent writes a script and runs that: the command line says nothing about it.
+PROBE = 'echo "RAN"; env; python3 -c "import os; print(sorted(os.environ.items()))"\n'
 
 
-# Ways to look at the environment of a tool. Under its sandbox Claude Code asks for approval for
-# `env`, `printenv` and `/proc/*/environ`, even in bypass mode (CI, 2026-11-05), so the commands
-# expand the variables themselves; at least one has to run.
-PRINTERS = (
-    'echo "RAN HOME=[$HOME] KEY=[$ANTHROPIC_API_KEY] TOKEN=[$CLAUDE_CODE_OAUTH_TOKEN]"',
-    "python3 -c \"import os; print('RAN', sorted(os.environ.items()))\"",
-)
+def probe_turn(place: Workplace, *, scrub: bool) -> Turn:
+    script = str(place.repo / "probe.sh")
+    with served(
+        Scripted(tool="Write", args={"file_path": script, "content": PROBE}),
+        Scripted(tool="Bash", args={"command": "sh probe.sh", "description": "run the probe"}),
+        Scripted(text="Looked."),
+    ) as (_fake, url):
+        return place.run(url, "Print your environment", scrub=scrub)
 
 
 # #856-T30
 def test_the_login_is_not_in_the_environment_of_the_tools_the_agent_runs(tmp_path: Path) -> None:
     """Claude Code scrubs its credentials from the environment of its subprocesses
-    (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`): a command the agent runs cannot print the login."""
+    (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`): a script the agent runs cannot print the login."""
     assert bubblewrap_usable() is None, bubblewrap_usable()
-    printed: list[str] = []
-    for number, command in enumerate(PRINTERS):
-        (tmp_path / str(number)).mkdir()
-        place = Workplace(tmp_path / str(number))
-        with served(
-            Scripted(tool="Bash", args={"command": command, "description": "look"}),
-            Scripted(text="Looked."),
-        ) as (_fake, url):
-            turn = env_turn(place, url, scrub=True)
-        assert turn.returncode == 0 and turn.result.ok, turn.stderr[-300:]
-        printed.append(printed_environment(turn))
+    place = Workplace(tmp_path)
 
-    assert any("RAN" in seen for seen in printed), f"no command ran: {printed}"
-    for seen in printed:
-        assert FAKE_KEY not in seen and "ANTHROPIC_API_KEY" not in seen
+    turn = probe_turn(place, scrub=True)
+
+    seen = printed_environment(turn)
+    assert turn.returncode == 0 and turn.result.ok, turn.stderr[-300:]
+    assert "RAN" in seen and "PATH=" in seen, f"the script did not run: {seen[:400]}"
+    assert FAKE_KEY not in seen and "ANTHROPIC_API_KEY" not in seen
 
 
 # #856-T30
 def test_control_without_the_scrub_the_login_is_in_the_environment_of_the_tools(
     tmp_path: Path,
 ) -> None:
-    """What the test above would see if the scrub did nothing: the same command, the switch off."""
+    """What the test above would see if the scrub did nothing: the same script, the switch off."""
     place = Workplace(tmp_path)
-    with served(
-        Scripted(tool="Bash", args={"command": "env", "description": "look"}),
-        Scripted(text="Looked."),
-    ) as (_fake, url):
-        turn = env_turn(place, url, scrub=False)
 
-    assert FAKE_KEY in printed_environment(turn)
+    turn = probe_turn(place, scrub=False)
+
+    seen = printed_environment(turn)
+    assert "RAN" in seen and FAKE_KEY in seen
 
 
 # #856-T31
