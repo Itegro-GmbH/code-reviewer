@@ -315,6 +315,24 @@ class RunnerService:
         assert self._host is not None
         self._api.hold(claimed.id, claimed.lease_token)
         try:
+            # Which features this app lists decides, for this job, whether the host opens the
+            # snapshot channel and downloads the stored session (`RunnerJobApi.supports_snapshot`).
+            # The job does not depend on it: whatever goes wrong here, it runs without a snapshot.
+            try:
+                await self._api.check_app(claimed.id)
+            except Exception as error:
+                self._log.warning(
+                    "job %s: the features of the app could not be read (%s): running without "
+                    "the session snapshot",
+                    claimed.id,
+                    type(error).__name__,
+                )
+            else:
+                if not self._api.features_listed:
+                    self._log.warning(
+                        "job %s: the app listed no features: running without the session snapshot",
+                        claimed.id,
+                    )
             end = await self._host.run_job(claimed)
         finally:
             self._api.forget(claimed.id)

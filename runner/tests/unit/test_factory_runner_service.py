@@ -60,6 +60,7 @@ from code_reviewer_runner.implementer.result_channel import make_result_director
 from code_reviewer_runner.implementer.role_labels import ROLE_LABEL, RUNNER_LABEL
 from code_reviewer_runner.job import IMPLEMENTER_WORK_DIR_VARIABLE
 from code_reviewer_runner.job_loop.api import ApiUnavailable, ClaimedJob
+from code_reviewer_runner.job_loop.http import ApiRejected
 
 pytestmark = pytest.mark.unit
 
@@ -123,9 +124,17 @@ class FakeJobApi(FakeApi):
         self.held: list[tuple[str, str]] = []
         self.forgotten: list[str] = []
         self.credentials: list[str] = []
+        self.checked: list[str] = []
+        self.check_error: BaseException | None = None
+        self.features_listed = True
 
     def hold(self, job_id: str, lease_token: str) -> None:
         self.held.append((job_id, lease_token))
+
+    async def check_app(self, job_id: str) -> None:
+        self.checked.append(job_id)
+        if self.check_error is not None:
+            raise self.check_error
 
     def forget(self, job_id: str) -> None:
         self.forgotten.append(job_id)
@@ -329,10 +338,55 @@ def test_once_takes_one_job_runs_it_and_ends(tmp_path: Path) -> None:
     assert code == EXIT_OK
     assert rig.client.claim_calls == 1  # the second job stays in the queue for someone else
     assert rig.api.held == [(claimed.id, claimed.lease_token)]
+    # #879: the features the app lists are read for the job, after the claim is held.
+    assert rig.api.checked == [claimed.id]
     assert rig.api.forgotten == [claimed.id]
     assert [(job, token) for job, token, _ in rig.api.completions] == [
         (claimed.id, claimed.lease_token)
     ]
+    assert rig.api.completions[0][2]["ok"] is True
+
+
+# #879-T07
+@pytest.mark.parametrize(
+    "error",
+    [ApiRejected("secret-in-text", 400, None), RecursionError("secret-in-text"), OSError("x")],
+    ids=lambda error: type(error).__name__,
+)
+def test_a_version_call_that_raises_does_not_stop_the_job_and_is_logged_by_class(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, error: Exception
+) -> None:
+    rig = Rig(tmp_path)
+    claimed = implementer_claim()
+    rig.client.claims = [claimed]
+    rig.api.check_error = error
+
+    with caplog.at_level(logging.WARNING, logger="code_reviewer_runner.loop"):
+        code = rig.go(once=True, wait=0)
+
+    assert code == EXIT_OK
+    assert [(job, token) for job, token, _ in rig.api.completions] == [
+        (claimed.id, claimed.lease_token)
+    ]
+    assert rig.api.completions[0][2]["ok"] is True
+    assert rig.api.forgotten == [claimed.id]
+    assert f"({type(error).__name__})" in caplog.text
+    assert "secret-in-text" not in caplog.text
+
+
+# #879-T07
+def test_an_app_that_lists_no_features_is_said_once_per_job_and_the_job_runs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    rig = Rig(tmp_path)
+    rig.client.claims = [implementer_claim()]
+    rig.api.features_listed = False
+
+    with caplog.at_level(logging.WARNING, logger="code_reviewer_runner.loop"):
+        code = rig.go(once=True, wait=0)
+
+    assert code == EXIT_OK
+    assert caplog.text.count("listed no features") == 1
     assert rig.api.completions[0][2]["ok"] is True
 
 

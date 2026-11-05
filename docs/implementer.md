@@ -115,9 +115,9 @@ follow-up's cost is not counted in the budget of the workflow run that started t
 ### On a customer's machine
 
 A turn on a runner of the customer (section "Environments of the kind `runner`" in [`runner.md`](runner.md)) is a turn like any other for
-the session, its branches and the preface. The conversation is the exception: the two snapshot routes take the Worker's per-job credential
-and a runner holds a runner credential, so a turn there **stores no snapshot and cannot download one** until #879 gives the runner its own
-two routes. A follow-up on a runner therefore continues from the summary and the digest (`summary_only`). The app sends `resume` only to a
+the session, its branches and the preface, and so is the conversation (#879): the runner moves the snapshot through its own two routes with its own credential and the lease token (`runner.md`, "Resume on customer runners"),
+so a follow-up on a runner continues the engine's conversation, whichever machine ran the earlier turns. That holds when the app lists the feature `runner_session_snapshot`, which the runner reads from the version
+call for every job; against an app that does not, a turn on a runner stores no snapshot and a follow-up continues from the summary and the digest (`summary_only`). The app sends `resume` only to a
 runner that names the claim feature `implementer_resume`; for any other the follow-up ends `implementer_engine_unavailable`, free, before a
 credential exists.
 
