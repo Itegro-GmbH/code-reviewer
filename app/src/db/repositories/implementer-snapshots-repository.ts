@@ -186,7 +186,8 @@ export function createImplementerSnapshotsRepository(
         if (part.count === 1) {
           // A snapshot in one part is checked as it stands: no row waits for the rest, and no bytes are read back.
           whole = Buffer.from(part.data);
-          if (!isWhole(whole, part, part.index === 0)) return { status: "invalid" };
+          if (!isWhole(whole, part, part.index === 0))
+            return { status: "invalid" };
         } else {
           await trx
             .insertInto("implementer_session_snapshot_parts")
