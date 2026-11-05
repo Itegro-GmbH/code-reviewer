@@ -199,20 +199,25 @@ machine (Linux, Docker)
 ### Install (one line, R2)
 
 For a Linux machine with **Docker** (the engine, not rootless), **systemd** and x86_64. Create a registration token in the app
-(Owner or Admin: Runners, "Add a runner"; it is valid for an hour and works once), then, as root:
+(Owner or Admin: Runners, "Add a runner"; it is valid for an hour and works once), then, as root. **The installer asks for the token on
+the terminal** (the input is hidden; nothing of it is in the process list, the shell history or the log of `sudo`):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Itegro-GmbH/code-reviewer/main/runner/install/install.sh \
-  | sudo FACTORY_RUNNER_TOKEN=crt_... sh -s -- --labels linux,gpu --disk-gb 50
+curl -fsSL https://raw.githubusercontent.com/Itegro-GmbH/code-reviewer/main/runner/install/install.sh | sudo sh
+# settings go behind `-s --`:   ... | sudo sh -s -- --labels linux,gpu --disk-gb 50
 ```
 
-or with the token out of the environment and out of the shell history (save the script first: under `curl | sh` the standard input *is* the
-script, so `--token-file -` cannot read the token from it):
+or from a file that only root can read (save the script first: under `curl | sh` the standard input *is* the script, so `--token-file -`
+cannot read the token from it):
 
 ```sh
 curl -fsSLo install.sh https://raw.githubusercontent.com/Itegro-GmbH/code-reviewer/main/runner/install/install.sh
 sudo sh install.sh --token-file /root/runner-token --labels linux,gpu
 ```
+
+`FACTORY_RUNNER_TOKEN=crt_... sudo sh install.sh` also works, but **only use it on a machine where that does not matter**: the token is
+then in your shell history, in the log of `sudo` and, while the command starts, in the process list. The installer prints that warning when
+the token came from the environment. (The token is valid for one hour and works once, which limits what a leak costs, not whether to avoid it.)
 
 [`runner/install/install.sh`](../runner/install/install.sh) is one POSIX shell file. In this order it:
 
@@ -222,24 +227,35 @@ sudo sh install.sh --token-file /root/runner-token --labels linux,gpu
    installer stops with "no runner image is published yet"** and installs nothing;
 3. fetches the **manifest and its signature**, **verifies the signature with `openssl`** (ECDSA P-256, SHA-256; see "Updates"), **pulls the image
    by the digest the manifest names**, checks that the image carries the release number the manifest names, and names it `factory-runner:current`.
-   A manifest that does not verify, or an image that is not the release it names, installs nothing (the image is removed again);
+   A manifest that does not verify, or an image that is not the release it names, installs nothing (the image is removed again). **The installer
+   never goes back**: it reads the release of the installed `current`, and when the announced release is the same, older, or one a
+   `factory-runner update --rollback` rejected (see "Updates"), it pulls nothing and changes no tag. `previous` is set only when `current` changes;
 4. writes the **command** `/usr/local/bin/factory-runner` (a throwaway container of `factory-runner:current` with the socket, the
    configuration volume and `/work`) and the **systemd unit** `/etc/systemd/system/factory-runner.service`: the container `run --rm
    --stop-timeout 150` with the host's Docker socket (for the runner only: the agent never gets it), the volumes `factory-runner-home`
    (the configuration, the credential) and `factory-runner-work` (`/work`), `FACTORY_RUNNER_IMAGE_TAG=factory-runner:current`,
-   `Restart=always` (but not after exit codes 4 revoked, 6 configuration, 9 shared daemon) and `TimeoutStopSec=170`;
+   `Restart=always` (but not after exit codes 4 revoked, 6 configuration, 9 shared daemon), `TimeoutStopSec=170` and a rotated log of the
+   container (`--log-opt max-size=10m --log-opt max-file=3`);
 5. **registers** the machine with the token and applies `--name --labels --url --cpus --memory-mb --disk-gb`;
 6. enables and **starts** the service.
 
 The token is **never an argument** (`--token` is refused, it would be in the process list and the shell history): it comes from
-`--token-file FILE` (`-`: standard input), from `FACTORY_RUNNER_TOKEN`, or is asked for on the terminal without echo. It reaches the
-registration on the standard input of a container, in no argument and no environment of it. With no token the service is installed and
-not started, and the script says how to register by hand.
+`--token-file FILE` (`-`: standard input; a file that is named and cannot be read is an error, not a silent skip), from
+`FACTORY_RUNNER_TOKEN` (with the warning above), or is asked for on the terminal without echo. It reaches the registration on the
+standard input of a container, in no argument and no environment of it. With no token the service is installed and not started, and the
+script prints the command to register by hand: `factory-runner register --token-file - < /path/to/token-file` (your shell opens the
+file, the command passes it on as the container's standard input; a path the container cannot see is not needed) and then
+`systemctl enable --now factory-runner`.
+
+**A download that is cut off changes nothing.** Under `curl | sh` the shell runs the file while it receives it. All of the script is
+functions; the last line, `main "$@"`, is the only command that does anything, and the script ends with the line `install: done`. A cut
+anywhere before that last line defines a few functions at most; a run that does not print `install: done` did not finish.
 
 **Safe to run again.** A registered machine is not registered twice (the token is not used); a setting you pass is applied with
 `config set`; the unit is rewritten only when it differs and a running service is **never restarted** (it switches to a newer image by
 itself between two jobs, and reads a changed configuration when it next starts: `systemctl restart factory-runner` after its job). A second
-run also finds the newer release and stages it, as `factory-runner update` does.
+run also finds the newer release and stages it, as `factory-runner update` does, and **never installs an older or a rolled-back one**.
+`--purge` is only valid with `--uninstall`.
 
 `--dry-run` says what it would do and changes nothing. `--uninstall` removes the service, the command and the images and keeps the
 configuration and `/work`; `--uninstall --purge` removes those too (revoke the runner in the app: its credential keeps working
@@ -247,11 +263,14 @@ until then). Afterwards the firewall tables Control left in the machine's networ
 by `nft delete table ...` or at the next restart of the machine.
 
 **Sysbox is a separate step, `--sysbox`, never part of the base install.** It prints what it does and asks you to type `yes` on the
-terminal (`--yes` accepts the warnings when there is none):
+terminal (`--yes` accepts the warnings when there is none). **The question comes before the first change** (the image, the unit, the
+registration), with the checks it needs and the download of the package and its SHA-256 check; with no terminal and no `--yes` the
+installer stops there with "nothing was changed". Any answer but `yes` is not a failure: the base installation goes on without Sysbox.
+Only then does the package go in, after `/etc/docker/daemon.json` was copied to `daemon.json.factory-runner-backup`:
 
 - it installs the package `sysbox-ce 0.7.1` (the version of the golden snapshot, checked against its SHA-256);
-- the package **rewrites `/etc/docker/daemon.json`**: the `sysbox-runc` runtime, `bip` 172.20.0.1/16 and `default-address-pools`
-  172.25.0.0/16, so the network ranges of your other containers can change;
+- the package **rewrites `/etc/docker/daemon.json`** (a copy is kept next to it first): the `sysbox-runc` runtime, `bip` 172.20.0.1/16 and
+  `default-address-pools` 172.25.0.0/16, so the network ranges of your other containers can change;
 - it **restarts Docker** when no container is running (so none may be: the step refuses otherwise, stop the runner first);
 - it needs `jq` and `systemctl`, runs `sysbox-mgr` and `sysbox-fs` as services, and is officially supported on Ubuntu 22.04 and 24.04
   (26.04 was tested, not supported; see "Spikes R0");
@@ -322,7 +341,7 @@ docker run -d --name factory-runner --restart unless-stopped --stop-timeout 150 
 | `config set [--name N] [--labels a,b] [--cpus N\|none] [--memory-mb N\|none] [--disk-gb N\|none] [--parallel N] [--runtime R] [--agent-image I\|none] [--auto-update on\|off]` | Changes the file **on the device** (labels, limits, parallelism, name, runtime, image, automatic updates). Every value goes through the check of `register`; one wrong value changes nothing. `none` removes a limit. The credential and everything not named stay as they are, and the environment is never written into the file; when a variable overrides a setting that was changed, it says so. A running service reads the file when it starts: restart it after its job. `--parallel` accepts 1: this runner takes one job at a time. |
 | `credential show`              | `credential: set (from the file)` or `not set`, and how old it is. Never the value.                                                         |
 | `credential renew`             | Asks the app for a new credential and saves it **before** anything uses it (the app keeps the old one valid until the new one was used once, so a failed write loses nothing). Not for a credential from the environment. Exit code 4 when the runner was revoked. |
-| `update [--rollback]`          | Fetches the newest release, **verifies it** and stages it (see "Updates"). Never touches a running job. `--rollback` points `current` back at the image before the last update. |
+| `update [--rollback]`          | Fetches the newest release, **verifies it** and stages it (see "Updates"). Never touches a running job. `--rollback` points `current` back at the image before the last update **and remembers the release it left**: no update, by the service or by this command, takes that release or an older one again until a higher one is announced. |
 
 **Exit codes** (the same list is in `factory_runner/base.py`):
 
@@ -333,7 +352,7 @@ docker run -d --name factory-runner --restart unless-stopped --stop-timeout 150 
 | 2    | Usage (a wrong argument, no token for `register`)                                                                                               |
 | 3    | The app requires a newer base (`426`)                                                                                                           |
 | 4    | Revoked: the app does not know the credential any more                                                                                          |
-| 5    | Not ready: the self-test failed (the failed check says why)                                                                                     |
+| 5    | Not ready: the self-test failed (the failed check says why). The service waits five minutes before it ends with it, so the unit's restart does not run the self-test every ten seconds; `run --once` ends at once |
 | 6    | Configuration: a value is missing or wrong; a file with a credential and no `runnerId` (`register --force`, or add the runnerId); a runner with no identity |
 | 7    | `run --once` only: **the app never answered a claim** during the whole wait. Not the same as 0: the runner does not know whether a job waited. An app that answered once and was lost later is "no job", exit 0 |
 | 8    | `register` only: the app registered the runner, but its credential could not be saved (revoke the runner in the app and register again)        |
@@ -458,9 +477,11 @@ Enforced through the host's Docker (`limits.py`, `disk_budget.py`):
 **The disk budget** (#855). `diskGb` is what one job may hold on the machine's disk. While a job runs (every 20 seconds) the runner measures
 what the job made: the folders of the turn in `/work` (`reserve`, `repo`, `result`, by the allocated blocks of their files, a file with
 several links once, links not followed), the **writable layer of every container of this runner** (the agent's, the setup container's, the
-door's: this is where what an agent writes into its container, its session files among it, is), and the image the setup container's result
-is committed as (`code-reviewer-agent:environment`). The Docker images of the runner itself and the images and containers of other things
-on the daemon are not the job's and not counted. When the measure passes the budget:
+door's: this is where what an agent writes into its container, its session files among it, is), and what the setup container's result added
+to the agent image: the image it is committed as (`code-reviewer-agent:environment`) **minus the size of the agent image** it was made
+from (the base image is the runner's, shared, and there before the job), and **once**: as soon as that image exists, the setup container's
+own writable layer is not counted any more, because it is what the commit wrote into the image. The Docker images of the runner itself and
+the images and containers of other things on the daemon are not the job's and not counted. When the measure passes the budget:
 
 1. the job process is ended the way a shutdown ends it (`JobHost`, the `guard`), and the job is **reported as failed**, not given back (it
    would fill the disk again): error code `runner_error`, error reason `disk_budget_exceeded`, and a text that names the budget and what
@@ -468,6 +489,13 @@ on the daemon are not the job's and not counted. When the measure passes the bud
 2. the cleaning that follows every job removes everything it made: the containers and networks of this runner, the folders of `/work`
    and the environment image (the name `code-reviewer-agent:environment`, so the daemon frees its layers). A hosted VM loses all of this
    with the VM; a machine would keep it, and without this step a run of jobs that commit an environment image would fill the disk.
+
+**The budget is an emergency brake, not a quota.** The measure is taken every 20 seconds, so a job can write more than the budget
+between two looks (the job is ended at the next one, and what it wrote is removed); and some things are **not measured**: what a job's
+Docker inside **Sysbox** writes (the inner Docker's images and containers live under `/var/lib/sysbox` on the host, which is not walked and
+which the daemon's size figure for the outer container does not include), **container logs** (the unit rotates its own; the logs of the
+job's containers are not counted), and anything outside the folders and layers above. The budget stops a job that fills the disk; it does not
+promise that a job stays below the number, and it is no replacement for keeping free space on the machine.
 
 Without `diskGb` there is no budget and the machine's disk is the limit; the app still shows the free space of `/work` as the disk of the
 runner. Choose the budget for the largest job you accept, and keep the rest of the machine's disk free for the images of the runner
@@ -499,11 +527,15 @@ the repository. **No extra program is needed to check it**: the runner uses the 
 
 1. the manifest and the signature are fetched (https only, at most 64 KiB) and the signature must verify with the channel's key, which
    must be an ECDSA P-256 key; the manifest must name the channel's repository, a `sha256:` digest and a release number of 1 or more;
-2. the release number must be **higher** than the running one's (the label `code-reviewer.runner.release` of the running image): a signed
-   older manifest that somebody serves again is no way back, and nothing is pulled for it;
+2. the release number must be **higher** than the running one's (the label `code-reviewer.runner.release` of the running image) **and
+   higher than the release a rollback left** (below): a signed older manifest that somebody serves again is no way back, and nothing is
+   pulled for it;
 3. only then is the image pulled **by the digest the manifest names** (the daemon checks the content against it); its label must carry the
    manifest's release number, otherwise it is removed again and nothing changes;
 4. the digest is named `factory-runner:current` (the one before it `factory-runner:previous`, for `update --rollback`).
+
+After a switch the service removes the **digest references** of the releases before `current` and `previous` (each pull by digest leaves
+one, and while it stays the daemon cannot free the old image); `--uninstall` removes the images by name and by their digest references.
 
 **Between jobs.** The unit starts the container from `factory-runner:current` and restarts it when it ends. The service looks for a release
 ten minutes after its start and then every six hours, **only between two jobs**; and when the image behind `current` is another one than the
@@ -513,8 +545,25 @@ starts it again from the new image. A job that is running is never touched. Both
 updates. `factory-runner config set --auto-update off` stops the looking by itself; an update the app requires is looked for anyway.
 
 **On the device.** `factory-runner update` stages the newest verified release and says so; the service switches to it after the job it is
-running. `factory-runner update --rollback` and a restart of the service go back one release. A new image that does not pass its own
-self-test is not ready (exit code 5) and takes no job: roll back.
+running. `factory-runner update --rollback` and a restart of the service go back one release, and the rollback **writes the release it
+left into the file `rejected-release` of the configuration volume**. From then on neither the service (every six hours) nor `factory-runner
+update` nor the installer takes that release or an older one again; the first release **above** it is taken as usual. (Without that, the
+service would take the same release back ten minutes after the operator had rolled it back.) The command says so; a rollback whose memory
+cannot be written changes nothing.
+
+**A new image that does not run: the way back by hand.** A new image that does not pass its own self-test is not ready (exit code 5): the
+service waits five minutes, ends, and the unit starts it again, so a bad update is tried every few minutes, not every ten seconds, and takes
+no job. To go back when `factory-runner update --rollback` is not possible (the new image does not start at all):
+
+```sh
+docker tag factory-runner:previous factory-runner:current && sudo systemctl restart factory-runner
+```
+
+Then write the bad release into `rejected-release` so that the service does not take it again (the file holds the number and a newline):
+`docker run --rm --entrypoint sh -v factory-runner-home:/var/lib/factory-runner factory-runner:current -c 'echo N > /var/lib/factory-runner/rejected-release'` (or let `factory-runner update --rollback` do it,
+once the service runs again from `previous`). **There is no automatic watchdog** that rolls back a new image that exits with an error within
+a few minutes: a check that works when the new image cannot even start has to live outside the image (a host-side script in the unit), which
+is more than this step; it is a follow-up (see "Known limits").
 
 **What is not in this repository, for the owner.** The release pipeline: nothing publishes a runner image today, and the tests of the images
 pipeline hold that no workflow logs in to a registry, pushes an image or asks for `packages: write` (#677: the source is visible but not
@@ -546,7 +595,7 @@ announce an image, so keep it where the other release secrets are. The tests sig
 ### Uninstall
 
 `sudo sh install.sh --uninstall` (see "Install"), then revoke the runner in the app. By hand: `systemctl disable --now factory-runner`, remove
-the unit and `/usr/local/bin/factory-runner`, `docker rm -f factory-runner`, `docker rmi factory-runner:current factory-runner:previous`,
+the unit and `/usr/local/bin/factory-runner`, `docker rm -f factory-runner`, `docker rmi factory-runner:current factory-runner:previous` (and the digest references, `docker images --digests`),
 and with the configuration and the work volume gone, `docker volume rm factory-runner-home factory-runner-work`. The firewall tables of
 the security notes (`nft delete table ip setup_egress`, and so on) go with the next restart of the machine.
 
@@ -572,6 +621,31 @@ standard input, idempotence, no restart of a running service, a signature that d
 refusal without a terminal, uninstall, and that the installer, `update.py`, the Dockerfile and the golden snapshot agree on the channel file and
 the versions. CI also runs `shellcheck` on the installer. **No test starts a real systemd unit or installs a package:**
 nothing runs on a machine of ours; the first install on a real machine is the test of that.
+
+Fix round 1 of the review of R2 added: a rollback that survives the auto-updater (`test_factory_runner_manage.py`, and the service test
+that runs the policy after a rollback), a script that is cut off anywhere and one that runs from its standard input
+(`test_install_script.py`, with a stand-in that consumes the standard input and a pseudo-terminal for the prompts), the installer that
+never goes back, the disk budget with a big base image under a small commit (`test_factory_runner_disk_budget.py`, lane L02 against the
+size the commit really added), and the event loop that stays free while a call waits for the one before it.
+
+### First install on a real host (the live test)
+
+What the tests cannot know and the first install must check (nothing of this runs in CI):
+
+1. **The image store.** With Docker's **containerd image store** (`docker info` lists `io.containerd.snapshotter.v1` as the storage driver
+   status) the id of the image a container reports and the id of the tag may differ. The service compares them
+   (`docker inspect <container> --format '{{.Image}}'` against `docker image inspect factory-runner:current --format '{{.Id}}'`): if
+   they differ for a freshly started service, it ends with exit code 10 at its first look, again and again. Check that the two are **equal**
+   after the first start; if not, the comparison has to use the image's digest instead and this is a bug to fix before the next runner.
+2. **The size figures** under that store: `docker image inspect --format '{{.Size}}'` of the agent image and of an image committed from it
+   (the lane test L02 asserts that the difference is what the commit added) and `SizeRw` of a container (lane test L01).
+3. **A real update and rollback:** publish two releases, let the service switch, `factory-runner update --rollback`, restart, and wait
+   past the first look (ten minutes): `current` must stay on the earlier release; announce a third and watch it taken.
+4. **A new image that does not run** (for instance an image whose self-test fails): the service must retry every few minutes, not every
+   ten seconds (`journalctl -u factory-runner`), and `docker tag factory-runner:previous factory-runner:current && systemctl restart
+   factory-runner` must bring the runner back.
+5. **The installer on a terminal:** `curl ... | sudo sh` asks for the token with the input hidden; with `--sysbox` the question comes before
+   anything is pulled, "no" continues, and `daemon.json.factory-runner-backup` exists after "yes".
 
 ### Security notes
 
@@ -602,6 +676,16 @@ nothing runs on a machine of ours; the first install on a real machine is the te
 
 ### Known limits
 
+- **No watchdog for a bad update.** A new image that fails is tried again every few minutes and the operator rolls back by hand (see
+  "Updates"); rolling back by itself and rejecting the release when the new image ends with an error within N minutes is a follow-up.
+- **The manifest has no expiry (freeze attack).** The signature proves that a manifest is ours, not that it is the newest: whoever controls the
+  address can keep serving an older signed manifest (a runner never goes below the running release, so this only *freezes* it, and the
+  app's minimum base version still forces an update where it matters). A signed `expires` date in the manifest, checked by the runner and the
+  installer, would close it; it is a follow-up.
+- **Rotating the release key** is a new `release-channel.json` in a new image: a runner that runs an image with the old key cannot
+  verify a manifest signed with the new one, and so does not update. Plan a release signed with the old key that carries the new channel
+  file before the old key is retired.
+- **The disk budget is an emergency brake** (measured every 20 seconds; not the inner Docker of Sysbox, not container logs; see "Limits").
 - **One runner per Docker daemon.** The containers have fixed names (`code-reviewer-agent` ...) and the model network a fixed address, so a
   second runner on the same daemon would fail every turn with a 409. Every container and network a runner's job creates carries
   `code-reviewer.runner=<runnerId>` (a runner without an id from the file, one with a credential from the environment, uses a digest of
