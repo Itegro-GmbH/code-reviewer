@@ -250,6 +250,12 @@ executable is needed for this suite. All fake threads, helpers and owned job dir
 
 Engine suite (`runner/tests/engine/`, `uv run pytest -m engine`, `make test-engine`; about 15 to 20 minutes in one serial process, which is how a developer runs it locally; the native provider file (#546) is about one minute of it, it was 3.7 minutes before it was consolidated). CI (`engine.yml`, #713) runs it as three jobs on runners of their own behind the one check `engine`: the **PR-Agent half** and the **OpenCode half** (`--engine-shard=pragent|opencode`, the files named in `runner/tests/engine_shards.py`; the PR-Agent half is every file that is not listed, so a new file cannot fall out of CI), each on four pytest-xdist workers (`-n 4 --dist loadfile` in `scripts/run_engine_offline.sh`, whole files per worker because some files share module-scoped engines), and the privileged suite as the third job. A test that starts its own `opencode serve` takes its port from the band of its xdist worker (`tests/engine/engine_ports.py`) and starts again on another port when the engine exits before it answers. The `smoke` marker (`-m "engine and smoke"`, `make test-engine-smoke`, 18 tests) is the subset that proves the runner end to end in about two minutes; it is for the faster pull request tier, not for the full run:
 
+- The Claude Code adapter of the Factory-Runner (#856, `test_engine_claude_code.py` and `claude_code_support.py`, in the PR-Agent half
+  of the shards) starts the real, pinned Claude Code with the adapter's own command line and environment against the strict fake
+  provider of `fakes/wire`. `runner/scripts/fetch_claude_code.py` installs the version pinned in
+  `implementer/claude_code/layer.py` with npm and accepts the tarball only with the pinned SHA-512 (`CLAUDE_CODE_BIN` overrides the
+  cache `~/.cache/code-reviewer/claude-code`); a missing program fails loudly with the command to run, never a skip. It is Anthropic's
+  proprietary software, fetched for the tests only. `engine.yml` caches it.
 - The OpenCode half (#197, `test_engine_opencode.py` and `opencode_support.py`) needs the pinned
   executable and a trusted `rg`. `runner/scripts/fetch_opencode.py` downloads the release named by
   `runner/opencode-pin.json` over https, accepts it only with the pinned size and SHA-256, unpacks
