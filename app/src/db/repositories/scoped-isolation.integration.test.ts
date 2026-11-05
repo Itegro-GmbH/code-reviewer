@@ -2003,6 +2003,12 @@ const CASES: Case[] = [
       }),
   },
   {
+    // Nothing is archived in A, whatever B holds (the repository test archives in both and compares).
+    name: "agentProfiles.archivedNames",
+    run: (a) => a.agentProfiles.archivedNames(),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
     name: "agentProfiles.versionFacts",
     run: (a, b) =>
       a.agentProfiles.versionFacts([

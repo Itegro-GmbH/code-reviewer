@@ -15,6 +15,8 @@
 //  - the tables have foreign keys to `workspaces` and (`profiles`) `users`, which take a short lock on those tables. The wait is
 //    bounded: after `LOCK_TIMEOUT` the migration gives up, the whole batch is rolled back (`MIGRATION_FAILED`) and the deployment can
 //    simply be run again;
+//  - a composite foreign key (`profile_id`, `workspace_id`) to `profiles` makes the database itself refuse a version in another
+//    workspace than its profile's, so a bug cannot link them across workspaces;
 //  - `profile_versions.workspace_id` repeats the workspace of the profile, so every query of a version can filter by the workspace
 //    itself (docs: workspace scoping) and the erasure of a workspace needs no join.
 import { sql } from "kysely";
@@ -62,11 +64,13 @@ export const migration: Migration = {
     await sql`create unique index profiles_workspace_name_unique
       on profiles (workspace_id, name) where archived_at is null`.execute(db);
 
+    // What the composite foreign key of the versions refers to (the id alone is the primary key already).
+    await sql`create unique index profiles_id_workspace_unique
+      on profiles (id, workspace_id)`.execute(db);
+
     await db.schema
       .createTable("profile_versions")
-      .addColumn("profile_id", "text", (column) =>
-        column.notNull().references("profiles.id"),
-      )
+      .addColumn("profile_id", "text", (column) => column.notNull())
       .addColumn("version", "integer", (column) => column.notNull())
       .addColumn("workspace_id", "text", (column) =>
         column.notNull().references("workspaces.id"),
@@ -91,6 +95,12 @@ export const migration: Migration = {
         "profile_id",
         "version",
       ])
+      .addForeignKeyConstraint(
+        "profile_versions_profile_fk",
+        ["profile_id", "workspace_id"],
+        "profiles",
+        ["id", "workspace_id"],
+      )
       .addCheckConstraint("profile_versions_version_check", sql`version >= 1`)
       .addCheckConstraint(
         "profile_versions_can_push_check",

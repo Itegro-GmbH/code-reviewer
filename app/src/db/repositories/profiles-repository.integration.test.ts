@@ -373,6 +373,18 @@ describe("the profiles repository", () => {
     expect(await a.listVersions("nope")).toEqual([]);
   });
 
+  // #843-T139
+  it("refuses in the database a version whose workspace is not the workspace of its profile", async () => {
+    const { a, db, idB } = await setup();
+    await a.create(NEW, 100);
+
+    await expect(
+      sql`insert into profile_versions
+        (profile_id, version, workspace_id, description, model_choice, instructions, can_push, created_by, created_at)
+        values ('pr-1', 2, ${idB}, '', '{}', '', 1, 'u-1', 'now')`.execute(db),
+    ).rejects.toThrow(/profile_versions_profile_fk/);
+  });
+
   // #843-T64
   it("refuses in the database to change a saved version, a name that is not a profile name, and values out of bounds", async () => {
     const { a, db } = await setup();
