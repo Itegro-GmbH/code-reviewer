@@ -148,6 +148,15 @@ describe("engine workflow", () => {
     expect(String(cache?.with?.key)).toContain("claude_code/layer.py");
   });
 
+  // #856-T37
+  it("installs bubblewrap for the engine job and lets it make its namespace", () => {
+    const text = commandLines(engine).join("\n");
+
+    expect(text).toContain("install --yes --no-install-recommends bubblewrap");
+    expect(text).toContain("kernel.apparmor_restrict_unprivileged_userns=0");
+    expect(text).not.toContain("apt-get update");
+  });
+
   // #197-T09, #713-T01
   it("runs the privileged suite in a job of its own, as root with the production capabilities and no network", () => {
     const lines = commandLines(privileged);

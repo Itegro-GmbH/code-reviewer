@@ -53,6 +53,14 @@ jobs:
       # holds ripgrep.
       - name: Install ripgrep
         run: sudo apt-get install --yes --no-install-recommends ripgrep
+      # Claude Code (#856) runs its tools under bubblewrap to scrub the login from their environment
+      # (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1) and refuses to start without it; the engine test of
+      # the scrub needs a namespace to be possible, which Ubuntu 24.04 restricts by default. No
+      # `apt-get update` (#713).
+      - name: Install bubblewrap and allow it its namespace
+        run: |
+          sudo apt-get install --yes --no-install-recommends bubblewrap
+          sudo sysctl --write kernel.apparmor_restrict_unprivileged_userns=0
       # PR-Agent counts tokens with a tiktoken encoding that it downloads on first use. The
       # download is the only network use of this job besides the installation, so it is cached.
       - name: Restore the tiktoken encoding

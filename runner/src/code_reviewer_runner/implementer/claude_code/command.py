@@ -124,8 +124,11 @@ def _amount(value: str) -> str:
 
 def claude_environment(login: ClaudeLogin, *, base_url: str | None = None) -> dict[str, str]:
     """The environment of the exec, built from names and never by inheriting. Telemetry, updates
-    and error reports are off; the tool schema is in the first request (`ENABLE_TOOL_SEARCH`:
-    otherwise a model must find the finish tool through a search tool first)."""
+    and error reports are off; the login is scrubbed from the environment of the tools the agent
+    runs (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`, in the pinned 2.1.311: it runs them under bubblewrap
+    and Claude Code refuses to start without it, so the layer installs it); the tool schema is in
+    the first request (`ENABLE_TOOL_SEARCH`: otherwise a model must find the finish tool through a
+    search tool first)."""
     environment = {
         "HOME": AGENT_HOME,
         "CLAUDE_CONFIG_DIR": CONFIG_DIRECTORY,
@@ -139,6 +142,7 @@ def claude_environment(login: ClaudeLogin, *, base_url: str | None = None) -> di
         "GIT_TERMINAL_PROMPT": "0",
         "PATH": f"/etc/code-reviewer:{AGENT_PATH}",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1",
         "DISABLE_AUTOUPDATER": "1",
         "ENABLE_TOOL_SEARCH": "false",
     }

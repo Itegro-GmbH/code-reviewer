@@ -41,6 +41,28 @@ SMALL_MODEL = "claude-haiku-4-5"
 SESSION = "d847dcf5-e741-4252-98b0-d73cbc39f2c0"
 
 
+def bubblewrap_usable() -> str | None:
+    """None when `bwrap` can make a namespace here, else why not. Claude Code's scrub of the
+    environment of its tools (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`) runs them under it and refuses
+    to start without it."""
+    try:
+        done = subprocess.run(
+            ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "true"],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except OSError:
+        return "bwrap is not installed (apt-get install bubblewrap)"
+    if done.returncode == 0:
+        return None
+    return (
+        "bwrap cannot make a namespace here: "
+        f"{done.stderr.decode(errors='replace').strip()[:200]} "
+        "(Ubuntu 24.04: sysctl kernel.apparmor_restrict_unprivileged_userns=0)"
+    )
+
+
 def claude_binary() -> Path:
     """The verified pinned executable. Absence is a failure with the fix, never a skip."""
     override = os.environ.get(BINARY_VARIABLE)
@@ -148,9 +170,13 @@ class Workplace:
         timeout: float = 120.0,
         max_budget_usd: str | None = None,
         setting_sources: str | None = None,
+        scrub: bool = False,
     ) -> Turn:
         """One `claude -p`, started with the adapter's own command line and environment, as the
-        user of the test (not root, so bypass mode needs no switch)."""
+        user of the test (not root, so bypass mode needs no switch). `scrub` keeps the adapter's
+        `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`, which needs bubblewrap (`bubblewrap_usable`); the
+        other tests are about other things and switch it off, so that they run where a namespace
+        cannot be made."""
         command = ClaudeCommand(
             model=MODEL,
             session=session or SessionChoice.new(SESSION),
@@ -161,6 +187,8 @@ class Workplace:
             max_budget_usd=max_budget_usd,
         )
         environment = claude_environment(ClaudeLogin.api_key(FAKE_KEY), base_url=provider_url)
+        if not scrub:
+            environment["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] = "0"
         if not logged_in:
             environment.pop("ANTHROPIC_API_KEY")
         environment.update(

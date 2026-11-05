@@ -20,6 +20,7 @@ from claude_code_support import (
     SESSION,
     Turn,
     Workplace,
+    bubblewrap_usable,
     claude_binary,
     provider,
 )
@@ -96,6 +97,24 @@ def test_a_turn_is_headless_free_inside_the_sandbox_and_ends_with_a_priced_resul
     # The rules of the workplace are part of the system prompt, the prompt is the user's message.
     first: Any = fake.records[0].body
     assert "Rules of this workplace" in json.dumps(first["system"])
+
+
+# #856-T30
+def test_the_login_is_not_in_the_environment_of_the_tools_the_agent_runs(tmp_path: Path) -> None:
+    """Claude Code scrubs its credentials from the environment of its subprocesses
+    (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`): a command the agent runs cannot print the login."""
+    assert bubblewrap_usable() is None, bubblewrap_usable()
+    place = Workplace(tmp_path)
+    with served(
+        Scripted(tool="Bash", args={"command": "env > seen-env.txt", "description": "look"}),
+        Scripted(text="Looked."),
+    ) as (_fake, url):
+        turn = place.run(url, "Print your environment", scrub=True)
+
+    seen = (place.repo / "seen-env.txt").read_text()
+    assert turn.returncode == 0 and turn.result.ok, turn.stderr[-300:]
+    assert seen.count("=") > 3, "the command ran and printed an environment"
+    assert FAKE_KEY not in seen and "ANTHROPIC_API_KEY" not in seen
 
 
 # #856-T31
