@@ -28,7 +28,7 @@ import time
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, TypeVar, cast
 
 from code_reviewer_runner import __version__
 from code_reviewer_runner.job_loop.api import CompleteReply, HeartbeatReply, parse_heartbeat
@@ -45,7 +45,12 @@ from code_reviewer_runner.job_loop.http import (
     send,
 )
 from code_reviewer_runner.job_loop.jsonvalues import as_object
-from code_reviewer_runner.job_loop.resume_download import ResumeFile, ResumeUnavailable
+from code_reviewer_runner.job_loop.resume_download import (
+    RESUME_REQUEST_TIMEOUT_SECONDS,
+    RESUME_TOTAL_SECONDS,
+    ResumeFile,
+    ResumeUnavailable,
+)
 from code_reviewer_runner.job_loop.snapshot_sender import SnapshotPart
 from code_reviewer_runner.job_loop.worker_errors import WorkerFailure, WorkerSetupError
 from code_reviewer_runner.llm_providers import registered_provider_ids
@@ -67,6 +72,7 @@ from code_reviewer_runner.snapshot_wire import (
 )
 from code_reviewer_runner.step_wire import FEATURE_IMPLEMENTER_STEPS
 
+_T = TypeVar("_T")
 _JOB_ID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 # A heartbeat interval above this would let the 2 minute lease run out between two beats.
 MAX_HEARTBEAT_INTERVAL_SECONDS = 60
@@ -100,12 +106,6 @@ STEPS_REQUEST_TIMEOUT_SECONDS = 5.0
 # One part of the session snapshot (#839): up to 3 MiB, so the socket may be slower than for a batch
 # of steps; the sender bounds the call by its own clock as well (`snapshot_sender.REQUEST_SECONDS`).
 SNAPSHOT_REQUEST_TIMEOUT_SECONDS = 20.0
-
-
-# One part of the stored session of a follow-up turn (#840), and the whole download: the file is at
-# most 8 MiB, three requests, and the turn's clock is already running.
-RESUME_REQUEST_TIMEOUT_SECONDS = 30.0
-RESUME_TOTAL_SECONDS = 60.0
 
 
 def snapshot_query(part: SnapshotPart) -> str:
@@ -292,13 +292,26 @@ class HttpWorkerApi:
         resume-session?part=n`, #840), in the parts the app serves it in (a response is held to 4.5
         MB like a request, so the file comes in parts of at most 3 MiB). Checks every part against
         the description of the whole and the whole against its size and digest. Raises
-        `ResumeUnavailable`; nothing it raises carries a value of the answer."""
-        path = f"/api/workers/v1/jobs/{self._safe_id(job_id)}/resume-session"
-        return await asyncio.to_thread(self._download_resume, path)
+        `ResumeUnavailable`; nothing it raises carries a value of the answer.
 
-    def _download_resume(self, path: str) -> ResumeFile:
-        failed = ResumeUnavailable(ResumeReason.DOWNLOAD_FAILED)
+        The whole is bounded by `RESUME_TOTAL_SECONDS`: the thread reads against that deadline, and
+        the wait ends at it even when the thread does not (a daemon thread, left to end by itself):
+        a socket timeout bounds one wait, and a server that sends a byte now and then never trips
+        it."""
+        path = f"/api/workers/v1/jobs/{self._safe_id(job_id)}/resume-session"
         deadline = time.monotonic() + RESUME_TOTAL_SECONDS
+        try:
+            return await asyncio.wait_for(
+                self._run_on_thread(
+                    "resume-download", lambda: self._download_resume(path, deadline)
+                ),
+                RESUME_TOTAL_SECONDS,
+            )
+        except TimeoutError:
+            raise ResumeUnavailable(ResumeReason.DOWNLOAD_FAILED) from None
+
+    def _download_resume(self, path: str, deadline: float) -> ResumeFile:
+        failed = ResumeUnavailable(ResumeReason.DOWNLOAD_FAILED)
         header: SnapshotHeader | None = None
         chunks: list[bytes] = []
         count = 1
@@ -314,6 +327,7 @@ class HttpWorkerApi:
                     None,
                     min(RESUME_REQUEST_TIMEOUT_SECONDS, left),
                     max_bytes=CHUNK_BYTES + 1,
+                    deadline=deadline,
                 )
             except ApiError:
                 raise failed from None
@@ -343,8 +357,16 @@ class HttpWorkerApi:
         running: threading.Thread | None = getattr(self, slot)
         if running is not None and running.is_alive():
             raise ApiUnavailable(f"an earlier {name} has not ended")
+        return await self._run_on_thread(name, call, slot=slot)
+
+    async def _run_on_thread(
+        self, name: str, call: Callable[[], _T], *, slot: str | None = None
+    ) -> _T:
+        """Run `call` on a daemon thread and wait for its answer. A wait that is cancelled or ends
+        by a timeout leaves the thread to end by itself, and nothing waits for it (nor does the
+        interpreter, which is why this is not `asyncio.to_thread`)."""
         loop = asyncio.get_running_loop()
-        done: asyncio.Future[Reply] = loop.create_future()
+        done: asyncio.Future[_T] = loop.create_future()
 
         def settle(setter: Any, value: Any) -> None:
             if not done.done():
@@ -362,7 +384,8 @@ class HttpWorkerApi:
                 loop.call_soon_threadsafe(settle, *outcome)
 
         thread = threading.Thread(target=run, name=name, daemon=True)
-        setattr(self, slot, thread)
+        if slot is not None:
+            setattr(self, slot, thread)
         thread.start()
         return await done
 
@@ -387,6 +410,7 @@ class HttpWorkerApi:
         *,
         content_type: str = "application/json",
         max_bytes: int | None = None,
+        deadline: float | None = None,
     ) -> Reply:
         request = urllib.request.Request(
             f"{self._base_url}{path}",
@@ -401,7 +425,7 @@ class HttpWorkerApi:
         )
         if max_bytes is None:
             return send(self._opener, request, timeout)
-        return send(self._opener, request, timeout, max_bytes)
+        return send(self._opener, request, timeout, max_bytes, deadline)
 
     @staticmethod
     def _failure(reply: Reply) -> ApiError:

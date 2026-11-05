@@ -4,6 +4,7 @@
 the process holds no credential, and hands the process the file and one word about it. Nothing the
 download does can fail the job: the process reads the word and the turn goes on from a summary."""
 
+import asyncio
 import hashlib
 from typing import Any
 
@@ -11,8 +12,14 @@ import pytest
 from loop_support import Harness, run, settle
 from test_implementer_job_host import advertising_harness, implementer_claim, implementer_input
 
+from code_reviewer_runner.job_loop import host as job_host
 from code_reviewer_runner.job_loop.process import ProcessSpec
-from code_reviewer_runner.job_loop.resume_download import ResumeFile, ResumeUnavailable
+from code_reviewer_runner.job_loop.resume_download import (
+    RESUME_TOTAL_SECONDS,
+    ResumeFile,
+    ResumeUnavailable,
+)
+from code_reviewer_runner.job_loop.worker_api import MAX_HEARTBEAT_INTERVAL_SECONDS
 from code_reviewer_runner.resume_wire import (
     RESUME_FILE_NAME,
     RESUME_STATE_VARIABLE,
@@ -164,3 +171,44 @@ def test_a_first_turn_and_a_review_job_download_nothing() -> None:
         assert RESUME_STATE_VARIABLE not in spec.env
 
     run(scenario)
+
+
+# #840-T161
+def test_a_download_that_never_ends_is_a_failed_download_at_the_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr(job_host, "RESUME_TOTAL_SECONDS", 0.2)
+        harness = advertising_harness()
+        never = asyncio.Event()
+
+        async def resume_session(job_id: str) -> ResumeFile:
+            await never.wait()
+            raise AssertionError("not reached")
+
+        api: Any = harness.api
+        api.resume_session = resume_session
+        harness.api.claims = [follow_up_claim()]
+
+        await harness.start()
+        assert harness.launcher.processes == []  # still waiting for the download
+        await asyncio.sleep(0.4)  # real time: the wait of the host ends by the event loop's clock
+        await settle()
+        spec = harness.launcher.processes[0].spec
+        harness.launcher.processes[0].finish()
+        await settle()
+
+        assert spec.files == {}
+        assert spec.env[RESUME_STATE_VARIABLE] == failed_state(ResumeReason.DOWNLOAD_FAILED)
+
+    run(scenario)
+
+
+# #840-T162
+def test_the_download_ends_before_the_lease_does_even_with_the_longest_heartbeat_interval() -> None:
+    # The first heartbeat comes one interval after the process starts, and the lease (four of the
+    # app's 30 s intervals) is not extended by the download: the two must fit with room to spare.
+    lease = 4 * 30.0
+    longest_interval = float(MAX_HEARTBEAT_INTERVAL_SECONDS)
+
+    assert RESUME_TOTAL_SECONDS + longest_interval <= lease - 10.0

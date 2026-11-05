@@ -92,7 +92,11 @@ from code_reviewer_runner.job_loop.reporting import (
     result_from_outcome,
     stopped_result,
 )
-from code_reviewer_runner.job_loop.resume_download import ResumeSessionApi, ResumeUnavailable
+from code_reviewer_runner.job_loop.resume_download import (
+    RESUME_TOTAL_SECONDS,
+    ResumeSessionApi,
+    ResumeUnavailable,
+)
 from code_reviewer_runner.job_loop.snapshot_sender import SnapshotApi, SnapshotSender
 from code_reviewer_runner.job_loop.step_sender import StepsApi, StepSender
 from code_reviewer_runner.lease_check import LeaseState
@@ -454,9 +458,17 @@ class JobHost:
         try:
             if not isinstance(self._api, ResumeSessionApi):
                 raise ResumeUnavailable(ResumeReason.DOWNLOAD_FAILED)
-            received = await self._api.resume_session(claimed.id)
+            # No heartbeat runs yet (it starts with the process), and the lease is four heartbeat
+            # intervals: whatever the API does, the wait ends at the total and the turn goes on
+            # from the summary (`resume_download.RESUME_TOTAL_SECONDS`).
+            received = await asyncio.wait_for(
+                self._api.resume_session(claimed.id), RESUME_TOTAL_SECONDS
+            )
         except ResumeUnavailable as unavailable:
             return _Resumed(state=failed_state(unavailable.reason))
+        except TimeoutError:
+            self._log.warning("job %s: the stored session did not arrive in time", claimed.id)
+            return _Resumed(state=failed_state(ResumeReason.DOWNLOAD_FAILED))
         except Exception as error:
             self._log.warning(
                 "job %s: the stored session could not be fetched (%s)",

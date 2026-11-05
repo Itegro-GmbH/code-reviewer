@@ -7,11 +7,15 @@ and what each way of failing is called. Nothing it raises carries a value of the
 import asyncio
 import hashlib
 import os
+import socket
+import threading
+import time
 from collections.abc import Iterator
 
 import pytest
 from worker_api_fake import CREDENTIAL, FakeWorkerApp, RawServer, Scripted, example
 
+from code_reviewer_runner.job_loop import worker_api
 from code_reviewer_runner.job_loop.resume_download import ResumeUnavailable
 from code_reviewer_runner.job_loop.worker_api import HttpWorkerApi
 from code_reviewer_runner.resume_wire import ResumeReason
@@ -202,3 +206,81 @@ def test_a_file_over_the_cap_is_a_failed_download(app: FakeWorkerApp) -> None:
     app.resume_headers = {"x-snapshot-bytes": str(8 * 1024 * 1024 + 1), "x-snapshot-parts": "3"}
 
     assert reason_of(app) is ResumeReason.DOWNLOAD_FAILED
+
+
+class Dribbler:
+    """A loopback server that answers the first request and then sends a byte every 0.2 s for as
+    long as it is open: no wait of the socket is long, and the answer never ends."""
+
+    def __init__(self, *, headers_first: bool) -> None:
+        self._headers_first = headers_first
+        self._stop = threading.Event()
+        self._listener = socket.socket()
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(8)
+        self.url = f"http://127.0.0.1:{self._listener.getsockname()[1]}"
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                connection, _ = self._listener.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._dribble, args=(connection,), daemon=True).start()
+
+    def _dribble(self, connection: socket.socket) -> None:
+        sha = hashlib.sha256(b"x" * 5_000).hexdigest()
+        with connection:
+            try:
+                connection.recv(65536)
+                if self._headers_first:
+                    connection.sendall(b"HTTP/1.1 200 OK\r\nX-Dribble: ")
+                else:
+                    connection.sendall(
+                        (
+                            "HTTP/1.1 200 OK\r\nContent-Length: 5000\r\n"
+                            "X-Snapshot-Parts: 1\r\nX-Snapshot-Bytes: 5000\r\n"
+                            "X-Snapshot-Raw-Bytes: 9\r\n"
+                            f"X-Snapshot-Sha256: {sha}\r\n"
+                            "X-Snapshot-Opencode-Version: 1.19.0\r\n\r\n"
+                        ).encode("ascii")
+                    )
+                while not self._stop.is_set():
+                    connection.sendall(b"x")
+                    time.sleep(0.2)
+            except OSError:
+                pass
+
+    def close(self) -> None:
+        self._stop.set()
+        self._listener.close()
+
+
+# #840-T160
+@pytest.mark.parametrize("headers_first", [False, True], ids=["body", "headers"])
+def test_a_server_that_dribbles_the_answer_ends_the_download_at_the_total_not_later(
+    monkeypatch: pytest.MonkeyPatch, headers_first: bool
+) -> None:
+    # No wait of the socket (30 s each) is ever long enough to time out, so only the deadline of the
+    # download can end it; 2 s instead of 45 keeps the test short.
+    monkeypatch.setattr(worker_api, "RESUME_TOTAL_SECONDS", 2.0)
+    server = Dribbler(headers_first=headers_first)
+    try:
+        started = time.monotonic()
+        with pytest.raises(ResumeUnavailable) as caught:
+            asyncio.run(client(server.url).resume_session(JOB_ID))
+        elapsed = time.monotonic() - started
+
+        assert caught.value.reason is ResumeReason.DOWNLOAD_FAILED
+        assert 1.5 <= elapsed < 4.0
+        if not headers_first:
+            # The thread read against the same deadline: it is over, not left reading.
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline and any(
+                t.name == "resume-download" for t in threading.enumerate()
+            ):
+                time.sleep(0.05)
+            assert not any(t.name == "resume-download" for t in threading.enumerate())
+    finally:
+        server.close()
