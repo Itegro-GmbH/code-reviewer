@@ -1075,6 +1075,8 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     );
     if (claimed === undefined) return;
     let outcome: StepOutcome | undefined;
+    // The step whose session this one goes on in: its instruction may be queued there, whatever ends the step.
+    let target: StoredStepRun | undefined;
     try {
       const document = await documentOf(run);
       const byId = document === undefined ? undefined : nodesById(document);
@@ -1110,6 +1112,8 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           return;
         }
         const values = valuesOf(run, steps, context);
+        if (claimed.kind === "agent")
+          target = continuedStep(node, steps, claimed.position);
         outcome =
           claimed.kind === "agent"
             ? await startAgent(run, claimed, node, values, context, steps, byId)
@@ -1122,8 +1126,36 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       // over later, and an agent step started under its request id cannot start twice.
       else throw error;
     }
-    if (outcome !== undefined)
-      await deps.runs.settleOwnStep(claimed.id, outcome);
+    if (outcome === undefined) return;
+    // A step that ends here without a turn (the owner has left, the Implementer refused) may have its own instruction queued behind a
+    // turn of the session it goes on in. It is discarded first: left there, the end of that turn would start it with no step to read it
+    // and no budget behind it. A turn it started in that moment is the step's after all, as it is when the step is given up.
+    if (outcome.status === "failed" && target !== undefined) {
+      const started = await discardAndFindTurn(run, claimed, target);
+      if (
+        started !== undefined &&
+        (await deps.runs.attachTurn(claimed.id, {
+          jobId: started.jobId,
+          turnId: started.turnId,
+        }))
+      ) {
+        log(
+          `[workflow-runs] turn adopted run=${run.id} step=${claimed.stepId}`,
+        );
+        return;
+      }
+    }
+    await deps.runs.settleOwnStep(claimed.id, outcome);
+  }
+
+  /** Discards the instruction a waiting step queued, then looks once more for the turn it may have started before that. */
+  async function discardAndFindTurn(
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+    target: StoredStepRun,
+  ): Promise<RequestedTurn | undefined> {
+    await discardQueuedInstruction(run, step, target);
+    return deps.turns.findByRequest(requestIdOf(run, step));
   }
 
   async function advance(runId: string): Promise<void> {
