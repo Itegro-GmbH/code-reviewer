@@ -266,6 +266,43 @@ describe("events that repeat, arrive late or arrive together", () => {
     expect(state.run.spentMicroUsd).toBe(500_000);
   });
 
+  // #875: a decision holds the connection of its transaction; any read through a second connection from inside it lets as many
+  // decisions as the pool has connections hold one each (the others wait for the row lock) and wait for another, until the connect
+  // timeout. The default pool of a server instance has three.
+  it.each([1, 2, 3])(
+    "does not starve a pool of %i connection(s) when more events than connections arrive together",
+    async (poolMax) => {
+      const app = await startEngineHarness({ poolMax });
+      const { runId } = await started(app);
+      const jobId = await app.finishTurn({ agentResult: { summary: "Plan." } });
+
+      await Promise.all([
+        app.engine.jobEnded(jobId),
+        app.engine.jobEnded(jobId),
+        app.engine.jobEnded(jobId),
+        app.engine.jobEnded(jobId),
+        app.engine.advance(runId),
+        app.engine.advance(runId),
+        app.engine.advance(runId),
+        app.engine.jobEnded(jobId),
+      ]);
+
+      const state = await app.stateOf(runId);
+      expect(stepsOf(state)).toEqual([
+        ["plan", "succeeded"],
+        ["build", "running"],
+      ]);
+      expect(app.engineLines.filter((line) => line.includes("FAILED"))).toEqual(
+        [],
+      );
+      expect(await app.counts()).toMatchObject({
+        jobs: 2,
+        sessions: 2,
+        turns: 2,
+      });
+    },
+  );
+
   // #844-T52
   it("ignores an event that comes after the run is over, and one for a job no workflow started", async () => {
     const app = await startEngineHarness();

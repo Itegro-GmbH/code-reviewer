@@ -35,11 +35,15 @@ export async function startSyncHarness(
      * reads, per request, from the credential store.
      */
     credentialsFromDatabase?: boolean;
+    /** The most connections the pool of the database opens; default: the test database's. */
+    poolMax?: number;
   } = {},
 ) {
   const github = await startGithubAppHarness();
   Object.assign(github.env, options.env);
-  const { db } = await createTestDatabase();
+  const { db } = await createTestDatabase(
+    options.poolMax === undefined ? {} : { poolMax: options.poolMax },
+  );
   let loadConfig: (() => Promise<GithubAppConfig>) | undefined;
   if (options.credentialsFromDatabase === true) {
     const appEnv = { ...github.env };
