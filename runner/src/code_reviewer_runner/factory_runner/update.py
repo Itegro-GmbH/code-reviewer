@@ -2,26 +2,36 @@
 
 """Signed updates of the runner's own image (#855, R2; plan decision 9).
 
-A runner updates itself between jobs, or on the device (`factory-runner update`), never from
-the app.
+A runner updates itself between jobs, or on the device (`factory-runner update`), never from the
+app.
 The unit that the installer writes starts the container from the local tag `factory-runner:current`
 and restarts it when it ends. An update is therefore two separate acts:
 
 1. **Stage** (`stage`): find the newest release, prove it is ours, and point the local tag at it.
-   The release channel is the tag `stable` of the runner image in the registry
-   (`ghcr.io/itegro-gmbh/code-reviewer-factory-runner`). The image is pulled by that tag, which only
-   downloads it, and **then verified by its digest**: `cosign verify` against the keyless signature
-   that the release workflow `.github/workflows/runner-image.yml` makes with GitHub's OIDC identity
-   (no key to keep: the certificate says which workflow of which repository signed, and `SIGNER`
-   pins it). Only a verified digest is tagged `current` (the one before it `previous`, for
-   `--rollback`); an image that does not verify is removed and nothing changes. The image carries
-   the number of its release (`code-reviewer.runner.release`, a label set by the workflow); an image
-   whose number is not higher than the running one's is not taken, so a signed older image that
-   somebody puts behind `stable` is no way to go back.
+   The release is named by a **signed manifest**, a small JSON file
+   `{"repository": ..., "digest": "sha256:...", "release": N}`, and its detached signature (ECDSA
+   over
+   P-256 with SHA-256, DER). Where they are and the public key that proves them are the **release
+   channel**, the file `runner/release-channel.json`, which is baked into the image
+   (`/opt/code-reviewer/release-channel.json`): a setting on the device cannot redirect an update.
+   The
+   runner needs no extra program for this: the check is the `cryptography` library the runner
+   already
+   has, and the installer does the same with `openssl`. Only when the manifest verifies is the image
+   pulled **by the digest it names** (the daemon checks the content against it), and its own label
+   `code-reviewer.runner.release` must be the manifest's number. A release number that is not higher
+   than the running one's is not taken, so an old signed manifest that somebody serves again is no
+   way
+   back. Only then is the digest named `factory-runner:current` (the one before it `previous`, for
+   `--rollback`); an image that does not match is removed and nothing changes.
 2. **Apply** (`switch_needed`): when the image behind `current` is another one than the one this
    container runs, the service ends (exit code 10) **between jobs**, never during one, and the unit
    starts it again from the new image. `factory-runner update` only stages; a running job is never
    touched.
+
+The release channel is **empty until the owner fills it** (there is no release pipeline in this
+repository: `docs/runner.md`, "Updates", says what it has to make). A runner with an empty channel
+does not look for updates and says so; `factory-runner update` ends with exit code 1 and the reason.
 
 The service does both on its own (`UpdatePolicy`): a check some minutes after the start and then
 every six hours, at the moment between two jobs; at once when the app answers a claim with "update
@@ -30,21 +40,30 @@ so (`FACTORY_RUNNER_IMAGE_TAG`), so a runner that somebody started by hand (`doc
 supervisor) never ends itself for an update. `run --once` never updates.
 """
 
+import base64
+import binascii
 import contextlib
+import json
 import logging
 import random
-import subprocess
+import re
+import urllib.error
+import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from functools import partial
-from typing import Final, cast
+from pathlib import Path
+from typing import Final
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.serialization import load_der_public_key
 
 from code_reviewer_runner.implementer.docker_api import DockerApi, DockerError
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 
-REPOSITORY: Final = "ghcr.io/itegro-gmbh/code-reviewer-factory-runner"
-CHANNEL_TAG: Final = "stable"
+CHANNEL_FILE: Final = Path("/opt/code-reviewer/release-channel.json")
 CURRENT_REPOSITORY: Final = "factory-runner"
 CURRENT_TAG: Final = "current"
 PREVIOUS_TAG: Final = "previous"
@@ -52,25 +71,20 @@ CURRENT_REFERENCE: Final = f"{CURRENT_REPOSITORY}:{CURRENT_TAG}"
 PREVIOUS_REFERENCE: Final = f"{CURRENT_REPOSITORY}:{PREVIOUS_TAG}"
 # The unit sets it to `CURRENT_REFERENCE`: the tag this container follows.
 IMAGE_TAG_VARIABLE: Final = "FACTORY_RUNNER_IMAGE_TAG"
-# The number of a release, a whole number that grows with every release (the workflow's run number).
+# The number of a release, a whole number that grows with every release.
 RELEASE_LABEL: Final = "code-reviewer.runner.release"
-# Who may sign a runner image: the release workflow of this repository, run from `main` or from a
-# tag, as GitHub's OIDC issuer says it. Not configurable: a runner that took another identity from
-# its configuration would be as safe as the file that names it.
-SIGNER: Final = (
-    r"^https://github\.com/Itegro-GmbH/code-reviewer/\.github/workflows/runner-image\.yml"
-    r"@refs/(heads/main|tags/.+)$"
-)
-OIDC_ISSUER: Final = "https://token.actions.githubusercontent.com"
-COSIGN: Final = "cosign"
-VERIFY_SECONDS: Final = 180.0
+FETCH_SECONDS: Final = 60.0
+# A manifest and a signature are a few hundred bytes; nothing bigger is read.
+MAX_DOCUMENT_BYTES: Final = 64 * 1024
 PULL_SECONDS: Final = 1800.0
+_DIGEST: Final = re.compile(r"sha256:[0-9a-f]{64}")
+_REPOSITORY: Final = re.compile(r"[a-z0-9][a-z0-9._/-]{0,200}")
 
 FIRST_CHECK_SECONDS: Final = 600.0
 CHECK_INTERVAL_SECONDS: Final = 6 * 3600.0
 CHECK_JITTER: Final = 0.1
 
-Runner = Callable[..., "subprocess.CompletedProcess[str]"]
+Fetch = Callable[[str], bytes]
 
 
 class UpdateError(Exception):
@@ -89,62 +103,109 @@ class Staged:
     digest: str
 
 
-def verify_command(reference: str, cosign: str = COSIGN) -> list[str]:
-    """What proves a digest: the signature of the release workflow, nothing else."""
-    return [
-        cosign,
-        "verify",
-        "--certificate-identity-regexp",
-        SIGNER,
-        "--certificate-oidc-issuer",
-        OIDC_ISSUER,
-        reference,
-    ]
+@dataclass(frozen=True)
+class ReleaseChannel:
+    """Where releases are announced and what proves them: the file `release-channel.json`."""
+
+    repository: str
+    manifest_url: str
+    signature_url: str
+    public_key: bytes  # the DER of the SubjectPublicKeyInfo
 
 
-def cosign_verify(
-    reference: str, *, environment: Mapping[str, str], run: Runner = subprocess.run
-) -> None:
-    """Raise `UpdateError` unless `reference` (by digest) carries our signature. The output of
-    `cosign` is not shown: its exit status is the answer."""
-    # Only what cosign needs: the search path, and a home for its cache of the signing roots (the
-    # runner's own configuration volume).
-    home = environment.get("FACTORY_RUNNER_HOME") or environment.get("HOME") or "/tmp"
-    env = {"PATH": environment.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": home}
+@dataclass(frozen=True)
+class Manifest:
+    repository: str
+    digest: str
+    release: int
+
+
+def load_channel(path: Path = CHANNEL_FILE) -> ReleaseChannel | None:
+    """The release channel of this image, None when it is empty (the owner has not filled it) or
+    cannot be read: a runner without one does not update by itself."""
     try:
-        done = run(
-            verify_command(reference),
-            capture_output=True,
-            text=True,
-            timeout=VERIFY_SECONDS,
-            check=False,
-            env=env,
-        )
-    except FileNotFoundError:
-        raise UpdateError("cosign is not installed: the signature cannot be checked") from None
-    except subprocess.TimeoutExpired:
+        document = as_object(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return None
+    if document is None:
+        return None
+    repository, manifest, signature, key = (
+        document.get(name) for name in ("repository", "manifestUrl", "signatureUrl", "publicKey")
+    )
+    if not all(
+        isinstance(value, str) and value for value in (repository, manifest, signature, key)
+    ):
+        return None
+    assert isinstance(repository, str) and isinstance(manifest, str)
+    assert isinstance(signature, str) and isinstance(key, str)
+    try:
+        public_key = base64.b64decode(key, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if not _REPOSITORY.fullmatch(repository) or not (
+        manifest.startswith("https://") and signature.startswith("https://")
+    ):
+        return None
+    return ReleaseChannel(repository, manifest, signature, public_key)
+
+
+def fetch_https(url: str) -> bytes:
+    """A small document from an `https` address. `UpdateError` for anything else."""
+    if not url.startswith("https://"):
+        raise UpdateError("a release document must come from an https address")
+    try:
+        with urllib.request.urlopen(url, timeout=FETCH_SECONDS) as answer:
+            data: bytes = answer.read(MAX_DOCUMENT_BYTES + 1)
+    except (urllib.error.URLError, OSError, ValueError):
         raise UpdateError(
-            "checking the signature took too long (is the network reachable?)"
+            "the release manifest could not be fetched (is the network reachable?)"
         ) from None
-    if done.returncode != 0:
-        raise UpdateError("the signature of the image could not be verified: not our release")
+    if len(data) > MAX_DOCUMENT_BYTES:
+        raise UpdateError("a release document is larger than it can be")
+    return data
+
+
+def verified_manifest(channel: ReleaseChannel, fetch: Fetch = fetch_https) -> Manifest:
+    """Fetch the manifest and its signature and prove them with the channel's key. `UpdateError`
+    unless the signature is valid and the manifest says what a release says."""
+    document = fetch(channel.manifest_url)
+    signature = fetch(channel.signature_url)
+    try:
+        key = load_der_public_key(channel.public_key)
+        if not isinstance(key, ec.EllipticCurvePublicKey) or not isinstance(
+            key.curve, ec.SECP256R1
+        ):
+            raise UpdateError("the release channel's key is not an ECDSA P-256 key")
+        key.verify(signature, document, ec.ECDSA(hashes.SHA256()))
+    except InvalidSignature:
+        raise UpdateError(
+            "the signature of the release manifest is not valid: not our release"
+        ) from None
+    except ValueError:
+        raise UpdateError("the release channel's key cannot be read") from None
+    try:
+        fields = as_object(json.loads(document))
+    except ValueError:
+        fields = None
+    repository = None if fields is None else fields.get("repository")
+    digest = None if fields is None else fields.get("digest")
+    release = None if fields is None else fields.get("release")
+    if (
+        repository != channel.repository
+        or not isinstance(digest, str)
+        or not _DIGEST.fullmatch(digest)
+        or not isinstance(release, int)
+        or isinstance(release, bool)
+        or release < 1
+    ):
+        raise UpdateError("the release manifest is not a manifest of this channel")
+    return Manifest(channel.repository, digest, release)
 
 
 def release_of(image: Mapping[str, object]) -> int:
     labels = as_object((as_object(image.get("Config")) or {}).get("Labels")) or {}
     raw = labels.get(RELEASE_LABEL)
     return int(raw) if isinstance(raw, str) and raw.isascii() and raw.isdigit() else 0
-
-
-def _digest_of(image: Mapping[str, object]) -> str | None:
-    listed: object = image.get("RepoDigests")
-    entries: list[object] = list(cast("list[object]", listed)) if isinstance(listed, list) else []
-    for entry in entries:
-        if isinstance(entry, str) and entry.startswith(f"{REPOSITORY}@sha256:"):
-            digest = entry.split("@", 1)[1]
-            if len(digest) == len("sha256:") + 64:
-                return digest
-    return None
 
 
 def own_image(api: DockerApi, hostname: str) -> dict[str, object]:
@@ -158,37 +219,32 @@ def own_image(api: DockerApi, hostname: str) -> dict[str, object]:
 
 def stage(
     api: DockerApi,
+    channel: ReleaseChannel,
     *,
     running_release: int,
-    verify: Callable[[str], None],
+    fetch: Fetch = fetch_https,
     pull_seconds: float = PULL_SECONDS,
 ) -> Staged:
-    """Find the release behind `stable`, prove it, and make it `current` when it is newer than
+    """Prove the release the channel announces, and make it `current` when it is newer than
     `running_release`. `UpdateError` for anything that stops that; nothing is tagged then, and an
-    image that failed its proof is removed again."""
-    channel = f"{REPOSITORY}:{CHANNEL_TAG}"
+    image that does not match its manifest is removed again."""
+    manifest = verified_manifest(channel, fetch)
+    if manifest.release <= running_release:
+        return Staged(Outcome.UP_TO_DATE, running_release, manifest.digest)
+    by_digest = f"{manifest.repository}@{manifest.digest}"
     try:
         api.request(
             "POST",
-            f"/images/create?fromImage={REPOSITORY}&tag={CHANNEL_TAG}",
+            f"/images/create?fromImage={manifest.repository}&tag={manifest.digest}",
             ok=(200,),
             timeout=pull_seconds,
         )
-        image = dict(api.inspect_image(channel))
+        image = dict(api.inspect_image(by_digest))
     except DockerError as error:
-        raise UpdateError(f"the release channel cannot be pulled ({error})") from None
-    digest = _digest_of(image)
-    if digest is None:
-        raise UpdateError("the pulled image has no digest of the release repository")
-    by_digest = f"{REPOSITORY}@{digest}"
-    try:
-        verify(by_digest)
-    except UpdateError:
-        _forget(api, channel)
-        raise
-    release = release_of(image)
-    if release <= running_release:
-        return Staged(Outcome.UP_TO_DATE, running_release, digest)
+        raise UpdateError(f"the release image cannot be pulled ({error})") from None
+    if release_of(image) != manifest.release:
+        _forget(api, by_digest)
+        raise UpdateError("the image is not the release its manifest names")
     try:
         if _exists(api, CURRENT_REFERENCE):
             api.request(
@@ -203,7 +259,7 @@ def stage(
         )
     except DockerError as error:
         raise UpdateError(f"the new image could not be named ({error})") from None
-    return Staged(Outcome.STAGED, release, digest)
+    return Staged(Outcome.STAGED, manifest.release, manifest.digest)
 
 
 def rollback(api: DockerApi) -> None:
@@ -254,7 +310,8 @@ class UpdatePolicy:
         hostname: Callable[[], str],
         now: Callable[[], float],
         jitter: Callable[[], float] = random.random,
-        verify: Callable[[str], None] | None = None,
+        channel: Callable[[], ReleaseChannel | None] = load_channel,
+        fetch: Fetch = fetch_https,
         logger: logging.Logger | None = None,
     ) -> None:
         self._api = api
@@ -263,9 +320,8 @@ class UpdatePolicy:
         self._hostname = hostname
         self._now = now
         self._jitter = jitter
-        self._verify: Callable[[str], None] = verify or partial(
-            cosign_verify, environment=environment
-        )
+        self._channel = channel
+        self._fetch = fetch
         self._log = logger or logging.getLogger(__name__)
         self._next_check = now() + FIRST_CHECK_SECONDS
 
@@ -296,9 +352,13 @@ class UpdatePolicy:
         self._next_check = self._now() + CHECK_INTERVAL_SECONDS * (
             1 + CHECK_JITTER * (self._jitter() - 0.5) * 2
         )
+        channel = self._channel()
+        if channel is None:
+            self._log.info("no update: this image has no release channel (the owner fills it)")
+            return
         try:
             running = release_of(own_image(api, self._hostname()))
-            staged = stage(api, running_release=running, verify=self._verify)
+            staged = stage(api, channel, running_release=running, fetch=self._fetch)
         except UpdateError as error:
             self._log.warning("no update: %s", error)
             return

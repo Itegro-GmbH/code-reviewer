@@ -82,6 +82,12 @@ from code_reviewer_runner.factory_runner.service import (
     RunnerService,
     Seams,
 )
+from code_reviewer_runner.factory_runner.update import (
+    Fetch,
+    ReleaseChannel,
+    fetch_https,
+    load_channel,
+)
 from code_reviewer_runner.implementer.docker_api import DockerApi
 from code_reviewer_runner.job_loop.service import configure_logging
 from code_reviewer_runner.job_loop.settings import SettingsError
@@ -107,8 +113,9 @@ class CliSeams:
     hostname: Callable[[], str] = socket.gethostname
     # The daemon the loop tidies (`housekeeping.py`).
     docker: Callable[[], DockerApi] = DockerApi
-    # What proves an image for `update` (`cosign verify` in production).
-    verify: Callable[[str], None] | None = None
+    # The release channel of the image and how its documents are fetched (`update.py`).
+    channel: Callable[[], ReleaseChannel | None] = load_channel
+    fetch: Fetch = fetch_https
 
 
 def _look(config: RunnerConfig, env: Mapping[str, str]) -> Prepared:
@@ -206,7 +213,8 @@ def main(
                 stderr,
                 docker=seams.docker,
                 hostname=seams.hostname,
-                verify=seams.verify,
+                channel=seams.channel,
+                fetch=seams.fetch,
             )
         if arguments.command == "selftest":
             return _selftest(arguments, env, seams, stdout, stderr)

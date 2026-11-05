@@ -53,12 +53,6 @@ require us to keep are in THIRD_PARTY_LICENSES.md, in particular:
   The Worker image carries the unmodified release 14.1.1 (source commit
   4649aa9700619f94cf9c66876e9549d83420e16c) as the search helper of the engine.
 
-  cosign (https://github.com/sigstore/cosign)
-  Copyright 2021 The Sigstore Authors
-  Licensed under the Apache License, Version 2.0.
-  The Factory-Runner image carries the unmodified release 3.1.3 (source commit
-  11926fa5bbbbde47e88fc006b625a17769b743b2) to verify the signature of an update.
-
   git (https://github.com/git/git)
   Copyright (c) Linus Torvalds and the git contributors
   Licensed under the GNU General Public License, version 2 (GPL-2.0-only).

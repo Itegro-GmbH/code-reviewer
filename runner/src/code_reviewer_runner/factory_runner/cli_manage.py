@@ -35,9 +35,11 @@ from code_reviewer_runner.factory_runner.config import (
     update_credential,
 )
 from code_reviewer_runner.factory_runner.update import (
+    Fetch,
     Outcome,
+    ReleaseChannel,
     UpdateError,
-    cosign_verify,
+    fetch_https,
     own_image,
     release_of,
     rollback,
@@ -202,7 +204,8 @@ def update_image(
     *,
     docker: Callable[[], DockerApi],
     hostname: Callable[[], str],
-    verify: Callable[[str], None] | None = None,
+    channel: Callable[[], ReleaseChannel | None],
+    fetch: Fetch = fetch_https,
 ) -> int:
     """Stage the newest verified image; the service switches to it after its running job. Nothing
     is pulled by the service's hand and nothing is ended here."""
@@ -212,12 +215,15 @@ def update_image(
             rollback(api)
             out.write("the earlier image is `current` again; restart the service to use it\n")
             return EXIT_OK
+        release_channel = channel()
+        if release_channel is None:
+            err.write(
+                f"{PROGRAM}: no update: this image has no release channel yet "
+                "(runner/release-channel.json is empty until the owner fills it)\n"
+            )
+            return EXIT_FAILED
         running = own_image(api, hostname())
-        staged = stage(
-            api,
-            running_release=release_of(running),
-            verify=verify or (lambda reference: cosign_verify(reference, environment=env)),
-        )
+        staged = stage(api, release_channel, running_release=release_of(running), fetch=fetch)
     except UpdateError as error:
         err.write(f"{PROGRAM}: no update: {error}\n")
         return EXIT_FAILED

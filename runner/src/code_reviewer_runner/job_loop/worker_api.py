@@ -121,6 +121,10 @@ def snapshot_query(part: SnapshotPart) -> str:
     )
 
 
+# How long a call waits for the thread of the one before it, which has answered, to end.
+ENDING_THREAD_SECONDS = 0.25
+
+
 class CredentialInvalid(LeaseLost):
     """401: the credential is not the job's (unknown, from an earlier claim, expired)."""
 
@@ -396,6 +400,11 @@ class HttpWorkerApi:
         """Run `call` on a daemon thread kept in `slot`, and refuse (`ApiUnavailable`) while the
         call before it on the same slot has not ended."""
         running: threading.Thread | None = getattr(self, slot)
+        if running is not None and running.is_alive():
+            # The thread of the call before this one hands its answer to the loop and ends a moment
+            # later: a caller that goes on at once (the next part of a snapshot) finds it alive.
+            # A call that is really still running is not waited for beyond this moment.
+            running.join(timeout=ENDING_THREAD_SECONDS)
         if running is not None and running.is_alive():
             raise ApiUnavailable(f"an earlier {name} has not ended")
         return await self._run_on_thread(name, call, slot=slot)

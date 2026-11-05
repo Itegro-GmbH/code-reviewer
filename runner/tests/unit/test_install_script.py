@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
 """The installer of the Factory-Runner (#855, R2): `runner/install/install.sh` against stand-ins for
-`docker`, `systemctl`, `cosign` and the rest, in a directory that plays the machine's root. Nothing
+`docker`, `systemctl`, `curl` and the rest, in a directory that plays the machine's root. The
+signature of the release manifest is checked by the real `openssl`, against files that
+`cryptography` signed, so the two implementations that have to agree (the installer's and the
+runner's) do. Nothing
 of the machine running the test is touched: no package, no unit, no daemon. What a real systemd and
 a real daemon do with the files is the job of the first install on a machine (docs/runner.md)."""
 
@@ -14,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from release_support import DIGEST, REPOSITORY, Release
 
 from code_reviewer_runner.factory_runner import update
 
@@ -23,8 +27,6 @@ RUNNER = Path(__file__).resolve().parents[2]
 REPOSITORY_ROOT = RUNNER.parent
 SCRIPT = RUNNER / "install" / "install.sh"
 TOKEN = "crt_" + "T" * 43
-DIGEST = "sha256:" + "d" * 64
-RELEASE_REPOSITORY = "ghcr.io/itegro-gmbh/code-reviewer-factory-runner"
 
 DOCKER = """\
 #!/bin/sh
@@ -35,7 +37,7 @@ case "$1" in
   image)
     if [ "$2" = inspect ]; then
       case "$*" in
-        *RepoDigests*) echo "{repository}@{digest}" ;;
+        *Labels*) echo "${STUB_LABEL:-7}" ;;
         *) [ -f "$STUB_STATE/current" ] || exit 1 ;;
       esac
     fi ;;
@@ -63,22 +65,35 @@ class Machine:
     bin: Path
     state: Path
     log: Path
+    # What the release addresses answer (the stand-in `curl` copies from here by file name).
+    served: Path
+    channel: Path
+    release: Release
 
     def run(
-        self, *args: str, env: dict[str, str] | None = None, stdin: str | None = None
+        self,
+        *args: str,
+        env: dict[str, str] | None = None,
+        stdin: str | None = None,
+        channel: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         variables = {
             "PATH": f"{self.bin}:/usr/bin:/bin",
             "HOME": str(self.root),
             "FACTORY_RUNNER_ROOT": str(self.root),
             "FACTORY_RUNNER_NO_SYSTEMCTL": "",
-            "COSIGN": str(self.bin / "cosign"),
             "STUB_LOG": str(self.log),
             "STUB_STATE": str(self.state),
+            "STUB_SERVED": str(self.served),
             **(env or {}),
         }
         return subprocess.run(
-            ["/bin/sh", str(SCRIPT), *args],
+            [
+                "/bin/sh",
+                str(SCRIPT),
+                *(["--channel-file", str(self.channel)] if channel else []),
+                *args,
+            ],
             env=variables,
             input=stdin if stdin is not None else "",
             capture_output=True,
@@ -112,8 +127,7 @@ def machine(tmp_path: Path) -> Machine:
     (root / "run" / "systemd" / "system").mkdir(parents=True)
     bin_dir.mkdir()
     state.mkdir()
-    docker = DOCKER.replace("{repository}", RELEASE_REPOSITORY).replace("{digest}", DIGEST)
-    (bin_dir / "docker").write_text(docker)
+    (bin_dir / "docker").write_text(DOCKER)
     (bin_dir / "docker").chmod(0o755)
     stub(bin_dir / "id", "echo 0")
     stub(bin_dir / "uname", 'case "$1" in -s) echo Linux ;; -m) echo x86_64 ;; esac')
@@ -123,20 +137,37 @@ def machine(tmp_path: Path) -> Machine:
         'case "$1" in is-active) [ -f "$STUB_STATE/active" ] ;; esac',
     )
     stub(
-        bin_dir / "cosign",
-        'printf "cosign %s\\n" "$*" >>"$STUB_LOG"; [ -z "${STUB_COSIGN_FAILS:-}" ]',
-    )
-    stub(
         bin_dir / "curl",
-        'printf "curl %s\\n" "$*" >>"$STUB_LOG"; '
-        'while [ $# -gt 0 ]; do [ "$1" = -o ] && echo junk >"$2"; shift; done',
+        'printf "curl %s\\n" "$*" >>"$STUB_LOG"; out=""; url=""; '
+        'while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift ;; https://*) url="$1" ;; esac; '
+        'shift; done; name="${url##*/}"; '
+        '[ -f "$STUB_SERVED/$name" ] && cp "$STUB_SERVED/$name" "$out" || echo junk >"$out"',
     )
     stub(bin_dir / "apt-get", 'printf "apt-get %s\\n" "$*" >>"$STUB_LOG"')
     stub(bin_dir / "jq", "true")
-    return Machine(root, bin_dir, state, tmp_path / "calls.log")
+    served = tmp_path / "served"
+    release = Release(release=7)
+    write_release(release, served)
+    return Machine(
+        root,
+        bin_dir,
+        state,
+        tmp_path / "calls.log",
+        served,
+        served / "release-channel.json",
+        release,
+    )
 
 
-def test_the_install_verifies_the_digest_writes_the_unit_registers_and_starts(
+def write_release(release: Release, folder: Path) -> None:
+    """The files the owner publishes, and the channel that names them."""
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "manifest.json").write_bytes(release.manifest())
+    (folder / "manifest.sig").write_bytes(release.signature())
+    (folder / "release-channel.json").write_text(json.dumps(release.channel_document(), indent=2))
+
+
+def test_the_install_verifies_the_manifest_pulls_its_digest_writes_the_unit_and_starts(
     machine: Machine,
 ) -> None:
     done = machine.run(
@@ -145,11 +176,13 @@ def test_the_install_verifies_the_digest_writes_the_unit_registers_and_starts(
 
     assert done.returncode == 0, done.stderr
     calls = machine.calls()
-    verify = next(call for call in calls if call.startswith("cosign verify"))
-    # The digest that was pulled is verified, not the tag, and only the release workflow's identity.
-    assert f"{RELEASE_REPOSITORY}@{DIGEST}" in verify
-    assert update.SIGNER in verify and update.OIDC_ISSUER in verify
-    assert f"docker tag {RELEASE_REPOSITORY}@{DIGEST} factory-runner:current" in calls
+    # The manifest and its signature were fetched, proved, and only then was the digest pulled.
+    fetched = [call for call in calls if call.startswith("curl")]
+    assert any("manifest.json" in call for call in fetched)
+    assert any("manifest.sig" in call for call in fetched)
+    assert f"docker pull -q {REPOSITORY}@{DIGEST}" in calls
+    assert f"docker tag {REPOSITORY}@{DIGEST} factory-runner:current" in calls
+    assert done.stdout.count("verified release 7") == 1
     unit = machine.unit.read_text()
     for part in (
         "--stop-timeout 150",
@@ -247,14 +280,52 @@ def test_a_setting_passed_to_a_registered_machine_is_applied_with_config_set(
     assert any("config set --labels linux,gpu --disk-gb 40" in call for call in machine.calls())
 
 
-def test_a_signature_that_does_not_verify_installs_nothing(machine: Machine) -> None:
-    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN, "STUB_COSIGN_FAILS": "1"})
+def test_a_manifest_that_somebody_else_signed_installs_nothing_and_pulls_nothing(
+    machine: Machine,
+) -> None:
+    write_release(Release(release=7), machine.served / "forged")
+    for name in ("manifest.json", "manifest.sig"):  # their manifest and signature, our channel
+        (machine.served / name).write_bytes((machine.served / "forged" / name).read_bytes())
+
+    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN})
 
     assert done.returncode != 0
     assert "not our release" in done.stderr
     assert not machine.unit.exists() and not machine.command.exists()
+    assert not any(call.startswith(("docker pull", "docker tag")) for call in machine.calls())
+
+
+def test_a_manifest_changed_after_it_was_signed_is_refused(machine: Machine) -> None:
+    manifest = machine.served / "manifest.json"
+    manifest.write_bytes(manifest.read_bytes().replace(b'"release": 7', b'"release": 8'))
+
+    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN})
+
+    assert done.returncode != 0 and "not our release" in done.stderr
+    assert not any(call.startswith("docker pull") for call in machine.calls())
+
+
+def test_an_image_that_is_not_the_release_its_manifest_names_is_removed(machine: Machine) -> None:
+    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN, "STUB_LABEL": "3"})
+
+    assert done.returncode != 0 and "not the release its manifest names" in done.stderr
+    assert any(call.startswith("docker rmi") for call in machine.calls())
     assert not any(call.startswith("docker tag") for call in machine.calls())
-    assert any(call.startswith("docker rmi") for call in machine.calls())  # the image is dropped
+    assert not machine.unit.exists()
+
+
+def test_with_the_release_channel_of_the_repository_nothing_is_installed_until_it_is_filled(
+    machine: Machine,
+) -> None:
+    empty = RUNNER / "release-channel.json"
+
+    done = machine.run(
+        "--channel-file", str(empty), channel=False, env={"FACTORY_RUNNER_TOKEN": TOKEN}
+    )
+
+    assert done.returncode != 0
+    assert "no runner image is published yet" in done.stderr
+    assert not machine.unit.exists()
 
 
 def test_without_a_token_the_service_is_installed_and_not_started(machine: Machine) -> None:
@@ -271,9 +342,9 @@ def test_a_dry_run_says_what_it_would_do_and_changes_nothing(machine: Machine) -
 
     assert done.returncode == 0, done.stderr
     assert "dry run: nothing was changed" in done.stdout
-    assert "would write" in done.stdout and "would run: docker pull" in done.stdout
+    assert "would write" in done.stdout and "would run: download the manifest" in done.stdout
     assert not machine.unit.exists() and not machine.command.exists()
-    changing = ("docker pull", "docker tag", "docker run", "systemctl", "apt-get", "curl", "cosign")
+    changing = ("docker pull", "docker tag", "docker run", "systemctl", "apt-get", "curl")
     assert not [call for call in machine.calls() if call.startswith(changing)]
 
 
@@ -310,7 +381,7 @@ def test_sysbox_is_never_installed_without_asking_and_says_what_it_does(machine:
     ):
         assert warning in done.stdout
     assert "no terminal to ask on" in done.stderr
-    assert not any(call.startswith(("apt-get", "curl")) for call in machine.calls())
+    assert not any(call.startswith("apt-get") or "sysbox" in call for call in machine.calls())
 
 
 def test_without_the_flag_the_warnings_and_the_step_do_not_appear(machine: Machine) -> None:
@@ -366,27 +437,53 @@ def shell_value(name: str) -> str:
     return found.group(1) if found.group(1) is not None else found.group(2)
 
 
-def test_the_installer_the_runner_and_the_image_name_the_same_release_and_signer() -> None:
-    assert shell_value("REPOSITORY") == update.REPOSITORY
-    assert shell_value("CHANNEL_TAG") == update.CHANNEL_TAG
-    assert shell_value("SIGNER") == update.SIGNER
-    assert shell_value("OIDC_ISSUER") == update.OIDC_ISSUER
+def test_the_channel_the_installer_downloads_is_the_file_the_image_carries() -> None:
+    channel = json.loads((RUNNER / "release-channel.json").read_text())
+    dockerfile = (RUNNER / "Dockerfile.factory-runner").read_text()
+    ignore = (RUNNER / "Dockerfile.factory-runner.dockerignore").read_text()
+
+    assert set(channel) == {"version", "repository", "manifestUrl", "signatureUrl", "publicKey"}
+    assert shell_value("CHANNEL_URL").endswith("/main/runner/release-channel.json")
+    assert (
+        "COPY --chown=0:0 --chmod=0644 release-channel.json " + str(update.CHANNEL_FILE)
+        in dockerfile
+    )
+    assert "!release-channel.json" in ignore
     assert shell_value("CURRENT") == update.CURRENT_REFERENCE
     assert shell_value("PREVIOUS") == update.PREVIOUS_REFERENCE
-    unit = SCRIPT.read_text()
-    assert "FACTORY_RUNNER_IMAGE_TAG=$CURRENT" in unit and update.IMAGE_TAG_VARIABLE in unit
+    assert "FACTORY_RUNNER_IMAGE_TAG=$CURRENT" in SCRIPT.read_text()
+    assert update.IMAGE_TAG_VARIABLE == "FACTORY_RUNNER_IMAGE_TAG"
 
 
-def test_cosign_is_the_same_file_in_the_pin_the_installer_and_the_image() -> None:
-    pin = json.loads((RUNNER / "cosign-pin.json").read_text())
-    entry = pin["platforms"]["linux-x64"]
-    dockerfile = (RUNNER / "Dockerfile.factory-runner").read_text()
+def test_the_installer_and_the_runner_read_the_same_channel_file_the_same_way(
+    tmp_path: Path,
+) -> None:
+    release = Release(release=7)
+    write_release(release, tmp_path)
 
-    assert shell_value("COSIGN_VERSION") == pin["tag"]
-    assert shell_value("COSIGN_SHA256") == entry["executableSha256"] == entry["archiveSha256"]
-    assert f'ARG COSIGN_SHA256="{entry["executableSha256"]}"' in dockerfile
-    assert f'ARG COSIGN_URL="{entry["url"]}"' in dockerfile
-    assert entry["url"].endswith(f"/{pin['tag']}/{entry['asset']}")
+    channel = update.load_channel(tmp_path / "release-channel.json")
+
+    assert channel == release.channel()
+    for key, value in (
+        ("repository", REPOSITORY),
+        ("manifestUrl", release.channel().manifest_url),
+        ("signatureUrl", release.channel().signature_url),
+    ):
+        script = f'. /dev/stdin <<"EOF"\n{json_functions()}\njson_value {key} "$1"\nEOF'
+        found = subprocess.run(
+            ["/bin/sh", "-c", script, "sh", str(tmp_path / "release-channel.json")],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert found == value, key
+
+
+def json_functions() -> str:
+    text = SCRIPT.read_text()
+    match = re.search(r"^json_value\(\) .*?^}\n", text, re.MULTILINE | re.DOTALL)
+    assert match is not None
+    return match.group(0)
 
 
 def test_sysbox_is_the_version_and_package_the_golden_snapshot_installs() -> None:

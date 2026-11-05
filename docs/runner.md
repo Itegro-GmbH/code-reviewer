@@ -216,11 +216,13 @@ sudo sh install.sh --token-file /root/runner-token --labels linux,gpu
 
 [`runner/install/install.sh`](../runner/install/install.sh) is one POSIX shell file. In this order it:
 
-1. **checks** Linux, x86_64, root, Docker (the daemon answers, not rootless), systemd, `curl` and `sha256sum`;
-2. gets **cosign** (the pinned version `runner/cosign-pin.json`, checked against its SHA-256; or the one in `COSIGN` / `PATH`);
-3. **pulls the newest runner image** (`ghcr.io/itegro-gmbh/code-reviewer-factory-runner:stable`, or the one you name with
-   `--image-digest sha256:...`), **verifies its signature** (see "Updates") and names the verified digest `factory-runner:current`. An image
-   that does not verify is removed and nothing is installed;
+1. **checks** Linux, x86_64, root, Docker (the daemon answers, not rootless), systemd, `curl`, `openssl`, `base64` and `sha256sum`;
+2. reads the **release channel** (`runner/release-channel.json`: the image repository, the addresses of the signed release manifest and its
+   signature, and the public key that proves them; or the file you name with `--channel-file`). **Empty until the owner fills it: then the
+   installer stops with "no runner image is published yet"** and installs nothing;
+3. fetches the **manifest and its signature**, **verifies the signature with `openssl`** (ECDSA P-256, SHA-256; see "Updates"), **pulls the image
+   by the digest the manifest names**, checks that the image carries the release number the manifest names, and names it `factory-runner:current`.
+   A manifest that does not verify, or an image that is not the release it names, installs nothing (the image is removed again);
 4. writes the **command** `/usr/local/bin/factory-runner` (a throwaway container of `factory-runner:current` with the socket, the
    configuration volume and `/work`) and the **systemd unit** `/etc/systemd/system/factory-runner.service`: the container `run --rm
    --stop-timeout 150` with the host's Docker socket (for the runner only: the agent never gets it), the volumes `factory-runner-home`
@@ -479,20 +481,29 @@ have a memory limit and are small and short), and more than one run at a time.
 A runner updates itself between jobs, or on the device (`factory-runner update`); **never from the app** (decision 9). The app may require a
 minimum base version: a runner below it gets no job, says "update needed" (claim answer `426`) and, if it can, updates at once.
 
-**Where the release comes from.** `ghcr.io/itegro-gmbh/code-reviewer-factory-runner`; the tag `stable` is the channel. The workflow
-[`runner-image.yml`](../.github/workflows/runner-image.yml) builds the agent image and the runner image from `main`, pushes them by digest, **signs
-them with cosign, keyless** (the workflow's own GitHub OIDC identity: there is **no key** to keep, rotate or lose), verifies what a runner will
-verify, and moves `stable` last. The runner image carries the number of its release (`code-reviewer.runner.release`, the run number of the
-workflow).
+**Where the release comes from, and what proves it.** A release is announced by a small **manifest** `{"repository": "...", "digest":
+"sha256:...", "release": N}` and a **detached signature** over exactly its bytes (ECDSA over P-256 with SHA-256, DER). Where they are
+and the public key are the **release channel**, [`runner/release-channel.json`](../runner/release-channel.json):
 
-**What is checked** (`factory_runner/update.py`, the same in `install.sh`):
+```json
+{ "version": 1, "repository": "", "manifestUrl": "", "signatureUrl": "", "publicKey": "" }
+```
 
-1. the image is pulled by the tag (a download, nothing runs), then **verified by its digest**: `cosign verify` with the certificate identity
-   `https://github.com/Itegro-GmbH/code-reviewer/.github/workflows/runner-image.yml@refs/(heads/main|tags/...)` and the issuer
-   `https://token.actions.githubusercontent.com`. The identity is **in the code, not in the configuration**. An image that does not verify is
-   removed and nothing changes;
-2. the release number must be **higher** than the running one's: a signed older image that somebody puts behind `stable` is no way back;
-3. only then is the digest named `factory-runner:current` (the one before it `factory-runner:previous`, for `update --rollback`).
+`publicKey` is the base64 of the DER of the SubjectPublicKeyInfo. The file is **copied into the runner image**
+(`/opt/code-reviewer/release-channel.json`), so a setting on the device cannot redirect an update; the installer reads the same file from
+the repository. **No extra program is needed to check it**: the runner uses the `cryptography` library it already has, the installer
+`openssl`. **It is empty in this repository.** A runner with an empty channel does not look for updates (it says so once),
+`factory-runner update` says "no release channel" (exit code 1), and the installer stops with "no runner image is published yet".
+
+**What is checked** (`factory_runner/update.py`; the installer does the same steps with `openssl`):
+
+1. the manifest and the signature are fetched (https only, at most 64 KiB) and the signature must verify with the channel's key, which
+   must be an ECDSA P-256 key; the manifest must name the channel's repository, a `sha256:` digest and a release number of 1 or more;
+2. the release number must be **higher** than the running one's (the label `code-reviewer.runner.release` of the running image): a signed
+   older manifest that somebody serves again is no way back, and nothing is pulled for it;
+3. only then is the image pulled **by the digest the manifest names** (the daemon checks the content against it); its label must carry the
+   manifest's release number, otherwise it is removed again and nothing changes;
+4. the digest is named `factory-runner:current` (the one before it `factory-runner:previous`, for `update --rollback`).
 
 **Between jobs.** The unit starts the container from `factory-runner:current` and restarts it when it ends. The service looks for a release
 ten minutes after its start and then every six hours, **only between two jobs**; and when the image behind `current` is another one than the
@@ -505,18 +516,32 @@ updates. `factory-runner config set --auto-update off` stops the looking by itse
 running. `factory-runner update --rollback` and a restart of the service go back one release. A new image that does not pass its own
 self-test is not ready (exit code 5) and takes no job: roll back.
 
-**What has to be done once by the owner, and is not done by this repository.** Nothing is published, and no runner can verify or update,
-until a person has:
+**What is not in this repository, for the owner.** The release pipeline: nothing publishes a runner image today, and the tests of the images
+pipeline hold that no workflow logs in to a registry, pushes an image or asks for `packages: write` (#677: the source is visible but not
+licensed, and a public image would let anybody run the service; publishing the runner image would also hand the Worker image's copyleft
+packages to customers, which `THIRD_PARTY_LICENSES.md`, "Copyleft and distribution", says must be reviewed first). So, **until the owner
+decides to publish and adds such a pipeline, no runner can install or update itself from a release**; the code, the installer and the tests
+are ready for it. The pipeline has to make, from `main` or by a manual dispatch and never in a run a pull request starts:
 
-1. reviewed the distribution (`THIRD_PARTY_LICENSES.md`, "Copyleft and distribution"): publishing the runner image delivers the Worker
-   image's copyleft packages to customers, which the policy says needs a review first. The workflow refuses to run without the confirmation
-   `reviewed` as input;
-2. started the workflow once from `main` (Actions, "Runner image", Run workflow), which creates the two packages in the registry;
-3. set the two packages (`code-reviewer-factory-runner`, `code-reviewer-agent`) to **public** in their settings: GitHub creates them private, a
-   runner on a customer's machine pulls without a login.
+1. the agent image and the runner image (`runner/Dockerfile.factory-runner` on the Worker image, with `AGENT_IMAGE_REF` the agent image's
+   **digest** and `RUNNER_RELEASE` a number that grows with every release, for instance the run number), pushed to a registry the customers can
+   pull from without a login;
+2. the manifest, signed with a key that only the pipeline holds:
 
-The first release is also the first real test of the signature check (the workflow verifies what a runner verifies, so a failure shows
-there, before `stable` moves) and of `cosign` against the registry; the unit tests cover the logic with stand-ins.
+   ```sh
+   openssl ecparam -genkey -name prime256v1 -noout -out release-key.pem          # once; keep it secret
+   openssl pkey -in release-key.pem -pubout -outform DER | base64 -w0            # the publicKey of the channel
+   printf '{"repository": "REGISTRY/IMAGE", "digest": "sha256:...", "release": N}' > manifest.json
+   openssl dgst -sha256 -sign release-key.pem -out manifest.sig manifest.json     # DER, what the runner reads
+   ```
+
+3. the manifest and the signature at the two addresses the channel names (a GitHub release asset or a static address will do), moved **last**,
+   after the image is pushed and its label was checked;
+4. the channel file filled in this repository (`repository`, `manifestUrl`, `signatureUrl`, `publicKey`): a change of the key is a change of
+   this file and a new image.
+
+The signing key is the one new secret this needs. Losing it stops updates (a runner keeps working); leaking it lets whoever holds it
+announce an image, so keep it where the other release secrets are. The tests sign with a throwaway key (`tests/unit/release_support.py`).
 
 ### Uninstall
 
@@ -542,10 +567,10 @@ repository is the Implementer's lane (`test_implementer_turn.py`), whose code th
 R2 (#855): `tests/unit/test_factory_runner_manage.py` (`config set`, `credential`, `update`, the proof), `test_factory_runner_disk_budget.py`
 (the measure, the guard, the host ending a job), the update cases in `test_factory_runner_service.py` (switch between jobs only, never during
 one, never in `--once`, update needed looks at once), and `test_install_script.py`, which runs `install.sh` against stand-ins for `docker`,
-`systemctl`, `cosign` and `curl` in a directory that plays the root of the machine: the verified digest, the unit, the token only on
+`systemctl` and `curl` in a directory that plays the root of the machine, with the real `openssl` checking a manifest that `cryptography` signed: the verified digest, the unit, the token only on
 standard input, idempotence, no restart of a running service, a signature that does not verify, the dry run, the Sysbox warnings and its
-refusal without a terminal, uninstall, and that the installer, `update.py`, `cosign-pin.json`, the Dockerfile and the golden snapshot name the
-same signer, release and versions. CI also runs `shellcheck` on the installer. **No test starts a real systemd unit or installs a package:**
+refusal without a terminal, uninstall, and that the installer, `update.py`, the Dockerfile and the golden snapshot agree on the channel file and
+the versions. CI also runs `shellcheck` on the installer. **No test starts a real systemd unit or installs a package:**
 nothing runs on a machine of ours; the first install on a real machine is the test of that.
 
 ### Security notes

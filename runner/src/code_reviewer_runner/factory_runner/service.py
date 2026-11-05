@@ -80,7 +80,13 @@ from code_reviewer_runner.factory_runner.housekeeping import (
 from code_reviewer_runner.factory_runner.job_api import RunnerJobApi
 from code_reviewer_runner.factory_runner.prepare import Prepared
 from code_reviewer_runner.factory_runner.selftest import summary
-from code_reviewer_runner.factory_runner.update import UpdatePolicy
+from code_reviewer_runner.factory_runner.update import (
+    Fetch,
+    ReleaseChannel,
+    UpdatePolicy,
+    fetch_https,
+    load_channel,
+)
 from code_reviewer_runner.implementer.agent_container import AGENT_IMAGE_REFERENCE
 from code_reviewer_runner.implementer.docker_api import DockerApi
 from code_reviewer_runner.job import IMPLEMENTER_WORK_DIR, IMPLEMENTER_WORK_DIR_VARIABLE
@@ -118,8 +124,9 @@ class Seams:
     hostname: Callable[[], str] = socket.gethostname
     # How often the disk budget is measured while a job runs.
     measure_seconds: float = MEASURE_SECONDS
-    # What proves an image for the self-update (`cosign verify` in production).
-    verify: Callable[[str], None] | None = None
+    # The release channel of the image and how its documents are fetched (`update.py`).
+    channel: Callable[[], ReleaseChannel | None] = load_channel
+    fetch: Fetch = fetch_https
 
 
 class RunnerService:
@@ -164,7 +171,8 @@ class RunnerService:
             hostname=seams.hostname,
             now=seams.wall,
             jitter=seams.jitter,
-            verify=seams.verify,
+            channel=seams.channel,
+            fetch=seams.fetch,
             logger=self._logger,
         )
 

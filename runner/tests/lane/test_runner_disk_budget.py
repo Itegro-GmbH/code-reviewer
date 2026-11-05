@@ -35,7 +35,7 @@ def test_what_a_container_writes_is_measured_noticed_and_freed_by_the_tidy(tmp_p
     try:
         docker(
             "run", "-d", "--name", WRITER, "--label", f"{ROLE_LABEL}=agent",
-            "--label", f"{RUNNER_LABEL}={RUNNER}", worker, "sh", "-c",
+            "--label", f"{RUNNER_LABEL}={RUNNER}", "--entrypoint", "sh", worker, "-c",
             f"dd if=/dev/zero of=/var/tmp/fill bs=1M count={MEGABYTES} && sleep 600",
         )  # fmt: skip
         api = DockerApi()
@@ -71,8 +71,9 @@ def test_the_image_a_setup_result_is_committed_as_is_removed_by_the_tidy(tmp_pat
     docker("rm", "-f", COMMITTED, check=False)
     try:
         docker(
-            "run", "--name", COMMITTED, worker, "sh", "-c", "head -c 5000000 /dev/zero > /var/tmp/x"
-        )
+            "run", "--name", COMMITTED, "--entrypoint", "sh", worker, "-c",
+            "head -c 5000000 /dev/zero > /var/tmp/x",
+        )  # fmt: skip
         docker("commit", COMMITTED, ENVIRONMENT_IMAGE)
         docker("rm", "-f", COMMITTED)
         api = DockerApi()

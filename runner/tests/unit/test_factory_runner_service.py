@@ -22,6 +22,7 @@ from loop_support import (
     outcome,
     run,
 )
+from release_support import DIGEST, MANIFEST_URL, REPOSITORY, SIGNATURE_URL, Release, fetcher
 from test_implementer_job_host import implementer_claim, line
 
 from code_reviewer_runner.factory_runner import service as service_module
@@ -60,8 +61,6 @@ from code_reviewer_runner.factory_runner.update import (
     CURRENT_REFERENCE,
     IMAGE_TAG_VARIABLE,
     RELEASE_LABEL,
-    REPOSITORY,
-    UpdateError,
 )
 from code_reviewer_runner.implementer.docker_api import DockerError
 from code_reviewer_runner.implementer.result_channel import make_result_directory
@@ -280,7 +279,8 @@ class Rig:
         clock: Any = None,
         environment: dict[str, str] | None = None,
         auto_update: bool = True,
-        verify: Any = None,
+        channel: Any = None,
+        fetch: Any = None,
     ) -> None:
         self.client = FakeClient()
         self.api = FakeJobApi()
@@ -308,7 +308,7 @@ class Rig:
                 launcher=lambda _grace: self.launcher,
                 docker=lambda: self.daemon,  # type: ignore[arg-type,return-value]
                 hostname=lambda: "runner-container",
-                verify=verify,
+                **({} if channel is None else {"channel": channel, "fetch": fetch}),
             ),
         )
 
@@ -1009,16 +1009,13 @@ def test_a_credential_file_of_another_runner_is_not_overwritten_by_a_renewal(
 # -- the update between jobs (#855) -----------------------------------------------------------
 
 
-UPDATE_DIGEST = "sha256:" + "c" * 64
-
-
 class ImageDaemon(FakeDaemon):
-    """A daemon that also knows images: the one this container runs (release 1) and, once pulled,
-    the release behind `stable`."""
+    """A daemon that also knows images: the one this container runs (release 1) and, once the
+    digest of the release is pulled, that image (with the number it carries)."""
 
-    def __init__(self, *, offered: int) -> None:
+    def __init__(self, *, label: int) -> None:
         super().__init__()
-        self.offered = offered
+        self.label = label
         self.images: dict[str, dict[str, Any]] = {
             "sha256:own": {"Id": "sha256:own", "Config": {"Labels": {RELEASE_LABEL: "1"}}},
             CURRENT_REFERENCE: {"Id": "sha256:own"},
@@ -1040,13 +1037,10 @@ class ImageDaemon(FakeDaemon):
             return super().request(method, path, *args, **kwargs)
         if path.startswith("/images/create"):
             self.pulls += 1
-            image = {
+            self.images[f"{REPOSITORY}@{DIGEST}"] = {
                 "Id": "sha256:new",
-                "RepoDigests": [f"{REPOSITORY}@{UPDATE_DIGEST}"],
-                "Config": {"Labels": {RELEASE_LABEL: str(self.offered)}},
+                "Config": {"Labels": {RELEASE_LABEL: str(self.label)}},
             }
-            self.images[f"{REPOSITORY}:stable"] = image
-            self.images[f"{REPOSITORY}@{UPDATE_DIGEST}"] = image
         elif "/tag?" in path and path.endswith("repo=factory-runner&tag=current"):
             self.images[CURRENT_REFERENCE] = self.images[
                 path.split("/images/")[1].split("/tag?")[0]
@@ -1056,22 +1050,21 @@ class ImageDaemon(FakeDaemon):
 
 class UpdateRig(Rig):
     def __init__(self, tmp_path: Path, *, offered: int = 2, **kwargs: Any) -> None:
-        self.verified: list[str] = []
-        self.refuse = False
+        self.release = Release(release=offered)
+        self.served = self.release.served()
+        self.fetched: list[str] = []
         super().__init__(
             tmp_path,
             environment={IMAGE_TAG_VARIABLE: CURRENT_REFERENCE},
-            verify=self._verify,
+            channel=self.release.channel,
+            fetch=self._fetch,
             **kwargs,
         )
-        self.daemon = ImageDaemon(offered=offered)
-        self.service._tidy = replace(self.service._tidy, api=lambda: self.daemon)  # type: ignore[arg-type,return-value]
-        self.service._updates._api = lambda: self.daemon  # type: ignore[assignment,return-value]
+        self.daemon = ImageDaemon(label=offered)
 
-    def _verify(self, reference: str) -> None:
-        self.verified.append(reference)
-        if self.refuse:
-            raise UpdateError("the signature of the image could not be verified: not our release")
+    def _fetch(self, url: str) -> bytes:
+        self.fetched.append(url)
+        return fetcher(self.served)(url)
 
 
 def test_a_staged_image_is_switched_to_between_jobs_and_nothing_is_claimed_first(
@@ -1124,7 +1117,7 @@ def test_the_first_look_for_a_release_comes_minutes_after_the_start_not_at_it(
     # 30 s polls: the check was due after 600 s, i.e. after about 20 of them.
     assert 15 <= rig.client.claim_calls <= 25
     assert rig.daemon.pulls == 1
-    assert rig.verified == [f"{REPOSITORY}@{UPDATE_DIGEST}"]
+    assert rig.fetched == [MANIFEST_URL, SIGNATURE_URL]
 
 
 def test_a_runner_with_automatic_updates_off_does_not_look_by_itself(tmp_path: Path) -> None:
@@ -1147,13 +1140,15 @@ def test_an_update_needed_that_cannot_be_met_is_said_and_waits_as_before(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     rig = UpdateRig(tmp_path)
-    rig.refuse = True
+    forged = Release(release=2)  # somebody else's key signs what the channel's address serves
+    rig.served = {MANIFEST_URL: forged.manifest(), SIGNATURE_URL: forged.signature()}
     rig.client.claims = [UpdateNeeded("1.4.0"), Revoked("no", 401)]
 
     with caplog.at_level(logging.WARNING):
         assert rig.go(once=False) == EXIT_REVOKED
 
-    assert "no update: the signature of the image could not be verified" in caplog.text
+    assert "no update: the signature of the release manifest is not valid" in caplog.text
+    assert rig.daemon.pulls == 0
     assert CURRENT_REFERENCE in rig.daemon.images and rig.daemon.images[CURRENT_REFERENCE] == {
         "Id": "sha256:own"
     }

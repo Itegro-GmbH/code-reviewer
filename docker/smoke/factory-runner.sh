@@ -29,9 +29,8 @@ docker run --rm "$image" config set --help >/dev/null || fail "config set --help
 docker run --rm "$image" credential renew --help >/dev/null || fail "credential renew --help failed"
 docker run --rm "$image" update --help >/dev/null || fail "update --help failed"
 
-step "cosign, which verifies an update, is in it and is the pinned version"
-want=$(grep -m1 '"version"' "$here/../../runner/cosign-pin.json" | sed 's/.*"\([0-9][^"]*\)".*/\1/')
-docker run --rm --entrypoint cosign "$image" version 2>&1 | grep -q "$want" || fail "cosign is not in the image or not $want"
+step "the release channel file is in it"
+docker run --rm --entrypoint cat "$image" /opt/code-reviewer/release-channel.json | grep -q '"repository"' || fail "release-channel.json is not in the image"
 
 step "config show reads the environment and never prints the credential"
 credential="crc_$(printf 'A%.0s' $(seq 1 43))"

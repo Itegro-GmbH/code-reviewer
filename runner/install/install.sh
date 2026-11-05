@@ -10,9 +10,10 @@
 #
 #   sudo sh install.sh --token-file /root/runner-token
 #
-# What it does, in this order: checks Docker and systemd; fetches the pinned `cosign` (or uses one
-# you have); pulls the newest runner image, VERIFIES its signature (the release workflow's, see
-# docs/runner.md) and names the verified digest `factory-runner:current`; writes the systemd unit
+# What it does, in this order: checks Docker and systemd; reads the release channel (the repository
+# and the public key of the runner image, runner/release-channel.json), fetches the signed release
+# manifest and VERIFIES its signature with `openssl`; pulls the image by the digest the manifest
+# names and names it `factory-runner:current` (docs/runner.md, "Updates"); writes the systemd unit
 # `factory-runner.service` and the command `factory-runner`; registers the machine with the token;
 # starts the service. It is safe to run again: nothing is registered twice, a service that runs is
 # not restarted (it switches to a new image by itself between jobs), a setting you pass is applied
@@ -28,18 +29,14 @@
 
 set -eu
 
-# -- pins (runner/cosign-pin.json is the source; a test keeps these equal to it) ----------------------
-COSIGN_VERSION="v3.1.3"
-COSIGN_SHA256="4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71"
+# -- pins ------------------------------------------------------------------------------------------
 # Sysbox as the golden snapshot installs it (dispatcher/src/snapshot/config.ts).
 SYSBOX_VERSION="0.7.1"
 SYSBOX_SHA256="9d6d5484f980d0a17f86c492c1262015c2afb66280bdb97215b79fde6a0261c5"
 
-# -- what the runner image is and who may sign it (factory_runner/update.py is the source) ----------
-REPOSITORY="ghcr.io/itegro-gmbh/code-reviewer-factory-runner"
-CHANNEL_TAG="stable"
-SIGNER='^https://github\.com/Itegro-GmbH/code-reviewer/\.github/workflows/runner-image\.yml@refs/(heads/main|tags/.+)$'
-OIDC_ISSUER="https://token.actions.githubusercontent.com"
+# -- the release channel: where the signed manifest is and what proves it (runner/release-channel.json,
+# the file the runner image carries; the owner fills it) ----------------------------------------------
+CHANNEL_URL="https://raw.githubusercontent.com/Itegro-GmbH/code-reviewer/main/runner/release-channel.json"
 CURRENT="factory-runner:current"
 PREVIOUS="factory-runner:previous"
 
@@ -56,13 +53,18 @@ WITH_SYSBOX=0
 UNINSTALL=0
 PURGE=0
 TOKEN_FILE=""
-IMAGE_DIGEST=""
+CHANNEL_FILE=""
 RUNNER_NAME=""
 RUNNER_LABELS=""
 RUNNER_URL=""
 RUNNER_CPUS=""
 RUNNER_MEMORY=""
 RUNNER_DISK=""
+
+# Temporary directories, removed when the script ends however it ends.
+TMPDIRS=""
+# shellcheck disable=SC2086 # mktemp paths hold no space
+trap 'rm -rf $TMPDIRS' EXIT
 
 say() { printf '%s\n' "$*"; }
 fail() { printf 'install: %s\n' "$*" >&2; exit 1; }
@@ -78,7 +80,7 @@ Usage: sh install.sh [options]
   --cpus N            CPUs the agent's and the setup container may use
   --memory-mb N       memory of the agent's and the setup container
   --disk-gb N         the disk budget of a job (/work and its containers)
-  --image-digest D    install this release (sha256:...) instead of the one behind "stable"; verified all the same
+  --channel-file F    read the release channel from this file instead of downloading runner/release-channel.json
   --sysbox            also install Sysbox (asks first; see the warnings it prints)
   --yes               accept the Sysbox warnings without asking
   --dry-run           say what would be done, change nothing
@@ -95,7 +97,7 @@ while [ $# -gt 0 ]; do
     --cpus) [ $# -ge 2 ] || fail "--cpus needs a value"; RUNNER_CPUS="$2"; shift 2 ;;
     --memory-mb) [ $# -ge 2 ] || fail "--memory-mb needs a value"; RUNNER_MEMORY="$2"; shift 2 ;;
     --disk-gb) [ $# -ge 2 ] || fail "--disk-gb needs a value"; RUNNER_DISK="$2"; shift 2 ;;
-    --image-digest) [ $# -ge 2 ] || fail "--image-digest needs a value"; IMAGE_DIGEST="$2"; shift 2 ;;
+    --channel-file) [ $# -ge 2 ] || fail "--channel-file needs a file"; CHANNEL_FILE="$2"; shift 2 ;;
     --sysbox) WITH_SYSBOX=1; shift ;;
     --yes) ASSUME_YES=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -106,11 +108,6 @@ while [ $# -gt 0 ]; do
     *) usage >&2; fail "unknown option: $1" ;;
   esac
 done
-
-case "$IMAGE_DIGEST" in
-  ""|sha256:????????????????????????????????????????????????????????????????) ;;
-  *) fail "--image-digest must look like sha256:<64 hex characters>" ;;
-esac
 
 # Every change goes through `act`: with --dry-run it is only said.
 act() {
@@ -138,65 +135,75 @@ preflight() {
   command -v systemctl >/dev/null 2>&1 || fail "systemctl is not available"
   command -v curl >/dev/null 2>&1 || fail "curl is not installed"
   command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is not installed"
+  command -v openssl >/dev/null 2>&1 || fail "openssl is not installed (it checks the signature of the release)"
+  command -v base64 >/dev/null 2>&1 || fail "base64 is not installed"
 }
 
-# -- cosign and the proof -------------------------------------------------------------------------------
+# -- the release channel and the proof -------------------------------------------------------------------
 
-find_cosign() {
-  if [ -n "${COSIGN:-}" ]; then
-    command -v "$COSIGN" >/dev/null 2>&1 || fail "COSIGN=$COSIGN is not an executable"
-    return
-  fi
-  if command -v cosign >/dev/null 2>&1; then
-    COSIGN="$(command -v cosign)"
-    return
-  fi
-  COSIGN="$LIBDIR/cosign"
-  if [ -x "$COSIGN" ] && [ "$(sha256sum "$COSIGN" | cut -d' ' -f1)" = "$COSIGN_SHA256" ]; then
-    return
-  fi
-  say "fetching cosign $COSIGN_VERSION (pinned, checked against its SHA-256)"
-  if [ "$DRY_RUN" = 1 ]; then
-    say "would run: download cosign to $COSIGN"
-    return
-  fi
-  mkdir -p "$LIBDIR"
-  temporary="$(mktemp "$LIBDIR/cosign.XXXXXX")"
-  curl -fsSL -o "$temporary" "https://github.com/sigstore/cosign/releases/download/$COSIGN_VERSION/cosign-linux-amd64" \
-    || { rm -f "$temporary"; fail "cosign could not be downloaded"; }
-  if [ "$(sha256sum "$temporary" | cut -d' ' -f1)" != "$COSIGN_SHA256" ]; then
-    rm -f "$temporary"
-    fail "the downloaded cosign is not the pinned one: nothing was installed"
-  fi
-  chmod 0755 "$temporary"
-  mv "$temporary" "$COSIGN"
+# The value of a string key of a flat JSON file (the channel and the manifest hold no escapes).
+json_value() { # json_value KEY FILE
+  sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$2" | head -n 1
 }
 
-# Pull the release, prove it is ours, and name it `current`. The image is only downloaded until it
-# has passed: nothing of it runs here.
+json_number() { # json_number KEY FILE
+  sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$2" | head -n 1
+}
+
+# Download the channel and the signed manifest, prove the manifest, and name the image it announces
+# `current`. The image is pulled by the digest the verified manifest names: nothing unproven is pulled.
 stage_image() {
-  if [ -n "$IMAGE_DIGEST" ]; then
-    reference="$REPOSITORY@$IMAGE_DIGEST"
-  else
-    reference="$REPOSITORY:$CHANNEL_TAG"
+  work="$(mktemp -d)"
+  TMPDIRS="$TMPDIRS $work"
+  channel="$CHANNEL_FILE"
+  if [ -z "$channel" ]; then
+    channel="$work/release-channel.json"
+    curl -fsSL -o "$channel" "$CHANNEL_URL" || fail "the release channel could not be downloaded"
   fi
-  say "pulling $reference"
+  [ -r "$channel" ] || fail "the release channel file cannot be read"
+  repository="$(json_value repository "$channel")"
+  manifest_url="$(json_value manifestUrl "$channel")"
+  signature_url="$(json_value signatureUrl "$channel")"
+  public_key="$(json_value publicKey "$channel")"
+  if [ -z "$repository" ] || [ -z "$manifest_url" ] || [ -z "$signature_url" ] || [ -z "$public_key" ]; then
+    fail "no runner image is published yet: the release channel (runner/release-channel.json) is empty until the owner fills it"
+  fi
+  case "$manifest_url$signature_url" in
+    https://*https://*) ;;
+    *) fail "the release channel must name https addresses" ;;
+  esac
+  say "reading the release manifest"
   if [ "$DRY_RUN" = 1 ]; then
-    say "would run: docker pull $reference, cosign verify (the release workflow's signature), docker tag ... $CURRENT"
+    say "would run: download the manifest and its signature, verify them with openssl, docker pull $repository@<digest>, docker tag ... $CURRENT"
     return
   fi
-  docker pull -q "$reference" >/dev/null || fail "the image could not be pulled"
-  digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$reference" | grep "^$REPOSITORY@sha256:" | head -n 1 || true)"
-  [ -n "$digest" ] || fail "the pulled image has no digest of $REPOSITORY"
-  if ! "$COSIGN" verify --certificate-identity-regexp "$SIGNER" --certificate-oidc-issuer "$OIDC_ISSUER" "$digest" >/dev/null 2>&1; then
-    docker rmi "$reference" >/dev/null 2>&1 || true
-    fail "the signature of the image could not be verified: this is not our release, nothing was installed"
+  curl -fsSL -o "$work/manifest.json" "$manifest_url" || fail "the release manifest could not be downloaded"
+  curl -fsSL -o "$work/manifest.sig" "$signature_url" || fail "the signature could not be downloaded"
+  printf '%s' "$public_key" | base64 -d >"$work/key.der" 2>/dev/null || fail "the public key of the channel cannot be read"
+  openssl pkey -pubin -inform DER -in "$work/key.der" -out "$work/key.pem" >/dev/null 2>&1 \
+    || fail "the public key of the channel cannot be read"
+  openssl dgst -sha256 -verify "$work/key.pem" -signature "$work/manifest.sig" "$work/manifest.json" >/dev/null 2>&1 \
+    || fail "the signature of the release manifest is not valid: this is not our release, nothing was installed"
+  digest="$(json_value digest "$work/manifest.json")"
+  release="$(json_number release "$work/manifest.json")"
+  [ "$(json_value repository "$work/manifest.json")" = "$repository" ] || fail "the manifest is not one of this channel"
+  case "$digest" in
+    sha256:????????????????????????????????????????????????????????????????) ;;
+    *) fail "the manifest has no digest" ;;
+  esac
+  [ -n "$release" ] || fail "the manifest has no release number"
+  say "pulling $repository@$digest (release $release)"
+  docker pull -q "$repository@$digest" >/dev/null || fail "the image could not be pulled"
+  label="$(docker image inspect --format '{{index .Config.Labels "code-reviewer.runner.release"}}' "$repository@$digest")"
+  if [ "$label" != "$release" ]; then
+    docker rmi "$repository@$digest" >/dev/null 2>&1 || true
+    fail "the image is not the release its manifest names: nothing was installed"
   fi
   if docker image inspect "$CURRENT" >/dev/null 2>&1; then
     docker tag "$CURRENT" "$PREVIOUS"
   fi
-  docker tag "$digest" "$CURRENT"
-  say "verified $digest"
+  docker tag "$repository@$digest" "$CURRENT"
+  say "verified release $release ($digest)"
 }
 
 # -- the command and the unit ------------------------------------------------------------------------------
@@ -380,7 +387,7 @@ install_sysbox() {
     return
   fi
   work="$(mktemp -d)"
-  trap 'rm -rf "$work"' EXIT
+  TMPDIRS="$TMPDIRS $work"
   curl -fsSL -o "$work/$package" "https://github.com/nestybox/sysbox/releases/download/v$SYSBOX_VERSION/$package" \
     || fail "the Sysbox package could not be downloaded"
   [ "$(sha256sum "$work/$package" | cut -d' ' -f1)" = "$SYSBOX_SHA256" ] \
@@ -422,7 +429,6 @@ if [ "$UNINSTALL" = 1 ]; then
   uninstall
   exit 0
 fi
-find_cosign
 stage_image
 write_command
 CHANGED=0

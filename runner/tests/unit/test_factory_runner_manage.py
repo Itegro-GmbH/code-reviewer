@@ -7,11 +7,18 @@ update is only ever staged: verified, and never during a job."""
 import io
 import json
 import stat
-import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
+from release_support import (
+    DIGEST,
+    MANIFEST_URL,
+    REPOSITORY,
+    SIGNATURE_URL,
+    Release,
+    fetcher,
+)
 
 from code_reviewer_runner.factory_runner.app_client import ApiError, Revoked
 from code_reviewer_runner.factory_runner.base import (
@@ -32,8 +39,9 @@ from code_reviewer_runner.factory_runner.update import (
     CURRENT_REFERENCE,
     PREVIOUS_REFERENCE,
     RELEASE_LABEL,
-    REPOSITORY,
     UpdateError,
+    load_channel,
+    verified_manifest,
 )
 from code_reviewer_runner.implementer.docker_api import DockerError
 
@@ -41,7 +49,6 @@ pytestmark = pytest.mark.unit
 
 CREDENTIAL = "crc_" + "A" * 43
 RENEWED = "crc_" + "B" * 43
-DIGEST = "sha256:" + "a" * 64
 
 
 class Client:
@@ -59,11 +66,12 @@ class Client:
 class Daemon:
     """The images of a daemon, by reference, and the calls made about them."""
 
-    def __init__(self, *, release: int, offered: int | None) -> None:
+    def __init__(self, *, release: int, label: int | None = None) -> None:
         self.images: dict[str, dict[str, Any]] = {
             "own-image": {"Config": {"Labels": {RELEASE_LABEL: str(release)}}}
         }
-        self.offered = offered
+        # The release number the image carries that a pull of the digest brings (None: nothing).
+        self.label = label
         self.calls: list[tuple[str, str]] = []
 
     def inspect_container(self, name: str) -> dict[str, Any]:
@@ -77,13 +85,11 @@ class Daemon:
     def request(self, method: str, path: str, *args: Any, **kwargs: Any) -> Any:
         self.calls.append((method, path))
         if path.startswith("/images/create"):
-            if self.offered is not None:
-                image = {
-                    "RepoDigests": [f"{REPOSITORY}@{DIGEST}"],
-                    "Config": {"Labels": {RELEASE_LABEL: str(self.offered)}},
+            assert path == f"/images/create?fromImage={REPOSITORY}&tag={DIGEST}"
+            if self.label is not None:
+                self.images[f"{REPOSITORY}@{DIGEST}"] = {
+                    "Config": {"Labels": {RELEASE_LABEL: str(self.label)}}
                 }
-                self.images[f"{REPOSITORY}:stable"] = image
-                self.images[f"{REPOSITORY}@{DIGEST}"] = image
             return None
         if method == "POST" and "/tag?" in path:
             source = path.split("/images/")[1].split("/tag?")[0]
@@ -101,7 +107,8 @@ def invoke(
     *argv: str,
     client: Client | None = None,
     daemon: Daemon | None = None,
-    verify: Any = None,
+    release: Release | None = None,
+    served: dict[str, bytes] | None = None,
     **env: str,
 ) -> tuple[int, str, str]:
     out, err = io.StringIO(), io.StringIO()
@@ -110,7 +117,10 @@ def invoke(
         now=lambda: 10 * 86400.0,
         hostname=lambda: "box",
         docker=lambda: daemon,  # type: ignore[arg-type,return-value]
-        verify=verify,
+        channel=lambda: None if release is None else release.channel(),
+        fetch=fetcher(
+            served if served is not None else ({} if release is None else release.served())
+        ),
     )
     code = main(
         list(argv),
@@ -282,126 +292,171 @@ def test_a_credential_from_the_environment_is_not_renewed_here(tmp_path: Path) -
 # -- update ------------------------------------------------------------------------------------
 
 
-def trusted(_reference: str) -> None:
-    return None
-
-
-def test_update_stages_a_newer_verified_release_and_keeps_the_one_before(tmp_path: Path) -> None:
-    daemon = Daemon(release=4, offered=7)
+def test_update_stages_a_newer_signed_release_and_keeps_the_one_before(tmp_path: Path) -> None:
+    daemon = Daemon(release=4, label=7)
     daemon.images[CURRENT_REFERENCE] = {"Id": "old"}
-    checked: list[str] = []
 
-    def record(reference: str) -> None:
-        checked.append(reference)
-
-    code, out, _ = invoke(tmp_path, "update", daemon=daemon, verify=record)
+    code, out, _ = invoke(tmp_path, "update", daemon=daemon, release=Release(release=7))
 
     assert code == EXIT_OK
-    assert checked == [f"{REPOSITORY}@{DIGEST}"]  # the digest is verified, not the tag
+    # What was pulled is the digest the signed manifest names, never a tag.
+    assert ("POST", f"/images/create?fromImage={REPOSITORY}&tag={DIGEST}") in daemon.calls
     assert daemon.images[CURRENT_REFERENCE] is daemon.images[f"{REPOSITORY}@{DIGEST}"]
     assert daemon.images[PREVIOUS_REFERENCE] == {"Id": "old"}
     assert "release 7" in out and "after the job" in out
 
 
-def test_update_with_nothing_newer_stages_nothing(tmp_path: Path) -> None:
-    daemon = Daemon(release=7, offered=7)
+def test_update_with_nothing_newer_pulls_and_stages_nothing(tmp_path: Path) -> None:
+    daemon = Daemon(release=7, label=7)
 
-    code, out, _ = invoke(tmp_path, "update", daemon=daemon, verify=trusted)
+    code, out, _ = invoke(tmp_path, "update", daemon=daemon, release=Release(release=7))
 
     assert code == EXIT_OK
     assert "up to date" in out
     assert CURRENT_REFERENCE not in daemon.images
+    assert not any(path.startswith("/images/create") for _, path in daemon.calls)
 
 
-def test_an_older_signed_release_is_no_way_back(tmp_path: Path) -> None:
-    daemon = Daemon(release=7, offered=3)
+def test_an_older_signed_manifest_served_again_is_no_way_back(tmp_path: Path) -> None:
+    daemon = Daemon(release=7, label=3)
 
-    invoke(tmp_path, "update", daemon=daemon, verify=trusted)
+    invoke(tmp_path, "update", daemon=daemon, release=Release(release=3))
 
     assert CURRENT_REFERENCE not in daemon.images
+    assert not any(path.startswith("/images/create") for _, path in daemon.calls)
 
 
-def test_an_image_that_does_not_verify_is_removed_and_never_named(tmp_path: Path) -> None:
-    daemon = Daemon(release=1, offered=9)
+def test_a_manifest_that_somebody_else_signed_pulls_nothing(tmp_path: Path) -> None:
+    ours, theirs = Release(release=9), Release(release=9)
+    served = {MANIFEST_URL: theirs.manifest(), SIGNATURE_URL: theirs.signature()}
+    daemon = Daemon(release=1, label=9)
 
-    def refuse(_reference: str) -> None:
-        raise UpdateError("the signature of the image could not be verified: not our release")
-
-    code, _, err = invoke(tmp_path, "update", daemon=daemon, verify=refuse)
+    code, _, err = invoke(tmp_path, "update", daemon=daemon, release=ours, served=served)
 
     assert code == EXIT_FAILED
     assert "not our release" in err
+    assert daemon.calls == []  # not even a pull
+
+
+def test_an_image_that_is_not_the_release_its_manifest_names_is_removed_and_not_named(
+    tmp_path: Path,
+) -> None:
+    daemon = Daemon(release=1, label=5)  # the manifest says 9
+
+    code, _, err = invoke(tmp_path, "update", daemon=daemon, release=Release(release=9))
+
+    assert code == EXIT_FAILED
+    assert "not the release its manifest names" in err
     assert CURRENT_REFERENCE not in daemon.images
-    assert f"{REPOSITORY}:stable" not in daemon.images
+    assert f"{REPOSITORY}@{DIGEST}" not in daemon.images
 
 
-def test_an_unreachable_registry_is_no_update_and_no_traceback(tmp_path: Path) -> None:
-    daemon = Daemon(release=1, offered=None)
+def test_a_registry_that_cannot_be_reached_is_no_update_and_no_traceback(tmp_path: Path) -> None:
+    daemon = Daemon(release=1, label=None)  # the pull brings nothing
 
-    code, _, err = invoke(tmp_path, "update", daemon=daemon, verify=trusted)
+    code, _, err = invoke(tmp_path, "update", daemon=daemon, release=Release(release=9))
 
     assert code == EXIT_FAILED
     assert "no update" in err
 
 
+def test_without_a_release_channel_in_the_image_there_is_nothing_to_update_from(
+    tmp_path: Path,
+) -> None:
+    code, _, err = invoke(tmp_path, "update", daemon=Daemon(release=1))
+
+    assert code == EXIT_FAILED
+    assert "no release channel" in err
+
+
 def test_rollback_points_current_back_at_the_image_before(tmp_path: Path) -> None:
-    daemon = Daemon(release=4, offered=None)
+    daemon = Daemon(release=4)
     daemon.images[PREVIOUS_REFERENCE] = {"Id": "old"}
 
     assert invoke(tmp_path, "update", "--rollback", daemon=daemon)[0] == EXIT_OK
     assert daemon.images[CURRENT_REFERENCE] == {"Id": "old"}
 
-    assert invoke(tmp_path, "update", "--rollback", daemon=Daemon(release=1, offered=None))[0] == (
-        EXIT_FAILED
-    )
+    assert invoke(tmp_path, "update", "--rollback", daemon=Daemon(release=1))[0] == (EXIT_FAILED)
 
 
 # -- the proof ---------------------------------------------------------------------------------
 
 
-def Done(code: int) -> "subprocess.CompletedProcess[str]":
-    return subprocess.CompletedProcess([], code, "", "")
+def test_a_manifest_is_good_only_with_the_channels_key_and_for_the_channels_repository() -> None:
+    release = Release(release=7)
+    channel = release.channel()
 
+    manifest = verified_manifest(channel, fetcher(release.served()))
+    assert (manifest.repository, manifest.digest, manifest.release) == (REPOSITORY, DIGEST, 7)
 
-def test_the_signature_must_be_the_release_workflows_of_this_repository() -> None:
-    from code_reviewer_runner.factory_runner.update import (
-        OIDC_ISSUER,
-        SIGNER,
-        cosign_verify,
-        verify_command,
-    )
-
-    seen: list[tuple[list[str], dict[str, str]]] = []
-
-    def run(command: list[str], **kwargs: Any) -> "subprocess.CompletedProcess[str]":
-        seen.append((command, kwargs["env"]))
-        return Done(0)
-
-    cosign_verify(f"{REPOSITORY}@{DIGEST}", environment={"PATH": "/x", "SECRET": "s"}, run=run)
-
-    command, env = seen[0]
-    assert command == verify_command(f"{REPOSITORY}@{DIGEST}")
-    assert command[command.index("--certificate-identity-regexp") + 1] == SIGNER
-    assert command[command.index("--certificate-oidc-issuer") + 1] == OIDC_ISSUER
-    assert "SECRET" not in env  # cosign gets a search path and a home, not the runner's environment
-    assert "Itegro-GmbH/code-reviewer/.github/workflows/runner-image.yml" in SIGNER.replace(
-        "\\", ""
-    )
-
-
-@pytest.mark.parametrize("code", [1, 2])
-def test_a_signature_that_does_not_verify_is_an_error_without_cosigns_output(code: int) -> None:
-    from code_reviewer_runner.factory_runner.update import cosign_verify
-
+    forged = release.served() | {
+        MANIFEST_URL: release.manifest().replace(b'"release": 7', b'"release": 8')
+    }
     with pytest.raises(UpdateError, match="not our release"):
-        cosign_verify("x@y", environment={}, run=lambda *_a, **_k: Done(code))
+        verified_manifest(channel, fetcher(forged))
+
+    other = Release(repository="registry.example/another-image")
+    with pytest.raises(UpdateError, match="not a manifest of this channel"):
+        verified_manifest(
+            channel,
+            fetcher(
+                {MANIFEST_URL: other.manifest(), SIGNATURE_URL: release.signature(other.manifest())}
+            ),
+        )
 
 
-def test_a_missing_cosign_is_said() -> None:
-    from code_reviewer_runner.factory_runner.update import cosign_verify
+@pytest.mark.parametrize(
+    "document",
+    [
+        b"not json",
+        b'{"repository": "%s", "digest": "sha256:short", "release": 7}' % REPOSITORY.encode(),
+        b'{"repository": "%s", "digest": "sha256:%s", "release": true}'
+        % (REPOSITORY.encode(), b"d" * 64),
+        b'{"repository": "%s", "digest": "sha256:%s", "release": 0}'
+        % (REPOSITORY.encode(), b"d" * 64),
+    ],
+)
+def test_a_signed_document_that_is_not_a_release_is_refused(document: bytes) -> None:
+    release = Release()
+    served = {MANIFEST_URL: document, SIGNATURE_URL: release.signature(document)}
 
-    def missing(*_args: Any, **_kwargs: Any) -> "subprocess.CompletedProcess[str]":
-        raise FileNotFoundError
+    with pytest.raises(UpdateError, match="not a manifest of this channel"):
+        verified_manifest(release.channel(), fetcher(served))
 
-    with pytest.raises(UpdateError, match="cosign is not installed"):
-        cosign_verify("x@y", environment={}, run=missing)
+
+def test_a_key_that_is_not_an_ecdsa_p256_key_is_refused() -> None:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    release = Release()
+    key = (
+        ed25519.Ed25519PrivateKey.generate()
+        .public_key()
+        .public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    )
+    channel = release.channel().__class__(REPOSITORY, MANIFEST_URL, SIGNATURE_URL, key)
+
+    with pytest.raises(UpdateError, match="not an ECDSA P-256 key"):
+        verified_manifest(channel, fetcher(release.served()))
+
+
+def test_the_channel_of_the_repository_is_empty_until_the_owner_fills_it() -> None:
+    path = Path(__file__).resolve().parents[2] / "release-channel.json"
+    assert load_channel(path) is None  # nothing is published: no runner updates by itself
+
+
+def test_a_filled_channel_file_is_read_and_a_wrong_one_is_none(tmp_path: Path) -> None:
+    release = Release()
+    good = tmp_path / "good.json"
+    good.write_text(json.dumps(release.channel_document()))
+    assert load_channel(good) == release.channel()
+
+    for change in (
+        {"manifestUrl": "http://plain.example/m"},
+        {"publicKey": "%%%"},
+        {"repository": ""},
+    ):
+        bad = tmp_path / "bad.json"
+        bad.write_text(json.dumps(release.channel_document() | change))
+        assert load_channel(bad) is None
+    assert load_channel(tmp_path / "missing.json") is None
