@@ -45,6 +45,8 @@ async function snapshot(
     if (
       table.name === "workflows" ||
       table.name === "workflow_versions" ||
+      table.name === "workflow_runs" ||
+      table.name === "workflow_step_runs" ||
       table.name === "profiles" ||
       table.name === "profile_versions" ||
       table.name === "runners" ||
@@ -64,7 +66,7 @@ async function columns(db: Kysely<Database>): Promise<string[]> {
   const { rows } = await sql<{
     name: string;
   }>`select table_name || '.' || column_name as name from information_schema.columns
-    where table_schema = 'public' and table_name not in ('workflows', 'workflow_versions', 'profiles', 'profile_versions', 'runners', 'runner_registration_tokens')
+    where table_schema = 'public' and table_name not in ('workflows', 'workflow_versions', 'workflow_runs', 'workflow_step_runs', 'profiles', 'profile_versions', 'runners', 'runner_registration_tokens')
     and not (table_name = 'implementer_turns' and column_name like 'profile\_%') order by 1`.execute(
     db,
   );
@@ -115,7 +117,8 @@ describe("the workflows migration", () => {
   // #833-M1-T172
   it("can be taken back, leaving the other tables as they were", async () => {
     const { db } = await createEmptyTestDatabase();
-    await migrateToLatest(db, migrationProvider);
+    // The tables of a later migration point at these (#844): the migrations after this one are not applied.
+    await migrateToLatest(db, throughThisMigration);
     const before = await columns(db);
 
     await (await migrationProvider.getMigrations())[THIS]?.down?.(db);

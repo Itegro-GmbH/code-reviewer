@@ -746,6 +746,8 @@ describe("the agent step", () => {
       "costUsd",
       "branch",
       "commits",
+      "headCommit",
+      "pushed",
     ]);
   });
 
@@ -1059,7 +1061,15 @@ describe("references", () => {
     expect(result.errors).toEqual([
       expect.objectContaining({
         code: "reference_unknown_field",
-        available: ["summary", "notes", "costUsd", "branch", "commits"],
+        available: [
+          "summary",
+          "notes",
+          "costUsd",
+          "branch",
+          "commits",
+          "headCommit",
+          "pushed",
+        ],
       }),
     ]);
   });
@@ -1270,6 +1280,39 @@ describe("facts the agent does not report", () => {
     expect(
       codes(withStep(comment("{{work.costUsd}} {{work.summary}}"), reviewer())),
     ).toEqual([]);
+  });
+
+  // #844-T220
+  it("gives headCommit and pushed to a profile that may push, with the types of a text and of true/false", () => {
+    expect(
+      codes(withStep(comment("{{work.headCommit}} {{work.pushed}}"))),
+    ).toEqual([]);
+  });
+
+  // #844-T221
+  it("refuses headCommit and pushed of a profile that may not push, like branch and commits", () => {
+    for (const fact of ["headCommit", "pushed"])
+      expect(codes(withStep(comment(`{{work.${fact}}}`), reviewer()))).toEqual([
+        ["/steps/1/body", "reference_fact_unavailable"],
+      ]);
+  });
+
+  // #844-T222
+  it("reserves headCommit and pushed as result fields of a step", () => {
+    const doc = change(tiny(), (d) => {
+      (agentSteps(d)[0] as Json).result = {
+        type: "object",
+        properties: {
+          headCommit: { type: "string" },
+          pushed: { type: "boolean" },
+        },
+      };
+    });
+
+    expect(codes(doc)).toEqual([
+      ["/steps/0/result/properties/headCommit", "result_field_reserved"],
+      ["/steps/0/result/properties/pushed", "result_field_reserved"],
+    ]);
   });
 
   // #833-M1-T87

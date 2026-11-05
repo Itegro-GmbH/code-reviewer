@@ -8,6 +8,7 @@ import { createBillingNotificationsRepository } from "../db/repositories/billing
 import { createBillingProfilesRepository } from "../db/repositories/billing-profiles-repository.ts";
 import { createBillingTopUpIntentsRepository } from "../db/repositories/billing-topup-intents-repository.ts";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
+import { createWorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
@@ -180,6 +181,34 @@ export async function seedWorkspaceForDeletion(
     },
     200,
   );
+  // #844-T141: a run of that workflow with a step that ran the finished job, which the erasure removes before the job.
+  const workflowRuns = createWorkflowRunsRepository(db, workspaceId);
+  const workflowRun = await workflowRuns.createRun({
+    workflowId: workflow.workflow.id,
+    workflowVersion: 1,
+    repositoryId: repository.id,
+    baseBranch: "main",
+    triggerInput: `{"tag":"${tag}"}`,
+    budgetMicroUsd: 1_000_000,
+    clientRequestId: `run-${tag}`,
+    createdBy: `owner-${tag}`,
+    actorLogin: "octocat",
+  });
+  const workflowStep = await workflowRuns.lockRun(workflowRun.run.id, (lock) =>
+    lock.addStep({
+      position: 0,
+      stepId: "work",
+      kind: "agent",
+      profile: null,
+      capMicroUsd: 1000,
+    }),
+  );
+  if (workflowStep === undefined) throw new Error("seeding failed");
+  await workflowRuns.claimStep(workflowStep.id);
+  await workflowRuns.attachTurn(workflowStep.id, {
+    jobId: finished.id,
+    turnId: null,
+  });
   // #843-T72: a profile with two versions, which the erasure removes with the rest.
   const agentProfiles = createProfilesRepository(db, workspaceId);
   const profileContent = {

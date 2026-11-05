@@ -16,6 +16,7 @@ import { workerLeaseToken } from "../jobs/worker-credential.ts";
 import { RUNNER_API_VERSION, type ReleaseResponse } from "./contract.ts";
 import type { WriteTokenRevoker } from "./write-token.ts";
 import type { RunnerApiLogger } from "./logger.ts";
+import { turnEndedSafely, type ReportDeps } from "./report.ts";
 import { parseReleaseRequest } from "./requests.ts";
 import {
   errorResponse,
@@ -31,6 +32,8 @@ export type ReleaseDeps = {
   jobEnded?: (event: JobEndedEvent) => void;
   /** #753: switches off the write tokens of a turn of the Implementer that was given back (a Worker that ended without a result). */
   revokeWriteTokens?: WriteTokenRevoker;
+  /** #844: a turn that failed for good ends its step in a workflow run; see `ReportDeps.turnEnded`. */
+  turnEnded?: ReportDeps["turnEnded"];
 };
 
 /** The reason a job fails with when a Dispatcher gives it back; a reason the app does not know becomes this one. */
@@ -93,6 +96,7 @@ export async function handleRelease(
     requeued: released.status === "requeued",
   });
   await deps.revokeWriteTokens?.(released.job);
+  if (released.status !== "requeued") turnEndedSafely(deps, released.job);
   return jsonResponse(200, {
     version: RUNNER_API_VERSION,
     job: {

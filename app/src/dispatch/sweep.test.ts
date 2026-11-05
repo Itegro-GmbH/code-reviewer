@@ -85,6 +85,12 @@ function setup(
       checked: 0,
     })),
     retryWriteTokens: vi.fn<() => Promise<void>>(async () => undefined),
+    reconcileRuns: vi.fn<
+      (options?: { budgetMs?: number }) => Promise<{
+        looked: number;
+        failed: number;
+      }>
+    >(async () => ({ looked: 0, failed: 0 })),
     info: vi.fn<(line: string) => void>(),
     error: vi.fn<(line: string) => void>(),
   };
@@ -106,6 +112,7 @@ function setup(
     balanceMails: { deliverDue: mocks.deliverDue },
     journalCheck: { run: mocks.checkJournal },
     writeTokens: { retryPending: mocks.retryWriteTokens },
+    workflowRuns: { reconcile: mocks.reconcileRuns },
     settings: options.settings ?? { giveUpMs: 3_600_000, maxRunning: null },
     ...(options.capabilities === undefined
       ? {}
@@ -675,6 +682,66 @@ describe("the write tokens of the Implementer in a run of the sweep (#790)", () 
     const report = await t.sweep.run();
 
     expect(report.failedSteps).toEqual(["write_tokens"]);
+    expect(t.cleanup).toHaveBeenCalledOnce();
+  });
+});
+
+describe("the workflow runs in a run of the sweep", () => {
+  const FACTORY = createCapabilitySet([
+    "review",
+    "dynamic-review",
+    "implementer",
+  ]);
+
+  // #844-T260
+  it("looks again at the runs that wait for a job, in a deployment with the Implementer", async () => {
+    const t = setup({ capabilities: FACTORY });
+
+    const report = await t.sweep.run();
+
+    expect(t.reconcileRuns).toHaveBeenCalledOnce();
+    expect(report.failedSteps).toEqual([]);
+  });
+
+  // #844-T281
+  it("gives them a time budget like the check runs", async () => {
+    const t = setup({ capabilities: FACTORY });
+
+    await t.sweep.run();
+
+    expect(t.reconcileRuns).toHaveBeenCalledWith({ budgetMs: 40_000 });
+  });
+
+  // #844-T282
+  it("names the step when the reconciler throws, and still does the steps after it", async () => {
+    const t = setup({ capabilities: FACTORY });
+    t.reconcileRuns.mockRejectedValueOnce(new Error("the database is down"));
+
+    const report = await t.sweep.run();
+
+    expect(report.failedSteps).toEqual(["workflow_runs"]);
+    expect(t.cleanup).toHaveBeenCalledOnce();
+  });
+
+  // #844-T261
+  it("does not in a deployment without the capability: code-review.com has no workflow runs", async () => {
+    const t = setup({
+      capabilities: createCapabilitySet(["review", "dynamic-review"]),
+    });
+
+    await t.sweep.run();
+
+    expect(t.reconcileRuns).not.toHaveBeenCalled();
+  });
+
+  // #844-T262
+  it("names the step when a run could not be advanced, and still does the others", async () => {
+    const t = setup({ capabilities: FACTORY });
+    t.reconcileRuns.mockResolvedValueOnce({ looked: 3, failed: 1 });
+
+    const report = await t.sweep.run();
+
+    expect(report.failedSteps).toEqual(["workflow_runs"]);
     expect(t.cleanup).toHaveBeenCalledOnce();
   });
 });
