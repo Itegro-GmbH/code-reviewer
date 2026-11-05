@@ -714,8 +714,7 @@ signature still decides who can start a run at all; the rule of one running run 
 GitHub's own redelivery.
 
 **A run without a person.** `workflow_runs.created_by` is empty for such a run and `triggerKind` is `github.issueLabeled` (the check of the table: only a run started by
-hand needs a user). The Implementer records the account a session belongs to, so the **turns of such a run belong to the account that owns the workflow** (the one that
-saved it first); their job shows the login of whoever put the label on. Neither decides anything: what a run may do is what the workflow, its profile and the GitHub
+hand needs a user). The Implementer records the account a session belongs to, so the **turns of such a run belong to the account that owns the workflow** (the author of the version the run uses; saving the workflow again makes a new version, and its author owns the runs that start afterwards); their job shows the login of whoever put the label on. Neither decides anything: what a run may do is what the workflow, its profile and the GitHub
 App allow.
 
 **At most one run per delivery and workflow.** The run is started under the request id `gh-<delivery id>-<workflow id>`. GitHub's "Redeliver" of a delivery, or a second
@@ -769,7 +768,7 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `budget_exhausted` | run | The budget does not cover another agent step. |
 | `step_kind_not_supported` | run | The pinned document holds a step this engine does not run (`if`, `loop`). |
 | `document_unusable` | run | The pinned version cannot be read. |
-| `workflow_owner_gone` | run | A run a label started: the account that owns the workflow (the one that saved it first) is no longer a member of the workspace. The run ends before its first step. The message: "The person who owns this workflow is no longer a member of the workspace; save the workflow again to take it over." The failed run frees the issue. If the owner leaves while the run goes on, the agent step that cannot start fails with `agent_start_failed` and the same sentence. |
+| `workflow_owner_gone` | run | A run a label started: the account that owns the workflow (the author of the version the run uses) is no longer a member of the workspace. The run ends before its first step. The message: "The person who owns this workflow is no longer a member of the workspace; save the workflow again to take it over." The failed run frees the issue. If the owner leaves while the run goes on, the agent step that cannot start fails with `agent_start_failed` and the same sentence. |
 | `template_missing_value` | step | A reference points at a value the run does not have, and has no default. |
 | `template_invalid` | step | A reference holds an object, or the text is not a template. |
 | `template_too_large` | step | The text does not fit where it goes. |

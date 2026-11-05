@@ -59,7 +59,7 @@ export type RequestedTurn = TurnRead & { jobId: string };
 
 export type EngineDependencies = {
   runs: WorkflowRunsRepository;
-  workflows: Pick<WorkflowsRepository, "get" | "getVersion">;
+  workflows: Pick<WorkflowsRepository, "getVersion">;
   /** The members of the workspace: a run a label started belongs to the account that owns the workflow, who must still be one. */
   members: Pick<WorkspaceMembersRepository, "get">;
   profiles: Pick<ProfilesRepository, "findByName">;
@@ -351,7 +351,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       });
       return { kind: "done" };
     }
-    // A run a label started belongs to the account that owns the workflow. If that person has left the workspace, the run ends before
+    // A run a label started belongs to the author of the workflow version it uses. If that person has left the workspace, the run ends before
     // it does anything: nobody who is still a member put the workflow in charge of the issue.
     if (run.createdBy === null && lock.steps.length === 0) {
       if (pre.ownerGone === undefined)
@@ -500,20 +500,29 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     }
   }
 
+  /**
+   * The account that owns a run a label started: the author of the workflow version the run uses. Saving the workflow again makes a
+   * new version, so whoever saves it takes over the runs that start afterwards.
+   */
+  async function workflowOwner(
+    run: StoredWorkflowRun,
+  ): Promise<string | undefined> {
+    return (
+      await deps.workflows.getVersion(run.workflowId, run.workflowVersion)
+    )?.createdBy;
+  }
+
   /** Whether the account that owns the workflow of a run is still a member of the workspace. */
   async function ownerIsMember(run: StoredWorkflowRun): Promise<boolean> {
-    const found = await deps.workflows.get(run.workflowId);
-    return (
-      found !== undefined &&
-      (await deps.members.get(found.workflow.createdBy)) !== undefined
-    );
+    const owner = await workflowOwner(run);
+    return owner !== undefined && (await deps.members.get(owner)) !== undefined;
   }
 
   /**
    * The account an agent step's session belongs to, and the login its job shows. A run started by hand belongs to the person who
    * started it. A run a label started has no person (`created_by` is null); its turns belong to the account that owns the workflow,
-   * the one that saved it first, and their job shows the login of whoever put the label on: the Implementer records the creator of a
-   * session for the Runs page, and decides nothing by it.
+   * the author of the version the run uses, and their job shows the login of whoever put the label on: the Implementer records the
+   * creator of a session for the Runs page, and decides nothing by it.
    */
   async function sessionOwner(
     run: StoredWorkflowRun,
@@ -522,12 +531,12 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
   > {
     if (run.createdBy !== null)
       return { id: run.createdBy, githubLogin: run.actorLogin };
-    const found = await deps.workflows.get(run.workflowId);
-    if (found === undefined) return { missing: "account" };
+    const owner = await workflowOwner(run);
+    if (owner === undefined) return { missing: "account" };
     // The owner may have left after the run began (the check at its start is for the first step only).
-    if ((await deps.members.get(found.workflow.createdBy)) === undefined)
+    if ((await deps.members.get(owner)) === undefined)
       return { missing: "membership" };
-    return { id: found.workflow.createdBy, githubLogin: run.actorLogin };
+    return { id: owner, githubLogin: run.actorLogin };
   }
 
   async function startAgent(

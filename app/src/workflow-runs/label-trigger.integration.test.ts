@@ -579,6 +579,46 @@ describe("label, implementer, pull request, comment (#845)", () => {
     expect(await outcomeOf(next)).toBe("workflow_runs_started");
   });
 
+  // #845-T40c
+  it("hands the next label run to whoever saved the workflow again, when the owner of the earlier version has left", async () => {
+    const harness = await startHarness();
+    const { app } = harness;
+    const workflow = await app.saveWorkflow(issueToPullRequest());
+    expect(await app.members.remove("user-1")).toBe(true);
+    const first = await deliverAndAdvance(harness, "delivery-1");
+    expect((await app.stateOf(first)).run).toMatchObject({
+      status: "failed",
+      errorCode: "workflow_owner_gone",
+    });
+
+    // Another member saves the workflow: the new version is theirs, and so are the runs that start with it.
+    await addUser(app.h.db, "user-2");
+    expect(await app.members.add("user-2", "member")).toBe("added");
+    const saved = await app.workflows.saveVersion(
+      workflow.id,
+      {
+        name: workflow.name,
+        document: JSON.stringify(issueToPullRequest()),
+        createdBy: "user-2",
+      },
+      100,
+    );
+    expect(saved.ok).toBe(true);
+    const runId = await deliverAndAdvance(harness, "delivery-2");
+
+    const state = await app.stateOf(runId);
+    expect(state.run).toMatchObject({ status: "running", errorCode: null });
+    const agent = state.steps.at(-1);
+    expect(agent).toMatchObject({ stepId: "implement", status: "running" });
+    expect(
+      await app.h.db
+        .selectFrom("implementer_turns")
+        .select("created_by")
+        .where("job_id", "=", agent?.jobId ?? "")
+        .executeTakeFirst(),
+    ).toEqual({ created_by: "user-2" });
+  });
+
   // #845-T40b
   it("fails the agent step with the same sentence when the owner leaves after the run began", async () => {
     const harness = await startHarness();

@@ -1393,7 +1393,6 @@ describe("a failure of the engine", () => {
           }),
       },
       workflows: {
-        get: (...args) => app.workflows.get(...args),
         getVersion: watched("document", (...args) =>
           app.workflows.getVersion(...args),
         ),
@@ -1443,7 +1442,6 @@ describe("a failure of the engine", () => {
       members: app.members,
       runs: app.runs,
       workflows: {
-        get: async () => undefined,
         getVersion: async () => ({
           workflowId: workflow.id,
           version: 1,

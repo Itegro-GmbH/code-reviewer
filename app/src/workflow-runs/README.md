@@ -29,7 +29,7 @@ not touched for a minute), classified in `scoping.test.ts`.
 A run is started by hand (`service.ts`) or by a label on an issue (`label-trigger.ts`, called by the webhook): `workflow_runs.trigger_kind` says which. A run of a label has
 no `created_by` (the table holds that: only `manual` needs a user), its `actor_login` is the login of whoever put the label on (display only), and its `trigger_input` is
 `{issue, repo}`, which the engine reads as `trigger.issue` and `trigger.repo` (`valuesOf`; a run by hand has `trigger.input`). The Implementer session of an agent step needs an
-account: the owner of the workflow (`sessionOwner`), who must still be a member of the workspace (else the run ends with `workflow_owner_gone`, before its first step). A workflow has one running run for one issue at a time (`trigger_key`, a partial unique index; `createRun` answers `busy`). The title, body and labels of the issue are defused where they go into the text of an action (`templates.ts`). The rules and
+account: the owner of the workflow (`sessionOwner`: the author of the workflow version the run uses, so whoever saves the workflow again takes over the runs that start afterwards), who must still be a member of the workspace (else the run ends with `workflow_owner_gone`, before its first step). A workflow has one running run for one issue at a time (`trigger_key`, a partial unique index; `createRun` answers `busy`). The title, body and labels of the issue are defused where they go into the text of an action (`templates.ts`). The rules and
 the filter: [`docs/workflows.md`](../../../docs/workflows.md#the-label-trigger).
 
 ## How a run goes
