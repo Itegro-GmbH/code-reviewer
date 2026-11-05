@@ -6,7 +6,12 @@ The engine suite runs the real Claude Code against the strict fake provider (the
 Factory-Runner, `implementer/claude_code`). The pin is the one the install layer builds with
 (`claude_code/layer.py`): an exact version and the SHA-512 of its npm tarball. The tarball is
 accepted only with that digest, before it is installed from the file, and the installed program must
-report the pinned version.
+report the pinned version. A program already in the cache is used again only with the verified
+tarball next to it (`VERIFIED_TARBALL`, checked against the pinned digest again) and the pinned
+version; the version string alone proves nothing, so anything else is installed anew.
+
+The digest covers the npm package only. It is a stub whose platform binary is an optional
+dependency that npm resolves from the registry on its own: **that binary is not pinned here.**
 
     uv run python scripts/fetch_claude_code.py [--dest DIR]
 
@@ -19,6 +24,7 @@ an image of ours.
 import argparse
 import base64
 import hashlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -34,6 +40,8 @@ from code_reviewer_runner.implementer.claude_code.layer import (
 
 DEFAULT_DESTINATION = Path.home() / ".cache" / "code-reviewer" / "claude-code"
 EXECUTABLE = "node_modules/.bin/claude"
+# The tarball that passed the digest check, kept beside the install it made.
+VERIFIED_TARBALL = "verified-claude-code.tgz"
 TIMEOUT_SECONDS = 600
 
 
@@ -57,11 +65,24 @@ def reported_version(executable: Path) -> str:
     return done.stdout.split(" ")[0].strip()
 
 
+def is_verified_install(destination: Path) -> bool:
+    """An install made by this script from the pinned tarball: the kept tarball still has the
+    pinned digest and the program reports the pinned version."""
+    kept, executable = destination / VERIFIED_TARBALL, destination / EXECUTABLE
+    if not kept.is_file() or not executable.is_file():
+        return False
+    return integrity_of(kept) == CLAUDE_CODE_INTEGRITY and (
+        reported_version(executable) == CLAUDE_CODE_VERSION
+    )
+
+
 def fetch(destination: Path) -> Path:
     executable = destination / EXECUTABLE
-    if executable.is_file() and reported_version(executable) == CLAUDE_CODE_VERSION:
+    if is_verified_install(destination):
         return executable
     destination.mkdir(parents=True, exist_ok=True)
+    (destination / VERIFIED_TARBALL).unlink(missing_ok=True)
+    shutil.rmtree(destination / "node_modules", ignore_errors=True)
     with tempfile.TemporaryDirectory() as scratch:
         packed = subprocess.run(
             ["npm", "pack", f"{PACKAGE}@{CLAUDE_CODE_VERSION}", "--pack-destination", scratch],
@@ -92,7 +113,11 @@ def fetch(destination: Path) -> Path:
         )
         if installed.returncode != 0:
             raise PinError("the pinned package could not be installed with npm")
-    if not executable.is_file() or reported_version(executable) != CLAUDE_CODE_VERSION:
+        if not (destination / EXECUTABLE).is_file():
+            raise PinError("the installed program is not where it is expected")
+        shutil.copyfile(tarballs[0], destination / VERIFIED_TARBALL)
+    if reported_version(executable) != CLAUDE_CODE_VERSION:
+        (destination / VERIFIED_TARBALL).unlink(missing_ok=True)
         raise PinError("the installed program does not report the pinned version")
     return executable
 

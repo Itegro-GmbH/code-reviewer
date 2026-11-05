@@ -253,7 +253,7 @@ Engine suite (`runner/tests/engine/`, `uv run pytest -m engine`, `make test-engi
 - The Claude Code adapter of the Factory-Runner (#856, `test_engine_claude_code.py` and `claude_code_support.py`, in the PR-Agent half
   of the shards) starts the real, pinned Claude Code with the adapter's own command line and environment against the strict fake
   provider of `fakes/wire`. `runner/scripts/fetch_claude_code.py` installs the version pinned in
-  `implementer/claude_code/layer.py` with npm and accepts the tarball only with the pinned SHA-512 (`CLAUDE_CODE_BIN` overrides the
+  `implementer/claude_code/layer.py` with npm and accepts the npm stub tarball only with the pinned SHA-512 (the platform binary is not covered, a follow-up of #856; a cached install is reused only with the verified tarball kept beside it; `CLAUDE_CODE_BIN` overrides the
   cache `~/.cache/code-reviewer/claude-code`); a missing program fails loudly with the command to run, never a skip. It is Anthropic's
   proprietary software, fetched for the tests only. `engine.yml` caches it.
 - The OpenCode half (#197, `test_engine_opencode.py` and `opencode_support.py`) needs the pinned
