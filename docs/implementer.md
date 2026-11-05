@@ -17,7 +17,8 @@ the task, picks a model and, if they want, a lower cost limit. The task becomes 
 OpenCode agent works in a clone, in a container of its own with its own Docker, and starts on the new branch. Git is free for
 the agent inside that clone, and it has no way to push: when the turn ends, **the runner pushes every local branch of the
 clone** to GitHub, the new branch among them (section "The git rules"). It does not open a pull request and does not merge.
-The person finds the branches on GitHub and the run on the Runs page.
+The person finds the branches on GitHub and the run on the Runs page, and can **continue the session** there with a next instruction on a new VM
+(section "Session and Turn").
 
 A task may name an **environment** (section "Environments"): a size for the VM and a setup script. The script runs once, before the agent
 starts, in a container of its own with full internet access and no secret of any kind (section "The environment's setup script"); what it
@@ -30,18 +31,112 @@ this is a decision for internal use: before outside users arrive, move it to Adm
 
 The models are those that serve Dynamic Review: on the operator's key a released catalog entry of that kind, on the workspace's
 own key a model of a provider that the models catalog lists and for which a key is saved. The agent is always OpenCode on the
-native path; the two registry providers (Anthropic, OpenRouter) are not offered.
+native path; the two registry providers (Anthropic, OpenRouter) are offered like any other provider of the catalog, and their
+keys go through the model door (#807).
 
 ## Session and Turn
 
 - A **Session** is one branch of one repository, the saved OpenCode session id and version, the last pushed commit and a
   summary. Per repository one session holds a branch name (a unique index), and it holds it even if the branch never reached GitHub:
   a turn that failed before it started keeps its name. A name that exists on GitHub already is refused at submit.
-- A **Turn** is one instruction. In this slice a session has exactly one turn; more turns per session come later. A turn is a
-  row of `jobs` too, so its status is the status of its job: there is no second state machine.
+- A **Turn** is one instruction. A session has one turn when a task starts and gets another each time the person continues it
+  (below, "Follow-ups"). A turn is a row of `jobs` too, so its status is the status of its job: there is no second state machine.
 - Two turns of one session never run at once; sessions of one repository run in parallel (the factory's
   `RUNNER_DISPATCH_MAX_RUNNING` is 2 for all kinds together, and a turn can take an hour, so reviews wait behind tasks when two
   are running; raise it and the Dispatcher entry's `maxRunning` together).
+
+### Follow-ups
+
+When a turn has ended the session is idle, and any member of the workspace may give it the next instruction. The form is "Continue"
+on the Runs page of the **newest** turn of the session; the route and its checks are in "Follow-up turns: the API and the form (#841)".
+A follow-up is a job like the first turn's: a new VM from the golden snapshot, the same sandbox, the same git rules, the same final push.
+
+- **Exactly one instruction can wait.** While a turn runs, the person may queue the next instruction; it starts when the turn ends. A
+  second one while one waits is `IMPLEMENTER_SESSION_BUSY` (409). An instruction that cannot start any more (the branch is gone from
+  GitHub, the model is no longer allowed, and so on) is discarded with a reason, and the Runs page shows the reason and the text.
+- **What the form leaves alone is what the last turn had:** the model, the cost limit, the environment (as a copy, so a deleted or edited
+  one changes nothing) and the profile. The model may be changed.
+- **What comes back to the new VM, and what does not.** Only the git repository comes back (below, "Branches"), and the conversation
+  (below, "The conversation"). The VM is new: processes, dev servers, databases, containers and the images they pulled, shell state, files outside the
+  repository and anything installed by hand are gone. The environment's setup script runs again. The agent is told so in a **preface** to
+  its instruction (section "Follow-up turns: resume in the runner (#840)"): that it is in a fresh sandbox, which branches exist and which one
+  is checked out, which branches moved on GitHub since the last turn, to check what runs and to start the dev tools again, and that the
+  commits of the earlier turns are already on GitHub, so that rewriting them makes the push reject the branch (the agent is warned,
+  not stopped).
+- **Branches.** A turn may push several branches (section "The git rules"), so a follow-up starts from **all** the branches the earlier turns
+  left on GitHub, not only the session's: one fetch, 50 commits deep from every tip, a local branch for each, and the branch the agent
+  ended on checked out (section "A follow-up turn: the workspace with several branches"). Each branch is judged against its own start
+  tip at the push, so a branch the turn did not touch is not pushed again. If someone pushed to a branch meanwhile, the turn continues on
+  the GitHub tip and the preface says so. A session whose branch was deleted on GitHub cannot be continued (`IMPLEMENTER_BRANCH_GONE`,
+  "start a new task"); one that never pushed anything starts again from the base branch under the same name.
+
+### The conversation
+
+At the end of every turn the runner reads the engine's session over its HTTP API, takes out the secrets it knows, gzips it (8 MiB at
+most) and hands it to the app through the job host (section "The session snapshot (#839)"). The app keeps **one snapshot per session**,
+replaced by each turn that uploads one. The next turn downloads it before its process starts and runs `opencode import` in the agent's
+container before the engine starts, so the agent continues in the **same OpenCode session** with its earlier messages and tool results.
+The Runs page shows the way it went as a line "Continuation":
+
+- `imported`: the conversation was imported.
+- `summary_only`: the turn goes on from a record instead, because there was no snapshot to import. The agent gets a fresh session, the
+  preface, and the last turn's summary and a digest of the earlier turns (the last instructions, the summaries, the commit subjects and the
+  changed files) in a part of its own, as data and never as instructions. The reason is a stable word: `no_snapshot` (none stored for the directly
+  preceding turn: the session never had one, or the last turn uploaded none because the export failed, the snapshot was over the cap
+  or the runner did not have the feature), `download_failed`, `snapshot_unreadable` (size, digest, shape), `import_failed` and
+  `version_changed` (the import failed and the engine's version is not the one that wrote the snapshot). None of them fails the turn.
+
+**Only the snapshot of the directly preceding turn is offered (#885).** A turn can end without uploading one: the hosted export failed,
+the snapshot was over the cap, or a customer's runner did not have the feature. The snapshot of the turn before stays stored in its place,
+but it holds the conversation of the turn before last while the branch already carries the later work, and importing it would make the
+agent continue from a conversation that is behind the code. So the claim says `resume.snapshot: true` and the download
+(`resume-session`, on the Worker route and on the runner route) serves a snapshot only when it was written by turn `n - 1` for turn `n`;
+otherwise `resume.snapshot` is `false`, the download answers 204, and the turn continues as `summary_only` with the reason `no_snapshot`.
+Both ask the same rule, so a snapshot is never offered and then not served. The older snapshot is **not deleted** (section "Keeping it: for
+ever, no close"); the next upload replaces it. A turn that does upload brings the chain back: the turn after it gets the conversation again.
+
+A snapshot holds what the agent read and said **with the outputs of its tools**, which the live view does not show. The page never shows
+it; the one reader is the next turn of the same session.
+
+### The live view
+
+While any turn runs, the Runs page shows what the agent thinks, says and does, one step after the other, and the steps of a follow-up
+turn are those of its own run (section "Step records (the live view)"). A follow-up is a run of its own, and the "Continue" form is on the
+newest one only.
+
+### Keeping it: for ever, no close
+
+**Nothing is closed, and nothing is deleted** (owner's decisions 4 and 8 of 2026-11-04). A session has no close button and no
+column that says it is closed, and no sweep removes old ones. The steps of a turn and the snapshot of a session are **kept for ever**, as long as the
+workspace exists; the one thing that removes them is the erasure of the workspace. The snapshot is that of the latest turn that uploaded one (each upload
+replaces it); the steps of every turn stay. The branch name stays held by its session. If the retention or a close becomes a need, it is a
+new decision with its own change.
+
+### What a long history costs
+
+A follow-up that imports a long conversation makes its **first call read all of it again**, at the price of the model for that many input
+tokens (the provider's cache may help if the follow-up starts soon after the last call; it is not promised). The form shows the size of
+the history ("about N tokens") before the person sends. The model door reserves the cost of a call before it makes it, so a history so
+long that the first call alone could cost more than the cost limit ends the turn with `cost_limit_reached`, **before any call reaches the
+provider** (measured: an 18.4 MB history at 5 USD). The person raises the limit, or starts a new task. When the model's window is too small
+for the history, the engine's automatic compaction summarises it, at the price of one more call. Each turn has its own cost limit; a
+follow-up's cost is not counted in the budget of the workflow run that started the session.
+
+### On a customer's machine
+
+A turn on a runner of the customer (section "Environments of the kind `runner`" in [`runner.md`](runner.md)) is a turn like any other for
+the session, its branches and the preface, and so is the conversation (#879): the runner moves the snapshot through its own two routes with its own credential and the lease token (`runner.md`, "Resume on customer runners"),
+so a follow-up on a runner continues the engine's conversation, whichever machine ran the earlier turns. That holds when the app lists the feature `runner_session_snapshot`, which the runner reads from the version
+call for every job; against an app that does not, a turn on a runner stores no snapshot and a follow-up continues from the summary and the digest (`summary_only`). The app sends `resume` only to a
+runner that names the claim feature `implementer_resume`; for any other the follow-up ends `implementer_engine_unavailable`, free, before a
+credential exists.
+
+### Shipping it
+
+The change is an App part and a runner part, and they go out **together**: the App (the contract and the migrations) first, the runner in
+the golden snapshot the same release builds. The App refuses keys in a result that it does not know, and the runner names `implementer_resume`
+only when it can read `resume`; a follow-up claimed by an older runner ends `implementer_engine_unavailable`, free, so a gap between
+the two deployments costs nothing but the follow-ups that fall into it. The live check on a real VM is the section "Release 2: live test".
 
 ## The data flow
 
@@ -63,28 +158,31 @@ native path; the two registry providers (Anthropic, OpenRouter) are not offered.
 4. **Prepare.** The runner (root in the container) clones the base branch with depth 1 into a bare mirror that only it can
    enter. It makes the agent's repository in `/work/repo` as a local clone of that mirror, and the reader (a container of its
    own, section "How Control reads the agent's repository") gives it no remote, no credential, the system identity and a new
-   branch at the base tip. Nothing else is put into that repository: no hook, no guard, no spool.
+   branch at the base tip. Nothing else is put into that repository: no hook, no guard, no spool. A follow-up turn (the job
+   carries `resume`) starts from the branches the earlier turns left on GitHub instead, taken in one fetch 50 commits deep from every tip (section "A follow-up turn: the workspace with several branches").
 5. **Set up** (only when the task's environment has a script). The runner starts the **Setup container** from the agent's image, runs the
    script in it with full internet access, and commits the container as the agent's image; a script that fails ends the turn here, free,
    before the model door exists (section "The environment's setup script"). Without a script nothing happens and nothing changes.
 6. **Work.** The runner starts the **model door**, a container of its own that holds the model key, and the **agent's container**,
    and OpenCode then runs there as root in `/work/repo` with a configuration the runner wrote. It reads, edits, writes,
    searches and runs shell commands, and starts containers in its own Docker; it cannot fetch web pages, search the web,
-   start sub-agents or ask a question, and it has no network but the door.
+   start sub-agents or ask a question, and it has no network but the model door and, when its environment's rule is not `off`, the
+   network door (section "The network door (step 7)").
    The task is the user message. When it ends its turn with uncommitted changes it gets one more message to commit them; what
    is still uncommitted afterwards is committed by the system ("Implementer: uncommitted changes of the turn") on the branch
    the agent is on. Work the agent committed on a detached HEAD, on no branch, is saved first, whether the tree is dirty or
    not: the runner makes a branch `<the task's branch>-leftover-<id>` at HEAD and the push takes it with the others. The
    branch is named in the summary and reported with the other branches.
-7. **Push.** Nothing is pushed while the agent works. When the turn ends, the agent's container is killed, and then the
+7. **Push.** Nothing is pushed while the agent works. When the turn ends, the runner first reads the engine's session out for a
+   follow-up (section "The session snapshot (#839)"), then the agent's container is killed, and then the
    runner pushes all local branches of the agent's repository, without force, one at a time (below, "The git rules"). Before it lists anything, and again right before each
    `git push`, it asks whether the lease is still held; only `held` allows a push. A lost lease ends the turn `lease_lost`
    with nothing pushed after it.
 8. **Report.** The Worker reports the result once: base and head commit and whether the head was pushed (both of the branch
    the form named), **every branch it pushed or tried to push with its outcome**, the commits (at most 200) and the changed
    files (at most 500) of the form's branch, the agent's closing summary (at most 8,192 characters, with known secrets
-   removed), the OpenCode ids and the usage. The session becomes idle and the Runs page shows the branches, the commits, the
-   files, the summary and the cost.
+   removed), the OpenCode ids and the usage. The session becomes idle, the Runs page shows the branches, the commits, the
+   files, the summary and the cost, and an instruction that waited for the turn (section "Session and Turn") starts.
 
 The repository's own OpenCode files (`opencode.json`, `opencode.jsonc`, `.opencode/`, its instruction files and skills) apply
 as they would on a person's machine: the agent is free in its container. What they cannot change is what the model door holds
@@ -144,6 +242,14 @@ arrived**. It ends `push_rejected` when the task's branch was not taken (rejecte
 commits, or when the agent's repository, or its list of branches (read up to 4 MiB), could not be read at all; it ends
 `agent_gave_up` when no branch has anything new. A rejected branch of the report is not an error of the turn by itself.
 
+**The branch the agent ended on.** The result also says which local branch HEAD was on when the runner read the repository
+(`checkedOut`, #837): read in the reader from the `symbolic-ref` that the rescue of a detached HEAD already runs, so it costs no
+further call, and set to the `-leftover-` branch when the rescue or the commit of the leftover had to make one. It is `null` when
+HEAD was detached and on no branch, when its name is not one the runner pushes (it is never shown), and when the repository was not
+read (the agent's container could not be confirmed gone). It names a branch of the agent's repository, which may not have arrived:
+`branches` says which did. The app keeps the field (`parseImplementerResult`), and the claim of a follow-up turn reads it back as the branch to check out (`checkout` of `resume`).
+The runner sends the field only when it names a branch, so a newer runner against an older app still works for `null`; a name needs the app first (the older parser refuses unknown keys). `checkedOut` can name a branch that is not in `branches` (for example the base branch the agent switched back to); a resume then falls back to the session branch (#849 refuses a checkout outside the resume branches). The name is redacted and clipped by the host like the names in `branches`.
+
 **One place for a later rule.** `PUSH_EXCLUDED_BRANCHES` in `runner/src/code_reviewer_runner/implementer/push_policy.py` is
 empty. A rule such as "only the branch the form named" goes into `select_branches` in the same file and nowhere else.
 
@@ -153,11 +259,11 @@ on. The watch still asks the lease every 30 seconds while the agent works, so a 
 the model.
 
 **Time.** The runner keeps the last 270 seconds (four and a half minutes) of the time limit for the end. Every step is counted at its ceiling, and the sum at a normal end is
-222 seconds: the end of the agent's container 25 s (the kill call 15 s at most, then the wait until the daemon says it is gone 10 s at most; the container is removed only
+229.5 seconds: the export of the engine's session 5 s (section "The session snapshot"; it comes first, because it is read from the running engine), the end of the agent's container 25 s (the kill call 15 s at most, then the wait until the daemon says it is gone 10 s at most; the container is removed only
 after the push, on a thread of its own, because removing a Sysbox container with its inner Docker can take long and nothing waits for it, which is right while one VM runs one turn), the first
 reset of the readers 10 s (below), the rescue of a detached HEAD (three git commands of 3 s at most), the look at the tree (10 s at most), the commit of what is left (40 s), the second reset
-of the readers 10 s, the final push (100 s), the two reads of the report (5 s each) and the last flush of the live view (8 s, section "Step records"). A stop (SIGTERM) commits nothing (it still saves a detached HEAD on a branch), resets the readers once, and
-the process leaves itself 115 seconds, of which the sum is 84 (the last flush gets 5 s there) and the final push gets 25. A test holds both sums and the slack (a fifth of the grace, a quarter of the 115 s), with the real
+of the readers 10 s, the final push (100 s), the two reads of the report (5 s each), the last flush of the live view (8 s, section "Step records") and, for a turn with a result schema, the read of the agent's result after its container is gone (2.5 s; the sum is then exactly the 85 % the test allows). A stop (SIGTERM) commits nothing (it still saves a detached HEAD on a branch), resets the readers once, and
+the process leaves itself 115 seconds, of which the sum is 86 (the last flush gets 5 s there, the export of the session 2 s) and the final push gets 25. A test holds both sums and the slack (a fifth of the grace, a quarter of the 115 s), with the real
 constants. **Why the ceilings are what they are.** Measured on a VM (2 vCPU): the kill call of the agent's container took 0.4 s idle, 2.0 s with two inner containers of a 1.5 GB image and 3.9 s
 with eight, and the wait after it 0.02 s, so the kill gets 15 s and the wait 10 s (an earlier round had 5 and 5, which a stack of a dozen inner services would have outgrown). The
 steps do not take their ceilings together except when the Docker daemon hangs, and then the push fails anyway and the report says what was and was not done; the slack is for the steps that
@@ -221,6 +327,43 @@ repository a task runs on. Workflow files are the exception, because the App has
 The commits that arrive carry whatever author and committer the agent chose; by default the system identity (the product's name
 and "Implementer"). Who started the task is not in the commits: it is in the run (the session's `created_by`, shown on the Runs
 page).
+
+### A follow-up turn: the workspace with several branches (#838, part of #745)
+
+A follow-up turn is a job whose `implementer` carries `resume` (`ImplementerResume` of the contract): the number of the turn, the branches the last turn pushed with the tip it pushed (the
+session branch first when it is among them, at most 20) and the branch the agent was on when that turn ended. Only a Worker that names the claim feature `implementer_resume` gets one. The
+app builds it from the stored reports of the earlier turns when a person continues a session (section "Follow-up turns: the API and the form (#841)"); this is the runner's side. What the runner does with the stored conversation is "Follow-up turns: resume in the runner" below.
+
+The workspace (`GitWorkspace`) prepares such a turn like this:
+
+- **Names.** The parser refuses (`invalid_job`) a repeat, more than 20 branches, a tip that is not 40 lower-case hex digits, a `checkout` that is neither one of the branches nor the session branch, and a
+  branch name of `resume` **or the session branch `branch` (every turn, the first too)** that the final push would refuse (`branch_name_problem` of `push_policy`: the stricter rule, so a name that could never be pushed is not taken at all, and a first turn does not run for nothing and lose its work at the push). The form's rules
+  (`checkBranchName`) are at least as strict as that policy, so the Worker refuses no branch the form accepted. A lone surrogate (which JSON allows) in
+  `baseBranch`, `branch` or a name of `resume` is refused the same way. Before anything is fetched the workspace checks every name once more as a first turn's names are checked (`git check-ref-format`, not `HEAD`,
+  no leading dash, no control character); a name git does not accept ends the turn `implementer_config_invalid`, free. The same code ends the turn when one name is the directory of another (the session branch
+  `a` and a branch `a/b`, or the base `main` and `main/x`): both cannot be refs, and the session branch is made at the base tip when the provider never had it.
+- **Fetch.** The runner asks the provider which of the branches it has (`git ls-remote --heads`, the same authenticated path as the clone, one call with a ref pattern per branch), then takes the base branch and **all**
+  of those that exist **in one** `git fetch --depth=50` (`RESUME_DEPTH`) into the mirror as `refs/heads/<name>`. Git counts the depth from every tip and keeps a commit when any tip reaches it within 50 commits, so
+  **what is guaranteed is: every tip (base, session branch, other branches) has at least 50 commits of history where it has that many, whatever the order of `resume.branches` and however the branches lie to each
+  other** (a branch 49 commits ahead of the base, or a session branch that forked before the base tip, does not make the base a shallow root). It is not guaranteed that nothing is deeper: a commit that another tip
+  reaches within 50 commits is there as well. The agent has no remote to deepen from, and with less history a base branch that moved since the earlier turn could not be merged, rebased or diffed against (`merge-base`
+  finds nothing, "refusing to merge unrelated histories"). **The limit that remains:** a merge base further back than 50 commits from the tips is not found. Separate fetches could not give this (a later `--depth`
+  fetch moves the shallow boundary, whatever the order), which is why there is one. The branches the provider does not list are left out and recorded (`resume_missing`) from the answer of `ls-remote`, without a fetch
+  that fails; a base branch it does not list ends the turn `base_branch_not_found`, a session branch of `resume` it does not list `clone_failed` (free). A first turn keeps the base branch one deep. The `ls-remote` is
+  bounded by `FETCH_TIMEOUT` (60 s) and the fetch by what is left of `RESUME_FETCH_SECONDS` (300 s, started before the `ls-remote`: both together); a turn that is not set up by then ends `clone_failed` (free). The token is
+  in the environment of those git processes and nowhere else, as for the base. The tip is read from the mirror after the fetch, never from the job or from the `ls-remote` (a branch that moves between the two is taken as
+  the fetch has it).
+- **What moved.** The tip the provider has now is the start of the turn, whatever the job said: a branch that is not at the tip the earlier turn pushed is taken as it is and recorded
+  (`resume_moved`: name, the tip that was, the tip that is) so that the agent can be told. A branch the provider no longer has is left out and recorded (`resume_missing`); the checkout falls back to the session
+  branch when that is the one that is gone. A session branch that is in `resume` and gone ends the turn `clone_failed` (free): the app checks it before it starts a turn, so this is a race.
+- **The agent's repository.** Made as always from the mirror (a clone that is not `--single-branch`: the mirror holds the base branch and the branches of the session and nothing else under `refs/heads/`), then a
+  local branch for every fetched branch at the tip the mirror has (one `update-ref --stdin -z` in the reader), the session branch at the base tip when no earlier turn pushed it, no remote, and the
+  branch the agent was on checked out. `resume` with no branches starts from the base like a first turn.
+- **One start tip per branch** (`start_tips`). `start_commit` is the start tip of the session branch (the base tip on a first turn), so `baseCommit`, `commits` and `filesChanged` of the report cover what this turn did to the
+  session branch. The final push judges every branch against its own start tip: a branch of the session that the agent did not touch is not fetched, not pushed and not reported; a branch the agent made is left alone while it is still at
+  some start tip (it holds no commit of its own). The push is as before: every local branch, no force. In the result of a follow-up turn `pushed` and `headCommit` describe the session branch only; the other
+  branches the turn pushed are in `branches`, which the claim of the next follow-up turn reads (`resume.branches`).
+- **After the setup script** the history of the script is undone branch by branch: HEAD back on the branch the agent starts on, every branch of the turn at its start tip, every other branch and tag deleted.
 
 ## The model door
 
@@ -399,7 +542,7 @@ Stop: the kill of the agent's container took 0.4 to 0.5 s idle and **3.5 s** wit
 the agent in a turn: the door's relay at `10.213.77.2` reached; the model network's gateway, the VM's docker0 gateway, the VM's control port `23456`, `1.1.1.1:443`, a name lookup (ping and `getent`) all blocked, and the agent's only routes are the model network and its own inner `docker0`;
 a plain container on the VM with the same tools reaches the host listener, `1.1.1.1:443` and resolves `example.com`. The reader attack and the full disk are under "The agent's container" and "The disk".
 
-## Step records (the live view, in progress)
+## Step records (the live view)
 
 While a turn runs, Control converts the events of the engine's stream into **step records**, one per part: what the agent
 thinks (`reasoning`), what it answers (`text`), each tool call (`tool`) and the tokens and cost of each model call (`step`)
@@ -508,8 +651,262 @@ agent read and said.** The runner and the app strip the secrets they know (the m
 like a credential), but they cannot know the repository: a `.env` the agent printed with `cat`, a key in a test fixture or customer
 data in a file the agent opened is in the agent's text or the input of its tool call, and so on the page. **The output of a tool is not
 shown** (the runner does not record it and the app never gets it), which keeps most of that out; the input of a tool call (a command, a
-path, a pattern) and the agent's own words are shown. Steps are kept as long as the run is, for now with no time limit. Before outside users arrive, the
+path, a pattern) and the agent's own words are shown. Steps are kept for ever (owner's decision 4 of 2026-11-04: no sweep, no close), until the workspace is erased. Before outside users arrive, the
 decision to let every member see them moves with the one for starting a task (the note in "What it is").
+
+## Follow-up turns: what was measured on a real VM (#837)
+
+A follow-up turn continues a session in a new VM: the old conversation is exported from the engine before its container is
+killed, kept, and imported on the new VM. This section is what a real VM said about the plan's
+assumptions before it was built (the result is in "Session and Turn" and the sections that follow); `runner/scripts/follow_up_spike.py` reproduces it (15 of 15 checks passed on the VM below, the lane's 11 tests of `test_implementer_git.py` and `test_implementer_turn.py` too).
+
+**Measured on a real VM (2026-11-04, `spike-837-followup-1`, 2 vCPU, 4 GB, a snapshot built from `development` at `f34a40a1`,
+`sysbox: proven`; the agent's container 2,048 MB under `sysbox-runc`; the pinned OpenCode 1.19.0; the strict scripted provider of
+`fakes/wire` behind a made-up key, so no model and no real key).** The script runs the lane's whole turn (`ImplementerSession.run()`,
+the real door, container, reader and workspace) several times on one VM and puts itself into the flow at three places: a recorder
+on the engine's event stream, the export just before `ImplementerAgent.stop()`, and the import just before the engine starts.
+
+| Question | What the VM said |
+| --- | --- |
+| Is the export by HTTP the CLI's export? | **Yes, equal as parsed JSON**, for 63 and 72 messages, in one call and in pages of 50. `GET /session/<id>` gives `info`; `GET /session/<id>/message` gives the messages. Without `limit` all of them come back in one answer. With `limit=N` the **newest** N come back, oldest first, and the header `x-next-cursor` (also `Link ... rel="next"`) holds the cursor for the next, older page (`before=<cursor>`; a cursor that is not one is a 400). The pages are put back in order by reversing them. A client that sends the runner's `x-opencode-directory` header gets the answer, and so does one that sends none (checked on a local engine). The empty answer of the earlier research was not the engine's. |
+| What does the CLI do when its output goes to a pipe? | **It cuts the document at the size of the pipe** (65,536 to 131,072 bytes arrived of 2.7 MB, never valid JSON) and exits 0. Redirected to a file it writes all of it. The CLI is a way to compare, not a way to take the export. |
+| Time of the export by HTTP, through the exec tunnel | 2.6 MB (63 messages, 61 tool calls): 0.10 s in one call, 0.2 s in three pages. 18.4 MB (244 messages): 0.24 to 0.29 s in one call, 0.37 to 0.41 s in six pages. The CLI takes 1.2 to 1.3 s, because it is a second OpenCode. |
+| Memory of the export by HTTP | Control (Python, joining the pages and parsing them): 7.6 MiB in one call and 10 MiB paged at 2.6 MB, 53 and 70 MiB at 18.4 MB, so three to four times the document. The engine's resident memory moved by less than 25 MB (769 MB before and after at 2.6 MB), and the VM's available memory dipped by at most 66 MiB (1,210 to 1,144 MiB at 18.4 MB). |
+| Memory of the CLI's export | A second OpenCode process: **312 MiB** peak at 2.6 MB, 345 MiB at 10 MB. On a transcript of 300 maximal tool calls, with two CLI exports in a row, the VM's guard (`vm_memory.py`, 512 MiB left) killed the agent's container. That is the reason to take the export over HTTP, as the plan says. |
+| The whole path of the runner (fetch, parse, redact, dump, gzip) | 0.4 s at 2.6 MB, 1.6 to 1.7 s at 18.4 MB. |
+| Redaction | The runner's `Redactor` **on the JSON text breaks the JSON**: its `Bearer ...` shape runs up to a quote, and in JSON text the quote it eats is the backslash of an escaped one (137 bytes changed, invalid JSON, in a transcript of the repository's own code; 15 strings). On the string values (and keys) it leaves valid JSON and takes the same time (0.09 s against 0.10 s at 2.6 MB, 0.62 to 0.74 s against 0.68 to 1.03 s at 18.4 MB). |
+| Does `opencode import` work under Sysbox, in a depth-cut clone with another root commit? | **Yes.** The second turn's clone was cut at depth one of the first turn's branch, so its only root commit (`0e4545bf`) was the first turn's tip and not the first turn's (`ea7bed08`). Before the engine started, the snapshot was written to `/etc/code-reviewer/resume.json` (0600, 0.05 s) and `opencode import` ran in the container with the engine's environment: it printed `Imported session: <id>`, kept the session id and the message ids, rewrote the project id to the new root commit and the directory to `/work/repo`. The engine then answered `GET /session/<id>` with 200. |
+| Does the imported session continue? | **Yes.** The runner's second user message (and its extra message for a dirty tree) went to the imported session; the first request of the model had 123 messages (1.35 MB) and carried the first turn's instruction, its answer and its tool results; the strict provider accepted the history; the second turn's export holds the 63 messages of the first with the same ids and 9 more. |
+| Time and memory of the import | 1.5 to 1.7 s at 2.6 MB with a peak of 306 to 313 MiB (a second OpenCode process; the container's own peak read 288 MiB then). At 18.4 MB: 2.1 to 2.3 s, 378 to 385 MiB (the container's peak 387 to 397 MiB), and the engine served the session. The plan's 60 s box is about 25 times the largest measured. |
+| What does a large history cost the first call? | At the lane's $5 limit the first call of a follow-up from the 18.4 MB snapshot was **refused by the door before any model call** (`cost_limit_reached`, no request reached the provider): the door reserves the cost of a call before it is made, and the history alone is more than the limit. The form's hint ("the first call reads all of it again") is the place to say so. |
+| Size of a realistic transcript | 61 tool calls over the repository's own source (63 messages, 187 parts): 2.60 MB as compact JSON, **0.62 MB gzipped** (0.24). Tool outputs are 1.26 MB of it, and the tools' metadata another 1.21 MB (a tool repeats its output in its metadata); everything else is 0.07 MB. About 43 KB and 10 KB gzipped per tool call. The CLI's own formatting makes the document 3 % larger. |
+| Size of the worst transcript | 240 tool calls that each answer 44 KB of random text (the engine cuts at 50 KB): 244 messages, 18.4 MB, **8.42 MB gzipped** (0.46), which is 33 KB over the plan's 8 MiB. The cap holds for about 235 of the largest tool answers there can be. |
+| Can the compacted outputs be left out? | **Yes.** After a later user message the engine's prune marks old tool outputs as compacted (`state.time.compacted`) and sends the model a fixed text in their place. After the second turn 42 of the 61 outputs were marked (1.11 of 1.32 MB). A follow-up from the snapshot with those outputs and the long strings of their metadata emptied sent the model **exactly the same 137 messages** as one from the full snapshot (equal JSON, the same 42 markers), and the snapshot was 1.52 MB against 2.73 MB (0.39 against 0.66 MB gzipped). Emptying the metadata strings of every tool part saved 36 KB more here. Nothing was marked after the first turn (two user messages), so it helps from the snapshot of the second turn on. |
+| Can `step-finish` come before a long tool call ends? | **No.** In 68 steps of turn one (61 tool calls), one of which ran a 12 s `bash` beside two quick tools, every `step-finish` part came after all the tools of its step ended: the two quick tools ended 0.1 s after the start, the long one 12.1 s, and the `step-finish` in the same millisecond. A tool part is reported as `running` twice (the second carries its metadata). |
+| What does the stream do on abort? | `POST /session/<id>/abort` returned in 0.1 s. The stream then carried `session.error` (`MessageAbortedError`), `session.status` idle and `session.idle`, and 20 ms later the tool part as `completed`, the message as completed with the error, and idle again. **No `step-finish` comes for an aborted step**, and the command (`sleep 60`) was gone. The export shows the aborted assistant message with the error and no finish. A view that groups by step must close an open step on `session.idle` or at the end of the turn. |
+| Does the stream say anything about old parts? | In the second turn the stream carried 42 `message.part.updated` events for tool parts of the first turn, as many as the prune marked, so the engine most likely re-sends a part when it marks it. The step feeder keys a record by part id, so they are upserts of rows the page already has; they must not move them. |
+
+**The end of the turn.** The export is cheap, so its budget can be small. The sums of the end (the sum test of `runner/tests/unit/test_implementer_session_parts.py`)
+were 222 of 270 s at a normal end (the test holds them to 85 %, 229.5 s) and 84 of 115 s at a stop (75 %, 86.25 s). The 20 s and 8 s of the plan would have made
+242 and 92 and failed both limits; the measured path takes 1.7 s at 18.4 MB, so **5 s at a normal end (227 s) and 2 s at a stop (86 s)**, which is what #839 built, fit the sums and are about three
+and 1.2 times the largest measurement. The upload of the file goes through the job host before `complete` and is not part of the grace.
+
+**Rerun.** On a `spike-` VM from a snapshot built from the branch (`docs/golden-snapshot.md`, `--skip-retention`), as root, with the repository's
+`runner/` and `fakes/` on the VM and `uv sync --frozen` run: `LANE_RUNTIME=sysbox-runc LANE_WORKER_IMAGE=code-reviewer-worker:golden
+LANE_AGENT_IMAGE=code-reviewer-agent:golden .venv/bin/python scripts/follow_up_spike.py` (about four minutes; `--skip` takes `two`, `blank`, `abort`, `bulk`,
+`bulk-import`; `--bulk-steps` and `--bulk-window` size the worst transcript). It prints one JSON line per check and per fact.
+
+**Not measured.** A real model (what a provider says to a replayed history, or to reasoning parts of another model), the clock of the VM against the first turn's, 4 vCPU,
+the narrowed network policy, and the import of a snapshot written by another OpenCode version.
+
+## The session snapshot (#839)
+
+A follow-up turn (#745) continues a session in a new VM, so the engine's conversation has to outlive the VM. At the end of every turn the runner takes the
+engine's session as a file and the job host uploads it to the app, which keeps **one snapshot for each session, replaced by each turn, and never deleted but by the erasure
+of the workspace** (owner's decision of 2026-11-04). The runner of a follow-up turn reads it back and imports it on the new VM ("Follow-up turns: resume in the runner", #840); the follow-up API and page are "Follow-up turns: the API and the form (#841)".
+
+**Taking it** (`implementer/session_export.py`, called by `ImplementerSession` right before `ImplementerAgent.stop()`, because it is read from the running engine). Over the
+engine's HTTP API only, as the spike measured: `GET /session/<id>` and `GET /session/<id>/message` in pages of 50, newest page first with the cursor in `x-next-cursor`, put back
+in order, over one connection (each connection through the exec tunnel costs an exec). Then, in this order: the output of every tool part the engine's prune marked as compacted
+and the long strings (over 256 characters) of that part's metadata, at any depth (an edit nests the file before and after in `filediff` and `files`), are emptied (the model is sent a fixed text in their place: the same 137 messages in the spike); the redactor of the
+turn is applied to **every string value and key**, never to the JSON text (its `Bearer ...` shape runs up to a quote and broke the document); the result is compact JSON with ASCII
+escapes (a lone surrogate cannot be encoded otherwise), gzipped with no time in the header. **Over 8 MiB gzipped there is no snapshot** (a note, `too_large`). The whole path, the hand-over to the job host included, is held to **5 s
+at a normal end and 2 s at a stop** (or when the lease or the runner is going away), which is what the sums above count; the measured path takes 1.7 s at 18.4 MB.
+
+**The engine is the agent's to replace, so the export does not trust it.** The engine runs in the agent's container and the agent can put any server on its port. A server that sends its body a byte at a time never trips a
+socket timeout (measured with a fake: 1 byte per 1.5 s kept a 3 s budget busy for 93 s), so the whole export (fetch, redaction, blanking, dump, gzip) runs in a **daemon thread that the caller joins for the seconds it was
+given**; at the deadline the thread is told to stop, the connection is shut (`shutdown`, which wakes a blocked read) and the export gives up with `out_of_time`: the push never waits behind it. The deadline is not hard: the thread looks at the stop signal between its phases, after every page and at every element of the redaction, but one `json.loads` or `json.dumps` of a large document holds the GIL and can overrun it by a second or two. For a large document the time is the effective cap, not the 64 MiB. What it will take is
+bounded before it is built: **at most 64 MiB raw** summed over the pages (the worst transcript of the spike, 18.4 MB, took 70 MiB of memory, about four times its size; an edit-heavy session carries each file three times in the metadata of
+its edits before the old ones are emptied) and the reading stops there; **at most 2 M elements**, counted from the commas of a page before it is parsed (an upper bound) and again by the walk of the parsed document (a page of 7.5 M tiny strings in 30 MB took
+11 s and 680 MB); **at most 100 levels** of nesting (a transcript has about ten; the parser's own recursion limit is a `bad_answer`). Over any of them: `too_large`; so is a document the fetch had to cut at its limit. The session's own record (`GET /session/<id>`) is held to 1 MiB and counted the same way before it is parsed. A comma inside a string counts as an element too (a known limit): dense data can be `too_large` early (from about 2 MB for pure commas, about 16 MB at one comma per 8 bytes).
+
+**What the redaction costs.** Besides the secrets of the turn, the redactor knows the shapes of secrets (`sk-` and 20 or more characters, `Bearer <token>`), so it also rewrites an ordinary path or word that looks like one. The snapshot is the
+model's history, so a follow-up agent may see `[REDACTED]` where an old tool input held such a path or word. That is the price of never storing a secret; the turn itself is redacted the same way. The attachments of a compacted tool
+part are kept as the engine wrote them: the spike did not show whether the engine sends them to the model, so they are not touched. A lost lease takes no
+export. Best effort: any failure is one note in the turn's notes (`the session was not saved for a follow-up turn: <word>`, the words `engine_unreachable`, `bad_answer`, `out_of_time`,
+`too_large`, `export_failed`, or `not handed to the host`) and changes nothing about the outcome, the push or the billing; the next turn then starts from a summary (the plan's fallback).
+A turn that ended badly is exported too: the conversation is worth keeping.
+
+**Getting it to the app** (`snapshot_wire.py`, `implementer/snapshot_pump.py`, `job_loop/snapshot_sender.py`, `job_loop/worker_api.py`). The job process holds neither the lease token nor the Worker's
+credential, so, like the steps, the file leaves over one more descriptor the host hands it (`RUNNER_SNAPSHOT_FD`, a third socket pair), only when the app lists the feature
+`implementer_snapshot` of `GET /api/runners/v1/version`: a header line (`S <size> <rawBytes> <sha256> <version>`) and the bytes. The host never reads a path from the process. It checks the digest
+and uploads the file to `PUT /api/workers/v1/jobs/{id}/session` with the Worker's credential, **in parts of exactly 3 MiB** (the last one is what is left). **The decision on the
+request size:** a function of the platform refuses a request body over 4.5 MB before the app is called, so a single request cannot carry the 8 MiB cap; 3 MiB leaves room, and the largest
+snapshot is three parts. Every part carries the description of the whole file in its query (`part`, `parts`, `bytes`, `rawBytes`, `sha256`, `opencodeVersion`), so a part is judged on its own,
+may arrive in any order and may arrive twice. The upload runs **beside the final push and before the result is delivered**: the process handle waits for it after the process has ended, for at most 50 s, and a
+dead app costs the sender its own 40 s and nothing else (it is not in the sums of the end of the turn). A lost claim (409, 404, 401) stops it for good, a snapshot the app refuses (another 4xx) is not sent
+again, anything else pauses 2 s and tries the same part again. The session therefore is never idle without its snapshot unless the app was away for the whole time.
+
+**Keeping it** (`db/repositories/implementer-snapshots-repository.ts`, scoped; `20261105090000_create_implementer_session_snapshots`). `implementer_session_snapshots` has one row for each session
+(its turn, the engine version, the sizes, the digest and the data) and `implementer_session_snapshot_parts` holds an upload until it is whole. The data is **base64 text**: the schema holds
+text and integers only (`src/db/README.md`, "Portable schema conventions"), so the plan's `bytea` is not used, and 8 MiB gzipped is at most about 10.7 MB of text, which the database TOASTs out of line and uncompressed (`set storage external`: it is gzip already). When the last part is in, the
+parts are put together in the transaction that also proves the claim (the job row is locked `FOR NO KEY UPDATE`, as for the steps), the size and the digest are checked, and the old snapshot is replaced; until then it stays
+readable. A snapshot in one part is checked and swapped in without a row in the parts table, and the bytes of the parts are read back only by the part that completes the set. Parts that disagree, or do not make the announced file, are refused (`400`) and nothing of that upload is kept. The parts of an upload that never finished are deleted when the next upload of the session starts (or by the erasure of the workspace), not when the result is delivered: at most one unfinished upload waits for a session, which costs storage and nothing else. The call does not extend the lease,
+answers `409 RUNNER_JOB_ENDED` once the job is over, `401` for a credential that is not the job's and `400` for a job that is not a turn of the Implementer.
+
+**Who sees it.** The page never shows the snapshot. What it holds is what the agent read and said, with the secrets the runner knows taken out (the same ones as in the steps) and **tool outputs
+included**, which the live view does not show: a committed `.env` the agent printed is in it. The one reader is the resume-session call of the Worker API (#840), with the credential of a job of the same session.
+
+**Tests.** `runner/tests/unit/test_session_export.py` (the document, the redaction, the blanking, the cap and the budget), `test_snapshot_pump.py`, `test_snapshot_sender.py`, `test_process_snapshot_channel.py`,
+`test_job_loop_snapshot.py` and the sum test of the end (`test_implementer_session_parts.py`); `tests/integration/test_implementer_job.py` (the export at a normal end and at a stop, a failing export, a host that does not read);
+the contract tests of both sides (`app/src/runner-api/snapshot-contract.test.ts`, `runner/tests/contract/test_snapshot_contract.py`); the app's integration tests (`snapshot.integration.test.ts`, the migration, the scoped repository
+in `scoping.test.ts` and `scoped-isolation.integration.test.ts`, the erasure); and one test of the lane (`tests/lane/test_implementer_turn.py`, E20): a real turn on a real Docker daemon, the file taken from the real engine through the
+tunnel, and **`opencode import` of the pinned engine reading it** in a container with no network. Not measured on a real VM again: the budget at 4 vCPU and the upload from a VM under the narrowed network policy
+(release 2's check).
+
+## Follow-up turns: resume in the runner (#840)
+
+A follow-up turn starts in a new VM. This is what the runner does with the conversation the earlier turns stored (PR 8 of #745). The app sends the `resume` block since the follow-up API and form (#841, section "Follow-up turns: the API and the form (#841)"
+below); before that none of this ran on the factory, and the tests below ran it.
+
+**The order.** The job host fetches the job and, when `implementer.resume.snapshot` is true, **downloads the stored session before it starts the process**: the process holds neither the lease token nor the Worker's credential.
+Then the workspace (`GitWorkspace`, the branches of #838), the setup script, the door and the agent's container as before; **`opencode import` runs in the agent's container before the engine starts**, with the engine's environment and
+in the agent's repository (the import rewrites the project and the directory to the repository it runs in); the engine starts on the imported database and the turn continues in the session the file names.
+
+**The import is ended, not only waited for.** The command runs in the container as `timeout -s KILL <n> opencode import <file>` (`timeout` is coreutils, in the agent image), `n` two seconds short of the exec's own limit (at most 60 s, never more than the turn has left), so the container kills a stuck import and
+everything it started and the exec still reports how it ended; a second engine process next to it (the server starts next) risks the memory guard killing the container. If the exec says nothing at all, a second exec (`pkill -KILL -f ' import <file>$'`, procps is in the image) ends it. Either way the turn goes on from the summary (`import_failed`) and
+the engine's server starts only after that (`test_implementer_resume_agent.py`).
+
+**The claim feature.** The `resume` fields (`snapshot`, `previousSummary`, `digest`) are in a closed object, so a runner of the state of PR 6 (#838), which knows `implementer_resume` but not these fields, would refuse a job that carries them. There is no such runner in the field: the released runner does not
+know `implementer_resume` at all and PR 6 is not released, so no mixed state exists. For the same reason **the app sends `resume`, and with it the three fields, only to a runner that names `implementer_resume`, and that feature comes in the same release as this runner** (checked in the claim, section "Follow-up turns: the API and the form (#841)").
+If PR 6 is ever released alone, the fields need a claim feature of their own.
+
+**Known limit: a repeat loses the snapshot.** A turn that is run a second time (the first attempt ended by a lost lease or a crash after it had uploaded its snapshot) starts from the summary: the first attempt's upload replaced the one of the turn before (one snapshot per session, replaced by each turn) and the read counts only
+snapshots of an earlier turn, so the repeat finds none (`no_snapshot`). The fallback is the answer; keeping the earlier snapshot until the turn ends would fix it and is not done here.
+
+**The call.** `GET /api/workers/v1/jobs/{id}/resume-session?part=n` (Worker API; the plan wrote `/api/runners/v1/...` with a lease token, but a Worker holds the per-job credential and the snapshot was put through the Worker API, so the read is there too).
+It is the upload turned round. The credential proves the claim and does not extend the lease; the session is found **from the job** (`implementer_turns`), never from anything the caller sends, so a job reads the snapshot of its own session and of no other,
+and a repository scoped to the job's workspace reads no other workspace's; only a snapshot of an **earlier** turn counts (the one a failed attempt of this very turn left is not an earlier conversation). A response body is held to 4.5 MB like a request
+body, so the file is served in the parts the upload used (3 MiB, at most three): the body is the bytes of the part and the description of the whole file (`x-snapshot-parts`, `-bytes`, `-raw-bytes`, `-sha256`, `-opencode-version`)
+is in the headers of every part, so a part is judged alone and may be fetched twice. `204` says the session has no snapshot; `409 RUNNER_JOB_ENDED`, `401` and `400` (a job that is not a turn of the Implementer, a part that is not 0 to 2 or is beyond the last) are as for the other Worker calls.
+The client (`HttpWorkerApi.resume_session`) checks every part against the description, the parts against each other, the whole against its size and digest, and everything against a total of **45 s**; any other answer is a failed download.
+The total is a real one: the download runs before the process starts and so before the first heartbeat (one interval after the start: 30 s from the app, 60 s at most for this runner), and the lease is four intervals, 120 s, from the claim
+and not extended by the download. 45 s plus the longest interval is 105 s, so 15 s are left for the job's details and the start of the process (60 s would leave none; `test_job_loop_resume.py` holds the sum). A socket timeout bounds one wait and a server that sends a byte now and then never trips it, so the body is
+read in pieces against the deadline (`http.send(deadline=)`) on a daemon thread, and the host ends its own wait at the total whatever the thread does (`asyncio.wait_for` in `_resume_session`): the turn goes on from the summary (`download_failed`) and never waits for a thread.
+
+**The hand-over.** The host puts the gzip file into the directory the process starts in (`resume-session.gz`, owner-only, made new and never through a link) and names it in one variable, `RUNNER_RESUME_SESSION`: `file <size> <rawBytes> <sha256> <version>` or
+`failed <reason>` (`resume_wire.py`). The process checks it all again with its own hash. `ResumeInput` is what the turn has of its conversation: the checked snapshot or the reason it has none.
+
+**What is checked before the engine sees it** (`resume_session.py`): the size and the digest; the inflation is bounded (the announced raw size, at most the 64 MiB the export reads) and the stream must end exactly there with nothing after it; the document must be an
+object with an `info` object and a `messages` list; the session id (`info.id`, read from the file, as the spike advised) must be letters, digits, `_` and `-` of at most 128 characters, because it goes into a URL path. The bytes written into the container
+(`/etc/code-reviewer/resume.json`, 0600) are the inflated file as it is, not a re-serialisation.
+
+**The fallback, `summary_only`, for every reason.** A fresh engine session, the preface, and the record of the earlier turns as data. The reason is a stable word of the result (`implementer.resume.reason`, `ImplementerResumeResult`) and a line of the log:
+
+| Reason | When |
+| --- | --- |
+| `no_snapshot` | the app says there is none (`resume.snapshot` false, or `204`), or the job carried no `snapshot` (the release before) |
+| `download_failed` | the download failed in any way, or the host could not hand the file over (an API without the call, no word from the host) |
+| `snapshot_unreadable` | the file is not the one that was described: size, digest, gzip, bound, JSON, shape or session id |
+| `import_failed` | `opencode import` failed or did not answer, there was too little time left for it, or the engine did not know the session afterwards (`GET /session/<id>` is checked) |
+| `version_changed` | the same as `import_failed`, and the engine version that wrote the snapshot is not the one that read it (a bumped pin) |
+
+Import is tried whatever the version is; only a failure of it, after the pin moved, is `version_changed`. None of these fails the turn. The import is boxed at 60 s and at what the ledger of the turn has left; it is paid from the work window, not from the grace kept for the end of
+the turn (the sums of `test_implementer_session_parts.py` do not include it; measured 1.5 to 2.3 s, 306 to 385 MiB, the plan's box is about 25 times the largest). The imported session keeps its id: `implementer.opencode.sessionId` of the result is the first turn's.
+
+**The preface** (`preface.py`) is the first part of the first user message, marked `synthetic`, in front of the person's instruction, which is the last part, sent as given. The prompt file (the system prompt) is the same on every turn, so the provider's cache can still serve a follow-up
+that starts inside its lifetime (not promised). It is a fixed text. It says that this is a **new sandbox**; that processes, dev servers, databases, containers and images, shell state, files outside the repository and anything installed by hand are gone and only the git repository came back;
+whether the earlier conversation is above (imported) or is restored from a record that follows (summary); that the environment's setup script ran again (when the turn has one); **the branches of the repository with their heads and the one that is checked out**; which branches
+**moved** on GitHub since the last turn (someone pushed: the agent continues from the new tip) and which are **gone**; to run `git status` and `git branch`, check what runs and **start the dev tools again**; and the owner's decision (10): the agent is **warned, not stopped**, that the commits of earlier turns are
+on GitHub and that rewriting them makes the push (always without force) reject the branch.
+
+**Only checked values go into the preface.** A branch name is shown only if it matches letters, digits and `._/-` (one to 100 characters, starting with a letter or a digit); a tip only if it is 40 lower-case hex digits, shown as seven; the turn number is an integer. Any other name or tip
+is left out and counted ("N more are here", "the branch that is checked out has a name that is not shown here"), up to 20 branches. A branch name that is a sentence cannot exist (a space is not a name), and a name made of letters is one token in backticks, so nothing the agent, a member or the repository wrote reaches the
+preface as text. The record is another matter, and is kept out of it.
+
+**The summary and the digest are data, never instructions.** In the fallback only, `previousSummary` (the last turn's summary, at most 8 KiB) and `digest` (the app's record of the earlier turns, at most 16 KiB; both counted in UTF-8 bytes by the runner) go into a **part of their own** (also `synthetic`), behind a fixed sentence
+that says what they are, each inside a fence longer than any run of backticks in the text, so the text cannot close it; line ends are made alike and every invisible character but tab and newline is taken out: the C0 and C1 controls (U+0085 among them) and DEL, U+2028 and U+2029, the bidirectional controls (U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069), the zero-width characters (U+200B to U+200D, U+FEFF) and the Unicode tag characters (U+E0000 to U+E007F, which spell text nobody sees). An imported turn gets no record even if the app sent one.
+
+**The result.** `implementer.resume` is `{"mode": "imported"}` or `{"mode": "summary_only", "reason": <word>}`, present on a follow-up turn that got as far as the engine's start (a turn that failed before it has none, and neither has a first turn). The app takes and keeps it with the rest of the
+result (`runner-api/requests.ts`; closed, the reason is one of the five words, `reason` only with `summary_only`). The Runs page shows it as a line "Continuation" with the mode and, for `summary_only`, the reason word and a sentence (#841).
+
+**A large history can cost the first call.** The model door reserves the cost of a call before it makes it. A follow-up that imported a history so long that the reservation of its first call alone is over the cost limit is refused **before any call reaches the provider** (measured: 18.4 MB at 5 USD, `cost_limit_reached`).
+The turn ends with the code of any cost limit and with the detail "the cost limit of the turn was reached before the first model call: the imported conversation of the earlier turns alone costs more than the limit, because the first call reads all of it again", so the person can tell it from a turn that did work. The hint on the
+form (#841) says it before the turn starts.
+
+**Tests.** `test_implementer_preface.py` (only checked values; hostile names, tips and records; the parts), `test_implementer_resume_session.py` (every way the file can be wrong, and the state), `test_implementer_resume_agent.py` (the import, its order, its time box, and each reason),
+`test_resume_download.py` (the client against a server on loopback), `test_job_loop_resume.py` and `test_process_files.py` (the host and the file in the process's directory), `test_implementer_job.py` (the follow-up turn through the entry point: the parts of the first message, the result, the cost-limit
+detail, the old fields only), `test_resume_contract.py`, `resume-session.integration.test.ts` (Postgres: the parts, 204, another session, another workspace, a stale credential, an ended job, the lease not extended, a part that does not exist), `resume-session-contract.test.ts`
+and the lane (`tests/lane/test_implementer_turn.py`, E21 to E23): **two turns on a real Docker daemon with the strict scripted provider**. The second turn's first request carries the first turn's instruction, its tool call and its closing text; a corrupt file and a file the real `opencode import` refuses
+(a required key of the first message taken out: the pinned engine answers `Missing key`/`Expected Message` and exits 1, checked on the pin) both fall back and finish the turn.
+
+**Not done here.** A real model replaying a history (not measured); the time of the download and the import on a VM under the narrowed network policy
+(release 2's check: the app host has to be reachable for the new call as for the steps and the snapshot).
+
+## Follow-up turns: the API and the form (#841)
+
+This is how a person gives a session its next instruction (PR 9 of #745). The route is `POST /api/w/:workspace/implementer/sessions/:sessionId/turns` with `{instruction, clientRequestId, model?, costLimitCents?, environmentId?, profile?}`; every member may
+send it (`start_implementer_task`). **What the body leaves out is what the last turn had**: the model, the cost limit, the copy of the environment (so an environment that was edited or deleted since still works) and the profile copy with its result schema. A runner environment (#854) is kept the same way, **as a copy with the labels of the last turn**: a follow-up is claimed by a runner that has those labels, even if the labels of the environment itself were edited afterwards, and the model must still be one of the owner's own key (`IMPLEMENTER_RUNNER_NEEDS_OWN_KEY`, which the form shows on the model field). `null` means none
+(an environment, a profile, a cost limit of the person's own). `profile` is `name@version` as in the form of the first turn; with one, the version brings the model and the cost limit and the body names neither (`IMPLEMENTER_REQUEST_INVALID`, `not_with_profile`). The model may be changed (owner's decision 6).
+
+**The order of the checks; nothing is written before the last.** 1. the body is valid and the session is this workspace's (`IMPLEMENTER_SESSION_NOT_FOUND`, 404, also for another workspace's session); 2. a client request id that made a turn before gets that turn back (`200`), and one that is queued gets the queue back;
+the same id with another body (another text, model, cost limit, environment or profile, whether the first request made a turn or is still queued) is `IMPLEMENTER_REQUEST_REUSED`; 3. the repository is active and the installation can write contents; 4. the session's branch is still on GitHub, or the session never pushed one (then the base branch must exist): a branch deleted on GitHub is
+`IMPLEMENTER_BRANCH_GONE` (409, "start a new task"); 5. the model is allowed, the cost limit is within the operator's maximum, the environment and the profile are copied as for the first turn; 6. one transaction.
+
+**The last step.** The row of the session is locked and the session must be `idle`: it goes `running`, the next turn number is taken, the turn and its job are written (the same placeholders as for the first turn, the negative slot as the pull request number, which is the second guard against two running turns) and the Dispatcher is woken.
+Of two parallel submits for one idle session, one makes the turn. If the session is running, the instruction is **queued instead, and exactly one can wait** (owner's decision 5): a second one is `IMPLEMENTER_SESSION_BUSY` (409). An idle session whose turn has just ended and whose queued instruction has not started yet also answers `IMPLEMENTER_SESSION_BUSY`:
+nobody jumps the queue. The answer is `201` with `{status: "started", runId, turnNumber}`, `202` with `{status: "queued"}`, or `200` for a request that was accepted before.
+
+**The queued instruction.** It is four nullable text columns of the session, `queued_instruction` (JSON with the checked and copied choices, the request id, who queued it), `queued_discarded` (the same instruction with the reason, when it could not start), `queued_attempted_at` (when a start was last tried, for the order and the backoff of the sweep) and `queued_first_failed_at` (when a start first failed, where the 24 hours below begin). There is no table, no close and no delete (owner's decision 8).
+It starts when the running turn ends, from the same hook as the workflow engine (`ReportDeps.turnEnded` of the runner API, which every report that ends a turn calls after the completion is stored, a repeated report included), after the response, and from the cron sweep as the step `follow_ups`. The two reactions to the end of a turn are independent: neither waits for the other and neither can fail the other.
+**The hook starts only the session of the turn that ended** (one event, at most one start and at most one look at GitHub); **the sweep takes every other idle session that holds an instruction**: the ones never tried first, then the ones tried longest ago, and a session tried within the last 5 minutes (`FOLLOW_UP_RETRY_BACKOFF_MS`) is left for a later run. So a session GitHub keeps refusing does not crowd out newer ones (20 per run), and a rate limit is not asked again by every event. Every attempt writes `queued_attempted_at` first (not `updated_at`). Both ways do the same thing, so the start is idempotent: a second call finds nothing, and the start itself locks the session and
+needs `idle` and a queued instruction. An error in it is counted and logged by a stable word (`FOLLOW_UP_START_FAILED`) and **never fails the end of the turn**, which is committed before. The start checks again what could have changed: the repository and the installation, the branch, the model and the cost limit, the size of the environment. A turn that cannot follow
+(`IMPLEMENTER_BRANCH_GONE` and the others) **discards the instruction with the reason** (`branch_gone`, `repository_unavailable`, `write_not_granted`, `model_not_allowed`, `cost_limit_exceeded`, `environment_unavailable`; `request_invalid` when the job queue refuses it for good with `JOB_INPUT_INVALID`, trying again changes nothing; `instruction_unreadable` for a stored text that cannot be read, which would hold the first place of the sweep for good), and the Runs page shows the sentence and the text, so the words are not lost. The discard names the instruction it read by its request id and only discards an instruction of that id on an idle session: when the one it read has started meanwhile and a newer one is queued behind that turn, the stale discard changes nothing (`discardQueued(sessionId, clientRequestId, reason)`). A workflow step (#846) that waited for its turn and was given up discards its own instruction with `workflow_gave_up`, also while a turn of the session runs (`discardRequested`, `whileRunning`): only the instruction of its request id, so that it does not start later with no step to read it and no budget behind it.
+When GitHub cannot be asked, or the start fails in a way nobody foresaw (the database, the model catalog, the queue), the instruction stays queued and the sweep tries again, **for 24 hours after the first failed start** (`QUEUED_INSTRUCTION_TTL_MS`, `queued_first_failed_at`, written by the first failure): then it is discarded with the reason `github_unavailable` (GitHub) or `start_failed` (anything else), and the Runs page says so and that the instruction has to be sent again. The 24 hours do not count from when it was queued: an instruction behind a turn that ran for more than a day (on a runner of a customer, say) has not waited for GitHub at all, and the first error after that turn must not drop it.
+The hook is wired in `workflow-runs/shared.ts` and the sweep step is handed in by the cron route, because the runner API and the sweep importing the Implementer directly would be new edges in the import cycles (`src/ci/import-cycles`).
+
+**The claim.** `runner-api/resume.ts` builds the `resume` block of the job from the stored reports of the earlier turns (never from anything the runner sends): `turn`; `branches`, the union of what all earlier turns pushed with the newest tip of a name (a turn that touched one branch does not list the others), the session branch first, at most 20; `checkout`, the branch the last turn
+ended on (`checkedOut`) when it is one of those or the session branch, else null; `snapshot`, whether a conversation of an **earlier** turn is stored; `previousSummary`, at most 8 KiB; and `digest`, at most 16 KiB: the last 5 instructions (2 KiB each), the last 3 summaries, the commit subjects since the base and the first 50 changed files. All of it is **data, never instructions**: control characters are
+taken out (and lone surrogates), the cut is on a character boundary, every instruction and summary in the digest is one line (line breaks become spaces, so a text cannot write an entry of its own), and the runner puts it in a part of its own. **`resume` and with it `snapshot`, `previousSummary` and `digest` go only to a runner that names `implementer_resume`**; a follow-up claimed by a runner without it ends `implementer_engine_unavailable` (free) before any credential exists, as for the other features. The runner of #868 parses all three fields.
+
+**The form "Continue".** On the run page of the **newest turn** of a session (an older run does not branch). It reads `GET /api/w/:workspace/runs/:id/continuation` (404 for any other run) and asks again every 3 seconds while a turn runs. Defaults are the last model, cost limit, environment copy and profile; a field the person leaves alone is not sent. While a turn runs the form says that the instruction waits and queues it; when one waits, it shows
+that instruction and is disabled. The hint "history: about N tokens; the first call reads all of it again" comes from the tokens of the last model call of the last turn, with the warning of the spike that a very long history can reach the cost limit with the first call. The run page also shows the continuation mode of a follow-up turn (`imported` or `summary_only` with the reason).
+
+**Known limits and the release window.**
+- **App before runner (release window).** Until the runner with `implementer_resume` is live, a follow-up turn ends for free with `implementer_engine_unavailable`, before any credential exists (the claim checks the feature, see above). The app and the runner of release 2 are shipped together, so the window does not exist there; it is only the time between the two deployments if they are ever shipped apart.
+- **A follow-up on a workflow's session.** A session that a workflow run started can be continued from the Runs page like any other. That **changes the branch behind the run** (the run's result is no longer what the branch holds), and the **cost of the follow-up turn is not counted in the run's budget**: it is a turn of its own, with its own cost limit.
+- **N3, one 404 discards at once.** The start discards the instruction when GitHub answers 404 for the branch or the repository once; there is no second look, so a wrong 404 from the platform loses the instruction (its text stays on the Runs page).
+- **N6, the summary and the depth.** `previousSummary` is the last summary that is not empty (a turn that reported none does not erase it), and the history that is read is at most 100 turns (`TURN_HISTORY_LIMIT`); the digest holds less (above).
+- **N7, `createdBy` is not checked again.** The start of a queued instruction does not look again whether the person who queued it is still a member or still allowed to start tasks. This is deliberate (the owner's rule of freedom: the instruction was allowed when it was given, and the checks at the start are about the platform, not the person).
+- **N9, the queue is one column.** The queue holds exactly one instruction in a text column of the session (at most 512 KiB, `implementer_sessions_queue_check`); a second one is refused with `IMPLEMENTER_SESSION_BUSY`. A longer queue, or an order between several, needs a table and is not part of this change.
+
+**Tests.** `follow-up.test.ts` (fakes: the turn that ends between the two writes, the repeat of a queued request id, the discard of one instruction only, the attempt, the day), `follow-up.integration.test.ts` and `follow-up-http.integration.test.ts` (Postgres: busy and queued, the second queued is `409`, branch gone, model not allowed, the environment copy, two parallel submits make one turn or one queued instruction, idempotency, another workspace is `404`, the start at the end of a turn also for a double event, the discard), `implementer-queue.integration.test.ts` (also the stale discard and the order and backoff of the sweep), `turn-ended-hook.test.ts`,
+`implementer-own-key-claim.integration.test.ts` (the claim with and without `implementer_resume`), `add-implementer-session-queue.integration.test.ts` (the migration), `resume.test.ts`, `continue-input.test.ts`, `follow-up-starter.test.ts`, `sweep.test.ts` and `continue-form.test.tsx`.
+
+## Release 2: live test
+
+This is the checklist of the lead for the release that brings the follow-up turns (#842, part of #745) to the factory. Everything above
+was proven with fakes, on a spike VM and in the Docker lane; **none of it has run on the factory's real VM with the real deployment**. The
+release and this test need the owner's go, and nobody runs them without it. The test costs about the same as the live view's (two short turns
+on a cheap model, well under 1 USD). How to run a turn and read the Runs page is in [`implementer-smoke-test.md`](implementer-smoke-test.md);
+the checks below add to it and do not replace it.
+
+**Before the release.**
+
+- The owner's go is given in writing (a comment on #842).
+- The cost maximum of the factory is at least the 5.00 USD of the owner's setting ("Limits"), and the test repository has a branch protection on its
+  default branch ("The risk, plainly").
+- Release 1 (the live view) is live: the steps below read the page's live view.
+
+**The order of the deployment.** One release run builds the golden snapshot with the new runner, stages the App and the Dispatcher and promotes the App first,
+the Dispatcher last (`docs/deployment-vercel.md`, the deployment pipeline). The test starts only after `persist` and the canary of that run are green and
+the Dispatcher serves the snapshot of the run. The App and the runner are **one release**: the App accepts the new keys of a result (`checkedOut`)
+and sends `resume` only to a runner that names `implementer_resume`, so between the two promotions a follow-up ends
+`implementer_engine_unavailable`, free, and a first turn is unharmed. Do not start a follow-up in that window and do not promote one half alone.
+
+| # | Check | A pass is | A failure is |
+|---|---|---|---|
+| R1 | **Turn 1** on a 2 vCPU environment with a setup script: the task makes the agent start a dev server in the background (a web server on a port is enough), commit a change on the session branch and create a **second branch** with a commit | The run ends `completed`; the Runs page lists both branches with their commits; the live view showed the steps while it ran; GitHub has both branches | Only one branch arrives, or the steps do not show |
+| R2 | **Turn 2**, the "Continue" form with "check what is running, then start it again, change both branches and push": no change to the model | The line "Continuation" says `imported`; the first thing the agent does is look (`git status`, the process list); it finds that the **server is gone** and **both branches are there at the pushed tips**; it starts the server again and pushes **both** branches; the second request of the model holds turn 1's instruction | `summary_only` (with a reason word): note it, then see R3 and the log. The agent says nothing of a new sandbox, or finds the server running |
+| R3 | **A branch that moved**: between turn 1 and turn 2 push one more commit to the second branch on GitHub (by hand, on the web) | The preface names that branch as moved; the agent continues from the new tip and its commits come on top of the commit made by hand | The push of that branch is `non_fast_forward`, or the agent works on the old tip |
+| R4 | **The app host under the narrow network rule**: turn 1 and turn 2 run with the environment's rule `off` (and once with `list`), so the VM's policy is narrowed ("The second wall") | The steps arrive during the turn, the snapshot is uploaded before the result (no note "the session was not saved for a follow-up turn"), and turn 2 downloads it (`imported`, not `download_failed`) | `download_failed` or a note about the snapshot with the rule `off`: the App's host is not in the policy for these calls; the fix is in the policy, not in the runner |
+| R5 | **The grace sums at 2 and 4 vCPU**: repeat R1 and R2 on a 4 vCPU environment, once ending normally and once ended by a stop of the Worker while the agent works (SIGTERM, "Limits", row Stop) | At both sizes the turn ends `completed` (or `runner_shutdown` on the stop), the final push of every branch arrives, and the snapshot is saved (a stop gets 2 s for the export, a normal end 5 s; "The git rules", "Time") | A branch is missing after the stop, a note says the export ran `out_of_time`, or the process was killed before it reported |
+| R6 | **A long history**: a third turn on the same session with a model of a small window, or with a cost limit lower than the history | The turn compacts and goes on, or ends `cost_limit_reached` before any call with the sentence about the imported conversation ("What a long history costs") | A turn that hangs, or one that bills a call it should have refused |
+| R7 | **One instruction waits**: while a turn runs, queue one instruction; queue a second | The first is accepted (`202`, "queued") and starts when the turn ends; the second is `IMPLEMENTER_SESSION_BUSY` | Both are accepted, or the queued one never starts |
+| R8 | **Nothing is closed**: the run page of the session has no close button; the steps and the snapshot of turn 1 are still there after turn 3 | The steps of every turn are listed; the session accepts another follow-up | A turn's steps are gone |
+
+**After the test.** Write the result, with the run ids, as a comment on #842, and in this section only what differs from the above. Delete the test branches on GitHub
+by hand and let the test workspace keep its sessions (nothing deletes them). An R2 that fell back to `summary_only`, whatever the reason word, is a failure of the release, not a detail: stop and read the notes of the run before anything else.
 
 ## The memory of the readers and the OS
 
@@ -564,11 +961,14 @@ bill, Control, the VM's services or the outside beyond the door**, not something
 **What runs, and where.**
 
 * `runner/scripts/sandbox_boundary_check.py` is run as the Control container of the Implementer's profile on a VM with Sysbox (the flags the Launcher renders,
-  the Docker socket, the work volume; the script and `boundary_probe.py` mounted read-only at `/driver`, as `model_door_check.py` is). It starts what a turn
+  the Docker socket, the work volume; the script and `boundary_probe.py` mounted read-only at `/driver`, as `model_door_check.py` is, and `contracts/environment-sizes.v1.json` read-only at `/contracts/environment-sizes.v1.json`). It starts what a turn
   starts with the production code (the model door with a made-up key, both readers, the agent's container, the Setup container with a script of its own) and
   prints one JSON line per check and a table. Each check names the **expected denial** and asserts it, and every denial has its control (the same attempt
   reaching what it may reach: the door, the internet from the Setup container, a listener on the default bridge, a link-local address that IPv6 really got).
   `--skip-abuse` leaves out the checks that stress the VM, `--offline` the one call that reaches the real provider. No secret is printed.
+  The agent's memory has no default in the script (#827): `RUNNER_IMPLEMENTER_AGENT_MEMORY_MB` when it is set, otherwise the figure of `agentMemoryMb` in
+  `contracts/environment-sizes.v1.json` for the VM's vCPU count (`boundary_memory.py`, next to the script; found at `<repository>/contracts` from a checkout and at
+  `/contracts` from `/driver`), and otherwise, or for a vCPU count the contract has no figure for, the script stops with a message that names the variable and the file.
 * `runner/scripts/boundary_probe.py` is the program that runs **inside** the agent's container, the Setup container and a container of the agent's own Docker.
   It uses the standard library only, makes plain `connect()` calls with short timeouts to addresses of this VM, and prints facts; the expectations are the
   checker's.
@@ -581,7 +981,7 @@ The 4 vCPU size (8.4 GB, 6,144 MB for the agent; since fix round 3 6,000) ran th
 
 **Third fix round, 2026-11-03** (the review of the memory guard; snapshot built from the branch, the final code of the check and of the runner bind-mounted over the Worker image's): the script grew by five checks (the OOM score in the agent and in the Setup
 container and as the VM sees it, a legitimate heavy build, one row for the limit of the score) and the memory rows measure more than before. **78 of 78 hold at 2 vCPU (4 GB, 2,048 MB for the agent) and at 8 vCPU (16 GB, the largest size,
-13,537 MB for the agent; it was not measured before).** The agent memory per size is now 2,048, 6,000, 9,768 and 13,537 MB (2, 4, 6 and 8 vCPU) because the guard's floor is taken off it (section "The agent's container", row "Memory"). Not run in this round: 4 and 6 vCPU.
+13,537 MB for the agent; it was not measured before).** The agent memory per size was then 2,048, 6,000, 9,768 and 13,537 MB (2, 4, 6 and 8 vCPU) because the guard's floor is taken off it; since the network door it is 1,952, 5,904, 9,672 and 13,441 MB (section "The agent's container", row "Memory"). Not run in this round: 4 and 6 vCPU.
 
 | Area | What is proven |
 |---|---|
@@ -644,7 +1044,7 @@ The branch names: the legal odd ones (`x;touch${IFS}...`, `$(touch${IFS}...)`) a
    root of the container can only lower it as far as -999 (measured in the third round; see below). (2) `vm_memory.MemoryGuard` in Control looks ten times a second at the memory the VM has left, **free memory plus the page cache of files, not
    `MemAvailable`** (the kernel counts the `struct file` of every open file as reclaimable slab: `MemAvailable` said 2.2 GB when the OOM killer ran), and kills the agent's container,
    or the Setup container, when less than 512 MiB or 8% of the VM's memory is left, and **again every half second while the memory stays low and the container has not ended** (a kill that failed is logged and tried again; the
-   guard of the Setup container is closed as soon as the script ended well, before `docker commit`, and says once in the log when `/proc/meminfo` cannot be read for 5 s). The turn then ends as a turn whose container died: the
+   guard of the Setup container watches until the container has ended (a process the script left behind runs until then) and is closed just before the room check and `docker commit`, which need memory of their own (#827: it was closed right after the script, so a background process could flood unguarded while the end script ran; a kill during the end ends the setup `not_saved` with the reason word `vm_memory`, and nothing is committed), and says once in the log when `/proc/meminfo` cannot be read for 5 s). The turn then ends as a turn whose container died: the
    detail starts with the reason word `vm_memory:` ("vm_memory: the agent's container ended during the turn: the container was killed because the VM was running out of memory"; `AgentEnd.vm_memory`, and for the Setup container
    the same word), and the billing class is the one of any container that died. The guard goes on looking after it has fired and keeps the least value it saw (`lowest_left`).
    Measured with both, the same floods (first round, 4 vCPU rows: the guard's own 10 Hz look at its metric, which misses the true minimum):
@@ -672,13 +1072,16 @@ The branch names: the legal odd ones (`x;touch${IFS}...`, `$(touch${IFS}...)`) a
    The first round's sentence "root of a user namespace cannot lower it" was an assumption and is wrong under Sysbox 0.7.1. So the score is a preference that helps against a process that does not try to avoid it, and it is not what stops the agent:
    the leaky floods of the check run with the score lowered to -999 by the flood itself, and Control's guard stopped them without a kernel OOM kill. The check pins the limit (a row that passes for "lowers to -999 and no further" or for "refuses every lowering") so
    that a Sysbox that closes it, or one that opens -1,000, is noticed. A way to forbid the write (an AppArmor profile for the agent's container, or a Sysbox that honours the capability drop) was not tried; it is a follow-up, and nothing in the owner's rule needs it while the guard holds.
-   *Not measured:* the guard in the Setup container under a real flood (unit test only), 4 and 6 vCPU in the third round, a consumer faster than 1 GB a second (the floor would have to go up), the kernel 6.8 numbers of the
+   **Control's own score (#827).** Because root of the agent's container can lower its processes to -999, and the kernel compares scores, a late guard would have left Control (score 0) a candidate beside an agent at -999. The Implementer's Control container is therefore started with `--oom-score-adj -1000` (`IMPLEMENTER_OOM_SCORE_ADJ` in `dispatcher/src/launchers/container.ts`, rendered only for the profile that has a work volume and the Docker socket; a review's flags are unchanged, and the golden file of `docker run` holds that). The agent can reach -999 but not -1000, so Control is never the kernel's choice while the agent's container is there.
+   **-1000 means exempt, not "the lowest".** The kernel does not rank a process with that score last, it takes it out of the choice (`oom_badness` returns the lowest possible value for it). That holds inside Control's own `--memory` limit (768 MiB) too: a Control that grew without a bound (a leak, a hostile line of output it buffers) would not die at its limit with the container's exit code, as it did before this score, and the turn would not end `worker_exited` (free) at once: it would stall at the limit. So Control bounds itself.
+   *The watch (`implementer/control_memory.py`, `ControlMemoryWatch`).* The job process of the Implementer (the Control that runs the turn) reads its container's memory cgroup, `memory.stat` and `memory.max`, five times a second, and when what the container holds reaches **90% of the limit on three looks in a row** (0.6 s; one spike that is given back is not a runaway) it ends the turn: the job process prints the result line and exits. The line is `runner_error` with the detail "control_memory: Control held N of M MiB of the memory of its container, so the turn was ended" (`runner._end_for_control_memory`; free, like the old `worker_exited`), or `agent_gave_up` when the model was billed (the class of any unexpected end of a turn that cost money); nothing is pushed and the step records not yet sent are lost too, as at the timeout's watchdog. **It stops no container**: the Implementer registers no engine with `shutdown_engines`, so the agent's container, the doors and the readers run on until the VM is torn down, and the model door's cost cap holds meanwhile. A trip that comes after the turn finished (the watch is closed) prints nothing, checked under the lock of the result line. What the container holds is only what the kernel cannot give back, `anon + shmem + kernel + sock` of `memory.stat`: the file cache, active as well as inactive, is not counted (the `git fetch --fsckObjects` of a big repository fills the cgroup with it up to the limit, see "The memory of the readers and the OS"). Only a `memory.stat` that lacks one of those keys falls back to `memory.current` without `inactive_file`, which still counts the active cache (the log says so once); the three looks are what keeps such a cache from ending a healthy, billed turn. A limit of `max` means nothing is watched (the log says "no limit" once); files that cannot be read leave the watch blind, and the log says so once after 10 s. It covers cgroup v2, which the golden snapshot's VM uses; it is tested with fake cgroup files (`test_control_memory.py`, `test_failed_run_usage.py`), not on a VM. *Not measured (#827):* that Docker accepts `--oom-score-adj -1000` under the VM's setup (the flag is the documented one and needs no capability from a rootful daemon, but no run on a `spike-` VM has shown it), and whether a Control-like container at -1000 that hits its `--memory` limit dies or hangs (the reasoning above is the kernel's rule, not an observation); the watch exists so that the answer does not matter for a runaway Control, and the check stays a follow-up for a `spike-` VM. *Remaining risk:* the 10% below the line and the 0.6 s of three looks are what a single allocation or a very fast leak can still cross; then Control is stuck at the limit as described above, and the turn ends by the lease (two minutes) and the timeout, not at once. The watch sees only the container's own cgroup: a global OOM of the VM, with the agent's container already gone (ended by its limit or by `MemoryGuard`) and the doors out of the way, has nothing to pick but `dockerd` or another host process, and Control's turn ends with the daemon (`worker_exited`).
+   *Not measured (#862):* the guard in the Setup container under a real flood (unit test only), 4 and 6 vCPU in the third round, a consumer faster than 1 GB a second (the floor would have to go up), the kernel 6.8 numbers of the
    review (only 6.18 was measured). `docker/sandbox/sysbox-prepare.sh` is an input of the golden snapshot, so the next release builds a new one; the guard and the OOM score are in
    the Worker image.
 3. **The door's image has git and a shell (not changed).** The plan's table says "no git, no shell". The image is the Worker image, which has both (a shell, git 2.53).
    The running door is one Python process with one listening port, its container is non-root, read-only, without capabilities and without a network but the
    provider, and nothing the agent can reach starts a process in it, so this opens nothing today. A door image of its own (the Python runtime and nothing else) would
-   make the table true; it is a size and build question for the owner.
+   make the table true; it is a size and build question for the owner (#861).
 4. **`/dev/net/tun` is not in the agent's container (information).** The boot step makes it world-writable on the VM, but Sysbox does not put it into the container, so a
    task that needs a tunnel device will not find one. Not a security matter.
 5. **The agent can make files with any uid below 65,536 in the volume (information).** The volume is mounted with the user ids shifted, so a file the agent's root makes is
@@ -732,7 +1135,8 @@ agent can still fill the disk, and a build that needs more room fails: it is not
 
 ## Network in the agent phase
 
-The agent has the model door and nothing else. The agent's container is on an internal Docker network with no exit
+The agent has the model door and nothing else, and the network door when its environment's rule is `list` or `open` (the next
+section). The agent's container is on an internal Docker network with no exit
 (`gateway_mode_ipv4=isolated`), so there is no route to the internet, to the VM or its services, or to a neighbour, and no name
 server; the containers it starts through its own Docker are behind it and reach the door only. The firewall rules of the Control
 container that used to confine the agent's user, and the allowlist proxy of package registries (`registry.npmjs.org`,
@@ -756,7 +1160,7 @@ are not touched: the platform reaches the VM through them, and they add nothing 
 more table in the host's namespace beside each `ip` one (`host_rules.close_bridge_inet`, tables `implementer_ipv6_setup` and
 `implementer_ipv6_agent`, hooked before Docker's rules at priority -10, only drops): no IPv6 packet from the Setup bridge or the model bridge to the VM
 itself (`input`) and none through the VM to a private range (`forward`: `::`, `::1`, `::ffff:0:0/96`, `64:ff9b::/96`, `fc00::/7`, `fe80::/10`, `ff00::/8`).
-The platform's kernel has no `inet` family (measured, above), so there the table is tried (the helper tells that case from a refusal by its exit status: `nft` says "Operation not supported"), a log line says the kernel has no family, and the turn goes on. On a kernel that has the family and refused the table, the turn goes on as well and the report has a note (`inet_failure_note`). The
+The platform's kernel has no `inet` family (measured, above), so there the table is tried (the helper tells that case from a refusal by its exit status, and the status comes from probes, not from `nft`'s wording (#827): when the table could not be installed, an empty `inet` table is tried (made: the family is there, so the table was refused, status 1), then an empty `ip` table (made: `nft` works but there is no `inet` family, status 3), and when neither can be made `nft` itself fails, status 1; a test runs the script for real against a stand-in `nft` of both kernels under several wordings), a log line says the kernel has no family, and the turn goes on. On a kernel that has the family and refused the table, the turn goes on as well and the report has a note (`inet_failure_note`). The
 sysctls and the missing address are what closes IPv6 on a kernel without the table. A Setup or an agent never fails for the table. The lane (L07) reads the state back where
 the kernel supports it: IPv6 off on the container's `eth0` (which takes `default`) before the probe switches it on, no IPv6 address on the bridge, and the `inet` table with
 its two drops.
@@ -931,9 +1335,8 @@ it. What it did to the repository is the **base** the agent starts from, not a c
    repository ignores already (`node_modules`, a virtual environment, build output) needs nothing. A name with a line end cannot be written as a
    pattern and is left as it is; more than 10,000 entries (or 1 MiB of names) ends the turn rather than half of them being kept.
 
-Before both, the script's **history** is undone (`_return_to_start`): HEAD goes back to the task's branch, the task's branch and the base branch to the start commit, and every other
-branch and every tag is deleted, whatever worktree has it checked out (`git update-ref --stdin -z`, fed by a streamed listing of the refs, so no number of refs and no length of names
-is a limit; `branch -D` would refuse a branch a linked worktree of the script has checked out and end the turn). The commits stay in the object store and their files in the tree.
+Before both, the script's **history** is undone (`_return_to_start`): HEAD goes back to the branch the agent starts on, every branch of the turn (the base branch, the task's branch and, on a follow-up, each branch of the session) to its own start tip, and every other
+branch and every tag is deleted, whatever worktree has it checked out (`git update-ref --stdin -z`, fed by a streamed listing of the refs, so no length of one name is a limit, and the number of refs and the bytes of their names are (#827): a script that leaves more than 100,000 branches and tags (`ref_drop.MAX_REFS`), or branches and tags whose delete commands are more than 32 MiB together (`ref_drop.MAX_REF_BYTES`, so that a few refs with names of kilobytes do not get round the count), ends the turn `setup_failed`, free, with "the script made more than 100000 branches and tags" or "the names of the branches and tags the script made are more than 33554432 bytes" (both bounds are well above any repository and well below what the 256 MiB reader holds in one `update-ref`, not measured on a VM); before, such a script ended it by the reader's memory limit with no reason; `branch -D` would refuse a branch a linked worktree of the script has checked out and end the turn). The commits stay in the object store and their files in the tree.
 
 This is a rule about where the agent starts, not about what the script may do. If it turns out to be wrong, it is one function. A script that left the
 repository unreadable (it removed `.git`) ends the turn with `setup_failed` (free: the runner could not read what the script left, and the script's output is not shown).
@@ -943,7 +1346,7 @@ log says so: "killed for its memory"), or leaves a container whose result cannot
 **before the model door exists**: nothing was handed a key, nothing was used, the turn is free, and the Runs page shows the exit status, the
 seconds, whether it timed out and the end of the output. A script that exited 0 and whose result could not be kept (the VM's disk had no room for the commit, or the daemon could not save the image)
 has the exit status 0 and the runner's own last line in the output (`[setup] the VM had no room to save the setup result: the VM's disk has X MB left and the result of the script needs about Y MB`);
-the page says "The script finished, but its result could not be kept" and shows that line. The room check is skipped, with a note in the report, when the VM's free space or the size of the container's file system cannot be had. A Setup container that could not be had (the daemon refused a step, the network rules
+the page says "The script finished, but its result could not be kept" and shows that line. A script whose container went away under it (its own memory, or the guard when the VM was running out of memory) has no exit status that says why (137 or none), so the same last line carries the reason as a whole sentence (`[setup] vm_memory: the container ended during the script: it was killed because the VM was running out of memory (exit code 137)`, #827). The room check is skipped, with a note in the report, when the VM's free space or the size of the container's file system cannot be had. A Setup container that could not be had (the daemon refused a step, the network rules
 did not go in, the container was not what was asked for) is `setup_failed`, free as well, with the reason word in the log: it is the runner's, not
 the script's. A SIGTERM during the script kills the container and ends the turn `runner_shutdown` as for the agent.
 
@@ -1086,6 +1489,80 @@ and from nothing else, and the **script** from the job the Worker fetches:
 What does not depend on the size: the work volume is a directory of the VM's disk (64 GB on the Pro plan, whatever the vCPUs), the reserve disk
 (8 GiB), `pids` of the Control container, the steps of the volume, and a VM lives `timeoutSeconds` plus the margin whatever its size.
 
+## Profiles
+
+A task can run with a **profile** (#843, [`docs/profiles.md`](profiles.md)): a workspace's own, versioned data with the model, standing
+instructions, cost limit and **push right** a turn runs with. The task is sent with `profile` in the body of the route behind the form (the form
+on the page does not offer one yet); the version it runs with is copied into the turn (`implementer_turns.profile_*`), like the environment, and the
+model and cost limit of the version are the turn's own. A task **without** a profile is the Implementer of before: no extra text, every local branch
+pushed. A profile with `canPush: false` makes Control skip everything about the push: no leftover commit, no listing, no push, no commits or files in
+the result, and the turn is a success when the agent ended well. The text of the profile is appended last to the instruction file the runner writes
+(`implementer/prompts.py`), so it is the same for every turn of one version and the provider's prompt cache hits. It reaches the Worker as
+`implementer.profile`, only if the Worker names the claim feature `implementer_profile`.
+
+## The finish tool
+
+A turn that has a **result schema** ([`contracts/result-schema.v1.json`](../contracts/result-schema.v1.json), [`workflows.md`](workflows.md#result-schemas))
+gives its agent a finish tool and asks it for a result in that shape (#843). The schema is the task's own (`result` in the body of
+`POST /api/w/<slug>/implementer/tasks`, checked by the validator of the format: `IMPLEMENTER_REQUEST_INVALID` with `issues: [{field: "result",
+code: "invalid", detail}]`) or, when the body has none, the default result schema of its profile version. It is copied into the turn
+(`implementer_turns.result_schema`) and reaches the Worker as `implementer.resultSchema`, only if the Worker names the claim feature
+`implementer_result`; for a Worker that does not, the turn ends `implementer_engine_unavailable`, free, before any credential exists. A task with
+neither is the Implementer of before, byte for byte: no tool, no file, no reminder, the same prompt (a test compares it with the text of before
+result schemas for every combination of setup script, push right and profile text).
+
+**How the agent hands the result in, on any harness.** One program, `finish_tool.py` (standard library only), runs in two places and is written
+into the engine's configuration directory in the agent's container as `/etc/code-reviewer/factory-submit` with the schema
+(`result-schema.json`):
+
+| Door | What | Why it works for any harness |
+|---|---|---|
+| the command `factory-submit` | the JSON result on standard input; exit code 0: accepted; exit code 2: refused, every problem on standard error (`factory-submit --help`) | any harness that can run a command; `/etc/code-reviewer` is first on the `PATH` of the engine and so of the agent's shells |
+| the MCP tool `submit_result` | `factory-submit mcp`, a stdio MCP server the engine starts itself from its config (`mcp.finish`, `type: local`) | a harness with MCP sees a real tool; the server validates, because the harness does not |
+
+The tool's name, description and parameters are derived from the schema (`tool_definition`: the schema itself with closed objects). In OpenCode (the
+pinned 1.19.0) an MCP tool is named after its server, so the agent's tool is `finish_submit_result`; the prompt says so, and a test holds the name,
+the config and the text together. The permission is `finish_submit_result: allow` next to the default-deny, and nothing else of the config moves (a test
+compares the rest key by key). Both doors check what the agent hands in against the schema; a refusal comes back as an error result (the tool) or
+a line on standard error with exit code 2 (the command) and the agent corrects and tries again. An accepted result is written to the **result
+file**.
+
+**Where the result is, and how Control reads it.** The file is `/work/result/result.json` in the agent's container: the Subpath `result` of the
+work volume, a directory beside the repository, not in it (the agent's container mounts it read-write, the readers read-only at `/result`;
+only a turn with a schema has the mount, and the seal check allows exactly that destination). Control never opens it: the agent made it, and a link
+in it would be followed in Control's file system. After the agent's container is gone, a **reader** (no network, no secret, read-only root) runs
+`test -f $1 && test ! -L $1 && head -c $2 $1` on it, so a link or a missing file is no result and at most `256 KiB + 1` byte come back. Then
+`parse_result` applies, in this order and before anything is built: the size (256 KiB), a linear scan of the bytes that counts levels (8) and values
+(20,000) without parsing (strings skipped whole; a value of two million keys costs the size of its file, not a second to check), then JSON (`NaN`
+and `Infinity` are refused), then the schema with the rules of `checkResultValue` (`contracts/result-check-vectors.json` holds the two to the same
+answers). That check, not the one in the container, is the one the turn is judged by, and a result the agent changed after it was accepted is
+judged as what it is. The valid result is redacted of the job's secrets (every text, keys included) and goes to the app in
+`implementer.agentResult`; the facts Control knows (branches, commits, files, cost, `checkedOut`) stay in the result beside it, and the agent cannot
+fake them. The app bounds it again (an object; the same size, levels and values, on the compact JSON; `contracts/result-check-vectors.json` holds the
+runner's scan and the app's count to the same answers at the edges), takes the secrets out of every text and key once more, keeps it with the turn
+(`implementer_turns.result_value`) and does not read it against the schema: the runner's check is the authoritative one, and the engine of milestone 3
+re-checks the stored value with `checkResultValue` against the turn's stored schema before it routes it anywhere (see
+[`workflows.md`](workflows.md), "The finish tool"). **A result is never a reason to lose a report.** A result that is over the bounds, in the runner
+after its secrets were taken out or in the app, is left out and the turn ends `no_result`; the branches, the commits, the files and the usage are kept. The
+same holds in the app for a report of success from a turn with a schema that carries no result: it is recorded `no_result`.
+
+**An agent that ends without a valid result** gets **one reminder** (`RESULT_REMINDER_PROMPT`), in the same session, like the message for a dirty
+working tree, and also for a profile that may not push, since the reminder is about the result and not about git. The order is: the task, the reminder
+(no valid result), the message for a dirty tree (a profile that may push). A turn that has no time for it (less than 20 s) says so in its notes. Then the
+turn ends `no_result` with the detail "the agent ended without a result that fits the schema (no result file | too_large | too_deep | too_many_values |
+not_json | invalid: N problems)", never a value of the file. A turn that another limit ended (cost, time, a lost lease, a stop) keeps that code, and its
+result is not read when the end is quick (a lost lease, a stop). A container that is not confirmed gone has not been read: `no_result` with that
+reason.
+
+**Billing of `no_result`: charged**, like `agent_gave_up` (`AI_COST_FAILURE_CODES`). The code is only possible after the agent ran, so the model was
+used and the money is spent; what the agent committed is pushed all the same when the profile may push. Everything that refuses a task before it
+starts (an invalid schema, a Worker that cannot read result schemas) is free.
+
+**On the Runs page** a task with a schema has a "Result" section: the result as plain JSON text in a block that is closed, or the sentence that the agent
+handed in no result. It is in the run API (`GET /api/w/<slug>/runs/<id>`: `implementer.result`, the JSON object, and `implementer.resultExpected`),
+scoped to the workspace like the rest, with every text cleaned and stripped of known secrets. The result is data, never a command: it posts and
+merges nothing; side effects happen only in the actions of a workflow.
+
 ## Limits
 
 | Limit | Value | Where it is decided |
@@ -1096,7 +1573,7 @@ What does not depend on the size: the work volume is a directory of the VM's dis
 | Stop | On SIGTERM the engine is ended at once, all committed branches are pushed (if the lease is still held; nothing uncommitted is committed) and the turn ends `runner_shutdown`. The job process gets a grace of 120 seconds, ends itself after 115 (the final push gets 25 of them), and the container's stop timeout is 150 seconds; each lease question (before the listing and before each push) is retried for 30 seconds at a normal end and 20 on a stop, and
 never beyond the time that is left of the final push | Runner, container spec |
 | Task text | 20,000 characters | Form and route |
-| Branch name | At most 200 characters, each part between slashes at most 240 bytes, git's rules, not the base branch | Form and route |
+| Branch name | At most 200 characters and 255 bytes, each part between slashes at most 240 bytes, no leading `-` or `+`, no white space or control character (the C1 block too), no lone surrogate half, git's rules, not the base branch (the Worker's push policy refuses the rest, #838) | Form and route |
 | Base branches offered | 100 names, default first; a base beyond that can be typed | Route |
 | Result | 200 commits and 500 files (of the task's branch), 50 branches, 8,192 characters of summary, the whole report under 4 MB (Vercel cuts a body at 4.5 MB) | Contract and runner |
 | VM and containers | 2 vCPU and 4 GB for the VM; the Control container 768 MB without swap and 2048 processes, `/work` mounted `nosuid,nodev`; the model door 256 MB; the network door 96 MB; the two readers 256 MB each; the agent's container the rest after 512 MB for the OS and the daemons (1,952 MB at 2 vCPU, section "The agent's container" for the other sizes), no swap. The Dispatcher refuses a size that leaves the VM no room for Control, the door, the readers and the OS (`sandbox_config_invalid`); a size that leaves the agent less than 1,024 MB (1 vCPU) is `sandbox_size_unsupported`, free, from the Worker, and from the Launcher for a job that names it. A task whose environment names a size (2, 4, 6 or 8 vCPU) gets that VM and, at that size, 2,048, 6,000, 9,768 or 13,537 MB for the agent ("Environments"); Control stays at 768 MB | Dispatcher (`DISPATCHER_WORKER_CONFIG` can override the default size), runner |
@@ -1121,6 +1598,7 @@ used):
 | `sandbox_unproven` | The golden snapshot's Sysbox is not proven (its build's proof did not pass, or the Dispatcher was told so). The turn ends before the clone | free | Look at the `sysbox` field of the snapshot's record and the log of its build step; rebuild the snapshot |
 | `environment_setup_failed` | The setup script of the task's environment exited with a status other than 0, ran out of its time (15 minutes, or what the turn's limit leaves), was killed for the memory of its container, filled the disk, or left a result that could not be saved as the agent's image. It runs before the model door exists, so nothing was used. The Runs page shows the exit status, the seconds, whether it timed out and the end of the output (the job's secrets removed) | free | Fix the script in Environments and send the task again |
 | `sandbox_size_unsupported` | The VM leaves the agent's container less than 1,024 MB (a 1 vCPU VM does: 512 MB). The turn ends before the clone | free | Choose a size of 2 vCPU or more |
+| `no_result` | The task had a [result schema](#the-finish-tool) and the agent ended without a result that fits it, also after the one reminder (the detail says why: no file, too large, not JSON, or N problems against the schema). What it committed is pushed when the profile may push | charged | Read its summary; make the schema or the task clearer; check the schema with `POST /workflows/validate` |
 | `agent_gave_up` | The agent ended with no new commit on any branch and nothing to commit, or its engine died, or its container ended ("the agent's container ended during the turn": killed, most likely for its memory), or the model door went away ("the model door ended during the turn"), after the model had been used (what it had committed is pushed when possible). The summary also says when files the agent wrote could not be kept, such as `opencode.json` | charged | Read its summary; try again with a clearer or smaller task |
 | `push_rejected` | The task's branch did not arrive (the branch exists with other history, a rule, a permission, a change of `.github/workflows/` which is never allowed, or GitHub could not be reached), no branch arrived although some had commits, or the agent's repository could not be read at the end. The Runs page lists every branch with its reason; branches that were pushed stay on GitHub | charged | Read the reasons, check the branches, then start again |
 | `branch_violation` | **No longer produced** (there are no rules inside the workspace to violate). Old runs keep the code and its class | charged | Look at the branch |
@@ -1151,15 +1629,15 @@ that were pushed first. A Worker that is stopped while it works (`runner_shutdow
 ## Out of scope
 
 - **The repository's own setup scripts and registries for the agent.** The repository's own install and set-up steps are not run. What a
-  task needs is installed by the environment's script, which has the internet; the agent has none until the network door (step 7 of the plan).
+  task needs is installed by the environment's script, which has the internet; the agent has none unless its environment's network rule is `list` or `open` (section "The network door (step 7)").
   Private registries do not work in the script either: it has no secrets, and a credential for one would be a new step.
 - **Secrets for tests.** No credential of any kind reaches the agent: tests that need an API key or a database URL cannot run
   against a real service (a database in the agent's own Docker is fine).
 - **Pushes that touch `.github/workflows/`.** The App has no `workflows` permission and never asks for it for this; GitHub
   rejects that branch (`workflows_not_allowed`) while the others arrive; a task whose own branch is the one rejected ends
   `push_rejected`. Change workflow files by hand ([`github-app.md`](github-app.md)).
-- Opening or merging a pull request, a second turn on the same branch, a task on an existing branch, forks, other platforms
-  than GitHub.
+- Opening or merging a pull request, a task on an existing branch (a follow-up continues the session's own branch and the others it
+  pushed, never one that a person made), forks, other platforms than GitHub.
 - **A targeted escape from the kernel or the Sysbox daemons.** Step 6 attacked the boundaries the runner builds (section "The attack test (step 6)"); it
   did not look for a flaw in the kernel, Sysbox or Docker themselves.
 
@@ -1206,7 +1684,7 @@ These are decisions of the owner, not oversights.
 
 ## Open points
 
-Open issues at the time of this change (2026-11-02):
+Open issues at the time of this change (2026-11-04):
 
 - **#745**, the epic of the first vertical slice, and **#768**, the operator guide and the live smoke test: the smoke test
   ([`implementer-smoke-test.md`](implementer-smoke-test.md)) is the first run of the whole path on the platform and has not

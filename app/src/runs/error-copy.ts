@@ -45,6 +45,12 @@ export const errorCopy = (
     "The project's review kind was changed before this run could start, so the waiting run was cancelled.",
   no_capable_runner:
     "No runner that can run this kind of review picked up the run within the time limit, so it was cancelled. It will run again on the next push or review request.",
+  runner_revoked:
+    "The runner working on this run was removed from the workspace, so the run was stopped. Nothing was charged.",
+  runner_needs_own_key:
+    "This run would use the operator's key on a runner, which is not allowed. Nothing was charged.",
+  no_runner_available:
+    "No runner of the workspace with the labels this run asks for picked it up within the time limit, so it was cancelled. Nothing was charged.",
   dispatch_unavailable:
     "No worker picked up this run within the time limit, so it was stopped. The service that starts workers may be down or fully busy. It will run again on the next push or review request.",
   dynamic_review_disabled:
@@ -188,6 +194,9 @@ export const errorCopy = (
     "The setup script of this task's environment did not finish successfully, so the task was stopped before the AI model was called and nothing was charged. The end of the script's output is shown below. Fix the script in Environments, then start the task again.",
   agent_gave_up:
     "The agent stopped without a result it could stand behind. Read its summary, then try again with a clearer or smaller task.",
+  // #843
+  no_result:
+    "The agent finished without handing in the result this task asks for, also after a reminder. Anything it committed is on its branch. Read its summary, then try again.",
   push_rejected:
     "The repository refused the new branch, so the work was not saved there.",
   branch_violation:
@@ -319,9 +328,18 @@ export const turnErrorCopy = (
   // Implementer cannot change the configuration of its own engine, such as opencode.json).
   agent_gave_up:
     "The agent stopped without a result it could stand behind, or its engine stopped before it could report one. Read its summary, if there is one: it also says when files the agent wrote could not be kept. Anything the agent committed was pushed to the branch when possible. Then try again with a clearer or smaller task.",
+  // #843: the task had a result schema and the agent ended without a result that fits it. The model was used, so the work is charged.
+  no_result:
+    "The agent finished without handing in the result this task asks for, also after one reminder, so the task counts as failed. Its summary, if it left one, is shown below. Anything it committed was pushed to the branch when the profile may push. Try again with a clearer task, or check the result schema.",
   // The table above promises a new run on the next push or review request; a task is never run again by itself.
   no_capable_runner:
     "No worker that can run tasks picked up this task within the time limit, so it was cancelled. Start it again later.",
+  runner_revoked:
+    "The runner working on this task was removed from the workspace, so the task was stopped and nothing was charged. Anything the agent pushed before that stays on the branch. Start the task again on another runner.",
+  runner_needs_own_key:
+    "A runner works with your own API key, and this task's model is one the platform pays for, so the task was not started and nothing was charged. Choose a model of your own key, or an environment that runs on a platform VM, and start the task again.",
+  no_runner_available:
+    "No runner of this workspace with the labels of the task's environment picked the task up within the time limit, so it was cancelled and nothing was charged. Start a runner that has the labels (see Runners), or choose another environment, and start the task again.",
   dispatch_unavailable:
     "No worker picked up this task within the time limit, so it was stopped. The service that starts workers may be down or fully busy. Start the task again later.",
   lease_lost:

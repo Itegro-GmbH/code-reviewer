@@ -179,12 +179,27 @@ export function createWorkspaceErasureRepository(
         .where("job_id", "in", ownJobs())
         .execute();
       // The Implementer's turns point at jobs and sessions, its sessions at repositories (#751): turns first. The steps of a turn
-      // (#745, live view) point at jobs only and go before them.
+      // (#745, live view) point at jobs only and go before them, and so do the snapshots of a session and the parts of one that is
+      // still arriving (#839), which point at the session and the job.
       for (const table of [
+        // The steps of a workflow run point at jobs and turns, the runs at the workflow versions (#844): steps first, runs next.
+        "workflow_step_runs",
+        "workflow_runs",
         "implementer_turn_steps",
+        "implementer_session_snapshot_parts",
+        "implementer_session_snapshots",
         "implementer_turns",
         "implementer_sessions",
         "implementer_environments",
+        // The versions point at their workflow: versions first (#833).
+        "workflow_versions",
+        "workflows",
+        // The versions point at their profile: versions first (#843).
+        "profile_versions",
+        "profiles",
+        // Runners and the tokens that made them (#854).
+        "runner_registration_tokens",
+        "runners",
         "job_check_runs",
         "job_vm_runs",
         "usage_records",

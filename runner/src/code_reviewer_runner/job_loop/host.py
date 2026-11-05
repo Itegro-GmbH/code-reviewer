@@ -39,7 +39,7 @@ import asyncio
 import json
 import logging
 import shlex
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
@@ -53,6 +53,7 @@ from code_reviewer_runner.capabilities import (
 )
 from code_reviewer_runner.dynamic_review.engine_user import sweep_user
 from code_reviewer_runner.dynamic_review.netguard import EGRESS_MODE_VARIABLE, EgressMode
+from code_reviewer_runner.implementer.runner_profile import RUNNER_PROFILE_NAMES
 from code_reviewer_runner.job import (
     IMPLEMENTER_ENVIRONMENT_NAMES,
     ImplementerInput,
@@ -92,10 +93,23 @@ from code_reviewer_runner.job_loop.reporting import (
     result_from_outcome,
     stopped_result,
 )
+from code_reviewer_runner.job_loop.resume_download import (
+    RESUME_TOTAL_SECONDS,
+    ResumeSessionApi,
+    ResumeUnavailable,
+)
+from code_reviewer_runner.job_loop.snapshot_sender import SnapshotApi, SnapshotSender
 from code_reviewer_runner.job_loop.step_sender import StepsApi, StepSender
 from code_reviewer_runner.lease_check import LeaseState
 from code_reviewer_runner.pr_agent_config import PASSTHROUGH_VARIABLES
-from code_reviewer_runner.result import ErrorCode
+from code_reviewer_runner.result import DISK_BUDGET_REASON, ErrorCode
+from code_reviewer_runner.resume_wire import (
+    RESUME_FILE_NAME,
+    RESUME_STATE_VARIABLE,
+    ResumeReason,
+    failed_state,
+    file_state,
+)
 from code_reviewer_runner.supersede_timing import (
     KILL_MARGIN_SECONDS,
     SUPERSEDED_DRAIN_SECONDS,
@@ -127,6 +141,8 @@ IMPLEMENTER_PASSTHROUGH_VARIABLES = (
     "RUNNER_DYNAMIC_PROXY_PORT",
     "RUNNER_DYNAMIC_ENGINE_PORT",
     *IMPLEMENTER_ENVIRONMENT_NAMES,
+    # #854: what a customer's runner decided about the runtime and the CPUs of the containers.
+    *RUNNER_PROFILE_NAMES,
 )
 # The newest bytes of its stdout the host keeps of an Implementer job process: its result line
 # carries the commits and files of the turn, up to the 4 MB the body is held to (`report.py`).
@@ -237,6 +253,15 @@ class _RunState:
             self.superseded.set()
 
 
+@dataclass(frozen=True)
+class _Resumed:
+    """What the host hands a follow-up turn's process of its stored session: the file, and the line
+    for `RESUME_STATE_VARIABLE` (None: the turn is not a follow-up that has a conversation)."""
+
+    files: Mapping[str, bytes] = field(default_factory=dict[str, bytes])
+    state: str | None = None
+
+
 def _kind_of(job: Job | ImplementerInput) -> ReviewKind:
     return ReviewKind.IMPLEMENTER if isinstance(job, ImplementerInput) else job.review_kind
 
@@ -303,6 +328,7 @@ class JobHost:
         environment: Mapping[str, str] | None = None,
         sweeper: Callable[[int, int], bool] = sweep_user,
         refuse_unadvertised_engine: bool = False,
+        guard: Callable[[], Awaitable[str]] | None = None,
     ) -> None:
         self._settings = settings
         self._api = api
@@ -320,6 +346,10 @@ class JobHost:
         # A Worker is handed its job and cannot choose: a Dynamic job whose engine this worker did
         # not advertise is refused here with the stable code. The loop never claims such a job.
         self._refuse_unadvertised_engine = refuse_unadvertised_engine
+        # A runner on a customer's machine (#855) ends a job that passes its disk budget: the
+        # guard's coroutine returns the text of the failure when it must end, and is otherwise
+        # cancelled with the job. None: no budget (the hosted Worker).
+        self._guard = guard
 
     def request_hard_stop(self) -> None:
         """End the running process now and report `runner_shutdown` (the grace period is over)."""
@@ -415,6 +445,47 @@ class JobHost:
             return None
         return StepSender(self._api, claimed.id, clock=self._clock, log=self._log).serve
 
+    def _snapshot_handler(self, claimed: ClaimedJob, kind: ReviewKind) -> StepsHandler | None:
+        """The uploader of the session snapshot of an Implementer turn (#839), or None: any other
+        kind of job, an API that has no snapshot call, and an app that did not list
+        `implementer_snapshot` get no channel, and then the process takes no export."""
+        if kind is not ReviewKind.IMPLEMENTER:
+            return None
+        if not isinstance(self._api, SnapshotApi) or not self._api.supports_snapshot:
+            return None
+        return SnapshotSender(self._api, claimed.id, clock=self._clock, log=self._log).serve
+
+    async def _resume_session(self, claimed: ClaimedJob, job: Job | ImplementerInput) -> _Resumed:
+        """The stored session of a follow-up turn (#840), downloaded for the process, which holds no
+        credential for the app. Nothing here is the job's failure: whatever goes wrong is the word
+        the process puts in its result, and the turn continues from a summary. A turn that has no
+        conversation (the app says so) gets nothing."""
+        resume = job.implementer.resume if isinstance(job, ImplementerInput) else None
+        if resume is None or not resume.snapshot:
+            return _Resumed()
+        try:
+            if not isinstance(self._api, ResumeSessionApi):
+                raise ResumeUnavailable(ResumeReason.DOWNLOAD_FAILED)
+            # No heartbeat runs yet (it starts with the process), and the lease is four heartbeat
+            # intervals: whatever the API does, the wait ends at the total and the turn goes on
+            # from the summary (`resume_download.RESUME_TOTAL_SECONDS`).
+            received = await asyncio.wait_for(
+                self._api.resume_session(claimed.id), RESUME_TOTAL_SECONDS
+            )
+        except ResumeUnavailable as unavailable:
+            return _Resumed(state=failed_state(unavailable.reason))
+        except TimeoutError:
+            self._log.warning("job %s: the stored session did not arrive in time", claimed.id)
+            return _Resumed(state=failed_state(ResumeReason.DOWNLOAD_FAILED))
+        except Exception as error:
+            self._log.warning(
+                "job %s: the stored session could not be fetched (%s)",
+                claimed.id,
+                type(error).__name__,
+            )
+            return _Resumed(state=failed_state(ResumeReason.DOWNLOAD_FAILED))
+        return _Resumed(files={RESUME_FILE_NAME: received.data}, state=file_state(received.header))
+
     def _ms_since(self, started: float) -> int:
         return int((self._clock.monotonic() - started) * 1000)
 
@@ -452,13 +523,18 @@ class JobHost:
             return await self._refuse(claimed, result)
         self._log.info("job %s claimed: %s", claimed.id, _label_of(job))
         state = _RunState()
+        resumed = await self._resume_session(claimed, job)
         try:
             # ASCII escapes: a lone surrogate in a text cannot break the encoding, and the job
             # process reads the same JSON.
             spec = ProcessSpec(
                 argv=self._settings.job_command,
-                env=self._child_environment(job),
+                env={
+                    **self._child_environment(job),
+                    **({} if resumed.state is None else {RESUME_STATE_VARIABLE: resumed.state}),
+                },
                 stdin=json.dumps(claimed.input).encode("ascii"),
+                files=resumed.files,
                 # A Dynamic job is the root supervisor (it drops the engine to its own user); every
                 # other job drops to the unprivileged job user when the loop itself is root.
                 run_as=(None if _supervises_an_engine(kind) else self._settings.diff_job_user),
@@ -472,6 +548,8 @@ class JobHost:
                 # #745: the step records of an Implementer turn, for the live view, when the app
                 # has the call. The process has no credential: this end posts them.
                 steps=self._steps_handler(claimed, kind),
+                # #839: and the session of the turn, for a follow-up; uploaded before the result.
+                snapshot=self._snapshot_handler(claimed, kind),
                 terminate_grace=(
                     IMPLEMENTER_TERMINATE_GRACE_SECONDS if kind is ReviewKind.IMPLEMENTER else None
                 ),
@@ -590,6 +668,9 @@ class JobHost:
             asyncio.ensure_future(self._drain(claimed, process, state)),
         ]
         _, lost_wait, timeout, shutdown, drained = helpers
+        guarded = asyncio.ensure_future(self._guard()) if self._guard is not None else None
+        if guarded is not None:
+            helpers.append(guarded)
         try:
             await asyncio.wait([finished, *helpers[1:]], return_when=asyncio.FIRST_COMPLETED)
         except asyncio.CancelledError:
@@ -634,6 +715,18 @@ class JobHost:
                 log_tail=tail,
                 redactor=redactor,
                 reason=NO_RESULT_REASON,
+            )
+        if guarded is not None and guarded.done() and not guarded.cancelled():
+            self._log.warning(
+                "job %s: the disk budget is used up, the process was ended", claimed.id
+            )
+            return failure_result(
+                ErrorCode.RUNNER_ERROR.value,
+                guarded.result(),
+                duration_ms=self._ms_since(started),
+                log_tail=tail,
+                redactor=redactor,
+                reason=DISK_BUDGET_REASON,
             )
         if shutdown.done() and not shutdown.cancelled():
             self._log.warning(

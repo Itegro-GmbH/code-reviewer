@@ -33,8 +33,22 @@ async function rowsOfEveryTable(
 ): Promise<Record<string, unknown[]>> {
   const result: Record<string, unknown[]> = {};
   for (const table of await db.introspection.getTables()) {
+    // Tables of later migrations (#833) are empty and are no change to an existing row.
+    if (
+      table.name === "workflows" ||
+      table.name === "workflow_versions" ||
+      table.name === "workflow_runs" ||
+      table.name === "workflow_step_runs" ||
+      table.name === "profiles" ||
+      table.name === "profile_versions" ||
+      table.name === "runners" ||
+      table.name === "runner_registration_tokens"
+    )
+      continue;
     // A later migration's table (#745): it does not exist before this migration is applied, and it is empty after.
     if (table.name === "implementer_turn_steps") continue;
+    if (table.name === "implementer_session_snapshots") continue;
+    if (table.name === "implementer_session_snapshot_parts") continue;
     const { rows } =
       await sql<unknown>`select * from ${sql.table(table.name)} order by 1`.execute(
         db,

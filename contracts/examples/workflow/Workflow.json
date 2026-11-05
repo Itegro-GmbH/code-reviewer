@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "name": "Issue to PR",
+  "description": "Implement the issue, have it reviewed, fix until the review finds nothing (3 rounds at most), then open the pull request; otherwise comment on the issue.",
+  "trigger": {
+    "kind": "github.issueLabeled",
+    "label": "ready for agent"
+  },
+  "budgetUsd": 20,
+  "steps": [
+    {
+      "id": "start",
+      "kind": "action",
+      "connector": "github.issue.labels",
+      "issue": "{{trigger.issue}}",
+      "remove": ["ready for agent"],
+      "add": ["agent working"]
+    },
+    {
+      "id": "fix",
+      "kind": "loop",
+      "maxRounds": 3,
+      "body": [
+        {
+          "id": "implement",
+          "kind": "agent",
+          "profile": "implementer@1",
+          "environment": "node",
+          "session": {
+            "continue": "implement"
+          },
+          "instruction": {
+            "first": "{{trigger.issue.title}}\n\n{{trigger.issue.body}}",
+            "next": "Fix these review findings:\n{{previous.review.findings}}"
+          },
+          "result": {
+            "type": "object",
+            "required": ["summary"],
+            "properties": {
+              "summary": {
+                "type": "string",
+                "description": "What was done, for the pull request."
+              }
+            }
+          }
+        },
+        {
+          "id": "review",
+          "kind": "agent",
+          "profile": "reviewer@1",
+          "environment": "node",
+          "session": "new",
+          "branch": "{{implement.branch}}",
+          "instruction": "Review branch {{implement.branch}} against the issue. Do not change anything.",
+          "result": {
+            "type": "object",
+            "required": ["findings"],
+            "properties": {
+              "findings": {
+                "type": "array",
+                "maxItems": 20,
+                "items": {
+                  "type": "object",
+                  "required": ["type", "name", "description"],
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": ["bug", "risk", "nit"]
+                    },
+                    "name": {
+                      "type": "string",
+                      "maxLength": 120
+                    },
+                    "description": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "until": {
+        "empty": "{{review.findings}}"
+      }
+    },
+    {
+      "id": "done",
+      "kind": "if",
+      "when": {
+        "equals": ["{{fix.exit}}", "until"]
+      },
+      "then": [
+        {
+          "id": "pr",
+          "kind": "action",
+          "connector": "github.pullRequest.open",
+          "head": "{{implement.branch}}",
+          "title": "{{trigger.issue.title}}",
+          "body": "{{implement.summary}}\n\nCloses #{{trigger.issue.number}}"
+        }
+      ],
+      "else": [
+        {
+          "id": "stuck",
+          "kind": "action",
+          "connector": "github.issue.comment",
+          "issue": "{{trigger.issue}}",
+          "body": "Stopped after {{fix.rounds}} rounds. Open findings:\n{{review.findings}}"
+        }
+      ]
+    }
+  ]
+}

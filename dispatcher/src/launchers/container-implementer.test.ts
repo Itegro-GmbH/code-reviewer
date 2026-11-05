@@ -100,6 +100,22 @@ describe("rendering the implementer profile", () => {
     ]);
   });
 
+  // #827-T02
+  it("keeps Control out of the kernel's OOM choice at -1000, which root in the agent's container cannot lower its own score to", () => {
+    expect(valuesOf(render(), "--oom-score-adj")).toStrictEqual(["-1000"]);
+  });
+
+  // #827-T02
+  it("leaves every other profile's flags as they were: no OOM score in the default container", () => {
+    const standard = renderDockerRunArguments(WORKER_CONTAINER_SPEC, {
+      image: IMAGE,
+      name: "code-reviewer-worker-job-1",
+      command: [ENTRY_MODE_WORKER_ONCE],
+      environment: { HOME: "/home/runner" },
+    });
+    expect(standard).not.toContain("--oom-score-adj");
+  });
+
   // #760-T02
   it("is the default container in every other flag", () => {
     const environment = { HOME: "/home/runner" };
@@ -117,6 +133,7 @@ describe("rendering the implementer profile", () => {
       "--memory-reservation",
       "--memory-swap",
       "--pids-limit",
+      "--oom-score-adj",
     ];
     expect(without(implementer, changed)).toStrictEqual(
       without(standard, changed),

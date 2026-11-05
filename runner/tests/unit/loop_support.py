@@ -241,6 +241,8 @@ class Harness:
     def __init__(self, **settings: Any) -> None:
         # `environment` is the host's environment (the rest of the keywords are its settings).
         environment: Mapping[str, str] = settings.pop("environment", {})
+        # The disk budget's guard of a customer's runner (#855); None: as hosted.
+        guard = settings.pop("guard", None)
         # The kill of the engine user's leftovers: calls are recorded, the answer is `sweeps_ok`.
         self.sweeps: list[tuple[int, int]] = []
         self.sweeps_ok = True
@@ -264,6 +266,7 @@ class Harness:
                 "OPENROUTER__KEY": API_KEY,
                 **environment,
             },
+            guard=guard,
         )
         self.loop = _Control(self.host)
         self.end: JobEnd | None = None

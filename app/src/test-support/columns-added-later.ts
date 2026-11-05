@@ -19,16 +19,44 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
     // #745, step 7: the environment's network rule, copied with it; null for every turn that exists (it reads `off`).
     "environment_network_mode",
     "environment_network_hosts",
+    // #854: the kind of the environment and the labels of a runner environment; null for every turn that exists (hosted).
+    "environment_kind",
+    "environment_labels",
+    // #843: the profile version a task ran with; null for every turn that exists (no profile: the platform's defaults).
+    "profile_id",
+    "profile_name",
+    "profile_version",
+    "profile_instructions",
+    "profile_can_push",
+    // #843: the result schema a task ran with and the result the agent handed in; null for every turn that exists.
+    "result_schema",
+    "result_value",
+  ],
+  // #841: the next instruction of a session and the one that could not start; null for every session that exists.
+  implementer_sessions: [
+    "queued_instruction",
+    "queued_discarded",
+    "queued_attempted_at",
+    "queued_first_failed_at",
   ],
   // #745, step 7: the environment's network rule; every environment that exists reads `off` and no hosts (`DEFAULTS_OF_COLUMNS`).
-  implementer_environments: ["network_mode", "network_hosts"],
+  // #854: the kind (`hosted`) and the labels (none) of every environment that exists.
+  implementer_environments: ["network_mode", "network_hosts", "kind", "labels"],
   // #818: the size of the VM where the Dispatcher reported it; null for every VM that exists.
   job_vm_runs: ["vcpus"],
+  // #845: what started a run; every run that exists was started by hand (`DEFAULTS_OF_COLUMNS`).
+  workflow_runs: ["trigger_kind"],
 };
 
 /** What a column added later holds on an existing row when it is not null: a constant default. */
 const DEFAULTS_OF_COLUMNS: Record<string, Record<string, unknown>> = {
-  implementer_environments: { network_mode: "off", network_hosts: "" },
+  implementer_environments: {
+    network_mode: "off",
+    network_hosts: "",
+    kind: "hosted",
+    labels: "",
+  },
+  workflow_runs: { trigger_kind: "manual" },
 };
 
 /** `rows` of `table` without the columns that migrations after the one under test added; those columns must be null. */

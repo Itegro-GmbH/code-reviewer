@@ -18,6 +18,8 @@ import {
 } from "../test-support/runner-contract.ts";
 import {
   IMPLEMENTER_ENVIRONMENT_NAMES,
+  IMPLEMENTER_RESUME_MODES,
+  IMPLEMENTER_RESUME_REASONS,
   RUNNER_ERROR_CODES,
   RUNNER_REVIEW_KINDS,
 } from "./contract.ts";
@@ -37,6 +39,7 @@ const NEW_ERROR_CODES = [
   "clone_failed",
   "setup_failed",
   "agent_gave_up",
+  "no_result",
   "push_rejected",
   "branch_violation",
   "cost_limit_reached",
@@ -259,6 +262,105 @@ describe("the implementer job input", () => {
   });
 });
 
+describe("the resume of a follow-up turn (#838)", () => {
+  const SHA = "1".repeat(40);
+
+  function withResume(resume: unknown): Document {
+    const input = example("RunnerJobInput");
+    input.implementer.resume = resume;
+    return input;
+  }
+
+  // #838-T70
+  it("has a valid example, alone and inside the job input", () => {
+    const resume = example("ImplementerResume");
+
+    expect(contract.check("ImplementerResume", resume)).toStrictEqual({
+      valid: true,
+      errors: "",
+    });
+    expect(accepts("RunnerJobInput", withResume(resume))).toBe(true);
+  });
+
+  // #838-T71
+  it("is optional: a first turn carries none", () => {
+    expect(example("RunnerJobInput").implementer.resume).toBeUndefined();
+    expect(accepts("RunnerJobInput", example("RunnerJobInput"))).toBe(true);
+  });
+
+  // #838-T72
+  it("is closed and needs its three fields", () => {
+    for (const key of ["turn", "branches", "checkout"]) {
+      const resume = example("ImplementerResume");
+      delete resume[key];
+      expect(accepts("ImplementerResume", resume), key).toBe(false);
+    }
+    for (const edit of [
+      (resume: Document) => (resume.somethingNew = true),
+      (resume: Document) => (resume.branches[0].somethingNew = true),
+    ]) {
+      const resume = example("ImplementerResume");
+      edit(resume);
+      expect(accepts("ImplementerResume", resume)).toBe(false);
+    }
+  });
+
+  // #838-T73
+  it("bounds the turn, the branches, their names and their tips", () => {
+    const refused: Array<(resume: Document) => void> = [
+      (resume) => (resume.turn = 1),
+      (resume) => (resume.turn = 2.5),
+      (resume) => (resume.turn = 100_001),
+      (resume) => (resume.branches = { name: "x", head: SHA }),
+      (resume) =>
+        (resume.branches = Array.from({ length: 21 }, (_, index) => ({
+          name: `feature/${index}`,
+          head: SHA,
+        }))),
+      (resume) => (resume.branches[0].name = "-delete"),
+      (resume) => (resume.branches[0].name = "has space"),
+      (resume) => delete resume.branches[0].head,
+      (resume) => (resume.branches[0].head = "main"),
+      (resume) => (resume.branches[0].head = "A".repeat(40)),
+      (resume) => (resume.branches[0].head = "abc1234"),
+      (resume) => (resume.checkout = "-delete"),
+      (resume) => (resume.checkout = 3),
+    ];
+    for (const edit of refused) {
+      const resume = example("ImplementerResume");
+      edit(resume);
+      expect(accepts("ImplementerResume", resume), String(edit)).toBe(false);
+    }
+    const largest = example("ImplementerResume");
+    largest.branches = Array.from({ length: 20 }, (_, index) => ({
+      name: `feature/${index}`,
+      head: SHA,
+    }));
+    largest.checkout = null;
+    expect(accepts("ImplementerResume", largest)).toBe(true);
+    expect(
+      accepts("ImplementerResume", {
+        ...largest,
+        branches: [],
+        checkout: null,
+      }),
+    ).toBe(true);
+  });
+
+  // #838-T74
+  it("is part of the implementer block only", () => {
+    const diff = {
+      prUrl: "https://github.com/acme/widgets/pull/7",
+      command: "review",
+      git: { provider: "github", baseUrl: "u", token: "t", botLogin: "b" },
+      llm: { provider: "openrouter", model: "m", apiKey: "k" },
+      env: {},
+      resume: example("ImplementerResume"),
+    };
+    expect(accepts("RunnerJobInput", diff)).toBe(false);
+  });
+});
+
 describe("the implementer result", () => {
   // #746-T02
   it("has a valid example", () => {
@@ -394,6 +496,85 @@ describe("the implementer result", () => {
       const result = example("RunnerResult");
       result.implementer.branchesDropped = dropped;
       expect(accepts("RunnerResult", result)).toBe(false);
+    }
+  });
+
+  // #837
+  it("takes the branch that was checked out: optional, a name from 1 to 255 characters or null", () => {
+    const result = example("RunnerResult");
+    expect(result.implementer.checkedOut).toBe("implementer/a1b2c3");
+    expect(accepts("RunnerResult", result)).toBe(true);
+    result.implementer.checkedOut = null;
+    expect(accepts("RunnerResult", result)).toBe(true);
+    delete result.implementer.checkedOut;
+    expect(accepts("RunnerResult", result)).toBe(true);
+
+    for (const bad of ["", "x".repeat(256), 3, ["a"]]) {
+      const refused = example("RunnerResult");
+      refused.implementer.checkedOut = bad;
+      expect(accepts("RunnerResult", refused)).toBe(false);
+    }
+  });
+
+  // #840
+  it("takes how a follow-up turn got its conversation: optional, `imported`, or `summary_only` with one of the runner's reasons", () => {
+    const result = example("RunnerResult");
+    expect(result.implementer.resume).toStrictEqual({
+      mode: "summary_only",
+      reason: "version_changed",
+    });
+    expect(accepts("RunnerResult", result)).toBe(true);
+    result.implementer.resume = { mode: "imported" };
+    expect(accepts("RunnerResult", result)).toBe(true);
+    delete result.implementer.resume;
+    expect(accepts("RunnerResult", result)).toBe(true);
+
+    for (const bad of [
+      {},
+      { mode: "copied" },
+      { mode: "summary_only" },
+      { mode: "summary_only", reason: "unknown" },
+      { mode: "imported", reason: "import_failed" },
+      { mode: "imported", note: "x" },
+      "imported",
+      null,
+    ]) {
+      const refused = example("RunnerResult");
+      refused.implementer.resume = bad;
+      expect(accepts("RunnerResult", refused)).toBe(false);
+    }
+  });
+
+  // #840
+  it("holds the words the app keeps for the resume result equal to the contract's", () => {
+    const properties = readContract().$defs.ImplementerResumeResult
+      ?.properties as Record<string, { enum?: string[] }> | undefined;
+
+    expect(properties?.mode?.enum).toStrictEqual([...IMPLEMENTER_RESUME_MODES]);
+    expect(properties?.reason?.enum).toStrictEqual([
+      ...IMPLEMENTER_RESUME_REASONS,
+    ]);
+  });
+
+  // #840
+  it("takes the stored-conversation fields of a follow-up job: `snapshot`, `previousSummary` and `digest`", () => {
+    const resume = example("ImplementerResume");
+    expect(resume.snapshot).toBe(true);
+    expect(accepts("ImplementerResume", resume)).toBe(true);
+    for (const name of ["snapshot", "previousSummary", "digest"]) {
+      const without = example("ImplementerResume");
+      delete without[name];
+      expect(accepts("ImplementerResume", without)).toBe(true);
+    }
+    for (const edit of [
+      (r: Document) => (r.snapshot = "yes"),
+      (r: Document) => (r.previousSummary = "x".repeat(8193)),
+      (r: Document) => (r.digest = "x".repeat(16385)),
+      (r: Document) => (r.digest = 3),
+    ]) {
+      const refused = example("ImplementerResume");
+      edit(refused);
+      expect(accepts("ImplementerResume", refused)).toBe(false);
     }
   });
 
@@ -692,5 +873,64 @@ describe("a job of the implementer kind in the claim", () => {
       kind: "refused",
       errorCode: "implementer_engine_unavailable",
     });
+  });
+});
+
+describe("the result schema and the result of a turn (#843)", () => {
+  function withSchema(schema: unknown): Document {
+    const input = example("RunnerJobInput");
+    input.implementer.resultSchema = schema;
+    return input;
+  }
+
+  // #843-T98
+  it("has valid examples of the schema and of the agent's result, alone and inside the job input and the result", () => {
+    const schema = example("ImplementerResultSchema");
+    const result = example("RunnerResult");
+    result.implementer.agentResult = example("ImplementerAgentResult");
+
+    expect(contract.check("ImplementerResultSchema", schema)).toStrictEqual({
+      valid: true,
+      errors: "",
+    });
+    expect(
+      accepts("ImplementerAgentResult", example("ImplementerAgentResult")),
+    ).toBe(true);
+    expect(accepts("RunnerJobInput", withSchema(schema))).toBe(true);
+    expect(accepts("RunnerResult", result)).toBe(true);
+  });
+
+  // #843-T98
+  it("is optional in both: a turn without a schema carries none, a result without a handed-in result has none", () => {
+    expect(example("RunnerJobInput").implementer.resultSchema).toBeUndefined();
+    expect(example("RunnerResult").implementer.agentResult).toBeUndefined();
+    expect(accepts("RunnerJobInput", example("RunnerJobInput"))).toBe(true);
+    expect(accepts("RunnerResult", example("RunnerResult"))).toBe(true);
+  });
+
+  // #843-T98
+  it("refuses a schema whose root is no object and a result that is not an object", () => {
+    for (const bad of ["findings", [], { type: "string" }, { type: "object" }])
+      expect(
+        accepts("RunnerJobInput", withSchema(bad)),
+        JSON.stringify(bad),
+      ).toBe(false);
+    for (const bad of [[], "text", 3, null]) {
+      const result = example("RunnerResult");
+      result.implementer.agentResult = bad;
+      expect(accepts("RunnerResult", result), JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  // #843-T98
+  it("names the claim feature that reads the schema and the code of a turn that handed in nothing", () => {
+    const features = contract.check("ClaimRequest", {
+      engines: ["implementer"],
+      features: ["implementer_result"],
+    });
+    expect(features.valid).toBe(true);
+    const failed = example("RunnerResult");
+    Object.assign(failed, { ok: false, errorCode: "no_result" });
+    expect(accepts("RunnerResult", failed)).toBe(true);
   });
 });

@@ -148,6 +148,44 @@ describe("the row of an implementer run", () => {
     );
   });
 
+  // #843-T140
+  it("names the branch of a turn whose profile may not push, but links nothing: the branch was never pushed", () => {
+    const quiet = {
+      branch: "implementer/abc123",
+      repositoryUrl: "https://github.com/acme/widgets",
+      canPush: false,
+    };
+
+    const row = toRunRowView(PRODUCT, turn(), "acme/widgets", NOW, quiet);
+    const detail = toCustomerRunDetailView(
+      PRODUCT,
+      turn(),
+      "acme/widgets",
+      NOW,
+      (text) => text,
+      false,
+      null,
+      { ...source(), canPush: false },
+    ).implementer;
+
+    expect(row.implementer).toEqual({
+      branch: "implementer/abc123",
+      branchUrl: null,
+    });
+    expect(detail).toMatchObject({
+      branch: "implementer/abc123",
+      branchUrl: null,
+    });
+    // A profile that may push, and a task without one, keep the link.
+    for (const canPush of [true, undefined])
+      expect(
+        toRunRowView(PRODUCT, turn(), "acme/widgets", NOW, {
+          ...quiet,
+          canPush,
+        }).implementer?.branchUrl,
+      ).toBe("https://github.com/acme/widgets/tree/implementer/abc123");
+  });
+
   // #758-T01
   it("still has the implementer variant when the turn of the job cannot be read, without a branch", () => {
     const row = toRunRowView(PRODUCT, turn(), "acme/widgets", NOW);
@@ -687,7 +725,12 @@ describe("the detail of an implementer run", () => {
         "instruction",
         "pushedNote",
         "reported",
+        "result",
+        "resultExpected",
+        "resume",
+        "runner",
         "summary",
+        "waitingForRunner",
       ].sort(),
     );
     expect(Object.keys(row.implementer ?? {}).sort()).toEqual([
@@ -1458,5 +1501,119 @@ describe("the network of an implementer run (#745)", () => {
         withNetwork({ mode: "open", hosts: [] }),
       ).implementer?.environment?.network.report?.vmPolicy,
     ).toBe("not_configured");
+  });
+});
+
+// #843: the result the agent handed in, as the page and the run API show it.
+describe("the result of an implementer run (#843)", () => {
+  const detailWith = (
+    result: ImplementerDetailSource["result"],
+    redact = (text: string) => text,
+  ) =>
+    toCustomerRunDetailView(
+      PRODUCT,
+      turn({ status: "succeeded", result: resultWith({}) }),
+      "acme/widgets",
+      NOW,
+      redact,
+      false,
+      null,
+      { ...source(), ...(result === undefined ? {} : { result }) },
+    ).implementer;
+
+  // #843-T96
+  it("has no result and expects none for a task that had no schema", () => {
+    const view = detailWith(undefined);
+
+    expect(view?.result).toBeNull();
+    expect(view?.resultExpected).toBe(false);
+  });
+
+  // #843-T96
+  it("expects one and has none for a task that had a schema and handed in nothing that fit", () => {
+    const view = detailWith({ expected: true, value: null });
+
+    expect(view?.result).toBeNull();
+    expect(view?.resultExpected).toBe(true);
+  });
+
+  // #843-T96
+  it("shows the result as data, every text cleaned and stripped of known secrets, keys included", () => {
+    const view = detailWith(
+      {
+        expected: true,
+        value: {
+          summary: `see ${GIT_TOKEN}\u001b[31m red\u202e`,
+          [`k-${GIT_TOKEN}`]: [1, true, null, { deep: "x" }],
+        },
+      },
+      (text) => text.replaceAll(GIT_TOKEN, "[redacted]"),
+    );
+
+    expect(view?.result).toEqual({
+      summary: "see [redacted] red",
+      "k-[redacted]": [1, true, null, { deep: "x" }],
+    });
+  });
+
+  // #843-T96
+  it("names a key such as __proto__ as a key and changes nothing of the prototype", () => {
+    const value = JSON.parse('{"__proto__": {"polluted": true}}');
+
+    const view = detailWith({ expected: true, value });
+
+    expect(Object.keys(view?.result ?? {})).toEqual(["__proto__"]);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+});
+
+// #841: how a follow-up turn got its earlier conversation, as the page shows it.
+describe("the continuation mode of an implementer run (#841)", () => {
+  const viewOf = (resume: unknown) =>
+    toCustomerRunDetailView(
+      PRODUCT,
+      turn({
+        status: "succeeded",
+        result: resultWith({ resume: resume as JsonValue }),
+      }),
+      "acme/widgets",
+      NOW,
+      (text) => text,
+      false,
+      null,
+      source(),
+    ).implementer?.resume;
+
+  // #841-R01
+  it("says the whole conversation was imported", () => {
+    expect(viewOf({ mode: "imported" })).toMatchObject({
+      mode: "imported",
+      reason: null,
+    });
+  });
+
+  // #841-R02
+  it("says a summary was used instead, with the reason word and a sentence for it", () => {
+    for (const reason of [
+      "no_snapshot",
+      "download_failed",
+      "snapshot_unreadable",
+      "import_failed",
+      "version_changed",
+    ])
+      expect(viewOf({ mode: "summary_only", reason })).toMatchObject({
+        mode: "summary_only",
+        reason,
+        text: expect.stringContaining("summary") as string,
+      });
+  });
+
+  // #841-R03
+  it("shows nothing for a first turn, a block it does not know, or a reason that is not one of the five", () => {
+    expect(viewOf(undefined)).toBeNull();
+    expect(viewOf({ mode: "other" })).toBeNull();
+    expect(viewOf({ mode: "summary_only", reason: "<script>" })).toBeNull();
+    expect(viewOf({ mode: "summary_only" })).toBeNull();
+    expect(viewOf("imported")).toBeNull();
   });
 });

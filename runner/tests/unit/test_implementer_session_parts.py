@@ -8,6 +8,7 @@ from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -28,6 +29,7 @@ from code_reviewer_runner.implementer.git_workspace import (
 from code_reviewer_runner.implementer.job_run import SIGTERM_BACKSTOP_SECONDS
 from code_reviewer_runner.implementer.limits import agent_limits
 from code_reviewer_runner.implementer.reader import RESET_SECONDS as READER_RESET_SECONDS
+from code_reviewer_runner.implementer.reader import RESULT_READ_SECONDS
 from code_reviewer_runner.implementer.session import (
     COST_LIMIT_DETAIL,
     DEADLINE_DETAIL,
@@ -36,8 +38,10 @@ from code_reviewer_runner.implementer.session import (
     GRACE_SECONDS,
     LEFTOVER_SECONDS,
     MAX_RETURNED_BYTES,
+    SNAPSHOT_SECONDS,
     STEPS_FLUSH_SECONDS,
     STOP_PUSH_SECONDS,
+    STOP_SNAPSHOT_SECONDS,
     STOP_STEPS_FLUSH_SECONDS,
     TOKEN_CAP_DETAIL,
     ImplementerSession,
@@ -45,10 +49,14 @@ from code_reviewer_runner.implementer.session import (
     deadline_seconds,
 )
 from code_reviewer_runner.implementer.step_pump import ANSWER_MARGIN_SECONDS
-from code_reviewer_runner.implementer.turn_result import MAX_SUMMARY_CHARS, clip_summary
+from code_reviewer_runner.implementer.turn_result import (
+    MAX_SUMMARY_CHARS,
+    TurnResult,
+    clip_summary,
+)
 from code_reviewer_runner.job import JobError, parse_implementer_input
 from code_reviewer_runner.redaction import REDACTED
-from code_reviewer_runner.result import ErrorCode
+from code_reviewer_runner.result import ErrorCode, Usage
 from code_reviewer_runner.step_wire import MAX_FLUSH_SECONDS
 
 EXAMPLE = (
@@ -452,7 +460,8 @@ def test_the_end_of_a_turn_fits_the_grace_and_a_stop_fits_the_sigterm_backstop()
     # after the commit (its filters ran in a reader that can write).
     quiet = READER_RESET_SECONDS
     normal = (
-        ENGINE_STOP_SECONDS
+        SNAPSHOT_SECONDS
+        + ENGINE_STOP_SECONDS
         + quiet
         + rescue
         + DIRTY_TIMEOUT
@@ -461,12 +470,20 @@ def test_the_end_of_a_turn_fits_the_grace_and_a_stop_fits_the_sigterm_backstop()
         + FINAL_PUSH_SECONDS
         + reads
         + STEPS_FLUSH_SECONDS
+        + RESULT_READ_SECONDS  # #843: the read of the agent's result, after the container is gone
     )
     stop = (
-        ENGINE_STOP_SECONDS + quiet + rescue + STOP_PUSH_SECONDS + reads + STOP_STEPS_FLUSH_SECONDS
+        STOP_SNAPSHOT_SECONDS
+        + ENGINE_STOP_SECONDS
+        + quiet
+        + rescue
+        + STOP_PUSH_SECONDS
+        + reads
+        + STOP_STEPS_FLUSH_SECONDS
     )
 
-    assert normal == 222.0 and stop == 84.0
+    assert SNAPSHOT_SECONDS == 5.0 and STOP_SNAPSHOT_SECONDS == 2.0
+    assert normal == 227.0 + RESULT_READ_SECONDS and stop == 86.0
     assert normal <= 0.85 * GRACE_SECONDS
     assert stop <= 0.75 * SIGTERM_BACKSTOP_SECONDS
 
@@ -478,3 +495,28 @@ def test_the_last_flush_of_the_live_view_asks_the_host_for_no_more_than_it_honou
     for seconds in (STEPS_FLUSH_SECONDS, STOP_STEPS_FLUSH_SECONDS):
         assert 0 < seconds - ANSWER_MARGIN_SECONDS <= MAX_FLUSH_SECONDS
     assert STOP_STEPS_FLUSH_SECONDS < STEPS_FLUSH_SECONDS
+
+
+def _turn(**changes: Any) -> TurnResult:
+    fields: dict[str, Any] = {
+        "error_code": None,
+        "error_detail": None,
+        "base_commit": "1" * 40,
+        "head_commit": None,
+        "pushed": False,
+        "branches": (),
+        "branches_dropped": (0, 0),
+        "commits": (),
+        "files_changed": (),
+        "summary": "Done.",
+        "opencode_session_id": None,
+        "opencode_version": "1.19.0",
+        "usage": Usage(None, 0, 0, 0, 0, False, None),
+    }
+    return TurnResult(**{**fields, **changes})
+
+
+# #837: an app of the release before refuses a key it does not know, a null included.
+def test_the_block_sends_the_branch_checked_out_only_when_there_is_one() -> None:
+    assert "checkedOut" not in _turn(checked_out=None).implementer_block()
+    assert _turn(checked_out="work/b").implementer_block()["checkedOut"] == "work/b"

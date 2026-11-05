@@ -6,25 +6,59 @@ model and a bare repository standing in for GitHub (`lane_support`). The journey
 table that still mean something with the agent in a container of its own: E01, E03, E04, E05, E12
 and E09 here, E06 and E07 in `test_implementer_git.py`, E15 in `test_reader_hostile.py`."""
 
+import copy
+import gzip
+import hashlib
+import json
 import re
+import shutil
 import threading
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fakes.wire.formats import Turn
-from lane_support import Turned, bash, commit, docker, lane_turn, says, write_file
+from lane_support import (
+    BRANCH,
+    INSTRUCTION,
+    Turned,
+    bash,
+    commit,
+    docker,
+    lane_turn,
+    says,
+    write_file,
+)
 from opencode_native import REAL_KEY
 
-from code_reviewer_runner.implementer.agent_container import AGENT_CONTAINER_NAME
+from code_reviewer_runner.implementer.agent_container import (
+    AGENT_CONTAINER_NAME,
+    AGENT_HOME,
+    AGENT_TMP,
+    OPENCODE,
+)
+from code_reviewer_runner.implementer.config import implementer_environment
 from code_reviewer_runner.implementer.git_workspace import LEFTOVER_MESSAGE
 from code_reviewer_runner.implementer.prompts import LEFTOVER_PROMPT
 from code_reviewer_runner.implementer.reader import (
     READER_CONTAINER_NAME,
     READER_WRITER_CONTAINER_NAME,
 )
+from code_reviewer_runner.implementer.resume_session import resume_input
+from code_reviewer_runner.implementer.snapshot_pump import SnapshotPump
+from code_reviewer_runner.job import ImplementerResume, ResumeBranch
 from code_reviewer_runner.result import ErrorCode
-from git_support import TOKEN, files_mentioning, raw
+from code_reviewer_runner.resume_wire import (
+    RESUME_FILE_NAME,
+    RESUME_STATE_VARIABLE,
+    ResumeReason,
+    file_state,
+)
+from code_reviewer_runner.snapshot_wire import SnapshotHeader
+from git_support import TOKEN, Origin, files_mentioning, raw
+from snapshot_support import SnapshotHost
 
 CLOSING = "I added hello.txt and committed it."
 
@@ -256,3 +290,228 @@ def test_a_container_killed_mid_turn_ends_the_turn_named_and_what_was_committed_
     finally:
         stop.set()
         killer.join(10.0)
+
+
+def texts_of(document: Mapping[str, Any]) -> str:
+    """Every text part of an export, in one string."""
+    return "\n".join(
+        str(part.get("text", ""))
+        for message in document["messages"]
+        for part in message.get("parts", [])
+        if part.get("type") == "text"
+    )
+
+
+# #839-E20
+def test_the_session_of_a_turn_is_exported_from_the_real_engine_and_the_pinned_engine_imports_it(
+    tmp_path: Path,
+) -> None:
+    def script(repo: Path) -> list[Turn]:
+        return [write_file(repo, "hello.txt"), commit("Add hello"), says(CLOSING)]
+
+    host = SnapshotHost()
+    with lane_turn(tmp_path, script, snapshot=SnapshotPump(host.process_end)) as turned:
+        result = turned.result
+
+        assert result.ok, (result.error_code, result.error_detail, result.notes)
+        assert not any("not saved" in note for note in result.notes), result.notes
+        assert host.wait(60), "the process closed the channel"
+        header = host.header
+        assert header is not None and header.version == "1.19.0"
+        packed = host.data
+        assert len(packed) == header.size
+        document = json.loads(gzip.decompress(packed))
+        assert document["info"]["id"] == result.opencode_session_id
+        texts = texts_of(document)
+        assert INSTRUCTION in texts and CLOSING in texts, "the conversation is in the file"
+        assert REAL_KEY not in json.dumps(document)
+
+        # The pinned engine reads the file as the next turn's VM will: `opencode import`, before
+        # any engine is started, in a container that has nothing else (no network).
+        resume = tmp_path / "resume.json"
+        resume.write_bytes(gzip.decompress(packed))
+        resume.chmod(0o644)
+        environment = implementer_environment(home=AGENT_HOME, scratch_dir=AGENT_TMP)
+        flags = [item for name, value in environment.items() for item in ("-e", f"{name}={value}")]
+        done = docker(
+            "run", "--rm", "--network", "none", "--memory", "1g",
+            "--entrypoint", OPENCODE,
+            "-v", f"{resume}:/resume.json:ro",
+            *flags, turned.config.agent_image, "import", "/resume.json",
+            timeout=180.0,
+        )  # fmt: skip
+        assert "Imported session" in done.stdout + done.stderr, done.stdout + done.stderr
+        assert str(result.opencode_session_id) in done.stdout + done.stderr
+    host.close()
+
+
+# -- a follow-up turn on a new sandbox (#840, part of #745) -------------------------------------
+
+CLOSING_TWO = "I added goodbye.txt and committed it."
+INSTRUCTION_TWO = "Now add a goodbye file and commit it."
+SUMMARY_OF_ONE = "SUMMARY-OF-TURN-ONE: the greeting file exists."
+
+
+@dataclass
+class FirstTurn:
+    """What turn one leaves for the next: the origin with its pushed branch, the engine's session
+    as the process hands it to the job host, and the result."""
+
+    origin: Origin
+    result: Any
+    packed: bytes
+    header: SnapshotHeader
+
+
+@pytest.fixture(scope="module")
+def first_turn(tmp_path_factory: pytest.TempPathFactory) -> FirstTurn:
+    scratch = tmp_path_factory.mktemp("turn-one")
+    host = SnapshotHost()
+
+    def script(repo: Path) -> list[Turn]:
+        return [write_file(repo, "hello.txt"), commit("Add hello"), says(CLOSING)]
+
+    with lane_turn(scratch, script, snapshot=SnapshotPump(host.process_end)) as turned:
+        assert turned.result.ok, (turned.result.error_code, turned.result.notes)
+        assert host.wait(60), "the process closed the channel"
+        header = host.header
+        assert header is not None
+        return FirstTurn(turned.origin, turned.result, host.data, header)
+
+
+def second_turn_script(repo: Path) -> list[Turn]:
+    return [write_file(repo, "goodbye.txt"), commit("Add goodbye"), says(CLOSING_TWO)]
+
+
+def copy_of(origin: Origin, where: Path) -> Origin:
+    """The origin as turn one left it, for a test of its own: a turn pushes."""
+    where.mkdir(parents=True, exist_ok=True)
+    clone = copy.copy(origin)
+    clone.path = where / "origin.git"
+    shutil.copytree(origin.path, clone.path)
+    return clone
+
+
+def stored_session(first: FirstTurn, directory: Path, data: bytes, header: SnapshotHeader) -> Any:
+    """What the job process makes of the file the job host downloaded: the host's file and word in
+    `directory`, read the way `runner.py` reads them."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / RESUME_FILE_NAME).write_bytes(data)
+    follow_up = ImplementerResume(
+        turn=2,
+        branches=(ResumeBranch(BRANCH, first.result.head_commit),),
+        checkout=None,
+        snapshot=True,
+    )
+    return resume_input(follow_up, {RESUME_STATE_VARIABLE: file_state(header)}, directory)
+
+
+def follow_up_job(first: FirstTurn) -> dict[str, Any]:
+    return {
+        "turn": 2,
+        "branches": [{"name": BRANCH, "head": first.result.head_commit}],
+        "checkout": None,
+        "snapshot": True,
+        "previousSummary": SUMMARY_OF_ONE,
+        "digest": "Turn 1 (instruction): " + INSTRUCTION,
+    }
+
+
+def damaged(first: FirstTurn) -> tuple[bytes, SnapshotHeader]:
+    """The engine's own export with one required key of its first message taken out: gzip, the
+    digest and the envelope are fine, and the engine's import refuses it."""
+    document = json.loads(gzip.decompress(first.packed))
+    del document["messages"][0]["info"]["role"]
+    raw = json.dumps(document).encode()
+    data = gzip.compress(raw, mtime=0)
+    return data, SnapshotHeader(len(data), len(raw), hashlib.sha256(data).hexdigest(), "1.19.0")
+
+
+# #840-E21
+def test_a_follow_up_turn_continues_the_conversation_of_the_first_in_a_new_sandbox(
+    tmp_path: Path, first_turn: FirstTurn
+) -> None:
+    stored = stored_session(first_turn, tmp_path / "host", first_turn.packed, first_turn.header)
+    assert stored.reason is None, "the file the first turn left is one the job process accepts"
+
+    with lane_turn(
+        tmp_path / "two",
+        second_turn_script,
+        instruction=INSTRUCTION_TWO,
+        origin_of_earlier_turn=copy_of(first_turn.origin, tmp_path / "origin"),
+        resume=follow_up_job(first_turn),
+        resume_input=stored,
+    ) as second:
+        result = second.result
+
+        assert result.ok, (result.error_code, result.error_detail, result.notes)
+        assert result.resume == {"mode": "imported"}
+        assert result.opencode_session_id == first_turn.result.opencode_session_id
+        # The message the runner sent is the preface in a part of its own, then the instruction.
+        (_, parts), *_ = second.message_parts
+        assert [part.get("synthetic") for part in parts] == [True, None]
+        assert parts[1]["text"] == INSTRUCTION_TWO
+        assert "NEW sandbox" in parts[0]["text"] and BRANCH in parts[0]["text"]
+        # The strict model saw the first turn's conversation in its first request of this turn.
+        asked = json.dumps(second.requests[0])
+        assert INSTRUCTION in asked and CLOSING in asked and "hello.txt" in asked
+        assert INSTRUCTION_TWO in asked and "NEW sandbox" in asked
+        assert SUMMARY_OF_ONE not in asked, "the summary is for the fallback only"
+        # And the branch moved on from the first turn's tip.
+        assert [c.subject for c in result.commits][-1:] == ["Add goodbye"]
+        assert second.origin_tip() == result.head_commit != first_turn.result.head_commit
+
+
+# #840-E22
+def test_a_corrupt_snapshot_falls_back_to_a_summary_and_the_turn_goes_on(
+    tmp_path: Path, first_turn: FirstTurn
+) -> None:
+    corrupt = first_turn.packed[:5] + b"\x01" + first_turn.packed[6:]
+    stored = stored_session(first_turn, tmp_path / "host", corrupt, first_turn.header)
+    assert stored.snapshot is None and stored.reason is ResumeReason.SNAPSHOT_UNREADABLE
+
+    with lane_turn(
+        tmp_path / "two",
+        second_turn_script,
+        instruction=INSTRUCTION_TWO,
+        origin_of_earlier_turn=copy_of(first_turn.origin, tmp_path / "origin"),
+        resume=follow_up_job(first_turn),
+        resume_input=stored,
+    ) as second:
+        result = second.result
+
+        assert result.ok, (result.error_code, result.error_detail, result.notes)
+        assert result.resume == {"mode": "summary_only", "reason": "snapshot_unreadable"}
+        assert result.opencode_session_id != first_turn.result.opencode_session_id
+        (_, parts), *_ = second.message_parts
+        assert [part.get("synthetic") for part in parts] == [True, True, None]
+        asked = json.dumps(second.requests[0])
+        assert SUMMARY_OF_ONE in asked and "NEW sandbox" in asked
+        assert CLOSING not in asked, "the old conversation did not come back"
+        assert second.origin_tip() == result.head_commit != first_turn.result.head_commit
+
+
+# #840-E23
+def test_a_snapshot_the_engine_refuses_to_import_falls_back_to_a_summary_too(
+    tmp_path: Path, first_turn: FirstTurn
+) -> None:
+    data, header = damaged(first_turn)
+    stored = stored_session(first_turn, tmp_path / "host", data, header)
+    assert stored.snapshot is not None, "the envelope is fine: only the engine can tell"
+
+    with lane_turn(
+        tmp_path / "two",
+        second_turn_script,
+        instruction=INSTRUCTION_TWO,
+        origin_of_earlier_turn=copy_of(first_turn.origin, tmp_path / "origin"),
+        resume=follow_up_job(first_turn),
+        resume_input=stored,
+    ) as second:
+        result = second.result
+
+        assert result.ok, (result.error_code, result.error_detail, result.notes)
+        assert result.resume == {"mode": "summary_only", "reason": "import_failed"}
+        assert any("continues from a summary" in note for note in result.notes), result.notes
+        asked = json.dumps(second.requests[0])
+        assert SUMMARY_OF_ONE in asked and CLOSING not in asked
+        assert second.origin_tip() == result.head_commit

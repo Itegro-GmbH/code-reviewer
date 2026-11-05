@@ -1,8 +1,8 @@
 # Webhooks
 
 `POST /api/webhooks/github-app` is the one webhook URL of the GitHub App: installations, repository
-changes, pull requests and comment commands of every installation arrive here. The route file
-(`src/app/api/webhooks/github-app/route.ts`) only calls `getGithubAppWebhookHandler()`; the logic is a
+changes, pull requests, comment commands and labels on issues (#845) of every installation arrive here. The route file
+(`src/app/api/webhooks/github-app/route.ts`) only calls `getGithubAppWebhookHandler()` (and hands it `labelTriggerFor` of the workflow engine, see below); the logic is a
 function of its collaborators in this folder, so tests wire fakes in.
 
 The route is **public**: it needs no session, and the auth guard must keep letting `/api/webhooks/**`
@@ -28,7 +28,7 @@ Each step ends the request when it fails; nothing before step 5 writes anything.
 | 1    | Size: more than 1 MiB (`WEBHOOK_MAX_BODY_BYTES`) is refused, by `Content-Length` or while reading                                                                                                                                                                                                 | `413` `WEBHOOK_BODY_TOO_LARGE`                                                                                                             |
 | 2    | Signature: `verifyWebhook(null, request)`, HMAC-SHA256 of the exact bytes received, constant time                                                                                                                                                                                                 | `401` `WEBHOOK_SIGNATURE_INVALID` (also when the secret is not configured: the cause is logged once, never answered)                       |
 | 3    | Shape: `X-GitHub-Event` and `X-GitHub-Delivery` exist and look like names, the body is JSON                                                                                                                                                                                                       | `400` with `WEBHOOK_EVENT_HEADER_INVALID`, `WEBHOOK_DELIVERY_HEADER_INVALID` or `WEBHOOK_BODY_NOT_JSON`                                    |
-| 4    | Relevance: only `pull_request`, `issue_comment`, `installation` and `installation_repositories` are used; any other event (`ping`, `push`, ...) is answered at once, nothing is recorded                                                                                                          | `202` `event_not_used`                                                                                                                     |
+| 4    | Relevance: only `pull_request`, `issue_comment`, `issues`, `installation` and `installation_repositories` are used; any other event (`ping`, `push`, ...) is answered at once, nothing is recorded                                                                                                | `202` `event_not_used`                                                                                                                     |
 | 5    | Claim: the delivery id is claimed in `webhook_deliveries`; an id that succeeded before is a duplicate, an id another request holds right now is in progress                                                                                                                                       | `202` `duplicate`; `409` `WEBHOOK_DELIVERY_IN_PROGRESS`                                                                                    |
 | 6    | Identify: `identifyWebhook` names the installation; the integration is loaded by `(github_app, externalId)` in any workspace (`integration-directory-repository.ts`), and with it the workspace: everything after this step (projects, settings, the job queue) runs in `integration.workspaceId` |                                                                                                                                            |
 | 7    | Translate: `parseEvent` gives `review_trigger`, `installation_changed` or `ignored`                                                                                                                                                                                                               |                                                                                                                                            |
@@ -37,7 +37,7 @@ Each step ends the request when it fails; nothing before step 5 writes anything.
 Answers carry only an error code or `{ "status": "accepted", "outcome": ... }`, never the body, a
 signature or a secret. Log lines name the delivery id, the event and the outcome, and nothing else.
 
-The outcomes of step 6 to 8 are `trigger_enqueued`, `trigger_skipped` (a pull request event the policy
+The outcomes of step 6 to 8 are `workflow_runs_started` and `no_workflow_matched` (a label on an issue, see below), `trigger_enqueued`, `trigger_skipped` (a pull request event the policy
 turned down, with the reason in the log), `waiting_jobs_discarded` (a pull request was closed or turned into a draft),
 `installation_changed`, `ignored` (a genuine event that starts nothing, such as a `labeled` pull
 request, or a command from a user without write access),
@@ -194,6 +194,16 @@ A second comment with the same command is a new job unless an equal one is still
 `/review` takes no arguments: text after it is dropped and never reaches a job, a settings file or an
 environment variable (PR-Agent would read it as options). It is never logged. No reply is posted for
 a refused command: the app only reacts through the review it posts when the job has run.
+
+## A label on an issue (workflow trigger)
+
+The event `issues` with the action `labeled` is not a review. `parseEvent` turns a label put on an **open issue** by a **user account** (sender type `User`) into `issue_labeled` (the issue, the label,
+the repository with its default branch, who put it on); a pull request (`issue.pull_request`), a bot, an organization or a mannequin (the App itself is a bot: the connectors label issues with the App's token),
+a closed issue and every other action are `ignored`. No project is needed. The handler hands the event to `WorkspaceCollaborators.workflows` (`LabelTrigger.start`,
+`src/workflow-runs/label-trigger.ts`), which starts the workflows of the workspace that wait for exactly this label, one run each, under the request id
+`gh-<delivery id>-<workflow id>`, and no workflow that already has a running run for the issue (`trigger_key`, one running run per workflow and issue): the outcome is `workflow_runs_started` when at least one workflow has a run for the delivery (the delivery id then stays claimed, so a
+redelivery is a `duplicate`) and `no_workflow_matched` otherwise (the id can be claimed again). What a run is made of and why the title and the body of the issue are
+defused in the text of an action: [`docs/workflows.md`](../../../docs/workflows.md#the-label-trigger). A server without a workflow engine leaves `workflows` out; a label is then `ignored`.
 
 ## The review trigger intake
 

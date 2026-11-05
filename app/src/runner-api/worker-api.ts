@@ -6,6 +6,9 @@
 //   GET  /jobs/:id             the job details, with the git token and the model key minted now (worker-fetch.ts)
 //   POST /jobs/:id/heartbeat   extends the lease
 //   POST /jobs/:id/result      delivers the result (the same rules as the runner API's `complete`)
+//   POST /jobs/:id/steps       the live view's steps of a turn of the Implementer (#745)
+//   PUT  /jobs/:id/session     one part of the session snapshot of a turn of the Implementer (#839)
+//   GET  /jobs/:id/resume-session  one part of the stored snapshot of the session, for a follow-up turn (#840)
 //
 // The order is the contract; each step ends the request on failure:
 //
@@ -13,6 +16,7 @@
 //                  of another job or of an earlier claim all get the one 401 WORKER_CREDENTIAL_INVALID
 //   2. job id      a UUID in the path                                                 400
 //   3. body        read up to 64 KiB, JSON object, checked (result only)               413 / 400
+//                  (a snapshot part: up to 3 MiB of bytes, and the query is checked)
 //   4. state       the job must still be running with this claim                      409 RUNNER_JOB_ENDED
 //   5. work        see the calls
 //
@@ -27,6 +31,7 @@ import {
   workerLeaseToken,
 } from "../jobs/worker-credential.ts";
 import { bodyLimitFor, discardBody, readJsonBody } from "./body.ts";
+import { readLimitedBody } from "../webhooks/limited-body.ts";
 import type { ClaimDeps } from "./claim.ts";
 import { describeError } from "./logger.ts";
 import {
@@ -37,6 +42,10 @@ import {
   type ReportDeps,
 } from "./report.ts";
 import { parseJobId, parseWorkerResultRequest } from "./requests.ts";
+import { SNAPSHOT_LIMITS } from "./contract.ts";
+import { parseResumePart, readResumeSessionPart } from "./resume-session.ts";
+import { storeSnapshotPart, type SnapshotDeps } from "./snapshot.ts";
+import { parseSnapshotPartRequest } from "./snapshot-request.ts";
 import { storeSteps, type StepsDeps } from "./steps.ts";
 import { parseWorkerStepsRequest } from "./steps-request.ts";
 import {
@@ -51,7 +60,8 @@ export const WORKER_RELEASE_CODES = [RUNNER_SHUTDOWN_CODE, "launch_failed"];
 
 export type WorkerApiDeps = ClaimDeps &
   ReportDeps &
-  Pick<StepsDeps, "steps"> & {
+  Pick<StepsDeps, "steps"> &
+  Pick<SnapshotDeps, "snapshots"> & {
     queue: Pick<RunnerQueue, "holding" | "countFetch" | "noteSupersede">;
   };
 
@@ -61,6 +71,10 @@ export type WorkerApi = {
   result(request: Request, jobId: string): Promise<Response>;
   /** #745: the steps of the running turn of the Implementer (the live view); proves the claim, does not extend the lease. */
   steps(request: Request, jobId: string): Promise<Response>;
+  /** #839: one part of the session snapshot of the running turn of the Implementer; proves the claim, does not extend the lease. */
+  session(request: Request, jobId: string): Promise<Response>;
+  /** #840: one part of the stored session snapshot, read by the Worker of a follow-up turn; proves the claim, does not extend the lease. */
+  resumeSession(request: Request, jobId: string): Promise<Response>;
 };
 
 /** Who is asking: the job the credential belongs to, and what the queue fences the claim on. */
@@ -195,6 +209,73 @@ export function createWorkerApi(deps: WorkerApiDeps): WorkerApi {
             : ended();
       } catch (error) {
         return unexpected("steps", error);
+      }
+    },
+
+    async session(request, jobId) {
+      try {
+        const who = await identify(request, jobId);
+        if (!who.ok) return who.response;
+        const body = await readLimitedBody(request, SNAPSHOT_LIMITS.partBytes);
+        if (!body.ok) return errorResponse(413, "RUNNER_BODY_TOO_LARGE");
+        const parsed = parseSnapshotPartRequest(
+          new URL(request.url).searchParams,
+          body.bytes,
+        );
+        if (!parsed.ok)
+          return errorResponse(400, "RUNNER_REQUEST_INVALID", {
+            fields: parsed.fields,
+          });
+        if (who.job.status !== "running") return ended();
+        const stored = await storeSnapshotPart(deps, {
+          job: who.job,
+          leaseToken: who.leaseToken,
+          parsed: parsed.value,
+          who: "worker",
+        });
+        if ("response" in stored) return stored.response;
+        // The job ended between the check and the write, or the claim was lost.
+        const now = await deps.queue.holding(who.job.id, who.leaseToken);
+        deps.logger.info(`[worker-api] session job=${who.job.id} refused`);
+        return now === undefined
+          ? workerUnauthorized()
+          : now.status === "running"
+            ? errorResponse(409, "RUNNER_LEASE_LOST")
+            : ended();
+      } catch (error) {
+        return unexpected("session", error);
+      }
+    },
+
+    async resumeSession(request, jobId) {
+      try {
+        const who = await identify(request, jobId);
+        if (!who.ok) return who.response;
+        const asked = parseResumePart(new URL(request.url).searchParams);
+        if (!asked.ok)
+          return errorResponse(400, "RUNNER_REQUEST_INVALID", {
+            fields: asked.fields,
+          });
+        if (who.job.status !== "running") return ended();
+        const read = await readResumeSessionPart(deps, {
+          job: who.job,
+          leaseToken: who.leaseToken,
+          part: asked.part,
+          who: "worker",
+        });
+        if ("response" in read) return read.response;
+        // The job ended between the check and the read, or the claim was lost.
+        const now = await deps.queue.holding(who.job.id, who.leaseToken);
+        deps.logger.info(
+          `[worker-api] resume-session job=${who.job.id} refused`,
+        );
+        return now === undefined
+          ? workerUnauthorized()
+          : now.status === "running"
+            ? errorResponse(409, "RUNNER_LEASE_LOST")
+            : ended();
+      } catch (error) {
+        return unexpected("resume-session", error);
       }
     },
 

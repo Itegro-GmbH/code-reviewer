@@ -26,6 +26,8 @@ const parsed: StartInput = {
   model: { entryId: "entry-1" },
   costLimitCents: null,
   environmentId: null,
+  profile: null,
+  result: null,
   clientRequestId: "req-1",
 };
 
@@ -247,5 +249,155 @@ describe("the body that starts a task", () => {
     expect(issuesOf({ ...VALID, environmentId })).toEqual([
       { field: "environmentId", code },
     ]);
+  });
+});
+
+describe("the body that starts a task with a profile (#843)", () => {
+  const { model: _model, ...WITHOUT_MODEL } = VALID;
+  void _model;
+
+  // #843-T160
+  it("takes a profile by name, newest version, or pinned to a version, in place of the model and the cost limit", () => {
+    expect(
+      validateStartInput({ ...WITHOUT_MODEL, profile: "reviewer" }),
+    ).toEqual({
+      ok: true,
+      value: {
+        ...parsed,
+        model: null,
+        profile: { name: "reviewer", version: null },
+      },
+    });
+    expect(
+      validateStartInput({ ...WITHOUT_MODEL, profile: "code-reviewer@12" }),
+    ).toMatchObject({
+      ok: true,
+      value: { profile: { name: "code-reviewer", version: 12 }, model: null },
+    });
+  });
+
+  // #843-T161
+  it("takes null or no profile as none: the model is required as before", () => {
+    for (const profile of [undefined, null])
+      expect(validateStartInput({ ...VALID, profile })).toEqual({
+        ok: true,
+        value: parsed,
+      });
+    expect(issuesOf(WITHOUT_MODEL)).toEqual([
+      { field: "model", code: "required" },
+    ]);
+    expect(issuesOf({ ...WITHOUT_MODEL, profile: null })).toEqual([
+      { field: "model", code: "required" },
+    ]);
+  });
+
+  // #843-T162
+  it.each([
+    ["Reviewer", "invalid"],
+    ["reviewer@0", "invalid"],
+    ["reviewer@latest", "invalid"],
+    ["", "required"],
+    ["a b", "invalid"],
+    [7, "invalid"],
+    [{ name: "reviewer" }, "invalid"],
+    ["x".repeat(65), "invalid"],
+  ])("refuses the profile %j: %s", (profile, code) => {
+    expect(issuesOf({ ...WITHOUT_MODEL, profile })).toEqual([
+      { field: "profile", code },
+    ]);
+  });
+
+  // #843-T163
+  it("refuses a model or a cost limit next to a profile: the profile's version brings both", () => {
+    expect(issuesOf({ ...VALID, profile: "reviewer" })).toEqual([
+      { field: "model", code: "not_with_profile" },
+    ]);
+    expect(
+      issuesOf({ ...WITHOUT_MODEL, profile: "reviewer", costLimitCents: 100 }),
+    ).toEqual([{ field: "costLimitCents", code: "not_with_profile" }]);
+    expect(
+      validateStartInput({
+        ...WITHOUT_MODEL,
+        profile: "reviewer",
+        costLimitCents: null,
+      }).ok,
+    ).toBe(true);
+  });
+});
+
+describe("the body that starts a task with a result schema (#843)", () => {
+  const SCHEMA = {
+    type: "object",
+    required: ["summary"],
+    properties: { summary: { type: "string", description: "What was done." } },
+  };
+
+  // #843-T93
+  it("takes a result schema and keeps it as the validator returned it", () => {
+    expect(validateStartInput({ ...VALID, result: SCHEMA })).toEqual({
+      ok: true,
+      value: { ...parsed, result: SCHEMA },
+    });
+  });
+
+  // #843-T93
+  it("takes none or null as none: the profile's default applies, or no finish tool", () => {
+    for (const result of [undefined, null])
+      expect(validateStartInput({ ...VALID, result })).toEqual({
+        ok: true,
+        value: parsed,
+      });
+  });
+
+  // #843-T93
+  it.each([
+    ["a text", "findings"],
+    ["a list", []],
+    ["an object that is not a schema", {}],
+    ["a schema whose root is not an object", { type: "string" }],
+    [
+      "an unknown field type",
+      { type: "object", properties: { a: { type: "date" } } },
+    ],
+    ["a required name that is no property", { ...SCHEMA, required: ["other"] }],
+  ])(
+    "refuses %s, with the first problem the validator found",
+    (_name, result) => {
+      const issues = issuesOf({ ...VALID, result });
+
+      expect(issues).toHaveLength(1);
+      expect(issues[0]).toMatchObject({ field: "result", code: "invalid" });
+      expect(issues[0]?.detail).toMatch(/\S/);
+    },
+  );
+
+  // #843-T93
+  it("refuses a schema larger than the bound of a body, without echoing it", () => {
+    const wide = {
+      type: "object",
+      properties: Object.fromEntries(
+        Array.from({ length: 50 }, (_, i) => [
+          `f${i}`,
+          {
+            type: "string",
+            enum: Array.from(
+              { length: 50 },
+              (_, j) => `v${i}-${j}${"x".repeat(190)}`,
+            ),
+          },
+        ]),
+      ),
+    };
+
+    const issues = issuesOf({ ...VALID, result: wide });
+
+    expect(issues).toEqual([{ field: "result", code: "too_long" }]);
+  });
+
+  // #843-T93
+  it("is told alongside the other fields' problems", () => {
+    const issues = issuesOf({ ...VALID, instruction: "", result: [] });
+
+    expect(issues.map((i) => i.field)).toEqual(["instruction", "result"]);
   });
 });

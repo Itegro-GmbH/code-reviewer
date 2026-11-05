@@ -205,6 +205,46 @@ describe("the normalized type guards", () => {
       isIntegrationEvent({ kind: "pull_request_drafted", repo, prNumber: 0 }),
     ).toBe(false);
 
+    // #845-T08
+    const labeled = {
+      repo,
+      defaultBranch: "main",
+      issue: {
+        number: 12,
+        title: "Cache",
+        body: "",
+        url: "https://github.test/acme/widgets/issues/12",
+        labels: ["a"],
+      },
+      label: "a",
+      actor: { login: "bob", externalId: "1002" },
+    };
+    expect(isIntegrationEvent({ kind: "issue_labeled", labeled })).toBe(true);
+    expect(
+      isIntegrationEvent({
+        kind: "issue_labeled",
+        labeled: { ...labeled, issue: { ...labeled.issue, number: 0 } },
+      }),
+    ).toBe(false);
+    expect(
+      isIntegrationEvent({
+        kind: "issue_labeled",
+        labeled: { ...labeled, issue: { ...labeled.issue, labels: [1] } },
+      }),
+    ).toBe(false);
+    expect(
+      isIntegrationEvent({
+        kind: "issue_labeled",
+        labeled: { ...labeled, label: "" },
+      }),
+    ).toBe(false);
+    expect(
+      isIntegrationEvent({
+        kind: "issue_labeled",
+        labeled: { ...labeled, raw: {} },
+      }),
+    ).toBe(false);
+
     expect(
       isIntegrationEvent({
         kind: "pull_request_closed",

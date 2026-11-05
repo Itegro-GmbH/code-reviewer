@@ -6,12 +6,19 @@
 import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import { BRANCH_NAME, CLIENT_REQUEST_ID } from "../jobs/job-input.ts";
 import { REVIEW_SETTING_LIMITS } from "../review-settings/settings.ts";
+import { parseProfileRef } from "../workflows/resolver.ts";
+import {
+  validateResultSchema,
+  type ResultSchema,
+} from "../workflows/result-schema.ts";
 import { checkBranchName } from "./branch-name.ts";
 import type { ImplementerIssue } from "./errors.ts";
 
 /** The instruction the agent is given: at most this many characters (the same bound as the form's text area). */
 export const INSTRUCTION_MAX_LENGTH = 20_000;
-const ID_MAX_LENGTH = 128;
+export const ID_MAX_LENGTH = 128;
+/** A result schema of a task, as compact JSON: the bound of a body that holds a profile (`docs/profiles.md`). */
+export const RESULT_SCHEMA_MAX_CHARS = 128 * 1024;
 const MODEL_FIELD_MAX_LENGTH = 200;
 
 export type StartInput = {
@@ -19,11 +26,19 @@ export type StartInput = {
   baseBranch: string;
   branch: string;
   instruction: string;
-  model: ModelChoice;
-  /** The customer's limit for the turn in whole US cents; null when none was asked for. */
+  /** The model; null when a profile is named (#843): the profile's version brings the model and the cost limit. */
+  model: ModelChoice | null;
+  /** The customer's limit for the turn in whole US cents; null when none was asked for (or a profile brings it). */
   costLimitCents: number | null;
   /** The environment of the workspace to start the task with (#818); null for none: the standard. */
   environmentId: string | null;
+  /** The profile of the workspace to run the task with (#843): its name and a version, or null for the newest; null for none. */
+  profile: { name: string; version: number | null } | null;
+  /**
+   * The result schema of the task (#843): the agent gets a finish tool made from it. Null: the task has none of its own, and the
+   * default of its profile (if it has one) applies; a task with neither runs without a finish tool, as before.
+   */
+  result: ResultSchema | null;
   clientRequestId: string;
 };
 
@@ -36,14 +51,14 @@ const LONE_SURROGATE =
   /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
 
 /** Every control character, tab and line breaks included: an id or a model name is one line. */
-const CONTROL_OR_NEWLINE = /[\u0000-\u001f\u007f]/;
+export const CONTROL_OR_NEWLINE = /[\u0000-\u001f\u007f]/;
 
 function isText(value: unknown): value is string {
   return typeof value === "string" && value.trim() !== "";
 }
 
 /** The model choice if the value is exactly one of the two shapes of a turn's `model_choice`. */
-function readModel(value: unknown): ModelChoice | undefined {
+export function readModel(value: unknown): ModelChoice | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     return undefined;
   const record = value as Record<string, unknown>;
@@ -64,6 +79,19 @@ function readModel(value: unknown): ModelChoice | undefined {
       model: record.model as string,
     };
   return undefined;
+}
+
+/** The issue code the instruction has, or "ok": the one rule for the first turn and every follow-up. */
+export function readInstruction(
+  instruction: unknown,
+): "ok" | "required" | "invalid" | "too_long" {
+  if (instruction === undefined || instruction === null) return "required";
+  if (typeof instruction !== "string") return "invalid";
+  if (instruction.trim() === "") return "required";
+  if (instruction.length > INSTRUCTION_MAX_LENGTH) return "too_long";
+  if (CONTROL.test(instruction) || LONE_SURROGATE.test(instruction))
+    return "invalid";
+  return "ok";
 }
 
 export function validateStartInput(body: unknown): StartInputCheck {
@@ -110,22 +138,35 @@ export function validateStartInput(body: unknown): StartInputCheck {
   }
 
   const instruction = fields.instruction;
-  if (instruction === undefined || instruction === null)
-    refuse("instruction", "required");
-  else if (typeof instruction !== "string") refuse("instruction", "invalid");
-  else if (instruction.trim() === "") refuse("instruction", "required");
-  else if (instruction.length > INSTRUCTION_MAX_LENGTH)
-    refuse("instruction", "too_long");
-  else if (CONTROL.test(instruction) || LONE_SURROGATE.test(instruction))
-    refuse("instruction", "invalid");
+  const checkedInstruction = readInstruction(instruction);
+  if (checkedInstruction !== "ok") refuse("instruction", checkedInstruction);
+
+  // A profile (#843) brings the model and the cost limit of its version: the body then names neither.
+  let profile: StartInput["profile"] = null;
+  const profileRef = fields.profile ?? null;
+  if (profileRef !== null) {
+    if (typeof profileRef !== "string") refuse("profile", "invalid");
+    else if (profileRef === "") refuse("profile", "required");
+    else {
+      const parsedRef = parseProfileRef(profileRef);
+      if (parsedRef === undefined) refuse("profile", "invalid");
+      else
+        profile = { name: parsedRef.name, version: parsedRef.version ?? null };
+    }
+  }
 
   const model = readModel(fields.model);
-  if (fields.model === undefined || fields.model === null)
+  if (profileRef !== null) {
+    if (fields.model !== undefined && fields.model !== null)
+      refuse("model", "not_with_profile");
+  } else if (fields.model === undefined || fields.model === null)
     refuse("model", "required");
   else if (model === undefined) refuse("model", "invalid");
 
   const cost = fields.costLimitCents ?? null;
-  if (
+  if (profileRef !== null && cost !== null)
+    refuse("costLimitCents", "not_with_profile");
+  else if (
     cost !== null &&
     (typeof cost !== "number" ||
       !Number.isSafeInteger(cost) ||
@@ -145,6 +186,25 @@ export function validateStartInput(body: unknown): StartInputCheck {
       refuse("environmentId", "invalid");
   }
 
+  // The result schema (#843) is checked by the validator of the format; the task keeps the schema it returns.
+  let result: ResultSchema | null = null;
+  const resultRaw = fields.result ?? null;
+  if (resultRaw !== null) {
+    const checked = validateResultSchema(resultRaw);
+    const problem = checked.issues[0];
+    if (problem !== undefined || checked.schema === undefined)
+      issues.push({
+        field: "result",
+        code: "invalid",
+        ...(problem === undefined
+          ? {}
+          : { detail: `${problem.path || "/"} ${problem.code}` }),
+      });
+    else if (JSON.stringify(checked.schema).length > RESULT_SCHEMA_MAX_CHARS)
+      refuse("result", "too_long");
+    else result = checked.schema;
+  }
+
   const requestId = fields.clientRequestId;
   if (requestId === undefined || requestId === "")
     refuse("clientRequestId", "required");
@@ -162,9 +222,11 @@ export function validateStartInput(body: unknown): StartInputCheck {
       baseBranch: baseBranch as string,
       branch: branch as string,
       instruction: instruction as string,
-      model: model as ModelChoice,
+      model: profileRef === null ? (model as ModelChoice) : null,
       costLimitCents: cost as number | null,
       environmentId: environmentId as string | null,
+      profile,
+      result,
       clientRequestId: requestId as string,
     },
   };

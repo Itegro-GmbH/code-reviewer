@@ -1,0 +1,27 @@
+{
+  "type": "object",
+  "required": ["findings"],
+  "properties": {
+    "findings": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "required": ["type", "name", "description"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["bug", "risk", "nit"]
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "description": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

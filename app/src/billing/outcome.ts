@@ -42,6 +42,9 @@ export const AI_COST_FAILURE_CODES = [
   // #754: the Implementer, after its agent ran: it gave up, the repository refused the branch, the work left the branch or the
   // repository could not be committed or verified afterwards, the turn ran out of time. The model was used in each.
   "agent_gave_up",
+  // #843: the agent ended without a result that fits the schema of its task, after one reminder. The model was used, so it is
+  // charged like `agent_gave_up`: the work and its cost are real, whatever the agent left out.
+  "no_result",
   "push_rejected",
   "branch_violation",
   "time_limit_reached",
@@ -90,6 +93,10 @@ export const ERROR_CODE_CLASSES = {
   pull_request_draft: "charged",
   review_kind_changed: "charged",
   no_capable_runner: "free",
+  no_runner_available: "free",
+  runner_needs_own_key: "free",
+  // A member revoked the runner during the turn: the turn ends at once, like a lost lease (#854), free like it.
+  runner_revoked: "free",
   dynamic_review_disabled: "free",
   command_removed: "charged",
   dispatch_unavailable: "free",
@@ -204,6 +211,7 @@ export const ERROR_CODE_CLASSES = {
   // or capability exists, so nothing was used: free, like the other ends before the agent.
   environment_setup_failed: "free",
   agent_gave_up: AI_COST_FAILURE_CLASS,
+  no_result: AI_COST_FAILURE_CLASS,
   push_rejected: AI_COST_FAILURE_CLASS,
   branch_violation: AI_COST_FAILURE_CLASS,
   time_limit_reached: AI_COST_FAILURE_CLASS,

@@ -56,6 +56,7 @@ from code_reviewer_runner.job import JobError
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 from code_reviewer_runner.result import ErrorCode
 
+from .agent import CommandOutcome
 from .docker_api import AttachedStreams, DockerApi, DockerError
 from .exec_run import exec_document, run_exec
 from .host_rules import (
@@ -67,12 +68,13 @@ from .host_rules import (
 )
 from .network_rule import MODE_OFF, OFF, NetworkRule
 from .reader import REPO_SUBPATH, work_volume_of
+from .result_channel import AGENT_RESULT_DIRECTORY, result_mount
+from .role_labels import role_labels
 from .vm_memory import MEMINFO, REASON_VM_MEMORY, MemoryGuard
 
 _log = logging.getLogger(__name__)
 
 AGENT_CONTAINER_NAME: Final = "code-reviewer-agent"
-AGENT_ROLE_LABEL: Final = "code-reviewer.role"
 AGENT_IMAGE_REFERENCE: Final = "code-reviewer-agent:golden"
 AGENT_RUNTIME: Final = "sysbox-runc"
 AGENT_REPO: Final = "/work/repo"
@@ -181,10 +183,25 @@ def agent_document(
     runtime: str = AGENT_RUNTIME,
     entrypoint: Sequence[str] | None = None,
     rule: NetworkRule = OFF,
+    result: bool = False,
+    nano_cpus: int = 0,
 ) -> dict[str, Any]:
     """The agent's container. Constants, the image id and the volume name the daemon gave, and the
     memory limit the Dispatcher computed for the size of the VM. The runtime is Sysbox and the
-    entrypoint the image's init; only the test lane without Sysbox names others (`AgentSeams`)."""
+    entrypoint the image's init; only the test lane without Sysbox names others (`AgentSeams`).
+    A turn with a result schema (#843) has the result directory beside the repository."""
+    mounts: list[dict[str, Any]] = [
+        {
+            "Type": "volume",
+            "Source": work_volume,
+            "Target": AGENT_REPO,
+            "ReadOnly": False,
+            "VolumeOptions": {"Subpath": REPO_SUBPATH, "NoCopy": True},
+        }
+    ]
+    if result:
+        mounts.append(result_mount(work_volume, AGENT_RESULT_DIRECTORY, read_only=False))
+    limits: dict[str, Any] = {"NanoCpus": nano_cpus} if nano_cpus > 0 else {}
     return {
         "Image": image,
         "Entrypoint": list(AGENT_ENTRYPOINT if entrypoint is None else entrypoint),
@@ -193,7 +210,7 @@ def agent_document(
         "Env": [f"{name}={value}" for name, value in proxy_environment(rule).items()],
         "Hostname": "agent",
         "WorkingDir": AGENT_REPO,
-        "Labels": {AGENT_ROLE_LABEL: "agent"},
+        "Labels": role_labels("agent"),
         "NetworkingConfig": {
             "EndpointsConfig": {
                 MODEL_NETWORK_NAME: {"IPAMConfig": {"IPv4Address": MODEL_AGENT_ADDRESS}}
@@ -205,19 +222,12 @@ def agent_document(
             "Privileged": False,
             "Memory": memory_bytes,
             "MemorySwap": memory_bytes,
+            **limits,
             "PidsLimit": AGENT_PIDS_LIMIT,
             "OomScoreAdj": AGENT_OOM_SCORE_ADJ,
             "RestartPolicy": {"Name": "no"},
             "PublishAllPorts": False,
-            "Mounts": [
-                {
-                    "Type": "volume",
-                    "Source": work_volume,
-                    "Target": AGENT_REPO,
-                    "ReadOnly": False,
-                    "VolumeOptions": {"Subpath": REPO_SUBPATH, "NoCopy": True},
-                }
-            ],
+            "Mounts": mounts,
         },
     }
 
@@ -348,6 +358,8 @@ class AgentSeams:
     # has to write `READY_FILE` itself. Production never sets either.
     runtime: str = AGENT_RUNTIME
     entrypoint: Sequence[str] | None = None
+    # A customer's runner (#854) limits the CPUs of the container (`NanoCpus`); 0: no limit.
+    nano_cpus: int = 0
     # The file the VM's available memory is read from (`MemoryGuard`).
     meminfo: str = MEMINFO
 
@@ -368,10 +380,13 @@ class AgentContainer:
         memory_mb: int,
         seams: AgentSeams = AgentSeams(),  # noqa: B008
         rule: NetworkRule = OFF,
+        result: bool = False,
     ) -> None:
         self._api = seams.api()
         self._seams = seams
         self._rule = rule
+        # #843: the result directory is mounted too (a turn with a result schema).
+        self._result = result
         self._memory_bytes = memory_mb * 1024 * 1024
         self._container: str | None = None
         self._tunnel: Tunnel | None = None
@@ -424,6 +439,8 @@ class AgentContainer:
                     runtime=self._seams.runtime,
                     entrypoint=self._seams.entrypoint,
                     rule=self._rule,
+                    result=self._result,
+                    nano_cpus=self._seams.nano_cpus,
                 ),
                 AGENT_CONTAINER_NAME,
             )
@@ -489,7 +506,8 @@ class AgentContainer:
         for mount in cast("list[Any]", mounts) if isinstance(mounts, list) else []:
             given = as_object(mount)
             destinations.add(None if given is None else given.get("Destination"))
-        if destinations - {AGENT_REPO}:
+        allowed = {AGENT_REPO, AGENT_RESULT_DIRECTORY} if self._result else {AGENT_REPO}
+        if destinations - allowed:
             problems.append("mounts")
         if problems:
             self._kill()
@@ -572,6 +590,27 @@ class AgentContainer:
             if done.returncode != 0 or done.unanswered:
                 raise unavailable("a file of the engine's configuration could not be written")
 
+    def run_command(
+        self, argv: list[str], environment: Mapping[str, str], timeout: float
+    ) -> CommandOutcome:
+        """Run a command in the agent's repository with `environment` and wait for it (the import
+        of a stored conversation, #840: the engine's own `import`, which reads the repository it is
+        run in). The command is a constant of the runner; what it prints is read (clipped) and the
+        answer is never raised on."""
+        container = self._container
+        if container is None:
+            return CommandOutcome(255, "", unanswered=True)
+        done = run_exec(
+            self._api,
+            container,
+            argv,
+            env=environment,
+            workdir=AGENT_REPO,
+            timeout=timeout,
+            name="a command of the engine",
+        )
+        return CommandOutcome(done.returncode, done.stdout, unanswered=done.unanswered)
+
     def start_engine(self, argv: list[str], environment: Mapping[str, str]) -> str:
         """Start the engine as a detached exec and open the tunnel to its port. Returns the address
         Control reaches it at."""
@@ -631,6 +670,10 @@ class AgentContainer:
                 _log.warning("the agent's container could not be killed (%s)", error.status)
 
     def _remove(self) -> None:
+        # Every failed start ends here: a guard left running would read /proc/meminfo ten times a
+        # second for the VM's life and call a kill that has no container to find.
+        if self._guard is not None:
+            self._guard.close()
         container, self._container = self._container, None
         if container is None:
             return

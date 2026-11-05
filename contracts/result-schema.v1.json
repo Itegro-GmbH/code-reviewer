@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Itegro-GmbH/code-reviewer/contracts/result-schema.v1.json",
+  "title": "Code Reviewer result schema, version 1",
+  "description": "The small subset of JSON Schema in which an agent step of a workflow says what its result looks like (#833, agent workflows, app/src/workflows/result-schema.ts). A result is an object whose fields are strings (optionally one of a list of names), numbers, whole numbers (`integer`), booleans, lists and objects. Required fields and length caps are the only constraints; every object is closed. The agent's finish tool (a later milestone) is made from the same schema and checks what the agent hands in against it. Limits the schema cannot state (levels of nesting: 4, fields in all: 100, a `required` name that is not a property) are the validator's, and are listed in docs/workflows.md. A string without `maxLength` is held to 10000 characters, a list without `maxItems` to 100 entries.",
+  "version": 1,
+  "$defs": {
+    "ResultSchema": {
+      "description": "The root of a result schema: always an object.",
+      "$ref": "#/$defs/ObjectSchema"
+    },
+    "SchemaNode": {
+      "description": "The schema of one field.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/StringSchema"
+        },
+        {
+          "$ref": "#/$defs/NumberSchema"
+        },
+        {
+          "$ref": "#/$defs/IntegerSchema"
+        },
+        {
+          "$ref": "#/$defs/BooleanSchema"
+        },
+        {
+          "$ref": "#/$defs/ArraySchema"
+        },
+        {
+          "$ref": "#/$defs/ObjectSchema"
+        }
+      ]
+    },
+    "Description": {
+      "type": "string",
+      "maxLength": 500
+    },
+    "StringSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "const": "string"
+        },
+        "description": {
+          "$ref": "#/$defs/Description"
+        },
+        "maxLength": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "enum": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        }
+      }
+    },
+    "NumberSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "const": "number"
+        },
+        "description": {
+          "$ref": "#/$defs/Description"
+        }
+      }
+    },
+    "IntegerSchema": {
+      "description": "A whole number. What names something (an issue) is one: the validator then knows it is whole, and a result is held to a number a computer holds exactly (an integer within the safe range).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "const": "integer"
+        },
+        "description": {
+          "$ref": "#/$defs/Description"
+        }
+      }
+    },
+    "BooleanSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "const": "boolean"
+        },
+        "description": {
+          "$ref": "#/$defs/Description"
+        }
+      }
+    },
+    "ArraySchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "items"],
+      "properties": {
+        "type": {
+          "const": "array"
+        },
+        "description": {
+          "$ref": "#/$defs/Description"
+        },
+        "items": {
+          "$ref": "#/$defs/SchemaNode"
+        },
+        "maxItems": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        }
+      }
+    },
+    "ObjectSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "properties"],
+      "properties": {
+        "type": {
+          "const": "object"
+        },
+        "description": {
+          "$ref": "#/$defs/Description"
+        },
+        "properties": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 50,
+          "propertyNames": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/SchemaNode"
+          }
+        },
+        "required": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": {
+          "const": false
+        }
+      }
+    }
+  }
+}

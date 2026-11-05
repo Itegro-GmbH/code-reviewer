@@ -62,6 +62,8 @@ function task(
     branchUrl: "https://github.com/acme/widgets/tree/implementer/abc123",
     baseBranch: "main",
     instruction: { preview: "Add a health endpoint.", full: null },
+    runner: null,
+    waitingForRunner: null,
     summary: "Added a health endpoint.",
     environment: null,
     commits: {
@@ -98,6 +100,9 @@ function task(
       url: `https://github.com/acme/widgets/commit/${SHA}`,
     },
     pushedNote: null,
+    result: null,
+    resultExpected: false,
+    resume: null,
     reported: true,
     ...overrides,
   };
@@ -510,6 +515,89 @@ describe("the detail page of an implementer run", () => {
     expect(container.textContent).toContain(hostile);
   });
 
+  describe("the result the agent handed in (#843)", () => {
+    // #843-T95
+    it("shows nothing for a task that had no result schema", () => {
+      const { container } = renderDetail(detail());
+
+      expect(
+        container.querySelector('[data-slot="run-agent-result"]'),
+      ).toBeNull();
+      expect(
+        container.querySelector('[data-slot="run-agent-result-none"]'),
+      ).toBeNull();
+    });
+
+    // #843-T95
+    it("shows the result as plain JSON text in a block that is closed", () => {
+      const { container } = renderDetail(
+        detail({
+          implementer: task({
+            resultExpected: true,
+            result: {
+              verdict: "done",
+              note: "<b>bold</b>",
+              list: [1, true, null],
+            },
+          }),
+        }),
+      );
+
+      const block = container.querySelector<HTMLDetailsElement>(
+        '[data-slot="run-agent-result"]',
+      );
+      expect(block).not.toBeNull();
+      expect(block?.open).toBe(false);
+      const text = block?.querySelector("pre")?.textContent ?? "";
+      expect(JSON.parse(text)).toEqual({
+        verdict: "done",
+        note: "<b>bold</b>",
+        list: [1, true, null],
+      });
+      expect(block?.querySelector("b")).toBeNull();
+    });
+
+    // #843-T95
+    it("renders hostile text in the result as text", () => {
+      const hostile = '<img src=x onerror="alert(1)">';
+      const { container } = renderDetail(
+        detail({
+          implementer: task({
+            resultExpected: true,
+            result: { note: hostile },
+          }),
+        }),
+      );
+
+      expect(container.querySelector("img")).toBeNull();
+      expect(container.textContent).toContain("alert(1)");
+    });
+
+    // #843-T95
+    it("says that a settled task with a schema handed in no result, and that a running one has not yet", () => {
+      const settled = renderDetail(
+        detail({ implementer: task({ resultExpected: true, result: null }) }),
+      );
+      expect(
+        settled.container.querySelector('[data-slot="run-agent-result-none"]')
+          ?.textContent,
+      ).toBe("The agent handed in no result.");
+      settled.unmount();
+
+      const running = renderDetail(
+        detail({
+          status: "running",
+          finishedAt: null,
+          implementer: task({ resultExpected: true, result: null }),
+        }),
+      );
+      expect(
+        running.container.querySelector('[data-slot="run-agent-result-none"]')
+          ?.textContent,
+      ).toBe("The agent has not handed in a result yet.");
+    });
+  });
+
   // #758-T02
   it("shows a task that has no result yet without failing", () => {
     const { container } = renderDetail(
@@ -851,5 +939,53 @@ describe("the network on the detail page of an implementer run (#745)", () => {
     expect(
       screen.getByText("The runner reported no connections."),
     ).toBeTruthy();
+  });
+});
+
+describe("how a follow-up turn got its conversation on the detail page (#841)", () => {
+  // #841-R04
+  it("says the conversation was imported, with the mode word", () => {
+    renderDetail(
+      detail({
+        implementer: task({
+          resume: {
+            mode: "imported",
+            reason: null,
+            text: "Continued with the whole conversation of the earlier turns.",
+          },
+        }),
+      }),
+    );
+
+    const line = document.querySelector('[data-slot="run-resume"]');
+    expect(line?.textContent).toContain("imported");
+    expect(line?.textContent).toContain("whole conversation");
+    expect(line?.textContent).not.toContain("Reason:");
+  });
+
+  // #841-R05
+  it("says a summary was used, with the reason word", () => {
+    renderDetail(
+      detail({
+        implementer: task({
+          resume: {
+            mode: "summary_only",
+            reason: "import_failed",
+            text: "Continued from a summary of the earlier turns, not their conversation. The agent engine could not take the stored conversation in.",
+          },
+        }),
+      }),
+    );
+
+    const line = document.querySelector('[data-slot="run-resume"]');
+    expect(line?.textContent).toContain("summary_only");
+    expect(line?.textContent).toContain("Reason: import_failed");
+  });
+
+  // #841-R06
+  it("shows nothing for a first turn", () => {
+    renderDetail(detail());
+
+    expect(document.querySelector('[data-slot="run-resume"]')).toBeNull();
   });
 });

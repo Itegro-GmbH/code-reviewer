@@ -25,7 +25,7 @@ import subprocess
 import tempfile
 import threading
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Protocol
 
@@ -35,6 +35,7 @@ from code_reviewer_runner.lease_check import (
     LeaseState,
 )
 from code_reviewer_runner.process_group import end_group, has_exited
+from code_reviewer_runner.snapshot_wire import SNAPSHOT_FD_VARIABLE
 from code_reviewer_runner.step_wire import MAX_LINE_BYTES, STEPS_FD_VARIABLE
 from code_reviewer_runner.supersede import SUPERSEDE_SIGNAL
 
@@ -49,6 +50,11 @@ _DRAIN_SECONDS = 2.0
 # What serves the steps channel: it reads the process's lines from the reader and answers on the
 # writer (`step_sender.StepSender.serve`).
 StepsHandler = Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]]
+# What serves the snapshot channel (#839): the same shape (`snapshot_sender.SnapshotSender.serve`).
+SnapshotHandler = StepsHandler
+# After the process has ended, how long its outcome waits for the snapshot upload to end: the upload
+# gives itself up after `snapshot_sender.TOTAL_SECONDS` (40 s), plus the read of the bytes.
+SNAPSHOT_SETTLE_SECONDS = 50.0
 # How often the leader is looked at (without reaping it) while the job runs.
 _EXIT_POLL_SECONDS = 0.02
 
@@ -92,6 +98,15 @@ class ProcessSpec:
     # descriptor (`RUNNER_STEPS_FD`) to send the step records of its turn over; it holds no
     # credential for the app. None: the process gets no such descriptor and records nothing.
     steps: StepsHandler | None = None
+    # #839: the host's end of the snapshot channel, the same way (`RUNNER_SNAPSHOT_FD`): the process
+    # hands over the engine's session at the end of the turn and the host uploads it. The outcome of
+    # the process is not known to the host before the upload has ended (or `snapshot_settle_seconds`
+    # have passed), so the snapshot is stored before the result is delivered.
+    snapshot: SnapshotHandler | None = None
+    snapshot_settle_seconds: float = SNAPSHOT_SETTLE_SECONDS
+    # #840: files the process starts with, in the directory it starts in (name -> bytes, owner-only,
+    # the process's own): the stored session of a follow-up turn the host downloaded for it.
+    files: Mapping[str, bytes] = field(default_factory=dict[str, bytes])
     # How much of the end of its stdout is kept. The result line of an Implementer turn carries
     # its commits and files and can be megabytes; every other job prints a line of a few KB.
     stdout_keep_bytes: int = STDOUT_KEEP_BYTES
@@ -202,6 +217,24 @@ class _StepsChannel:
             self.writer.close()
 
 
+@dataclass(frozen=True)
+class _SnapshotChannel:
+    """The host's end of the descriptor pair a process hands its session snapshot over (#839)."""
+
+    reader: asyncio.StreamReader
+    writer: asyncio.StreamWriter
+    handler: SnapshotHandler
+
+    async def serve(self) -> None:
+        # Best effort: a fault of the snapshot is never the job's.
+        with contextlib.suppress(Exception):
+            await self.handler(self.reader, self.writer)
+
+    def close(self) -> None:
+        with contextlib.suppress(Exception):
+            self.writer.close()
+
+
 class _SubprocessJob:
     def __init__(
         self,
@@ -213,11 +246,15 @@ class _SubprocessJob:
         lease: _LeaseChannel | None = None,
         stdout_keep_bytes: int = STDOUT_KEEP_BYTES,
         steps: _StepsChannel | None = None,
+        snapshot: _SnapshotChannel | None = None,
+        snapshot_settle_seconds: float = SNAPSHOT_SETTLE_SECONDS,
     ) -> None:
         self._process = process
         self._pipes = pipes
         self._lease = lease
         self._steps = steps
+        self._snapshot = snapshot
+        self._snapshot_settle_seconds = snapshot_settle_seconds
         self._workdir = workdir
         self._terminate_grace = terminate_grace
         # Whoever ends the group holds it, so one cannot signal after the other has reaped.
@@ -231,6 +268,9 @@ class _SubprocessJob:
         ]
         self._lease_server = asyncio.create_task(lease.serve()) if lease is not None else None
         self._steps_server = asyncio.create_task(steps.serve()) if steps is not None else None
+        self._snapshot_server = (
+            asyncio.create_task(snapshot.serve()) if snapshot is not None else None
+        )
         self._collected = asyncio.create_task(self._collect())
 
     @property
@@ -274,6 +314,14 @@ class _SubprocessJob:
                 self._lease_server.cancel()
                 await asyncio.gather(self._lease_server, return_exceptions=True)
                 self._lease.close()
+            if self._snapshot_server is not None and self._snapshot is not None:
+                # The upload goes on after the process has ended (the descriptor is at its end
+                # of file by now): the outcome waits for it, so the snapshot is stored before the
+                # result is delivered, and for no longer than it may.
+                await asyncio.wait([self._snapshot_server], timeout=self._snapshot_settle_seconds)
+                self._snapshot_server.cancel()
+                await asyncio.gather(self._snapshot_server, return_exceptions=True)
+                self._snapshot.close()
             if self._steps_server is not None and self._steps is not None:
                 self._steps_server.cancel()
                 await asyncio.gather(self._steps_server, return_exceptions=True)
@@ -329,9 +377,17 @@ class SubprocessLauncher:
         # The two ends of the steps channel (#745), only for a process whose host sends steps.
         step_ends = socket.socketpair() if spec.steps is not None else None
         steps: _StepsChannel | None = None
+        # The two ends of the snapshot channel (#839), only for a process whose host uploads it.
+        snapshot_ends = socket.socketpair() if spec.snapshot is not None else None
+        snapshot: _SnapshotChannel | None = None
         try:
             if uid is not None and gid is not None:
                 os.chown(workdir, uid, gid)
+            for name, content in spec.files.items():
+                # Never the job's failure: a file that cannot be written (a full disk) is a file the
+                # process does not find, and it says so in its own words (`resume_session.py`).
+                with contextlib.suppress(OSError):
+                    _put_file(workdir / name, content, uid, gid)
             pass_fds: tuple[int, ...] = ()
             if ends is not None:
                 pass_fds = (ends[1].fileno(),)
@@ -339,6 +395,9 @@ class SubprocessLauncher:
             if step_ends is not None:
                 pass_fds = (*pass_fds, step_ends[1].fileno())
                 environment[STEPS_FD_VARIABLE] = str(step_ends[1].fileno())
+            if snapshot_ends is not None:
+                pass_fds = (*pass_fds, snapshot_ends[1].fileno())
+                environment[SNAPSHOT_FD_VARIABLE] = str(snapshot_ends[1].fileno())
             # `SIGUSR1` (a run that was superseded) ends a process that has no handler yet. It is
             # blocked in this thread while the process is made: the mask survives the exec, a
             # signal that comes early stays pending, and the process unblocks it once its handler
@@ -371,6 +430,12 @@ class SubprocessLauncher:
                     sock=step_ends[0], limit=2 * MAX_LINE_BYTES
                 )
                 steps = _StepsChannel(step_reader, step_writer, spec.steps)
+            if snapshot_ends is not None and spec.snapshot is not None:
+                snapshot_ends[1].close()  # the process holds its end now
+                snapshot_reader, snapshot_writer = await asyncio.open_connection(
+                    sock=snapshot_ends[0]
+                )
+                snapshot = _SnapshotChannel(snapshot_reader, snapshot_writer, spec.snapshot)
         except BaseException:
             try:
                 if process is not None:
@@ -378,7 +443,7 @@ class SubprocessLauncher:
             finally:
                 # Also when the start is cancelled a second time while the group is being ended.
                 shutil.rmtree(workdir, ignore_errors=True)
-                for end in (*(ends or ()), *(step_ends or ())):
+                for end in (*(ends or ()), *(step_ends or ()), *(snapshot_ends or ())):
                     end.close()
             raise
         return _SubprocessJob(
@@ -390,7 +455,19 @@ class SubprocessLauncher:
             lease,
             stdout_keep_bytes=spec.stdout_keep_bytes,
             steps=steps,
+            snapshot=snapshot,
+            snapshot_settle_seconds=spec.snapshot_settle_seconds,
         )
+
+
+def _put_file(path: Path, content: bytes, uid: int | None, gid: int | None) -> None:
+    """One file for the process, owner-only: made new (never through a link), owned by the user the
+    process drops to."""
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(content)
+    if uid is not None and gid is not None:
+        os.chown(path, uid, gid)
 
 
 async def _connect_pipes(process: subprocess.Popen[bytes]) -> _Pipes:

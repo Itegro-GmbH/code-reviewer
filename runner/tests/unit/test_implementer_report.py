@@ -365,6 +365,17 @@ def test_the_counts_of_the_branches_that_were_left_out_are_optional_and_checked(
         assert valid_block(block(branchesDropped=bad)) is None, bad
 
 
+# #837
+def test_the_branch_that_was_checked_out_is_a_name_or_null_and_optional() -> None:
+    named = block(checkedOut="work/b")
+
+    assert valid_block(named) == named
+    assert valid_block(block(checkedOut=None)) is not None
+    assert valid_block(block()) is not None  # a runner of the release before
+    for bad in ("", "x" * 256, 3, True, ["work/b"], {"name": "work/b"}):
+        assert valid_block(block(checkedOut=bad)) is None, bad
+
+
 def test_a_report_with_no_branch_at_all_is_valid_for_a_turn_that_pushed_nothing() -> None:
     assert valid_block(block(commits=[], branches=[], filesChanged=[])) is not None
 
@@ -377,3 +388,41 @@ def test_the_branches_stay_in_a_report_that_is_fitted_to_the_body() -> None:
 
     assert fitted["branches"] == report["branches"]
     assert escaped_size(fitted) <= BODY_BUDGET_BYTES
+
+
+# #843-T66
+def test_the_result_of_the_agent_is_an_object_the_app_takes_as_data() -> None:
+    result = {"findings": [{"type": "bug", "name": WIDE, "n": 1, "ok": True, "x": None}]}
+
+    assert valid_block(block(agentResult=result)) is not None
+    assert valid_block(block(agentResult={})) is not None
+    assert "agentResult" not in (valid_block(block()) or {})
+    for bad in ([], "text", 3, None, [{"a": 1}]):
+        assert valid_block(block(agentResult=bad)) is None, bad
+
+
+# #843-T66
+def test_the_result_of_the_agent_is_held_to_the_bounds_of_a_result_again() -> None:
+    big = {"text": "x" * (256 * 1024)}
+    deep: Any = {}
+    for _ in range(9):
+        deep = {"a": deep}
+    wide = {"list": [1] * 25_000}
+
+    assert valid_block(block(agentResult=big)) is None
+    assert valid_block(block(agentResult={"text": "x" * (256 * 1024 - 20)})) is not None
+    assert valid_block(block(agentResult=deep)) is None
+    assert valid_block(block(agentResult=wide)) is None
+    assert valid_block(block(agentResult={"n": float("nan")})) is None
+    assert valid_block(block(agentResult={"n": float("inf")})) is None
+
+
+# #843-T66
+def test_a_result_with_text_outside_the_basic_plane_still_fits_the_body() -> None:
+    result = {"text": WIDE * 20_000}
+    other = escaped_size({"ok": True})
+
+    fitted = fit_block(block(agentResult=result), other)
+
+    assert fitted["agentResult"] == result, "the result is never cut"
+    assert valid_block(fitted) is not None

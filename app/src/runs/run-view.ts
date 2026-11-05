@@ -162,6 +162,15 @@ export type ImplementerBranchView = {
   isTaskBranch: boolean;
 };
 
+/** #841: the resume mode of a follow-up turn as the page shows it. */
+export type ImplementerResumeView = {
+  mode: "imported" | "summary_only";
+  /** The runner's word for why the conversation was not imported; null for `imported`. */
+  reason: string | null;
+  /** One sentence for the page. */
+  text: string;
+};
+
 /** What the detail page shows of a task besides the facts every run has. Built only from the fields listed here. */
 export type ImplementerDetailView = ImplementerRowView & {
   /** The branch the new one started from; null when the turn of the job cannot be read. Untrusted text. */
@@ -181,6 +190,23 @@ export type ImplementerDetailView = ImplementerRowView & {
   };
   /** The environment the task started with; null for a task without one (the standard). */
   environment: ImplementerEnvironmentView | null;
+  /** #854: the runner environment the task started with (name and labels, untrusted text); null for any other task. */
+  runner: { name: string; labels: string[] } | null;
+  /** #854: "Waiting for a runner with labels gpu, linux" while a task of a runner environment is queued; null otherwise. */
+  waitingForRunner: string | null;
+  /**
+   * The result the agent handed in through the finish tool (#843), as the app kept it (the runner checked it against the task's
+   * schema; the app held it to the bounds, it did not check the schema again): data from the agent, each text in it cleaned and stripped of known secrets, and nothing else changed. Null when there is none.
+   */
+  result: Record<string, unknown> | null;
+  /** The task had a result schema (the agent was given a finish tool), so a settled task without `result` ended without one. */
+  resultExpected: boolean;
+  /**
+   * How a follow-up turn got its earlier conversation (#841, from `implementer.resume` of the result): `imported` is the whole
+   * conversation, `summary_only` a fresh session given a summary, with the stable `reason` word and a sentence for it. Null for a first
+   * turn, a turn that ended before the engine started, and a report without the block.
+   */
+  resume: ImplementerResumeView | null;
   /** The last commit on the branch after the turn, when the turn pushed. */
   head: { shortSha: string; url: string | null } | null;
   /** For a task that did not succeed but pushed work: "N commits were pushed to <branch>."; null otherwise. */
@@ -197,12 +223,21 @@ export type ImplementerRowSource = {
   branch: string;
   /** The url of the repository as the repositories table holds it. */
   repositoryUrl: string;
+  /**
+   * Whether the profile the turn ran with may push (#843); absent for a turn without a profile. A turn that may not push never
+   * pushed its branch, so the page does not link to it.
+   */
+  canPush?: boolean;
 };
 
 /** And for the detail. */
 export type ImplementerDetailSource = ImplementerRowSource & {
   baseBranch: string;
   instruction: string;
+  /** #843: whether the turn had a result schema, and the result the agent handed in once it was checked against it. */
+  result?: { expected: boolean; value: Record<string, unknown> | null };
+  /** The runner environment the turn copied (#854): the task waits for a runner that has these labels. Absent or null for any other task. */
+  runner?: { name: string; labels: string[] } | null;
   /** The environment the turn copied when it started (#818); absent or null for a task without one. */
   environment?: {
     name: string;
@@ -584,7 +619,10 @@ function implementerRowView(
   if (source === null) return { branch: null, branchUrl: null };
   return {
     branch: display(cleanTaskLine(head(source.branch, 1000))),
-    branchUrl: githubBranchUrl(source.repositoryUrl, source.branch),
+    branchUrl:
+      source.canPush === false
+        ? null
+        : githubBranchUrl(source.repositoryUrl, source.branch),
   };
 }
 
@@ -745,6 +783,57 @@ function plural(count: number, one: string, many: string): string {
  * log, stripped of known secrets, cut to the limits of the contract and rendered as text by the page; a link is made only by
  * `githubBranchUrl` and `githubCommitUrl`.
  */
+/** `value` with `clean` applied to every text in it, keys included: a result is data from the agent and is shown as it is otherwise. */
+function cleanedValue(
+  value: unknown,
+  clean: (text: string) => string,
+): unknown {
+  if (typeof value === "string") return clean(value);
+  if (Array.isArray(value))
+    return value.map((item) => cleanedValue(item, clean));
+  if (isRecord(value))
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        clean(key),
+        cleanedValue(item, clean),
+      ]),
+    );
+  return value;
+}
+
+const RESUME_REASON_TEXT: Record<string, string> = {
+  no_snapshot: "No stored conversation was available.",
+  download_failed: "The stored conversation could not be fetched.",
+  snapshot_unreadable: "The stored conversation could not be read.",
+  import_failed: "The agent engine could not take the stored conversation in.",
+  version_changed:
+    "The agent engine changed since the conversation was stored, and could not read it.",
+};
+
+/** `implementer.resume` of a stored result (#841): only the two modes and the five reason words are shown; anything else reads as none. */
+function resumeViewOf(result: JsonValue | null): ImplementerResumeView | null {
+  if (!isRecord(result) || !isRecord(result.implementer)) return null;
+  const block = result.implementer.resume;
+  if (!isRecord(block)) return null;
+  if (block.mode === "imported")
+    return {
+      mode: "imported",
+      reason: null,
+      text: "Continued with the whole conversation of the earlier turns.",
+    };
+  if (
+    block.mode === "summary_only" &&
+    typeof block.reason === "string" &&
+    Object.hasOwn(RESUME_REASON_TEXT, block.reason)
+  )
+    return {
+      mode: "summary_only",
+      reason: block.reason,
+      text: `Continued from a summary of the earlier turns, not their conversation. ${RESUME_REASON_TEXT[block.reason] ?? ""}`.trimEnd(),
+    };
+  return null;
+}
+
 function implementerDetailView(
   job: Job,
   source: ImplementerDetailSource | null,
@@ -834,6 +923,29 @@ function implementerDetailView(
     },
     summary: summary === "" ? null : summary,
     environment: environmentView(source, job.result, display),
+    runner:
+      source?.runner == null
+        ? null
+        : {
+            name: display(cleanTaskLine(head(source.runner.name, 400))),
+            labels: source.runner.labels.map((label) =>
+              display(cleanTaskLine(head(label, 160))),
+            ),
+          },
+    waitingForRunner:
+      job.status === "queued" && source?.runner != null
+        ? `Waiting for a runner with labels ${source.runner.labels
+            .map((label) => display(cleanTaskLine(head(label, 160))))
+            .join(", ")}`
+        : null,
+    resultExpected: source?.result?.expected ?? false,
+    resume: resumeViewOf(job.result),
+    result:
+      source?.result?.value == null
+        ? null
+        : (cleanedValue(source.result.value, (text) =>
+            display(cleanTaskText(text)),
+          ) as Record<string, unknown>),
     commits: {
       shown: commits.slice(0, MAX_LISTED_COMMITS),
       more: Math.max(0, commits.length - MAX_LISTED_COMMITS),

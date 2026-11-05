@@ -4,7 +4,9 @@
 container of the Implementer's profile, against the VM's own Docker and the real Sysbox.
 
     docker run <the flags of the Implementer's profile> --entrypoint /usr/bin/tini \\
-        --mount type=bind,source=<runner/scripts>,target=/driver,readonly <image> -- \\
+        --mount type=bind,source=<runner/scripts>,target=/driver,readonly \\
+        --mount type=bind,source=<contracts/environment-sizes.v1.json>,target=/contracts/environment-sizes.v1.json,readonly \\
+        <image> -- \\
         /opt/venv/bin/python /driver/sandbox_boundary_check.py [--skip-abuse]
 
 It starts what a turn starts (the model door with a made-up key, the agent's container, the readers
@@ -24,6 +26,13 @@ table. No value that is secret is printed: the key of the door is made up for th
 flood, a processor burn, the VM's disk filled). `--offline` leaves out the one call that reaches the
 real provider (a request with another Host header, which the provider answers with a 401 for the
 made-up key). The exit status is 0 when every check holds.
+
+The memory of the agent's container is `RUNNER_IMPLEMENTER_AGENT_MEMORY_MB` when it is set (the
+Launcher passes it). When it is not, the figure of `contracts/environment-sizes.v1.json`
+(`agentMemoryMb`) for the VM's vCPU count is used, so the check cannot test a stale size; the
+contract is not in the image, hence the second mount above (`/contracts`, found from `/driver`; from
+a checkout it is found at `<repository>/contracts`). With neither, or with a vCPU count the contract
+has no figure for, the script stops with a message that names the variable and the file (#827).
 """
 
 import contextlib
@@ -38,6 +47,8 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, cast
+
+from boundary_memory import BoundaryMemoryError, agent_memory_mb, contract_candidates, vcpu_count
 
 from code_reviewer_runner.dynamic_review.config import new_proxy_capability
 from code_reviewer_runner.dynamic_review.model_door_route import (
@@ -78,7 +89,10 @@ Json = dict[str, Any]
 SKIP_ABUSE = "--skip-abuse" in sys.argv[1:]
 DRIVER = Path(__file__).resolve().parent
 PROBE_TEXT = (DRIVER / "boundary_probe.py").read_text(encoding="utf-8")
-MEMORY_MB = int(os.environ.get("RUNNER_IMPLEMENTER_AGENT_MEMORY_MB", "2048"))
+try:
+    MEMORY_MB = agent_memory_mb(os.environ, vcpu_count(), contract_candidates(DRIVER))
+except BoundaryMemoryError as error:
+    sys.exit(f"sandbox_boundary_check: {error}")
 VENV_PYTHON = "/opt/venv/bin/python"
 # Made up for the run, built so that no scan of the source sees a key; the provider refuses it.
 KEY = "sk-ant-" + "api03-boundary-" + secrets.token_hex(16)

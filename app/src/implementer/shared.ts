@@ -6,6 +6,9 @@ import "server-only";
 import { notFound } from "next/navigation";
 import { getCapabilities } from "../capabilities/shared.ts";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
+import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
+import { createImplementerStepsRepository } from "../db/repositories/implementer-steps-repository.ts";
+import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import { createIntegrationsRepository } from "../db/repositories/integrations-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { getDatabase } from "../db/startup.ts";
@@ -13,6 +16,7 @@ import { integrationRegistry } from "../integrations/registry.ts";
 import { jobQueueFor } from "../jobs/shared.ts";
 import { keyModeForJob } from "../llm/resolve.ts";
 import { getWorkspaceLlm } from "../llm/shared.ts";
+import { llmProviderDescriptors } from "../llm/providers/index.ts";
 import { getCatalogService } from "../model-catalog/shared.ts";
 import { getImplementerCatalog } from "../native-providers/shared.ts";
 import { getNativeCost } from "../native-cost/shared.ts";
@@ -24,7 +28,8 @@ import {
   type ResolvedEntitlements,
 } from "../workspaces/entitlements.ts";
 import { configuredKeyProviders } from "./key-providers.ts";
-import { createImplementerModels } from "./models.ts";
+import { createTurnPricer } from "./turn-price.ts";
+import { createImplementerModels, type ImplementerModels } from "./models.ts";
 import {
   createImplementerService,
   type ImplementerService,
@@ -44,43 +49,65 @@ export function requireImplementerCapability(): void {
   if (!getCapabilities().has("implementer")) notFound();
 }
 
-/** The Implementer service of one workspace. */
-export function implementerServiceFor(workspaceId: string): ImplementerService {
+/**
+ * The models a workspace can run a task on, as the claim would: the rule of the picker and of the submit. The profiles of the
+ * workspace (#843) check their model with the same rule when they are saved.
+ */
+export function implementerModelsFor(workspaceId: string): ImplementerModels {
   const db = getDatabase();
   const catalog = getCatalogService();
   const nativeCost = getNativeCost();
   const keys = getWorkspaceLlm().keyServiceFor(workspaceId);
-  // The service is made for one request. The key mode and every entry of the picker ask about the same entitlements, so they are
-  // read once, on first use.
+  // The key mode and every entry of the picker ask about the same entitlements, so they are read once, on first use.
   let entitlements: Promise<ResolvedEntitlements> | undefined;
   const readEntitlements = () =>
     (entitlements ??= readEffectiveEntitlements(db, workspaceId));
+  return createImplementerModels({
+    keyMode: async () => keyModeForJob(await readEntitlements()),
+    configuredProviders: () => configuredKeyProviders(keys),
+    nativeCatalog: getImplementerCatalog(),
+    catalog: catalogSelectionFrom(catalog, async (id) =>
+      entryAllowed(await readEntitlements(), { id }),
+    ),
+    // What the claim does with the entry of a job on the operator's key (src/runner-api/claim.ts, `costOf`): the model
+    // must be one the native path knows, have a confirmed price, and have an entry the catalog can describe.
+    entryUsable: async (id) => {
+      const entry = await catalog.get(id);
+      if (entry === undefined) return false;
+      const ref = nativeCost.refOf({
+        provider: entry.provider,
+        model: entry.modelId,
+      });
+      if (ref === null) return false;
+      if (!(await nativeCost.policyFor("managed", ref)).ok) return false;
+      return (await nativeCost.entryFor(ref)).ok;
+    },
+  });
+}
+
+/**
+ * The catalog price of the model of a turn, for the workflow engine's charge of a turn whose cost the runner did not report (#844): the
+ * price table of the provider adapter, reached through the catalog entry or the provider of the turn's model choice.
+ */
+export function implementerTurnPricer() {
+  return createTurnPricer({
+    catalog: getCatalogService(),
+    providers: llmProviderDescriptors,
+  });
+}
+
+/** The Implementer service of one workspace. */
+export function implementerServiceFor(workspaceId: string): ImplementerService {
+  const db = getDatabase();
   return createImplementerService({
     repositories: createRepositoriesRepository(db, workspaceId),
     integrations: createIntegrationsRepository(db, workspaceId),
     registry: integrationRegistry,
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
-    models: createImplementerModels({
-      keyMode: async () => keyModeForJob(await readEntitlements()),
-      configuredProviders: () => configuredKeyProviders(keys),
-      nativeCatalog: getImplementerCatalog(),
-      catalog: catalogSelectionFrom(catalog, async (id) =>
-        entryAllowed(await readEntitlements(), { id }),
-      ),
-      // What the claim does with the entry of a job on the operator's key (src/runner-api/claim.ts, `costOf`): the model
-      // must be one the native path knows, have a confirmed price, and have an entry the catalog can describe.
-      entryUsable: async (id) => {
-        const entry = await catalog.get(id);
-        if (entry === undefined) return false;
-        const ref = nativeCost.refOf({
-          provider: entry.provider,
-          model: entry.modelId,
-        });
-        if (ref === null) return false;
-        if (!(await nativeCost.policyFor("managed", ref)).ok) return false;
-        return (await nativeCost.entryFor(ref)).ok;
-      },
-    }),
+    profiles: createProfilesRepository(db, workspaceId),
+    sessions: createImplementerRepository(db, workspaceId),
+    steps: createImplementerStepsRepository(db, workspaceId),
+    models: implementerModelsFor(workspaceId),
     queue: jobQueueFor(workspaceId),
     operatorCostLimitCents: operatorCostLimitCentsFrom(db),
   });

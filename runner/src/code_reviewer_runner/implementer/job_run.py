@@ -68,8 +68,11 @@ from .git_workspace import (
 from .network_rule import OFF
 from .reader import ReaderAccess
 from .report import clip_texts, escaped_size, fit_block, valid_block
+from .result_channel import ResultReader, make_result_directory
+from .resume_session import ResumeInput
+from .runner_profile import agent_seams, reader_seams, setup_seams
 from .session import AgentPlace, ImplementerSession, SessionSeams
-from .setup_container import SetupSeams
+from .snapshot_pump import SnapshotPump
 from .step_pump import StepPump
 from .turn_result import TurnResult
 
@@ -127,6 +130,8 @@ class TurnSetup:
     command: tuple[str, ...]
     close: Callable[[], None] = lambda: None
     environment: EnvironmentHost | None = None
+    # #843: how the result file is read; None for a turn without a result schema.
+    results: ResultReader | None = None
 
 
 SetupFactory = Callable[[ImplementerInput, Mapping[str, str], Callable[[], None]], TurnSetup]
@@ -200,20 +205,28 @@ def production_setup(
     memory = int(environment.get(AGENT_MEMORY_VARIABLE, "0").strip())
     spec = job.implementer
     identity = identity_for(job)
+    # #843: a turn with a result schema has the result directory in its containers and its readers.
+    with_result = spec.result_schema is not None
     reader = ReaderAccess(
         {
             "GIT_AUTHOR_NAME": identity.name,
             "GIT_AUTHOR_EMAIL": identity.email,
             "GIT_COMMITTER_NAME": identity.name,
             "GIT_COMMITTER_EMAIL": identity.email,
-        }
+        },
+        reader_seams(environment),
+        result=with_result,
     )
+    if with_result:
+        # Before the agent's container: its mount of the directory needs the directory.
+        make_result_directory(work_dir)
     workspace = GitWorkspace(
         WorkspaceSpec(
             clone_url=spec.repo.clone_url,
             token=job.git.token,
             base_branch=spec.base_branch,
             branch=spec.branch,
+            resume=spec.resume,
         ),
         WorkspaceLayout(work_dir=work_dir),
         identity,
@@ -236,20 +249,23 @@ def production_setup(
             elapsed=elapsed,
             should_stop=should_stop,
             secrets=turn.secrets,
-            seams=SetupSeams(),
+            seams=setup_seams(environment),
         )
 
     rule = OFF if spec.environment is None else spec.environment.network
 
     def place_from(image: str) -> Callable[[], AgentPlace]:
-        return lambda: AgentContainer(memory, AgentSeams(image=image), rule)
+        return lambda: AgentContainer(
+            memory, agent_seams(environment, AgentSeams(image=image)), rule, result=with_result
+        )
 
     return TurnSetup(
         workspace,
-        lambda: AgentContainer(memory, rule=rule),
+        lambda: AgentContainer(memory, agent_seams(environment), rule, result=with_result),
         (OPENCODE,),
         close=reader.close,
         environment=EnvironmentHost(run_environment, place_from),
+        results=reader if with_result else None,
     )
 
 
@@ -373,6 +389,8 @@ def run_implementer_job(
     process_timeout: float | None = None,
     secrets_sink: list[str] | None = None,
     steps: StepPump | None = None,
+    snapshot: SnapshotPump | None = None,
+    resume: ResumeInput | None = None,
     seams: JobSeams = JobSeams(),  # noqa: B008 - frozen, shared on purpose
 ) -> JobResult:
     """Run one turn and return its result. Never raises for a turn that failed; whatever an
@@ -382,7 +400,10 @@ def run_implementer_job(
     held to the smaller of it and its own time limit, so a lowered timeout still leaves the time for
     the last push. `secrets_sink` receives the secrets the turn made up (the capability of its model
     proxy), for the scrub of the line that is printed. `steps` is the channel the step records of
-    the turn go out over (#745); None records nothing."""
+    the turn go out over (#745); None records nothing. `snapshot` is the channel the engine's
+    session leaves over at the end of the turn (#839); None takes no export. `resume` is what a
+    follow-up turn has of its earlier conversation (#840): the checked snapshot the job host
+    downloaded, or the reason there is none; None for a first turn."""
     clock = seams.clock
     advertised = engines_from_environment(environment) if engines is None else engines
     if ENGINE_IMPLEMENTER not in advertised:
@@ -418,7 +439,16 @@ def run_implementer_job(
             assert prepared.image is not None and setup.environment is not None
             setup = replace(setup, place=setup.environment.place(prepared.image))
         session = _session(
-            job, setup, started, environment, shutdown, seams, process_timeout, steps
+            job,
+            setup,
+            started,
+            environment,
+            shutdown,
+            seams,
+            process_timeout,
+            steps,
+            snapshot,
+            resume,
         )
         if usage_probe is not None:
             usage_probe.watch(lambda: _usage_of(session, job))
@@ -503,6 +533,8 @@ def _session(
     seams: JobSeams,
     process_timeout: float | None,
     steps: StepPump | None = None,
+    snapshot: SnapshotPump | None = None,
+    resume: ResumeInput | None = None,
 ) -> TurnLike:
     options: dict[str, object] = {
         "workspace": setup.workspace,
@@ -514,7 +546,12 @@ def _session(
         "should_stop": shutdown.is_set,
         "max_seconds": process_timeout,
         "steps": steps,
+        "snapshot": snapshot,
     }
+    if resume is not None:
+        options["resume"] = resume
+    if setup.results is not None:
+        options["results"] = setup.results
     if seams.session is not None:
         return seams.session(job, **options)
     return ImplementerSession(job, **options)  # type: ignore[arg-type]  # the keywords above

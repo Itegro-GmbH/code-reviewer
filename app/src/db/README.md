@@ -601,6 +601,41 @@ migration in an earlier deployment does not have it.
   last, with `lock_timeout` 5 s for its own statements (`create-implementer-turn-steps.integration.test.ts` holds a writer open and checks that the batch gives up and can be
   run again).
 
+### Implementer session snapshots (#839)
+
+`20261105090000_create_implementer_session_snapshots` (follow-up turns) adds two tables and one index; no existing table changes.
+
+- `implementer_session_snapshots` (`repositories/implementer-snapshots-repository.ts`, scoped): ONE row for each session, replaced by the snapshot of each turn and never deleted but by the erasure of the workspace
+  (owner's decision of 2026-11-04). `data` is the engine's export as the runner made it (JSON, secrets taken out, gzipped) as **base64 text**: the schema holds text and integers only, see "Portable schema conventions" (the plan's `bytea` is
+  not used), and 8 MiB gzipped is at most about 10.7 MB of text, TOASTed out of line and uncompressed (`set storage external`: it is gzip already). `turn_number` and `job_id` say which turn it came from, `opencode_version` which engine wrote it, `bytes`, `raw_bytes` and `sha256` describe the file.
+- `implementer_session_snapshot_parts`: where an upload waits until it is whole (keyed by `(job_id, part_index)`; every part repeats the description of the file). `recordPart(jobId, leaseToken, part)` proves the claim in the transaction (the job row
+  locked `FOR NO KEY UPDATE`, the lease **not** extended), stores the part, and when it is the last missing puts the parts together, checks size and digest, swaps the snapshot in and deletes the parts, all in that transaction, so a reader sees the
+  old snapshot or the new one. Parts that disagree or do not add up are deleted and refused; the parts of an upload that never finished are deleted when the next upload of the session starts (or by the erasure of the workspace), not when the turn's result is delivered: at most one unfinished upload per session waits, which costs storage and nothing else. A snapshot in one part never has a row here, and the bytes of the parts are read back only by the part that completes the set.
+- `readForJob(jobId, leaseToken)` (#840, the resume of a follow-up turn) finds the session from the job's turn, proves the claim in the same read (running, this lease token, kind `implementer`, this workspace; it neither locks the job nor extends the lease) and returns the snapshot of an **earlier** turn only (`turn_number < number`), or `none`.
+- Composite keys `(session_id, workspace_id)` to `implementer_sessions` and `(job_id, workspace_id)` to `jobs` keep the workspaces apart. The erasure of a workspace deletes both tables before the turns, the sessions and the jobs.
+- **Live database.** Expand only, like the steps: the tables are created first, the index, then the four links as `alter table` last, with `lock_timeout` 5 s for its own statements
+  (`create-implementer-session-snapshots.integration.test.ts` holds a writer open and checks that the batch gives up and can be run again).
+
+### What started a workflow run (#845)
+
+`20261105190000_add_workflow_run_trigger` lets a run that a label on an issue started have no person: `workflow_runs.created_by` is nullable, and the new column `trigger_kind` (`manual`, the default, or `github.issueLabeled`) says what started the run. The check `workflow_runs_trigger_check` holds the rule: only a `manual` run needs a user. `actor_login` stays required (for a label it is the login of whoever put the label on, display only). Expand only: `drop not null` and a constant default change the catalog, not the rows; `lock_timeout` 5 s. `down` puts `not null` back, which Postgres refuses while a run of a label exists.
+
+### Rounds, control steps and skipped steps (#846)
+
+`20261105200000_add_workflow_step_rounds` changes `workflow_step_runs` for `loop` and `if`. The new column `round` says how often the step has run in the run (from 1: the rounds of a loop; in a loop inside a loop the count goes on across the outer rounds, so it stays unique), and the unique index on (`run_id`, `step_id`) becomes one on (`run_id`, `step_id`, `round`), created before the old one is dropped. `kind` may also be `if` or `loop` (the row holds what the control step decided as its `output`), `status` may also be `skipped` (a step in the branch an `if` did not take; it counts as over, so it has a `finished_at`). Every step written before reads round 1. Expand only for the rows: a constant default and plain `add constraint` checks on a table of one row per step, `lock_timeout` 5 s. In the deploy window the old version, whose sweep advances every running run, can mishandle a run with a loop that the new version wrote just before it stopped; the migration's comment says so. `down` puts the old rules back, which Postgres refuses while a step ran twice, a control step or a skipped step exists.
+
+### The queued instruction of a session (#841)
+
+`20261105160000_add_implementer_session_queue` (follow-up turns) adds four nullable text columns to `implementer_sessions` and one check; no table, index or link.
+
+- `queued_instruction`: JSON text of the one instruction a person queued while a turn runs, with the choices already checked and copied (model, cost limit, environment, profile, result schema), the client request id, who queued it and when (`QueuedInstruction` in `repositories/implementer-repository.ts`). Null when nothing waits.
+  `queueInstruction` takes the row lock and writes it only for a `running` session with an empty queue (`full` otherwise), so of two calls one queues; `startFollowUpTurn` empties it when the queued instruction starts.
+- `queued_discarded`: JSON text of an instruction that could not start, with the reason word (`DISCARD_REASONS`), kept for the Runs page. Starting a turn or queueing again clears it.
+- `queued_attempted_at`: ISO 8601 text, when a start of the queued instruction was last tried (`noteQueuedAttempt`); null before the first try and once the instruction is gone. `sessionsWithQueuedInstruction` orders by it (never tried first) and skips a session tried within the backoff, so a session the platform keeps refusing neither crowds out newer ones nor makes each run ask GitHub again. It does not touch `updated_at`.
+- `queued_first_failed_at`: ISO 8601 text, when a start of the queued instruction first failed (`noteQueuedFailure` sets it once and hands it back); null until then and once the instruction is gone. The 24 hours an instruction waits for a start count from it, not from when it was queued, so an instruction behind a long turn is not dropped by the first error after that turn.
+- `startFollowUpTurn` is the one place a session goes `idle` to `running` again: it locks the session row, takes the next turn number, calls the job maker and writes the turn in the same transaction. `sessionsWithQueuedInstruction` (`implementer-sessions-sweep.ts`, instance level) lists the idle sessions that hold an instruction for the sweep.
+- **Live database.** Expand only: four columns without a default, which Postgres adds without rewriting a table, and one check; `lock_timeout` 5 s (`add-implementer-session-queue.integration.test.ts` holds a writer open and checks that the batch gives up and can be run again). Migrations of this change sort after `20261105150000`.
+
 ### A database that ran the removed billing migrations
 
 Three migrations of an earlier billing design existed on `development` for a few days and are deleted (#491):

@@ -52,6 +52,13 @@ const PUBLIC_ROUTES = [
   "/api/runners/v1/jobs/[id]/complete",
   // The steps of a running turn of the Implementer, with the same token and the lease token in the body (#745).
   "/api/runners/v1/jobs/[id]/steps",
+  // The session snapshot of a turn and its read by the follow-up turn, with the runner credential and the lease token in a header (#879).
+  "/api/runners/v1/jobs/[id]/session",
+  "/api/runners/v1/jobs/[id]/resume-session",
+  // A customer's own runner sends the registration token in the body, or its own credential (#854).
+  "/api/runners/v1/register",
+  "/api/runners/v1/self",
+  "/api/runners/v1/credential",
   // A Dispatcher gives a job back and reads the version with the same token (#322).
   "/api/runners/v1/jobs/[id]/release",
   // A Dispatcher reports the VM it created with the same token and the job credential in the body (#493).
@@ -63,6 +70,8 @@ const PUBLIC_ROUTES = [
   "/api/workers/v1/jobs/[id]",
   "/api/workers/v1/jobs/[id]/heartbeat",
   "/api/workers/v1/jobs/[id]/result",
+  "/api/workers/v1/jobs/[id]/session",
+  "/api/workers/v1/jobs/[id]/resume-session",
   "/api/workers/v1/jobs/[id]/steps",
   // The operator sends its own bearer token; the routes do not exist until it is set (src/operator-api/README.md).
   "/api/operator/v1/workspaces",
@@ -122,6 +131,7 @@ const PROTECTED_ROUTES = [
   "/w/[workspace]/members",
   "/w/[workspace]/projects",
   "/w/[workspace]/projects/[repositoryId]",
+  "/w/[workspace]/runners",
   "/w/[workspace]/runs",
   "/w/[workspace]/runs/[id]",
   "/w/[workspace]/settings",
@@ -130,6 +140,10 @@ const PROTECTED_ROUTES = [
   "/w/[workspace]/settings/llm",
   "/w/[workspace]/settings/plan",
   "/w/[workspace]/settings/review-defaults",
+  // The workflow pages (#873).
+  "/w/[workspace]/workflows",
+  "/w/[workspace]/workflows/[workflowId]",
+  "/w/[workspace]/workflows/[workflowId]/runs/[runId]",
 ] as const;
 // Data routes: a visitor without a session gets 401 instead of a redirect.
 const PROTECTED_DATA_ROUTES = [
@@ -183,10 +197,26 @@ const PROTECTED_DATA_ROUTES = [
   // The environments of the Implementer (#818).
   "/api/w/[workspace]/environments",
   "/api/w/[workspace]/environments/[environmentId]",
+  // The agent workflows (#833).
+  "/api/w/[workspace]/workflows",
+  "/api/w/[workspace]/workflows/[workflowId]",
+  "/api/w/[workspace]/workflows/validate",
+  // The runs of a workflow (#844).
+  "/api/w/[workspace]/workflows/[workflowId]/runs",
+  "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]",
+  // The runners on customers' machines (#854).
+  "/api/w/[workspace]/runners",
+  "/api/w/[workspace]/runners/tokens",
+  "/api/w/[workspace]/runners/[runnerId]/revoke",
+  // The profiles of the agents (#843).
+  "/api/w/[workspace]/profiles",
+  "/api/w/[workspace]/profiles/[profileId]",
+  "/api/w/[workspace]/profiles/validate",
   // The routes behind the Implementer form (#755).
   "/api/w/[workspace]/implementer/models",
   "/api/w/[workspace]/implementer/repositories",
   "/api/w/[workspace]/implementer/repositories/[repositoryId]/branches",
+  "/api/w/[workspace]/implementer/sessions/[sessionId]/turns",
   "/api/w/[workspace]/implementer/tasks",
   "/api/w/[workspace]/integrations/[integrationId]",
   "/api/w/[workspace]/integrations/sync",
@@ -210,6 +240,7 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/review-settings",
   "/api/w/[workspace]/runs",
   "/api/w/[workspace]/runs/[id]",
+  "/api/w/[workspace]/runs/[id]/continuation",
   "/api/w/[workspace]/runs/[id]/steps",
 ] as const;
 // Files the proxy matcher leaves out on purpose (src/proxy.ts), so no session rule applies to them.

@@ -120,6 +120,36 @@ of a model call as `step`) in batches of at most 50 records and 48 KiB to `POST 
 - **No claim feature.** A claim feature gates what the app _sends_ a runner (a job field it must understand). This call adds nothing to the job; what a runner needs to know is
   whether the app _has_ the call, and that is the app feature `implementer_steps` of `GET /api/runners/v1/version`.
 
+## The session snapshot of a turn of the Implementer (#839)
+
+`PUT /api/workers/v1/jobs/:id/session` (Worker API only; the credential in the header) puts one part of the session snapshot of the running turn: the engine's export, gzipped by the runner, at most 8 MiB, kept
+so that a follow-up turn can resume the conversation in a new VM. The body is the bytes of the part (read up to 3 MiB, `413` above), the description of the whole file is in the query (`part`, `parts`, `bytes`, `rawBytes`, `sha256`,
+`opencodeVersion`; `snapshot-request.ts`). A function of the platform takes no request body over 4.5 MB, so the file arrives in parts of exactly 3 MiB, the last one what is left, at most three; the parts may come in any order and twice.
+
+- **Same rules as the steps.** It proves the claim and does **not** extend the lease; `409 RUNNER_JOB_ENDED` once the job is over, `401` for a credential that is not the job's, `400` for a job that is not a turn of the Implementer or a query or
+  body that does not fit (`fields`, never a value). The feature is the app feature `implementer_snapshot`; there is no claim feature.
+- **Whole or not at all.** The parts wait in `implementer_session_snapshot_parts`. When the last is in, the repository puts them together in the transaction that proves the claim, checks the size and the digest, and swaps the snapshot in
+  for the session's old one (`db/repositories/implementer-snapshots-repository.ts`); until then the old one is read. Parts that disagree or do not make the announced file are `400` and nothing of that upload is kept. The `200` answer says `complete`.
+- **One per session, kept for good.** Replaced by each turn (an older turn never replaces a newer snapshot), deleted by nothing but the erasure of the workspace. The app does not open the bytes; the runner has taken the secrets it knows out of the export,
+  and what the repository holds (a committed `.env` the agent printed) can be in it, tool outputs included. The one reader is the resume-session call below.
+
+## The stored session of a follow-up turn (#840)
+
+`GET /api/workers/v1/jobs/:id/resume-session?part=n` (Worker API only; the credential in the header) reads one part of the snapshot the earlier turns stored for the session of the running turn, for the Worker of a follow-up turn
+(`implementer.resume.snapshot` true) to import into the engine (`resume-session.ts`, `readForJob` of the snapshots repository). The body is the bytes of the part, exactly as stored (the app never opens them and never logs them); a function of the platform holds a response to
+4.5 MB like a request, so the file comes in the parts the upload used (3 MiB, at most three, `part` from 0, absent is 0), and the headers `x-snapshot-parts`, `-bytes`, `-raw-bytes`, `-sha256` and `-opencode-version` describe the whole file on every part (`ResumeSessionHeaders`).
+
+- **Same rules as the write.** It proves the claim and does **not** extend the lease; `409 RUNNER_JOB_ENDED` once the job is over, `401` for a credential that is not the job's, `400` for a job that is not a turn of the Implementer or a `part` that is not 0 to 2 or is beyond the last (`fields`, never a value).
+  No app feature and no claim feature: a Worker asks only when the job's `resume.snapshot` says there is something, and an app without the call answers 404, which is a failed download and a summary.
+- **Its own session only.** The session is found from the job (`implementer_turns`), never from the query, in the transaction-free read of a repository scoped to the job's workspace; only the snapshot of the directly preceding turn (turn `n - 1` for turn `n`, #885) is read; an older one stays stored and is not offered. `204` without a body: there is none, and the turn continues from a summary.
+
+### On a customer's runner (#879)
+
+`PUT /api/runners/v1/jobs/:id/session` and `GET /api/runners/v1/jobs/:id/resume-session?part=n` are these two calls for a runner that holds a credential of its own (`api.ts`: `session`, `resumeSession`; the handlers
+are the Worker API's, `storeSnapshotPart` and `readResumeSessionPart`, so there is one logic). `Authorization: Bearer crc_...` and the lease token in `X-Lease-Token` (`lease-header.ts`: the body is raw bytes, so it cannot
+be in the body as for `steps`). Order: credential (`401`), job id (`400`), the job (`404` unless it is of the runner's workspace and held by this runner), the header (`400`), the query and body (`413`/`400`), then the claim (`409 RUNNER_LEASE_LOST`).
+The shared token is `401` here. The app feature is `runner_session_snapshot`; a runner reads it from `GET /api/runners/v1/version` with its own credential. `docs/runner.md`, "Resume on customer runners".
+
 ## Authentication
 
 `Authorization: Bearer <RUNNER_TOKEN>` on every call. One shared token in the MVP, read from the
@@ -135,6 +165,17 @@ through (`src/auth/access.ts`): this token is the authentication.
 `jobs.runner_id` and in the logs. There is no rate limit on failed attempts: that is why the token must
 be long and random (`openssl rand -hex 32`); a production start with a missing or short token is refused (`DEPLOY_CONFIG_INVALID`, `src/deploy/startup.ts`), any other start logs one warning. It is bookkeeping, not a security boundary: what proves that a runner
 holds a job is the **lease token**.
+
+### A customer's runner (#854)
+
+A runner on a customer's own machine does not hold `RUNNER_TOKEN`. It registers with a token a member of its workspace made and then sends
+`Authorization: Bearer crc_...`, a credential of its own (`src/runner-fleet/README.md`, `src/runner-api/registration.ts`, `contracts/runner-registration.v1.json`). `claim` looks
+at the form of the header first: a `crc_` credential takes the runner's path (unknown, revoked or blank is the same `401 RUNNER_UNAUTHORIZED`;
+a runner below `RUNNER_MIN_BASE_VERSION` is `426 RUNNER_UPDATE_NEEDED`) and never the shared one. The call sets the runner's `last seen`. Such a claim names the
+engine `implementer` and takes the turns of runner environments of its workspace whose labels it has and whose harness it announces as ready
+(`docs/runner.md`, "Routing"). `heartbeat`, `complete`, `release` and `steps` take the credential for a job of its own workspace (`404 RUNNER_JOB_NOT_FOUND`
+for any other); `session` and `resume-session` (#879, below) take it for a job its own runner holds; the Dispatcher's calls (`vm`, the job state) and every other claim take the shared token alone; `version` takes the shared token, the credential of a running claim and (#879) the credential of a live runner. A claim without a runner
+credential never takes a turn of a runner environment (`db/repositories/jobs-claim.ts`).
 
 ## The lease token
 
@@ -338,6 +379,20 @@ when an environment was chosen; the Dispatcher launches the VM before any Worker
 `implementer_environment`: for one that does not, the job ends `implementer_engine_unavailable` (free) before any credential exists, since a
 script that is silently skipped would run the task on a base the person did not choose. The Worker reports what the script did in
 `result.implementer.setup`; a script that fails ends the turn with `environment_setup_failed` (free, `billing/outcome.ts`).
+
+**The profile of a turn (#843).** A task started with a profile holds a copy of the version it runs with (`implementer_turns.profile_*`: id, name,
+version, instructions, push right; the model and the cost limit are the turn's own columns, filled from the version when the task was written). The
+Worker's input carries `implementer.profile {name, version, instructions?, canPush}` (`instructions` left out when empty; the id stays in the app),
+**only to a caller that names the claim feature `implementer_profile`**: for any other the job ends `implementer_engine_unavailable` (free) before any
+credential exists, since a Worker that did not read it would push the work of a profile that may not push, and would run the agent without the
+instructions the person chose. A turn without a profile carries nothing and is the turn of before. What the runner does with it:
+[`docs/profiles.md`](../../../docs/profiles.md#the-push-right). A profile that may not push also gets a token that can only read the
+contents (`implementerAccess(..., { readOnly: true })`, `contents: read`), so the Worker could not push even with a bug; the token is kept in the same
+ledger and ends with the turn like the write token.
+
+**The branches of a follow-up turn (#838, part of #745).** The claim feature `implementer_resume` is the Worker's way to say it reads `implementer.resume` (`ImplementerResume`: the number of the turn, the branches the
+last turn pushed with their tips, the branch to check out). The App builds `resume` for every turn from number 2 on (#841, `resume.ts`: the union of the branches the earlier turns pushed, the checkout, whether the conversation of the directly preceding turn is stored (#885), the last summary and the digest, all from the stored reports) and sends it, with `snapshot`,
+`previousSummary` and `digest` inside it, only to a caller that named the feature; any other caller gets the turn refused (`implementer_engine_unavailable`, free, before any credential exists, as for the environment).
 
 A failure that may pass (GitHub down while the installation is read or the token is made) gives the job back with `Retry-After`.
 A turn is never run twice (`maxAttempts` 1), so it is put back in the queue only while **no input was ever handed to a Worker**: the
@@ -566,7 +621,7 @@ Worker. It cannot count what runs, so the app counts for it. Three additions, al
   `features` from `APP_FEATURES` (`worker_api`, `claim_by_job_id`, `pool_cap`, `release`, `vm_lifecycle`). It takes the
   dispatcher credential; a Worker may also call it with its credential **and** `?jobId=<its job>` (the
   credential must be the running claim of that job, a primary key lookup), to check the app before it
-  fetches its job. The answer holds nothing of any job.
+  fetches its job. #879: or with the credential of a live runner (a revoked or unknown one is `401`). The answer holds no job data; authenticating also marks the runner seen.
 
 - **Job state (#364).** `GET /api/runners/v1/jobs/:id` answers `{ version: 1, job: { id, status } }` with the
   status of the job (`queued`, `running`, `succeeded`, `failed`, `superseded`, `cancelled`) and nothing else: no job

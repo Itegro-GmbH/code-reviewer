@@ -17,12 +17,18 @@ import { createJobsRepository } from "../db/repositories/jobs-repository.ts";
 import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
 import { createPinnedAddressReader } from "../review-settings/pinned-addresses.ts";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
+import {
+  createImplementerSnapshotsRepository,
+  isDirectPredecessorSnapshot,
+} from "../db/repositories/implementer-snapshots-repository.ts";
 import { createImplementerStepsRepository } from "../db/repositories/implementer-steps-repository.ts";
 import { createJobVmRunsRepository } from "../db/repositories/job-vm-runs-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { getDatabase } from "../db/startup.ts";
+import { buildResume } from "./resume.ts";
 import { integrationRegistry } from "../integrations/registry.ts";
 import { jobEnded, touched } from "../dispatch/maintenance-shared.ts";
+import { turnEnded } from "../workflow-runs/shared.ts";
 import { getRunnerQueue } from "../jobs/shared.ts";
 import { readEntitlements } from "../workspaces/effective-entitlements.ts";
 import { getWorkspaceLlm, modelCapabilities } from "../llm/shared.ts";
@@ -31,6 +37,12 @@ import { projectServiceFor } from "../projects/shared.ts";
 import { reviewSettingsServiceFor } from "../review-settings/shared.ts";
 import { noteDispatcherClaim } from "../billing/dispatcher-features.ts";
 import { createRunnerApi, type RunnerApi } from "./api.ts";
+import {
+  createRunnerRegistrationApi,
+  type RunnerRegistrationApi,
+} from "./registration.ts";
+import { createRunnerCredentialsRepository } from "../db/repositories/runner-credentials-repository.ts";
+import { minimumBaseVersion } from "../runner-identity/config.ts";
 import { createProviderPins } from "./provider-pins.ts";
 import { knownContextWindowFrom } from "./known-context-window.ts";
 import { APP_VERSION } from "./app-version.ts";
@@ -113,6 +125,27 @@ function sharedDeps(): WorkerApiDeps {
       createImplementerRepository(getDatabase(), job.workspaceId).getTurnByJob(
         job.id,
       ),
+    // #841: what a follow-up turn is told about the turns before it, from the job's own workspace: the stored reports, the session's
+    // summary and whether the conversation of the directly preceding turn is stored (#885).
+    implementerResume: async (job, { turn, session }) => {
+      const history = await createImplementerRepository(
+        getDatabase(),
+        job.workspaceId,
+      ).turnHistory(session.id);
+      const snapshot = await createImplementerSnapshotsRepository(
+        getDatabase(),
+        job.workspaceId,
+      ).find(session.id);
+      return buildResume({
+        turnNumber: turn.number,
+        sessionBranch: session.branch,
+        history: history.filter((entry) => entry.number < turn.number),
+        sessionSummary: session.summary,
+        hasSnapshot:
+          snapshot !== undefined &&
+          isDirectPredecessorSnapshot(snapshot.turnNumber, turn.number),
+      });
+    },
     claimedKeyMode: async (job) =>
       (await createUsageRecordsRepository(db, job.workspaceId).get(job.id))
         ?.keyMode,
@@ -149,6 +182,9 @@ function sharedDeps(): WorkerApiDeps {
     claimedKeys,
     // #745: the steps of a running turn, scoped to the job's own workspace.
     steps: (workspaceId) => createImplementerStepsRepository(db, workspaceId),
+    // #839: the session snapshot of a turn (follow-up turns), scoped to the job's own workspace.
+    snapshots: (workspaceId) =>
+      createImplementerSnapshotsRepository(db, workspaceId),
     // #753: the write token of a turn of the Implementer ends with the turn (and with a fetch that failed after it was made).
     revokeWriteTokens: writeTokens.revokeAllOf,
     revokeUndelivered: writeTokens.revokeUndelivered,
@@ -159,6 +195,8 @@ function sharedDeps(): WorkerApiDeps {
       ),
     // #395: what happens between two sweeps. Both run after the response and do nothing in poll mode.
     jobEnded,
+    // #844: a turn that is over goes on with the workflow run whose step it was (a job that is no turn of the Implementer is ignored).
+    turnEnded,
     activity: () => touched(),
     now: () => new Date(),
     logger: consoleRunnerApiLogger,
@@ -181,6 +219,8 @@ export function getRunnerApi(): RunnerApi {
     vmRuns: (workspaceId) =>
       createJobVmRunsRepository(getDatabase(), workspaceId),
     runnerToken: () => configuredRunnerToken(process.env),
+    // #854: the runners of customers' own machines, with credentials of their own.
+    fleet: getRunnerRegistrationApi(),
     appVersion: APP_VERSION,
     // #498: which Dispatchers this app serves (billing is not switched on over one that reports no VMs).
     noteClaimFeatures: (features) =>
@@ -220,6 +260,29 @@ export async function withWorkerApi(
   } catch (error) {
     consoleRunnerApiLogger.error(
       `[worker-api] the API could not be set up: ${describeError(error)}`,
+    );
+    return errorResponse(500, "RUNNER_INTERNAL_ERROR");
+  }
+}
+
+/** The runner side of the registration on the running server (#854): the exchange, the announcement, the renewal and the credential check. */
+export function getRunnerRegistrationApi(): RunnerRegistrationApi {
+  return createRunnerRegistrationApi({
+    credentials: createRunnerCredentialsRepository(getDatabase()),
+    settings: () => ({ minBaseVersion: minimumBaseVersion(process.env) }),
+    logger: consoleRunnerApiLogger,
+  });
+}
+
+/** What the route files of the registration call: if the API cannot be set up, the caller gets the answer of any other unplanned failure. */
+export async function withRunnerRegistrationApi(
+  call: (api: RunnerRegistrationApi) => Promise<Response>,
+): Promise<Response> {
+  try {
+    return await call(getRunnerRegistrationApi());
+  } catch (error) {
+    consoleRunnerApiLogger.error(
+      `[runner-registration] the API could not be set up: ${describeError(error)}`,
     );
     return errorResponse(500, "RUNNER_INTERNAL_ERROR");
   }

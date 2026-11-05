@@ -24,6 +24,8 @@ const NEW_TABLES = [
   "implementer_turns",
   "implementer_environments",
   "implementer_turn_steps",
+  "implementer_session_snapshots",
+  "implementer_session_snapshot_parts",
 ];
 
 /** The migrations the previous release's database ran: everything before the new one. */
@@ -54,6 +56,18 @@ async function rowsOfEveryOldTable(
   const result: Record<string, unknown[]> = {};
   for (const table of await db.introspection.getTables()) {
     if (NEW_TABLES.includes(table.name)) continue;
+    // Tables of later migrations (#833) are empty and are no change to an existing row.
+    if (
+      table.name === "workflows" ||
+      table.name === "workflow_versions" ||
+      table.name === "workflow_runs" ||
+      table.name === "workflow_step_runs" ||
+      table.name === "profiles" ||
+      table.name === "profile_versions" ||
+      table.name === "runners" ||
+      table.name === "runner_registration_tokens"
+    )
+      continue;
     const { rows } =
       await sql<unknown>`select * from ${sql.table(table.name)} order by 1`.execute(
         db,

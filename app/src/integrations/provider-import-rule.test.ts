@@ -172,6 +172,45 @@ describe("the provider import rule", () => {
     ]);
   });
 
+  it("flags a specifier that spells the providers folder through escape sequences", () => {
+    // None of the files contains the folder's name as plain text, so a filter that only looks for
+    // the name in the source would let them through.
+    const spelled = (escaped: string) =>
+      importLine(`../integrations/${escaped}/github-app/index.ts`);
+    const files = [
+      file("src/jobs/a.ts", spelled("prov\\u0069ders")),
+      file("src/jobs/b.ts", spelled("prov\\u{69}ders")),
+      file("src/jobs/c.ts", spelled("prov\\x69ders")),
+      file("src/jobs/d.ts", spelled("prov\\151ders")),
+      file("src/jobs/e.ts", spelled("prov\\\niders")),
+      file("src/jobs/f.ts", spelled("prov\\iders")),
+      file(
+        "src/jobs/g.ts",
+        "const p = await import(`../integrations/prov\\u0069ders/${name}/index.ts`);",
+      ),
+    ];
+
+    expect(files.filter((f) => f.content.includes("providers"))).toEqual([]);
+    expect(
+      findProviderImportViolations(files).map((violation) => violation.file),
+    ).toEqual(files.map((f) => f.path));
+  });
+
+  it("does not flag a file with escape sequences that spell something else", () => {
+    const violations = findProviderImportViolations([
+      file(
+        "src/jobs/enqueue.ts",
+        [
+          importLine("../integrations/types\\u002Ets"),
+          "const pattern = /\\d+\\/providers?/;",
+          'const text = "a\\nb \\u0070ro\\x76iders";',
+        ].join("\n"),
+      ),
+    ]);
+
+    expect(violations).toEqual([]);
+  });
+
   it("scans plain JavaScript and files at the root of the app", () => {
     const violations = findProviderImportViolations([
       file("proxy.js", importLine(`./src/${GITHUB}/provider.js`)),

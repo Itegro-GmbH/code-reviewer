@@ -55,6 +55,8 @@ describe("the environments repository", () => {
         id: "env-1",
         workspaceId: idA,
         name: "Node 22",
+        kind: "hosted",
+        labels: [],
         vcpus: 4,
         setupScript: "  npm ci\r\n\tnpm run build  \n",
         network: { mode: "off", hosts: [] },
@@ -97,6 +99,8 @@ describe("the environments repository", () => {
       {
         id: expect.any(String),
         name: "Bun",
+        kind: "hosted",
+        labels: [],
         vcpus: 1,
         hasScript: true,
         networkMode: "off",
@@ -104,6 +108,8 @@ describe("the environments repository", () => {
       {
         id: expect.any(String),
         name: "pnpm",
+        kind: "hosted",
+        labels: [],
         vcpus: 4,
         hasScript: false,
         networkMode: "off",
@@ -113,6 +119,8 @@ describe("the environments repository", () => {
       expect(Object.keys(summary).sort()).toEqual([
         "hasScript",
         "id",
+        "kind",
+        "labels",
         "name",
         "networkMode",
         "vcpus",
@@ -357,5 +365,96 @@ describe("the environments repository and the network rule", () => {
           db,
         ),
       ).rejects.toThrow(/implementer_environments_network_check/);
+  });
+});
+
+describe("the environments of the kind runner (#854)", () => {
+  // #854-T231
+  it("stores the labels lower case and sorted, with no size, script or network rule, and reads them back", async () => {
+    const { a, idA } = await setup();
+
+    const created = await a.create(
+      {
+        kind: "runner",
+        name: "GPU box",
+        labels: ["Linux", "gpu", "linux"],
+        createdBy: "u-1",
+      },
+      50,
+    );
+
+    expect(created).toMatchObject({
+      ok: true,
+      environment: {
+        workspaceId: idA,
+        kind: "runner",
+        labels: ["gpu", "linux"],
+        vcpus: null,
+        setupScript: "",
+        network: { mode: "off", hosts: [] },
+      },
+    });
+    expect((await a.list()).map((entry) => [entry.name, entry.kind])).toEqual([
+      ["GPU box", "runner"],
+    ]);
+    expect(await a.listSummaries()).toEqual([
+      {
+        id: "env-1",
+        name: "GPU box",
+        kind: "runner",
+        labels: ["gpu", "linux"],
+        vcpus: null,
+        hasScript: false,
+        networkMode: "off",
+      },
+    ]);
+  });
+
+  // #854-T232
+  it("shares the names, the count and the update with the hosted kind, and one can become the other", async () => {
+    const { a } = await setup();
+    await a.create(NODE, 50);
+
+    expect(
+      await a.create(
+        { kind: "runner", name: "node 22", labels: ["x"], createdBy: "u-1" },
+        50,
+      ),
+    ).toEqual({ ok: false, reason: "name_taken" });
+    const runner = await a.create(
+      { kind: "runner", name: "Box", labels: ["x"], createdBy: "u-1" },
+      50,
+    );
+    if (!runner.ok) throw new Error("seeding failed");
+
+    const toHosted = await a.update(runner.environment.id, {
+      name: "Box",
+      vcpus: 2,
+      setupScript: "echo",
+    });
+    const toRunner = await a.update("env-1", {
+      kind: "runner",
+      name: "Node 22",
+      labels: ["linux"],
+    });
+
+    expect(toHosted).toMatchObject({
+      ok: true,
+      environment: {
+        kind: "hosted",
+        vcpus: 2,
+        labels: [],
+        setupScript: "echo",
+      },
+    });
+    expect(toRunner).toMatchObject({
+      ok: true,
+      environment: {
+        kind: "runner",
+        vcpus: null,
+        labels: ["linux"],
+        setupScript: "",
+      },
+    });
   });
 });

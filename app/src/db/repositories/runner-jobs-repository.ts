@@ -70,7 +70,8 @@ import { headNoticeKey } from "../refusal-notice-key.ts";
 import { claimOldestDueJob } from "./jobs-claim.ts";
 import { toJob } from "./jobs-repository.ts";
 import { createUsageRecordsRepository } from "./usage-records-repository.ts";
-import { turnResultOf } from "../implementer-turn-result.ts";
+import { agentResultOf, turnResultOf } from "../implementer-turn-result.ts";
+import { boundAgentResult } from "../agent-result.ts";
 import { createImplementerRepository } from "./implementer-repository.ts";
 import { idleSessionsOfEndedTurns } from "./implementer-sessions-sweep.ts";
 import { closeRecordsOfEndedJobs } from "./usage-records-sweep.ts";
@@ -98,8 +99,22 @@ async function recordTurnOfJob(
 ): Promise<void> {
   const sessions = createImplementerRepository(trx, job.workspace_id, now);
   const turn = await sessions.getTurnByJob(job.id);
-  if (turn !== undefined)
-    await sessions.recordTurnResult(turn.session.id, turnResultOf(result));
+  if (turn === undefined) return;
+  await sessions.recordTurnResult(turn.session.id, turnResultOf(result));
+  // #843: the result the agent handed in is kept with the turn, which has a schema. The runner checked it against that schema; the
+  // app does not (the workflow engine re-checks it with `checkResultValue` before it routes it anywhere). The report path
+  // (`runner-api/report.ts`) took out a result over the bounds and recorded the turn `no_result`; the bounds are held again here,
+  // because this is the last place before it is stored.
+  if (turn.turn.resultSchema === null) return;
+  const handed = agentResultOf(result);
+  if (handed === undefined) return;
+  const bounded = boundAgentResult(handed);
+  if (bounded.ok)
+    await sessions.recordTurnAgentResult(turn.turn.id, bounded.value);
+  else
+    console.error(
+      `[queue] agent_result_refused job=${job.id} reason=${bounded.reason}`,
+    );
 }
 
 /** What `expireStaleJobs` did. */
@@ -112,6 +127,8 @@ export type ExpiryReport = {
   timedOut: number;
   /** Waiting Dynamic jobs no capable runner claimed within the deadline (#195). */
   noCapableRunner: number;
+  /** Waiting turns of runner environments no runner of the workspace took within the deadline (#854). */
+  noRunnerAvailable: number;
 };
 
 export type RunnerJobsRepositoryOptions = {
@@ -249,6 +266,12 @@ export type RunnerJobsRepository = {
   /** Deals with leases and runtimes that ran out. `claimNext` does this first on every call. */
   expireStaleJobs(): Promise<ExpiryReport>;
   /**
+   * #854: ends the running claims of one runner at once (a member revoked it): their leases are cut to now and the expiry runs, which
+   * ends each as it ends any claim whose lease ran out: a turn of the Implementer has one attempt, so it fails (`runner_revoked`, free like a lost lease) and its
+   * VM, its write token and its record are dealt with by the same reactions. Returns what the expiry did.
+   */
+  expireClaimsOf(runnerId: string): Promise<ExpiryReport>;
+  /**
    * #328: fails every queued job that has waited `waitedMs` or longer, counted from the later of the time it
    * became due and the time it was last queued (a job given back after a lost lease starts waiting again), with
    * the stable code `dispatch_unavailable`. No attempt is counted. A job whose dispatch a Dispatcher
@@ -294,6 +317,11 @@ export type ClaimOptions = {
    * (`noteSupersede`).
    */
   acceptsSupersede?: boolean;
+  /**
+   * #854: the claim is a customer's runner's. It takes only the turns of runner environments of `workspaceId` whose labels are all in
+   * `labels`, and never a job of another kind. Without it the claim never takes a turn of a runner environment.
+   */
+  customerRunner?: { workspaceId: string; labels: readonly string[] };
 };
 
 /** Which running jobs an attempt-losing statement applies to. */
@@ -302,6 +330,8 @@ type RunningScope = {
   leaseExpiredBefore?: string;
   /** Only this job, and only while `leaseToken` is its current claim. */
   claim?: { jobId: string; leaseToken: string };
+  /** Only the claims of this runner (#854). */
+  runnerId?: string;
 };
 
 function runningWhere(scope: RunningScope) {
@@ -317,6 +347,9 @@ function runningWhere(scope: RunningScope) {
             eb("id", "=", scope.claim.jobId),
             eb("lease_token", "=", scope.claim.leaseToken),
           ]),
+      ...(scope.runnerId === undefined
+        ? []
+        : [eb("runner_id", "=", scope.runnerId)]),
     ]);
 }
 
@@ -327,6 +360,7 @@ function runningWhere(scope: RunningScope) {
  */
 const REAPER_ERROR_CODES = [
   "lease_expired",
+  "runner_revoked",
   "timeout",
   "command_removed",
 ] as const satisfies readonly JobErrorCode[];
@@ -570,6 +604,68 @@ export function createRunnerJobsRepository(
     return Number(result.numUpdatedRows);
   }
 
+  /** #854: the job is not the turn of a runner environment. */
+  function notARunnerTurn(eb: ExpressionBuilder<Database, "jobs">) {
+    return eb.not(isARunnerTurn(eb));
+  }
+
+  function isARunnerTurn(eb: ExpressionBuilder<Database, "jobs">) {
+    return eb.exists(
+      eb
+        .selectFrom("implementer_turns")
+        .select("implementer_turns.id")
+        .whereRef("implementer_turns.job_id", "=", "jobs.id")
+        .where("implementer_turns.environment_kind", "=", "runner"),
+    );
+  }
+
+  /** #854: the same for the `jobs as served` row of a subquery. */
+  function servedIsARunnerTurn(
+    eb: ExpressionBuilder<Database & { served: Database["jobs"] }, "served">,
+  ) {
+    return eb.exists(
+      eb
+        .selectFrom("implementer_turns")
+        .select("implementer_turns.id")
+        .whereRef("implementer_turns.job_id", "=", "served.id")
+        .where("implementer_turns.environment_kind", "=", "runner"),
+    );
+  }
+
+  /**
+   * #854: a turn of a runner environment waits for a runner of its workspace that has its labels. One that no runner took within the
+   * deadline (`noRunnerAvailableMs`, 30 minutes by default) is cancelled with the stable code `no_runner_available`: free, without an
+   * attempt and without a credential, and it is not started again by itself. The pass of `no_capable_runner` leaves these turns to
+   * this one, because a busy pool of other runners says nothing about the labels this turn asks for.
+   */
+  async function cancelUnservedRunnerTurns(
+    executor: Kysely<Database>,
+    current: Date,
+  ): Promise<number> {
+    const timestamp = formatTimestamp(current);
+    const waitedBefore = formatTimestamp(
+      new Date(current.getTime() - limits.noRunnerAvailableMs),
+    );
+    const result = await executor
+      .updateTable("jobs")
+      .set({
+        status: "cancelled",
+        error_code: "no_runner_available" satisfies JobErrorCode,
+        finished_at: timestamp,
+        updated_at: timestamp,
+      })
+      .where("status", "=", "queued")
+      .where("review_kind", "=", "implementer")
+      .where("attempts", "=", 0)
+      .where("created_at", "<=", waitedBefore)
+      .where("run_after", "<=", waitedBefore)
+      .where(isARunnerTurn)
+      .executeTakeFirst();
+    const cancelled = Number(result.numUpdatedRows);
+    if (cancelled > 0) await idleSessionsOfEndedTurns(executor, timestamp);
+    return cancelled;
+  }
+
   /**
    * #195 (finding 1): a Dynamic job no capable runner claims within the deadline would wait forever (#752: so would a turn of
    * the Implementer, which only a runner with its own engine claims),
@@ -605,6 +701,8 @@ export function createRunnerJobsRepository(
       })
       .where("status", "=", "queued")
       .where("review_kind", "in", ["dynamic", "implementer"])
+      // A turn of a runner environment waits for a runner of its workspace and has a deadline of its own (`cancelUnservedRunnerTurns`).
+      .where(notARunnerTurn)
       // A claimed job follows the lease/attempt policy, never this initial capability deadline.
       .where("attempts", "=", 0)
       .where("created_at", "<=", strandedBefore)
@@ -621,6 +719,8 @@ export function createRunnerJobsRepository(
                 .selectFrom("jobs as served")
                 .select("served.id")
                 .whereRef("served.review_kind", "=", "jobs.review_kind")
+                // A turn of a customer's runner is no sign of the pool of hosted engines this pass asks about.
+                .where((served) => served.not(servedIsARunnerTurn(served)))
                 .where((served) =>
                   served.or([
                     // Running: the passes of `expire` ran before, so a lapsed lease or a spent runtime is not `running` any more.
@@ -674,6 +774,8 @@ export function createRunnerJobsRepository(
     current: Date,
     unknownCost: UnknownCostSettlement[],
     endedClaims: string[],
+    /** #854: the runner a member revoked; its claims end with `runner_revoked` instead of `lease_expired`. */
+    revokedRunnerId?: string,
   ): Promise<ExpiryReport> {
     const timestamp = formatTimestamp(current);
     // Before the expiry passes or claim: reserve all live candidates in the same row order. The
@@ -703,18 +805,35 @@ export function createRunnerJobsRepository(
     // migration (a race); a running one was claimed before the upgrade. They are cancelled here so
     // they can neither starve review jobs nor be requeued.
     await cancelRemovedCommands(executor, timestamp);
-    const lost = await loseAttempt(
+    const revoked =
+      revokedRunnerId === undefined
+        ? { failed: 0, requeued: 0 }
+        : await loseAttempt(
+            executor,
+            { leaseExpiredBefore: timestamp, runnerId: revokedRunnerId },
+            "runner_revoked" satisfies JobErrorCode,
+            timestamp,
+          );
+    const lostOthers = await loseAttempt(
       executor,
       { leaseExpiredBefore: timestamp },
       "lease_expired" satisfies JobErrorCode,
       timestamp,
     );
+    const lost = {
+      failed: revoked.failed + lostOthers.failed,
+      requeued: revoked.requeued + lostOthers.requeued,
+    };
     // A job whose runner keeps the lease alive but never finishes. Lost leases come first: a job
     // whose runner vanished long ago is retried, not failed for taking long.
     const timedOut = await failTimedOut(executor, {}, current);
     // A Dynamic job no runner can run must not wait forever (#195). After the two passes above on purpose (#752): a row whose
     // lease lapsed or whose runtime ran out is not `running` any more, so it is no sign of a live runner here.
     const noCapableRunner = await cancelStrandedDynamic(executor, current);
+    const noRunnerAvailable = await cancelUnservedRunnerTurns(
+      executor,
+      current,
+    );
     unknownCost.push(...(await closeRecordsOfEndedJobs(executor, timestamp)));
     // Only the jobs that are over: one that went back to the queue gets a new claim, and its VM must not be stopped.
     if (expiring.length > 0)
@@ -733,6 +852,7 @@ export function createRunnerJobsRepository(
       leaseExpired: lost.failed,
       timedOut,
       noCapableRunner,
+      noRunnerAvailable,
     };
   }
 
@@ -753,6 +873,8 @@ export function createRunnerJobsRepository(
         // Due for that long, and queued (again) for that long: a requeue changes `updated_at`, not `run_after`.
         eb("run_after", "<=", waitedBefore),
         eb("updated_at", "<=", waitedBefore),
+        // A turn of a runner environment is not dispatched to a VM: it waits for a runner and ends as `no_runner_available`.
+        notARunnerTurn(eb),
         eb.not(
           eb.exists(
             eb
@@ -909,6 +1031,9 @@ export function createRunnerJobsRepository(
               claim,
               reviewKinds,
               claimOptions.jobId,
+              claimOptions.customerRunner === undefined
+                ? undefined
+                : { customerRunner: claimOptions.customerRunner },
             );
             if (row === undefined) return null;
             // #498: read once per claim, for the first job that is taken (a claim that finds no job reads nothing). #499
@@ -1438,6 +1563,19 @@ export function createRunnerJobsRepository(
       return inAlertingTransaction((trx, unknownCost, endedClaims) =>
         expire(trx, now(), unknownCost, endedClaims),
       );
+    },
+
+    expireClaimsOf(runnerId) {
+      return inAlertingTransaction(async (trx, unknownCost, endedClaims) => {
+        const current = now();
+        await trx
+          .updateTable("jobs")
+          .set({ lease_expires_at: formatTimestamp(current) })
+          .where("status", "=", "running")
+          .where("runner_id", "=", runnerId)
+          .execute();
+        return expire(trx, current, unknownCost, endedClaims, runnerId);
+      });
     },
 
     failUndispatched(waitedMs) {

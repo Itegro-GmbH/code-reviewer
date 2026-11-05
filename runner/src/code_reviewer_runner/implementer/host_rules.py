@@ -35,11 +35,11 @@ import re
 from typing import Any, Final
 
 from .docker_api import DockerApi, DockerError
+from .role_labels import role_labels
 
 _log = logging.getLogger(__name__)
 
 HELPER_NAME: Final = "code-reviewer-host-helper"
-HELPER_ROLE_LABEL: Final = "code-reviewer.role"
 HELPER_SECONDS: Final = 20.0
 NFT: Final = "/usr/sbin/nft"
 _INTERFACE_NAME = re.compile(r"[A-Za-z0-9_-]{1,15}")
@@ -89,7 +89,7 @@ def helper_document(
         "Cmd": command,
         "User": "0:0",
         "Env": [],
-        "Labels": {HELPER_ROLE_LABEL: role},
+        "Labels": role_labels(role),
         "HostConfig": {
             "NetworkMode": "host",
             "Privileged": False,
@@ -198,12 +198,21 @@ def inet_rules(role: str, bridge: str) -> str:
 
 
 # The `nft` call of the `inet` table, in a shell, to tell a kernel with no `inet` family (the
-# platform's: `nft` says "Operation not supported", measured) from one that has it and refused:
-# exit status 3 for the first, 1 for the second. Only the status decides whether a note is made.
+# platform's, measured) from one that has it and refused: exit status 3 for the first, 1 for the
+# second. Only the status decides whether a note is made, and the statuses of probes decide it,
+# never the wording of `nft` (#827): when the table could not be installed, an empty `inet` table
+# is tried (the family is there, so the table was refused: 1), then an empty `ip` table (`nft`
+# works but the kernel has no `inet` family: 3), and if neither can be made `nft` itself is
+# failing (1). The probe tables are removed again.
 INET_NO_FAMILY_EXIT: Final = 3
+INET_PROBE_TABLE: Final = "implementer_family_probe"
 INET_SCRIPT: Final = (
-    f'out=$({NFT} "$1" 2>&1) && exit 0; case "$out" in *"not supported"*) exit '
-    f"{INET_NO_FAMILY_EXIT};; esac; exit 1"
+    f'{NFT} "$1" && exit 0; '
+    f"if {NFT} add table inet {INET_PROBE_TABLE}; then "
+    f"{NFT} delete table inet {INET_PROBE_TABLE}; exit 1; fi; "
+    f"if {NFT} add table ip {INET_PROBE_TABLE}; then "
+    f"{NFT} delete table ip {INET_PROBE_TABLE}; exit {INET_NO_FAMILY_EXIT}; fi; "
+    "exit 1"
 )
 INET_INSTALLED: Final = "installed"
 INET_NO_FAMILY: Final = "no_family"

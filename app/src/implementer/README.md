@@ -2,7 +2,7 @@
 
 Part of the Implementer of the factory deployment (epic #745, `plans/implementer-slice.md`). This folder is the server side of
 "send off a task": which repositories, branches and models a person can pick, and the validated submit that writes a session, a
-turn and a queued job. The page that uses it is `/w/<slug>/implementer` (#756, below). It follows the pattern of `manual-reviews`.
+turn and a queued job, and (below, "Follow-up turns") the next instruction of a session. The page that uses it is `/w/<slug>/implementer` (#756, below). It follows the pattern of `manual-reviews`.
 
 The routes exist only in a deployment with the capability `implementer` (the product `factory`, switched on by
 `PRODUCT_CAPABILITIES`). Everywhere else every route below is **absent**: the access proxy answers it as a path that does not
@@ -10,20 +10,45 @@ exist (`src/capabilities/routes.ts`, class `implementer`, one entry per route fi
 and each route file asks again (`requireImplementerCapability()` in `shared.ts`, Next.js's own `notFound()`) before the session
 or the database is looked at, so code-review.com hands out nothing.
 
-| File                                    | Role                                                                                                                                                                                                                                                                                     |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `service.ts`                            | `createImplementerService`: `listRepositories()`, `listBranches(id)`, `listModels()`, `startTask(user, body)`; every rule is here                                                                                                                                                        |
-| `models.ts`                             | `createImplementerModels`: the options of the model picker and the check at submit, one rule for both                                                                                                                                                                                    |
-| `start-input.ts`                        | `validateStartInput`: the body, field by field, with `INSTRUCTION_MAX_LENGTH` (20,000)                                                                                                                                                                                                   |
-| `branch-name.ts`                        | `checkBranchName`: the rules of `git check-ref-format --branch` plus 200 characters and "not the base branch"; one code per rule                                                                                                                                                         |
-| `errors.ts`                             | `ImplementerError` with the stable codes, their HTTP status, the field `issues` and the model refusal `reason`s                                                                                                                                                                          |
-| `http.ts`                               | The handlers behind the four routes: user first, then the origin, content type and body, then the service                                                                                                                                                                                |
-| `shared.ts`                             | The wiring of the running server (`implementerServiceFor(workspaceId)`) and the second wall `requireImplementerCapability()`                                                                                                                                                             |
-| `../db/implementer-job-shape.ts` (#752) | The one place that writes the pull request columns of a turn's job; the branch in `pr_url` is percent-encoded per part (#755). It lives in `db/` because the database layer imports it, and `implementer/` imports the database layer: the import cycle check (#715) allows no new cycle |
+| File                                    | Role                                                                                                                                                                                                                                                                                                                                                                                                         |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `service.ts`                            | `createImplementerService`: `listRepositories()`, `listBranches(id)`, `listModels()`, `startTask(user, body, options?)`; every rule is here. `options.costCapCents` (#844) is for code inside the app only, never a field of the body: the workflow engine starts a step with the rest of the workflow's budget as the most it may cost; it only lowers the cost limit and is held to the operator's maximum |
+| `models.ts`                             | `createImplementerModels`: the options of the model picker and the check at submit, one rule for both                                                                                                                                                                                                                                                                                                        |
+| `start-input.ts`                        | `validateStartInput`: the body, field by field, with `INSTRUCTION_MAX_LENGTH` (20,000)                                                                                                                                                                                                                                                                                                                       |
+| `agent-result.ts` (#843)                | `readStoredResultSchema`: the default result schema of a profile version, read back as the validator reads it. The bounds of the result an agent hands in are `../db/agent-result.ts`; the schema is checked by the runner (`finish_tool.py`)                                                                                                                                                                |
+| `branch-name.ts`                        | `checkBranchName`: the rules of `git check-ref-format --branch` plus 200 characters, 255 bytes, no leading `+` and "not the base branch"; one code per rule                                                                                                                                                                                                                                                  |
+| `errors.ts`                             | `ImplementerError` with the stable codes, their HTTP status, the field `issues` and the model refusal `reason`s                                                                                                                                                                                                                                                                                              |
+| `http.ts`                               | The handlers behind the four routes: user first, then the origin, content type and body, then the service                                                                                                                                                                                                                                                                                                    |
+| `shared.ts`                             | The wiring of the running server (`implementerServiceFor(workspaceId)`) and the second wall `requireImplementerCapability()`                                                                                                                                                                                                                                                                                 |
+| `../db/implementer-job-shape.ts` (#752) | The one place that writes the pull request columns of a turn's job; the branch in `pr_url` is percent-encoded per part (#755). It lives in `db/` because the database layer imports it, and `implementer/` imports the database layer: the import cycle check (#715) allows no new cycle                                                                                                                     |
+
+## Follow-up turns (#841)
+
+| File                                          | Role                                                                                                                                                                                                    |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `follow-up.ts`                                | `createFollowUps`: `continueSession` (the submit of the next instruction), `startQueued` (starts or discards the instruction that waited), `continuation` (what the "Continue" form needs)              |
+| `continue-input.ts`                           | `validateContinueInput`: what is left out means "as the last turn", `null` means none                                                                                                                   |
+| `service-support.ts`                          | what the first turn and the follow-ups share: refusals, `resolveRepository`, the copies of an environment and a profile                                                                                 |
+| `follow-up-starter.ts`, `follow-up-shared.ts` | the starter of queued instructions: idempotent, never throws; wired to the hook of the workflow engine at the end of a turn (`workflow-runs/shared.ts`, `turnEnded`) and to the sweep step `follow_ups` |
+| `../runner-api/resume.ts`                     | the `resume` block of the job: branches, checkout, snapshot flag, previous summary, digest                                                                                                              |
+| `ui/continue-form.tsx`                        | the "Continue" form on the run page of the newest turn                                                                                                                                                  |
+
+Routes: `POST /api/w/:workspace/implementer/sessions/:sessionId/turns` and `GET /api/w/:workspace/runs/:id/continuation`. The rules are in `docs/implementer.md`, section "Follow-up turns: the API and the form (#841)".
+
+What a session is, and is not, after the follow-ups (`docs/implementer.md`, "Session and Turn"; the owner's decisions of 2026-11-04):
+
+- **One turn after the other, never two at once.** A session is `running` or `idle`; the idle-to-running update is the one guard, and the negative slot as the
+  pull request number of the job is the second. A session may hold **exactly one queued instruction** (a second is `IMPLEMENTER_SESSION_BUSY`); it starts when
+  the running turn ends or in the cron step `follow_ups`.
+- **No close, no delete.** There is no close button, no closed column, no `IMPLEMENTER_SESSION_CLOSED` and no retention sweep. The steps of every turn and the
+  latest snapshot of a session (`../db/repositories/implementer-snapshots-repository.ts`, one per session, replaced by each turn) are kept for ever; the
+  erasure of the workspace is the only thing that removes them. A session keeps its branch name for good.
+- **The conversation comes back or a summary does.** `runner-api/resume.ts` builds what the next turn is told; the runner imports the snapshot or falls back to
+  `summary_only`. The app never reads the snapshot except to hand it to the next turn of the same session.
 
 ## Routes
 
-All four are for every member (`start_implementer_task`, minimum role `member`; one line in `workspaces/permissions.ts` raises
+The four routes of the first task (the follow-up routes are above) are for every member (`start_implementer_task`, minimum role `member`; one line in `workspaces/permissions.ts` raises
 it), run through `withWorkspace(...)` after the proxy, and answer `Cache-Control: no-store`. Every request is checked for where it
 comes from (`Sec-Fetch-Site` / `Origin`), the body of the POST for `application/json` and 64 KB. Every refusal is `{ "error": <code> }`.
 
@@ -36,7 +61,7 @@ comes from (`Sec-Fetch-Site` / `Origin`), the body of the POST for `application/
 - `GET /api/w/:workspace/implementer/repositories/:repositoryId/branches`: `{ defaultBranch, branches, truncated }`, the default
   branch first, at most 100 names (`getRepositoryFacts` and `listBranches`).
 - `GET /api/w/:workspace/implementer/models`: the options of the picker (below).
-- `POST /api/w/:workspace/implementer/tasks` with `{ repositoryId, baseBranch, branch, instruction, model, costLimitCents?,
+- `POST /api/w/:workspace/implementer/tasks` with `{ repositoryId, baseBranch, branch, instruction, model, costLimitCents?, environmentId?, profile?, result?,
 clientRequestId }`: `201 { runId, sessionId }`, `200` with the same ids for a client request id that was accepted before (nothing
   is written then). `model` is `{ entryId }` (operator's key) or `{ provider, model }` (own key).
 
@@ -52,6 +77,7 @@ clientRequestId }`: `201 { runId, sessionId }`, `200` with the same ids for a cl
 | 409       | `IMPLEMENTER_REQUEST_REUSED` (+ `runId`)                              | The client request id made a task before and this body is not that task (another instruction, branch, base branch, repository, model or cost limit): nothing is written, `runId` is the first task's |
 | 409       | `IMPLEMENTER_BRANCH_EXISTS`                                           | The new branch exists on GitHub, or a session of the repository holds the name: **a new branch name is needed**                                                                                      |
 | 413 / 415 | `IMPLEMENTER_BODY_TOO_LARGE` / `IMPLEMENTER_CONTENT_TYPE_UNSUPPORTED` | A body over 64 KB; a body that is not `application/json`                                                                                                                                             |
+| 404       | `IMPLEMENTER_PROFILE_NOT_FOUND`                                       | The `profile` is not one of this workspace (another workspace's looks the same), is archived, or has no such version (#843)                                                                          |
 | 422       | `IMPLEMENTER_MODEL_NOT_ALLOWED` (+ `reason`)                          | The model is not one the claim would run (reasons in `errors.ts`)                                                                                                                                    |
 | 422       | `EXCEEDS_OPERATOR_MAXIMUM` (+ `maximumCents`)                         | The cost limit is above the operator's maximum per turn                                                                                                                                              |
 | 503       | `IMPLEMENTER_GITHUB_UNAVAILABLE`                                      | GitHub failed, timed out, was rate limited or answered with something unusable; nothing was written                                                                                                  |
@@ -80,9 +106,13 @@ In this order, each step ends the request on failure, and **nothing is written b
    a folder of a listed branch or the other way round (`foo` and `foo/bar`; `IMPLEMENTER_BRANCH_CONFLICT`, from
    `listBranches`). **What this cannot see:** a conflicting branch beyond the first 100 the platform lists, and the name of a
    task whose branch is not on GitHub yet. Git finds those at the push (`push_rejected`);
-6. the model is allowed (`models.check`, the rule of the picker);
-7. a cost limit is at most the operator's maximum (`review_max_cost_cents`); none asked for is stored as none, and the maximum
-   applies at the claim;
+6. with a `profile` (#843): the profile is read (`profiles.findByName`, the newest version or the one pinned) and its version brings the model and
+   the cost limit, in place of the body's (the body then names neither: `not_with_profile`); then the model is allowed (`models.check`, the rule of
+   the picker); the result schema of the task (#843) is the body's `result` (checked by `validateResultSchema`, `IMPLEMENTER_REQUEST_INVALID` with
+   `issues: [{field: "result", code: "invalid", detail}]`) or else the default of the profile version (`agent-result.ts`, `readStoredResultSchema`), copied
+   into the turn with the rest; with one, the agent gets a finish tool (`docs/implementer.md`, "The finish tool");
+7. a cost limit (the body's, or the profile version's) is at most the operator's maximum (`review_max_cost_cents`); none asked for is stored as
+   none, and the maximum applies at the claim;
 8. `queue.enqueueImplementerTurn`: session, turn and job in one transaction, then the Dispatcher is woken as for any job. A lost
    race on the branch name hits the unique index of the sessions and is `IMPLEMENTER_BRANCH_EXISTS`; two submits with one new
    branch give exactly one `201`.
@@ -90,7 +120,8 @@ In this order, each step ends the request on failure, and **nothing is written b
 A turn that fails before it starts keeps its branch name (accepted for this slice, #785), so the retry with the same name and a
 new request id is `IMPLEMENTER_BRANCH_EXISTS`; the message says a new branch name is needed, and the form shows it.
 
-The branch name is checked against git's rules at submit: at most 200 characters, **each part between slashes at most 240 UTF-8
+The branch name is checked against git's rules at submit: at most 200 characters and **255 UTF-8 bytes in all**, no leading `+` or `-`, no
+control character of the C1 block, no lone surrogate half (the rules of the Worker's push policy, #838: it refuses a session branch it could never push, on every turn), **each part between slashes at most 240 UTF-8
 bytes** (a file name holds 255 bytes and git also makes `<name>.lock`; `ä` is two bytes, so 150 times `ä` is under 200
 characters and cannot be created), no white space of any kind (`\s`, the class of the queue's `BRANCH_NAME`: NBSP, U+2028,
 U+FEFF too, so a name the form accepts is never refused by the queue without an issue), and git's own rules. The branch in the

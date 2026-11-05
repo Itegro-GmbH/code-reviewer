@@ -24,6 +24,7 @@ const expiry = {
   leaseExpired: 0,
   timedOut: 0,
   noCapableRunner: 0,
+  noRunnerAvailable: 0,
 };
 const cleaned = {
   rateLimits: 0,
@@ -85,6 +86,15 @@ function setup(
       checked: 0,
     })),
     retryWriteTokens: vi.fn<() => Promise<void>>(async () => undefined),
+    startFollowUps: vi.fn<() => Promise<{ started: number }>>(async () => ({
+      started: 0,
+    })),
+    reconcileRuns: vi.fn<
+      (options?: { budgetMs?: number }) => Promise<{
+        looked: number;
+        failed: number;
+      }>
+    >(async () => ({ looked: 0, failed: 0 })),
     info: vi.fn<(line: string) => void>(),
     error: vi.fn<(line: string) => void>(),
   };
@@ -106,6 +116,8 @@ function setup(
     balanceMails: { deliverDue: mocks.deliverDue },
     journalCheck: { run: mocks.checkJournal },
     writeTokens: { retryPending: mocks.retryWriteTokens },
+    workflowRuns: { reconcile: mocks.reconcileRuns },
+    followUps: { startDue: mocks.startFollowUps },
     settings: options.settings ?? { giveUpMs: 3_600_000, maxRunning: null },
     ...(options.capabilities === undefined
       ? {}
@@ -675,6 +687,127 @@ describe("the write tokens of the Implementer in a run of the sweep (#790)", () 
     const report = await t.sweep.run();
 
     expect(report.failedSteps).toEqual(["write_tokens"]);
+    expect(t.cleanup).toHaveBeenCalledOnce();
+  });
+});
+
+describe("the workflow runs in a run of the sweep", () => {
+  const FACTORY = createCapabilitySet([
+    "review",
+    "dynamic-review",
+    "implementer",
+  ]);
+
+  // #844-T260
+  it("looks again at the runs that wait for a job, in a deployment with the Implementer", async () => {
+    const t = setup({ capabilities: FACTORY });
+
+    const report = await t.sweep.run();
+
+    expect(t.reconcileRuns).toHaveBeenCalledOnce();
+    expect(report.failedSteps).toEqual([]);
+  });
+
+  // #844-T281
+  it("gives them a time budget like the check runs", async () => {
+    const t = setup({ capabilities: FACTORY });
+
+    await t.sweep.run();
+
+    expect(t.reconcileRuns).toHaveBeenCalledWith({ budgetMs: 40_000 });
+  });
+
+  // #844-T282
+  it("names the step when the reconciler throws, and still does the steps after it", async () => {
+    const t = setup({ capabilities: FACTORY });
+    t.reconcileRuns.mockRejectedValueOnce(new Error("the database is down"));
+
+    const report = await t.sweep.run();
+
+    expect(report.failedSteps).toEqual(["workflow_runs"]);
+    expect(t.cleanup).toHaveBeenCalledOnce();
+  });
+
+  // #844-T261
+  it("does not in a deployment without the capability: code-review.com has no workflow runs", async () => {
+    const t = setup({
+      capabilities: createCapabilitySet(["review", "dynamic-review"]),
+    });
+
+    await t.sweep.run();
+
+    expect(t.reconcileRuns).not.toHaveBeenCalled();
+  });
+
+  // #844-T262
+  it("names the step when a run could not be advanced, and still does the others", async () => {
+    const t = setup({ capabilities: FACTORY });
+    t.reconcileRuns.mockResolvedValueOnce({ looked: 3, failed: 1 });
+
+    const report = await t.sweep.run();
+
+    expect(report.failedSteps).toEqual(["workflow_runs"]);
+    expect(t.cleanup).toHaveBeenCalledOnce();
+  });
+});
+
+describe("the queued instructions of the Implementer in a run of the sweep (#841)", () => {
+  const implementer = createCapabilitySet([
+    "review",
+    "dynamic-review",
+    "implementer",
+  ]);
+
+  // #841
+  it("starts the instructions whose turn ended without an event reaching them, and reports how many", async () => {
+    const t = setup({ capabilities: implementer });
+    t.startFollowUps.mockResolvedValueOnce({ started: 2 });
+
+    const report = await t.sweep.run();
+
+    expect(t.startFollowUps).toHaveBeenCalledOnce();
+    expect(report.followUpsStarted).toBe(2);
+    expect(report.failedSteps).toEqual([]);
+  });
+
+  // #841
+  it("runs after the step that expires leases, which ends turns without a report", async () => {
+    const t = setup({ capabilities: implementer });
+    const order: string[] = [];
+    t.expireStaleJobs.mockImplementationOnce(async () => {
+      order.push("expire");
+      return expiry;
+    });
+    t.startFollowUps.mockImplementationOnce(async () => {
+      order.push("follow_ups");
+      return { started: 0 };
+    });
+
+    await t.sweep.run();
+
+    expect(order).toEqual(["expire", "follow_ups"]);
+  });
+
+  // #841
+  it("does not run in a deployment without the capability", async () => {
+    const t = setup({
+      capabilities: createCapabilitySet(["review", "dynamic-review"]),
+    });
+
+    await t.sweep.run();
+
+    expect(t.startFollowUps).not.toHaveBeenCalled();
+  });
+
+  // #841: an error must never stop the sweep, and must not stop the workflow reconciler beside it
+  it("goes on with the other steps, and names the step, when starting fails", async () => {
+    const t = setup({ capabilities: implementer });
+    t.startFollowUps.mockRejectedValueOnce(new Error("down"));
+
+    const report = await t.sweep.run();
+
+    expect(report.failedSteps).toEqual(["follow_ups"]);
+    expect(t.reconcileRuns).toHaveBeenCalledOnce();
     expect(t.cleanup).toHaveBeenCalledOnce();
   });
 });

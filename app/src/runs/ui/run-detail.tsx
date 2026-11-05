@@ -153,6 +153,22 @@ function MaybeLink({
   );
 }
 
+/** How a follow-up turn got its earlier conversation (#841): `implementer.resume` of the result, as two modes and a reason. */
+function TaskResume({ task }: { task: ImplementerDetailView }) {
+  if (task.resume === null) return null;
+  return (
+    <p data-slot="run-resume" className="text-sm break-words">
+      <span className="font-semibold">Continuation:</span>{" "}
+      <code className="font-mono">{task.resume.mode}</code>. {task.resume.text}
+      {task.resume.reason === null ? null : (
+        <span className="block text-xs text-muted-foreground">
+          Reason: <code className="font-mono">{task.resume.reason}</code>
+        </span>
+      )}
+    </p>
+  );
+}
+
 /** The task of a run of the Implementer: its instruction. Text from the person who started it, rendered as text. */
 function TaskInstruction({ task }: { task: ImplementerDetailView }) {
   return (
@@ -324,6 +340,43 @@ function TaskNetwork({ task }: { task: ImplementerDetailView }) {
   );
 }
 
+/**
+ * The result the agent handed in through the finish tool (#843), as plain JSON text in a collapsed block: the texts in it are from
+ * the agent, rendered as text and never as markup. Shown only for a task that was given a result schema.
+ */
+function AgentResult({
+  task,
+  settled,
+}: {
+  task: ImplementerDetailView;
+  settled: boolean;
+}) {
+  if (!task.resultExpected) return null;
+  return (
+    <Section title="Result">
+      {task.result !== null ? (
+        <details data-slot="run-agent-result" className="text-sm">
+          <summary className="cursor-pointer text-muted-foreground">
+            Show the result the agent handed in (JSON)
+          </summary>
+          <pre className="mt-2 max-h-96 overflow-auto font-mono text-xs break-words whitespace-pre-wrap">
+            {JSON.stringify(task.result, null, 2)}
+          </pre>
+        </details>
+      ) : (
+        <p
+          data-slot="run-agent-result-none"
+          className="text-sm text-muted-foreground"
+        >
+          {settled
+            ? "The agent handed in no result."
+            : "The agent has not handed in a result yet."}
+        </p>
+      )}
+    </Section>
+  );
+}
+
 /** What the agent did: its own summary, the commits and the files. Every text here is from the agent or the repository. */
 function TaskResult({
   task,
@@ -370,6 +423,7 @@ function TaskResult({
           </p>
         )}
       </Section>
+      <AgentResult task={task} settled={settled} />
       {task.branches.shown.length === 0 &&
       task.branches.dropped.invalid === 0 &&
       task.branches.dropped.overflow === 0 ? null : (
@@ -577,6 +631,19 @@ export function RunDetail({
       : [
           projectItem,
           { term: "Kind", description: JOB_KIND_NAMES[run.reviewKind] },
+          ...(task.runner === null
+            ? []
+            : [
+                {
+                  term: "Environment",
+                  description: (
+                    <span className="break-words">
+                      {task.runner.name} (runner:{" "}
+                      {task.runner.labels.join(", ")})
+                    </span>
+                  ),
+                },
+              ]),
           ...(task.environment === null
             ? []
             : [
@@ -673,6 +740,11 @@ export function RunDetail({
             <span className="text-sm text-muted-foreground">{run.problem}</span>
           ) : null}
         </div>
+        {task?.waitingForRunner == null ? null : (
+          <p data-slot="run-waiting-for-runner" className="text-sm break-words">
+            {task.waitingForRunner}
+          </p>
+        )}
         {task?.pushedNote == null ? null : (
           <p data-slot="run-pushed-note" className="text-sm break-words">
             {task.pushedNote}
@@ -712,6 +784,7 @@ export function RunDetail({
       ) : (
         <>
           <TaskInstruction task={task} />
+          <TaskResume task={task} />
           <TaskSetup task={task} />
           <Section title={STEPS_COPY.title}>
             {/* Rides on the poll of the run: a new snapshot (`generatedAt`) is one request for the steps after the cursor. */}

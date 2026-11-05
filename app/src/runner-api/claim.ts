@@ -30,6 +30,7 @@
 // credentials and the model key) runs when the Worker fetches the job (`worker-fetch.ts`), by the same
 // code, so the Dispatcher never sees a secret of the job.
 import "server-only";
+import type { StoredResultSchema } from "../db/agent-result.ts";
 import type { AttemptedShas } from "../db/repositories/jobs-repository.ts";
 import type { IntegrationsRepository } from "../db/repositories/integrations-repository.ts";
 import type {
@@ -53,6 +54,7 @@ import type {
   RepoRef,
   ReviewCommand,
 } from "../integrations/types.ts";
+import type { ResumeBlock } from "./resume.ts";
 import type { RunnerQueue } from "../jobs/runner-queue.ts";
 import type { ClaimResult, Job, JobErrorCode } from "../jobs/job-types.ts";
 import { REVIEW_SETTING_LIMITS } from "../review-settings/settings.ts";
@@ -242,6 +244,15 @@ export type ClaimDeps = {
     | undefined
   >;
   /**
+   * #841: what a follow-up turn (number 2 or more) is told about the turns before it: the branches they pushed, the one to check out,
+   * whether a conversation is stored, the last summary and the digest (`implementer/resume.ts`). Asked only for a turn that is not the
+   * first, in the job's own workspace.
+   */
+  implementerResume: (
+    job: Job,
+    turn: { turn: StoredImplementerTurn; session: StoredImplementerSession },
+  ) => Promise<ResumeBlock>;
+  /**
    * Notes the provider and, for a job on the operator's key, the catalog entry (id and name as they are now) the job was
    * given in its usage record (#432): never the model. The claim reserved the record already; a failure gives the job back.
    */
@@ -359,6 +370,17 @@ export type Checked = {
       /** #745, step 7: the rule for the agent's network; `off` when the turn has none. */
       network: NetworkRule;
     } | null;
+    /** #843: the profile version the turn copied when it started; null for a task without one (the platform's defaults). */
+    profile: {
+      name: string;
+      version: number;
+      instructions: string;
+      canPush: boolean;
+    } | null;
+    /** #843: the result schema the turn copied when it started; null for a task without one (no finish tool). */
+    resultSchema: StoredResultSchema | null;
+    /** #841: what the turns before it left, for a follow-up turn; null for the first turn of a session. */
+    resume: ResumeBlock | null;
   } | null;
 };
 
@@ -373,7 +395,8 @@ export type Built = {
   native: boolean;
   /**
    * #753: the write token of a turn of the Implementer (the same value as `input.git.token`), or null. The caller remembers it
-   * before the input leaves and switches it off when the input does not (`revokeUndelivered`).
+   * before the input leaves and switches it off when the input does not (`revokeUndelivered`). For a profile that may not push (#843)
+   * it is a token that can only read: it is kept in the same ledger, so it ends with the turn like the other.
    */
   writeToken: GitTokenEntry | null;
 };
@@ -930,6 +953,10 @@ export async function checkJob(
   });
   if (!selected.ok) return refuse(selected.errorCode, selected.detail);
   const { selection } = selected;
+  // #854: a turn of a runner environment runs on a customer's machine with the owner's own key. The operator's key never leaves for a
+  // runner, whatever the turn says: a managed selection ends the job here, before a record, a key or a credential exists.
+  if (turn?.turn.runnerEnvironment != null && selection.keyMode === "managed")
+    return refuse("runner_needs_own_key", "kind=implementer");
   await deps.recordSelection(job, selection);
 
   // #553: the cost of a native Dynamic job. On the operator's key, which we pay, a model whose price is not confirmed ends
@@ -1066,6 +1093,20 @@ export async function checkJob(
                 setupScript: turn.turn.environment.setupScript,
                 network: turn.turn.environment.network ?? NETWORK_OFF,
               },
+        profile:
+          turn.turn.profile === null
+            ? null
+            : {
+                name: turn.turn.profile.name,
+                version: turn.turn.profile.version,
+                instructions: turn.turn.profile.instructions,
+                canPush: turn.turn.profile.canPush,
+              },
+        resultSchema: turn.turn.resultSchema,
+        resume:
+          turn.turn.number >= 2
+            ? await deps.implementerResume(job, turn)
+            : null,
       },
     };
   }
@@ -1177,6 +1218,21 @@ export async function buildJobInput(
   const network = implementer?.environment?.network ?? NETWORK_OFF;
   if (network.mode !== "off" && !features.includes("implementer_network"))
     return refuse("implementer_engine_unavailable", "reason=network");
+  // #843: the same for the profile. A Worker that does not read it would push the work of a profile that may not push, and would run
+  // the agent without the instructions the person chose.
+  if (implementer?.profile != null && !features.includes("implementer_profile"))
+    return refuse("implementer_engine_unavailable", "reason=profile");
+  // #843: the same for the result schema. A Worker that does not read it would run an agent that is never asked for its result.
+  if (
+    implementer?.resultSchema != null &&
+    !features.includes("implementer_result")
+  )
+    return refuse("implementer_engine_unavailable", "reason=result");
+  // #841: the same for a follow-up turn. A Worker that does not read `resume` would start from the base branch and push over the work of
+  // the earlier turns, and would never be given the conversation, the summary or the digest, which only a Worker that names the
+  // feature reads (the three fields are part of `resume`, a closed object): the turn ends here, free, before any credential exists.
+  if (implementer?.resume != null && !features.includes("implementer_resume"))
+    return refuse("implementer_engine_unavailable", "reason=resume");
   if (costLimit.enforced === "none")
     deps.logger.info(
       `[runner-api] job=${job.id} carries no cost limit: the runner names neither claim feature cost_limit nor operator_cost_limit, so a Dynamic Review is held only to the runner's own RUNNER_DYNAMIC_MAX_COST_USD and a Diff Review to none`,
@@ -1219,7 +1275,10 @@ export async function buildJobInput(
   try {
     git = revealGitAccess(
       job.reviewKind === "implementer"
-        ? await provider.implementerAccess(integration, repo)
+        ? await provider.implementerAccess(integration, repo, {
+            // #843: a profile that may not push gets a token that cannot, whatever the Worker does.
+            readOnly: implementer?.profile?.canPush === false,
+          })
         : await provider.jobAccess(integration, repo),
     );
   } catch (error) {
@@ -1301,6 +1360,42 @@ export async function buildJobInput(
                     name: implementer.environment.name,
                     ...(script === "" ? {} : { setupScript: script }),
                     ...(network.mode === "off" ? {} : { network }),
+                  },
+                }),
+            // #843: only a turn that was started with a profile carries one, and only to a Worker that reads it (the refusal above).
+            ...(implementer.profile === null
+              ? {}
+              : {
+                  profile: {
+                    name: implementer.profile.name,
+                    version: implementer.profile.version,
+                    ...(implementer.profile.instructions === ""
+                      ? {}
+                      : { instructions: implementer.profile.instructions }),
+                    canPush: implementer.profile.canPush,
+                  },
+                }),
+            // #843: only a turn that has a result schema carries one, and only to a Worker that reads it (the refusal above).
+            ...(implementer.resultSchema === null
+              ? {}
+              : { resultSchema: implementer.resultSchema }),
+            // #841: only a follow-up turn carries `resume`, and only to a Worker that reads it (the refusal above).
+            ...(implementer.resume === null
+              ? {}
+              : {
+                  resume: {
+                    turn: implementer.resume.turn,
+                    branches: implementer.resume.branches,
+                    checkout: implementer.resume.checkout,
+                    snapshot: implementer.resume.snapshot,
+                    ...(implementer.resume.previousSummary === undefined
+                      ? {}
+                      : {
+                          previousSummary: implementer.resume.previousSummary,
+                        }),
+                    ...(implementer.resume.digest === undefined
+                      ? {}
+                      : { digest: implementer.resume.digest }),
                   },
                 }),
           },
@@ -1604,6 +1699,8 @@ export async function handleClaim(
     maxRunning?: number;
     /** #424: the providers the caller advertised in its claim; absent means the default provider only. */
     llmProviders?: readonly string[];
+    /** #854: the claim is a customer's runner's: only the turns of its workspace's runner environments whose labels it has. */
+    customerRunner?: { workspaceId: string; labels: readonly string[] };
   } = {},
 ): Promise<Response> {
   // #320: a Dispatcher names `worker_credential` and gets a per-job credential instead of the input.
@@ -1618,6 +1715,9 @@ export async function handleClaim(
       ...(!split && features.includes("supersede")
         ? { acceptsSupersede: true }
         : {}),
+      ...(target.customerRunner === undefined
+        ? {}
+        : { customerRunner: target.customerRunner }),
       ...(target.jobId === undefined ? {} : { jobId: target.jobId }),
       ...(target.maxRunning === undefined
         ? {}

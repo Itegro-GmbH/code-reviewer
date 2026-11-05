@@ -7,6 +7,7 @@
 // repository, so the pages need no second lookup. The list is read without the columns it never
 // shows (the stored result with the log, the arguments, the lease): it is asked for every few seconds
 // by every open tab.
+import { labelsFromText } from "../../runner-identity/announcement.ts";
 import "server-only";
 import type { Kysely } from "kysely";
 import type { JobStatus } from "../job-status.ts";
@@ -108,6 +109,21 @@ function isManagedKey(usage: {
   );
 }
 
+/** The result kept with a turn (#843), written by this app as JSON text of an object; null for none. */
+function readResultValue(text: string | null): Record<string, unknown> | null {
+  if (text === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === "object" &&
+      parsed !== null &&
+      !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function createRunsRepository(
   db: Kysely<Database>,
   workspaceId: WorkspaceId,
@@ -150,6 +166,7 @@ export function createRunsRepository(
           "repositories.full_name as project",
           "repositories.url as repository_url",
           "implementer_sessions.branch as session_branch",
+          "implementer_turns.profile_can_push as turn_profile_can_push",
         ])
         .where("jobs.workspace_id", "=", workspaceId);
       if (filter.repositoryId !== undefined)
@@ -174,6 +191,9 @@ export function createRunsRepository(
                   implementer: {
                     branch: row.session_branch,
                     repositoryUrl: row.repository_url,
+                    ...(row.turn_profile_can_push === null
+                      ? {}
+                      : { canPush: row.turn_profile_can_push === 1 }),
                   },
                 }),
             job: {
@@ -233,10 +253,15 @@ export function createRunsRepository(
           "implementer_sessions.branch as session_branch",
           "implementer_sessions.base_branch as session_base_branch",
           "implementer_turns.instruction as turn_instruction",
+          "implementer_turns.profile_can_push as turn_profile_can_push",
+          "implementer_turns.result_schema as turn_result_schema",
+          "implementer_turns.result_value as turn_result_value",
           "implementer_turns.environment_name as turn_environment_name",
           "implementer_turns.environment_vcpus as turn_environment_vcpus",
           "implementer_turns.environment_network_mode as turn_environment_network_mode",
           "implementer_turns.environment_network_hosts as turn_environment_network_hosts",
+          "implementer_turns.environment_kind as turn_environment_kind",
+          "implementer_turns.environment_labels as turn_environment_labels",
           "usage_records.key_mode as key_mode",
           "usage_records.catalog_entry_id as catalog_entry_id",
           "usage_records.model_tier as model_tier",
@@ -256,10 +281,15 @@ export function createRunsRepository(
         session_branch: branch,
         session_base_branch: baseBranch,
         turn_instruction: instruction,
+        turn_profile_can_push: profileCanPush,
+        turn_result_schema: resultSchema,
+        turn_result_value: resultValue,
         turn_environment_name: environmentName,
         turn_environment_vcpus: environmentVcpus,
         turn_environment_network_mode: networkMode,
         turn_environment_network_hosts: networkHosts,
+        turn_environment_kind: environmentKind,
+        turn_environment_labels: environmentLabels,
         ...job
       } = row;
       return {
@@ -279,6 +309,24 @@ export function createRunsRepository(
                 baseBranch,
                 instruction,
                 repositoryUrl,
+                ...(profileCanPush === null
+                  ? {}
+                  : { canPush: profileCanPush === 1 }),
+                // #843: whether the turn had a result schema, and the result that was kept for it.
+                result: {
+                  expected: resultSchema !== null,
+                  value: readResultValue(resultValue),
+                },
+                // #854: the runner environment the turn copied, for the note of a task that waits for a runner.
+                runner:
+                  environmentKind === "runner" &&
+                  environmentName !== null &&
+                  environmentLabels !== null
+                    ? {
+                        name: environmentName,
+                        labels: labelsFromText(environmentLabels),
+                      }
+                    : null,
                 // #818: the environment the turn copied; none for a task without one.
                 environment:
                   environmentName === null || environmentVcpus === null

@@ -20,17 +20,20 @@ What a caller has to tell apart is the same small set as in the runner API (`api
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import re
 import threading
+import time
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, TypeVar, cast
 
 from code_reviewer_runner import __version__
 from code_reviewer_runner.job_loop.api import CompleteReply, HeartbeatReply, parse_heartbeat
 from code_reviewer_runner.job_loop.http import (
+    MAX_RESPONSE_BYTES,
     ApiError,
     ApiRejected,
     ApiUnavailable,
@@ -43,10 +46,34 @@ from code_reviewer_runner.job_loop.http import (
     send,
 )
 from code_reviewer_runner.job_loop.jsonvalues import as_object
+from code_reviewer_runner.job_loop.resume_download import (
+    RESUME_REQUEST_TIMEOUT_SECONDS,
+    RESUME_TOTAL_SECONDS,
+    ResumeFile,
+    ResumeUnavailable,
+)
+from code_reviewer_runner.job_loop.snapshot_sender import SnapshotPart
 from code_reviewer_runner.job_loop.worker_errors import WorkerFailure, WorkerSetupError
 from code_reviewer_runner.llm_providers import registered_provider_ids
+from code_reviewer_runner.resume_wire import (
+    HEADER_BYTES,
+    HEADER_PARTS,
+    HEADER_RAW_BYTES,
+    HEADER_SHA256,
+    HEADER_VERSION,
+    ResumeReason,
+)
+from code_reviewer_runner.snapshot_wire import (
+    CHUNK_BYTES,
+    FEATURE_IMPLEMENTER_SNAPSHOT,
+    MAX_SNAPSHOT_BYTES,
+    SnapshotHeader,
+    parse_header,
+    parts_of,
+)
 from code_reviewer_runner.step_wire import FEATURE_IMPLEMENTER_STEPS
 
+_T = TypeVar("_T")
 _JOB_ID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 # A heartbeat interval above this would let the 2 minute lease run out between two beats.
 MAX_HEARTBEAT_INTERVAL_SECONDS = 60
@@ -62,6 +89,14 @@ WORKER_FEATURES: tuple[str, ...] = (
     "implementer_environment",
     # #745, step 7: the Worker reads `implementer.environment.network` and starts the door for it.
     "implementer_network",
+    # #843: the Worker reads `implementer.profile` (the version's instructions and push right).
+    "implementer_profile",
+    # #843: the Worker reads `implementer.resultSchema`, gives the agent the finish tool made from
+    # it and reports the result the agent handed in.
+    "implementer_result",
+    # #838: the Worker reads `implementer.resume` and starts a follow-up turn from the branches of
+    # the session.
+    "implementer_resume",
 )
 # The feature of `GET /api/runners/v1/version` that says the Worker API exists.
 FEATURE_WORKER_API = "worker_api"
@@ -69,6 +104,26 @@ FEATURE_WORKER_API = "worker_api"
 # socket operation, not the call (nor the name lookup), so the sender bounds a call by its own clock
 # as well (`step_sender.REQUEST_SECONDS`).
 STEPS_REQUEST_TIMEOUT_SECONDS = 5.0
+# One part of the session snapshot (#839): up to 3 MiB, so the socket may be slower than for a batch
+# of steps; the sender bounds the call by its own clock as well (`snapshot_sender.REQUEST_SECONDS`).
+SNAPSHOT_REQUEST_TIMEOUT_SECONDS = 20.0
+# The whole version call, which runs before the host takes the job: the answer is a few hundred
+# bytes, so a server that keeps it going longer is treated as one that gave no list. It counts
+# against the lease (see the budget in `resume_download.py`).
+VERSION_CALL_TOTAL_SECONDS = 10.0
+
+
+def snapshot_query(part: SnapshotPart) -> str:
+    """The query of one part of the snapshot (`SessionPartQuery` in the Worker contract)."""
+    return (
+        f"part={part.index}&parts={part.count}&bytes={part.size}&rawBytes={part.raw_bytes}"
+        f"&sha256={part.sha256}&opencodeVersion={part.version}"
+    )
+
+
+# How long a call waits for the thread of the one before it, which has answered, to end.
+ENDING_THREAD_SECONDS = 0.25
+ENDING_THREAD_POLL_SECONDS = 0.01
 
 
 class CredentialInvalid(LeaseLost):
@@ -105,6 +160,10 @@ class WorkerApi(Protocol):
 class HttpWorkerApi:
     """The Worker API over HTTP. Blocking calls run in a thread, so the event loop stays free."""
 
+    # The routes of the snapshot (`{prefix}/{id}/session`, `/resume-session`): a customer's runner
+    # has its own (#879).
+    _session_prefix = "/api/workers/v1/jobs"
+
     def __init__(self, base_url: str, credential: str, *, request_timeout: float = 30.0) -> None:
         self._base_url = base_url.rstrip("/")
         self._credential = credential
@@ -112,8 +171,9 @@ class HttpWorkerApi:
         self._opener = build_opener()
         # The features the app listed in the version answer (empty: none or not asked).
         self._features: frozenset[str] = frozenset()
-        # The thread of the steps call in flight, if any (see `steps`).
+        # The thread of the steps call in flight, if any, and of the snapshot call (`_call_alone`).
         self._steps_thread: threading.Thread | None = None
+        self._snapshot_thread: threading.Thread | None = None
 
     # -- the checks and the three calls -------------------------------------------------------
 
@@ -127,22 +187,44 @@ class HttpWorkerApi:
         Any other answer (an app from before the call, a 401, no answer) is left to the details
         call, which is a Worker API call and tells the two apart (`fetch`).
         """
-        try:
-            reply = await asyncio.to_thread(
-                self._send, "GET", f"/api/runners/v1/version?jobId={self._safe_id(job_id)}", None
-            )
-        except ApiUnavailable:
-            return
-        body = as_object(parse_json(reply)) if reply.status == 200 else None
-        features = body.get("features") if body and body.get("version") == 1 else None
-        if isinstance(features, list):
-            self._features = frozenset(
-                name for name in cast("list[object]", features) if isinstance(name, str)
-            )
-        if isinstance(features, list) and FEATURE_WORKER_API not in features:
+        features = await self._read_features(job_id)
+        if features is not None and FEATURE_WORKER_API not in features:
             raise WorkerSetupError(
                 WorkerFailure.APP_UNSUPPORTED, "the app does not list the Worker API (worker_api)"
             )
+
+    async def _read_features(self, job_id: str) -> list[str] | None:
+        """Ask the version call which features the app lists and keep them in `_features`. None
+        when the app gave no list (no answer within `VERSION_CALL_TOTAL_SECONDS`, an app from
+        before, a 401): `_features` is then what it was."""
+        path = f"/api/runners/v1/version?jobId={self._safe_id(job_id)}"
+        deadline = time.monotonic() + VERSION_CALL_TOTAL_SECONDS
+        try:
+            # The deadline ends a read that trickles; `wait_for` ends a connect or a thread that
+            # does not (a daemon thread, left to end by itself).
+            reply = await asyncio.wait_for(
+                self._run_on_thread(
+                    "version-call",
+                    lambda: self._send_bytes(
+                        "GET",
+                        path,
+                        None,
+                        min(self._timeout, VERSION_CALL_TOTAL_SECONDS),
+                        max_bytes=MAX_RESPONSE_BYTES,
+                        deadline=deadline,
+                    ),
+                ),
+                VERSION_CALL_TOTAL_SECONDS,
+            )
+        except (ApiUnavailable, TimeoutError):
+            return None
+        body = as_object(parse_json(reply)) if reply.status == 200 else None
+        features = body.get("features") if body and body.get("version") == 1 else None
+        if not isinstance(features, list):
+            return None
+        listed = [name for name in cast("list[object]", features) if isinstance(name, str)]
+        self._features = frozenset(listed)
+        return listed
 
     async def fetch(self, job_id: str) -> WorkerJob:
         path = f"/api/workers/v1/jobs/{self._safe_id(job_id)}"
@@ -206,19 +288,148 @@ class HttpWorkerApi:
         a first that is still waiting: it is `ApiUnavailable` until that one is over.
         """
         path = f"/api/workers/v1/jobs/{self._safe_id(job_id)}/steps"
-        running = self._steps_thread
+        reply = await self._call_alone(
+            "_steps_thread",
+            "steps-call",
+            lambda: self._send_bytes("POST", path, body, STEPS_REQUEST_TIMEOUT_SECONDS),
+        )
+        if reply.status != 200:
+            raise self._failure(reply)
+
+    @property
+    def supports_snapshot(self) -> bool:
+        """True when the app listed `implementer_snapshot` (#839): it has the snapshot call. An app
+        that did not answer the version call, or does not list it, gets none."""
+        return FEATURE_IMPLEMENTER_SNAPSHOT in self._features
+
+    async def snapshot(self, job_id: str, part: SnapshotPart) -> None:
+        """Put one part of the session snapshot (`PUT /api/workers/v1/jobs/{id}/session`). The
+        description of the whole file travels with every part, in the query, so a part is judged
+        on its own and a part sent twice is the same call; the body is the bytes of the part.
+
+        On a thread of its own like `steps`, one at a time."""
+        path = f"{self._session_prefix}/{self._safe_id(job_id)}/session?{snapshot_query(part)}"
+        headers = self._session_headers(job_id)
+        reply = await self._call_alone(
+            "_snapshot_thread",
+            "snapshot-call",
+            lambda: self._send_bytes(
+                "PUT",
+                path,
+                part.data,
+                SNAPSHOT_REQUEST_TIMEOUT_SECONDS,
+                content_type="application/octet-stream",
+                headers=headers,
+            ),
+        )
+        if reply.status != 200:
+            raise self._failure(reply)
+
+    async def resume_session(self, job_id: str) -> ResumeFile:
+        """Get the stored session of the follow-up turn this job is (`GET /api/workers/v1/jobs/{id}/
+        resume-session?part=n`, #840), in the parts the app serves it in (a response is held to 4.5
+        MB like a request, so the file comes in parts of at most 3 MiB). Checks every part against
+        the description of the whole and the whole against its size and digest. Raises
+        `ResumeUnavailable`; nothing it raises carries a value of the answer.
+
+        The whole is bounded by `RESUME_TOTAL_SECONDS`: the thread reads against that deadline, and
+        the wait ends at it even when the thread does not (a daemon thread, left to end by itself):
+        a socket timeout bounds one wait, and a server that sends a byte now and then never trips
+        it."""
+        path = f"{self._session_prefix}/{self._safe_id(job_id)}/resume-session"
+        headers = self._session_headers(job_id)
+        deadline = time.monotonic() + RESUME_TOTAL_SECONDS
+        try:
+            return await asyncio.wait_for(
+                self._run_on_thread(
+                    "resume-download", lambda: self._download_resume(path, headers, deadline)
+                ),
+                RESUME_TOTAL_SECONDS,
+            )
+        except TimeoutError:
+            raise ResumeUnavailable(ResumeReason.DOWNLOAD_FAILED) from None
+
+    def _download_resume(
+        self, path: str, headers: Mapping[str, str], deadline: float
+    ) -> ResumeFile:
+        failed = ResumeUnavailable(ResumeReason.DOWNLOAD_FAILED)
+        header: SnapshotHeader | None = None
+        chunks: list[bytes] = []
+        count = 1
+        index = 0
+        while index < count:
+            left = deadline - time.monotonic()
+            if left < 1.0:
+                raise failed
+            try:
+                reply = self._send_bytes(
+                    "GET",
+                    f"{path}?part={index}",
+                    None,
+                    min(RESUME_REQUEST_TIMEOUT_SECONDS, left),
+                    max_bytes=CHUNK_BYTES + 1,
+                    deadline=deadline,
+                    headers=headers,
+                )
+            except ApiError:
+                raise failed from None
+            if reply.status == 204:  # the session has no stored conversation
+                raise ResumeUnavailable(ResumeReason.NO_SNAPSHOT)
+            if reply.status != 200:
+                raise failed
+            described = _resume_header(reply.headers)
+            if described is None or (header is not None and described != (header, count)):
+                raise failed
+            header, count = described
+            wanted = min(CHUNK_BYTES, header.size - index * CHUNK_BYTES)
+            if count != parts_of(header.size) or len(reply.body) != wanted:
+                raise failed
+            chunks.append(reply.body)
+            index += 1
+        data = b"".join(chunks)
+        if header is None or len(data) != header.size:
+            raise failed
+        if hashlib.sha256(data).hexdigest() != header.sha256:
+            raise failed
+        return ResumeFile(header, data)
+
+    def _session_headers(self, job_id: str) -> Mapping[str, str]:
+        """What the two session calls send besides the credential: nothing for a Worker."""
+        return {}
+
+    async def _call_alone(self, slot: str, name: str, call: Callable[[], Reply]) -> Reply:
+        """Run `call` on a daemon thread kept in `slot`, and refuse (`ApiUnavailable`) while the
+        call before it on the same slot has not ended."""
+        running: threading.Thread | None = getattr(self, slot)
         if running is not None and running.is_alive():
-            raise ApiUnavailable("an earlier steps call has not ended")
+            # The thread of the call before this one hands its answer to the loop and ends a moment
+            # later: a caller that goes on at once (the next part of a snapshot) finds it alive.
+            # A call that is really still running is not waited for beyond this moment. The wait
+            # gives the loop back (a `join` here would stop the heartbeat for the moment).
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + ENDING_THREAD_SECONDS
+            while running.is_alive() and loop.time() < deadline:
+                await asyncio.sleep(ENDING_THREAD_POLL_SECONDS)
+        if running is not None and running.is_alive():
+            raise ApiUnavailable(f"an earlier {name} has not ended")
+        return await self._run_on_thread(name, call, slot=slot)
+
+    async def _run_on_thread(
+        self, name: str, call: Callable[[], _T], *, slot: str | None = None
+    ) -> _T:
+        """Run `call` on a daemon thread and wait for its answer. A wait that is cancelled or ends
+        by a timeout leaves the thread to end by itself, and nothing waits for it (nor does the
+        interpreter, which is why this is not `asyncio.to_thread`)."""
         loop = asyncio.get_running_loop()
-        done: asyncio.Future[Reply] = loop.create_future()
+        done: asyncio.Future[_T] = loop.create_future()
 
         def settle(setter: Any, value: Any) -> None:
             if not done.done():
                 setter(value)
 
-        def call() -> None:
+        def run() -> None:
             try:
-                reply = self._send_bytes("POST", path, body, STEPS_REQUEST_TIMEOUT_SECONDS)
+                reply = call()
             except BaseException as error:
                 outcome = (done.set_exception, error)
             else:
@@ -227,11 +438,11 @@ class HttpWorkerApi:
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(settle, *outcome)
 
-        self._steps_thread = threading.Thread(target=call, name="steps-call", daemon=True)
-        self._steps_thread.start()
-        reply = await done
-        if reply.status != 200:
-            raise self._failure(reply)
+        thread = threading.Thread(target=run, name=name, daemon=True)
+        if slot is not None:
+            setattr(self, slot, thread)
+        thread.start()
+        return await done
 
     # -- internals ----------------------------------------------------------------------------
 
@@ -245,19 +456,35 @@ class HttpWorkerApi:
         data = json.dumps(body, separators=(",", ":")).encode("ascii") if body is not None else None
         return self._send_bytes(method, path, data, self._timeout)
 
-    def _send_bytes(self, method: str, path: str, data: bytes | None, timeout: float) -> Reply:
+    def _send_bytes(
+        self,
+        method: str,
+        path: str,
+        data: bytes | None,
+        timeout: float,
+        *,
+        content_type: str = "application/json",
+        max_bytes: int | None = None,
+        deadline: float | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> Reply:
+        """`headers` are added to the fixed ones (a customer's runner sends `X-Lease-Token` with
+        them); the fixed ones win."""
         request = urllib.request.Request(
             f"{self._base_url}{path}",
             data=data,
             method=method,
             headers={
+                **(headers or {}),
                 "Authorization": f"Bearer {self._credential}",
-                "Content-Type": "application/json",
+                "Content-Type": content_type,
                 "Accept": "application/json",
                 "User-Agent": f"code-reviewer-worker/{__version__}",
             },
         )
-        return send(self._opener, request, timeout)
+        if max_bytes is None:
+            return send(self._opener, request, timeout)
+        return send(self._opener, request, timeout, max_bytes, deadline)
 
     @staticmethod
     def _failure(reply: Reply) -> ApiError:
@@ -305,3 +532,24 @@ class HttpWorkerApi:
             heartbeat_interval=float(min(interval, MAX_HEARTBEAT_INTERVAL_SECONDS)),
             input=job_input,
         )
+
+
+def _resume_header(headers: Mapping[str, str]) -> tuple[SnapshotHeader, int] | None:
+    """The description of the whole file in the headers of one part, and how many parts there are;
+    None when a header is missing or is not what the contract says."""
+    lower = {name.lower(): value for name, value in headers.items()}
+    try:
+        parts = lower[HEADER_PARTS]
+        line = (
+            f"S {lower[HEADER_BYTES]} {lower[HEADER_RAW_BYTES]} {lower[HEADER_SHA256]} "
+            f"{lower[HEADER_VERSION]}\n"
+        )
+    except KeyError:
+        return None
+    header = parse_header(line.encode("ascii", "replace"))
+    if header is None or not parts.isascii() or not parts.isdigit():
+        return None
+    # Between one part and the most a snapshot of the cap takes.
+    if not 1 <= int(parts) <= parts_of(MAX_SNAPSHOT_BYTES):
+        return None
+    return header, int(parts)

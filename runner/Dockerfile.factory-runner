@@ -1,0 +1,68 @@
+# syntax=docker/dockerfile:1
+# SPDX-License-Identifier: LicenseRef-Proprietary
+#
+# Image of the Factory-Runner (#854, R1b): the Implementer's Control as a service on a customer's Linux
+# machine. It is the Worker image (the `sandbox` target of runner/Dockerfile) with the `factory-runner`
+# command as its entry point: the same Python venv, the same job host, the same model door and git
+# code, the pinned OpenCode and ripgrep, because Control starts the door, the reader and the rule
+# helpers from its own image. Nothing of the hosted deployment is changed by it: runner/Dockerfile
+# stays as it is (the golden snapshot hashes it, and a test pins `sandbox` as its last stage).
+#
+#   docker build -f runner/Dockerfile --target sandbox -t code-reviewer-runner-sandbox:local .
+#   docker build -f runner/Dockerfile.factory-runner \
+#     --build-arg WORKER_IMAGE=code-reviewer-runner-sandbox:local \
+#     --build-arg AGENT_IMAGE_REF=ghcr.io/itegro-gmbh/code-reviewer-agent:1.0.0 \
+#     -t factory-runner:local runner
+#
+# `WORKER_IMAGE` is the base. The default is the local tag of the commands above, for a developer;
+# a release builds from the Worker image **by digest** (`registry/code-reviewer-worker@sha256:...`),
+# never from a moving tag, so the runner image is made of exactly the code that was released.
+#
+# `AGENT_IMAGE_REF` is the reference of the agent image the runner pulls when the daemon does not have
+# it, or has another one (the `agent` target of runner/Dockerfile, published with the release; empty:
+# the image must be loaded by hand or named with FACTORY_RUNNER_AGENT_IMAGE). **Pin it by digest in a
+# release**: a tag can move, and the runner can only tell a stale image from the right one by digest.
+# The build says so when it is not one. The build context is the folder `runner/` (nothing is
+# copied from it).
+#
+# `RUNNER_RELEASE` is the number of the release (the release pipeline passes its run number): a whole
+# number that grows with every release, in the label `code-reviewer.runner.release`. The runner
+# updates itself only to a release with a higher number (docs/runner.md, "Updates").
+#
+# The release channel a runner updates itself from is the file runner/release-channel.json, copied into
+# the image (`/opt/code-reviewer/release-channel.json`): the image repository, where the signed release
+# manifest is, and the public key that proves it. It is part of the image, so a configuration on the
+# device cannot redirect an update. The owner fills it when a release pipeline exists (docs/runner.md,
+# "Updates"); empty, the runner does not update by itself.
+ARG WORKER_IMAGE=code-reviewer-runner-sandbox:local
+
+FROM ${WORKER_IMAGE} AS factory-runner
+ARG AGENT_IMAGE_REF=""
+ARG RUNNER_RELEASE="0"
+LABEL code-reviewer.runner.release="${RUNNER_RELEASE}" \
+      org.opencontainers.image.title="Factory-Runner" \
+      org.opencontainers.image.description="Runs the jobs of a Code Reviewer workspace on this machine (factory-runner)" \
+      org.opencontainers.image.source="https://github.com/Itegro-GmbH/code-reviewer" \
+      org.opencontainers.image.licenses="LicenseRef-Proprietary"
+# Why root: Control starts the containers of a turn through the host's Docker socket, and whoever can
+# use that socket is root of the machine whatever user they are in this container, so a non-root user
+# here would add no isolation. Root is what it needs besides: to write the work volume it mounts into
+# the agent's container by name (the files of a turn belong to other uids), and to empty it between
+# jobs (`factory_runner/housekeeping.py`). The agent is not root of this container: it is a container
+# of its own, under Sysbox where there is one (docs/runner.md says what `runc` means instead).
+USER 0:0
+COPY --chown=0:0 --chmod=0644 release-channel.json /opt/code-reviewer/release-channel.json
+RUN install -d -m 0755 /opt/code-reviewer \
+    && printf '{"reference": "%s"}\n' "${AGENT_IMAGE_REF}" > /opt/code-reviewer/agent-image.json \
+    && install -d -m 0700 /var/lib/factory-runner /work
+RUN case "${AGENT_IMAGE_REF}" in \
+      ""|*@sha256:????????????????????????????????????????????????????????????????) ;; \
+      *) echo "warning: AGENT_IMAGE_REF is a tag, not a digest (@sha256:...): pin it in a release" >&2 ;; \
+    esac
+ENV FACTORY_RUNNER_HOME=/var/lib/factory-runner
+# The configuration (credential included) and the work of the turns are volumes, so that the container
+# can be replaced by an update without losing the registration.
+VOLUME ["/var/lib/factory-runner", "/work"]
+WORKDIR /var/lib/factory-runner
+ENTRYPOINT ["/usr/bin/tini", "--", "factory-runner"]
+CMD ["run"]

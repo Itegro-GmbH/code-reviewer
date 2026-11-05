@@ -13,6 +13,13 @@ export const BRANCH_NAME_MAX_LENGTH = 200;
  */
 export const BRANCH_COMPONENT_MAX_BYTES = 240;
 
+/**
+ * The most UTF-8 bytes of the whole name: the limit of the final push of the Worker (#838), which takes a branch of at most 255
+ * bytes. Without this rule a name of 200 characters in a script of two-byte letters is accepted here and refused by the Worker
+ * when the task starts.
+ */
+export const BRANCH_NAME_MAX_BYTES = 255;
+
 export const BRANCH_NAME_ISSUES = [
   /** Nothing, or only white space. */
   "empty",
@@ -20,7 +27,7 @@ export const BRANCH_NAME_ISSUES = [
   "too_long",
   /** A part between slashes of more than `BRANCH_COMPONENT_MAX_BYTES` UTF-8 bytes. */
   "component_too_long",
-  /** White space of any kind (`\\s`: NBSP, line and paragraph separators, the byte order mark too), a control character, `~ ^ : ? * [` or a backslash. */
+  /** White space of any kind (`\\s`: NBSP, line and paragraph separators, the byte order mark too), a control character (the C1 block too), a lone surrogate half, `~ ^ : ? * [` or a backslash. */
   "forbidden_character",
   /** `..` anywhere. */
   "double_dot",
@@ -28,6 +35,10 @@ export const BRANCH_NAME_ISSUES = [
   "reflog_syntax",
   /** Starts with `-`: git would read it as an option. */
   "leading_dash",
+  /** Starts with `+`: the Worker's push reads a leading `+` as a forced update and never takes such a name. */
+  "leading_plus",
+  /** More than `BRANCH_NAME_MAX_BYTES` UTF-8 bytes in all. */
+  "too_many_bytes",
   /** Starts or ends with `/`, or has `//`. */
   "slash_placement",
   /** A part between slashes starts with `.`. */
@@ -49,8 +60,12 @@ export type BranchNameCheck =
   { ok: true; value: string } | { ok: false; issue: BranchNameIssue };
 
 // White space of every kind (`\s`, the class the queue refuses too: `jobs/job-input.ts` BRANCH_NAME), ASCII control characters
-// (git: below 0x20, and DEL), and the characters git refuses in a ref name.
-const FORBIDDEN = /[\s\u0000-\u001f\u007f~^:?*[\\]/;
+// (git: below 0x20, and DEL; the push policy of the Worker also refuses the C1 block, 0x80 to 0x9f), and the characters git
+// refuses in a ref name.
+const FORBIDDEN = /[\s\u0000-\u001f\u007f-\u009f~^:?*[\\]/;
+// A lone surrogate half is no UTF-8: the runner refuses the job, the encoder below would only replace it.
+const LONE_SURROGATE =
+  /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
 
 /** The first rule `name` breaks, or the name itself. `base` is the branch the task starts from. */
 export function checkBranchName(name: string, base: string): BranchNameCheck {
@@ -60,10 +75,12 @@ export function checkBranchName(name: string, base: string): BranchNameCheck {
   });
   if (name.trim() === "") return refuse("empty");
   if (name.length > BRANCH_NAME_MAX_LENGTH) return refuse("too_long");
-  if (FORBIDDEN.test(name)) return refuse("forbidden_character");
+  if (FORBIDDEN.test(name) || LONE_SURROGATE.test(name))
+    return refuse("forbidden_character");
   if (name.includes("..")) return refuse("double_dot");
   if (name.includes("@{")) return refuse("reflog_syntax");
   if (name.startsWith("-")) return refuse("leading_dash");
+  if (name.startsWith("+")) return refuse("leading_plus");
   if (name.startsWith("/") || name.endsWith("/") || name.includes("//"))
     return refuse("slash_placement");
   const parts = name.split("/");
@@ -76,6 +93,8 @@ export function checkBranchName(name: string, base: string): BranchNameCheck {
     )
   )
     return refuse("component_too_long");
+  if (encoder.encode(name).length > BRANCH_NAME_MAX_BYTES)
+    return refuse("too_many_bytes");
   if (name.endsWith(".lock")) return refuse("lock_suffix");
   if (parts.some((part) => part.endsWith(".lock")))
     return refuse("component_lock_suffix");

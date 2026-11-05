@@ -10,24 +10,37 @@
 // transaction writes the session, the turn and the job (`queue.enqueueImplementerTurn`), and the queue wakes the Dispatcher.
 // Nothing is written before the last step, and a platform that cannot be asked ends the submit with 503.
 import type { ImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
-import type { TurnEnvironment } from "../db/repositories/implementer-repository.ts";
+import type { TurnProfile } from "../db/repositories/implementer-repository.ts";
+import type { ProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import type { IntegrationsRepository } from "../db/repositories/integrations-repository.ts";
 import type { RepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { ImplementerStoreError } from "../db/implementer-errors.ts";
-import {
-  IntegrationError,
-  type IntegrationErrorCode,
-} from "../integrations/errors.ts";
 import type { IntegrationRegistry } from "../integrations/registry.ts";
-import type { Integration, RepoRef } from "../integrations/types.ts";
+import type { Integration } from "../integrations/types.ts";
 import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import { JobQueueError } from "../jobs/errors.ts";
 import type { EnqueueImplementerTurnResult } from "../jobs/job-types.ts";
 import type { JobQueue } from "../jobs/job-queue.ts";
-import { isEnvironmentVcpus } from "./environments/limits.ts";
 import { branchConflict } from "./branch-name.ts";
 import { ImplementerError, type UnwritableReason } from "./errors.ts";
+import {
+  BRANCH_CONFLICT,
+  BRANCH_EXISTS,
+  copyEnvironment,
+  copyProfile,
+  noAccessReason,
+  NOT_FOUND,
+  platformFailure,
+  resolveRepository,
+  resultOfProfile,
+  sameModel,
+} from "./service-support.ts";
 import type { ImplementerModels, ModelOptions } from "./models.ts";
+import {
+  createFollowUps,
+  type FollowUps,
+  type FollowUpDependencies,
+} from "./follow-up.ts";
 import { validateStartInput, type StartInput } from "./start-input.ts";
 
 export type RepositoryChoice = {
@@ -55,7 +68,7 @@ export type StartedTask = {
   created: boolean;
 };
 
-export type ImplementerService = {
+export type ImplementerService = FollowUps & {
   /** The active repositories of the workspace whose integration is active (a project is not needed), by name. */
   listRepositories(): Promise<{ repositories: RepositoryChoice[] }>;
   listBranches(repositoryId: string): Promise<BranchChoices>;
@@ -67,16 +80,31 @@ export type ImplementerService = {
   startTask(
     user: { id: string; githubLogin: string },
     input: unknown,
+    options?: StartTaskOptions,
   ): Promise<StartedTask>;
 };
 
-export type ImplementerServiceDependencies = {
+/**
+ * What only code inside the app can ask for, never a request body (#844): the workflow engine starts a step with the rest of the
+ * workflow's budget as the most the step may cost.
+ */
+export type StartTaskOptions = {
+  /**
+   * The most the task may cost, in whole US cents. It lowers the cost limit of the task (the profile version's, or none) and never
+   * raises it; it is held to the operator's maximum like any limit, but a cap above that maximum is lowered to it instead of refused.
+   */
+  costCapCents?: number;
+};
+
+export type ImplementerServiceDependencies = FollowUpDependencies & {
   repositories: Pick<RepositoriesRepository, "get" | "list">;
   integrations: Pick<IntegrationsRepository, "get" | "list">;
   registry: Pick<IntegrationRegistry, "resolve">;
   models: ImplementerModels;
   /** The workspace's environments (#818): a task may start with one, copied into the turn. */
   environments: Pick<ImplementerEnvironmentsRepository, "get">;
+  /** The workspace's profiles (#843): a task may run with one, whose version is copied into the turn. */
+  profiles: Pick<ProfilesRepository, "findByName">;
   queue: Pick<JobQueue, "enqueueImplementerTurn" | "findImplementerTurn">;
   /** The operator's maximum cost per turn in whole US cents, read for each call. */
   operatorCostLimitCents(): Promise<number>;
@@ -84,74 +112,21 @@ export type ImplementerServiceDependencies = {
   log?: (line: string) => void;
 };
 
-const MAX_ID_LENGTH = 128;
-
-const NOT_FOUND = () =>
-  new ImplementerError(
-    "IMPLEMENTER_REPOSITORY_NOT_FOUND",
-    "There is no such repository in this workspace.",
-  );
-const NOT_INSTALLED = () =>
-  new ImplementerError(
-    "IMPLEMENTER_APP_NOT_INSTALLED",
-    "The app is not installed for this repository any more, or GitHub refuses it access.",
-  );
-const UNAVAILABLE = () =>
-  new ImplementerError(
-    "IMPLEMENTER_GITHUB_UNAVAILABLE",
-    "GitHub could not be asked, or answered with something unusable.",
-  );
-const BRANCH_EXISTS = () =>
-  new ImplementerError(
-    "IMPLEMENTER_BRANCH_EXISTS",
-    "A branch or an earlier task of this repository already has this branch name. Choose a new branch name.",
-  );
-
-const BRANCH_CONFLICT = () =>
-  new ImplementerError(
-    "IMPLEMENTER_BRANCH_CONFLICT",
-    "A branch name cannot be a folder of another branch (foo and foo/bar), and a branch of this repository already has such a name. Choose a new branch name.",
-  );
-
-/**
- * The codes of an access failure that mean the app has no (more) access to the connection or the repository, each with the
- * reason the form gives for it.
- */
-const NO_ACCESS_REASONS: Partial<
-  Record<IntegrationErrorCode, UnwritableReason>
-> = {
-  INTEGRATION_ACCESS_CONNECTION_GONE: "connection_gone",
-  INTEGRATION_ACCESS_CONNECTION_SUSPENDED: "connection_suspended",
-  INTEGRATION_ACCESS_APP_AUTH_FAILED: "app_auth_failed",
-  INTEGRATION_ACCESS_SCOPE_REFUSED: "scope_refused",
-  INTEGRATION_REPOSITORY_NOT_ACCESSIBLE: "repository_not_accessible",
-};
-
-function noAccessReason(error: unknown): UnwritableReason | undefined {
-  return error instanceof IntegrationError
-    ? NO_ACCESS_REASONS[error.code]
-    : undefined;
+/** Whether the result schema a repeated body names is the one the earlier task ran with (a body that names none compares nothing). */
+function sameResult(stored: unknown, asked: StartInput["result"]): boolean {
+  return asked === null || JSON.stringify(stored) === JSON.stringify(asked);
 }
 
-function isNoAccess(error: unknown): boolean {
-  return noAccessReason(error) !== undefined;
-}
-
-/** What went wrong while asking the platform, as an error of this module. */
-function platformFailure(error: unknown): ImplementerError {
-  if (error instanceof ImplementerError) return error;
-  return isNoAccess(error) ? NOT_INSTALLED() : UNAVAILABLE();
-}
-
-/** Whether a stored model choice is the one of the body: the same entry, or the same provider and model. */
-function sameModel(stored: ModelChoice, asked: ModelChoice): boolean {
-  if ("entryId" in stored || "entryId" in asked)
-    return (
-      "entryId" in stored &&
-      "entryId" in asked &&
-      stored.entryId === asked.entryId
-    );
-  return stored.provider === asked.provider && stored.model === asked.model;
+function sameProfile(
+  stored: TurnProfile | null,
+  asked: StartInput["profile"],
+): boolean {
+  if (asked === null) return stored === null;
+  return (
+    stored !== null &&
+    stored.name === asked.name &&
+    (asked.version === null || stored.version === asked.version)
+  );
 }
 
 /** The answer for a request id that made a task before: that task when the body is the same, else the conflict. */
@@ -160,14 +135,22 @@ function repeatOf(
   task: StartInput,
 ): StartedTask {
   const { session, turn } = earlier;
+  // With a profile the model and the cost limit are the version's, not the body's: only the profile is compared.
+  const sameChoices =
+    task.profile !== null ||
+    (turn.costLimitCents === task.costLimitCents &&
+      task.model !== null &&
+      sameModel(turn.modelChoice, task.model));
   const same =
     session.repositoryId === task.repositoryId &&
     session.baseBranch === task.baseBranch &&
     session.branch === task.branch &&
     turn.instruction === task.instruction &&
-    turn.costLimitCents === task.costLimitCents &&
-    (turn.environment?.id ?? null) === task.environmentId &&
-    sameModel(turn.modelChoice, task.model);
+    (turn.environment?.id ?? turn.runnerEnvironment?.id ?? null) ===
+      task.environmentId &&
+    sameProfile(turn.profile, task.profile) &&
+    sameResult(turn.resultSchema, task.result) &&
+    sameChoices;
   if (!same)
     throw new ImplementerError(
       "IMPLEMENTER_REQUEST_REUSED",
@@ -181,40 +164,11 @@ export function createImplementerService(
   deps: ImplementerServiceDependencies,
 ): ImplementerService {
   const log = deps.log ?? ((line) => console.info(line));
-
-  /** The repository, its active integration and the reference the provider needs, or the refusal. Nothing is asked of the platform. */
-  async function resolveRepository(repositoryId: string): Promise<{
-    integration: Integration;
-    repo: RepoRef;
-  }> {
-    if (
-      typeof repositoryId !== "string" ||
-      repositoryId.trim() === "" ||
-      repositoryId.length > MAX_ID_LENGTH
-    )
-      throw new ImplementerError(
-        "IMPLEMENTER_REQUEST_INVALID",
-        "The repository id is missing or malformed.",
-      );
-    // Postgres refuses a NUL in text (22021) and the request would end in a 500: no row has such an id, so it is an unknown id.
-    if (repositoryId.includes("\u0000")) throw NOT_FOUND();
-    const repository = await deps.repositories.get(repositoryId);
-    if (repository === undefined || !repository.active) throw NOT_FOUND();
-    const integration = await deps.integrations.get(repository.integrationId);
-    if (integration === undefined) throw NOT_FOUND();
-    if (integration.status !== "active") throw NOT_INSTALLED();
-    return {
-      integration,
-      repo: {
-        integrationId: repository.integrationId,
-        externalId: repository.externalId,
-        fullName: repository.fullName,
-        url: repository.url,
-      },
-    };
-  }
+  const followUps = createFollowUps(deps);
 
   return {
+    ...followUps,
+
     async listRepositories() {
       const integrations = new Map(
         (await deps.integrations.list())
@@ -264,7 +218,7 @@ export function createImplementerService(
     },
 
     async listBranches(repositoryId) {
-      const { integration, repo } = await resolveRepository(repositoryId);
+      const { integration, repo } = await resolveRepository(deps, repositoryId);
       const provider = deps.registry.resolve(integration.type);
       try {
         // One after the other: with `Promise.all` the second call would keep running (and holding a token and a connection)
@@ -283,7 +237,7 @@ export function createImplementerService(
 
     listModels: () => deps.models.options(),
 
-    async startTask(user, input) {
+    async startTask(user, input, options = {}) {
       const checked = validateStartInput(input);
       if (!checked.ok)
         throw new ImplementerError(
@@ -303,7 +257,10 @@ export function createImplementerService(
       );
       if (earlier !== undefined) return repeatOf(earlier, task);
 
-      const { integration, repo } = await resolveRepository(task.repositoryId);
+      const { integration, repo } = await resolveRepository(
+        deps,
+        task.repositoryId,
+      );
       const provider = deps.registry.resolve(integration.type);
 
       let baseSha: string;
@@ -339,7 +296,29 @@ export function createImplementerService(
         throw platformFailure(error);
       }
 
-      const reason = await deps.models.check(task.model);
+      // A profile (#843) is read now and its version copied into the turn: what it says at this moment is what the task runs with,
+      // whatever is done to it afterwards. Its model and cost limit take the place of the body's, and are checked like the body's.
+      let profile: TurnProfile | null = null;
+      let profileResult: string | null = null;
+      let model: ModelChoice;
+      let costLimitCents: number | null;
+      if (task.profile === null) {
+        // `validateStartInput` leaves the model out only when a profile is named.
+        model = task.model as ModelChoice;
+        costLimitCents = task.costLimitCents;
+      } else {
+        const copied = await copyProfile(deps.profiles, task.profile);
+        profile = copied.profile;
+        model = copied.model;
+        costLimitCents = copied.costLimitCents;
+        profileResult = copied.defaultResult;
+      }
+
+      // The result schema (#843): the task's own, else the default of its profile version, copied into the turn like the rest. A task
+      // with neither runs without a finish tool, as it did before result schemas.
+      const resultSchema = task.result ?? resultOfProfile(profileResult);
+
+      const reason = await deps.models.check(model);
       if (reason !== null)
         throw new ImplementerError(
           "IMPLEMENTER_MODEL_NOT_ALLOWED",
@@ -349,37 +328,28 @@ export function createImplementerService(
 
       // The environment is read now and copied into the turn: what it says at this moment is what the task runs with, whatever
       // is done to it afterwards. An id of another workspace, or of one that is gone, is the same refusal.
-      let environment: TurnEnvironment | null = null;
-      if (task.environmentId !== null) {
-        const found = await deps.environments.get(task.environmentId);
-        if (found === undefined)
-          throw new ImplementerError(
-            "IMPLEMENTER_ENVIRONMENT_NOT_FOUND",
-            "There is no such environment in this workspace.",
-          );
-        // A size that is no longer offered (1 vCPU) is shown on the page as it is and refused here, before a turn, a job or a VM exists.
-        if (!isEnvironmentVcpus(found.vcpus))
-          throw new ImplementerError(
-            "IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED",
-            "The size of this environment is no longer offered.",
-          );
-        environment = {
-          id: found.id,
-          name: found.name,
-          vcpus: found.vcpus,
-          setupScript: found.setupScript,
-          network: found.network,
-        };
-      }
+      const { environment, runnerEnvironment } =
+        task.environmentId === null
+          ? { environment: null, runnerEnvironment: null }
+          : await copyEnvironment(deps.environments, task.environmentId, model);
 
-      if (task.costLimitCents !== null) {
+      if (costLimitCents !== null) {
         const maximumCents = await deps.operatorCostLimitCents();
-        if (task.costLimitCents > maximumCents)
+        if (costLimitCents > maximumCents)
           throw new ImplementerError(
             "EXCEEDS_OPERATOR_MAXIMUM",
             "The cost limit is above the maximum per task.",
             { maximumCents },
           );
+      }
+      // The cap of the caller (#844) only lowers: the smaller of it, the limit above and the operator's maximum.
+      if (options.costCapCents !== undefined) {
+        const maximumCents = await deps.operatorCostLimitCents();
+        costLimitCents = Math.min(
+          costLimitCents ?? Number.POSITIVE_INFINITY,
+          Math.max(1, Math.floor(options.costCapCents)),
+          maximumCents,
+        );
       }
 
       let result;
@@ -390,9 +360,12 @@ export function createImplementerService(
           baseSha,
           branch: task.branch,
           instruction: task.instruction,
-          modelChoice: task.model,
-          costLimitCents: task.costLimitCents,
+          modelChoice: model,
+          costLimitCents,
           environment,
+          runnerEnvironment,
+          profile,
+          resultSchema,
           createdBy: user.id,
           actorLogin: user.githubLogin,
           clientRequestId: task.clientRequestId,

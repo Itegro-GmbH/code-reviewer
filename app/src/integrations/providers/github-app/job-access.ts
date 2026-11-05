@@ -37,6 +37,30 @@ export const IMPLEMENTER_TOKEN_PERMISSIONS: InstallationPermissions = {
   metadata: "read",
 };
 
+/**
+ * What the token of an Implementer turn whose profile may not push (#843) may do: read the contents of one repository and the
+ * metadata. The turn clones, but pushing is an exit, so the token cannot do it even if the Worker had a bug.
+ */
+export const IMPLEMENTER_READ_TOKEN_PERMISSIONS: InstallationPermissions = {
+  contents: "read",
+  metadata: "read",
+};
+
+/**
+ * What the token of a workflow action on an issue (#844, a comment or a label) may do: write issues of one repository and the metadata.
+ * GitHub files the comments and labels of a pull request under issues too.
+ */
+export const ISSUE_ACTION_TOKEN_PERMISSIONS: InstallationPermissions = {
+  issues: "write",
+  metadata: "read",
+};
+
+/** What the token that opens a pull request for a workflow (#844) may do: write pull requests of one repository and the metadata. */
+export const PULL_REQUEST_ACTION_TOKEN_PERMISSIONS: InstallationPermissions = {
+  pull_requests: "write",
+  metadata: "read",
+};
+
 /** What the token that reads a posted review comment (#657) may do: read the comments of one repository and the metadata. */
 export const COMMENT_READ_TOKEN_PERMISSIONS: InstallationPermissions = {
   issues: "read",
@@ -160,7 +184,7 @@ export const VERDICT_TOKEN_PERMISSIONS: InstallationPermissions = {
  *   (`INTEGRATION_REPOSITORY_ARCHIVED`), a repository outside the installation
  *   (`INTEGRATION_REPOSITORY_NOT_ACCESSIBLE`) and a refusal for another reason (the normal retry path);
  * - 422 on the call itself: the platform refuses what was sent (a review of the app's own pull request):
- *   `INTEGRATION_REQUEST_REFUSED`.
+ *   `INTEGRATION_REQUEST_REFUSED`; for a pull request with nothing to compare, `INTEGRATION_NO_CHANGES_TO_COMPARE`.
  */
 export function toWriteError(error: unknown): IntegrationError {
   if (!(error instanceof GithubAppError)) return toReadError(error);
@@ -194,9 +218,37 @@ export function toWriteError(error: unknown): IntegrationError {
         cause: error,
       },
     );
+  if (
+    error.code === "GITHUB_APP_REQUEST_FAILED" &&
+    error.status === 422 &&
+    error.refusal === "no_commits_between"
+  )
+    return new IntegrationError(
+      "INTEGRATION_NO_CHANGES_TO_COMPARE",
+      error.message,
+      { cause: error },
+    );
   if (error.code === "GITHUB_APP_REQUEST_FAILED" && error.status === 422)
     return new IntegrationError("INTEGRATION_REQUEST_REFUSED", error.message, {
       cause: error,
     });
   return toReadError(error);
+}
+
+/**
+ * `toWriteError` for the calls of the workflow actions (#844). A 403 that GitHub gives for no reason this code knows (it is not a
+ * missing permission, a rate limit, an archived repository) is a failure of the action, not "the App lacks the permission": the
+ * step ends as `action_failed` and does not tell the owner to change the App's settings.
+ */
+export function toActionError(error: unknown): IntegrationError {
+  if (
+    error instanceof GithubAppError &&
+    error.code === "GITHUB_APP_FORBIDDEN" &&
+    !error.duringTokenRequest &&
+    error.refusal === "other"
+  )
+    return new IntegrationError("INTEGRATION_ACCESS_FAILED", error.message, {
+      cause: error,
+    });
+  return toWriteError(error);
 }

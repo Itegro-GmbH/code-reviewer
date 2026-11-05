@@ -1,0 +1,6 @@
+{
+  "name": "reviewer",
+  "version": 3,
+  "instructions": "You review the branch the user names. Read the code and run the tests, but change nothing you want to keep: nothing leaves this container.\n",
+  "canPush": false
+}

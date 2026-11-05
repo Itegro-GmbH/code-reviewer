@@ -1039,6 +1039,39 @@ export interface ImplementerSessionsTable {
   /** ISO 8601 UTC. */
   created_at: string;
   updated_at: string;
+  /**
+   * #841: the one instruction queued while a turn runs, as JSON text (`QueuedInstruction` in repositories/implementer-repository.ts);
+   * null when nothing is queued. It starts when the turn ends and is then cleared.
+   */
+  queued_instruction: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  /** #841: a queued instruction that could not start, with the reason, as JSON text; null otherwise. */
+  queued_discarded: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  /**
+   * #841: when the sweep or the end of a turn last tried to start the queued instruction (ISO 8601 UTC); null before the first try.
+   * Orders the sweep and spaces its tries. Cleared with the instruction.
+   */
+  queued_attempted_at: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  /**
+   * #841: when a start of the queued instruction first failed (ISO 8601 UTC); null until then. The 24 hours it waits for a start count
+   * from it. Cleared with the instruction.
+   */
+  queued_first_failed_at: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
 }
 
 /**
@@ -1096,6 +1129,68 @@ export interface ImplementerTurnsTable {
     string | null | undefined,
     string | null
   >;
+  /** #854: `hosted` or `runner`; null is a turn written before the kind (hosted). */
+  environment_kind: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  /** #854: the labels a runner must have, one on each line, for the kind `runner`; null otherwise. */
+  environment_labels: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  /**
+   * The profile version the task ran with, copied when the turn was written (#843): all five are null (a task without a profile: the
+   * platform's own defaults, as before profiles) or all are set. No foreign key: nothing in the profile tables reaches the turn.
+   * `profile_instructions` is the system-level text of that version, empty for none.
+   */
+  profile_id: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  profile_name: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  profile_version: ColumnType<
+    number | null,
+    number | null | undefined,
+    number | null
+  >;
+  profile_instructions: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  /** 1 when the profile version may push, 0 when not. */
+  profile_can_push: ColumnType<
+    number | null,
+    number | null | undefined,
+    number | null
+  >;
+  /**
+   * The result schema the task ran with (#843), JSON text of a schema the validator of the format accepted: the task's own, or the
+   * default of its profile version, copied when the turn was written. Null for a task without one: no finish tool.
+   */
+  result_schema: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  /**
+   * The result the agent handed in, JSON text, written when the turn ended with a result that fits `result_schema` (the runner
+   * checked it; the app held it to the bounds and did not check the schema again: the workflow engine re-checks it with
+   * `checkResultValue` against `result_schema` before it routes it anywhere). Null until then, and for a turn that ended without one.
+   */
+  result_value: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
 }
 
 /**
@@ -1118,6 +1213,46 @@ export interface ImplementerTurnStepsTable {
 }
 
 /**
+ * The conversation of an Implementer session (#839): one row for each session, replaced by the snapshot of each turn. `data` is the
+ * engine's export (JSON, redacted by the runner, gzipped) as base64 text; `turn_number` and `job_id` say which turn it came from.
+ */
+export interface ImplementerSessionSnapshotsTable {
+  session_id: string;
+  workspace_id: string;
+  job_id: string;
+  turn_number: number;
+  opencode_version: string;
+  /** The size of the gzip file, and of the JSON inside it. */
+  bytes: number;
+  raw_bytes: number;
+  /** Hex digest of the gzip file. */
+  sha256: string;
+  data: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * A part of a snapshot that is still arriving (#839): the upload waits here until every part is in, then the snapshot is swapped in
+ * and the parts of the job are deleted. Every part carries the description of the whole file, and the parts of one upload must agree.
+ */
+export interface ImplementerSessionSnapshotPartsTable {
+  job_id: string;
+  part_index: number;
+  workspace_id: string;
+  session_id: string;
+  part_count: number;
+  opencode_version: string;
+  /** The size of the whole gzip file, and of the JSON inside it. */
+  bytes: number;
+  raw_bytes: number;
+  sha256: string;
+  /** base64 of this part's bytes. */
+  data: string;
+  created_at: string;
+}
+
+/**
  * A start configuration for an Implementer task (#818): a size and a setup script, kept per workspace. A task copies size and
  * script at its start, so nothing points at this row: editing or deleting it touches no turn. `setup_script` is literal text,
  * stored as it was written (no trimming, no normalised line ends), at most 64 KB of UTF-8.
@@ -1127,17 +1262,195 @@ export interface ImplementerEnvironmentsTable {
   workspace_id: string;
   /** Unique within the workspace, whatever the case. */
   name: string;
-  /** A size of `contracts/environment-sizes.v1.json`; the app checks the list, the database only that it is positive. */
-  vcpus: number;
+  /** A size of `contracts/environment-sizes.v1.json`; the app checks the list, the database only that it is positive. Null for the kind `runner` (#854). */
+  vcpus: number | null;
   setup_script: string;
   /** `off`, `list` or `open` (#745, step 7): the rule for the agent's network. Existing environments read `off`. */
   network_mode: ColumnType<string, string | undefined, string>;
   /** The host names of a list, one on each line, in the form the door compares them in; empty unless the mode is `list`. */
   network_hosts: ColumnType<string, string | undefined, string>;
+  /** `hosted` (a VM of the platform: size, script, network rule) or `runner` (labels of a customer's runner instead; #854). */
+  kind: ColumnType<string, string | undefined, string>;
+  /** The labels a runner must have, one on each line, lower case and sorted; empty for the kind `hosted`. */
+  labels: ColumnType<string, string | undefined, string>;
   created_by: string;
   /** ISO 8601 UTC. */
   created_at: string;
   updated_at: string;
+}
+
+/**
+ * A workflow of a workspace (#833): a name and which saved version is the current one. The document itself is in
+ * `workflow_versions`; a save adds a version and moves `current_version`.
+ */
+export interface WorkflowsTable {
+  id: string;
+  workspace_id: string;
+  /** Unique within the workspace, whatever the case. The `name` of the current version's document. */
+  name: string;
+  current_version: number;
+  created_by: string;
+  /** ISO 8601 UTC. */
+  created_at: string;
+  updated_at: string;
+  /** Set when the workflow was archived: hidden from the list, takes no new version, its name is free. */
+  archived_at: string | null;
+}
+
+/** One saved version of a workflow's document (#833). Immutable: the database refuses an update. */
+export interface WorkflowVersionsTable {
+  workflow_id: string;
+  version: number;
+  /** The workspace of the workflow, repeated so that every query filters by it. */
+  workspace_id: string;
+  /** The JSON text of the document as it was validated and saved, at most 256 KB of UTF-8. */
+  document: string;
+  created_by: string;
+  created_at: string;
+}
+
+/**
+ * One start of a saved workflow version (#844, milestone 3). It names the version it started with, the repository it works on and the
+ * input of its trigger; the money is counted in millionths of a US dollar. `status` is `running`, `succeeded` or `failed`.
+ */
+export interface WorkflowRunsTable {
+  id: string;
+  workspace_id: string;
+  workflow_id: string;
+  workflow_version: number;
+  repository_id: string;
+  /** The branch the agent steps start from. */
+  base_branch: string;
+  /** JSON text: what the caller of the manual trigger handed in; for a label, the issue and the repository (`label-trigger.ts`). */
+  trigger_input: string;
+  status: string;
+  /** A stable code of `src/workflow-runs/errors.ts` for a failed run; null otherwise. */
+  error_code: string | null;
+  budget_micro_usd: number;
+  spent_micro_usd: ColumnType<number, number | undefined, number>;
+  /** One run per request id and workspace: makes the start idempotent. */
+  client_request_id: string;
+  /** The person who started the run by hand; null for a run that a trigger started (#845). */
+  created_by: string | null;
+  /** What started the run: `manual` or `github.issueLabeled` (#845). */
+  trigger_kind: ColumnType<string, string | undefined, string>;
+  /** What a trigger started the run for (`<repository id>#<issue number>` for a label); null for a run by hand. One running run for each (workflow, key). */
+  trigger_key: ColumnType<string | null, string | null | undefined, never>;
+  /** The login the agent steps are started as: the person who started the run, or who put the label on. Display only. */
+  actor_login: string;
+  created_at: string;
+  updated_at: string;
+  /** Set when the run ends. */
+  finished_at: string | null;
+}
+
+/** One step of a run (#844), in the order the steps run. `status` is `pending`, `running`, `succeeded`, `failed` or `skipped` (#846). */
+export interface WorkflowStepRunsTable {
+  id: string;
+  run_id: string;
+  workspace_id: string;
+  position: number;
+  step_id: string;
+  /** `agent`, `action`, or a control step the run decided: `if` or `loop` (#846). */
+  kind: string;
+  /** `pending`, `running`, `succeeded`, `failed`, or `skipped` (a step in the branch of an `if` that was not taken, #846). */
+  status: string;
+  /** How often the step has run in the run, from 1: the rounds of a loop (#846). */
+  round: number;
+  profile_name: string | null;
+  profile_version: number | null;
+  /** The job of the Implementer turn an agent step started. */
+  job_id: string | null;
+  turn_id: string | null;
+  cap_micro_usd: number | null;
+  cost_micro_usd: number | null;
+  /** Where `cost_micro_usd` comes from: `reported`, `estimated` or `limit` (#873); null for a step that was charged nothing. */
+  cost_basis: string | null;
+  /** JSON text: the values later steps refer to. */
+  output: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+/**
+ * A profile of a workspace (#843): a name and which saved version is the current one. What the profile says is in `profile_versions`;
+ * a save adds a version and moves `current_version`. The name never changes.
+ */
+export interface ProfilesTable {
+  id: string;
+  workspace_id: string;
+  /** The name a workflow refers to: lower case, unique within the workspace among the profiles that are not archived. */
+  name: string;
+  current_version: number;
+  created_by: string;
+  /** ISO 8601 UTC. */
+  created_at: string;
+  updated_at: string;
+  /** Set when the profile was archived: hidden from the list, takes no new version, is not started, its name is free. */
+  archived_at: string | null;
+}
+
+/**
+ * A runner on a customer's own machine (#854): registered with a token of the workspace, it takes jobs of that workspace only. The
+ * credential is never stored, only its hash.
+ */
+export interface RunnersTable {
+  id: string;
+  workspace_id: string;
+  name: string;
+  /** One label on each line, lower case, sorted. */
+  labels: string;
+  /** The version of the base the runner provides, as it reported it (`1.2.3`). */
+  base_version: string;
+  /** JSON text: the harnesses it announces (version, ready) and its capabilities. */
+  manifest: string;
+  /** JSON text: the limits the runner works within, as it reported them. */
+  limits: string;
+  /** sha256 (hex) of the credential. */
+  credential_hash: string;
+  /** The hash a renewal replaced; accepted until the new credential is used once. */
+  previous_credential_hash: string | null;
+  created_at: string;
+  last_seen_at: string;
+  /** Set when a member revoked the runner. */
+  revoked_at: string | null;
+}
+
+/** A registration token of a workspace (#854): short lived, used once, kept as a hash. */
+export interface RunnerRegistrationTokensTable {
+  id: string;
+  workspace_id: string;
+  token_hash: string;
+  created_by: string;
+  created_at: string;
+  expires_at: string;
+  /** Set by the exchange that used the token, with the runner it made. */
+  used_at: string | null;
+  runner_id: string | null;
+}
+
+/** One saved version of a profile (#843). Immutable: the database refuses an update. */
+export interface ProfileVersionsTable {
+  profile_id: string;
+  version: number;
+  /** The workspace of the profile, repeated so that every query filters by it. */
+  workspace_id: string;
+  description: string;
+  /** JSON text of a `ModelChoice` (`src/db/implementer-model-choice.ts`). */
+  model_choice: string;
+  /** The system-level text the agent is given; empty for none. */
+  instructions: string;
+  /** Whole US cents per turn; null: the operator's maximum alone. */
+  cost_limit_cents: number | null;
+  /** 1 when a turn of this version may push, 0 when not. */
+  can_push: number;
+  /** JSON text of the default result schema, or null for none. */
+  default_result: string | null;
+  created_by: string;
+  created_at: string;
 }
 
 export interface Database {
@@ -1171,7 +1484,17 @@ export interface Database {
   implementer_sessions: ImplementerSessionsTable;
   implementer_turns: ImplementerTurnsTable;
   implementer_turn_steps: ImplementerTurnStepsTable;
+  implementer_session_snapshots: ImplementerSessionSnapshotsTable;
+  implementer_session_snapshot_parts: ImplementerSessionSnapshotPartsTable;
   implementer_environments: ImplementerEnvironmentsTable;
+  workflows: WorkflowsTable;
+  workflow_versions: WorkflowVersionsTable;
+  workflow_runs: WorkflowRunsTable;
+  workflow_step_runs: WorkflowStepRunsTable;
+  profiles: ProfilesTable;
+  profile_versions: ProfileVersionsTable;
+  runners: RunnersTable;
+  runner_registration_tokens: RunnerRegistrationTokensTable;
   plan_handoff_tokens: PlanHandoffTokensTable;
   model_catalog_entries: ModelCatalogEntriesTable;
   models_dev_providers: ModelsDevProvidersTable;

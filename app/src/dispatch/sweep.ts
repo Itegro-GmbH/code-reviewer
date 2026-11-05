@@ -17,6 +17,8 @@
 //     batch, each tried a few times at most.
 //  6. `checks`: the check runs and review verdicts of jobs whose GitHub state is behind (#405): jobs the steps above
 //     ended or requeued, jobs no request named, syncs whose retry is due. At most one batch, within a time budget.
+//  6b. `follow_ups`: the instructions a person queued while a turn ran start for the sessions whose turn has ended (#841), the ones
+//      the event at the end of the turn did not reach.
 //  7. `cleanup`: the hourly cleanup a long-lived server runs on a timer, once when the hour has changed.
 //  8. `billing_holds`: while billing is on, releases the holds of jobs that ended while it was off (#591), once more than the
 //     switch-on did. A job that ended in the moment billing was switched on is not seen by the switch-on; this finds it.
@@ -55,6 +57,8 @@ export const CLEANUP_HOUR_KEY = "maintenance.sweep_cleanup_hour";
 const HOUR_MS = 60 * 60 * 1000;
 /** The sweep runs in an internal route (five minutes), so the check runs may have most of a minute (#405). */
 export const CHECKS_BUDGET_MS = 40_000;
+/** The same for the workflow runs (#844): a run is looked at as a whole, so the budget is checked between two runs. */
+export const WORKFLOW_RUNS_BUDGET_MS = 40_000;
 /**
  * The deadline of the models.dev run: the fetch, the lookups and the write together (#548). The route has 300 seconds; the
  * check runs take 40 of them at most, the other steps are single queries and calls with limits of their own, and this
@@ -70,6 +74,8 @@ export const SWEEP_STEPS = [
   "notices",
   "checks",
   "write_tokens",
+  "workflow_runs",
+  "follow_ups",
   "cleanup",
   "billing_holds",
   "balance_mails",
@@ -94,6 +100,8 @@ export type SweepReport = {
   noticesTried: number;
   /** How many jobs had their check run or review verdict synced with GitHub (#405). */
   checksSynced: number;
+  /** How many queued instructions of the Implementer were started (#841). */
+  followUpsStarted: number;
   cleanedUp: boolean;
   /** How many holds of ended jobs were released (#591); 0 while billing is off. */
   holdsReleased: number;
@@ -128,6 +136,14 @@ export type SweepDependencies = {
   };
   /** #790: tries again to switch off the write tokens of ended turns that could not be switched off. Left out, none is tried. */
   writeTokens?: { retryPending(): Promise<void> };
+  /** #844: looks again at the workflow runs that wait for a job which may have ended without a report. Left out, none is looked at. */
+  workflowRuns?: {
+    reconcile(options?: {
+      budgetMs?: number;
+    }): Promise<{ looked: number; failed: number }>;
+  };
+  /** #841: starts the queued instructions of sessions whose turn has ended and found no event. Left out, none is. */
+  followUps?: { startDue(): Promise<{ started: number }> };
   /** #591: releases the holds of ended jobs while billing is on (the step reads only the switch while it is off). Left out, none is. */
   billingHolds?: { releaseStranded(): Promise<{ released: number }> };
   /** #506: mails the balance crossings that are due (reads only the switch while billing is off). Left out, none is. */
@@ -162,6 +178,7 @@ export function createDispatchSweep(deps: SweepDependencies): DispatchSweep {
       sent: 0,
       noticesTried: 0,
       checksSynced: 0,
+      followUpsStarted: 0,
       cleanedUp: false,
       holdsReleased: 0,
       balanceMailsSent: 0,
@@ -225,6 +242,21 @@ export function createDispatchSweep(deps: SweepDependencies): DispatchSweep {
       await step("write_tokens", async () => {
         await writeTokens.retryPending();
       });
+    const workflowRuns = has("implementer") ? deps.workflowRuns : undefined;
+    if (workflowRuns !== undefined)
+      await step("workflow_runs", async () => {
+        const { failed } = await workflowRuns.reconcile({
+          budgetMs: WORKFLOW_RUNS_BUDGET_MS,
+        });
+        if (failed > 0) throw new Error("workflow runs could not be advanced");
+      });
+    // Beside the workflow runs, not in them: a failure of one never stops the other. After `expire`, which ends turns without a report:
+    // the instruction a person queued behind such a turn starts now.
+    const followUps = has("implementer") ? deps.followUps : undefined;
+    if (followUps !== undefined)
+      await step("follow_ups", async () => {
+        report.followUpsStarted = (await followUps.startDue()).started;
+      });
     await step("cleanup", async () => {
       const hour = Math.floor(now().getTime() / HOUR_MS);
       const done = Number(await deps.meta.get(CLEANUP_HOUR_KEY));
@@ -263,7 +295,8 @@ export function createDispatchSweep(deps: SweepDependencies): DispatchSweep {
         expired.requeued +
           expired.leaseExpired +
           expired.timedOut +
-          expired.noCapableRunner >
+          expired.noCapableRunner +
+          expired.noRunnerAvailable >
           0) ||
       report.givenUp + report.revived + report.sent > 0;
     if (changed)

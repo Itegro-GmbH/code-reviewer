@@ -74,12 +74,12 @@ from .host_rules import (
     run_helper,
 )
 from .reader import REPO_SUBPATH, work_volume_of
+from .role_labels import role_labels
 from .vm_memory import MEMINFO, REASON_VM_MEMORY, MemoryGuard
 
 _log = logging.getLogger(__name__)
 
 SETUP_CONTAINER_NAME: Final = "code-reviewer-setup"
-SETUP_ROLE_LABEL: Final = "code-reviewer.role"
 SETUP_NETWORK_NAME: Final = "code-reviewer-setup"
 # The bridge's own name, so that the rules can name it before it exists (a name is matched when a
 # packet comes in).
@@ -222,7 +222,7 @@ def network_document() -> dict[str, Any]:
             "Config": [{"Subnet": SETUP_NETWORK_SUBNET, "Gateway": SETUP_NETWORK_GATEWAY}],
         },
         "Options": {"com.docker.network.bridge.name": SETUP_BRIDGE},
-        "Labels": {SETUP_ROLE_LABEL: "setup-network"},
+        "Labels": role_labels("setup-network"),
     }
 
 
@@ -233,6 +233,7 @@ def setup_document(
     *,
     runtime: str = AGENT_RUNTIME,
     entrypoint: Sequence[str] | None = None,
+    nano_cpus: int = 0,
 ) -> dict[str, Any]:
     """The Setup container: the agent's image, the agent's limits, the repository and nothing else.
     Constants, the image id, the volume name the daemon gave and the memory the Dispatcher computed.
@@ -245,7 +246,7 @@ def setup_document(
         "Env": [],
         "Hostname": SETUP_HOSTNAME,
         "WorkingDir": AGENT_REPO,
-        "Labels": {SETUP_ROLE_LABEL: "setup"},
+        "Labels": role_labels("setup"),
         "NetworkingConfig": {
             "EndpointsConfig": {SETUP_NETWORK_NAME: {"IPAMConfig": {"IPv4Address": SETUP_ADDRESS}}}
         },
@@ -256,6 +257,8 @@ def setup_document(
             "Privileged": False,
             "Memory": memory_bytes,
             "MemorySwap": memory_bytes,
+            # A customer's runner (#855) limits the CPUs of this container as it does the agent's.
+            **({"NanoCpus": nano_cpus} if nano_cpus > 0 else {}),
             "PidsLimit": AGENT_PIDS_LIMIT,
             "OomScoreAdj": AGENT_OOM_SCORE_ADJ,
             "RestartPolicy": {"Name": "no"},
@@ -330,6 +333,8 @@ class SetupSeams:
     helper_image: str = AGENT_IMAGE_REFERENCE
     runtime: str = AGENT_RUNTIME
     entrypoint: Sequence[str] | None = None
+    # A customer's runner (#855) limits the CPUs of the container (`NanoCpus`); 0: no limit.
+    nano_cpus: int = 0
     ready_seconds: float = READY_SECONDS
     commit_seconds: float = COMMIT_SECONDS
     finish_seconds: float = FINISH_EXEC_SECONDS
@@ -404,10 +409,6 @@ class SetupContainer:
             if outcome != OUTCOME_OK:
                 self._clean()
                 return self._ended_run(outcome, why, tail, begun, started, finished, code=code)
-            # The script is over and the memory it could take is back: the guard must not kill the
-            # container under `docker commit`, which reads its layer and needs memory of its own.
-            if self._guard is not None:
-                self._guard.close()
             try:
                 image = self._save(container, free_bytes)
             except _NoRoom as reason:
@@ -496,6 +497,7 @@ class SetupContainer:
                 self._memory_bytes,
                 runtime=self._seams.runtime,
                 entrypoint=self._seams.entrypoint,
+                nano_cpus=self._seams.nano_cpus,
             ),
             SETUP_CONTAINER_NAME,
         )
@@ -728,15 +730,33 @@ class SetupContainer:
                 container, grace=STOP_GRACE_SECONDS, timeout=STOP_WAIT_SECONDS + 30.0
             )
         elif not self._ended.wait(self._seams.docker_stop_seconds):
+            # A guard that tripped is why it did not stop in time (its kill may have failed).
+            self._refuse_if_the_vm_ran_out_of_memory()
             raise _Unavailable(
                 "the container's Docker did not stop in time, so its images are not kept"
             )
         if not self._ended.wait(STOP_WAIT_SECONDS):
+            self._refuse_if_the_vm_ran_out_of_memory()
             raise _Unavailable("the container did not stop, so its file system is not kept")
+        # The container is gone and the memory it could take is back: the guard must not kill
+        # anything under `docker commit`, which reads its layer and needs memory of its own. Until
+        # now it watched, because a process the script left behind runs until the container stops.
+        if self._guard is not None:
+            self._guard.close()
+        self._refuse_if_the_vm_ran_out_of_memory()
         self._check_room(container, free_bytes)
         return api.commit_container(
             container, SETUP_IMAGE_REPOSITORY, SETUP_IMAGE_TAG, timeout=self._seams.commit_seconds
         )
+
+    def _refuse_if_the_vm_ran_out_of_memory(self) -> None:
+        """The guard's kill came while the setup was being finished: what the image would hold is
+        not what the script left, whatever else went wrong after it."""
+        if self._guard is not None and self._guard.tripped_at is not None:
+            raise _Unavailable(
+                f"{REASON_VM_MEMORY}: the VM was running out of memory while the setup was "
+                "being finished, so its result is not kept"
+            )
 
     def _check_room(self, container: str, free_bytes: Callable[[], int | None]) -> None:
         """The commit writes the container's file system into the VM's disk; a disk the script

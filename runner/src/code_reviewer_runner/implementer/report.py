@@ -26,6 +26,7 @@ from typing import Any, cast
 
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 
+from .finish_tool import MAX_RESULT_BYTES, scan_bounds
 from .history import MAX_COMMITS, MAX_FILES, MAX_PATH_CHARS, MAX_SUBJECT_CHARS, ChangeKind
 
 MAX_SUMMARY_CHARS = 8192
@@ -54,6 +55,9 @@ _BLOCK_KEYS = frozenset(
         "opencode",
         "setup",
         "network",
+        "checkedOut",
+        "resume",
+        "agentResult",
     }
 )
 MAX_BRANCHES = 50
@@ -61,7 +65,15 @@ MAX_BRANCH_NAME_CHARS = 255
 MAX_REASON_CHARS = 40
 _REASON = re.compile(r"[a-z][a-z_]*")
 # Not required: a block without the count (an older shape) is still one the app reads.
-_OPTIONAL_KEYS = frozenset({"branchesDropped", "setup", "network"})
+_OPTIONAL_KEYS = frozenset(
+    {"branchesDropped", "setup", "network", "checkedOut", "agentResult", "resume"}
+)
+_RESUME_KEYS = frozenset({"mode", "reason"})
+_RESUME_MODES = frozenset({"imported", "summary_only"})
+# The words of `ResumeReason` (`resume_wire.py`); a test pins them against it.
+_RESUME_REASONS = frozenset(
+    {"no_snapshot", "download_failed", "snapshot_unreadable", "import_failed", "version_changed"}
+)
 MAX_SETUP_OUTPUT_CHARS = 8192
 _SETUP_KEYS = frozenset({"ok", "exitCode", "timedOut", "durationSeconds", "output"})
 MAX_DROPPED = 1_000_000_000
@@ -229,6 +241,39 @@ def _branch_ok(value: object) -> bool:
     )
 
 
+def _checked_out_ok(value: object) -> bool:
+    """`checkedOut` (#837): the name of a branch, or null; judged as a name of `branches` is."""
+    return value is None or _is_string(value, MAX_BRANCH_NAME_CHARS, minimum=1)
+
+
+def _resume_ok(value: object) -> bool:
+    """`resume` (#840): the mode the follow-up turn got its conversation by, and for the summary
+    only the reason, one of the runner's words."""
+    if not isinstance(value, dict):
+        return False
+    given = cast("dict[str, object]", value)
+    if not set(given) <= _RESUME_KEYS or given.get("mode") not in _RESUME_MODES:
+        return False
+    if given["mode"] == "imported":
+        return "reason" not in given
+    return given.get("reason") in _RESUME_REASONS
+
+
+def agent_result_ok(value: object) -> bool:
+    """`agentResult` (#843): an object the app takes as data. The bounds of a result hold again
+    here, on the compact UTF-8 form the app measures (which is never longer than the file the
+    finish tool was read from), so a block with a result over them is refused and never sent."""
+    if as_object(value) is None:
+        return False
+    try:
+        text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError, RecursionError):
+        return False
+    return (
+        scan_bounds(text.encode("utf-8", "surrogatepass")) is None and len(text) <= MAX_RESULT_BYTES
+    )
+
+
 def _sha_or_none(value: object, *, allow_none: bool) -> bool:
     if value is None:
         return allow_none
@@ -246,6 +291,12 @@ def valid_block(value: object) -> dict[str, Any] | None:
     if "setup" in block and not _setup_ok(block["setup"]):
         return None
     if "network" in block and not _network_ok(block["network"]):
+        return None
+    if "checkedOut" in block and not _checked_out_ok(block["checkedOut"]):
+        return None
+    if "resume" in block and not _resume_ok(block["resume"]):
+        return None
+    if "agentResult" in block and not agent_result_ok(block["agentResult"]):
         return None
     base, head, pushed = block["baseCommit"], block["headCommit"], block["pushed"]
     commits, files, branches = block["commits"], block["filesChanged"], block["branches"]
@@ -292,6 +343,8 @@ def clip_texts(block: Mapping[str, Any]) -> dict[str, Any]:
             {**branch, "name": branch["name"][:MAX_BRANCH_NAME_CHARS]}
             for branch in clipped["branches"]
         ]
+        if isinstance(clipped.get("checkedOut"), str):
+            clipped["checkedOut"] = clipped["checkedOut"][:MAX_BRANCH_NAME_CHARS]
         clipped["commits"] = [
             {**commit, "subject": commit["subject"][:MAX_SUBJECT_CHARS]}
             for commit in clipped["commits"]

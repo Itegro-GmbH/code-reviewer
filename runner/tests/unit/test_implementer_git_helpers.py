@@ -134,6 +134,12 @@ START = "5" * 40
 def _ready(tmp_path: Path) -> GitWorkspace:
     workspace = _workspace(tmp_path)
     workspace._start = START  # pyright: ignore[reportPrivateUsage]
+    # A first turn: the base branch and the session branch start at the base tip.
+    spec = workspace.spec
+    workspace._starts = {  # pyright: ignore[reportPrivateUsage]
+        spec.base_branch: START,
+        spec.branch: START,
+    }
     return workspace
 
 

@@ -5,7 +5,10 @@
 // contents write and that has accepted it, a user, the real job queue and the service wired to all of them. The model check is
 // a stand-in that allows everything unless a test says otherwise; the rule itself is proven in src/implementer/models.test.ts.
 import type { FakePermissions } from "../../../fakes/github/server.ts";
+import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
+import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
+import { createImplementerStepsRepository } from "../db/repositories/implementer-steps-repository.ts";
 import { createImplementerService } from "../implementer/service.ts";
 import type { ImplementerModels } from "../implementer/models.ts";
 import { createTestQueue } from "./jobs.ts";
@@ -38,9 +41,12 @@ export async function startImplementerHarness(
     accepted?: FakePermissions;
     models?: ImplementerModels;
     operatorCostLimitCents?: number;
+    /** The most connections the pool of the database opens. */
+    poolMax?: number;
   } = {},
 ) {
   const h = await startWebhookHarness({
+    ...(options.poolMax === undefined ? {} : { poolMax: options.poolMax }),
     ...(options.requestTimeoutMs === undefined
       ? {}
       : { requestTimeoutMs: options.requestTimeoutMs }),
@@ -68,6 +74,9 @@ export async function startImplementerHarness(
     integrations: h.integrations,
     registry: h.registry,
     environments: createImplementerEnvironmentsRepository(h.db, h.workspaceId),
+    profiles: createProfilesRepository(h.db, h.workspaceId),
+    sessions: createImplementerRepository(h.db, h.workspaceId),
+    steps: createImplementerStepsRepository(h.db, h.workspaceId),
     models: options.models ?? ALLOW_ALL,
     queue,
     operatorCostLimitCents: async () => options.operatorCostLimitCents ?? 500,
@@ -105,7 +114,19 @@ export async function startImplementerHarness(
     ...overrides,
   });
 
-  return { h, repository, integration, service, queue, lines, counts, body };
+  const profiles = createProfilesRepository(h.db, h.workspaceId);
+
+  return {
+    h,
+    repository,
+    integration,
+    service,
+    queue,
+    lines,
+    counts,
+    body,
+    profiles,
+  };
 }
 
 export type ImplementerHarness = Awaited<

@@ -79,6 +79,18 @@ import { migration as addJobsSupersededByIndex } from "./20261023160000_add_jobs
 import { migration as addUsersPosthogIdentity } from "./20261025140000_add_users_posthog_identity.ts";
 import { migration as addEnvironmentNetwork } from "./20261103100000_add_environment_network.ts";
 import { migration as createImplementerTurnSteps } from "./20261104100000_create_implementer_turn_steps.ts";
+import { migration as createImplementerSessionSnapshots } from "./20261105090000_create_implementer_session_snapshots.ts";
+import { migration as createWorkflows } from "./20261104140000_create_workflows.ts";
+import { migration as createProfiles } from "./20261104150000_create_profiles.ts";
+import { migration as createRunners } from "./20261105120000_create_runners.ts";
+import { migration as addRunnerEnvironments } from "./20261105140000_add_runner_environments.ts";
+import { migration as addWorkflowStepCostBasis } from "./20261105170000_add_workflow_step_cost_basis.ts";
+import { migration as addImplementerTurnProfile } from "./20261104160000_add_implementer_turn_profile.ts";
+import { migration as addImplementerTurnResult } from "./20261105100000_add_implementer_turn_result.ts";
+import { migration as createWorkflowRuns } from "./20261105130000_create_workflow_runs.ts";
+import { migration as addImplementerSessionQueue } from "./20261105160000_add_implementer_session_queue.ts";
+import { migration as addWorkflowRunTrigger } from "./20261105190000_add_workflow_run_trigger.ts";
+import { migration as addWorkflowStepRounds } from "./20261105200000_add_workflow_step_rounds.ts";
 import { migration as addImplementerTurnEnvironment } from "./20261102150000_add_implementer_turn_environment.ts";
 import { migration as createImplementerEnvironments } from "./20261102140000_create_implementer_environments.ts";
 import { migration as createImplementerSessionsAndTurns } from "./20261030140000_create_implementer_sessions_and_turns.ts";
@@ -182,6 +194,19 @@ const migrations: Record<string, Migration> = {
     addImplementerTurnEnvironment,
   "20261103100000_add_environment_network": addEnvironmentNetwork,
   "20261104100000_create_implementer_turn_steps": createImplementerTurnSteps,
+  "20261104140000_create_workflows": createWorkflows,
+  "20261104150000_create_profiles": createProfiles,
+  "20261104160000_add_implementer_turn_profile": addImplementerTurnProfile,
+  "20261105090000_create_implementer_session_snapshots":
+    createImplementerSessionSnapshots,
+  "20261105100000_add_implementer_turn_result": addImplementerTurnResult,
+  "20261105120000_create_runners": createRunners,
+  "20261105130000_create_workflow_runs": createWorkflowRuns,
+  "20261105140000_add_runner_environments": addRunnerEnvironments,
+  "20261105160000_add_implementer_session_queue": addImplementerSessionQueue,
+  "20261105170000_add_workflow_step_cost_basis": addWorkflowStepCostBasis,
+  "20261105190000_add_workflow_run_trigger": addWorkflowRunTrigger,
+  "20261105200000_add_workflow_step_rounds": addWorkflowStepRounds,
 };
 
 export const migrationProvider: MigrationProvider = {

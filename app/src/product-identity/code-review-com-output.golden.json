@@ -244,6 +244,9 @@
         "command_removed": "This command was removed from the product, so the waiting run was cancelled.",
         "review_kind_changed": "The project's review kind was changed before this run could start, so the waiting run was cancelled.",
         "no_capable_runner": "No runner that can run this kind of review picked up the run within the time limit, so it was cancelled. It will run again on the next push or review request.",
+        "runner_revoked": "The runner working on this run was removed from the workspace, so the run was stopped. Nothing was charged.",
+        "runner_needs_own_key": "This run would use the operator's key on a runner, which is not allowed. Nothing was charged.",
+        "no_runner_available": "No runner of the workspace with the labels this run asks for picked it up within the time limit, so it was cancelled. Nothing was charged.",
         "dispatch_unavailable": "No worker picked up this run within the time limit, so it was stopped. The service that starts workers may be down or fully busy. It will run again on the next push or review request.",
         "dynamic_review_disabled": "Dynamic Review is not switched on yet, so this run could not start. Ask whoever runs the server to turn it on, or switch the project to Diff Review on its settings page.",
         "workspace_suspended": "Reviews are paused for this workspace, so this run did not start and no AI model was used. Ask whoever manages this workspace's plan.",
@@ -330,6 +333,7 @@
         "sandbox_unproven": "The environment for tasks has not been proven safe on this platform version yet, so the task did not start and was not billed.",
         "sandbox_size_unsupported": "The chosen size leaves too little memory for the agent's own container, so the task did not start and was not billed. Choose a larger size.",
         "environment_setup_failed": "The setup script of this task's environment did not finish successfully, so the task was stopped before the AI model was called and nothing was charged. The end of the script's output is shown below. Fix the script in Environments, then start the task again.",
+        "no_result": "The agent finished without handing in the result this task asks for, also after a reminder. Anything it committed is on its branch. Read its summary, then try again.",
         "unknown": "The run failed for a reason this version does not know."
       },
       "CHECKOUT_REASON_COPY": {

@@ -11,10 +11,30 @@ import { managedModelsOf } from "../runner-api/managed-models.ts";
 import { createUsageRecordsRepository } from "../db/repositories/usage-records-repository.ts";
 import { createJobsRepository } from "../db/repositories/jobs-repository.ts";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
+import {
+  createImplementerSnapshotsRepository,
+  isDirectPredecessorSnapshot,
+} from "../db/repositories/implementer-snapshots-repository.ts";
+import { buildResume } from "../runner-api/resume.ts";
 import { createImplementerStepsRepository } from "../db/repositories/implementer-steps-repository.ts";
 import { createCapabilitySet } from "../capabilities/capability.ts";
 import { createJobQueue } from "../jobs/job-queue.ts";
-import type { EnqueueImplementerTurnInput } from "../jobs/job-types.ts";
+import type {
+  EnqueueFollowUpTurnInput,
+  EnqueueImplementerTurnInput,
+} from "../jobs/job-types.ts";
+import { createRunnerCredentialsRepository } from "../db/repositories/runner-credentials-repository.ts";
+import { createRunnersRepository } from "../db/repositories/runners-repository.ts";
+import { createRunnerRegistrationApi } from "../runner-api/registration.ts";
+import {
+  normalizeLabels,
+  type Announcement,
+} from "../runner-identity/announcement.ts";
+import {
+  hashSecret,
+  newRegistrationToken,
+  newRunnerCredential,
+} from "../runner-identity/tokens.ts";
 import { addUser } from "./workspace-deletion-fixture.ts";
 import { createJobVmRunsRepository } from "../db/repositories/job-vm-runs-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
@@ -134,7 +154,7 @@ export async function startRunnerApiHarness(
     /** Wraps the job queue the API uses, for example to make one call fail. */
     wrapQueue?: (queue: TestQueue) => TestQueue;
     /** #395: what the running server does when a job ends or a call touched the database. */
-    hooks?: Pick<ReportDeps, "jobEnded" | "activity">;
+    hooks?: Pick<ReportDeps, "jobEnded" | "activity" | "turnEnded">;
     limits?: Partial<JobQueueLimits>;
     /** Replaces or (with undefined) removes variables of the app's environment. */
     env?: Record<string, string | undefined>;
@@ -524,6 +544,25 @@ export async function startRunnerApiHarness(
         createImplementerRepository(fixture.db, job.workspaceId).getTurnByJob(
           job.id,
         ),
+      implementerResume: async (job, { turn, session }) => {
+        const history = await createImplementerRepository(
+          fixture.db,
+          job.workspaceId,
+        ).turnHistory(session.id);
+        const snapshot = await createImplementerSnapshotsRepository(
+          fixture.db,
+          job.workspaceId,
+        ).find(session.id);
+        return buildResume({
+          turnNumber: turn.number,
+          sessionBranch: session.branch,
+          history: history.filter((entry) => entry.number < turn.number),
+          sessionSummary: session.summary,
+          hasSnapshot:
+            snapshot !== undefined &&
+            isDirectPredecessorSnapshot(snapshot.turnNumber, turn.number),
+        });
+      },
       claimedKeyMode: async (job) =>
         (
           await createUsageRecordsRepository(
@@ -544,6 +583,12 @@ export async function startRunnerApiHarness(
       claimedKeys,
       steps: (workspaceId) =>
         createImplementerStepsRepository(
+          fixture.db,
+          workspaceId,
+          fixture.clock.now,
+        ),
+      snapshots: (workspaceId) =>
+        createImplementerSnapshotsRepository(
           fixture.db,
           workspaceId,
           fixture.clock.now,
@@ -576,6 +621,14 @@ export async function startRunnerApiHarness(
       vmRuns: (workspaceId) =>
         createJobVmRunsRepository(fixture.db, workspaceId, fixture.clock.now),
       runnerToken: () => configuredRunnerToken(env),
+      // #854: the runners of customers' machines, with credentials of their own.
+      fleet: createRunnerRegistrationApi({
+        credentials: createRunnerCredentialsRepository(fixture.db, {
+          now: fixture.clock.now,
+        }),
+        settings: () => ({ minBaseVersion: fleetSettings.minBaseVersion }),
+        logger,
+      }),
       appVersion: TEST_APP_VERSION,
       noteClaimFeatures: (features) =>
         noteDispatcherClaim(fixture.db, features, fixture.clock.now()),
@@ -584,6 +637,10 @@ export async function startRunnerApiHarness(
     const workerApi = createWorkerApi(apiDeps);
     return { api, workerApi, llm, claimedKeys, writeTokens };
   }
+  /** #854: what the harness's fleet reads from the environment of a server. */
+  const fleetSettings: { minBaseVersion: string | null } = {
+    minBaseVersion: null,
+  };
   const { api, workerApi, llm, claimedKeys, writeTokens } = buildApi();
   /** Saves (or, with null, removes) the LLM key of the workspace of the jobs, for a provider (default: the first one). */
   async function setLlmKey(
@@ -800,6 +857,57 @@ export async function startRunnerApiHarness(
       jobId,
     );
 
+  /**
+   * #879: one part of the session snapshot, through the runner API. `query` is the description of the whole file, `body` the bytes of the
+   * part; the lease token goes in the header `leaseToken` names (none when it is `null`).
+   */
+  const runnerSession = (
+    jobId: string,
+    query: Record<string, string | number>,
+    body: Uint8Array,
+    request: RequestOptions & { leaseToken?: string | null } = {},
+  ) =>
+    api.session(
+      new Request(
+        `${url}/jobs/${jobId}/session?${new URLSearchParams(
+          Object.entries(query).map(([name, value]) => [name, String(value)]),
+        ).toString()}`,
+        {
+          method: "PUT",
+          headers: headers(request, {
+            "content-type": "application/octet-stream",
+            ...(request.leaseToken == null
+              ? {}
+              : { "x-lease-token": request.leaseToken }),
+          }),
+          body: body as BodyInit,
+        },
+      ),
+      jobId,
+    );
+
+  /** #879: one part of the stored session snapshot, through the runner API (`part` left out asks for the first). */
+  const runnerResumeSession = (
+    jobId: string,
+    part?: number | string,
+    request: RequestOptions & { leaseToken?: string | null } = {},
+  ) =>
+    api.resumeSession(
+      new Request(
+        `${url}/jobs/${jobId}/resume-session${part === undefined ? "" : `?part=${String(part)}`}`,
+        {
+          method: "GET",
+          headers: headers(
+            request,
+            request.leaseToken == null
+              ? {}
+              : { "x-lease-token": request.leaseToken },
+          ),
+        },
+      ),
+      jobId,
+    );
+
   /** Every row of the jobs table, for "nothing changed" assertions. */
   const snapshotJobs = () =>
     fixture.db.selectFrom("jobs").selectAll().orderBy("id").execute();
@@ -884,6 +992,41 @@ export async function startRunnerApiHarness(
         }),
         jobId,
       ),
+    /** #840: one part of the stored session snapshot, read by the Worker of a follow-up turn. */
+    resumeSession: (
+      jobId: string,
+      credential: string | null,
+      part?: number | string,
+    ) =>
+      workerApi.resumeSession(
+        new Request(
+          `${workerUrl}/jobs/${jobId}/resume-session${part === undefined ? "" : `?part=${String(part)}`}`,
+          { method: "GET", headers: workerHeaders(credential) },
+        ),
+        jobId,
+      ),
+    /** #839: one part of the session snapshot; `query` is the description of the whole file, `body` the bytes of the part. */
+    session: (
+      jobId: string,
+      credential: string | null,
+      query: Record<string, string | number>,
+      body: Uint8Array,
+    ) =>
+      workerApi.session(
+        new Request(
+          `${workerUrl}/jobs/${jobId}/session?${new URLSearchParams(
+            Object.entries(query).map(([name, value]) => [name, String(value)]),
+          ).toString()}`,
+          {
+            method: "PUT",
+            headers: workerHeaders(credential, {
+              "content-type": "application/octet-stream",
+            }),
+            body: body as BodyInit,
+          },
+        ),
+        jobId,
+      ),
     /** `body` is sent as JSON, or as it is if it is a string; a result alone is wrapped as `{ result }`. */
     result: (
       jobId: string,
@@ -941,6 +1084,7 @@ export async function startRunnerApiHarness(
       ]).allowsReviewKind(kind),
   });
   let turnCounter = 0;
+  let runnerCounter = 0;
   /** #753: a turn of the Implementer on the harness repository, as the submit will make it (a queued job of the kind). */
   async function enqueueTurn(
     overrides: Partial<EnqueueImplementerTurnInput> = {},
@@ -963,6 +1107,30 @@ export async function startRunnerApiHarness(
     });
     if (result.status !== "created")
       throw new Error(`expected a new turn, got ${result.status}`);
+    return result;
+  }
+
+  /** #841: the next turn of a session the harness made a turn for (the session must be idle: the first turn has ended). */
+  async function enqueueFollowUp(
+    sessionId: string,
+    overrides: Partial<EnqueueFollowUpTurnInput> = {},
+  ) {
+    turnCounter += 1;
+    fixture.clock.advance(1);
+    const result = await turnQueue.enqueueFollowUpTurn({
+      sessionId,
+      headSha: sha("b"),
+      instruction: "Now do more.",
+      modelChoice: { entryId: "entry-1" },
+      costLimitCents: null,
+      createdBy: "turn-user",
+      actorLogin: "octocat",
+      clientRequestId: `request-${String(turnCounter)}`,
+      fromQueued: false,
+      ...overrides,
+    });
+    if (result.status !== "created")
+      throw new Error(`expected a new follow-up turn, got ${result.status}`);
     return result;
   }
 
@@ -1051,6 +1219,50 @@ export async function startRunnerApiHarness(
         github.fake.pullRequestComments(repoFullName, prNumber),
     },
     enqueueTurn,
+    enqueueFollowUp,
+    /** #854: the minimum version of the base a customer's runner may have (`RUNNER_MIN_BASE_VERSION`); null for none. */
+    setMinBaseVersion(version: string | null) {
+      fleetSettings.minBaseVersion = version;
+    },
+    /**
+     * #854: registers a runner of a workspace (the harness's, or `workspaceId`) the way a member and the runner would, and returns its id
+     * and its credential. `claim({ token: credential })` is then that runner's claim.
+     */
+    async registerRunner(
+      announcement: Partial<Announcement> & { workspaceId?: string } = {},
+    ) {
+      const workspaceId = announcement.workspaceId ?? fixture.workspaceId;
+      if (runnerCounter === 0) await addUser(fixture.db, "fleet-user");
+      runnerCounter += 1;
+      const token = newRegistrationToken();
+      const made = await createRunnersRepository(fixture.db, workspaceId, {
+        now: fixture.clock.now,
+      }).createToken(
+        {
+          tokenHash: hashSecret(token),
+          createdBy: "fleet-user",
+          expiresAt: new Date(fixture.clock.now().getTime() + 3_600_000),
+        },
+        20,
+      );
+      if (!made.ok) throw new Error("token limit");
+      const credential = newRunnerCredential();
+      const redeemed = await createRunnerCredentialsRepository(fixture.db, {
+        now: fixture.clock.now,
+      }).redeem(hashSecret(token), {
+        name: `runner-${String(runnerCounter)}`,
+        labels: normalizeLabels(announcement.labels ?? ["linux"]),
+        baseVersion: announcement.baseVersion ?? "1.0.0",
+        manifest: announcement.manifest ?? {
+          harnesses: { opencode: { version: "1.19.0", ready: true } },
+          capabilities: [],
+        },
+        limits: announcement.limits ?? {},
+        credentialHash: hashSecret(credential),
+      });
+      if (!redeemed.ok) throw new Error("exchange failed");
+      return { runnerId: redeemed.runner.id, credential };
+    },
     /** #790: the write token service of the first app instance (the sweep's `retryPending`, the end of a turn). */
     writeTokens,
     /** #790: waits for the write tokens that the ends of claims (the reaper, a stop) switched off after their response. */
@@ -1071,6 +1283,8 @@ export async function startRunnerApiHarness(
     version,
     heartbeat,
     steps,
+    runnerSession,
+    runnerResumeSession,
     complete,
     post,
     snapshotJobs,

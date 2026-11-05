@@ -217,6 +217,10 @@ guard of git and bakes in no git configuration (git is free in the agent's works
 `docker build -f runner/Dockerfile --target sandbox -t code-reviewer-runner-sandbox .` (`make test-images` builds it and
 runs its smoke test).
 
+`runner/Dockerfile.factory-runner` (#854) is the second Dockerfile: the Factory-Runner image, `FROM` the Worker image with the
+`factory-runner` command as its entry point (`docs/runner.md`). It is a file of its own so that `runner/Dockerfile`, which the golden
+snapshot hashes and whose last stage is pinned to `sandbox`, does not change. CI builds it from the image above, without a push.
+
 The sizing of a container (memory per process) is in `docs/spike/cr-13-measurements.md`.
 
 ## One job
@@ -627,6 +631,7 @@ and the enum agree. Callers branch on the code, never on the text.
 | `base_branch_not_found` | An implementer job (#746): the base branch the turn should start from does not exist on the remote |
 | `clone_failed` | An implementer job (#746): the repository could not be cloned |
 | `setup_failed` | An implementer job (#746): the workplace could not be prepared before the turn started (git missing, the mirror, a port) |
+| `no_result` | An implementer job (#843) that carried a result schema: the agent ended without a result that fits it, also after the one reminder. Control reads the result file once the agent's container is gone (a reader, bounded before it is parsed: 256 KiB, 8 levels, 20,000 values) and checks it against the schema; the turn cost money, so the code is charged like `agent_gave_up`. What the agent committed is pushed all the same when the profile may push |
 | `agent_gave_up` | An implementer job (#746): the agent ended without a result it stands behind. Also (#764) a turn whose engine died, or that a bound of the audit ended, **after** the model was called: the turn cost money, so it is this charged code and not the free `runner_error`; commits made before are pushed and reported |
 | `push_rejected` | An implementer job (#746): the task's branch did not arrive at the end of the turn (refused, or not taken after one more try), no branch arrived although some had commits, or the agent's repository could not be read; the report lists every branch with its reason |
 | `branch_violation` | An implementer job (#746). **No longer produced** (there are no rules inside the workspace); the word stays for old runs |
@@ -1259,6 +1264,14 @@ the script of `implementer.environment` in the Setup container (`setup_container
 script ends the turn `environment_setup_failed` before the model door exists; the tracked files it changed are put back (`GitWorkspace.restore_tracked`);
 the end of its output is the `setup` block of the report. `job_run.py` runs the step and starts the agent's container from the committed image;
 a turn without an environment is exactly as before. `docs/implementer.md`, "The environment's setup script", has the rules and the measurements.
+
+**The finish tool (#843).** A turn whose job carries `implementer.resultSchema` (claim feature `implementer_result`) gets a tool to hand its result in:
+`implementer/finish_tool.py` is one standard-library program that is written into the agent's container as `factory-submit` (the command, and the stdio MCP
+server `factory-submit mcp` with the tool `submit_result`, which OpenCode names `finish_submit_result`) and is imported by Control for its own check
+(`parse_result`: size, then a scan of levels and values, then JSON, then the schema; `contracts/result-check-vectors.json` holds it to the app's
+`checkResultValue`). The result file is `/work/result/result.json`, the Subpath `result` of the work volume (`result_channel.py`), read after the container
+is gone through `ReaderAccess.read_result`. `session.py` sends one reminder when there is no valid result and ends `no_result` when there is still none;
+without a schema nothing of this exists and the prompt, the config and the containers are those of before. `docs/implementer.md`, "The finish tool".
 
 `implementer/session.py` runs one turn; `agent.py` is its engine, `config.py` and `prompts.py` what the runner tells the engine. The engine
 (`opencode serve`) runs in the agent's container (`agent_container.py`); Control reaches it through a loopback listener that opens one

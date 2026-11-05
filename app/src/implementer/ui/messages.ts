@@ -45,11 +45,31 @@ export const FORM_COPY = {
   providerPlaceholder: "Choose a provider",
   model: "Model",
   modelPlaceholder: "Choose a model",
+  profile: "Profile",
+  profileNone: "No profile",
+  profilePlaceholder: "Choose a profile",
+  profileHint:
+    "A profile brings the model, the cost limit and the standing instructions. Without one, you choose the model and cost limit below.",
+  profileLoadFailed:
+    "The profiles could not be loaded. A task can still be sent without a profile.",
+  profileDetailLoadFailed:
+    "This profile could not be loaded. Try again, or choose another.",
+  profileVersion: "version",
+  profileModelHint:
+    "The model of the profile. To use another, choose another profile or none.",
+  profileModelUnknown: "A model of this profile",
+  profileModelGone:
+    "The model of this profile is not available in this workspace, so the task would be refused. Choose another profile or none.",
+  profileCostHint: "The cost limit of the profile.",
+  profileCostMaximum: "The operator's maximum",
+  profileNoPush: "This profile does not push: the result stays in the run.",
   environment: "Environment",
   environmentPlaceholder: "Choose an environment",
   environmentHint:
     "A size and a setup script for this task. The script runs once in a container of its own, before the agent starts. Without a choice the standard applies. Environments are managed under",
   environmentLink: "Environments",
+  environmentRunnerNote:
+    "The task runs on a runner of the workspace that has the labels of this environment, with your own API key. It waits for one and is cancelled, free of charge, if no runner takes it in time.",
   environmentScriptNote:
     "This environment has a setup script. It runs as root in a container of its own with full internet access and no secrets, before the agent starts, and its time counts toward the task's time limit. If it fails, the task stops before the AI model is called and is not charged.",
   environmentNoNetworkNote: "The agent then works without internet access.",
@@ -108,6 +128,9 @@ const BRANCH_COPY: Record<BranchNameIssue, string> = {
   double_dot: "A branch name cannot contain two dots in a row.",
   reflog_syntax: "A branch name cannot contain the characters @{.",
   leading_dash: "A branch name cannot start with a dash.",
+  leading_plus: "A branch name cannot start with a plus sign.",
+  too_many_bytes:
+    "A branch name can have at most 255 bytes (letters outside the basic Latin alphabet take two to four). Shorten it.",
   slash_placement:
     "A branch name cannot start or end with a slash, or contain two slashes in a row.",
   component_leading_dot:
@@ -203,6 +226,17 @@ const FIELD_COPY: Record<
     too_long:
       "This environment cannot be used. Reload the page and choose another.",
   },
+  profile: {
+    required: "Choose a profile, or none.",
+    invalid: "This profile cannot be used. Choose another, or none.",
+    too_long: "This profile cannot be used. Choose another, or none.",
+  },
+  // The form has no field for a result schema (#843); a request that names one is the API's.
+  result: {
+    required: "A result schema is needed here.",
+    invalid: "This result schema cannot be used. Check it with the validator.",
+    too_long: "This result schema is too large.",
+  },
   costLimitCents: {
     required: "Enter an amount, for example 2.50, or leave the field empty.",
     invalid: "Enter an amount in dollars, for example 2.50.",
@@ -289,9 +323,19 @@ const failureCopy = (
     "This environment does not exist any more. Choose another, or the standard.",
   IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED:
     "The size of this environment is no longer offered (1 vCPU leaves the agent no memory), so the task was not started and nothing was charged. Change the size under Environments to 2 vCPU or more, or choose another environment.",
+  IMPLEMENTER_RUNNER_NEEDS_OWN_KEY:
+    "A runner works with your own API key, and the model of this task is a managed one that runs on platform VMs only. Choose a model of your own key, or an environment that runs on a platform VM. Nothing was started and nothing was charged.",
+  IMPLEMENTER_PROFILE_NOT_FOUND:
+    "This profile does not exist any more, is archived, or has no such version. Choose another, or none.",
   IMPLEMENTER_MODEL_NOT_ALLOWED: hasReason(failure.reason)
     ? MODEL_REFUSAL_COPY[failure.reason]
     : MODEL_REFUSED_GENERIC,
+  IMPLEMENTER_SESSION_NOT_FOUND:
+    "This session is not available in this workspace any more. Reload the page.",
+  IMPLEMENTER_SESSION_BUSY:
+    "A turn is running and the next instruction is already queued. It starts when the running turn ends; you can send another one after that.",
+  IMPLEMENTER_BRANCH_GONE:
+    "The branch of this session is no longer on GitHub, so it cannot be continued. Start a new task.",
   EXCEEDS_OPERATOR_MAXIMUM:
     typeof failure.maximumCents === "number" &&
     Number.isFinite(failure.maximumCents)

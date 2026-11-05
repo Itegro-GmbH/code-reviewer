@@ -61,8 +61,10 @@ from code_reviewer_runner.job import (
 )
 from code_reviewer_runner.redaction import Redactor
 from code_reviewer_runner.result import ErrorCode, Usage
+from code_reviewer_runner.resume_wire import ResumeReason
 
-from .agent import AgentTurn, EngineRuntime, ImplementerAgent
+from . import finish_tool
+from .agent import AgentTurn, EngineRuntime, ImplementerAgent, ResumeOutcome
 from .agent_container import (
     AGENT_HOME,
     AGENT_REPO,
@@ -79,6 +81,7 @@ from .git_workspace import (
     CONFIRM_SECONDS,
     LIST_TOO_LARGE,
     REASON_OUT_OF_SPACE,
+    BranchPush,
     GitWorkspace,
     PushReport,
 )
@@ -97,8 +100,20 @@ from .network_report import (
 )
 from .network_rule import MODE_OFF, MODE_OPEN, OFF, NetworkRule
 from .network_switch import Post, model_host_of, narrow_policy, parse_switch, urllib_post
-from .prompts import LEFTOVER_PROMPT, instructions_text
+from .preface import MovedBranch, PrefaceFacts, ResumeMode, message_parts
+from .prompts import LEFTOVER_PROMPT, RESULT_REMINDER_PROMPT, instructions_text
 from .reader import RESET_SECONDS as READER_RESET_SECONDS
+from .report import agent_result_ok
+from .result_channel import (
+    CONFIG_DIRECTORY,
+    ResultReader,
+    finish_files,
+    finish_server_command,
+    redacted_value,
+)
+from .resume_session import ResumeInput
+from .session_export import ExportFailed
+from .snapshot_pump import SnapshotPump
 from .step_pump import FLUSH_SECONDS as STEPS_FLUSH_SECONDS
 from .step_pump import STOP_FLUSH_SECONDS as STOP_STEPS_FLUSH_SECONDS
 from .step_pump import StepPump
@@ -110,22 +125,31 @@ _log = logging.getLogger(__name__)
 # and the final push (the plan: the last three minutes; four and a half since the readers are made
 # quiet twice and the container's end got its measured ceilings). A short limit keeps a third of it.
 GRACE_SECONDS = 270.0
-# How the grace is spent at a normal end, every step at its ceiling: the end of the agent's
-# container (`ENGINE_STOP_SECONDS`: the kill call and the wait until the daemon says it is gone;
-# its removal comes after the push, `remove()`, and is in no sum), the first reset of the readers
+# How the grace is spent at a normal end, every step at its ceiling: the export of the engine's
+# session for a follow-up turn (`SNAPSHOT_SECONDS`, #839: before the container is killed, because it
+# is read from the running engine; the fetch, the redaction, the gzip and the hand-over to the job
+# host, all inside the budget), the end of the agent's container (`ENGINE_STOP_SECONDS`: the kill
+# call and the wait until the daemon says it is gone; its removal comes after the push, `remove()`,
+# and is in no sum), the first reset of the readers
 # (`READER_RESET_SECONDS`), the rescue of a detached HEAD (three git commands of
 # `RESCUE_STEP_TIMEOUT`), the look at the tree (`DIRTY_TIMEOUT`), the leftover commit of the system,
 # the second reset of the readers (the commit ran the repository's filters in a reader that can
 # write), the final push, the two reads of the report (`REPORT_READ_TIMEOUT` each) and the last
 # flush of the live view (`STEPS_FLUSH_SECONDS`, #745: after the push, before the result, bounded in
-# all of its parts). The sum is 222 s of the 270; a test holds it, and holds the slack.
+# all of its parts). The sum is 227 s of the 270, 229.5 s with the read of the agent's result
+# (`RESULT_READ_SECONDS`, #843); a test holds it, and holds the slack. The upload
+# of the snapshot to the app is not in the sum: the job host does it beside the push and before the
+# result is delivered (`job_loop/snapshot_sender.py`).
+SNAPSHOT_SECONDS = 5.0
+STOP_SNAPSHOT_SECONDS = 2.0
 LEFTOVER_SECONDS = 40.0
 FINAL_PUSH_SECONDS = 100.0
 ENGINE_STOP_SECONDS = KILL_SECONDS + STOP_SECONDS
 # A stop (SIGTERM) leaves the process `SIGTERM_BACKSTOP_SECONDS` in all (`job_run.py`): the engine
 # comes out of it, then the reset of the readers, the rescue of a detached HEAD, the final push (no
 # leftover is committed, so no second reset), the two reads of the report and the shorter last
-# flush of the live view (`STOP_STEPS_FLUSH_SECONDS`): 84 s of the 115.
+# flush of the live view (`STOP_STEPS_FLUSH_SECONDS`), and the shorter export of the session
+# (`STOP_SNAPSHOT_SECONDS`): 86 s of the 115.
 STOP_PUSH_SECONDS = 25.0
 # How often the watch asks the job host whether the job is still ours while the agent works (a
 # lost lease ends the turn at once; nothing is pushed in the meantime).
@@ -142,6 +166,15 @@ INSTRUCTIONS_FILE = "implementer-instructions.md"
 DEADLINE_DETAIL = "the whole-job deadline was reached"
 COST_LIMIT_DETAIL = "the cost limit is used up"
 TOKEN_CAP_DETAIL = "the token cap is used up"
+# #840: a follow-up turn that imported a long conversation can be refused by the model door before
+# any call reaches the provider: the door reserves the cost of a call first, and the history alone
+# (the first call reads all of it again) is more than the limit (measured: 18.4 MB at 5 USD). The
+# code is the same as for any cost limit; the sentence says why this one came before any work.
+HISTORY_OVER_LIMIT_DETAIL = (
+    "the cost limit of the turn was reached before the first model call: the imported conversation "
+    "of the earlier turns alone costs more than the limit, because the first call reads all of it "
+    "again"
+)
 
 
 def deadline_seconds(time_limit: float, elapsed: float) -> float:
@@ -169,6 +202,9 @@ class SessionSeams:
     # The last flush of the live view (#745), at a normal end and at a stop.
     steps_flush_seconds: float = STEPS_FLUSH_SECONDS
     stop_steps_flush_seconds: float = STOP_STEPS_FLUSH_SECONDS
+    # The export of the engine's session (#839), at a normal end and at a stop.
+    snapshot_seconds: float = SNAPSHOT_SECONDS
+    stop_snapshot_seconds: float = STOP_SNAPSHOT_SECONDS
     startup_seconds: float | None = None
     clock: Callable[[], float] = time.monotonic
     # How the model door is started and what it talks to (#745, step 3); the defaults are the VM's
@@ -343,8 +379,21 @@ class ImplementerSession:
         should_stop: Callable[[], bool] = lambda: False,
         max_seconds: float | None = None,
         steps: StepPump | None = None,
+        results: ResultReader | None = None,
+        snapshot: SnapshotPump | None = None,
+        resume: ResumeInput | None = None,
     ) -> None:
         self.job = job
+        # #843: the profile version the turn started with. A turn without one pushes, as before.
+        profile = job.implementer.profile
+        self._can_push = profile is None or profile.can_push
+        self._profile_instructions = "" if profile is None else profile.instructions
+        # #843: the result schema of the turn (None: no finish tool, the turn is what it was before
+        # result schemas), where the result file is read, and what was read from it.
+        self._schema = job.implementer.result_schema
+        self._results = results
+        self._agent_result: dict[str, Any] | None = None
+        self._result_problem = "no result file"
         self.workspace = workspace
         self.command = tuple(command)
         self._place_factory = place
@@ -358,6 +407,17 @@ class ImplementerSession:
         self._max_seconds = max_seconds
         # The channel the step records of the turn leave over (#745): None records nothing.
         self._steps = steps
+        # The channel the engine's session leaves over at the end (#839): None takes no export.
+        self._snapshot = snapshot
+        # #840: the stored conversation of a follow-up turn (or the reason there is none), and how
+        # the engine got it once it started. A follow-up that was handed none has no conversation.
+        follow_up = job.implementer.resume
+        self._resume_input: ResumeInput | None = None
+        if follow_up is not None:
+            self._resume_input = resume or ResumeInput.without(
+                ResumeReason.DOWNLOAD_FAILED if follow_up.snapshot else ResumeReason.NO_SNAPSHOT
+            )
+        self._resume_outcome: ResumeOutcome | None = None
         self._notes: list[str] = []
         self._summary = ""
         self._error: tuple[ErrorCode, str] | None = None
@@ -407,8 +467,13 @@ class ImplementerSession:
             for note in place.create():
                 self._note(note)
             agent = self._agent(model, place)
-            agent.start(ENGINE_PORT)
+            if self._resume_input is None:
+                agent.start(ENGINE_PORT)
+            else:
+                agent.start(ENGINE_PORT, self._resume_input)
             self._session_id = agent.session_id
+            if self._resume_input is not None:
+                self._note_resume(agent.resume)
             self._start_steps(agent)
             self._work(agent)
         except Exception as error:
@@ -418,6 +483,8 @@ class ImplementerSession:
             # can change the repository or call the door from here on.
             ended = True
             if agent is not None:
+                # The engine must still be running for the export: it is read over its API.
+                self._save_session(agent)
                 ended = agent.stop()
             elif place is not None:
                 ended = place.stop()
@@ -445,9 +512,92 @@ class ImplementerSession:
             # The last flush of the live view, after the push and before the result: it hands over
             # what is left, is bounded in time and best effort, so the push never waits for it.
             self._finish_steps()
+            if self._snapshot is not None:
+                self._snapshot.close()
         result = self._result()
         self._remove_place(place)
         return result
+
+    def _note_resume(self, outcome: ResumeOutcome | None) -> None:
+        """How the follow-up turn got its earlier conversation, as a line of the log."""
+        self._resume_outcome = outcome
+        if outcome is None:
+            return
+        if outcome.mode is ResumeMode.IMPORTED:
+            self._note("the conversation of the earlier turns was imported")
+        else:
+            reason = "" if outcome.reason is None else f": {outcome.reason.value}"
+            self._note(f"the turn continues from a summary of the earlier turns{reason}")
+
+    def _resume_block(self) -> dict[str, Any] | None:
+        """`ImplementerResumeResult`: set once the engine started on a follow-up turn."""
+        outcome = self._resume_outcome
+        if outcome is None:
+            return None
+        if outcome.mode is ResumeMode.IMPORTED:
+            return {"mode": outcome.mode.value}
+        reason = outcome.reason or ResumeReason.IMPORT_FAILED
+        return {"mode": outcome.mode.value, "reason": reason.value}
+
+    def _first_message(self, agent: ImplementerAgent) -> str | list[dict[str, Any]]:
+        """The first message of the turn: the instruction, and on a follow-up turn the preface
+        (what happened to the sandbox) in front of it, as a part of its own."""
+        instruction = self.job.implementer.instruction
+        resume = self.job.implementer.resume
+        if resume is None:
+            return instruction
+        outcome = agent.resume or ResumeOutcome(ResumeMode.SUMMARY_ONLY, ResumeReason.IMPORT_FAILED)
+        workspace = self.workspace
+        tips = workspace.start_tips
+        # The session branch first, then the others in alphabetical order.
+        session = self.job.implementer.branch
+        names = sorted(tips, key=lambda name: (name != session, name))
+        checkout = workspace.start_checkout or session
+        facts = PrefaceFacts(
+            turn=resume.turn,
+            mode=outcome.mode,
+            branches=[(name, tips[name]) for name in names],
+            checkout=checkout,
+            moved=[MovedBranch(m.name, m.was, m.now) for m in workspace.resume_moved],
+            missing=workspace.resume_missing,
+            setup_ran=self._has_script(),
+        )
+        return message_parts(
+            facts, instruction, previous_summary=resume.previous_summary, digest=resume.digest
+        )
+
+    def _save_session(self, agent: ImplementerAgent) -> None:
+        """Take the engine's session and hand it to the job host, which uploads it (#839).
+        Best effort, inside a budget, and never the turn's: no failure here changes the outcome,
+        the push or the bill, it is a line in the notes and the next turn starts from a summary.
+
+        Skipped without a channel (an app that does not list the feature) and after a lost lease
+        (the app would refuse it)."""
+        pump = self._snapshot
+        if pump is None or agent.session_id is None:
+            return
+        lost = self._error is not None and self._error[0] is ErrorCode.LEASE_LOST
+        if lost:
+            pump.close()
+            return
+        quick = self._should_stop() or self._ends_quickly()
+        seconds = self.seams.stop_snapshot_seconds if quick else self.seams.snapshot_seconds
+        began = self._clock()
+        try:
+            snapshot = agent.export_session(Redactor(self.secrets()), seconds)
+            sent = pump.send(
+                snapshot, PINNED_ENGINE_VERSION, max(seconds - (self._clock() - began), 0.2)
+            )
+        except ExportFailed as error:
+            self._note(f"the session was not saved for a follow-up turn: {error.reason.value}")
+            pump.close()
+            return
+        except Exception:
+            self._note("the session was not saved for a follow-up turn: export_failed")
+            pump.close()
+            return
+        if not sent:
+            self._note("the session was not saved for a follow-up turn: not handed to the host")
 
     def _start_steps(self, agent: ImplementerAgent) -> None:
         """Begin to send the step records of the open session. Best effort: a fault here is the
@@ -617,6 +767,7 @@ class ImplementerSession:
                 capability=model.capability,
                 instructions_path=instructions_path,
                 door_host=MODEL_DOOR_ADDRESS,
+                finish_command=None if self._schema is None else finish_server_command(),
             )
 
         options: dict[str, Any] = {}
@@ -630,14 +781,24 @@ class ImplementerSession:
             make_config=make_config,
             instructions=(
                 INSTRUCTIONS_FILE,
-                instructions_text(with_setup=self._has_script()),
+                instructions_text(
+                    with_setup=self._has_script(),
+                    can_push=self._can_push,
+                    profile_instructions=self._profile_instructions,
+                    with_result=self._schema is not None,
+                ),
             ),
-            environment=implementer_environment(home=AGENT_HOME, scratch_dir=AGENT_TMP),
+            environment=implementer_environment(
+                home=AGENT_HOME,
+                scratch_dir=AGENT_TMP,
+                config_directory=None if self._schema is None else CONFIG_DIRECTORY,
+            ),
             model=entry.model_id,
             provider_id=entry.provider_id,
             transport=self.seams.transport,
             # Without a channel nothing is recorded, so nothing is queued to be "not taken in time".
             redactor=Redactor(self.secrets()) if self._steps is not None else None,
+            files=None if self._schema is None else finish_files(self._schema),
             **options,
         )
 
@@ -661,16 +822,57 @@ class ImplementerSession:
         return check
 
     def _work(self, agent: ImplementerAgent) -> None:
-        """The instruction, and the one extra message when the tree is still dirty."""
+        """The instruction, and the one extra message when the tree is still dirty. A profile that
+        may not push gets no extra message: nothing is collected from the tree, so a second paid
+        turn would only ask for a commit that nobody takes (#843)."""
         check = self._watch()
-        ended = agent.turn(self.job.implementer.instruction, check=check)
+        ended = agent.turn(self._first_message(agent), check=check)
         self._summary = ended.text
         self._note("the agent ended its turn")
+        if self._schema is not None:
+            self._remind_for_result(agent, check)
+        if not self._can_push:
+            return
         if not self.workspace.dirty() or not self._time_for_another_turn(agent):
             return
         self._note("the working tree is dirty: one extra message")
         again: AgentTurn = agent.turn(LEFTOVER_PROMPT, check=check)
         self._summary = self._summary or again.text
+
+    def _remind_for_result(self, agent: ImplementerAgent, check: Callable[[], None]) -> None:
+        """A turn with a result schema whose agent ended without a result that fits gets one more
+        message, like the extra message for a dirty tree and for the same reason: the model is
+        asked once. What is read now is a first look (the container is still up); the result the
+        turn is judged by is read after the container is gone (`_collect_result`)."""
+        if self._read_agent_result() is not None:
+            return
+        if not self._time_for_another_turn(agent):
+            self._note("no valid result was handed in, and there is no time for a reminder")
+            return
+        self._note("no valid result was handed in: one reminder")
+        again: AgentTurn = agent.turn(RESULT_REMINDER_PROMPT, check=check)
+        self._summary = self._summary or again.text
+
+    def _read_agent_result(self) -> dict[str, Any] | None:
+        """The result file as the schema judges it: bounded before it is parsed, then checked
+        (`finish_tool.parse_result`). None when there is no file, it cannot be read, or it does not
+        fit; `_result_problem` says which, in a word (never a value of the file)."""
+        schema = self._schema
+        if schema is None or self._results is None:
+            return None
+        try:
+            raw = self._results.read_result(finish_tool.MAX_RESULT_BYTES + 1)
+        except Exception:
+            raw = None
+        if raw is None:
+            self._result_problem = "no result file"
+            return None
+        parsed = finish_tool.parse_result(schema, raw)
+        if parsed.value is None:
+            self._result_problem = parsed.problem or "invalid"
+            if parsed.problem == "invalid":
+                self._result_problem = f"invalid: {len(parsed.issues)} problems"
+        return parsed.value
 
     def _time_for_another_turn(self, agent: ImplementerAgent) -> bool:
         return agent.ledger.remaining_seconds() >= MIN_EXTRA_TURN_SECONDS
@@ -680,9 +882,15 @@ class ImplementerSession:
         used = model is not None and model.ledger.model_used
         failed = None if model is None else model.upstream_error()
         code, detail = classify(error, used_model=used, provider_error=failed)
+        if code is ErrorCode.COST_LIMIT_REACHED and not used and self._history_imported():
+            detail = HISTORY_OVER_LIMIT_DETAIL
         if self._error is None:
             self._error = (code, detail)
         self._note(f"the turn ended: {code.value}")
+
+    def _history_imported(self) -> bool:
+        outcome = self._resume_outcome
+        return outcome is not None and outcome.mode is ResumeMode.IMPORTED
 
     # -- the end --------------------------------------------------------------
 
@@ -691,6 +899,13 @@ class ImplementerSession:
         A failure of the push is the turn's error only when nothing ended the turn before; a
         leftover that cannot be committed is a note (the branches that are committed are pushed
         all the same)."""
+        self._collect_result()
+        if not self._can_push:
+            # #843: a profile without the right to push. Nothing leaves the container, so nothing
+            # is rescued, committed, listed or pushed, and the repository is not read after it.
+            self._note("this profile may not push: nothing was pushed")
+            self._note_disk()
+            return
         quick = self._ends_quickly()
         if not self._engine_ended:
             self._unchecked = True
@@ -730,6 +945,38 @@ class ImplementerSession:
             self._stopped_by(error)
         self._note_branches(self.workspace.push_report())
         self._note_disk()
+
+    def _collect_result(self) -> None:
+        """The result of the agent, once its container is gone: nothing in it can change the file
+        now. Read in a reader, bounded, parsed and checked against the schema of the turn; that is
+        the one the turn is judged by, whatever the first look said. A turn without a result that
+        fits ends `no_result` (the model was used, so it is the charged code), unless something
+        ended it before. Not read when the end is quick (a lost lease, a stop) or the container is
+        not confirmed gone."""
+        if self._schema is None or self._ends_quickly():
+            return
+        if not self._engine_ended:
+            self._result_problem = "the agent's container is not confirmed gone"
+            self._note("the result was not read: the agent's container is not confirmed gone")
+        else:
+            read = self._read_agent_result()
+            if read is not None:
+                # The agent wrote it, and anything it was shown can be in it: the job's secrets
+                # are taken out of every text before the result leaves this process.
+                cleaned = redacted_value(read, Redactor(self.secrets()).redact)
+                # Taking secrets out can make the texts longer. A result over the bounds now would
+                # cost the whole report, so it is the result that is left out.
+                if agent_result_ok(cleaned):
+                    self._agent_result = cleaned
+                else:
+                    self._result_problem = "too_large once the secrets were taken out"
+                    self._note("the result was left out: it is over the bounds without its secrets")
+        if self._agent_result is None and self._error is None:
+            self._error = (
+                ErrorCode.NO_RESULT,
+                f"the agent ended without a result that fits the schema ({self._result_problem})",
+            )
+            self._note("the turn ended: no_result")
 
     def _quiet(self) -> None:
         """Kill what runs in the readers and start them again (`GitWorkspace.quiet_readers`):
@@ -773,6 +1020,11 @@ class ImplementerSession:
 
     def _result(self) -> TurnResult:
         workspace = self.workspace
+        if not self._can_push:
+            # #843: no branch, no head, no commits and no files: nothing was pushed, so there is
+            # nothing Control vouches for. A turn that ended well is a success whether the agent
+            # changed anything or not.
+            return self._turn_result(self._error, None, False, (), (0, 0), (), ())
         report = workspace.push_report()
         commits: list[CommitInfo] = workspace.commits_since_start()
         files: list[FileChange] = workspace.changed_files()
@@ -804,6 +1056,27 @@ class ImplementerSession:
             # is work that did not arrive, and a branch that is gone is not verifiably empty. Not a
             # success, whatever else was pushed.
             error = (ErrorCode.PUSH_REJECTED, "the work could not be pushed")
+        return self._turn_result(
+            error,
+            head,
+            pushed,
+            report.branches,
+            (report.invalid, report.overflow),
+            tuple(commits),
+            tuple(files),
+        )
+
+    def _turn_result(
+        self,
+        error: tuple[ErrorCode, str] | None,
+        head: str | None,
+        pushed: bool,
+        branches: tuple[BranchPush, ...],
+        dropped: tuple[int, int],
+        commits: tuple[CommitInfo, ...],
+        files: tuple[FileChange, ...],
+    ) -> TurnResult:
+        workspace = self.workspace
         usage = self._usage()
         summary = clip_summary(
             self._summary,
@@ -816,16 +1089,19 @@ class ImplementerSession:
             base_commit=workspace.start_commit,
             head_commit=head,
             pushed=pushed,
-            branches=report.branches,
-            branches_dropped=(report.invalid, report.overflow),
-            commits=tuple(commits),
-            files_changed=tuple(files),
+            branches=branches,
+            branches_dropped=dropped,
+            commits=commits,
+            files_changed=files,
             summary=summary,
             opencode_session_id=self._session_id,
             opencode_version=PINNED_ENGINE_VERSION,
             usage=usage,
             notes=tuple(self._notes),
             network=self._network_block(),
+            checked_out=workspace.checked_out,
+            agent_result=self._agent_result,
+            resume=self._resume_block(),
         )
 
     def _usage(self) -> Usage:

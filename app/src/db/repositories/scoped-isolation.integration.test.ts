@@ -5,6 +5,7 @@
 // every scoped repository: each is called with the scope of workspace A against the ids and keys of
 // workspace B, and nothing of B may come back or change. The table must cover every method of every
 // repository, so a method added later without a row here fails the last test.
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { Kysely } from "kysely";
 import { createTestDatabase } from "../../test-support/test-database.ts";
@@ -36,7 +37,12 @@ import { createBillingProfilesRepository } from "./billing-profiles-repository.t
 import { createBillingNotificationsRepository } from "./billing-notifications-repository.ts";
 import { createBillingWorkspaceSettingsRepository } from "./billing-workspace-settings-repository.ts";
 import { createImplementerEnvironmentsRepository } from "./implementer-environments-repository.ts";
+import { createWorkflowsRepository } from "./workflows-repository.ts";
+import { createWorkflowRunsRepository } from "./workflow-runs-repository.ts";
+import { createProfilesRepository } from "./profiles-repository.ts";
+import { createRunnersRepository } from "./runners-repository.ts";
 import { createImplementerRepository } from "./implementer-repository.ts";
+import { createImplementerSnapshotsRepository } from "./implementer-snapshots-repository.ts";
 import { createImplementerStepsRepository } from "./implementer-steps-repository.ts";
 
 const SHA = "b".repeat(40);
@@ -67,7 +73,12 @@ function reposOf(db: Kysely<Database>, workspaceId: string) {
     notifications: createBillingNotificationsRepository(db, workspaceId),
     implementer: createImplementerRepository(db, workspaceId),
     steps: createImplementerStepsRepository(db, workspaceId),
+    snapshots: createImplementerSnapshotsRepository(db, workspaceId),
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
+    workflows: createWorkflowsRepository(db, workspaceId),
+    workflowRuns: createWorkflowRunsRepository(db, workspaceId),
+    agentProfiles: createProfilesRepository(db, workspaceId),
+    runners: createRunnersRepository(db, workspaceId),
     erasure: createWorkspaceErasureRepository(db, workspaceId),
   };
 }
@@ -355,6 +366,11 @@ async function seed(
             instruction: `Instruction ${tag}`,
             modelChoice: { entryId: `entry-${tag}` },
             costLimitCents: 100,
+            // #843: a result schema, so that the turn is one that takes a result and only the workspace stops the other from writing it.
+            resultSchema: {
+              type: "object",
+              properties: { summary: { type: "string" } },
+            },
             createdBy: `user-${tag}`,
           },
           async (trx, { slot }) => {
@@ -413,6 +429,25 @@ async function seed(
     );
     if (stored.status !== "ok" || stored.stored !== 2)
       throw new Error("seeding failed");
+    // The session snapshot of that turn (#839): one part is in (an upload under way) and the snapshot of the earlier turn is
+    // stored, so the other workspace has a snapshot to read and a part to complete or overwrite.
+    const first = await repos.snapshots.recordPart(
+      started.turn.jobId,
+      `lease-${tag}`,
+      {
+        index: 0,
+        count: 1,
+        size: 5,
+        rawBytes: 20,
+        sha256: createHash("sha256")
+          .update(Buffer.from(`snap-${tag}`.slice(0, 5)))
+          .digest("hex"),
+        opencodeVersion: "1.19.0",
+        data: Buffer.from(`snap-${tag}`.slice(0, 5)),
+      },
+    );
+    if (first.status !== "ok" || !first.complete)
+      throw new Error("seeding failed");
   }
   // An environment of the Implementer (#818) in every workspace, under the same name: the other workspace's is there to be read,
   // changed and deleted.
@@ -426,8 +461,104 @@ async function seed(
     50,
   );
   if (!created.ok) throw new Error("seeding failed");
+  // A workflow with a second version (#833) in every workspace, under the same name.
+  const workflow = await repos.workflows.create(
+    {
+      name: "Issue to PR",
+      document: `{"tag":"${tag}"}`,
+      createdBy: `user-${tag}`,
+    },
+    100,
+  );
+  if (!workflow.ok) throw new Error("seeding failed");
+  const secondVersion = await repos.workflows.saveVersion(
+    workflow.workflow.id,
+    {
+      name: "Issue to PR",
+      // The text the label trigger looks for (#845): both workspaces have a workflow that has it.
+      document: `{"tag":"${tag}","v":2,"trigger":{"kind":"github.issueLabeled"}}`,
+      createdBy: `user-${tag}`,
+    },
+    200,
+  );
+  if (!secondVersion.ok) throw new Error("seeding failed");
+  // A run of that workflow with one step (#844) in every workspace.
+  const workflowRun = await repos.workflowRuns.createRun({
+    workflowId: workflow.workflow.id,
+    workflowVersion: 1,
+    repositoryId: repository.id,
+    baseBranch: "main",
+    triggerInput: `{"repo":"acme/${tag}"}`,
+    budgetMicroUsd: 20_000_000,
+    clientRequestId: `run-${tag}`,
+    createdBy: `user-${tag}`,
+    actorLogin: "octocat",
+  });
+  const workflowStep = await repos.workflowRuns.lockRun(
+    workflowRun.run.id,
+    (lock) =>
+      lock.addStep({
+        position: 0,
+        stepId: "work",
+        kind: "action",
+        round: 1,
+        profile: null,
+        capMicroUsd: null,
+      }),
+  );
+  if (workflowStep === undefined) throw new Error("seeding failed");
+  // A profile with a second version (#843) in every workspace, under the same name.
+  const profileContent = {
+    description: "",
+    model: { entryId: `entry-${tag}` },
+    instructions: `be ${tag}`,
+    costLimitCents: null,
+    canPush: true,
+    defaultResult: null,
+  };
+  const profile = await repos.agentProfiles.create(
+    {
+      name: "implementer",
+      content: profileContent,
+      createdBy: `user-${tag}`,
+    },
+    100,
+  );
+  if (!profile.ok) throw new Error("seeding failed");
+  const secondProfileVersion = await repos.agentProfiles.saveVersion(
+    profile.profile.id,
+    {
+      content: { ...profileContent, instructions: `be ${tag} again` },
+      createdBy: `user-${tag}`,
+    },
+    200,
+  );
+  if (!secondProfileVersion.ok) throw new Error("seeding failed");
+  // A runner on a customer's machine (#854) in every workspace: the other workspace's is there to be listed and revoked.
+  await db
+    .insertInto("runners")
+    .values({
+      id: `runner-${tag}`,
+      workspace_id: workspaceId,
+      name: `box ${tag}`,
+      labels: "linux",
+      base_version: "1.0.0",
+      manifest: '{"harnesses":{},"capabilities":[]}',
+      limits: "{}",
+      credential_hash: `hash-${tag}`,
+      previous_credential_hash: null,
+      created_at: "2026-11-05T08:00:00.000Z",
+      last_seen_at: "2026-11-05T08:00:00.000Z",
+      revoked_at: null,
+    })
+    .execute();
   return {
+    runnerId: `runner-${tag}`,
     environment: created.environment,
+    workflow: secondVersion.workflow,
+    workflowRun: workflowRun.run,
+    workflowStep,
+    agentProfile: secondProfileVersion.profile,
     implementer: started,
     topUpIntentId: topUpIntent.id,
     unpagedIntentId: unpagedIntent.id,
@@ -590,12 +721,75 @@ async function rowsOf(db: Kysely<Database>, workspaceId: string) {
       .where("workspace_id", "=", workspaceId)
       .orderBy("id")
       .execute(),
+    workflows: await db
+      .selectFrom("workflows")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("id")
+      .execute(),
+    workflowVersions: await db
+      .selectFrom("workflow_versions")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("workflow_id")
+      .orderBy("version")
+      .execute(),
+    workflowRuns: await db
+      .selectFrom("workflow_runs")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("id")
+      .execute(),
+    workflowStepRuns: await db
+      .selectFrom("workflow_step_runs")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("id")
+      .execute(),
+    agentProfiles: await db
+      .selectFrom("profiles")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("id")
+      .execute(),
+    agentProfileVersions: await db
+      .selectFrom("profile_versions")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("profile_id")
+      .orderBy("version")
+      .execute(),
+    runners: await db
+      .selectFrom("runners")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("id")
+      .execute(),
+    runnerRegistrationTokens: await db
+      .selectFrom("runner_registration_tokens")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("id")
+      .execute(),
     implementerTurnSteps: await db
       .selectFrom("implementer_turn_steps")
       .selectAll()
       .where("workspace_id", "=", workspaceId)
       .orderBy("job_id")
       .orderBy("part_id")
+      .execute(),
+    implementerSessionSnapshots: await db
+      .selectFrom("implementer_session_snapshots")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("session_id")
+      .execute(),
+    implementerSessionSnapshotParts: await db
+      .selectFrom("implementer_session_snapshot_parts")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("job_id")
+      .orderBy("part_index")
       .execute(),
   };
 }
@@ -909,6 +1103,24 @@ const CASES: Case[] = [
       expect(answer).toMatchObject({
         rejected: expect.objectContaining({ code: "JOB_REPOSITORY_UNKNOWN" }),
       }),
+  },
+  {
+    // #841: the next turn of B's session cannot be queued from A's scope; nothing is written
+    name: "jobs.enqueueFollowUpTurn",
+    run: (a, b) =>
+      a.jobs.enqueueFollowUpTurn({
+        sessionId: taskOf(b).session.id,
+        headSha: SHA,
+        instruction: "Hijacked.",
+        modelChoice: { entryId: "entry-1" },
+        costLimitCents: null,
+        createdBy: "user-a",
+        actorLogin: "octocat",
+        clientRequestId: "foreign-follow-up",
+        fromQueued: false,
+      }),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ status: "session_not_found" }),
   },
   {
     // #791: a request id is looked up in the workspace of the scope; a turn of B is never found under A (the delivery id carries the workspace)
@@ -1751,6 +1963,14 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {
+    name: "implementer.recordTurnAgentResult",
+    run: (a, b) =>
+      a.implementer.recordTurnAgentResult(taskOf(b).turn.id, {
+        summary: "hijacked",
+      }),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
     name: "implementer.createSessionWithTurn",
     run: (a, b) =>
       settle(() =>
@@ -1768,6 +1988,75 @@ const CASES: Case[] = [
         ),
       ),
     expectAnswer: notFound("IMPLEMENTER_REPOSITORY_NOT_FOUND"),
+  },
+  // follow-up turns (#841): B's session is not A's to continue, to queue an instruction on, or to read the turns of
+  {
+    name: "implementer.startFollowUpTurn",
+    run: (a, b) =>
+      a.implementer.startFollowUpTurn(
+        {
+          sessionId: taskOf(b).session.id,
+          instruction: "Hijacked.",
+          modelChoice: { entryId: "entry-a" },
+          costLimitCents: null,
+          environment: null,
+          profile: null,
+          resultSchema: null,
+          createdBy: "user-a",
+          fromQueued: false,
+        },
+        async () => b.job.id,
+      ),
+    expectAnswer: (answer) => expect(answer).toEqual({ status: "not_found" }),
+  },
+  {
+    name: "implementer.queueInstruction",
+    run: (a, b) =>
+      a.implementer.queueInstruction(taskOf(b).session.id, {
+        clientRequestId: "request-a",
+        instruction: "Hijacked.",
+        modelChoice: { entryId: "entry-a" },
+        costLimitCents: null,
+        environment: null,
+        profile: null,
+        resultSchema: null,
+        createdBy: "user-a",
+        actorLogin: "octocat",
+        queuedAt: "2026-11-05T09:00:00.000Z",
+      }),
+    expectAnswer: (answer) => expect(answer).toEqual({ status: "not_found" }),
+  },
+  {
+    name: "implementer.discardQueued",
+    run: (a, b) =>
+      a.implementer.discardQueued(
+        taskOf(b).session.id,
+        "request-a",
+        "branch_gone",
+      ),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "implementer.noteQueuedAttempt",
+    run: (a, b) =>
+      a.implementer.noteQueuedAttempt(taskOf(b).session.id, "request-a"),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "implementer.noteQueuedFailure",
+    run: (a, b) =>
+      a.implementer.noteQueuedFailure(taskOf(b).session.id, "request-a"),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "implementer.lastTurn",
+    run: (a, b) => a.implementer.lastTurn(taskOf(b).session.id),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "implementer.turnHistory",
+    run: (a, b) => a.implementer.turnHistory(taskOf(b).session.id),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
   },
   // implementer steps (#745): B's steps are not A's to read or write, not even with B's lease token
   {
@@ -1790,9 +2079,47 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toEqual({ status: "not_holder" }),
   },
   {
+    name: "steps.lastStep",
+    run: (a, b) => a.steps.lastStep(taskOf(b).turn.jobId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
     name: "steps.listAfter",
     run: (a, b) => a.steps.listAfter(taskOf(b).turn.jobId, 0, 100),
     expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  // implementer session snapshots (#839): B's snapshot is not A's to read, replace or complete, not even with B's lease token
+  {
+    name: "snapshots.recordPart",
+    run: (a, b) =>
+      a.snapshots.recordPart(taskOf(b).turn.jobId, `lease-b`, {
+        index: 0,
+        count: 1,
+        size: 7,
+        rawBytes: 28,
+        sha256: createHash("sha256")
+          .update(Buffer.from("planted"))
+          .digest("hex"),
+        opencodeVersion: "1.19.0",
+        data: Buffer.from("planted"),
+      }),
+    expectAnswer: (answer) => expect(answer).toEqual({ status: "not_holder" }),
+  },
+  // #840: B's turn is not A's to read the snapshot for, not even with B's lease token
+  {
+    name: "snapshots.readForJob",
+    run: (a, b) => a.snapshots.readForJob(taskOf(b).turn.jobId, `lease-b`),
+    expectAnswer: (answer) => expect(answer).toEqual({ status: "not_holder" }),
+  },
+  {
+    name: "snapshots.find",
+    run: (a, b) => a.snapshots.find(taskOf(b).session.id),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "snapshots.read",
+    run: (a, b) => a.snapshots.read(taskOf(b).session.id),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   // implementer environments (#818-T04): B's environments are not A's to read, change or delete
   {
@@ -1808,6 +2135,8 @@ const CASES: Case[] = [
         {
           id: a.environment.id,
           name: a.environment.name,
+          kind: "hosted",
+          labels: [],
           vcpus: a.environment.vcpus,
           hasScript: true,
           networkMode: "off",
@@ -1842,6 +2171,256 @@ const CASES: Case[] = [
   {
     name: "environments.remove",
     run: (a, b) => a.environments.remove(b.environment.id),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  // workflows (#833-M1-T160): B's workflows and versions are not A's to read or save over
+  {
+    name: "workflows.list",
+    run: (a) => a.workflows.list(),
+    expectAnswer: (answer, a) => expect(answer).toEqual([a.workflow]),
+  },
+  {
+    name: "workflows.get",
+    run: (a, b) => a.workflows.get(b.workflow.id),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  // #845-T40: the workflows a label starts are read in the workspace of the installation only
+  {
+    name: "workflows.listWithIssueTrigger",
+    run: (a) => a.workflows.listWithIssueTrigger(),
+    expectAnswer: (answer, a) =>
+      expect(
+        (answer as { workflow: { id: string } }[]).map(
+          (found) => found.workflow.id,
+        ),
+      ).toEqual([a.workflow.id]),
+  },
+  {
+    name: "workflows.getVersion",
+    run: (a, b) => a.workflows.getVersion(b.workflow.id, 1),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "workflows.listVersions",
+    run: (a, b) => a.workflows.listVersions(b.workflow.id),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    name: "workflows.create",
+    run: (a) =>
+      a.workflows.create(
+        { name: "Another", document: "{}", createdBy: "user-a" },
+        100,
+      ),
+    expectAnswer: (answer) => expect(answer).toMatchObject({ ok: true }),
+  },
+  {
+    name: "workflows.saveVersion",
+    run: (a, b) =>
+      a.workflows.saveVersion(
+        b.workflow.id,
+        { name: "hijacked", document: "{}", createdBy: "user-a" },
+        200,
+      ),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ ok: false, reason: "not_found" }),
+  },
+  {
+    name: "workflows.archive",
+    run: (a, b) => a.workflows.archive(b.workflow.id, 1000),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ ok: false, reason: "not_found" }),
+  },
+  // workflow runs (#844-T140): B's runs and steps are not A's to read, lock, claim or end
+  {
+    name: "workflowRuns.getRun",
+    run: (a, b) => a.workflowRuns.getRun(b.workflowRun.id),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "workflowRuns.findByRequest",
+    run: (a, b) => a.workflowRuns.findByRequest(b.workflowRun.clientRequestId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "workflowRuns.listRuns",
+    run: (a, b) => a.workflowRuns.listRuns(b.workflow.id, 10),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    name: "workflowRuns.listSteps",
+    run: (a, b) => a.workflowRuns.listSteps(b.workflowRun.id),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    name: "workflowRuns.findStepByJob",
+    run: (a, b) => a.workflowRuns.findStepByJob(b.job.id),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    // B's request id is no request id of A: A makes its own run.
+    name: "workflowRuns.createRun",
+    run: (a, b) =>
+      a.workflowRuns.createRun({
+        workflowId: b.workflow.id,
+        workflowVersion: 1,
+        repositoryId: b.repository.id,
+        baseBranch: "main",
+        triggerInput: "{}",
+        budgetMicroUsd: 1_000_000,
+        clientRequestId: b.workflowRun.clientRequestId,
+        createdBy: b.userId,
+        actorLogin: "octocat",
+      }),
+    expectAnswer: (answer) =>
+      expect(answer).toMatchObject({ status: "created" }),
+  },
+  {
+    name: "workflowRuns.lockRun",
+    run: (a, b) =>
+      a.workflowRuns.lockRun(b.workflowRun.id, async () => "worked"),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "workflowRuns.claimStep",
+    run: (a, b) => a.workflowRuns.claimStep(b.workflowStep.id),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "workflowRuns.attachTurn",
+    run: (a, b) =>
+      a.workflowRuns.attachTurn(b.workflowStep.id, {
+        jobId: b.job.id,
+        turnId: null,
+      }),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "workflowRuns.settleOwnStep",
+    run: (a, b) =>
+      a.workflowRuns.settleOwnStep(b.workflowStep.id, {
+        status: "failed",
+        errorCode: "action_failed",
+        errorMessage: null,
+      }),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  // profiles (#843-T70): B's profiles and versions are not A's to read, find, start from or save over
+  {
+    name: "agentProfiles.list",
+    run: (a) => a.agentProfiles.list(),
+    expectAnswer: (answer, a) => expect(answer).toEqual([a.agentProfile]),
+  },
+  {
+    name: "agentProfiles.get",
+    run: (a, b) => a.agentProfiles.get(b.agentProfile.id),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "agentProfiles.getVersion",
+    run: (a, b) => a.agentProfiles.getVersion(b.agentProfile.id, 1),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "agentProfiles.listVersions",
+    run: (a, b) => a.agentProfiles.listVersions(b.agentProfile.id),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    // The same name exists in both workspaces: A finds its own, never B's version.
+    name: "agentProfiles.findByName",
+    run: (a, b) =>
+      a.agentProfiles.findByName("implementer", b.agentProfile.version),
+    expectAnswer: (answer, a) =>
+      expect(answer).toMatchObject({
+        profile: { id: a.agentProfile.id },
+        version: { content: { instructions: "be a again" } },
+      }),
+  },
+  {
+    // Nothing is archived in A, whatever B holds (the repository test archives in both and compares).
+    name: "agentProfiles.archivedNames",
+    run: (a) => a.agentProfiles.archivedNames(),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    name: "agentProfiles.versionFacts",
+    run: (a, b) =>
+      a.agentProfiles.versionFacts([
+        { profileId: b.agentProfile.id, version: 1 },
+      ]),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    name: "agentProfiles.create",
+    run: (a) =>
+      a.agentProfiles.create(
+        {
+          name: "another",
+          content: {
+            description: "",
+            model: { entryId: "e" },
+            instructions: "",
+            costLimitCents: null,
+            canPush: false,
+            defaultResult: null,
+          },
+          createdBy: "user-a",
+        },
+        100,
+      ),
+    expectAnswer: (answer) => expect(answer).toMatchObject({ ok: true }),
+  },
+  {
+    name: "agentProfiles.saveVersion",
+    run: (a, b) =>
+      a.agentProfiles.saveVersion(
+        b.agentProfile.id,
+        {
+          content: {
+            description: "",
+            model: { entryId: "e" },
+            instructions: "hijacked",
+            costLimitCents: null,
+            canPush: true,
+            defaultResult: null,
+          },
+          createdBy: "user-a",
+        },
+        200,
+      ),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ ok: false, reason: "not_found" }),
+  },
+  {
+    name: "agentProfiles.archive",
+    run: (a, b) => a.agentProfiles.archive(b.agentProfile.id, 1000),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ ok: false, reason: "not_found" }),
+  },
+  // runners (#854-T80): B's runners are not A's to list or revoke, and a token made by A is A's alone
+  {
+    name: "runners.list",
+    run: (a) => a.runners.list(),
+    expectAnswer: (answer, a) =>
+      expect(answer).toEqual([expect.objectContaining({ id: a.runnerId })]),
+  },
+  {
+    name: "runners.createToken",
+    run: (a) =>
+      a.runners.createToken(
+        {
+          tokenHash: "token-hash-a",
+          createdBy: "user-a",
+          expiresAt: new Date("2099-01-01T00:00:00.000Z"),
+        },
+        20,
+      ),
+    expectAnswer: (answer) => expect(answer).toMatchObject({ ok: true }),
+  },
+  {
+    name: "runners.revoke",
+    run: (a, b) => a.runners.revoke(b.runnerId),
     expectAnswer: (answer) => expect(answer).toBe(false),
   },
   // runs

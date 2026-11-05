@@ -3,6 +3,7 @@
 // Pins down the checks on what a runner sends: the job id in the path, the runner id header and the
 // bodies of heartbeat and complete. A refusal names fields and reasons, never the values.
 import { describe, expect, it } from "vitest";
+import { IMPLEMENTER_RESUME_REASONS } from "./contract.ts";
 import {
   callerLlmProviders,
   parseClaimRequest,
@@ -11,6 +12,7 @@ import {
   parseJobId,
   parseReleaseRequest,
   parseRunnerId,
+  parseWorkerFeatures,
   parseWorkerLlmProviders,
   parseWorkerResultRequest,
 } from "./requests.ts";
@@ -685,6 +687,18 @@ describe("the features of a claim (#279)", () => {
     expect(parseClaimRequest({})).toEqual({ ok: true, value: {} });
   });
 
+  // #838-T75
+  it("knows the feature a follow-up turn of the Implementer needs", () => {
+    expect(
+      parseClaimRequest({
+        features: ["implementer_resume", "a_future_feature"],
+      }),
+    ).toEqual({ ok: true, value: { features: ["implementer_resume"] } });
+    expect(
+      parseWorkerFeatures("implementer_environment, implementer_resume"),
+    ).toEqual(["implementer_environment", "implementer_resume"]);
+  });
+
   it("refuses features that are not a list of plain names", () => {
     for (const features of ["dynamic_capabilities", [1], ["Bad Name"], {}]) {
       expect(parseClaimRequest({ features })).toEqual({
@@ -1122,6 +1136,162 @@ describe("the implementer block of a result (#754)", () => {
         field,
       );
     });
+  });
+
+  describe("the branch that was checked out (#837)", () => {
+    const parsed = (checkedOut: unknown) =>
+      parseCompleteRequest(bodyWith({ ...block(), checkedOut }));
+
+    it("keeps a name or null as sent, and leaves the field out when the runner sent none", () => {
+      const named = parsed("feature/x");
+      const none = parsed(null);
+      const absent = parseCompleteRequest(bodyWith(block()));
+
+      expect(named.ok && named.value.result.implementer?.checkedOut).toBe(
+        "feature/x",
+      );
+      expect(none.ok && none.value.result.implementer?.checkedOut).toBeNull();
+      expect(
+        absent.ok && "checkedOut" in (absent.value.result.implementer ?? {}),
+      ).toBe(false);
+    });
+
+    it("removes control characters from the name, as it does from a branch's", () => {
+      const done = parsed("a\u0000b");
+
+      expect(done.ok && done.value.result.implementer?.checkedOut).toBe("ab");
+    });
+
+    it.each<[string, unknown]>([
+      ["an empty name", ""],
+      ["a name of 256 characters", "x".repeat(256)],
+      ["a number", 3],
+      ["an object", { name: "feature/x" }],
+    ])("refuses %s", (_, value) => {
+      const done = parsed(value);
+
+      expect(done.ok).toBe(false);
+      expect(!done.ok && done.fields.map((entry) => entry.field)).toContain(
+        "result.implementer.checkedOut",
+      );
+    });
+  });
+
+  describe("how a follow-up turn got its conversation (#840)", () => {
+    const parsed = (resume: unknown) =>
+      parseCompleteRequest(bodyWith({ ...block(), resume }));
+
+    it("keeps `imported`, and `summary_only` with its reason, as sent", () => {
+      const imported = parsed({ mode: "imported" });
+      const summary = parsed({
+        mode: "summary_only",
+        reason: "version_changed",
+      });
+
+      expect(imported.ok && imported.value.result.implementer?.resume).toEqual({
+        mode: "imported",
+      });
+      expect(summary.ok && summary.value.result.implementer?.resume).toEqual({
+        mode: "summary_only",
+        reason: "version_changed",
+      });
+    });
+
+    it.each(IMPLEMENTER_RESUME_REASONS)("takes the reason %s", (reason) => {
+      const done = parsed({ mode: "summary_only", reason });
+
+      expect(done.ok && done.value.result.implementer?.resume).toEqual({
+        mode: "summary_only",
+        reason,
+      });
+    });
+
+    it("leaves the field out when the runner sent none (a first turn, an older runner)", () => {
+      const absent = parseCompleteRequest(bodyWith(block()));
+
+      expect(
+        absent.ok && "resume" in (absent.value.result.implementer ?? {}),
+      ).toBe(false);
+    });
+
+    it.each<[string, unknown]>([
+      ["a mode that is not one", { mode: "copied" }],
+      ["no mode", {}],
+      ["a summary without its reason", { mode: "summary_only" }],
+      [
+        "a reason that is not a word of the runner",
+        { mode: "summary_only", reason: "x" },
+      ],
+      [
+        "an import with a reason",
+        { mode: "imported", reason: "import_failed" },
+      ],
+      ["an unknown key", { mode: "imported", note: "x" }],
+      ["null", null],
+      ["a string", "imported"],
+    ])("refuses %s", (_, value) => {
+      const done = parsed(value);
+
+      expect(done.ok).toBe(false);
+      expect(
+        !done.ok &&
+          done.fields.some((entry) =>
+            entry.field.startsWith("result.implementer.resume"),
+          ),
+      ).toBe(true);
+    });
+  });
+
+  describe("the result the agent handed in (#843)", () => {
+    const parsed = (agentResult: unknown) =>
+      parseCompleteRequest(bodyWith({ ...block(), agentResult }));
+
+    // #843-T94
+    it("keeps an object as sent and leaves the field out when the runner sent none", () => {
+      const value = { summary: "Done.", findings: [{ name: "a", n: 1 }] };
+      const done = parsed(value);
+      const absent = parseCompleteRequest(bodyWith(block()));
+
+      expect(done.ok && done.value.result.implementer?.agentResult).toEqual(
+        value,
+      );
+      expect(
+        absent.ok && "agentResult" in (absent.value.result.implementer ?? {}),
+      ).toBe(false);
+    });
+
+    // #843-T94
+    it.each<[string, unknown]>([
+      ["a list", []],
+      ["a text", "done"],
+      ["null", null],
+      [
+        "an object nested nine levels",
+        JSON.parse('{"a":'.repeat(9) + "{}" + "}".repeat(9)),
+      ],
+      ["an object over 256 KiB", { text: "x".repeat(256 * 1024) }],
+      [
+        "an object of more than 20,000 values",
+        { list: Array.from({ length: 20_000 }, () => 1) },
+      ],
+      [
+        "an object of 20,001 values in lists of one number",
+        JSON.parse(`{"a":[1,${"[1],".repeat(9_998)}[1]]}`),
+      ],
+    ])(
+      "leaves out %s and keeps the rest of the report: it is the result that is lost, not the work",
+      (_, value) => {
+        const done = parsed(value);
+
+        expect(done.ok).toBe(true);
+        const implementer = done.ok ? done.value.result.implementer : undefined;
+        expect(implementer).toMatchObject({
+          headCommit: block().headCommit,
+          commits: block().commits,
+        });
+        expect(implementer && "agentResult" in implementer).toBe(false);
+      },
+    );
   });
 
   // #754-T03

@@ -10,6 +10,14 @@ What the system does, and what the agent can and cannot:
   fill, so the final push has room however full the VM's disk is). The provider token is in the
   environment of that one git process and nowhere else: not in argv, a config file, a URL, the
   mirror or anything the agent can reach.
+* **A follow-up turn** (#838, `resume` of the job) starts from the branches the earlier turn left on
+  the provider and not from the base alone: the provider is asked which of them it still has, and
+  the base and all of those are fetched in one `--depth=50` fetch (git counts the depth from every
+  tip, so none has less than 50 commits of history where it has that many), the agent's repository
+  gets a local branch for each and the one the agent was on is checked out. A branch that moved on
+  the provider since is taken at the provider's tip and the change is recorded (`resume_moved`). The
+  start tip is kept **per branch** (`start_tips`): a branch the agent did not touch is not pushed
+  again, and what a setup script did is undone branch by branch.
 * The agent works in `/work/repo` of **its own container** (`agent_container.py`): the Subpath
   `repo` of the work volume, a local clone of the mirror with no remote and no credential. It may do
   anything with git there: commit, amend, rebase, reset, create and switch branches, tag. Nothing is
@@ -62,7 +70,7 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlsplit
 
-from ..job import JobError
+from ..job import ImplementerResume, JobError
 from ..result import ErrorCode
 from .git_process import (
     DEFAULT_TIMEOUT,
@@ -82,7 +90,7 @@ from .history import (
     parse_commits,
     parse_name_status,
 )
-from .push_policy import select_branches
+from .push_policy import branch_name_problem, select_branches
 from .ref_drop import RefDeletions, RefListingFailed
 
 LEFTOVER_MESSAGE = "Implementer: uncommitted changes of the turn"
@@ -102,6 +110,17 @@ RESCUE_STEP_TIMEOUT = 3.0
 # number of refs; this holds about 40,000 branches and the rest is not read.
 LIST_MAX_BYTES = 4 * 1024 * 1024
 FETCH_TIMEOUT = 60.0
+# The most time the `ls-remote` and the one fetch of a follow-up's branches may take together (the
+# `ls-remote` gets `FETCH_TIMEOUT` of it at most); a turn that is not set up by then ends
+# `clone_failed`, free.
+RESUME_FETCH_SECONDS = 300.0
+# How much history every branch of a follow-up turn gets at least (the base branch, the session
+# branch and the other branches, fetched in one command so that git counts the depth from every
+# tip): the agent has no remote to deepen from, and with less the base branch that moved since the
+# earlier turn cannot be merged, rebased or diffed against (`merge-base` finds nothing). A merge
+# base further back than this many commits is not found. A first turn takes the base branch one
+# deep: its branch starts at the tip.
+RESUME_DEPTH = 50
 PUSH_TIMEOUT = 120.0
 # The wait before the one new try of a push the provider could not take.
 TRANSIENT_PAUSE_SECONDS = 3.0
@@ -255,6 +274,18 @@ class WorkspaceSpec:
     token: str
     base_branch: str
     branch: str
+    # #838: the branches of the session on a follow-up turn; None on the first turn.
+    resume: ImplementerResume | None = None
+
+
+@dataclass(frozen=True)
+class BranchMoved:
+    """A branch of the session that is not where the earlier turn left it: `was` is the tip that
+    turn pushed, `now` the tip the provider has (the one the new turn starts from)."""
+
+    name: str
+    was: str
+    now: str
 
 
 @dataclass(frozen=True)
@@ -405,7 +436,15 @@ class GitWorkspace:
         self.reserve = layout.work_dir / RESERVE_DIRECTORY
         self.mirror = self.reserve / "mirror.git"
         self.repo = layout.work_dir / "repo"
+        # The tip each branch starts the turn at: the base branch, the session branch (the base tip
+        # when the earlier turn never pushed it) and every branch of a follow-up that arrived. The
+        # one of the form's branch is `_start`.
+        self._starts: dict[str, str] = {}
         self._start: str | None = None
+        # The branch checked out when the agent starts.
+        self._checkout: str | None = None
+        self._moved: list[BranchMoved] = []
+        self._missing: list[str] = []
         self._names_checked = False
         self._progress = _Progress()
         # How many tracked files `settle_after_setup` found changed, and how many entries it put on
@@ -416,6 +455,10 @@ class GitWorkspace:
         # `settle_after_setup` took away (0 before it ran).
         self.script_commits = 0
         self.dropped_refs = 0
+        # The local branch HEAD is on when the agent's work is read after the turn (#837), set by
+        # `rescue_detached_head` and `commit_all`: None while it was not read, and for a HEAD that
+        # is detached (and saved on a branch some other way, or not at all).
+        self.checked_out: str | None = None
 
     # -- what the caller needs -------------------------------------------------------------------
 
@@ -424,6 +467,28 @@ class GitWorkspace:
         if self._start is None:
             raise fail(ErrorCode.SETUP_FAILED, "the base branch is not cloned yet")
         return self._start
+
+    @property
+    def start_tips(self) -> dict[str, str]:
+        """The tip every branch of the repository starts the turn at, by name (a copy)."""
+        if self._start is None:
+            raise fail(ErrorCode.SETUP_FAILED, "the base branch is not cloned yet")
+        return dict(self._starts)
+
+    @property
+    def start_checkout(self) -> str | None:
+        """The branch the agent starts on, once the agent's repository is made (None before)."""
+        return self._checkout
+
+    @property
+    def resume_moved(self) -> tuple[BranchMoved, ...]:
+        """The branches of a follow-up that moved on the provider since the earlier turn."""
+        return tuple(self._moved)
+
+    @property
+    def resume_missing(self) -> tuple[str, ...]:
+        """The branches of a follow-up that the provider no longer has (they are left out)."""
+        return tuple(self._missing)
 
     # -- the steps of a turn's set-up ------------------------------------------------------------
 
@@ -438,8 +503,9 @@ class GitWorkspace:
             raise fail(ErrorCode.SETUP_FAILED, "reader_unavailable: the reader cannot be made")
 
     def clone_mirror(self) -> None:
-        """Fetch the base branch, depth 1, into the new bare mirror. The token is in this one
-        process's environment."""
+        """Fetch the base branch, depth 1, into the new bare mirror; a follow-up fetches the
+        branches of its session as well, `RESUME_DEPTH` deep (`_fetch_follow_up`). The token is in
+        the environment of each git process that reaches the provider and nowhere else."""
         self._check_names()
         self._prepare_directories()
         mirror = self.mirror
@@ -454,6 +520,18 @@ class GitWorkspace:
             raise fail(
                 ErrorCode.SETUP_FAILED, "the mirror cannot be created: " + self._detail(init)
             )
+        self._moved, self._missing = [], []
+        if self.spec.resume is not None:
+            self._starts = self._fetch_follow_up()
+        else:
+            self._starts = {base: self._fetch_base()}
+        # The session branch starts at the base tip unless an earlier turn pushed it.
+        self._start = self._starts.setdefault(self.spec.branch, self._starts[base])
+
+    def _fetch_base(self) -> str:
+        """A first turn: the base branch, one deep, into the mirror as `refs/heads/<base>`; its
+        tip."""
+        base = self.spec.base_branch
         fetched = self._mirror(
             [
                 "fetch",
@@ -472,18 +550,105 @@ class GitWorkspace:
                 else ErrorCode.CLONE_FAILED
             )
             raise fail(code, "the base branch cannot be cloned: " + self._detail(fetched))
-        tip = self._mirror(["rev-parse", "--verify", f"refs/heads/{base}^{{commit}}"])
-        if tip.returncode != 0:
-            raise fail(ErrorCode.CLONE_FAILED, "the cloned base branch has no commit")
-        self._start = tip.stdout.strip()
+        return self._tips_in_mirror([base])[base]
+
+    def _fetch_follow_up(self) -> dict[str, str]:
+        """A follow-up turn: the base branch and each branch the earlier turn left on the provider,
+        into the mirror as `refs/heads/<name>`, by name and tip as the mirror has them.
+
+        The provider is asked first which of the branches it has (`git ls-remote`, with the token
+        as every other command that reaches it), then **one** `git fetch --depth=RESUME_DEPTH` takes
+        all of them: git counts the depth from every tip and keeps a commit when any tip reaches it
+        within that many commits, so no tip is left with less than `RESUME_DEPTH` commits of
+        history (where it has that many), whatever the branches lie to each other. Separate fetches
+        would not do that: a later `--depth` fetch moves the shallow boundary and can make a branch
+        that is an ancestor of the new one, or a base that it is far ahead of, a shallow root.
+
+        A branch the provider no longer has is left out and recorded (`resume_missing`); a tip that
+        is not the pushed one is recorded (`resume_moved`). The base branch gone is
+        `base_branch_not_found`; the session branch gone is the end of the turn (the app checks it
+        before it starts one, so this is a race). Both git commands are bound by `FETCH_TIMEOUT`
+        and the `RESUME_FETCH_SECONDS` deadline together."""
+        resume = self.spec.resume
+        assert resume is not None
+        base = self.spec.base_branch
+        deadline = self._clock() + RESUME_FETCH_SECONDS
+        wanted = [base, *(entry.name for entry in resume.branches if entry.name != base)]
+        listed = self._mirror(
+            [
+                "ls-remote",
+                "--heads",
+                self.spec.clone_url,
+                *(f"refs/heads/{name}" for name in wanted),
+            ],
+            protocols=":".join(self._schemes),
+            token=True,
+            timeout=self._left(FETCH_TIMEOUT, deadline),
+        )
+        if listed.returncode != 0:
+            raise fail(
+                ErrorCode.CLONE_FAILED,
+                "the branches of the session cannot be listed: " + self._detail(listed),
+            )
+        on_provider = {
+            line.partition("\t")[2].removeprefix("refs/heads/")
+            for line in listed.stdout.splitlines()
+        }
+        if base not in on_provider:
+            raise fail(ErrorCode.BASE_BRANCH_NOT_FOUND, "the base branch is not on the provider")
+        present = [name for name in wanted if name in on_provider]
+        fetched = self._mirror(
+            [
+                "fetch",
+                f"--depth={RESUME_DEPTH}",
+                *_PLAIN_FETCH,
+                self.spec.clone_url,
+                *(f"refs/heads/{name}:refs/heads/{name}" for name in present),
+            ],
+            protocols=":".join(self._schemes),
+            token=True,
+            timeout=self._left(RESUME_FETCH_SECONDS, deadline),
+        )
+        if fetched.returncode != 0:
+            raise fail(
+                ErrorCode.CLONE_FAILED,
+                "the branches of the session cannot be fetched: " + self._detail(fetched),
+            )
+        tips = self._tips_in_mirror(present)
+        for entry in resume.branches:
+            tip = tips.get(entry.name)
+            if tip is None:
+                if entry.name == self.spec.branch:
+                    raise fail(ErrorCode.CLONE_FAILED, "the session branch is gone on the provider")
+                self._missing.append(entry.name)
+                continue
+            if tip != entry.head:
+                self._moved.append(BranchMoved(entry.name, entry.head, tip))
+        return tips
+
+    def _tips_in_mirror(self, names: Sequence[str]) -> dict[str, str]:
+        """The commit each of the branches fetched into the mirror is at, by name."""
+        tips: dict[str, str] = {}
+        for name in names:
+            done = self._mirror(["rev-parse", "--verify", f"refs/heads/{name}^{{commit}}"])
+            if done.returncode != 0 or not _SHA.fullmatch(done.stdout.strip()):
+                raise fail(ErrorCode.CLONE_FAILED, "a fetched branch of the session has no commit")
+            tips[name] = done.stdout.strip()
+        return tips
 
     def create_agent_repository(self) -> None:
         """The agent's repository: a local clone of the mirror (no hard links, so nothing is shared
-        with it), without a remote, with the identity and the new branch at the base tip. Made by
-        Control from its own mirror before the agent exists; the steps that read or write inside it
-        run in the reader. The same path every turn."""
-        start = self.start_commit
+        with it), without a remote, with the identity and the new branch at the base tip; on a
+        follow-up a local branch for every branch the mirror holds, at the tip the mirror has, and
+        the one the agent was on checked out. Made by Control from its own mirror before the agent
+        exists; the steps that read or write inside it run in the reader. The same path every
+        turn."""
         base = self.spec.base_branch
+        starts = self.start_tips  # raises when the base branch is not cloned yet
+        target = self._start_branch()
+        start = starts[target]
+        # Not `--single-branch`: the mirror holds the base branch and, on a follow-up, the branches
+        # of the session, and nothing else under `refs/heads/`.
         cloned = self._root(
             [
                 "-c",
@@ -491,7 +656,6 @@ class GitWorkspace:
                 "clone",
                 "-q",
                 "--no-tags",
-                "--single-branch",
                 f"--branch={base}",
                 "--template=",
                 "--no-checkout",
@@ -505,12 +669,18 @@ class GitWorkspace:
                 ErrorCode.SETUP_FAILED,
                 "the agent repository cannot be cloned: " + self._detail(cloned),
             )
+        if self.spec.resume is not None:
+            self._make_local_branches()
         setup = (
             ["remote", "remove", "origin"],
             ["config", "user.name", self.identity.name],
             ["config", "user.email", self.identity.email],
             ["config", "commit.gpgsign", "false"],
-            ["checkout", "-q", "-b", self.spec.branch],
+            # A new branch at the base tip on the first turn; on a follow-up every branch exists
+            # already and the checkout fills the empty tree.
+            ["checkout", "-q", "-b", self.spec.branch]
+            if self.spec.resume is None
+            else ["checkout", "-q", target, "--"],
         )
         for arguments in setup:
             done = self._access.run(arguments, timeout=self._timeout, write=True)
@@ -522,7 +692,41 @@ class GitWorkspace:
                 )
         head = self._access.run(["rev-parse", "HEAD"], timeout=self._timeout)
         if head.stdout.strip() != start:
-            raise fail(ErrorCode.SETUP_FAILED, "the agent repository is not at the base tip")
+            raise fail(
+                ErrorCode.SETUP_FAILED,
+                "the agent repository is not at the base tip"
+                if self.spec.resume is None
+                else "the agent repository is not at the tip of the branch to check out",
+            )
+        self._checkout = target
+
+    def _start_branch(self) -> str:
+        """The branch the agent starts on: the session branch on a first turn; on a follow-up the
+        one the earlier turn ended on, when the provider still has it."""
+        resume = self.spec.resume
+        if resume is not None and resume.checkout in self._starts:
+            assert resume.checkout is not None
+            return resume.checkout
+        return self.spec.branch
+
+    def _make_local_branches(self) -> None:
+        """A local branch for every branch of the session at its start tip (the base branch is the
+        one the clone made, the session branch is made at the base tip when it never arrived). One
+        `update-ref --stdin -z` in the reader, with the tips the mirror gave; the names were
+        checked, and are not read by anything that parses them."""
+        base = self.spec.base_branch
+        commands = (
+            b"create refs/heads/" + name.encode() + b"\0" + tip.encode() + b"\0"
+            for name, tip in self._starts.items()
+            if name != base
+        )
+        done = self._access.update_refs([], commands, timeout=self._timeout)
+        if done.returncode != 0:
+            raise fail(
+                ErrorCode.SETUP_FAILED,
+                "the branches of the session cannot be made in the agent repository: "
+                + self._agent_detail(done),
+            )
 
     # -- the leftover (in the reader) -------------------------------------------------------
 
@@ -576,13 +780,13 @@ class GitWorkspace:
         if staged.returncode != 1:
             raise fail(ErrorCode.SETUP_FAILED, "git diff failed: " + self._agent_detail(staged))
         if run(["symbolic-ref", "-q", "HEAD"]).returncode == 1:
-            moved = run(
-                ["switch", "-q", "-c", f"{self.spec.branch}-leftover-{uuid.uuid4().hex[:8]}"]
-            )
+            leftover = f"{self.spec.branch}-leftover-{uuid.uuid4().hex[:8]}"
+            moved = run(["switch", "-q", "-c", leftover])
             if moved.returncode != 0:
                 raise fail(
                     ErrorCode.SETUP_FAILED, "git switch failed: " + self._agent_detail(moved)
                 )
+            self.checked_out = leftover
         committed = run(["commit", "-q", "--no-verify", "-m", message])
         if committed.returncode != 0:
             raise fail(
@@ -604,10 +808,12 @@ class GitWorkspace:
         * **Its history is undone** (`_return_to_start`): the script may have run `git commit`,
           `git checkout -b`, `git tag` or `git reset`, and the turn ends by pushing every local
           branch, so a commit of the script would arrive on GitHub as the agent's work. HEAD goes
-          back to the task's branch at `start_commit`, the base branch to `start_commit`, and every
-          other branch and tag is deleted. The files of a commit the script made are not lost
-          with the commit (see the next two points: a changed tracked file is put back, an added
-          one stays as the script left it). Reflogs and objects stay in the repository.
+          back to the branch the agent starts on, and every branch of the turn (the base branch,
+          the session branch and, on a follow-up, each branch of the session) to its start tip
+          (`start_tips`); every other branch and every tag is deleted. The files of a commit the
+          script made are not lost with the commit (see the next two points: a changed tracked
+          file is put back, an added one stays as the script left it). Reflogs and objects stay in
+          the repository.
         * A change to a file git **tracks** is undone, in the working tree and the index
           (`git reset --hard`, after `git status` counted them): the turn ends by committing and
           pushing whatever the tree holds and a lockfile an install rewrote or a configuration a
@@ -673,13 +879,14 @@ class GitWorkspace:
         return names
 
     def _return_to_start(self, left: Callable[[], float]) -> None:
-        """The history of the script is undone: HEAD on the task's branch, the task's branch and the
-        base branch at `start_commit`, every other branch and every tag deleted. The index is
-        reset to the start (mixed): the working tree is not touched, so what the script committed
-        is now a change of the tree like any other (`settle_after_setup` deals with it)."""
-        start = self.start_commit
-        task = self.spec.branch
-        base = self.spec.base_branch
+        """The history of the script is undone: HEAD on the branch the agent starts on, every branch
+        of the turn at its start tip, every other branch and every tag deleted. The index is reset
+        to the start (mixed): the working tree is not touched, so what the script committed is now
+        a change of the tree like any other (`settle_after_setup` deals with it)."""
+        starts = self._starts
+        target = self._checkout
+        if target is None or target not in starts:
+            raise fail(ErrorCode.SETUP_FAILED, "the agent repository is not made yet")
         options = [arg for setting in _LEFTOVER_OPTIONS for arg in ("-c", setting)]
 
         def git(args: list[str], what: str) -> Outcome:
@@ -688,27 +895,35 @@ class GitWorkspace:
                 raise fail(ErrorCode.SETUP_FAILED, f"{what}: " + self._agent_detail(done))
             return done
 
-        counted = self._access.run(["rev-list", "--count", "--all", "--not", start], timeout=left())
+        counted = self._access.run(
+            ["rev-list", "--count", "--all", "--not", *sorted(set(starts.values()))],
+            timeout=left(),
+        )
         if counted.returncode != 0 or not counted.stdout.strip().isdigit():
             raise fail(ErrorCode.SETUP_FAILED, "the repository cannot be read after the script")
         self.script_commits = int(counted.stdout.strip())
         git(
-            ["symbolic-ref", "HEAD", f"refs/heads/{task}"],
-            "the task's branch cannot be checked out",
+            ["symbolic-ref", "HEAD", f"refs/heads/{target}"],
+            "the branch the agent starts on cannot be checked out",
         )
-        git(["reset", "-q", "--mixed", start], "the repository cannot be put back to its start")
-        if base != task:
-            git(["update-ref", f"refs/heads/{base}", start], "the base branch cannot be put back")
+        git(
+            ["reset", "-q", "--mixed", starts[target]],
+            "the repository cannot be put back to its start",
+        )
+        for name, tip in starts.items():
+            if name != target:
+                git(["update-ref", f"refs/heads/{name}", tip], "a branch cannot be put back")
         deletions = RefDeletions(
             lambda consume: self._access.stream(
                 ["for-each-ref", "--format=%(refname)%00", "refs/heads/", "refs/tags/"],
                 consume,
                 timeout=left(),
             ),
-            {task, base},
+            set(starts),
         )
         # `update-ref` takes a branch a linked worktree of the script has checked out, `branch -D`
-        # does not; the listing is streamed into it, so no count or length of names is limited.
+        # does not; the listing is streamed into it, so no length of one name is limited, but the
+        # count of the refs and the bytes of their names are (`MAX_REFS`, `MAX_REF_BYTES`).
         try:
             removed = self._access.update_refs(
                 [arg for setting in _LEFTOVER_OPTIONS for arg in ("-c", setting)],
@@ -808,8 +1023,8 @@ class GitWorkspace:
             self._progress.listed = False
             return self.push_report()
         self._progress.form_listed = any(name == self.spec.branch for name, _ in listed)
-        # A branch still at the start commit has nothing on it: it is neither fetched nor reported.
-        names = [name for name, tip in listed if tip != self.start_commit]
+        # A branch still at its start tip has nothing on it: it is neither fetched nor reported.
+        names = [name for name, tip in listed if not self._unchanged(name, tip)]
         selection = select_branches(names, form_branch=self.spec.branch)
         self._progress.invalid = selection.invalid
         self._progress.overflow = selection.overflow
@@ -975,6 +1190,8 @@ class GitWorkspace:
         otherwise None. Runs in the reader; a failure is raised (`setup_failed`) for the
         caller to note."""
         attached = self._reader(["symbolic-ref", "-q", "HEAD"], timeout=RESCUE_STEP_TIMEOUT)
+        if attached.returncode == 0:
+            self._remember_checked_out(attached.stdout)
         if attached.returncode != 1:
             return None
         containing = self._reader(
@@ -998,7 +1215,20 @@ class GitWorkspace:
         moved = self._reader(["switch", "-q", "-c", name], timeout=RESCUE_STEP_TIMEOUT, write=True)
         if moved.returncode != 0:
             raise fail(ErrorCode.SETUP_FAILED, "git switch failed: " + self._agent_detail(moved))
+        self.checked_out = name
         return name
+
+    def _remember_checked_out(self, ref: str) -> None:
+        """The branch a `symbolic-ref HEAD` answered, when it is a name the runner would push (the
+        name is the agent's: anything else is left unknown, never shown). Only the line feed of the
+        answer is cut: `strip()` would take a no-break space off a name, and a HEAD on a tag is
+        no branch."""
+        ref = ref.removesuffix("\n")
+        if not ref.startswith("refs/heads/"):
+            self.checked_out = None
+            return
+        name = ref.removeprefix("refs/heads/")
+        self.checked_out = None if branch_name_problem(name) is not None else name
 
     def _push_one(
         self, index: int, name: str, deadline: float, confirm_seconds: float, confirm_pause: float
@@ -1008,9 +1238,9 @@ class GitWorkspace:
         if problem is not None or tip is None:
             self._record(name, tip, problem or REASON_UNREADABLE)
             return
-        if tip == self.start_commit:
-            # Nothing new on it: the base branch as the agent found it, or a branch it made and
-            # never committed to. Nothing to push.
+        if self._unchanged(name, tip):
+            # Nothing new on it: a branch as the agent found it, or a branch it made and never
+            # committed to. Nothing to push.
             return
         if name == self.spec.branch:
             self._progress.form_head = tip
@@ -1018,6 +1248,16 @@ class GitWorkspace:
         self._ask_lease(deadline, confirm_seconds, confirm_pause)
         reason = self._push(scratch, name, deadline)
         self._record(name, tip, reason)
+
+    def _unchanged(self, name: str, tip: str) -> bool:
+        """Whether a local branch is where the turn started it. A branch with a start tip of its own
+        (the base branch, the session branch, a branch of the session) is judged by that one; a
+        branch the agent made is unchanged while it is still at any start tip, that is, while it
+        holds no commit of its own."""
+        start = self._starts.get(name)
+        if start is not None:
+            return tip == start
+        return tip in self._starts.values()
 
     def _record(self, name: str, tip: str | None, reason: str | None) -> None:
         self._progress.branches.append(BranchPush(name, tip, reason is None, reason))
@@ -1133,7 +1373,33 @@ class GitWorkspace:
             done = self._root(["check-ref-format", f"refs/heads/{name}"], protocols="file")
             if done.returncode != 0:
                 raise _invalid("a branch name is not one git accepts")
+        for entry in () if self.spec.resume is None else self.spec.resume.branches:
+            self._check_session_name(entry.name)
+        if self.spec.resume is not None and self.spec.resume.checkout is not None:
+            self._check_session_name(self.spec.resume.checkout)
+        self._check_no_ref_collision()
         self._names_checked = True
+
+    def _check_no_ref_collision(self) -> None:
+        """No branch may be a directory of another (`a` and `a/b` cannot both be refs): the session
+        branch is made at the base tip when the provider never had it, and with `a/b` of the session
+        beside it that fails in the agent's repository. The turn ends here, before anything is
+        fetched, with the stable reason of a branch name git cannot take."""
+        names = {self.spec.base_branch, self.spec.branch}
+        if self.spec.resume is not None:
+            names.update(entry.name for entry in self.spec.resume.branches)
+        if any(other.startswith(name + "/") for name in names for other in names):
+            raise _invalid("a branch of the session is the directory of another")
+
+    def _check_session_name(self, name: str) -> None:
+        """A name of a branch of the session is used in refspecs and ref names as the others are."""
+        # A control character (a NUL above all) is refused before a name reaches a command line or
+        # the standard input of `update-ref -z`.
+        if name == "HEAD" or name.startswith("-") or _CONTROL_CHARS.search(name):
+            raise _invalid("a branch name of the session is not one git accepts")
+        done = self._root(["check-ref-format", f"refs/heads/{name}"], protocols="file")
+        if done.returncode != 0:
+            raise _invalid("a branch name of the session is not one git accepts")
 
     def _prepare_directories(self) -> None:
         for directory in (self.layout.work_dir, self.layout.run_dir, self.reserve):

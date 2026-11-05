@@ -28,6 +28,7 @@ const SCOPED = [
   "installation-link-requests-repository.ts",
   "implementer-environments-repository.ts",
   "implementer-repository.ts",
+  "implementer-snapshots-repository.ts",
   "implementer-steps-repository.ts",
   "integrations-repository.ts",
   "invitations-repository.ts",
@@ -44,6 +45,10 @@ const SCOPED = [
   "workspace-erasure-repository.ts",
   "workspace-members-repository.ts",
   "workspace-secrets-repository.ts",
+  "workflows-repository.ts",
+  "workflow-runs-repository.ts",
+  "profiles-repository.ts",
+  "runners-repository.ts",
 ] as const;
 
 /**
@@ -81,6 +86,9 @@ const SCOPED = [
  *   instance (the sweep, the timer and the requests that touch the database); it only reads the rows that are due and
  *   the waiting or running jobs without one, and every answer names its workspace. The record itself goes through
  *   the scoped job check runs repository;
+ * - workflow-runs-sweep: the workflow runs that run and have not been looked at for a while (#844), for the reconciler that
+ *   serves the whole instance (the sweep and the requests that touch the database); it only reads, and every answer names
+ *   its workspace, where the engine then works through the scoped workflow runs repository;
  * - job-dispatches: where the signed wake-up call of a job stands (#326). The sender holds the job it just queued and
  *   the sweep works through the whole instance, like the lease side of the queue; the table has a job id and
  *   counters, no repository data, and is only written in webhook mode;
@@ -128,12 +136,18 @@ const SCOPED = [
  *   order of the states of a refund or dispute, and for an event under review the ids of our own top-up and workspace it belongs to and
  *   what an operator recorded when closing it (#603: their id, time and note, and the journal entry). No payload, no amount and no
  *   buyer, so it is not customer data;
+ * - runner-credentials: what happens to a customer's runner before its workspace is known (#854): the exchange of a registration
+ *   token for a runner and the lookup of a runner by its credential on every call it makes. The caller holds only a secret
+ *   (the database keeps its hash), so there is no workspace to scope to before the secret is looked up; it never lists, and every
+ *   answer names its own workspace, which is where everything that follows goes. Making a token, the list and revoking a runner go
+ *   through the scoped runners repository;
  * - instance-settings-store: the generic key/value access to `instance_settings` (#715, cut 2), which the repository of the
  *   whole instance and the domains that own a key (billing, the setup wizard) build on. Instance level like the repository,
  *   and it knows no setting;
  * - instance-setting-types: the shapes of two instance settings (tenancy, the sign-up rule), no function, no query.
  */
 const INSTANCE_LEVEL = [
+  "workflow-runs-sweep.ts",
   "allowed-login-pins-repository.ts",
   "app-meta-repository.ts",
   "billing-holds-sweep.ts",
@@ -164,6 +178,7 @@ const INSTANCE_LEVEL = [
   "plan-handoff-redeem-repository.ts",
   "rate-limits-repository.ts",
   "refusal-notices-sweep.ts",
+  "runner-credentials-repository.ts",
   "runner-jobs-repository.ts",
   "secrets-repository.ts",
   "setup-codes-repository.ts",

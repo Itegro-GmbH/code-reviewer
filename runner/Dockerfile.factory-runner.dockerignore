@@ -1,0 +1,5 @@
+# The build context of runner/Dockerfile.factory-runner is the folder runner/ and the image copies
+# one file from it: the release channel (the repository, the manifest and the public key the runner
+# updates itself from).
+*
+!release-channel.json

@@ -18,6 +18,8 @@ import type {
   FindingPriority,
   ImplementerNetworkReport,
   ImplementerResult,
+  ImplementerResumeReason,
+  ImplementerResumeResult,
   ImplementerSetupResult,
   ReviewFindings,
   RunnerResult,
@@ -31,6 +33,7 @@ import {
   FINDING_PRIORITIES,
   IMPLEMENTER_FILE_STATUSES,
   IMPLEMENTER_RESULT_LIMITS,
+  IMPLEMENTER_RESUME_REASONS,
   IMPLEMENTER_SETUP_OUTPUT_CHARS,
   LLM_PROVIDER_ID_PATTERN,
   MAX_FINDING_COUNT,
@@ -45,6 +48,7 @@ import {
 } from "./contract.ts";
 import { WORKER_CREDENTIAL_PATTERN } from "../jobs/worker-credential.ts";
 import { checkCallTrace } from "./call-trace.ts";
+import { boundAgentResult, type AgentResultValue } from "../db/agent-result.ts";
 
 export type Parsed<T> =
   { ok: true; value: T } | { ok: false; fields: FieldError[] };
@@ -1068,6 +1072,9 @@ function parseImplementerResult(
       "opencode",
       "setup",
       "network",
+      "checkedOut",
+      "resume",
+      "agentResult",
     ],
     prefix,
   );
@@ -1124,6 +1131,29 @@ function parseImplementerResult(
     value.network === undefined
       ? undefined
       : parseImplementerNetwork(check, value.network, `${prefix}network`);
+  // #837: the branch HEAD was on at the end; a name as the ones of `branches` are, or null (detached, or not read).
+  const checkedOut =
+    value.checkedOut === undefined || value.checkedOut === null
+      ? null
+      : check.string(value, "checkedOut", `${prefix}checkedOut`, {
+          min: 1,
+          max: MAX_BRANCH_NAME_CHARS,
+          stripControls: true,
+        });
+  const resume =
+    value.resume === undefined
+      ? undefined
+      : parseImplementerResume(check, value.resume, `${prefix}resume`);
+  // #843: the result the agent handed in through the finish tool: an object within the bounds of a result, or none. One that is not
+  // is left out, never refused: the runner holds a result to the same bounds before it sends it, but a request that fails for the
+  // result of an agent would lose the report with it (the branches that were pushed, the commits, the usage). A turn that has a
+  // schema and no result ends `no_result` (`implementer-result-guard.ts`, with the turn). The parser does not know the turn, and
+  // the app does not check the value against its schema (the M3 engine does, before it routes the value anywhere).
+  let agentResult: AgentResultValue | undefined;
+  if (value.agentResult !== undefined) {
+    const bounded = boundAgentResult(value.agentResult);
+    if (bounded.ok) agentResult = bounded.value;
+  }
   if (typeof pushed === "boolean" && headCommit !== undefined) {
     if (pushed && headCommit === null) check.fail(`${prefix}pushed`, "invalid");
     const last = commits?.at(-1);
@@ -1142,7 +1172,9 @@ function parseImplementerResult(
     summary === undefined ||
     opencode === undefined ||
     (value.setup !== undefined && setup === undefined) ||
-    (value.network !== undefined && network === undefined)
+    (value.network !== undefined && network === undefined) ||
+    (value.resume !== undefined && resume === undefined) ||
+    checkedOut === undefined
   )
     return undefined;
   return {
@@ -1158,7 +1190,45 @@ function parseImplementerResult(
     opencode,
     ...(setup === undefined ? {} : { setup }),
     ...(network === undefined ? {} : { network }),
+    // Kept only when the runner sent it, as `branches` is.
+    ...(value.checkedOut === undefined ? {} : { checkedOut }),
+    ...(resume === undefined ? {} : { resume }),
+    ...(agentResult === undefined ? {} : { agentResult }),
   };
+}
+
+/** #840: how a follow-up turn got its conversation: `imported`, or `summary_only` with one of the runner's reasons (and only then). */
+function parseImplementerResume(
+  check: Checker,
+  value: unknown,
+  field: string,
+): ImplementerResumeResult | undefined {
+  if (!isRecord(value)) return check.fail(field, "invalid");
+  const before = check.fields.length;
+  refuseUnknownKeys(check, value, ["mode", "reason"], `${field}.`);
+  const mode = value.mode;
+  if (mode === "imported") {
+    if (value.reason !== undefined) check.fail(`${field}.reason`, "invalid");
+    return check.fields.length > before ? undefined : { mode };
+  }
+  if (mode !== "summary_only") {
+    check.fail(`${field}.mode`, mode === undefined ? "required" : "invalid");
+    return undefined;
+  }
+  const reason = value.reason;
+  if (
+    typeof reason !== "string" ||
+    !(IMPLEMENTER_RESUME_REASONS as readonly string[]).includes(reason)
+  ) {
+    check.fail(
+      `${field}.reason`,
+      reason === undefined ? "required" : "invalid",
+    );
+    return undefined;
+  }
+  return check.fields.length > before
+    ? undefined
+    : { mode, reason: reason as ImplementerResumeReason };
 }
 
 function parseResult(check: Checker, value: unknown): RunnerResult | undefined {

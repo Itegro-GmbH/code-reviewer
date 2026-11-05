@@ -68,6 +68,8 @@ class Rig:
         # What the end script finds: "stops" (the container's Docker stops and the container
         # ends with it), "no-docker" (nothing runs in it but its init) or "hangs".
         self.finish_mode = "no-docker"
+        # The VM runs low while the end script runs (a background process of the script).
+        self.finish_squeezes = False
         self.execs: list[tuple[list[str], dict[str, str], str | None]] = []
         # The VM's memory as `MemoryGuard` reads it: plenty, until a test says otherwise.
         self.meminfo = directory / "meminfo"
@@ -110,6 +112,9 @@ class Rig:
                 return 137
             return self.script_exit
         if argv[:3] == ["/bin/sh", "-c", sc.FINISH_SCRIPT]:
+            if self.finish_squeezes:
+                self.set_left(300_000)
+                threading.Event().wait(0.5)  # five looks of the guard
             if self.finish_mode == "no-docker":
                 stdout.write(sc.NO_DOCKER + "\n")
             else:
@@ -431,23 +436,54 @@ def test_a_vm_running_out_of_memory_ends_the_script_and_says_so(rig: Rig) -> Non
     assert all(c.removed for c in rig.engine.containers.values())
 
 
-# #745-T11: the script is over when `docker commit` runs; the guard is closed by then and does
-# not kill the container under it
-def test_the_guard_is_closed_when_the_script_ended_well_before_the_commit(
+# #745-T11 (#827): the container has ended when `docker commit` runs; the guard is closed by then
+# and does not kill the container under it
+def test_the_guard_is_closed_when_the_container_ended_before_the_commit(
     rig: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    saved = sc.SetupContainer._save  # pyright: ignore[reportPrivateUsage]
+    checked = sc.SetupContainer._check_room  # pyright: ignore[reportPrivateUsage]
 
-    def squeezed(self: Any, container: str, free_bytes: Any) -> str:
+    def squeezed(self: Any, container: str, free_bytes: Any) -> None:
         rig.set_left(300_000)  # below the floor while the layer is being saved
         threading.Event().wait(0.5)  # five looks of the guard
-        return saved(self, container, free_bytes)
+        checked(self, container, free_bytes)
 
-    monkeypatch.setattr(sc.SetupContainer, "_save", squeezed)
+    monkeypatch.setattr(sc.SetupContainer, "_check_room", squeezed)
     done = run(rig)
     assert done.outcome == OUTCOME_OK and done.image is not None
     assert rig.engine.committed, "the commit ran"
     assert "running out of memory" not in done.detail
+
+
+# #827-T01: the script exited well, but a process of it still runs until the container stops; the
+# VM running out of memory while the setup is finished is the guard's, and nothing is committed
+def test_a_vm_running_out_of_memory_while_the_setup_is_finished_is_not_committed(rig: Rig) -> None:
+    rig.finish_squeezes = True
+    done = run(rig)
+    assert done.outcome == OUTCOME_NOT_SAVED and done.image is None
+    assert done.detail.startswith("vm_memory: ")
+    assert "running out of memory" in done.detail
+    assert rig.engine.committed == []
+    assert all(c.removed for c in rig.engine.containers.values())
+
+
+# #827-N3: the guard tripped while the end script ran, its kill did not end the container, and the
+# container's Docker did not stop in time: the reason is the VM's memory, not "Docker did not stop"
+def test_a_vm_out_of_memory_while_the_docker_does_not_stop_says_vm_memory(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+
+    def no_kill(_: Any) -> None:
+        return None
+
+    monkeypatch.setattr(sc.SetupContainer, "_kill", no_kill)
+    rig.finish_squeezes = True
+    rig.finish_mode = "hangs"
+    done = run(rig, docker_stop_seconds=0.5)
+    assert done.outcome == OUTCOME_NOT_SAVED and done.image is None
+    assert done.detail.startswith("vm_memory: ")
+    assert "Docker did not stop" not in done.detail
+    assert rig.engine.committed == []
 
 
 # -- the result ------------------------------------------------------------------------------------

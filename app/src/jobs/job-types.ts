@@ -10,10 +10,13 @@ import type { JsonValue } from "../integrations/types.ts";
 import type { JobKind, ProjectReviewKind } from "../job-kind/job-kind.ts";
 import type { JobStatus } from "../db/job-status.ts";
 import type { ModelChoice } from "../db/implementer-model-choice.ts";
+import type { StoredResultSchema } from "../db/agent-result.ts";
 import type {
   StoredImplementerSession,
   StoredImplementerTurn,
   TurnEnvironment,
+  TurnRunnerEnvironment,
+  TurnProfile,
 } from "../db/repositories/implementer-repository.ts";
 
 /**
@@ -117,6 +120,12 @@ export type EnqueueImplementerTurnInput = {
   costLimitCents: number | null;
   /** A copy of the environment the person chose (#818), made by the service from the workspace's own; null for none. */
   environment?: TurnEnvironment | null;
+  /** A copy of the runner environment the person chose (#854): its labels; null for none. Never together with `environment`. */
+  runnerEnvironment?: TurnRunnerEnvironment | null;
+  /** A copy of the profile version the person chose (#843), made by the service from the workspace's own; null for none. */
+  profile?: TurnProfile | null;
+  /** The result schema of the task (#843), already validated; null for none. */
+  resultSchema?: StoredResultSchema | null;
   /** The user who started the task. */
   createdBy: string;
   /** The login of that person on the provider, for the job's `actor_login`. */
@@ -135,6 +144,37 @@ export type EnqueueImplementerTurnResult = {
   session: StoredImplementerSession;
   turn: StoredImplementerTurn;
 };
+
+/**
+ * #841: the next turn of an existing session. The pull request columns of the job are made as for the first turn; `headSha` is the tip of
+ * the session branch (or of the base branch when the session pushed nothing) read when the instruction was accepted.
+ */
+export type EnqueueFollowUpTurnInput = {
+  sessionId: string;
+  headSha: string;
+  instruction: string;
+  modelChoice: ModelChoice;
+  costLimitCents: number | null;
+  environment?: TurnEnvironment | null;
+  /** #854: the runner environment, never together with `environment`. */
+  runnerEnvironment?: TurnRunnerEnvironment | null;
+  profile?: TurnProfile | null;
+  resultSchema?: StoredResultSchema | null;
+  createdBy: string;
+  actorLogin: string;
+  /** As for the first turn: the same id gives the same turn back and writes nothing new. */
+  clientRequestId: string;
+  /** The turn is the queued instruction of the session (`implementer-repository.ts`, `NewFollowUpTurn`). */
+  fromQueued: boolean;
+};
+
+export type EnqueueFollowUpTurnResult =
+  | EnqueueImplementerTurnResult
+  /** The session is running, or idle with a queued instruction that has not started. Nothing was written. */
+  | { status: "busy" }
+  /** `fromQueued` and nothing is queued any more. Nothing was written. */
+  | { status: "nothing_queued" }
+  | { status: "session_not_found" };
 
 /** Why `enqueue` returned an existing job instead of creating one. */
 export const ENQUEUE_EXISTING_REASONS = [
@@ -195,6 +235,12 @@ export const JOB_ERROR_CODES = [
   "review_kind_changed",
   /** Cancelled because no runner that can run this job claimed it within the deadline (#195). */
   "no_capable_runner",
+  /** Failed because a member revoked the runner that was working on the job (#854). */
+  "runner_revoked",
+  /** Failed at claim because the turn of a runner environment would run on the operator's key; a runner works with the owner's own key (#854). */
+  "runner_needs_own_key",
+  /** Cancelled because no runner of the workspace with the labels of its environment took the turn within the deadline (#854). */
+  "no_runner_available",
   /** Failed because Dynamic Review is not enabled on this instance yet (#195 rollout gate). */
   "dynamic_review_disabled",
   /** Cancelled because the job's command was removed from the product (#203). */

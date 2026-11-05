@@ -47,6 +47,12 @@ BODIES = (
     # #745: the steps of a running turn of the Implementer (the live view).
     "StepsRequest",
     "StepsResponse",
+    # #879: the session snapshot calls of a customer's runner (query and headers as objects).
+    "RunnerLeaseTokenHeader",
+    "RunnerSessionPartQuery",
+    "RunnerSessionPartResponse",
+    "RunnerResumeSessionQuery",
+    "RunnerResumeSessionHeaders",
 )
 
 Document = dict[str, Any]

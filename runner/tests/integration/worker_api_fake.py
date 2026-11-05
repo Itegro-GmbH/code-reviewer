@@ -16,10 +16,13 @@ from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 EXAMPLES = Path(__file__).resolve().parents[3] / "contracts" / "examples" / "worker-api"
 CREDENTIAL = "crj_" + "Q" * 43
-_ROUTE = re.compile(r"/api/workers/v1/jobs/([^/?]+)(/heartbeat|/result|/steps)?(\?.*)?")
+_ROUTE = re.compile(
+    r"/api/workers/v1/jobs/([^/?]+)(/heartbeat|/result|/steps|/session|/resume-session)?(\?.*)?"
+)
 _VERSION = re.compile(r"/api/runners/v1/version(\?.*)?")
 
 
@@ -44,6 +47,11 @@ class FakeWorkerApp:
         self.features: list[str] | None = None
         # Seconds the steps call waits before it answers (a slow or hung app).
         self.steps_delay = 0.0
+        # The stored session the resume-session call serves (#840): the gzip file, its raw size,
+        # and the headers of the whole file it should say (None: computed from the file).
+        self.resume_file: bytes | None = None
+        self.resume_raw_bytes = 12_345
+        self.resume_headers: dict[str, str] | None = None
         self._scripted: dict[str, list[Scripted]] = defaultdict(list)
         self._lock = threading.Lock()
         self._server: ThreadingHTTPServer | None = None
@@ -64,7 +72,11 @@ class FakeWorkerApp:
                 status, headers, body = app._handle(
                     self.command, self.path, dict(self.headers), raw
                 )
-                payload = b"" if body is None else json.dumps(body).encode()
+                payload = (
+                    body
+                    if isinstance(body, bytes)
+                    else (b"" if body is None else json.dumps(body).encode())
+                )
                 self.send_response(status)
                 for name, value in headers.items():
                     self.send_header(name, value)
@@ -74,6 +86,7 @@ class FakeWorkerApp:
 
             do_GET = handle_any
             do_POST = handle_any
+            do_PUT = handle_any
 
             def log_message(self, format: str, *args: Any) -> None:
                 return
@@ -91,10 +104,36 @@ class FakeWorkerApp:
             self._server.shutdown()
             self._server.server_close()
 
+    def _resume(self, path: str) -> tuple[int, dict[str, str], Any]:
+        """One part of the stored session, as the app serves it: the bytes, and the description of
+        the whole file in the headers."""
+        import hashlib
+
+        if self.resume_file is None:
+            return 204, {}, None
+        query = parse_qs(urlsplit(path).query)
+        index = int(query.get("part", ["0"])[0])
+        whole = self.resume_file
+        described = {
+            "x-snapshot-parts": str(max(1, -(-len(whole) // (3 * 1024 * 1024)))),
+            "x-snapshot-bytes": str(len(whole)),
+            "x-snapshot-raw-bytes": str(self.resume_raw_bytes),
+            "x-snapshot-sha256": hashlib.sha256(whole).hexdigest(),
+            "x-snapshot-opencode-version": "1.19.0",
+            **(self.resume_headers or {}),
+        }
+        return (
+            200,
+            {"Content-Type": "application/octet-stream", **described},
+            _resume_part(whole, index),
+        )
+
     def _handle(
         self, method: str, path: str, headers: dict[str, str], raw: bytes
     ) -> tuple[int, dict[str, str], Any]:
-        if _ROUTE.fullmatch(path) is not None and path.split("?")[0].endswith("/steps"):
+        if _ROUTE.fullmatch(path) is not None and path.split("?")[0].endswith(
+            ("/steps", "/session")
+        ):
             time.sleep(self.steps_delay)
         with self._lock:
             if self.features is not None and _VERSION.fullmatch(path) is not None:
@@ -110,10 +149,21 @@ class FakeWorkerApp:
                 "/heartbeat": "heartbeat",
                 "/result": "result",
                 "/steps": "steps",
+                "/session": "session",
+                "/resume-session": "resume",
             }[match.group(2)]
-            body: Any = json.loads(raw) if raw else None
+            # The session snapshot (#839) is bytes, not JSON; its description is in the query.
+            body: Any = json.loads(raw) if raw and kind not in ("session", "resume") else None
             self.requests.append(
-                {"kind": kind, "job": job_id, "method": method, "headers": headers, "body": body}
+                {
+                    "kind": kind,
+                    "job": job_id,
+                    "method": method,
+                    "headers": headers,
+                    "body": body,
+                    "raw": raw,
+                    "query": parse_qs(urlsplit(path).query),
+                }
             )
             if self._scripted[kind]:
                 answer = self._scripted[kind].pop(0)
@@ -127,6 +177,16 @@ class FakeWorkerApp:
                 if job_id in self.superseded:
                     answer["job"]["superseded"] = True
                 return 200, {}, answer
+            if kind == "session":
+                query = parse_qs(urlsplit(path).query)
+                part, parts = int(query["part"][0]), int(query["parts"][0])
+                return (
+                    200,
+                    {},
+                    {"version": 1, "part": part, "parts": parts, "complete": part == parts - 1},
+                )
+            if kind == "resume":
+                return self._resume(path)
             if kind == "steps":
                 return (
                     200,
@@ -137,6 +197,10 @@ class FakeWorkerApp:
             answer = _with_job_id(example("WorkerResultResponse"), job_id)
             answer["job"]["status"] = self.complete_status
             return 200, {}, answer
+
+
+def _resume_part(self_file: bytes, index: int) -> bytes:
+    return self_file[index * 3 * 1024 * 1024 : (index + 1) * 3 * 1024 * 1024]
 
 
 def _with_job_id(answer: dict[str, Any], job_id: str) -> dict[str, Any]:

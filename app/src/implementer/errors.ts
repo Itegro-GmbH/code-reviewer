@@ -43,10 +43,26 @@ export const IMPLEMENTER_ERROR_CODES = [
    * anything is written, so nothing is started and nothing is charged; the person changes the size in Environments. 422.
    */
   "IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED",
+  /**
+   * The environment is a runner's (#854) and the model is a managed one. A runner works with its owner's own API key: a managed model is
+   * the platform's and runs on platform VMs only. Refused before anything is written, so nothing is started and nothing is charged. 422.
+   */
+  "IMPLEMENTER_RUNNER_NEEDS_OWN_KEY",
+  /** The profile named by the body is not one of this workspace (another workspace's looks the same), is archived, or has no such version. 404. */
+  "IMPLEMENTER_PROFILE_NOT_FOUND",
   /** The model is not one the claim would run (`reason` says why). 422. */
   "IMPLEMENTER_MODEL_NOT_ALLOWED",
   /** The cost limit is above the operator's maximum per turn; the answer carries `maximumCents`. 422. */
   "EXCEEDS_OPERATOR_MAXIMUM",
+  /** No session of this workspace has this id (another workspace's looks the same). 404. */
+  "IMPLEMENTER_SESSION_NOT_FOUND",
+  /**
+   * A turn runs and an instruction is queued already, or the turn that ended has a queued instruction that is about to start (#841): the
+   * session takes one next instruction at a time. 409.
+   */
+  "IMPLEMENTER_SESSION_BUSY",
+  /** The session's branch is no longer on the platform (deleted there): a follow-up cannot continue it; the person starts a new task. 409. */
+  "IMPLEMENTER_BRANCH_GONE",
   /** The platform could not be asked, answered with an error, or answered with something unusable. 503 (never a 502, #690). */
   "IMPLEMENTER_GITHUB_UNAVAILABLE",
 ] as const;
@@ -70,8 +86,13 @@ export const IMPLEMENTER_ERROR_STATUS: Record<
   IMPLEMENTER_REQUEST_REUSED: 409,
   IMPLEMENTER_ENVIRONMENT_NOT_FOUND: 404,
   IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED: 422,
+  IMPLEMENTER_RUNNER_NEEDS_OWN_KEY: 422,
+  IMPLEMENTER_PROFILE_NOT_FOUND: 404,
   IMPLEMENTER_MODEL_NOT_ALLOWED: 422,
   EXCEEDS_OPERATOR_MAXIMUM: 422,
+  IMPLEMENTER_SESSION_NOT_FOUND: 404,
+  IMPLEMENTER_SESSION_BUSY: 409,
+  IMPLEMENTER_BRANCH_GONE: 409,
   IMPLEMENTER_GITHUB_UNAVAILABLE: 503,
 };
 
@@ -85,8 +106,17 @@ export type ImplementerIssue = {
     | "model"
     | "costLimitCents"
     | "environmentId"
+    | "profile"
+    | "result"
     | "clientRequestId";
-  code: "required" | "invalid" | "too_long" | BranchNameIssue;
+  /** `not_with_profile`: a model or a cost limit next to a profile, whose version brings both. */
+  code:
+    "required" | "invalid" | "too_long" | "not_with_profile" | BranchNameIssue;
+  /**
+   * For `result` (#843): the first problem the validator of the result-schema format found, `<pointer> <code>`: enough to start from;
+   * `POST /workflows/validate` lists every problem of a schema written in a workflow.
+   */
+  detail?: string;
 };
 
 /** Why a model is not allowed. The picker never lists such a model; a submit that names one is refused with the reason. */

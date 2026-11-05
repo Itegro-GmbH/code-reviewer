@@ -98,6 +98,8 @@ export type RunnerQueue = {
   get(id: string): Promise<Job | undefined>;
   /** The expiry step of `claimNext` on its own. */
   expireStaleJobs(): Promise<ExpiryReport>;
+  /** #854: ends the running claims of one runner at once (a member revoked it). */
+  expireClaimsOf(runnerId: string): Promise<ExpiryReport>;
   /**
    * #328: fails the queued jobs that waited `waitedMs` or longer for a claim with `dispatch_unavailable`
    * (the cron sweep of a hosted deployment, when no Dispatcher took them). Returns how many.
@@ -134,6 +136,7 @@ export function createRunnerQueue(
     noteSupersede: (jobId, leaseToken) => jobs.noteSupersede(jobId, leaseToken),
     get: (id) => jobs.get(id),
     expireStaleJobs: () => jobs.expireStaleJobs(),
+    expireClaimsOf: (runnerId) => jobs.expireClaimsOf(runnerId),
     failUndispatched: (waitedMs) => jobs.failUndispatched(waitedMs),
     countRunning: () => jobs.countRunning(),
     cancelClaimed: (jobId, leaseToken, errorCode) =>

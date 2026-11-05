@@ -58,6 +58,8 @@ export type RecordStepsResult =
     };
 
 export type ImplementerStepsRepository = {
+  /** #841: the payload of the newest `step` record (the end of a model call) of the turn, or undefined when it has none. */
+  lastStep(jobId: string): Promise<Record<string, unknown> | undefined>;
   /**
    * Stores a batch for the running turn `jobId` held with `leaseToken`. The higher `seq` of a part wins, whatever the order the
    * records come in, also within one batch. Idempotent: the same batch again stores nothing.
@@ -245,6 +247,19 @@ export function createImplementerStepsRepository(
           dropped,
         };
       });
+    },
+
+    async lastStep(jobId) {
+      const row = await db
+        .selectFrom("implementer_turn_steps")
+        .select("payload")
+        .where("job_id", "=", jobId)
+        .where("workspace_id", "=", workspaceId)
+        .where("kind", "=", "step")
+        .orderBy("seq", "desc")
+        .limit(1)
+        .executeTakeFirst();
+      return row === undefined ? undefined : parsePayload(row.payload);
     },
 
     async listAfter(jobId, afterSeq, limit) {

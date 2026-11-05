@@ -131,6 +131,27 @@ export type RunnerResult = {
   usage?: RunnerUsage | null;
   [k: string]: unknown;
 };
+/**
+ * #840 (part of #745): how a follow-up turn got its earlier conversation, in `RunnerResult.implementer.resume`. Present on a follow-up turn (the job carried `resume`) that got as far as the engine's start; a first turn has none, and neither has a follow-up that ended before (the clone failed, the setup script failed). `mode` `imported` is the whole conversation of the earlier turns, read back into the engine, which continued in that session: the commands in it are the history the agent sees, not things that ran in the new sandbox. `summary_only` is a fresh engine session that was given a summary and a digest as data instead, for one of the stable `reason` words (always present with `summary_only`, never with `imported`): `no_snapshot` (the app had none, or the session was never saved), `download_failed` (the stored session could not be fetched), `snapshot_unreadable` (the file did not match its size or digest, was not gzip, or was not the engine's export), `import_failed` (the engine refused the import or the session was not there after it), `version_changed` (the same, and the engine version that wrote the snapshot is not the one that read it). Neither is a failure of the turn. A turn that imported a history so long that its first call alone is over the cost limit ends `cost_limit_reached` before any model call (the door refuses a call whose reserved cost is over the limit).
+ */
+export type ImplementerResumeResult = {
+  mode: "imported" | "summary_only";
+  reason?:
+    | "no_snapshot"
+    | "download_failed"
+    | "snapshot_unreadable"
+    | "import_failed"
+    | "version_changed";
+} & (
+  | {
+      mode?: "imported";
+      [k: string]: unknown;
+    }
+  | {
+      mode?: "summary_only";
+      [k: string]: unknown;
+    }
+);
 
 /**
  * #424: the query string of GET /api/workers/v1/jobs/{id}, as an object of its parameters. Both are optional comma separated lists: `features` (the names of KnownClaimFeature, unknown names are ignored) and `llmProviders` (slugs of LlmProviderId: the LLM providers the Worker can run; absent means `openrouter`). The app ignores the list today (the claim issue of epic #420 will use it); it still always sends `openrouter`.
@@ -488,7 +509,7 @@ export interface ClaimBase {
   comparison: "full" | "incremental";
 }
 /**
- * #746: what an implementer job asks for (`reviewKind: implementer`; the factory deployment only). A closed object: there is no command, permission, executable, endpoint or upstream URL here, so a job can never widen what the agent may do. The agent works in a clone of `repo` that starts at the head of `baseBranch`, on the new branch `branch` (it must not exist yet) and only there, and pushes it. `instruction` is the user's task as literal data. `limits.timeLimitSeconds` is the wall clock the runner holds the turn to (the Dispatcher's own timeout for the kind is the backstop). `cost` and `modelEntry` are the `DynamicCostPolicy` and the `DynamicModelEntry` of the native Dynamic job, unchanged: the same passthrough proxy, price book and token cap, and a native job is the only way the Implementer runs a model. `capabilities` is optional, as for Dynamic.
+ * #746: what an implementer job asks for (`reviewKind: implementer`; the factory deployment only). A closed object: there is no command, permission, executable, endpoint or upstream URL here, so a job can never widen what the agent may do. The agent works in a clone of `repo` that starts at the head of `baseBranch`, on the new branch `branch` (it must not exist yet) and only there, and pushes it. `instruction` is the user's task as literal data. `limits.timeLimitSeconds` is the wall clock the runner holds the turn to (the Dispatcher's own timeout for the kind is the backstop). `cost` and `modelEntry` are the `DynamicCostPolicy` and the `DynamicModelEntry` of the native Dynamic job, unchanged: the same passthrough proxy, price book and token cap, and a native job is the only way the Implementer runs a model. `capabilities` is optional, as for Dynamic. `resume` (#838) is present on a follow-up turn only: the branch then exists on the provider (an earlier turn pushed it) and the turn starts from the branches of `resume` instead of the base.
  */
 export interface ImplementerJob {
   repo: ImplementerRepo;
@@ -521,6 +542,9 @@ export interface ImplementerJob {
   modelEntry: DynamicModelEntry;
   capabilities?: DynamicModelCapabilities;
   environment?: ImplementerEnvironment;
+  profile?: ImplementerProfile;
+  resultSchema?: ImplementerResultSchema;
+  resume?: ImplementerResume;
 }
 /**
  * #746: the one repository a turn works on. `fullName` is `owner/name`; `cloneUrl` is the https address the runner clones from (the host of the git provider), with no credential in it: the token is in `git.token`.
@@ -538,6 +562,295 @@ export interface ImplementerNetworkRule {
    * @maxItems 100
    */
   hosts: string[];
+}
+/**
+ * #843: the profile version a turn was started with, as the turn copied it when it started. Present only for a turn started with a profile and a caller that named the claim feature `implementer_profile`; a turn without a profile carries nothing and runs with the platform's own defaults, exactly as every turn did before profiles. The model and the cost limit of the version are not here: they are the turn's own `modelEntry`, `cost` and `llm.maxCostUsd`, chosen from the version by the app. `instructions`, when present, is the system-level text the agent is given: the runner appends it to the instruction file it writes for the engine (after its own rules, so the text is the same for every turn of one version and the model provider's prompt cache hits), as literal data written by a member of the workspace; it is left out when the version has none. `canPush` says whether Control pushes the branches the agent made when the turn ends: when false the runner pushes nothing, lists no branch, reports no head commit and no commits, and the turn is a success without a push (a profile that only reads). The agent never has a remote or a credential, whatever `canPush` says. `name` and `version` are for the run's log line only.
+ */
+export interface ImplementerProfile {
+  name: string;
+  version: number;
+  instructions?: string;
+  canPush: boolean;
+}
+/**
+ * #843: the result schema of a turn, in the format of `result-schema.v1.json` (a subset of JSON Schema: strings with optional `enum` and `maxLength`, numbers, whole numbers, booleans, lists with `items` and `maxItems`, objects with `properties` and `required`, all closed, at most 4 levels and 100 fields). Present only for a turn that has one (the task's own, or the default of its profile) and a caller that named the claim feature `implementer_result`. The agent gets a finish tool made from it and decides itself when it is done; the runner checks what it handed in against the schema, with the rules of the app's `checkResultValue`. The app holds the result to the bounds of a result and does not check it against the schema again: the workflow engine does, before it routes the value anywhere. This definition states the root only: the format, its limits and the answer to a schema that breaks them are those of `result-schema.v1.json` and of the validators on both sides (`contracts/result-check-vectors.json` holds them to the same answers).
+ */
+export interface ImplementerResultSchema {
+  type: "object";
+  properties: {
+    [k: string]: unknown;
+  };
+  [k: string]: unknown;
+}
+/**
+ * #838 (part of #745): what a follow-up turn of an Implementer session is told about the branches the earlier turns left on the provider. Present only on a follow-up, and only for a caller that named the claim feature `implementer_resume`; a first turn has none. Without it the turn starts from `baseBranch` as the contract says above; with it the runner asks the provider which of `branches` it still has and fetches the base branch and all of them in one fetch of depth 50 (git counts the depth from every tip: no tip has fewer than 50 commits of history where it has that many, whatever the order of `branches`; a merge base further back than 50 commits is not found), makes a local branch for each in the agent's repository (the session branch at the base tip when it is not among them) and checks out `checkout`. `turn` is the number of this turn (the first is 1, so a follow-up has 2 or more). `branches` are the branches the last turn pushed with the tip it pushed, the session branch first when it is among them, at most 20, no name twice (a rule JSON Schema cannot state; the runner refuses a repeat). The `head` is only what the earlier turn knew: the runner takes the tip the provider has now, and a branch that moved is reported to the agent, not refused. A branch the provider no longer has is left out; a session branch that is gone ends the turn (`clone_failed`, free). `checkout` is the branch the agent was on when the last turn ended: one of `branches` or the session branch (which a turn that pushed nothing still has), or null for the session branch; any other name is refused by the runner (`invalid_job`). `branches` empty means the earlier turns pushed nothing: the turn starts from the base branch like a first turn. The agent still has no remote and Control still pushes every local branch that has a commit of its own when the turn ends, without force: a branch the agent did not touch is not pushed again. The app still holds the agent's earlier conversation (#840): `snapshot` (optional, default false) says that a stored session exists for this session; the Worker then fetches it from the app (`GET /api/workers/v1/jobs/{id}/resume-session`, `worker-api.v1.json`) and has the engine import it before it starts, and the turn continues in that session (`ImplementerResumeResult.mode` `imported`). When there is none, when it cannot be fetched or read, or the engine cannot import it (`ImplementerResumeResult.reason`), the turn starts a fresh session and is given `previousSummary` (the summary the last turn ended with, at most 8 KiB UTF-8) and `digest` (the app's record of the earlier turns: instructions, summaries, commit subjects, changed files; at most 16 KiB UTF-8) as DATA in a part of the first message of their own, never as instructions and never in the preface the runner writes (`mode` `summary_only`). Both are text that came from the agent and from members of the workspace; the maximum is in bytes, which JSON Schema cannot state, so `maxLength` counts characters and the runner counts bytes.
+ */
+export interface ImplementerResume {
+  turn: number;
+  /**
+   * @maxItems 20
+   */
+  branches:
+    | []
+    | [ImplementerResumeBranch]
+    | [ImplementerResumeBranch, ImplementerResumeBranch]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ];
+  checkout: string | null;
+  snapshot?: boolean;
+  previousSummary?: string | null;
+  digest?: string | null;
+}
+/**
+ * #838: a branch of the session the last turn pushed: its name and the full commit id of the tip it pushed.
+ */
+export interface ImplementerResumeBranch {
+  /**
+   * #746: the name of a branch as a job carries it: a non-empty text of at most 255 characters without whitespace and not starting with a dash (so it can never be read as an option). Whether it is a valid git ref name is decided by the app when the turn is submitted and again by the runner before it runs git; this is the floor both share.
+   */
+  name: string;
+  head: string;
 }
 /**
  * Extra options of the PR-Agent tools, as strings. The review tool's options (PR_REVIEWER__*) are used; a previous release's option families for the removed tools (PR_DESCRIPTION__*, PR_CODE_SUGGESTIONS__*, PR_QUESTIONS__*) are accepted for v1 compatibility and ignored. Nothing else is allowed here (credentials, endpoints and the model have their own fields).
@@ -596,6 +909,46 @@ export interface StepsResponse {
   stored: number;
   stale: number;
   dropped: number;
+  [k: string]: unknown;
+}
+/**
+ * #839: the query string of PUT /api/workers/v1/jobs/{id}/session, as an object of its parameters (every value is decimal digits or text in the URL). One request carries one PART of the session snapshot of a running turn of the Implementer (follow-up turns): the engine's export as the runner made it (JSON, secrets taken out, gzipped), at most 8 MiB gzipped. A function of the platform takes no request body over 4.5 MB, so the file is cut into parts of exactly 3 MiB (`bytes` / 3145728, rounded up, at most 3) and the last part is whatever is left; the body of the request is the bytes of the part (`application/octet-stream`), read up to 3 MiB (413 RUNNER_BODY_TOO_LARGE above) and exactly as long as `bytes` says for that part (400 otherwise). Every part carries the description of the whole file: `parts` (the count, which must be what `bytes` makes), `part` (this part's index from 0), `bytes` (the size of the gzip file), `rawBytes` (the size of the JSON inside it), `sha256` (the lower case hex digest of the gzip file) and `opencodeVersion` (the engine that wrote it). A part is judged on its own and may arrive in any order or twice. The app keeps the parts of the job apart; when the last one is in it puts them together, checks size and digest, and swaps the snapshot in for the session's old one (one snapshot for each session, replaced by each turn, kept for good; the old one stays readable until then). 400 RUNNER_REQUEST_INVALID names the wrong fields (`fields`), also `body` for parts that do not make the announced file or disagree with each other (nothing of that upload is kept). The call proves the claim and nothing more: it does NOT extend the lease. 409 RUNNER_JOB_ENDED when the job is over, 401 WORKER_CREDENTIAL_INVALID for a credential that is not the job's, 400 for a job that is not a turn of the Implementer. The sender is best effort: a snapshot that is not stored means the next turn starts from a summary.
+ */
+export interface SessionPartQuery {
+  part: string;
+  parts: string;
+  bytes: string;
+  rawBytes: string;
+  sha256: string;
+  opencodeVersion: string;
+  [k: string]: unknown;
+}
+/**
+ * #839: 200 from the snapshot call. `part` and `parts` repeat the request's; `complete` is true once the whole snapshot is stored, also for a part sent again after that. Repeating a part answers 200.
+ */
+export interface SessionPartResponse {
+  version: 1;
+  part: number;
+  parts: number;
+  complete: boolean;
+  [k: string]: unknown;
+}
+/**
+ * #840: the query string of GET /api/workers/v1/jobs/{id}/resume-session, as an object of its parameters. The Worker of a follow-up turn (`implementer.resume.snapshot` true) fetches the session snapshot the app stored for the job's own session (the file `PUT .../session` delivered, replaced by each turn): the engine's export, gzipped, at most 8 MiB. A response body is held to 4.5 MB like a request body, so the file comes in the same parts of exactly 3 MiB (`bytes` / 3145728, rounded up, at most 3; the last part is whatever is left) and `part` (from 0, default 0) names the one to send. 200 `application/octet-stream`: the bytes of that part, with the description of the whole file in the headers `ResumeSessionHeaders` (every part carries it, so a part is judged on its own and the parts may be fetched in any order and twice). 204 without a body: the session has no stored snapshot (never saved, or not by a turn that could). 400 RUNNER_REQUEST_INVALID (`fields`: `part`) for a part that is not a number or beyond the last. 401 WORKER_CREDENTIAL_INVALID, 409 RUNNER_JOB_ENDED / RUNNER_LEASE_LOST as for every Worker call, and 400 for a job that is not a turn of the Implementer. The call reads a snapshot of the job's own session and of no other: the app finds the session from the job. It proves the claim and nothing more: it does NOT extend the lease. The Worker checks the size and the sha256 of the whole file; a file it cannot fetch or read means the turn continues from a summary (`ImplementerResumeResult`), never a failed turn. The file holds what the earlier turns read and said, secrets of the turn taken out, tool outputs included (see the session snapshot in docs/implementer.md).
+ */
+export interface ResumeSessionQuery {
+  part?: string;
+  [k: string]: unknown;
+}
+/**
+ * #840: the response headers of a 200 from GET /api/workers/v1/jobs/{id}/resume-session, as an object of lower-case header names (every value is text in the header). They describe the WHOLE file, not the part: `x-snapshot-parts` (how many parts, 1 to 3, which is what `x-snapshot-bytes` makes), `x-snapshot-bytes` (the size of the gzip file), `x-snapshot-raw-bytes` (the size of the JSON inside it), `x-snapshot-sha256` (the lower case hex digest of the gzip file) and `x-snapshot-opencode-version` (the engine that wrote it). `Content-Length` is the size of this part. `Cache-Control` is `no-store`.
+ */
+export interface ResumeSessionHeaders {
+  "x-snapshot-parts": string;
+  "x-snapshot-bytes": string;
+  "x-snapshot-raw-bytes": string;
+  "x-snapshot-sha256": string;
+  "x-snapshot-opencode-version": string;
   [k: string]: unknown;
 }
 /**
@@ -666,6 +1019,9 @@ export interface ImplementerResult {
   } | null;
   setup?: ImplementerSetupResult;
   network?: ImplementerNetworkReport;
+  checkedOut?: string | null;
+  resume?: ImplementerResumeResult;
+  agentResult?: ImplementerAgentResult;
 }
 /**
  * #818: what the setup script of a turn did, in `ImplementerResult.setup`; present when a script ran, absent otherwise. `ok` is whether it ended with exit status 0 within its time limit. `exitCode` is its exit status, null when it did not end by itself (the time limit, `timedOut`, or a signal). `output` is the end of what it wrote to stdout and stderr together, at most 8192 characters, with every secret known to the runner removed like every log line. A failed script ends the turn with the error code `environment_setup_failed` before the model is called.
@@ -701,6 +1057,12 @@ export interface ImplementerNetworkReport {
     bytesIn: number;
     bytesOut: number;
   }[];
+}
+/**
+ * #843: the result the agent handed in through the finish tool, in `ImplementerResult.agentResult`. Present only for a turn that carried `resultSchema` and only when the agent's result fits it: the runner reads the file the tool wrote once the agent's container is gone, holds it to at most 256 KiB, 8 levels and 20,000 values before it parses it, and checks it against the schema. Data of an untrusted writer: the app holds it to the same bounds, takes the secrets out of every text and key in it, shows it as plain text and hands it to a workflow only as data, never as a command; it does not check it against the schema (the workflow engine does, before it routes the value anywhere). A turn that ended without a valid result has no `agentResult` and ends `no_result`. A result the app finds over the bounds (also after the secrets are taken out) is left out and the turn is recorded `no_result` as well; the rest of the report is kept, so a result is never a reason to refuse a completion.
+ */
+export interface ImplementerAgentResult {
+  [k: string]: unknown;
 }
 export interface RunnerUsage {
   model: string | null;
@@ -916,7 +1278,7 @@ export interface WorkerResultResponse {
 export interface WorkerErrorResponse {
   error: {
     /**
-     * Every error of the API has one of these codes. 401 RUNNER_UNAUTHORIZED, 400 RUNNER_ID_INVALID / RUNNER_REQUEST_INVALID, 404 RUNNER_JOB_NOT_FOUND, 409 RUNNER_LEASE_LOST / RUNNER_RESULT_CONFLICT, 413 RUNNER_BODY_TOO_LARGE, 503 RUNNER_GIT_ACCESS_UNAVAILABLE (with Retry-After), 500 RUNNER_INTERNAL_ERROR. #318 adds 401 WORKER_CREDENTIAL_INVALID (a Worker route got a credential that is not the job's: wrong job, unknown, expired or from an earlier claim; also the fourth call of the details route in one claim, whose three calls are spent: the Worker has nothing left to fetch and stops, the claim itself is not lost) and 409 RUNNER_JOB_ENDED (the app ended the job, for example after a permanent access failure at fetch; the Worker stops).
+     * Every error of the API has one of these codes. 401 RUNNER_UNAUTHORIZED, 400 RUNNER_ID_INVALID / RUNNER_REQUEST_INVALID, 404 RUNNER_JOB_NOT_FOUND, 409 RUNNER_LEASE_LOST / RUNNER_RESULT_CONFLICT, 413 RUNNER_BODY_TOO_LARGE, 503 RUNNER_GIT_ACCESS_UNAVAILABLE (with Retry-After), 500 RUNNER_INTERNAL_ERROR. #318 adds 401 WORKER_CREDENTIAL_INVALID (a Worker route got a credential that is not the job's: wrong job, unknown, expired or from an earlier claim; also the fourth call of the details route in one claim, whose three calls are spent: the Worker has nothing left to fetch and stops, the claim itself is not lost) and 409 RUNNER_JOB_ENDED (the app ended the job, for example after a permanent access failure at fetch; the Worker stops). #854 adds 401 RUNNER_REGISTRATION_TOKEN_INVALID (the registration token of a customer's runner is unknown, used or expired: one answer for all three) and 426 RUNNER_UPDATE_NEEDED (a customer's runner whose base is older than the minimum the app requires gets no job; the error carries `minBaseVersion`). A customer's runner authenticates with its own credential (contracts/runner-registration.v1.json); a revoked credential is a plain 401 RUNNER_UNAUTHORIZED.
      */
     code:
       | "RUNNER_UNAUTHORIZED"
@@ -929,7 +1291,9 @@ export interface WorkerErrorResponse {
       | "RUNNER_GIT_ACCESS_UNAVAILABLE"
       | "RUNNER_INTERNAL_ERROR"
       | "WORKER_CREDENTIAL_INVALID"
-      | "RUNNER_JOB_ENDED";
+      | "RUNNER_JOB_ENDED"
+      | "RUNNER_REGISTRATION_TOKEN_INVALID"
+      | "RUNNER_UPDATE_NEEDED";
     message: string;
     retryAfterSeconds?: number;
     [k: string]: unknown;

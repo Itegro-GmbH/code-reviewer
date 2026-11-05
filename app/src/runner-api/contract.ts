@@ -4,7 +4,7 @@
 // these types and sets are written by hand and kept in line with it by
 // integration-tests/compatibility/runner-api-contract.integration.test.ts (the sets are compared
 // with the file, and real answers and the request checks are validated against it).
-import type { ReviewCommand } from "../integrations/types.ts";
+import type { JsonValue, ReviewCommand } from "../integrations/types.ts";
 import type { JobStatus } from "../db/job-status.ts";
 import type { CostPolicyJson } from "../native-cost/policy.ts";
 import type { JobModelEntry } from "../models-dev/job-entry.ts";
@@ -56,6 +56,17 @@ export const CLAIM_FEATURES = [
   // named it; a turn whose environment has a rule other than `off` is refused (`implementer_engine_unavailable`, free) for a
   // caller that did not.
   "implementer_network",
+  // #843: the runner reads `implementer.profile` (the instructions and the push right of the profile version a turn started with). Sent
+  // only to a caller that named it; a turn with a profile is refused (`implementer_engine_unavailable`, free) for a caller that did not.
+  "implementer_profile",
+  // #843: the runner reads `implementer.resultSchema`, gives the agent the finish tool made from it and reports the result the agent
+  // handed in (`implementer.agentResult`). Sent only to a caller that named it; a turn with a result schema is refused
+  // (`implementer_engine_unavailable`, free) for a caller that did not, since a runner that did not read it would never ask the agent for it.
+  "implementer_result",
+  // #838 (part of #745): the runner reads `implementer.resume`, the branches a follow-up turn starts from. Sent only to a caller that
+  // named it; a follow-up turn is refused (`implementer_engine_unavailable`, free) for a caller that did not. The app sends no `resume`
+  // yet: the follow-up API (the next step of #745) is what produces one.
+  "implementer_resume",
 ] as const;
 export type ClaimFeature = (typeof CLAIM_FEATURES)[number];
 
@@ -104,6 +115,9 @@ export const APP_FEATURES = [
   "release",
   "vm_lifecycle",
   "implementer_steps",
+  "implementer_snapshot",
+  // #879: the snapshot calls of the runner API, for a customer's runner (`implementer_snapshot` is the Worker API's).
+  "runner_session_snapshot",
 ] as const;
 export type AppFeature = (typeof APP_FEATURES)[number];
 
@@ -254,6 +268,8 @@ export const RUNNER_ERROR_CODES = [
   "clone_failed",
   "setup_failed",
   "agent_gave_up",
+  // #843: the turn had a result schema and the agent ended without a result that fits it, also after the one reminder. The model was used.
+  "no_result",
   "push_rejected",
   "branch_violation",
   "time_limit_reached",
@@ -309,6 +325,9 @@ export const RUNNER_API_ERROR_CODES = [
   // The Worker API (#318, served from #320): a credential that is not the job's, and a job the app ended.
   "WORKER_CREDENTIAL_INVALID",
   "RUNNER_JOB_ENDED",
+  // A customer's runner (#854): a registration token that cannot be exchanged, and a base older than the minimum.
+  "RUNNER_REGISTRATION_TOKEN_INVALID",
+  "RUNNER_UPDATE_NEEDED",
 ] as const;
 export type RunnerApiErrorCode = (typeof RUNNER_API_ERROR_CODES)[number];
 
@@ -321,6 +340,8 @@ export type ErrorResponse = {
     message: string;
     fields?: FieldError[];
     retryAfterSeconds?: number;
+    /** #854: with `RUNNER_UPDATE_NEEDED`, the oldest version of the base the app accepts. */
+    minBaseVersion?: string;
   };
 };
 
@@ -464,6 +485,24 @@ export type ImplementerJobOptions = {
   cost: CostPolicyJson;
   modelEntry: JobModelEntry;
   capabilities?: DynamicModelCapabilities;
+  /** #841: present on a follow-up turn only, and only for a caller that named `implementer_resume` (`ImplementerResume` in the contract). */
+  resume?: ImplementerJobResume;
+};
+
+/**
+ * #841: what a follow-up turn is told about the turns before it (`ImplementerResume` in the contract); the app builds it from the stored
+ * reports (`implementer/resume.ts`). Every text in it is data, never an instruction.
+ */
+export type ImplementerJobResume = {
+  turn: number;
+  /** At most 20, the session branch first, no name twice. */
+  branches: Array<{ name: string; head: string }>;
+  checkout: string | null;
+  snapshot: boolean;
+  /** At most 8 KiB of UTF-8. */
+  previousSummary?: string;
+  /** At most 16 KiB of UTF-8. */
+  digest?: string;
 };
 
 /**
@@ -781,7 +820,48 @@ export type ImplementerResult = {
   setup?: ImplementerSetupResult;
   /** #745, step 7: present when the turn had a network door or the VM's network policy was changed. */
   network?: ImplementerNetworkReport;
+  /**
+   * #837: the local branch HEAD was on when the agent's work was read, after the rescue of a detached HEAD; null when HEAD was
+   * detached and on no branch, or was not read. Absent from a runner of the release before.
+   */
+  checkedOut?: string | null;
+  /**
+   * #840: how a follow-up turn got its earlier conversation. Present on a follow-up turn that got as far as the engine's start; absent
+   * on a first turn and from a runner of the release before.
+   */
+  resume?: ImplementerResumeResult;
+  /**
+   * #843: the result the agent handed in through the finish tool, checked by the runner against the turn's result schema after the
+   * agent's container was gone. Data of an untrusted writer, an object within the bounds of `agent-result.ts`; the app holds it to the
+   * bounds and takes the secrets out of it, but does not check it against the turn's schema (the workflow engine does, before it routes the
+   * value anywhere). Absent when the turn has no schema, the agent handed in none that fits, or the app found it over the bounds (the turn
+   * is then recorded `no_result`).
+   */
+  agentResult?: { [key: string]: JsonValue };
 };
+
+/** #840: the two ways a follow-up turn gets its earlier conversation (`ImplementerResumeResult.mode` in the contract). */
+export const IMPLEMENTER_RESUME_MODES = ["imported", "summary_only"] as const;
+export type ImplementerResumeMode = (typeof IMPLEMENTER_RESUME_MODES)[number];
+
+/**
+ * #840: why a follow-up turn continued from a summary and not from the conversation (`ImplementerResumeResult.reason`). The words of the
+ * runner (`resume_wire.py`): none of them fails the turn.
+ */
+export const IMPLEMENTER_RESUME_REASONS = [
+  "no_snapshot",
+  "download_failed",
+  "snapshot_unreadable",
+  "import_failed",
+  "version_changed",
+] as const;
+export type ImplementerResumeReason =
+  (typeof IMPLEMENTER_RESUME_REASONS)[number];
+
+/** `reason` is there exactly when `mode` is `summary_only`. */
+export type ImplementerResumeResult =
+  | { mode: "imported" }
+  | { mode: "summary_only"; reason: ImplementerResumeReason };
 
 export type CompleteRequest = { leaseToken: string; result: RunnerResult };
 
@@ -872,4 +952,29 @@ export type StepsResponse = {
   stored: number;
   stale: number;
   dropped: number;
+};
+
+/**
+ * #839: the bounds of the session snapshot of a turn of the Implementer (`PUT /api/workers/v1/jobs/{id}/session`,
+ * `SessionPartResponse` in the contract). The snapshot is the engine's export, gzipped, and arrives in parts: a function of the
+ * platform takes no request body over 4.5 MB (a larger one is refused before the app is called), so a part is at most
+ * `partBytes` and the largest snapshot is `maxParts` of them. The last part is whatever is left.
+ */
+export const SNAPSHOT_LIMITS = {
+  /** The most a snapshot is, gzipped (the plan's cap; the runner keeps no snapshot over it). */
+  maxBytes: 8 * 1024 * 1024,
+  /** The most one request carries, and exactly what every part but the last carries. */
+  partBytes: 3 * 1024 * 1024,
+  /** `ceil(maxBytes / partBytes)`. */
+  maxParts: 3,
+  /** The most the JSON inside the gzip file may be. The app never inflates it; it is a figure for the page that will show a size. */
+  maxRawBytes: 256 * 1024 * 1024,
+} as const;
+
+/** #839: 200 from the snapshot call (`SessionPartResponse`). `complete` is true once the whole snapshot is stored. */
+export type SessionPartResponse = {
+  version: typeof RUNNER_API_VERSION;
+  part: number;
+  parts: number;
+  complete: boolean;
 };

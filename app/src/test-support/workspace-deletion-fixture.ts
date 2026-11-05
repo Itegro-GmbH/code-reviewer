@@ -8,6 +8,9 @@ import { createBillingNotificationsRepository } from "../db/repositories/billing
 import { createBillingProfilesRepository } from "../db/repositories/billing-profiles-repository.ts";
 import { createBillingTopUpIntentsRepository } from "../db/repositories/billing-topup-intents-repository.ts";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
+import { createWorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
+import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
+import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
 import { createInstallationLinkRequestsRepository } from "../db/repositories/installation-link-requests-repository.ts";
 import { createIntegrationsRepository } from "../db/repositories/integrations-repository.ts";
@@ -157,6 +160,79 @@ export async function seedWorkspaceForDeletion(
       createdBy: `owner-${tag}`,
     },
     50,
+  );
+  // #833-M1-T161: a workflow with two versions, which the erasure removes with the rest.
+  const workflows = createWorkflowsRepository(db, workspaceId);
+  const workflow = await workflows.create(
+    {
+      name: `Workflow ${tag}`,
+      document: `{"tag":"${tag}"}`,
+      createdBy: `owner-${tag}`,
+    },
+    100,
+  );
+  if (!workflow.ok) throw new Error("seeding failed");
+  await workflows.saveVersion(
+    workflow.workflow.id,
+    {
+      name: `Workflow ${tag}`,
+      document: `{"tag":"${tag}","v":2}`,
+      createdBy: `owner-${tag}`,
+    },
+    200,
+  );
+  // #844-T141: a run of that workflow with a step that ran the finished job, which the erasure removes before the job.
+  const workflowRuns = createWorkflowRunsRepository(db, workspaceId);
+  const workflowRun = await workflowRuns.createRun({
+    workflowId: workflow.workflow.id,
+    workflowVersion: 1,
+    repositoryId: repository.id,
+    baseBranch: "main",
+    triggerInput: `{"tag":"${tag}"}`,
+    budgetMicroUsd: 1_000_000,
+    clientRequestId: `run-${tag}`,
+    createdBy: `owner-${tag}`,
+    actorLogin: "octocat",
+  });
+  const workflowStep = await workflowRuns.lockRun(workflowRun.run.id, (lock) =>
+    lock.addStep({
+      position: 0,
+      stepId: "work",
+      kind: "agent",
+      round: 1,
+      profile: null,
+      capMicroUsd: 1000,
+    }),
+  );
+  if (workflowStep === undefined) throw new Error("seeding failed");
+  await workflowRuns.claimStep(workflowStep.id);
+  await workflowRuns.attachTurn(workflowStep.id, {
+    jobId: finished.id,
+    turnId: null,
+  });
+  // #843-T72: a profile with two versions, which the erasure removes with the rest.
+  const agentProfiles = createProfilesRepository(db, workspaceId);
+  const profileContent = {
+    description: `Profile ${tag}`,
+    model: { entryId: `entry-${tag}` },
+    instructions: "",
+    costLimitCents: null,
+    canPush: true,
+    defaultResult: null,
+  };
+  const agentProfile = await agentProfiles.create(
+    {
+      name: `profile-${tag}`,
+      content: profileContent,
+      createdBy: `owner-${tag}`,
+    },
+    100,
+  );
+  if (!agentProfile.ok) throw new Error("seeding failed");
+  await agentProfiles.saveVersion(
+    agentProfile.profile.id,
+    { content: profileContent, createdBy: `owner-${tag}` },
+    200,
   );
   await db
     .insertInto("job_dispatches")

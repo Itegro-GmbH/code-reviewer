@@ -61,9 +61,12 @@ export async function startWebhookHarness(
     wrapProvider?: (provider: IntegrationProvider) => IntegrationProvider;
     /** The review settings every project uses; default: the built-in values (everything on). */
     reviewSettings?: Partial<ReviewSettings>;
+    /** The most connections the pool of the database opens. */
+    poolMax?: number;
   } = {},
 ) {
   const base = await startSyncHarness({
+    ...(options.poolMax === undefined ? {} : { poolMax: options.poolMax }),
     ...(options.env === undefined ? {} : { env: options.env }),
     ...(options.credentialsFromDatabase === undefined
       ? {}
@@ -98,12 +101,20 @@ export async function startWebhookHarness(
   const settingsFor: WorkspaceCollaborators["settingsFor"] = async () =>
     settings;
   const automatic: AutomaticReviewDeps = {};
+  // #845: what starts the workflows of a label; a test that needs it sets it after the harness is up (it is built from tables the
+  // harness does not own).
+  let workflows: WorkspaceCollaborators["workflows"];
   const handler = createGithubAppWebhookHandler({
     registry,
     integrations: base.directory,
     deliveries,
     sync: base.sync,
-    workspace: () => ({ projects, settingsFor, intake }),
+    workspace: () => ({
+      projects,
+      settingsFor,
+      intake,
+      ...(workflows === undefined ? {} : { workflows }),
+    }),
     automatic,
     logger,
     ...(options.maxBodyBytes === undefined
@@ -218,6 +229,10 @@ export async function startWebhookHarness(
     automatic,
     intake,
     handler,
+    /** Hands the label trigger to the route's handler (#845). */
+    setLabelTrigger(trigger: WorkspaceCollaborators["workflows"]) {
+      workflows = trigger;
+    },
     infoLines,
     errorLines,
     seedInstallation,

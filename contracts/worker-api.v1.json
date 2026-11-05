@@ -91,6 +91,58 @@
       "description": "#745: 200 from the Worker's steps call: `StepsResponse` of runner-api.v1.json.",
       "$ref": "runner-api.v1.json#/$defs/StepsResponse"
     },
+    "SessionPartQuery": {
+      "description": "#839: the query string of PUT /api/workers/v1/jobs/{id}/session, as an object of its parameters (every value is decimal digits or text in the URL). One request carries one PART of the session snapshot of a running turn of the Implementer (follow-up turns): the engine's export as the runner made it (JSON, secrets taken out, gzipped), at most 8 MiB gzipped. A function of the platform takes no request body over 4.5 MB, so the file is cut into parts of exactly 3 MiB (`bytes` / 3145728, rounded up, at most 3) and the last part is whatever is left; the body of the request is the bytes of the part (`application/octet-stream`), read up to 3 MiB (413 RUNNER_BODY_TOO_LARGE above) and exactly as long as `bytes` says for that part (400 otherwise). Every part carries the description of the whole file: `parts` (the count, which must be what `bytes` makes), `part` (this part's index from 0), `bytes` (the size of the gzip file), `rawBytes` (the size of the JSON inside it), `sha256` (the lower case hex digest of the gzip file) and `opencodeVersion` (the engine that wrote it). A part is judged on its own and may arrive in any order or twice. The app keeps the parts of the job apart; when the last one is in it puts them together, checks size and digest, and swaps the snapshot in for the session's old one (one snapshot for each session, replaced by each turn, kept for good; the old one stays readable until then). 400 RUNNER_REQUEST_INVALID names the wrong fields (`fields`), also `body` for parts that do not make the announced file or disagree with each other (nothing of that upload is kept). The call proves the claim and nothing more: it does NOT extend the lease. 409 RUNNER_JOB_ENDED when the job is over, 401 WORKER_CREDENTIAL_INVALID for a credential that is not the job's, 400 for a job that is not a turn of the Implementer. The sender is best effort: a snapshot that is not stored means the next turn starts from a summary.",
+      "type": "object",
+      "required": ["part", "parts", "bytes", "rawBytes", "sha256", "opencodeVersion"],
+      "properties": {
+        "part": { "type": "string", "pattern": "^(0|[1-9][0-9]{0,15})$" },
+        "parts": { "type": "string", "pattern": "^[1-3]$" },
+        "bytes": { "type": "string", "pattern": "^[1-9][0-9]{0,15}$" },
+        "rawBytes": { "type": "string", "pattern": "^[1-9][0-9]{0,15}$" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "opencodeVersion": { "type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z._-]{0,31}$" }
+      }
+    },
+    "SessionPartResponse": {
+      "description": "#839: 200 from the snapshot call. `part` and `parts` repeat the request's; `complete` is true once the whole snapshot is stored, also for a part sent again after that. Repeating a part answers 200.",
+      "type": "object",
+      "required": ["version", "part", "parts", "complete"],
+      "properties": {
+        "version": { "const": 1 },
+        "part": { "type": "integer", "minimum": 0, "maximum": 2 },
+        "parts": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "complete": { "type": "boolean" }
+      }
+    },
+    "ResumeSessionQuery": {
+      "description": "#840: the query string of GET /api/workers/v1/jobs/{id}/resume-session, as an object of its parameters. The Worker of a follow-up turn (`implementer.resume.snapshot` true) fetches the session snapshot the app stored for the job's own session (the file `PUT .../session` delivered, replaced by each turn): the engine's export, gzipped, at most 8 MiB. A response body is held to 4.5 MB like a request body, so the file comes in the same parts of exactly 3 MiB (`bytes` / 3145728, rounded up, at most 3; the last part is whatever is left) and `part` (from 0, default 0) names the one to send. 200 `application/octet-stream`: the bytes of that part, with the description of the whole file in the headers `ResumeSessionHeaders` (every part carries it, so a part is judged on its own and the parts may be fetched in any order and twice). 204 without a body: the session has no stored snapshot (never saved, or not by a turn that could). 400 RUNNER_REQUEST_INVALID (`fields`: `part`) for a part that is not a number or beyond the last. 401 WORKER_CREDENTIAL_INVALID, 409 RUNNER_JOB_ENDED / RUNNER_LEASE_LOST as for every Worker call, and 400 for a job that is not a turn of the Implementer. The call reads a snapshot of the job's own session and of no other: the app finds the session from the job. It proves the claim and nothing more: it does NOT extend the lease. The Worker checks the size and the sha256 of the whole file; a file it cannot fetch or read means the turn continues from a summary (`ImplementerResumeResult`), never a failed turn. The file holds what the earlier turns read and said, secrets of the turn taken out, tool outputs included (see the session snapshot in docs/implementer.md).",
+      "type": "object",
+      "properties": {
+        "part": { "type": "string", "pattern": "^[0-2]$" }
+      }
+    },
+    "ResumeSessionHeaders": {
+      "description": "#840: the response headers of a 200 from GET /api/workers/v1/jobs/{id}/resume-session, as an object of lower-case header names (every value is text in the header). They describe the WHOLE file, not the part: `x-snapshot-parts` (how many parts, 1 to 3, which is what `x-snapshot-bytes` makes), `x-snapshot-bytes` (the size of the gzip file), `x-snapshot-raw-bytes` (the size of the JSON inside it), `x-snapshot-sha256` (the lower case hex digest of the gzip file) and `x-snapshot-opencode-version` (the engine that wrote it). `Content-Length` is the size of this part. `Cache-Control` is `no-store`.",
+      "type": "object",
+      "required": [
+        "x-snapshot-parts",
+        "x-snapshot-bytes",
+        "x-snapshot-raw-bytes",
+        "x-snapshot-sha256",
+        "x-snapshot-opencode-version"
+      ],
+      "properties": {
+        "x-snapshot-parts": { "type": "string", "pattern": "^[1-3]$" },
+        "x-snapshot-bytes": { "type": "string", "pattern": "^[1-9][0-9]{0,15}$" },
+        "x-snapshot-raw-bytes": { "type": "string", "pattern": "^[1-9][0-9]{0,15}$" },
+        "x-snapshot-sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "x-snapshot-opencode-version": {
+          "type": "string",
+          "pattern": "^[0-9A-Za-z][0-9A-Za-z._-]{0,31}$"
+        }
+      }
+    },
     "WorkerResultRequest": {
       "description": "The body of POST /api/workers/v1/jobs/{id}/result. The whole request body must not exceed 65536 bytes (413 otherwise). The app applies the redaction of the runner API's complete call, including the model key remembered at fetch. A result with errorCode runner_shutdown or launch_failed is not stored: the job is given back and counts an attempt.",
       "type": "object",

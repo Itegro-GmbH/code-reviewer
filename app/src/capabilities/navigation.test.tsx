@@ -164,7 +164,9 @@ describe("the Implementer item in the sidebar", () => {
       ["QA", "/w/acme/projects"],
       ["Implementer", "/w/acme/implementer"],
       ["Environments", "/w/acme/environments"],
+      ["Runners", "/w/acme/runners"],
       ["Runs", "/w/acme/runs"],
+      ["Workflows", "/w/acme/workflows"],
       ["Connections", "/w/acme/connections"],
       ["Members", "/w/acme/members"],
       ["Settings", "/w/acme/settings"],
@@ -231,6 +233,47 @@ describe("the Implementer item in the sidebar", () => {
   });
 });
 
+describe("the Workflows item in the sidebar (#873)", () => {
+  const WITH_IMPLEMENTER = createCapabilitySet([
+    "review",
+    "dynamic-review",
+    "implementer",
+  ]);
+
+  // #873-T90
+  it("follows Runs where the deployment has the capability, and points to the page", () => {
+    const items = navItemsFor(
+      "/w/acme",
+      identityFor("factory"),
+      WITH_IMPLEMENTER,
+    );
+    const labels = items.map((item) => item.label);
+
+    expect(labels.indexOf("Workflows")).toBe(labels.indexOf("Runs") + 1);
+    expect(items.find((item) => item.label === "Workflows")?.href).toBe(
+      "/w/acme/workflows",
+    );
+  });
+
+  // #873-T90
+  it("is in no list without the capability: code-review.com's, the factory's without it, a review-only set", () => {
+    for (const product of [
+      identityFor("code-review-com"),
+      identityFor("factory"),
+    ])
+      for (const set of [
+        undefined,
+        createCapabilitySet(PRODUCTS["code-review-com"].default),
+        createCapabilitySet(FACTORY),
+        createCapabilitySet(["review"]),
+        createCapabilitySet([]),
+      ])
+        expect(
+          navItemsFor("/w/acme", product, set).map((item) => item.label),
+        ).not.toContain("Workflows");
+  });
+});
+
 describe("the Environments item in the sidebar (#818)", () => {
   const WITH_IMPLEMENTER = createCapabilitySet([
     "review",
@@ -250,7 +293,9 @@ describe("the Environments item in the sidebar (#818)", () => {
     expect(labels.indexOf("Environments")).toBe(
       labels.indexOf("Implementer") + 1,
     );
-    expect(labels.indexOf("Runs")).toBe(labels.indexOf("Environments") + 1);
+    // #854: the runners of the workspace follow the environments, which name the labels they ask for.
+    expect(labels.indexOf("Runners")).toBe(labels.indexOf("Environments") + 1);
+    expect(labels.indexOf("Runs")).toBe(labels.indexOf("Runners") + 1);
   });
 
   // #818-T10

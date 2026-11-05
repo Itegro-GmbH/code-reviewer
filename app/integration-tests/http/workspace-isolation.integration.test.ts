@@ -27,6 +27,7 @@ import { createInvitationsRepository } from "../../src/db/repositories/invitatio
 import { createProjectsRepository } from "../../src/db/repositories/projects-repository.ts";
 import { createRepositoriesRepository } from "../../src/db/repositories/repositories-repository.ts";
 import { createSecretsRepository } from "../../src/db/repositories/secrets-repository.ts";
+import { createWorkflowRunsRepository } from "../../src/db/repositories/workflow-runs-repository.ts";
 import { createWorkspacesRepository } from "../../src/db/repositories/workspaces-repository.ts";
 import { closeDatabase, getDatabase } from "../../src/db/startup.ts";
 import { jobQueueFor } from "../../src/jobs/shared.ts";
@@ -38,6 +39,9 @@ import {
 } from "../../src/test-support/github-app.ts";
 import { signedInMember } from "../../src/test-support/session-lookup.ts";
 import { createImplementerEnvironmentsRepository } from "../../src/db/repositories/implementer-environments-repository.ts";
+import { createImplementerRepository } from "../../src/db/repositories/implementer-repository.ts";
+import { createProfilesRepository } from "../../src/db/repositories/profiles-repository.ts";
+import { createWorkflowsRepository } from "../../src/db/repositories/workflows-repository.ts";
 import { openRouteTestDatabase } from "../../src/test-support/test-database.ts";
 import { discoverRoutes } from "../../src/test-support/routes.ts";
 import { MINIMUM_ROLE } from "../../src/workspaces/permissions.ts";
@@ -57,15 +61,24 @@ vi.mock("next/server", async (importOriginal) => ({
 }));
 
 const fakes: FakeGithub[] = [];
+/** An environment every seeded workspace has, which the workflows of the matrix name. */
+const SHARED_ENVIRONMENT = "shared";
 const HEAD = "1f3a5c7e9b2d4f60a8c1e3b5d7f90a2c4e6b8d01";
 
 type Ids = {
   integrationId: string;
   repositoryId: string;
   runId: string;
+  /** #841: a running Implementer session of the workspace and the job of its first turn. */
+  sessionId: string;
+  turnRunId: string;
   userId: string;
   invitationId: string;
   environmentId: string;
+  workflowId: string;
+  workflowRunId: string;
+  profileId: string;
+  runnerId: string;
 };
 
 /** What a row of the table needs to make a request: the parts of the address and the body. */
@@ -370,6 +383,32 @@ const ENTRIES: Entry[] = [
     implementer: true,
   },
   {
+    // #841: the next instruction of a session; another workspace's session is not found, and nothing is written there.
+    name: "POST implementer/sessions/[sessionId]/turns",
+    route: "/api/w/[workspace]/implementer/sessions/[sessionId]/turns",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) => `/implementer/sessions/${ids.sessionId}/turns`,
+    body: () => ({
+      instruction: "Add a test.",
+      clientRequestId: "follow-up-request-1",
+    }),
+    params: (ids) => ({ sessionId: ids.sessionId }),
+    file: "implementer/sessions/[sessionId]/turns/route.ts",
+    implementer: true,
+  },
+  {
+    // #841: what the Continue form of a run needs, read like the run by every member of the workspace in the address.
+    name: "GET runs/[id]/continuation",
+    route: "/api/w/[workspace]/runs/[id]/continuation",
+    method: "GET",
+    minRole: MINIMUM_ROLE.view,
+    path: (ids) => `/runs/${ids.turnRunId}/continuation`,
+    params: (ids) => ({ id: ids.turnRunId }),
+    file: "runs/[id]/continuation/route.ts",
+    implementer: true,
+  },
+  {
     name: "POST implementer/tasks",
     route: "/api/w/[workspace]/implementer/tasks",
     method: "POST",
@@ -432,6 +471,258 @@ const ENTRIES: Entry[] = [
     path: (ids) => `/environments/${ids.environmentId}`,
     params: (ids) => ({ environmentId: ids.environmentId }),
     file: "environments/[environmentId]/route.ts",
+    implementer: true,
+  },
+  {
+    // #833-M1-T228: every member lists the workflows of their own workspace; the other workspace's are not reachable.
+    name: "GET workflows",
+    route: "/api/w/[workspace]/workflows",
+    method: "GET",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/workflows",
+    params: () => ({}),
+    file: "workflows/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    name: "POST workflows",
+    route: "/api/w/[workspace]/workflows",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/workflows",
+    body: () => ({
+      version: 1,
+      name: "Created by the matrix",
+      // Both workspaces have an environment of this name, so the document is valid whichever workspace the request is for.
+      trigger: {
+        kind: "manual",
+        input: {
+          type: "object",
+          required: ["repo"],
+          properties: { repo: { type: "string" } },
+        },
+      },
+      steps: [
+        {
+          id: "work",
+          kind: "agent",
+          profile: "implementer",
+          environment: SHARED_ENVIRONMENT,
+          instruction: "x",
+        },
+      ],
+    }),
+    params: () => ({}),
+    file: "workflows/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    name: "POST workflows/validate",
+    route: "/api/w/[workspace]/workflows/validate",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/workflows/validate",
+    body: () => ({}),
+    params: () => ({}),
+    file: "workflows/validate/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    name: "GET workflows/[workflowId]",
+    route: "/api/w/[workspace]/workflows/[workflowId]",
+    method: "GET",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) => `/workflows/${ids.workflowId}`,
+    params: (ids) => ({ workflowId: ids.workflowId }),
+    file: "workflows/[workflowId]/route.ts",
+    implementer: true,
+  },
+  {
+    name: "PUT workflows/[workflowId]",
+    route: "/api/w/[workspace]/workflows/[workflowId]",
+    method: "PUT",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) => `/workflows/${ids.workflowId}`,
+    body: () => ({
+      version: 1,
+      name: "Changed by the matrix",
+      // Both workspaces have an environment of this name, so the document is valid whichever workspace the request is for.
+      trigger: {
+        kind: "manual",
+        input: {
+          type: "object",
+          required: ["repo"],
+          properties: { repo: { type: "string" } },
+        },
+      },
+      steps: [
+        {
+          id: "work",
+          kind: "agent",
+          profile: "implementer",
+          environment: SHARED_ENVIRONMENT,
+          instruction: "x",
+        },
+      ],
+    }),
+    params: (ids) => ({ workflowId: ids.workflowId }),
+    file: "workflows/[workflowId]/route.ts",
+    implementer: true,
+  },
+  {
+    // #833-M1-T359: every member archives a workflow of their own workspace; the other workspace's is not reachable.
+    name: "DELETE workflows/[workflowId]",
+    route: "/api/w/[workspace]/workflows/[workflowId]",
+    method: "DELETE",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) => `/workflows/${ids.workflowId}`,
+    params: (ids) => ({ workflowId: ids.workflowId }),
+    file: "workflows/[workflowId]/route.ts",
+    implementer: true,
+  },
+  {
+    // #844-T156: every member lists the runs of a workflow of their own workspace; another workspace's workflow is not reachable.
+    name: "GET workflows/[workflowId]/runs",
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs",
+    method: "GET",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) => `/workflows/${ids.workflowId}/runs`,
+    params: (ids) => ({ workflowId: ids.workflowId }),
+    file: "workflows/[workflowId]/runs/route.ts",
+    implementer: true,
+  },
+  {
+    // The body names a repository that is none of the workspace's, so the start ends before it asks GitHub or writes anything.
+    name: "POST workflows/[workflowId]/runs",
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) => `/workflows/${ids.workflowId}/runs`,
+    body: () => ({
+      input: { repo: "nobody/nothing" },
+      clientRequestId: "matrix-request",
+    }),
+    params: (ids) => ({ workflowId: ids.workflowId }),
+    file: "workflows/[workflowId]/runs/route.ts",
+    implementer: true,
+  },
+  {
+    name: "GET workflows/[workflowId]/runs/[runId]",
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]",
+    method: "GET",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) => `/workflows/${ids.workflowId}/runs/${ids.workflowRunId}`,
+    params: (ids) => ({
+      workflowId: ids.workflowId,
+      runId: ids.workflowRunId,
+    }),
+    file: "workflows/[workflowId]/runs/[runId]/route.ts",
+    implementer: true,
+  },
+  {
+    // #843-T120: every member lists the profiles of their own workspace; the other workspace's are not reachable.
+    name: "GET profiles",
+    route: "/api/w/[workspace]/profiles",
+    method: "GET",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/profiles",
+    params: () => ({}),
+    file: "profiles/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    name: "POST profiles",
+    route: "/api/w/[workspace]/profiles",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/profiles",
+    body: () => ({}),
+    params: () => ({}),
+    file: "profiles/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    name: "POST profiles/validate",
+    route: "/api/w/[workspace]/profiles/validate",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/profiles/validate",
+    body: () => ({}),
+    params: () => ({}),
+    file: "profiles/validate/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    name: "GET profiles/[profileId]",
+    route: "/api/w/[workspace]/profiles/[profileId]",
+    method: "GET",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) => `/profiles/${ids.profileId}`,
+    params: (ids) => ({ profileId: ids.profileId }),
+    file: "profiles/[profileId]/route.ts",
+    implementer: true,
+  },
+  {
+    name: "PUT profiles/[profileId]",
+    route: "/api/w/[workspace]/profiles/[profileId]",
+    method: "PUT",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) => `/profiles/${ids.profileId}`,
+    body: () => ({}),
+    params: (ids) => ({ profileId: ids.profileId }),
+    file: "profiles/[profileId]/route.ts",
+    implementer: true,
+  },
+  {
+    // #843-T121: every member archives a profile of their own workspace; the other workspace's is not reachable.
+    name: "DELETE profiles/[profileId]",
+    route: "/api/w/[workspace]/profiles/[profileId]",
+    method: "DELETE",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) => `/profiles/${ids.profileId}`,
+    params: (ids) => ({ profileId: ids.profileId }),
+    file: "profiles/[profileId]/route.ts",
+    implementer: true,
+  },
+  {
+    // #854-T140: every member lists the runners of their own workspace; the other workspace's are not reachable.
+    name: "GET runners",
+    route: "/api/w/[workspace]/runners",
+    method: "GET",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/runners",
+    params: () => ({}),
+    file: "runners/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    // #854-T141: an Owner or an Admin makes a registration token for their own workspace.
+    name: "POST runners/tokens",
+    route: "/api/w/[workspace]/runners/tokens",
+    method: "POST",
+    minRole: MINIMUM_ROLE.manage_runners,
+    path: () => "/runners/tokens",
+    params: () => ({}),
+    file: "runners/tokens/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    // #854-T142: an Owner or an Admin revokes a runner of their own workspace; the other workspace's is not reachable.
+    name: "POST runners/[runnerId]/revoke",
+    route: "/api/w/[workspace]/runners/[runnerId]/revoke",
+    method: "POST",
+    minRole: MINIMUM_ROLE.manage_runners,
+    path: (ids) => `/runners/${ids.runnerId}/revoke`,
+    params: (ids) => ({ runnerId: ids.runnerId }),
+    file: "runners/[runnerId]/revoke/route.ts",
     implementer: true,
   },
   {
@@ -757,6 +1048,47 @@ async function seedWorkspace(
     workspaceId: workspace.id,
     role: "owner",
   });
+  // A running session of the Implementer with its first turn (#841): the next-instruction route of the other workspace must not reach it.
+  const started = await createImplementerRepository(
+    db,
+    workspace.id,
+  ).createSessionWithTurn(
+    {
+      repositoryId: repository.id,
+      baseBranch: "main",
+      branch: `implementer/${slug}`,
+      instruction: "Add a health endpoint.",
+      modelChoice: { entryId: `entry-${slug}` },
+      costLimitCents: null,
+      createdBy: names.owner,
+    },
+    async (trx, { slot }) => {
+      const id = `turn-job-of-${slug}`;
+      await trx
+        .insertInto("jobs")
+        .values({
+          id,
+          workspace_id: workspace.id,
+          repository_id: repository.id,
+          pr_number: -slot,
+          pr_url: `https://github.test/${names.repo}/tree/implementer/${slug}`,
+          head_sha: HEAD,
+          command: "review",
+          review_kind: "implementer",
+          args: "",
+          trigger_kind: "manual",
+          actor_login: `login-of-${slug}`,
+          delivery_id: `implementer:${workspace.id}:seed`,
+          status: "running",
+          run_after: "2026-11-05T08:00:00.000Z",
+          attempts: 0,
+          created_at: "2026-11-05T08:00:00.000Z",
+          updated_at: "2026-11-05T08:00:00.000Z",
+        })
+        .execute();
+      return id;
+    },
+  );
   const invitation = await createInvitationsRepository(db, workspace.id).create(
     {
       id: `invitation-of-${slug}`,
@@ -781,15 +1113,94 @@ async function seedWorkspace(
     50,
   );
   if (!environment.ok) throw new Error("seeding failed");
+  const shared = await createImplementerEnvironmentsRepository(
+    db,
+    workspace.id,
+  ).create(
+    {
+      name: SHARED_ENVIRONMENT,
+      vcpus: 4,
+      setupScript: "",
+      createdBy: names.owner,
+    },
+    50,
+  );
+  if (!shared.ok) throw new Error("seeding failed");
+  // A workflow (#833): the other workspace's must not be reachable through this one's address, nor changed.
+  const workflow = await createWorkflowsRepository(db, workspace.id).create(
+    {
+      name: `Workflow of ${slug}`,
+      document: `{"of":"${slug}"}`,
+      createdBy: names.owner,
+    },
+    100,
+  );
+  if (!workflow.ok) throw new Error("seeding failed");
+  // A run of that workflow (#844): the other workspace's must not be reachable through this one's address.
+  const workflowRun = await createWorkflowRunsRepository(
+    db,
+    workspace.id,
+  ).createRun({
+    workflowId: workflow.workflow.id,
+    workflowVersion: 1,
+    repositoryId: repository.id,
+    baseBranch: "main",
+    triggerInput: `{"of":"${slug}"}`,
+    budgetMicroUsd: 20_000_000,
+    clientRequestId: `run-${slug}`,
+    createdBy: names.owner,
+    actorLogin: "octocat",
+  });
+  // A profile (#843): the workflows of the matrix run it, and the other workspace's must not be reachable through this one's address.
+  const profile = await createProfilesRepository(db, workspace.id).create(
+    {
+      name: "implementer",
+      content: {
+        description: `Profile of ${slug}`,
+        model: { entryId: `entry-${slug}` },
+        instructions: "",
+        costLimitCents: null,
+        canPush: true,
+        defaultResult: null,
+      },
+      createdBy: names.owner,
+    },
+    100,
+  );
+  if (!profile.ok) throw new Error("seeding failed");
+  // A runner on a customer's machine (#854): the other workspace's must not be revocable through this one's address.
+  await db
+    .insertInto("runners")
+    .values({
+      id: `runner-${slug}`,
+      workspace_id: workspace.id,
+      name: `box ${slug}`,
+      labels: "linux",
+      base_version: "1.0.0",
+      manifest: "{}",
+      limits: "{}",
+      credential_hash: `hash-${slug}`,
+      previous_credential_hash: null,
+      created_at: "2026-11-05T08:00:00.000Z",
+      last_seen_at: "2026-11-05T08:00:00.000Z",
+      revoked_at: null,
+    })
+    .execute();
   return {
     workspace,
     owner,
     keySentinel,
     ids: {
       environmentId: environment.environment.id,
+      workflowId: workflow.workflow.id,
+      workflowRunId: workflowRun.run.id,
+      profileId: profile.profile.id,
+      runnerId: `runner-${slug}`,
       integrationId: integration.id,
       repositoryId: repository.id,
       runId: job.job.id,
+      sessionId: started.session.id,
+      turnRunId: started.turn.jobId,
       userId: names.owner,
       invitationId: invitation.id,
     } satisfies Ids,
@@ -923,7 +1334,14 @@ async function start() {
         | "workspace_members"
         | "plan_handoff_tokens"
         | "billing_workspace_settings"
-        | "implementer_environments",
+        | "implementer_environments"
+        | "implementer_sessions"
+        | "workflows"
+        | "workflow_versions"
+        | "workflow_runs"
+        | "workflow_step_runs"
+        | "profiles"
+        | "profile_versions",
     ) =>
       db
         .selectFrom(table)
@@ -944,6 +1362,13 @@ async function start() {
       planHandoffTokens: await select("plan_handoff_tokens"),
       billingWorkspaceSettings: await select("billing_workspace_settings"),
       implementerEnvironments: await select("implementer_environments"),
+      implementerSessions: await select("implementer_sessions"),
+      workflows: await select("workflows"),
+      workflowVersions: await select("workflow_versions"),
+      workflowRuns: await select("workflow_runs"),
+      workflowStepRuns: await select("workflow_step_runs"),
+      profiles: await select("profiles"),
+      profileVersions: await select("profile_versions"),
       projects: await db
         .selectFrom("projects")
         .innerJoin("repositories", "repositories.id", "projects.repository_id")

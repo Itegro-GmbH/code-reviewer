@@ -37,6 +37,7 @@ NEW_ERROR_CODES = (
     "clone_failed",
     "setup_failed",
     "agent_gave_up",
+    "no_result",
     "push_rejected",
     "branch_violation",
     "cost_limit_reached",
@@ -126,6 +127,34 @@ JOB_REFUSALS: dict[str, Callable[[Document], None]] = {
     "base branch with a space": _set(("implementer", "baseBranch"), "has space"),
     "full name without owner": _set(("implementer", "repo", "fullName"), "no-owner"),
     "clone url that is not https": _set(("implementer", "repo", "cloneUrl"), "file:///etc/passwd"),
+    # #843: the profile version a turn started with
+    "profile that is a string": _set(("implementer", "profile"), "reviewer"),
+    "unknown profile field": _set(
+        ("implementer", "profile"), {"name": "r", "version": 1, "canPush": True, "model": "m"}
+    ),
+    "profile without a push right": _set(("implementer", "profile"), {"name": "r", "version": 1}),
+    "profile without a name": _set(("implementer", "profile"), {"version": 1, "canPush": True}),
+    "profile without a version": _set(("implementer", "profile"), {"name": "r", "canPush": True}),
+    "push right that is not a boolean": _set(
+        ("implementer", "profile"), {"name": "r", "version": 1, "canPush": "yes"}
+    ),
+    "profile version zero": _set(
+        ("implementer", "profile"), {"name": "r", "version": 0, "canPush": True}
+    ),
+    "profile version fraction": _set(
+        ("implementer", "profile"), {"name": "r", "version": 1.5, "canPush": True}
+    ),
+    "profile name in capitals": _set(
+        ("implementer", "profile"), {"name": "Reviewer", "version": 1, "canPush": True}
+    ),
+    "empty profile instructions": _set(
+        ("implementer", "profile"),
+        {"name": "r", "version": 1, "canPush": True, "instructions": ""},
+    ),
+    "profile instructions too long": _set(
+        ("implementer", "profile"),
+        {"name": "r", "version": 1, "canPush": True, "instructions": "x" * 20_001},
+    ),
 }
 
 
@@ -153,6 +182,144 @@ def test_the_schema_and_the_runner_both_refuse(name: str) -> None:
     with pytest.raises(runner_job.JobError) as refused:
         runner_job.parse_implementer_input(json.dumps(job))
     assert refused.value.code is ErrorCode.INVALID_JOB
+
+
+def test_the_example_of_the_profile_is_valid_and_the_runner_reads_it_in_a_job() -> None:
+    profile = _load(EXAMPLES / "ImplementerProfile.json")
+    assert _accepts("ImplementerProfile", profile)
+    job = _job()
+    job["implementer"]["profile"] = profile
+    assert _accepts("RunnerJobInput", job)
+
+    parsed = runner_job.parse_implementer_input(json.dumps(job)).implementer.profile
+
+    assert parsed is not None
+    assert (parsed.name, parsed.version, parsed.can_push) == ("reviewer", 3, False)
+    assert parsed.instructions == profile["instructions"]
+
+
+def test_a_job_without_a_profile_is_the_job_of_before_profiles() -> None:
+    job = _job()
+    assert "profile" not in job["implementer"]
+
+    assert runner_job.parse_implementer_input(json.dumps(job)).implementer.profile is None
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        {"name": "r", "version": 1, "canPush": True},
+        {"name": "r", "version": 1, "canPush": False},
+        {"name": "x" * 64, "version": 999999, "canPush": True, "instructions": "x" * 20_000},
+        {"name": "a_b-9", "version": 2, "canPush": False, "instructions": "ä😀\n\ttext"},
+    ],
+)
+def test_the_smallest_and_the_largest_profile_are_accepted_by_both(profile: Document) -> None:
+    job = _job()
+    job["implementer"]["profile"] = profile
+
+    assert _accepts("RunnerJobInput", job)
+    parsed = runner_job.parse_implementer_input(json.dumps(job)).implementer.profile
+    assert parsed is not None and parsed.can_push is profile["canPush"]
+    assert parsed.instructions == profile.get("instructions", "")
+
+
+def test_the_feature_that_reads_the_profile_is_in_the_contract_and_named_by_the_worker() -> None:
+    from code_reviewer_runner.job_loop.worker_api import WORKER_FEATURES
+
+    features = _schema()["$defs"]["KnownClaimFeature"]["enum"]
+
+    assert "implementer_profile" in features
+    assert "implementer_profile" in WORKER_FEATURES
+    assert set(WORKER_FEATURES) <= set(features)
+
+
+def _with_resume(resume: Any) -> Document:
+    job = _job()
+    job["implementer"]["resume"] = resume
+    return job
+
+
+def _resume_example() -> Document:
+    return _load(EXAMPLES / "ImplementerResume.json")
+
+
+# #838-T70
+def test_the_example_of_the_resume_is_valid_alone_and_in_the_job_and_the_runner_reads_it() -> None:
+    assert _accepts("ImplementerResume", _resume_example())
+    assert _accepts("RunnerJobInput", _with_resume(_resume_example()))
+
+    parsed = runner_job.parse_implementer_input(json.dumps(_with_resume(_resume_example())))
+
+    resume = parsed.implementer.resume
+    assert resume is not None
+    assert [(branch.name, branch.head) for branch in resume.branches] == [
+        ("implementer/a1b2c3", "1" * 40),
+        ("feature/retry-docs", "2" * 40),
+    ]
+    assert (resume.turn, resume.checkout) == (2, "feature/retry-docs")
+
+
+def _resume_set(path: tuple[str | int, ...], value: Any) -> Callable[[Document], None]:
+    def edit(resume: Document) -> None:
+        target: Any = resume
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = value
+
+    return edit
+
+
+RESUME_REFUSALS: dict[str, Callable[[Document], None]] = {
+    "unknown field": _resume_set(("somethingNew",), 1),
+    "no turn": lambda resume: resume.pop("turn"),
+    "no branches": lambda resume: resume.pop("branches"),
+    "no checkout": lambda resume: resume.pop("checkout"),
+    "turn one": _resume_set(("turn",), 1),
+    "turn that is a fraction": _resume_set(("turn",), 2.5),
+    "turn above the bound": _resume_set(("turn",), 100_001),
+    "unknown branch field": _resume_set(("branches", 0, "somethingNew"), 1),
+    "branch without a head": lambda resume: resume["branches"][0].pop("head"),
+    "head that is a name": _resume_set(("branches", 0, "head"), "main"),
+    "head in upper case": _resume_set(("branches", 0, "head"), "A" * 40),
+    "short head": _resume_set(("branches", 0, "head"), "abc1234"),
+    "name with a space": _resume_set(("branches", 0, "name"), "has space"),
+    "name that starts with a dash": _resume_set(("branches", 0, "name"), "-delete"),
+    "checkout with a space": _resume_set(("checkout",), "has space"),
+    "checkout that is not text": _resume_set(("checkout",), 3),
+    "21 branches": _resume_set(
+        ("branches",), [{"name": f"feature/{number}", "head": "1" * 40} for number in range(21)]
+    ),
+}
+
+
+# #838-T71
+@pytest.mark.parametrize("name", sorted(RESUME_REFUSALS))
+def test_the_schema_and_the_runner_both_refuse_a_resume_that_is_not_the_contracts(
+    name: str,
+) -> None:
+    resume = _resume_example()
+    RESUME_REFUSALS[name](resume)
+
+    assert not _accepts("RunnerJobInput", _with_resume(resume))
+    with pytest.raises(runner_job.JobError) as refused:
+        runner_job.parse_implementer_input(json.dumps(_with_resume(resume)))
+    assert refused.value.code is ErrorCode.INVALID_JOB
+
+
+# #838-T72
+def test_the_resume_of_a_first_turn_is_absent_in_the_example_and_in_the_parsed_job() -> None:
+    assert "resume" not in _job()["implementer"]
+    assert runner_job.parse_implementer_input(json.dumps(_job())).implementer.resume is None
+
+
+# #838-T73
+def test_the_worker_names_the_claim_feature_of_a_follow_up_and_the_contract_knows_it() -> None:
+    from code_reviewer_runner.job_loop.worker_api import WORKER_FEATURES
+
+    assert "implementer_resume" in WORKER_FEATURES
+    for feature in WORKER_FEATURES:
+        assert feature in _schema()["$defs"]["KnownClaimFeature"]["enum"], feature
 
 
 def test_the_longest_instruction_is_accepted_by_both() -> None:
@@ -203,6 +370,76 @@ def test_every_recorded_job_of_the_earlier_kinds_is_still_valid_and_parses(name:
     assert parsed.review_kind is not runner_job.ReviewKind.IMPLEMENTER
 
 
+# #843-T50
+def test_the_example_of_the_result_schema_is_valid_and_the_runner_reads_it_in_a_job() -> None:
+    schema = _load(EXAMPLES / "ImplementerResultSchema.json")
+    assert _accepts("ImplementerResultSchema", schema)
+    job = _job()
+    job["implementer"]["resultSchema"] = schema
+    assert _accepts("RunnerJobInput", job)
+
+    parsed = runner_job.parse_implementer_input(json.dumps(job)).implementer.result_schema
+
+    assert parsed == schema
+
+
+# #843-T50
+def test_a_job_without_a_result_schema_has_none() -> None:
+    assert "resultSchema" not in _job()["implementer"]
+
+    assert runner_job.parse_implementer_input(json.dumps(_job())).implementer.result_schema is None
+
+
+# #843-T50
+@pytest.mark.parametrize(
+    "schema",
+    [
+        [],
+        {"type": "string"},
+        {"type": "object", "properties": {}},
+        {"type": "object", "properties": {"a": {"type": "date"}}},
+        {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["b"]},
+    ],
+)
+def test_the_runner_refuses_a_result_schema_it_cannot_make_a_tool_from(schema: Any) -> None:
+    job = _job()
+    job["implementer"]["resultSchema"] = schema
+
+    with pytest.raises(runner_job.JobError) as refused:
+        runner_job.parse_implementer_input(json.dumps(job))
+
+    assert refused.value.code is ErrorCode.INVALID_JOB
+
+
+# #843-T50
+def test_the_example_of_the_agent_result_is_valid_in_the_result_and_fits_the_example_schema() -> (
+    None
+):
+    from code_reviewer_runner.implementer import finish_tool
+
+    value = _load(EXAMPLES / "ImplementerAgentResult.json")
+    assert _accepts("ImplementerAgentResult", value)
+    schema = _load(EXAMPLES / "ImplementerResultSchema.json")
+    assert finish_tool.check_value(schema, value) == []
+    result = _result()
+    result["implementer"]["agentResult"] = value
+    assert _accepts("RunnerResult", result)
+    result["implementer"]["agentResult"] = []
+    assert not _accepts("RunnerResult", result)
+
+
+# #843-T50
+def test_the_feature_that_reads_the_result_schema_is_in_the_contract_and_named_by_the_worker() -> (
+    None
+):
+    from code_reviewer_runner.job_loop.worker_api import WORKER_FEATURES
+
+    features = _schema()["$defs"]["KnownClaimFeature"]["enum"]
+
+    assert "implementer_result" in features
+    assert "implementer_result" in WORKER_FEATURES
+
+
 def test_the_example_of_the_result_is_valid() -> None:
     assert _accepts("RunnerResult", _result())
     assert _accepts("CompleteRequest", {"leaseToken": "lease-token-example", "result": _result()})
@@ -216,6 +453,17 @@ def test_the_counts_of_the_branches_that_were_left_out_are_optional_and_accepted
     counted["implementer"]["branchesDropped"] = {"invalid": 3, "overflow": 7}
     assert _accepts("RunnerResult", counted)
     assert _accepts("RunnerResult", _result())  # the example has none: still valid
+
+
+# #837
+def test_the_branch_that_was_checked_out_is_optional_and_a_name_or_null() -> None:
+    named = _result()
+    assert named["implementer"]["checkedOut"] == "implementer/a1b2c3"
+    assert _accepts("RunnerResult", named)
+    named["implementer"]["checkedOut"] = None
+    assert _accepts("RunnerResult", named)
+    del named["implementer"]["checkedOut"]  # a runner of the release before
+    assert _accepts("RunnerResult", named)
 
 
 def _result_set(path: tuple[str, ...], value: Any) -> Callable[[Document], None]:
@@ -267,6 +515,9 @@ RESULT_REFUSALS: dict[str, Callable[[Document], None]] = {
         ("branchesDropped",), {"invalid": 0, "overflow": 1.5}
     ),
     "dropped counts that are null": _result_set(("branchesDropped",), None),
+    "a checked out branch without a name": _result_set(("checkedOut",), ""),
+    "a checked out branch name of 256 characters": _result_set(("checkedOut",), "x" * 256),
+    "a checked out branch that is a number": _result_set(("checkedOut",), 3),
 }
 
 
