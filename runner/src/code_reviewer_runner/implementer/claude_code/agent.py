@@ -301,7 +301,10 @@ class ClaudeCodeAgent:
                 ErrorCode.IMPLEMENTER_ENGINE_UNAVAILABLE,
                 f"Claude Code ended its turn with an error ({reason})",
             )
-        return AgentTurn(text=result.text, note=result.terminal_reason or result.subtype)
+        # The login is in the environment of the agent's tools, so the agent can print it: nothing
+        # it said leaves this object with it in (the session redacts again with the job's secrets).
+        note = result.terminal_reason or result.subtype
+        return AgentTurn(text=self._redactor.redact(result.text), note=self._redactor.redact(note))
 
 
 def _text_of(part: Mapping[str, Any]) -> str:

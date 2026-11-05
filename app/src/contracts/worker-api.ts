@@ -1096,6 +1096,14 @@ export interface RunnerUsage {
    */
   limitExceededBy?: number;
   callTrace?: RunnerCallTrace;
+  /**
+   * #856: present only on a turn that ran on the harness `claude-code` (a login of the customer's device): `subscription`. Such a turn is not billed through us, so `costUsd` is null; `estimatedCostUsd` is what Claude Code says the turn is worth at API prices, an estimate that is shown as such (for example as 'about 1.20 USD through a subscription') and never billed and never added to a total. A reader that does not know the field ignores it, and a turn without it is billed as before.
+   */
+  costBasis?: "subscription";
+  /**
+   * #856: see `costBasis`. Null when Claude Code did not price every model of the turn from its list (unknown).
+   */
+  estimatedCostUsd?: number | null;
   [k: string]: unknown;
 }
 /**

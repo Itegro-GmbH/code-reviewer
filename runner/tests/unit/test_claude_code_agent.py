@@ -4,6 +4,7 @@
 `stream-json` it reads becomes steps, and how a turn that ends badly is told. The place is a double
 that plays scripted output."""
 
+import base64
 import json
 import threading
 from collections.abc import Callable, Mapping
@@ -214,6 +215,27 @@ def test_a_secret_that_is_in_the_output_is_redacted_in_the_records() -> None:
 
     assert agent.steps is not None
     assert all(TOKEN not in json.dumps(r.as_json()) for r in agent.steps.drain(100))
+
+
+# #856-R01
+def test_the_text_of_a_turn_never_carries_the_login_in_any_of_its_spellings() -> None:
+    encoded = base64.b64encode(TOKEN.encode()).decode()
+    place = Place(outputs=[stream(f"token {TOKEN} and {encoded}")])
+    agent = agent_of(place)  # the login is the agent's own secret: it is not handed in twice
+
+    ended = agent.turn("Fix the bug")
+
+    assert TOKEN not in ended.text and encoded not in ended.text
+    assert ended.text.startswith("token [REDACTED]")
+
+
+# #856-R01
+def test_the_note_of_a_turn_never_carries_the_login_either() -> None:
+    place = Place(outputs=[stream("done", terminal_reason=f"stopped {TOKEN}")])
+
+    ended = agent_of(place).turn("Fix the bug")
+
+    assert TOKEN not in (ended.note or "")
 
 
 # #856-T20

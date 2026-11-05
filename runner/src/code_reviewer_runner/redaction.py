@@ -52,9 +52,16 @@ class Redactor:
         self._values = sorted(values, key=len, reverse=True)
         self.longest = len(self._values[0]) if self._values else 0
 
-    def redact(self, text: str) -> str:
+    def redact_known(self, text: str) -> str:
+        """Only the exact secrets and their spellings, not the token shapes: for facts that are
+        data (a commit subject, a branch name, a path), where "authorization: ..." in a subject is
+        no secret."""
         for value in self._values:
             text = text.replace(value, REDACTED)
+        return text
+
+    def redact(self, text: str) -> str:
+        text = self.redact_known(text)
         for pattern in _PATTERNS:
             text = pattern.sub(REDACTED, text)
         return text
