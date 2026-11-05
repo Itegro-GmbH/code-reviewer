@@ -145,6 +145,35 @@ describe("the status of a run", () => {
   });
 });
 
+describe("a run a label started (#845)", () => {
+  // #845-T61
+  it("shows the trigger and who put the label on, and asks for no starter", () => {
+    const { container } = renderRun(
+      run({
+        trigger: "github.issueLabeled",
+        actorLogin: "bob",
+        input: {
+          issue: { number: 12 },
+          repo: { fullName: "acme/widgets", owner: "acme", name: "widgets" },
+        },
+      }),
+    );
+
+    expect(container.textContent).toContain("A label on an issue");
+    expect(container.textContent).toContain("Label put on by");
+    expect(container.textContent).toContain("bob");
+    expect(container.textContent).not.toContain("Started by hand");
+    expect(container.textContent).toContain("acme/widgets");
+  });
+
+  // #845-T62
+  it("shows no actor row for a run started by hand", () => {
+    const { container } = renderRun(run());
+
+    expect(container.textContent).not.toContain("Label put on by");
+  });
+});
+
 describe("the budget and the cost", () => {
   // #873-T41
   it("shows what was spent of the budget", () => {

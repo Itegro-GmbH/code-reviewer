@@ -72,6 +72,14 @@ export type ArchiveOutcome =
 export type WorkflowsRepository = {
   /** The workflows of the workspace that are not archived, by name (case ignored), without their documents. */
   list(): Promise<StoredWorkflow[]>;
+  /**
+   * The workflows that are not archived, with their current version, whose document names the trigger `github.issueLabeled` (#845).
+   * A text match, not a reading of the JSON: the caller reads the document and decides, a document that only mentions the name
+   * (a description) comes back too.
+   */
+  listWithIssueTrigger(): Promise<
+    { workflow: StoredWorkflow; current: StoredWorkflowVersion }[]
+  >;
   /** The workflow with its current version, also when it is archived (its versions stay readable). */
   get(
     id: string,
@@ -152,6 +160,45 @@ export function createWorkflowsRepository(
         .orderBy("id")
         .execute();
       return rows.map(workflowFrom);
+    },
+
+    async listWithIssueTrigger() {
+      const rows = await db
+        .selectFrom("workflows")
+        .innerJoin("workflow_versions", (join) =>
+          join
+            .onRef("workflow_versions.workflow_id", "=", "workflows.id")
+            .onRef(
+              "workflow_versions.version",
+              "=",
+              "workflows.current_version",
+            ),
+        )
+        .selectAll("workflows")
+        .select([
+          "workflow_versions.workflow_id as version_workflow_id",
+          "workflow_versions.version as version_number",
+          "workflow_versions.document as version_document",
+          "workflow_versions.created_by as version_created_by",
+          "workflow_versions.created_at as version_created_at",
+        ])
+        .where("workflows.workspace_id", "=", workspaceId)
+        .where("workflow_versions.workspace_id", "=", workspaceId)
+        .where("workflows.archived_at", "is", null)
+        .where("workflow_versions.document", "like", '%"github.issueLabeled"%')
+        .orderBy("workflows.created_at")
+        .orderBy("workflows.id")
+        .execute();
+      return rows.map((row) => ({
+        workflow: workflowFrom(row),
+        current: versionFrom({
+          workflow_id: row.version_workflow_id,
+          version: row.version_number,
+          document: row.version_document,
+          created_by: row.version_created_by,
+          created_at: row.version_created_at,
+        }),
+      }));
     },
 
     async get(id) {

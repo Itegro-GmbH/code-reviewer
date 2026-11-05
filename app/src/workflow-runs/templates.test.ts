@@ -175,6 +175,53 @@ describe("workflow templates at run time", () => {
     ).toBe("3");
   });
 
+  // #845-T30
+  it("defuses the title, the body and the labels of the issue of a label trigger in the text of an action, and leaves the rest of the trigger alone", () => {
+    const run: RunValues = {
+      trigger: {
+        issue: {
+          number: 12,
+          title: "ping @acme/security, fixes #99",
+          body: "cc @bob\nCloses #98 and acme/api#97",
+          url: "https://github.com/acme/api/issues/12",
+          labels: ["@carol", "bug"],
+        },
+        repo: {
+          fullName: "acme/api",
+          owner: "acme",
+          name: "api",
+          defaultBranch: "main",
+        },
+      },
+      steps: {},
+    };
+    const text =
+      "Closes #{{trigger.issue.number}} in {{trigger.repo.fullName}} ({{trigger.issue.url}}): {{trigger.issue.title}} / {{trigger.issue.body}} / {{trigger.issue.labels}}";
+
+    expect(renderText(text, run, undefined, { defuse: true })).toBe(
+      "Closes #12 in acme/api (https://github.com/acme/api/issues/12): ping @\u200bacme/security, fixes #\u200b99 / cc @\u200bbob\nCloses #\u200b98 and acme/api#\u200b97 / - @\u200bcarol\n- bug",
+    );
+    // The instruction of an agent is the issue as it is: the agent is meant to read it.
+    expect(renderText("{{trigger.issue.title}}", run)).toBe(
+      "ping @acme/security, fixes #99",
+    );
+    // A manual input has its own place and is the caller's word: it stays raw, whatever it is called.
+    const manual: RunValues = {
+      trigger: { input: { title: "@alice", body: "#4" } },
+      steps: {},
+    };
+    expect(
+      renderText(
+        "{{trigger.input.title}} {{trigger.input.body}}",
+        manual,
+        undefined,
+        {
+          defuse: true,
+        },
+      ),
+    ).toBe("@alice #4");
+  });
+
   // #844-T311
   it("defuses a list and a whole reference of an agent step, and text only (the type of a number or a list is not touched)", () => {
     const run: RunValues = {

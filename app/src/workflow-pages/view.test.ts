@@ -28,6 +28,13 @@ describe("what the workflow pages take from a run", () => {
     expect(repositoryOfRun({ input: { repo: REPO } })).toBe(REPO);
     expect(repositoryOfRun({ input: { repo: 7 } })).toBeUndefined();
     expect(repositoryOfRun({ input: null })).toBeUndefined();
+    // #845-T60: a run a label started has the repository in `repo.fullName`.
+    expect(
+      repositoryOfRun({ input: { issue: {}, repo: { fullName: REPO } } }),
+    ).toBe(REPO);
+    expect(
+      repositoryOfRun({ input: { repo: { fullName: 7 } } }),
+    ).toBeUndefined();
   });
 
   it("measures a finished step and gives no duration for the rest", () => {

@@ -15,12 +15,15 @@ export function formatUsd(usd: number): string {
   return formatMoney(Math.round(usd * MICRO_USD_PER_USD));
 }
 
-/** The `owner/name` the run works on: the `repo` of its input. */
+/** The `owner/name` the run works on: the `repo` of the input of a run by hand, the `repo.fullName` of a run a label started. */
 export function repositoryOfRun(
   run: Pick<RunView, "input">,
 ): string | undefined {
-  return isRecord(run.input) && typeof run.input.repo === "string"
-    ? run.input.repo
+  if (!isRecord(run.input)) return undefined;
+  const { repo } = run.input;
+  if (typeof repo === "string") return repo;
+  return isRecord(repo) && typeof repo.fullName === "string"
+    ? repo.fullName
     : undefined;
 }
 

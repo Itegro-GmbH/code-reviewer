@@ -139,6 +139,30 @@ export function isPullRequestRef(value: unknown): value is PullRequestRef {
   );
 }
 
+function isIssueLabeled(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (
+    !hasExactKeys(value, ["repo", "defaultBranch", "issue", "label", "actor"])
+  )
+    return false;
+  const { issue } = value;
+  return (
+    isRepoRef(value.repo) &&
+    isNonEmptyString(value.defaultBranch) &&
+    isNonEmptyString(value.label) &&
+    isActor(value.actor) &&
+    isRecord(issue) &&
+    hasExactKeys(issue, ["number", "title", "body", "url", "labels"]) &&
+    Number.isInteger(issue.number) &&
+    (issue.number as number) >= 1 &&
+    typeof issue.title === "string" &&
+    typeof issue.body === "string" &&
+    isNonEmptyString(issue.url) &&
+    Array.isArray(issue.labels) &&
+    issue.labels.every((name: unknown) => typeof name === "string")
+  );
+}
+
 export function isIntegrationEvent(value: unknown): value is IntegrationEvent {
   if (!isRecord(value)) return false;
   if (value.kind === "review_trigger")
@@ -165,6 +189,10 @@ export function isIntegrationEvent(value: unknown): value is IntegrationEvent {
       isRepoRef(value.repo) &&
       Number.isInteger(value.prNumber) &&
       (value.prNumber as number) >= 1
+    );
+  if (value.kind === "issue_labeled")
+    return (
+      hasExactKeys(value, ["kind", "labeled"]) && isIssueLabeled(value.labeled)
     );
   if (value.kind === "ignored" || value.kind === "invalid_payload")
     return (

@@ -42,3 +42,19 @@ export const ACTION_LABEL_MAX_CHARS = 50;
 export const ACTION_LABELS_MAX = 20;
 /** A branch name an action is given (a Git ref component is at most 255 bytes). */
 export const ACTION_BRANCH_MAX_CHARS = 255;
+
+/** The issue a label hands to a run (#845) is stored bounded: whoever opened the issue chose its words. */
+export const ISSUE_TITLE_MAX_CHARS = 256;
+/**
+ * The body is held below what one value of a text may be (`TEMPLATE_VALUE_MAX_CHARS`), so that a longer body is cut here, once, and says
+ * so. The instruction of an agent step is at most `INSTRUCTION_MAX_LENGTH` (20 000) characters: with the title (256), the labels
+ * (`ISSUE_LABELS_MAX` of `ISSUE_LABEL_MAX_CHARS`, 1 000 at most) and this body (8 000) an issue takes at most about 9 300 of them, and
+ * the rest is the workflow's own text, however it places the three.
+ */
+export const ISSUE_BODY_MAX_CHARS = 8_000;
+export const ISSUE_URL_MAX_CHARS = 500;
+export const ISSUE_LABELS_MAX = 20;
+/** A label name: GitHub accepts 50 characters. */
+export const ISSUE_LABEL_MAX_CHARS = 50;
+/** A GitHub login is at most 39 characters; a bot's ends in `[bot]`. */
+export const ACTOR_LOGIN_MAX_CHARS = 100;

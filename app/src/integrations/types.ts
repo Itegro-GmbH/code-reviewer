@@ -122,6 +122,27 @@ export function isStoredReviewCommand(
   return STORED_REVIEW_COMMANDS.some((command) => command === value);
 }
 
+/** An open issue that got a label, as a delivery reports it (#845). The texts are untrusted and not yet bounded. */
+export type IssueLabeled = {
+  repo: RepoRef;
+  /** The default branch of the repository at the time of the delivery. */
+  defaultBranch: string;
+  issue: {
+    number: number;
+    title: string;
+    /** An issue without a description has an empty body. */
+    body: string;
+    /** Web URL of the issue. */
+    url: string;
+    /** The names of all labels the issue has now, the new one included. */
+    labels: string[];
+  };
+  /** The label that was just put on. */
+  label: string;
+  /** Who put it on. */
+  actor: TriggerActor;
+};
+
 /** The person or bot that caused the event. */
 export type TriggerActor = {
   login: string;
@@ -292,6 +313,11 @@ export type IntegrationEvent =
    * waiting automatic jobs, because a draft is not reviewed automatically.
    */
   | { kind: "pull_request_drafted"; repo: RepoRef; prNumber: number }
+  /**
+   * A label was put on an issue (not on a pull request) by a person (#845). It starts no review: the workflows of the workspace
+   * that are started by this label take it from here. Title, body and labels are the words of whoever opened the issue.
+   */
+  | { kind: "issue_labeled"; labeled: IssueLabeled }
   /**
    * A delivery of an event the app uses whose payload lacks fields the app reads (or has them with
    * the wrong type). Nothing can be done with it and a redelivery would not change that; `reason`

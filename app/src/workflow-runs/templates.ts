@@ -5,7 +5,8 @@
 //
 // Values are data. A text is built in one pass from the parts of the template; what a reference yields is inserted as it is and never
 // read again, so a result that holds `{{` or an instruction does nothing here. The default of a reference is a JSON value taken as it
-// is. A value of an agent step that goes into the text of an action (a title, a comment) is defused: it cannot mention a person or a
+// is. A value of an agent step that goes into the text of an action (a title, a comment) is defused, and so are the title, body and
+// labels of the issue of a label trigger (#845: anyone who can open an issue wrote them): it cannot mention a person or a
 // team, nor name an issue a pull request would close, nor rebuild the marker of a comment (`defuseSegments`). The text is defused
 // once it is put together, so what a boundary between two parts would form (`@` and `octocat`) is caught too. A value that goes into a text is cleaned of control characters (the Implementer refuses them) and cut at
 // `TEMPLATE_VALUE_MAX_CHARS` with a note that says so; the text as a whole must fit the bound of the place it goes to, or the step
@@ -30,7 +31,7 @@ export type RunValues = {
 };
 
 export type RenderOptions = {
-  /** For the text of an action: what an agent step reported is defused. Literals of the workflow and values of the trigger stay as they are. */
+  /** For the text of an action: what an agent step reported, and the title, body and labels of the issue of a label trigger, are defused. Literals of the workflow and the other values of the trigger stay as they are. */
   defuse?: boolean;
   /** The text is no Markdown (a title): code spans and fences hide nothing there, so nothing is left out of the defusing. */
   plain?: boolean;
@@ -38,7 +39,28 @@ export type RenderOptions = {
 
 const ZERO_WIDTH_SPACE = "\u200b";
 
-/** A part of a text that is put together; `agent` for what an agent step reported. */
+/**
+ * The values of an issue a label started a run for (#845) that whoever opened the issue wrote: its title, its body and its labels.
+ * They go into the text of an action defused, like what an agent wrote: an issue that says `@org/team` or `Closes #5` must not mention
+ * that team or close that issue from a comment or a pull request the workflow writes. The number and the address are the platform's,
+ * and so is the repository, and stay as they are (`Closes #{{trigger.issue.number}}` is the workflow's own sentence).
+ */
+const OUTSIDER_TRIGGER_FIELDS: ReadonlySet<string> = new Set([
+  "title",
+  "body",
+  "labels",
+]);
+
+function isOutsiderText(path: readonly string[]): boolean {
+  return (
+    path[0] === "trigger" &&
+    path[1] === "issue" &&
+    path[2] !== undefined &&
+    OUTSIDER_TRIGGER_FIELDS.has(path[2])
+  );
+}
+
+/** A part of a text that is put together; `agent` for what an agent step reported or an outsider wrote. */
 export type TextSegment = { text: string; agent: boolean };
 
 const NAME_CHARACTER = /[A-Za-z0-9_-]/;
@@ -363,7 +385,9 @@ function renderParts(
             resolveReference(part.ref, values),
             part.ref.path.join("."),
           ),
-          agent: values.agentSteps?.has(part.ref.path[0] ?? "") === true,
+          agent:
+            values.agentSteps?.has(part.ref.path[0] ?? "") === true ||
+            isOutsiderText(part.ref.path),
         },
   );
   const text =

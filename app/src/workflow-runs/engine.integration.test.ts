@@ -426,6 +426,7 @@ describe("a turn that was started and not recorded", () => {
     const refusing = createWorkflowEngine({
       runs: app.runs,
       workflows: app.workflows,
+      members: app.members,
       profiles: app.profiles,
       environments: app.environments,
       implementer: {
@@ -1344,6 +1345,7 @@ describe("a failure of the engine", () => {
         },
       },
       workflows: app.workflows,
+      members: app.members,
       profiles: app.profiles,
       environments: { listSummaries: async () => [] },
       implementer: app.implementerService,
@@ -1377,6 +1379,7 @@ describe("a failure of the engine", () => {
         return call(...args);
       };
     const engine = createWorkflowEngine({
+      members: app.members,
       runs: {
         ...app.runs,
         lockRun: (runId, work) =>
@@ -1436,6 +1439,7 @@ describe("a failure of the engine", () => {
       .where("id", "=", run.id)
       .execute();
     const wrecked = createWorkflowEngine({
+      members: app.members,
       runs: app.runs,
       workflows: {
         getVersion: async () => ({

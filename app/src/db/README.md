@@ -616,6 +616,10 @@ migration in an earlier deployment does not have it.
 - **Live database.** Expand only, like the steps: the tables are created first, the index, then the four links as `alter table` last, with `lock_timeout` 5 s for its own statements
   (`create-implementer-session-snapshots.integration.test.ts` holds a writer open and checks that the batch gives up and can be run again).
 
+### What started a workflow run (#845)
+
+`20261105190000_add_workflow_run_trigger` lets a run that a label on an issue started have no person: `workflow_runs.created_by` is nullable, and the new column `trigger_kind` (`manual`, the default, or `github.issueLabeled`) says what started the run. The check `workflow_runs_trigger_check` holds the rule: only a `manual` run needs a user. `actor_login` stays required (for a label it is the login of whoever put the label on, display only). Expand only: `drop not null` and a constant default change the catalog, not the rows; `lock_timeout` 5 s. `down` puts `not null` back, which Postgres refuses while a run of a label exists.
+
 ### The queued instruction of a session (#841)
 
 `20261105160000_add_implementer_session_queue` (follow-up turns) adds four nullable text columns to `implementer_sessions` and one check; no table, index or link.

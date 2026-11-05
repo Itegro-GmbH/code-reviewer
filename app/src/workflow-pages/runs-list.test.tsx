@@ -55,6 +55,18 @@ function renderList(
 }
 
 describe("the list of runs", () => {
+  // #845-T63
+  it("names a label as the trigger and shows who put it on", () => {
+    const { container } = renderList([
+      summary({ trigger: "github.issueLabeled", actorLogin: "bob" }),
+    ]);
+
+    const row = within(container.querySelector("tbody tr") as HTMLElement);
+    expect(row.getByText("A label on an issue")).toBeTruthy();
+    expect(row.getByText("bob")).toBeTruthy();
+    expect(container.textContent).not.toContain("Started by hand");
+  });
+
   // #873-T60
   it("shows status, start, trigger, spent of the budget and version of each run, newest first as given", () => {
     const { container } = renderList([

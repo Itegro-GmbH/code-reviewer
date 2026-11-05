@@ -5,7 +5,8 @@
 // `fakes/fixtures/github-webhooks/` against the same list, so the two cannot drift apart: a field
 // that is read but not listed here cannot be read at all.
 
-export type PayloadFieldType = "string" | "number" | "boolean" | "object";
+export type PayloadFieldType =
+  "string" | "number" | "boolean" | "object" | "array";
 
 export type PayloadFieldSpec = {
   /** Dotted path from the root of the payload, for example "pull_request.head.sha". */
@@ -13,6 +14,8 @@ export type PayloadFieldSpec = {
   type: PayloadFieldType;
   /** Absent is fine; if present, the type must match. */
   optional?: boolean;
+  /** `null` is fine too (GitHub sends the body of an issue without a description as `null`). */
+  nullable?: boolean;
 };
 
 const INSTALLATION: PayloadFieldSpec[] = [
@@ -63,6 +66,23 @@ export const WEBHOOK_READ_FIELDS = {
     ...REPOSITORY,
     ...SENDER,
   ],
+  // #845: an issue got a label. The label is read only for `labeled`, so it is optional here; the parser asks for it.
+  issues: [
+    { path: "action", type: "string" },
+    { path: "issue.number", type: "number" },
+    { path: "issue.title", type: "string" },
+    { path: "issue.body", type: "string", optional: true, nullable: true },
+    { path: "issue.html_url", type: "string" },
+    { path: "issue.state", type: "string" },
+    { path: "issue.labels", type: "array" },
+    // Present only when the "issue" is a pull request.
+    { path: "issue.pull_request", type: "object", optional: true },
+    { path: "label.name", type: "string", optional: true },
+    { path: "repository.default_branch", type: "string" },
+    { path: "installation.id", type: "number" },
+    ...REPOSITORY,
+    ...SENDER,
+  ],
 } as const satisfies Record<string, PayloadFieldSpec[]>;
 
 export type WebhookEventName = keyof typeof WEBHOOK_READ_FIELDS;
@@ -83,6 +103,7 @@ function valueAt(payload: unknown, path: string): unknown {
 function matches(value: unknown, type: PayloadFieldType): boolean {
   if (type === "object")
     return typeof value === "object" && value !== null && !Array.isArray(value);
+  if (type === "array") return Array.isArray(value);
   return typeof value === type;
 }
 
@@ -95,6 +116,7 @@ export function payloadProblems(
     .filter((spec: PayloadFieldSpec) => {
       const value = valueAt(payload, spec.path);
       if (value === undefined && spec.optional === true) return false;
+      if (value === null && spec.nullable === true) return false;
       return !matches(value, spec.type);
     })
     .map((spec: PayloadFieldSpec) => spec.path);
@@ -110,4 +132,9 @@ export function field<T extends string | number | boolean>(
 
 export function hasField(payload: unknown, path: string): boolean {
   return valueAt(payload, path) !== undefined;
+}
+
+/** The value at a path of a payload that `payloadProblems` accepted, when its type is not one of the scalars `field` takes. */
+export function rawField(payload: unknown, path: string): unknown {
+  return valueAt(payload, path);
 }

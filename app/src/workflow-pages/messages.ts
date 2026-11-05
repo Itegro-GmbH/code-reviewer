@@ -19,6 +19,7 @@ import {
 import { RUNS_LISTED_MAX } from "../workflow-runs/limits.ts";
 import {
   RUN_FAILURE_CODES,
+  WORKFLOW_OWNER_GONE_TEXT,
   STEP_FAILURE_CODES,
   type WorkflowRunErrorCode,
 } from "../workflow-runs/errors.ts";
@@ -52,6 +53,7 @@ export const STEP_KIND_COPY = {
 
 export const TRIGGER_COPY = {
   manual: "Started by hand",
+  "github.issueLabeled": "A label on an issue",
 } as const;
 
 /** Why a run failed, in a sentence. */
@@ -62,6 +64,7 @@ const RUN_FAILURE_TEXT: Record<(typeof RUN_FAILURE_CODES)[number], string> = {
   step_kind_not_supported:
     "The workflow has a step that this version of the engine does not run yet.",
   document_unusable: "The saved version of the workflow cannot be read.",
+  workflow_owner_gone: WORKFLOW_OWNER_GONE_TEXT,
 };
 
 /**
@@ -218,6 +221,7 @@ export const PAGE_COPY = {
   runStartedAt: "Started",
   runFinishedAt: "Finished",
   runTrigger: "Trigger",
+  runActor: "Label put on by",
   runWorkflowVersion: "Workflow version",
   runRepository: "Repository",
   runBaseBranch: "Base branch",

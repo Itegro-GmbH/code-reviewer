@@ -14,6 +14,7 @@ import { getIntegrationSync } from "../integrations/sync/shared.ts";
 import {
   createGithubAppWebhookHandler,
   type WebhookHandler,
+  type WorkflowStarter,
 } from "./github-app-handler.ts";
 import { projectServiceFor } from "../projects/shared.ts";
 import { reviewSettingsServiceFor } from "../review-settings/shared.ts";
@@ -37,8 +38,13 @@ export function getJobQueueReviewTriggerIntake(
   });
 }
 
-/** The handler of `POST /api/webhooks/github-app`, wired to the running server. */
-export function getGithubAppWebhookHandler(): WebhookHandler {
+/**
+ * The handler of `POST /api/webhooks/github-app`, wired to the running server. `workflowsFor` is what starts the workflows of a label
+ * on an issue in one workspace (#845); the route passes it in, because the engine depends on this folder and not the other way round.
+ */
+export function getGithubAppWebhookHandler(
+  options: { workflowsFor?: (workspaceId: string) => WorkflowStarter } = {},
+): WebhookHandler {
   const db = getDatabase();
   return createGithubAppWebhookHandler({
     registry: integrationRegistry,
@@ -53,6 +59,9 @@ export function getGithubAppWebhookHandler(): WebhookHandler {
         settings: reviewSettingsServiceFor(workspaceId),
       }),
       intake: getJobQueueReviewTriggerIntake(workspaceId),
+      ...(options.workflowsFor === undefined
+        ? {}
+        : { workflows: options.workflowsFor(workspaceId) }),
     }),
     automatic: {},
     logger: consoleWebhookLogger,

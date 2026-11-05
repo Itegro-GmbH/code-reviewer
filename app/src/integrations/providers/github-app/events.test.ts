@@ -239,3 +239,152 @@ describe("the order in which a comment is looked at", () => {
     expect(performance.now() - start).toBeLessThan(500);
   });
 });
+
+describe("which issue events start a workflow (#845)", () => {
+  /** A recorded `issues.labeled` payload with other values at the given places. */
+  function issuePayloadWith(
+    changes: {
+      action?: string;
+      issue?: Record<string, unknown>;
+      label?: unknown;
+      sender?: Record<string, unknown>;
+      drop?: string[];
+    } = {},
+  ) {
+    const payload = webhookFixture("issues.labeled") as Record<
+      string,
+      unknown
+    > & { issue: Record<string, unknown>; sender: Record<string, unknown> };
+    const changed: Record<string, unknown> = {
+      ...payload,
+      ...(changes.action === undefined ? {} : { action: changes.action }),
+      ...("label" in changes ? { label: changes.label } : {}),
+      issue: { ...payload.issue, ...changes.issue },
+      sender: { ...payload.sender, ...changes.sender },
+    };
+    for (const key of changes.drop ?? []) delete changed[key];
+    return changed;
+  }
+
+  // #845-T01
+  it("turns a label on an open issue into the issue, the label, the repository and who put it on", async () => {
+    expect(await eventOf("issues.labeled")).toEqual({
+      kind: "issue_labeled",
+      labeled: {
+        repo: {
+          integrationId: "integration-1",
+          externalId: "7001",
+          fullName: "acme/widgets",
+          url: "https://github.com/acme/widgets",
+        },
+        defaultBranch: "main",
+        issue: {
+          number: 12,
+          title: "Cache the widget list",
+          body: "The widget list is rebuilt on every request.\nCache it for a minute.",
+          url: "https://github.com/acme/widgets/issues/12",
+          labels: ["enhancement", "ready for agent"],
+        },
+        label: "ready for agent",
+        actor: { login: "bob", externalId: "1002" },
+      },
+    });
+  });
+
+  // #845-T02
+  it("reads an issue without a description as an empty body", async () => {
+    expect(await eventOf("issues.labeled.no-body")).toMatchObject({
+      kind: "issue_labeled",
+      labeled: { issue: { body: "" } },
+    });
+    expect(
+      await eventOfPayload(
+        "issues",
+        issuePayloadWith({ issue: { body: undefined } }),
+      ),
+    ).toMatchObject({
+      kind: "issue_labeled",
+      labeled: { issue: { body: "" } },
+    });
+  });
+
+  // #845-T03
+  it.each([
+    ["a label on a pull request", "issues.labeled.pull-request"],
+    ["a label put on by a bot (the App itself included)", "issues.labeled.bot"],
+    ["a label on a closed issue", "issues.labeled.closed"],
+    ["a label taken off", "issues.unlabeled"],
+    ["a new issue", "issues.opened"],
+  ])("starts nothing for %s", async (_name, fixture) => {
+    expect(await eventOf(fixture)).toMatchObject({ kind: "ignored" });
+  });
+
+  // #845-T03a
+  it.each(["Bot", "Organization", "Mannequin"])(
+    "starts nothing for a label put on by a sender of the type %s, and starts for a User",
+    async (type) => {
+      expect(
+        await eventOfPayload("issues", issuePayloadWith({ sender: { type } })),
+      ).toMatchObject({ kind: "ignored" });
+      expect(
+        await eventOfPayload(
+          "issues",
+          issuePayloadWith({ sender: { type: "User" } }),
+        ),
+      ).toMatchObject({ kind: "issue_labeled" });
+    },
+  );
+
+  // #845-T04
+  it.each(["edited", "closed", "reopened", "assigned", "milestoned"])(
+    "starts nothing for the action %s",
+    async (action) => {
+      expect(
+        await eventOfPayload("issues", issuePayloadWith({ action })),
+      ).toMatchObject({ kind: "ignored" });
+    },
+  );
+
+  // #845-T05
+  it("names the field, never its value, when the label is missing", async () => {
+    for (const label of [undefined, {}, { name: "" }, { name: 3 }]) {
+      const event = await eventOfPayload("issues", issuePayloadWith({ label }));
+      expect(event).toEqual({
+        kind: "invalid_payload",
+        reason: expect.stringContaining("label.name"),
+      });
+    }
+  });
+
+  // #845-T06
+  it("is invalid when a field the app reads is missing: the issue, the default branch or the sender", async () => {
+    for (const drop of ["issue", "repository", "sender", "installation"]) {
+      expect(
+        await eventOfPayload("issues", issuePayloadWith({ drop: [drop] })),
+      ).toMatchObject({ kind: "invalid_payload" });
+    }
+    expect(
+      await eventOfPayload(
+        "issues",
+        issuePayloadWith({ issue: { labels: "enhancement" } }),
+      ),
+    ).toMatchObject({ kind: "invalid_payload" });
+  });
+
+  // #845-T07
+  it("takes the names of the labels and leaves out an entry that has none", async () => {
+    const event = await eventOfPayload(
+      "issues",
+      issuePayloadWith({
+        issue: {
+          labels: [{ name: "a" }, null, "b", { name: 3 }, {}, { name: "c" }],
+        },
+      }),
+    );
+
+    expect(event).toMatchObject({
+      kind: "issue_labeled",
+      labeled: { issue: { labels: ["a", "c"] } },
+    });
+  });
+});

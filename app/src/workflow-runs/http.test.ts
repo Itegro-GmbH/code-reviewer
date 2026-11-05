@@ -25,6 +25,7 @@ const SUMMARY: RunSummaryView = {
   trigger: "manual",
   status: "running",
   errorCode: null,
+  actorLogin: "octocat",
   budgetUsd: 20,
   spentUsd: 0,
   createdAt: "2026-11-05T10:00:00.000Z",

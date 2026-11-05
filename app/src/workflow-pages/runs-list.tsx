@@ -123,6 +123,11 @@ export function WorkflowRunsList({
                   </TableCell>
                   <TableCell className="align-top whitespace-normal text-xs">
                     {TRIGGER_COPY[run.trigger]}
+                    {run.trigger === "manual" ? null : (
+                      <span className="block text-muted-foreground">
+                        {run.actorLogin}
+                      </span>
+                    )}
                   </TableCell>
                   <TableCell className="align-top whitespace-normal text-xs">
                     {formatUsd(run.spentUsd)} {PAGE_COPY.of}{" "}

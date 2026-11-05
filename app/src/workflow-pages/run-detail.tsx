@@ -389,6 +389,10 @@ export function WorkflowRunDetail({
               term: PAGE_COPY.runTrigger,
               description: TRIGGER_COPY[run.trigger],
             },
+            // A run a label started has no person who started it: who put the label on is shown, as the text it is (a login).
+            ...(run.trigger === "manual"
+              ? []
+              : [{ term: PAGE_COPY.runActor, description: run.actorLogin }]),
             {
               term: PAGE_COPY.runStartedAt,
               description: <Time iso={run.createdAt} />,

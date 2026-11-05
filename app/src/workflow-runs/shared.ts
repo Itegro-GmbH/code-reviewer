@@ -13,6 +13,7 @@ import { createRepositoriesRepository } from "../db/repositories/repositories-re
 import { createWorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
 import { dueWorkflowRuns } from "../db/repositories/workflow-runs-sweep.ts";
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
+import { createWorkspaceMembersRepository } from "../db/repositories/workspace-members-repository.ts";
 import { getDatabase } from "../db/startup.ts";
 import { runAfterResponse } from "../dispatch/shared.ts";
 import { startQueuedFollowUps } from "../implementer/follow-up-shared.ts";
@@ -29,6 +30,7 @@ import { reconcileRuns, type ReconcileReport } from "./reconcile.ts";
 import { WorkflowRunError } from "./errors.ts";
 import { createWorkflowEngine, type WorkflowEngine } from "./engine.ts";
 import { RUN_QUIET_MS, SWEEP_RUNS_MAX } from "./limits.ts";
+import { createLabelTrigger, type LabelTrigger } from "./label-trigger.ts";
 import {
   createWorkflowRunService,
   type WorkflowRunService,
@@ -76,6 +78,7 @@ export function workflowEngineFor(workspaceId: string): WorkflowEngine {
   return createWorkflowEngine({
     runs: createWorkflowRunsRepository(db, workspaceId),
     workflows: createWorkflowsRepository(db, workspaceId),
+    members: createWorkspaceMembersRepository(db, workspaceId),
     profiles: createProfilesRepository(db, workspaceId),
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
     implementer: implementerServiceFor(workspaceId),
@@ -124,6 +127,28 @@ export function workflowRunServiceFor(workspaceId: string): WorkflowRunService {
       }
     },
     // The first steps run after the response: starting a turn asks GitHub several times.
+    kick: (runId) =>
+      runAfterResponse(() => workflowEngineFor(workspaceId).advance(runId)),
+  });
+}
+
+/**
+ * The label trigger of one workspace (#845): the webhook hands it the issue a label was put on, it writes the runs of the workflows that
+ * wait for that label. The first steps run after the response, as for a run started by hand.
+ */
+export function labelTriggerFor(workspaceId: string): LabelTrigger {
+  const db = getDatabase();
+  const repositories = createRepositoriesRepository(db, workspaceId);
+  return createLabelTrigger({
+    runs: createWorkflowRunsRepository(db, workspaceId),
+    workflows: createWorkflowsRepository(db, workspaceId),
+    async activeRepository(repo) {
+      const repository = await repositories.findByExternalId(
+        repo.integrationId,
+        repo.externalId,
+      );
+      return repository?.active === true ? { id: repository.id } : undefined;
+    },
     kick: (runId) =>
       runAfterResponse(() => workflowEngineFor(workspaceId).advance(runId)),
   });
