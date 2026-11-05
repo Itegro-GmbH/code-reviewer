@@ -1173,10 +1173,17 @@ class _ResultChannel:
         self._lock = threading.Lock()
         self._written = False
 
-    def write(self, result: JobResult, secrets: Sequence[str] = ()) -> int | None:
-        """Print the result. Returns the exit code, or None if a result was printed before."""
+    def write(
+        self,
+        result: JobResult,
+        secrets: Sequence[str] = (),
+        *,
+        skip_if: Callable[[], bool] | None = None,
+    ) -> int | None:
+        """Print the result. Returns the exit code, or None if a result was printed before or
+        `skip_if`, asked under the lock, says the line is not wanted (nothing is printed)."""
         with self._lock:
-            if self._written:
+            if self._written or (skip_if is not None and skip_if()):
                 return None
             self._written = True
             result = _ensure_clean(result, secrets)
@@ -1364,14 +1371,18 @@ def _end_for_control_memory(
     probe: UsageProbe | None,
     used: int,
     limit: int,
+    *,
+    finished: Callable[[], bool] = lambda: False,
 ) -> None:
-    """Control holds nearly all the memory of its container (`ControlMemoryWatch`, #827): the
-    kernel never picks it (`--oom-score-adj -1000`), so it ends its own turn, at once, as the OOM
-    killer used to end it. The engines go first; the result is `runner_error` (free) or, when the
-    model was billed, `agent_gave_up` (charged), the classes of any other unexpected end of the
-    turn. Like the watchdog of the timeout, it leaves the process only once it printed the
-    result."""
-    shutdown_engines()
+    """Control holds nearly all the memory of its container that the kernel cannot give back
+    (`ControlMemoryWatch`, #827): the kernel never picks it (`--oom-score-adj -1000`), so it ends
+    its own turn, at once, as the OOM killer used to end it. The result is `runner_error` (free)
+    or, when the model was billed, `agent_gave_up` (charged), the classes of any other unexpected
+    end of the turn. Like the watchdog of the timeout, it leaves the process only once it printed
+    the result. It stops no container: the agent's container, the doors and the readers run on
+    until the VM is torn down (the model door's cost cap holds meanwhile), and the steps not yet
+    sent are lost, as at the timeout. `finished` says the turn is over: a trip that comes after
+    it, checked under the lock of the result line, prints nothing."""
     usage = _probe_usage(probe)
     code = ErrorCode.AGENT_GAVE_UP if usage is not None else ErrorCode.RUNNER_ERROR
     mib = 1024 * 1024
@@ -1384,7 +1395,7 @@ def _end_for_control_memory(
             None,
             usage=usage,
         )
-        written = channel.write(result, secrets)
+        written = channel.write(result, secrets, skip_if=finished)
     except Exception:
         written = 1
     if written is not None:
@@ -1534,11 +1545,11 @@ def _run_implementer(
     extra: list[str] = []
     memory = ControlMemoryWatch(
         lambda used, limit: _end_for_control_memory(
-            channel, started, job.secrets, probe, used, limit
+            channel, started, job.secrets, probe, used, limit, finished=lambda: memory.closed
         )
     )
-    memory.start()
     try:
+        memory.start()
         with _stop_on_sigterm(stop):
             result = run_implementer_job(
                 job,
