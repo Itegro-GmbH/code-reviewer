@@ -1113,10 +1113,11 @@ describe("actions", () => {
 
     await endTurn(app, { agentResult: { summary: "Cache it." } });
 
+    // The text of the exception is for the log; the step keeps a fixed sentence.
     expect((await app.stateOf(runId)).steps[1]).toMatchObject({
       status: "failed",
       errorCode: "action_failed",
-      errorMessage: "GitHub said no",
+      errorMessage: "The action failed.",
     });
   });
 
