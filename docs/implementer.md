@@ -674,7 +674,7 @@ the engine's server starts only after that (`test_implementer_resume_agent.py`).
 
 **The claim feature.** The `resume` fields the app adds in PR 9 (`snapshot`, `previousSummary`, `digest`) are in a closed object, so a runner of the state of PR 6 (#838), which knows `implementer_resume` but not these fields, would refuse a job that carries them. There is no such runner in the field: the released runner does not
 know `implementer_resume` at all and PR 6 is not released, so no mixed state exists. For the same reason **PR 9 sends the three fields only to a runner that names `implementer_resume`, and that feature comes in the same release as this PR's runner.** If PR 6 is ever released alone, the fields need a claim feature of their own
-(for example `implementer_resume_snapshot`) before PR 9 can send them to it.
+before PR 9 can send them to it.
 
 **Known limit: a repeat loses the snapshot.** A turn that is run a second time (the first attempt ended by a lost lease or a crash after it had uploaded its snapshot) starts from the summary: the first attempt's upload replaced the one of the turn before (one snapshot per session, replaced by each turn) and the read counts only
 snapshots of an earlier turn, so the repeat finds none (`no_snapshot`). The fallback is the answer; keeping the earlier snapshot until the turn ends would fix it and is not done here.
