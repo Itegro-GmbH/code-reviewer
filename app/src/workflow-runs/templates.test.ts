@@ -609,7 +609,7 @@ describe("previous.* in a loop", () => {
   });
 
   // #846-T63
-  it("does not let a step named previous reach into the values of the steps", () => {
+  it("does not fall back to the latest value of the step when the round before has none", () => {
     expect(
       renderText('{{previous.work.summary | default "none"}}', {
         ...values,

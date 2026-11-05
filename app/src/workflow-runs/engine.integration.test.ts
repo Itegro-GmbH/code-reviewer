@@ -439,6 +439,7 @@ describe("a turn that was started and not recorded", () => {
           );
         },
         continueSession: app.implementerService.continueSession,
+        discardRequested: app.implementerService.discardRequested,
       },
       turns: app.turnReader,
       connectors: createConnectorRegistry(),

@@ -21,10 +21,13 @@ const REPO = "acme/widgets";
 const ISSUE = 12;
 
 /** The finding a reviewer reports in round `round`. */
-const finding = (round: number) => ({
+const finding = (
+  round: number,
+  description = "The cache is never emptied.",
+) => ({
   type: "bug",
   name: `Bug ${String(round)}`,
-  description: "The cache is never emptied.",
+  description,
 });
 
 /** The plan's workflow with the profiles and the environment of the test: `worker` pushes, `reviewer` does not, `Python` is the environment. */
@@ -130,6 +133,7 @@ async function turnOf(app: EngineHarness, jobId: string) {
       "implementer_turns.session_id",
       "implementer_turns.profile_name",
       "implementer_sessions.branch",
+      "implementer_sessions.base_branch",
     ])
     .where("implementer_turns.job_id", "=", jobId)
     .executeTakeFirstOrThrow();
@@ -219,8 +223,14 @@ describe("Issue to PR: a label, implement and review in rounds, then a pull requ
     ];
     expect(reviews.map((turn) => [turn.number, turn.branch])).toEqual([
       [1, `workflow/${runId}/review`],
-      [1, `workflow/${runId}/review-r2`],
+      [1, `workflow/${runId}/review.r2`],
     ]);
+    // The reviewer starts from the branch of `implement` in every round, the implementer from the base branch of the run.
+    expect(reviews.map((turn) => turn.base_branch)).toEqual([
+      `workflow/${runId}/implement`,
+      `workflow/${runId}/implement`,
+    ]);
+    expect(first.base_branch).toBe("main");
     expect(reviews[0]?.session_id).not.toBe(reviews[1]?.session_id);
     expect(reviews[0]?.instruction).toBe(
       `Review branch workflow/${runId}/implement against the issue.`,
@@ -255,7 +265,19 @@ describe("Issue to PR: a label, implement and review in rounds, then a pull requ
       await endTurn(app, {
         agentResult: { summary: `Round ${String(round)}.` },
       });
-      await endTurn(app, { agentResult: { findings: [finding(round)] } });
+      // Whoever wrote the code can make the reviewer quote a mention and an issue to close: in the comment they only read as text.
+      await endTurn(app, {
+        agentResult: {
+          findings: [
+            finding(
+              round,
+              round === 3
+                ? "@octocat should look at this, it closes #99."
+                : undefined,
+            ),
+          ],
+        },
+      });
     }
 
     const state = await app.stateOf(runId);
@@ -298,6 +320,38 @@ describe("Issue to PR: a label, implement and review in rounds, then a pull requ
     // The findings of the last round, not of the first.
     expect(comment?.body).toContain('"name":"Bug 3"');
     expect(comment?.body).not.toContain('"name":"Bug 1"');
+    // The mention and the issue a reviewer quoted are defused, so the comment mentions nobody and closes nothing.
+    expect(comment?.body).not.toContain("@octocat");
+    expect(comment?.body).toContain("@\u200boctocat");
+    expect(comment?.body).not.toContain("#99");
+    expect(comment?.body).toContain("#\u200b99");
+    // `previous` in round three is round two: the third instruction carries the findings of round two, neither the first nor the third.
+    const third = (await turnOf(app, jobOf(state, "implement", 3))).instruction;
+    expect(third).toContain('"name":"Bug 2"');
+    expect(third).not.toContain('"name":"Bug 1"');
+    expect(third).not.toContain('"name":"Bug 3"');
+  });
+
+  // #846-T103
+  it("ends the review with agent_start_failed when the branch of the implementer is not on GitHub, and starts nothing for it", async () => {
+    const app = await startHarness();
+    const { runId } = await labeled(app);
+
+    // The implementer's branch was never pushed (or was deleted): the reviewer has nothing to start from.
+    await endTurn(app, { agentResult: { summary: "Round one." } });
+
+    const state = await app.stateOf(runId);
+    expect(rowsOf(state)).toEqual([
+      "start#1:action:succeeded",
+      "implement#1:agent:succeeded",
+      "review#1:agent:failed",
+    ]);
+    expect(state.steps[2]).toMatchObject({ errorCode: "agent_start_failed" });
+    expect(state.run).toMatchObject({
+      status: "failed",
+      errorCode: "step_failed",
+    });
+    expect(await app.counts()).toMatchObject({ jobs: 1, turns: 1 });
   });
 
   // #846-T102
@@ -564,59 +618,169 @@ describe("a round that changes while events and sweeps arrive together", () => {
 
 describe("session.continue", () => {
   // #846-T130
-  it("takes no second turn while one runs: the instruction waits behind it and the step finds its turn later", async () => {
-    const app = await startEngineHarness();
-    const runId = await startedLoop(app, workLoop());
-    const branch = `workflow/${runId}/work`;
-    app.h.fake.addBranch(REPO, branch, sha("d"));
-    const firstJob = await app.finishTurn({ agentResult: { summary: "more" } });
-    const first = await turnOf(app, firstJob);
-    // While the engine has not yet looked at the end of the first turn, a person starts a turn of the same session.
-    const manual = await app.implementerService.continueSession(
-      USER,
-      first.session_id,
-      { instruction: "A note from a person.", clientRequestId: "manual-1" },
-    );
-    expect(manual).toMatchObject({ status: "started", turnNumber: 2 });
+  it.each([1, 3])(
+    "takes no second turn while one runs: the instruction waits behind it and the step finds its turn later, with a pool of %i connection(s)",
+    async (poolMax) => {
+      const app = await startEngineHarness({ poolMax });
+      const runId = await startedLoop(app, workLoop());
+      const branch = `workflow/${runId}/work`;
+      app.h.fake.addBranch(REPO, branch, sha("d"));
+      const firstJob = await app.finishTurn({
+        agentResult: { summary: "more" },
+      });
+      const first = await turnOf(app, firstJob);
+      // While the engine has not yet looked at the end of the first turn, a person starts a turn of the same session.
+      const manual = await app.implementerService.continueSession(
+        USER,
+        first.session_id,
+        { instruction: "A note from a person.", clientRequestId: "manual-1" },
+      );
+      expect(manual).toMatchObject({ status: "started", turnNumber: 2 });
 
-    await app.engine.jobEnded(firstJob);
+      await app.engine.jobEnded(firstJob);
 
-    // The next round asked for a turn of the session, which is busy: nothing was started, the instruction is queued, the step waits.
-    let state = await app.stateOf(runId);
-    expect(rowsOf(state)).toEqual([
-      "work#1:agent:succeeded",
-      "work#2:agent:running",
-    ]);
-    expect(state.steps[1]?.jobId).toBeNull();
-    expect(await app.counts()).toMatchObject({ jobs: 2, turns: 2 });
-    const queued = await app.h.db
-      .selectFrom("implementer_sessions")
-      .select("queued_instruction")
-      .executeTakeFirstOrThrow();
-    expect(queued.queued_instruction).not.toBeNull();
+      // The next round asked for a turn of the session, which is busy: nothing was started, the instruction is queued, the step waits.
+      let state = await app.stateOf(runId);
+      expect(rowsOf(state)).toEqual([
+        "work#1:agent:succeeded",
+        "work#2:agent:running",
+      ]);
+      expect(state.steps[1]?.jobId).toBeNull();
+      expect(await app.counts()).toMatchObject({ jobs: 2, turns: 2 });
+      const queued = await app.h.db
+        .selectFrom("implementer_sessions")
+        .select("queued_instruction")
+        .executeTakeFirstOrThrow();
+      expect(queued.queued_instruction).not.toBeNull();
 
-    // The person's turn ends and the queued instruction starts, as the hook at the end of a turn does.
-    await app.finishTurn({});
-    expect(
-      await app.implementerService.startQueued(first.session_id),
-    ).toMatchObject({ status: "started" });
-    expect(await app.counts()).toMatchObject({ jobs: 3, turns: 3 });
-    // The step is looked at again once its claim is stale: it repeats the same request and gets the turn that exists.
-    app.advanceClock(3 * 60 * 1000);
-    await app.engine.advance(runId);
+      // The person's turn ends and the queued instruction starts, as the hook at the end of a turn does.
+      await app.finishTurn({});
+      expect(
+        await app.implementerService.startQueued(first.session_id),
+      ).toMatchObject({ status: "started" });
+      expect(await app.counts()).toMatchObject({ jobs: 3, turns: 3 });
+      // The step is looked at again once its claim is stale: it repeats the same request and gets the turn that exists.
+      app.advanceClock(3 * 60 * 1000);
+      await app.engine.advance(runId);
 
-    state = await app.stateOf(runId);
-    const jobId = jobOf(state, "work", 2);
-    expect(await turnOf(app, jobId)).toMatchObject({
-      number: 3,
-      session_id: first.session_id,
-      instruction: "Go on after: more",
-    });
-    expect(await app.counts()).toMatchObject({ jobs: 3, turns: 3 });
+      state = await app.stateOf(runId);
+      const jobId = jobOf(state, "work", 2);
+      expect(await turnOf(app, jobId)).toMatchObject({
+        number: 3,
+        session_id: first.session_id,
+        instruction: "Go on after: more",
+      });
+      expect(await app.counts()).toMatchObject({ jobs: 3, turns: 3 });
 
-    await endTurn(app, { agentResult: { summary: "done" } });
-    expect((await app.stateOf(runId)).run.status).toBe("succeeded");
-  });
+      await endTurn(app, { agentResult: { summary: "done" } });
+      expect((await app.stateOf(runId)).run.status).toBe("succeeded");
+    },
+  );
+
+  // #846-T133
+  it.each([1, 3])(
+    "waits, and does not fail, when a person has queued an instruction in the session already, with a pool of %i connection(s)",
+    async (poolMax) => {
+      const app = await startEngineHarness({ poolMax });
+      const runId = await startedLoop(app, workLoop());
+      app.h.fake.addBranch(REPO, `workflow/${runId}/work`, sha("d"));
+      const firstJob = await app.finishTurn({
+        agentResult: { summary: "more" },
+      });
+      const first = await turnOf(app, firstJob);
+      // A person has a turn running in the session and one more instruction queued behind it: the one place is taken.
+      await app.implementerService.continueSession(USER, first.session_id, {
+        instruction: "A note from a person.",
+        clientRequestId: "manual-1",
+      });
+      expect(
+        await app.implementerService.continueSession(USER, first.session_id, {
+          instruction: "And another one.",
+          clientRequestId: "manual-2",
+        }),
+      ).toMatchObject({ status: "queued" });
+
+      await app.engine.jobEnded(firstJob);
+
+      // The next round asks for a turn and is told the session is busy: the step waits like one behind a running turn.
+      let state = await app.stateOf(runId);
+      expect(rowsOf(state)).toEqual([
+        "work#1:agent:succeeded",
+        "work#2:agent:running",
+      ]);
+      expect(state.steps[1]).toMatchObject({ jobId: null, errorCode: null });
+      expect(state.run.status).toBe("running");
+      expect(app.engineLines.join("\n")).not.toContain("STEP_START_FAILED");
+      expect(await app.counts()).toMatchObject({ jobs: 2, turns: 2 });
+
+      // The person's two turns run and end; the step asks again after its claim went stale and its instruction is queued, then started.
+      for (let ended = 0; ended < 2; ended += 1) {
+        await app.finishTurn({});
+        await app.implementerService.startQueued(first.session_id);
+        app.advanceClock(3 * 60 * 1000);
+        await app.engine.advance(runId);
+      }
+
+      state = await app.stateOf(runId);
+      expect(state.steps[1]?.jobId).not.toBeNull();
+      expect((await turnOf(app, jobOf(state, "work", 2))).instruction).toBe(
+        "Go on after: more",
+      );
+      await endTurn(app, { agentResult: { summary: "done" } });
+      expect((await app.stateOf(runId)).run.status).toBe("succeeded");
+    },
+  );
+
+  // #846-T134
+  it.each([1, 3])(
+    "discards the instruction of a step it gave up on, so that no turn without a step and a budget starts later, with a pool of %i connection(s)",
+    async (poolMax) => {
+      const app = await startEngineHarness({ poolMax });
+      const runId = await startedLoop(app, workLoop());
+      app.h.fake.addBranch(REPO, `workflow/${runId}/work`, sha("d"));
+      const firstJob = await app.finishTurn({
+        agentResult: { summary: "more" },
+      });
+      const first = await turnOf(app, firstJob);
+      await app.implementerService.continueSession(USER, first.session_id, {
+        instruction: "A long turn of a person.",
+        clientRequestId: "manual-1",
+      });
+      await app.engine.jobEnded(firstJob);
+      const queued = () =>
+        app.h.db
+          .selectFrom("implementer_sessions")
+          .select(["queued_instruction", "queued_discarded"])
+          .where("id", "=", first.session_id)
+          .executeTakeFirstOrThrow();
+      expect((await queued()).queued_instruction).not.toBeNull();
+
+      // The person's turn runs for longer than a step waits for a turn.
+      app.advanceClock(2 * 60 * 60 * 1000);
+      await app.engine.advance(runId);
+
+      const state = await app.stateOf(runId);
+      expect(state.steps[1]).toMatchObject({
+        status: "failed",
+        errorCode: "agent_start_failed",
+      });
+      expect(state.run).toMatchObject({
+        status: "failed",
+        errorCode: "step_failed",
+      });
+      const after = await queued();
+      expect(after.queued_instruction).toBeNull();
+      expect(JSON.stringify(after.queued_discarded)).toContain(
+        "workflow_gave_up",
+      );
+      // The person's turn ends: nothing starts after it.
+      await app.finishTurn({});
+      expect(
+        await app.implementerService.startQueued(first.session_id),
+      ).toMatchObject({ status: "nothing" });
+      expect(await app.counts()).toMatchObject({ jobs: 2, turns: 2 });
+    },
+  );
 
   // #846-T131
   it("refuses to go on in the session of another step that asks for another result, before anything is started", async () => {
@@ -714,5 +878,128 @@ describe("session.continue", () => {
       branch: `workflow/${run.id}/plan`,
     });
     expect(await app.counts()).toMatchObject({ sessions: 1, turns: 2 });
+  });
+});
+
+describe("a run that ends in the middle of its control steps", () => {
+  const trigger = {
+    kind: "manual",
+    input: {
+      type: "object",
+      required: ["repo"],
+      properties: { repo: { type: "string" } },
+    },
+  };
+
+  // #846-T112
+  it("ends the run with condition_failed when the condition of an if cannot be told, and skips nothing after it", async () => {
+    const app = await startEngineHarness();
+    // A document the validator would refuse (the reference has no default): the engine still must not run on a guess. A value a platform
+    // fact should hold and does not is the same case at run time.
+    const saved = await app.workflows.create(
+      {
+        name: "Cannot tell",
+        document: JSON.stringify({
+          version: 1,
+          name: "Cannot tell",
+          trigger,
+          steps: [
+            {
+              id: "work",
+              kind: "agent",
+              profile: "worker",
+              environment: "Python",
+              instruction: "Work.",
+              result: SUMMARY_RESULT,
+            },
+            {
+              id: "gate",
+              kind: "if",
+              when: { equals: ["{{work.nothing}}", "x"] },
+              then: [
+                {
+                  id: "after",
+                  kind: "agent",
+                  profile: "worker",
+                  environment: "Python",
+                  instruction: "After.",
+                },
+              ],
+            },
+          ],
+        }),
+        createdBy: USER.id,
+      },
+      100,
+    );
+    if (!saved.ok) throw new Error("seeding failed");
+    const { run } = await app.start(saved.workflow.id, {
+      input: { repo: REPO },
+    });
+    await app.engine.advance(run.id);
+
+    await endTurn(app, { agentResult: { summary: "Done." } });
+
+    const state = await app.stateOf(run.id);
+    expect(rowsOf(state)).toEqual(["work#1:agent:succeeded"]);
+    expect(state.run).toMatchObject({
+      status: "failed",
+      errorCode: "condition_failed",
+    });
+    expect(await app.counts()).toMatchObject({ jobs: 1, turns: 1 });
+    expect(app.engineLines.join("\n")).toContain(
+      `CONDITION_FAILED run=${run.id} step=gate`,
+    );
+  });
+
+  // #846-T113
+  it("ends the run with budget_exhausted when the budget is used up inside a round, not between two", async () => {
+    const app = await startEngineHarness();
+    const workflow = await app.saveWorkflow({
+      version: 1,
+      name: "Two agents in a round",
+      trigger,
+      budgetUsd: 1,
+      steps: [
+        {
+          id: "again",
+          kind: "loop",
+          maxRounds: 3,
+          body: [
+            {
+              id: "work",
+              kind: "agent",
+              profile: "worker",
+              environment: "Python",
+              instruction: "Work.",
+              result: SUMMARY_RESULT,
+            },
+            {
+              id: "check",
+              kind: "agent",
+              profile: "reviewer",
+              environment: "Python",
+              instruction: "Check.",
+              result: SUMMARY_RESULT,
+            },
+          ],
+          until: { equals: ["{{check.summary}}", "done"] },
+        },
+      ],
+    });
+    const { run } = await app.start(workflow.id, { input: { repo: REPO } });
+    await app.engine.advance(run.id);
+
+    // The first step of the round spends the whole budget: the second cannot be paid, whatever the loop would do after the round.
+    await endTurn(app, { agentResult: { summary: "Work." }, costUsd: 1 });
+
+    const state = await app.stateOf(run.id);
+    expect(rowsOf(state)).toEqual(["work#1:agent:succeeded"]);
+    expect(state.run).toMatchObject({
+      status: "failed",
+      errorCode: "budget_exhausted",
+      spentMicroUsd: 1_000_000,
+    });
+    expect(await app.counts()).toMatchObject({ jobs: 1, turns: 1 });
   });
 });

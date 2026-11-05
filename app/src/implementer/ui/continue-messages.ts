@@ -68,6 +68,8 @@ const DISCARD_SENTENCES: Record<DiscardReason, string> = {
     "The job queue does not accept this instruction (what it asks for is not valid any more), so it was not started. Check the choices and send it again.",
   instruction_unreadable:
     "The stored instruction could not be read, so it was dropped. Send it again.",
+  workflow_gave_up:
+    "A workflow step sent this instruction and gave up waiting for its turn, so it was dropped.",
 };
 
 /** The sentence for why a queued instruction did not start; an unknown word gets the general sentence. */

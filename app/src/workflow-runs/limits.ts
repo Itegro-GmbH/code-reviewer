@@ -19,7 +19,7 @@ export const RUNS_LISTED_MAX = 50;
 export const STEP_STALE_MS = 2 * 60 * 1000;
 /**
  * The most a connector may take for one call (#844): well under `STEP_STALE_MS`, so that a step still being worked on is never taken
- * for abandoned and run a second time while its action is still running. A connector of milestone 3b keeps to it (`docs/workflows.md`).
+ * for abandoned and run a second time while its action is still running. Every connector keeps to it (`docs/workflows.md`).
  */
 export const ACTION_TIMEOUT_MS = 60 * 1000;
 /** An agent step that has no job this long after it was written is given up (`agent_start_failed`). */

@@ -538,6 +538,33 @@ describe("a loop", () => {
     ]);
   });
 
+  // #846-T20
+  it("points previous in round three at the rows of round two, not at those of round one", () => {
+    const steps = [
+      start,
+      ...rounds(2),
+      done("implement"),
+      step("review", { status: "pending", hasJob: false }),
+    ];
+
+    const { contexts } = replay(nodes, steps);
+
+    // Rows: start 0, round one 1-2, round two 3-4, round three 5-6.
+    expect(contexts[1]).toMatchObject({ loopRound: 1, previous: {} });
+    expect(contexts[3]).toMatchObject({
+      loopRound: 2,
+      previous: { implement: 1, review: 2 },
+    });
+    expect(contexts[5]).toMatchObject({
+      loopRound: 3,
+      previous: { implement: 3, review: 4 },
+    });
+    expect(contexts[6]).toMatchObject({
+      loopRound: 3,
+      previous: { implement: 3, review: 4 },
+    });
+  });
+
   // #846-T17
   it("ends the run with condition_failed when until cannot be told", () => {
     expect(

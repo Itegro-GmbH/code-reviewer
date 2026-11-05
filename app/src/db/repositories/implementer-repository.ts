@@ -98,8 +98,13 @@ export const DISCARD_REASONS = [
   "request_invalid",
   /** The stored text of the instruction cannot be read. */
   "instruction_unreadable",
+  /** A workflow step (#846) sent it and gave up waiting for its turn, so the instruction must not start by itself later. */
+  "workflow_gave_up",
 ] as const;
 export type DiscardReason = (typeof DISCARD_REASONS)[number];
+
+/** `whileRunning` (#846): also discards while a turn of the session runs, which only the instruction of THAT request id (not null) can be. */
+export type DiscardOptions = { whileRunning?: boolean };
 
 export type DiscardedInstruction = {
   reason: DiscardReason;
@@ -304,6 +309,7 @@ export type ImplementerRepository = {
     sessionId: string,
     clientRequestId: string | null,
     reason: DiscardReason,
+    options?: DiscardOptions,
   ): Promise<StoredImplementerSession | undefined>;
   /**
    * #841: notes that a start of the queued instruction with this client request id was tried now, for the sweep's order and backoff
@@ -806,12 +812,14 @@ export function createImplementerRepository(
       });
     },
 
-    async discardQueued(sessionId, clientRequestId, reason) {
+    async discardQueued(sessionId, clientRequestId, reason, options) {
       return inTransaction(async (trx) => {
         const locked = await lockedSession(trx, sessionId);
+        const whileRunning =
+          options?.whileRunning === true && clientRequestId !== null;
         if (
           locked === undefined ||
-          locked.status !== "idle" ||
+          (locked.status !== "idle" && !whileRunning) ||
           locked.queued_instruction === null
         )
           return undefined;

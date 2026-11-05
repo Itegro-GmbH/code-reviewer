@@ -1977,3 +1977,96 @@ describe("the budget", () => {
     ]);
   });
 });
+
+describe("the branch an agent step starts from (#846)", () => {
+  const reviewer = (extra: Json): Json => ({
+    id: "look",
+    kind: "agent",
+    profile: "reviewer",
+    environment: "node",
+    session: "new",
+    instruction: "look",
+    result: {
+      type: "object",
+      required: ["verdict"],
+      properties: { verdict: { type: "string" } },
+    },
+    ...extra,
+  });
+  const after = (extra: Json): Json => withStep(reviewer(extra));
+
+  // #846-T64
+  it("takes a literal, an input of the trigger or the branch of an earlier agent step that may push", () => {
+    for (const branch of [
+      "release/1",
+      "{{work.branch}}",
+      "{{trigger.input.repo}}",
+    ])
+      expect(codes(after({ branch }))).toEqual([]);
+  });
+
+  // #846-T65
+  it("refuses a branch that is text an agent wrote, text around a reference or a value of another kind", () => {
+    const refused = (branch: unknown) => codes(after({ branch }));
+
+    expect(refused("{{work.summary}}")).toEqual([
+      ["/steps/1/branch", "target_from_untrusted_value"],
+    ]);
+    expect(refused("x/{{work.branch}}")).toEqual([
+      ["/steps/1/branch", "target_from_untrusted_value"],
+    ]);
+    expect(refused('{{work.branch | default "main"}}')).toEqual([]);
+    expect(refused(7)).toEqual([["/steps/1/branch", "wrong_type"]]);
+    expect(refused("  ")).toEqual([["/steps/1/branch", "invalid_value"]]);
+  });
+
+  // #846-T66
+  it("takes no branch of a step that may not push, nor of one that is not certain to have run", () => {
+    const gate = (inner: Json): Json => ({
+      id: "gate",
+      kind: "if",
+      when: { notEmpty: "{{trigger.input.repo}}" },
+      then: [inner],
+    });
+    const pushing = (id: string): Json => ({
+      id,
+      kind: "agent",
+      profile: "implementer",
+      environment: "node",
+      instruction: "go",
+    });
+    const read = withStep(reviewer({ id: "first" }));
+    const readThenAsk = change(read, (d) =>
+      agentSteps(d).push(
+        reviewer({ id: "second", branch: "{{first.branch}}" }),
+      ),
+    );
+    const branched = change(withStep(gate(pushing("inner"))), (d) =>
+      agentSteps(d).push(reviewer({ id: "late", branch: "{{inner.branch}}" })),
+    );
+
+    expect(codes(readThenAsk)).toEqual([
+      ["/steps/2/branch", "reference_fact_unavailable"],
+    ]);
+    expect(codes(branched)).toEqual([
+      ["/steps/2/branch", "reference_not_in_scope"],
+    ]);
+  });
+
+  // #846-T67
+  it("is not for a step that goes on in a session: that session keeps its branch", () => {
+    expect(
+      codes(
+        withStep({
+          id: "more",
+          kind: "agent",
+          profile: "implementer",
+          environment: "node",
+          instruction: "go on",
+          session: { continue: "work" },
+          branch: "{{work.branch}}",
+        }),
+      ),
+    ).toEqual([["/steps/1/branch", "session_target_invalid"]]);
+  });
+});

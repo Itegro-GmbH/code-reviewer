@@ -1344,7 +1344,7 @@ export interface WorkflowRunsTable {
   finished_at: string | null;
 }
 
-/** One step of a run (#844), in the order the steps run. `status` is `pending`, `running`, `succeeded` or `failed`. */
+/** One step of a run (#844), in the order the steps run. `status` is `pending`, `running`, `succeeded`, `failed` or `skipped` (#846). */
 export interface WorkflowStepRunsTable {
   id: string;
   run_id: string;

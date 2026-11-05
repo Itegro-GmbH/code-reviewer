@@ -48,7 +48,7 @@ profile, becomes the task's [result schema](implementer.md#the-finish-tool): the
 
 This is the reviewer of the workflow ["Issue to PR"](workflows.md#the-first-workflow), and it is data like any other: created through the API, nothing is seeded. It may not push
 (`canPush: false`: Control never pushes for it, and a step that runs it yields no `branch` or `commits`), it has a cost limit of its own, and its default result is a list of findings, so
-a review step needs no `result` of its own. A finding is a `bug`, a `risk` or a `nit`, with a name and a description; an empty list means the reviewer found nothing, which is what ends
+a review step may leave out its `result` and take this one (the example of the workflow declares it anyway, so that it validates and reads without the profile at hand). A finding is a `bug`, a `risk` or a `nit`, with a name and a description; an empty list means the reviewer found nothing, which is what ends
 the loop of the workflow.
 
 | Field | Needed | What |

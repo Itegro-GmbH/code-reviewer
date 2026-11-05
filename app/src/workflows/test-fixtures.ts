@@ -63,6 +63,7 @@ export function issueToPr(): Json {
             profile: "reviewer@1",
             environment: "node",
             session: "new",
+            branch: "{{implement.branch}}",
             instruction:
               "Review branch {{implement.branch}} against the issue.",
             result: {

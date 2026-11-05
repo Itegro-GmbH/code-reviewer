@@ -46,7 +46,13 @@ import {
   type StepInfo,
   type Use,
 } from "./scope.ts";
-import { enumOf, NUMBER, objectOf, type FieldType } from "./value-type.ts";
+import {
+  enumOf,
+  NUMBER,
+  objectOf,
+  STRING,
+  type FieldType,
+} from "./value-type.ts";
 
 export const SUPPORTED_KINDS = ["agent", "action", "if", "loop"] as const;
 /** Named in the format so a document can use them later; version 1 refuses them. */
@@ -293,6 +299,7 @@ const AGENT_KEYS = [
   "environment",
   "instruction",
   "session",
+  "branch",
   "result",
 ];
 
@@ -640,6 +647,53 @@ function checkSession(
       );
 }
 
+/**
+ * `branch`: the branch a session of its own starts from. It decides what the agent works on, so it is a target (a literal, a trigger
+ * value, or the branch an earlier agent step made), never text an agent wrote. A step that goes on in a session keeps the branch of
+ * that session, so it names none.
+ */
+function checkStartBranch(
+  node: Record<string, unknown>,
+  path: string,
+  c: Checker,
+  env: Env,
+  state: StepState,
+): void {
+  const value = node.branch;
+  if (value === undefined) return;
+  const where = pointer(path, "branch");
+  if (typeof value !== "string") {
+    c.report(
+      issue(
+        where,
+        "wrong_type",
+        `'branch' must be a text, not ${jsonTypeName(value)}.`,
+      ),
+    );
+    return;
+  }
+  if (value.trim() === "")
+    c.report(
+      issue(
+        where,
+        "invalid_value",
+        "'branch' is the name of a branch, not an empty text.",
+      ),
+    );
+  if (isRecord(node.session))
+    c.report(
+      issue(
+        where,
+        "session_target_invalid",
+        "A step that goes on in a session (session.continue) works on the branch of that session, so it takes no 'branch'. Use 'branch' on a step that starts a session of its own.",
+      ),
+    );
+  checkInput(value, STRING, where, c, reachOf(env, where, state), {
+    input: "branch",
+    roots: ["input", "defaultBranch", "branch"],
+  });
+}
+
 function checkAgent(
   node: Record<string, unknown>,
   path: string,
@@ -659,6 +713,7 @@ function checkAgent(
   checkRunnerRules(node, path, c);
   checkInstruction(node, path, c, env, state);
   checkSession(node, path, c, env, state);
+  checkStartBranch(node, path, c, env, state);
   if (node.result === undefined) return;
   const where = pointer(path, "result");
   const checked = validateResultSchema(node.result, where);
