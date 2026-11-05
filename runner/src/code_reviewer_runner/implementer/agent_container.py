@@ -611,6 +611,37 @@ class AgentContainer:
         )
         return CommandOutcome(done.returncode, done.stdout, unanswered=done.unanswered)
 
+    def run_streaming(
+        self,
+        argv: list[str],
+        environment: Mapping[str, str],
+        *,
+        user: str,
+        stdin: bytes,
+        timeout: float,
+        consume: Callable[[bytes], None],
+    ) -> CommandOutcome:
+        """Run a command in the agent's repository as `user` (`uid:gid`), with `stdin` as its
+        input, and hand its standard output to `consume` as it comes (Claude Code, #856: one
+        process per message, one JSON line per event). The command is a constant of the runner;
+        the prompt is the standard input and in no argument. The answer is never raised on."""
+        container = self._container
+        if container is None:
+            return CommandOutcome(255, "", unanswered=True)
+        done = run_exec(
+            self._api,
+            container,
+            argv,
+            env=environment,
+            workdir=AGENT_REPO,
+            user=user,
+            stdin=stdin,
+            timeout=timeout,
+            consume=consume,
+            name="the agent's process",
+        )
+        return CommandOutcome(done.returncode, done.stdout, unanswered=done.unanswered)
+
     def start_engine(self, argv: list[str], environment: Mapping[str, str]) -> str:
         """Start the engine as a detached exec and open the tunnel to its port. Returns the address
         Control reaches it at."""
