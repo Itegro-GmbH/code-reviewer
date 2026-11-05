@@ -42,7 +42,8 @@ upper bound of its elements; a page of millions of tiny strings is refused witho
 the walk of the parsed document counts elements and depth (`MAX_NODES`, `MAX_DEPTH`); a transcript
 never comes near them (about 20 bytes an element, nesting of about ten). The session's own record
 is held to `MAX_INFO_BYTES` and counted the same way. A comma inside a string counts too, so
-dense data (a page of mostly commas) can be `too_large` from about 16 MB on; a known limit.
+dense data can be `too_large` early: from about 2 MB for pure commas, about 16 MB at one
+comma per 8 bytes; a known limit.
 
 **What the redaction costs.** The redactor of the turn also knows the *shapes* of secrets
 (`sk-` followed by 20 or more characters, `Bearer <token>`), so it rewrites an ordinary path or word
