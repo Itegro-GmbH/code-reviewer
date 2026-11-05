@@ -10,7 +10,7 @@ import type { Database } from "../schema.ts";
 import { migrationProvider } from "./index.ts";
 import { createEmptyTestDatabase } from "../../test-support/test-database.ts";
 
-const THIS = "20261105130000_add_runner_environments";
+const THIS = "20261105140000_add_runner_environments";
 const T = "2026-11-05T08:00:00.000Z";
 
 function upTo(include: (name: string) => boolean): MigrationProvider {

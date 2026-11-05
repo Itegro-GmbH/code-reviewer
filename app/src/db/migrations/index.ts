@@ -83,7 +83,7 @@ import { migration as createImplementerSessionSnapshots } from "./20261105090000
 import { migration as createWorkflows } from "./20261104140000_create_workflows.ts";
 import { migration as createProfiles } from "./20261104150000_create_profiles.ts";
 import { migration as createRunners } from "./20261105120000_create_runners.ts";
-import { migration as addRunnerEnvironments } from "./20261105130000_add_runner_environments.ts";
+import { migration as addRunnerEnvironments } from "./20261105140000_add_runner_environments.ts";
 import { migration as addImplementerTurnProfile } from "./20261104160000_add_implementer_turn_profile.ts";
 import { migration as addImplementerTurnResult } from "./20261105100000_add_implementer_turn_result.ts";
 import { migration as addImplementerTurnEnvironment } from "./20261102150000_add_implementer_turn_environment.ts";
@@ -196,7 +196,7 @@ const migrations: Record<string, Migration> = {
     createImplementerSessionSnapshots,
   "20261105100000_add_implementer_turn_result": addImplementerTurnResult,
   "20261105120000_create_runners": createRunners,
-  "20261105130000_add_runner_environments": addRunnerEnvironments,
+  "20261105140000_add_runner_environments": addRunnerEnvironments,
 };
 
 export const migrationProvider: MigrationProvider = {
