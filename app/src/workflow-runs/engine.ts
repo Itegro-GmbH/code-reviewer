@@ -426,7 +426,11 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       Math.min(step.capMicroUsd ?? 0, MICRO_USD_COLUMN_MAX),
     );
     const cost = Math.min(outcome.costMicroUsd, MICRO_USD_COLUMN_MAX);
-    if (outcome.costBasis !== "reported")
+    // A subscription turn has no cost to report (#856): its estimate is on the page, nothing is left to watch.
+    if (
+      outcome.costBasis !== "reported" &&
+      outcome.costBasis !== "subscription"
+    )
       log(
         `[workflow-runs] cost not reported run=${step.runId} step=${step.stepId} charged=${outcome.costBasis}`,
       );

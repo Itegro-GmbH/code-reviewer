@@ -86,6 +86,8 @@ export type TurnReport = {
   ok?: boolean;
   errorCode?: string;
   costUsd?: number | null;
+  /** A turn on a customer device's login (#856): no cost, the basis `subscription` and the estimate at API prices (null: none). */
+  subscription?: { estimatedCostUsd: number | null };
   /** The token counts of the usage; default 1 and 1. */
   tokens?: { prompt: number; completion: number };
   /** What the finish tool stored; none when the turn has no schema or the agent never called it. */
@@ -270,8 +272,17 @@ export async function startEngineHarness(
                 (report.tokens?.prompt ?? 1) + (report.tokens?.completion ?? 1),
               aiCalls: 1,
               fallbackUsed: false,
-              costUsd: report.costUsd === null ? null : (report.costUsd ?? 0.5),
+              costUsd:
+                report.subscription !== undefined || report.costUsd === null
+                  ? null
+                  : (report.costUsd ?? 0.5),
               stoppedEarly: null,
+              ...(report.subscription === undefined
+                ? {}
+                : {
+                    costBasis: "subscription",
+                    estimatedCostUsd: report.subscription.estimatedCostUsd,
+                  }),
             },
       implementer: {
         baseCommit: sha("a"),
