@@ -613,6 +613,19 @@ export function createRunnerJobsRepository(
     );
   }
 
+  /** #854: the same for the `jobs as served` row of a subquery. */
+  function servedIsARunnerTurn(
+    eb: ExpressionBuilder<Database, "jobs" | "served">,
+  ) {
+    return eb.exists(
+      eb
+        .selectFrom("implementer_turns")
+        .select("implementer_turns.id")
+        .whereRef("implementer_turns.job_id", "=", "served.id")
+        .where("implementer_turns.environment_kind", "=", "runner"),
+    );
+  }
+
   /**
    * #854: a turn of a runner environment waits for a runner of its workspace that has its labels. One that no runner took within the
    * deadline (`noRunnerAvailableMs`, 30 minutes by default) is cancelled with the stable code `no_runner_available`: free, without an
@@ -700,6 +713,8 @@ export function createRunnerJobsRepository(
                 .selectFrom("jobs as served")
                 .select("served.id")
                 .whereRef("served.review_kind", "=", "jobs.review_kind")
+                // A turn of a customer's runner is no sign of the pool of hosted engines this pass asks about.
+                .where((served) => served.not(servedIsARunnerTurn(served)))
                 .where((served) =>
                   served.or([
                     // Running: the passes of `expire` ran before, so a lapsed lease or a spent runtime is not `running` any more.
@@ -837,6 +852,8 @@ export function createRunnerJobsRepository(
         // Due for that long, and queued (again) for that long: a requeue changes `updated_at`, not `run_after`.
         eb("run_after", "<=", waitedBefore),
         eb("updated_at", "<=", waitedBefore),
+        // A turn of a runner environment is not dispatched to a VM: it waits for a runner and ends as `no_runner_available`.
+        notARunnerTurn(eb),
         eb.not(
           eb.exists(
             eb
