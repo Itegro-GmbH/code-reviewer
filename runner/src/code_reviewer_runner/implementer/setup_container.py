@@ -404,10 +404,6 @@ class SetupContainer:
             if outcome != OUTCOME_OK:
                 self._clean()
                 return self._ended_run(outcome, why, tail, begun, started, finished, code=code)
-            # The script is over and the memory it could take is back: the guard must not kill the
-            # container under `docker commit`, which reads its layer and needs memory of its own.
-            if self._guard is not None:
-                self._guard.close()
             try:
                 image = self._save(container, free_bytes)
             except _NoRoom as reason:
@@ -728,15 +724,33 @@ class SetupContainer:
                 container, grace=STOP_GRACE_SECONDS, timeout=STOP_WAIT_SECONDS + 30.0
             )
         elif not self._ended.wait(self._seams.docker_stop_seconds):
+            # A guard that tripped is why it did not stop in time (its kill may have failed).
+            self._refuse_if_the_vm_ran_out_of_memory()
             raise _Unavailable(
                 "the container's Docker did not stop in time, so its images are not kept"
             )
         if not self._ended.wait(STOP_WAIT_SECONDS):
+            self._refuse_if_the_vm_ran_out_of_memory()
             raise _Unavailable("the container did not stop, so its file system is not kept")
+        # The container is gone and the memory it could take is back: the guard must not kill
+        # anything under `docker commit`, which reads its layer and needs memory of its own. Until
+        # now it watched, because a process the script left behind runs until the container stops.
+        if self._guard is not None:
+            self._guard.close()
+        self._refuse_if_the_vm_ran_out_of_memory()
         self._check_room(container, free_bytes)
         return api.commit_container(
             container, SETUP_IMAGE_REPOSITORY, SETUP_IMAGE_TAG, timeout=self._seams.commit_seconds
         )
+
+    def _refuse_if_the_vm_ran_out_of_memory(self) -> None:
+        """The guard's kill came while the setup was being finished: what the image would hold is
+        not what the script left, whatever else went wrong after it."""
+        if self._guard is not None and self._guard.tripped_at is not None:
+            raise _Unavailable(
+                f"{REASON_VM_MEMORY}: the VM was running out of memory while the setup was "
+                "being finished, so its result is not kept"
+            )
 
     def _check_room(self, container: str, free_bytes: Callable[[], int | None]) -> None:
         """The commit writes the container's file system into the VM's disk; a disk the script

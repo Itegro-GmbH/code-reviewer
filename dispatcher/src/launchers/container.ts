@@ -136,6 +136,15 @@ export const WORK_VOLUME_PATH = "/work";
 const WORK_VOLUME_OPTIONS = ["rw", "nosuid", "nodev"] as const;
 const WORK_VOLUME_SOURCE = "named-volume";
 const IMPLEMENTER_PIDS_LIMIT = 2048;
+/**
+ * The OOM score of the Implementer's Control container (#827): -1000, which makes its processes exempt from the OOM killer (the
+ * kernel's `oom_badness` returns the lowest value for them), so that the VM's kernel never picks Control over the agent's container
+ * (score 1000, which root there can lower to -999 but not to -1000). The exemption holds inside Control's own `--memory` limit too:
+ * a Control that grows without a bound is not killed at the limit, so Control bounds itself (`ControlMemoryWatch` in the runner,
+ * which ends the turn at 90% of the container's memory, `docs/implementer.md`). Only this profile: a review's container has none of
+ * this and its flags stay as they were.
+ */
+export const IMPLEMENTER_OOM_SCORE_ADJ = -1000;
 /** The VM's Docker socket and where the Implementer's Control container sees it (the contract's `DockerSocket`). */
 export const DOCKER_SOCKET_SOURCE = "/var/run/docker.sock";
 export const DOCKER_SOCKET_TARGET = "/run/docker.sock";
@@ -584,6 +593,9 @@ export function renderDockerRunArguments(
           "--mount",
           `type=bind,source=${hardened.dockerSocket.source},target=${hardened.dockerSocket.target},readonly`,
         ]
+      : []),
+    ...("dockerSocket" in hardened
+      ? ["--oom-score-adj", String(IMPLEMENTER_OOM_SCORE_ADJ)]
       : []),
     "--memory",
     memory.limit,

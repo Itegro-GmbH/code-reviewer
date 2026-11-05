@@ -15,6 +15,7 @@ from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar
 
 import pytest
@@ -362,6 +363,131 @@ def test_the_watchdog_reports_what_the_run_used_up_to_then(monkeypatch: pytest.M
     assert "errorReason" not in result  # the counters were read: nothing is unknown
     assert result["usage"]["aiCalls"] == 1
     assert result["usage"]["costUsd"] == 0.01
+
+
+# #827-S1: Control that holds 90% of its container's memory ends its own turn, free when the model
+# was not billed and charged when it was
+@pytest.mark.parametrize("billed", [False, True])
+def test_control_that_holds_its_containers_memory_ends_the_turn_by_its_class(
+    monkeypatch: pytest.MonkeyPatch, billed: bool
+) -> None:
+    unit_costs = UnitCosts(input_usd_per_mtok=Decimal("0.5"), output_usd_per_mtok=Decimal(2))
+    ledger = BudgetLedger(DynamicLimits(), unit_costs=unit_costs)
+    if billed:
+        reservation = ledger.reserve_call("x" * 400, output_tokens=10)
+        ledger.settle_call(
+            reservation, prompt_tokens=100, completion_tokens=10, cost=Decimal("0.01")
+        )
+    probe = runner.UsageProbe()
+    probe.watch(lambda: ledger.usage("vendor/model"))
+    out = io.StringIO()
+    channel = runner._ResultChannel(out)  # pyright: ignore[reportPrivateUsage]
+    ended: list[int] = []
+    monkeypatch.setattr(runner.os, "_exit", ended.append)
+
+    runner._end_for_control_memory(  # pyright: ignore[reportPrivateUsage]
+        channel, time.monotonic(), ("s3cret",), probe, 700 * 1024 * 1024, 768 * 1024 * 1024
+    )
+
+    result = json.loads(out.getvalue())
+    assert ended == [1]
+    assert result["errorCode"] == ("agent_gave_up" if billed else "runner_error")
+    assert (result["usage"] is not None) is billed
+    assert "control_memory: " in result["logTail"]
+    assert "700 of 768 MiB" in result["logTail"]
+
+
+# #827-S1: a trip that comes after the turn finished (the watch is closed) must not print over the
+# result of the finished turn nor end the process
+def test_a_trip_after_the_turn_finished_prints_nothing_and_does_not_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = io.StringIO()
+    channel = runner._ResultChannel(out)  # pyright: ignore[reportPrivateUsage]
+    ended: list[int] = []
+    monkeypatch.setattr(runner.os, "_exit", ended.append)
+
+    runner._end_for_control_memory(  # pyright: ignore[reportPrivateUsage]
+        channel,
+        time.monotonic(),
+        (),
+        None,
+        700 * 1024 * 1024,
+        768 * 1024 * 1024,
+        finished=lambda: True,
+    )
+
+    assert out.getvalue() == "" and ended == []
+    later = runner._failure(ErrorCode.RUNNER_ERROR, "x", 0.0, None)  # pyright: ignore[reportPrivateUsage]
+    assert channel.write(later) is not None, "the line is still free for the turn's own result"
+
+
+class TripsAtOnce:
+    """Stands in for `ControlMemoryWatch`: the container is full the moment it starts."""
+
+    def __init__(self, on_high: Callable[[int, int], None], *args: object, **options: object):
+        self._on_high = on_high
+        self.closed = False
+
+    def start(self) -> None:
+        self._on_high(700 * 1024 * 1024, 768 * 1024 * 1024)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class CannotStart(TripsAtOnce):
+    def start(self) -> None:
+        raise RuntimeError("can't start new thread")
+
+
+def no_seam(*args: object, **options: object) -> None:
+    return None
+
+
+def run_the_implementer(
+    monkeypatch: pytest.MonkeyPatch, watch: type[TripsAtOnce]
+) -> tuple[JobResult, io.StringIO, list[int]]:
+    out = io.StringIO()
+    channel = runner._ResultChannel(out)  # pyright: ignore[reportPrivateUsage]
+    ended: list[int] = []
+    monkeypatch.setattr(runner.os, "_exit", ended.append)
+    monkeypatch.setattr(runner, "ControlMemoryWatch", watch)
+    monkeypatch.setattr(runner, "lease_check_from_environment", no_seam)
+    monkeypatch.setattr(runner, "step_pump_from_environment", no_seam)
+
+    def turn(*args: object, **options: object) -> JobResult:
+        raise RuntimeError("the turn did not stop by itself")
+
+    monkeypatch.setattr(runner, "run_implementer_job", turn)
+    job = SimpleNamespace(secrets=("s3cret",))
+    result, _ = runner._run_implementer(  # pyright: ignore[reportPrivateUsage]
+        job,  # type: ignore[arg-type]
+        channel,
+        time.monotonic(),
+        {},
+    )
+    return result, out, ended
+
+
+# #827-S1
+def test_the_implementer_ends_its_turn_with_the_result_line_when_the_watch_trips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, out, ended = run_the_implementer(monkeypatch, TripsAtOnce)
+
+    line = json.loads(out.getvalue())
+    assert ended == [1], "the process exits once the line is out"
+    assert line["errorCode"] == "runner_error"
+    assert "control_memory: " in line["logTail"] and "700 of 768 MiB" in line["logTail"]
+
+
+# #827-S1
+def test_a_watch_that_cannot_start_still_yields_a_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    result, out, ended = run_the_implementer(monkeypatch, CannotStart)
+
+    assert result.error_code is ErrorCode.RUNNER_ERROR
+    assert out.getvalue() == "" and ended == []
 
 
 class WaitsForTheDeadline(ScriptedEngine):
