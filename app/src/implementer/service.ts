@@ -22,6 +22,7 @@ import { JobQueueError } from "../jobs/errors.ts";
 import type { EnqueueImplementerTurnResult } from "../jobs/job-types.ts";
 import type { JobQueue } from "../jobs/job-queue.ts";
 import { branchConflict } from "./branch-name.ts";
+import { createRunCanceller, type RunCanceller } from "./cancel.ts";
 import { ImplementerError, type UnwritableReason } from "./errors.ts";
 import {
   BRANCH_CONFLICT,
@@ -68,21 +69,22 @@ export type StartedTask = {
   created: boolean;
 };
 
-export type ImplementerService = FollowUps & {
-  /** The active repositories of the workspace whose integration is active (a project is not needed), by name. */
-  listRepositories(): Promise<{ repositories: RepositoryChoice[] }>;
-  listBranches(repositoryId: string): Promise<BranchChoices>;
-  listModels(): Promise<ModelOptions>;
-  /**
-   * Starts a task. `user` is the signed-in person: `id` is recorded as the creator of the session, `githubLogin` as the actor
-   * of the job. `input` is the body as received and is checked here. Throws an `ImplementerError`.
-   */
-  startTask(
-    user: { id: string; githubLogin: string },
-    input: unknown,
-    options?: StartTaskOptions,
-  ): Promise<StartedTask>;
-};
+export type ImplementerService = FollowUps &
+  RunCanceller & {
+    /** The active repositories of the workspace whose integration is active (a project is not needed), by name. */
+    listRepositories(): Promise<{ repositories: RepositoryChoice[] }>;
+    listBranches(repositoryId: string): Promise<BranchChoices>;
+    listModels(): Promise<ModelOptions>;
+    /**
+     * Starts a task. `user` is the signed-in person: `id` is recorded as the creator of the session, `githubLogin` as the actor
+     * of the job. `input` is the body as received and is checked here. Throws an `ImplementerError`.
+     */
+    startTask(
+      user: { id: string; githubLogin: string },
+      input: unknown,
+      options?: StartTaskOptions,
+    ): Promise<StartedTask>;
+  };
 
 /**
  * What only code inside the app can ask for, never a request body (#844): the workflow engine starts a step with the rest of the
@@ -105,7 +107,10 @@ export type ImplementerServiceDependencies = FollowUpDependencies & {
   environments: Pick<ImplementerEnvironmentsRepository, "get">;
   /** The workspace's profiles (#843): a task may run with one, whose version is copied into the turn. */
   profiles: Pick<ProfilesRepository, "findByName">;
-  queue: Pick<JobQueue, "enqueueImplementerTurn" | "findImplementerTurn">;
+  queue: Pick<
+    JobQueue,
+    "enqueueImplementerTurn" | "findImplementerTurn" | "get" | "requestCancel"
+  >;
   /** The operator's maximum cost per turn in whole US cents, read for each call. */
   operatorCostLimitCents(): Promise<number>;
   /** One line per started task; never carries the instruction, a model or a token. */
@@ -165,9 +170,14 @@ export function createImplementerService(
 ): ImplementerService {
   const log = deps.log ?? ((line) => console.info(line));
   const followUps = createFollowUps(deps);
+  const canceller = createRunCanceller({
+    queue: deps.queue,
+    ...(deps.log === undefined ? {} : { log: deps.log }),
+  });
 
   return {
     ...followUps,
+    ...canceller,
 
     async listRepositories() {
       const integrations = new Map(

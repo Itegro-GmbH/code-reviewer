@@ -30,6 +30,8 @@ export type EndedTurn = {
   /** The final status of the job. */
   jobStatus: "succeeded" | "failed" | "superseded" | "cancelled";
   jobErrorCode: string | null;
+  /** The job was claimed by a runner (it has a claim time). A job that ended before that never ran. */
+  jobClaimed: boolean;
   /** What the runner reported, as stored. */
   jobResult: unknown;
   turn: StoredImplementerTurn;
@@ -132,6 +134,20 @@ function pushFacts(ended: EndedTurn): Record<string, unknown> {
 }
 
 /**
+ * #891: the codes with which a claimed job a member stopped ends when its Worker never got going: it could not be started, or it was
+ * given back before it had the input of the job (the release reasons of the claim, `CLAIM_RELEASE_REASONS`, but `worker_exited`, after
+ * which the turn may have run). Billing frees these; the run's budget does too.
+ */
+const NEVER_RAN_CODES: ReadonlySet<string> = new Set([
+  "launch_failed",
+  "claim_failed",
+  "git_access_unavailable",
+  "pull_request_unavailable",
+  "price_check_failed",
+  "provider_pin_check_failed",
+]);
+
+/**
  * `unknownCostMicroUsd` is the cap the turn ran under. A turn whose cost the runner did not report is charged by its token counts at
  * the catalog price (never above the cap) when both are there, and at the whole cap when not, so that a run whose cost cannot be seen
  * never spends more than its budget.
@@ -147,6 +163,23 @@ export function outcomeOfTurn(
       code: "no_runner_available",
       message:
         "No runner of this workspace with the labels of the environment took the turn in time. Start a runner with these labels and run the workflow again.",
+      costMicroUsd: 0,
+      costBasis: "reported",
+    };
+  // #891: a turn a member stopped that never ran (no runner took it, or its Worker could not be started) used no model: it is booked
+  // at no cost, not at the cap. One that ran and reported nothing may have used it, and falls through to the cap below.
+  if (
+    ended.jobStatus === "cancelled" &&
+    (!ended.jobClaimed ||
+      (ended.jobErrorCode !== null &&
+        NEVER_RAN_CODES.has(ended.jobErrorCode))) &&
+    costOfResult(ended.jobResult) === null
+  )
+    return {
+      ok: false,
+      code: ended.jobErrorCode ?? "cancelled",
+      message: "The agent's task was stopped because the run was cancelled.",
+      detail: `status=${ended.jobStatus} error=${ended.jobErrorCode ?? "none"}`,
       costMicroUsd: 0,
       costBasis: "reported",
     };
@@ -168,7 +201,11 @@ export function outcomeOfTurn(
     return {
       ok: false,
       code: ended.jobErrorCode ?? "job_failed",
-      message: "The agent's task ended without success.",
+      message:
+        // #891: stopped by a member; what it had pushed stays on its branch.
+        ended.jobErrorCode === "cancelled"
+          ? "The agent's task was stopped because the run was cancelled."
+          : "The agent's task ended without success.",
       detail: `status=${ended.jobStatus} error=${ended.jobErrorCode ?? "none"}`,
       costMicroUsd,
       costBasis,

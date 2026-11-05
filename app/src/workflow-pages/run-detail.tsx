@@ -7,7 +7,8 @@
 // ended it stops. Everything that came from outside (the values an agent returned, what an action got from GitHub) is rendered as
 // text, and a link is made only to an address of the run's own repository on github.com (`github-link.ts`).
 import Link from "next/link";
-import { useId, useMemo, type ReactNode } from "react";
+import { useId, useMemo, useState, type ReactNode } from "react";
+import { Button } from "../components/button.tsx";
 import { DescriptionList } from "../components/description-list.tsx";
 import { InfoHint } from "../components/info-hint.tsx";
 import { StatusRegion } from "../components/status-region.tsx";
@@ -37,6 +38,7 @@ import {
   COST_NOT_RUN_COPY,
   describeRunFailure,
   describeRunPollFailure,
+  describeStartFailure,
   describeStepFailure,
   PAGE_COPY,
   STEP_KIND_COPY,
@@ -370,6 +372,75 @@ function Step({
   );
 }
 
+/**
+ * Stops a run that runs (#891). The button asks the route; the run keeps running until its agent has stopped, so a run that was asked
+ * (here or elsewhere: `cancelRequestedAt`) shows that it is stopping instead of the button. The page's own polling shows the end.
+ */
+function CancelControl({
+  run,
+  requested,
+  workflowId,
+  api,
+  onAsked,
+}: {
+  run: RunView;
+  /** The stop was asked for, by anyone (the run says so) or by this page just now. */
+  requested: boolean;
+  workflowId: string;
+  api: WorkflowRunsApi;
+  onAsked: () => void;
+}) {
+  const product = useProductIdentity();
+  const [pending, setPending] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  if (run.status !== "running") return null;
+  if (requested)
+    return (
+      <p
+        data-slot="run-cancel-requested"
+        className="text-sm text-muted-foreground"
+        role="status"
+      >
+        {PAGE_COPY.cancelRequested}
+      </p>
+    );
+  async function cancel() {
+    setPending(true);
+    setProblem(null);
+    const result = await api.cancel(workflowId, run.id);
+    setPending(false);
+    if (result.ok) onAsked();
+    else setProblem(describeStartFailure(product, result));
+  }
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          type="button"
+          variant="secondary"
+          loading={pending}
+          loadingLabel={PAGE_COPY.cancelling}
+          onClick={() => void cancel()}
+        >
+          {PAGE_COPY.cancelRun}
+        </Button>
+        <span className="text-sm text-muted-foreground">
+          {PAGE_COPY.cancelHint}
+        </span>
+      </div>
+      {problem === null ? null : (
+        <p
+          data-slot="run-cancel-failure"
+          role="alert"
+          className="text-sm text-destructive"
+        >
+          {problem}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function WorkflowRunDetail({
   workspaceSlug,
   workflowId,
@@ -399,6 +470,8 @@ export function WorkflowRunDetail({
     idleIntervalMs: null,
   });
   const { run } = data;
+  // A stop this page asked for shows at once; the run says so itself from the next poll on.
+  const [askedFor, setAskedFor] = useState<string | null>(null);
   const repository = repositoryOfRun(run);
   const failure = describeRunFailure(run.errorCode);
   return (
@@ -454,6 +527,13 @@ export function WorkflowRunDetail({
                 ]),
             { term: PAGE_COPY.runBaseBranch, description: run.baseBranch },
           ]}
+        />
+        <CancelControl
+          run={run}
+          requested={run.cancelRequestedAt !== null || askedFor === run.id}
+          workflowId={workflowId}
+          api={api}
+          onAsked={() => setAskedFor(run.id)}
         />
       </Section>
       <Budget run={run} />

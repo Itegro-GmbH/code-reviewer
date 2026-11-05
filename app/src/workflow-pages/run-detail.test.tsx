@@ -44,7 +44,10 @@ function apiAnswering(answers: RequestResult<{ run: RunView }>[]) {
   return fake as unknown as WorkflowRunsApi & { run: typeof fake.run };
 }
 
-function renderRun(value: RunView, api = apiAnswering([])) {
+function renderRun<T extends WorkflowRunsApi>(
+  value: RunView,
+  api: T = apiAnswering([]) as unknown as T,
+) {
   const view = render(
     <WorkflowRunDetail
       workspaceSlug="acme"
@@ -678,5 +681,107 @@ describe("while the run runs", () => {
       await vi.advanceTimersByTimeAsync(WORKFLOW_RUN_POLL_MS * 10);
     });
     expect(api.run).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("stopping a run", () => {
+  const cancelling = (
+    answers: RequestResult<{ run: RunView; outcome: string }>[],
+  ) => {
+    const cancel = vi.fn(
+      async () =>
+        answers.shift() ??
+        ({
+          ok: false,
+          status: 500,
+          code: "UNEXPECTED_RESPONSE",
+          issues: [],
+        } as RequestResult<{ run: RunView; outcome: string }>),
+    );
+    return {
+      run: vi.fn(async () => failure("UNEXPECTED_RESPONSE")),
+      cancel,
+    } as unknown as WorkflowRunsApi & { cancel: typeof cancel };
+  };
+
+  // #891-T60
+  it("offers to cancel a run that runs, asks the route and says the run is stopping", async () => {
+    const api = cancelling([
+      {
+        ok: true,
+        data: {
+          run: run({ cancelRequestedAt: "2026-11-05T10:03:00.000Z" }),
+          outcome: "requested",
+        },
+      },
+    ]);
+    const { container } = renderRun(run(), api);
+
+    const button = screen.getByRole("button", { name: "Cancel run" });
+    await act(async () => {
+      button.click();
+    });
+
+    expect(api.cancel).toHaveBeenCalledWith("wf-1", "run-1");
+    expect(screen.queryByRole("button", { name: "Cancel run" })).toBeNull();
+    expect(
+      container.querySelector("[data-slot=run-cancel-requested]")?.textContent,
+    ).toContain("stopping");
+  });
+
+  // #891-T60
+  it("shows a run that is already stopping as stopping, without the button", () => {
+    const { container } = renderRun(
+      run({ cancelRequestedAt: "2026-11-05T10:03:00.000Z" }),
+    );
+
+    expect(screen.queryByRole("button", { name: "Cancel run" })).toBeNull();
+    expect(
+      container.querySelector("[data-slot=run-cancel-requested]"),
+    ).not.toBeNull();
+  });
+
+  // #891-T61
+  it("has no button for a run that has ended, and shows a cancelled run in words", () => {
+    const { container } = renderRun(
+      run({
+        status: "cancelled",
+        cancelRequestedAt: "2026-11-05T10:03:00.000Z",
+        finishedAt: "2026-11-05T10:04:00.000Z",
+        steps: [
+          step({
+            status: "failed",
+            errorCode: "cancelled",
+            output: null,
+            finishedAt: "2026-11-05T10:04:00.000Z",
+          }),
+        ],
+      }),
+    );
+
+    expect(screen.queryByRole("button", { name: "Cancel run" })).toBeNull();
+    expect(screen.getAllByText("Cancelled").length).toBeGreaterThan(0);
+    expect(container.querySelector("[data-slot=run-failure]")).toBeNull();
+    expect(
+      container.querySelector("[data-slot=step-failure]")?.textContent,
+    ).toContain("stopped the run");
+    expect(container.textContent).not.toContain("cancelled");
+  });
+
+  // #891-T62
+  it("says why when the stop could not be asked for, and keeps the button", async () => {
+    const api = cancelling([
+      { ok: false, status: 404, code: "WORKFLOW_RUN_NOT_FOUND", issues: [] },
+    ]);
+    const { container } = renderRun(run(), api);
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Cancel run" }).click();
+    });
+
+    expect(
+      container.querySelector("[data-slot=run-cancel-failure]")?.textContent,
+    ).toContain("no longer exists");
+    expect(screen.getByRole("button", { name: "Cancel run" })).toBeTruthy();
   });
 });

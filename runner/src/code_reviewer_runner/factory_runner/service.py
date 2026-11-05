@@ -286,7 +286,7 @@ class RunnerService:
             if once:
                 return (
                     EXIT_OK
-                    if end in (JobEnd.OK, JobEnd.GIVEN_BACK, JobEnd.SUPERSEDED)
+                    if end in (JobEnd.OK, JobEnd.GIVEN_BACK, JobEnd.SUPERSEDED, JobEnd.CANCELLED)
                     else EXIT_FAILED
                 )
         self._log.info("stopped")

@@ -139,6 +139,7 @@ describe("the migrations of both epics", () => {
       "20261105170000_add_workflow_step_cost_basis",
       "20261105190000_add_workflow_run_trigger",
       "20261105200000_add_workflow_step_rounds",
+      "20261105210000_add_run_cancellation",
     ]);
   });
 

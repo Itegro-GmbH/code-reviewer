@@ -48,6 +48,14 @@ export const DEFAULT_IMPLEMENTER_MAX_RUNTIME_MS = 70 * 60 * 1000;
  */
 export const DEFAULT_NO_RUNNER_AVAILABLE_MS = 30 * 60 * 1000;
 
+/**
+ * #891: how long the holder of a running job gets to stop a turn a member asked it to stop. The Worker learns of it at its next heartbeat
+ * (30 seconds at most), the process ends the agent, pushes what is committed and takes the snapshot within the 115 seconds of its stop, and the
+ * report follows. After this the app ends the job `cancelled` itself (a holder that heard nothing, or died, stops being asked and cannot
+ * push any more).
+ */
+export const DEFAULT_CANCEL_GRACE_MS = 4 * 60 * 1000;
+
 export type JobQueueLimits = {
   leaseMs: number;
   /** The hard timeout of a Diff or Dynamic job. */
@@ -60,6 +68,8 @@ export type JobQueueLimits = {
   noCapableRunnerAbsoluteMs: number;
   /** How long a turn of a runner environment waits for a runner of its workspace (#854). */
   noRunnerAvailableMs: number;
+  /** How long the holder of a job a member asked to stop has to stop it before the app ends the job (#891). */
+  cancelGraceMs: number;
 };
 
 export const DEFAULT_JOB_QUEUE_LIMITS: JobQueueLimits = {
@@ -70,6 +80,7 @@ export const DEFAULT_JOB_QUEUE_LIMITS: JobQueueLimits = {
   noCapableRunnerMs: DEFAULT_NO_CAPABLE_RUNNER_MS,
   noCapableRunnerAbsoluteMs: DEFAULT_NO_CAPABLE_RUNNER_ABSOLUTE_MS,
   noRunnerAvailableMs: DEFAULT_NO_RUNNER_AVAILABLE_MS,
+  cancelGraceMs: DEFAULT_CANCEL_GRACE_MS,
 };
 
 /** The environment variable an operator sets to own the deadline; seconds. */

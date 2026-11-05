@@ -8,6 +8,7 @@ import type { MigrationProvider } from "kysely/migration";
 import { describe, expect, it } from "vitest";
 import { migrateToLatest } from "../migrate.ts";
 import type { Database } from "../schema.ts";
+import { withoutColumnsAddedLater } from "../../test-support/columns-added-later.ts";
 import { migrationProvider } from "./index.ts";
 import {
   connectPostgres,
@@ -73,9 +74,14 @@ async function constraintsOf(db: Kysely<Database>, table: string) {
 }
 
 async function rowsOf(db: Kysely<Database>, table: string) {
-  return (
-    await sql<unknown>`select * from ${sql.table(table)} order by 1`.execute(db)
-  ).rows;
+  return withoutColumnsAddedLater(
+    table,
+    (
+      await sql<unknown>`select * from ${sql.table(table)} order by 1`.execute(
+        db,
+      )
+    ).rows,
+  );
 }
 
 const insertRecord = (db: Kysely<Database>, kind: string) =>

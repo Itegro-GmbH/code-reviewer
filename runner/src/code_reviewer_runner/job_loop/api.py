@@ -77,6 +77,9 @@ class HeartbeatReply:
     # When the lease ends, in seconds since the epoch, as the answer names it (None: absent or
     # unreadable). A superseded run drains until shortly before it (`host.py`).
     lease_expires_at: float | None = None
+    # #891: a member asked for this run to stop; the host ends the turn and reports `cancelled`.
+    # Absent in the answer means False.
+    cancel_requested: bool = False
 
 
 def parse_heartbeat(reply: Reply, job_id: str) -> HeartbeatReply:
@@ -84,7 +87,7 @@ def parse_heartbeat(reply: Reply, job_id: str) -> HeartbeatReply:
     job.
 
     A gateway or a captive portal that answers 200 to everything is not the app (#260). `superseded`
-    counts only as the boolean `true`; anything else is "not superseded".
+    and `cancelRequested` count only as the boolean `true`; anything else is "not".
     """
     body = as_object(parse_json(reply))
     job = as_object(body.get("job")) if body and body.get("version") == 1 else None
@@ -93,6 +96,7 @@ def parse_heartbeat(reply: Reply, job_id: str) -> HeartbeatReply:
     return HeartbeatReply(
         superseded=job.get("superseded") is True,
         lease_expires_at=_epoch(job.get("leaseExpiresAt")),
+        cancel_requested=job.get("cancelRequested") is True,
     )
 
 

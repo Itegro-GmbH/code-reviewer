@@ -873,6 +873,34 @@ that instruction and is disabled. The hint "history: about N tokens; the first c
 **Tests.** `follow-up.test.ts` (fakes: the turn that ends between the two writes, the repeat of a queued request id, the discard of one instruction only, the attempt, the day), `follow-up.integration.test.ts` and `follow-up-http.integration.test.ts` (Postgres: busy and queued, the second queued is `409`, branch gone, model not allowed, the environment copy, two parallel submits make one turn or one queued instruction, idempotency, another workspace is `404`, the start at the end of a turn also for a double event, the discard), `implementer-queue.integration.test.ts` (also the stale discard and the order and backoff of the sweep), `turn-ended-hook.test.ts`,
 `implementer-own-key-claim.integration.test.ts` (the claim with and without `implementer_resume`), `add-implementer-session-queue.integration.test.ts` (the migration), `resume.test.ts`, `continue-input.test.ts`, `follow-up-starter.test.ts`, `sweep.test.ts` and `continue-form.test.tsx`.
 
+## Cancelling a run (#891)
+
+A member stops a run with `POST /api/w/:workspace/implementer/runs/:runId/cancel` (no body; `:runId` is the id of the job, `runId` of the start answer), for every member (`start_implementer_task`: whoever may start a task may stop one). A job that is no
+turn of the Implementer of this workspace is `404 IMPLEMENTER_RUN_NOT_FOUND`, whatever the reason. The answer is `{runId, outcome, status}`:
+
+| `outcome` | HTTP | What happened |
+|---|---|---|
+| `cancelled` | 200 | The turn was waiting (for a Dispatcher, or for a runner of its labels). It ended at once with the code `cancelled`: nothing ran, its usage record is void, its hold is given back, the session is idle again, and no instruction of it is left to start. |
+| `requested` | 202 | The turn runs. The job is marked (`jobs.cancel_requested_at`). |
+| `already_requested` | 200 | It runs and was asked before. Nothing changed; the first moment stays. |
+| `already_ended` | 200 | The run is over (`status` says how). Nothing changed. |
+
+**How a running turn stops.** Every heartbeat answer of the job says `cancelRequested: true` while the mark is set (the lease is extended as usual; contract `HeartbeatResponse` and `WorkerHeartbeatResponse`). The job host of the Worker, and of a customer's runner (the same `JobHost`),
+learns it at its next heartbeat (30 seconds on the Worker, 60 at most on a customer's runner) or at the lease check before a push, and ends the turn the way it ends it when the Worker is stopped (SIGTERM, "Limits", row Stop): the engine is ended at once, **what is committed is pushed** (the lease check still says `held`),
+the snapshot is taken when it takes 2 seconds or less, and the process prints its result. The stop has up to 120 seconds (`IMPLEMENTER_TERMINATE_GRACE_SECONDS`), as long as the lease: the host keeps beating the heart while the process ends, so the lease cannot lapse before the report is delivered or the grace is over. The host reports it under the code `cancelled` (not `runner_shutdown`: the job is not given back) with what the process printed: the usage the model was used for and the report of the turn (the pushed branches, the summary).
+A turn that finished by itself in the same moment keeps its own result. The job then ends **`cancelled`** with `error_code = cancelled` (`complete` takes the code `cancelled` as the status `cancelled`; a repeated report is recognised, another outcome is a conflict), the session is idle, and the report is recorded on the session like any turn's.
+
+**What is charged.** The class of the code is `charged` (`app/src/billing/outcome.ts`): the usage the runner reported, at the price of the key mode, and the minutes. A turn that never ran prices to nothing. A holder that never reports (it died, it heard nothing) leaves the usage record `settled`
+with an unknown cost (`no_result`), which bills the minutes only, like a lost lease. A process that was ended without printing a result (killed after the grace, not ended cleanly) is reported `cancelled` with the reason `no_result_from_process`, which settles the record the same way instead of voiding it. A holder that gives the job back because the platform failed (`launch_failed`, `worker_exited`, or the input never arrived) ends it `cancelled` with that code: free, a void record, nothing charged. In a workflow, a turn that never ran (nobody claimed it, or its Worker could not be started) is booked at no cost on the reported basis; one that ran and reported nothing is booked at the limit.
+
+**When the holder does not stop.** The job is ended by the app, with `cancelled`, in these cases, and never queued again however many attempts it has left (a turn is run once anyway): its lease lapsed; its claim was given back (`release`); the grace of 4 minutes (`cancelGraceMs`,
+`DEFAULT_CANCEL_GRACE_MS`) after the request is over, at the heartbeat of the holder (which then loses its claim, like at the hard limit) or at the sweep. A runner of an earlier release ignores the field and stops that way, without a push.
+
+**In a workflow.** The [run route](workflows.md#cancelling-a-run) asks the job of the step. Stopping the task of an agent step on its own ends the run `cancelled` too, at the next look of the engine (the end of the turn, or the sweep).
+
+**Tests.** `jobs/cancel-queue.integration.test.ts` (the queue: waiting, running, repeats, ended jobs, other workspaces, the report, billing, the lapsed lease, the release, the grace), `implementer/cancel.test.ts` (the service and the route), `job_loop` host tests
+`test_job_loop_cancelled.py` (heartbeat answer, the stop, the report, the lease check), `workflow-runs/engine-cancel.integration.test.ts` and `machine.test.ts` (the run).
+
 ## Release 2: live test
 
 This is the checklist of the lead for the release that brings the follow-up turns (#842, part of #745) to the factory. Everything above
@@ -1612,6 +1640,7 @@ used):
 | `dispatch_unavailable` | Nothing claimed the turn within `RUNNER_DISPATCH_GIVE_UP_SECONDS` (60 minutes by default); the Dispatcher is down, protected or full ([`deployment-vercel.md`](deployment-vercel.md), 5.3) | free | Look at the App's sweep log and the Dispatcher's |
 | `timeout` | The turn was still running 70 minutes after it started, so the app failed it. The Worker normally ends it before at its 3600 seconds | free | Check the branch for what was pushed |
 | `lease_lost`, `lease_expired` | The Worker no longer held the turn when it was ready, or stopped reporting, or the lease could not be confirmed before the final push; the result was not saved and nothing is pushed after the loss. Nothing is pushed during the turn, so a lost lease means no work reached GitHub | free | Start again |
+| `cancelled` | A member stopped the run (#891, [Cancelling a run](#cancelling-a-run-891)): while it waited (nothing ran), or while it ran, when the engine was ended at the next heartbeat and what was committed was pushed. Also when the stop was not carried out within 4 minutes and the app ended the job | charged (what it used; nothing for a turn that never ran) | Check the branch for what was pushed |
 | `runner_shutdown` | The Worker was told to stop (SIGTERM) while it worked: the engine was ended, all committed branches were pushed if the lease was still held. A turn of the Implementer is never run twice, so the app gives it back and it ends here, as its last attempt. The usage of a stopped turn is not recorded yet (#799) | free | Check the branch for what was pushed; start again with a new branch name |
 | `runner_error` | The runner failed unexpectedly before any model call, or the model door or the agent's container went away during the turn before any call was billed or open ("the model door ended during the turn" or "the agent's container ended during the turn", with the exit code, and "killed for its memory" when the kernel did it) | free | Read the Worker log; start again |
 | `dynamic_accounting_failed` | The model usage could not be accounted for, so the turn ended and its cost is not known. The work may be done: check the branch | free | Check the branch |

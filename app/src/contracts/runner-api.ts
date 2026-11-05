@@ -144,6 +144,7 @@ export type KnownRunnerErrorCode =
   | "cost_limit_reached"
   | "lease_lost"
   | "superseded"
+  | "cancelled"
   | "branch_exists"
   | "base_branch_not_found"
   | "clone_failed"
@@ -1409,6 +1410,10 @@ export interface HeartbeatResponse {
      * #396: true when a newer push replaced this run. Sent only to a claim that named the feature `supersede`; absent means not superseded. The runner finishes the model requests in flight, sends no more, publishes nothing, reports its result (errorCode `superseded`, with usage) and exits.
      */
     superseded?: boolean;
+    /**
+     * #891: true while a member has asked for this run to stop (a turn of the Implementer); absent means nobody did. The lease is extended as usual. The runner ends the agent, pushes what is committed, takes the snapshot, reports its result with errorCode `cancelled` and the usage it measured, and exits. A runner of an earlier release ignores the field; the app ends the job `cancelled` itself once the grace for the stop (4 minutes) is over, and the claim is then lost.
+     */
+    cancelRequested?: boolean;
     [k: string]: unknown;
   };
   [k: string]: unknown;
@@ -1647,9 +1652,9 @@ export interface CompleteResponse {
   job: {
     id: JobId;
     /**
-     * succeeded or failed: the job is finished. queued: the runner reported runner_shutdown, the job was given back and waits for another runner (it fails instead if that was the last allowed attempt). superseded (#397): the run was replaced by a newer push; its report is stored once and the job stays superseded.
+     * succeeded or failed: the job is finished. queued: the runner reported runner_shutdown, the job was given back and waits for another runner (it fails instead if that was the last allowed attempt). superseded (#397): the run was replaced by a newer push; its report is stored once and the job stays superseded. cancelled (#891): the runner reported errorCode `cancelled` after it stopped a turn a member asked it to stop; the report is stored and the job is cancelled.
      */
-    status: "succeeded" | "failed" | "queued" | "superseded";
+    status: "succeeded" | "failed" | "queued" | "superseded" | "cancelled";
     [k: string]: unknown;
   };
   alreadyCompleted: boolean;

@@ -19,7 +19,9 @@
 //    last round (`maxRounds`), or the budget cannot pay another agent step (`budget`: checked only between two rounds), else the
 //    body starts again. The decision is written as the loop's row, with `exit` and `rounds` as its output.
 //
-// A run is `running` until the walk is over (`succeeded`) or a step failed or the budget ran out (`failed`).
+// A run is `running` until the walk is over (`succeeded`), a step failed or the budget ran out (`failed`), or a member stopped it (`cancelled`, #891:
+// once a stop is asked for, no step is written or started any more; a turn that runs is asked to stop, a step that did not start is
+// skipped, and the run ends when nothing runs).
 import { MICRO_USD_PER_CENT } from "./limits.ts";
 import type { RunFailureCode } from "./errors.ts";
 
@@ -50,6 +52,8 @@ export type MachineStep = {
   createdAt: string;
   /** When the step was claimed; null for a step nobody has taken yet. */
   startedAt: string | null;
+  /** Why a failed step failed (`cancelled` for a turn a member stopped, #891). */
+  errorCode?: string | null;
   /** For an `if`: the branch it took. */
   taken?: "then" | "else";
 };
@@ -67,7 +71,9 @@ export type RoundContext = {
 };
 
 export type MachineState = {
-  runStatus: "running" | "succeeded" | "failed";
+  runStatus: "running" | "succeeded" | "failed" | "cancelled";
+  /** A member asked for the run to stop (#891). */
+  cancelRequested: boolean;
   budgetMicroUsd: number;
   spentMicroUsd: number;
   /** The steps written so far, by position. */
@@ -128,15 +134,22 @@ export type Move =
   | { move: "execute"; position: number; takeOver: boolean }
   /** The step's job may have ended: read it and end the step. */
   | { move: "read_job"; position: number }
-  /** An action was started and the engine was interrupted (it is not repeated), or an agent step could not be started for too long. */
+  /** #891: a stop was asked for and the step's turn runs: ask its job to stop (asked again at every look, which is harmless). */
+  | { move: "cancel_job"; position: number }
+  /** #891: a stop was asked for and the step was written and not claimed: it ends skipped. */
+  | { move: "skip_step"; position: number }
+  /**
+   * An action was started and the engine was interrupted (it is not repeated), an agent step could not be started for too long, or (#891) a
+   * stop was asked for while an agent step had no turn yet.
+   */
   | {
       move: "fail_step";
       position: number;
-      code: "action_interrupted" | "agent_start_failed";
+      code: "action_interrupted" | "agent_start_failed" | "cancelled";
     }
   | {
       move: "finish_run";
-      status: "succeeded" | "failed";
+      status: "succeeded" | "failed" | "cancelled";
       errorCode: RunFailureCode | null;
     };
 
@@ -332,14 +345,46 @@ function roundOf(steps: readonly MachineStep[], stepId: string): number {
   return steps.filter((step) => step.stepId === stepId).length + 1;
 }
 
+/** What a run does once a member asked it to stop: nothing new starts, what runs is asked to stop, and the run ends when nothing runs. */
+function cancelMove(state: MachineState): Move {
+  const last = state.steps[state.steps.length - 1];
+  if (last === undefined)
+    return { move: "finish_run", status: "cancelled", errorCode: null };
+  const position = state.steps.length - 1;
+  switch (last.status) {
+    case "pending":
+      return { move: "skip_step", position };
+    case "running":
+      if (last.kind === "agent" && last.hasJob)
+        return { move: "cancel_job", position };
+      // An agent step whose turn is not recorded yet: the one that claimed it may be starting the turn this moment. The step ends now, the
+      // turn that may exist under its request id is found and asked to stop (`fail_step`), and one that starts later is stopped by the one
+      // that started it (`attachTurn` fails for an ended step).
+      if (last.kind === "agent")
+        return { move: "fail_step", position, code: "cancelled" };
+      // An action that runs is not interrupted (it may have happened); one that was interrupted is told so, as in any run.
+      return isStale(last, state.now, state.staleMs)
+        ? { move: "fail_step", position, code: "action_interrupted" }
+        : { move: "idle" };
+    case "failed":
+    case "succeeded":
+    case "skipped":
+      return { move: "finish_run", status: "cancelled", errorCode: null };
+  }
+}
+
 export function nextMove(state: MachineState): Move {
   if (state.runStatus !== "running") return { move: "idle" };
+  if (state.cancelRequested) return cancelMove(state);
 
   const last = state.steps[state.steps.length - 1];
   if (last !== undefined) {
     const position = state.steps.length - 1;
     switch (last.status) {
       case "failed":
+        // #891: the turn of this step was stopped by a member (through the run, or through the task itself): the run is cancelled, not failed.
+        if (last.errorCode === "cancelled")
+          return { move: "finish_run", status: "cancelled", errorCode: null };
         return {
           move: "finish_run",
           status: "failed",

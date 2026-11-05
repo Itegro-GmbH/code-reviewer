@@ -332,6 +332,8 @@ const failureCopy = (
     : MODEL_REFUSED_GENERIC,
   IMPLEMENTER_SESSION_NOT_FOUND:
     "This session is not available in this workspace any more. Reload the page.",
+  IMPLEMENTER_RUN_NOT_FOUND:
+    "This run is not available in this workspace any more. Reload the page.",
   IMPLEMENTER_SESSION_BUSY:
     "A turn is running and the next instruction is already queued. It starts when the running turn ends; you can send another one after that.",
   IMPLEMENTER_BRANCH_GONE:
