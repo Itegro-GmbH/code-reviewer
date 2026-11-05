@@ -45,6 +45,8 @@ export const errorCopy = (
     "The project's review kind was changed before this run could start, so the waiting run was cancelled.",
   no_capable_runner:
     "No runner that can run this kind of review picked up the run within the time limit, so it was cancelled. It will run again on the next push or review request.",
+  runner_revoked:
+    "The runner working on this run was removed from the workspace, so the run was stopped. Nothing was charged.",
   runner_needs_own_key:
     "This run would use the operator's key on a runner, which is not allowed. Nothing was charged.",
   no_runner_available:
@@ -332,6 +334,8 @@ export const turnErrorCopy = (
   // The table above promises a new run on the next push or review request; a task is never run again by itself.
   no_capable_runner:
     "No worker that can run tasks picked up this task within the time limit, so it was cancelled. Start it again later.",
+  runner_revoked:
+    "The runner working on this task was removed from the workspace, so the task was stopped and nothing was charged. Anything the agent pushed before that stays on the branch. Start the task again on another runner.",
   runner_needs_own_key:
     "A runner works with your own API key, and this task's model is one the platform pays for, so the task was not started and nothing was charged. Choose a model of your own key, or an environment that runs on a platform VM, and start the task again.",
   no_runner_available:

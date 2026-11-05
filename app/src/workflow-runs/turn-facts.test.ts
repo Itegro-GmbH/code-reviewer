@@ -112,6 +112,26 @@ describe("the outcome of a turn", () => {
     });
   });
 
+  // #854: a runner turn no runner took ends cancelled and free; the step fails with the code and a text, and is not charged the cap
+  it("fails the step of a runner turn that no runner took with no_runner_available, free and with a text", () => {
+    const outcome = outcomeOfTurn(
+      ended({
+        jobStatus: "cancelled",
+        jobErrorCode: "no_runner_available",
+        jobResult: null,
+      }),
+      5_000_000,
+    );
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      code: "no_runner_available",
+      costMicroUsd: 0,
+      costBasis: "reported",
+    });
+    expect((outcome as { message: string }).message).toMatch(/runner/);
+  });
+
   // #844-T31
   it("gives a profile that may not push the cost only: no branch, no commits, no head, no push state", () => {
     const outcome = outcomeOfTurn(

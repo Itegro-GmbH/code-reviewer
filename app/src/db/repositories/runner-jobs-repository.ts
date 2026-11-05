@@ -267,7 +267,7 @@ export type RunnerJobsRepository = {
   expireStaleJobs(): Promise<ExpiryReport>;
   /**
    * #854: ends the running claims of one runner at once (a member revoked it): their leases are cut to now and the expiry runs, which
-   * ends each as it ends any claim whose lease ran out: a turn of the Implementer has one attempt, so it fails (`lease_expired`) and its
+   * ends each as it ends any claim whose lease ran out: a turn of the Implementer has one attempt, so it fails (`runner_revoked`, free like a lost lease) and its
    * VM, its write token and its record are dealt with by the same reactions. Returns what the expiry did.
    */
   expireClaimsOf(runnerId: string): Promise<ExpiryReport>;
@@ -330,6 +330,8 @@ type RunningScope = {
   leaseExpiredBefore?: string;
   /** Only this job, and only while `leaseToken` is its current claim. */
   claim?: { jobId: string; leaseToken: string };
+  /** Only the claims of this runner (#854). */
+  runnerId?: string;
 };
 
 function runningWhere(scope: RunningScope) {
@@ -345,6 +347,9 @@ function runningWhere(scope: RunningScope) {
             eb("id", "=", scope.claim.jobId),
             eb("lease_token", "=", scope.claim.leaseToken),
           ]),
+      ...(scope.runnerId === undefined
+        ? []
+        : [eb("runner_id", "=", scope.runnerId)]),
     ]);
 }
 
@@ -355,6 +360,7 @@ function runningWhere(scope: RunningScope) {
  */
 const REAPER_ERROR_CODES = [
   "lease_expired",
+  "runner_revoked",
   "timeout",
   "command_removed",
 ] as const satisfies readonly JobErrorCode[];
@@ -768,6 +774,8 @@ export function createRunnerJobsRepository(
     current: Date,
     unknownCost: UnknownCostSettlement[],
     endedClaims: string[],
+    /** #854: the runner a member revoked; its claims end with `runner_revoked` instead of `lease_expired`. */
+    revokedRunnerId?: string,
   ): Promise<ExpiryReport> {
     const timestamp = formatTimestamp(current);
     // Before the expiry passes or claim: reserve all live candidates in the same row order. The
@@ -797,12 +805,25 @@ export function createRunnerJobsRepository(
     // migration (a race); a running one was claimed before the upgrade. They are cancelled here so
     // they can neither starve review jobs nor be requeued.
     await cancelRemovedCommands(executor, timestamp);
-    const lost = await loseAttempt(
+    const revoked =
+      revokedRunnerId === undefined
+        ? { failed: 0, requeued: 0 }
+        : await loseAttempt(
+            executor,
+            { leaseExpiredBefore: timestamp, runnerId: revokedRunnerId },
+            "runner_revoked" satisfies JobErrorCode,
+            timestamp,
+          );
+    const lostOthers = await loseAttempt(
       executor,
       { leaseExpiredBefore: timestamp },
       "lease_expired" satisfies JobErrorCode,
       timestamp,
     );
+    const lost = {
+      failed: revoked.failed + lostOthers.failed,
+      requeued: revoked.requeued + lostOthers.requeued,
+    };
     // A job whose runner keeps the lease alive but never finishes. Lost leases come first: a job
     // whose runner vanished long ago is retried, not failed for taking long.
     const timedOut = await failTimedOut(executor, {}, current);
@@ -1553,7 +1574,7 @@ export function createRunnerJobsRepository(
           .where("status", "=", "running")
           .where("runner_id", "=", runnerId)
           .execute();
-        return expire(trx, current, unknownCost, endedClaims);
+        return expire(trx, current, unknownCost, endedClaims, runnerId);
       });
     },
 

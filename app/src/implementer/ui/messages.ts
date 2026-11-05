@@ -69,7 +69,7 @@ export const FORM_COPY = {
     "A size and a setup script for this task. The script runs once in a container of its own, before the agent starts. Without a choice the standard applies. Environments are managed under",
   environmentLink: "Environments",
   environmentRunnerNote:
-    "The task runs on a runner of the workspace that has the labels of this environment, with your own API key. It waits for one and ends with no_runner_available if none takes it in time.",
+    "The task runs on a runner of the workspace that has the labels of this environment, with your own API key. It waits for one and is cancelled, free of charge, if no runner takes it in time.",
   environmentScriptNote:
     "This environment has a setup script. It runs as root in a container of its own with full internet access and no secrets, before the agent starts, and its time counts toward the task's time limit. If it fails, the task stops before the AI model is called and is not charged.",
   environmentNoNetworkNote: "The agent then works without internet access.",

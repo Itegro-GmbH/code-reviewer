@@ -204,6 +204,8 @@ export const JOB_ERROR_CODES = [
   "review_kind_changed",
   /** Cancelled because no runner that can run this job claimed it within the deadline (#195). */
   "no_capable_runner",
+  /** Failed because a member revoked the runner that was working on the job (#854). */
+  "runner_revoked",
   /** Failed at claim because the turn of a runner environment would run on the operator's key; a runner works with the owner's own key (#854). */
   "runner_needs_own_key",
   /** Cancelled because no runner of the workspace with the labels of its environment took the turn within the deadline (#854). */

@@ -95,6 +95,8 @@ export const ERROR_CODE_CLASSES = {
   no_capable_runner: "free",
   no_runner_available: "free",
   runner_needs_own_key: "free",
+  // A member revoked the runner during the turn: the turn ends at once, like a lost lease (#854), free like it.
+  runner_revoked: "free",
   dynamic_review_disabled: "free",
   command_removed: "charged",
   dispatch_unavailable: "free",

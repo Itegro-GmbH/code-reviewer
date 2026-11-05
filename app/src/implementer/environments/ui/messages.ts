@@ -64,7 +64,7 @@ export const PAGE_COPY = {
     "Comma separated, at least one. A runner of this workspace that has every one of these labels and announces the harness of the profile can take the task. Lower case letters, digits and . _ : -, up to 40 characters each. Size, setup script and network are the runner's own.",
   labelsShown: "Needs a runner with the labels",
   runnerNote:
-    "A task with this environment waits for a runner of the workspace and ends with no_runner_available if none takes it in time. It needs your own API key: a managed model runs on platform VMs only.",
+    "A task with this environment waits for a runner of the workspace that has these labels and is cancelled, free of charge, if no runner takes it in time. It needs your own API key: a managed model runs on platform VMs only.",
   network: "Network",
   networkHint:
     "This setting applies to the agent, after the setup script is done: the setup script always has full internet access, whatever you choose here. The agent has no way out that does not pass a proxy, which checks the host name of every request; IP addresses, names that resolve to private addresses and ports other than 80 and 443 are always refused.",
