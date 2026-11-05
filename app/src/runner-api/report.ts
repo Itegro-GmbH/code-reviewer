@@ -188,6 +188,10 @@ export function heartbeatAnswer(
       heartbeatAt: job.heartbeatAt,
       leaseExpiresAt: job.leaseExpiresAt,
       ...(superseded ? { superseded: true } : {}),
+      // #891: while a member has asked for the turn to stop, every heartbeat says so.
+      ...(!superseded && job.cancelRequestedAt !== null
+        ? { cancelRequested: true }
+        : {}),
     },
   };
 }
@@ -384,10 +388,12 @@ export async function finishJob(
     case "already_completed": {
       const status = result.job.status;
       // `superseded` (#397): the report of a run a newer push replaced is stored and the job stays superseded.
+      // `cancelled` (#891): the report of a turn a member asked to stop is stored and the job ends cancelled.
       if (
         status !== "succeeded" &&
         status !== "failed" &&
-        status !== "superseded"
+        status !== "superseded" &&
+        status !== "cancelled"
       )
         throw new Error(`Completed job ${jobId} has the status ${status}.`);
       deps.logger.info(

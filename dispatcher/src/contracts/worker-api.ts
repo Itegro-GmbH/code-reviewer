@@ -897,6 +897,10 @@ export interface WorkerHeartbeatResponse {
      * #396: true when a newer push replaced this run; see HeartbeatResponse in runner-api.v1.json. Sent only to a Worker that named the feature `supersede` in its details request.
      */
     superseded?: boolean;
+    /**
+     * #891: true while a member has asked for this run to stop; see HeartbeatResponse in runner-api.v1.json. The Worker ends the turn, pushes what is committed and reports errorCode `cancelled`.
+     */
+    cancelRequested?: boolean;
     [k: string]: unknown;
   };
   [k: string]: unknown;
@@ -1283,9 +1287,9 @@ export interface WorkerResultResponse {
      */
     id: string;
     /**
-     * succeeded or failed: the job is finished. queued: the job was given back (runner_shutdown, launch_failed) and waits for another claim; it fails instead if that was the last allowed attempt. superseded (#397): the run was replaced by a newer push; its result is stored once and the job stays superseded.
+     * succeeded or failed: the job is finished. queued: the job was given back (runner_shutdown, launch_failed) and waits for another claim; it fails instead if that was the last allowed attempt. superseded (#397): the run was replaced by a newer push; its result is stored once and the job stays superseded. cancelled (#891): the Worker reported errorCode `cancelled` after it stopped a turn a member asked it to stop.
      */
-    status: "succeeded" | "failed" | "queued" | "superseded";
+    status: "succeeded" | "failed" | "queued" | "superseded" | "cancelled";
     [k: string]: unknown;
   };
   alreadyCompleted: boolean;

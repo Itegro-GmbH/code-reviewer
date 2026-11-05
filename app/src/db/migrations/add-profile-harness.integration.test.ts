@@ -11,7 +11,7 @@ import type { Database } from "../schema.ts";
 import { migrationProvider } from "./index.ts";
 import { createEmptyTestDatabase } from "../../test-support/test-database.ts";
 
-const THIS = "20261105210000_add_profile_harness";
+const THIS = "20261105230000_add_profile_harness";
 const T = "2026-11-05T08:00:00.000Z";
 
 function upTo(include: (name: string) => boolean): MigrationProvider {
@@ -107,7 +107,7 @@ describe("the profile harness migration", () => {
     expect((await columns.execute(db)).rows).toHaveLength(2);
 
     const { migration } =
-      await import("./20261105210000_add_profile_harness.ts");
+      await import("./20261105230000_add_profile_harness.ts");
     await migration.down?.(db);
 
     expect((await columns.execute(db)).rows).toHaveLength(0);

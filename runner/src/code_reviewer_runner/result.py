@@ -83,6 +83,9 @@ class ErrorCode(StrEnum):
     # A newer push replaced this run while it was running (#396). It stopped sending model requests,
     # published nothing and reports what it used. Not a failure of the job.
     SUPERSEDED = "superseded"
+    # A member asked for this run to stop (#891). The turn was ended, what was committed was pushed
+    # and the usage is reported. Not a failure of the job.
+    CANCELLED = "cancelled"
     # The Implementer (#746). Stable codes a caller branches on; a turn that fails is never run
     # again silently. `COST_LIMIT_REACHED` above is the cost limit of a turn as well.
     # `BRANCH_EXISTS` and `BRANCH_VIOLATION` are no longer produced since git is free in the

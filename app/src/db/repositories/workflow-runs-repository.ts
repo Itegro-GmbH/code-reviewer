@@ -19,7 +19,8 @@ import type {
 } from "../schema.ts";
 import type { WorkspaceId } from "../workspace-scope.ts";
 
-export type WorkflowRunStatus = "running" | "succeeded" | "failed";
+export type WorkflowRunStatus =
+  "running" | "succeeded" | "failed" | "cancelled";
 export type StepRunStatus =
   "pending" | "running" | "succeeded" | "failed" | "skipped";
 /** `if` and `loop` are written by the engine when it decides them: the row holds the decision as its output (#846). */
@@ -48,6 +49,8 @@ export type StoredWorkflowRun = {
   createdBy: string | null;
   /** The login the run acts as and shows: the person who started it, or who put the label on. Display only. */
   actorLogin: string;
+  /** #891: when a member asked for the run to stop; null when nobody did. The run stays `running` until its turn has ended. */
+  cancelRequestedAt: string | null;
   createdAt: string;
   updatedAt: string;
   finishedAt: string | null;
@@ -127,6 +130,8 @@ export type NewFinishedStep = {
 };
 
 export type StepOutcome =
+  /** #891: the step did not run because the run was stopped; it ends without an output, a cost or a code. */
+  | { status: "skipped" }
   | {
       status: "succeeded";
       output: string | null;
@@ -161,9 +166,14 @@ export type RunLock = {
   /** Ends a step that is not over yet; the money it cost is added to the run. */
   finishStep(stepRunId: string, outcome: StepOutcome): Promise<void>;
   finishRun(outcome: {
-    status: "succeeded" | "failed";
+    status: "succeeded" | "failed" | "cancelled";
     errorCode: string | null;
   }): Promise<void>;
+  /**
+   * #891: marks the run as one a member asked to stop, unless that was done before. Returns whether this call set it. A run that is over is
+   * not marked.
+   */
+  requestCancel(): Promise<boolean>;
   /** Marks the run as looked at without changing anything else: the sweep takes the runs that waited longest first. */
   touch(): Promise<void>;
 };
@@ -227,6 +237,7 @@ function runFrom(row: Selectable<WorkflowRunsTable>): StoredWorkflowRun {
     triggerKind: row.trigger_kind as RunTriggerKind,
     createdBy: row.created_by,
     actorLogin: row.actor_login,
+    cancelRequestedAt: row.cancel_requested_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     finishedAt: row.finished_at,
@@ -295,19 +306,31 @@ export function createWorkflowRunsRepository(
       .where("id", "=", id);
 
   /** The columns an outcome sets on a step that ends. */
-  const endValues = (outcome: StepOutcome, at: string) => ({
-    status: outcome.status,
-    output: outcome.output ?? null,
-    cost_micro_usd: outcome.costMicroUsd ?? null,
-    // The check of the table: a basis needs a cost.
-    cost_basis:
-      outcome.costMicroUsd === undefined || outcome.costMicroUsd === null
-        ? null
-        : (outcome.costBasis ?? null),
-    error_code: outcome.status === "failed" ? outcome.errorCode : null,
-    error_message: outcome.status === "failed" ? outcome.errorMessage : null,
-    finished_at: at,
-  });
+  const endValues = (outcome: StepOutcome, at: string) => {
+    if (outcome.status === "skipped")
+      return {
+        status: "skipped",
+        output: null,
+        cost_micro_usd: null,
+        cost_basis: null,
+        error_code: null,
+        error_message: null,
+        finished_at: at,
+      };
+    return {
+      status: outcome.status,
+      output: outcome.output ?? null,
+      cost_micro_usd: outcome.costMicroUsd ?? null,
+      // The check of the table: a basis needs a cost.
+      cost_basis:
+        outcome.costMicroUsd === undefined || outcome.costMicroUsd === null
+          ? null
+          : (outcome.costBasis ?? null),
+      error_code: outcome.status === "failed" ? outcome.errorCode : null,
+      error_message: outcome.status === "failed" ? outcome.errorMessage : null,
+      finished_at: at,
+    };
+  };
 
   return {
     async createRun(input) {
@@ -328,6 +351,7 @@ export function createWorkflowRunsRepository(
         trigger_key: input.triggerKey ?? null,
         created_by: input.createdBy,
         actor_login: input.actorLogin,
+        cancel_requested_at: null,
         created_at: at,
         updated_at: at,
         finished_at: null,
@@ -517,7 +541,8 @@ export function createWorkflowRunsRepository(
             if (ended === undefined) return;
             const index = lock.steps.findIndex((step) => step.id === stepRunId);
             if (index !== -1) lock.steps[index] = stepFrom(ended);
-            const cost = outcome.costMicroUsd ?? 0;
+            const cost =
+              outcome.status === "skipped" ? 0 : (outcome.costMicroUsd ?? 0);
             if (cost > 0) {
               const spent = await trx
                 .updateTable("workflow_runs")
@@ -553,6 +578,21 @@ export function createWorkflowRunsRepository(
               finishedAt: at,
               updatedAt: at,
             };
+          },
+          async requestCancel() {
+            const at = formatTimestamp(now());
+            const marked = await trx
+              .updateTable("workflow_runs")
+              .set({ cancel_requested_at: at, updated_at: at })
+              .where("workspace_id", "=", workspaceId)
+              .where("id", "=", runId)
+              .where("status", "=", "running")
+              .where("cancel_requested_at", "is", null)
+              .returning("id")
+              .executeTakeFirst();
+            if (marked === undefined) return false;
+            lock.run = { ...lock.run, cancelRequestedAt: at, updatedAt: at };
+            return true;
           },
           async touch() {
             const at = formatTimestamp(now());

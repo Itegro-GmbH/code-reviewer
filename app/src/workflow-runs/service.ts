@@ -76,6 +76,8 @@ export type RunSummaryView = {
   trigger: StoredWorkflowRun["triggerKind"];
   status: StoredWorkflowRun["status"];
   errorCode: string | null;
+  /** When a member asked for the run to stop (#891), or null. A run that runs and has this is stopping: it ends `cancelled` when its turn has. */
+  cancelRequestedAt: string | null;
   /** Who started it or put the label on, by their login on the platform. Display only: it decides nothing. */
   actorLogin: string;
   budgetUsd: number;
@@ -94,6 +96,15 @@ export type RunView = RunSummaryView & {
 
 export type StartedRun = { run: RunView; created: boolean };
 
+/**
+ * What stopping a run came to (#891). `requested`: the run is marked; its turn stops at its runner's next heartbeat and the run ends `cancelled`
+ * when it has. `already_requested`: it was marked before. `already_ended`: the run is over, however it ended; nothing changed.
+ */
+export type CancelledRun = {
+  run: RunView;
+  outcome: "requested" | "already_requested" | "already_ended";
+};
+
 export type WorkflowRunService = {
   /** Starts a run of the workflow by hand. Throws a `WorkflowRunError`. */
   start(
@@ -102,6 +113,12 @@ export type WorkflowRunService = {
     body: unknown,
   ): Promise<StartedRun>;
   get(workflowId: string, runId: string): Promise<RunView>;
+  /**
+   * #891: stops a run. Whoever may start one may (the route's right). It marks the run and tells the engine, which asks the turn that runs to
+   * stop; the engine ends the run `cancelled` once the turn has ended, so no step starts any more and the steps that did not start are skipped.
+   * A repeat and a run that is over change nothing and say so. Throws `WORKFLOW_RUN_NOT_FOUND`.
+   */
+  cancel(workflowId: string, runId: string): Promise<CancelledRun>;
   /** The newest runs of a workflow, without their steps. */
   list(workflowId: string): Promise<{ runs: RunSummaryView[] }>;
 };
@@ -151,6 +168,7 @@ function summaryOf(run: StoredWorkflowRun): RunSummaryView {
     trigger: run.triggerKind,
     status: run.status,
     errorCode: run.errorCode,
+    cancelRequestedAt: run.cancelRequestedAt,
     actorLogin: run.actorLogin,
     budgetUsd: usd(run.budgetMicroUsd),
     spentUsd: usd(run.spentMicroUsd),
@@ -352,6 +370,34 @@ export function createWorkflowRunService(
           "There is no such run of this workflow.",
         );
       return view(run);
+    },
+
+    async cancel(workflowId, runId) {
+      checkId(workflowId);
+      const found = await deps.runs.getRun(runId);
+      if (found === undefined || found.workflowId !== workflowId)
+        throw new WorkflowRunError(
+          "WORKFLOW_RUN_NOT_FOUND",
+          "There is no such run of this workflow.",
+        );
+      if (found.status !== "running")
+        return { run: await view(found), outcome: "already_ended" };
+      // Under the lock of the run, like every decision about it: of two calls one marks the run, the other finds the mark.
+      const marked = await deps.runs.lockRun(runId, (lock) =>
+        lock.requestCancel(),
+      );
+      // Always, also for a repeat: the first kick may have been lost, and the engine does nothing twice.
+      deps.kick(runId);
+      const current = (await deps.runs.getRun(runId)) ?? found;
+      return {
+        run: await view(current),
+        outcome:
+          marked === true
+            ? "requested"
+            : current.status === "running"
+              ? "already_requested"
+              : "already_ended",
+      };
     },
 
     async list(workflowId) {

@@ -22,6 +22,7 @@ import {
   implementerTurnPricer,
 } from "../implementer/shared.ts";
 import { integrationRegistry } from "../integrations/registry.ts";
+import { jobQueueFor } from "../jobs/shared.ts";
 import type { Job } from "../jobs/job-types.ts";
 import { createConnectorRegistry } from "./connectors.ts";
 import { createGithubConnectors } from "./github-connectors.ts";
@@ -82,6 +83,7 @@ export function workflowEngineFor(workspaceId: string): WorkflowEngine {
     profiles: createProfilesRepository(db, workspaceId),
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
     implementer: implementerServiceFor(workspaceId),
+    jobs: jobQueueFor(workspaceId),
     turns: createTurnReader({
       jobs,
       turns,

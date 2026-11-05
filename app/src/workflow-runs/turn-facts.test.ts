@@ -79,6 +79,7 @@ function ended(patch: Partial<EndedTurn> = {}): EndedTurn {
   return {
     jobStatus: "succeeded",
     jobErrorCode: null,
+    jobClaimed: true,
     jobResult: {
       usage: { costUsd: 0.25 },
       implementer: {
@@ -305,6 +306,55 @@ describe("the outcome of a turn", () => {
     expect(
       outcomeOfTurn(ended({ jobStatus: "cancelled", jobErrorCode: null }), 0),
     ).toMatchObject({ ok: false, code: "job_failed" });
+  });
+
+  // #891-T41
+  it("books a cancelled turn that never ran at no cost, on the reported basis, not at the cap", () => {
+    for (const patch of [
+      { jobClaimed: false, jobErrorCode: "cancelled", jobResult: null },
+      // The Worker could not be started: the job ends cancelled with the reason, free.
+      { jobClaimed: true, jobErrorCode: "launch_failed", jobResult: null },
+      // It never got the input of the job: given back before the start, free like the launch.
+      { jobClaimed: true, jobErrorCode: "claim_failed", jobResult: null },
+      {
+        jobClaimed: true,
+        jobErrorCode: "git_access_unavailable",
+        jobResult: null,
+      },
+    ])
+      expect(
+        outcomeOfTurn(ended({ jobStatus: "cancelled", ...patch }), 777_000),
+      ).toMatchObject({
+        ok: false,
+        costMicroUsd: 0,
+        costBasis: "reported",
+      });
+    expect(
+      outcomeOfTurn(
+        ended({
+          jobStatus: "cancelled",
+          jobClaimed: false,
+          jobErrorCode: "cancelled",
+          jobResult: null,
+        }),
+        777_000,
+      ),
+    ).toMatchObject({ code: "cancelled" });
+  });
+
+  // #891-T41
+  it("still books a cancelled turn that ran but reported nothing at the cap", () => {
+    expect(
+      outcomeOfTurn(
+        ended({
+          jobStatus: "cancelled",
+          jobClaimed: true,
+          jobErrorCode: "cancelled",
+          jobResult: null,
+        }),
+        777_000,
+      ),
+    ).toMatchObject({ costMicroUsd: 777_000, costBasis: "limit" });
   });
 
   // #844-T38

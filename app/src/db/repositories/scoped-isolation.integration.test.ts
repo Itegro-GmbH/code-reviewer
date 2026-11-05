@@ -1129,6 +1129,12 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {
+    // #891: a member of A cannot stop a job of B; it is not found, and B's job is not marked or ended
+    name: "jobs.requestCancel",
+    run: (a, b) => a.jobs.requestCancel(b.job.id),
+    expectAnswer: (answer) => expect(answer).toEqual({ status: "not_found" }),
+  },
+  {
     name: "jobs.cancelWaitingForRepository",
     run: (a, b) => a.jobs.cancelWaitingForRepository(b.repository.id),
     expectAnswer: (answer) => expect(answer).toBe(0),

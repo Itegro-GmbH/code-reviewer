@@ -448,7 +448,11 @@ def test_a_complete_response_may_say_the_job_was_given_back_after_a_shutdown() -
     response["job"]["status"] = "queued"
     assert _accepts("CompleteResponse", response)
 
+    # #891: the report of a turn a member stopped ends the job `cancelled`, none ends it `running`.
     response["job"]["status"] = "cancelled"
+    assert _accepts("CompleteResponse", response)
+
+    response["job"]["status"] = "running"
     assert not _accepts("CompleteResponse", response)
 
 

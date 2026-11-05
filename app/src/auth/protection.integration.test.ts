@@ -204,6 +204,7 @@ const PROTECTED_DATA_ROUTES = [
   // The runs of a workflow (#844).
   "/api/w/[workspace]/workflows/[workflowId]/runs",
   "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]",
+  "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/cancel",
   // The runners on customers' machines (#854).
   "/api/w/[workspace]/runners",
   "/api/w/[workspace]/runners/tokens",
@@ -216,6 +217,7 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/implementer/models",
   "/api/w/[workspace]/implementer/repositories",
   "/api/w/[workspace]/implementer/repositories/[repositoryId]/branches",
+  "/api/w/[workspace]/implementer/runs/[runId]/cancel",
   "/api/w/[workspace]/implementer/sessions/[sessionId]/turns",
   "/api/w/[workspace]/implementer/tasks",
   "/api/w/[workspace]/integrations/[integrationId]",

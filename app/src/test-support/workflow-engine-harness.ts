@@ -93,6 +93,8 @@ export type TurnReport = {
   pushed?: boolean;
   commits?: string[];
   headCommit?: string | null;
+  /** The claim of a turn a test took before (`claimTurn`): the report is made for that job, not for the oldest that waits. */
+  claimed?: { job: { id: string }; leaseToken: string };
 };
 
 export async function startEngineHarness(
@@ -167,6 +169,7 @@ export async function startEngineHarness(
     profiles: app.profiles,
     environments,
     implementer: app.service,
+    jobs,
     turns: turnReader,
     connectors: createConnectorRegistry(options.connectors ?? []),
     repositoryName: async (id) => (await h.repositories.get(id))?.fullName,
@@ -243,7 +246,9 @@ export async function startEngineHarness(
    */
   async function finishTurn(report: TurnReport = {}): Promise<string> {
     claimed += 1;
-    const lease = await app.queue.claimNext("runner-a", ["implementer"]);
+    const lease =
+      report.claimed ??
+      (await app.queue.claimNext("runner-a", ["implementer"]));
     if (lease === null) throw new Error("no turn waits for a runner");
     const head = report.headCommit === undefined ? sha("c") : report.headCommit;
     const result = {
@@ -301,9 +306,17 @@ export async function startEngineHarness(
     return lease.job.id;
   }
 
+  /** Claims the oldest turn that waits, the way a runner does: it runs, and a test reports it later (`finishTurn({ claimed })`). */
+  async function claimTurn() {
+    const lease = await app.queue.claimNext("runner-a", ["implementer"]);
+    if (lease === null) throw new Error("no turn waits for a runner");
+    return lease;
+  }
+
   return {
     ...app,
     workspaceId,
+    claimTurn,
     workflows,
     members,
     runs,

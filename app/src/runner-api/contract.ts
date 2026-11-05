@@ -261,6 +261,8 @@ export const RUNNER_ERROR_CODES = [
   "lease_lost",
   // #396: the run was replaced by a newer push; it stopped gracefully and reports what it used.
   "superseded",
+  // #891: a member asked for the turn to stop; it stopped, pushed what was committed and reports what it used.
+  "cancelled",
   // #746: the Implementer (the factory deployment only). Stable codes a caller branches on; a turn that fails is never
   // run again silently. `cost_limit_reached` above is the cost limit of a turn as well.
   "branch_exists",
@@ -614,6 +616,8 @@ export type HeartbeatResponse = {
     leaseExpiresAt: string;
     /** #396: a newer push replaced this run (only for a claim that named the feature `supersede`). */
     superseded?: boolean;
+    /** #891: a member asked for this run to stop; the runner ends the turn, pushes what is committed and reports `cancelled`. */
+    cancelRequested?: boolean;
   };
 };
 
@@ -906,7 +910,7 @@ export type CompleteResponse = {
    */
   job: {
     id: string;
-    status: "succeeded" | "failed" | "queued" | "superseded";
+    status: "succeeded" | "failed" | "queued" | "superseded" | "cancelled";
   };
   alreadyCompleted: boolean;
 };

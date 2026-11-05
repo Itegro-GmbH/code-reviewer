@@ -253,6 +253,15 @@ export interface JobsTable {
   worker_fetches: ColumnType<number, number | undefined, number>;
   /** #397: 1 when the holder of the claim understands that its run can be superseded (the feature `supersede`). */
   accepts_supersede: ColumnType<number, number | undefined, number>;
+  /**
+   * #891: when a member asked for the running turn of the job to stop (ISO 8601 text in UTC), or null. The heartbeat answers `cancelRequested`
+   * while it is set; the job ends `cancelled` when its holder reports it, when its lease lapses or when the grace for the stop is over.
+   */
+  cancel_requested_at: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
   claimed_at: string | null;
   heartbeat_at: string | null;
   lease_expires_at: string | null;
@@ -1344,6 +1353,12 @@ export interface WorkflowRunsTable {
   trigger_key: ColumnType<string | null, string | null | undefined, never>;
   /** The login the agent steps are started as: the person who started the run, or who put the label on. Display only. */
   actor_login: string;
+  /** #891: when a member asked for the run to stop; the run stays `running` until its turn has ended, then ends `cancelled`. */
+  cancel_requested_at: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
   created_at: string;
   updated_at: string;
   /** Set when the run ends. */

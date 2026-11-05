@@ -143,9 +143,14 @@ class FakeProcess:
     # What the process printed before it went when it was terminated (a turn of the Implementer
     # prints its result on SIGTERM, #765).
     printed_on_terminate: bytes = b""
+    # A process that is slow to go (the Implementer's engine, its push): terminate returns, the
+    # process ends only when the test finishes it.
+    hang_on_terminate: bool = False
 
     async def terminate(self) -> None:
         self.terminated = True
+        if self.hang_on_terminate:
+            return
         self.finish(
             outcome(exit_code=-15, stdout=self.printed_on_terminate, stderr=b"terminated\n")
         )
@@ -183,6 +188,8 @@ class FakeApi:
         self.heartbeat_errors: list[ApiError] = []
         # #396: the heartbeats answer `superseded` from this many heartbeats on (None: never).
         self.superseded_from: int | None = None
+        # #891: the heartbeats answer `cancelRequested` from this many heartbeats on (None: never).
+        self.cancel_from: int | None = None
         # The lease end the superseded answer names, in seconds from the clock's zero (None: it
         # does not name one, as a mixed-version app).
         self.lease_expires_after: float | None = None
@@ -213,7 +220,10 @@ class FakeApi:
         lease = (
             WALL_EPOCH + self.lease_expires_after if self.lease_expires_after is not None else None
         )
-        return HeartbeatReply(superseded=superseded, lease_expires_at=lease)
+        cancel = self.cancel_from is not None and len(self.heartbeats) >= self.cancel_from
+        return HeartbeatReply(
+            superseded=superseded, lease_expires_at=lease, cancel_requested=cancel
+        )
 
     async def complete(
         self, job_id: str, lease_token: str, result: Mapping[str, Any]

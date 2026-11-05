@@ -47,7 +47,10 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
   // #818: the size of the VM where the Dispatcher reported it; null for every VM that exists.
   job_vm_runs: ["vcpus"],
   // #845: what started a run; every run that exists was started by hand (`DEFAULTS_OF_COLUMNS`).
-  workflow_runs: ["trigger_kind"],
+  // #891: when a member asked for the run to stop; null for every run that exists.
+  workflow_runs: ["trigger_kind", "cancel_requested_at"],
+  // #891: when a member asked for the running turn to stop; null for every job that exists.
+  jobs: ["cancel_requested_at"],
 };
 
 /** What a column added later holds on an existing row when it is not null: a constant default. */
