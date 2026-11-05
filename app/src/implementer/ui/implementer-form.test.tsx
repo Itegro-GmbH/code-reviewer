@@ -1542,6 +1542,8 @@ describe("labels and order", () => {
 const NODE_ENV = {
   id: "env-node",
   name: "Node 22",
+  kind: "hosted" as const,
+  labels: [] as string[],
   vcpus: 6,
   memoryGb: 10,
   sizeSupported: true,

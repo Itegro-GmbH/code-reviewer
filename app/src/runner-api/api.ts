@@ -45,8 +45,13 @@ import { parseStepsRequest } from "./steps-request.ts";
 import { bearerTokenOf, tokensMatch } from "./token-auth.ts";
 import {
   bearerRunnerCredential,
+  customerRunnerId,
   type RunnerRegistrationApi,
 } from "./registration.ts";
+import {
+  OPENCODE_HARNESS,
+  readyHarnesses,
+} from "../runner-identity/harness.ts";
 
 export type RunnerApiDeps = ClaimDeps &
   ReportDeps &
@@ -103,6 +108,38 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
     return { ok: true, runnerId: runnerId.value };
   }
 
+  /**
+   * Steps 1 to 3 for a call about one job. A customer's runner (#854) is known by its credential and may touch a job of its own
+   * workspace only; the lease token in the body still proves that it holds the job. The Dispatcher's calls (the VM, the state of a job)
+   * do not use this: they take the shared token alone.
+   */
+  async function identifyForJob(
+    request: Request,
+    jobId: string,
+  ): Promise<
+    { ok: true; runnerId: string } | { ok: false; response: Response }
+  > {
+    if (bearerRunnerCredential(request.headers.get("authorization")) === null)
+      return identify(request);
+    const customer = await deps.fleet?.authenticate(request);
+    if (customer === undefined || customer === null)
+      return { ok: false, response: unauthorized() };
+    if (!parseJobId(jobId))
+      return {
+        ok: false,
+        response: errorResponse(400, "RUNNER_REQUEST_INVALID", {
+          fields: [{ field: "jobId", code: "invalid" }],
+        }),
+      };
+    const job = await deps.queue.get(jobId);
+    if (job === undefined || job.workspaceId !== customer.runner.workspaceId)
+      return {
+        ok: false,
+        response: errorResponse(404, "RUNNER_JOB_NOT_FOUND"),
+      };
+    return { ok: true, runnerId: customerRunnerId(customer.runner.id) };
+  }
+
   /** #322: the Worker's way into the version call: `Bearer crj_...` plus `?jobId=` of the job it holds. */
   async function isRunningClaim(request: Request): Promise<boolean> {
     const credential = bearerWorkerCredential(
@@ -138,7 +175,36 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
                 ? {}
                 : { minBaseVersion: customer.minBaseVersion }),
             });
-          return noContent();
+          const body = await readOptionalJsonBody(request);
+          if (!body.ok) return body.response;
+          const parsed = parseClaimRequest(body.value);
+          if (!parsed.ok)
+            return errorResponse(400, "RUNNER_REQUEST_INVALID", {
+              fields: parsed.fields,
+            });
+          // It takes the turns of runner environments of its own workspace whose labels it has, with a harness it announces as ready
+          // (OpenCode, the only harness of a profile today), and nothing else: never a review, never a split claim, never a job by id.
+          if (
+            !readyHarnesses(customer.runner.manifest).includes(OPENCODE_HARNESS)
+          )
+            return noContent();
+          return await handleClaim(
+            deps,
+            customerRunnerId(customer.runner.id),
+            ["implementer"],
+            (parsed.value.features ?? []).filter(
+              (feature) => feature !== "worker_credential",
+            ),
+            {
+              ...(parsed.value.llmProviders === undefined
+                ? {}
+                : { llmProviders: parsed.value.llmProviders }),
+              customerRunner: {
+                workspaceId: customer.runner.workspaceId,
+                labels: customer.runner.labels,
+              },
+            },
+          );
         }
         const who = identify(request);
         if (!who.ok) return who.response;
@@ -176,7 +242,7 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
 
     async heartbeat(request, jobId) {
       try {
-        const who = identify(request);
+        const who = await identifyForJob(request, jobId);
         if (!who.ok) return who.response;
         if (!parseJobId(jobId))
           return errorResponse(400, "RUNNER_REQUEST_INVALID", {
@@ -192,7 +258,7 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
 
     async complete(request, jobId) {
       try {
-        const who = identify(request);
+        const who = await identifyForJob(request, jobId);
         if (!who.ok) return who.response;
         if (!parseJobId(jobId))
           return errorResponse(400, "RUNNER_REQUEST_INVALID", {
@@ -212,7 +278,7 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
 
     async release(request, jobId) {
       try {
-        const who = identify(request);
+        const who = await identifyForJob(request, jobId);
         if (!who.ok) return who.response;
         if (!parseJobId(jobId))
           return errorResponse(400, "RUNNER_REQUEST_INVALID", {
@@ -244,7 +310,7 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
 
     async steps(request, jobId) {
       try {
-        const who = identify(request);
+        const who = await identifyForJob(request, jobId);
         if (!who.ok) return who.response;
         if (!parseJobId(jobId))
           return errorResponse(400, "RUNNER_REQUEST_INVALID", {

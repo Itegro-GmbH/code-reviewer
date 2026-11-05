@@ -41,7 +41,8 @@ export type SettledReason = (typeof SETTLED_REASONS)[number];
 
 /**
  * The error codes a job ends with when a runner held it and no result arrived (`lease_expired` and `timeout` are the
- * queue's own, `runner_shutdown` is a runner that was stopped and gave the job back on its last attempt). Any other
+ * queue's own, `runner_shutdown` is a runner that was stopped and gave the job back on its last attempt, `runner_revoked`
+ * is a customer's runner removed while it held the job). Any other
  * way for a job to end without `complete` (cancelled, replaced, never started, given back before the runner began)
  * made no model call anybody knows of: its record is void.
  */
@@ -49,6 +50,7 @@ export const NO_RESULT_JOB_ERROR_CODES = [
   "lease_expired",
   "timeout",
   "runner_shutdown",
+  "runner_revoked",
 ] as const;
 
 /** Whose key a run was made with. The same two values as the key mode of the entitlements. */

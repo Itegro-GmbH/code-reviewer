@@ -4,6 +4,10 @@
 // code and a sentence an AI can act on (the `Issue` of the workflow validator, whose codes it shares). What needs the world is not
 // here but in the service: whether the model is one the claim would run, whether the cost limit is within the operator's maximum,
 // whether the name is free. The default result schema is checked by the validator of the workflow format (`validateResultSchema`).
+import {
+  CATALOG_HARNESSES,
+  OPENCODE_HARNESS,
+} from "../runner-identity/harness.ts";
 import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import {
   issue,
@@ -34,6 +38,8 @@ export const PROFILE_FIELDS = [
   "costLimitCents",
   "canPush",
   "defaultResult",
+  /** #854: the harness the agent runs with. Profiles know only OpenCode today; the field is accepted so that a document can already name it. */
+  "harness",
 ] as const;
 
 /** The cost limit of a turn in whole US cents: what the Implementer form takes (`REVIEW_SETTING_LIMITS.maxCostCents`). */
@@ -254,6 +260,19 @@ export function validateProfile(body: unknown): ProfileCheck {
       costLimitCents = undefined;
     } else costLimitCents = cost;
   }
+
+  // #854: the harness. Only the platform's catalog (OpenCode) is a harness a profile can name today; a harness a runner announces
+  // becomes nameable when the first one is built. Nothing is stored for it: every version runs OpenCode.
+  const harness = given("harness");
+  if (harness !== undefined && harness !== OPENCODE_HARNESS)
+    report(
+      issue(
+        "/harness",
+        typeof harness === "string" ? "invalid_value" : "wrong_type",
+        `The harness is ${CATALOG_HARNESSES.map((name) => shown(name)).join(", ")}; ${typeof harness === "string" ? shown(harness) : `a ${jsonTypeName(harness)}`} is not a harness a profile can name.`,
+        CATALOG_HARNESSES,
+      ),
+    );
 
   const push = body.canPush;
   if (push === undefined)

@@ -25,6 +25,15 @@ export type JobClaim = {
   leaseExpiresAt: Date;
 };
 
+/**
+ * #854: whose turns a claim may take. A claim without a scope (the Dispatcher's, the poll mode's) never takes a turn of a runner
+ * environment: those wait for a runner of their workspace. A customer's runner takes only the turns of runner environments of its own
+ * workspace whose labels it has all of.
+ */
+export type ClaimScope = {
+  customerRunner: { workspaceId: string; labels: readonly string[] };
+};
+
 /** Enough for every pull request in the queue to be tried; a bug fails instead of looping. */
 const MAX_CLAIM_ATTEMPTS = 100;
 
@@ -47,6 +56,7 @@ export async function claimOldestDueJob(
   claim: JobClaim,
   reviewKinds: readonly JobKind[],
   jobId?: string,
+  scope?: ClaimScope,
 ): Promise<Selectable<JobsTable> | undefined> {
   // One savepoint for the whole attempt loop: a rolled-back-to savepoint stays usable, and the outer
   // transaction can keep going after each unique violation.
@@ -55,6 +65,7 @@ export async function claimOldestDueJob(
     try {
       const { rows } = await claimQuery(executor, claim, reviewKinds, {
         jobId,
+        scope,
       });
       return rows[0];
     } catch (error) {
@@ -73,7 +84,10 @@ function claimQuery(
   executor: Kysely<Database>,
   claim: JobClaim,
   reviewKinds: readonly JobKind[],
-  { jobId }: { jobId: string | undefined },
+  {
+    jobId,
+    scope,
+  }: { jobId: string | undefined; scope: ClaimScope | undefined },
 ) {
   const now = formatTimestamp(claim.now);
   // #195: the runner only gets jobs of a kind one of its engines can run. A caller with no engines is
@@ -83,6 +97,27 @@ function claimQuery(
     reviewKinds.map((kind) => sql`${kind}`),
     sql`, `,
   );
+  // #854: the turns of runner environments go to runners of their workspace and to nobody else.
+  const labels =
+    scope === undefined || scope.customerRunner.labels.length === 0
+      ? sql`'{}'::text[]`
+      : sql`array[${sql.join(
+          scope.customerRunner.labels.map((label) => sql`${label}`),
+          sql`, `,
+        )}]::text[]`;
+  const routing =
+    scope === undefined
+      ? sql`and not exists (
+          select 1 from implementer_turns as routed
+          where routed.job_id = due.id and routed.environment_kind = 'runner'
+        )`
+      : sql`and due.workspace_id = ${scope.customerRunner.workspaceId}
+        and exists (
+          select 1 from implementer_turns as routed
+          where routed.job_id = due.id
+            and routed.environment_kind = 'runner'
+            and string_to_array(routed.environment_labels, E'\n') <@ ${labels}
+        )`;
   return sql<Selectable<JobsTable>>`
     update jobs
     set status = 'running',
@@ -101,6 +136,7 @@ function claimQuery(
         and due.command = 'review'
         and due.review_kind in (${kinds})
         ${jobId === undefined ? sql`` : sql`and due.id = ${jobId}`}
+        ${routing}
         and due.run_after <= ${now}
         and not exists (
           select 1

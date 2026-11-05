@@ -93,6 +93,7 @@ const FIELD_OF_FAILURE: Record<string, FieldKey> = {
   IMPLEMENTER_MODEL_NOT_ALLOWED: "model",
   IMPLEMENTER_ENVIRONMENT_NOT_FOUND: "environment",
   IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED: "environment",
+  IMPLEMENTER_RUNNER_NEEDS_OWN_KEY: "environment",
   IMPLEMENTER_PROFILE_NOT_FOUND: "profile",
   EXCEEDS_OPERATOR_MAXIMUM: "cost",
 };
@@ -506,9 +507,12 @@ export function ImplementerForm({
     { id: STANDARD, label: FORM_COPY.environmentStandard },
     ...environmentList.map((candidate) => ({
       id: candidate.id,
-      label: candidate.sizeSupported
-        ? `${candidate.name} (${candidate.vcpus} vCPU, ${candidate.memoryGb} GB memory${candidate.hasScript ? ", setup script" : ""}${candidate.networkMode === "off" ? "" : candidate.networkMode === "open" ? ", network: any host" : ", network: listed hosts"})`
-        : `${candidate.name} (${candidate.vcpus} vCPU, no longer offered)`,
+      label:
+        candidate.kind === "runner"
+          ? `${candidate.name} (runner: ${candidate.labels.join(", ")})`
+          : candidate.sizeSupported
+            ? `${candidate.name} (${candidate.vcpus} vCPU, ${candidate.memoryGb} GB memory${candidate.hasScript ? ", setup script" : ""}${candidate.networkMode === "off" ? "" : candidate.networkMode === "open" ? ", network: any host" : ", network: listed hosts"})`
+            : `${candidate.name} (${candidate.vcpus} vCPU, no longer offered)`,
     })),
   ];
 
@@ -741,7 +745,11 @@ export function ImplementerForm({
           disabled={environments.state === "loading"}
           placeholder={FORM_COPY.environmentPlaceholder}
         />
-        {environment !== undefined && !environment.sizeSupported ? (
+        {environment?.kind === "runner" ? (
+          <p className="-mt-3 text-sm text-muted-foreground">
+            {FORM_COPY.environmentRunnerNote}
+          </p>
+        ) : environment !== undefined && !environment.sizeSupported ? (
           <p className="-mt-3 text-sm text-destructive">
             {FORM_COPY.environmentSizeUnsupportedNote}
           </p>

@@ -24,6 +24,7 @@ const expiry = {
   leaseExpired: 0,
   timedOut: 0,
   noCapableRunner: 0,
+  noRunnerAvailable: 0,
 };
 const cleaned = {
   rateLimits: 0,

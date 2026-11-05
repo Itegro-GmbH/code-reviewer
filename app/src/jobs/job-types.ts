@@ -15,6 +15,7 @@ import type {
   StoredImplementerSession,
   StoredImplementerTurn,
   TurnEnvironment,
+  TurnRunnerEnvironment,
   TurnProfile,
 } from "../db/repositories/implementer-repository.ts";
 
@@ -119,6 +120,8 @@ export type EnqueueImplementerTurnInput = {
   costLimitCents: number | null;
   /** A copy of the environment the person chose (#818), made by the service from the workspace's own; null for none. */
   environment?: TurnEnvironment | null;
+  /** A copy of the runner environment the person chose (#854): its labels; null for none. Never together with `environment`. */
+  runnerEnvironment?: TurnRunnerEnvironment | null;
   /** A copy of the profile version the person chose (#843), made by the service from the workspace's own; null for none. */
   profile?: TurnProfile | null;
   /** The result schema of the task (#843), already validated; null for none. */
@@ -201,6 +204,12 @@ export const JOB_ERROR_CODES = [
   "review_kind_changed",
   /** Cancelled because no runner that can run this job claimed it within the deadline (#195). */
   "no_capable_runner",
+  /** Failed because a member revoked the runner that was working on the job (#854). */
+  "runner_revoked",
+  /** Failed at claim because the turn of a runner environment would run on the operator's key; a runner works with the owner's own key (#854). */
+  "runner_needs_own_key",
+  /** Cancelled because no runner of the workspace with the labels of its environment took the turn within the deadline (#854). */
+  "no_runner_available",
   /** Failed because Dynamic Review is not enabled on this instance yet (#195 rollout gate). */
   "dynamic_review_disabled",
   /** Cancelled because the job's command was removed from the product (#203). */

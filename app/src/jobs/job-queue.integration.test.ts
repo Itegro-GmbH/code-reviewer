@@ -573,6 +573,7 @@ describe("leases that run out", () => {
       leaseExpired: 1,
       timedOut: 0,
       noCapableRunner: 0,
+      noRunnerAvailable: 0,
     });
     expect(await fixture.queue.get(job.id)).toMatchObject({
       status: "failed",

@@ -12,13 +12,21 @@ import type { NetworkRule } from "../../../network-rule/network.ts";
 import type { EnvironmentList, EnvironmentView } from "../service.ts";
 
 /** The body of `POST` and `PUT`: the fields of an environment. */
-export type EnvironmentBody = {
-  name: string;
-  vcpus: number;
-  setupScript: string;
-  /** #745, step 7: the rule for the agent's network. */
-  network: NetworkRule;
-};
+export type EnvironmentBody =
+  | {
+      kind?: "hosted";
+      name: string;
+      vcpus: number;
+      setupScript: string;
+      /** #745, step 7: the rule for the agent's network. */
+      network: NetworkRule;
+    }
+  | {
+      /** #854: the labels a runner must have, instead of a size, a script and a network rule. */
+      kind: "runner";
+      name: string;
+      labels: string[];
+    };
 
 export type EnvironmentApi = {
   list(): Promise<RequestResult<EnvironmentList>>;

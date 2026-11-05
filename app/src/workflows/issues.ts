@@ -76,6 +76,10 @@ export const SEMANTIC_ISSUE_CODES = [
   "profile_version_unknown",
   /** No environment of that name in the workspace. */
   "environment_unknown",
+  /** A step runs a profile with a managed model (the platform's key) in a runner environment; a runner works with the owner's own key (#854). */
+  "runner_needs_own_key",
+  /** A step runs a profile whose harness is not OpenCode in an environment that is not a runner's (#854). */
+  "harness_needs_runner",
   /** The result of the step names a field the platform fills in itself. */
   "result_field_reserved",
   /** The run has no repository: a manual trigger must declare the input `repo` (a required text). */
