@@ -613,11 +613,21 @@ of the workspace** (owner's decision of 2026-11-04). Nothing reads it yet: the i
 **Taking it** (`implementer/session_export.py`, called by `ImplementerSession` right before `ImplementerAgent.stop()`, because it is read from the running engine). Over the
 engine's HTTP API only, as the spike measured: `GET /session/<id>` and `GET /session/<id>/message` in pages of 50, newest page first with the cursor in `x-next-cursor`, put back
 in order, over one connection (each connection through the exec tunnel costs an exec). Then, in this order: the output of every tool part the engine's prune marked as compacted
-and the long strings (over 256 characters) of that part's metadata are emptied (the model is sent a fixed text in their place: the same 137 messages in the spike); the redactor of the
+and the long strings (over 256 characters) of that part's metadata, at any depth (an edit nests the file before and after in `filediff` and `files`), are emptied (the model is sent a fixed text in their place: the same 137 messages in the spike); the redactor of the
 turn is applied to **every string value and key**, never to the JSON text (its `Bearer ...` shape runs up to a quote and broke the document); the result is compact JSON with ASCII
-escapes (a lone surrogate cannot be encoded otherwise), gzipped with no time in the header. **Over 8 MiB gzipped there is no snapshot** (a note, `too_large`); a document is read up to
-32 MiB raw (the worst transcript of the spike, 18.4 MB, took 70 MiB of memory, about four times its size). The whole path, the hand-over to the job host included, is held to **5 s
-at a normal end and 2 s at a stop** (or when the lease or the runner is going away), which is what the sums above count; the measured path takes 1.7 s at 18.4 MB. A lost lease takes no
+escapes (a lone surrogate cannot be encoded otherwise), gzipped with no time in the header. **Over 8 MiB gzipped there is no snapshot** (a note, `too_large`). The whole path, the hand-over to the job host included, is held to **5 s
+at a normal end and 2 s at a stop** (or when the lease or the runner is going away), which is what the sums above count; the measured path takes 1.7 s at 18.4 MB.
+
+**The engine is the agent's to replace, so the export does not trust it.** The engine runs in the agent's container and the agent can put any server on its port. A server that sends its body a byte at a time never trips a
+socket timeout (measured with a fake: 1 byte per 1.5 s kept a 3 s budget busy for 93 s), so the whole export (fetch, redaction, blanking, dump, gzip) runs in a **daemon thread that the caller joins for the seconds it was
+given**; at the deadline the thread is told to stop, the connection is shut (`shutdown`, which wakes a blocked read) and the export gives up with `out_of_time`: the push never waits behind it. What it will take is
+bounded before it is built: **at most 64 MiB raw** summed over the pages (the worst transcript of the spike, 18.4 MB, took 70 MiB of memory, about four times its size; an edit-heavy session carries each file three times in the metadata of
+its edits before the old ones are emptied) and the reading stops there; **at most 2 M elements**, counted from the commas of a page before it is parsed (an upper bound) and again by the walk of the parsed document (a page of 7.5 M tiny strings in 30 MB took
+11 s and 680 MB); **at most 100 levels** of nesting (a transcript has about ten; the parser's own recursion limit is a `bad_answer`). Over any of them: `too_large`.
+
+**What the redaction costs.** Besides the secrets of the turn, the redactor knows the shapes of secrets (`sk-` and 20 or more characters, `Bearer <token>`), so it also rewrites an ordinary path or word that looks like one. The snapshot is the
+model's history, so a follow-up agent may see `[REDACTED]` where an old tool input held such a path or word. That is the price of never storing a secret; the turn itself is redacted the same way. The attachments of a compacted tool
+part are kept as the engine wrote them: the spike did not show whether the engine sends them to the model, so they are not touched. A lost lease takes no
 export. Best effort: any failure is one note in the turn's notes (`the session was not saved for a follow-up turn: <word>`, the words `engine_unreachable`, `bad_answer`, `out_of_time`,
 `too_large`, `export_failed`, or `not handed to the host`) and changes nothing about the outcome, the push or the billing; the next turn then starts from a summary (the plan's fallback).
 A turn that ended badly is exported too: the conversation is worth keeping.
@@ -634,9 +644,9 @@ again, anything else pauses 2 s and tries the same part again. The session there
 
 **Keeping it** (`db/repositories/implementer-snapshots-repository.ts`, scoped; `20261105090000_create_implementer_session_snapshots`). `implementer_session_snapshots` has one row for each session
 (its turn, the engine version, the sizes, the digest and the data) and `implementer_session_snapshot_parts` holds an upload until it is whole. The data is **base64 text**: the schema holds
-text and integers only (`src/db/README.md`, "Portable schema conventions"), so the plan's `bytea` is not used, and 8 MiB gzipped is at most about 10.7 MB of text, which the database TOASTs. When the last part is in, the
+text and integers only (`src/db/README.md`, "Portable schema conventions"), so the plan's `bytea` is not used, and 8 MiB gzipped is at most about 10.7 MB of text, which the database TOASTs out of line and uncompressed (`set storage external`: it is gzip already). When the last part is in, the
 parts are put together in the transaction that also proves the claim (the job row is locked `FOR NO KEY UPDATE`, as for the steps), the size and the digest are checked, and the old snapshot is replaced; until then it stays
-readable. Parts that disagree, or do not make the announced file, are refused (`400`) and nothing of that upload is kept. The parts of an upload that never finished are deleted when the next upload of the session starts. The call does not extend the lease,
+readable. A snapshot in one part is checked and swapped in without a row in the parts table, and the bytes of the parts are read back only by the part that completes the set. Parts that disagree, or do not make the announced file, are refused (`400`) and nothing of that upload is kept. The parts of an upload that never finished are deleted when the next upload of the session starts (or by the erasure of the workspace), not when the result is delivered: at most one unfinished upload waits for a session, which costs storage and nothing else. The call does not extend the lease,
 answers `409 RUNNER_JOB_ENDED` once the job is over, `401` for a credential that is not the job's and `400` for a job that is not a turn of the Implementer.
 
 **Who sees it.** The page never shows the snapshot, and nothing reads it yet. What it holds is what the agent read and said, with the secrets the runner knows taken out (the same ones as in the steps) and **tool outputs
