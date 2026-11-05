@@ -22,6 +22,19 @@ or the database is looked at, so code-review.com hands out nothing.
 | `shared.ts`                             | The wiring of the running server (`implementerServiceFor(workspaceId)`) and the second wall `requireImplementerCapability()`                                                                                                                                                             |
 | `../db/implementer-job-shape.ts` (#752) | The one place that writes the pull request columns of a turn's job; the branch in `pr_url` is percent-encoded per part (#755). It lives in `db/` because the database layer imports it, and `implementer/` imports the database layer: the import cycle check (#715) allows no new cycle |
 
+## Follow-up turns (#841)
+
+| File                                          | Role                                                                                                                                                                                       |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `follow-up.ts`                                | `createFollowUps`: `continueSession` (the submit of the next instruction), `startQueued` (starts or discards the instruction that waited), `continuation` (what the "Continue" form needs) |
+| `continue-input.ts`                           | `validateContinueInput`: what is left out means "as the last turn", `null` means none                                                                                                      |
+| `service-support.ts`                          | what the first turn and the follow-ups share: refusals, `resolveRepository`, the copies of an environment and a profile                                                                    |
+| `follow-up-starter.ts`, `follow-up-shared.ts` | the starter of queued instructions: idempotent, never throws; wired for the routes that end a turn and for the sweep step `follow_ups`                                                     |
+| `../runner-api/resume.ts`                     | the `resume` block of the job: branches, checkout, snapshot flag, previous summary, digest                                                                                                 |
+| `ui/continue-form.tsx`                        | the "Continue" form on the run page of the newest turn                                                                                                                                     |
+
+Routes: `POST /api/w/:workspace/implementer/sessions/:sessionId/turns` and `GET /api/w/:workspace/runs/:id/continuation`. The rules are in `docs/implementer.md`, section "Follow-up turns: the API and the form (#841)".
+
 ## Routes
 
 All four are for every member (`start_implementer_task`, minimum role `member`; one line in `workspaces/permissions.ts` raises
