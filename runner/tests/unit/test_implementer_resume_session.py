@@ -164,6 +164,18 @@ def test_a_document_that_is_not_the_engines_export_is_unreadable(content: bytes)
     assert failure_of(data, header_of(raw, data)) is ResumeReason.SNAPSHOT_UNREADABLE
 
 
+# #840-T159
+@pytest.mark.parametrize("depth", [200, 20_000, 2_000_000])
+def test_a_document_nested_deeper_than_the_parser_can_read_is_unreadable_not_an_exception(
+    depth: int,
+) -> None:
+    # A few kilobytes that pass the size and the digest; `json.loads` raises `RecursionError` (or
+    # `MemoryError`), which is not a `ValueError`: it must not end the turn as a runner error.
+    raw, data = packed(b'{"info":{"id":"' + SESSION.encode() + b'"},"messages":' + b"[" * depth)
+
+    assert failure_of(data, header_of(raw, data)) is ResumeReason.SNAPSHOT_UNREADABLE
+
+
 # #840-T58
 @pytest.mark.parametrize(
     "identifier",

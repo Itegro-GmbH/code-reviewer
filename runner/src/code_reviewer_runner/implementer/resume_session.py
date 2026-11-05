@@ -80,7 +80,9 @@ def decode_snapshot(data: bytes, header: SnapshotHeader) -> ResumeSnapshot:
         raise unreadable
     try:
         document: Any = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError, MemoryError):
+        # Not JSON, or JSON nested so deep that the parser runs out of stack (20000 brackets are
+        # 20 kB of a file that passes the size and the digest): all of them are not the export.
         raise unreadable from None
     session_id = _session_id(document)
     if session_id is None:
