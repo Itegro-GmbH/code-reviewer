@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Itegro-GmbH/code-reviewer/contracts/runner-registration.v1.json",
+  "title": "Code Reviewer runner registration, version 1",
+  "description": "How a runner on a customer's own machine gets to the app (#854, R1a of the runner epic #852). A member of a workspace makes a registration token in the app (short lived, usable once, shown once). The runner exchanges it with POST /api/runners/v1/register for a credential of its own (`crc_` and 43 characters; the app keeps only a hash). From then on every call carries 'Authorization: Bearer <credential>'. PUT /api/runners/v1/self tells the app what the runner is now (its labels, the version of its base, its manifest and limits live on the machine, not in the app); POST /api/runners/v1/credential renews the credential (the previous one works until the new one is used once, so a lost answer does not lock the runner out). A member can revoke a runner in the app: its next call is 401 RUNNER_UNAUTHORIZED. Every call updates `last seen`. A runner whose base is older than the minimum the app requires gets no job and the error 426 RUNNER_UPDATE_NEEDED. Errors are the ErrorResponse of contracts/runner-api.v1.json. A reader ignores fields it does not know; a writer sends only the fields below.",
+  "version": 1,
+  "$defs": {
+    "RegistrationToken": {
+      "description": "Made in the app by a member of the workspace; valid for one hour, usable once. Secret: never log it.",
+      "type": "string",
+      "pattern": "^crt_[A-Za-z0-9_-]{43}$"
+    },
+    "RunnerCredential": {
+      "description": "The runner's own credential. Secret: never log it.",
+      "type": "string",
+      "pattern": "^crc_[A-Za-z0-9_-]{43}$"
+    },
+    "BaseVersion": {
+      "description": "The version of the base every runner provides (the pinned OpenCode, the model door, the cost ledger, the finish tool, the git rules): three numbers and an optional pre-release tag. A pre-release is older than its release.",
+      "type": "string",
+      "pattern": "^\\d{1,6}\\.\\d{1,6}\\.\\d{1,6}(-[0-9A-Za-z.-]{1,32})?$"
+    },
+    "Label": {
+      "description": "A label a job can ask for. Lower case; the app lower-cases what it gets.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._:-]{0,39}$"
+    },
+    "HarnessName": {
+      "description": "`opencode`, or `custom/name` for a harness the runner describes itself. Only OpenCode is in the platform's catalog; any other name exists for the app only while a runner announces it as ready.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,31}(/[a-z0-9][a-z0-9_-]{0,31})?$"
+    },
+    "HarnessAnnouncement": {
+      "type": "object",
+      "required": ["version", "ready"],
+      "properties": {
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9A-Za-z][0-9A-Za-z._+-]{0,31}$"
+        },
+        "ready": {
+          "description": "Installed, logged in and proven by the runner's self test. Only a ready harness is given a job.",
+          "type": "boolean"
+        }
+      }
+    },
+    "RunnerManifest": {
+      "description": "What the runner adds to the base or overrides in the how. It never removes the base.",
+      "type": "object",
+      "properties": {
+        "harnesses": {
+          "type": "object",
+          "maxProperties": 16,
+          "propertyNames": { "$ref": "#/$defs/HarnessName" },
+          "additionalProperties": { "$ref": "#/$defs/HarnessAnnouncement" }
+        },
+        "capabilities": {
+          "description": "For example `agent-docker`, announced only when the runner's self test ran a container in a Docker inside Sysbox.",
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$" }
+        }
+      }
+    },
+    "RunnerLimits": {
+      "description": "What the runner works within, as it reports it. Informational: the limits are enforced on the machine.",
+      "type": "object",
+      "properties": {
+        "cpus": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "memoryMb": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "diskGb": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "parallelRuns": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+      }
+    },
+    "RunnerAnnouncement": {
+      "description": "What a runner says about itself. The labels are all the routing reads (together with the ready harnesses and the version): a job runs on a runner that has every label its environment asks for.",
+      "type": "object",
+      "required": ["labels", "baseVersion"],
+      "properties": {
+        "labels": {
+          "type": "array",
+          "maxItems": 20,
+          "items": { "$ref": "#/$defs/Label" }
+        },
+        "baseVersion": { "$ref": "#/$defs/BaseVersion" },
+        "manifest": { "$ref": "#/$defs/RunnerManifest" },
+        "limits": { "$ref": "#/$defs/RunnerLimits" }
+      }
+    },
+    "RegisterRequest": {
+      "description": "POST /api/runners/v1/register. No other credential: the token is the proof. 401 RUNNER_REGISTRATION_TOKEN_INVALID when the token is unknown, used or expired (one answer for all three); 400 RUNNER_REQUEST_INVALID with `fields` for a body that does not fit.",
+      "type": "object",
+      "required": ["token", "name", "labels", "baseVersion"],
+      "properties": {
+        "token": { "$ref": "#/$defs/RegistrationToken" },
+        "name": {
+          "description": "The name in the list of runners: one line, 1 to 80 characters.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "labels": { "$ref": "#/$defs/RunnerAnnouncement/properties/labels" },
+        "baseVersion": { "$ref": "#/$defs/BaseVersion" },
+        "manifest": { "$ref": "#/$defs/RunnerManifest" },
+        "limits": { "$ref": "#/$defs/RunnerLimits" }
+      }
+    },
+    "RegisterResponse": {
+      "description": "201. The credential is in this answer and nowhere else.",
+      "type": "object",
+      "required": ["version", "runnerId", "credential", "minBaseVersion"],
+      "properties": {
+        "version": { "const": 1 },
+        "runnerId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "credential": { "$ref": "#/$defs/RunnerCredential" },
+        "minBaseVersion": {
+          "description": "The oldest base the app accepts, or null for none.",
+          "anyOf": [{ "$ref": "#/$defs/BaseVersion" }, { "type": "null" }]
+        }
+      }
+    },
+    "AnnounceRequest": {
+      "description": "PUT /api/runners/v1/self: replaces what the app holds of the runner's labels, base version, manifest and limits. The runner sends it at start and whenever one of them changes.",
+      "$ref": "#/$defs/RunnerAnnouncement"
+    },
+    "AnnounceResponse": {
+      "type": "object",
+      "required": ["version", "runnerId", "minBaseVersion", "updateNeeded"],
+      "properties": {
+        "version": { "const": 1 },
+        "runnerId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "minBaseVersion": {
+          "anyOf": [{ "$ref": "#/$defs/BaseVersion" }, { "type": "null" }]
+        },
+        "updateNeeded": {
+          "description": "True when the announced base is older than the minimum: the runner gets no job until it is updated.",
+          "type": "boolean"
+        }
+      }
+    },
+    "CredentialResponse": {
+      "description": "POST /api/runners/v1/credential: a new credential for the runner. The one it presented stays valid until the new one is used once.",
+      "type": "object",
+      "required": ["version", "credential"],
+      "properties": {
+        "version": { "const": 1 },
+        "credential": { "$ref": "#/$defs/RunnerCredential" }
+      }
+    }
+  }
+}

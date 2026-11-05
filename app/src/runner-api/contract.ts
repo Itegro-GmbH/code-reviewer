@@ -323,6 +323,9 @@ export const RUNNER_API_ERROR_CODES = [
   // The Worker API (#318, served from #320): a credential that is not the job's, and a job the app ended.
   "WORKER_CREDENTIAL_INVALID",
   "RUNNER_JOB_ENDED",
+  // A customer's runner (#854): a registration token that cannot be exchanged, and a base older than the minimum.
+  "RUNNER_REGISTRATION_TOKEN_INVALID",
+  "RUNNER_UPDATE_NEEDED",
 ] as const;
 export type RunnerApiErrorCode = (typeof RUNNER_API_ERROR_CODES)[number];
 
@@ -335,6 +338,8 @@ export type ErrorResponse = {
     message: string;
     fields?: FieldError[];
     retryAfterSeconds?: number;
+    /** #854: with `RUNNER_UPDATE_NEEDED`, the oldest version of the base the app accepts. */
+    minBaseVersion?: string;
   };
 };
 

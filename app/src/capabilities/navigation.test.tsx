@@ -164,6 +164,7 @@ describe("the Implementer item in the sidebar", () => {
       ["QA", "/w/acme/projects"],
       ["Implementer", "/w/acme/implementer"],
       ["Environments", "/w/acme/environments"],
+      ["Runners", "/w/acme/runners"],
       ["Runs", "/w/acme/runs"],
       ["Connections", "/w/acme/connections"],
       ["Members", "/w/acme/members"],
@@ -250,7 +251,9 @@ describe("the Environments item in the sidebar (#818)", () => {
     expect(labels.indexOf("Environments")).toBe(
       labels.indexOf("Implementer") + 1,
     );
-    expect(labels.indexOf("Runs")).toBe(labels.indexOf("Environments") + 1);
+    // #854: the runners of the workspace follow the environments, which name the labels they ask for.
+    expect(labels.indexOf("Runners")).toBe(labels.indexOf("Environments") + 1);
+    expect(labels.indexOf("Runs")).toBe(labels.indexOf("Runners") + 1);
   });
 
   // #818-T10

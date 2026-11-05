@@ -32,6 +32,12 @@ import { projectServiceFor } from "../projects/shared.ts";
 import { reviewSettingsServiceFor } from "../review-settings/shared.ts";
 import { noteDispatcherClaim } from "../billing/dispatcher-features.ts";
 import { createRunnerApi, type RunnerApi } from "./api.ts";
+import {
+  createRunnerRegistrationApi,
+  type RunnerRegistrationApi,
+} from "./registration.ts";
+import { createRunnerCredentialsRepository } from "../db/repositories/runner-credentials-repository.ts";
+import { minimumBaseVersion } from "../runner-identity/config.ts";
 import { createProviderPins } from "./provider-pins.ts";
 import { knownContextWindowFrom } from "./known-context-window.ts";
 import { APP_VERSION } from "./app-version.ts";
@@ -185,6 +191,8 @@ export function getRunnerApi(): RunnerApi {
     vmRuns: (workspaceId) =>
       createJobVmRunsRepository(getDatabase(), workspaceId),
     runnerToken: () => configuredRunnerToken(process.env),
+    // #854: the runners of customers' own machines, with credentials of their own.
+    fleet: getRunnerRegistrationApi(),
     appVersion: APP_VERSION,
     // #498: which Dispatchers this app serves (billing is not switched on over one that reports no VMs).
     noteClaimFeatures: (features) =>
@@ -224,6 +232,29 @@ export async function withWorkerApi(
   } catch (error) {
     consoleRunnerApiLogger.error(
       `[worker-api] the API could not be set up: ${describeError(error)}`,
+    );
+    return errorResponse(500, "RUNNER_INTERNAL_ERROR");
+  }
+}
+
+/** The runner side of the registration on the running server (#854): the exchange, the announcement, the renewal and the credential check. */
+export function getRunnerRegistrationApi(): RunnerRegistrationApi {
+  return createRunnerRegistrationApi({
+    credentials: createRunnerCredentialsRepository(getDatabase()),
+    settings: () => ({ minBaseVersion: minimumBaseVersion(process.env) }),
+    logger: consoleRunnerApiLogger,
+  });
+}
+
+/** What the route files of the registration call: if the API cannot be set up, the caller gets the answer of any other unplanned failure. */
+export async function withRunnerRegistrationApi(
+  call: (api: RunnerRegistrationApi) => Promise<Response>,
+): Promise<Response> {
+  try {
+    return await call(getRunnerRegistrationApi());
+  } catch (error) {
+    consoleRunnerApiLogger.error(
+      `[runner-registration] the API could not be set up: ${describeError(error)}`,
     );
     return errorResponse(500, "RUNNER_INTERNAL_ERROR");
   }
