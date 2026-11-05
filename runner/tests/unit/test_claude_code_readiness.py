@@ -7,8 +7,6 @@ the self-test command), and never as a reason for the base to fail."""
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from code_reviewer_runner.factory_runner.config import RunnerConfig
 from code_reviewer_runner.factory_runner.prepare import announcement_for, prepare
 from code_reviewer_runner.factory_runner.selftest import Check, SelfTestResult
@@ -143,8 +141,6 @@ def test_a_build_that_fails_is_not_ready_with_the_reason_and_never_raises(tmp_pa
 def test_a_login_that_cannot_be_used_is_not_ready_and_the_note_never_holds_the_token(
     tmp_path: Path,
 ) -> None:
-    if __import__("os").geteuid() == 0:
-        pytest.skip("root reads every file")
     found = status(Daemon(layer=True), token_in(tmp_path, mode=0o644), tmp_path)
 
     assert found is not None and not found.ready

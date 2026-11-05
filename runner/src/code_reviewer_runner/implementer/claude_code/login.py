@@ -12,7 +12,8 @@ database, never sent to the app, never logged**. The runner reads it from
 3. `CLAUDE_CODE_OAUTH_TOKEN` in the runner's own environment,
 
 and hands it to the agent's container as `CLAUDE_CODE_OAUTH_TOKEN` for the turn (`command.py`). A
-file must be a plain file (not a link) that only its owner can read, like an SSH key. The stored
+file must be a plain file (not a link), owned by the user the runner runs as, that only its owner
+can read, like an SSH key (the mode is checked for root too). The stored
 login file of Claude Code (`~/.claude/.credentials.json`) is not used: it refreshes itself against
 Anthropic's endpoint, which the agent's container must not reach.
 
@@ -87,7 +88,11 @@ def _read_file(path: Path) -> ClaudeLogin | LoginProblem:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
             return LoginProblem(f"the token file {path.name} is not a plain file")
-        if os.geteuid() != 0 and info.st_mode & 0o077:
+        if info.st_uid != os.geteuid():
+            return LoginProblem(
+                f"the token file {path.name} is not owned by the user the runner runs as"
+            )
+        if info.st_mode & 0o077:  # root is no exception: a careless file stays a careless file
             return LoginProblem(
                 f"the token file {path.name} can be read by others: change its mode to 0600"
             )

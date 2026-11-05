@@ -229,7 +229,6 @@ def test_no_token_is_a_problem_that_says_where_to_put_one(tmp_path: Path) -> Non
 
 
 # #856-T12
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads every file")
 def test_a_token_file_others_can_read_is_refused_and_the_value_is_never_named(
     tmp_path: Path,
 ) -> None:
@@ -240,6 +239,36 @@ def test_a_token_file_others_can_read_is_refused_and_the_value_is_never_named(
     assert isinstance(problem, LoginProblem)
     assert "0600" in problem.text and TOKEN not in problem.text
     assert stat.S_IMODE(path.stat().st_mode) == 0o644
+
+
+# #856-T12
+def test_the_mode_of_the_token_file_is_checked_for_root_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A runner that runs as root is the one most likely to be handed a careless file."""
+    path = write_token(tmp_path, TOKEN, mode=0o640)
+    monkeypatch.setattr(os, "geteuid", lambda: path.stat().st_uid)  # the owner, root or not
+
+    problem = load_login({"FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE": str(path)}, tmp_path)
+
+    assert isinstance(problem, LoginProblem) and "0600" in problem.text
+
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    as_root = load_login({"FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE": str(path)}, tmp_path)
+    assert isinstance(as_root, LoginProblem), "never a login for root from this file"
+
+
+# #856-T12
+def test_a_token_file_of_another_owner_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = write_token(tmp_path, TOKEN)
+    monkeypatch.setattr(os, "geteuid", lambda: path.stat().st_uid + 1)
+
+    problem = load_login({"FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE": str(path)}, tmp_path)
+
+    assert isinstance(problem, LoginProblem)
+    assert "owned by" in problem.text and TOKEN not in problem.text
 
 
 # #856-T12
