@@ -244,6 +244,8 @@
         "command_removed": "This command was removed from the product, so the waiting run was cancelled.",
         "review_kind_changed": "The project's review kind was changed before this run could start, so the waiting run was cancelled.",
         "no_capable_runner": "No runner that can run this kind of review picked up the run within the time limit, so it was cancelled. It will run again on the next push or review request.",
+        "runner_needs_own_key": "This run would use the operator's key on a runner, which is not allowed. Nothing was charged.",
+        "no_runner_available": "No runner of the workspace with the labels this run asks for picked it up within the time limit, so it was cancelled. Nothing was charged.",
         "dispatch_unavailable": "No worker picked up this run within the time limit, so it was stopped. The service that starts workers may be down or fully busy. It will run again on the next push or review request.",
         "dynamic_review_disabled": "Dynamic Review is not switched on yet, so this run could not start. Ask whoever runs the server to turn it on, or switch the project to Diff Review on its settings page.",
         "workspace_suspended": "Reviews are paused for this workspace, so this run did not start and no AI model was used. Ask whoever manages this workspace's plan.",
