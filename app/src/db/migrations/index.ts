@@ -79,6 +79,7 @@ import { migration as addJobsSupersededByIndex } from "./20261023160000_add_jobs
 import { migration as addUsersPosthogIdentity } from "./20261025140000_add_users_posthog_identity.ts";
 import { migration as addEnvironmentNetwork } from "./20261103100000_add_environment_network.ts";
 import { migration as createImplementerTurnSteps } from "./20261104100000_create_implementer_turn_steps.ts";
+import { migration as createImplementerSessionSnapshots } from "./20261105090000_create_implementer_session_snapshots.ts";
 import { migration as createWorkflows } from "./20261104140000_create_workflows.ts";
 import { migration as createProfiles } from "./20261104150000_create_profiles.ts";
 import { migration as addImplementerTurnProfile } from "./20261104160000_add_implementer_turn_profile.ts";
@@ -188,6 +189,8 @@ const migrations: Record<string, Migration> = {
   "20261104140000_create_workflows": createWorkflows,
   "20261104150000_create_profiles": createProfiles,
   "20261104160000_add_implementer_turn_profile": addImplementerTurnProfile,
+  "20261105090000_create_implementer_session_snapshots":
+    createImplementerSessionSnapshots,
 };
 
 export const migrationProvider: MigrationProvider = {

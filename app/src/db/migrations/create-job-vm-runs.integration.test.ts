@@ -51,6 +51,8 @@ async function rowsOfEveryTable(
       table.name === "profiles" ||
       table.name === "profile_versions" ||
       table.name === "implementer_turn_steps" ||
+      table.name === "implementer_session_snapshots" ||
+      table.name === "implementer_session_snapshot_parts" ||
       table.name === "implementer_turns"
     )
       continue;

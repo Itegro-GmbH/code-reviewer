@@ -120,6 +120,19 @@ of a model call as `step`) in batches of at most 50 records and 48 KiB to `POST 
 - **No claim feature.** A claim feature gates what the app _sends_ a runner (a job field it must understand). This call adds nothing to the job; what a runner needs to know is
   whether the app _has_ the call, and that is the app feature `implementer_steps` of `GET /api/runners/v1/version`.
 
+## The session snapshot of a turn of the Implementer (#839)
+
+`PUT /api/workers/v1/jobs/:id/session` (Worker API only; the credential in the header) puts one part of the session snapshot of the running turn: the engine's export, gzipped by the runner, at most 8 MiB, kept
+so that a follow-up turn can resume the conversation in a new VM. The body is the bytes of the part (read up to 3 MiB, `413` above), the description of the whole file is in the query (`part`, `parts`, `bytes`, `rawBytes`, `sha256`,
+`opencodeVersion`; `snapshot-request.ts`). A function of the platform takes no request body over 4.5 MB, so the file arrives in parts of exactly 3 MiB, the last one what is left, at most three; the parts may come in any order and twice.
+
+- **Same rules as the steps.** It proves the claim and does **not** extend the lease; `409 RUNNER_JOB_ENDED` once the job is over, `401` for a credential that is not the job's, `400` for a job that is not a turn of the Implementer or a query or
+  body that does not fit (`fields`, never a value). The feature is the app feature `implementer_snapshot`; there is no claim feature.
+- **Whole or not at all.** The parts wait in `implementer_session_snapshot_parts`. When the last is in, the repository puts them together in the transaction that proves the claim, checks the size and the digest, and swaps the snapshot in
+  for the session's old one (`db/repositories/implementer-snapshots-repository.ts`); until then the old one is read. Parts that disagree or do not make the announced file are `400` and nothing of that upload is kept. The `200` answer says `complete`.
+- **One per session, kept for good.** Replaced by each turn (an older turn never replaces a newer snapshot), deleted by nothing but the erasure of the workspace. The app does not open the bytes; the runner has taken the secrets it knows out of the export,
+  and what the repository holds (a committed `.env` the agent printed) can be in it, tool outputs included. Nothing reads it yet (PR 8).
+
 ## Authentication
 
 `Authorization: Bearer <RUNNER_TOKEN>` on every call. One shared token in the MVP, read from the

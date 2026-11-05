@@ -37,8 +37,10 @@ from code_reviewer_runner.implementer.session import (
     GRACE_SECONDS,
     LEFTOVER_SECONDS,
     MAX_RETURNED_BYTES,
+    SNAPSHOT_SECONDS,
     STEPS_FLUSH_SECONDS,
     STOP_PUSH_SECONDS,
+    STOP_SNAPSHOT_SECONDS,
     STOP_STEPS_FLUSH_SECONDS,
     TOKEN_CAP_DETAIL,
     ImplementerSession,
@@ -457,7 +459,8 @@ def test_the_end_of_a_turn_fits_the_grace_and_a_stop_fits_the_sigterm_backstop()
     # after the commit (its filters ran in a reader that can write).
     quiet = READER_RESET_SECONDS
     normal = (
-        ENGINE_STOP_SECONDS
+        SNAPSHOT_SECONDS
+        + ENGINE_STOP_SECONDS
         + quiet
         + rescue
         + DIRTY_TIMEOUT
@@ -468,10 +471,17 @@ def test_the_end_of_a_turn_fits_the_grace_and_a_stop_fits_the_sigterm_backstop()
         + STEPS_FLUSH_SECONDS
     )
     stop = (
-        ENGINE_STOP_SECONDS + quiet + rescue + STOP_PUSH_SECONDS + reads + STOP_STEPS_FLUSH_SECONDS
+        STOP_SNAPSHOT_SECONDS
+        + ENGINE_STOP_SECONDS
+        + quiet
+        + rescue
+        + STOP_PUSH_SECONDS
+        + reads
+        + STOP_STEPS_FLUSH_SECONDS
     )
 
-    assert normal == 222.0 and stop == 84.0
+    assert SNAPSHOT_SECONDS == 5.0 and STOP_SNAPSHOT_SECONDS == 2.0
+    assert normal == 227.0 and stop == 86.0
     assert normal <= 0.85 * GRACE_SECONDS
     assert stop <= 0.75 * SIGTERM_BACKSTOP_SECONDS
 

@@ -14,6 +14,7 @@ from worker_api_fake import CREDENTIAL, FakeWorkerApp, RawServer, Scripted, exam
 
 from code_reviewer_runner.job_loop.api import parse_heartbeat
 from code_reviewer_runner.job_loop.http import ApiRejected, ApiUnavailable, LeaseLost, Reply
+from code_reviewer_runner.job_loop.snapshot_sender import SnapshotPart
 from code_reviewer_runner.job_loop.worker_api import (
     CredentialInvalid,
     HttpWorkerApi,
@@ -367,3 +368,93 @@ def test_a_hung_steps_call_leaves_the_other_calls_free_and_is_not_piled_up(
 
     assert beat < 1.0
     assert whole >= 1.4
+
+
+# -- #839: the snapshot call --------------------------------------------------------------------
+
+DIGEST = "c" * 64
+
+
+def part_of(data: bytes, *, index: int = 0, count: int = 1) -> SnapshotPart:
+    return SnapshotPart(index, count, len(data) * count, DIGEST, 9_999, "1.19.0", data)
+
+
+# #839-T15
+def test_the_client_offers_the_snapshot_only_to_an_app_that_lists_the_feature(
+    app: FakeWorkerApp,
+) -> None:
+    api = client(app.url)
+    assert api.supports_snapshot is False, "before the version call nothing is known"
+
+    app.features = ["worker_api", "implementer_steps"]
+    asyncio.run(api.check_app(JOB_ID))
+    assert api.supports_snapshot is False
+
+    app.features = ["worker_api", "implementer_snapshot"]
+    asyncio.run(api.check_app(JOB_ID))
+    assert api.supports_snapshot is True
+
+
+# #839-T15
+def test_a_part_is_put_as_bytes_with_its_description_in_the_query(app: FakeWorkerApp) -> None:
+    data = bytes(range(256)) * 40  # not text
+
+    asyncio.run(client(app.url).snapshot(JOB_ID, part_of(data, index=1, count=3)))
+
+    (sent,) = [r for r in app.requests if r["kind"] == "session"]
+    assert sent["method"] == "PUT"
+    assert sent["raw"] == data
+    assert sent["headers"]["Authorization"] == f"Bearer {CREDENTIAL}"
+    assert sent["headers"]["Content-Type"] == "application/octet-stream"
+    assert sent["query"] == {
+        "part": ["1"],
+        "parts": ["3"],
+        "bytes": [str(len(data) * 3)],
+        "rawBytes": ["9999"],
+        "sha256": [DIGEST],
+        "opencodeVersion": ["1.19.0"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (409, LeaseLost),
+        (404, LeaseLost),
+        (401, CredentialInvalid),
+        (400, ApiRejected),
+        (413, ApiRejected),
+        (500, ApiUnavailable),
+        (429, ApiUnavailable),
+    ],
+)
+# #839-T15
+def test_the_answers_to_a_snapshot_call_are_told_apart_as_for_every_other_call(
+    app: FakeWorkerApp, status: int, expected: type[Exception]
+) -> None:
+    app.script("session", Scripted(status, {"error": {"code": "X", "message": "m"}}))
+
+    with pytest.raises(expected):
+        asyncio.run(client(app.url).snapshot(JOB_ID, part_of(b"x")))
+
+
+# #839-T15
+def test_a_hung_snapshot_call_leaves_the_other_calls_free_and_is_not_piled_up(
+    app: FakeWorkerApp,
+) -> None:
+    app.steps_delay = 1.0  # the fake's delay of the steps and the snapshot calls
+    api = client(app.url)
+
+    async def scenario() -> float:
+        loop = asyncio.get_running_loop()
+        first = asyncio.ensure_future(api.snapshot(JOB_ID, part_of(b"x")))
+        await asyncio.sleep(0.2)
+        began = loop.time()
+        await api.heartbeat(JOB_ID, CREDENTIAL)  # not held up by the snapshot call in flight
+        beat = loop.time() - began
+        with pytest.raises(ApiUnavailable):  # a second part does not queue behind the first
+            await api.snapshot(JOB_ID, part_of(b"y"))
+        await first
+        return beat
+
+    assert asyncio.run(scenario()) < 0.8

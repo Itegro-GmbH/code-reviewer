@@ -24,6 +24,17 @@ const beforeThisMigration: MigrationProvider = {
   },
 };
 
+/** The migrations up to and including this one: a later migration adds tables of its own. */
+const throughThisMigration: MigrationProvider = {
+  async getMigrations() {
+    return Object.fromEntries(
+      Object.entries(await migrationProvider.getMigrations()).filter(
+        ([name]) => name <= THIS,
+      ),
+    );
+  },
+};
+
 async function snapshot(
   db: Kysely<Database>,
 ): Promise<Record<string, unknown[]>> {
@@ -74,7 +85,7 @@ describe("the workflows migration", () => {
     const rows = await snapshot(db);
     const before = await columns(db);
 
-    const { executed } = await migrateToLatest(db, migrationProvider);
+    const { executed } = await migrateToLatest(db, throughThisMigration);
 
     expect(executed).toContain(THIS);
     expect(await snapshot(db)).toEqual(rows);

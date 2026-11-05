@@ -28,6 +28,8 @@ const LATER_TABLES = [
   "implementer_sessions",
   "implementer_turns",
   "implementer_turn_steps",
+  "implementer_session_snapshots",
+  "implementer_session_snapshot_parts",
   "implementer_environments",
   "workflows",
   "workflow_versions",

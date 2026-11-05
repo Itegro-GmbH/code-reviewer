@@ -53,6 +53,8 @@ async function snapshot(
       table.name === "profiles" ||
       table.name === "profile_versions" ||
       table.name === "implementer_turn_steps" ||
+      table.name === "implementer_session_snapshots" ||
+      table.name === "implementer_session_snapshot_parts" ||
       table.name === "implementer_turns" ||
       table.name === "job_vm_runs" ||
       table.name === "billing_topup_intents" ||

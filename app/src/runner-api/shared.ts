@@ -17,6 +17,7 @@ import { createJobsRepository } from "../db/repositories/jobs-repository.ts";
 import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
 import { createPinnedAddressReader } from "../review-settings/pinned-addresses.ts";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
+import { createImplementerSnapshotsRepository } from "../db/repositories/implementer-snapshots-repository.ts";
 import { createImplementerStepsRepository } from "../db/repositories/implementer-steps-repository.ts";
 import { createJobVmRunsRepository } from "../db/repositories/job-vm-runs-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
@@ -149,6 +150,9 @@ function sharedDeps(): WorkerApiDeps {
     claimedKeys,
     // #745: the steps of a running turn, scoped to the job's own workspace.
     steps: (workspaceId) => createImplementerStepsRepository(db, workspaceId),
+    // #839: the session snapshot of a turn (follow-up turns), scoped to the job's own workspace.
+    snapshots: (workspaceId) =>
+      createImplementerSnapshotsRepository(db, workspaceId),
     // #753: the write token of a turn of the Implementer ends with the turn (and with a fetch that failed after it was made).
     revokeWriteTokens: writeTokens.revokeAllOf,
     revokeUndelivered: writeTokens.revokeUndelivered,

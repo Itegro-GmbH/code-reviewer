@@ -6,6 +6,8 @@ model and a bare repository standing in for GitHub (`lane_support`). The journey
 table that still mean something with the agent in a container of its own: E01, E03, E04, E05, E12
 and E09 here, E06 and E07 in `test_implementer_git.py`, E15 in `test_reader_hostile.py`."""
 
+import gzip
+import json
 import re
 import threading
 from collections.abc import Mapping
@@ -13,18 +15,35 @@ from pathlib import Path
 from typing import Any
 
 from fakes.wire.formats import Turn
-from lane_support import Turned, bash, commit, docker, lane_turn, says, write_file
+from lane_support import (
+    INSTRUCTION,
+    Turned,
+    bash,
+    commit,
+    docker,
+    lane_turn,
+    says,
+    write_file,
+)
 from opencode_native import REAL_KEY
 
-from code_reviewer_runner.implementer.agent_container import AGENT_CONTAINER_NAME
+from code_reviewer_runner.implementer.agent_container import (
+    AGENT_CONTAINER_NAME,
+    AGENT_HOME,
+    AGENT_TMP,
+    OPENCODE,
+)
+from code_reviewer_runner.implementer.config import implementer_environment
 from code_reviewer_runner.implementer.git_workspace import LEFTOVER_MESSAGE
 from code_reviewer_runner.implementer.prompts import LEFTOVER_PROMPT
 from code_reviewer_runner.implementer.reader import (
     READER_CONTAINER_NAME,
     READER_WRITER_CONTAINER_NAME,
 )
+from code_reviewer_runner.implementer.snapshot_pump import SnapshotPump
 from code_reviewer_runner.result import ErrorCode
 from git_support import TOKEN, files_mentioning, raw
+from snapshot_support import SnapshotHost
 
 CLOSING = "I added hello.txt and committed it."
 
@@ -256,3 +275,56 @@ def test_a_container_killed_mid_turn_ends_the_turn_named_and_what_was_committed_
     finally:
         stop.set()
         killer.join(10.0)
+
+
+def texts_of(document: Mapping[str, Any]) -> str:
+    """Every text part of an export, in one string."""
+    return "\n".join(
+        str(part.get("text", ""))
+        for message in document["messages"]
+        for part in message.get("parts", [])
+        if part.get("type") == "text"
+    )
+
+
+# #839-E20
+def test_the_session_of_a_turn_is_exported_from_the_real_engine_and_the_pinned_engine_imports_it(
+    tmp_path: Path,
+) -> None:
+    def script(repo: Path) -> list[Turn]:
+        return [write_file(repo, "hello.txt"), commit("Add hello"), says(CLOSING)]
+
+    host = SnapshotHost()
+    with lane_turn(tmp_path, script, snapshot=SnapshotPump(host.process_end)) as turned:
+        result = turned.result
+
+        assert result.ok, (result.error_code, result.error_detail, result.notes)
+        assert not any("not saved" in note for note in result.notes), result.notes
+        assert host.wait(60), "the process closed the channel"
+        header = host.header
+        assert header is not None and header.version == "1.19.0"
+        packed = host.data
+        assert len(packed) == header.size
+        document = json.loads(gzip.decompress(packed))
+        assert document["info"]["id"] == result.opencode_session_id
+        texts = texts_of(document)
+        assert INSTRUCTION in texts and CLOSING in texts, "the conversation is in the file"
+        assert REAL_KEY not in json.dumps(document)
+
+        # The pinned engine reads the file as the next turn's VM will: `opencode import`, before
+        # any engine is started, in a container that has nothing else (no network).
+        resume = tmp_path / "resume.json"
+        resume.write_bytes(gzip.decompress(packed))
+        resume.chmod(0o644)
+        environment = implementer_environment(home=AGENT_HOME, scratch_dir=AGENT_TMP)
+        flags = [item for name, value in environment.items() for item in ("-e", f"{name}={value}")]
+        done = docker(
+            "run", "--rm", "--network", "none", "--memory", "1g",
+            "--entrypoint", OPENCODE,
+            "-v", f"{resume}:/resume.json:ro",
+            *flags, turned.config.agent_image, "import", "/resume.json",
+            timeout=180.0,
+        )  # fmt: skip
+        assert "Imported session" in done.stdout + done.stderr, done.stdout + done.stderr
+        assert str(result.opencode_session_id) in done.stdout + done.stderr
+    host.close()
