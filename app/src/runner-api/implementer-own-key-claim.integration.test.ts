@@ -19,6 +19,7 @@ import {
 import { anthropicDescriptor } from "../llm/providers/anthropic/descriptor.ts";
 import { openrouterDescriptor } from "../llm/providers/openrouter/descriptor.ts";
 import { createWorkspaceEntitlementsRepository } from "../db/repositories/workspace-entitlements-repository.ts";
+import { createImplementerSnapshotsRepository } from "../db/repositories/implementer-snapshots-repository.ts";
 import { startRunnerApiHarness } from "../test-support/runner-api-harness.ts";
 import type { ClaimResponse } from "./contract.ts";
 
@@ -493,6 +494,125 @@ describe("the claim of a follow-up turn of the Implementer", () => {
       (job.input as { implementer: { resume: { snapshot: boolean } } })
         .implementer.resume.snapshot,
     ).toBe(true);
+  });
+
+  /** The snapshot a turn's upload leaves: it replaces the session's older one, as the repository's swap does. */
+  async function storeSnapshot(
+    h: Awaited<ReturnType<typeof start>>,
+    session: { id: string },
+    turn: { jobId: string; number: number },
+  ) {
+    await h.db
+      .deleteFrom("implementer_session_snapshots")
+      .where("session_id", "=", session.id)
+      .execute();
+    await h.db
+      .insertInto("implementer_session_snapshots")
+      .values({
+        session_id: session.id,
+        workspace_id: h.workspaceId,
+        job_id: turn.jobId,
+        turn_number: turn.number,
+        opencode_version: "1.19.0",
+        bytes: 10,
+        raw_bytes: 20,
+        sha256: "d".repeat(64),
+        data: "AAAA",
+        created_at: "2026-11-05T09:00:00.000Z",
+        updated_at: "2026-11-05T09:00:00.000Z",
+      })
+      .execute();
+  }
+
+  /** The turn `claim` holds, reported as finished on the session's branch, so that the next one can be queued. */
+  async function finishTurn(
+    h: Awaited<ReturnType<typeof start>>,
+    claim: ClaimResponse,
+    branch: string,
+  ) {
+    const reported = await h.complete(claim.job.id, claim.job.leaseToken, {
+      implementer: {
+        baseCommit: "a".repeat(40),
+        headCommit: HEAD,
+        pushed: true,
+        commits: [],
+        filesChanged: [],
+        summary: "Did more.",
+        opencode: null,
+        branches: [
+          { name: branch, head: HEAD, result: "pushed", reason: null },
+        ],
+        checkedOut: branch,
+      },
+    });
+    expect(reported.status).toBe(200);
+  }
+
+  const offered = (claim: ClaimResponse) =>
+    (claim.job.input as { implementer: { resume: { snapshot: boolean } } })
+      .implementer.resume.snapshot;
+
+  // #885-C01: the claim and the download follow the same rule
+  it("offers turn 3 no conversation when turn 2 uploaded none, and the download of turn 3 finds none: the snapshot of turn 1 stays stored", async () => {
+    const { h, first } = await afterFirstTurn();
+    await storeSnapshot(h, first.session, { jobId: first.job.id, number: 1 });
+    const options = { ...claimOptions(), features: WITH_RESUME };
+    await h.enqueueFollowUp(first.session.id, {
+      modelChoice: { provider: "anthropic", model: SONNET },
+      costLimitCents: 500,
+    });
+    const second = await h.claimed(options);
+    expect(offered(second)).toBe(true);
+    await finishTurn(h, second, first.session.branch);
+    await h.enqueueFollowUp(first.session.id, {
+      modelChoice: { provider: "anthropic", model: SONNET },
+      costLimitCents: 500,
+    });
+
+    const third = await h.claimed(options);
+
+    expect(offered(third)).toBe(false);
+    const read = await createImplementerSnapshotsRepository(
+      h.db,
+      h.workspaceId,
+    ).readForJob(third.job.id, third.job.leaseToken);
+    expect(read).toStrictEqual({ status: "none" });
+    const kept = await h.db
+      .selectFrom("implementer_session_snapshots")
+      .select(["job_id", "turn_number"])
+      .where("session_id", "=", first.session.id)
+      .execute();
+    expect(kept).toEqual([{ job_id: first.job.id, turn_number: 1 }]);
+  });
+
+  // #885-C02
+  it("offers turn 3 the conversation of turn 2 when turn 2 uploaded one, and the download of turn 3 serves it", async () => {
+    const { h, first } = await afterFirstTurn();
+    await storeSnapshot(h, first.session, { jobId: first.job.id, number: 1 });
+    const options = { ...claimOptions(), features: WITH_RESUME };
+    await h.enqueueFollowUp(first.session.id, {
+      modelChoice: { provider: "anthropic", model: SONNET },
+      costLimitCents: 500,
+    });
+    const second = await h.claimed(options);
+    await finishTurn(h, second, first.session.branch);
+    await storeSnapshot(h, first.session, { jobId: second.job.id, number: 2 });
+    await h.enqueueFollowUp(first.session.id, {
+      modelChoice: { provider: "anthropic", model: SONNET },
+      costLimitCents: 500,
+    });
+
+    const third = await h.claimed(options);
+
+    expect(offered(third)).toBe(true);
+    const read = await createImplementerSnapshotsRepository(
+      h.db,
+      h.workspaceId,
+    ).readForJob(third.job.id, third.job.leaseToken);
+    expect(read).toMatchObject({
+      status: "ok",
+      snapshot: { jobId: second.job.id, turnNumber: 2 },
+    });
   });
 
   // #841-C05: the branch the last turn ended on must be one the runner can check out

@@ -17,7 +17,10 @@ import { createJobsRepository } from "../db/repositories/jobs-repository.ts";
 import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
 import { createPinnedAddressReader } from "../review-settings/pinned-addresses.ts";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
-import { createImplementerSnapshotsRepository } from "../db/repositories/implementer-snapshots-repository.ts";
+import {
+  createImplementerSnapshotsRepository,
+  isDirectPredecessorSnapshot,
+} from "../db/repositories/implementer-snapshots-repository.ts";
 import { createImplementerStepsRepository } from "../db/repositories/implementer-steps-repository.ts";
 import { createJobVmRunsRepository } from "../db/repositories/job-vm-runs-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
@@ -123,7 +126,7 @@ function sharedDeps(): WorkerApiDeps {
         job.id,
       ),
     // #841: what a follow-up turn is told about the turns before it, from the job's own workspace: the stored reports, the session's
-    // summary and whether a conversation of an earlier turn is stored.
+    // summary and whether the conversation of the directly preceding turn is stored (#885).
     implementerResume: async (job, { turn, session }) => {
       const history = await createImplementerRepository(
         getDatabase(),
@@ -139,7 +142,8 @@ function sharedDeps(): WorkerApiDeps {
         history: history.filter((entry) => entry.number < turn.number),
         sessionSummary: session.summary,
         hasSnapshot:
-          snapshot !== undefined && snapshot.turnNumber < turn.number,
+          snapshot !== undefined &&
+          isDirectPredecessorSnapshot(snapshot.turnNumber, turn.number),
       });
     },
     claimedKeyMode: async (job) =>

@@ -74,16 +74,26 @@ A follow-up is a job like the first turn's: a new VM from the golden snapshot, t
 
 At the end of every turn the runner reads the engine's session over its HTTP API, takes out the secrets it knows, gzips it (8 MiB at
 most) and hands it to the app through the job host (section "The session snapshot (#839)"). The app keeps **one snapshot per session**,
-replaced by each turn. The next turn downloads it before its process starts and runs `opencode import` in the agent's container before the
-engine starts, so the agent continues in the **same OpenCode session** with its earlier messages and tool results. The Runs page shows the
-way it went as a line "Continuation":
+replaced by each turn that uploads one. The next turn downloads it before its process starts and runs `opencode import` in the agent's
+container before the engine starts, so the agent continues in the **same OpenCode session** with its earlier messages and tool results.
+The Runs page shows the way it went as a line "Continuation":
 
 - `imported`: the conversation was imported.
 - `summary_only`: the turn goes on from a record instead, because there was no snapshot to import. The agent gets a fresh session, the
   preface, and the last turn's summary and a digest of the earlier turns (the last instructions, the summaries, the commit subjects and the
-  changed files) in a part of its own, as data and never as instructions. The reason is a stable word: `no_snapshot` (none stored, or
-  it was over the cap or the export failed), `download_failed`, `snapshot_unreadable` (size, digest, shape), `import_failed` and
+  changed files) in a part of its own, as data and never as instructions. The reason is a stable word: `no_snapshot` (none stored for the directly
+  preceding turn: the session never had one, or the last turn uploaded none because the export failed, the snapshot was over the cap
+  or the runner did not have the feature), `download_failed`, `snapshot_unreadable` (size, digest, shape), `import_failed` and
   `version_changed` (the import failed and the engine's version is not the one that wrote the snapshot). None of them fails the turn.
+
+**Only the snapshot of the directly preceding turn is offered (#885).** A turn can end without uploading one: the hosted export failed,
+the snapshot was over the cap, or a customer's runner did not have the feature. The snapshot of the turn before stays stored in its place,
+but it holds the conversation of the turn before last while the branch already carries the later work, and importing it would make the
+agent continue from a conversation that is behind the code. So the claim says `resume.snapshot: true` and the download
+(`resume-session`, on the Worker route and on the runner route) serves a snapshot only when it was written by turn `n - 1` for turn `n`;
+otherwise `resume.snapshot` is `false`, the download answers 204, and the turn continues as `summary_only` with the reason `no_snapshot`.
+Both ask the same rule, so a snapshot is never offered and then not served. The older snapshot is **not deleted** (section "Keeping it: for
+ever, no close"); the next upload replaces it. A turn that does upload brings the chain back: the turn after it gets the conversation again.
 
 A snapshot holds what the agent read and said **with the outputs of its tools**, which the live view does not show. The page never shows
 it; the one reader is the next turn of the same session.
@@ -98,7 +108,7 @@ newest one only.
 
 **Nothing is closed, and nothing is deleted** (owner's decisions 4 and 8 of 2026-11-04). A session has no close button and no
 column that says it is closed, and no sweep removes old ones. The steps of a turn and the snapshot of a session are **kept for ever**, as long as the
-workspace exists; the one thing that removes them is the erasure of the workspace. The snapshot is the latest turn's only (each turn
+workspace exists; the one thing that removes them is the erasure of the workspace. The snapshot is that of the latest turn that uploaded one (each upload
 replaces it); the steps of every turn stay. The branch name stays held by its session. If the retention or a close becomes a need, it is a
 new decision with its own change.
 

@@ -11,7 +11,7 @@
 //    over all earlier turns, the newest tip of a name winning. A branch that was `rejected` does not count.
 //  - `checkout`: the branch the agent was on when the LAST turn ended (`checkedOut` of its report), when it is one of `branches` or the
 //    session branch (the runner refuses any other name); else null, which is the session branch.
-//  - `snapshot`: a stored conversation of an earlier turn exists.
+//  - `snapshot`: a stored conversation of the directly preceding turn exists (#885; an older one is not offered).
 //  - `previousSummary`: the summary the last turn ended with, at most 8 KiB.
 //  - `digest`: built here, at most 16 KiB: the last 5 instructions (2 KiB each), the last 3 summaries, the commit subjects since the
 //    base and the first 50 changed files.

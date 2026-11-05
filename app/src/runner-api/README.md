@@ -141,7 +141,7 @@ so that a follow-up turn can resume the conversation in a new VM. The body is th
 
 - **Same rules as the write.** It proves the claim and does **not** extend the lease; `409 RUNNER_JOB_ENDED` once the job is over, `401` for a credential that is not the job's, `400` for a job that is not a turn of the Implementer or a `part` that is not 0 to 2 or is beyond the last (`fields`, never a value).
   No app feature and no claim feature: a Worker asks only when the job's `resume.snapshot` says there is something, and an app without the call answers 404, which is a failed download and a summary.
-- **Its own session only.** The session is found from the job (`implementer_turns`), never from the query, in the transaction-free read of a repository scoped to the job's workspace; only a snapshot of an earlier turn than the job's own is read. `204` without a body: there is none, and the turn continues from a summary.
+- **Its own session only.** The session is found from the job (`implementer_turns`), never from the query, in the transaction-free read of a repository scoped to the job's workspace; only the snapshot of the directly preceding turn (turn `n - 1` for turn `n`, #885) is read; an older one stays stored and is not offered. `204` without a body: there is none, and the turn continues from a summary.
 
 ### On a customer's runner (#879)
 
@@ -391,7 +391,7 @@ contents (`implementerAccess(..., { readOnly: true })`, `contents: read`), so th
 ledger and ends with the turn like the write token.
 
 **The branches of a follow-up turn (#838, part of #745).** The claim feature `implementer_resume` is the Worker's way to say it reads `implementer.resume` (`ImplementerResume`: the number of the turn, the branches the
-last turn pushed with their tips, the branch to check out). The App builds `resume` for every turn from number 2 on (#841, `resume.ts`: the union of the branches the earlier turns pushed, the checkout, whether a conversation of an earlier turn is stored, the last summary and the digest, all from the stored reports) and sends it, with `snapshot`,
+last turn pushed with their tips, the branch to check out). The App builds `resume` for every turn from number 2 on (#841, `resume.ts`: the union of the branches the earlier turns pushed, the checkout, whether the conversation of the directly preceding turn is stored (#885), the last summary and the digest, all from the stored reports) and sends it, with `snapshot`,
 `previousSummary` and `digest` inside it, only to a caller that named the feature; any other caller gets the turn refused (`implementer_engine_unavailable`, free, before any credential exists, as for the environment).
 
 A failure that may pass (GitHub down while the installation is read or the token is made) gives the job back with `Retry-After`.
