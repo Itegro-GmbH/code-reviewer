@@ -131,4 +131,40 @@ describe("the inputs of an action", () => {
       createConnectorRegistry().get("github.issue.comment"),
     ).toBeUndefined();
   });
+
+  // #844-T212
+  it("defuses what an agent step reported in the title and the body, and not the literals of the workflow or the trigger", () => {
+    const run: RunValues = {
+      trigger: { input: { issueNo: 7, who: "@alice" } },
+      steps: {
+        review: { summary: "Thanks @bob, fixes acme/api#12" },
+        work: { branch: "workflow/r/work" },
+      },
+      agentSteps: new Set(["review", "work"]),
+    };
+
+    expect(
+      resolveActionInputs(
+        {
+          head: "{{work.branch}}",
+          title: "Review {{review.summary}}",
+          body: "Closes #{{trigger.input.issueNo}} for {{trigger.input.who}}: {{review.summary}}",
+        },
+        GITHUB_PULL_REQUEST_OPEN,
+        run,
+      ),
+    ).toEqual({
+      head: "workflow/r/work",
+      title: "Review Thanks @\u200bbob, fixes acme/api#\u200b12",
+      body: "Closes #7 for @alice: Thanks @\u200bbob, fixes acme/api#\u200b12",
+    });
+    // The number of an issue and the labels are not texts: they are not touched.
+    expect(
+      resolveActionInputs(
+        { issue: "{{trigger.input.issueNo}}", body: "{{review.summary}}" },
+        GITHUB_ISSUE_COMMENT,
+        run,
+      ),
+    ).toEqual({ issue: 7, body: "Thanks @\u200bbob, fixes acme/api#\u200b12" });
+  });
 });

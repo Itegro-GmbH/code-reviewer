@@ -30,6 +30,8 @@ import { isRecord } from "../workflows/json.ts";
 import { parseProfileRef } from "../workflows/resolver.ts";
 import {
   ActionInputError,
+  ConnectorError,
+  MAY_HAVE_HAPPENED,
   resolveActionInputs,
   specOf,
   type ConnectorRegistry,
@@ -157,6 +159,9 @@ function valuesOf(
           ? [[step.stepId, parseOutput(step.output) ?? {}] as const]
           : [],
       ),
+    ),
+    agentSteps: new Set(
+      steps.filter((step) => step.kind === "agent").map((step) => step.stepId),
     ),
   };
 }
@@ -560,8 +565,10 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
             runId: run.id,
             stepId: step.stepId,
             repository: { id: run.repositoryId, fullName },
+            baseBranch: run.baseBranch,
             inputs,
             idempotencyKey: requestIdOf(run, step),
+            stepCreatedAt: step.createdAt,
             signal,
           }),
         deps.actionTimeoutMs ?? ACTION_TIMEOUT_MS,
@@ -575,8 +582,14 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       if (error instanceof ActionTimeout)
         return failed(
           "action_timeout",
-          "The connector did not answer in time; whether the action happened is not known, so it was not repeated.",
+          connector.idempotent === true
+            ? "The connector did not answer in time; whether the action happened is not known, so it was not repeated."
+            : `The connector did not answer in time and the action was not repeated. ${MAY_HAVE_HAPPENED}`,
         );
+      if (error instanceof ConnectorError)
+        return failed(error.code, error.message);
+      if (error instanceof ActionInputError)
+        return failed("action_input_invalid", error.message);
       return failed(
         "action_failed",
         error instanceof Error ? error.message : "The connector failed.",

@@ -111,6 +111,54 @@ export interface IntegrationProvider {
   ): Promise<"posted" | "already_there">;
 
   /**
+   * Only where the app can open a pull request (#844, the workflow action `github.pullRequest.open`): opens one from `head` (a
+   * branch of the repository itself) into `base`, as the app, with a token of its own limited to this repository and the pull
+   * request permission. A pull request that is open for this head and base is the result (`existing`), not an error. Rejects with
+   * an `IntegrationError`: `INTEGRATION_ACCESS_SCOPE_REFUSED` is an app without the permission, `INTEGRATION_REQUEST_REFUSED` a
+   * request the platform refuses for its content (no commits between the branches). The message never holds a token or the text.
+   */
+  openPullRequest?(
+    integration: Integration,
+    repo: RepoRef,
+    input: {
+      head: string;
+      base: string;
+      title: string;
+      body?: string;
+      draft?: boolean;
+    },
+    signal?: AbortSignal,
+  ): Promise<{ number: number; url: string; existing: boolean }>;
+
+  /**
+   * Only where the app can write a comment (#844, `github.issue.comment`): writes `body` below an issue or pull request, as the
+   * app, with a token limited to this repository and the issue permission. With a `marker` (text inside `body`), the comments of the
+   * issue are looked at first: the app's own comment that holds the marker is the result (`existing`) and nothing is written, so a
+   * call that is made again does not comment twice. `since` (ISO 8601) bounds that look to the comments changed after it: nothing older
+   * can hold the marker. Rejects like `openPullRequest`.
+   */
+  commentOnIssue?(
+    integration: Integration,
+    repo: RepoRef,
+    issueNumber: number,
+    body: string,
+    options?: { signal?: AbortSignal; marker?: string; since?: string },
+  ): Promise<{ url: string; existing: boolean }>;
+
+  /**
+   * Only where the app can label (#844, `github.issue.labels`): adds and removes labels of an issue or pull request, as the app,
+   * with a token limited to this repository and the issue permission. Idempotent. Answers every label on the issue afterwards.
+   * Rejects like `openPullRequest`.
+   */
+  changeIssueLabels?(
+    integration: Integration,
+    repo: RepoRef,
+    issueNumber: number,
+    change: { add: readonly string[]; remove: readonly string[] },
+    signal?: AbortSignal,
+  ): Promise<{ labels: string[] }>;
+
+  /**
    * Only where a review is posted as a comment (#657): the body of the comment `commentId` below the pull request, so the
    * run page can show what was posted. Only a comment the app itself wrote counts (anybody can write a comment): another
    * author's, and a comment that is gone, answer null. The body is untrusted text. Rejects like `getPullRequest`; the

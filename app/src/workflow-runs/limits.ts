@@ -32,3 +32,13 @@ export const SWEEP_RUNS_MAX = 25;
 export const MOVES_PER_CALL_MAX = 200;
 /** Words of an error message kept with a step. */
 export const ERROR_MESSAGE_MAX_CHARS = 1000;
+/** A pull request title of an action: GitHub accepts 256 characters; a longer one is cut. */
+export const ACTION_TITLE_MAX_CHARS = 256;
+/** The text of a comment or a pull request description of an action: GitHub accepts 65 536; a longer text is cut and says so. */
+export const ACTION_BODY_MAX_CHARS = 60_000;
+/** A label name: GitHub accepts 50 characters. */
+export const ACTION_LABEL_MAX_CHARS = 50;
+/** The most labels one action adds or removes. */
+export const ACTION_LABELS_MAX = 20;
+/** A branch name an action is given (a Git ref component is at most 255 bytes). */
+export const ACTION_BRANCH_MAX_CHARS = 255;

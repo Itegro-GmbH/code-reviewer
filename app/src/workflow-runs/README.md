@@ -1,8 +1,8 @@
 # Workflow engine (#844, milestone 3a of epic #833)
 
 Runs a saved [workflow](../../../docs/workflows.md#engine) version: one **run** per start, one **step run** per step, the steps one after the other.
-This slice has the **core** only: linear `agent` and `action` steps, the manual trigger, no GitHub actions (milestone 3b), no `if` and `loop`
-(milestone 5), no page. What it does and the error codes: [`docs/workflows.md`](../../../docs/workflows.md#engine). The plan: `plans/agent-workflows.md`.
+This slice has the **core** and the **GitHub actions** (milestone 3b: `github-connectors.ts`): linear `agent` and `action` steps, the manual trigger, no `if` and `loop`
+(milestone 5), no page yet (milestone 3c). What it does and the error codes: [`docs/workflows.md`](../../../docs/workflows.md#engine). The plan: `plans/agent-workflows.md`.
 
 The routes exist only in a deployment with the capability `implementer` (`src/capabilities/routes.ts`), like the workflows and the Implementer; every
 member may use them (`start_implementer_task`: a run starts tasks).
@@ -13,7 +13,8 @@ member may use them (`start_implementer_task`: a run starts tasks).
 | `engine.ts`                          | `createWorkflowEngine`: reads the state under the lock of the run, asks for the move, makes it; `advance(runId)` and `jobEnded(jobId)` (never throws)                    |
 | `turn-facts.ts`, `turn-reader.ts`    | What an agent step yields once its turn is over: the result held to the stored schema again (`checkResultValue`), the facts, the cost; and the read of a turn            |
 | `templates.ts`                       | `{{ref}}` at run time: one pass, values are data, bounded, a missing value fails the step                                                                                |
-| `connectors.ts`                      | The interface of an action, the registry, and the inputs of an action node resolved and held to the connector's spec (the real connectors are milestone 3b)              |
+| `connectors.ts`                      | The interface of an action, the registry, `ConnectorError` (a step ends with its code), and the inputs of an action node resolved and held to the connector's spec       |
+| `github-connectors.ts`               | The three GitHub actions through the GitHub App of the workspace: cleaned and bounded inputs, GitHub's refusals as stable codes (`docs/workflows.md`, "GitHub actions")  |
 | `document.ts`                        | The workflow document as the engine reads it (defensively)                                                                                                               |
 | `service.ts`, `http.ts`, `shared.ts` | The run service (start, get, list), the handlers behind the routes, the wiring of the running server (the hook of the runner API, the reconciler of the sweep)           |
 | `errors.ts`, `limits.ts`             | The stable codes (`WORKFLOW_RUN_*` for the routes, the lower case codes of a failed run or step) and the bounds                                                          |
