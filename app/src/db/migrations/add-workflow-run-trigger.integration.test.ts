@@ -105,6 +105,35 @@ describe("the workflow run trigger migration", () => {
     await db.destroy();
   });
 
+  // #845-T51a
+  it("lets a workflow have one running run for a trigger key, and a run that has ended frees it", async () => {
+    const { db } = await createEmptyTestDatabase();
+    await migrateToLatest(db, migrationProvider);
+    await seed(db);
+    const keyed = (id: string) =>
+      sql`insert into workflow_runs (id, workspace_id, workflow_id, workflow_version, repository_id, base_branch, trigger_input,
+        status, budget_micro_usd, client_request_id, trigger_kind, trigger_key, created_by, actor_login, created_at, updated_at)
+      values (${id}, 'w-1', 'f-1', 1, 'r-1', 'main', '{}', 'running', 20000000, ${id}, 'github.issueLabeled', 'r-1#12', null, 'octocat', ${T}, ${T})`;
+
+    await keyed("run-1").execute(db);
+    await expect(keyed("run-2").execute(db)).rejects.toThrow(
+      /workflow_runs_trigger_running_unique/,
+    );
+    // Another key, and runs by hand (no key), are not held by it.
+    await sql`update workflow_runs set trigger_key = 'r-1#13' where id = 'run-1'`.execute(
+      db,
+    );
+    await keyed("run-2").execute(db);
+    await run("hand-1", "u-1").execute(db);
+    await run("hand-2", "u-1").execute(db);
+    // The run ends: the key is free for the next one.
+    await sql`update workflow_runs set status = 'failed' where id = 'run-2'`.execute(
+      db,
+    );
+    await keyed("run-3").execute(db);
+    await db.destroy();
+  });
+
   // #845-T52
   it("is applied once and can be taken back while no run of a label exists", async () => {
     const { db } = await createEmptyTestDatabase();
@@ -119,7 +148,7 @@ describe("the workflow run trigger migration", () => {
       name: string;
       nullable: string;
     }>`select column_name as name, is_nullable as nullable from information_schema.columns
-      where table_name = 'workflow_runs' and column_name in ('trigger_kind', 'created_by')`.execute(
+      where table_name = 'workflow_runs' and column_name in ('trigger_kind', 'trigger_key', 'created_by')`.execute(
       db,
     );
     expect(rows).toEqual([{ name: "created_by", nullable: "NO" }]);

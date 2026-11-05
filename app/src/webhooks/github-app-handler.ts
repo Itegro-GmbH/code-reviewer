@@ -114,6 +114,8 @@ export type WorkflowStarter = {
     existing: number;
     /** Matched workflows that start nothing (a step the engine does not run yet). */
     skipped: number;
+    /** Matched workflows that already have a running run for the issue. */
+    busy: number;
   }>;
 };
 
@@ -386,7 +388,7 @@ export function createGithubAppWebhookHandler(
       if (workflows === undefined) return "ignored";
       const started = await workflows.start(deliveryId, event.labeled);
       logger.info(
-        `[webhook] delivery=${deliveryId} issue=${event.labeled.issue.number} label matched ${started.matched} workflow(s): started=${started.started} existing=${started.existing} skipped=${started.skipped}`,
+        `[webhook] delivery=${deliveryId} issue=${event.labeled.issue.number} label matched ${started.matched} workflow(s): started=${started.started} existing=${started.existing} skipped=${started.skipped} busy=${started.busy}`,
       );
       return started.started + started.existing > 0
         ? "workflow_runs_started"

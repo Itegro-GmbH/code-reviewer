@@ -197,11 +197,11 @@ a refused command: the app only reacts through the review it posts when the job 
 
 ## A label on an issue (workflow trigger)
 
-The event `issues` with the action `labeled` is not a review. `parseEvent` turns a label put on an **open issue** by a **person** into `issue_labeled` (the issue, the label,
-the repository with its default branch, who put it on); a pull request (`issue.pull_request`), a bot (the App itself included: the connectors label issues with the App's token),
+The event `issues` with the action `labeled` is not a review. `parseEvent` turns a label put on an **open issue** by a **user account** (sender type `User`) into `issue_labeled` (the issue, the label,
+the repository with its default branch, who put it on); a pull request (`issue.pull_request`), a bot, an organization or a mannequin (the App itself is a bot: the connectors label issues with the App's token),
 a closed issue and every other action are `ignored`. No project is needed. The handler hands the event to `WorkspaceCollaborators.workflows` (`LabelTrigger.start`,
 `src/workflow-runs/label-trigger.ts`), which starts the workflows of the workspace that wait for exactly this label, one run each, under the request id
-`gh-<delivery id>-<workflow id>`: the outcome is `workflow_runs_started` when at least one workflow has a run for the delivery (the delivery id then stays claimed, so a
+`gh-<delivery id>-<workflow id>`, and no workflow that already has a running run for the issue (`trigger_key`, one running run per workflow and issue): the outcome is `workflow_runs_started` when at least one workflow has a run for the delivery (the delivery id then stays claimed, so a
 redelivery is a `duplicate`) and `no_workflow_matched` otherwise (the id can be claimed again). What a run is made of and why the title and the body of the issue are
 defused in the text of an action: [`docs/workflows.md`](../../../docs/workflows.md#the-label-trigger). A server without a workflow engine leaves `workflows` out; a label is then `ignored`.
 

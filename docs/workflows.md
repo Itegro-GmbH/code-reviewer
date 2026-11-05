@@ -680,20 +680,38 @@ workspace of the installation decides which workflows start ([`label-trigger.ts`
 
 - the action is `labeled` on an **open issue**. A pull request is no issue here (GitHub also sends `issues` for pull requests: `issue.pull_request` is set), and
   neither are `opened`, `edited`, `unlabeled` or any other action, nor a closed issue;
-- the label was put on by **a person**. A **bot** (the sender's type is `Bot`), the App itself included, starts nothing: the GitHub actions label issues with the
-  App's token, and a label that starts a workflow would start the next run by itself;
+- the label was put on by a **user account**: the sender's type is `User`. A `Bot` (the App itself included), an `Organization` or a `Mannequin` starts nothing: the
+  GitHub actions label issues with the App's token, and a label that starts a workflow would start the next run by itself. A **machine account that labels with a
+  personal access token is a `User` to GitHub** and starts workflows like a person; use no such account for anything that labels an issue a workflow waits for, unless
+  that is meant;
 - the repository of the issue is an **active repository of the workspace** (the installation's workspace; a repository of another installation, or one that was
   removed from it, starts nothing). No project is needed;
 - the workflow is **not archived**, its **current version** has the trigger `github.issueLabeled`, and its `label` is **exactly** the label that was put on: the same
   characters, case and spaces included (GitHub keeps the spelling a label was created with, and the payload carries it);
 - every step is one the engine runs (`agent` and `action`). A workflow with an `if` or a `loop` (milestone 5) is **left out** and the log says which step: a run that
-  ends halfway, after its first action changed the issue, is worse than none.
+  ends halfway, after its first action changed the issue, is worse than none;
+- the workflow has **no running run for this issue**. A workflow has at most one running run for one issue (the repository and the issue number): the label put on,
+  taken off and put on again while the first run goes on starts nothing, and the log says why; a person (or a script) cannot start a run with a full budget as often as
+  they like. When the run has ended (`succeeded` or `failed`), the next label starts the next one. The database holds the rule (a partial unique index on the workflow and
+  the issue, for runs that are `running`), so two deliveries that race for the same issue write one run. The delivery that started nothing is answered
+  `no_workflow_matched`. Another issue, or another workflow, is not held by it.
 
 The format gives an issue trigger no repository of its own: the workflow runs on the repository of the issue (`trigger.repo`), so every active repository of the
 workspace fits. Several workflows may wait for one label; **each starts a run of its own**.
 
 **Nobody is asked.** There is no check of our own about who put the label on (owner decision 2 of the plan): GitHub decides who may label. The login of the person is
 kept as the run's `actorLogin`, to be shown, and decides nothing.
+
+> **Warning: keep the trigger label out of issue templates.** An issue that is created from an issue template or an issue form that has `labels:` gets those labels
+> **when it is created**, and GitHub sends the label to the App as if a person had put it on. If the label of a workflow is in a template of a **public repository**,
+> **anybody who can open an issue starts a run** (with the budget of the workflow, one per issue). The label that starts a workflow belongs in no template; put it on by
+> hand, or let a trusted automation of your own do it (it is a `User` to GitHub only if it labels with a personal access token). The platform does not change this
+> behavior: it cannot tell a template from a person.
+
+**Known limit: the delivery id is not signed.** GitHub signs the body of a delivery, not its headers, and the delivery id (`X-GitHub-Delivery`), under which the runs
+are written once, is a header. Whoever holds a correctly signed body (a captured request) can send it again under another id, and it is taken for a new delivery. The
+signature still decides who can start a run at all; the rule of one running run for one issue (above) is what limits a replay, the delivery id only protects against
+GitHub's own redelivery.
 
 **A run without a person.** `workflow_runs.created_by` is empty for such a run and `triggerKind` is `github.issueLabeled` (the check of the table: only a run started by
 hand needs a user). The Implementer records the account a session belongs to, so the **turns of such a run belong to the account that owns the workflow** (the one that
@@ -712,11 +730,14 @@ finds the runs that were written.
 | --- | --- |
 | `trigger.issue.number` | The number of the issue (an integer). |
 | `trigger.issue.title` | The title, at most 256 characters (a longer one ends in `…`). |
-| `trigger.issue.body` | The description, at most 10,000 characters (a longer one is cut with a note that says how long it was); empty when the issue has none. |
+| `trigger.issue.body` | The description, at most 8,000 characters (a longer one is cut with a note that says how long it was); empty when the issue has none. |
 | `trigger.issue.url` | The web address of the issue. |
-| `trigger.issue.labels` | The names of all labels the issue has now (the new one included): 50 at most, 100 characters each. |
+| `trigger.issue.labels` | The names of all labels the issue has now (the new one included): 20 at most, 50 characters each (GitHub's own bound for a name); a longer name is cut, and labels after the twentieth are left out. |
 | `trigger.repo.fullName`, `.owner`, `.name` | The repository. |
 | `trigger.repo.defaultBranch` | Its default branch at the time of the delivery: the branch the run's agent steps start from. |
+
+The bounds leave room for the workflow's own text: the instruction of an agent step is at most 20,000 characters, and the title (256), the labels (1,000 at most) and the
+body (8,000) take at most about 9,300 of them.
 
 The environment of an agent step is a literal of the workflow (a [target](#one-repository-per-run-and-targets)), so there is no `defaultEnvironment`. Control characters
 are removed from the texts, as from every value that goes into a text.
@@ -748,6 +769,7 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `budget_exhausted` | run | The budget does not cover another agent step. |
 | `step_kind_not_supported` | run | The pinned document holds a step this engine does not run (`if`, `loop`). |
 | `document_unusable` | run | The pinned version cannot be read. |
+| `workflow_owner_gone` | run | A run a label started: the account that owns the workflow (the one that saved it first) is no longer a member of the workspace. The run ends before its first step. The message: "The person who owns this workflow is no longer a member of the workspace; save the workflow again to take it over." The failed run frees the issue. If the owner leaves while the run goes on, the agent step that cannot start fails with `agent_start_failed` and the same sentence. |
 | `template_missing_value` | step | A reference points at a value the run does not have, and has no default. |
 | `template_invalid` | step | A reference holds an object, or the text is not a template. |
 | `template_too_large` | step | The text does not fit where it goes. |

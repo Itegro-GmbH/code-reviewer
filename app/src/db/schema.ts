@@ -1334,6 +1334,8 @@ export interface WorkflowRunsTable {
   created_by: string | null;
   /** What started the run: `manual` or `github.issueLabeled` (#845). */
   trigger_kind: ColumnType<string, string | undefined, string>;
+  /** What a trigger started the run for (`<repository id>#<issue number>` for a label); null for a run by hand. One running run for each (workflow, key). */
+  trigger_key: ColumnType<string | null, string | null | undefined, never>;
   /** The login the agent steps are started as: the person who started the run, or who put the label on. Display only. */
   actor_login: string;
   created_at: string;

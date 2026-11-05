@@ -19,6 +19,7 @@ import { createImplementerRepository } from "../db/repositories/implementer-repo
 import { createJobsRepository } from "../db/repositories/jobs-repository.ts";
 import { createWorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
+import { createWorkspaceMembersRepository } from "../db/repositories/workspace-members-repository.ts";
 import { createResolver } from "../workflows/resolver.ts";
 import { validateWorkflow } from "../workflows/validate.ts";
 import type { JsonValue } from "../integrations/types.ts";
@@ -138,6 +139,9 @@ export async function startEngineHarness(
   if (!environment.ok) throw new Error("seeding failed");
 
   const workflows = createWorkflowsRepository(h.db, workspaceId);
+  // The owner of the workflows of a test is a member of the workspace; a test that wants them gone removes them.
+  const members = createWorkspaceMembersRepository(h.db, workspaceId);
+  await members.add(USER.id, "member");
   let clock = new Date("2026-11-05T10:00:00.000Z");
   const now = () => clock;
   const runs = createWorkflowRunsRepository(h.db, workspaceId, { now });
@@ -153,6 +157,7 @@ export async function startEngineHarness(
   const engine = createWorkflowEngine({
     runs,
     workflows,
+    members,
     profiles: app.profiles,
     environments,
     implementer: app.service,
@@ -294,6 +299,7 @@ export async function startEngineHarness(
     ...app,
     workspaceId,
     workflows,
+    members,
     runs,
     environments,
     turnReader,

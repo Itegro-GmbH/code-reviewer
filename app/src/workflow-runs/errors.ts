@@ -60,8 +60,14 @@ export const RUN_FAILURE_CODES = [
   "step_kind_not_supported",
   /** The document of the pinned version cannot be read or does not fit the run. */
   "document_unusable",
+  /** A run a label started: the account that owns the workflow is no longer a member of the workspace (`WORKFLOW_OWNER_GONE_TEXT`). */
+  "workflow_owner_gone",
 ] as const;
 export type RunFailureCode = (typeof RUN_FAILURE_CODES)[number];
+
+/** What a person is told when `workflow_owner_gone` ends a run, or an agent step cannot start for the same reason. */
+export const WORKFLOW_OWNER_GONE_TEXT =
+  "The person who owns this workflow is no longer a member of the workspace; save the workflow again to take it over.";
 
 /** Why a step failed, besides the code of the job that ended without a result (`timeout`, `no_result`, ...), which is kept as it is. */
 export const STEP_FAILURE_CODES = [

@@ -98,8 +98,9 @@ function labelNames(payload: unknown): string[] {
 
 /**
  * `issues` (#845): only a label put on an open issue starts anything. A pull request is an issue to GitHub and arrives here too
- * (`issue.pull_request`); it is not one for the workflows. A bot, our own App included, does not start a workflow either: the
- * connectors label issues with the App's token, and a label that starts a workflow would otherwise start the next one by itself.
+ * (`issue.pull_request`); it is not one for the workflows. Only a sender of the type "User" starts one: a bot, our own App included,
+ * does not (the connectors label issues with the App's token, and a label that starts a workflow would otherwise start the next one by
+ * itself), nor does an "Organization" or a "Mannequin". A machine account that uses a personal access token is a "User" to GitHub.
  * Who may label is GitHub's rule, there is no check of our own.
  */
 function parseIssueEvent(
@@ -113,8 +114,10 @@ function parseIssueEvent(
     return ignored("the label is on a pull request, not on an issue");
   if (field<string>(payload, "issue.state") !== "open")
     return ignored("the issue is not open");
-  if (field<string>(payload, "sender.type") === "Bot")
-    return ignored("the label was put on by a bot");
+  // Only a "User" starts a workflow: a "Bot" (the App itself included), an "Organization" or a "Mannequin" do not. A machine account
+  // that labels with a personal access token is a "User" to GitHub, and starts workflows like any person.
+  if (field<string>(payload, "sender.type") !== "User")
+    return ignored("the label was not put on by a user account");
   const label = rawField(payload, "label.name");
   if (typeof label !== "string" || label === "")
     return {

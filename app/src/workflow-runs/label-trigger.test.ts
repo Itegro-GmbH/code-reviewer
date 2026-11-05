@@ -11,6 +11,7 @@ import type {
   StoredWorkflow,
   StoredWorkflowVersion,
 } from "../db/repositories/workflows-repository.ts";
+import { INSTRUCTION_MAX_LENGTH } from "../implementer/start-input.ts";
 import type { IssueLabeled } from "../integrations/types.ts";
 import {
   createLabelTrigger,
@@ -67,6 +68,7 @@ function harness(
   options: { active?: boolean; failFor?: string[] } = {},
 ) {
   const written = new Map<string, StoredWorkflowRun>();
+  const keys = new Map<string, string>();
   const created: NewWorkflowRun[] = [];
   const kicked: string[] = [];
   const lines: string[] = [];
@@ -77,6 +79,14 @@ function harness(
           throw new Error("the database is gone");
         const earlier = written.get(input.clientRequestId);
         if (earlier !== undefined) return { status: "existing", run: earlier };
+        const holder = [...written.values()].find(
+          (run) =>
+            run.status === "running" &&
+            run.workflowId === input.workflowId &&
+            keys.get(run.id) === input.triggerKey,
+        );
+        if (input.triggerKey !== undefined && holder !== undefined)
+          return { status: "busy", run: holder };
         created.push(input);
         const run: StoredWorkflowRun = {
           id: `run-${written.size + 1}`,
@@ -99,6 +109,7 @@ function harness(
           finishedAt: null,
         };
         written.set(input.clientRequestId, run);
+        if (input.triggerKey !== undefined) keys.set(run.id, input.triggerKey);
         return { status: "created", run };
       },
     },
@@ -136,7 +147,13 @@ describe("which workflows a label starts", () => {
 
     const result = await trigger.start("delivery-1", LABELED);
 
-    expect(result).toEqual({ matched: 1, started: 1, existing: 0, skipped: 0 });
+    expect(result).toEqual({
+      matched: 1,
+      started: 1,
+      existing: 0,
+      skipped: 0,
+      busy: 0,
+    });
     expect(created).toHaveLength(1);
     expect(created[0]).toMatchObject({
       workflowId: "wf-1",
@@ -167,6 +184,7 @@ describe("which workflows a label starts", () => {
       started: 0,
       existing: 0,
       skipped: 0,
+      busy: 0,
     });
     expect(created).toEqual([]);
     expect(kicked).toEqual([]);
@@ -201,7 +219,13 @@ describe("which workflows a label starts", () => {
 
     const result = await trigger.start("delivery-1", LABELED);
 
-    expect(result).toEqual({ matched: 2, started: 2, existing: 0, skipped: 0 });
+    expect(result).toEqual({
+      matched: 2,
+      started: 2,
+      existing: 0,
+      skipped: 0,
+      busy: 0,
+    });
     expect(created.map((run) => [run.workflowId, run.workflowVersion])).toEqual(
       [
         ["wf-1", 1],
@@ -232,6 +256,7 @@ describe("which workflows a label starts", () => {
       started: 0,
       existing: 0,
       skipped: 0,
+      busy: 0,
     });
     expect(
       await elsewhere.trigger.start("delivery-1", {
@@ -243,17 +268,70 @@ describe("which workflows a label starts", () => {
     expect(elsewhere.created).toEqual([]);
   });
 
+  // #845-T15a
+  it("starts nothing for an issue a workflow has a running run for, and logs why; an ended run frees the issue", async () => {
+    const { trigger, created, kicked, lines, written } = harness([
+      { id: "wf-1", document: workflowDocument(READY) },
+      { id: "wf-2", document: workflowDocument(READY) },
+    ]);
+
+    const first = await trigger.start("delivery-1", LABELED);
+    // Labeled, unlabeled, labeled again: another delivery for the same issue while the runs go on.
+    const again = await trigger.start("delivery-2", LABELED);
+    // Another issue is another key.
+    const other = await trigger.start("delivery-3", {
+      ...LABELED,
+      issue: { ...LABELED.issue, number: 13 },
+    });
+
+    expect(first).toMatchObject({ started: 2, busy: 0 });
+    expect(again).toEqual({
+      matched: 2,
+      started: 0,
+      existing: 0,
+      skipped: 0,
+      busy: 2,
+    });
+    expect(other).toMatchObject({ started: 2, busy: 0 });
+    expect(created.map((run) => run.triggerKey)).toEqual([
+      "repo-1#12",
+      "repo-1#12",
+      "repo-1#13",
+      "repo-1#13",
+    ]);
+    expect(kicked).toHaveLength(4);
+    expect(lines.filter((line) => line.includes("is still running"))).toEqual([
+      expect.stringContaining("workflow=wf-1 starts no run: run=run-1"),
+      expect.stringContaining("workflow=wf-2 starts no run: run=run-2"),
+    ]);
+
+    // The first runs end: the next label starts the next ones.
+    for (const run of written.values())
+      if (run.clientRequestId.startsWith("gh-delivery-1-"))
+        run.status = "succeeded";
+    const next = await trigger.start("delivery-4", LABELED);
+    expect(next).toMatchObject({ started: 2, busy: 0 });
+  });
+
   // #845-T15
   it("starts the same delivery once: a retry finds the runs and writes none", async () => {
-    const { trigger, created, kicked } = harness([
+    const { trigger, created, kicked, written } = harness([
       { id: "wf-1", document: workflowDocument(READY) },
     ]);
 
     await trigger.start("delivery-1", LABELED);
     const retry = await trigger.start("delivery-1", LABELED);
+    // The first run is over: another delivery of the label is another start.
+    for (const run of written.values()) run.status = "succeeded";
     const next = await trigger.start("delivery-2", LABELED);
 
-    expect(retry).toEqual({ matched: 1, started: 0, existing: 1, skipped: 0 });
+    expect(retry).toEqual({
+      matched: 1,
+      started: 0,
+      existing: 1,
+      skipped: 0,
+      busy: 0,
+    });
     expect(next.started).toBe(1);
     expect(created.map((run) => run.clientRequestId)).toEqual([
       "gh-delivery-1-wf-1",
@@ -296,7 +374,13 @@ describe("which workflows a label starts", () => {
 
     const result = await trigger.start("delivery-1", LABELED);
 
-    expect(result).toEqual({ matched: 2, started: 1, existing: 0, skipped: 1 });
+    expect(result).toEqual({
+      matched: 2,
+      started: 1,
+      existing: 0,
+      skipped: 1,
+      busy: 0,
+    });
     expect(created.map((run) => run.workflowId)).toEqual(["wf-2"]);
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain("wf-1");
@@ -374,11 +458,19 @@ describe("what a run of a label holds", () => {
 
     expect(Array.from(input.issue.title)).toHaveLength(256);
     expect(input.issue.title.endsWith("…")).toBe(true);
-    // The body fits one value of a text (10,000), cut note included: it is not cut a second time when it is put into a text.
-    expect(Array.from(input.issue.body)).toHaveLength(10_000);
+    // The body is 8,000 characters at most, cut note included, so that the instruction of a step keeps room for the workflow's own text.
+    expect(Array.from(input.issue.body)).toHaveLength(8_000);
     expect(input.issue.body).toMatch(/… \[cut: 50000 characters\]$/);
-    expect(input.issue.labels).toHaveLength(50);
-    expect(Array.from(input.issue.labels[0] ?? "")).toHaveLength(100);
+    expect(input.issue.labels).toHaveLength(20);
+    expect(Array.from(input.issue.labels[0] ?? "")).toHaveLength(50);
+    // Title, body and labels together, put into one instruction (20,000 at most), leave more than half of it to the workflow.
+    const together = [
+      input.issue.title,
+      input.issue.body,
+      ...input.issue.labels,
+    ].join("").length;
+    expect(together).toBeLessThanOrEqual(256 + 8_000 + 20 * 50);
+    expect(INSTRUCTION_MAX_LENGTH - together).toBeGreaterThan(10_000);
     expect(JSON.stringify(input).length).toBeLessThan(64 * 1024);
   });
 

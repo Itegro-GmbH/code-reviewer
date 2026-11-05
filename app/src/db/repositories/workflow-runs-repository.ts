@@ -88,11 +88,18 @@ export type NewWorkflowRun = {
   /** Needed for `manual`, null for a run a trigger started (the database holds that rule). */
   createdBy: string | null;
   actorLogin: string;
+  /**
+   * What a trigger started the run for. A workflow has at most one `running` run for one key: a start for a key that is taken answers
+   * `busy` with the run that holds it. Left out for a run by hand.
+   */
+  triggerKey?: string;
 };
 
 export type CreateRunOutcome =
   | { status: "created"; run: StoredWorkflowRun }
-  | { status: "existing"; run: StoredWorkflowRun };
+  | { status: "existing"; run: StoredWorkflowRun }
+  /** The key of the start is held by a running run of the workflow (`run`); nothing was written. */
+  | { status: "busy"; run: StoredWorkflowRun };
 
 export type NewStepRun = {
   position: number;
@@ -144,7 +151,8 @@ export type RunLock = {
 
 export type WorkflowRunsRepository = {
   /**
-   * Writes the run, or answers the run that this request id made before (`existing`). The caller compares the body.
+   * Writes the run, or answers the run that this request id made before (`existing`), or, for a start with a trigger key, the running
+   * run of the workflow that holds the key (`busy`). The caller compares the body.
    */
   createRun(input: NewWorkflowRun): Promise<CreateRunOutcome>;
   getRun(id: string): Promise<StoredWorkflowRun | undefined>;
@@ -297,6 +305,7 @@ export function createWorkflowRunsRepository(
         budget_micro_usd: input.budgetMicroUsd,
         client_request_id: input.clientRequestId,
         trigger_kind: input.triggerKind ?? "manual",
+        trigger_key: input.triggerKey ?? null,
         created_by: input.createdBy,
         actor_login: input.actorLogin,
         created_at: at,
@@ -313,8 +322,23 @@ export function createWorkflowRunsRepository(
           .where("workspace_id", "=", workspaceId)
           .where("client_request_id", "=", input.clientRequestId)
           .executeTakeFirst();
-        if (earlier === undefined) throw error;
-        return { status: "existing", run: runFrom(earlier) };
+        if (earlier !== undefined)
+          return { status: "existing", run: runFrom(earlier) };
+        // Not the request id: the key is held (the one index that is left). Which of the two indexes reports first when both are
+        // violated is not defined, so the request id is looked at first: a retry of the start finds its own run, never `busy`.
+        const holder =
+          input.triggerKey === undefined
+            ? undefined
+            : await db
+                .selectFrom("workflow_runs")
+                .selectAll()
+                .where("workspace_id", "=", workspaceId)
+                .where("workflow_id", "=", input.workflowId)
+                .where("trigger_key", "=", input.triggerKey)
+                .where("status", "=", "running")
+                .executeTakeFirst();
+        if (holder === undefined) throw error;
+        return { status: "busy", run: runFrom(holder) };
       }
       const created = await selectRun(db, row.id).executeTakeFirstOrThrow();
       return { status: "created", run: runFrom(created) };

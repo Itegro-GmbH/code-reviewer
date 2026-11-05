@@ -16,6 +16,7 @@ import {
 } from "../test-support/workflow-engine-harness.ts";
 import { addUser } from "../test-support/workspace-deletion-fixture.ts";
 import { addWorkspace } from "../test-support/workspaces.ts";
+import { WORKFLOW_OWNER_GONE_TEXT } from "./errors.ts";
 import { createGithubConnectors } from "./github-connectors.ts";
 import { createLabelTrigger, labelRequestId } from "./label-trigger.ts";
 
@@ -223,10 +224,69 @@ describe("the webhook: a label on an issue starts the workflows that wait for it
     expect(runs).toHaveLength(1);
     // The run is pushed to the engine again, which does nothing for a run that moves.
     expect(kicked).toEqual([runs[0]?.id, runs[0]?.id]);
+  });
 
-    // Another delivery of the same label is another start.
-    await app.h.deliver("issues.labeled", { deliveryId: "delivery-2" });
+  // #845-T31a
+  it("starts one run for an issue while one is running: labeled, unlabeled, labeled again; when it has ended, the next label starts the next", async () => {
+    const { app } = await startHarness();
+    const workflow = await app.saveWorkflow(issueToPullRequest());
+
+    await app.h.deliver("issues.labeled", { deliveryId: "delivery-1" });
+    expect(
+      await outcomeOf(
+        await app.h.deliver("issues.unlabeled", { deliveryId: "delivery-2" }),
+      ),
+    ).not.toBe("workflow_runs_started");
+    const again = await app.h.deliver("issues.labeled", {
+      deliveryId: "delivery-3",
+    });
+
+    // Nothing started: the delivery is not a success that stays claimed.
+    expect(await outcomeOf(again)).toBe("no_workflow_matched");
+    const [first, ...rest] = await runsOf(app, workflow.id);
+    expect(rest).toEqual([]);
+
+    // Another issue is not held by it.
+    app.h.fake.addIssue("acme/widgets", {
+      number: 13,
+      title: "Another",
+      labels: [READY],
+    });
+    await app.h.deliver("issues.labeled", {
+      deliveryId: "delivery-4",
+      payload: labeledWith({
+        number: 13,
+        html_url: "https://github.com/acme/widgets/issues/13",
+      }),
+    });
     expect(await runsOf(app, workflow.id)).toHaveLength(2);
+
+    // The first run ends; the label put on again starts a new run for issue 12.
+    await app.runs.lockRun(first?.id ?? "", (lock) =>
+      lock.finishRun({ status: "failed", errorCode: "step_failed" }),
+    );
+    const next = await app.h.deliver("issues.labeled", {
+      deliveryId: "delivery-5",
+    });
+    expect(await outcomeOf(next)).toBe("workflow_runs_started");
+    expect(await runsOf(app, workflow.id)).toHaveLength(3);
+  });
+
+  // #845-T31b
+  it("starts one run when two deliveries for the same issue arrive at once", async () => {
+    const { app } = await startHarness();
+    const workflow = await app.saveWorkflow(issueToPullRequest());
+
+    const answers = await Promise.all(
+      ["delivery-1", "delivery-2", "delivery-3"].map((deliveryId) =>
+        app.h.deliver("issues.labeled", { deliveryId }),
+      ),
+    );
+
+    expect(await Promise.all(answers.map(outcomeOf))).toEqual(
+      expect.arrayContaining(["workflow_runs_started"]),
+    );
+    expect(await runsOf(app, workflow.id)).toHaveLength(1);
   });
 
   // #845-T32
@@ -490,6 +550,62 @@ describe("label, implementer, pull request, comment (#845)", () => {
     ]);
   });
 
+  // #845-T40a
+  it("ends a run with workflow_owner_gone, before its first step, when the owner of the workflow has left the workspace", async () => {
+    const harness = await startHarness();
+    const { app } = harness;
+    await app.saveWorkflow(issueToPullRequest());
+    expect(await app.members.remove("user-1")).toBe(true);
+
+    const runId = await deliverAndAdvance(harness, "delivery-1");
+
+    const state = await app.stateOf(runId);
+    expect(state.run).toMatchObject({
+      status: "failed",
+      errorCode: "workflow_owner_gone",
+    });
+    // Nothing was done on GitHub and no turn was queued.
+    expect(state.steps).toEqual([]);
+    expect(app.h.fake.issueLabels("acme/widgets", 12)).toEqual([
+      "enhancement",
+      READY,
+    ]);
+    expect(await app.waitingJobs()).toEqual([]);
+    // The failed run frees the issue: once the owner is back (or the workflow is taken over), the next label starts the run.
+    expect(await app.members.add("user-1", "member")).toBe("added");
+    const next = await app.h.deliver("issues.labeled", {
+      deliveryId: "delivery-2",
+    });
+    expect(await outcomeOf(next)).toBe("workflow_runs_started");
+  });
+
+  // #845-T40b
+  it("fails the agent step with the same sentence when the owner leaves after the run began", async () => {
+    const harness = await startHarness();
+    const { app } = harness;
+    await app.saveWorkflow(issueToPullRequest());
+    // The check at the start of the run finds the owner; by the time the agent step starts, they are gone.
+    const present = app.members.get.bind(app.members);
+    let asked = 0;
+    app.members.get = async (userId) =>
+      (asked += 1) === 1 ? present(userId) : undefined;
+
+    const runId = await deliverAndAdvance(harness, "delivery-1");
+
+    const state = await app.stateOf(runId);
+    expect(state.run).toMatchObject({
+      status: "failed",
+      errorCode: "step_failed",
+    });
+    expect(state.steps.at(-1)).toMatchObject({
+      stepId: "implement",
+      status: "failed",
+      errorCode: "agent_start_failed",
+      errorMessage: WORKFLOW_OWNER_GONE_TEXT,
+    });
+    expect(await app.waitingJobs()).toEqual([]);
+  });
+
   // #845-T41
   it("defuses the words of whoever opened the issue where they go into a pull request, and hands them to the agent as they are", async () => {
     const harness = await startHarness();
@@ -542,6 +658,6 @@ describe("label, implementer, pull request, comment (#845)", () => {
       issue: { title: string; body: string };
     };
     expect(Array.from(input.issue.title)).toHaveLength(256);
-    expect(Array.from(input.issue.body)).toHaveLength(10_000);
+    expect(Array.from(input.issue.body)).toHaveLength(8_000);
   });
 });

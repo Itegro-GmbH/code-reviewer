@@ -23,6 +23,7 @@ import type {
   WorkflowRunsRepository,
 } from "../db/repositories/workflow-runs-repository.ts";
 import type { WorkflowsRepository } from "../db/repositories/workflows-repository.ts";
+import type { WorkspaceMembersRepository } from "../db/repositories/workspace-members-repository.ts";
 import { ImplementerError } from "../implementer/errors.ts";
 import type { ImplementerService } from "../implementer/service.ts";
 import { INSTRUCTION_MAX_LENGTH } from "../implementer/start-input.ts";
@@ -47,6 +48,7 @@ import {
   STEP_STALE_MS,
 } from "./limits.ts";
 import { nextMove, type MachineState } from "./machine.ts";
+import { WORKFLOW_OWNER_GONE_TEXT } from "./errors.ts";
 import { renderText, TemplateError, type RunValues } from "./templates.ts";
 import { outcomeOfTurn, type CostBasis, type EndedTurn } from "./turn-facts.ts";
 
@@ -58,6 +60,8 @@ export type RequestedTurn = TurnRead & { jobId: string };
 export type EngineDependencies = {
   runs: WorkflowRunsRepository;
   workflows: Pick<WorkflowsRepository, "get" | "getVersion">;
+  /** The members of the workspace: a run a label started belongs to the account that owns the workflow, who must still be one. */
+  members: Pick<WorkspaceMembersRepository, "get">;
   profiles: Pick<ProfilesRepository, "findByName">;
   environments: Pick<ImplementerEnvironmentsRepository, "listSummaries">;
   implementer: Pick<ImplementerService, "startTask">;
@@ -99,6 +103,8 @@ type Resolved = { name: string; version: number } | undefined;
 type Prefetched = {
   document?: { value: RunDocument | undefined };
   turns: Map<string, TurnRead | undefined>;
+  /** For a run a label started that has no step yet: whether the owner of the workflow has left the workspace. */
+  ownerGone?: boolean;
   /** For an agent step with no job that has been claimed for a while: the turn its request id started, if any (by step id). */
   started: Map<string, RequestedTurn | undefined>;
   profiles: Map<string, Resolved>;
@@ -345,6 +351,27 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       });
       return { kind: "done" };
     }
+    // A run a label started belongs to the account that owns the workflow. If that person has left the workspace, the run ends before
+    // it does anything: nobody who is still a member put the workflow in charge of the issue.
+    if (run.createdBy === null && lock.steps.length === 0) {
+      if (pre.ownerGone === undefined)
+        return {
+          kind: "fetch",
+          read: async (into) => {
+            into.ownerGone = !(await ownerIsMember(run));
+          },
+        };
+      if (pre.ownerGone) {
+        await lock.finishRun({
+          status: "failed",
+          errorCode: "workflow_owner_gone",
+        });
+        log(
+          `[workflow-runs] run failed run=${run.id} code=workflow_owner_gone`,
+        );
+        return { kind: "done" };
+      }
+    }
     const state: MachineState = {
       runStatus: run.status,
       budgetMicroUsd: run.budgetMicroUsd,
@@ -473,6 +500,15 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     }
   }
 
+  /** Whether the account that owns the workflow of a run is still a member of the workspace. */
+  async function ownerIsMember(run: StoredWorkflowRun): Promise<boolean> {
+    const found = await deps.workflows.get(run.workflowId);
+    return (
+      found !== undefined &&
+      (await deps.members.get(found.workflow.createdBy)) !== undefined
+    );
+  }
+
   /**
    * The account an agent step's session belongs to, and the login its job shows. A run started by hand belongs to the person who
    * started it. A run a label started has no person (`created_by` is null); its turns belong to the account that owns the workflow,
@@ -481,13 +517,17 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
    */
   async function sessionOwner(
     run: StoredWorkflowRun,
-  ): Promise<{ id: string; githubLogin: string } | undefined> {
+  ): Promise<
+    { id: string; githubLogin: string } | { missing: "account" | "membership" }
+  > {
     if (run.createdBy !== null)
       return { id: run.createdBy, githubLogin: run.actorLogin };
     const found = await deps.workflows.get(run.workflowId);
-    return found === undefined
-      ? undefined
-      : { id: found.workflow.createdBy, githubLogin: run.actorLogin };
+    if (found === undefined) return { missing: "account" };
+    // The owner may have left after the run began (the check at its start is for the first step only).
+    if ((await deps.members.get(found.workflow.createdBy)) === undefined)
+      return { missing: "membership" };
+    return { id: found.workflow.createdBy, githubLogin: run.actorLogin };
   }
 
   async function startAgent(
@@ -520,10 +560,12 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           : "";
     const instruction = renderText(text, values, INSTRUCTION_MAX_LENGTH);
     const owner = await sessionOwner(run);
-    if (owner === undefined)
+    if ("missing" in owner)
       return failed(
         "agent_start_failed",
-        "The workflow that started this run no longer has an account the turn can belong to.",
+        owner.missing === "membership"
+          ? WORKFLOW_OWNER_GONE_TEXT
+          : "The workflow that started this run no longer has an account the turn can belong to.",
       );
     let started: { runId: string };
     try {

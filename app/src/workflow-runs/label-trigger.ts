@@ -15,6 +15,10 @@
 //  - A delivery starts each workflow at most once: the run's request id is `gh-<delivery id>-<workflow id>`. A retry of the delivery
 //    (GitHub's redelivery, a second request that raced the first) finds the runs it made and writes none; a workflow that was saved
 //    in between starts with the retry, as it would have with the first try.
+//  - A workflow has at most ONE running run for one issue (`triggerKey`: the repository and the issue number). The label put on, taken
+//    off and put on again while the first run goes on starts nothing, so that a person (or a script) cannot start a run with a full
+//    budget as often as they like; when the run has ended, the next label starts the next one. The database holds it (a partial unique
+//    index), so two deliveries that race for it write one run. The skipped start is logged with its reason.
 //  - The run's input is the issue (`trigger.issue`: number, title, body, url, labels) and the repository (`trigger.repo`: fullName,
 //    owner, name, defaultBranch), stored bounded as the run's `trigger_input`. The texts are those of whoever opened the issue. They are
 //    data like any value: a text is never read as a reference (`templates.ts`), and where they go into the text of an action (a comment, a
@@ -54,12 +58,14 @@ export type LabelTriggerResult = {
   existing: number;
   /** Matched workflows that start nothing now (a step the engine does not run, a document it cannot read). */
   skipped: number;
+  /** Matched workflows that already have a running run for this issue (a label put on again): they start nothing. */
+  busy: number;
 };
 
 export type LabelTrigger = {
   /**
-   * Starts the workflows the label starts for the issue. Throws what the database throws: the delivery is then tried again, which
-   * is safe, a workflow that has its run is not started twice.
+   * Starts the workflows the label starts for the issue, except those that have a running run for it. Throws what the database
+   * throws: the delivery is then tried again, which is safe, a workflow that has its run is not started twice.
    */
   start(deliveryId: string, labeled: IssueLabeled): Promise<LabelTriggerResult>;
 };
@@ -78,6 +84,12 @@ export type LabelTriggerDependencies = {
   /** One line per workflow left out; never a value of the issue. */
   log?: (line: string) => void;
 };
+
+/** What a run of a label is for: the issue, in the repository of the workspace. At most one running run of a workflow holds it. */
+export const labelTriggerKey = (
+  repositoryId: string,
+  issueNumber: number,
+): string => `${repositoryId}#${issueNumber}`;
 
 /** The request id a delivery starts a workflow under: the same delivery never makes a second run of the same workflow. */
 export const labelRequestId = (
@@ -147,11 +159,13 @@ export function createLabelTrigger(
         started: 0,
         existing: 0,
         skipped: 0,
+        busy: 0,
       };
       // A repository that is not an active one of the workspace starts nothing, whatever the workflows say.
       const repository = await deps.activeRepository(labeled.repo);
       if (repository === undefined) return result;
 
+      const triggerKey = labelTriggerKey(repository.id, labeled.issue.number);
       const triggerInput = JSON.stringify(labelTriggerInput(labeled));
       const actorLogin = bounded(
         labeled.actor.login,
@@ -190,9 +204,17 @@ export function createLabelTrigger(
             budgetMicroUsd: runBudgetMicroUsd(document, maxBudgetUsd),
             clientRequestId: labelRequestId(deliveryId, workflow.id),
             triggerKind: LABEL_TRIGGER_KIND,
+            triggerKey,
             createdBy: null,
             actorLogin,
           });
+          if (created.status === "busy") {
+            result.busy += 1;
+            log(
+              `[label-trigger] workflow=${workflow.id} starts no run: run=${created.run.id} is still running for issue ${labeled.issue.number}`,
+            );
+            continue;
+          }
           if (created.status === "created") result.started += 1;
           else result.existing += 1;
           // A run an earlier try wrote may have lost its first push (the process ended between the write and the kick): `advance` does

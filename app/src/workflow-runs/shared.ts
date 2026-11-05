@@ -13,6 +13,7 @@ import { createRepositoriesRepository } from "../db/repositories/repositories-re
 import { createWorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
 import { dueWorkflowRuns } from "../db/repositories/workflow-runs-sweep.ts";
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
+import { createWorkspaceMembersRepository } from "../db/repositories/workspace-members-repository.ts";
 import { getDatabase } from "../db/startup.ts";
 import { runAfterResponse } from "../dispatch/shared.ts";
 import { startQueuedFollowUps } from "../implementer/follow-up-shared.ts";
@@ -77,6 +78,7 @@ export function workflowEngineFor(workspaceId: string): WorkflowEngine {
   return createWorkflowEngine({
     runs: createWorkflowRunsRepository(db, workspaceId),
     workflows: createWorkflowsRepository(db, workspaceId),
+    members: createWorkspaceMembersRepository(db, workspaceId),
     profiles: createProfilesRepository(db, workspaceId),
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
     implementer: implementerServiceFor(workspaceId),

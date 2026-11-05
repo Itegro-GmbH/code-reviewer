@@ -319,6 +319,22 @@ describe("which issue events start a workflow (#845)", () => {
     expect(await eventOf(fixture)).toMatchObject({ kind: "ignored" });
   });
 
+  // #845-T03a
+  it.each(["Bot", "Organization", "Mannequin"])(
+    "starts nothing for a label put on by a sender of the type %s, and starts for a User",
+    async (type) => {
+      expect(
+        await eventOfPayload("issues", issuePayloadWith({ sender: { type } })),
+      ).toMatchObject({ kind: "ignored" });
+      expect(
+        await eventOfPayload(
+          "issues",
+          issuePayloadWith({ sender: { type: "User" } }),
+        ),
+      ).toMatchObject({ kind: "issue_labeled" });
+    },
+  );
+
   // #845-T04
   it.each(["edited", "closed", "reopened", "assigned", "milestoned"])(
     "starts nothing for the action %s",

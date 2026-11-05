@@ -19,6 +19,7 @@ import {
 import { RUNS_LISTED_MAX } from "../workflow-runs/limits.ts";
 import {
   RUN_FAILURE_CODES,
+  WORKFLOW_OWNER_GONE_TEXT,
   STEP_FAILURE_CODES,
   type WorkflowRunErrorCode,
 } from "../workflow-runs/errors.ts";
@@ -63,6 +64,7 @@ const RUN_FAILURE_TEXT: Record<(typeof RUN_FAILURE_CODES)[number], string> = {
   step_kind_not_supported:
     "The workflow has a step that this version of the engine does not run yet.",
   document_unusable: "The saved version of the workflow cannot be read.",
+  workflow_owner_gone: WORKFLOW_OWNER_GONE_TEXT,
 };
 
 /**
