@@ -60,6 +60,10 @@ export const WEBHOOK_DELIVERY_OUTCOMES = [
   "trigger_skipped",
   /** A pull request was closed and the jobs waiting for it were dropped. */
   "waiting_jobs_discarded",
+  /** An issue got a label and the workflows started by it have their runs (#845). */
+  "workflow_runs_started",
+  /** An issue got a label and no workflow starts for it (not final: a workflow saved later is started by a redelivery). */
+  "no_workflow_matched",
   /** The installation or its repositories were synchronized. */
   "installation_changed",
   /** An installation no workspace has linked: noted as unclaimed, nothing was created (not final: it can be redelivered). */
@@ -70,6 +74,7 @@ export type WebhookDeliveryOutcome = (typeof WEBHOOK_DELIVERY_OUTCOMES)[number];
 /** The outcomes after which the same delivery id is a duplicate. */
 export const WEBHOOK_DELIVERY_FINAL_OUTCOMES = [
   "trigger_enqueued",
+  "workflow_runs_started",
   "installation_changed",
 ] as const satisfies readonly WebhookDeliveryOutcome[];
 

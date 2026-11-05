@@ -15,6 +15,7 @@ import {
   hasField,
   isReadWebhookEvent,
   payloadProblems,
+  rawField,
 } from "./webhook-fields.ts";
 
 /** GitHub's `installation` actions that matter, and what they mean for the app. */
@@ -79,6 +80,63 @@ function actorOf(payload: unknown) {
   return {
     login: field<string>(payload, "sender.login"),
     externalId: String(field<number>(payload, "sender.id")),
+  };
+}
+
+/** The names of the labels an issue has; an entry that is not an object with a name is left out. */
+function labelNames(payload: unknown): string[] {
+  const labels = rawField(payload, "issue.labels");
+  if (!Array.isArray(labels)) return [];
+  return labels.flatMap((entry: unknown) => {
+    const name =
+      typeof entry === "object" && entry !== null
+        ? (entry as { name?: unknown }).name
+        : undefined;
+    return typeof name === "string" && name !== "" ? [name] : [];
+  });
+}
+
+/**
+ * `issues` (#845): only a label put on an open issue starts anything. A pull request is an issue to GitHub and arrives here too
+ * (`issue.pull_request`); it is not one for the workflows. A bot, our own App included, does not start a workflow either: the
+ * connectors label issues with the App's token, and a label that starts a workflow would otherwise start the next one by itself.
+ * Who may label is GitHub's rule, there is no check of our own.
+ */
+function parseIssueEvent(
+  context: ParseContext,
+  action: string,
+): IntegrationEvent {
+  const { payload } = context;
+  if (action !== "labeled")
+    return ignored(`the issue action "${action}" does not start a workflow`);
+  if (hasField(payload, "issue.pull_request"))
+    return ignored("the label is on a pull request, not on an issue");
+  if (field<string>(payload, "issue.state") !== "open")
+    return ignored("the issue is not open");
+  if (field<string>(payload, "sender.type") === "Bot")
+    return ignored("the label was put on by a bot");
+  const label = rawField(payload, "label.name");
+  if (typeof label !== "string" || label === "")
+    return {
+      kind: "invalid_payload",
+      reason: 'the "issues" payload lacks the expected fields: label.name',
+    };
+  const body = rawField(payload, "issue.body");
+  return {
+    kind: "issue_labeled",
+    labeled: {
+      repo: repoOf(context),
+      defaultBranch: field<string>(payload, "repository.default_branch"),
+      issue: {
+        number: field<number>(payload, "issue.number"),
+        title: field<string>(payload, "issue.title"),
+        body: typeof body === "string" ? body : "",
+        url: field<string>(payload, "issue.html_url"),
+        labels: labelNames(payload),
+      },
+      label,
+      actor: actorOf(payload),
+    },
   };
 }
 
@@ -159,6 +217,8 @@ export async function parseGithubEvent(
     };
     return { kind: "review_trigger", trigger };
   }
+
+  if (eventName === "issues") return parseIssueEvent(context, action);
 
   // issue_comment
   if (action !== "created")

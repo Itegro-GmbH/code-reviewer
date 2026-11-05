@@ -22,6 +22,8 @@ import type { WorkspaceId } from "../workspace-scope.ts";
 export type WorkflowRunStatus = "running" | "succeeded" | "failed";
 export type StepRunStatus = "pending" | "running" | "succeeded" | "failed";
 export type StepRunKind = "agent" | "action";
+/** What started a run: a person by hand, or a label on an issue (#845). */
+export type RunTriggerKind = "manual" | "github.issueLabeled";
 
 export type StoredWorkflowRun = {
   id: string;
@@ -37,7 +39,10 @@ export type StoredWorkflowRun = {
   budgetMicroUsd: number;
   spentMicroUsd: number;
   clientRequestId: string;
-  createdBy: string;
+  triggerKind: RunTriggerKind;
+  /** The person who started the run by hand; null for a run a trigger started. */
+  createdBy: string | null;
+  /** The login the run acts as and shows: the person who started it, or who put the label on. Display only. */
   actorLogin: string;
   createdAt: string;
   updatedAt: string;
@@ -74,7 +79,10 @@ export type NewWorkflowRun = {
   triggerInput: string;
   budgetMicroUsd: number;
   clientRequestId: string;
-  createdBy: string;
+  /** Left out: `manual`. */
+  triggerKind?: RunTriggerKind;
+  /** Needed for `manual`, null for a run a trigger started (the database holds that rule). */
+  createdBy: string | null;
   actorLogin: string;
 };
 
@@ -183,6 +191,7 @@ function runFrom(row: Selectable<WorkflowRunsTable>): StoredWorkflowRun {
     budgetMicroUsd: row.budget_micro_usd,
     spentMicroUsd: row.spent_micro_usd,
     clientRequestId: row.client_request_id,
+    triggerKind: row.trigger_kind as RunTriggerKind,
     createdBy: row.created_by,
     actorLogin: row.actor_login,
     createdAt: row.created_at,
@@ -275,6 +284,7 @@ export function createWorkflowRunsRepository(
         error_code: null,
         budget_micro_usd: input.budgetMicroUsd,
         client_request_id: input.clientRequestId,
+        trigger_kind: input.triggerKind ?? "manual",
         created_by: input.createdBy,
         actor_login: input.actorLogin,
         created_at: at,

@@ -15,6 +15,7 @@ member may use them (`start_implementer_task`: a run starts tasks).
 | `templates.ts`                       | `{{ref}}` at run time: one pass, values are data, bounded, a missing value fails the step                                                                                |
 | `connectors.ts`                      | The interface of an action, the registry, `ConnectorError` (a step ends with its code), and the inputs of an action node resolved and held to the connector's spec       |
 | `github-connectors.ts`               | The three GitHub actions through the GitHub App of the workspace: cleaned and bounded inputs, GitHub's refusals as stable codes (`docs/workflows.md`, "GitHub actions")  |
+| `label-trigger.ts`                   | The label trigger (#845): which workflows a label on an issue starts, one run each under `gh-<delivery id>-<workflow id>`, and the bounded issue as the run's input      |
 | `document.ts`                        | The workflow document as the engine reads it (defensively)                                                                                                               |
 | `service.ts`, `http.ts`, `shared.ts` | The run service (start, get, list), the handlers behind the routes, the wiring of the running server (the hook of the runner API, the reconciler of the sweep)           |
 | `errors.ts`, `limits.ts`             | The stable codes (`WORKFLOW_RUN_*` for the routes, the lower case codes of a failed run or step) and the bounds                                                          |
@@ -22,6 +23,14 @@ member may use them (`start_implementer_task`: a run starts tasks).
 The tables are `workflow_runs` and `workflow_step_runs` (migration `20261105130000_create_workflow_runs`), written by
 `src/db/repositories/workflow-runs-repository.ts`, scoped to a workspace. `workflow-runs-sweep.ts` is the one instance-level read (the runs that run and were
 not touched for a minute), classified in `scoping.test.ts`.
+
+## Runs of a label (#845)
+
+A run is started by hand (`service.ts`) or by a label on an issue (`label-trigger.ts`, called by the webhook): `workflow_runs.trigger_kind` says which. A run of a label has
+no `created_by` (the table holds that: only `manual` needs a user), its `actor_login` is the login of whoever put the label on (display only), and its `trigger_input` is
+`{issue, repo}`, which the engine reads as `trigger.issue` and `trigger.repo` (`valuesOf`; a run by hand has `trigger.input`). The Implementer session of an agent step needs an
+account: the owner of the workflow (`sessionOwner`). The title, body and labels of the issue are defused where they go into the text of an action (`templates.ts`). The rules and
+the filter: [`docs/workflows.md`](../../../docs/workflows.md#the-label-trigger).
 
 ## How a run goes
 

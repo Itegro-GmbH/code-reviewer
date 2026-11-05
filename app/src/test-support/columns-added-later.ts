@@ -44,6 +44,8 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
   implementer_environments: ["network_mode", "network_hosts", "kind", "labels"],
   // #818: the size of the VM where the Dispatcher reported it; null for every VM that exists.
   job_vm_runs: ["vcpus"],
+  // #845: what started a run; every run that exists was started by hand (`DEFAULTS_OF_COLUMNS`).
+  workflow_runs: ["trigger_kind"],
 };
 
 /** What a column added later holds on an existing row when it is not null: a constant default. */
@@ -54,6 +56,7 @@ const DEFAULTS_OF_COLUMNS: Record<string, Record<string, unknown>> = {
     kind: "hosted",
     labels: "",
   },
+  workflow_runs: { trigger_kind: "manual" },
 };
 
 /** `rows` of `table` without the columns that migrations after the one under test added; those columns must be null. */

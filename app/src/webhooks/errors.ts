@@ -45,6 +45,10 @@ export const WEBHOOK_ACCEPTED_OUTCOMES = [
   "trigger_skipped",
   /** A pull request was closed; the jobs still waiting for it were dropped (possibly none). */
   "waiting_jobs_discarded",
+  /** An issue got a label (#845) and at least one workflow of the workspace has a run for it now (started by this delivery or an earlier try of it). */
+  "workflow_runs_started",
+  /** An issue got a label (#845) and no workflow of the workspace starts for it (no workflow with the label, or the repository is not an active one). */
+  "no_workflow_matched",
   "installation_changed",
   /** An installation that no workspace has linked: noted as unclaimed, nothing was created. */
   "installation_unclaimed",

@@ -1321,7 +1321,7 @@ export interface WorkflowRunsTable {
   repository_id: string;
   /** The branch the agent steps start from. */
   base_branch: string;
-  /** JSON text: what the caller of the manual trigger handed in. */
+  /** JSON text: what the caller of the manual trigger handed in; for a label, the issue and the repository (`label-trigger.ts`). */
   trigger_input: string;
   status: string;
   /** A stable code of `src/workflow-runs/errors.ts` for a failed run; null otherwise. */
@@ -1330,8 +1330,11 @@ export interface WorkflowRunsTable {
   spent_micro_usd: ColumnType<number, number | undefined, number>;
   /** One run per request id and workspace: makes the start idempotent. */
   client_request_id: string;
-  created_by: string;
-  /** The login the agent steps are started as. */
+  /** The person who started the run by hand; null for a run that a trigger started (#845). */
+  created_by: string | null;
+  /** What started the run: `manual` or `github.issueLabeled` (#845). */
+  trigger_kind: ColumnType<string, string | undefined, string>;
+  /** The login the agent steps are started as: the person who started the run, or who put the label on. Display only. */
   actor_login: string;
   created_at: string;
   updated_at: string;

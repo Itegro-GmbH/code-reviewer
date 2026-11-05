@@ -5,10 +5,11 @@ run in order. A GitHub issue gets a label, an agent implements it, another revie
 request is opened. Workflows are written by an AI through the API (there is no editor), checked by a strict validator, and saved per
 workspace with versions.
 
-**Status (milestones 1 to 3a of epic #833).** The format, the validator, the storage, the [profiles](profiles.md) they refer to and the
-**engine core** exist: a workflow with the manual trigger can be started through the API and runs its agent and action steps one after the other
-(see [Engine](#engine)). Not yet: the three GitHub actions (they need rights of the GitHub App; milestone 3b, until then an action step ends with
-`connector_unavailable`), `if` and `loop` (milestone 5: a workflow that has one is refused at the start), the label trigger (milestone 4) and a page.
+**Status (milestones 1 to 4 of epic #833).** The format, the validator, the storage, the [profiles](profiles.md) they refer to, the
+**engine core**, the three GitHub actions and the **label trigger** exist: a workflow with the manual trigger can be started through the API, and a
+workflow with the trigger `github.issueLabeled` starts when somebody puts its label on an issue (see [Engine](#engine) and [The label trigger](#the-label-trigger));
+either runs its agent and action steps one after the other. Not yet: `if` and `loop` (milestone 5: a workflow that has one is refused at a manual start and
+left out by a label) and a page.
 The finish tool exists (see [Result schemas](#result-schemas)). The workflows exist only in
 a deployment with the capability `implementer` (the factory); there is no page, only the routes below. Every member of a workspace may
 use them (the permission `start_implementer_task`).
@@ -84,7 +85,7 @@ holds one to the other.
 | `manual` | `input` (needed): a [result schema](#result-schemas) that declares what the caller hands in. It must declare **`repo`**, a required text (`owner/name`): the repository the run works on (`repo_required`) | `{{trigger.input.<field>}}`, so `{{trigger.input.repo}}` |
 | `github.issueLabeled` | `label` (needed, not only spaces): the label that starts the workflow | `{{trigger.issue.number}}` (an integer), `.title`, `.body`, `.url`, `.labels` (a list; title, body and labels are free text from whoever opened the issue: read in texts, never a [target](#one-repository-per-run-and-targets)), and `{{trigger.repo.fullName}}`, `.owner`, `.name`, `.defaultBranch` |
 
-Other triggers (a schedule, Jira) come later. Who may set the label is decided by GitHub, not by the workflow.
+Other triggers (a schedule, Jira) come later. Who may set the label is decided by GitHub, not by the workflow. How a label starts a run: [The label trigger](#the-label-trigger).
 
 ### One repository per run, and targets
 
@@ -464,8 +465,9 @@ What the engine keeps to (milestone 3a keeps all of it); the validator and the r
 
 *Milestone 3a of epic #833; the code is [`app/src/workflow-runs/`](../app/src/workflow-runs/README.md).* The engine takes a saved workflow
 version and runs it: one **run** per start, one **step run** per step. In this slice it runs **linear** workflows (`agent` and `action` steps, one
-after the other) that start with the **manual** trigger. `if` and `loop` are valid in the format but are refused when a run is started
-(`WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED`, with the step named), before anything costs money; they come with milestone 5.
+after the other) that start with the **manual** trigger or a **label** on an issue (milestone 4, [The label trigger](#the-label-trigger)). `if` and `loop` are valid in the
+format but are refused when a run is started by hand (`WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED`, with the step named) and left out when a label would start them, before
+anything costs money; they come with milestone 5.
 
 ### Starting a run
 
@@ -487,7 +489,7 @@ A run looks like this (a step is `pending` when written, `running` once claimed,
 {
   "run": {
     "id": "7f0c…", "workflowId": "…", "workflowVersion": 3, "status": "running", "errorCode": null,
-    "budgetUsd": 20, "spentUsd": 0.42, "repositoryId": "…", "baseBranch": "main", "input": {"repo": "acme/widgets", "topic": "caching"},
+    "triggerKind": "manual", "actorLogin": "octocat", "budgetUsd": 20, "spentUsd": 0.42, "repositoryId": "…", "baseBranch": "main", "input": {"repo": "acme/widgets", "topic": "caching"},
     "createdAt": "…", "updatedAt": "…", "finishedAt": null,
     "steps": [
       { "id": "plan", "position": 0, "kind": "agent", "status": "succeeded", "profile": {"name": "worker", "version": 1},
@@ -498,12 +500,14 @@ A run looks like this (a step is `pending` when written, `running` once claimed,
 }
 ```
 
-`jobId` and `turnId` link an agent step to its Implementer run (the live view of that run shows what the agent does).
+`jobId` and `turnId` link an agent step to its Implementer run (the live view of that run shows what the agent does). `triggerKind` says what started the
+run (`manual`, or `github.issueLabeled`) and `actorLogin` who: the person who started it, or whoever put the label on. It is for display and decides nothing.
+For a run a label started, `input` is `{"issue": {...}, "repo": {...}}` ([The label trigger](#the-label-trigger)).
 
 ### What the engine does
 
 - **An agent step starts an Implementer turn** through the same service as a task started by hand (`startTask`), as the person who started the
-  run. The **profile** is the version the step pins; a profile **without a version** means the newest version **at the moment the step starts**,
+  run (a run a label started has no person: its turns belong to the account that owns the workflow, see [The label trigger](#the-label-trigger)). The **profile** is the version the step pins; a profile **without a version** means the newest version **at the moment the step starts**,
   and that version is stored with the step run. The **environment** is found by name (case ignored). The **instruction** is the step's text with its
   references filled in. The step's `result` schema (or the default of the profile version) becomes the finish tool. The turn works on a branch
   the platform names, `workflow/<run id>/<step id>`, from the default branch of the repository at the start of the run.
@@ -552,9 +556,9 @@ model that reports its cost, avoids it. When the budget cannot pay one cent for 
 
 ### Known limits of milestone 3
 
-- **The unique constraint `(run_id, step_id)`, the check on `kind` and `created_by NOT NULL` of the run tables need a migration in milestones 4 and 5.** A loop
-  runs one step several times (the constraint on `(run_id, step_id)` refuses the second round), `if` and `loop` are other kinds, and a run started by a label has no
-  person who started it.
+- **The unique constraint `(run_id, step_id)` and the check on `kind` of the step table need a migration in milestone 5.** A loop runs one step several times
+  (the constraint on `(run_id, step_id)` refuses the second round) and `if` and `loop` are other kinds. (`created_by` of a run is nullable since milestone 4: a run
+  started by a label has no person who started it.)
 - **A run cannot be cancelled yet.** It ends as `succeeded` or `failed`; a person cannot stop one that runs.
 - **Profiles are resolved per step**, at the moment the step starts; a profile without a version can mean version 2 for step two of a run whose step one ran
   with version 1.
@@ -663,6 +667,74 @@ number or a list that is a whole reference (an issue number, labels). What a ste
 and **Pull requests: Read and write** to it and the owner of each installation accepts the change, every one of these steps ends with
 `github_permission_missing` and a sentence that names the permission ("The GitHub App of this workspace may not open pull requests: it needs the permission
 "Pull requests: Read and write". …"). Nothing in the app changes the App's configuration at GitHub.
+
+### The label trigger
+
+*Milestone 4 of epic #833 (#845).* A label put on an issue starts the workflows that wait for it. The webhook of the GitHub App (`POST /api/webhooks/github-app`,
+[`app/src/webhooks/`](../app/src/webhooks/README.md)) takes the event `issues`; once the signature, the delivery id and the installation are settled, the
+workspace of the installation decides which workflows start ([`label-trigger.ts`](../app/src/workflow-runs/label-trigger.ts)).
+
+**What starts a workflow.** All of these hold:
+
+- the action is `labeled` on an **open issue**. A pull request is no issue here (GitHub also sends `issues` for pull requests: `issue.pull_request` is set), and
+  neither are `opened`, `edited`, `unlabeled` or any other action, nor a closed issue;
+- the label was put on by **a person**. A **bot** (the sender's type is `Bot`), the App itself included, starts nothing: the GitHub actions label issues with the
+  App's token, and a label that starts a workflow would start the next run by itself;
+- the repository of the issue is an **active repository of the workspace** (the installation's workspace; a repository of another installation, or one that was
+  removed from it, starts nothing). No project is needed;
+- the workflow is **not archived**, its **current version** has the trigger `github.issueLabeled`, and its `label` is **exactly** the label that was put on: the same
+  characters, case and spaces included (GitHub keeps the spelling a label was created with, and the payload carries it);
+- every step is one the engine runs (`agent` and `action`). A workflow with an `if` or a `loop` (milestone 5) is **left out** and the log says which step: a run that
+  ends halfway, after its first action changed the issue, is worse than none.
+
+The format gives an issue trigger no repository of its own: the workflow runs on the repository of the issue (`trigger.repo`), so every active repository of the
+workspace fits. Several workflows may wait for one label; **each starts a run of its own**.
+
+**Nobody is asked.** There is no check of our own about who put the label on (owner decision 2 of the plan): GitHub decides who may label. The login of the person is
+kept as the run's `actorLogin`, to be shown, and decides nothing.
+
+**A run without a person.** `workflow_runs.created_by` is empty for such a run and `triggerKind` is `github.issueLabeled` (the check of the table: only a run started by
+hand needs a user). The Implementer records the account a session belongs to, so the **turns of such a run belong to the account that owns the workflow** (the one that
+saved it first); their job shows the login of whoever put the label on. Neither decides anything: what a run may do is what the workflow, its profile and the GitHub
+App allow.
+
+**At most one run per delivery and workflow.** The run is started under the request id `gh-<delivery id>-<workflow id>`. GitHub's "Redeliver" of a delivery, or a second
+request that raced the first, finds the runs the first one made and writes none; a run whose first push was lost is pushed again. The webhook answers `202` with
+the outcome `workflow_runs_started` (at least one workflow has a run for this delivery; the delivery then stays a duplicate for 7 days) or `no_workflow_matched` (none
+starts; the delivery can be redelivered, for a workflow saved later). If writing a run fails, the other workflows still start, the answer is `500` and a redelivery
+finds the runs that were written.
+
+**The input is the issue.** `trigger_input` of the run, and what the steps read, is:
+
+| Value | What |
+| --- | --- |
+| `trigger.issue.number` | The number of the issue (an integer). |
+| `trigger.issue.title` | The title, at most 256 characters (a longer one ends in `…`). |
+| `trigger.issue.body` | The description, at most 10,000 characters (a longer one is cut with a note that says how long it was); empty when the issue has none. |
+| `trigger.issue.url` | The web address of the issue. |
+| `trigger.issue.labels` | The names of all labels the issue has now (the new one included): 50 at most, 100 characters each. |
+| `trigger.repo.fullName`, `.owner`, `.name` | The repository. |
+| `trigger.repo.defaultBranch` | Its default branch at the time of the delivery: the branch the run's agent steps start from. |
+
+The environment of an agent step is a literal of the workflow (a [target](#one-repository-per-run-and-targets)), so there is no `defaultEnvironment`. Control characters
+are removed from the texts, as from every value that goes into a text.
+
+**The title, the body and the labels are the words of whoever opened the issue**, which can be anybody who may open an issue. They are data, never read again as a
+template (`{{` in a body does nothing) and never a target (the validator refuses it). In the **instruction of an agent** they are put in as they are: the agent is meant to
+read the issue, and works in its sandbox. In the **text of an action** (a comment, the title and body of a pull request) they are **defused like what an agent wrote**:
+`@name` and `@org/team` mention nobody (a zero-width space after the `@`), `#12`, `owner/repo#12` and an issue address name no issue (so a body that says `Closes #5` closes
+nothing), a `<!--` rebuilds no marker. The number and the address of the issue and the repository are the platform's and stay as they are, so `Closes #{{trigger.issue.number}}`
+works as written.
+
+**The labels at the start.** The engine changes no label by itself. Swapping `ready for agent` for `agent working` is the first step of the workflow, an action
+`github.issue.labels` (see [the first workflow](#the-first-workflow)); the validator refuses an action that adds the label that starts the workflow.
+
+**What the GitHub App needs** (the owner of the App sets this on GitHub; nothing in the app changes the App's configuration):
+
+- the event **Issues** subscribed (*Permissions & events > Subscribe to events*: tick **Issues**; see [`github-app.md`](github-app.md#events)). Without it GitHub sends no `issues` delivery and no label starts anything;
+- the permission **Issues: Read** to receive the event. The actions of the workflow need more: **Issues: Read and write** (the comment, the labels) and **Pull requests: Read and write**
+  (the pull request), and **Contents: Read and write** for the agent's branch ([GitHub actions](#github-actions));
+- every installation has to accept a changed permission (GitHub asks the account that installed the App).
 
 ### Failure codes
 

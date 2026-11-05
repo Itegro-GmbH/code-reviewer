@@ -1379,6 +1379,7 @@ describe("a failure of the engine", () => {
           }),
       },
       workflows: {
+        get: (...args) => app.workflows.get(...args),
         getVersion: watched("document", (...args) =>
           app.workflows.getVersion(...args),
         ),
@@ -1427,6 +1428,7 @@ describe("a failure of the engine", () => {
     const wrecked = createWorkflowEngine({
       runs: app.runs,
       workflows: {
+        get: async () => undefined,
         getVersion: async () => ({
           workflowId: workflow.id,
           version: 1,

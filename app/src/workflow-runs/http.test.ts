@@ -24,6 +24,8 @@ const SUMMARY: RunSummaryView = {
   workflowVersion: 2,
   status: "running",
   errorCode: null,
+  triggerKind: "manual",
+  actorLogin: "octocat",
   budgetUsd: 20,
   spentUsd: 0,
   createdAt: "2026-11-05T10:00:00.000Z",

@@ -15,8 +15,10 @@
 //   6. identify  `identifyWebhook` names the installation; the integration is loaded, and with it
 //                the workspace the delivery belongs to (everything after this runs in that
 //                workspace: its projects, its settings, its job queue)
-//   7. translate `parseEvent`: a review trigger, an installation change or "ignored"
-//   8. act       trigger -> the repository must have an active project, then the trigger
+//   7. translate `parseEvent`: a review trigger, an installation change, a label on an issue or "ignored"
+//   8. act       label on an issue -> the workflows the label starts get their runs (#845; no project is needed: the repository
+//                must be an active one of the workspace);
+//                trigger -> the repository must have an active project, then the trigger
 //                policy (automatic-review-policy.ts: drafts, settings;
 //                then the commit still being the head, checked against GitHub, failing open) or,
 //                for a comment command, the project's list of allowed commands; then
@@ -40,6 +42,7 @@ import type {
   Integration,
   IntegrationEvent,
   IntegrationType,
+  IssueLabeled,
   PullRequestRef,
 } from "../integrations/types.ts";
 import {
@@ -71,6 +74,8 @@ const REVIEW_EVENTS: ReadonlySet<string> = new Set([
   "pull_request",
   "issue_comment",
 ]);
+/** The events that can start a workflow (#845). */
+const WORKFLOW_EVENTS: ReadonlySet<string> = new Set(["issues"]);
 const INSTALLATION_EVENTS: ReadonlySet<string> = new Set([
   "installation",
   "installation_repositories",
@@ -92,6 +97,26 @@ export type AutomaticReviewDeps = {
   headCheckTimeoutMs?: number;
 };
 
+/**
+ * What starts the workflows a label on an issue starts (#845): `LabelTrigger` of `src/workflow-runs/`, which this module does not import
+ * (the engine imports the webhook's body reader; the route wires the two together).
+ */
+export type WorkflowStarter = {
+  start(
+    deliveryId: string,
+    labeled: IssueLabeled,
+  ): Promise<{
+    /** The workflows whose trigger is this label. */
+    matched: number;
+    /** The runs this delivery wrote now. */
+    started: number;
+    /** The runs an earlier try of the same delivery had written. */
+    existing: number;
+    /** Matched workflows that start nothing (a step the engine does not run yet). */
+    skipped: number;
+  }>;
+};
+
 /** The collaborators that act inside one workspace. */
 export type WorkspaceCollaborators = {
   /** Which repositories of the workspace are reviewed at all. */
@@ -105,6 +130,11 @@ export type WorkspaceCollaborators = {
     repositoryExternalId: string,
   ): Promise<ReviewSettings | undefined>;
   intake: ReviewTriggerIntake;
+  /**
+   * Starts the workflows a label on an issue starts (#845). Left out where a server has no workflow engine: a label then starts
+   * nothing (`ignored`).
+   */
+  workflows?: WorkflowStarter;
 };
 
 export type GithubAppWebhookDeps = {
@@ -345,9 +375,23 @@ export function createGithubAppWebhookHandler(
     if (integration === undefined) return "unknown_installation";
 
     // From here on the delivery is the business of the workspace the installation is linked to.
-    const { projects, settingsFor, intake } = deps.workspace(
+    const { projects, settingsFor, intake, workflows } = deps.workspace(
       integration.workspaceId,
     );
+
+    // A label on an issue starts the workflows that wait for exactly this label (#845). Nobody is asked whether they may label: GitHub
+    // decides that. The repository must be an active one of the workspace (a project is not needed). The runs are written under the id
+    // of the delivery, so a retry of it starts nothing twice.
+    if (event.kind === "issue_labeled") {
+      if (workflows === undefined) return "ignored";
+      const started = await workflows.start(deliveryId, event.labeled);
+      logger.info(
+        `[webhook] delivery=${deliveryId} issue=${event.labeled.issue.number} label matched ${started.matched} workflow(s): started=${started.started} existing=${started.existing} skipped=${started.skipped}`,
+      );
+      return started.started + started.existing > 0
+        ? "workflow_runs_started"
+        : "no_workflow_matched";
+    }
 
     // A closed pull request starts nothing; the jobs still waiting for it are dropped. Only for a
     // repository with an active project (deactivating a project drops its waiting jobs already).
@@ -505,7 +549,11 @@ export function createGithubAppWebhookHandler(
     }
 
     // 4. relevance
-    if (!REVIEW_EVENTS.has(eventName) && !INSTALLATION_EVENTS.has(eventName))
+    if (
+      !REVIEW_EVENTS.has(eventName) &&
+      !WORKFLOW_EVENTS.has(eventName) &&
+      !INSTALLATION_EVENTS.has(eventName)
+    )
       return accepted("event_not_used");
 
     // 5. claim

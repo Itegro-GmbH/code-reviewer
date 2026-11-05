@@ -57,7 +57,7 @@ export type RequestedTurn = TurnRead & { jobId: string };
 
 export type EngineDependencies = {
   runs: WorkflowRunsRepository;
-  workflows: Pick<WorkflowsRepository, "getVersion">;
+  workflows: Pick<WorkflowsRepository, "get" | "getVersion">;
   profiles: Pick<ProfilesRepository, "findByName">;
   environments: Pick<ImplementerEnvironmentsRepository, "listSummaries">;
   implementer: Pick<ImplementerService, "startTask">;
@@ -145,14 +145,18 @@ function parseOutput(text: string | null): unknown {
   }
 }
 
-/** What a reference can reach: the input of the trigger and the output of every step that succeeded. */
+/**
+ * What a reference can reach: the trigger and the output of every step that succeeded. A run started by hand has `trigger.input`, what
+ * the caller handed in; a run a label started has `trigger.issue` and `trigger.repo`, stored as they are (`label-trigger.ts`).
+ */
 function valuesOf(
   run: StoredWorkflowRun,
   steps: readonly StoredStepRun[],
 ): RunValues {
   const input = parseOutput(run.triggerInput);
+  const record = isRecord(input) ? input : {};
   return {
-    trigger: { input: isRecord(input) ? input : {} },
+    trigger: run.triggerKind === "manual" ? { input: record } : record,
     steps: Object.fromEntries(
       steps.flatMap((step) =>
         step.status === "succeeded"
@@ -461,6 +465,23 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     }
   }
 
+  /**
+   * The account an agent step's session belongs to, and the login its job shows. A run started by hand belongs to the person who
+   * started it. A run a label started has no person (`created_by` is null); its turns belong to the account that owns the workflow,
+   * the one that saved it first, and their job shows the login of whoever put the label on: the Implementer records the creator of a
+   * session for the Runs page, and decides nothing by it.
+   */
+  async function sessionOwner(
+    run: StoredWorkflowRun,
+  ): Promise<{ id: string; githubLogin: string } | undefined> {
+    if (run.createdBy !== null)
+      return { id: run.createdBy, githubLogin: run.actorLogin };
+    const found = await deps.workflows.get(run.workflowId);
+    return found === undefined
+      ? undefined
+      : { id: found.workflow.createdBy, githubLogin: run.actorLogin };
+  }
+
   async function startAgent(
     run: StoredWorkflowRun,
     step: StoredStepRun,
@@ -490,10 +511,16 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           ? node.instruction.first
           : "";
     const instruction = renderText(text, values, INSTRUCTION_MAX_LENGTH);
+    const owner = await sessionOwner(run);
+    if (owner === undefined)
+      return failed(
+        "agent_start_failed",
+        "The workflow that started this run no longer has an account the turn can belong to.",
+      );
     let started: { runId: string };
     try {
       started = await deps.implementer.startTask(
-        { id: run.createdBy, githubLogin: run.actorLogin },
+        owner,
         {
           repositoryId: run.repositoryId,
           baseBranch: run.baseBranch,

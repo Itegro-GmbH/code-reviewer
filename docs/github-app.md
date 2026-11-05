@@ -245,13 +245,15 @@ answered `IMPLEMENTER_WRITE_NOT_GRANTED` (a job that gets that far ends `git_wri
 
 ## Events
 
-Under *Subscribe to events* tick exactly **Pull request** and **Issue comment**. The other two events below have
+Under *Subscribe to events* tick **Pull request** and **Issue comment**, and **Issues** when workflows with the
+[label trigger](workflows.md#the-label-trigger) are used (the `issues` row below). The other two events below have
 no checkbox: GitHub sends them to every app that has a webhook.
 
 | Event | Subscription | What the app does with it |
 |---|---|---|
 | `pull_request` | Tick "Pull request" | A pull request was opened, reopened, marked ready for review or got new commits: becomes a review trigger |
 | `issue_comment` | Tick "Issue comment" | A comment on a pull request that starts with `/review` from somebody with write access becomes a command trigger (the removed `/ask`, `/improve` and `/describe` are ordinary comments) |
+| `issues` | Tick "Issues" (only for the [label trigger](workflows.md#the-label-trigger) of a workflow; an App made from the manifest does not subscribe to it yet, tick it by hand) | A label put on an open issue by a person starts the workflows of the workspace that wait for that label. Pull requests, bots, other actions (`opened`, `edited`, `unlabeled`, ...) and closed issues start nothing |
 | `installation` | Always sent, nothing to tick | The app was installed, removed, suspended or unsuspended: creates or disables the installation in the app |
 | `installation_repositories` | Always sent, nothing to tick | Repositories were added to or removed from an installation: keeps the repository list current |
 

@@ -30,10 +30,13 @@ import {
   checkResultValue,
   validateResultSchema,
 } from "../workflows/result-schema.ts";
-import { readRunDocument } from "./document.ts";
+import {
+  readRunDocument,
+  runBudgetMicroUsd,
+  unsupportedStep,
+} from "./document.ts";
 import { WorkflowRunError } from "./errors.ts";
 import {
-  MICRO_USD_COLUMN_MAX,
   MICRO_USD_PER_USD,
   RUNS_LISTED_MAX,
   TRIGGER_INPUT_MAX_CHARS,
@@ -64,6 +67,10 @@ export type RunSummaryView = {
   workflowVersion: number;
   status: StoredWorkflowRun["status"];
   errorCode: string | null;
+  /** What started the run: a person by hand (`manual`) or a label on an issue (`github.issueLabeled`). */
+  triggerKind: StoredWorkflowRun["triggerKind"];
+  /** Who started it or put the label on, by their login on the platform. Display only: it decides nothing. */
+  actorLogin: string;
   budgetUsd: number;
   spentUsd: number;
   createdAt: string;
@@ -136,6 +143,8 @@ function summaryOf(run: StoredWorkflowRun): RunSummaryView {
     workflowVersion: run.workflowVersion,
     status: run.status,
     errorCode: run.errorCode,
+    triggerKind: run.triggerKind,
+    actorLogin: run.actorLogin,
     budgetUsd: usd(run.budgetMicroUsd),
     spentUsd: usd(run.spentMicroUsd),
     createdAt: run.createdAt,
@@ -271,13 +280,13 @@ export function createWorkflowRunService(
           "WORKFLOW_RUN_TRIGGER_NOT_MANUAL",
           "Only a workflow with the manual trigger is started by hand.",
         );
-      for (const step of document.steps)
-        if (step.kind !== "agent" && step.kind !== "action")
-          throw new WorkflowRunError(
-            "WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED",
-            `The step ${step.id.slice(0, 64)} is of the kind ${step.kind.slice(0, 20)}, which the engine does not run yet (only agent and action steps).`,
-            { step: { id: step.id, kind: step.kind } },
-          );
+      const unsupported = unsupportedStep(document);
+      if (unsupported !== undefined)
+        throw new WorkflowRunError(
+          "WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED",
+          `The step ${unsupported.id.slice(0, 64)} is of the kind ${unsupported.kind.slice(0, 20)}, which the engine does not run yet (only agent and action steps).`,
+          { step: { id: unsupported.id, kind: unsupported.kind } },
+        );
 
       const schema = validateResultSchema(document.trigger.input).schema;
       if (schema === undefined)
@@ -305,17 +314,13 @@ export function createWorkflowRunService(
           "There is no such repository in this workspace.",
         );
 
-      const budgetUsd = Math.min(document.budgetUsd, maxBudgetUsd);
       const created = await deps.runs.createRun({
         workflowId,
         workflowVersion: found.current.version,
         repositoryId: repository.id,
         baseBranch: repository.defaultBranch,
         triggerInput,
-        budgetMicroUsd: Math.min(
-          MICRO_USD_COLUMN_MAX,
-          Math.max(1, Math.round(budgetUsd * MICRO_USD_PER_USD)),
-        ),
+        budgetMicroUsd: runBudgetMicroUsd(document, maxBudgetUsd),
         clientRequestId,
         createdBy: user.id,
         actorLogin: user.githubLogin,
