@@ -38,6 +38,7 @@ import {
 } from "../../src/test-support/github-app.ts";
 import { signedInMember } from "../../src/test-support/session-lookup.ts";
 import { createImplementerEnvironmentsRepository } from "../../src/db/repositories/implementer-environments-repository.ts";
+import { createImplementerRepository } from "../../src/db/repositories/implementer-repository.ts";
 import { createProfilesRepository } from "../../src/db/repositories/profiles-repository.ts";
 import { createWorkflowsRepository } from "../../src/db/repositories/workflows-repository.ts";
 import { openRouteTestDatabase } from "../../src/test-support/test-database.ts";
@@ -67,6 +68,9 @@ type Ids = {
   integrationId: string;
   repositoryId: string;
   runId: string;
+  /** #841: a running Implementer session of the workspace and the job of its first turn. */
+  sessionId: string;
+  turnRunId: string;
   userId: string;
   invitationId: string;
   environmentId: string;
@@ -374,6 +378,32 @@ const ENTRIES: Entry[] = [
     params: () => ({}),
     file: "implementer/models/route.ts",
     takesNoIds: true,
+    implementer: true,
+  },
+  {
+    // #841: the next instruction of a session; another workspace's session is not found, and nothing is written there.
+    name: "POST implementer/sessions/[sessionId]/turns",
+    route: "/api/w/[workspace]/implementer/sessions/[sessionId]/turns",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) => `/implementer/sessions/${ids.sessionId}/turns`,
+    body: () => ({
+      instruction: "Add a test.",
+      clientRequestId: "follow-up-request-1",
+    }),
+    params: (ids) => ({ sessionId: ids.sessionId }),
+    file: "implementer/sessions/[sessionId]/turns/route.ts",
+    implementer: true,
+  },
+  {
+    // #841: what the Continue form of a run needs, read like the run by every member of the workspace in the address.
+    name: "GET runs/[id]/continuation",
+    route: "/api/w/[workspace]/runs/[id]/continuation",
+    method: "GET",
+    minRole: MINIMUM_ROLE.view,
+    path: (ids) => `/runs/${ids.turnRunId}/continuation`,
+    params: (ids) => ({ id: ids.turnRunId }),
+    file: "runs/[id]/continuation/route.ts",
     implementer: true,
   },
   {
@@ -977,6 +1007,47 @@ async function seedWorkspace(
     workspaceId: workspace.id,
     role: "owner",
   });
+  // A running session of the Implementer with its first turn (#841): the next-instruction route of the other workspace must not reach it.
+  const started = await createImplementerRepository(
+    db,
+    workspace.id,
+  ).createSessionWithTurn(
+    {
+      repositoryId: repository.id,
+      baseBranch: "main",
+      branch: `implementer/${slug}`,
+      instruction: "Add a health endpoint.",
+      modelChoice: { entryId: `entry-${slug}` },
+      costLimitCents: null,
+      createdBy: names.owner,
+    },
+    async (trx, { slot }) => {
+      const id = `turn-job-of-${slug}`;
+      await trx
+        .insertInto("jobs")
+        .values({
+          id,
+          workspace_id: workspace.id,
+          repository_id: repository.id,
+          pr_number: -slot,
+          pr_url: `https://github.test/${names.repo}/tree/implementer/${slug}`,
+          head_sha: HEAD,
+          command: "review",
+          review_kind: "implementer",
+          args: "",
+          trigger_kind: "manual",
+          actor_login: `login-of-${slug}`,
+          delivery_id: `implementer:${workspace.id}:seed`,
+          status: "running",
+          run_after: "2026-11-05T08:00:00.000Z",
+          attempts: 0,
+          created_at: "2026-11-05T08:00:00.000Z",
+          updated_at: "2026-11-05T08:00:00.000Z",
+        })
+        .execute();
+      return id;
+    },
+  );
   const invitation = await createInvitationsRepository(db, workspace.id).create(
     {
       id: `invitation-of-${slug}`,
@@ -1071,6 +1142,8 @@ async function seedWorkspace(
       integrationId: integration.id,
       repositoryId: repository.id,
       runId: job.job.id,
+      sessionId: started.session.id,
+      turnRunId: started.turn.jobId,
       userId: names.owner,
       invitationId: invitation.id,
     } satisfies Ids,
@@ -1205,6 +1278,7 @@ async function start() {
         | "plan_handoff_tokens"
         | "billing_workspace_settings"
         | "implementer_environments"
+        | "implementer_sessions"
         | "workflows"
         | "workflow_versions"
         | "profiles"
@@ -1229,6 +1303,7 @@ async function start() {
       planHandoffTokens: await select("plan_handoff_tokens"),
       billingWorkspaceSettings: await select("billing_workspace_settings"),
       implementerEnvironments: await select("implementer_environments"),
+      implementerSessions: await select("implementer_sessions"),
       workflows: await select("workflows"),
       workflowVersions: await select("workflow_versions"),
       profiles: await select("profiles"),

@@ -123,6 +123,7 @@ describe("the dispatch sweep route", () => {
       sent: 0,
       noticesTried: 0,
       checksSynced: 0,
+      followUpsStarted: 0,
       cleanedUp: true,
       modelsDev: null,
       holdsReleased: 0,

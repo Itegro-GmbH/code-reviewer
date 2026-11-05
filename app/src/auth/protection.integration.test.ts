@@ -206,6 +206,7 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/implementer/models",
   "/api/w/[workspace]/implementer/repositories",
   "/api/w/[workspace]/implementer/repositories/[repositoryId]/branches",
+  "/api/w/[workspace]/implementer/sessions/[sessionId]/turns",
   "/api/w/[workspace]/implementer/tasks",
   "/api/w/[workspace]/integrations/[integrationId]",
   "/api/w/[workspace]/integrations/sync",
@@ -229,6 +230,7 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/review-settings",
   "/api/w/[workspace]/runs",
   "/api/w/[workspace]/runs/[id]",
+  "/api/w/[workspace]/runs/[id]/continuation",
   "/api/w/[workspace]/runs/[id]/steps",
 ] as const;
 // Files the proxy matcher leaves out on purpose (src/proxy.ts), so no session rule applies to them.

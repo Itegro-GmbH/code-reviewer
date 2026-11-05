@@ -1063,6 +1063,24 @@ const CASES: Case[] = [
       }),
   },
   {
+    // #841: the next turn of B's session cannot be queued from A's scope; nothing is written
+    name: "jobs.enqueueFollowUpTurn",
+    run: (a, b) =>
+      a.jobs.enqueueFollowUpTurn({
+        sessionId: taskOf(b).session.id,
+        headSha: SHA,
+        instruction: "Hijacked.",
+        modelChoice: { entryId: "entry-1" },
+        costLimitCents: null,
+        createdBy: "user-a",
+        actorLogin: "octocat",
+        clientRequestId: "foreign-follow-up",
+        fromQueued: false,
+      }),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ status: "session_not_found" }),
+  },
+  {
     // #791: a request id is looked up in the workspace of the scope; a turn of B is never found under A (the delivery id carries the workspace)
     name: "jobs.findImplementerTurn",
     run: (a) => a.jobs.findImplementerTurn("request-of-b"),
