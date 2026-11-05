@@ -53,6 +53,7 @@ from code_reviewer_runner.capabilities import (
 )
 from code_reviewer_runner.dynamic_review.engine_user import sweep_user
 from code_reviewer_runner.dynamic_review.netguard import EGRESS_MODE_VARIABLE, EgressMode
+from code_reviewer_runner.implementer.runner_profile import RUNNER_PROFILE_NAMES
 from code_reviewer_runner.job import (
     IMPLEMENTER_ENVIRONMENT_NAMES,
     ImplementerInput,
@@ -140,6 +141,8 @@ IMPLEMENTER_PASSTHROUGH_VARIABLES = (
     "RUNNER_DYNAMIC_PROXY_PORT",
     "RUNNER_DYNAMIC_ENGINE_PORT",
     *IMPLEMENTER_ENVIRONMENT_NAMES,
+    # #854: what a customer's runner decided about the runtime and the CPUs of the containers.
+    *RUNNER_PROFILE_NAMES,
 )
 # The newest bytes of its stdout the host keeps of an Implementer job process: its result line
 # carries the commits and files of the turn, up to the 4 MB the body is held to (`report.py`).

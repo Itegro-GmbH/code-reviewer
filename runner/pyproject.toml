@@ -14,6 +14,7 @@ code-reviewer-runner = "code_reviewer_runner.cli:main"
 code-reviewer-run-job = "code_reviewer_runner.runner:main"
 code-reviewer-worker = "code_reviewer_runner.worker_cli:main"
 worker-reap = "code_reviewer_runner.worker_reap:main"
+factory-runner = "code_reviewer_runner.factory_runner.cli:entry_point"
 
 [build-system]
 requires = ["hatchling"]
