@@ -17,7 +17,7 @@ import { startRunnerApiHarness } from "../test-support/runner-api-harness.ts";
 import { createContractValidator } from "../test-support/runner-contract.ts";
 import { addWorkspace } from "../test-support/workspaces.ts";
 import { addUser } from "../test-support/workspace-deletion-fixture.ts";
-import { SNAPSHOT_LIMITS } from "./contract.ts";
+import { SNAPSHOT_LIMITS, type ImplementerResult } from "./contract.ts";
 
 const IMPLEMENTER = ["implementer"] as const;
 const contract = createContractValidator();
@@ -123,6 +123,36 @@ async function start() {
       runner,
     };
   }
+  /**
+   * What the queue does with a claim it takes back (`runner-jobs-repository.ts`): the turn waits again with one more lost attempt, nobody holds
+   * it and the lease token is gone.
+   */
+  async function requeue(jobId: string) {
+    await h.db
+      .updateTable("jobs")
+      .set((eb) => ({
+        status: "queued",
+        attempts: eb("attempts", "+", 1),
+        runner_id: null,
+        lease_token: null,
+        claimed_at: null,
+        heartbeat_at: null,
+        lease_expires_at: null,
+      }))
+      .where("id", "=", jobId)
+      .execute();
+  }
+  /** The turn `held` once more, claimed by `runner` (the claim a customer's runner makes): a new lease token, and `runner` holds it. */
+  async function claimAgain(held: Held, runner: Runner): Promise<Held> {
+    const claimed = await h.queue.claimNext(
+      customerRunnerId(runner.runnerId),
+      IMPLEMENTER,
+      { customerRunner: { workspaceId: h.workspaceId, labels: LABELS } },
+    );
+    if (claimed === null || claimed.job.id !== held.jobId)
+      throw new Error("the turn was not claimed again");
+    return { ...held, leaseToken: claimed.leaseToken, runner };
+  }
   /** A hosted turn that a Dispatcher's Worker holds. */
   async function hosted() {
     const enqueued = await enqueue({ runner: false });
@@ -196,6 +226,8 @@ async function start() {
     fleet,
     snapshots,
     running,
+    requeue,
+    claimAgain,
     hosted,
     followUp,
     store,
@@ -745,6 +777,224 @@ describe("who may call the two routes (#879)", () => {
         error: { code: "WORKER_CREDENTIAL_INVALID" },
       });
     }
+  });
+});
+
+const implementerResult = (): ImplementerResult => ({
+  baseCommit: sha("a"),
+  headCommit: sha("b"),
+  pushed: true,
+  commits: [{ sha: sha("b"), subject: "Add a health endpoint" }],
+  filesChanged: [{ path: "src/health.ts", status: "added" }],
+  summary: "Added a health endpoint.",
+  opencode: { sessionId: "ses_1", version: "1.19.0" },
+});
+
+describe("a job that changes hands or ends under the calls of a runner (#879)", () => {
+  type Call = "session" | "resume-session";
+  const CALLS: Call[] = ["session", "resume-session"];
+
+  /** One call as `runner` makes it with `leaseToken` for the job `jobId`. */
+  function call(
+    h: Awaited<ReturnType<typeof start>>["h"],
+    kind: Call,
+    jobId: string,
+    runner: Runner,
+    leaseToken: string,
+  ) {
+    const whole = randomBytes(2_000);
+    const over = { token: runner.credential, leaseToken };
+    return kind === "session"
+      ? h.runnerSession(jobId, describeFile(whole, 0), whole, over)
+      : h.runnerResumeSession(jobId, 0, over);
+  }
+
+  // #879-T60
+  it.each(CALLS)(
+    "answers 404 to the runner that lost a job another runner has claimed since, with the lease token it had, and still serves the new holder (%s)",
+    async (kind) => {
+      const { h, running, requeue, claimAgain, stored } = await start();
+      const a = await h.registerRunner({ labels: LABELS });
+      const b = await h.registerRunner({ labels: LABELS });
+      const first = await running(a);
+      await requeue(first.jobId);
+      const second = await claimAgain(first, b);
+      expect((await h.queue.get(first.jobId))?.runnerId).toBe(
+        customerRunnerId(b.runnerId),
+      );
+
+      const lost = await call(h, kind, first.jobId, a, first.leaseToken);
+
+      expect(lost.status).toBe(404);
+      expect(await lost.json()).toMatchObject({
+        error: { code: "RUNNER_JOB_NOT_FOUND" },
+      });
+      expect(await stored()).toHaveLength(0);
+      const holder = await call(h, kind, second.jobId, b, second.leaseToken);
+      expect(holder.status).toBeLessThan(300);
+    },
+  );
+
+  // #879-T61
+  it.each(CALLS)(
+    "answers 409 to the same runner that holds the job again under a new claim, when it still sends the old lease token (%s)",
+    async (kind) => {
+      const { h, running, requeue, claimAgain, stored } = await start();
+      const runner = await h.registerRunner({ labels: LABELS });
+      const first = await running(runner);
+      await requeue(first.jobId);
+      const second = await claimAgain(first, runner);
+      expect(second.leaseToken).not.toBe(first.leaseToken);
+
+      const old = await call(h, kind, first.jobId, runner, first.leaseToken);
+
+      expect(old.status).toBe(409);
+      expect(await old.json()).toMatchObject({
+        error: { code: "RUNNER_LEASE_LOST" },
+      });
+      expect(await stored()).toHaveLength(0);
+      const fresh = await call(
+        h,
+        kind,
+        second.jobId,
+        runner,
+        second.leaseToken,
+      );
+      expect(fresh.status).toBeLessThan(300);
+    },
+  );
+
+  // #879-T62
+  it.each(CALLS)(
+    "answers 409 for a job that is back in the queue and held by nobody, not 404 (%s)",
+    async (kind) => {
+      const { h, running, requeue, stored } = await start();
+      const runner = await h.registerRunner({ labels: LABELS });
+      const held = await running(runner);
+      await requeue(held.jobId);
+      expect(await h.queue.get(held.jobId)).toMatchObject({
+        status: "queued",
+        runnerId: null,
+      });
+
+      const answer = await call(h, kind, held.jobId, runner, held.leaseToken);
+
+      expect(answer.status).toBe(409);
+      expect(await answer.json()).toMatchObject({
+        error: { code: "RUNNER_LEASE_LOST" },
+      });
+      expect(await stored()).toHaveLength(0);
+    },
+  );
+
+  // #879-T63
+  it.each(CALLS)(
+    "answers 409 once the turn was ended with complete, though the runner still holds the credential and the token of that claim (%s)",
+    async (kind) => {
+      const { h, running, store, followUp, stored } = await start();
+      const runner = await h.registerRunner({ labels: LABELS });
+      const first = await running(runner);
+      await store(first, randomBytes(2_000));
+      const turn = await followUp(first);
+      const done = await h.complete(
+        turn.jobId,
+        turn.leaseToken,
+        { implementer: implementerResult() },
+        { token: runner.credential },
+      );
+      expect(done.status).toBe(200);
+      expect(await h.queue.get(turn.jobId)).toMatchObject({
+        status: "succeeded",
+      });
+      const before = await stored();
+
+      const answer = await call(h, kind, turn.jobId, runner, turn.leaseToken);
+
+      expect(answer.status).toBe(409);
+      expect(await answer.json()).toMatchObject({
+        error: { code: "RUNNER_LEASE_LOST" },
+      });
+      expect(answer.headers.get("x-snapshot-bytes")).toBeNull();
+      expect(await stored()).toStrictEqual(before);
+    },
+  );
+
+  // #879-T64
+  it.each(CALLS)(
+    "answers 409 to an earlier turn of a session that has a newer turn running, and neither writes nor reads the session's snapshot (%s)",
+    async (kind) => {
+      const { h, running, store, followUp, stored, get } = await start();
+      const runner = await h.registerRunner({ labels: LABELS });
+      const first = await running(runner);
+      const file = randomBytes(2_000);
+      await store(first, file);
+      const next = await followUp(first);
+      expect(next.sessionId).toBe(first.sessionId);
+      const before = await stored();
+
+      const answer = await call(h, kind, first.jobId, runner, first.leaseToken);
+
+      expect(answer.status).toBe(409);
+      expect(await answer.json()).toMatchObject({
+        error: { code: "RUNNER_LEASE_LOST" },
+      });
+      expect(await stored()).toStrictEqual(before);
+      // The turn that runs now reads the file the earlier one left, and nothing was changed under it.
+      const read = await get(next, 0);
+      expect(read.status).toBe(200);
+      expect(Buffer.from(await bytesOf(read)).equals(file)).toBe(true);
+    },
+  );
+
+  // #879-T65
+  it("writes neither a lease token nor a credential to the log, whichever way the calls were answered", async () => {
+    const { h, running, store, followUp, put, get } = await start();
+    const runner = await h.registerRunner({ labels: LABELS });
+    const stranger = await h.registerRunner({ labels: LABELS });
+    const first = await running(runner);
+    await store(first, randomBytes(2_000));
+    const turn = await followUp(first);
+    const whole = randomBytes(2_000);
+    const wrongLease = "wrong-lease-token-0123456789";
+    const unknownCredential = "crc_" + "C".repeat(43);
+
+    const answers = [
+      await get(turn, 0), // served: the file of the earlier turn
+      await put(turn, whole, 0), // stored
+      await h.runnerSession(turn.jobId, describeFile(whole, 0), whole, {
+        token: runner.credential,
+        leaseToken: wrongLease,
+      }), // 409
+      await put(first, whole, 0), // 409: an earlier turn
+      await h.runnerResumeSession(turn.jobId, 0, {
+        token: stranger.credential,
+        leaseToken: turn.leaseToken,
+      }), // 404
+      await h.runnerSession(turn.jobId, describeFile(whole, 0), whole, {
+        token: unknownCredential,
+        leaseToken: turn.leaseToken,
+      }), // 401
+      await h.runnerResumeSession(turn.jobId, 0, {
+        token: runner.credential,
+        leaseToken: null,
+      }), // 400
+    ];
+    expect(answers.map((answer) => answer.status)).toStrictEqual([
+      200, 200, 409, 409, 404, 401, 400,
+    ]);
+
+    const log = h.logLines().join("\n");
+    // The calls did leave lines, or the check below would prove nothing.
+    expect(log).toContain("refused: lease lost");
+    for (const secret of [
+      runner.credential,
+      stranger.credential,
+      unknownCredential,
+      turn.leaseToken,
+      first.leaseToken,
+      wrongLease,
+    ])
+      expect(log).not.toContain(secret);
   });
 });
 

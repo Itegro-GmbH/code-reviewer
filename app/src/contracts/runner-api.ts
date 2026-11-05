@@ -1859,7 +1859,7 @@ export interface RunnerResumeSessionHeaders {
   [k: string]: unknown;
 }
 /**
- * #879: a customer's runner may also send its own credential (`Authorization: Bearer crc_...`; a revoked or unknown one is 401), to read the features before it uses a call the app of an earlier release does not have. #318: 200 from GET /api/runners/v1/version (dispatcher credential; #322: a Worker may also send its per-job credential with ?jobId=<its job>, which must be the running claim of that job). Lets a Dispatcher or a Worker detect an app that is too old before it claims anything. An app of a previous release has no such route (404), which means it is too old. `version` is the runner API version; `appVersion` is the build of the app, for logs.
+ * #879: a customer's runner may also send its own credential (`Authorization: Bearer crc_...`; a revoked or unknown one is 401), to read the features before it uses a call the app of an earlier release does not have. The answer holds no job data; authenticating with a runner credential also marks the runner seen, as every call of the runner does. #318: 200 from GET /api/runners/v1/version (dispatcher credential; #322: a Worker may also send its per-job credential with ?jobId=<its job>, which must be the running claim of that job). Lets a Dispatcher or a Worker detect an app that is too old before it claims anything. An app of a previous release has no such route (404), which means it is too old. `version` is the runner API version; `appVersion` is the build of the app, for logs.
  */
 export interface VersionResponse {
   version: 1;

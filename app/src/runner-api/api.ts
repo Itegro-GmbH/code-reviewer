@@ -485,8 +485,8 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
       try {
         // The dispatcher credential, or the credential of a running claim with its job id: a Worker
         // checks the app before it fetches its job. #879: or the credential of a customer's runner, which reads
-        // the features to know whether it may use a call the app of an earlier release lacks. Read only, and the
-        // answer holds nothing of any job.
+        // the features to know whether it may use a call the app of an earlier release lacks. No job data in the
+        // answer; authenticating also marks the runner seen.
         const who = identify(request);
         if (
           !who.ok &&

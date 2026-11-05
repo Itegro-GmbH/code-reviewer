@@ -110,12 +110,25 @@ GET /api/runners/v1/jobs/{id}/resume-session?part=n
 - **Who may call.** A live runner and nobody else: a revoked or unknown credential, the shared token and a per-job credential are the same `401 RUNNER_UNAUTHORIZED`. The job must be of the runner's own workspace
   **and held by this very runner**: a job of another workspace, a job another runner holds and a hosted job (a Dispatcher holds it) are all `404 RUNNER_JOB_NOT_FOUND`, so the answer says nothing about which. Then the lease
   token decides, as it does for the steps: a lease that ran out, a claim that ended or a token that is not the claim's is `409 RUNNER_LEASE_LOST` (stop sending). A job that is not a turn of the Implementer is `400`.
-- **The switch.** The app lists the feature `runner_session_snapshot` in `KnownAppFeature`. `implementer_snapshot` says only that the **Worker API's** calls exist, and an app can have those and not these; a runner on
-  a customer's machine reads the list from `GET /api/runners/v1/version` **with its own credential** (the call answers a live runner as well as a Dispatcher or a running claim) and uses the two calls only if it
-  finds `runner_session_snapshot` there. The runner client (`RunnerJobApi`, #874) takes `snapshot=...`: `snapshot=True` sends the snapshot and reads the stored session, `False` (an older app) makes the turn take no export and a
-  follow-up continue from the summary of the earlier ones, which is the plan's fallback and costs a turn nothing else. It needs no claim feature: the claim names `implementer_resume` already, and the job says
-  with `implementer.resume.snapshot` whether there is a file to read.
-- **What the runner does with it.** Nothing new: the host downloads the stored session before the process starts and uploads the snapshot beside the final push, exactly as for a Worker
+  These two calls answer `404` for a job another runner of the workspace holds, while `steps`, `heartbeat` and `complete` check the workspace and the lease token only and answer `409 RUNNER_LEASE_LOST` for the same job.
+  The difference is deliberate for these two calls and not yet for the others: whether `steps`, `heartbeat` and `complete` should check the holder too is a separate question (a follow-up, not decided here).
+- **The switch.** The app lists the feature `runner_session_snapshot` in `KnownAppFeature`. `implementer_snapshot` says only that the **Worker API's** calls exist, and an app can have those and not these (production
+  lists it today without the runner routes); a runner on a customer's machine reads the list from `GET /api/runners/v1/version` **with its own credential** (the call answers a live runner as well as a Dispatcher
+  or a running claim) and uses the two calls only if it finds `runner_session_snapshot` there. It needs no claim feature: the claim names `implementer_resume` already, and the job says with
+  `implementer.resume.snapshot` whether there is a file to read.
+- **Not switched on yet: the open part of #879.** This change is the app's side only. The runner client of #874 (`RunnerJobApi`, `origin/854-runner-service`) does not fit these routes yet, and the snapshot stays off in
+  the runner until it does (a follow-up turn continues from the summary of the earlier ones). What is missing there:
+  - the paths: `RunnerJobApi` inherits the Worker API's `/api/workers/v1/jobs/{id}/session` and `/resume-session`; it must send to `/api/runners/v1/jobs/{id}/session` and `/resume-session` (the query, the parts and the
+    response headers are the same);
+  - the header `X-Lease-Token` on those two calls (`_send_bytes` sends the credential only; the token is kept per job in `RunnerJobApi`);
+  - the check of the feature: `supports_snapshot` must test `runner_session_snapshot`, not `implementer_snapshot` (an override in `RunnerJobApi`, after `check_app` has read the list from the version call with the runner's
+    credential);
+  - a fix for a fault that exists today: with `snapshot=False`, `check_app` still replaces the feature list with the app's, so an app that lists `implementer_snapshot` makes the host open the snapshot channel and the
+    runner calls the Worker routes, which refuse its credential (`401 WORKER_CREDENTIAL_INVALID`).
+
+  `docs/runner.md` "Known limits" of #874 says the app does not take a snapshot from a runner credential; that line changes with the switch-on change.
+
+- **What the runner does with it, once it is switched on.** Nothing new: the host downloads the stored session before the process starts and uploads the snapshot beside the final push, exactly as for a Worker
   ([`implementer.md`](implementer.md#follow-up-turns-resume-in-the-runner-840)). Which machine ran the earlier turns does not matter: the snapshot belongs to the session.
 - **Tests.** `app/src/runner-api/runner-session.integration.test.ts` (the parts and the bounds through the runner's door, a snapshot stored by one runner and read by another, another workspace, another runner,
   a lease that ran out, a revoked runner, a hosted job, the shared token and a per-job credential, the Worker routes still closed to a runner, the version call), `runner-session-contract.test.ts` and

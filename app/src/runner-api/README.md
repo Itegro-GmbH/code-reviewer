@@ -621,7 +621,7 @@ Worker. It cannot count what runs, so the app counts for it. Three additions, al
   `features` from `APP_FEATURES` (`worker_api`, `claim_by_job_id`, `pool_cap`, `release`, `vm_lifecycle`). It takes the
   dispatcher credential; a Worker may also call it with its credential **and** `?jobId=<its job>` (the
   credential must be the running claim of that job, a primary key lookup), to check the app before it
-  fetches its job. The answer holds nothing of any job.
+  fetches its job. #879: or with the credential of a live runner (a revoked or unknown one is `401`). The answer holds no job data; authenticating also marks the runner seen.
 
 - **Job state (#364).** `GET /api/runners/v1/jobs/:id` answers `{ version: 1, job: { id, status } }` with the
   status of the job (`queued`, `running`, `succeeded`, `failed`, `superseded`, `cancelled`) and nothing else: no job
