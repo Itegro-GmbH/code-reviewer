@@ -475,7 +475,8 @@ async function seed(
     workflow.workflow.id,
     {
       name: "Issue to PR",
-      document: `{"tag":"${tag}","v":2}`,
+      // The text the label trigger looks for (#845): both workspaces have a workflow that has it.
+      document: `{"tag":"${tag}","v":2,"trigger":{"kind":"github.issueLabeled"}}`,
       createdBy: `user-${tag}`,
     },
     200,
@@ -2181,6 +2182,17 @@ const CASES: Case[] = [
     name: "workflows.get",
     run: (a, b) => a.workflows.get(b.workflow.id),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  // #845-T40: the workflows a label starts are read in the workspace of the installation only
+  {
+    name: "workflows.listWithIssueTrigger",
+    run: (a) => a.workflows.listWithIssueTrigger(),
+    expectAnswer: (answer, a) =>
+      expect(
+        (answer as { workflow: { id: string } }[]).map(
+          (found) => found.workflow.id,
+        ),
+      ).toEqual([a.workflow.id]),
   },
   {
     name: "workflows.getVersion",
