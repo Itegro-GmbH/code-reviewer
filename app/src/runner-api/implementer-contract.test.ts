@@ -531,7 +531,9 @@ describe("the implementer result", () => {
     for (const bad of [
       {},
       { mode: "copied" },
+      { mode: "summary_only" },
       { mode: "summary_only", reason: "unknown" },
+      { mode: "imported", reason: "import_failed" },
       { mode: "imported", note: "x" },
       "imported",
       null,

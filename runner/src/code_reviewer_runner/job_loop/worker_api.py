@@ -461,11 +461,9 @@ def _resume_header(headers: Mapping[str, str]) -> tuple[SnapshotHeader, int] | N
     except KeyError:
         return None
     header = parse_header(line.encode("ascii", "replace"))
-    if (
-        header is None
-        or not parts.isascii()
-        or not parts.isdigit()
-        or header.size > MAX_SNAPSHOT_BYTES
-    ):
+    if header is None or not parts.isascii() or not parts.isdigit():
+        return None
+    # Between one part and the most a snapshot of the cap takes.
+    if not 1 <= int(parts) <= parts_of(MAX_SNAPSHOT_BYTES):
         return None
     return header, int(parts)

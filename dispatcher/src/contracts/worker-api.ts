@@ -131,6 +131,27 @@ export type RunnerResult = {
   usage?: RunnerUsage | null;
   [k: string]: unknown;
 };
+/**
+ * #840 (part of #745): how a follow-up turn got its earlier conversation, in `RunnerResult.implementer.resume`. Present on a follow-up turn (the job carried `resume`) that got as far as the engine's start; a first turn has none, and neither has a follow-up that ended before (the clone failed, the setup script failed). `mode` `imported` is the whole conversation of the earlier turns, read back into the engine, which continued in that session: the commands in it are the history the agent sees, not things that ran in the new sandbox. `summary_only` is a fresh engine session that was given a summary and a digest as data instead, for one of the stable `reason` words (always present with `summary_only`, never with `imported`): `no_snapshot` (the app had none, or the session was never saved), `download_failed` (the stored session could not be fetched), `snapshot_unreadable` (the file did not match its size or digest, was not gzip, or was not the engine's export), `import_failed` (the engine refused the import or the session was not there after it), `version_changed` (the same, and the engine version that wrote the snapshot is not the one that read it). Neither is a failure of the turn. A turn that imported a history so long that its first call alone is over the cost limit ends `cost_limit_reached` before any model call (the door refuses a call whose reserved cost is over the limit).
+ */
+export type ImplementerResumeResult = {
+  mode: "imported" | "summary_only";
+  reason?:
+    | "no_snapshot"
+    | "download_failed"
+    | "snapshot_unreadable"
+    | "import_failed"
+    | "version_changed";
+} & (
+  | {
+      mode?: "imported";
+      [k: string]: unknown;
+    }
+  | {
+      mode?: "summary_only";
+      [k: string]: unknown;
+    }
+);
 
 /**
  * #424: the query string of GET /api/workers/v1/jobs/{id}, as an object of its parameters. Both are optional comma separated lists: `features` (the names of KnownClaimFeature, unknown names are ignored) and `llmProviders` (slugs of LlmProviderId: the LLM providers the Worker can run; absent means `openrouter`). The app ignores the list today (the claim issue of epic #420 will use it); it still always sends `openrouter`.
@@ -1024,18 +1045,6 @@ export interface ImplementerNetworkReport {
     bytesIn: number;
     bytesOut: number;
   }[];
-}
-/**
- * #840 (part of #745): how a follow-up turn got its earlier conversation, in `RunnerResult.implementer.resume`. Present on a follow-up turn (the job carried `resume`) that got as far as the engine's start; a first turn has none, and neither has a follow-up that ended before (the clone failed, the setup script failed). `mode` `imported` is the whole conversation of the earlier turns, read back into the engine, which continued in that session: the commands in it are the history the agent sees, not things that ran in the new sandbox. `summary_only` is a fresh engine session that was given a summary and a digest as data instead, for one of the stable `reason` words (always present with `summary_only`, never with `imported`): `no_snapshot` (the app had none, or the session was never saved), `download_failed` (the stored session could not be fetched), `snapshot_unreadable` (the file did not match its size or digest, was not gzip, or was not the engine's export), `import_failed` (the engine refused the import or the session was not there after it), `version_changed` (the same, and the engine version that wrote the snapshot is not the one that read it). Neither is a failure of the turn. A turn that imported a history so long that its first call alone is over the cost limit ends `cost_limit_reached` before any model call (the door refuses a call whose reserved cost is over the limit).
- */
-export interface ImplementerResumeResult {
-  mode: "imported" | "summary_only";
-  reason?:
-    | "no_snapshot"
-    | "download_failed"
-    | "snapshot_unreadable"
-    | "import_failed"
-    | "version_changed";
 }
 export interface RunnerUsage {
   model: string | null;

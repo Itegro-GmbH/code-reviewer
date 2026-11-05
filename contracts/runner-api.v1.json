@@ -570,7 +570,11 @@
             "version_changed"
           ]
         }
-      }
+      },
+      "oneOf": [
+        { "properties": { "mode": { "const": "imported" } }, "not": { "required": ["reason"] } },
+        { "properties": { "mode": { "const": "summary_only" } }, "required": ["reason"] }
+      ]
     },
     "ImplementerEnvironment": {
       "description": "#818: the environment a turn was started with, as the turn copied it when it started: the setup script the runner runs once in the repository's folder after the clone and before the model is called, and (#745, step 7) the rule for the agent's network. Present only when the environment has a script or a network rule other than `off`, and the caller named the claim feature `implementer_environment` (and `implementer_network` for a rule); a turn with neither carries nothing (the size of the VM is the Dispatcher's business, it reaches the Worker as the VM it runs in). `setupScript`, when present, is literal text of at most 64 KB of UTF-8, written by a member of the workspace: it is data to run, never a command of the app, and it holds no secret by design (there is no field for one). `network`, when present, is the rule the network door enforces; absent means `off`. At least one of the two is present. `name` is for the run's log line only.",

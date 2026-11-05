@@ -232,6 +232,27 @@ export type ImplementerEnvironment1 = {
   [k: string]: unknown;
 };
 /**
+ * #840 (part of #745): how a follow-up turn got its earlier conversation, in `RunnerResult.implementer.resume`. Present on a follow-up turn (the job carried `resume`) that got as far as the engine's start; a first turn has none, and neither has a follow-up that ended before (the clone failed, the setup script failed). `mode` `imported` is the whole conversation of the earlier turns, read back into the engine, which continued in that session: the commands in it are the history the agent sees, not things that ran in the new sandbox. `summary_only` is a fresh engine session that was given a summary and a digest as data instead, for one of the stable `reason` words (always present with `summary_only`, never with `imported`): `no_snapshot` (the app had none, or the session was never saved), `download_failed` (the stored session could not be fetched), `snapshot_unreadable` (the file did not match its size or digest, was not gzip, or was not the engine's export), `import_failed` (the engine refused the import or the session was not there after it), `version_changed` (the same, and the engine version that wrote the snapshot is not the one that read it). Neither is a failure of the turn. A turn that imported a history so long that its first call alone is over the cost limit ends `cost_limit_reached` before any model call (the door refuses a call whose reserved cost is over the limit).
+ */
+export type ImplementerResumeResult = {
+  mode: "imported" | "summary_only";
+  reason?:
+    | "no_snapshot"
+    | "download_failed"
+    | "snapshot_unreadable"
+    | "import_failed"
+    | "version_changed";
+} & ImplementerResumeResult1;
+export type ImplementerResumeResult1 =
+  | {
+      mode?: "imported";
+      [k: string]: unknown;
+    }
+  | {
+      mode?: "summary_only";
+      [k: string]: unknown;
+    };
+/**
  * #746: what happened to a file between the base commit and the head commit.
  */
 export type ImplementerFileStatus =
@@ -1233,18 +1254,6 @@ export interface ImplementerResume {
 export interface ImplementerResumeBranch {
   name: ImplementerBranchName;
   head: string;
-}
-/**
- * #840 (part of #745): how a follow-up turn got its earlier conversation, in `RunnerResult.implementer.resume`. Present on a follow-up turn (the job carried `resume`) that got as far as the engine's start; a first turn has none, and neither has a follow-up that ended before (the clone failed, the setup script failed). `mode` `imported` is the whole conversation of the earlier turns, read back into the engine, which continued in that session: the commands in it are the history the agent sees, not things that ran in the new sandbox. `summary_only` is a fresh engine session that was given a summary and a digest as data instead, for one of the stable `reason` words (always present with `summary_only`, never with `imported`): `no_snapshot` (the app had none, or the session was never saved), `download_failed` (the stored session could not be fetched), `snapshot_unreadable` (the file did not match its size or digest, was not gzip, or was not the engine's export), `import_failed` (the engine refused the import or the session was not there after it), `version_changed` (the same, and the engine version that wrote the snapshot is not the one that read it). Neither is a failure of the turn. A turn that imported a history so long that its first call alone is over the cost limit ends `cost_limit_reached` before any model call (the door refuses a call whose reserved cost is over the limit).
- */
-export interface ImplementerResumeResult {
-  mode: "imported" | "summary_only";
-  reason?:
-    | "no_snapshot"
-    | "download_failed"
-    | "snapshot_unreadable"
-    | "import_failed"
-    | "version_changed";
 }
 /**
  * #745, step 7: what the network door did in a turn, in `ImplementerResult.network`; present for every turn that got as far as the network, whatever its rule (so for the rule `off` too; `door` is false then), also when the second wall is not in place (`vmPolicy` says so), so that a missing wall is never left out of the report. `connections` are the connections the door saw, one entry for each distinct host, port and outcome, with their count and the bytes each way (the bytes the door relayed, both directions, counted at the end of a connection; nothing of their content is kept), at most 100 (`dropped` counts the entries that did not fit); `reason` is a word of the door for a refusal (`not_listed`, `ip_literal`, `private_address`, `port_not_allowed`, `unresolvable`, `bad_request`, `too_many_connections`, `upstream_failed`) and null for an allowed connection. `vmPolicy` says what the second wall did: `narrowed` (the VM's network policy was cut to GitHub, the model provider, the app and the rule), `unchanged` (the rule is `open`, so the policy was left as it was), `not_configured` (this runner was started without a way to change the policy, for example because the Dispatcher has no public address or the App named no provider host: the first wall alone held, and the turn's notes say so).
