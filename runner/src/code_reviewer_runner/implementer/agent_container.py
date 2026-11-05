@@ -185,6 +185,7 @@ def agent_document(
     rule: NetworkRule = OFF,
     result: bool = False,
     nano_cpus: int = 0,
+    no_new_privileges: bool = False,
 ) -> dict[str, Any]:
     """The agent's container. Constants, the image id and the volume name the daemon gave, and the
     memory limit the Dispatcher computed for the size of the VM. The runtime is Sysbox and the
@@ -202,6 +203,10 @@ def agent_document(
     if result:
         mounts.append(result_mount(work_volume, AGENT_RESULT_DIRECTORY, read_only=False))
     limits: dict[str, Any] = {"NanoCpus": nano_cpus} if nano_cpus > 0 else {}
+    # #856: the Claude Code agent runs as an unprivileged user with the device's login in its
+    # environment; nothing it runs may gain privileges (a setuid program, a file capability). The
+    # hosted OpenCode agent is root and free and keeps its container as it was.
+    sealed: dict[str, Any] = {"SecurityOpt": ["no-new-privileges"]} if no_new_privileges else {}
     return {
         "Image": image,
         "Entrypoint": list(AGENT_ENTRYPOINT if entrypoint is None else entrypoint),
@@ -223,6 +228,7 @@ def agent_document(
             "Memory": memory_bytes,
             "MemorySwap": memory_bytes,
             **limits,
+            **sealed,
             "PidsLimit": AGENT_PIDS_LIMIT,
             "OomScoreAdj": AGENT_OOM_SCORE_ADJ,
             "RestartPolicy": {"Name": "no"},
@@ -360,6 +366,8 @@ class AgentSeams:
     entrypoint: Sequence[str] | None = None
     # A customer's runner (#854) limits the CPUs of the container (`NanoCpus`); 0: no limit.
     nano_cpus: int = 0
+    # #856: the Claude Code agent's container is made with `no-new-privileges`.
+    no_new_privileges: bool = False
     # The file the VM's available memory is read from (`MemoryGuard`).
     meminfo: str = MEMINFO
 
@@ -441,6 +449,7 @@ class AgentContainer:
                     rule=self._rule,
                     result=self._result,
                     nano_cpus=self._seams.nano_cpus,
+                    no_new_privileges=self._seams.no_new_privileges,
                 ),
                 AGENT_CONTAINER_NAME,
             )
