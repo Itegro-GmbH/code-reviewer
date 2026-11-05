@@ -214,6 +214,8 @@ export type FakeGithubAppControls = {
     repoFullName: string,
     number: number,
   ): { id: number; body: string; login: string }[];
+  /** The pull requests of a repository, oldest first: the ones added and the ones opened through `POST /pulls` (#844). */
+  pullRequests(repoFullName: string): FakePullRequest[];
   /** The comments below a pull request, oldest first. */
   pullRequestComments(repoFullName: string, number: number): FakeComment[];
   /** Writes a comment below a pull request, by default as the bot of the app. */
@@ -1151,6 +1153,7 @@ export function createAppPart(
     issueLabels: (repoFullName, number) => actions.labels(repoFullName, number),
     issueComments: (repoFullName, number) =>
       actions.issueComments(repoFullName, number),
+    pullRequests: (repoFullName) => [...(pullRequests.get(repoFullName) ?? [])],
     pullRequestComments: (repoFullName, number) =>
       review.comments(repoFullName, number),
     addPullRequestComment: (repoFullName, number, body, login) =>

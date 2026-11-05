@@ -118,6 +118,11 @@ the credentials of a job). With `lookForEarlierSince` it first looks for the app
 (only the app's own: anybody can copy a marker) and posts nothing if there is one. A failure is an `IntegrationError` with the
 same provider neutral access codes as the reads above, and never holds a token or the body.
 
+`openPullRequest`, `commentOnIssue` and `changeIssueLabels` (#844, the workflow actions, `src/workflow-runs/github-connectors.ts`) write as the app with
+a token of its own limited to the repository and to one permission (pull requests, or issues) and switched off afterwards. A pull request that is open for
+the same head and base is the result (`existing`), labels are idempotent. A failure is an `IntegrationError` with the codes of a write: `..._SCOPE_REFUSED` is an
+App that lacks the permission, `..._NO_CHANGES_TO_COMPARE` a head with nothing the base lacks, `..._REQUEST_REFUSED` any other refusal of the content.
+
 ### Rules for implementations
 
 - `canTrigger` is about the trigger: may this event start a job (for example, does the comment author

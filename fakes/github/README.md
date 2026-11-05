@@ -17,6 +17,7 @@ memory. Dummy values only.
 | `git-http.ts`                       | Git over smart HTTP: fetch (`git-upload-pack`) and push (`git-receive-pack`) of a registered repository.           |
 | `git-fixture.ts`, `git-branches.ts` | The Git repository a test registers, and its branches as the branch endpoints report them.                         |
 | `review-api.ts`                     | What a reviewer reads and writes: diff, commits, file contents and comments of a pull request.                     |
+| `actions-api.ts`                    | What the workflow actions write (#844): open a pull request, issues with their comments, and labels.               |
 | `webhooks.ts`                       | Signed webhook deliveries, `webhookFixture(name)` loads a payload from `../fixtures`.                              |
 | `http.ts`                           | Small helpers for answering and reading HTTP messages.                                                             |
 | `main.ts`                           | Starts the sign in part as its own process (Playwright).                                                           |
@@ -141,9 +142,23 @@ host. Routes that name a commit or a ref (`commits`, `compare`, `contents`) serv
 with that head. A ref that is no head (the default branch, the base commit) is answered only when it
 is unambiguous: with one pull request in the repository it is that one's, with several a file is
 served when all pull requests that have it agree on its text; everything else is a 404, the fake never
-guesses. Not modelled: inline review comments, reviews, labels,
+guesses. Not modelled: inline review comments, reviews, the labels of the review part (see the actions above for those of the workflow actions),
 check runs and paging (the engine suite's own fake, `runner/tests/engine/fake_github.py`, has the same
 limits and stays: it serves the job entry point on its own, with `/api/v3` in its address).
+
+## What the workflow actions write
+
+The calls behind `github.pullRequest.open`, `github.issue.comment` and `github.issue.labels` (#844, `actions-api.ts`). Issues and pull requests
+share the numbers of a repository.
+
+| Endpoint                                                             | Behavior                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /repos/:o/:r/pulls`                                            | Opens a pull request from `head` into `base` (both must be branches of the repository: the default branch, the heads of added pull requests, branches added with `addBranch`, or the Git fixture's). Needs `pull_requests: write`, else 403. 422 for a missing title, an unknown branch, `A pull request already exists for <owner>:<head>.` and `No commits between <base> and <head>` (head and base at the same commit). The author is the bot of the app. |
+| `GET .../pulls?state=&head=owner:branch&base=`                       | As before, now narrowed by `head` and `base` like GitHub.                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `GET/POST .../issues/:n/labels`, `DELETE .../issues/:n/labels/:name` | The labels of an issue added with `addIssue` or of a pull request: list (paged), add (a new label is created, one that is there stays), remove (404 `Label does not exist` for one that is not on it). Need `issues` or `pull_requests` (read for the list, write for the others); 404 for a number that is neither an issue nor a pull request.                                                                                                              |
+| `POST .../issues/:n/comments` (issue that is no pull request)        | A comment below an issue, written as the bot. Needs `issues: write`. The comments of a pull request are `review-api.ts`'s.                                                                                                                                                                                                                                                                                                                                    |
+
+In a test: `addIssue(repo, { number, title, labels? })`, `addBranch(repo, name, sha)`, `issueLabels(repo, n)`, `issueComments(repo, n)` and `pullRequests(repo)`.
 
 ## In a Vitest test (same process)
 
