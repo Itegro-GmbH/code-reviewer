@@ -118,23 +118,29 @@ GET /api/runners/v1/jobs/{id}/resume-session?part=n
   lists it today without the runner routes); a runner on a customer's machine reads the list from `GET /api/runners/v1/version` **with its own credential** (the call answers a live runner as well as a Dispatcher
   or a running claim) and uses the two calls only if it finds `runner_session_snapshot` there. It needs no claim feature: the claim names `implementer_resume` already, and the job says with
   `implementer.resume.snapshot` whether there is a file to read.
-- **Not switched on yet: the open part of #879.** This change is the app's side only. The runner client of #874 (`RunnerJobApi`, `origin/854-runner-service`) does not fit these routes yet, and the snapshot stays off in
-  the runner until it does (a follow-up turn continues from the summary of the earlier ones). What is missing there:
-  - the paths: `RunnerJobApi` inherits the Worker API's `/api/workers/v1/jobs/{id}/session` and `/resume-session`; it must send to `/api/runners/v1/jobs/{id}/session` and `/resume-session` (the query, the parts and the
-    response headers are the same);
-  - the header `X-Lease-Token` on those two calls (`_send_bytes` sends the credential only; the token is kept per job in `RunnerJobApi`);
-  - the check of the feature: `supports_snapshot` must test `runner_session_snapshot`, not `implementer_snapshot` (an override in `RunnerJobApi`, after `check_app` has read the list from the version call with the runner's
-    credential);
-  - a fix for a fault that exists today: with `snapshot=False`, `check_app` still replaces the feature list with the app's, so an app that lists `implementer_snapshot` makes the host open the snapshot channel and the
-    runner calls the Worker routes, which refuse its credential (`401 WORKER_CREDENTIAL_INVALID`).
+- **Resume works on customer runners (the runner's side, #879).** `RunnerJobApi` of the `factory-runner` (`runner/src/code_reviewer_runner/factory_runner/job_api.py`) speaks the two calls above, **on the condition that
+  the app lists `runner_session_snapshot`**; against an app without it the runner behaves as before.
+  - *Paths and header.* `snapshot` sends to `/api/runners/v1/jobs/{id}/session` and `resume_session` to `/api/runners/v1/jobs/{id}/resume-session?part=n` (the query, the parts and the checks of the answer are the
+    Worker client's, shared code), with the runner credential in `Authorization` and the lease token of the claim in `X-Lease-Token`. The token is read from the claim the runner holds (`hold`), goes into the header and
+    nowhere else: not into an error text, not into a log line, not into the URL. A job the runner does not hold sends nothing.
+  - *The switch is read for every job.* The service asks the version call (`check_app`, with the runner's credential, `GET /api/runners/v1/version?jobId=...`) after it holds the claim and before the host starts the job.
+    The features of an earlier job are forgotten first: an app that does not answer, or lists nothing, is an app without the snapshot for this job. A runner's job is not a Worker API job, so `worker_api` is not asked for.
+    `supports_snapshot` is true if and only if `runner_session_snapshot` is listed; `implementer_snapshot` (the Worker routes) does not count.
+  - *Off means off.* The host opens no snapshot channel for a turn on such an app, so the process takes no export, and does not download a stored session either: the turn runs as before and a follow-up continues from the
+    summary (`summary_only`). This also fixes the fault of #874 in which an app that listed `implementer_snapshot` made the host open the channel while the runner could only call routes that refuse its credential.
+    The constructor switch `RunnerJobApi(snapshot=...)` is gone: the app decides.
+  - *Answers.* Upload: `404` and `409` (`RUNNER_LEASE_LOST`, `RUNNER_JOB_ENDED`) are `LeaseLost` (the sender stops, nothing more is sent for the job), `401` is `CredentialInvalid` (a `LeaseLost` too), any other `4xx` (`400`,
+    `413`) is `ApiRejected` and not retried, `5xx`, `408`, `425`, `429` and no answer are `ApiUnavailable` and retried within the sender's time. Download: `204` is "no stored snapshot" (`no_snapshot`), and every other answer
+    (`400`, `401`, `404`, `409`, `5xx`) is a failed download (`download_failed`): the turn is never failed by it, it continues from the summary, and a lost lease shows at the next heartbeat.
 
-  `docs/runner.md` "Known limits" of #874 says the app does not take a snapshot from a runner credential; that line changes with the switch-on change.
-
-- **What the runner does with it, once it is switched on.** Nothing new: the host downloads the stored session before the process starts and uploads the snapshot beside the final push, exactly as for a Worker
+- **What the runner does with it.** Nothing new: the host downloads the stored session before the process starts and uploads the snapshot beside the final push, exactly as for a Worker
   ([`implementer.md`](implementer.md#follow-up-turns-resume-in-the-runner-840)). Which machine ran the earlier turns does not matter: the snapshot belongs to the session.
 - **Tests.** `app/src/runner-api/runner-session.integration.test.ts` (the parts and the bounds through the runner's door, a snapshot stored by one runner and read by another, another workspace, another runner,
   a lease that ran out, a revoked runner, a hosted job, the shared token and a per-job credential, the Worker routes still closed to a runner, the version call), `runner-session-contract.test.ts` and
-  `runner/tests/contract/test_snapshot_contract.py` (the contract on both sides).
+  `runner/tests/contract/test_snapshot_contract.py` (the contract on both sides). The runner's client: `runner/tests/unit/test_factory_runner_job_api.py` (paths, header, the switch on and off per job, the
+  statuses, no secret in an error or a log), `runner/tests/contract/test_runner_session_client_contract.py` (the real client on HTTP against the fake App, which holds every query, header and answer to the
+  `Runner*` definitions: parts of one to three, 204, a lost lease, a revoked runner, the switch) and, in `runner/tests/integration/test_factory_runner_loopback.py`, two turns through the service in which turn 2 reads the
+  snapshot turn 1 stored, and an app that lists only `implementer_snapshot`, which gets no channel and no download.
 
 ### Validator rules
 
@@ -185,7 +191,7 @@ machine (Linux, Docker)
 | Agent's container                        | The same image, the same fixed address on the same internal model network, memory without swap, no host mount, no socket, **but** the runtime is `sysbox-runc` only where the self-test proved it; otherwise the daemon's default (`runc`), with an init that only says "ready". |
 | The agent's own Docker                   | **Not part of the base** (decision 3, S2). The capability `agent-docker` is announced only when the self-test ran a container in a Docker inside Sysbox. A job whose setup needs Docker is for a runner that announces it. |
 | Lease, heartbeat, result                 | The runner API (`/api/runners/v1/jobs/{id}/heartbeat`, `/complete`, `/steps`) with the runner's credential and the lease token of the claim in the body. |
-| Session snapshot and stored session      | **Not yet** (see "Known limits"): the app takes them from the per-job credential only. The client for them is in the runner and switched off.         |
+| Session snapshot and stored session      | The runner API (`/api/runners/v1/jobs/{id}/session`, `/resume-session`) with the runner's credential and the lease token in `X-Lease-Token`, **if the app lists `runner_session_snapshot`** (see "Resume on customer runners"); otherwise none, and a follow-up continues from the summary. |
 | Sizing                                   | The configured memory and CPUs, not the VM size the Dispatcher computes. One run at a time.                                                           |
 
 ### Install (developer, one machine)
@@ -431,11 +437,9 @@ whose code the runner runs unchanged.
   same id (one configuration copied to two machines on one daemon) are not told apart. The lock closes the window of two different runners
   that start in the same moment. Unique names, and with them more runners on one daemon, are R2. The hosted version sets no id and is
   unchanged.
-- **Snapshot and stored session.** `PUT .../session` and `GET .../resume-session` are Worker API routes and take the per-job
-  credential alone; R1a part 2 decided that a runner credential must not reach them. Until the app lets a runner credential reach them
-  for a job it holds, a turn on a runner takes **no snapshot** and a follow-up turn continues from the summary of the earlier ones (the
-  fallback of the plan). The client is written (`RunnerJobApi(snapshot=True)`, tested against the fake App) and off. This resume gap
-  (snapshot and resume for a customer's runner) is its own issue, **#879**; R1b does not build it.
+- **Snapshot and stored session.** Resume works on customer runners (#879, "Resume on customer runners"): the runner sends `PUT .../session` and `GET .../resume-session` to the runner API's routes when
+  the app lists `runner_session_snapshot`. Against an app that does not list it (an older release) a turn on a runner takes **no snapshot** and a follow-up turn continues from the summary of the earlier ones
+  (the fallback of the plan).
 - **SIGTERM during the self-test** (N4) comes before the signal handlers are installed and ends the process at once; nothing is claimed.
 - **No warning for a `config.json` that is too open** (N5): the file is written 0600 in a 0700 folder, but a mode changed later is not noticed.
 - **`proven` under `runc`** (N6): the name of the sandbox proof says only that the self-test passed; under `runc` there is no Sysbox wall (see the security notes).

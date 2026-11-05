@@ -32,7 +32,7 @@ from code_reviewer_runner.factory_runner.prepare import Prepared
 from code_reviewer_runner.factory_runner.selftest import Check, SelfTestResult
 from code_reviewer_runner.implementer.docker_api import DockerError
 from code_reviewer_runner.job_loop.settings import WorkerSettings
-from runner_app import FakeRunnerApp
+from runner_app import EXAMPLE_JOB, FakeRunnerApp
 
 pytestmark = pytest.mark.integration
 
@@ -96,6 +96,46 @@ STAND_IN = textwrap.dedent(
 )
 
 
+# #879: a turn that takes part in the session snapshot like the real process: the channel the host
+# hands it (`RUNNER_SNAPSHOT_FD`) gets this turn's conversation, the file the host downloaded for a
+# follow-up turn (`resume-session.gz`) is read, and what it saw is appended to the `seen` file.
+SNAPSHOT_STAND_IN = textwrap.dedent(
+    """
+    import hashlib, json, os, socket, sys
+    job = json.loads(sys.stdin.read())
+    seen, finished = sys.argv[2], sys.argv[3]
+    work = os.environ["RUNNER_IMPLEMENTER_WORK_DIR"]
+    os.makedirs(work, exist_ok=True)
+    for name in ("reserve", "repo", "result"):
+        os.mkdir(os.path.join(work, name))
+    turn = (job["implementer"].get("resume") or {}).get("turn", 1)
+    resumed = None
+    if os.path.exists("resume-session.gz"):
+        resumed = open("resume-session.gz", "rb").read()
+    descriptor = os.environ.get("RUNNER_SNAPSHOT_FD")
+    if descriptor is not None:
+        data = ("the conversation of turn %d" % turn).encode()
+        digest = hashlib.sha256(data).hexdigest()
+        header = "S %d %d %s 1.19.0\\n" % (len(data), 9 * len(data), digest)
+        channel = socket.socket(fileno=int(descriptor))
+        channel.sendall(header.encode() + data)
+        channel.close()
+    with open(seen, "a") as handle:
+        handle.write(json.dumps({
+            "turn": turn,
+            "channel": descriptor is not None,
+            "resumed": None if resumed is None else resumed.decode(),
+            "state": (os.environ.get("RUNNER_RESUME_SESSION") or "").split(" ")[0] or None,
+        }) + "\\n")
+    print(json.dumps({
+        "ok": True, "durationMs": 5, "commentUrl": None, "errorCode": None,
+        "logTail": "pushed", "logTruncated": False, "usage": None,
+        "implementer": json.loads(finished),
+    }))
+    """
+)
+
+
 @pytest.fixture
 def app() -> Iterator[FakeRunnerApp]:
     fake = FakeRunnerApp().start()
@@ -116,12 +156,13 @@ class Machine:
         }
         self.sleep = sleep
         self.work = tmp_path / "work"
+        self.stand_in = STAND_IN
 
     def prepare(self, config: RunnerConfig, _env: object) -> Prepared:
         settings = WorkerSettings(
             engines=("implementer",),
             job_command=(
-                *(sys.executable, "-c", STAND_IN),
+                *(sys.executable, "-c", self.stand_in),
                 *(str(self.sleep), str(self.seen), json.dumps(report())),
             ),
             job_timeout=60.0,
@@ -312,3 +353,76 @@ def test_an_app_that_requires_a_newer_base_ends_the_once_mode_with_its_exit_code
 
     assert code == EXIT_UPDATE_NEEDED
     assert "update needed" in capsys.readouterr().err
+
+
+def follow_up_input(turn: int) -> dict[str, object]:
+    """The input of a follow-up turn that has a conversation to continue (`implementer.resume`)."""
+    job = json.loads(json.dumps(EXAMPLE_JOB))
+    job["implementer"]["resume"] = {
+        "turn": turn,
+        "branches": [],
+        "checkout": None,
+        "snapshot": True,
+    }
+    return job
+
+
+def turns_seen(machine: Machine) -> list[dict[str, object]]:
+    return [json.loads(line) for line in machine.seen.read_text().splitlines()]
+
+
+# #879-T10
+def test_a_follow_up_turn_continues_from_the_snapshot_the_first_turn_stored(
+    app: FakeRunnerApp, tmp_path: Path
+) -> None:
+    machine = Machine(app, tmp_path)
+    machine.stand_in = SNAPSHOT_STAND_IN
+    machine.register()
+    app.queue_job(JOB)
+    app.queue_job(JOB.replace("aa", "ab"), follow_up_input(2))
+
+    first = machine.cli("run", "--once", "--wait", "30")
+    second = machine.cli("run", "--once", "--wait", "30")
+
+    assert (first, second) == (EXIT_OK, EXIT_OK)
+    assert app.violations == []
+    # Turn 1 had the channel and nothing to resume; turn 2 had the file of turn 1.
+    assert turns_seen(machine) == [
+        {"turn": 1, "channel": True, "resumed": None, "state": None},
+        {"turn": 2, "channel": True, "resumed": "the conversation of turn 1", "state": "file"},
+    ]
+    # Through the runner routes only, with the runner's credential, before each turn's result.
+    session_paths = [
+        r.path for r in app.requests if r.path.endswith(("/session", "/resume-session"))
+    ]
+    assert session_paths == [
+        f"/api/runners/v1/jobs/{JOB}/session",
+        f"/api/runners/v1/jobs/{JOB.replace('aa', 'ab')}/resume-session",
+        f"/api/runners/v1/jobs/{JOB.replace('aa', 'ab')}/session",
+    ]
+    assert all("/api/workers/" not in r.path for r in app.requests)
+    order = [(r.method, r.path.rsplit("/", 1)[1]) for r in app.requests if "/jobs/" in r.path]
+    assert order.index(("PUT", "session")) < order.index(("POST", "complete"))
+
+
+# #879-T11
+def test_an_app_without_the_runner_routes_gets_a_turn_without_snapshot_and_with_the_old_fallback(
+    app: FakeRunnerApp, tmp_path: Path
+) -> None:
+    # The Worker's feature is listed (production did so before the runner routes): the host opens no
+    # channel and downloads nothing, and the turns run as before.
+    app.features = ["worker_api", "implementer_steps", "implementer_snapshot"]
+    machine = Machine(app, tmp_path)
+    machine.stand_in = SNAPSHOT_STAND_IN
+    machine.register()
+    app.queue_job(JOB)
+    app.queue_job(JOB.replace("aa", "ab"), follow_up_input(2))
+
+    first = machine.cli("run", "--once", "--wait", "30")
+    second = machine.cli("run", "--once", "--wait", "30")
+
+    assert (first, second) == (EXIT_OK, EXIT_OK)
+    assert app.session_calls == [] and app.violations == []
+    assert [t["channel"] for t in turns_seen(machine)] == [False, False]
+    assert [t["resumed"] for t in turns_seen(machine)] == [None, None]
+    assert [c["ok"] for c in app.completions] == [True, True]

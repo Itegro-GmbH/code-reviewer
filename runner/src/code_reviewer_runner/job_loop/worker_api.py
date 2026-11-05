@@ -150,6 +150,10 @@ class WorkerApi(Protocol):
 class HttpWorkerApi:
     """The Worker API over HTTP. Blocking calls run in a thread, so the event loop stays free."""
 
+    # The routes of the snapshot (`{prefix}/{id}/session`, `/resume-session`): a customer's runner
+    # has its own (#879).
+    _session_prefix = "/api/workers/v1/jobs"
+
     def __init__(self, base_url: str, credential: str, *, request_timeout: float = 30.0) -> None:
         self._base_url = base_url.rstrip("/")
         self._credential = credential
@@ -173,22 +177,29 @@ class HttpWorkerApi:
         Any other answer (an app from before the call, a 401, no answer) is left to the details
         call, which is a Worker API call and tells the two apart (`fetch`).
         """
+        features = await self._read_features(job_id)
+        if features is not None and FEATURE_WORKER_API not in features:
+            raise WorkerSetupError(
+                WorkerFailure.APP_UNSUPPORTED, "the app does not list the Worker API (worker_api)"
+            )
+
+    async def _read_features(self, job_id: str) -> list[str] | None:
+        """Ask the version call which features the app lists and keep them in `_features`. None
+        when the app gave no list (no answer, an app from before, a 401): `_features` is then what
+        it was."""
         try:
             reply = await asyncio.to_thread(
                 self._send, "GET", f"/api/runners/v1/version?jobId={self._safe_id(job_id)}", None
             )
         except ApiUnavailable:
-            return
+            return None
         body = as_object(parse_json(reply)) if reply.status == 200 else None
         features = body.get("features") if body and body.get("version") == 1 else None
-        if isinstance(features, list):
-            self._features = frozenset(
-                name for name in cast("list[object]", features) if isinstance(name, str)
-            )
-        if isinstance(features, list) and FEATURE_WORKER_API not in features:
-            raise WorkerSetupError(
-                WorkerFailure.APP_UNSUPPORTED, "the app does not list the Worker API (worker_api)"
-            )
+        if not isinstance(features, list):
+            return None
+        listed = [name for name in cast("list[object]", features) if isinstance(name, str)]
+        self._features = frozenset(listed)
+        return listed
 
     async def fetch(self, job_id: str) -> WorkerJob:
         path = f"/api/workers/v1/jobs/{self._safe_id(job_id)}"
@@ -272,7 +283,8 @@ class HttpWorkerApi:
         on its own and a part sent twice is the same call; the body is the bytes of the part.
 
         On a thread of its own like `steps`, one at a time."""
-        path = f"/api/workers/v1/jobs/{self._safe_id(job_id)}/session?{snapshot_query(part)}"
+        path = f"{self._session_prefix}/{self._safe_id(job_id)}/session?{snapshot_query(part)}"
+        headers = self._session_headers(job_id)
         reply = await self._call_alone(
             "_snapshot_thread",
             "snapshot-call",
@@ -282,6 +294,7 @@ class HttpWorkerApi:
                 part.data,
                 SNAPSHOT_REQUEST_TIMEOUT_SECONDS,
                 content_type="application/octet-stream",
+                headers=headers,
             ),
         )
         if reply.status != 200:
@@ -298,19 +311,22 @@ class HttpWorkerApi:
         the wait ends at it even when the thread does not (a daemon thread, left to end by itself):
         a socket timeout bounds one wait, and a server that sends a byte now and then never trips
         it."""
-        path = f"/api/workers/v1/jobs/{self._safe_id(job_id)}/resume-session"
+        path = f"{self._session_prefix}/{self._safe_id(job_id)}/resume-session"
+        headers = self._session_headers(job_id)
         deadline = time.monotonic() + RESUME_TOTAL_SECONDS
         try:
             return await asyncio.wait_for(
                 self._run_on_thread(
-                    "resume-download", lambda: self._download_resume(path, deadline)
+                    "resume-download", lambda: self._download_resume(path, headers, deadline)
                 ),
                 RESUME_TOTAL_SECONDS,
             )
         except TimeoutError:
             raise ResumeUnavailable(ResumeReason.DOWNLOAD_FAILED) from None
 
-    def _download_resume(self, path: str, deadline: float) -> ResumeFile:
+    def _download_resume(
+        self, path: str, headers: Mapping[str, str], deadline: float
+    ) -> ResumeFile:
         failed = ResumeUnavailable(ResumeReason.DOWNLOAD_FAILED)
         header: SnapshotHeader | None = None
         chunks: list[bytes] = []
@@ -328,6 +344,7 @@ class HttpWorkerApi:
                     min(RESUME_REQUEST_TIMEOUT_SECONDS, left),
                     max_bytes=CHUNK_BYTES + 1,
                     deadline=deadline,
+                    headers=headers,
                 )
             except ApiError:
                 raise failed from None
@@ -350,6 +367,10 @@ class HttpWorkerApi:
         if hashlib.sha256(data).hexdigest() != header.sha256:
             raise failed
         return ResumeFile(header, data)
+
+    def _session_headers(self, job_id: str) -> Mapping[str, str]:
+        """What the two session calls send besides the credential: nothing for a Worker."""
+        return {}
 
     async def _call_alone(self, slot: str, name: str, call: Callable[[], Reply]) -> Reply:
         """Run `call` on a daemon thread kept in `slot`, and refuse (`ApiUnavailable`) while the
@@ -411,12 +432,16 @@ class HttpWorkerApi:
         content_type: str = "application/json",
         max_bytes: int | None = None,
         deadline: float | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> Reply:
+        """`headers` are added to the fixed ones (a customer's runner sends `X-Lease-Token` with
+        them); the fixed ones win."""
         request = urllib.request.Request(
             f"{self._base_url}{path}",
             data=data,
             method=method,
             headers={
+                **(headers or {}),
                 "Authorization": f"Bearer {self._credential}",
                 "Content-Type": content_type,
                 "Accept": "application/json",

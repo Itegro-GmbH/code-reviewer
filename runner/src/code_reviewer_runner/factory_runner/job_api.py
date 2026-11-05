@@ -10,12 +10,15 @@ body, on the routes of the runner API (`POST /api/runners/v1/jobs/{id}/heartbeat
 Worker client with those routes; everything else it inherits (the HTTP, the failure mapping, the
 threads of the steps, the snapshot and the stored session).
 
-**The snapshot and the stored session.** The Worker API routes `PUT .../session` and
-`GET .../resume-session` take the per-job credential alone; the app does not let a runner
-credential reach them yet (docs/runner.md, "Known limits"). Until it does, `supports_snapshot` is
-False: the turn takes no export, and a follow-up turn continues from the summary of the earlier
-ones (the fallback of the plan). `snapshot=True` switches the calls on for an app that has them
-(the integration test does).
+**The snapshot and the stored session** (#879). A customer's runner has two calls of its own,
+`PUT /api/runners/v1/jobs/{id}/session` and `GET /api/runners/v1/jobs/{id}/resume-session?part=n`:
+the query, the parts and the answers are those of the Worker API (the inherited code), the runner
+credential is in `Authorization` and the lease token of the claim in `X-Lease-Token`, because the
+body is raw bytes. The app lists the feature `runner_session_snapshot` when it has them
+(`implementer_snapshot` says only that the Worker routes exist, which refuse a runner). It is read
+from the version call at every job (`check_app`, with the runner's credential) and
+`supports_snapshot` is true only then: otherwise the host opens no snapshot channel, the turn takes
+no export, and a follow-up turn continues from the summary of the earlier ones.
 
 The host passes the lease token to `heartbeat` and `complete` and not to `steps`, so the client
 keeps the token of the job it was given at the claim.
@@ -36,29 +39,25 @@ from code_reviewer_runner.job_loop.worker_api import (
     HttpWorkerApi,
 )
 from code_reviewer_runner.resume_wire import ResumeReason
-from code_reviewer_runner.snapshot_wire import FEATURE_IMPLEMENTER_SNAPSHOT
+from code_reviewer_runner.snapshot_wire import FEATURE_RUNNER_SESSION_SNAPSHOT
 from code_reviewer_runner.step_wire import FEATURE_IMPLEMENTER_STEPS
 
 RUNNER_JOBS = "/api/runners/v1/jobs"
+LEASE_TOKEN_HEADER = "X-Lease-Token"
+# What a client that has not asked the version call (yet) may assume: the steps call, which the
+# app has had since the runner API began.
+_DEFAULT_FEATURES = frozenset({FEATURE_IMPLEMENTER_STEPS})
 
 
 class RunnerJobApi(HttpWorkerApi):
     """The job calls of a customer's runner, with its credential and the lease token."""
 
-    def __init__(
-        self,
-        base_url: str,
-        credential: str,
-        *,
-        snapshot: bool = False,
-        request_timeout: float = 30.0,
-    ) -> None:
+    _session_prefix = RUNNER_JOBS
+
+    def __init__(self, base_url: str, credential: str, *, request_timeout: float = 30.0) -> None:
         super().__init__(base_url, credential, request_timeout=request_timeout)
         self._lease_tokens: dict[str, str] = {}
-        self._features = frozenset(
-            {FEATURE_IMPLEMENTER_STEPS, *([FEATURE_IMPLEMENTER_SNAPSHOT] if snapshot else [])}
-        )
-        self._snapshot = snapshot
+        self._features = _DEFAULT_FEATURES
 
     def use_credential(self, credential: str) -> None:
         """A renewed credential, for the calls after it (a job in flight keeps working)."""
@@ -76,7 +75,18 @@ class RunnerJobApi(HttpWorkerApi):
             raise ApiRejected("the runner does not hold this job", 409, None)
         return token
 
+    def _session_headers(self, job_id: str) -> Mapping[str, str]:
+        return {LEASE_TOKEN_HEADER: self._token(job_id)}
+
     # -- the calls ---------------------------------------------------------------------------
+
+    async def check_app(self, job_id: str) -> None:
+        """Read the features the app lists (`GET /api/runners/v1/version`, the runner's credential)
+        for the job about to run, and nothing else: a runner's job is not a Worker API job, so
+        `worker_api` is not asked for. What an earlier job found is forgotten first, so an app that
+        does not answer now is treated as one that lists nothing."""
+        self._features = _DEFAULT_FEATURES
+        await self._read_features(job_id)
 
     async def heartbeat(self, job_id: str, lease_token: str) -> HeartbeatReply:
         path = f"{RUNNER_JOBS}/{self._safe_id(job_id)}/heartbeat"
@@ -122,12 +132,22 @@ class RunnerJobApi(HttpWorkerApi):
         if reply.status != 200:
             raise self._failure(reply)
 
+    @property
+    def supports_snapshot(self) -> bool:
+        """True when the app listed `runner_session_snapshot` (#879): it has the runner's session
+        routes. `implementer_snapshot` is the Worker routes' and does not count."""
+        return FEATURE_RUNNER_SESSION_SNAPSHOT in self._features
+
     async def snapshot(self, job_id: str, part: SnapshotPart) -> None:
-        if not self._snapshot:
-            raise ApiUnavailable("the app does not take a snapshot from a runner credential")
+        if not self.supports_snapshot:
+            raise ApiUnavailable("the app does not list the session routes of a runner")
         await super().snapshot(job_id, part)
 
     async def resume_session(self, job_id: str) -> ResumeFile:
-        if not self._snapshot:
+        if not self.supports_snapshot:
             raise ResumeUnavailable(ResumeReason.DOWNLOAD_FAILED)
+        try:
+            self._session_headers(job_id)
+        except ApiRejected:  # the job is not held: nothing is sent
+            raise ResumeUnavailable(ResumeReason.DOWNLOAD_FAILED) from None
         return await super().resume_session(job_id)

@@ -123,9 +123,13 @@ class FakeJobApi(FakeApi):
         self.held: list[tuple[str, str]] = []
         self.forgotten: list[str] = []
         self.credentials: list[str] = []
+        self.checked: list[str] = []
 
     def hold(self, job_id: str, lease_token: str) -> None:
         self.held.append((job_id, lease_token))
+
+    async def check_app(self, job_id: str) -> None:
+        self.checked.append(job_id)
 
     def forget(self, job_id: str) -> None:
         self.forgotten.append(job_id)
@@ -329,6 +333,8 @@ def test_once_takes_one_job_runs_it_and_ends(tmp_path: Path) -> None:
     assert code == EXIT_OK
     assert rig.client.claim_calls == 1  # the second job stays in the queue for someone else
     assert rig.api.held == [(claimed.id, claimed.lease_token)]
+    # #879: the features the app lists are read for the job, after the claim is held.
+    assert rig.api.checked == [claimed.id]
     assert rig.api.forgotten == [claimed.id]
     assert [(job, token) for job, token, _ in rig.api.completions] == [
         (claimed.id, claimed.lease_token)

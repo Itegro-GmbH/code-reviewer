@@ -315,6 +315,9 @@ class RunnerService:
         assert self._host is not None
         self._api.hold(claimed.id, claimed.lease_token)
         try:
+            # Which features this app lists decides, for this job, whether the host opens the
+            # snapshot channel and downloads the stored session (`RunnerJobApi.supports_snapshot`).
+            await self._api.check_app(claimed.id)
             end = await self._host.run_job(claimed)
         finally:
             self._api.forget(claimed.id)
