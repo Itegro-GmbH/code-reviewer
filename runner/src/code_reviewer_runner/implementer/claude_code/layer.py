@@ -12,15 +12,16 @@ The version is pinned here (`CLAUDE_CODE_VERSION`, the npm `stable` tag of 2026-
 spike measured) together with the SHA-512 of its npm tarball (`CLAUDE_CODE_INTEGRITY`): the build
 fetches the tarball, accepts it only with that digest and installs it from the file. The device may
 choose another exact version (`LayerSpec(version=...)`): then there is no digest to compare, and the
-choice is the device's. **Verified and unverified layers never share a tag or a label** (`layer_tag`,
-`layer_labels`): a device that names the pinned version itself still gets the pinned spec with its
+choice is the device's. **Verified and unverified layers never share a tag or a label**
+(`layer_tag`, `layer_labels`): a device that names the pinned version itself still gets the pinned spec with its
 digest, and a layer built without the check is never taken for the pinned one.
 
 The digest covers the npm package, which is a stub with the platform binary as an optional
 dependency that npm fetches from the registry on its own: the platform binary is **not** pinned by
-a digest of ours (follow-up in `docs/runner.md`). A version, never a tag such as `latest`: the adapter's event shapes and the
-behaviours it relies on (`--include-partial-messages`, the tool search switch) are those of a
-version.
+a digest of ours (follow-up in `docs/runner.md`).
+
+A version, never a tag such as `latest`: the adapter's event shapes and the behaviours it relies on
+(`--include-partial-messages`, the tool search switch) are those of a version.
 
 The layer adds one thing besides the program: the unprivileged user Claude Code runs as
 (`command.py`; `bypassPermissions` refuses to run as root), with a home of its own.
