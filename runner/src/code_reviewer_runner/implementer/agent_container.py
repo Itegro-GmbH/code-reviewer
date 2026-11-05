@@ -69,12 +69,12 @@ from .host_rules import (
 from .network_rule import MODE_OFF, OFF, NetworkRule
 from .reader import REPO_SUBPATH, work_volume_of
 from .result_channel import AGENT_RESULT_DIRECTORY, result_mount
+from .role_labels import role_labels
 from .vm_memory import MEMINFO, REASON_VM_MEMORY, MemoryGuard
 
 _log = logging.getLogger(__name__)
 
 AGENT_CONTAINER_NAME: Final = "code-reviewer-agent"
-AGENT_ROLE_LABEL: Final = "code-reviewer.role"
 AGENT_IMAGE_REFERENCE: Final = "code-reviewer-agent:golden"
 AGENT_RUNTIME: Final = "sysbox-runc"
 AGENT_REPO: Final = "/work/repo"
@@ -184,6 +184,7 @@ def agent_document(
     entrypoint: Sequence[str] | None = None,
     rule: NetworkRule = OFF,
     result: bool = False,
+    nano_cpus: int = 0,
 ) -> dict[str, Any]:
     """The agent's container. Constants, the image id and the volume name the daemon gave, and the
     memory limit the Dispatcher computed for the size of the VM. The runtime is Sysbox and the
@@ -200,6 +201,7 @@ def agent_document(
     ]
     if result:
         mounts.append(result_mount(work_volume, AGENT_RESULT_DIRECTORY, read_only=False))
+    limits: dict[str, Any] = {"NanoCpus": nano_cpus} if nano_cpus > 0 else {}
     return {
         "Image": image,
         "Entrypoint": list(AGENT_ENTRYPOINT if entrypoint is None else entrypoint),
@@ -208,7 +210,7 @@ def agent_document(
         "Env": [f"{name}={value}" for name, value in proxy_environment(rule).items()],
         "Hostname": "agent",
         "WorkingDir": AGENT_REPO,
-        "Labels": {AGENT_ROLE_LABEL: "agent"},
+        "Labels": role_labels("agent"),
         "NetworkingConfig": {
             "EndpointsConfig": {
                 MODEL_NETWORK_NAME: {"IPAMConfig": {"IPv4Address": MODEL_AGENT_ADDRESS}}
@@ -220,6 +222,7 @@ def agent_document(
             "Privileged": False,
             "Memory": memory_bytes,
             "MemorySwap": memory_bytes,
+            **limits,
             "PidsLimit": AGENT_PIDS_LIMIT,
             "OomScoreAdj": AGENT_OOM_SCORE_ADJ,
             "RestartPolicy": {"Name": "no"},
@@ -355,6 +358,8 @@ class AgentSeams:
     # has to write `READY_FILE` itself. Production never sets either.
     runtime: str = AGENT_RUNTIME
     entrypoint: Sequence[str] | None = None
+    # A customer's runner (#854) limits the CPUs of the container (`NanoCpus`); 0: no limit.
+    nano_cpus: int = 0
     # The file the VM's available memory is read from (`MemoryGuard`).
     meminfo: str = MEMINFO
 
@@ -435,6 +440,7 @@ class AgentContainer:
                     entrypoint=self._seams.entrypoint,
                     rule=self._rule,
                     result=self._result,
+                    nano_cpus=self._seams.nano_cpus,
                 ),
                 AGENT_CONTAINER_NAME,
             )

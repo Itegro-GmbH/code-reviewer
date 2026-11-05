@@ -70,8 +70,8 @@ from .reader import ReaderAccess
 from .report import clip_texts, escaped_size, fit_block, valid_block
 from .result_channel import ResultReader, make_result_directory
 from .resume_session import ResumeInput
+from .runner_profile import agent_seams, reader_seams, setup_seams
 from .session import AgentPlace, ImplementerSession, SessionSeams
-from .setup_container import SetupSeams
 from .snapshot_pump import SnapshotPump
 from .step_pump import StepPump
 from .turn_result import TurnResult
@@ -214,6 +214,7 @@ def production_setup(
             "GIT_COMMITTER_NAME": identity.name,
             "GIT_COMMITTER_EMAIL": identity.email,
         },
+        reader_seams(environment),
         result=with_result,
     )
     if with_result:
@@ -248,17 +249,19 @@ def production_setup(
             elapsed=elapsed,
             should_stop=should_stop,
             secrets=turn.secrets,
-            seams=SetupSeams(),
+            seams=setup_seams(environment),
         )
 
     rule = OFF if spec.environment is None else spec.environment.network
 
     def place_from(image: str) -> Callable[[], AgentPlace]:
-        return lambda: AgentContainer(memory, AgentSeams(image=image), rule, result=with_result)
+        return lambda: AgentContainer(
+            memory, agent_seams(environment, AgentSeams(image=image)), rule, result=with_result
+        )
 
     return TurnSetup(
         workspace,
-        lambda: AgentContainer(memory, rule=rule, result=with_result),
+        lambda: AgentContainer(memory, agent_seams(environment), rule, result=with_result),
         (OPENCODE,),
         close=reader.close,
         environment=EnvironmentHost(run_environment, place_from),
