@@ -52,6 +52,11 @@ export type StepView = {
   turnId: string | null;
   /** What the step was charged, in US dollars; null while it runs. */
   costUsd: number | null;
+  /**
+   * Where `costUsd` comes from (#873): `reported` (the runner's figure), `estimated` (the token counts at the catalog price) or `limit`
+   * (the whole cap the turn ran under, because nothing better was known). null for a step that was charged nothing.
+   */
+  costBasis: "reported" | "estimated" | "limit" | null;
   /** The values later steps refer to; null until the step succeeded. */
   output: unknown;
   errorCode: string | null;
@@ -65,10 +70,10 @@ export type RunSummaryView = {
   id: string;
   workflowId: string;
   workflowVersion: number;
+  /** What started the run: a person by hand (`manual`) or a label on an issue (`github.issueLabeled`). */
+  trigger: StoredWorkflowRun["triggerKind"];
   status: StoredWorkflowRun["status"];
   errorCode: string | null;
-  /** What started the run: a person by hand (`manual`) or a label on an issue (`github.issueLabeled`). */
-  triggerKind: StoredWorkflowRun["triggerKind"];
   /** Who started it or put the label on, by their login on the platform. Display only: it decides nothing. */
   actorLogin: string;
   budgetUsd: number;
@@ -141,9 +146,9 @@ function summaryOf(run: StoredWorkflowRun): RunSummaryView {
     id: run.id,
     workflowId: run.workflowId,
     workflowVersion: run.workflowVersion,
+    trigger: run.triggerKind,
     status: run.status,
     errorCode: run.errorCode,
-    triggerKind: run.triggerKind,
     actorLogin: run.actorLogin,
     budgetUsd: usd(run.budgetMicroUsd),
     spentUsd: usd(run.spentMicroUsd),
@@ -163,6 +168,7 @@ function stepView(step: StoredStepRun): StepView {
     jobId: step.jobId,
     turnId: step.turnId,
     costUsd: step.costMicroUsd === null ? null : usd(step.costMicroUsd),
+    costBasis: step.costBasis,
     output: jsonOrNull(step.output),
     errorCode: step.errorCode,
     errorMessage: step.errorMessage,

@@ -143,6 +143,13 @@ so that a follow-up turn can resume the conversation in a new VM. The body is th
   No app feature and no claim feature: a Worker asks only when the job's `resume.snapshot` says there is something, and an app without the call answers 404, which is a failed download and a summary.
 - **Its own session only.** The session is found from the job (`implementer_turns`), never from the query, in the transaction-free read of a repository scoped to the job's workspace; only a snapshot of an earlier turn than the job's own is read. `204` without a body: there is none, and the turn continues from a summary.
 
+### On a customer's runner (#879)
+
+`PUT /api/runners/v1/jobs/:id/session` and `GET /api/runners/v1/jobs/:id/resume-session?part=n` are these two calls for a runner that holds a credential of its own (`api.ts`: `session`, `resumeSession`; the handlers
+are the Worker API's, `storeSnapshotPart` and `readResumeSessionPart`, so there is one logic). `Authorization: Bearer crc_...` and the lease token in `X-Lease-Token` (`lease-header.ts`: the body is raw bytes, so it cannot
+be in the body as for `steps`). Order: credential (`401`), job id (`400`), the job (`404` unless it is of the runner's workspace and held by this runner), the header (`400`), the query and body (`413`/`400`), then the claim (`409 RUNNER_LEASE_LOST`).
+The shared token is `401` here. The app feature is `runner_session_snapshot`; a runner reads it from `GET /api/runners/v1/version` with its own credential. `docs/runner.md`, "Resume on customer runners".
+
 ## Authentication
 
 `Authorization: Bearer <RUNNER_TOKEN>` on every call. One shared token in the MVP, read from the
@@ -167,7 +174,7 @@ at the form of the header first: a `crc_` credential takes the runner's path (un
 a runner below `RUNNER_MIN_BASE_VERSION` is `426 RUNNER_UPDATE_NEEDED`) and never the shared one. The call sets the runner's `last seen`. Such a claim names the
 engine `implementer` and takes the turns of runner environments of its workspace whose labels it has and whose harness it announces as ready
 (`docs/runner.md`, "Routing"). `heartbeat`, `complete`, `release` and `steps` take the credential for a job of its own workspace (`404 RUNNER_JOB_NOT_FOUND`
-for any other); the Dispatcher's calls (`vm`, the job state, `version`) and every other claim take the shared token alone. A claim without a runner
+for any other); `session` and `resume-session` (#879, below) take it for a job its own runner holds; the Dispatcher's calls (`vm`, the job state) and every other claim take the shared token alone; `version` takes the shared token, the credential of a running claim and (#879) the credential of a live runner. A claim without a runner
 credential never takes a turn of a runner environment (`db/repositories/jobs-claim.ts`).
 
 ## The lease token
@@ -614,7 +621,7 @@ Worker. It cannot count what runs, so the app counts for it. Three additions, al
   `features` from `APP_FEATURES` (`worker_api`, `claim_by_job_id`, `pool_cap`, `release`, `vm_lifecycle`). It takes the
   dispatcher credential; a Worker may also call it with its credential **and** `?jobId=<its job>` (the
   credential must be the running claim of that job, a primary key lookup), to check the app before it
-  fetches its job. The answer holds nothing of any job.
+  fetches its job. #879: or with the credential of a live runner (a revoked or unknown one is `401`). The answer holds no job data; authenticating also marks the runner seen.
 
 - **Job state (#364).** `GET /api/runners/v1/jobs/:id` answers `{ version: 1, job: { id, status } }` with the
   status of the job (`queued`, `running`, `succeeded`, `failed`, `superseded`, `cancelled`) and nothing else: no job

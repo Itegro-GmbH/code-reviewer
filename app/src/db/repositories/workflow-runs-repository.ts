@@ -24,6 +24,8 @@ export type StepRunStatus = "pending" | "running" | "succeeded" | "failed";
 export type StepRunKind = "agent" | "action";
 /** What started a run: a person by hand, or a label on an issue (#845). */
 export type RunTriggerKind = "manual" | "github.issueLabeled";
+/** Where the cost charged to a step comes from: the runner's figure, an estimate from the token counts, or the cap the turn ran under. */
+export type StepCostBasis = "reported" | "estimated" | "limit";
 
 export type StoredWorkflowRun = {
   id: string;
@@ -62,6 +64,8 @@ export type StoredStepRun = {
   turnId: string | null;
   capMicroUsd: number | null;
   costMicroUsd: number | null;
+  /** Where `costMicroUsd` comes from; null when the step was charged nothing (an action) or ended before this was kept. */
+  costBasis: StepCostBasis | null;
   /** JSON text: the values later steps refer to. */
   output: string | null;
   errorCode: string | null;
@@ -103,6 +107,7 @@ export type StepOutcome =
       status: "succeeded";
       output: string | null;
       costMicroUsd: number | null;
+      costBasis?: StepCostBasis | null;
     }
   | {
       status: "failed";
@@ -110,6 +115,7 @@ export type StepOutcome =
       errorMessage: string | null;
       output?: string | null;
       costMicroUsd?: number | null;
+      costBasis?: StepCostBasis | null;
     };
 
 /** The run, held under a lock until `lockRun`'s callback returns. Everything it does is part of one transaction. */
@@ -217,6 +223,7 @@ function stepFrom(row: Selectable<WorkflowStepRunsTable>): StoredStepRun {
     turnId: row.turn_id,
     capMicroUsd: row.cap_micro_usd,
     costMicroUsd: row.cost_micro_usd,
+    costBasis: row.cost_basis as StepCostBasis | null,
     output: row.output,
     errorCode: row.error_code,
     errorMessage: row.error_message,
@@ -264,6 +271,11 @@ export function createWorkflowRunsRepository(
     status: outcome.status,
     output: outcome.output ?? null,
     cost_micro_usd: outcome.costMicroUsd ?? null,
+    // The check of the table: a basis needs a cost.
+    cost_basis:
+      outcome.costMicroUsd === undefined || outcome.costMicroUsd === null
+        ? null
+        : (outcome.costBasis ?? null),
     error_code: outcome.status === "failed" ? outcome.errorCode : null,
     error_message: outcome.status === "failed" ? outcome.errorMessage : null,
     finished_at: at,
@@ -372,6 +384,7 @@ export function createWorkflowRunsRepository(
               turn_id: null,
               cap_micro_usd: input.capMicroUsd,
               cost_micro_usd: null,
+              cost_basis: null,
               output: null,
               error_code: null,
               error_message: null,

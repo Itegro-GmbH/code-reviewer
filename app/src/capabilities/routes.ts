@@ -199,6 +199,10 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   // runs turns.
   { route: "/api/w/[workspace]/runs/[id]/steps", class: "implementer" },
   { route: "/api/runners/v1/jobs/[id]/steps", class: "implementer" },
+  // The session snapshot of a turn and its read by the follow-up turn, on a customer's runner (#879); the Worker API's calls of the same names are
+  // classified with the Worker routes.
+  { route: "/api/runners/v1/jobs/[id]/session", class: "implementer" },
+  { route: "/api/runners/v1/jobs/[id]/resume-session", class: "implementer" },
   // A customer's own runner (#854): the exchange of a registration token, what the runner says about itself, the renewal of its
   // credential; and, for a member of the workspace, the list, a registration token and the revoking of a runner.
   { route: "/api/runners/v1/register", class: "implementer" },
@@ -227,20 +231,27 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   },
   { route: "/w/[workspace]/environments", class: "implementer" },
   // The agent workflows, written through the API (#833, milestone 1): the list and the save, the check without storing, one
-  // workflow with its versions. No page yet.
+  // workflow with its versions. There is no editor; the pages below show and start them.
   { route: "/api/w/[workspace]/workflows", class: "implementer" },
   { route: "/api/w/[workspace]/workflows/validate", class: "implementer" },
   {
     route: "/api/w/[workspace]/workflows/[workflowId]",
     class: "implementer",
   },
-  // The runs of a workflow (#844, milestone 3): start one by hand and list them, one run with its steps. No page yet.
+  // The runs of a workflow (#844, milestone 3): start one by hand and list them, one run with its steps. The pages (#873): the list of
+  // workflows, one workflow with its Start form and runs, one run.
   {
     route: "/api/w/[workspace]/workflows/[workflowId]/runs",
     class: "implementer",
   },
   {
     route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]",
+    class: "implementer",
+  },
+  { route: "/w/[workspace]/workflows", class: "implementer" },
+  { route: "/w/[workspace]/workflows/[workflowId]", class: "implementer" },
+  {
+    route: "/w/[workspace]/workflows/[workflowId]/runs/[runId]",
     class: "implementer",
   },
   // The profiles the agents run with, written through the API (#843, milestone 2): the list and the save, the check without storing,

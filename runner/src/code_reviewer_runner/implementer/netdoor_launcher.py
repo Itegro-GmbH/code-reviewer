@@ -59,7 +59,6 @@ from code_reviewer_runner.result import ErrorCode
 from .docker_api import AttachedStreams, DockerApi, DockerError
 from .door_launcher import (
     BRIDGE_NETWORK,
-    DOOR_ROLE_LABEL,
     DOOR_TMPFS,
     DOOR_USER,
     PRIVATE_RANGES,
@@ -78,6 +77,7 @@ from .netdoor.protocol import (
     VERSION,
 )
 from .network_rule import NetworkRule
+from .role_labels import role_labels
 
 _log = logging.getLogger(__name__)
 
@@ -174,7 +174,7 @@ def door_document(image: str, test: CiNetwork | None = None) -> dict[str, Any]:
         "User": DOOR_USER,
         "Env": environment,
         "Hostname": "network-door",
-        "Labels": {DOOR_ROLE_LABEL: "network-door"},
+        "Labels": role_labels("network-door"),
         "OpenStdin": True,
         "StdinOnce": True,
         "AttachStdin": True,
@@ -195,7 +195,7 @@ def rules_document(image: str, door: str, test_cidr: str | None = None) -> dict[
         "Cmd": [egress_rules(test_cidr)],
         "User": "0:0",
         "Env": [],
-        "Labels": {DOOR_ROLE_LABEL: "network-door-rules"},
+        "Labels": role_labels("network-door-rules"),
         "HostConfig": {
             "NetworkMode": f"container:{door}",
             "Privileged": False,

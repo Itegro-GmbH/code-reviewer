@@ -116,6 +116,8 @@ export const APP_FEATURES = [
   "vm_lifecycle",
   "implementer_steps",
   "implementer_snapshot",
+  // #879: the snapshot calls of the runner API, for a customer's runner (`implementer_snapshot` is the Worker API's).
+  "runner_session_snapshot",
 ] as const;
 export type AppFeature = (typeof APP_FEATURES)[number];
 

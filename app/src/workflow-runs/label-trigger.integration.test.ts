@@ -180,6 +180,13 @@ describe("the webhook: a label on an issue starts the workflows that wait for it
       },
     });
     expect(kicked).toEqual([run?.id]);
+    // The run as the routes and the run page show it: the real trigger and who put the label on, no starter.
+    const view = await app.service.get(workflow.id, run?.id ?? "");
+    expect(view).toMatchObject({
+      trigger: "github.issueLabeled",
+      actorLogin: "bob",
+    });
+    expect(view).not.toHaveProperty("createdBy");
     // The delivery is recorded as a success: it stays a duplicate.
     expect(
       await app.h.db

@@ -70,13 +70,13 @@ from .result_channel import (
     RESULT_FILE,
     result_mount,
 )
+from .role_labels import role_labels
 
 _log = logging.getLogger(__name__)
 
 READER_CONTAINER_NAME: Final = "code-reviewer-reader"
 # The second reader, with the repository read-write.
 READER_WRITER_CONTAINER_NAME: Final = "code-reviewer-reader-rw"
-READER_ROLE_LABEL: Final = "code-reviewer.role"
 READER_RUNTIME: Final = "sysbox-runc"
 # Where the repository is in the reader, and in Control (the work volume at `/work`).
 READER_REPO: Final = "/repo"
@@ -199,7 +199,7 @@ def reader_document(
         "User": "0:0",
         "Env": [f"PATH={READER_PATH}", "HOME=/tmp"],
         "Hostname": "reader",
-        "Labels": {READER_ROLE_LABEL: "reader-rw" if writable else "reader"},
+        "Labels": role_labels("reader-rw" if writable else "reader"),
         "NetworkDisabled": True,
         "HostConfig": {
             "Runtime": runtime,
