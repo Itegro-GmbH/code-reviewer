@@ -328,6 +328,11 @@ class DockerApi:
             raise DockerError(0, "the daemon's answer has no image id")
         return identifier
 
+    def remove_image(self, reference: str) -> None:
+        """Remove the name `reference` and, when no other name or container holds them, the layers.
+        An image that is not there, or is in use (409), is what was wanted."""
+        self.request("DELETE", f"/images/{reference}", ok=(200, 404, 409))
+
     def inspect_image(self, reference: str) -> dict[str, Any]:
         answer = as_object(self.request("GET", f"/images/{reference}/json"))
         if answer is None:

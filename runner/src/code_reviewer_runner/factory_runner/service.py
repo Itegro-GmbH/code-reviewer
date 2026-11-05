@@ -34,7 +34,7 @@ import random
 import signal
 import socket
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -62,6 +62,12 @@ from code_reviewer_runner.factory_runner.config import (
     runner_identity,
     update_credential,
     with_credential,
+)
+from code_reviewer_runner.factory_runner.disk_budget import (
+    MEASURE_SECONDS,
+    budget_bytes,
+    guard_for,
+    used_bytes,
 )
 from code_reviewer_runner.factory_runner.housekeeping import (
     NO_IDENTITY,
@@ -110,6 +116,8 @@ class Seams:
     launcher: Callable[[float], ProcessLauncher] = SubprocessLauncher
     docker: Callable[[], DockerApi] = DockerApi
     hostname: Callable[[], str] = socket.gethostname
+    # How often the disk budget is measured while a job runs.
+    measure_seconds: float = MEASURE_SECONDS
     # What proves an image for the self-update (`cosign verify` in production).
     verify: Callable[[str], None] | None = None
 
@@ -332,6 +340,19 @@ class RunnerService:
             clock=self._clock,
             logger=self._logger,
             environment=dict(self._prepared.environment),
+            guard=self._disk_guard(),
+        )
+
+    def _disk_guard(self) -> Callable[[], Awaitable[str]] | None:
+        """The job host's guard for the disk budget (`disk_budget.py`); none without `diskGb`."""
+        limit = budget_bytes(self._config.limits)
+        if limit is None:
+            return None
+        tidy_seams = self._tidy
+        return guard_for(
+            limit,
+            lambda: used_bytes(tidy_seams.api(), tidy_seams.work_dir, tidy_seams.runner_id),
+            interval=self._seams.measure_seconds,
         )
 
     async def _run_job(self, claimed: ClaimedJob) -> JobEnd:

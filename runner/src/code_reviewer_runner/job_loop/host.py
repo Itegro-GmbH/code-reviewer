@@ -39,7 +39,7 @@ import asyncio
 import json
 import logging
 import shlex
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
@@ -102,7 +102,7 @@ from code_reviewer_runner.job_loop.snapshot_sender import SnapshotApi, SnapshotS
 from code_reviewer_runner.job_loop.step_sender import StepsApi, StepSender
 from code_reviewer_runner.lease_check import LeaseState
 from code_reviewer_runner.pr_agent_config import PASSTHROUGH_VARIABLES
-from code_reviewer_runner.result import ErrorCode
+from code_reviewer_runner.result import DISK_BUDGET_REASON, ErrorCode
 from code_reviewer_runner.resume_wire import (
     RESUME_FILE_NAME,
     RESUME_STATE_VARIABLE,
@@ -328,6 +328,7 @@ class JobHost:
         environment: Mapping[str, str] | None = None,
         sweeper: Callable[[int, int], bool] = sweep_user,
         refuse_unadvertised_engine: bool = False,
+        guard: Callable[[], Awaitable[str]] | None = None,
     ) -> None:
         self._settings = settings
         self._api = api
@@ -345,6 +346,10 @@ class JobHost:
         # A Worker is handed its job and cannot choose: a Dynamic job whose engine this worker did
         # not advertise is refused here with the stable code. The loop never claims such a job.
         self._refuse_unadvertised_engine = refuse_unadvertised_engine
+        # A runner on a customer's machine (#855) ends a job that passes its disk budget: the
+        # guard's coroutine returns the text of the failure when it must end, and is otherwise
+        # cancelled with the job. None: no budget (the hosted Worker).
+        self._guard = guard
 
     def request_hard_stop(self) -> None:
         """End the running process now and report `runner_shutdown` (the grace period is over)."""
@@ -663,6 +668,9 @@ class JobHost:
             asyncio.ensure_future(self._drain(claimed, process, state)),
         ]
         _, lost_wait, timeout, shutdown, drained = helpers
+        guarded = asyncio.ensure_future(self._guard()) if self._guard is not None else None
+        if guarded is not None:
+            helpers.append(guarded)
         try:
             await asyncio.wait([finished, *helpers[1:]], return_when=asyncio.FIRST_COMPLETED)
         except asyncio.CancelledError:
@@ -707,6 +715,18 @@ class JobHost:
                 log_tail=tail,
                 redactor=redactor,
                 reason=NO_RESULT_REASON,
+            )
+        if guarded is not None and guarded.done() and not guarded.cancelled():
+            self._log.warning(
+                "job %s: the disk budget is used up, the process was ended", claimed.id
+            )
+            return failure_result(
+                ErrorCode.RUNNER_ERROR.value,
+                guarded.result(),
+                duration_ms=self._ms_since(started),
+                log_tail=tail,
+                redactor=redactor,
+                reason=DISK_BUDGET_REASON,
             )
         if shutdown.done() and not shutdown.cancelled():
             self._log.warning(

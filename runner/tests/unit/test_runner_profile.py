@@ -29,7 +29,7 @@ from code_reviewer_runner.implementer.runner_profile import (
     reader_seams,
     setup_seams,
 )
-from code_reviewer_runner.implementer.setup_container import SetupSeams
+from code_reviewer_runner.implementer.setup_container import SetupSeams, setup_document
 
 pytestmark = pytest.mark.unit
 
@@ -69,6 +69,19 @@ def test_the_agents_container_carries_the_cpu_limit_beside_the_memory_limit() ->
 
     assert limited["NanoCpus"] == 2_000_000_000 and limited["Memory"] == 2**30
     assert "NanoCpus" not in plain  # hosted: no CPU limit, as before
+
+
+# #855: the S4 limit of #874. The container that runs the environment's script is as free as the
+# agent, so it carries the same memory and CPU limits.
+def test_the_setup_container_carries_the_memory_and_cpu_limits_of_the_runner() -> None:
+    limited = setup_document("img", "vol", 2**30, nano_cpus=2_000_000_000)["HostConfig"]
+    plain = setup_document("img", "vol", 2**30)["HostConfig"]
+
+    assert limited["NanoCpus"] == 2_000_000_000
+    assert limited["Memory"] == limited["MemorySwap"] == 2**30
+    assert "NanoCpus" not in plain  # hosted: no CPU limit, as before
+    assert setup_seams({AGENT_CPUS_VARIABLE: "3"}).nano_cpus == 3_000_000_000
+    assert setup_seams({}).nano_cpus == 0
 
 
 def test_the_runner_never_gives_the_agent_more_than_the_hosted_one_has() -> None:

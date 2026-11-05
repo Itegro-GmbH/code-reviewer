@@ -173,6 +173,7 @@ class FakeDaemon:
         self.networks: list[str] = []
         self.removed: list[str] = []
         self.listing_fails = False
+        self.images_removed: list[str] = []
         self.filters: list[str] = []
         # What the check for another runner is shown (every state, containers and networks).
         self.foreign: list[dict[str, Any]] = []
@@ -216,6 +217,9 @@ class FakeDaemon:
     def remove_network(self, network: str) -> None:
         self.networks.remove(network)
         self.removed.append(network)
+
+    def remove_image(self, reference: str) -> None:
+        self.images_removed.append(reference)
 
 
 def container_id(letter: str) -> str:

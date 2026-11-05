@@ -11,6 +11,9 @@ from typing import Any
 # result (#273): the model may have been used and nobody can say how much, so the app counts the run
 # with an unknown cost instead of voiding it.
 NO_RESULT_REASON = "no_result_from_process"
+# The finer name of a failure of a job that a customer's runner ended because it passed the runner's
+# disk budget (#855, `factory_runner/disk_budget.py`), next to the code `runner_error`.
+DISK_BUDGET_REASON = "disk_budget_exceeded"
 
 
 class ErrorCode(StrEnum):

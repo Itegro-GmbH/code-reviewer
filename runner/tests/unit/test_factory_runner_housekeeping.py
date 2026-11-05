@@ -204,6 +204,9 @@ class Daemon:
         self.networks.remove(network)
         self.calls.append(f"remove network {network[:1]}")
 
+    def remove_image(self, reference: str) -> None:
+        self.calls.append(f"remove image {reference}")
+
     def create_container(self, document: dict[str, Any], name: str) -> str:
         assert name == LOCK_CONTAINER
         if self.lock_refused:
