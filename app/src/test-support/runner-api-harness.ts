@@ -16,7 +16,10 @@ import { buildResume } from "../runner-api/resume.ts";
 import { createImplementerStepsRepository } from "../db/repositories/implementer-steps-repository.ts";
 import { createCapabilitySet } from "../capabilities/capability.ts";
 import { createJobQueue } from "../jobs/job-queue.ts";
-import type { EnqueueImplementerTurnInput } from "../jobs/job-types.ts";
+import type {
+  EnqueueFollowUpTurnInput,
+  EnqueueImplementerTurnInput,
+} from "../jobs/job-types.ts";
 import { addUser } from "./workspace-deletion-fixture.ts";
 import { createJobVmRunsRepository } from "../db/repositories/job-vm-runs-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
@@ -1027,6 +1030,30 @@ export async function startRunnerApiHarness(
     return result;
   }
 
+  /** #841: the next turn of a session the harness made a turn for (the session must be idle: the first turn has ended). */
+  async function enqueueFollowUp(
+    sessionId: string,
+    overrides: Partial<EnqueueFollowUpTurnInput> = {},
+  ) {
+    turnCounter += 1;
+    fixture.clock.advance(1);
+    const result = await turnQueue.enqueueFollowUpTurn({
+      sessionId,
+      headSha: sha("b"),
+      instruction: "Now do more.",
+      modelChoice: { entryId: "entry-1" },
+      costLimitCents: null,
+      createdBy: "turn-user",
+      actorLogin: "octocat",
+      clientRequestId: `request-${String(turnCounter)}`,
+      fromQueued: false,
+      ...overrides,
+    });
+    if (result.status !== "created")
+      throw new Error(`expected a new follow-up turn, got ${result.status}`);
+    return result;
+  }
+
   /** Claims the next job and returns the parsed answer. */
   async function claimed(request?: RequestOptions) {
     const response = await claim(request);
@@ -1112,6 +1139,7 @@ export async function startRunnerApiHarness(
         github.fake.pullRequestComments(repoFullName, prNumber),
     },
     enqueueTurn,
+    enqueueFollowUp,
     /** #790: the write token service of the first app instance (the sweep's `retryPending`, the end of a turn). */
     writeTokens,
     /** #790: waits for the write tokens that the ends of claims (the reaper, a stop) switched off after their response. */
