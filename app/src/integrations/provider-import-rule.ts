@@ -11,6 +11,10 @@
 // `require()`, and `vi.mock`/`vi.doMock`/`vi.importActual`-style calls (`jest.*` too). A template
 // literal with substitutions counts when its fixed start already points into a provider folder.
 // A specifier that is built entirely at run time cannot be seen.
+//
+// Parsing every file of the app costs seconds and grows with it, so a file is parsed only if it can
+// reach a provider folder at all (`mayReachProviders`). That is a filter in front of the parser, not
+// a second rule: it lets through every file the parser could report.
 import { posix } from "node:path";
 import ts from "typescript";
 
@@ -27,6 +31,9 @@ export type ProviderImportViolation = {
 };
 
 const PROVIDERS_DIRECTORY = "src/integrations/providers";
+const PROVIDERS_NAME = PROVIDERS_DIRECTORY.slice(
+  PROVIDERS_DIRECTORY.lastIndexOf("/") + 1,
+);
 const REGISTRY_FILE = "src/integrations/registry.ts";
 const MODULE_FUNCTIONS = new Set([
   "mock",
@@ -36,6 +43,48 @@ const MODULE_FUNCTIONS = new Set([
   "importActual",
   "importMock",
 ]);
+
+// An escape sequence of a string or template literal: a unicode escape (four digits or in braces), a
+// hex or an octal escape, a line continuation, or a backslash before any other character.
+const ESCAPE =
+  /\\(?:u\{([0-9a-fA-F]+)\}|u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|([0-7]{1,3})|\r\n|[\n\r\u2028\u2029]|([\s\S]))/g;
+
+function unescapeLiterals(content: string): string {
+  return content.replace(
+    ESCAPE,
+    (
+      _match,
+      braced: string | undefined,
+      unicode: string | undefined,
+      hex: string | undefined,
+      octal: string | undefined,
+      plain: string | undefined,
+    ) => {
+      const code = braced ?? unicode ?? hex;
+      if (code !== undefined) {
+        const value = Number.parseInt(code, 16);
+        return value <= 0x10ffff ? String.fromCodePoint(value) : "";
+      }
+      if (octal !== undefined)
+        return String.fromCharCode(Number.parseInt(octal, 8));
+      return plain ?? "";
+    },
+  );
+}
+
+/**
+ * Whether a file can import something inside the providers folder. A specifier from a file outside
+ * it only resolves into it by spelling the folder's name (`./providers/...`, `@/integrations/providers`,
+ * the fixed start of a template literal), if need be through escape sequences. Unescaping the whole
+ * file shows that text wherever it stands in a literal; extra text elsewhere only means that a file
+ * is parsed which did not need to be.
+ */
+function mayReachProviders(content: string): boolean {
+  if (content.includes(PROVIDERS_NAME)) return true;
+  return (
+    content.includes("\\") && unescapeLiterals(content).includes(PROVIDERS_NAME)
+  );
+}
 
 function resolveSpecifier(file: string, specifier: string): string | null {
   const resolved = specifier.startsWith("@/")
@@ -105,12 +154,9 @@ export function findProviderImportViolations(
     const file = path.split("\\").join("/");
     if (file === REGISTRY_FILE || isInsideProviders(file)) continue;
 
-    const source = ts.createSourceFile(
-      file,
-      content,
-      ts.ScriptTarget.Latest,
-      true,
-    );
+    if (!mayReachProviders(content)) continue;
+
+    const source = ts.createSourceFile(file, content, ts.ScriptTarget.Latest);
     for (const specifier of specifiersOf(source)) {
       const resolved = resolveSpecifier(file, specifier);
       if (resolved !== null && isInsideProviders(resolved))
