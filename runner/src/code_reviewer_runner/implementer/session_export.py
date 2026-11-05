@@ -35,13 +35,14 @@ Best effort: every failure is an `ExportFailed` with a stable reason, never the 
 
 import gzip
 import hashlib
+import http.client
 import json
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Final, cast
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from code_reviewer_runner.redaction import Redactor
 from code_reviewer_runner.snapshot_wire import MAX_SNAPSHOT_BYTES
@@ -182,7 +183,9 @@ def _blank_compacted(messages: list[Any]) -> int:
     Returns how many parts were changed."""
     changed = 0
     for message in messages:
-        parts = message.get("parts") if isinstance(message, dict) else None
+        if not isinstance(message, dict):
+            continue
+        parts = cast("dict[str, Any]", message).get("parts")
         if not isinstance(parts, list):
             continue
         for part in cast("list[Any]", parts):
@@ -212,7 +215,7 @@ def _compacted(state: dict[str, Any]) -> bool:
 def _redact(value: Any, redactor: Redactor) -> Any:
     """The same document with the redactor applied to every string value and key."""
     if isinstance(value, str):
-        return redactor.redact(cast("str", value))
+        return redactor.redact(value)
     if isinstance(value, list):
         return [_redact(item, redactor) for item in cast("list[Any]", value)]
     if isinstance(value, dict):
@@ -221,3 +224,36 @@ def _redact(value: Any, redactor: Redactor) -> Any:
             for key, item in cast("dict[str, Any]", value).items()
         }
     return value
+
+
+class EngineFetch:
+    """The production `Fetch`: GET requests to the engine's address over one connection (each
+    connection through the exec tunnel costs an exec, so the calls share one), scoped to the
+    engine's directory by the runner's own header. Loopback only: `http.client` never uses a proxy
+    of the environment and never follows a redirect. A body is read up to one byte past
+    `MAX_RAW_BYTES`, which `take_snapshot` takes for a document that is too large."""
+
+    def __init__(self, base_url: str, directory: str) -> None:
+        parts = urlsplit(base_url)
+        self._host = parts.hostname or "127.0.0.1"
+        self._port = parts.port
+        self._directory = directory
+        self._connection: http.client.HTTPConnection | None = None
+
+    def __call__(self, path: str, timeout: float) -> tuple[int, Mapping[str, str], bytes]:
+        connection = self._connection
+        if connection is None:
+            connection = self._connection = http.client.HTTPConnection(
+                self._host, self._port, timeout=timeout
+            )
+        elif connection.sock is not None:
+            connection.sock.settimeout(timeout)
+        connection.request("GET", path, headers={"x-opencode-directory": self._directory})
+        response = connection.getresponse()
+        body = response.read(MAX_RAW_BYTES + 1)
+        return response.status, {k.lower(): v for k, v in response.getheaders()}, body
+
+    def close(self) -> None:
+        connection, self._connection = self._connection, None
+        if connection is not None:
+            connection.close()

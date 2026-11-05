@@ -99,6 +99,8 @@ from .network_rule import MODE_OFF, MODE_OPEN, OFF, NetworkRule
 from .network_switch import Post, model_host_of, narrow_policy, parse_switch, urllib_post
 from .prompts import LEFTOVER_PROMPT, instructions_text
 from .reader import RESET_SECONDS as READER_RESET_SECONDS
+from .session_export import ExportFailed
+from .snapshot_pump import SnapshotPump
 from .step_pump import FLUSH_SECONDS as STEPS_FLUSH_SECONDS
 from .step_pump import STOP_FLUSH_SECONDS as STOP_STEPS_FLUSH_SECONDS
 from .step_pump import StepPump
@@ -110,22 +112,30 @@ _log = logging.getLogger(__name__)
 # and the final push (the plan: the last three minutes; four and a half since the readers are made
 # quiet twice and the container's end got its measured ceilings). A short limit keeps a third of it.
 GRACE_SECONDS = 270.0
-# How the grace is spent at a normal end, every step at its ceiling: the end of the agent's
-# container (`ENGINE_STOP_SECONDS`: the kill call and the wait until the daemon says it is gone;
-# its removal comes after the push, `remove()`, and is in no sum), the first reset of the readers
+# How the grace is spent at a normal end, every step at its ceiling: the export of the engine's
+# session for a follow-up turn (`SNAPSHOT_SECONDS`, #839: before the container is killed, because it
+# is read from the running engine; the fetch, the redaction, the gzip and the hand-over to the job
+# host, all inside the budget), the end of the agent's container (`ENGINE_STOP_SECONDS`: the kill
+# call and the wait until the daemon says it is gone; its removal comes after the push, `remove()`,
+# and is in no sum), the first reset of the readers
 # (`READER_RESET_SECONDS`), the rescue of a detached HEAD (three git commands of
 # `RESCUE_STEP_TIMEOUT`), the look at the tree (`DIRTY_TIMEOUT`), the leftover commit of the system,
 # the second reset of the readers (the commit ran the repository's filters in a reader that can
 # write), the final push, the two reads of the report (`REPORT_READ_TIMEOUT` each) and the last
 # flush of the live view (`STEPS_FLUSH_SECONDS`, #745: after the push, before the result, bounded in
-# all of its parts). The sum is 222 s of the 270; a test holds it, and holds the slack.
+# all of its parts). The sum is 227 s of the 270; a test holds it, and holds the slack. The upload
+# of the snapshot to the app is not in the sum: the job host does it beside the push and before the
+# result is delivered (`job_loop/snapshot_sender.py`).
+SNAPSHOT_SECONDS = 5.0
+STOP_SNAPSHOT_SECONDS = 2.0
 LEFTOVER_SECONDS = 40.0
 FINAL_PUSH_SECONDS = 100.0
 ENGINE_STOP_SECONDS = KILL_SECONDS + STOP_SECONDS
 # A stop (SIGTERM) leaves the process `SIGTERM_BACKSTOP_SECONDS` in all (`job_run.py`): the engine
 # comes out of it, then the reset of the readers, the rescue of a detached HEAD, the final push (no
 # leftover is committed, so no second reset), the two reads of the report and the shorter last
-# flush of the live view (`STOP_STEPS_FLUSH_SECONDS`): 84 s of the 115.
+# flush of the live view (`STOP_STEPS_FLUSH_SECONDS`), and the shorter export of the session
+# (`STOP_SNAPSHOT_SECONDS`): 86 s of the 115.
 STOP_PUSH_SECONDS = 25.0
 # How often the watch asks the job host whether the job is still ours while the agent works (a
 # lost lease ends the turn at once; nothing is pushed in the meantime).
@@ -169,6 +179,9 @@ class SessionSeams:
     # The last flush of the live view (#745), at a normal end and at a stop.
     steps_flush_seconds: float = STEPS_FLUSH_SECONDS
     stop_steps_flush_seconds: float = STOP_STEPS_FLUSH_SECONDS
+    # The export of the engine's session (#839), at a normal end and at a stop.
+    snapshot_seconds: float = SNAPSHOT_SECONDS
+    stop_snapshot_seconds: float = STOP_SNAPSHOT_SECONDS
     startup_seconds: float | None = None
     clock: Callable[[], float] = time.monotonic
     # How the model door is started and what it talks to (#745, step 3); the defaults are the VM's
@@ -343,6 +356,7 @@ class ImplementerSession:
         should_stop: Callable[[], bool] = lambda: False,
         max_seconds: float | None = None,
         steps: StepPump | None = None,
+        snapshot: SnapshotPump | None = None,
     ) -> None:
         self.job = job
         self.workspace = workspace
@@ -358,6 +372,8 @@ class ImplementerSession:
         self._max_seconds = max_seconds
         # The channel the step records of the turn leave over (#745): None records nothing.
         self._steps = steps
+        # The channel the engine's session leaves over at the end (#839): None takes no export.
+        self._snapshot = snapshot
         self._notes: list[str] = []
         self._summary = ""
         self._error: tuple[ErrorCode, str] | None = None
@@ -418,6 +434,8 @@ class ImplementerSession:
             # can change the repository or call the door from here on.
             ended = True
             if agent is not None:
+                # The engine must still be running for the export: it is read over its API.
+                self._save_session(agent)
                 ended = agent.stop()
             elif place is not None:
                 ended = place.stop()
@@ -445,9 +463,44 @@ class ImplementerSession:
             # The last flush of the live view, after the push and before the result: it hands over
             # what is left, is bounded in time and best effort, so the push never waits for it.
             self._finish_steps()
+            if self._snapshot is not None:
+                self._snapshot.close()
         result = self._result()
         self._remove_place(place)
         return result
+
+    def _save_session(self, agent: ImplementerAgent) -> None:
+        """Take the engine's session and hand it to the job host, which uploads it (#839).
+        Best effort, inside a budget, and never the turn's: no failure here changes the outcome,
+        the push or the bill, it is a line in the notes and the next turn starts from a summary.
+
+        Skipped without a channel (an app that does not list the feature) and after a lost lease
+        (the app would refuse it)."""
+        pump = self._snapshot
+        if pump is None or agent.session_id is None:
+            return
+        lost = self._error is not None and self._error[0] is ErrorCode.LEASE_LOST
+        if lost:
+            pump.close()
+            return
+        quick = self._should_stop() or self._ends_quickly()
+        seconds = self.seams.stop_snapshot_seconds if quick else self.seams.snapshot_seconds
+        began = self._clock()
+        try:
+            snapshot = agent.export_session(Redactor(self.secrets()), seconds)
+            sent = pump.send(
+                snapshot, PINNED_ENGINE_VERSION, max(seconds - (self._clock() - began), 0.2)
+            )
+        except ExportFailed as error:
+            self._note(f"the session was not saved for a follow-up turn: {error.reason.value}")
+            pump.close()
+            return
+        except Exception:
+            self._note("the session was not saved for a follow-up turn: export_failed")
+            pump.close()
+            return
+        if not sent:
+            self._note("the session was not saved for a follow-up turn: not handed to the host")
 
     def _start_steps(self, agent: ImplementerAgent) -> None:
         """Begin to send the step records of the open session. Best effort: a fault here is the

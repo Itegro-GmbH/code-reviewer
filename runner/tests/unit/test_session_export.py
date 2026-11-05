@@ -340,3 +340,81 @@ def test_the_transcript_is_read_only_up_to_a_bound_of_memory() -> None:
         take_snapshot(bulky, SESSION, redactor=Redactor([]), seconds=60.0)
 
     assert caught.value.reason is ExportReason.TOO_LARGE
+
+
+# -- the production fetch --------------------------------------------------------------------
+
+
+class EngineServer:
+    """A loopback server that plays the engine's two session routes, over one keep-alive
+    connection, and remembers what it was asked."""
+
+    def __init__(self, messages: list[dict[str, Any]]) -> None:
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        outer = self
+        engine = Engine(messages)
+        self.requests: list[tuple[str, str | None]] = []
+        self.connections = 0
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def setup(self) -> None:
+                super().setup()
+                outer.connections += 1
+
+            def do_GET(self) -> None:
+                outer.requests.append((self.path, self.headers.get("x-opencode-directory")))
+                status, headers, body = engine(self.path, 1.0)
+                self.send_response(status)
+                for name, value in headers.items():
+                    self.send_header(name, value)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args: Any) -> None:
+                return
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    def stop(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+
+# #839-T19
+def test_the_production_fetch_scopes_every_call_to_the_directory_over_one_connection() -> None:
+    from code_reviewer_runner.implementer.session_export import EngineFetch
+
+    server = EngineServer([message(n, [tool_part(n)]) for n in range(120)])
+    fetch = EngineFetch(server.url, "/work/repo")
+    try:
+        snapshot = take_snapshot(fetch, SESSION, redactor=Redactor([]), seconds=10.0)
+    finally:
+        fetch.close()
+        server.stop()
+
+    assert snapshot.messages == 120
+    assert len(server.requests) == 4
+    assert {directory for _, directory in server.requests} == {"/work/repo"}
+    assert server.connections == 1, "each connection through the tunnel costs an exec"
+
+
+# #839-T19
+def test_the_production_fetch_of_a_dead_engine_is_an_unreachable_engine() -> None:
+    from code_reviewer_runner.implementer.session_export import EngineFetch
+
+    server = EngineServer([])
+    url = server.url
+    server.stop()
+    fetch = EngineFetch(url, "/work/repo")
+
+    with pytest.raises(ExportFailed) as caught:
+        take_snapshot(fetch, SESSION, redactor=Redactor([]), seconds=5.0)
+
+    assert caught.value.reason is ExportReason.UNREACHABLE
