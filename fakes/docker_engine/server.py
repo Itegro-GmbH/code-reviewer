@@ -421,8 +421,10 @@ class FakeDockerEngine:
                 container.exit_code = self.rules_exit
             self._reply(connection, 204)
             return
-        self._reply(connection, 204)
+        # Running before the answer: a client that asks for the state, or waits for the end, right
+        # after the answer must not find a container that has not begun (#827).
         container.running = True
+        self._reply(connection, 204)
         behaviour = self.behaviour
         if behaviour is None:
             return
