@@ -364,6 +364,40 @@ def test_the_watchdog_reports_what_the_run_used_up_to_then(monkeypatch: pytest.M
     assert result["usage"]["costUsd"] == 0.01
 
 
+# #827-S1: Control that holds 90% of its container's memory ends its own turn, free when the model
+# was not billed and charged when it was
+@pytest.mark.parametrize("billed", [False, True])
+def test_control_that_holds_its_containers_memory_ends_the_turn_by_its_class(
+    monkeypatch: pytest.MonkeyPatch, billed: bool
+) -> None:
+    unit_costs = UnitCosts(input_usd_per_mtok=Decimal("0.5"), output_usd_per_mtok=Decimal(2))
+    ledger = BudgetLedger(DynamicLimits(), unit_costs=unit_costs)
+    if billed:
+        reservation = ledger.reserve_call("x" * 400, output_tokens=10)
+        ledger.settle_call(
+            reservation, prompt_tokens=100, completion_tokens=10, cost=Decimal("0.01")
+        )
+    probe = runner.UsageProbe()
+    probe.watch(lambda: ledger.usage("vendor/model"))
+    out = io.StringIO()
+    channel = runner._ResultChannel(out)  # pyright: ignore[reportPrivateUsage]
+    ended: list[int] = []
+    monkeypatch.setattr(runner.os, "_exit", ended.append)
+    stopped: list[bool] = []
+    monkeypatch.setattr(runner, "shutdown_engines", lambda: stopped.append(True))
+
+    runner._end_for_control_memory(  # pyright: ignore[reportPrivateUsage]
+        channel, time.monotonic(), ("s3cret",), probe, 700 * 1024 * 1024, 768 * 1024 * 1024
+    )
+
+    result = json.loads(out.getvalue())
+    assert ended == [1] and stopped == [True]
+    assert result["errorCode"] == ("agent_gave_up" if billed else "runner_error")
+    assert (result["usage"] is not None) is billed
+    assert "control_memory: " in result["logTail"]
+    assert "700 of 768 MiB" in result["logTail"]
+
+
 class WaitsForTheDeadline(ScriptedEngine):
     """Makes one priced model call, then asks for another one only once the deadline has passed."""
 

@@ -102,6 +102,10 @@ from code_reviewer_runner.identity_patch import (
     apply_identity_patch,
     check_pr_agent_version,
 )
+from code_reviewer_runner.implementer.control_memory import (
+    REASON_CONTROL_MEMORY,
+    ControlMemoryWatch,
+)
 from code_reviewer_runner.implementer.job_run import (
     SIGTERM_BACKSTOP_SECONDS as IMPLEMENTER_SIGTERM_BACKSTOP_SECONDS,
 )
@@ -1353,6 +1357,40 @@ def _start_watchdog(
     return timer
 
 
+def _end_for_control_memory(
+    channel: _ResultChannel,
+    started: float,
+    secrets: Sequence[str],
+    probe: UsageProbe | None,
+    used: int,
+    limit: int,
+) -> None:
+    """Control holds nearly all the memory of its container (`ControlMemoryWatch`, #827): the
+    kernel never picks it (`--oom-score-adj -1000`), so it ends its own turn, at once, as the OOM
+    killer used to end it. The engines go first; the result is `runner_error` (free) or, when the
+    model was billed, `agent_gave_up` (charged), the classes of any other unexpected end of the
+    turn. Like the watchdog of the timeout, it leaves the process only once it printed the
+    result."""
+    shutdown_engines()
+    usage = _probe_usage(probe)
+    code = ErrorCode.AGENT_GAVE_UP if usage is not None else ErrorCode.RUNNER_ERROR
+    mib = 1024 * 1024
+    try:
+        result = _failure(
+            code,
+            f"{REASON_CONTROL_MEMORY}: Control held {used // mib} of {limit // mib} MiB of the "
+            "memory of its container, so the turn was ended",
+            started,
+            None,
+            usage=usage,
+        )
+        written = channel.write(result, secrets)
+    except Exception:
+        written = 1
+    if written is not None:
+        os._exit(1)
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -1494,6 +1532,12 @@ def _run_implementer(
     )
     stop = threading.Event()
     extra: list[str] = []
+    memory = ControlMemoryWatch(
+        lambda used, limit: _end_for_control_memory(
+            channel, started, job.secrets, probe, used, limit
+        )
+    )
+    memory.start()
     try:
         with _stop_on_sigterm(stop):
             result = run_implementer_job(
@@ -1517,6 +1561,7 @@ def _run_implementer(
         failed = _failure(code, "unexpected runner error", started, None, usage=usage)
         return failed, tuple(extra)
     finally:
+        memory.close()
         if watchdog is not None:
             watchdog.cancel()
 

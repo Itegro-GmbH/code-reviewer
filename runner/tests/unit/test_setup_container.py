@@ -472,7 +472,11 @@ def test_a_vm_running_out_of_memory_while_the_setup_is_finished_is_not_committed
 def test_a_vm_out_of_memory_while_the_docker_does_not_stop_says_vm_memory(
     rig: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(sc.SetupContainer, "_kill", lambda self: None)
+
+    def no_kill(_: Any) -> None:
+        return None
+
+    monkeypatch.setattr(sc.SetupContainer, "_kill", no_kill)
     rig.finish_squeezes = True
     rig.finish_mode = "hangs"
     done = run(rig, docker_stop_seconds=0.5)

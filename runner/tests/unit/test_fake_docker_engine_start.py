@@ -69,7 +69,12 @@ def test_a_start_whose_answer_cannot_be_sent_still_runs_the_behaviour_of_the_con
 ) -> None:
     made, api = engine
     ran = threading.Event()
-    made.behaviour = lambda stdin, stdout, stderr: ran.set() or 0
+
+    def behave(stdin: Any, stdout: Any, stderr: Any) -> int:
+        ran.set()
+        return 0
+
+    made.behaviour = behave
     real = FakeDockerEngine._reply  # pyright: ignore[reportPrivateUsage]
 
     def broken(self: Any, connection: Any, status: int, document: Any = None) -> None:
