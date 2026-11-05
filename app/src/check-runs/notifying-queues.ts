@@ -59,6 +59,12 @@ function notifyingRunnerQueueFunction(
       if (result.status === "cancelled") safely(() => notify.job(jobId));
       return result;
     },
+    async expireClaimsOf(runnerId) {
+      const report = await queue.expireClaimsOf(runnerId);
+      if (report.leaseExpired + report.requeued > 0)
+        safely(() => notify.change());
+      return report;
+    },
     async expireStaleJobs() {
       const report = await queue.expireStaleJobs();
       if (

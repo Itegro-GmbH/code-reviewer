@@ -266,6 +266,12 @@ export type RunnerJobsRepository = {
   /** Deals with leases and runtimes that ran out. `claimNext` does this first on every call. */
   expireStaleJobs(): Promise<ExpiryReport>;
   /**
+   * #854: ends the running claims of one runner at once (a member revoked it): their leases are cut to now and the expiry runs, which
+   * ends each as it ends any claim whose lease ran out: a turn of the Implementer has one attempt, so it fails (`lease_expired`) and its
+   * VM, its write token and its record are dealt with by the same reactions. Returns what the expiry did.
+   */
+  expireClaimsOf(runnerId: string): Promise<ExpiryReport>;
+  /**
    * #328: fails every queued job that has waited `waitedMs` or longer, counted from the later of the time it
    * became due and the time it was last queued (a job given back after a lost lease starts waiting again), with
    * the stable code `dispatch_unavailable`. No attempt is counted. A job whose dispatch a Dispatcher
@@ -1519,6 +1525,19 @@ export function createRunnerJobsRepository(
       return inAlertingTransaction((trx, unknownCost, endedClaims) =>
         expire(trx, now(), unknownCost, endedClaims),
       );
+    },
+
+    expireClaimsOf(runnerId) {
+      return inAlertingTransaction(async (trx, unknownCost, endedClaims) => {
+        const current = now();
+        await trx
+          .updateTable("jobs")
+          .set({ lease_expires_at: formatTimestamp(current) })
+          .where("status", "=", "running")
+          .where("runner_id", "=", runnerId)
+          .execute();
+        return expire(trx, current, unknownCost, endedClaims);
+      });
     },
 
     failUndispatched(waitedMs) {

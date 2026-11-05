@@ -20,6 +20,9 @@ import { createWorkspaceEntitlementsRepository } from "../db/repositories/worksp
 import { startRunnerApiHarness } from "../test-support/runner-api-harness.ts";
 import type { ClaimResponse } from "./contract.ts";
 import { addWorkspace } from "../test-support/workspaces.ts";
+import { createRunnersRepository } from "../db/repositories/runners-repository.ts";
+import { createRunnerFleetService } from "../runner-fleet/service.ts";
+import { customerRunnerId } from "../runner-identity/tokens.ts";
 
 const NOW = new Date("2026-11-02T10:00:00.000Z");
 const KEY = "dummy-anthropic-key-0123456789-implementer";
@@ -426,5 +429,187 @@ describe("the claim of a customer's runner", () => {
     });
     expect(h.issuedJobTokens()).toEqual([]);
     expect(h.logLines().join("\n")).not.toContain("dummy-operator");
+  });
+});
+
+describe("revoking a runner that is running a turn (#854)", () => {
+  async function runningTurn() {
+    const h = await start();
+    const runner = await h.registerRunner({ labels: ["gpu", "linux"] });
+    const turn = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+    });
+    const { job } = (await (
+      await h.claim(claimOf(runner.credential))
+    ).json()) as ClaimResponse;
+    const fleet = createRunnerFleetService({
+      runners: createRunnersRepository(h.db, h.workspaceId, {
+        now: h.clock.now,
+      }),
+      settings: () => ({ minBaseVersion: null, onlineWithinSeconds: 120 }),
+      endClaimsOf: async (id) => {
+        await h.queue.expireClaimsOf(id);
+      },
+      now: h.clock.now,
+    });
+    return { h, runner, turn, job, fleet };
+  }
+
+  // #854-T240
+  it("refuses it every report about the job it was running, and ends the job at once as failed", async () => {
+    const { h, runner, turn, job, fleet } = await runningTurn();
+    expect(
+      (await h.heartbeat(job.id, job.leaseToken, { token: runner.credential }))
+        .status,
+    ).toBe(200);
+
+    await fleet.revoke(runner.runnerId);
+
+    for (const answer of [
+      await h.heartbeat(job.id, job.leaseToken, { token: runner.credential }),
+      await h.complete(
+        job.id,
+        job.leaseToken,
+        {},
+        { token: runner.credential },
+      ),
+      await h.steps(
+        job.id,
+        { leaseToken: job.leaseToken, records: [] },
+        { token: runner.credential },
+      ),
+      await h.release(
+        job.id,
+        { leaseToken: job.leaseToken, reason: "shutdown" },
+        { token: runner.credential },
+      ),
+    ]) {
+      expect(answer.status).toBe(401);
+      expect(await answer.json()).toMatchObject({
+        error: { code: "RUNNER_UNAUTHORIZED" },
+      });
+    }
+    // The job is over now, not when its lease would have run out: one attempt, so it failed, and it was not put back in the queue.
+    expect(await h.queue.get(turn.job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "lease_expired",
+    });
+    expect(job.id).toBe(turn.job.id);
+  });
+
+  // #854-T241
+  it("cannot reach the session snapshot of the job either: the Worker API takes the per-job credential alone", async () => {
+    const { h, runner, job, fleet } = await runningTurn();
+    await fleet.revoke(runner.runnerId);
+
+    for (const credential of [runner.credential, job.leaseToken]) {
+      const answer = await h.worker.session(
+        job.id,
+        credential,
+        { index: 0, count: 1, size: 1, rawBytes: 1, sha256: "0".repeat(64) },
+        new Uint8Array([1]),
+      );
+      expect(answer.status).toBe(401);
+    }
+  });
+
+  // #854-T242
+  it("leaves the jobs of other runners as they were", async () => {
+    const { h, runner, fleet } = await runningTurn();
+    const other = await h.registerRunner({ labels: ["gpu", "linux"] });
+    await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: { ...RUNNER_ENV, id: "env-2" },
+    });
+    const { job } = (await (
+      await h.claim(claimOf(other.credential))
+    ).json()) as ClaimResponse;
+
+    await fleet.revoke(runner.runnerId);
+
+    expect(await h.queue.get(job.id)).toMatchObject({
+      status: "running",
+      runnerId: customerRunnerId(other.runnerId),
+    });
+    expect(
+      (await h.heartbeat(job.id, job.leaseToken, { token: other.credential }))
+        .status,
+    ).toBe(200);
+  });
+});
+
+describe("what a customer's runner never gets (#854)", () => {
+  // #854-T243
+  it("takes no job of another workspace: not a runner turn with its labels, not a hosted turn, not a review", async () => {
+    const h = await start();
+    const otherWorkspace = await addWorkspace(h.db, "other");
+    const mine = await h.registerRunner({
+      labels: ["gpu", "linux"],
+      workspaceId: otherWorkspace,
+    });
+    // Every kind of job the harness workspace has, with the labels the runner has.
+    const runnerTurn = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+    });
+    const hostedTurn = await h.enqueueTurn({ modelChoice: OWN_MODEL });
+    const review = await h.enqueue({ prNumber: 7 });
+
+    // Asked as a runner, with every engine it could name and with the id of each job.
+    for (const jobId of [undefined, runnerTurn.job.id, hostedTurn.job.id])
+      expect(
+        (
+          await h.claim({
+            ...claimOf(mine.credential),
+            engines: ["implementer", "opencode", "pr-agent"],
+            ...(jobId === undefined ? {} : { jobId }),
+          })
+        ).status,
+      ).toBe(204);
+
+    for (const id of [runnerTurn.job.id, hostedTurn.job.id, review.job.id])
+      expect(await h.queue.get(id)).toMatchObject({
+        status: "queued",
+        attempts: 0,
+      });
+  });
+
+  // #854-T244
+  it("takes no hosted turn and no review of its own workspace, whatever it asks for", async () => {
+    const h = await start();
+    const runner = await h.registerRunner({ labels: ["gpu", "linux"] });
+    const hostedTurn = await h.enqueueTurn({ modelChoice: OWN_MODEL });
+    const review = await h.enqueue({ prNumber: 8 });
+
+    expect((await h.claim(claimOf(runner.credential))).status).toBe(204);
+    expect(
+      (
+        await h.claim({
+          ...claimOf(runner.credential),
+          engines: ["pr-agent", "opencode", "implementer"],
+          features: ["worker_credential"],
+          jobId: hostedTurn.job.id,
+        })
+      ).status,
+    ).toBe(204);
+
+    for (const id of [hostedTurn.job.id, review.job.id])
+      expect(await h.queue.get(id)).toMatchObject({ status: "queued" });
+  });
+
+  // #854-T245
+  it("takes no turn that was queued for the operator's key, even with labels it has", async () => {
+    const h = await start();
+    const runner = await h.registerRunner({ labels: ["gpu", "linux"] });
+    const operatorTurn = await h.enqueueTurn({
+      modelChoice: { entryId: "entry-1" },
+    });
+
+    expect((await h.claim(claimOf(runner.credential))).status).toBe(204);
+
+    expect(await h.queue.get(operatorTurn.job.id)).toMatchObject({
+      status: "queued",
+    });
   });
 });

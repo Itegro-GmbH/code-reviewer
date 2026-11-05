@@ -118,7 +118,9 @@ describe("the runner environments migration", () => {
       .execute(db)
       .catch(() => undefined);
     let turns = 0;
-    const turn = (values: Record<string, string | number | null>) =>
+    const turn = (
+      values: { id: string } & Partial<Record<string, string | number | null>>,
+    ) =>
       sql`insert into implementer_turns (id, session_id, workspace_id, number, instruction, model_choice, job_id, created_by, created_at,
           environment_id, environment_name, environment_vcpus, environment_setup_script, environment_kind, environment_labels)
         values (${values.id}, 's-1', 'w-1', ${++turns}, 'x', '{}', ${values.id}, 'u-1', ${T},

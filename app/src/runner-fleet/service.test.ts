@@ -151,6 +151,24 @@ describe("the runner fleet service", () => {
     });
   });
 
+  // #854-T46
+  it("ends the running claims of a revoked runner after the revoke took effect, by the id it has in the queue, and not for a runner that is not there", async () => {
+    const ended: string[] = [];
+    const service = createRunnerFleetService({
+      runners: fakeRepository([runner()]),
+      settings: () => SETTINGS,
+      endClaimsOf: async (id) => void ended.push(id),
+      now: () => NOW,
+    });
+
+    await service.revoke("r1");
+    await expect(service.revoke("nope")).rejects.toBeInstanceOf(
+      RunnerFleetError,
+    );
+
+    expect(ended).toEqual(["runner:r1"]);
+  });
+
   // #854-T45
   it("revokes a runner of the workspace and answers not found for any other id", async () => {
     const service = createRunnerFleetService({

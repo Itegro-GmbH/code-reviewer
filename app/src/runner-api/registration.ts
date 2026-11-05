@@ -26,6 +26,7 @@ import {
   type FieldIssue,
 } from "../runner-identity/announcement.ts";
 import {
+  customerRunnerId,
   hashSecret,
   newRunnerCredential,
   REGISTRATION_TOKEN_PATTERN,
@@ -42,10 +43,7 @@ export function bearerRunnerCredential(header: string | null): string | null {
   return token !== null && RUNNER_CREDENTIAL_PATTERN.test(token) ? token : null;
 }
 
-/** The id a customer's runner has in `jobs.runner_id` and in the logs: `runner:` and its id. */
-export function customerRunnerId(runnerId: string): string {
-  return `runner:${runnerId}`;
-}
+export { customerRunnerId };
 
 export type FleetSettings = { minBaseVersion: string | null };
 
