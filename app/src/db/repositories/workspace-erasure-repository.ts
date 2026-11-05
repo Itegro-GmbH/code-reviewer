@@ -194,6 +194,9 @@ export function createWorkspaceErasureRepository(
         // The versions point at their profile: versions first (#843).
         "profile_versions",
         "profiles",
+        // Runners and the tokens that made them (#854).
+        "runner_registration_tokens",
+        "runners",
         "job_check_runs",
         "job_vm_runs",
         "usage_records",

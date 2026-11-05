@@ -46,7 +46,9 @@ async function snapshot(
       table.name === "workflows" ||
       table.name === "workflow_versions" ||
       table.name === "profiles" ||
-      table.name === "profile_versions"
+      table.name === "profile_versions" ||
+      table.name === "runners" ||
+      table.name === "runner_registration_tokens"
     )
       continue;
     const { rows } =
@@ -62,7 +64,7 @@ async function columns(db: Kysely<Database>): Promise<string[]> {
   const { rows } = await sql<{
     name: string;
   }>`select table_name || '.' || column_name as name from information_schema.columns
-    where table_schema = 'public' and table_name not in ('workflows', 'workflow_versions', 'profiles', 'profile_versions')
+    where table_schema = 'public' and table_name not in ('workflows', 'workflow_versions', 'profiles', 'profile_versions', 'runners', 'runner_registration_tokens')
     and not (table_name = 'implementer_turns' and column_name like 'profile\_%') order by 1`.execute(
     db,
   );

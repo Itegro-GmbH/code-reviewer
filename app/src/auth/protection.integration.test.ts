@@ -52,6 +52,10 @@ const PUBLIC_ROUTES = [
   "/api/runners/v1/jobs/[id]/complete",
   // The steps of a running turn of the Implementer, with the same token and the lease token in the body (#745).
   "/api/runners/v1/jobs/[id]/steps",
+  // A customer's own runner sends the registration token in the body, or its own credential (#854).
+  "/api/runners/v1/register",
+  "/api/runners/v1/self",
+  "/api/runners/v1/credential",
   // A Dispatcher gives a job back and reads the version with the same token (#322).
   "/api/runners/v1/jobs/[id]/release",
   // A Dispatcher reports the VM it created with the same token and the job credential in the body (#493).
@@ -124,6 +128,7 @@ const PROTECTED_ROUTES = [
   "/w/[workspace]/members",
   "/w/[workspace]/projects",
   "/w/[workspace]/projects/[repositoryId]",
+  "/w/[workspace]/runners",
   "/w/[workspace]/runs",
   "/w/[workspace]/runs/[id]",
   "/w/[workspace]/settings",
@@ -189,6 +194,10 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/workflows",
   "/api/w/[workspace]/workflows/[workflowId]",
   "/api/w/[workspace]/workflows/validate",
+  // The runners on customers' machines (#854).
+  "/api/w/[workspace]/runners",
+  "/api/w/[workspace]/runners/tokens",
+  "/api/w/[workspace]/runners/[runnerId]/revoke",
   // The profiles of the agents (#843).
   "/api/w/[workspace]/profiles",
   "/api/w/[workspace]/profiles/[profileId]",

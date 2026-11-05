@@ -34,10 +34,19 @@ import { handleVmStart, type VmStartDeps } from "./vm.ts";
 import { describeError } from "./logger.ts";
 import { parseClaimRequest, parseJobId, parseRunnerId } from "./requests.ts";
 import { handleComplete, handleHeartbeat, type ReportDeps } from "./report.ts";
-import { errorResponse, jsonResponse, unauthorized } from "./responses.ts";
+import {
+  errorResponse,
+  jsonResponse,
+  noContent,
+  unauthorized,
+} from "./responses.ts";
 import { storeSteps, type StepsDeps } from "./steps.ts";
 import { parseStepsRequest } from "./steps-request.ts";
 import { bearerTokenOf, tokensMatch } from "./token-auth.ts";
+import {
+  bearerRunnerCredential,
+  type RunnerRegistrationApi,
+} from "./registration.ts";
 
 export type RunnerApiDeps = ClaimDeps &
   ReportDeps &
@@ -54,6 +63,11 @@ export type RunnerApiDeps = ClaimDeps &
      * app serves, so billing is not switched on over one that reports no VMs. Never throws; absent: nothing is noted.
      */
     noteClaimFeatures?: (features: readonly string[]) => Promise<void>;
+    /**
+     * #854: the runners of customers' own machines. A claim that carries a runner credential (`crc_...`) is theirs: it is checked
+     * here and never takes the path of the shared token. Absent: the credential is not known and the claim is 401.
+     */
+    fleet?: Pick<RunnerRegistrationApi, "authenticate">;
   };
 
 export type RunnerApi = {
@@ -110,6 +124,22 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
   return {
     async claim(request) {
       try {
+        // #854: a customer's runner has a credential of its own; the shared token is the Dispatcher's and the poll mode's.
+        if (
+          bearerRunnerCredential(request.headers.get("authorization")) !== null
+        ) {
+          const customer = await deps.fleet?.authenticate(request);
+          if (customer === undefined || customer === null)
+            return unauthorized();
+          // The call counts as its heartbeat (`last seen`, set by the check above). Below the minimum it gets no job.
+          if (customer.updateNeeded)
+            return errorResponse(426, "RUNNER_UPDATE_NEEDED", {
+              ...(customer.minBaseVersion === null
+                ? {}
+                : { minBaseVersion: customer.minBaseVersion }),
+            });
+          return noContent();
+        }
         const who = identify(request);
         if (!who.ok) return who.response;
         // The claim body is read after the token check and before any job is claimed (#195).

@@ -35,6 +35,8 @@ const LATER_TABLES = [
   "workflow_versions",
   "profiles",
   "profile_versions",
+  "runners",
+  "runner_registration_tokens",
 ];
 
 const beforeThisMigration: MigrationProvider = {
