@@ -13,8 +13,8 @@ spike measured) together with the SHA-512 of its npm tarball (`CLAUDE_CODE_INTEG
 fetches the tarball, accepts it only with that digest and installs it from the file. The device may
 choose another exact version (`LayerSpec(version=...)`): then there is no digest to compare, and the
 choice is the device's. **Verified and unverified layers never share a tag or a label**
-(`layer_tag`, `layer_labels`): a device that names the pinned version itself still gets the pinned spec with its
-digest, and a layer built without the check is never taken for the pinned one.
+(`layer_tag`, `layer_labels`): a device that names the pinned version itself still gets the pinned
+spec with its digest, and a layer built without the check is never taken for the pinned one.
 
 The digest covers the npm package, which is a stub with the platform binary as an optional
 dependency that npm fetches from the registry on its own: the platform binary is **not** pinned by
