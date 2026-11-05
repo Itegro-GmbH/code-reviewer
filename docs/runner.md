@@ -46,7 +46,7 @@ POST /api/w/:ws/runners/tokens   ->  token crt_... (1 hour, once, hash kept)
 - **Last seen.** Every authenticated call of the runner is its heartbeat; the claim, which it makes every 30 seconds or so, is the one that matters. The
   list shows a runner as _online_ when it was heard from within two minutes and _offline_ otherwise.
 - **Revoking.** Owners and Admins revoke a runner on the page (`POST /api/w/:workspace/runners/:id/revoke`). The next call of that runner is
-  `401 RUNNER_UNAUTHORIZED`, the answer for any credential the app does not know. The same holds for every report about the job it was running (`heartbeat`, `complete`, `release`, `steps`; the session snapshot is the Worker API's and takes the per-job credential alone). Revoking also **ends the runner's running jobs at once**: their leases are cut to now and the queue's expiry runs, so a turn (one attempt) fails with its own code, `runner_revoked` (free, with its own text on the run page: the runner was removed, not "ran out of retries"), and its write token and record are dealt with as for any lost lease. What it already pushed stays on the branch.
+  `401 RUNNER_UNAUTHORIZED`, the answer for any credential the app does not know. The same holds for every report about the job it was running (`heartbeat`, `complete`, `release`, `steps`, `session` and `resume-session`; the Worker API's calls of the same names take the per-job credential alone and never a runner's). Revoking also **ends the runner's running jobs at once**: their leases are cut to now and the queue's expiry runs, so a turn (one attempt) fails with its own code, `runner_revoked` (free, with its own text on the run page: the runner was removed, not "ran out of retries"), and its write token and record are dealt with as for any lost lease. What it already pushed stays on the branch.
 - **The minimum version of the base** (decision 9). `RUNNER_MIN_BASE_VERSION` (unset: none) is the oldest base that gets jobs. A claim by a runner below
   it is `426 RUNNER_UPDATE_NEEDED` with `minBaseVersion`, the list shows _update needed_, and the runner says so on the machine. The app never updates a runner.
 - **Two doors.** The shared `RUNNER_TOKEN` (the Dispatcher's, and the poll mode's) and a runner credential are different secrets; a request that carries a
@@ -68,7 +68,7 @@ deleting the environment touches no turn, and the claim routes by the turn's own
   **ready** (today always `opencode`: profiles know no other harness) and is not below the minimum base version. A runner without a ready OpenCode gets
   nothing; one below the minimum gets `426 RUNNER_UPDATE_NEEDED`. The runner claims with its credential and takes the engine `implementer` only: not a
   review, not a split claim, not a job by id. The claim is the ordinary claim of a turn (the same input, the key and the model entry as the Dispatcher's
-  Worker gets them), so a runner's turn is built exactly like a hosted one. Its calls about the job (`heartbeat`, `complete`, `release`, `steps`) take the
+  Worker gets them), so a runner's turn is built exactly like a hosted one. Its calls about the job (`heartbeat`, `complete`, `release`, `steps`, and the two snapshot calls below) take the
   credential too, for a job of its own workspace only (`404 RUNNER_JOB_NOT_FOUND` for any other); the Dispatcher's calls (`vm`, the job state) take the
   shared token alone.
 - **Who never does.** A **hosted job never goes to a customer's runner**, and a **runner turn never goes to the Dispatcher or to the shared token**: the
@@ -82,6 +82,44 @@ deleting the environment touches no turn, and the claim routes by the turn's own
   (a catalog entry) in a runner environment is refused with `IMPLEMENTER_RUNNER_NEEDS_OWN_KEY` (422) before a session, a turn or a job exists; a workspace
   without its own key for the model's provider is refused by the rule every task meets. The claim holds the same line: a runner turn whose selection would
   be managed ends `runner_needs_own_key` before a key or a credential exists.
+
+### Resume on customer runners (#879)
+
+A follow-up turn continues the conversation of the earlier turns: the engine's session is taken as a file at the end of every turn (the session snapshot, [`implementer.md`](implementer.md#the-session-snapshot-839))
+and imported into the engine of the next turn, which may run on another machine ([`implementer.md`](implementer.md#follow-up-turns-resume-in-the-runner-840)). On the hosted deployment the Worker moves the file with the
+per-job credential (`PUT /api/workers/v1/jobs/{id}/session`, `GET .../resume-session`). A customer's runner holds no such credential and the runner credential stays out of the Worker API
+(a Worker route answers `401 WORKER_CREDENTIAL_INVALID` to it), so the runner has two calls of its own:
+
+```
+runner                                                                           app
+PUT /api/runners/v1/jobs/{id}/session?part=0&parts=2&bytes=..&rawBytes=..&sha256=..&opencodeVersion=..
+    Authorization: Bearer crc_...      X-Lease-Token: <lease token of the claim>
+    body: the bytes of the part (up to 3 MiB)                                ->  200 { version, part, parts, complete }
+GET /api/runners/v1/jobs/{id}/resume-session?part=n
+    Authorization: Bearer crc_...      X-Lease-Token: <lease token of the claim>
+                                                                             <-  200 the bytes of the part, x-snapshot-* headers
+                                                                                 204 the session has no stored snapshot
+```
+
+- **The same calls.** The handlers are the Worker API's (`storeSnapshotPart`, `readResumeSessionPart`): the same parts of exactly 3 MiB (at most three), the same description of the whole file in the query or in the
+  headers, the same digest and size checks, the same replacement of the session's snapshot once the last part is in, the same reading of the earlier turns' snapshot of the job's own session and of no other. The wire
+  format is `RunnerSessionPartQuery`, `RunnerSessionPartResponse`, `RunnerResumeSessionQuery` and `RunnerResumeSessionHeaders` of [`contracts/runner-api.v1.json`](../contracts/runner-api.v1.json), which say the same about
+  the fields as the Worker contract's definitions (a test holds them to it). Neither call extends the lease.
+- **The lease token is a header.** The calls with a JSON body (`heartbeat`, `complete`, `steps`) carry the token in the body; here the body is raw bytes (or there is none), so it is `X-Lease-Token`
+  (`RunnerLeaseTokenHeader`: 8 to 256 characters). A missing or malformed one is `400 RUNNER_REQUEST_INVALID` with the field `x-lease-token`, never its value.
+- **Who may call.** A live runner and nobody else: a revoked or unknown credential, the shared token and a per-job credential are the same `401 RUNNER_UNAUTHORIZED`. The job must be of the runner's own workspace
+  **and held by this very runner**: a job of another workspace, a job another runner holds and a hosted job (a Dispatcher holds it) are all `404 RUNNER_JOB_NOT_FOUND`, so the answer says nothing about which. Then the lease
+  token decides, as it does for the steps: a lease that ran out, a claim that ended or a token that is not the claim's is `409 RUNNER_LEASE_LOST` (stop sending). A job that is not a turn of the Implementer is `400`.
+- **The switch.** The app lists the feature `runner_session_snapshot` in `KnownAppFeature`. `implementer_snapshot` says only that the **Worker API's** calls exist, and an app can have those and not these; a runner on
+  a customer's machine reads the list from `GET /api/runners/v1/version` **with its own credential** (the call answers a live runner as well as a Dispatcher or a running claim) and uses the two calls only if it
+  finds `runner_session_snapshot` there. The runner client (`RunnerJobApi`, #874) takes `snapshot=...`: `snapshot=True` sends the snapshot and reads the stored session, `False` (an older app) makes the turn take no export and a
+  follow-up continue from the summary of the earlier ones, which is the plan's fallback and costs a turn nothing else. It needs no claim feature: the claim names `implementer_resume` already, and the job says
+  with `implementer.resume.snapshot` whether there is a file to read.
+- **What the runner does with it.** Nothing new: the host downloads the stored session before the process starts and uploads the snapshot beside the final push, exactly as for a Worker
+  ([`implementer.md`](implementer.md#follow-up-turns-resume-in-the-runner-840)). Which machine ran the earlier turns does not matter: the snapshot belongs to the session.
+- **Tests.** `app/src/runner-api/runner-session.integration.test.ts` (the parts and the bounds through the runner's door, a snapshot stored by one runner and read by another, another workspace, another runner,
+  a lease that ran out, a revoked runner, a hosted job, the shared token and a per-job credential, the Worker routes still closed to a runner, the version call), `runner-session-contract.test.ts` and
+  `runner/tests/contract/test_snapshot_contract.py` (the contract on both sides).
 
 ### Validator rules
 
