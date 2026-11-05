@@ -202,4 +202,38 @@ describe("the write tokens of the Implementer in the repair work (#790)", () => 
 
     expect(order).toEqual(["expire", "workflow runs"]);
   });
+
+  // #844-T280
+  it("gives the workflow runs a budget, and still brings the check runs in line when they fail", async () => {
+    const reconcile = vi.fn<(options?: { budgetMs?: number }) => Promise<void>>(
+      async () => {
+        throw new Error("postgres://user:secret@host/db is down");
+      },
+    );
+    const reconcileDue = vi.fn(async () => ({ synced: 0 }));
+    const error = vi.fn();
+    const maintenance = createOpportunisticMaintenance({
+      withLock: async (work) => ({ acquired: true, value: await work() }),
+      queue: {
+        expireStaleJobs: async () => ({
+          requeued: 0,
+          leaseExpired: 0,
+          timedOut: 0,
+          noCapableRunner: 0,
+        }),
+      },
+      workflowRuns: { reconcile },
+      checks: { reconcileDue },
+      log: { error },
+    });
+
+    expect(await maintenance.run()).toBe("ran");
+
+    expect(reconcile).toHaveBeenCalledWith({ budgetMs: 10_000 });
+    expect(reconcileDue).toHaveBeenCalledOnce();
+    expect(error).toHaveBeenCalledWith(
+      "[dispatch] OPPORTUNISTIC_WORKFLOW_RUNS_FAILED",
+    );
+    expect(JSON.stringify(error.mock.calls)).not.toContain("secret");
+  });
 });

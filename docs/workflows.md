@@ -514,6 +514,9 @@ A run looks like this (a step is `pending` when written, `running` once claimed,
   on the run, from the state the lock shows, so the second one finds what the first did and changes nothing. A step is claimed by a guarded update, so one
   worker does it; an agent step is started under a request id made from the run and the position, so starting it twice yields one turn. An action
   that was interrupted is **not** repeated (it may have happened): its step ends as `action_interrupted`.
+- **A turn that exists is never lost.** The engine can die after the turn was started and before the step recorded it. Before a step is given up
+  (`agent_start_failed`, after an hour without a job), and whenever the Implementer refuses the repeat of its request, the engine looks for a turn under
+  the request id of the step (`wf-<run id>-<position>`). A turn it finds is attached to the step, read like any other, and its cost is charged to the run.
 - **A failure of the engine never fails the end of a turn.** The hook runs after the completion is stored; if it throws, the completion is
   answered and stored as it would have been, the failure is logged by its code only, and the sweep picks the run up again.
 
@@ -540,8 +543,22 @@ data: it can be put into a text (an instruction, a comment), never into a target
 
 A run has a budget: `budgetUsd` of the document (20 when left out), held to the operator's maximum (100 USD today) once more at the start. Every agent
 step gets as its cost limit **at most what is left of the budget**, in whole cents, and not more than the limit of its profile version or the operator's
-maximum per task. A turn is charged what the runner reported; a turn whose cost is not known is charged the cap it ran under, so a run never spends more
-than its budget. When the budget cannot pay one cent for the next agent step, the run ends with `budget_exhausted`; an action step costs nothing and still runs.
+maximum per task. A turn is charged what the runner reported. **A turn whose cost is not known** (the runner reported none, as with a model of the
+workspace's own key that has no price) is charged by its token counts at the price of the model in the catalog, never above its cap; with no token counts or
+no price in the catalog it is charged **the whole cap it ran under**, so a run never spends more than its budget. That is conservative on purpose: with
+an unpriced model a workflow of two agent steps with a budget of 1 USD can end after step one with `budget_exhausted`, because step one was charged the
+whole of it. The engine logs `[workflow-runs] cost not reported run=… step=… charged=estimated|limit` for each such step. A price in the catalog, or a
+model that reports its cost, avoids it. When the budget cannot pay one cent for the next agent step, the run ends with `budget_exhausted`; an action step costs nothing and still runs.
+
+### Known limits of milestone 3
+
+- **The unique constraint `(run_id, step_id)`, the check on `kind` and `created_by NOT NULL` of the run tables need a migration in milestones 4 and 5.** A loop
+  runs one step several times (the constraint on `(run_id, step_id)` refuses the second round), `if` and `loop` are other kinds, and a run started by a label has no
+  person who started it.
+- **A run cannot be cancelled yet.** It ends as `succeeded` or `failed`; a person cannot stop one that runs.
+- **Profiles are resolved per step**, at the moment the step starts; a profile without a version can mean version 2 for step two of a run whose step one ran
+  with version 1.
+- **The sweep has a time budget** (40 seconds, 10 for the maintenance after a request), checked between two runs; a run is looked at as a whole.
 
 ### Actions
 
@@ -549,6 +566,12 @@ An action step is a **connector**: an interface (`name`, `run(call)`) and a regi
 held to the connector's types again. The three connectors of the format (`github.pullRequest.open`, `github.issue.comment`, `github.issue.labels`)
 need rights of the GitHub App that the owner grants first, so they come with milestone 3b; a step whose connector is not available ends with
 `connector_unavailable` and the run with `step_failed`. The tests use a fake connector.
+
+**A call takes 60 seconds at most** (`ACTION_TIMEOUT_MS`), which is well under the two minutes after which a step that was claimed and has no outcome is taken
+for abandoned (`STEP_STALE_MS`). A call that takes longer ends its step with `action_timeout` and is not repeated (it may have happened); the call gets an
+`AbortSignal` that is aborted then. **The connectors of milestone 3b must keep to it**: pass `call.signal` to every request they make and set no longer
+time limit or retry of their own. A connector that outlasts the limit could otherwise run twice, once for the engine that waits for it and once for the
+one that took the step over. Use `call.idempotencyKey` for what the platform supports.
 
 ### Failure codes
 
@@ -572,6 +595,7 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `connector_unavailable` | step | No connector is there for the action. |
 | `action_input_invalid` | step | The inputs of the action are not what the connector takes, once the references are resolved. |
 | `action_failed` | step | The connector failed; the message is its own. |
+| `action_timeout` | step | The connector did not answer within 60 seconds; the action is not repeated. |
 | `action_interrupted` | step | The engine was interrupted while the action ran; it is not repeated. |
 
 ### Errors of the run routes (`error`)

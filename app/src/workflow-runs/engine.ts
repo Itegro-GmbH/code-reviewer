@@ -36,6 +36,7 @@ import {
 } from "./connectors.ts";
 import { readRunDocument, type RunDocument } from "./document.ts";
 import {
+  ACTION_TIMEOUT_MS,
   ERROR_MESSAGE_MAX_CHARS,
   MICRO_USD_COLUMN_MAX,
   MICRO_USD_PER_CENT,
@@ -49,6 +50,8 @@ import { outcomeOfTurn, type EndedTurn } from "./turn-facts.ts";
 
 /** A turn as the engine reads it: its id, and the whole of it once its job is over. */
 export type TurnRead = { turnId: string; ended: EndedTurn | undefined };
+/** A turn found by the request id it was started under. */
+export type RequestedTurn = TurnRead & { jobId: string };
 
 export type EngineDependencies = {
   runs: WorkflowRunsRepository;
@@ -57,11 +60,17 @@ export type EngineDependencies = {
   environments: Pick<ImplementerEnvironmentsRepository, "listSummaries">;
   implementer: Pick<ImplementerService, "startTask">;
   /** The turn a job runs, or undefined for a job that is no turn of this workspace. `ended` is set once the job is over. */
-  turns: { read(jobId: string): Promise<TurnRead | undefined> };
+  turns: {
+    read(jobId: string): Promise<TurnRead | undefined>;
+    /** The turn a request id started (`wf-<run>-<position>`), or undefined. Looked at before a step is given up. */
+    findByRequest(clientRequestId: string): Promise<RequestedTurn | undefined>;
+  };
   connectors: ConnectorRegistry;
   /** The full name of the repository of a run, for the call of an action. */
   repositoryName(repositoryId: string): Promise<string | undefined>;
   now?: () => Date;
+  /** The most one call of a connector may take; `ACTION_TIMEOUT_MS` unless a test shortens it. */
+  actionTimeoutMs?: number;
   /** One line per notable event; never a value, a token or the text of an error. */
   log?: (line: string) => void;
 };
@@ -86,6 +95,8 @@ type Resolved = { name: string; version: number } | undefined;
 type Prefetched = {
   document?: { value: RunDocument | undefined };
   turns: Map<string, TurnRead | undefined>;
+  /** For an agent step with no job that has been claimed for a while: the turn its request id started, if any (by step id). */
+  started: Map<string, RequestedTurn | undefined>;
   profiles: Map<string, Resolved>;
 };
 
@@ -139,6 +150,32 @@ function valuesOf(
   };
 }
 
+/** The request id an agent step starts its turn under, and the idempotency key of an action: stable for the step of a run. */
+const requestIdOf = (
+  run: Pick<StoredWorkflowRun, "id">,
+  step: Pick<StoredStepRun, "position">,
+): string => `wf-${run.id}-${step.position}`;
+
+class ActionTimeout extends Error {}
+
+/** Resolves with what the work yields, or rejects with `ActionTimeout` once `ms` have passed; the work gets a signal that is aborted then. */
+function withTimeout<T>(
+  work: (signal: AbortSignal) => Promise<T>,
+  ms: number,
+): Promise<T> {
+  const abort = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      abort.abort();
+      reject(new ActionTimeout());
+    }, ms);
+  });
+  return Promise.race([work(abort.signal), expired]).finally(() =>
+    clearTimeout(timer),
+  );
+}
+
 /** The micro dollars of the budget to whole cents a task's limit is made of, at least one. */
 function capCents(capMicroUsd: number | null): number {
   return Math.max(1, Math.floor((capMicroUsd ?? 0) / MICRO_USD_PER_CENT));
@@ -183,6 +220,10 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       Math.min(step.capMicroUsd ?? 0, MICRO_USD_COLUMN_MAX),
     );
     const cost = Math.min(outcome.costMicroUsd, MICRO_USD_COLUMN_MAX);
+    if (outcome.costBasis !== "reported")
+      log(
+        `[workflow-runs] cost not reported run=${step.runId} step=${step.stepId} charged=${outcome.costBasis}`,
+      );
     await lock.finishStep(
       step.id,
       outcome.ok
@@ -213,7 +254,11 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
 
   /** Reads what the next decision about a run will need, outside the lock; see `Prefetched`. Never throws. */
   async function prefetch(runId: string): Promise<Prefetched> {
-    const pre: Prefetched = { turns: new Map(), profiles: new Map() };
+    const pre: Prefetched = {
+      turns: new Map(),
+      started: new Map(),
+      profiles: new Map(),
+    };
     try {
       const run = await deps.runs.getRun(runId);
       if (run === undefined || run.status !== "running") return pre;
@@ -224,6 +269,17 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       const last = steps[steps.length - 1];
       if (last?.status === "running" && last.jobId !== null)
         pre.turns.set(last.jobId, await deps.turns.read(last.jobId));
+      if (
+        last?.status === "running" &&
+        last.kind === "agent" &&
+        last.jobId === null &&
+        last.startedAt !== null &&
+        now().getTime() - Date.parse(last.startedAt) >= STEP_STALE_MS
+      )
+        pre.started.set(
+          last.id,
+          await deps.turns.findByRequest(requestIdOf(run, last)),
+        );
       const next = document.steps[steps.length];
       if (
         (last === undefined || last.status === "succeeded") &&
@@ -322,6 +378,25 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       case "fail_step": {
         const stepRun = lock.steps[move.position];
         if (stepRun === undefined) return { kind: "done" };
+        // A step is never given up while its turn exists: the claimant may have died between the start of the turn and the record of
+        // it, and a turn nobody reads would run on and count in no budget. The turn is attached, and the next move reads it.
+        if (move.code === "agent_start_failed") {
+          const found = pre.started.has(stepRun.id)
+            ? pre.started.get(stepRun.id)
+            : await deps.turns.findByRequest(requestIdOf(run, stepRun));
+          if (
+            found !== undefined &&
+            (await lock.attachTurn(stepRun.id, {
+              jobId: found.jobId,
+              turnId: found.turnId,
+            }))
+          ) {
+            log(
+              `[workflow-runs] turn adopted run=${run.id} step=${stepRun.stepId}`,
+            );
+            return { kind: "again" };
+          }
+        }
         await lock.finishStep(
           stepRun.id,
           failed(
@@ -365,7 +440,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           ? node.instruction.first
           : "";
     const instruction = renderText(text, values, INSTRUCTION_MAX_LENGTH);
-    let started;
+    let started: { runId: string };
     try {
       started = await deps.implementer.startTask(
         { id: run.createdBy, githubLogin: run.actorLogin },
@@ -378,20 +453,28 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           environmentId: environment.id,
           profile: `${step.profile.name}@${step.profile.version}`,
           ...(node.result === undefined ? {} : { result: node.result }),
-          clientRequestId: `wf-${run.id}-${step.position}`,
+          clientRequestId: requestIdOf(run, step),
         },
         { costCapCents: capCents(step.capMicroUsd) },
       );
     } catch (error) {
-      if (error instanceof ImplementerError)
+      if (!(error instanceof ImplementerError)) throw error;
+      // The step is about to be given up: not while a turn exists under its request id (a repeat of the request that no longer fits it).
+      const existing = await deps.turns.findByRequest(requestIdOf(run, step));
+      if (existing === undefined)
         return failed("agent_start_failed", `${error.code}: ${error.message}`);
-      throw error;
+      started = { runId: existing.jobId };
     }
     const turn = await deps.turns.read(started.runId);
-    await deps.runs.attachTurn(step.id, {
+    const attached = await deps.runs.attachTurn(step.id, {
       jobId: started.runId,
       turnId: turn?.turnId ?? null,
     });
+    // Somebody ended the step while the turn was started; the turn runs on, and no step reads it.
+    if (!attached)
+      log(
+        `[workflow-runs] STEP_TURN_ORPHANED run=${run.id} step=${step.stepId} job=${started.runId}`,
+      );
     return undefined;
   }
 
@@ -425,20 +508,30 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         "The repository of the run is no longer one of the workspace.",
       );
     try {
-      const output = await connector.run({
-        workspaceId: run.workspaceId,
-        runId: run.id,
-        stepId: step.stepId,
-        repository: { id: run.repositoryId, fullName },
-        inputs,
-        idempotencyKey: `wf-${run.id}-${step.position}`,
-      });
+      const output = await withTimeout(
+        (signal) =>
+          connector.run({
+            workspaceId: run.workspaceId,
+            runId: run.id,
+            stepId: step.stepId,
+            repository: { id: run.repositoryId, fullName },
+            inputs,
+            idempotencyKey: requestIdOf(run, step),
+            signal,
+          }),
+        deps.actionTimeoutMs ?? ACTION_TIMEOUT_MS,
+      );
       return {
         status: "succeeded",
         output: JSON.stringify(isRecord(output) ? output : {}),
         costMicroUsd: null,
       };
     } catch (error) {
+      if (error instanceof ActionTimeout)
+        return failed(
+          "action_timeout",
+          "The connector did not answer in time; whether the action happened is not known, so it was not repeated.",
+        );
       return failed(
         "action_failed",
         error instanceof Error ? error.message : "The connector failed.",

@@ -89,6 +89,8 @@ export const STEP_FAILURE_CODES = [
   "action_input_invalid",
   /** The connector refused or failed. */
   "action_failed",
+  /** The connector did not answer within `ACTION_TIMEOUT_MS`; whether the action happened is not known, and it is not repeated. */
+  "action_timeout",
   /** The engine was interrupted while an action ran; whether it happened is not known, and it is not repeated. */
   "action_interrupted",
 ] as const;

@@ -78,7 +78,9 @@ function getMaintenance(env: Env): OpportunisticMaintenance | undefined {
     ...(getCapabilities().has("implementer")
       ? {
           writeTokens: getWriteTokens(),
-          workflowRuns: { reconcile: () => reconcileWorkflowRuns() },
+          workflowRuns: {
+            reconcile: (options) => reconcileWorkflowRuns(options),
+          },
         }
       : {}),
   });

@@ -9,6 +9,7 @@ import type { ActionConnector } from "../workflow-runs/connectors.ts";
 import { createConnectorRegistry } from "../workflow-runs/connectors.ts";
 import { createWorkflowEngine } from "../workflow-runs/engine.ts";
 import { createTurnReader } from "../workflow-runs/turn-reader.ts";
+import type { TokenPrice } from "../workflow-runs/turn-facts.ts";
 import {
   createWorkflowRunService,
   type WorkflowRunService,
@@ -83,6 +84,8 @@ export type TurnReport = {
   ok?: boolean;
   errorCode?: string;
   costUsd?: number | null;
+  /** The token counts of the usage; default 1 and 1. */
+  tokens?: { prompt: number; completion: number };
   /** What the finish tool stored; none when the turn has no schema or the agent never called it. */
   agentResult?: JsonValue;
   pushed?: boolean;
@@ -95,6 +98,9 @@ export async function startEngineHarness(
     connectors?: readonly ActionConnector[];
     operatorCostLimitCents?: number;
     maxBudgetUsd?: number;
+    /** The catalog price of the model of a turn; left out: no turn has a price. */
+    priceOf?: () => Promise<TokenPrice | undefined>;
+    actionTimeoutMs?: number;
   } = {},
 ) {
   const app = await startImplementerHarness({
@@ -135,7 +141,11 @@ export async function startEngineHarness(
   const jobs = createJobsRepository(h.db, workspaceId);
   const turns = createImplementerRepository(h.db, workspaceId);
 
-  const turnReader = createTurnReader({ jobs, turns });
+  const turnReader = createTurnReader({
+    jobs,
+    turns,
+    ...(options.priceOf === undefined ? {} : { priceOf: options.priceOf }),
+  });
   const engineLines: string[] = [];
   const engine = createWorkflowEngine({
     runs,
@@ -147,6 +157,9 @@ export async function startEngineHarness(
     connectors: createConnectorRegistry(options.connectors ?? []),
     repositoryName: async (id) => (await h.repositories.get(id))?.fullName,
     now,
+    ...(options.actionTimeoutMs === undefined
+      ? {}
+      : { actionTimeoutMs: options.actionTimeoutMs }),
     log: (line) => engineLines.push(line),
   });
 
@@ -228,16 +241,17 @@ export async function startEngineHarness(
       logTail: "",
       logTruncated: false,
       usage:
-        report.costUsd === null
+        report.costUsd === null && report.tokens === undefined
           ? null
           : {
               model: null,
-              promptTokens: 1,
-              completionTokens: 1,
-              totalTokens: 2,
+              promptTokens: report.tokens?.prompt ?? 1,
+              completionTokens: report.tokens?.completion ?? 1,
+              totalTokens:
+                (report.tokens?.prompt ?? 1) + (report.tokens?.completion ?? 1),
               aiCalls: 1,
               fallbackUsed: false,
-              costUsd: report.costUsd ?? 0.5,
+              costUsd: report.costUsd === null ? null : (report.costUsd ?? 0.5),
               stoppedEarly: null,
             },
       implementer: {
@@ -289,6 +303,7 @@ export async function startEngineHarness(
     saveWorkflow,
     start,
     finishTurn,
+    now,
     advanceClock(ms: number) {
       clock = new Date(clock.getTime() + ms);
     },

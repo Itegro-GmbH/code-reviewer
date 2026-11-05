@@ -17,6 +17,11 @@ export const MICRO_USD_COLUMN_MAX = 2_000_000_000;
 export const RUNS_LISTED_MAX = 50;
 /** A step that was claimed and has no job after this long was not finished by whoever claimed it. */
 export const STEP_STALE_MS = 2 * 60 * 1000;
+/**
+ * The most a connector may take for one call (#844): well under `STEP_STALE_MS`, so that a step still being worked on is never taken
+ * for abandoned and run a second time while its action is still running. A connector of milestone 3b keeps to it (`docs/workflows.md`).
+ */
+export const ACTION_TIMEOUT_MS = 60 * 1000;
 /** An agent step that has no job this long after it was written is given up (`agent_start_failed`). */
 export const STEP_GIVE_UP_MS = 60 * 60 * 1000;
 /** The sweep looks at a run that nobody touched for this long. */

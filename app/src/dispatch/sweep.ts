@@ -55,6 +55,8 @@ export const CLEANUP_HOUR_KEY = "maintenance.sweep_cleanup_hour";
 const HOUR_MS = 60 * 60 * 1000;
 /** The sweep runs in an internal route (five minutes), so the check runs may have most of a minute (#405). */
 export const CHECKS_BUDGET_MS = 40_000;
+/** The same for the workflow runs (#844): a run is looked at as a whole, so the budget is checked between two runs. */
+export const WORKFLOW_RUNS_BUDGET_MS = 40_000;
 /**
  * The deadline of the models.dev run: the fetch, the lookups and the write together (#548). The route has 300 seconds; the
  * check runs take 40 of them at most, the other steps are single queries and calls with limits of their own, and this
@@ -130,7 +132,11 @@ export type SweepDependencies = {
   /** #790: tries again to switch off the write tokens of ended turns that could not be switched off. Left out, none is tried. */
   writeTokens?: { retryPending(): Promise<void> };
   /** #844: looks again at the workflow runs that wait for a job which may have ended without a report. Left out, none is looked at. */
-  workflowRuns?: { reconcile(): Promise<{ looked: number; failed: number }> };
+  workflowRuns?: {
+    reconcile(options?: {
+      budgetMs?: number;
+    }): Promise<{ looked: number; failed: number }>;
+  };
   /** #591: releases the holds of ended jobs while billing is on (the step reads only the switch while it is off). Left out, none is. */
   billingHolds?: { releaseStranded(): Promise<{ released: number }> };
   /** #506: mails the balance crossings that are due (reads only the switch while billing is off). Left out, none is. */
@@ -231,7 +237,9 @@ export function createDispatchSweep(deps: SweepDependencies): DispatchSweep {
     const workflowRuns = has("implementer") ? deps.workflowRuns : undefined;
     if (workflowRuns !== undefined)
       await step("workflow_runs", async () => {
-        const { failed } = await workflowRuns.reconcile();
+        const { failed } = await workflowRuns.reconcile({
+          budgetMs: WORKFLOW_RUNS_BUDGET_MS,
+        });
         if (failed > 0) throw new Error("workflow runs could not be advanced");
       });
     await step("cleanup", async () => {

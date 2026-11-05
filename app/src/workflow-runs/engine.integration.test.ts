@@ -21,6 +21,7 @@ import { dueWorkflowRuns } from "../db/repositories/workflow-runs-sweep.ts";
 import { createWorkflowRunService } from "./service.ts";
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import { createConnectorRegistry, type ActionConnector } from "./connectors.ts";
+import { ImplementerError } from "../implementer/errors.ts";
 
 /** Starts the run and lets the engine take its first steps, as the kick after the response does. */
 async function started(app: EngineHarness, document = twoAgentSteps()) {
@@ -335,6 +336,107 @@ describe("events that repeat, arrive late or arrive together", () => {
   });
 });
 
+describe("a turn that was started and not recorded", () => {
+  /** The state the engine leaves when it dies between the start of the turn and the record of it: the turn exists, the step has no job. */
+  async function forgetTurn(app: EngineHarness, runId: string) {
+    const [step] = await app.runs.listSteps(runId);
+    if (step?.jobId == null) throw new Error("the step has no job");
+    await app.h.db
+      .updateTable("workflow_step_runs")
+      .set({ job_id: null, turn_id: null })
+      .where("id", "=", step.id)
+      .execute();
+    return step.jobId;
+  }
+
+  // #844-T283
+  it("is attached to its step instead of the step being given up, and its cost counts in the budget", async () => {
+    const app = await startEngineHarness();
+    const { runId } = await started(app);
+    const jobId = await forgetTurn(app, runId);
+    // Past the give-up time of a step without a job.
+    app.advanceClock(2 * 60 * 60_000);
+
+    await app.engine.advance(runId);
+
+    const adopted = await app.stateOf(runId);
+    expect(stepsOf(adopted)).toEqual([["plan", "running"]]);
+    expect(adopted.steps[0]?.jobId).toBe(jobId);
+    expect(adopted.steps[0]?.turnId).not.toBeNull();
+    expect(await app.counts()).toMatchObject({ jobs: 1, turns: 1 });
+    expect(app.engineLines.join("\n")).toContain("turn adopted");
+
+    await endTurn(app, { agentResult: { summary: "Plan." }, costUsd: 0.5 });
+
+    const done = await app.stateOf(runId);
+    expect(stepsOf(done)).toEqual([
+      ["plan", "succeeded"],
+      ["build", "running"],
+    ]);
+    expect(done.run.spentMicroUsd).toBe(500_000);
+  });
+
+  // #844-T284
+  it("is attached when the Implementer refuses the repeat of its request, instead of the step failing with agent_start_failed", async () => {
+    const app = await startEngineHarness();
+    const { runId } = await started(app);
+    const jobId = await forgetTurn(app, runId);
+    app.advanceClock(10 * 60_000);
+    const refusing = createWorkflowEngine({
+      runs: app.runs,
+      workflows: app.workflows,
+      profiles: app.profiles,
+      environments: app.environments,
+      implementer: {
+        startTask: async () => {
+          throw new ImplementerError(
+            "IMPLEMENTER_REQUEST_INVALID",
+            "The request is not valid.",
+          );
+        },
+      },
+      turns: app.turnReader,
+      connectors: createConnectorRegistry(),
+      repositoryName: async () => undefined,
+      now: app.now,
+    });
+
+    await refusing.advance(runId);
+
+    const state = await app.stateOf(runId);
+    expect(state.steps[0]).toMatchObject({ status: "running", jobId });
+    expect(await app.counts()).toMatchObject({ jobs: 1, turns: 1 });
+  });
+
+  // #844-T285
+  it("still gives a step up when no turn exists under its request id", async () => {
+    const app = await startEngineHarness();
+    const workflow = await app.saveWorkflow(twoAgentSteps());
+    const { run } = await app.start(workflow.id);
+    await app.runs.lockRun(run.id, (lock) =>
+      lock.addStep({
+        position: 0,
+        stepId: "plan",
+        kind: "agent",
+        profile: { name: "worker", version: 1 },
+        capMicroUsd: 20_000_000,
+      }),
+    );
+    const [pending] = await app.runs.listSteps(run.id);
+    if (pending === undefined) throw new Error("no step");
+    await app.runs.claimStep(pending.id);
+    app.advanceClock(2 * 60 * 60_000);
+
+    await app.engine.advance(run.id);
+
+    expect((await app.stateOf(run.id)).steps[0]).toMatchObject({
+      status: "failed",
+      errorCode: "agent_start_failed",
+    });
+    expect(await app.counts()).toMatchObject({ jobs: 0 });
+  });
+});
+
 describe("the result of an agent", () => {
   // #844-T60
   it("treats a turn that succeeded without a result as no_result and stops the run", async () => {
@@ -552,6 +654,34 @@ describe("the budget over all steps", () => {
     });
   });
 
+  // #844-T286
+  it("charges a turn whose cost is not known by its tokens at the catalog price, not at the whole cap", async () => {
+    const app = await startEngineHarness({
+      operatorCostLimitCents: 10_000,
+      priceOf: async () => ({ inputPerMillion: 3, outputPerMillion: 15 }),
+    });
+    const { runId } = await started(app, withBudget(1));
+
+    await endTurn(app, {
+      agentResult: { summary: "Plan." },
+      costUsd: null,
+      tokens: { prompt: 100_000, completion: 10_000 },
+    });
+
+    const state = await app.stateOf(runId);
+    expect(state.steps[0]).toMatchObject({
+      status: "succeeded",
+      costMicroUsd: 450_000,
+    });
+    // The run goes on with what is left; at the cap it would have ended after step one.
+    expect(stepsOf(state)).toEqual([
+      ["plan", "succeeded"],
+      ["build", "running"],
+    ]);
+    expect(state.run.spentMicroUsd).toBe(450_000);
+    expect(app.engineLines.join("\n")).toContain("charged=estimated");
+  });
+
   // #844-T74
   it("holds the budget of the document to the operator's maximum", async () => {
     const app = await startEngineHarness({ maxBudgetUsd: 5 });
@@ -620,6 +750,27 @@ describe("starting a run", () => {
       code: "WORKFLOW_RUN_REQUEST_REUSED",
       runId: first.run.id,
     });
+  });
+
+  // #844-T287
+  it("takes the same input written with its keys in another order for the same request", async () => {
+    const app = await startEngineHarness();
+    const workflow = await app.saveWorkflow(twoAgentSteps());
+    const first = await app.start(workflow.id, {
+      input: { repo: "acme/widgets", topic: "caching" },
+    });
+
+    const again = await app.start(workflow.id, {
+      input: { topic: "caching", repo: "acme/widgets" },
+    });
+
+    expect(again).toMatchObject({ created: false });
+    expect(again.run.id).toBe(first.run.id);
+    await expect(
+      app.start(workflow.id, {
+        input: { topic: "other", repo: "acme/widgets" },
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_RUN_REQUEST_REUSED" });
   });
 
   // #844-T82
@@ -1037,6 +1188,54 @@ describe("actions", () => {
   });
 });
 
+describe("an action that does not answer", () => {
+  // #844-T288
+  it("ends the step with action_timeout after the time limit of a connector call, and does not repeat it", async () => {
+    const calls: AbortSignal[] = [];
+    const hanging: ActionConnector = {
+      name: "github.pullRequest.open",
+      run(call) {
+        calls.push(call.signal);
+        return new Promise(() => undefined);
+      },
+    };
+    const app = await startEngineHarness({
+      connectors: [hanging],
+      actionTimeoutMs: 50,
+    });
+    const workflow = await app.saveWorkflow({
+      version: 1,
+      name: "Open",
+      trigger: MANUAL_TRIGGER,
+      steps: [
+        {
+          id: "open",
+          kind: "action",
+          connector: "github.pullRequest.open",
+          head: "main",
+          title: "Title",
+        },
+      ],
+    });
+    const { run } = await app.start(workflow.id);
+
+    await app.engine.advance(run.id);
+    await app.engine.advance(run.id);
+
+    const state = await app.stateOf(run.id);
+    expect(state.steps[0]).toMatchObject({
+      status: "failed",
+      errorCode: "action_timeout",
+    });
+    expect(state.run).toMatchObject({
+      status: "failed",
+      errorCode: "step_failed",
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.aborted).toBe(true);
+  });
+});
+
 describe("a failure of the engine", () => {
   // #844-T110
   it("does not reach the code that tells it a turn ended: the event is swallowed and logged without the cause", async () => {
@@ -1053,7 +1252,10 @@ describe("a failure of the engine", () => {
       profiles: app.profiles,
       environments: { listSummaries: async () => [] },
       implementer: app.implementerService,
-      turns: { read: async () => undefined },
+      turns: {
+        read: async () => undefined,
+        findByRequest: async () => undefined,
+      },
       connectors: createConnectorRegistry(),
       repositoryName: async () => undefined,
       log: (line) => lines.push(line),
@@ -1106,6 +1308,9 @@ describe("a failure of the engine", () => {
       implementer: app.implementerService,
       turns: {
         read: watched("turn", (jobId) => app.turnReader.read(jobId)),
+        findByRequest: watched("turn", (id) =>
+          app.turnReader.findByRequest(id),
+        ),
       },
       connectors: createConnectorRegistry(),
       repositoryName: async () => undefined,
@@ -1149,7 +1354,10 @@ describe("a failure of the engine", () => {
       profiles: app.profiles,
       environments: { listSummaries: async () => [] },
       implementer: app.implementerService,
-      turns: { read: async () => undefined },
+      turns: {
+        read: async () => undefined,
+        findByRequest: async () => undefined,
+      },
       connectors: createConnectorRegistry(),
       repositoryName: async () => undefined,
     });

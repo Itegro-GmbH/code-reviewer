@@ -51,7 +51,9 @@ export function getDispatchSweep(
       ? {
           writeTokens: getWriteTokens(),
           // #844: the runs of workflows that wait for a job which ended without a report.
-          workflowRuns: { reconcile: () => reconcileWorkflowRuns() },
+          workflowRuns: {
+            reconcile: (options) => reconcileWorkflowRuns(options),
+          },
         }
       : {}),
     // #548: the daily fetch of the models.dev catalog, last.

@@ -29,11 +29,13 @@ export type ActionCall = {
   inputs: Record<string, unknown>;
   /** The same for a call that is made again, so a connector can recognise a repeat. Stable per step of a run. */
   idempotencyKey: string;
+  /** Aborted when the call has taken `ACTION_TIMEOUT_MS`; a connector passes it on to what it calls. */
+  signal: AbortSignal;
 };
 
 export type ActionConnector = {
   name: string;
-  /** Does the action; the output has the fields the spec's `output` names. A throw ends the step with `action_failed`. */
+  /** Does the action; the output has the fields the spec's `output` names. A throw ends the step with `action_failed`; an answer later than `ACTION_TIMEOUT_MS` is not waited for (`action_timeout`). */
   run(call: ActionCall): Promise<Record<string, unknown>>;
 };
 

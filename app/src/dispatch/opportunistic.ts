@@ -19,6 +19,8 @@ export const OPPORTUNISTIC_INTERVAL_MS = 30_000;
 export const OPPORTUNISTIC_MIN_JOB_AGE_MS = 50_000;
 /** The check runs get little time: this runs in the `after()` of a request that has a minute in all (#405). */
 const CHECKS_BUDGET_MS = 15_000;
+/** The workflow runs get less still: they are looked at before the check runs, which must not be left without time (#844). */
+const WORKFLOW_RUNS_BUDGET_MS = 10_000;
 
 export type OpportunisticOutcome = "ran" | "throttled" | "locked" | "failed";
 
@@ -35,7 +37,9 @@ export type OpportunisticDependencies = {
   /** #790: tries again to switch off the write tokens of ended turns that could not be switched off. Left out, none is tried. */
   writeTokens?: { retryPending(): Promise<void> };
   /** #844: looks again at the workflow runs that wait for a job which may have ended without a report. Left out, none is looked at. */
-  workflowRuns?: { reconcile(): Promise<unknown> };
+  workflowRuns?: {
+    reconcile(options?: { budgetMs?: number }): Promise<unknown>;
+  };
   now?: () => number;
   intervalMs?: number;
   log?: Pick<Console, "error">;
@@ -66,7 +70,14 @@ export function createOpportunisticMaintenance(
           // A write token the end of its turn could not switch off is tried again until it expires (#790).
           await deps.writeTokens?.retryPending();
           // A job the expiry above ended has no report to tell the workflow engine: its runs are looked at again.
-          await deps.workflowRuns?.reconcile();
+          // Its failure is its own: the check runs after it are still brought in line.
+          try {
+            await deps.workflowRuns?.reconcile({
+              budgetMs: WORKFLOW_RUNS_BUDGET_MS,
+            });
+          } catch {
+            log.error("[dispatch] OPPORTUNISTIC_WORKFLOW_RUNS_FAILED");
+          }
           // The leases released above changed jobs no request named: their check runs follow.
           await deps.checks?.reconcileDue({ budgetMs: CHECKS_BUDGET_MS });
         });

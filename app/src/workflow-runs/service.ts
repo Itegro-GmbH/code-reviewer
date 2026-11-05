@@ -21,7 +21,7 @@ import type {
 } from "../db/repositories/workflow-runs-repository.ts";
 import type { WorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import { CLIENT_REQUEST_ID } from "../jobs/job-input.ts";
-import { isRecord } from "../workflows/json.ts";
+import { canonicalJson, isRecord } from "../workflows/json.ts";
 import {
   BUDGET_OPERATOR_MAX_USD,
   WORKFLOW_ID_MAX_LENGTH,
@@ -209,15 +209,18 @@ export function createWorkflowRunService(
     if (id.length === 0 || id.length > WORKFLOW_ID_MAX_LENGTH) throw notFound();
   }
 
-  /** The run an earlier request with this id made, when the body is the same one. */
+  /**
+   * The run an earlier request with this id made, when the body is the same one. The inputs are compared by content: the same input
+   * written with its keys in another order is the same request.
+   */
   function sameRequest(
     earlier: StoredWorkflowRun,
     workflowId: string,
-    triggerInput: string,
+    input: Record<string, unknown>,
   ): StoredWorkflowRun {
     if (
       earlier.workflowId !== workflowId ||
-      earlier.triggerInput !== triggerInput
+      canonicalJson(jsonOrNull(earlier.triggerInput)) !== canonicalJson(input)
     )
       throw new WorkflowRunError(
         "WORKFLOW_RUN_REQUEST_REUSED",
@@ -246,7 +249,7 @@ export function createWorkflowRunService(
       const earlier = await deps.runs.findByRequest(clientRequestId);
       if (earlier !== undefined)
         return {
-          run: await view(sameRequest(earlier, workflowId, triggerInput)),
+          run: await view(sameRequest(earlier, workflowId, input)),
           created: false,
         };
 
@@ -319,7 +322,7 @@ export function createWorkflowRunService(
       });
       if (created.status === "existing")
         return {
-          run: await view(sameRequest(created.run, workflowId, triggerInput)),
+          run: await view(sameRequest(created.run, workflowId, input)),
           created: false,
         };
       deps.kick(created.run.id);

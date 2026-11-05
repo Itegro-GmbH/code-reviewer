@@ -110,6 +110,14 @@ export type RunLock = {
   /** The steps written so far, by position. */
   steps: StoredStepRun[];
   addStep(input: NewStepRun): Promise<StoredStepRun>;
+  /**
+   * Records a turn found for a step under the lock: the step then reads that turn instead of being given up. Only a `running` step
+   * without a job takes one; returns whether it was written.
+   */
+  attachTurn(
+    stepRunId: string,
+    turn: { jobId: string; turnId: string | null },
+  ): Promise<boolean>;
   /** Ends a step that is not over yet; the money it cost is added to the run. */
   finishStep(stepRunId: string, outcome: StepOutcome): Promise<void>;
   finishRun(outcome: {
@@ -372,6 +380,22 @@ export function createWorkflowRunsRepository(
             lock.steps.push(added);
             await lock.touch();
             return added;
+          },
+          async attachTurn(stepRunId, turn) {
+            const attached = await trx
+              .updateTable("workflow_step_runs")
+              .set({ job_id: turn.jobId, turn_id: turn.turnId })
+              .where("workspace_id", "=", workspaceId)
+              .where("id", "=", stepRunId)
+              .where("status", "=", "running")
+              .where("job_id", "is", null)
+              .returningAll()
+              .executeTakeFirst();
+            if (attached === undefined) return false;
+            const index = lock.steps.findIndex((step) => step.id === stepRunId);
+            if (index !== -1) lock.steps[index] = stepFrom(attached);
+            await lock.touch();
+            return true;
           },
           async finishStep(stepRunId, outcome) {
             const at = formatTimestamp(now());

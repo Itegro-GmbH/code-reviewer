@@ -15,11 +15,15 @@ import { dueWorkflowRuns } from "../db/repositories/workflow-runs-sweep.ts";
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import { getDatabase } from "../db/startup.ts";
 import { runAfterResponse } from "../dispatch/shared.ts";
-import { implementerServiceFor } from "../implementer/shared.ts";
+import {
+  implementerServiceFor,
+  implementerTurnPricer,
+} from "../implementer/shared.ts";
 import { integrationRegistry } from "../integrations/registry.ts";
 import type { Job } from "../jobs/job-types.ts";
 import { createConnectorRegistry } from "./connectors.ts";
 import { createTurnReader } from "./turn-reader.ts";
+import { reconcileRuns, type ReconcileReport } from "./reconcile.ts";
 import { WorkflowRunError } from "./errors.ts";
 import { createWorkflowEngine, type WorkflowEngine } from "./engine.ts";
 import { RUN_QUIET_MS, SWEEP_RUNS_MAX } from "./limits.ts";
@@ -46,7 +50,11 @@ export function workflowEngineFor(workspaceId: string): WorkflowEngine {
     profiles: createProfilesRepository(db, workspaceId),
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
     implementer: implementerServiceFor(workspaceId),
-    turns: createTurnReader({ jobs, turns }),
+    turns: createTurnReader({
+      jobs,
+      turns,
+      priceOf: implementerTurnPricer(),
+    }),
     connectors,
     repositoryName: async (id) => (await repositories.get(id))?.fullName,
   });
@@ -103,26 +111,26 @@ export function turnEnded(job: Pick<Job, "id" | "workspaceId">): void {
 /**
  * The reconciler of the sweep: a job can end without anybody reporting it (its lease ran out, a Dispatcher never started it), so no
  * event reaches the engine. The runs that run and were not touched for a while are looked at again; `advance` does nothing for a run
- * that waits for a job still running. Returns how many runs it looked at.
+ * that waits for a job still running. `budgetMs` bounds the pass (checked between two runs). Returns how many runs it looked at.
  */
-export async function reconcileWorkflowRuns(
-  now: () => Date = () => new Date(),
-): Promise<{ looked: number; failed: number }> {
-  const due = await dueWorkflowRuns(getDatabase(), {
-    olderThan: new Date(now().getTime() - RUN_QUIET_MS).toISOString(),
-    limit: SWEEP_RUNS_MAX,
-  });
-  let failed = 0;
-  for (const { workspaceId, runId } of due)
-    try {
+export function reconcileWorkflowRuns(
+  options: { budgetMs?: number; now?: () => Date } = {},
+): Promise<ReconcileReport> {
+  const now = options.now ?? (() => new Date());
+  return reconcileRuns({
+    budgetMs: options.budgetMs,
+    due: () =>
+      dueWorkflowRuns(getDatabase(), {
+        olderThan: new Date(now().getTime() - RUN_QUIET_MS).toISOString(),
+        limit: SWEEP_RUNS_MAX,
+      }),
+    async look({ workspaceId, runId }) {
       await workflowEngineFor(workspaceId).advance(runId);
       // A run that waits is marked as looked at, so the next sweep takes the runs that waited longer first.
       await createWorkflowRunsRepository(getDatabase(), workspaceId).lockRun(
         runId,
         (lock) => lock.touch(),
       );
-    } catch {
-      failed += 1;
-    }
-  return { looked: due.length, failed };
+    },
+  });
 }

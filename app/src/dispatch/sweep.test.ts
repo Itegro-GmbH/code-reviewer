@@ -85,9 +85,12 @@ function setup(
       checked: 0,
     })),
     retryWriteTokens: vi.fn<() => Promise<void>>(async () => undefined),
-    reconcileRuns: vi.fn<() => Promise<{ looked: number; failed: number }>>(
-      async () => ({ looked: 0, failed: 0 }),
-    ),
+    reconcileRuns: vi.fn<
+      (options?: { budgetMs?: number }) => Promise<{
+        looked: number;
+        failed: number;
+      }>
+    >(async () => ({ looked: 0, failed: 0 })),
     info: vi.fn<(line: string) => void>(),
     error: vi.fn<(line: string) => void>(),
   };
@@ -698,6 +701,26 @@ describe("the workflow runs in a run of the sweep", () => {
 
     expect(t.reconcileRuns).toHaveBeenCalledOnce();
     expect(report.failedSteps).toEqual([]);
+  });
+
+  // #844-T281
+  it("gives them a time budget like the check runs", async () => {
+    const t = setup({ capabilities: FACTORY });
+
+    await t.sweep.run();
+
+    expect(t.reconcileRuns).toHaveBeenCalledWith({ budgetMs: 40_000 });
+  });
+
+  // #844-T282
+  it("names the step when the reconciler throws, and still does the steps after it", async () => {
+    const t = setup({ capabilities: FACTORY });
+    t.reconcileRuns.mockRejectedValueOnce(new Error("the database is down"));
+
+    const report = await t.sweep.run();
+
+    expect(report.failedSteps).toEqual(["workflow_runs"]);
+    expect(t.cleanup).toHaveBeenCalledOnce();
   });
 
   // #844-T261

@@ -7,7 +7,12 @@ import type {
   StoredImplementerSession,
   StoredImplementerTurn,
 } from "../db/repositories/implementer-repository.ts";
-import { costOfResult, outcomeOfTurn, type EndedTurn } from "./turn-facts.ts";
+import {
+  costOfResult,
+  estimateCost,
+  outcomeOfTurn,
+  type EndedTurn,
+} from "./turn-facts.ts";
 
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
@@ -95,6 +100,7 @@ describe("the outcome of a turn", () => {
     expect(outcomeOfTurn(ended(), 999)).toEqual({
       ok: true,
       costMicroUsd: 250_000,
+      costBasis: "reported",
       output: {
         summary: "Done.",
         costUsd: 0.25,
@@ -262,5 +268,111 @@ describe("the outcome of a turn", () => {
       ok: true,
       output: { commits: [SHA_B], headCommit: "", pushed: false },
     });
+  });
+
+  // #844-T271
+  it("never lets a result field stand in for a fact: a profile that may not push has no branch, whatever the agent named a field", () => {
+    const withBranch = {
+      type: "object" as const,
+      required: ["branch"],
+      properties: { branch: { type: "string" }, summary: { type: "string" } },
+    };
+    const outcome = outcomeOfTurn(
+      ended({
+        turn: turn({
+          profile: { ...turn().profile!, canPush: false },
+          resultSchema: withBranch,
+          resultValue: { branch: "main", summary: "Done." },
+        }),
+      }),
+      0,
+    );
+
+    expect(outcome).toMatchObject({ ok: true });
+    expect((outcome as { output: object }).output).toEqual({
+      summary: "Done.",
+      costUsd: 0.25,
+    });
+    // With the right to push, the platform's branch is the one that is there.
+    const pushing = outcomeOfTurn(
+      ended({
+        turn: turn({
+          resultSchema: withBranch,
+          resultValue: { branch: "main" },
+        }),
+      }),
+      0,
+    );
+    expect(pushing).toMatchObject({
+      output: { branch: "workflow/run-1/work" },
+    });
+  });
+
+  // #844-T272
+  it("prices a turn whose cost is not reported by its token counts, never above the cap", () => {
+    const unreported = (promptTokens: number, completionTokens: number) =>
+      ended({
+        jobResult: { usage: { costUsd: null, promptTokens, completionTokens } },
+        price: { inputPerMillion: 3, outputPerMillion: 15 },
+      });
+
+    expect(outcomeOfTurn(unreported(100_000, 10_000), 1_000_000)).toMatchObject(
+      { ok: true, costMicroUsd: 450_000, costBasis: "estimated" },
+    );
+    expect(
+      outcomeOfTurn(unreported(1_000_000, 100_000), 1_000_000),
+    ).toMatchObject({ costMicroUsd: 1_000_000, costBasis: "estimated" });
+    expect(
+      outcomeOfTurn(
+        ended({
+          jobStatus: "failed",
+          jobErrorCode: "timeout",
+          jobResult: {
+            usage: {
+              costUsd: null,
+              promptTokens: 1000,
+              completionTokens: 1000,
+            },
+          },
+          price: { inputPerMillion: 1, outputPerMillion: 1 },
+        }),
+        777,
+      ),
+    ).toMatchObject({ ok: false, costMicroUsd: 777, costBasis: "estimated" });
+  });
+
+  // #844-T273
+  it("charges the cap when the tokens or the price are missing, and the reported cost when there is one", () => {
+    const price = { inputPerMillion: 3, outputPerMillion: 15 };
+    const tokens = { promptTokens: 10, completionTokens: 10 };
+
+    for (const patch of [
+      { jobResult: { usage: { costUsd: null } }, price },
+      { jobResult: { usage: { costUsd: null, ...tokens } } },
+      {
+        jobResult: {
+          usage: { costUsd: null, promptTokens: 1.5, completionTokens: 1 },
+        },
+        price,
+      },
+      {
+        jobResult: {
+          usage: { costUsd: null, promptTokens: -1, completionTokens: 1 },
+        },
+        price,
+      },
+    ])
+      expect(outcomeOfTurn(ended(patch), 777_000)).toMatchObject({
+        costMicroUsd: 777_000,
+        costBasis: "limit",
+      });
+    expect(
+      outcomeOfTurn(
+        ended({ jobResult: { usage: { costUsd: 0.1, ...tokens } }, price }),
+        777_000,
+      ),
+    ).toMatchObject({ costMicroUsd: 100_000, costBasis: "reported" });
+    expect(estimateCost({ usage: tokens }, price)).toBe(180);
+    expect(estimateCost({ usage: tokens }, undefined)).toBeNull();
   });
 });
