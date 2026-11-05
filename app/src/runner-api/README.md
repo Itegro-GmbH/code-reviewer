@@ -154,8 +154,11 @@ holds a job is the **lease token**.
 A runner on a customer's own machine does not hold `RUNNER_TOKEN`. It registers with a token a member of its workspace made and then sends
 `Authorization: Bearer crc_...`, a credential of its own (`src/runner-fleet/README.md`, `src/runner-api/registration.ts`, `contracts/runner-registration.v1.json`). `claim` looks
 at the form of the header first: a `crc_` credential takes the runner's path (unknown, revoked or blank is the same `401 RUNNER_UNAUTHORIZED`;
-a runner below `RUNNER_MIN_BASE_VERSION` is `426 RUNNER_UPDATE_NEEDED`) and never the shared one. The call sets the runner's `last seen`. In this
-part such a claim answers 204; the routing of jobs to it is the next part of the same issue. No other call of this API takes a runner credential yet.
+a runner below `RUNNER_MIN_BASE_VERSION` is `426 RUNNER_UPDATE_NEEDED`) and never the shared one. The call sets the runner's `last seen`. Such a claim names the
+engine `implementer` and takes the turns of runner environments of its workspace whose labels it has and whose harness it announces as ready
+(`docs/runner.md`, "Routing"). `heartbeat`, `complete`, `release` and `steps` take the credential for a job of its own workspace (`404 RUNNER_JOB_NOT_FOUND`
+for any other); the Dispatcher's calls (`vm`, the job state, `version`) and every other claim take the shared token alone. A claim without a runner
+credential never takes a turn of a runner environment (`db/repositories/jobs-claim.ts`).
 
 ## The lease token
 

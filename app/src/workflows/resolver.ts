@@ -16,6 +16,10 @@ export type ProfileVersionFacts = {
   canPush: boolean;
   /** The result schema the version brings; a step that declares none yields this one. */
   defaultResult?: ResultSchema;
+  /** Whether the version's model is a managed one (an entry of the catalog, on the platform's key), as opposed to one of the workspace's own key (#854). */
+  managedModel?: boolean;
+  /** The harness the version runs with (#854); left out: OpenCode, the only one profiles know today. */
+  harness?: string;
 };
 
 export type ProfileInfo = {
@@ -29,7 +33,11 @@ export type ProfileInfo = {
   facts: Readonly<Record<number, ProfileVersionFacts>>;
 };
 
-export type EnvironmentInfo = { name: string };
+export type EnvironmentInfo = {
+  name: string;
+  /** #854: a runner environment is a customer's runner with labels; left out: a platform VM. */
+  kind?: "hosted" | "runner";
+};
 
 export type WorkflowResolver = {
   profiles(): readonly ProfileInfo[];

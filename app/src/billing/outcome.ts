@@ -93,6 +93,8 @@ export const ERROR_CODE_CLASSES = {
   pull_request_draft: "charged",
   review_kind_changed: "charged",
   no_capable_runner: "free",
+  no_runner_available: "free",
+  runner_needs_own_key: "free",
   dynamic_review_disabled: "free",
   command_removed: "charged",
   dispatch_unavailable: "free",

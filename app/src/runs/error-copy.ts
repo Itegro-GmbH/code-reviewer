@@ -45,6 +45,10 @@ export const errorCopy = (
     "The project's review kind was changed before this run could start, so the waiting run was cancelled.",
   no_capable_runner:
     "No runner that can run this kind of review picked up the run within the time limit, so it was cancelled. It will run again on the next push or review request.",
+  runner_needs_own_key:
+    "This run would use the operator's key on a runner, which is not allowed. Nothing was charged.",
+  no_runner_available:
+    "No runner of the workspace with the labels this run asks for picked it up within the time limit, so it was cancelled. Nothing was charged.",
   dispatch_unavailable:
     "No worker picked up this run within the time limit, so it was stopped. The service that starts workers may be down or fully busy. It will run again on the next push or review request.",
   dynamic_review_disabled:
@@ -328,6 +332,10 @@ export const turnErrorCopy = (
   // The table above promises a new run on the next push or review request; a task is never run again by itself.
   no_capable_runner:
     "No worker that can run tasks picked up this task within the time limit, so it was cancelled. Start it again later.",
+  runner_needs_own_key:
+    "A runner works with your own API key, and this task's model is one the platform pays for, so the task was not started and nothing was charged. Choose a model of your own key, or an environment that runs on a platform VM, and start the task again.",
+  no_runner_available:
+    "No runner of this workspace with the labels of the task's environment picked the task up within the time limit, so it was cancelled and nothing was charged. Start a runner that has the labels (see Runners), or choose another environment, and start the task again.",
   dispatch_unavailable:
     "No worker picked up this task within the time limit, so it was stopped. The service that starts workers may be down or fully busy. Start the task again later.",
   lease_lost:

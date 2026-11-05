@@ -68,6 +68,8 @@ export const FORM_COPY = {
   environmentHint:
     "A size and a setup script for this task. The script runs once in a container of its own, before the agent starts. Without a choice the standard applies. Environments are managed under",
   environmentLink: "Environments",
+  environmentRunnerNote:
+    "The task runs on a runner of the workspace that has the labels of this environment, with your own API key. It waits for one and ends with no_runner_available if none takes it in time.",
   environmentScriptNote:
     "This environment has a setup script. It runs as root in a container of its own with full internet access and no secrets, before the agent starts, and its time counts toward the task's time limit. If it fails, the task stops before the AI model is called and is not charged.",
   environmentNoNetworkNote: "The agent then works without internet access.",
@@ -321,6 +323,8 @@ const failureCopy = (
     "This environment does not exist any more. Choose another, or the standard.",
   IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED:
     "The size of this environment is no longer offered (1 vCPU leaves the agent no memory), so the task was not started and nothing was charged. Change the size under Environments to 2 vCPU or more, or choose another environment.",
+  IMPLEMENTER_RUNNER_NEEDS_OWN_KEY:
+    "A runner works with your own API key, and the model of this task is a managed one that runs on platform VMs only. Choose a model of your own key, or an environment that runs on a platform VM. Nothing was started and nothing was charged.",
   IMPLEMENTER_PROFILE_NOT_FOUND:
     "This profile does not exist any more, is archived, or has no such version. Choose another, or none.",
   IMPLEMENTER_MODEL_NOT_ALLOWED: hasReason(failure.reason)

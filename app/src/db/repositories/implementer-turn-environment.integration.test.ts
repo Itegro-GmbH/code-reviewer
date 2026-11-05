@@ -43,7 +43,7 @@ describe("the environment snapshot of a turn", () => {
         environment: {
           id: environment.id,
           name: environment.name,
-          vcpus: environment.vcpus,
+          vcpus: environment.vcpus as number,
           setupScript: environment.setupScript,
         },
       }),
@@ -98,7 +98,7 @@ describe("the environment snapshot of a turn", () => {
         environment: {
           id: environment.id,
           name: environment.name,
-          vcpus: environment.vcpus,
+          vcpus: environment.vcpus as number,
           setupScript: environment.setupScript,
         },
       }),

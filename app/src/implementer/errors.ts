@@ -43,6 +43,11 @@ export const IMPLEMENTER_ERROR_CODES = [
    * anything is written, so nothing is started and nothing is charged; the person changes the size in Environments. 422.
    */
   "IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED",
+  /**
+   * The environment is a runner's (#854) and the model is a managed one. A runner works with its owner's own API key: a managed model is
+   * the platform's and runs on platform VMs only. Refused before anything is written, so nothing is started and nothing is charged. 422.
+   */
+  "IMPLEMENTER_RUNNER_NEEDS_OWN_KEY",
   /** The profile named by the body is not one of this workspace (another workspace's looks the same), is archived, or has no such version. 404. */
   "IMPLEMENTER_PROFILE_NOT_FOUND",
   /** The model is not one the claim would run (`reason` says why). 422. */
@@ -72,6 +77,7 @@ export const IMPLEMENTER_ERROR_STATUS: Record<
   IMPLEMENTER_REQUEST_REUSED: 409,
   IMPLEMENTER_ENVIRONMENT_NOT_FOUND: 404,
   IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED: 422,
+  IMPLEMENTER_RUNNER_NEEDS_OWN_KEY: 422,
   IMPLEMENTER_PROFILE_NOT_FOUND: 404,
   IMPLEMENTER_MODEL_NOT_ALLOWED: 422,
   EXCEEDS_OPERATOR_MAXIMUM: 422,

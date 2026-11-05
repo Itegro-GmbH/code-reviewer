@@ -52,6 +52,94 @@ POST /api/w/:ws/runners/tokens   ->  token crt_... (1 hour, once, hash kept)
 - **Two doors.** The shared `RUNNER_TOKEN` (the Dispatcher's, and the poll mode's) and a runner credential are different secrets; a request that carries a
   `crc_` credential takes the runner's path and never the shared one, and the other way round.
 
+### Environments of the kind `runner`
+
+An environment is either `hosted` (a VM of the platform: a size, a setup script and a network rule, as before) or `runner`: **labels instead of all
+three**. A runner environment names at least one and at most twenty labels (lower case, `[a-z0-9][a-z0-9._:-]{0,39}`); a size, a script or a network
+rule in its body is refused with the field's name, not silently dropped. Size, script and network are the runner's own business (decision 8). Hosted
+environments change in no way; a body without a `kind` is hosted, as every body was before.
+
+The turn copies the kind and the labels with the rest of the environment (`implementer_turns.environment_kind`, `environment_labels`), so editing or
+deleting the environment touches no turn, and the claim routes by the turn's own row.
+
+### Routing
+
+- **Who takes a runner turn.** Only a runner of the **same workspace** that has **every label** of the environment, announces the harness of the profile
+  **ready** (today always `opencode`: profiles know no other harness) and is not below the minimum base version. A runner without a ready OpenCode gets
+  nothing; one below the minimum gets `426 RUNNER_UPDATE_NEEDED`. The runner claims with its credential and `engines: ["implementer"]`; it can claim neither
+  a review nor a split claim nor a job by id. The claim is the ordinary claim of a turn (the same input, the model door and the key behind it as the
+  Dispatcher's Worker gets it), so a runner's turn is built exactly like a hosted one. Its calls about the job (`heartbeat`, `complete`, `release`,
+  `steps`) take the credential too, for a job of its own workspace only (`404 RUNNER_JOB_NOT_FOUND` for any other); the Dispatcher's calls (`vm`, the
+  job state) take the shared token alone.
+- **Who never does.** A **hosted job never goes to a customer's runner**, and a **runner turn never goes to the Dispatcher or to the shared token**: the
+  claim statement itself excludes the turns of runner environments from every claim that is not a runner's, and the dispatch (the signed wake-up call, its
+  rows, its listings and its sweep) skips them, so the Dispatcher is not woken for a job it cannot take.
+- **Waiting.** A turn that waits for a runner shows **"Waiting for a runner with labels gpu, linux"** on the run page. After `RUNNER_WAIT_DEADLINE_MINUTES`
+  (default 30) without a claim it ends **cancelled with `no_runner_available`**, free: no attempt, no credential, no charge, and it is not run again by
+  itself. This pass runs wherever the queue expires jobs (every claim, the sweep), so it works in poll mode too. A busy pool of other runners does not
+  delay it: the wait is for _these labels_.
+- **No operator key on a runner** (decision 2). A runner environment needs a model of the workspace's **own key**. Starting a task with a managed model
+  (a catalog entry) in a runner environment is refused with `IMPLEMENTER_RUNNER_NEEDS_OWN_KEY` (422) before a session, a turn or a job exists; a workspace
+  without its own key for the model's provider is refused by the rule every task meets. The claim holds the same line: a runner turn whose selection would
+  be managed ends `runner_needs_own_key` before a key or a credential exists.
+
+### Validator rules
+
+The validator of workflows (`POST .../workflows/validate`, and every save) knows the kind of each environment and, for each profile version it runs, whether its
+model is managed and which harness it runs with:
+
+| Code                   | When                                                                                                                                   |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `runner_needs_own_key` | An agent step runs a profile with a **managed model** in an environment of the kind `runner`. Managed models run on platform VMs only. |
+| `harness_needs_runner` | An agent step runs a profile whose **harness is not OpenCode** in an environment that is not a runner's.                               |
+
+Profiles know only OpenCode today. The field `harness` is accepted in a profile document (`"opencode"` and nothing else, no other value is a harness a profile
+can name), nothing is stored for it, and the second rule is prepared for the first harness a runner announces; this change adds none.
+
+### Environments of the kind `runner`
+
+An environment is either `hosted` (a VM of the platform: a size, a setup script and a network rule, as before) or `runner`: **labels instead of all
+three**. A runner environment names at least one and at most twenty labels (lower case, `[a-z0-9][a-z0-9._:-]{0,39}`); a size, a script or a network
+rule in its body is refused with the field's name, not silently dropped. Size, script and network are the runner's own business (decision 8). Hosted
+environments change in no way; a body without a `kind` is hosted, as every body was before.
+
+The turn copies the kind and the labels with the rest of the environment (`implementer_turns.environment_kind`, `environment_labels`), so editing or
+deleting the environment touches no turn, and the claim routes by the turn's own row.
+
+### Routing
+
+- **Who takes a runner turn.** Only a runner of the **same workspace** that has **every label** of the environment, announces the harness of the profile
+  **ready** (today always `opencode`: profiles know no other harness) and is not below the minimum base version. A runner without a ready OpenCode gets
+  nothing; one below the minimum gets `426 RUNNER_UPDATE_NEEDED`. The runner claims with its credential and takes the engine `implementer` only: not a
+  review, not a split claim, not a job by id. The claim is the ordinary claim of a turn (the same input, the key and the model entry as the Dispatcher's
+  Worker gets them), so a runner's turn is built exactly like a hosted one. Its calls about the job (`heartbeat`, `complete`, `release`, `steps`) take the
+  credential too, for a job of its own workspace only (`404 RUNNER_JOB_NOT_FOUND` for any other); the Dispatcher's calls (`vm`, the job state) take the
+  shared token alone.
+- **Who never does.** A **hosted job never goes to a customer's runner**, and a **runner turn never goes to the Dispatcher or to the shared token**: the
+  claim statement itself excludes the turns of runner environments from every claim that is not a runner's, and the dispatch (the signed wake-up call, its
+  rows, its listings and its sweep) skips them, so the Dispatcher is not woken for a job it cannot take.
+- **Waiting.** A turn that waits for a runner shows **"Waiting for a runner with labels gpu, linux"** on the run page. After `RUNNER_WAIT_DEADLINE_MINUTES`
+  (default 30) without a claim it ends **cancelled with `no_runner_available`**, free: no attempt, no credential, no charge, and it is not run again by
+  itself. This pass runs wherever the queue expires jobs (every claim, the sweep), so it works in poll mode too. A busy pool of other runners does not
+  delay it: the wait is for _these labels_.
+- **No operator key on a runner** (decision 2). A runner environment needs a model of the workspace's **own key**. Starting a task with a managed model
+  (a catalog entry) in a runner environment is refused with `IMPLEMENTER_RUNNER_NEEDS_OWN_KEY` (422) before a session, a turn or a job exists; a workspace
+  without its own key for the model's provider is refused by the rule every task meets. The claim holds the same line: a runner turn whose selection would
+  be managed ends `runner_needs_own_key` before a key or a credential exists.
+
+### Validator rules
+
+The validator of workflows (`POST .../workflows/validate`, and every save) knows the kind of each environment and, for each profile version it runs, whether
+its model is managed and which harness it runs with:
+
+| Code                   | When                                                                                                                                   |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `runner_needs_own_key` | An agent step runs a profile with a **managed model** in an environment of the kind `runner`. Managed models run on platform VMs only. |
+| `harness_needs_runner` | An agent step runs a profile whose **harness is not OpenCode** in an environment that is not a runner's.                               |
+
+Profiles know only OpenCode today. The field `harness` is accepted in a profile document (`"opencode"` and nothing else: no other value is a harness a profile
+can name), nothing is stored for it, and the second rule is prepared for the first harness a runner announces; this change adds none.
+
 ## Spikes R0 (#853)
 
 R0 settles two questions of the plan on a real VM, with no real model, no real key and no subscription:

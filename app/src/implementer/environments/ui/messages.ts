@@ -54,6 +54,17 @@ export const PAGE_COPY = {
   script: "Setup script",
   scriptHint:
     "The script runs once when a task starts, as root in a container of its own with full internet access and no secrets, in the repository's folder (bash, with -e: a failing command ends it; a first line starting with #! picks another interpreter). What it installs, including the images its Docker pulls, is what the agent starts with; the agent has no internet access. A script that fails or runs longer than 15 minutes stops the task before the AI model is called, and the task is not charged. Changes it makes to files tracked by git are undone before the agent starts. The text is stored as written and shown to every member. Keep secrets out of it: there is no secrets field.",
+  kind: "Runs on",
+  kindHint:
+    "A platform VM is started for each task. A runner is a machine of your own that takes the task: it needs every label you list, and runs the task with your own API key.",
+  kindHosted: "A platform VM",
+  kindRunner: "A runner of the workspace",
+  labels: "Labels",
+  labelsHint:
+    "Comma separated, at least one. A runner of this workspace that has every one of these labels and announces the harness of the profile can take the task. Lower case letters, digits and . _ : -, up to 40 characters each. Size, setup script and network are the runner's own.",
+  labelsShown: "Needs a runner with the labels",
+  runnerNote:
+    "A task with this environment waits for a runner of the workspace and ends with no_runner_available if none takes it in time. It needs your own API key: a managed model runs on platform VMs only.",
   network: "Network",
   networkHint:
     "This setting applies to the agent, after the setup script is done: the setup script always has full internet access, whatever you choose here. The agent has no way out that does not pass a proxy, which checks the host name of every request; IP addresses, names that resolve to private addresses and ports other than 80 and 443 are always refused.",
@@ -105,6 +116,17 @@ const FIELD_COPY: Record<
     required: "List at least one host, or choose another network setting.",
     invalid: `A line is not a host name. Write names like registry.npmjs.org or *.pythonhosted.org: letters, digits, hyphens and dots, at least two parts, no IP address, port, path or scheme.`,
     too_long: `A list has at most ${NETWORK_HOSTS_MAX} hosts.`,
+  },
+  kind: {
+    required: "Choose where the task runs.",
+    invalid: "Choose one of the two ways to run.",
+    too_long: "Choose one of the two ways to run.",
+  },
+  labels: {
+    required: "Enter at least one label.",
+    invalid:
+      "A label is lower case letters, digits and . _ : - up to 40 characters, starting with a letter or a digit. Separate labels with commas.",
+    too_long: "A runner environment names at most 20 labels.",
   },
   setupScript: {
     required: "Enter the script or leave the field empty.",

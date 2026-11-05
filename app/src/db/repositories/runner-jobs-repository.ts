@@ -127,6 +127,8 @@ export type ExpiryReport = {
   timedOut: number;
   /** Waiting Dynamic jobs no capable runner claimed within the deadline (#195). */
   noCapableRunner: number;
+  /** Waiting turns of runner environments no runner of the workspace took within the deadline (#854). */
+  noRunnerAvailable: number;
 };
 
 export type RunnerJobsRepositoryOptions = {
@@ -309,6 +311,11 @@ export type ClaimOptions = {
    * (`noteSupersede`).
    */
   acceptsSupersede?: boolean;
+  /**
+   * #854: the claim is a customer's runner's. It takes only the turns of runner environments of `workspaceId` whose labels are all in
+   * `labels`, and never a job of another kind. Without it the claim never takes a turn of a runner environment.
+   */
+  customerRunner?: { workspaceId: string; labels: readonly string[] };
 };
 
 /** Which running jobs an attempt-losing statement applies to. */
@@ -585,6 +592,55 @@ export function createRunnerJobsRepository(
     return Number(result.numUpdatedRows);
   }
 
+  /** #854: the job is not the turn of a runner environment. */
+  function notARunnerTurn(eb: ExpressionBuilder<Database, "jobs">) {
+    return eb.not(isARunnerTurn(eb));
+  }
+
+  function isARunnerTurn(eb: ExpressionBuilder<Database, "jobs">) {
+    return eb.exists(
+      eb
+        .selectFrom("implementer_turns")
+        .select("implementer_turns.id")
+        .whereRef("implementer_turns.job_id", "=", "jobs.id")
+        .where("implementer_turns.environment_kind", "=", "runner"),
+    );
+  }
+
+  /**
+   * #854: a turn of a runner environment waits for a runner of its workspace that has its labels. One that no runner took within the
+   * deadline (`noRunnerAvailableMs`, 30 minutes by default) is cancelled with the stable code `no_runner_available`: free, without an
+   * attempt and without a credential, and it is not started again by itself. The pass of `no_capable_runner` leaves these turns to
+   * this one, because a busy pool of other runners says nothing about the labels this turn asks for.
+   */
+  async function cancelUnservedRunnerTurns(
+    executor: Kysely<Database>,
+    current: Date,
+  ): Promise<number> {
+    const timestamp = formatTimestamp(current);
+    const waitedBefore = formatTimestamp(
+      new Date(current.getTime() - limits.noRunnerAvailableMs),
+    );
+    const result = await executor
+      .updateTable("jobs")
+      .set({
+        status: "cancelled",
+        error_code: "no_runner_available" satisfies JobErrorCode,
+        finished_at: timestamp,
+        updated_at: timestamp,
+      })
+      .where("status", "=", "queued")
+      .where("review_kind", "=", "implementer")
+      .where("attempts", "=", 0)
+      .where("created_at", "<=", waitedBefore)
+      .where("run_after", "<=", waitedBefore)
+      .where(isARunnerTurn)
+      .executeTakeFirst();
+    const cancelled = Number(result.numUpdatedRows);
+    if (cancelled > 0) await idleSessionsOfEndedTurns(executor, timestamp);
+    return cancelled;
+  }
+
   /**
    * #195 (finding 1): a Dynamic job no capable runner claims within the deadline would wait forever (#752: so would a turn of
    * the Implementer, which only a runner with its own engine claims),
@@ -620,6 +676,8 @@ export function createRunnerJobsRepository(
       })
       .where("status", "=", "queued")
       .where("review_kind", "in", ["dynamic", "implementer"])
+      // A turn of a runner environment waits for a runner of its workspace and has a deadline of its own (`cancelUnservedRunnerTurns`).
+      .where(notARunnerTurn)
       // A claimed job follows the lease/attempt policy, never this initial capability deadline.
       .where("attempts", "=", 0)
       .where("created_at", "<=", strandedBefore)
@@ -730,6 +788,10 @@ export function createRunnerJobsRepository(
     // A Dynamic job no runner can run must not wait forever (#195). After the two passes above on purpose (#752): a row whose
     // lease lapsed or whose runtime ran out is not `running` any more, so it is no sign of a live runner here.
     const noCapableRunner = await cancelStrandedDynamic(executor, current);
+    const noRunnerAvailable = await cancelUnservedRunnerTurns(
+      executor,
+      current,
+    );
     unknownCost.push(...(await closeRecordsOfEndedJobs(executor, timestamp)));
     // Only the jobs that are over: one that went back to the queue gets a new claim, and its VM must not be stopped.
     if (expiring.length > 0)
@@ -748,6 +810,7 @@ export function createRunnerJobsRepository(
       leaseExpired: lost.failed,
       timedOut,
       noCapableRunner,
+      noRunnerAvailable,
     };
   }
 
@@ -924,6 +987,9 @@ export function createRunnerJobsRepository(
               claim,
               reviewKinds,
               claimOptions.jobId,
+              claimOptions.customerRunner === undefined
+                ? undefined
+                : { customerRunner: claimOptions.customerRunner },
             );
             if (row === undefined) return null;
             // #498: read once per claim, for the first job that is taken (a claim that finds no job reads nothing). #499

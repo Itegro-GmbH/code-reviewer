@@ -95,6 +95,26 @@ describe("a profile document", () => {
       expect(problems(body)).toEqual([["", "wrong_type"]]);
   });
 
+  // #854-T194
+  it("takes the harness opencode, the only one a profile can name today, and refuses any other", () => {
+    expect(validateProfile(profile({ harness: "opencode" })).valid).toBe(true);
+    expect(validateProfile(profile({ harness: undefined })).valid).toBe(true);
+
+    const other = validateProfile(profile({ harness: "claude-code" }));
+    const notText = validateProfile(profile({ harness: 3 }));
+
+    expect(other.errors).toEqual([
+      expect.objectContaining({
+        path: "/harness",
+        code: "invalid_value",
+        available: ["opencode"],
+      }),
+    ]);
+    expect(notText.errors).toEqual([
+      expect.objectContaining({ path: "/harness", code: "wrong_type" }),
+    ]);
+  });
+
   // #843-T05
   it("refuses a field the format does not have and lists those that exist", () => {
     const result = validateProfile(profile({ push: true }));
@@ -111,6 +131,7 @@ describe("a profile document", () => {
           "costLimitCents",
           "canPush",
           "defaultResult",
+          "harness",
         ],
       }),
     ]);

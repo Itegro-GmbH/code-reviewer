@@ -65,7 +65,8 @@ function notifyingRunnerQueueFunction(
         report.requeued +
           report.leaseExpired +
           report.timedOut +
-          report.noCapableRunner >
+          report.noCapableRunner +
+          report.noRunnerAvailable >
         0
       )
         safely(() => notify.change());
