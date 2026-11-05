@@ -308,3 +308,19 @@ def test_the_first_message_of_a_turn_can_be_a_list_of_parts() -> None:
     assert sent[0]["parts"] == parts
     assert sent[1]["parts"] == [{"type": "text", "text": "and again"}]
     del engine
+
+
+# #840-T82
+def test_the_import_is_paid_from_the_work_window_and_never_from_the_grace_of_the_end() -> None:
+    """The ledger of the turn runs on the job's limit less the grace kept for the end of the turn
+    (`session.GRACE_SECONDS`), so the box of the import cannot be longer than what is left of that
+    window; the sums of the end (`test_implementer_session_parts.py`) do not include it."""
+    from code_reviewer_runner.implementer.agent import IMPORT_SECONDS
+    from code_reviewer_runner.implementer.session import GRACE_SECONDS, deadline_seconds
+
+    shortest = deadline_seconds(60.0, 0.0)  # the shortest time limit a job may have
+    _, place, _ = start(input=ResumeInput(snapshot(), None), seconds=shortest)
+
+    assert shortest < IMPORT_SECONDS, "a short job has less than the full box"
+    assert place.commands[0][2] <= shortest
+    assert deadline_seconds(3600.0, 0.0) == 3600.0 - GRACE_SECONDS

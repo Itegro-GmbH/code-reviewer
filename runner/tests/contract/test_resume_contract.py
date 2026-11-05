@@ -3,9 +3,9 @@
 """The stored session of a follow-up turn from the runner's side (#840).
 
 The app checks the same schema against its own reading (`resume-session-contract.test.ts`,
-`implementer-contract.test.ts`); here the other half: the examples are valid, the runner's reading of
-`implementer.resume` gives the schema's verdict, the words the runner reports are the schema's, the
-headers its client reads are the ones the schema requires, and the report it builds is valid.
+`implementer-contract.test.ts`); here the other half: the examples are valid, the runner's reading
+of `implementer.resume` gives the schema's verdict, the words the runner reports are the schema's,
+the headers its client reads are the ones the schema requires, and the report it builds is valid.
 """
 
 import json

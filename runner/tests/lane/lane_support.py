@@ -89,6 +89,7 @@ from code_reviewer_runner.implementer.reader import (
     ReaderAccess,
     ReaderSeams,
 )
+from code_reviewer_runner.implementer.resume_session import ResumeInput
 from code_reviewer_runner.implementer.session import ImplementerSession, SessionSeams
 from code_reviewer_runner.implementer.setup_container import (
     SETUP_CONTAINER_NAME,
@@ -102,6 +103,7 @@ from code_reviewer_runner.implementer.turn_result import TurnResult
 from code_reviewer_runner.job import (
     ImplementerEnvironment,
     ImplementerInput,
+    ImplementerResume,
     parse_implementer_input,
 )
 from git_support import TOKEN, Origin, raw, system_git
@@ -392,12 +394,16 @@ def implementer_job(
     time_limit: int = 3600,
     max_cost_usd: float | None = None,
     instruction: str = INSTRUCTION,
+    resume: Mapping[str, Any] | None = None,
 ) -> ImplementerInput:
-    """The contract's example job with the provider, model and cost policy of the lane."""
+    """The contract's example job with the provider, model and cost policy of the lane. With
+    `resume`, the job is a follow-up turn (#840)."""
     document: dict[str, Any] = json.loads(EXAMPLE.read_text(encoding="utf-8"))
     entry = ENTRIES[family]
     spec = document["implementer"]
     spec["instruction"] = instruction
+    if resume is not None:
+        spec["resume"] = dict(resume)
     spec["limits"]["timeLimitSeconds"] = time_limit
     spec["cost"] = dict(MANAGED)
     model_entry = spec["modelEntry"]
@@ -432,8 +438,12 @@ class Turned:
     scratch: Path
     volume: str
     result: TurnResult = field(init=False)
-    # The messages the runner sent the engine: (session id, text of the one text part).
+    # The messages the runner sent the engine: (session id, text of the last text part, which is the
+    # instruction or the extra message; the first message of a follow-up turn has the preface in
+    # front of it, in `message_parts`).
     messages: list[tuple[str, str]] = field(default_factory=lambda: [])
+    # Every part of every message the runner sent: (session id, the parts as sent).
+    message_parts: list[tuple[str, list[dict[str, Any]]]] = field(default_factory=lambda: [])
     doors: list[LaneDoor] = field(default_factory=lambda: [])
     # The environment's setup step, when the turn had one.
     setup: EnvironmentSetup | None = None
@@ -552,6 +562,8 @@ def lane_workspace(
     origin_setup: Callable[[Origin], None] | None = None,
     disk_megabytes: int | None = None,
     origin_base: Path | None = None,
+    origin_of_earlier_turn: Origin | None = None,
+    resume: ImplementerResume | None = None,
 ) -> Generator[LaneWorkspace]:
     """The origin (a bare repository standing in for GitHub), the work volume, the stand-in of the
     Control container and the real reader; the workspace is prepared (the mirror on the reserve
@@ -561,7 +573,8 @@ def lane_workspace(
     # GitHub is not on the VM's disk. A run that fills the real disk of a VM names a directory on
     # another file system (a tmpfs that allows hooks: the origin refuses some pushes with one).
     stand_in = origin_base or scratch
-    origin = Origin(stand_in, git)
+    # A follow-up turn (#840) starts from the origin the earlier turn pushed to.
+    origin = origin_of_earlier_turn or Origin(stand_in, git)
     if seed is not None:
         seed(origin.seed)
         raw("add", "-A", cwd=origin.seed, git=git)
@@ -587,7 +600,7 @@ def lane_workspace(
         ReaderSeams(runtime=config.runtime, hostname=lambda: control, python=sys.executable),
     )
     workspace = GitWorkspace(
-        WorkspaceSpec(origin.url, TOKEN, "main", BRANCH),
+        WorkspaceSpec(origin.url, TOKEN, "main", BRANCH, resume),
         layout,
         IDENTITY,
         reader,
@@ -679,15 +692,23 @@ def lane_turn(
     memory_mb: int = 2048,
     setup_script: str | None = None,
     snapshot: SnapshotPump | None = None,
+    origin_of_earlier_turn: Origin | None = None,
+    resume: Mapping[str, Any] | None = None,
+    resume_input: ResumeInput | None = None,
 ) -> Generator[Turned]:
     """Run one whole turn to its result against a model that follows `script(repo)` (the path of
     the repository in the agent's container). With `setup_script`, the environment's script runs
     first in a Setup container (`run_environment_setup`, as `job_run` runs it) and the agent's
     container starts from the image it made; a script that fails raises: use `lane_environment`
-    for those."""
-    job = implementer_job(family, time_limit=time_limit, instruction=instruction)
+    for those.
+
+    A follow-up turn (#840) is `resume` (the job's `implementer.resume`), the
+    `origin_of_earlier_turn` it continues on and the `resume_input` the job host and the process
+    would have made of the stored session."""
+    job = implementer_job(family, time_limit=time_limit, instruction=instruction, resume=resume)
     port = slot_ports({}).proxy
     messages: list[tuple[str, str]] = []
+    message_parts: list[tuple[str, list[dict[str, Any]]]] = []
     doors: list[LaneDoor] = []
 
     def transport(
@@ -696,7 +717,8 @@ def lane_turn(
         if method == "POST" and body is not None and url.endswith("/message"):
             document = json.loads(body)
             session = url.rsplit("/session/", 1)[1].split("/", 1)[0]
-            messages.append((session, document["parts"][0]["text"]))
+            messages.append((session, document["parts"][-1]["text"]))
+            message_parts.append((session, document["parts"]))
         return session_module._http_request(method, url, body, headers, timeout)  # pyright: ignore[reportPrivateUsage]
 
     entry = ENTRIES[family]
@@ -708,6 +730,8 @@ def lane_turn(
                 origin_setup=origin_setup,
                 disk_megabytes=disk_megabytes,
                 origin_base=origin_base,
+                origin_of_earlier_turn=origin_of_earlier_turn,
+                resume=job.implementer.resume,
             )
         )
         config = lane.config
@@ -750,6 +774,7 @@ def lane_turn(
             environment={"RUNNER_DYNAMIC_MAX_COST_USD": limit},
             seams=SessionSeams(transport=transport),
             snapshot=snapshot,
+            resume=resume_input,
         )
         turned = Turned(
             config=config,
@@ -760,6 +785,7 @@ def lane_turn(
             scratch=scratch,
             volume=lane.volume,
             messages=messages,
+            message_parts=message_parts,
             doors=doors,
             setup=prepared,
         )
