@@ -193,6 +193,18 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   // runs turns.
   { route: "/api/w/[workspace]/runs/[id]/steps", class: "implementer" },
   { route: "/api/runners/v1/jobs/[id]/steps", class: "implementer" },
+  // A customer's own runner (#854): the exchange of a registration token, what the runner says about itself, the renewal of its
+  // credential; and, for a member of the workspace, the list, a registration token and the revoking of a runner.
+  { route: "/api/runners/v1/register", class: "implementer" },
+  { route: "/api/runners/v1/self", class: "implementer" },
+  { route: "/api/runners/v1/credential", class: "implementer" },
+  { route: "/api/w/[workspace]/runners", class: "implementer" },
+  { route: "/api/w/[workspace]/runners/tokens", class: "implementer" },
+  {
+    route: "/api/w/[workspace]/runners/[runnerId]/revoke",
+    class: "implementer",
+  },
+  { route: "/w/[workspace]/runners", class: "implementer" },
   { route: "/api/workers/v1/jobs/[id]/steps", class: "implementer" },
   // One part of the session snapshot of a turn, put by its Worker for the follow-up turns (#839).
   { route: "/api/workers/v1/jobs/[id]/session", class: "implementer" },

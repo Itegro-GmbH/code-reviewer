@@ -25,6 +25,10 @@ const MESSAGES: Record<RunnerApiErrorCode, string> = {
   RUNNER_INTERNAL_ERROR: "The request could not be handled.",
   WORKER_CREDENTIAL_INVALID: "A valid credential for this job is required.",
   RUNNER_JOB_ENDED: "The job was ended and cannot be continued.",
+  RUNNER_REGISTRATION_TOKEN_INVALID:
+    "The registration token is not valid. It may have been used or have expired.",
+  RUNNER_UPDATE_NEEDED:
+    "The runner is older than the minimum the app requires. Update it to get jobs.",
 };
 
 export function jsonResponse(
@@ -46,7 +50,11 @@ export function noContent(): Response {
 export function errorResponse(
   status: number,
   code: RunnerApiErrorCode,
-  extra: { fields?: FieldError[]; retryAfterSeconds?: number } = {},
+  extra: {
+    fields?: FieldError[];
+    retryAfterSeconds?: number;
+    minBaseVersion?: string;
+  } = {},
 ): Response {
   const body: ErrorResponse = {
     error: {
@@ -56,6 +64,9 @@ export function errorResponse(
       ...(extra.retryAfterSeconds === undefined
         ? {}
         : { retryAfterSeconds: extra.retryAfterSeconds }),
+      ...(extra.minBaseVersion === undefined
+        ? {}
+        : { minBaseVersion: extra.minBaseVersion }),
     },
   };
   return jsonResponse(

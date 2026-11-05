@@ -132,6 +132,7 @@ describe("the migrations of both epics", () => {
       "20261104160000_add_implementer_turn_profile",
       "20261105090000_create_implementer_session_snapshots",
       "20261105100000_add_implementer_turn_result",
+      "20261105120000_create_runners",
     ]);
   });
 
@@ -208,6 +209,8 @@ describe("starting the database", () => {
       "rate_limits",
       "refusal_notices",
       "repositories",
+      "runner_registration_tokens",
+      "runners",
       "secrets",
       "sessions",
       "setup_codes",

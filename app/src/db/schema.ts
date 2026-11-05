@@ -1278,6 +1278,45 @@ export interface ProfilesTable {
   archived_at: string | null;
 }
 
+/**
+ * A runner on a customer's own machine (#854): registered with a token of the workspace, it takes jobs of that workspace only. The
+ * credential is never stored, only its hash.
+ */
+export interface RunnersTable {
+  id: string;
+  workspace_id: string;
+  name: string;
+  /** One label on each line, lower case, sorted. */
+  labels: string;
+  /** The version of the base the runner provides, as it reported it (`1.2.3`). */
+  base_version: string;
+  /** JSON text: the harnesses it announces (version, ready) and its capabilities. */
+  manifest: string;
+  /** JSON text: the limits the runner works within, as it reported them. */
+  limits: string;
+  /** sha256 (hex) of the credential. */
+  credential_hash: string;
+  /** The hash a renewal replaced; accepted until the new credential is used once. */
+  previous_credential_hash: string | null;
+  created_at: string;
+  last_seen_at: string;
+  /** Set when a member revoked the runner. */
+  revoked_at: string | null;
+}
+
+/** A registration token of a workspace (#854): short lived, used once, kept as a hash. */
+export interface RunnerRegistrationTokensTable {
+  id: string;
+  workspace_id: string;
+  token_hash: string;
+  created_by: string;
+  created_at: string;
+  expires_at: string;
+  /** Set by the exchange that used the token, with the runner it made. */
+  used_at: string | null;
+  runner_id: string | null;
+}
+
 /** One saved version of a profile (#843). Immutable: the database refuses an update. */
 export interface ProfileVersionsTable {
   profile_id: string;
@@ -1337,6 +1376,8 @@ export interface Database {
   workflow_versions: WorkflowVersionsTable;
   profiles: ProfilesTable;
   profile_versions: ProfileVersionsTable;
+  runners: RunnersTable;
+  runner_registration_tokens: RunnerRegistrationTokensTable;
   plan_handoff_tokens: PlanHandoffTokensTable;
   model_catalog_entries: ModelCatalogEntriesTable;
   models_dev_providers: ModelsDevProvidersTable;

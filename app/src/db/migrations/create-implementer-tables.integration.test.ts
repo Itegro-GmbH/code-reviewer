@@ -61,7 +61,9 @@ async function rowsOfEveryOldTable(
       table.name === "workflows" ||
       table.name === "workflow_versions" ||
       table.name === "profiles" ||
-      table.name === "profile_versions"
+      table.name === "profile_versions" ||
+      table.name === "runners" ||
+      table.name === "runner_registration_tokens"
     )
       continue;
     const { rows } =

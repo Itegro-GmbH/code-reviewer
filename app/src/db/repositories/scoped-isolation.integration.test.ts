@@ -39,6 +39,7 @@ import { createBillingWorkspaceSettingsRepository } from "./billing-workspace-se
 import { createImplementerEnvironmentsRepository } from "./implementer-environments-repository.ts";
 import { createWorkflowsRepository } from "./workflows-repository.ts";
 import { createProfilesRepository } from "./profiles-repository.ts";
+import { createRunnersRepository } from "./runners-repository.ts";
 import { createImplementerRepository } from "./implementer-repository.ts";
 import { createImplementerSnapshotsRepository } from "./implementer-snapshots-repository.ts";
 import { createImplementerStepsRepository } from "./implementer-steps-repository.ts";
@@ -75,6 +76,7 @@ function reposOf(db: Kysely<Database>, workspaceId: string) {
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
     workflows: createWorkflowsRepository(db, workspaceId),
     agentProfiles: createProfilesRepository(db, workspaceId),
+    runners: createRunnersRepository(db, workspaceId),
     erasure: createWorkspaceErasureRepository(db, workspaceId),
   };
 }
@@ -504,7 +506,26 @@ async function seed(
     200,
   );
   if (!secondProfileVersion.ok) throw new Error("seeding failed");
+  // A runner on a customer's machine (#854) in every workspace: the other workspace's is there to be listed and revoked.
+  await db
+    .insertInto("runners")
+    .values({
+      id: `runner-${tag}`,
+      workspace_id: workspaceId,
+      name: `box ${tag}`,
+      labels: "linux",
+      base_version: "1.0.0",
+      manifest: '{"harnesses":{},"capabilities":[]}',
+      limits: "{}",
+      credential_hash: `hash-${tag}`,
+      previous_credential_hash: null,
+      created_at: "2026-11-05T08:00:00.000Z",
+      last_seen_at: "2026-11-05T08:00:00.000Z",
+      revoked_at: null,
+    })
+    .execute();
   return {
+    runnerId: `runner-${tag}`,
     environment: created.environment,
     workflow: secondVersion.workflow,
     agentProfile: secondProfileVersion.profile,
@@ -695,6 +716,18 @@ async function rowsOf(db: Kysely<Database>, workspaceId: string) {
       .where("workspace_id", "=", workspaceId)
       .orderBy("profile_id")
       .orderBy("version")
+      .execute(),
+    runners: await db
+      .selectFrom("runners")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("id")
+      .execute(),
+    runnerRegistrationTokens: await db
+      .selectFrom("runner_registration_tokens")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("id")
       .execute(),
     implementerTurnSteps: await db
       .selectFrom("implementer_turn_steps")
@@ -2143,6 +2176,31 @@ const CASES: Case[] = [
     run: (a, b) => a.agentProfiles.archive(b.agentProfile.id, 1000),
     expectAnswer: (answer) =>
       expect(answer).toEqual({ ok: false, reason: "not_found" }),
+  },
+  // runners (#854-T80): B's runners are not A's to list or revoke, and a token made by A is A's alone
+  {
+    name: "runners.list",
+    run: (a) => a.runners.list(),
+    expectAnswer: (answer, a) =>
+      expect(answer).toEqual([expect.objectContaining({ id: a.runnerId })]),
+  },
+  {
+    name: "runners.createToken",
+    run: (a) =>
+      a.runners.createToken(
+        {
+          tokenHash: "token-hash-a",
+          createdBy: "user-a",
+          expiresAt: new Date("2099-01-01T00:00:00.000Z"),
+        },
+        20,
+      ),
+    expectAnswer: (answer) => expect(answer).toMatchObject({ ok: true }),
+  },
+  {
+    name: "runners.revoke",
+    run: (a, b) => a.runners.revoke(b.runnerId),
+    expectAnswer: (answer) => expect(answer).toBe(false),
   },
   // runs
   {
