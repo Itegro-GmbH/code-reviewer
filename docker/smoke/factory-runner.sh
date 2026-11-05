@@ -22,9 +22,16 @@ case "$output" in
   *) fail "unexpected --version output: $output" ;;
 esac
 
-step "register and selftest are commands of it"
+step "register, selftest, config, credential and update are commands of it"
 docker run --rm "$image" register --help >/dev/null || fail "register --help failed"
 docker run --rm "$image" selftest --help >/dev/null || fail "selftest --help failed"
+docker run --rm "$image" config set --help >/dev/null || fail "config set --help failed"
+docker run --rm "$image" credential renew --help >/dev/null || fail "credential renew --help failed"
+docker run --rm "$image" update --help >/dev/null || fail "update --help failed"
+
+step "cosign, which verifies an update, is in it and is the pinned version"
+want=$(grep -m1 '"version"' "$here/../../runner/cosign-pin.json" | sed 's/.*"\([0-9][^"]*\)".*/\1/')
+docker run --rm --entrypoint cosign "$image" version 2>&1 | grep -q "$want" || fail "cosign is not in the image or not $want"
 
 step "config show reads the environment and never prints the credential"
 credential="crc_$(printf 'A%.0s' $(seq 1 43))"

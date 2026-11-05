@@ -216,6 +216,22 @@ THE SOFTWARE.
 When a pinned version changes, check that the license text and the copyright line above still
 match the license shipped in the new release, and regenerate the OpenCode snapshot.
 
+## cosign (the Factory-Runner image and its installer)
+
+The Factory-Runner image (`runner/Dockerfile.factory-runner`) carries one more prebuilt, unmodified
+upstream binary: cosign, which verifies the signature of an update before the runner uses it, and
+which the installer (`runner/install/install.sh`) fetches for the same purpose. It is named by an
+exact version, a source commit and a SHA-256 in `runner/cosign-pin.json`, and a download is accepted
+only when it matches the pin.
+
+- Package: cosign 3.1.3 (tag `v3.1.3`, pinned in `runner/cosign-pin.json`)
+- Source: https://github.com/sigstore/cosign, source commit `11926fa5bbbbde47e88fc006b625a17769b743b2`
+- License: Apache License, Version 2.0 (https://github.com/sigstore/cosign/blob/v3.1.3/LICENSE),
+  Copyright 2021 The Sigstore Authors. The binary is used unmodified as a separate program and the
+  license text is kept at the link above and in the project's `/licenses` folder of the image.
+- The statically linked Go modules of the binary are not audited one by one in this repository; the
+  review covers the license of cosign itself.
+
 ## Toolchain of the Worker image (Implementer)
 
 The agent of the Implementer builds and tests repositories inside the Worker container, so the image
@@ -459,6 +475,7 @@ packages inside OpenCode (`runner/opencode-bundled-licenses.json`, reviewed 2026
 | ---------- | ------- | ------- | ---------------------------------------- | -------------------------- |
 | `opencode` | 1.19.0  | MIT     | 733b2c627e5aec39cb33cc22373bdce33053ef2c | `runner/opencode-pin.json` |
 | `ripgrep`  | 14.1.1  | MIT     | 4649aa9700619f94cf9c66876e9549d83420e16c | `runner/ripgrep-pin.json`  |
+| `cosign`   | 3.1.3   | Apache-2.0 | 11926fa5bbbbde47e88fc006b625a17769b743b2 | `runner/cosign-pin.json` |
 | `git`      | 2.53.0  | GPL-2.0-only | 67ad42147a7acc2af6074753ebd03d904476118f | `runner/git-pin.json` |
 | `node`     | 24.22.2 | MIT     | f7f273a9bb6445f6f7fb6349105e7532972045fb | `runner/node-pin.json`     |
 | `pnpm`     | 10.17.0 | MIT     | 1a1a272fa4f5be459430cad677ffce946c99cd86 | `runner/pnpm-pin.json`     |
@@ -507,6 +524,13 @@ operator's own infrastructure and are never given to a customer or published, so
 duties of those licenses (source offer, relinking) are not triggered. The image is therefore not
 published to a public registry. If the image or a build were ever delivered to anyone outside Itegro
 GmbH, review these exceptions again first.
+
+The Factory-Runner image (R2, #855) is the one place where this changes: it is made to run on a
+customer's machine, so publishing it **is** delivering the image to someone outside Itegro GmbH, with
+the Worker image's copyleft packages in it. The workflow that would publish it
+(`.github/workflows/runner-image.yml`) therefore never runs by itself: it is started by hand and
+refuses to publish without the confirmation that this review was done. Until then no runner image is
+in any registry.
 
 ## Updating this file
 

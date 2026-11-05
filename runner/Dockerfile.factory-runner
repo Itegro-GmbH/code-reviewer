@@ -24,11 +24,23 @@
 # release**: a tag can move, and the runner can only tell a stale image from the right one by digest.
 # The build says so when it is not one. The build context is the folder `runner/` (nothing is
 # copied from it).
+#
+# `RUNNER_RELEASE` is the number of the release (the release workflow passes its run number): a whole
+# number that grows with every release, in the label `code-reviewer.runner.release`. The runner
+# updates itself only to a release with a higher number (docs/runner.md, "Updates").
+#
+# `cosign` is what the runner verifies an update with. It is the release asset of runner/cosign-pin.json,
+# fetched with its SHA-256 (the build fails when the download is another file); a test keeps these two
+# arguments equal to the pin.
 ARG WORKER_IMAGE=code-reviewer-runner-sandbox:local
 
 FROM ${WORKER_IMAGE} AS factory-runner
 ARG AGENT_IMAGE_REF=""
-LABEL org.opencontainers.image.title="Factory-Runner" \
+ARG RUNNER_RELEASE="0"
+ARG COSIGN_URL="https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-amd64"
+ARG COSIGN_SHA256="4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71"
+LABEL code-reviewer.runner.release="${RUNNER_RELEASE}" \
+      org.opencontainers.image.title="Factory-Runner" \
       org.opencontainers.image.description="Runs the jobs of a Code Reviewer workspace on this machine (factory-runner)" \
       org.opencontainers.image.source="https://github.com/Itegro-GmbH/code-reviewer" \
       org.opencontainers.image.licenses="LicenseRef-Proprietary"
@@ -39,6 +51,7 @@ LABEL org.opencontainers.image.title="Factory-Runner" \
 # jobs (`factory_runner/housekeeping.py`). The agent is not root of this container: it is a container
 # of its own, under Sysbox where there is one (docs/runner.md says what `runc` means instead).
 USER 0:0
+ADD --checksum=sha256:${COSIGN_SHA256} --chmod=0755 ${COSIGN_URL} /usr/local/bin/cosign
 RUN install -d -m 0755 /opt/code-reviewer \
     && printf '{"reference": "%s"}\n' "${AGENT_IMAGE_REF}" > /opt/code-reviewer/agent-image.json \
     && install -d -m 0700 /var/lib/factory-runner /work
