@@ -83,6 +83,17 @@ of the part, and the description of the whole file is in the headers of every pa
 `previousSummary` and `digest`, and the result's `implementer.resume` (`ImplementerResumeResult`) says whether the conversation was `imported` or the turn continued from a summary (`summary_only`, with a stable `reason`). `examples/worker-api/ResumeSessionQuery.json` and `ResumeSessionHeaders.json`,
 `examples/implementer/ImplementerResume.json` and `RunnerResult.json` are validated by all suites.
 
+
+## The snapshot calls of a customer's runner (#879)
+
+`RunnerSessionPartQuery`, `RunnerSessionPartResponse`, `RunnerResumeSessionQuery`, `RunnerResumeSessionHeaders` and `RunnerLeaseTokenHeader` in `runner-api.v1.json` describe `PUT /api/runners/v1/jobs/{id}/session` and
+`GET /api/runners/v1/jobs/{id}/resume-session?part=n`: the Worker API's two calls for a runner that holds the credential of its own (`Authorization: Bearer crc_...`, `runner-registration.v1.json`) and no per-job credential. The query, the
+answer and the headers say the same as `SessionPartQuery`, `SessionPartResponse`, `ResumeSessionQuery` and `ResumeSessionHeaders` of `worker-api.v1.json` (a test on each side holds the fields equal; only the descriptions differ); what is new is the
+lease token, which travels in the header `X-Lease-Token` because the body is raw bytes (`RunnerLeaseTokenHeader`), and the answers: `401 RUNNER_UNAUTHORIZED`, `404 RUNNER_JOB_NOT_FOUND` for a job of another workspace, one another runner
+holds or a hosted one, `409 RUNNER_LEASE_LOST`. The app lists the feature `runner_session_snapshot` in `KnownAppFeature` and a runner reads the list from `GET /api/runners/v1/version` with its own credential. The five examples
+(`examples/Runner*.json`) are validated by the app, the runner and the Dispatcher's copy of the types; the app holds its hand-written readings to the schema (`app/src/runner-api/runner-session-contract.test.ts`) and the runner
+the query it builds (`runner/tests/contract/test_snapshot_contract.py`).
+
 ## The job model entry contract
 
 `job-model-entry.v1.json` (#548) is written by the app (`app/src/models-dev/job-entry.ts`) and read by the runner
