@@ -47,6 +47,43 @@ def test_an_answer_without_the_field_is_not_a_cancel() -> None:
     assert parse_heartbeat(reply, "j-1").cancel_requested is False
 
 
+# #856-T45
+@pytest.mark.parametrize("estimate", [0.0412, None])
+def test_a_cancelled_subscription_turn_reports_the_basis_and_no_cost_of_ours(
+    estimate: float | None,
+) -> None:
+    subscription = {
+        **USAGE,
+        "model": "claude-sonnet-5-5",
+        "aiCalls": 0,
+        "costUsd": None,
+        "costBasis": "subscription",
+        "estimatedCostUsd": estimate,
+    }
+
+    async def scenario() -> None:
+        harness = advertising_harness()
+        harness.api.claims = [implementer_claim()]
+        harness.api.cancel_from = 1
+        await harness.start()
+        process = harness.launcher.processes[0]
+        process.printed_on_terminate = line(
+            ok=False, errorCode="runner_shutdown", usage=subscription, implementer=report()
+        )
+
+        await harness.clock.advance(30)
+        await settle()
+
+        assert harness.end is JobEnd.CANCELLED
+        result = harness.api.completions[0][2]
+        assert result["errorCode"] == "cancelled"
+        usage = result["usage"]
+        assert usage["costBasis"] == "subscription" and usage["estimatedCostUsd"] == estimate
+        assert usage["costUsd"] is None
+
+    run(scenario)
+
+
 # #891-T11
 def test_a_cancelled_turn_is_ended_and_reports_cancelled_with_what_it_pushed_and_cost() -> None:
     async def scenario() -> None:

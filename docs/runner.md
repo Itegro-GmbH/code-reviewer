@@ -730,7 +730,8 @@ The code is [`runner/src/code_reviewer_runner/implementer/claude_code/`](../runn
   of another uid (`reader.py`).
 - **Cost** of a subscription turn is an estimate: Claude Code's `total_cost_usd` is the list price of the usage, and the adapter takes
   it only when Claude Code priced **every** model of the turn from its list (`costBasis: list`); otherwise it is unknown, never a number.
-  The display is "≈ <amount> through a subscription", never billed, never added to our totals (the app side is a follow-up).
+  The display is "≈ <amount> through a subscription", never billed, never added to our totals. The app books it for the budget of a
+  workflow run (below, "Cost").
 
 ### The parts
 
@@ -784,19 +785,29 @@ queued for one that does.
 (`contracts/runner-api.v1.json`; the schema and the runner's parser refuse a job that mixes the two shapes). The app chooses no model,
 reads no key and records no selection for it; `maxBudgetUsd` is the smaller of the profile's cost limit and the operator's maximum, in
 dollars, and becomes `--max-budget-usd`: with no model door there is no ledger, so the budget and the job's clock are the only brakes.
+Claude Code counts the flag per process and every message of a turn is another process (the instruction, the extra message for a dirty
+tree, the reminder for a result), so the agent passes each message **what the earlier messages left** of the budget (the cap less their
+estimate, `ClaudeCodeAgent._budget_left`); a spent budget sends no further message (the extra messages are skipped, the first one
+cannot be). If an earlier message was not priced, the leftover is unknown and the turn sends one extra message at most (two messages
+in all, each with the whole cap).
 The login is never in a job: the job process reads it from the file the runner hands it by **path** (`FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE`,
 resolved from the runner's own configuration; a login that only the runner's environment holds is handed on in
 `CLAUDE_CODE_OAUTH_TOKEN`, and the runner's log masks it).
 
 **Cost.** The usage of such a turn has `costUsd: null`, `costBasis: "subscription"` and `estimatedCostUsd` (null when Claude Code did
-not price every model): an estimate, never billed. The app stores nothing of it yet (see the follow-ups).
+not price every model): an estimate, never billed. A turn a member cancels reports the same (the job host keeps the usage the process
+printed). The app keeps both fields (`parseUsage`); the AI price of the run is nothing (`costUsd` is null, so the run is settled as
+"AI cost unknown": only the minutes, never the AI price). The budget of a workflow run counts the estimate at API prices (0 when there
+is none) with the step cost basis `subscription` ("estimated, not billed" on the run page), not the cap with the basis `limit`; the
+`costUsd` fact of the step is that estimate. A turn of the harness that left no usage at all (killed) is booked at 0 as well. The
+estimate is never a charge and enters no total of billing.
 
 **Gates** (the token is visible inside the agent's container; the decision of the lead, which the owner may revise, is to accept that
 and to guard the exits):
 
 | Gate | Where | What |
 | ---- | ----- | ---- |
-| Push guard | `implementer/push_guard.py`, `GitWorkspace._login_secret_in` | Before a branch is pushed the runner reads what it adds beyond where the turn started (`git rev-list --objects` and `git cat-file --batch` in the mirror: commits, trees with their names, blobs, and the name of the branch) for the token and its spellings (`redaction.secret_forms`: as it is, URL-quoted, base64, base64url). Found: the branch gets the reason `login_secret` and is not pushed; the task's branch ends the turn `push_rejected`. Not read to the end (too large, a failed git, a timeout): `unchecked`, not pushed (it fails closed). Bounds: 300 s per read, a 64 MiB object list, 4 GiB of content. |
+| Push guard | `implementer/push_guard.py`, `GitWorkspace._login_secret_in` | Before a branch is pushed the runner reads what it adds beyond where the turn started (`git rev-list --objects` and `git cat-file --batch` in the mirror: commits, trees with their names, blobs, and the name of the branch) for the token and its spellings (`redaction.secret_forms`: as it is, URL-quoted, and base64 and base64url, with and without padding, at each of the three alignments the token can have inside a larger base64 text). Found: the branch gets the reason `login_secret` and is not pushed; the task's branch ends the turn `push_rejected`. Not read to the end (too large, a failed git, a timeout): `unchecked`, not pushed (it fails closed). Bounds: 300 s per read, a 64 MiB object list, 4 GiB of content. **It is a net, not a wall**: it finds the token and the spellings above, in plain text. It does not find the token hex-encoded, compressed (gzip, tar, a packed or zipped file), rot13 or otherwise shifted, reversed, or split over several lines or files. An agent that is told to hide the login can; the guard stops the accident and the lazy case, and the decision to accept the login in the agent's environment (follow-up 5) stands on the network gate, the owner's own device and the owner's own subscription. **Time**: the final push keeps 40 % of its seconds for the guard (`GUARD_SHARE`: 10 of the 25 s of a stop, 40 of the 100 s of a normal end); the fetch of a branch, the question to the lease and the push stop before that slice, and what the guard does not use goes back to the push of the last branch. So a stop (a cancelled run, a stopped Worker) or a slow fetch cannot leave the guard a second and turn committed work into `unchecked`. |
 | Redaction | `claude_code/agent.py`, `job_run.result_of` | The agent's `Redactor` knows the login: the step records, the turn's text and note are redacted in the agent; the job's secrets (the login included) are taken out of every text of the report (branch names, commit subjects, paths, the summary) and of the log line. Exact forms only for the facts of the report: a commit subject "fix authorization header" is not a secret. No snapshot export and no transcript volume exist for this harness yet (follow-up: resume across containers), so there is nothing else to scrub. |
 | Network | `claude_code/gates.py`, `session._start_network`, `job_run.production_setup` | A subscription turn is forced onto the network door with the rule `list` and exactly `api.anthropic.com` (an exact name, no suffix). An environment that is `open`, or lists any other host, refuses the turn (`implementer_config_invalid`, detail starting `subscription_network_open` or `subscription_network_hosts`), free, before the container exists. The door dials ports 80 and 443 only (`netdoor/proxy.py`), as for every rule; Claude Code uses 443. Narrowing a rule to a port is not in the rule format yet (follow-up). |
 | Readiness per job | `claude_code/readiness.ready_harness`, `job_run.run_implementer_job` | The manifest said ready at the start; the job looks again (the login file, the layer on the daemon; nothing is built). A device that cannot refuses the job (`implementer_engine_unavailable`, detail starting `harness_not_ready`) and never falls back to OpenCode. |
@@ -812,8 +823,10 @@ copies its labels only); the combination can only come from a hand-made job.
    turn, +5 KB per turn, no key on it), and the runner's snapshot channel for it. Until then a follow-up turn on this harness continues
    from the summary of the earlier turns (`summary_only`, reason `no_snapshot`). The adapter already resumes within a container and
    falls back to a fresh session when the volume is empty. The session volume and the snapshot must be redacted with the login too.
-2. **Cost in the app**: the app ignores `costBasis` and `estimatedCostUsd` today (`parseUsage`). "≈ <amount> through a subscription" on the
-   Runs page, never in the totals; the per-workflow switch that lets a budget count it.
+2. **Cost in the app** (done for the budget of a workflow run, see "Cost"): "≈ <amount> through a subscription" on the Runs page, never in
+   the totals; a per-workflow switch that lets a budget ignore it. **Owner question**: should a subscription turn on a customer runner be
+   free of infra minutes and of the balance check at claim? Today it is not (the minutes are billed as for every job and the claim checks
+   the balance).
 3. **The self-test's canned turn for Claude Code** (a canned Anthropic provider inside the container, as for OpenCode), so that
    "ready" means "ran a turn" and not only "installed and logged in"; a lane test that builds the layer and runs a turn as the user
    `agent` behind the door.
