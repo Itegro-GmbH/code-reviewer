@@ -867,6 +867,28 @@ export interface StepsResponse {
   [k: string]: unknown;
 }
 /**
+ * #839: the query string of PUT /api/workers/v1/jobs/{id}/session, as an object of its parameters (every value is decimal digits or text in the URL). One request carries one PART of the session snapshot of a running turn of the Implementer (follow-up turns): the engine's export as the runner made it (JSON, secrets taken out, gzipped), at most 8 MiB gzipped. A function of the platform takes no request body over 4.5 MB, so the file is cut into parts of exactly 3 MiB (`bytes` / 3145728, rounded up, at most 3) and the last part is whatever is left; the body of the request is the bytes of the part (`application/octet-stream`), read up to 3 MiB (413 RUNNER_BODY_TOO_LARGE above) and exactly as long as `bytes` says for that part (400 otherwise). Every part carries the description of the whole file: `parts` (the count, which must be what `bytes` makes), `part` (this part's index from 0), `bytes` (the size of the gzip file), `rawBytes` (the size of the JSON inside it), `sha256` (the lower case hex digest of the gzip file) and `opencodeVersion` (the engine that wrote it). A part is judged on its own and may arrive in any order or twice. The app keeps the parts of the job apart; when the last one is in it puts them together, checks size and digest, and swaps the snapshot in for the session's old one (one snapshot for each session, replaced by each turn, kept for good; the old one stays readable until then). 400 RUNNER_REQUEST_INVALID names the wrong fields (`fields`), also `body` for parts that do not make the announced file or disagree with each other (nothing of that upload is kept). The call proves the claim and nothing more: it does NOT extend the lease. 409 RUNNER_JOB_ENDED when the job is over, 401 WORKER_CREDENTIAL_INVALID for a credential that is not the job's, 400 for a job that is not a turn of the Implementer. The sender is best effort: a snapshot that is not stored means the next turn starts from a summary.
+ */
+export interface SessionPartQuery {
+  part: string;
+  parts: string;
+  bytes: string;
+  rawBytes: string;
+  sha256: string;
+  opencodeVersion: string;
+  [k: string]: unknown;
+}
+/**
+ * #839: 200 from the snapshot call. `part` and `parts` repeat the request's; `complete` is true once the whole snapshot is stored, also for a part sent again after that. Repeating a part answers 200.
+ */
+export interface SessionPartResponse {
+  version: 1;
+  part: number;
+  parts: number;
+  complete: boolean;
+  [k: string]: unknown;
+}
+/**
  * The body of POST /api/workers/v1/jobs/{id}/result. The whole request body must not exceed 65536 bytes (413 otherwise). The app applies the redaction of the runner API's complete call, including the model key remembered at fetch. A result with errorCode runner_shutdown or launch_failed is not stored: the job is given back and counts an attempt.
  */
 export interface WorkerResultRequest {

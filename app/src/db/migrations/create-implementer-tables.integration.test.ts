@@ -24,6 +24,8 @@ const NEW_TABLES = [
   "implementer_turns",
   "implementer_environments",
   "implementer_turn_steps",
+  "implementer_session_snapshots",
+  "implementer_session_snapshot_parts",
 ];
 
 /** The migrations the previous release's database ran: everything before the new one. */

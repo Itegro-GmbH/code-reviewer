@@ -128,6 +128,7 @@ describe("the migrations of both epics", () => {
       "20261103100000_add_environment_network",
       "20261104100000_create_implementer_turn_steps",
       "20261104140000_create_workflows",
+      "20261105090000_create_implementer_session_snapshots",
     ]);
   });
 
@@ -173,6 +174,8 @@ describe("starting the database", () => {
       "billing_workspace_settings",
       "email_verification_tokens",
       "implementer_environments",
+      "implementer_session_snapshot_parts",
+      "implementer_session_snapshots",
       "implementer_sessions",
       "implementer_turn_steps",
       "implementer_turns",

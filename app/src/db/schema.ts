@@ -1118,6 +1118,46 @@ export interface ImplementerTurnStepsTable {
 }
 
 /**
+ * The conversation of an Implementer session (#839): one row for each session, replaced by the snapshot of each turn. `data` is the
+ * engine's export (JSON, redacted by the runner, gzipped) as base64 text; `turn_number` and `job_id` say which turn it came from.
+ */
+export interface ImplementerSessionSnapshotsTable {
+  session_id: string;
+  workspace_id: string;
+  job_id: string;
+  turn_number: number;
+  opencode_version: string;
+  /** The size of the gzip file, and of the JSON inside it. */
+  bytes: number;
+  raw_bytes: number;
+  /** Hex digest of the gzip file. */
+  sha256: string;
+  data: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * A part of a snapshot that is still arriving (#839): the upload waits here until every part is in, then the snapshot is swapped in
+ * and the parts of the job are deleted. Every part carries the description of the whole file, and the parts of one upload must agree.
+ */
+export interface ImplementerSessionSnapshotPartsTable {
+  job_id: string;
+  part_index: number;
+  workspace_id: string;
+  session_id: string;
+  part_count: number;
+  opencode_version: string;
+  /** The size of the whole gzip file, and of the JSON inside it. */
+  bytes: number;
+  raw_bytes: number;
+  sha256: string;
+  /** base64 of this part's bytes. */
+  data: string;
+  created_at: string;
+}
+
+/**
  * A start configuration for an Implementer task (#818): a size and a setup script, kept per workspace. A task copies size and
  * script at its start, so nothing points at this row: editing or deleting it touches no turn. `setup_script` is literal text,
  * stored as it was written (no trimming, no normalised line ends), at most 64 KB of UTF-8.
@@ -1201,6 +1241,8 @@ export interface Database {
   implementer_sessions: ImplementerSessionsTable;
   implementer_turns: ImplementerTurnsTable;
   implementer_turn_steps: ImplementerTurnStepsTable;
+  implementer_session_snapshots: ImplementerSessionSnapshotsTable;
+  implementer_session_snapshot_parts: ImplementerSessionSnapshotPartsTable;
   implementer_environments: ImplementerEnvironmentsTable;
   workflows: WorkflowsTable;
   workflow_versions: WorkflowVersionsTable;

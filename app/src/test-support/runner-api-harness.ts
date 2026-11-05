@@ -11,6 +11,7 @@ import { managedModelsOf } from "../runner-api/managed-models.ts";
 import { createUsageRecordsRepository } from "../db/repositories/usage-records-repository.ts";
 import { createJobsRepository } from "../db/repositories/jobs-repository.ts";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
+import { createImplementerSnapshotsRepository } from "../db/repositories/implementer-snapshots-repository.ts";
 import { createImplementerStepsRepository } from "../db/repositories/implementer-steps-repository.ts";
 import { createCapabilitySet } from "../capabilities/capability.ts";
 import { createJobQueue } from "../jobs/job-queue.ts";
@@ -548,6 +549,12 @@ export async function startRunnerApiHarness(
           workspaceId,
           fixture.clock.now,
         ),
+      snapshots: (workspaceId) =>
+        createImplementerSnapshotsRepository(
+          fixture.db,
+          workspaceId,
+          fixture.clock.now,
+        ),
       revokeWriteTokens: writeTokens.revokeAllOf,
       revokeUndelivered: writeTokens.revokeUndelivered,
       pinnedAddresses:
@@ -882,6 +889,28 @@ export async function startRunnerApiHarness(
           }),
           body: typeof body === "string" ? body : JSON.stringify(body),
         }),
+        jobId,
+      ),
+    /** #839: one part of the session snapshot; `query` is the description of the whole file, `body` the bytes of the part. */
+    session: (
+      jobId: string,
+      credential: string | null,
+      query: Record<string, string | number>,
+      body: Uint8Array,
+    ) =>
+      workerApi.session(
+        new Request(
+          `${workerUrl}/jobs/${jobId}/session?${new URLSearchParams(
+            Object.entries(query).map(([name, value]) => [name, String(value)]),
+          ).toString()}`,
+          {
+            method: "PUT",
+            headers: workerHeaders(credential, {
+              "content-type": "application/octet-stream",
+            }),
+            body: body as BodyInit,
+          },
+        ),
         jobId,
       ),
     /** `body` is sent as JSON, or as it is if it is a string; a result alone is wrapped as `{ result }`. */
