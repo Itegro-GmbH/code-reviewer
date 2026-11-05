@@ -25,7 +25,8 @@ export const GITHUB_APP_ERROR_CODES = [
  * permission or the installation has not accepted it. `repository_archived`: the repository is read-only.
  * `repository_not_accessible`: the repository is not part of the installation. `other`: GitHub said something else.
  * Two reasons name what a 422 of opening a pull request says (#844): `pull_request_exists` (one is open for this head and base
- * already) and `no_commits_between` (the head has nothing the base lacks).
+ * already) and `no_commits_between` (the head has nothing the base lacks). `rate_limited`: a 403 or 429 without the rate limit headers whose
+ * message names a rate limit (GitHub's secondary limit answers like that).
  */
 export const GITHUB_REFUSAL_REASONS = [
   "permission_missing",
@@ -33,6 +34,7 @@ export const GITHUB_REFUSAL_REASONS = [
   "repository_not_accessible",
   "pull_request_exists",
   "no_commits_between",
+  "rate_limited",
   "other",
 ] as const;
 export type GithubRefusalReason = (typeof GITHUB_REFUSAL_REASONS)[number];

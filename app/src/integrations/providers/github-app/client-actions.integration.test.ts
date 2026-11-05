@@ -100,7 +100,7 @@ describe("opening a pull request", () => {
   });
 
   // #844-T342
-  it("is 'no commits between' for a branch that is at the base, 'exists' is handled, an unknown branch is a plain refusal", async () => {
+  it("is 'no commits between' for a branch that is at the base, and an unknown branch is a plain refusal", async () => {
     const { fake, client } = await setup();
     fake.addBranch("acme/widgets", "empty", "b".repeat(40));
 
@@ -131,8 +131,134 @@ describe("opening a pull request", () => {
     });
   });
 
+  // #844-T345
+  it("finds the pull request somebody opened between the look and the call: GitHub says it exists, the second look answers it", async () => {
+    const { fake, client } = await setup();
+    const input = {
+      head: "workflow/r1/work",
+      base: "main",
+      title: "Add caching",
+    };
+    const first = await client.openPullRequest(
+      "4242",
+      PULLS,
+      "acme/widgets",
+      input,
+    );
+    // The first look is told there is none (as when the pull request is opened right after it); the call then gets 422 "already exists".
+    fake.fail({
+      method: "GET",
+      pathIncludes: "/pulls",
+      status: 200,
+      body: [],
+      times: 1,
+    });
+
+    const raced = await client.openPullRequest(
+      "4242",
+      PULLS,
+      "acme/widgets",
+      input,
+    );
+
+    expect(raced).toEqual({
+      number: first.number,
+      url: first.url,
+      existing: true,
+    });
+    expect(
+      fake
+        .requests()
+        .filter((r) => r.method === "POST" && r.path.endsWith("/pulls")),
+    ).toHaveLength(2);
+  });
+
+  // #844-T346
+  it("rethrows the refusal when GitHub says the pull request exists and the second look finds none", async () => {
+    const { fake, client } = await setup();
+    const input = {
+      head: "workflow/r1/work",
+      base: "main",
+      title: "Add caching",
+    };
+    await client.openPullRequest("4242", PULLS, "acme/widgets", input);
+    fake.fail({
+      method: "GET",
+      pathIncludes: "/pulls",
+      status: 200,
+      body: [],
+    });
+
+    const failed = await failureOf(
+      client.openPullRequest("4242", PULLS, "acme/widgets", input),
+    );
+
+    expect(failed).toMatchObject({
+      status: 422,
+      refusal: "pull_request_exists",
+    });
+  });
+
+  // #844-T347
+  it("takes an open pull request for the answer only when its head is a branch of this repository and head and base are the ones asked for", async () => {
+    const pull = (headRepo: string, headRef: string, baseRef: string) => ({
+      number: 40,
+      title: "Somebody else's",
+      html_url: "https://github.com/acme/widgets/pull/40",
+      state: "open",
+      user: { login: "someone", id: 9 },
+      head: {
+        sha: "d".repeat(40),
+        ref: headRef,
+        repo: { full_name: headRepo },
+      },
+      base: { ref: baseRef },
+    });
+    const input = {
+      head: "workflow/r1/work",
+      base: "main",
+      title: "Add caching",
+    };
+    // A fork of the same owner has the branch name too (`acme:workflow/r1/work` names both), and the list may hold other branches.
+    for (const lookalike of [
+      pull("acme/widgets-fork", "workflow/r1/work", "main"),
+      pull("acme/widgets", "workflow/r1/other", "main"),
+      pull("acme/widgets", "workflow/r1/work", "develop"),
+    ]) {
+      const { fake, client } = await setup();
+      fake.fail({
+        method: "GET",
+        pathIncludes: "/pulls",
+        status: 200,
+        body: [lookalike],
+        times: 1,
+      });
+      const opened = await client.openPullRequest(
+        "4242",
+        PULLS,
+        "acme/widgets",
+        input,
+      );
+      expect(opened.existing).toBe(false);
+      expect(opened.number).not.toBe(40);
+    }
+
+    // Owner and repository names are case-insensitive on GitHub.
+    const { fake, client } = await setup();
+    fake.fail({
+      method: "GET",
+      pathIncludes: "/pulls",
+      status: 200,
+      body: [pull("Acme/Widgets", "workflow/r1/work", "main")],
+      times: 1,
+    });
+    expect(
+      await client.openPullRequest("4242", PULLS, "acme/widgets", input),
+    ).toMatchObject({ number: 40, existing: true });
+  });
+
   // #844-T343
-  it("fails with the token refused when the App does not hold the permission, and with 403 when the token lacks it", async () => {
+  it("fails with the token refused when the App does not hold the permission", async () => {
     const { fake, client } = await setup();
     fake.setAppPermissions({
       metadata: "read",
@@ -151,6 +277,86 @@ describe("opening a pull request", () => {
       status: 422,
       duringTokenRequest: true,
       refusal: "permission_missing",
+    });
+  });
+
+  // #844-T348
+  it("fails with 403 and the permission missing when GitHub refuses the call itself (the token lacks the right)", async () => {
+    const { fake, client } = await setup();
+    fake.fail({
+      method: "POST",
+      pathIncludes: "/pulls",
+      status: 403,
+      message: "Resource not accessible by integration",
+    });
+
+    const refused = await failureOf(
+      client.openPullRequest("4242", PULLS, "acme/widgets", {
+        head: "workflow/r1/work",
+        base: "main",
+        title: "T",
+      }),
+    );
+
+    expect(refused).toMatchObject({
+      code: "GITHUB_APP_FORBIDDEN",
+      status: 403,
+      refusal: "permission_missing",
+    });
+    expect(refused.duringTokenRequest).toBeFalsy();
+  });
+
+  // #844-T349
+  it("tells a 403 with a rate limit message, with or without the rate limit headers, from a missing permission and from a 403 for another reason", async () => {
+    const { fake, client } = await setup();
+    const open = () =>
+      client.openPullRequest("4242", PULLS, "acme/widgets", {
+        head: "workflow/r1/work",
+        base: "main",
+        title: "T",
+      });
+    const post = { method: "POST", pathIncludes: "/pulls", times: 1 } as const;
+
+    // The secondary limit: no header, only the text.
+    fake.fail({
+      ...post,
+      status: 403,
+      message:
+        "You have exceeded a secondary rate limit. Please wait a few minutes before you try again.",
+    });
+    expect(await failureOf(open())).toMatchObject({
+      code: "GITHUB_APP_RATE_LIMITED",
+      status: 403,
+      retryAfterSeconds: null,
+    });
+
+    // The primary limit and the abuse limit send headers.
+    fake.fail({
+      ...post,
+      status: 403,
+      message: "API rate limit exceeded",
+      headers: { "x-ratelimit-remaining": "0" },
+    });
+    expect(await failureOf(open())).toMatchObject({
+      code: "GITHUB_APP_RATE_LIMITED",
+    });
+    fake.fail({
+      ...post,
+      status: 403,
+      message: "Forbidden",
+      headers: { "retry-after": "30" },
+    });
+    expect(await failureOf(open())).toMatchObject({
+      code: "GITHUB_APP_RATE_LIMITED",
+      retryAfterSeconds: 30,
+    });
+
+    // Any other 403 is forbidden, for a reason that is not the permission.
+    fake.fail({ ...post, status: 403, message: "Repository access blocked" });
+    expect(await failureOf(open())).toMatchObject({
+      code: "GITHUB_APP_FORBIDDEN",
+      status: 403,
+      refusal: "other",
     });
   });
 
@@ -209,7 +415,7 @@ describe("commenting on an issue", () => {
   });
 
   // #844-T351
-  it("is 404 for an issue that does not exist, 403 when the token lacks the permission, and honors the abort signal", async () => {
+  it("is 404 for an issue that does not exist, the token refused when the App lacks the permission, and honors the abort signal", async () => {
     const { fake, client } = await setup();
 
     const missing = await failureOf(
@@ -246,6 +452,76 @@ describe("commenting on an issue", () => {
         )
       ).code,
     ).toBe("GITHUB_APP_UNAVAILABLE");
+  });
+});
+
+describe("a comment that GitHub refuses at the call", () => {
+  // #844-T352
+  it("is 403 with the permission missing when the token lacks the right, and a rate limit when the text says so", async () => {
+    const { fake, client } = await setup();
+    fake.addIssue("acme/widgets", { number: 7, title: "T" });
+    const comment = () =>
+      client.createIssueComment("4242", ISSUES, "acme/widgets", 7, "x");
+
+    fake.fail({
+      method: "POST",
+      pathIncludes: "/comments",
+      status: 403,
+      message: "Resource not accessible by integration",
+      times: 1,
+    });
+    expect(await failureOf(comment())).toMatchObject({
+      code: "GITHUB_APP_FORBIDDEN",
+      refusal: "permission_missing",
+    });
+
+    fake.fail({
+      method: "POST",
+      pathIncludes: "/comments",
+      status: 403,
+      message: "You have exceeded a secondary rate limit.",
+      times: 1,
+    });
+    expect(await failureOf(comment())).toMatchObject({
+      code: "GITHUB_APP_RATE_LIMITED",
+    });
+    expect(fake.issueComments("acme/widgets", 7)).toEqual([]);
+  });
+});
+
+describe("the comments below an issue", () => {
+  // #844-T353
+  it("lists the comments below an issue that is no pull request, with the author, so the marker of an earlier try is found", async () => {
+    const { fake, client } = await setup();
+    fake.addIssue("acme/widgets", { number: 7, title: "T" });
+    await client.createIssueComment(
+      "4242",
+      ISSUES,
+      "acme/widgets",
+      7,
+      "Done.\n\n<!-- wf-r1-1 -->",
+    );
+
+    const listed = await client.listIssueComments(
+      "4242",
+      ISSUES,
+      "acme/widgets",
+      7,
+    );
+
+    expect(listed).toHaveLength(1);
+    expect(listed[0]).toMatchObject({
+      authorLogin: expect.stringMatching(/\[bot\]$/) as string,
+      body: "Done.\n\n<!-- wf-r1-1 -->",
+    });
+    expect(
+      await client.listIssueComments("4242", ISSUES, "acme/widgets", 7, {
+        signal: new AbortController().signal,
+      }),
+    ).toHaveLength(1);
+    await expect(
+      client.listIssueComments("4242", ISSUES, "acme/widgets", 99),
+    ).rejects.toMatchObject({ code: "GITHUB_APP_NOT_FOUND" });
   });
 });
 
@@ -312,6 +588,32 @@ describe("changing labels", () => {
       }),
     );
     expect(missing.code).toBe("GITHUB_APP_NOT_FOUND");
+  });
+
+  // #844-T364
+  it("refuses a label that is only dots before any request: `DELETE .../labels/.` would remove every label of the issue", async () => {
+    const { fake, client } = await setup();
+    fake.addIssue("acme/widgets", {
+      number: 7,
+      title: "T",
+      labels: ["ready", "bug"],
+    });
+
+    for (const change of [
+      { add: [], remove: ["."] },
+      { add: [], remove: [".."] },
+      { add: [], remove: ["..."] },
+      { add: ["."], remove: [] },
+      { add: ["ok"], remove: ["bug", ".."] },
+    ])
+      await expect(
+        client.changeIssueLabels("4242", ISSUES, "acme/widgets", 7, change),
+      ).rejects.toBeInstanceOf(GithubAppError);
+
+    expect(fake.issueLabels("acme/widgets", 7)).toEqual(["ready", "bug"]);
+    expect(fake.requests().filter((r) => r.path.includes("/labels"))).toEqual(
+      [],
+    );
   });
 
   // #844-T362

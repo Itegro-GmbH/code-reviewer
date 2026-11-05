@@ -43,6 +43,7 @@ import {
   toImplementerAccessError,
   toJobAccessError,
   toReadError,
+  toActionError,
   toWriteError,
 } from "./job-access.ts";
 import { isValidSignature } from "./webhook-signature.ts";
@@ -405,25 +406,50 @@ export function createGithubAppProvider(
           signal,
         );
       } catch (error) {
-        throw toWriteError(error);
+        throw toActionError(error);
       }
     },
 
-    async commentOnIssue(integration, repo, issueNumber, body, signal) {
+    async commentOnIssue(integration, repo, issueNumber, body, options = {}) {
       try {
-        const { url } = await (
-          await getClient()
-        ).createIssueComment(
+        const { signal, marker } = options;
+        const client = await getClient();
+        const scope = actionScope(
+          integration,
+          repo,
+          ISSUE_ACTION_TOKEN_PERMISSIONS,
+        );
+        if (marker !== undefined) {
+          const botLogin = `${(await getConfig()).slug}[bot]`;
+          const earlier = await client.listIssueComments(
+            integration.externalId,
+            scope,
+            repo.fullName,
+            issueNumber,
+            { ...(signal === undefined ? {} : { signal }) },
+          );
+          // Only the app's own comment counts: anybody can copy a marker into theirs.
+          const found = earlier.find(
+            (comment) =>
+              comment.authorLogin === botLogin && comment.body.includes(marker),
+          );
+          if (found !== undefined)
+            return {
+              url: `${repo.url}/issues/${String(issueNumber)}#issuecomment-${found.id}`,
+              existing: true,
+            };
+        }
+        const { url } = await client.createIssueComment(
           integration.externalId,
-          actionScope(integration, repo, ISSUE_ACTION_TOKEN_PERMISSIONS),
+          scope,
           repo.fullName,
           issueNumber,
           body,
           signal,
         );
-        return { url };
+        return { url, existing: false };
       } catch (error) {
-        throw toWriteError(error);
+        throw toActionError(error);
       }
     },
 
@@ -442,7 +468,7 @@ export function createGithubAppProvider(
           ),
         };
       } catch (error) {
-        throw toWriteError(error);
+        throw toActionError(error);
       }
     },
 

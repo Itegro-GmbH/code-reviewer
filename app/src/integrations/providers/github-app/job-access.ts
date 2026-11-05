@@ -234,3 +234,21 @@ export function toWriteError(error: unknown): IntegrationError {
     });
   return toReadError(error);
 }
+
+/**
+ * `toWriteError` for the calls of the workflow actions (#844). A 403 that GitHub gives for no reason this code knows (it is not a
+ * missing permission, a rate limit, an archived repository) is a failure of the action, not "the App lacks the permission": the
+ * step ends as `action_failed` and does not tell the owner to change the App's settings.
+ */
+export function toActionError(error: unknown): IntegrationError {
+  if (
+    error instanceof GithubAppError &&
+    error.code === "GITHUB_APP_FORBIDDEN" &&
+    !error.duringTokenRequest &&
+    error.refusal === "other"
+  )
+    return new IntegrationError("INTEGRATION_ACCESS_FAILED", error.message, {
+      cause: error,
+    });
+  return toWriteError(error);
+}

@@ -114,9 +114,13 @@ export type FakeFailure = {
   pathIncludes?: string;
   /** Applies to requests whose query string contains this text, for example "page=2". */
   queryIncludes?: string;
+  /** Applies to requests with this HTTP method only ("POST", "DELETE", ...); every method when omitted. */
+  method?: string;
   /** Answers with this status and a JSON error body holding `message` ("Injected failure" when omitted). */
   status?: number;
   message?: string;
+  /** The JSON answer instead of `{ message }`: for a 200 with a list the client would not get from a plain failure. */
+  body?: unknown;
   headers?: Record<string, string>;
   /** Waits this long before looking at the request (and before the status, if both are given). */
   delayMs?: number;
@@ -245,10 +249,15 @@ export async function startGithubFake(
   let credentials: string[] = [];
   let failures: Array<FakeFailure & { remaining: number }> = [];
 
-  function takeFailure(path: string, query: string): FakeFailure | undefined {
+  function takeFailure(
+    method: string,
+    path: string,
+    query: string,
+  ): FakeFailure | undefined {
     const failure = failures.find(
       (candidate) =>
         candidate.remaining > 0 &&
+        (candidate.method === undefined || candidate.method === method) &&
         (candidate.pathIncludes === undefined ||
           path.includes(candidate.pathIncludes)) &&
         (candidate.queryIncludes === undefined ||
@@ -306,7 +315,7 @@ export async function startGithubFake(
       // The control endpoints of the test itself are not GitHub and never fail on purpose.
       const failure = path.startsWith("/__fake/")
         ? undefined
-        : takeFailure(path, url.search);
+        : takeFailure(method, path, url.search);
       if (failure?.delayMs !== undefined)
         await new Promise((resolve) => setTimeout(resolve, failure.delayMs));
       if (failure?.hang === true) {
@@ -318,7 +327,9 @@ export async function startGithubFake(
           response,
           failure.status,
           "application/json",
-          JSON.stringify({ message: failure.message ?? "Injected failure" }),
+          JSON.stringify(
+            failure.body ?? { message: failure.message ?? "Injected failure" },
+          ),
           failure.headers,
         );
         return;

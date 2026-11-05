@@ -211,7 +211,7 @@ export type GithubAppClient = {
     scope: JobTokenScope,
     repoFullName: string,
     prNumber: number,
-    options?: { since?: string },
+    options?: { since?: string; signal?: AbortSignal },
   ): Promise<IssueComment[]>;
   /**
    * One comment below a pull request by its id (#657; `GET .../issues/comments/{id}`), read with a token of its own
@@ -564,6 +564,41 @@ function repoPath(repoFullName: string): string {
 const UNPAIRED_SURROGATE =
   /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
+/** Whether `json` is a pull request from `input.head` of the repository itself into `input.base`. */
+function isPullRequestOf(
+  json: unknown,
+  repoFullName: string,
+  input: NewPullRequest,
+): boolean {
+  if (!isRecord(json) || !isRecord(json.head) || !isRecord(json.base))
+    return false;
+  const { repo } = json.head;
+  return (
+    json.head.ref === input.head &&
+    json.base.ref === input.base &&
+    isRecord(repo) &&
+    typeof repo.full_name === "string" &&
+    repo.full_name.toLowerCase() === repoFullName.toLowerCase()
+  );
+}
+
+/**
+ * A label name goes into a path (`DELETE .../labels/{name}`): `.` and `..` (and any name of dots only) are dot segments there, and
+ * `.../labels/.` is normalised to `.../labels/`, which removes every label of the issue.
+ */
+function checkLabelName(name: string): void {
+  if (
+    name === "" ||
+    /^\.+$/.test(name) ||
+    /[\u0000-\u001f\u007f]/.test(name) ||
+    UNPAIRED_SURROGATE.test(name)
+  )
+    throw new GithubAppError(
+      "GITHUB_APP_REQUEST_FAILED",
+      "The label name is not usable.",
+    );
+}
+
 /**
  * A branch name is text without control characters or lone surrogates; Git allows no more than 255 bytes in a
  * ref component. `.` and `..` are no branches either: in a path they are dot segments and would address a
@@ -685,6 +720,12 @@ export function createGithubAppClient(
     } catch {
       // An answer that is not JSON says nothing.
     }
+    // GitHub's secondary rate limit is a 403 with no header that says so, only its message.
+    if (
+      (response.status === 403 || response.status === 429) &&
+      /rate limit/i.test(message)
+    )
+      return "rate_limited";
     if (/pull request already exists/i.test(message))
       return "pull_request_exists";
     if (/no commits between/i.test(message)) return "no_commits_between";
@@ -712,7 +753,8 @@ export function createGithubAppClient(
       status === 429 ||
       (status === 403 &&
         (response.headers.get("retry-after") !== null ||
-          response.headers.get("x-ratelimit-remaining") === "0"));
+          response.headers.get("x-ratelimit-remaining") === "0" ||
+          refusal === "rate_limited"));
     if (rateLimited)
       return new GithubAppError(
         "GITHUB_APP_RATE_LIMITED",
@@ -1263,17 +1305,24 @@ export function createGithubAppClient(
           ? ""
           : `?since=${encodeURIComponent(options.since)}`;
       const path = `${repoPath(repoFullName)}/issues/${prNumber}/comments${since}`;
-      return withScopedToken(installationId, scope, (token) =>
-        allPages(
-          async () => token,
-          path,
-          (json) => {
-            if (!Array.isArray(json))
-              throw shapeError("GET /repos/{owner}/{repo}/issues/{n}/comments");
-            return json;
-          },
-          (item) => toIssueComment(item),
-        ),
+      return withScopedToken(
+        installationId,
+        scope,
+        (token) =>
+          allPages(
+            async () => token,
+            path,
+            (json) => {
+              if (!Array.isArray(json))
+                throw shapeError(
+                  "GET /repos/{owner}/{repo}/issues/{n}/comments",
+                );
+              return json;
+            },
+            (item) => toIssueComment(item),
+            options.signal,
+          ),
+        options.signal,
       );
     },
 
@@ -1364,7 +1413,11 @@ export function createGithubAppClient(
             const json = await request(token, "GET", lookup, undefined, signal);
             if (!Array.isArray(json))
               throw shapeError("GET /repos/{owner}/{repo}/pulls");
-            const [first] = json;
+            // The head and the base are the ones asked for, and the head is a branch of this repository: `owner:branch` also names
+            // a branch of a fork of the same owner.
+            const first = json.find((entry: unknown) =>
+              isPullRequestOf(entry, repoFullName, input),
+            );
             return first === undefined ? null : toOpened(first, true);
           };
           const before = await found();
@@ -1412,6 +1465,8 @@ export function createGithubAppClient(
     ) {
       checkInstallationId(installationId);
       checkPullRequestNumber(issueNumber);
+      for (const name of [...change.add, ...change.remove])
+        checkLabelName(name);
       const path = `${repoPath(repoFullName)}/issues/${issueNumber}/labels`;
       return withScopedToken(
         installationId,

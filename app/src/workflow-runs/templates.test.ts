@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { TEMPLATE_VALUE_MAX_CHARS } from "./limits.ts";
 import {
   cleanText,
+  defuseMentions,
   renderText,
   resolveValue,
   TemplateError,
@@ -140,5 +141,63 @@ describe("workflow templates at run time", () => {
   // #844-T29
   it("passes a literal with an escaped brace through", () => {
     expect(renderText("a \\{{literal}} b", values)).toBe("a {{literal}} b");
+  });
+
+  // #844-T310
+  it("defuses what an agent step reported where the text goes to an action, and leaves literals and trigger values alone", () => {
+    const run: RunValues = {
+      trigger: {
+        input: { who: "@alice please look", issue: "acme/api#4", n: 9 },
+      },
+      steps: {
+        review: {
+          summary:
+            "ping @bob and @acme/reviewers, see acme/api#12, #13 and https://github.com/acme/api/issues/14. Closes #15. mail a@b.org",
+        },
+        open: { number: 3 },
+      },
+      agentSteps: new Set(["review"]),
+    };
+    const text =
+      "Closes #{{trigger.input.n}} @carol {{trigger.input.who}} {{trigger.input.issue}} #{{open.number}}: {{review.summary}}";
+
+    expect(renderText(text, run, undefined, { defuse: true })).toBe(
+      "Closes #9 @carol @alice please look acme/api#4 #3: ping @\u200bbob and @\u200bacme/reviewers, see acme/api#\u200b12, #\u200b13 and https://github.com/acme/api/issues/\u200b14. Closes #\u200b15. mail a@\u200bb.org",
+    );
+    // Not an action: the instruction of an agent is rendered as it is.
+    expect(renderText("{{review.summary}}", run)).toContain("@bob");
+    expect(renderText("{{review.summary}}", run)).not.toContain("\u200b");
+    // The same step id without the mark of an agent step (a value of the trigger, a step that is not an agent's) stays as it is.
+    expect(
+      renderText("{{open.number}}", run, undefined, { defuse: true }),
+    ).toBe("3");
+  });
+
+  // #844-T311
+  it("defuses a list and a whole reference of an agent step, and text only (the type of a number or a list is not touched)", () => {
+    const run: RunValues = {
+      trigger: { input: {} },
+      steps: { review: { items: ["@bob", "#4"], count: 4 } },
+      agentSteps: new Set(["review"]),
+    };
+    expect(
+      renderText("{{review.items}}", run, undefined, { defuse: true }),
+    ).toBe("- @\u200bbob\n- #\u200b4");
+    expect(resolveValue("{{review.count}}", run, { defuse: true })).toBe(4);
+    expect(resolveValue("{{review.items}}", run, { defuse: true })).toEqual([
+      "@bob",
+      "#4",
+    ]);
+  });
+
+  // #844-T312
+  it("keeps the text readable: a zero-width space only after @ and # of a reference and before the number of an issue address", () => {
+    expect(defuseMentions("no mention here, 100% and a # alone, @ alone")).toBe(
+      "no mention here, 100% and a # alone, @ alone",
+    );
+    expect(defuseMentions("@a #1").replaceAll("\u200b", "")).toBe("@a #1");
+    expect(defuseMentions("https://github.com/o/r/pull/3")).toBe(
+      "https://github.com/o/r/pull/\u200b3",
+    );
   });
 });

@@ -150,11 +150,16 @@ describe("start by hand, implementer, open the pull request, comment on the issu
     const prOutput = JSON.parse(state.steps[1]?.output ?? "null") as {
       number: number;
       url: string;
+      existing: boolean;
     };
     expect(prOutput.number).toBe(8);
+    expect(prOutput.existing).toBe(false);
+    // The comment ends with the invisible marker of its step (position 2) of this run.
     expect(
       app.h.fake.issueComments("acme/widgets", 7).map((c) => c.body),
-    ).toEqual([`Opened ${prOutput.url} (pull request 8).`]);
+    ).toEqual([
+      `Opened ${prOutput.url} (pull request 8).\n\n<!-- wf-${runId}-2 -->`,
+    ]);
     expect(app.h.fake.issueLabels("acme/widgets", 7)).toEqual([
       "bug",
       "pr opened",
@@ -224,6 +229,7 @@ describe("start by hand, implementer, open the pull request, comment on the issu
     const state = await app.stateOf(runId);
     expect(JSON.parse(state.steps[1]?.output ?? "null")).toMatchObject({
       number: 3,
+      existing: true,
     });
     // Issue 7 does not exist in this fake: the comment fails with the code for a missing issue.
     expect(state.steps[2]).toMatchObject({

@@ -35,8 +35,14 @@ export type ActionCall = {
   signal: AbortSignal;
 };
 
+/** What a step says when an action that cannot be repeated ended without an answer: the run page does not know whether it took effect. */
+export const MAY_HAVE_HAPPENED =
+  "The action may have happened; check GitHub before starting again.";
+
 export type ActionConnector = {
   name: string;
+  /** True for an action that does the same when it is done twice (labels): a timeout of it does not warn that it may have happened. */
+  idempotent?: boolean;
   /** Does the action; the output has the fields the spec's `output` names. A `ConnectorError` ends the step with its code, an `ActionInputError` with `action_input_invalid`, any other throw with `action_failed`; an answer later than `ACTION_TIMEOUT_MS` is not waited for (`action_timeout`). */
   run(call: ActionCall): Promise<Record<string, unknown>>;
 };
@@ -134,7 +140,8 @@ function coerce(
 
 /**
  * The inputs of an action node with every reference resolved and the type of each held to the connector's spec. A text input may be a
- * text with references; any other is a literal or exactly one reference, which keeps the type of the value. Throws `ActionInputError`
+ * text with references (what an agent step reported is defused there, `templates.ts`); any other is a literal or exactly one reference,
+ * which keeps the type of the value. Throws `ActionInputError`
  * (or a `TemplateError` for a reference that cannot be resolved).
  */
 export function resolveActionInputs(
@@ -154,7 +161,7 @@ export function resolveActionInputs(
     }
     const resolved =
       typeof raw === "string" && input.type.kind === "string"
-        ? renderText(raw, values)
+        ? renderText(raw, values, undefined, { defuse: true })
         : typeof raw === "string"
           ? resolveValue(raw, values)
           : Array.isArray(raw) && input.type.kind === "list"

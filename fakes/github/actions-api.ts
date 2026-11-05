@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // The part of the fake GitHub behind the workflow actions (#844): opening a pull request, issues (a number, a title, labels, and the
-// comments below them), and the labels of an issue or pull request. It sits inside the GitHub App part (`app-api.ts`), which
+// comments below them, written and listed), and the labels of an issue or pull request. It sits inside the GitHub App part (`app-api.ts`), which
 // authenticates the installation token and finds the repository; the answers are shaped like GitHub's.
 //
 // Issues and pull requests share the numbers of a repository. A label that is added and is not known is created. Not modelled on
@@ -206,14 +206,36 @@ export function createActionsApi(options: ActionsApiOptions): ActionsApi {
 
     // Comments below an issue that is no pull request (those of a pull request are `review-api.ts`'s).
     const commentsMatch = /^\/issues\/(\d+)\/comments$/.exec(rest);
-    if (commentsMatch !== null && method === "POST") {
+    if (commentsMatch !== null && (method === "POST" || method === "GET")) {
       const number = Number(commentsMatch[1]);
       if (request.pullRequestNumbers.includes(number)) return undefined;
-      if (!mayDo(["issues"], "write")) return forbidden;
+      if (!mayDo(["issues"], method === "POST" ? "write" : "read"))
+        return forbidden;
       const issue = issuesOf(repository.fullName).find(
         (candidate) => candidate.number === number,
       );
       if (issue === undefined) return notFound;
+      const key = `${repository.fullName}#${String(number)}`;
+      const commentJson = (comment: FakeIssueComment) => ({
+        id: comment.id,
+        body: comment.body,
+        user: { login: comment.login, id: 1, type: "Bot" },
+        html_url: `${options.webBase()}/${repository.fullName}/issues/${String(number)}#issuecomment-${String(comment.id)}`,
+        issue_url: `${options.apiBase()}/repos/${repository.fullName}/issues/${String(number)}`,
+      });
+      if (method === "GET") {
+        const perPage = Math.min(
+          Math.max(Number(request.query.get("per_page")) || 30, 1),
+          MAX_PER_PAGE,
+        );
+        const page = Math.max(Number(request.query.get("page")) || 1, 1);
+        return {
+          status: 200,
+          body: (comments.get(key) ?? [])
+            .slice((page - 1) * perPage, page * perPage)
+            .map(commentJson),
+        };
+      }
       const input = JSON.parse((await request.body()) || "{}") as {
         body?: unknown;
       };
@@ -226,18 +248,8 @@ export function createActionsApi(options: ActionsApiOptions): ActionsApi {
         body: input.body,
         login: options.botLogin,
       };
-      const key = `${repository.fullName}#${String(number)}`;
       comments.set(key, [...(comments.get(key) ?? []), comment]);
-      return {
-        status: 201,
-        body: {
-          id: comment.id,
-          body: comment.body,
-          user: { login: comment.login, id: 1, type: "Bot" },
-          html_url: `${options.webBase()}/${repository.fullName}/issues/${String(number)}#issuecomment-${String(comment.id)}`,
-          issue_url: `${options.apiBase()}/repos/${repository.fullName}/issues/${String(number)}`,
-        },
-      };
+      return { status: 201, body: commentJson(comment) };
     }
     return undefined;
   }

@@ -13,13 +13,19 @@ import { createGithubAppProvider } from "./provider.ts";
 import { fakeIntegration } from "../../../test-support/fake-integration-provider.ts";
 import { testGithubAppEnv } from "../../../test-support/github-app.ts";
 import type { RepoRef } from "../../types.ts";
+import { IntegrationError } from "../../errors.ts";
 import {
   ActionInputError,
   ConnectorError,
   CONNECTOR_FAILURE_CODES,
+  MAY_HAVE_HAPPENED,
   type ActionCall,
 } from "../../../workflow-runs/connectors.ts";
-import { createGithubConnectors } from "../../../workflow-runs/github-connectors.ts";
+import {
+  cleanBody,
+  cleanTitle,
+  createGithubConnectors,
+} from "../../../workflow-runs/github-connectors.ts";
 import {
   ACTION_BODY_MAX_CHARS,
   ACTION_LABELS_MAX,
@@ -108,6 +114,7 @@ describe("github.pullRequest.open", () => {
     expect(output).toEqual({
       number: 12,
       url: "https://github.com/acme/widgets/pull/12",
+      existing: false,
     });
     const [opened] = client.calls.filter((c) => c.method === "openPullRequest");
     expect(opened?.args.slice(0, 2)).toEqual([
@@ -145,6 +152,7 @@ describe("github.pullRequest.open", () => {
     ).resolves.toEqual({
       number: 5,
       url: "https://github.com/acme/widgets/pull/5",
+      existing: true,
     });
   });
 
@@ -319,10 +327,12 @@ describe("github.issue.comment", () => {
 
     expect(output).toEqual({
       url: "https://github.com/acme/widgets/pull/7#issuecomment-5001",
+      existing: false,
     });
     const [written] = client.calls.filter(
       (c) => c.method === "createIssueComment",
     );
+    // The text is followed by the invisible marker of the step of the run.
     expect(written?.args.slice(0, 5)).toEqual([
       "4242",
       {
@@ -331,7 +341,7 @@ describe("github.issue.comment", () => {
       },
       "acme/widgets",
       7,
-      "Done: https://github.com/acme/widgets/pull/12",
+      "Done: https://github.com/acme/widgets/pull/12\n\n<!-- wf-r1-1 -->",
     ]);
   });
 
@@ -349,6 +359,7 @@ describe("github.issue.comment", () => {
       ?.args[4] as string;
     expect(body.startsWith("abc\nd")).toBe(true);
     expect(body).toContain("more characters were left out");
+    expect(body.endsWith("\n\n<!-- wf-r1-1 -->")).toBe(true);
 
     expect(await failure(run({ issue: 7, body: "  \n" }))).toBeInstanceOf(
       ActionInputError,
@@ -445,6 +456,9 @@ describe("github.issue.labels", () => {
       { add: [""] },
       { add: ["x".repeat(51)] },
       { add: ["a\nb"] },
+      { remove: ["."] },
+      { remove: [".."] },
+      { add: ["..."] },
       {
         add: Array.from(
           { length: ACTION_LABELS_MAX + 1 },
@@ -495,6 +509,176 @@ describe("github.issue.labels", () => {
     );
     expect((error as ConnectorError).code).toBe("github_unavailable");
     expect(client.calls.at(-1)?.args.at(-1)).toBe(controller.signal);
+  });
+});
+
+describe("what a step reports and what it is told", () => {
+  // #844-T307
+  it("reports an address of the repository's own pages, whatever GitHub's answer says (it ends up as a link on the run page)", async () => {
+    for (const url of [
+      "javascript:alert(1)",
+      "https://evil.example/acme/widgets/pull/5",
+      "https://github.com/acme/widgets-other/pull/5",
+    ]) {
+      const { connector } = setup({
+        openedPullRequest: { number: 5, url, existing: false },
+      });
+      expect(
+        await connector("github.pullRequest.open").run(
+          call({ head: "workflow/r1/work", title: "T" }),
+        ),
+      ).toEqual({
+        number: 5,
+        url: "https://github.com/acme/widgets/pull/5",
+        existing: false,
+      });
+    }
+  });
+
+  // #844-T308
+  it("cuts a title and a body without tearing a surrogate pair, drops lone halves, and drops bidirectional controls from a title", () => {
+    const pair = "\u{1F600}";
+    // The cut falls inside the pair of the emoji: the pair goes whole.
+    const title = cleanTitle(
+      `${"a".repeat(ACTION_TITLE_MAX_CHARS - 2)}${pair}${pair}`,
+    );
+    expect(title).toBe(`${"a".repeat(ACTION_TITLE_MAX_CHARS - 2)}…`);
+    expect(title).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])/);
+    // A title that fits exactly is not cut.
+    const exact = `${"a".repeat(ACTION_TITLE_MAX_CHARS - 3)}${pair}b`;
+    expect(cleanTitle(exact)).toBe(exact);
+
+    const body = cleanBody(
+      `${"b".repeat(ACTION_BODY_MAX_CHARS - 1)}${pair}tail`,
+      "body",
+    );
+    expect(body.startsWith("b".repeat(ACTION_BODY_MAX_CHARS - 1))).toBe(true);
+    expect(body).not.toContain(pair);
+    expect(body).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])/);
+    expect(body).toContain("more characters were left out");
+
+    expect(cleanTitle("a\ud800b\udc00c")).toBe("abc");
+    expect(cleanBody("a\ud800b", "body")).toBe("ab");
+    expect(cleanTitle("fix ‮gnp.exe‬ ⁦x⁩ done")).toBe("fix gnp.exe x done");
+    expect(cleanBody("keep ‮ here", "body")).toBe("keep ‮ here");
+  });
+
+  // #844-T309
+  it("says the action may have happened when GitHub could not be reached for an action that creates something, not for labels", async () => {
+    const unavailableFailure = new GithubAppError(
+      "GITHUB_APP_UNAVAILABLE",
+      "GitHub answered 502.",
+      { status: 502 },
+    );
+    const run = {
+      "github.pullRequest.open": { head: "workflow/r1/work", title: "T" },
+      "github.issue.comment": { issue: 7, body: "x" },
+      "github.issue.labels": { issue: 7, add: ["x"] },
+    } as const;
+    for (const [name, inputs] of Object.entries(run)) {
+      const { connector } = setup({
+        openPullRequestFailure: unavailableFailure,
+        commentFailure: unavailableFailure,
+        labelsFailure: unavailableFailure,
+      });
+      const error = await failure(connector(name).run(call({ ...inputs })));
+      expect((error as ConnectorError).code).toBe("github_unavailable");
+      if (name === "github.issue.labels")
+        expect(error.message).not.toContain(MAY_HAVE_HAPPENED);
+      else expect(error.message).toContain(MAY_HAVE_HAPPENED);
+    }
+  });
+
+  // #844-T314
+  it("writes a marker with the comment and, when the same step comes again, finds its own comment instead of writing a second", async () => {
+    const marked = {
+      id: "6001",
+      authorLogin: "code-reviewer-test[bot]",
+      body: "Done.\n\n<!-- wf-r1-1 -->",
+    };
+    const again = setup({ comments: { "acme/widgets#7": [marked] } });
+
+    expect(
+      await again
+        .connector("github.issue.comment")
+        .run(call({ issue: 7, body: "Done." })),
+    ).toEqual({
+      url: "https://github.com/acme/widgets/issues/7#issuecomment-6001",
+      existing: true,
+    });
+    expect(
+      again.client.calls.some((c) => c.method === "createIssueComment"),
+    ).toBe(false);
+
+    // A comment of somebody else with the same text is not the app's, and the marker of another step is another comment.
+    const other = setup({
+      comments: {
+        "acme/widgets#7": [
+          { ...marked, id: "6002", authorLogin: "someone" },
+          { ...marked, id: "6003", body: "Done.\n\n<!-- wf-r1-2 -->" },
+        ],
+      },
+    });
+    expect(
+      await other
+        .connector("github.issue.comment")
+        .run(call({ issue: 7, body: "Done." })),
+    ).toMatchObject({ existing: false });
+    expect(
+      other.client.calls.filter((c) => c.method === "createIssueComment"),
+    ).toHaveLength(1);
+  });
+
+  // #844-T315
+  it("does not call a 403 for another reason a missing permission: the step fails as itself and does not send the owner to the App's settings", async () => {
+    const otherForbidden = new GithubAppError(
+      "GITHUB_APP_FORBIDDEN",
+      "GitHub answered 403 for POST /repos/{owner}/{repo}/issues/{n}/comments.",
+      { status: 403, refusal: "other" },
+    );
+    const run = {
+      "github.pullRequest.open": { head: "workflow/r1/work", title: "T" },
+      "github.issue.comment": { issue: 7, body: "x" },
+      "github.issue.labels": { issue: 7, add: ["x"] },
+    } as const;
+    for (const [name, inputs] of Object.entries(run)) {
+      const { connector } = setup({
+        openPullRequestFailure: otherForbidden,
+        commentFailure: otherForbidden,
+        labelsFailure: otherForbidden,
+      });
+      const error = await failure(connector(name).run(call({ ...inputs })));
+      // Not a ConnectorError of the permission: the engine ends the step as `action_failed`.
+      expect(error).toBeInstanceOf(IntegrationError);
+      expect((error as IntegrationError).code).toBe(
+        "INTEGRATION_ACCESS_FAILED",
+      );
+      expect(error.message).not.toMatch(/permission/i);
+    }
+  });
+
+  // #844-T316
+  it("refuses a label of dots only before any call to GitHub (the address of its removal would be that of every label)", async () => {
+    const { client, connector } = setup();
+    for (const label of [".", "..", "...", " . "])
+      for (const input of ["add", "remove"])
+        expect(
+          await failure(
+            connector("github.issue.labels").run(
+              call({ issue: 7, [input]: [label] }),
+            ),
+          ),
+        ).toBeInstanceOf(ActionInputError);
+    expect(client.calls.some((c) => c.method === "changeIssueLabels")).toBe(
+      false,
+    );
+    // A name with dots in it is a name.
+    await connector("github.issue.labels").run(
+      call({ issue: 7, add: [".net", "v1.2"] }),
+    );
+    expect(client.calls.some((c) => c.method === "changeIssueLabels")).toBe(
+      true,
+    );
   });
 });
 

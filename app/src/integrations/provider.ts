@@ -132,15 +132,17 @@ export interface IntegrationProvider {
 
   /**
    * Only where the app can write a comment (#844, `github.issue.comment`): writes `body` below an issue or pull request, as the
-   * app, with a token limited to this repository and the issue permission. Rejects like `openPullRequest`.
+   * app, with a token limited to this repository and the issue permission. With a `marker` (text inside `body`), the comments of the
+   * issue are looked at first: the app's own comment that holds the marker is the result (`existing`) and nothing is written, so a
+   * call that is made again does not comment twice. Rejects like `openPullRequest`.
    */
   commentOnIssue?(
     integration: Integration,
     repo: RepoRef,
     issueNumber: number,
     body: string,
-    signal?: AbortSignal,
-  ): Promise<{ url: string }>;
+    options?: { signal?: AbortSignal; marker?: string },
+  ): Promise<{ url: string; existing: boolean }>;
 
   /**
    * Only where the app can label (#844, `github.issue.labels`): adds and removes labels of an issue or pull request, as the app,

@@ -69,7 +69,7 @@ export const GITHUB_PULL_REQUEST_OPEN: ConnectorSpec = {
     body: { type: STRING, required: false },
     draft: { type: BOOLEAN, required: false },
   },
-  output: objectOf({ number: INTEGER, url: STRING }),
+  output: objectOf({ number: INTEGER, url: STRING, existing: BOOLEAN }),
 };
 
 export const GITHUB_ISSUE_COMMENT: ConnectorSpec = {
@@ -79,7 +79,7 @@ export const GITHUB_ISSUE_COMMENT: ConnectorSpec = {
     issue: { type: ISSUE, required: true, target: ISSUE_ROOTS },
     body: { type: STRING, required: true },
   },
-  output: objectOf({ url: STRING }),
+  output: objectOf({ url: STRING, existing: BOOLEAN }),
 };
 
 export const GITHUB_ISSUE_LABELS: ConnectorSpec = {

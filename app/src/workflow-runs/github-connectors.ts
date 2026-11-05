@@ -12,6 +12,7 @@ import type { Integration, RepoRef } from "../integrations/types.ts";
 import {
   ActionInputError,
   ConnectorError,
+  MAY_HAVE_HAPPENED,
   type ActionCall,
   type ActionConnector,
 } from "./connectors.ts";
@@ -50,32 +51,66 @@ const ACTION_VERB = {
 
 type GithubConnectorName = keyof typeof GITHUB_PERMISSION_NEEDED;
 
+/** The actions that create something when they are done twice: after a timeout or an answer of GitHub's own error the step cannot know that nothing was created. */
+const NOT_REPEATABLE: ReadonlySet<GithubConnectorName> = new Set([
+  "github.pullRequest.open",
+  "github.issue.comment",
+]);
+
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
 const CONTROL_EXCEPT_LINE_BREAKS =
   /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 const LINE_BREAKS = /[\u0000-\u001f\u007f\u2028\u2029]+/g;
+/** The characters that reorder how a line is shown (embeddings, overrides, isolates): a title must read as it is written. */
+const BIDI_CONTROLS = /[\u202a-\u202e\u2066-\u2069]/g;
+/** A half of a surrogate pair on its own is no text (JSON carries it as an escape that GitHub may refuse). */
+const LONE_SURROGATE =
+  /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+/** A label of dots only is a path segment (`.`, `..`) in the address that removes it; the client refuses it as well. */
+const DOTS_ONLY = /^\.+$/;
 /** A branch of this repository: the characters Git allows without surprises, no `owner:` part, no `..`. */
 const BRANCH_NAME = /^[A-Za-z0-9._/-]+$/;
 
-/** A title is one line: every run of line breaks and control characters becomes one space; it is cut at GitHub's bound. */
+/** The first `length` code units of a text, without cutting a surrogate pair in two. */
+function leading(text: string, length: number): string {
+  const splitsPair =
+    length > 0 &&
+    length < text.length &&
+    /[\ud800-\udbff]/.test(text.charAt(length - 1)) &&
+    /[\udc00-\udfff]/.test(text.charAt(length));
+  return text.slice(0, splitsPair ? length - 1 : length);
+}
+
+/**
+ * A title is one line: every run of line breaks and control characters becomes one space, bidirectional controls and lone surrogate
+ * halves are dropped, and it is cut at GitHub's bound (never inside a surrogate pair).
+ */
 export function cleanTitle(value: unknown): string {
   if (typeof value !== "string")
     throw new ActionInputError("title must be a text.");
-  const line = value.replace(LINE_BREAKS, " ").replace(/ {2,}/g, " ").trim();
+  const line = value
+    .replace(BIDI_CONTROLS, "")
+    .replace(LONE_SURROGATE, "")
+    .replace(LINE_BREAKS, " ")
+    .replace(/ {2,}/g, " ")
+    .trim();
   if (line === "") throw new ActionInputError("title must not be empty.");
   return line.length <= ACTION_TITLE_MAX_CHARS
     ? line
-    : `${line.slice(0, ACTION_TITLE_MAX_CHARS - 1).trimEnd()}…`;
+    : `${leading(line, ACTION_TITLE_MAX_CHARS - 1).trimEnd()}…`;
 }
 
 /** A text of a comment or a description: control characters other than line breaks and tabs are dropped, a long text is cut and says so. */
 export function cleanBody(value: unknown, name: string): string {
   if (typeof value !== "string")
     throw new ActionInputError(`${name} must be a text.`);
-  const text = value.replace(CONTROL_EXCEPT_LINE_BREAKS, "");
+  const text = value
+    .replace(CONTROL_EXCEPT_LINE_BREAKS, "")
+    .replace(LONE_SURROGATE, "");
   if (text.length <= ACTION_BODY_MAX_CHARS) return text;
-  const left = text.length - ACTION_BODY_MAX_CHARS;
-  return `${text.slice(0, ACTION_BODY_MAX_CHARS)}\n\n… (${String(left)} more characters were left out.)`;
+  const kept = leading(text, ACTION_BODY_MAX_CHARS);
+  const left = text.length - kept.length;
+  return `${kept}\n\n… (${String(left)} more characters were left out.)`;
 }
 
 function branchName(value: unknown, name: string): string {
@@ -107,10 +142,11 @@ function labelNames(value: unknown, name: string): string[] {
     if (
       label === "" ||
       label.length > ACTION_LABEL_MAX_CHARS ||
-      CONTROL_CHARACTERS.test(label)
+      CONTROL_CHARACTERS.test(label) ||
+      DOTS_ONLY.test(label)
     )
       throw new ActionInputError(
-        `${name} holds a label that is empty, longer than ${String(ACTION_LABEL_MAX_CHARS)} characters or has control characters.`,
+        `${name} holds a label that is empty, longer than ${String(ACTION_LABEL_MAX_CHARS)} characters, has control characters or is only dots.`,
       );
     names.add(label);
   }
@@ -188,7 +224,9 @@ export function toConnectorError(
     case "INTEGRATION_ACCESS_UNAVAILABLE":
       return new ConnectorError(
         "github_unavailable",
-        "GitHub could not be reached or did not answer in time.",
+        NOT_REPEATABLE.has(name)
+          ? `GitHub could not be reached or did not answer in time. ${MAY_HAVE_HAPPENED}`
+          : "GitHub could not be reached or did not answer in time.",
       );
     default:
       return error;
@@ -206,6 +244,19 @@ async function targetOrFail(
       "The repository of the run has no active GitHub connection.",
     );
   return target;
+}
+
+/**
+ * The address a step reports is a page of the repository of the run: GitHub's answer is taken only when it is one, otherwise the
+ * address the repository's own pages have (`fallbackPath`). A step output ends up as a link on the run page.
+ */
+function pageOfRepository(
+  reported: string,
+  repo: RepoRef,
+  fallbackPath: string,
+): string {
+  const base = repo.url.replace(/\/+$/, "");
+  return reported.startsWith(`${base}/`) ? reported : `${base}${fallbackPath}`;
 }
 
 function unavailable(name: GithubConnectorName): ConnectorError {
@@ -248,7 +299,15 @@ export function createGithubConnectors(
           },
           call.signal,
         );
-        return { number: opened.number, url: opened.url };
+        return {
+          number: opened.number,
+          url: pageOfRepository(
+            opened.url,
+            repo,
+            `/pull/${String(opened.number)}`,
+          ),
+          existing: opened.existing,
+        };
       } catch (error) {
         throw toConnectorError(name, error);
       }
@@ -265,15 +324,21 @@ export function createGithubConnectors(
         throw new ActionInputError("body must not be empty.");
       const { provider, integration, repo } = await targetOrFail(deps, call);
       if (provider.commentOnIssue === undefined) throw unavailable(name);
+      // An invisible marker of this step of this run: a call that is made again for the same step finds its comment instead of
+      // writing a second one. It holds within one run; a new run is a new comment.
+      const marker = `<!-- ${call.idempotencyKey} -->`;
       try {
-        const { url } = await provider.commentOnIssue(
+        const { url, existing } = await provider.commentOnIssue(
           integration,
           repo,
           issue,
-          body,
-          call.signal,
+          `${body}\n\n${marker}`,
+          { signal: call.signal, marker },
         );
-        return { url };
+        return {
+          url: pageOfRepository(url, repo, `/issues/${String(issue)}`),
+          existing,
+        };
       } catch (error) {
         throw toConnectorError(name, error);
       }
@@ -282,6 +347,7 @@ export function createGithubConnectors(
 
   const issueLabels: ActionConnector = {
     name: "github.issue.labels",
+    idempotent: true,
     async run(call) {
       const name = "github.issue.labels";
       const issue = issueNumber(call.inputs.issue);
