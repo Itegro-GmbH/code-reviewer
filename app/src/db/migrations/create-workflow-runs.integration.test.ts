@@ -184,7 +184,7 @@ describe("the workflow runs migration", () => {
       /workflow_step_runs_position_unique/,
     );
     await expect(step("s-3", 1, "plan").execute(db)).rejects.toThrow(
-      /workflow_step_runs_step_unique/,
+      /workflow_step_runs_round_unique/,
     );
     await expect(
       sql`update workflow_step_runs set status = 'succeeded' where id = 's-1'`.execute(

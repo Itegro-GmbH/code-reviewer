@@ -223,7 +223,7 @@ describe("Issue to PR: a label, implement and review in rounds, then a pull requ
     ]);
     expect(reviews[0]?.session_id).not.toBe(reviews[1]?.session_id);
     expect(reviews[0]?.instruction).toBe(
-      `Review branch workflow/${runId}/implement against the issue. Do not change anything.`,
+      `Review branch workflow/${runId}/implement against the issue.`,
     );
     expect(await app.counts()).toEqual({ jobs: 4, sessions: 3, turns: 4 });
 
