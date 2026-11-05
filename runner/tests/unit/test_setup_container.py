@@ -467,6 +467,21 @@ def test_a_vm_running_out_of_memory_while_the_setup_is_finished_is_not_committed
     assert all(c.removed for c in rig.engine.containers.values())
 
 
+# #827-N3: the guard tripped while the end script ran, its kill did not end the container, and the
+# container's Docker did not stop in time: the reason is the VM's memory, not "Docker did not stop"
+def test_a_vm_out_of_memory_while_the_docker_does_not_stop_says_vm_memory(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sc.SetupContainer, "_kill", lambda self: None)
+    rig.finish_squeezes = True
+    rig.finish_mode = "hangs"
+    done = run(rig, docker_stop_seconds=0.5)
+    assert done.outcome == OUTCOME_NOT_SAVED and done.image is None
+    assert done.detail.startswith("vm_memory: ")
+    assert "Docker did not stop" not in done.detail
+    assert rig.engine.committed == []
+
+
 # -- the result ------------------------------------------------------------------------------------
 
 
