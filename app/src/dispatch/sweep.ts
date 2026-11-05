@@ -70,6 +70,7 @@ export const SWEEP_STEPS = [
   "notices",
   "checks",
   "write_tokens",
+  "workflow_runs",
   "cleanup",
   "billing_holds",
   "balance_mails",
@@ -128,6 +129,8 @@ export type SweepDependencies = {
   };
   /** #790: tries again to switch off the write tokens of ended turns that could not be switched off. Left out, none is tried. */
   writeTokens?: { retryPending(): Promise<void> };
+  /** #844: looks again at the workflow runs that wait for a job which may have ended without a report. Left out, none is looked at. */
+  workflowRuns?: { reconcile(): Promise<{ looked: number; failed: number }> };
   /** #591: releases the holds of ended jobs while billing is on (the step reads only the switch while it is off). Left out, none is. */
   billingHolds?: { releaseStranded(): Promise<{ released: number }> };
   /** #506: mails the balance crossings that are due (reads only the switch while billing is off). Left out, none is. */
@@ -224,6 +227,12 @@ export function createDispatchSweep(deps: SweepDependencies): DispatchSweep {
     if (writeTokens !== undefined)
       await step("write_tokens", async () => {
         await writeTokens.retryPending();
+      });
+    const workflowRuns = has("implementer") ? deps.workflowRuns : undefined;
+    if (workflowRuns !== undefined)
+      await step("workflow_runs", async () => {
+        const { failed } = await workflowRuns.reconcile();
+        if (failed > 0) throw new Error("workflow runs could not be advanced");
       });
     await step("cleanup", async () => {
       const hour = Math.floor(now().getTime() / HOUR_MS);

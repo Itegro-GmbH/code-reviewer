@@ -746,6 +746,8 @@ describe("the agent step", () => {
       "costUsd",
       "branch",
       "commits",
+      "headCommit",
+      "pushed",
     ]);
   });
 
@@ -1059,7 +1061,15 @@ describe("references", () => {
     expect(result.errors).toEqual([
       expect.objectContaining({
         code: "reference_unknown_field",
-        available: ["summary", "notes", "costUsd", "branch", "commits"],
+        available: [
+          "summary",
+          "notes",
+          "costUsd",
+          "branch",
+          "commits",
+          "headCommit",
+          "pushed",
+        ],
       }),
     ]);
   });

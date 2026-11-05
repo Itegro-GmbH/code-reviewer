@@ -11,6 +11,7 @@ import { getCapabilities } from "../capabilities/shared.ts";
 import { getWriteTokens } from "../runner-api/claimed-keys-shared.ts";
 import { getCheckRunService } from "../check-runs/shared.ts";
 import { getRunnerQueue } from "../jobs/shared.ts";
+import { reconcileWorkflowRuns } from "../workflow-runs/shared.ts";
 import {
   createJobEndedReaction,
   type JobEndedEvent,
@@ -75,7 +76,10 @@ function getMaintenance(env: Env): OpportunisticMaintenance | undefined {
     dispatch,
     checks: getCheckRunService(),
     ...(getCapabilities().has("implementer")
-      ? { writeTokens: getWriteTokens() }
+      ? {
+          writeTokens: getWriteTokens(),
+          workflowRuns: { reconcile: () => reconcileWorkflowRuns() },
+        }
       : {}),
   });
   return maintenance;

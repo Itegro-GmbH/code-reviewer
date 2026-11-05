@@ -84,6 +84,9 @@ const SCOPED = [
  *   instance (the sweep, the timer and the requests that touch the database); it only reads the rows that are due and
  *   the waiting or running jobs without one, and every answer names its workspace. The record itself goes through
  *   the scoped job check runs repository;
+ * - workflow-runs-sweep: the workflow runs that run and have not been looked at for a while (#844), for the reconciler that
+ *   serves the whole instance (the sweep and the requests that touch the database); it only reads, and every answer names
+ *   its workspace, where the engine then works through the scoped workflow runs repository;
  * - job-dispatches: where the signed wake-up call of a job stands (#326). The sender holds the job it just queued and
  *   the sweep works through the whole instance, like the lease side of the queue; the table has a job id and
  *   counters, no repository data, and is only written in webhook mode;
@@ -137,6 +140,7 @@ const SCOPED = [
  * - instance-setting-types: the shapes of two instance settings (tenancy, the sign-up rule), no function, no query.
  */
 const INSTANCE_LEVEL = [
+  "workflow-runs-sweep.ts",
   "allowed-login-pins-repository.ts",
   "app-meta-repository.ts",
   "billing-holds-sweep.ts",

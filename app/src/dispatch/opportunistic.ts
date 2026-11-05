@@ -34,6 +34,8 @@ export type OpportunisticDependencies = {
   };
   /** #790: tries again to switch off the write tokens of ended turns that could not be switched off. Left out, none is tried. */
   writeTokens?: { retryPending(): Promise<void> };
+  /** #844: looks again at the workflow runs that wait for a job which may have ended without a report. Left out, none is looked at. */
+  workflowRuns?: { reconcile(): Promise<unknown> };
   now?: () => number;
   intervalMs?: number;
   log?: Pick<Console, "error">;
@@ -63,6 +65,8 @@ export function createOpportunisticMaintenance(
           });
           // A write token the end of its turn could not switch off is tried again until it expires (#790).
           await deps.writeTokens?.retryPending();
+          // A job the expiry above ended has no report to tell the workflow engine: its runs are looked at again.
+          await deps.workflowRuns?.reconcile();
           // The leases released above changed jobs no request named: their check runs follow.
           await deps.checks?.reconcileDue({ budgetMs: CHECKS_BUDGET_MS });
         });

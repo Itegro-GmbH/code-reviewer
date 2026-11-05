@@ -24,6 +24,7 @@ import { createRepositoriesRepository } from "../db/repositories/repositories-re
 import { getDatabase } from "../db/startup.ts";
 import { integrationRegistry } from "../integrations/registry.ts";
 import { jobEnded, touched } from "../dispatch/maintenance-shared.ts";
+import { turnEnded } from "../workflow-runs/shared.ts";
 import { getRunnerQueue } from "../jobs/shared.ts";
 import { readEntitlements } from "../workspaces/effective-entitlements.ts";
 import { getWorkspaceLlm, modelCapabilities } from "../llm/shared.ts";
@@ -163,6 +164,8 @@ function sharedDeps(): WorkerApiDeps {
       ),
     // #395: what happens between two sweeps. Both run after the response and do nothing in poll mode.
     jobEnded,
+    // #844: a turn that is over goes on with the workflow run whose step it was (a job that is no turn of the Implementer is ignored).
+    turnEnded,
     activity: () => touched(),
     now: () => new Date(),
     logger: consoleRunnerApiLogger,

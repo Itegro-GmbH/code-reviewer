@@ -214,6 +214,15 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     route: "/api/w/[workspace]/workflows/[workflowId]",
     class: "implementer",
   },
+  // The runs of a workflow (#844, milestone 3): start one by hand and list them, one run with its steps. No page yet.
+  {
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs",
+    class: "implementer",
+  },
+  {
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]",
+    class: "implementer",
+  },
   // The profiles the agents run with, written through the API (#843, milestone 2): the list and the save, the check without storing,
   // one profile with its versions. No page yet.
   { route: "/api/w/[workspace]/profiles", class: "implementer" },
