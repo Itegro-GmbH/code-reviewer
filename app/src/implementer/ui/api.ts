@@ -23,7 +23,7 @@ export type StartTaskRequest = {
   model?: ModelChoice;
   /** Whole US cents; left out when the person set no limit of their own, and when a profile is named (it brings its own). */
   costLimitCents?: number;
-  /** The name of a profile of the workspace, for its newest version (#843); left out for none. */
+  /** A profile of the workspace, `<name>@<version>` for the version the form shows (#843); left out for none. */
   profile?: string;
   /** The environment of the workspace to start with (#818); left out for the standard. */
   environmentId?: string;
