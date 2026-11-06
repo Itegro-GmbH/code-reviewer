@@ -53,6 +53,14 @@ export const NO_RESULT_JOB_ERROR_CODES = [
   "runner_revoked",
 ] as const;
 
+/**
+ * How to read the missing cost of a settled record (#856): `subscription` is a turn that ran on the login of a customer's device. It
+ * has no cost, which is not a cost nobody could measure: it is never counted or reported as an unknown cost (#361, #385), it adds
+ * nothing to a sum, and it is never billed. Its estimate at API prices is shown on the run and not kept here.
+ */
+export const USAGE_COST_BASES = ["subscription"] as const;
+export type UsageCostBasis = (typeof USAGE_COST_BASES)[number];
+
 /** Whose key a run was made with. The same two values as the key mode of the entitlements. */
 export type UsageKeyMode = KeyMode;
 
@@ -101,6 +109,8 @@ export type UsageSettlement =
       completionTokens: number | null;
       /** Why it was settled without a report of its run; absent when the run reported. */
       reason?: SettledReason;
+      /** Present for a turn that ran through a subscription (#856); it has no cost and is not an unknown one. */
+      costBasis?: UsageCostBasis;
     };
 
 type ReportedUsage = {
@@ -109,6 +119,8 @@ type ReportedUsage = {
   costUsd: number | null;
   /** Null when the runner did not say (it is not needed to settle). */
   aiCalls: number | null;
+  /** `subscription` only for a usage without a cost (#856): a basis beside a cost is not trusted. */
+  costBasis: UsageCostBasis | null;
 };
 
 function isCount(value: unknown): value is number {
@@ -125,17 +137,27 @@ function reportedUsage(result: unknown): ReportedUsage | null {
   if (typeof result !== "object" || result === null) return null;
   const usage = (result as { usage?: unknown }).usage;
   if (typeof usage !== "object" || usage === null) return null;
-  const { promptTokens, completionTokens, costUsd, aiCalls } = usage as Record<
-    string,
-    unknown
-  >;
+  const { promptTokens, completionTokens, costUsd, aiCalls, costBasis } =
+    usage as Record<string, unknown>;
   if (!isCount(promptTokens) || !isCount(completionTokens)) return null;
   const calls = isCount(aiCalls) ? aiCalls : null;
   if (costUsd === null)
-    return { promptTokens, completionTokens, costUsd: null, aiCalls: calls };
+    return {
+      promptTokens,
+      completionTokens,
+      costUsd: null,
+      aiCalls: calls,
+      costBasis: costBasis === "subscription" ? "subscription" : null,
+    };
   if (typeof costUsd !== "number" || !Number.isFinite(costUsd) || costUsd < 0)
     return null;
-  return { promptTokens, completionTokens, costUsd, aiCalls: calls };
+  return {
+    promptTokens,
+    completionTokens,
+    costUsd,
+    aiCalls: calls,
+    costBasis: null,
+  };
 }
 
 /** Whether the result carries a usage at all, readable or not. */
@@ -241,5 +263,6 @@ export function settlementOfOutcome(outcome: JobOutcome): UsageSettlement {
       usage.costUsd === null ? null : costUsdToMicroUsd(usage.costUsd),
     promptTokens: usage.promptTokens,
     completionTokens: usage.completionTokens,
+    ...(usage.costBasis === null ? {} : { costBasis: usage.costBasis }),
   };
 }

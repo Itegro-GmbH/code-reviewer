@@ -84,6 +84,52 @@ describe("how a completed job settles its usage record", () => {
     });
   });
 
+  // #856-T75
+  it("marks the settlement of a turn on a subscription, with no cost", () => {
+    expect(
+      settlementOfOutcome({
+        ok: true,
+        result: {
+          ok: true,
+          usage: {
+            ...USAGE,
+            costUsd: null,
+            costBasis: "subscription",
+            estimatedCostUsd: 0.42,
+          },
+        },
+      }),
+    ).toStrictEqual({
+      state: "settled",
+      costMicroUsd: null,
+      promptTokens: 12000,
+      completionTokens: 900,
+      costBasis: "subscription",
+    });
+  });
+
+  // #856-T75
+  it("does not take the estimate of a subscription turn for a cost, and takes no basis it does not know", () => {
+    const settled = (usage: { [key: string]: JsonValue }) =>
+      settlementOfOutcome({ ok: true, result: { ok: true, usage } });
+
+    // A report with a cost beside the basis is a malformed one: a subscription turn has no cost, so the cost stays the cost and the
+    // basis is not taken.
+    const withCost = settled({
+      ...USAGE,
+      costBasis: "subscription",
+      estimatedCostUsd: 0.42,
+    });
+    expect(withCost).toMatchObject({ costMicroUsd: 12346 });
+    expect(withCost).not.toHaveProperty("costBasis");
+    expect(
+      settled({ ...USAGE, costUsd: null, costBasis: "subscription" }),
+    ).toMatchObject({ costMicroUsd: null, costBasis: "subscription" });
+    expect(
+      settled({ ...USAGE, costUsd: null, costBasis: "metered" }),
+    ).not.toHaveProperty("costBasis");
+  });
+
   // #274-T07: the exact cost of a Diff Review (the decimal sum of the charges its provider stated,
   // printed as the shortest number) is stored as it is, in whole micro-USD, without a drift.
   it("stores the exact cost of a Diff Review that the runner reports", () => {

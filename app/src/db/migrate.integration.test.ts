@@ -142,6 +142,7 @@ describe("the migrations of both epics", () => {
       "20261105210000_add_run_cancellation",
       "20261105230000_add_profile_harness",
       "20261105231000_widen_step_cost_basis_for_subscription",
+      "20261105233000_add_usage_record_cost_basis",
     ]);
   });
 

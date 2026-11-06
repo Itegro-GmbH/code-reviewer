@@ -893,6 +893,34 @@ describe("the limits at claim", () => {
     ]);
   });
 
+  // #856-T75
+  it("raises no alert for a turn that ran through a subscription: it has no cost to be unknown", async () => {
+    const fixture = await start();
+    const alerts: unknown[] = [];
+    const queue = createRunnerQueue(fixture.db, {
+      now: fixture.clock.now,
+      onUnknownCostSettled: (event) => alerts.push(event),
+    });
+    const job = await enqueue(fixture);
+    const claimed = await queue.claimNext("runner-a");
+
+    await queue.complete(job.id, claimed?.leaseToken ?? "", {
+      ok: true as const,
+      result: {
+        ok: true,
+        usage: {
+          promptTokens: 1,
+          completionTokens: 1,
+          costUsd: null,
+          costBasis: "subscription",
+          estimatedCostUsd: 0.1,
+        },
+      },
+    });
+
+    expect(alerts).toEqual([]);
+  });
+
   // #361-T10
   it("raises the alert for a run that ended with no result, whose cost is unknown too", async () => {
     const fixture = await start();

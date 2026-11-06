@@ -1496,7 +1496,9 @@ export function createRunnerJobsRepository(
             if (
               settled &&
               settlement.state === "settled" &&
-              settlement.costMicroUsd === null
+              settlement.costMicroUsd === null &&
+              // #856: a turn on a subscription has no cost to be unknown.
+              settlement.costBasis === undefined
             )
               unknownCost.push({
                 workspaceId: finished.workspace_id,

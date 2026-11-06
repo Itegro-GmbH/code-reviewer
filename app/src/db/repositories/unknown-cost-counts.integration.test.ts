@@ -96,6 +96,46 @@ describe("the count of unknown-cost settlements", () => {
     expect(await countsOf(feed)).toEqual([]);
   });
 
+  // #856-T75
+  it("does not count a turn that ran through a subscription, which has no cost to know", async () => {
+    const { fixture, feed } = await start();
+    const job = await enqueue(fixture);
+    const claimed = await fixture.queue.claimNext("runner-a", ENGINES);
+    await fixture.queue.complete(job.id, claimed?.leaseToken ?? "", {
+      ok: true,
+      result: {
+        ok: true,
+        usage: {
+          promptTokens: 100,
+          completionTokens: 10,
+          costUsd: null,
+          costBasis: "subscription",
+          estimatedCostUsd: 0.42,
+        },
+      },
+    });
+
+    expect(await countsOf(feed)).toEqual([]);
+    expect(await recordsOf(fixture).get(job.id)).toMatchObject({
+      state: "settled",
+      costMicroUsd: null,
+      costBasis: "subscription",
+      promptTokens: 100,
+    });
+    // The workspace's own summary does not count it as unknown either, and it adds nothing to a cost.
+    const [group] = await recordsOf(fixture).summarize(WHOLE);
+    expect(group).toMatchObject({
+      settledCount: 1,
+      knownCostMicroUsd: 0,
+      unknownCostCount: 0,
+    });
+    // A run of unknown cost beside it is still counted.
+    await runToCompletion(fixture, { costUsd: null });
+    expect(await countsOf(feed)).toEqual([
+      { workspaceId: fixture.workspaceId, keyMode: "own", unknownCostCount: 1 },
+    ]);
+  });
+
   // #385-T03
   it("counts a run of unknown cost under the key mode it ran on, own and operator's apart", async () => {
     const { fixture, feed } = await start();

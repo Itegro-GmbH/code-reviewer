@@ -428,6 +428,11 @@ export interface UsageRecordsTable {
    * claimed with billing off, which is never charged.
    */
   billing_state: string | null;
+  /**
+   * `subscription` (USAGE_COST_BASES, #856) for a turn that ran on the login of a customer's device: it has no cost, but not because
+   * the runner could not measure it, so it is not an unknown cost; null for every other record.
+   */
+  cost_basis: string | null;
 }
 
 /** The LLM key handed to a runner with the claim of a job, encrypted (src/runner-api/claimed-keys.ts). */
