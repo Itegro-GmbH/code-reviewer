@@ -6,9 +6,21 @@ import { describe, expect, it } from "vitest";
 import {
   IMPLEMENTER_TOKEN_PERMISSIONS,
   JOB_TOKEN_PERMISSIONS,
+  PULL_REQUEST_ACTION_TOKEN_PERMISSIONS,
   toImplementerAccessError,
 } from "./job-access.ts";
 import { GithubAppError } from "./errors.ts";
+
+describe("the token permissions of the action that opens a pull request", () => {
+  // #913-T01
+  it("are pull requests write, contents read and metadata read: without contents GitHub cannot resolve the head and base refs", () => {
+    expect(PULL_REQUEST_ACTION_TOKEN_PERMISSIONS).toStrictEqual({
+      pull_requests: "write",
+      contents: "read",
+      metadata: "read",
+    });
+  });
+});
 
 describe("the token permissions of the Implementer", () => {
   // #749-T04

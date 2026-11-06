@@ -92,6 +92,17 @@ const forbidden = new GithubAppError(
   "GitHub answered 403 for POST /repos/{owner}/{repo}/pulls.",
   { status: 403, refusal: "permission_missing" },
 );
+/** A 422 of the call itself (not of the token request) with the reason the GitHub client read from the answer, if it read one. */
+const refusedFor = (reason: string | undefined) =>
+  new GithubAppError(
+    "GITHUB_APP_REQUEST_FAILED",
+    "GitHub answered 422 for POST /repos/{owner}/{repo}/pulls.",
+    {
+      status: 422,
+      refusal: "other",
+      ...(reason === undefined ? {} : { reason }),
+    },
+  );
 const tokenRefused = new GithubAppError(
   "GITHUB_APP_REQUEST_FAILED",
   "GitHub answered 422 for POST /app/installations/{id}/access_tokens.",
@@ -100,7 +111,7 @@ const tokenRefused = new GithubAppError(
 
 describe("github.pullRequest.open", () => {
   // #844-T300
-  it("opens a pull request on the repository of the run with a token for pull requests only, and reports number and url", async () => {
+  it("opens a pull request on the repository of the run with a token for pull requests and the contents it reads, and reports number and url", async () => {
     const { client, connector } = setup();
 
     const output = await connector("github.pullRequest.open").run(
@@ -122,7 +133,11 @@ describe("github.pullRequest.open", () => {
       "4242",
       {
         repositoryIds: [7001],
-        permissions: { pull_requests: "write", metadata: "read" },
+        permissions: {
+          pull_requests: "write",
+          contents: "read",
+          metadata: "read",
+        },
       },
     ]);
     // The base is the branch the run started from when the node names none.
@@ -277,6 +292,70 @@ describe("github.pullRequest.open", () => {
       expect((error as ConnectorError).code).toBe(code);
       expect(error.message).toMatch(text);
     }
+  });
+
+  // #913-T03
+  it("names GitHub's reason in the github_validation message, and keeps the generic sentence in front of it", async () => {
+    const { connector } = setup({
+      openPullRequestFailure: refusedFor("PullRequest head invalid"),
+    });
+
+    const error = await failure(
+      connector("github.pullRequest.open").run(
+        call({ head: "workflow/r1/work", title: "T" }),
+      ),
+    );
+
+    expect(error).toBeInstanceOf(ConnectorError);
+    expect((error as ConnectorError).code).toBe("github_validation");
+    expect(error.message).toBe(
+      "GitHub refused the request: one of the values is not accepted (for example a branch that does not exist). GitHub said: PullRequest head invalid.",
+    );
+  });
+
+  // #913-T03
+  it("cuts GitHub's reason to its bound and defuses it: it is untrusted text and no link or token passes", async () => {
+    const hostile = [
+      "Ask @org/team to close #12.\n<!-- marker -->",
+      "see https://evil.example/x?t=ghs_abcdefghijklmnopqrstuvwxyz0123456789",
+      "token ghs_abcdefghijklmnopqrstuvwxyz0123456789 and github_pat_11ABCDEFG0abcdefghijklmnop_qrstuvwx",
+      "x".repeat(2_000),
+    ].join(" ");
+    const { connector } = setup({
+      openPullRequestFailure: refusedFor(hostile),
+    });
+
+    const error = await failure(
+      connector("github.pullRequest.open").run(
+        call({ head: "workflow/r1/work", title: "T" }),
+      ),
+    );
+
+    expect((error as ConnectorError).code).toBe("github_validation");
+    expect(error.message.length).toBeLessThanOrEqual(300);
+    expect(error.message).not.toMatch(/https?:\/\//);
+    expect(error.message).not.toMatch(/ghs_|github_pat_/);
+    expect(error.message).not.toContain("@org");
+    expect(error.message).not.toContain("<!--");
+    expect(error.message).not.toMatch(/[\u0000-\u001f]/);
+    expect(error.message).toContain("GitHub said: ");
+  });
+
+  // #913-T03
+  it("says only the generic sentence when GitHub gave no reason", async () => {
+    const { connector } = setup({
+      openPullRequestFailure: refusedFor(undefined),
+    });
+
+    const error = await failure(
+      connector("github.pullRequest.open").run(
+        call({ head: "workflow/r1/work", title: "T" }),
+      ),
+    );
+
+    expect(error.message).toBe(
+      "GitHub refused the request: one of the values is not accepted (for example a branch that does not exist).",
+    );
   });
 
   // #844-T305

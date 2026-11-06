@@ -23,7 +23,7 @@ const ISSUES: JobTokenScope = {
 };
 const HEAD_SHA = "c".repeat(40);
 
-async function setup() {
+async function setup(options: { fetch?: typeof fetch } = {}) {
   const harness = await startGithubAppHarness();
   const { fake, clock, env } = harness;
   fake.addInstallation({ id: 4242, account: ACME });
@@ -32,6 +32,7 @@ async function setup() {
   const client: GithubAppClient = createGithubAppClient({
     config: loadGithubAppConfig(env),
     now: clock.now,
+    ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
   });
   return { fake, client };
 }
@@ -129,6 +130,95 @@ describe("opening a pull request", () => {
       status: 422,
       refusal: "other",
     });
+  });
+
+  // #913-T02
+  it("names resource, field and code of a refusal whose errors carry no message, and keeps the other classifications", async () => {
+    const answer = (errors: unknown[]) =>
+      (async (input, init) => {
+        if (init?.method === "POST" && String(input).endsWith("/pulls"))
+          return new Response(
+            JSON.stringify({ message: "Validation Failed", errors }),
+            { status: 422, headers: { "content-type": "application/json" } },
+          );
+        return fetch(input, init);
+      }) satisfies typeof fetch;
+    const open = async (errors: unknown[]) => {
+      const { client } = await setup({ fetch: answer(errors) });
+      return failureOf(
+        client.openPullRequest("4242", PULLS, "acme/widgets", {
+          head: "workflow/r1/work",
+          base: "main",
+          title: "T",
+        }),
+      );
+    };
+
+    const withoutMessage = await open([
+      { resource: "PullRequest", field: "head", code: "invalid" },
+    ]);
+    expect(withoutMessage).toMatchObject({
+      status: 422,
+      refusal: "other",
+      reason: "PullRequest head invalid",
+    });
+
+    const withMessage = await open([
+      { resource: "PullRequest", code: "custom", message: "title is missing" },
+    ]);
+    expect(withMessage).toMatchObject({
+      refusal: "other",
+      reason: "title is missing",
+    });
+
+    expect(
+      await open([
+        {
+          resource: "PullRequest",
+          code: "custom",
+          message: "No commits between main and workflow/r1/work",
+        },
+      ]),
+    ).toMatchObject({ refusal: "no_commits_between" });
+    expect(
+      await open([
+        {
+          resource: "PullRequest",
+          code: "custom",
+          message: "A pull request already exists for acme:workflow/r1/work.",
+        },
+      ]),
+    ).toMatchObject({ refusal: "pull_request_exists" });
+  });
+
+  // #913-T02
+  it("keeps links, tokens and control characters out of the reason and bounds it", async () => {
+    const hostile = `see https://evil.example/x ghs_abcdefghijklmnopqrstuvwxyz0123456789\nnext ${"y".repeat(1_000)}`;
+    const { client } = await setup({
+      fetch: (async (input, init) => {
+        if (init?.method === "POST" && String(input).endsWith("/pulls"))
+          return new Response(
+            JSON.stringify({
+              message: "Validation Failed",
+              errors: [{ resource: "PullRequest", message: hostile }],
+            }),
+            { status: 422 },
+          );
+        return fetch(input, init);
+      }) satisfies typeof fetch,
+    });
+
+    const error = await failureOf(
+      client.openPullRequest("4242", PULLS, "acme/widgets", {
+        head: "workflow/r1/work",
+        base: "main",
+        title: "T",
+      }),
+    );
+
+    expect(error.reason).toBeDefined();
+    expect(error.reason).not.toMatch(/https?:|ghs_|[\u0000-\u001f]/);
+    expect(error.reason?.length).toBeLessThanOrEqual(300);
   });
 
   // #844-T345

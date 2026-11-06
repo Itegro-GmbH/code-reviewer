@@ -22,8 +22,9 @@ import {
   ACTION_LABELS_MAX,
   ACTION_LABEL_MAX_CHARS,
   ACTION_TITLE_MAX_CHARS,
+  GITHUB_REASON_MAX_CHARS,
 } from "./limits.ts";
-import { BIDI_CONTROLS } from "./templates.ts";
+import { BIDI_CONTROLS, defuseMentions } from "./templates.ts";
 
 /** The connection and the repository an action acts on, resolved for the repository of the run. */
 export type GithubActionTarget = {
@@ -167,9 +168,38 @@ function permissionText(name: GithubConnectorName): string {
   return `The GitHub App of this workspace may not ${ACTION_VERB[name]}: it needs the permission "${GITHUB_PERMISSION_NEEDED[name]}". The owner of the GitHub installation has to grant it in the App's settings and accept the change on the installation; then run the workflow again.`;
 }
 
+/** A link, or a word that looks like a GitHub token. GitHub's reason may quote what was sent; neither goes into a step. */
+const LINK = /https?:\/\/\S*/gi;
+const TOKEN = /\b(?:gh[pousr]_|github_pat_)\w+/g;
+
 /**
- * What GitHub's refusal means for the step. The message never carries the answer of GitHub or an input of the action; the permission
- * the action needs is named so that the run page can say what to change.
+ * GitHub's reason for a refusal, as a short line the step may carry, or undefined for none. It is GitHub's text and quotes what
+ * the action sent, so it is untrusted data like an agent's: one line without control characters, links or token-looking words, cut at
+ * `GITHUB_REASON_MAX_CHARS` (never inside a surrogate pair) and defused so that it cannot mention, close or mark anything where a
+ * comment repeats it.
+ */
+export function cleanReason(value: string | null): string | undefined {
+  if (value === null) return undefined;
+  const line = value
+    .replace(BIDI_CONTROLS, "")
+    .replace(LONE_SURROGATE, "")
+    .replace(LINE_BREAKS, " ")
+    .replace(LINK, "[link]")
+    .replace(TOKEN, "[token]")
+    .replace(/ {2,}/g, " ")
+    .trim();
+  if (line === "") return undefined;
+  const cut =
+    line.length <= GITHUB_REASON_MAX_CHARS
+      ? line
+      : `${leading(line, GITHUB_REASON_MAX_CHARS - 1).trimEnd()}…`;
+  return defuseMentions(cut);
+}
+
+/**
+ * What GitHub's refusal means for the step. The message never carries an input of the action or a credential; the permission the
+ * action needs is named so that the run page can say what to change, and for a refused value (422) GitHub's own short reason follows
+ * the generic sentence (`cleanReason`, #913).
  */
 export function toConnectorError(
   name: GithubConnectorName,
@@ -209,11 +239,13 @@ export function toConnectorError(
         "github_validation",
         "There are no commits between the head and the base branch, so there is nothing to open a pull request for.",
       );
-    case "INTEGRATION_REQUEST_REFUSED":
+    case "INTEGRATION_REQUEST_REFUSED": {
+      const reason = cleanReason(error.detail);
       return new ConnectorError(
         "github_validation",
-        "GitHub refused the request: one of the values is not accepted (for example a branch that does not exist).",
+        `GitHub refused the request: one of the values is not accepted (for example a branch that does not exist).${reason === undefined ? "" : ` GitHub said: ${reason}.`}`,
       );
+    }
     case "INTEGRATION_ACCESS_RATE_LIMITED":
       return new ConnectorError(
         "github_rate_limited",

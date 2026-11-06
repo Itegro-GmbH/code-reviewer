@@ -377,6 +377,8 @@ const JWT_REUSE_MS = 5 * 60_000;
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_REVOKE_TIMEOUT_MS = 3_000;
 const GITHUB_API_VERSION = "2022-11-28";
+/** The longest text of GitHub's reason for a refused call that is kept (#913). */
+const REASON_MAX_CHARS = 300;
 
 function shapeError(call: string): GithubAppError {
   return new GithubAppError(
@@ -560,6 +562,23 @@ function repoPath(repoFullName: string): string {
   return `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
 }
 
+/**
+ * GitHub's words for a refusal as one short line: control characters become spaces, a link and a token-looking word are replaced
+ * (the text is GitHub's, but it can quote what was sent), and the rest is cut at `REASON_MAX_CHARS`. Undefined for nothing.
+ */
+function cleanReason(text: string): string | undefined {
+  const line = text
+    .replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ")
+    .replace(/https?:\/\/\S*/gi, "[link]")
+    .replace(/\b(?:gh[pousr]_|github_pat_)\w+/g, "[token]")
+    .replace(/ {2,}/g, " ")
+    .trim();
+  if (line === "") return undefined;
+  if (line.length <= REASON_MAX_CHARS) return line;
+  const cut = line.slice(0, REASON_MAX_CHARS - 1);
+  return `${/[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut}…`;
+}
+
 /** A name with a half of a surrogate pair cannot be percent encoded (`encodeURIComponent` throws a URIError). */
 const UNPAIRED_SURROGATE =
   /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
@@ -699,32 +718,46 @@ export function createGithubAppClient(
   }
 
   /**
-   * Why GitHub refused, from the `message` of its answer (read at most a few kilobytes, never kept): the closed
-   * set of `GithubRefusalReason`. Only for the answers where the reason decides what the caller does.
+   * Why GitHub refused, from the `message` and `errors` of its answer (read at most a few kilobytes): the closed set of
+   * `GithubRefusalReason`, which only the answers where the reason decides what the caller does need, and `reason`, GitHub's own
+   * short words for it (#913). An entry of `errors` without a `message` is named by its `resource`, `field` and `code`
+   * (`PullRequest head invalid`: GitHub says that for a branch it cannot resolve, and nothing else).
    */
-  async function refusalOf(response: Response): Promise<GithubRefusalReason> {
+  async function refusalOf(
+    response: Response,
+  ): Promise<{ refusal: GithubRefusalReason; reason?: string }> {
     let message = "";
+    let entries = "";
     try {
       const json: unknown = JSON.parse((await response.text()).slice(0, 4000));
       if (isRecord(json) && typeof json.message === "string")
         message = json.message;
       // A 422 says what is wrong in `errors` (opening a pull request: the pull request exists, there is nothing to compare).
       if (isRecord(json) && Array.isArray(json.errors))
-        message += ` ${json.errors
-          .map((entry: unknown) =>
-            isRecord(entry) && typeof entry.message === "string"
-              ? entry.message
-              : "",
-          )
-          .join(" ")}`;
+        entries = json.errors
+          .map((entry: unknown) => {
+            if (!isRecord(entry)) return "";
+            if (typeof entry.message === "string" && entry.message !== "")
+              return entry.message;
+            return [entry.resource, entry.field, entry.code]
+              .filter((part): part is string => typeof part === "string")
+              .join(" ");
+          })
+          .filter((text) => text !== "")
+          .join("; ");
     } catch {
       // An answer that is not JSON says nothing.
     }
+    const reason = cleanReason(entries === "" ? message : entries);
+    return {
+      refusal: classify(response.status, `${message} ${entries}`),
+      ...(reason === undefined ? {} : { reason }),
+    };
+  }
+
+  function classify(status: number, message: string): GithubRefusalReason {
     // GitHub's secondary rate limit is a 403 with no header that says so, only its message.
-    if (
-      (response.status === 403 || response.status === 429) &&
-      /rate limit/i.test(message)
-    )
+    if ((status === 403 || status === 429) && /rate limit/i.test(message))
       return "rate_limited";
     if (/pull request already exists/i.test(message))
       return "pull_request_exists";
@@ -746,6 +779,7 @@ export function createGithubAppClient(
     path: string,
     response: Response,
     refusal?: GithubRefusalReason,
+    reason?: string,
   ): GithubAppError {
     const status = response.status;
     const call = `${method} ${path}`;
@@ -774,6 +808,8 @@ export function createGithubAppClient(
     return new GithubAppError(code, `GitHub answered ${status} for ${call}.`, {
       status,
       ...(refusal === undefined ? {} : { refusal }),
+      // GitHub's words are kept for a refused call (422) only: a refused token request or a 403 has a message of its own.
+      ...(reason === undefined || status !== 422 ? {} : { reason }),
       // A 5xx may say when to come back (Retry-After); everything else has nothing to wait for.
       retryAfterSeconds: status >= 500 ? retryAfter(response.headers) : null,
     });
@@ -819,17 +855,18 @@ export function createGithubAppClient(
         response.headers.get("x-ratelimit-remaining") === "0";
       // The body is read only to tell why a 403 or a 422 was refused (#405) and never ends up in a message;
       // otherwise it is not needed: free the socket.
-      const refusal =
+      const refused =
         (response.status === 403 || response.status === 422) && !rateLimited
           ? await refusalOf(response)
           : undefined;
-      if (refusal === undefined)
+      if (refused === undefined)
         await response.body?.cancel().catch(() => undefined);
       throw errorForStatus(
         method,
         path.split("?")[0] as string,
         response,
-        refusal,
+        refused?.refusal,
+        refused?.reason,
       );
     }
     try {

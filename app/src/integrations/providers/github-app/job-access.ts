@@ -55,9 +55,14 @@ export const ISSUE_ACTION_TOKEN_PERMISSIONS: InstallationPermissions = {
   metadata: "read",
 };
 
-/** What the token that opens a pull request for a workflow (#844) may do: write pull requests of one repository and the metadata. */
+/**
+ * What the token that opens a pull request for a workflow (#844) may do: write pull requests of one repository, read its contents
+ * and the metadata. The contents are read-only and needed all the same (#913): without them GitHub cannot resolve the head and base
+ * refs and answers 422 "head invalid" for a branch that exists.
+ */
 export const PULL_REQUEST_ACTION_TOKEN_PERMISSIONS: InstallationPermissions = {
   pull_requests: "write",
+  contents: "read",
   metadata: "read",
 };
 
@@ -231,6 +236,7 @@ export function toWriteError(error: unknown): IntegrationError {
   if (error.code === "GITHUB_APP_REQUEST_FAILED" && error.status === 422)
     return new IntegrationError("INTEGRATION_REQUEST_REFUSED", error.message, {
       cause: error,
+      ...(error.reason === undefined ? {} : { detail: error.reason }),
     });
   return toReadError(error);
 }

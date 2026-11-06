@@ -3,7 +3,8 @@
 import type { SafeMessageError } from "../../errors.ts";
 
 // Stable error codes of the GitHub App provider. Callers branch on `code`, never on the message. A
-// message names the call and the status, never a key, a JWT, a token or a response body.
+// message names the call and the status, never a key, a JWT, a token or a response body; the one exception is `reason` (#913),
+// the short text GitHub gave for a refusal, which the client has cleaned and bounded.
 export const GITHUB_APP_ERROR_CODES = [
   "GITHUB_APP_CONFIG_INVALID",
   /** GitHub refused the App JWT or an installation token (HTTP 401). */
@@ -56,6 +57,11 @@ export class GithubAppError extends Error implements SafeMessageError {
   readonly duringTokenRequest: boolean;
   /** Why GitHub refused (403, or 422 for a token request); undefined where the answer was not read. */
   readonly refusal: GithubRefusalReason | undefined;
+  /**
+   * What GitHub said about a refused call (#913), for example `PullRequest head invalid`: cleaned of control characters, links and
+   * tokens and bounded by the client, but still GitHub's text, so untrusted. Undefined where the answer was not read or said nothing.
+   */
+  readonly reason: string | undefined;
 
   constructor(
     code: GithubAppErrorCode,
@@ -65,6 +71,7 @@ export class GithubAppError extends Error implements SafeMessageError {
       retryAfterSeconds?: number | null;
       duringTokenRequest?: boolean;
       refusal?: GithubRefusalReason;
+      reason?: string;
     } = {},
   ) {
     super(message);
@@ -74,6 +81,7 @@ export class GithubAppError extends Error implements SafeMessageError {
     this.retryAfterSeconds = options.retryAfterSeconds ?? null;
     this.duringTokenRequest = options.duringTokenRequest ?? false;
     this.refusal = options.refusal;
+    this.reason = options.reason;
   }
 }
 

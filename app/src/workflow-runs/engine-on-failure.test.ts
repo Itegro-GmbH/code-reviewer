@@ -33,7 +33,10 @@ const comment = (id: string, body: string) => ({
   body,
 });
 
-function documentOf(onFailure: unknown[] | undefined) {
+function documentOf(
+  onFailure: unknown[] | undefined,
+  opensPullRequest = false,
+) {
   return {
     version: 1,
     name: "Issue to PR",
@@ -46,13 +49,21 @@ function documentOf(onFailure: unknown[] | undefined) {
         environment: "node",
         instruction: "Do it.",
       },
-      {
-        id: "open",
-        kind: "action",
-        connector: "github.issue.comment",
-        issue: "{{trigger.issue}}",
-        body: "Done.",
-      },
+      opensPullRequest
+        ? {
+            id: "pr",
+            kind: "action",
+            connector: "github.pullRequest.open",
+            head: "workflow/r1/work",
+            title: "Add caching",
+          }
+        : {
+            id: "open",
+            kind: "action",
+            connector: "github.issue.comment",
+            issue: "{{trigger.issue}}",
+            body: "Done.",
+          },
     ],
     ...(onFailure === undefined ? {} : { onFailure }),
   };
@@ -114,6 +125,8 @@ type Calls = Array<{ connector: string; stepId: string; inputs: unknown }>;
 
 function harness(options: {
   onFailure?: unknown[] | undefined;
+  /** The second step of the workflow opens a pull request instead of commenting. */
+  opensPullRequest?: boolean;
   steps?: StoredStepRun[];
   run?: Partial<StoredWorkflowRun>;
   /** Connectors that fail, by name. */
@@ -161,6 +174,8 @@ function harness(options: {
       calls.push({ connector: name, stepId: call.stepId, inputs: call.inputs });
       const failure = options.failing?.[name];
       if (failure !== undefined) throw failure;
+      if (name === "github.pullRequest.open")
+        return { number: 12, url: "https://github.test/p/12", existing: false };
       return name === "github.issue.comment"
         ? { url: "https://github.test/c/1" }
         : { labels: [] };
@@ -274,7 +289,9 @@ function harness(options: {
     workflows: {
       getVersion: async () =>
         ({
-          document: JSON.stringify(documentOf(options.onFailure)),
+          document: JSON.stringify(
+            documentOf(options.onFailure, options.opensPullRequest),
+          ),
           createdBy: "u-1",
         }) as never,
     },
@@ -295,6 +312,7 @@ function harness(options: {
     connectors: createConnectorRegistry([
       connector("github.issue.comment"),
       connector("github.issue.labels"),
+      connector("github.pullRequest.open"),
     ]),
     repositoryName: async () => "acme/app",
     now: () => NOW,
@@ -353,6 +371,44 @@ describe("a run that fails, in a workflow with onFailure steps", () => {
     expect(body).toContain(`#${ZERO_WIDTH_SPACE}12`);
     expect(body).toContain(`<!-${ZERO_WIDTH_SPACE}-`);
     expect(body).not.toContain("@org");
+  });
+
+  // #913-T04
+  it("ends a run whose pull request is refused failed, and the steps of onFailure read GitHub's reason in failure.message", async () => {
+    const reason =
+      "GitHub refused the request: one of the values is not accepted (for example a branch that does not exist). GitHub said: PullRequest head invalid.";
+    const app = harness({
+      onFailure: CLEANUP,
+      opensPullRequest: true,
+      steps: [stepRow(0, {})],
+      failing: {
+        "github.pullRequest.open": new ConnectorError(
+          "github_validation",
+          reason,
+        ),
+      },
+    });
+
+    await app.engine.advance(RUN_ID);
+
+    expect(app.steps[1]).toMatchObject({
+      stepId: "pr",
+      status: "failed",
+      errorCode: "github_validation",
+      errorMessage: reason,
+    });
+    expect(app.calls.map((call) => [call.connector, call.stepId])).toEqual([
+      ["github.pullRequest.open", "pr"],
+      ["github.issue.comment", "report"],
+      ["github.issue.labels", "unlabel"],
+    ]);
+    expect(app.calls[1]?.inputs).toMatchObject({
+      body: `Stopped at pr (failed, github_validation): ${reason}`,
+    });
+    expect(app.run).toMatchObject({
+      status: "failed",
+      errorCode: "step_failed",
+    });
   });
 
   // #902-T52

@@ -749,6 +749,9 @@ references are resolved.
 
 GitHub files the comments and labels of a pull request under issues, so `Issues` covers a pull request too.
 
+`github.pullRequest.open` needs **Pull requests: Read and write** and, besides, **Contents: Read** (the App's installation holds it for the agent's branch already): its token asks for
+`pull_requests: write`, `contents: read` and `metadata: read`. Without the contents GitHub cannot resolve the head and base refs and answers 422 "head invalid" for a branch that exists (#913).
+
 | Input | Bound |
 | --- | --- |
 | `title` | One line (line breaks and control characters become a space), at most 256 characters; a longer title is cut (never inside a surrogate pair, so no emoji is torn in two), lone surrogate halves are dropped, and the bidirectional controls (U+200E, U+200F, U+061C, U+202A–U+202E, U+2066–U+2069) are removed so that a title reads as it is written. Empty after cleaning is `action_input_invalid`. |
@@ -757,13 +760,14 @@ GitHub files the comments and labels of a pull request under issues, so `Issues`
 | `issue` | A whole number from 1. |
 | `add`, `remove` | At most 20 names each, 50 characters at most, no control characters, no empty name, **no name of dots only** (`.`, `..`): the address that removes a label ends with its name, `DELETE …/labels/.` is read as `…/labels/` and would remove every label of the issue. The connector and the client both refuse such a name before any request. Duplicates are dropped. |
 
-**Failures.** What GitHub refuses ends the step with a code of its own and a message for the run page that names no token, no answer of GitHub and no text of the action:
+**Failures.** What GitHub refuses ends the step with a code of its own and a message for the run page that names no token and no text of the action. The one text of GitHub's that it carries is the short reason of a refused value (`github_validation`,
+for example "GitHub said: PullRequest head invalid."): it is GitHub's own, so it is cleaned (one line, no links or token-looking words), cut at 150 characters and defused like an agent's text, and the message as a whole stays within the 300 characters that `{{failure.message}}` keeps:
 
 | What GitHub answered | Code |
 | --- | --- |
 | The App lacks the permission (the token request is refused with 422, or the call with 403 "Resource not accessible by integration"), or the installation is suspended | `github_permission_missing` |
 | 404 for the issue or pull request; the repository is not (or no longer) part of the installation; the installation is gone | `github_not_found` |
-| 422: no commits between head and base, a branch that does not exist; 403 for an archived repository | `github_validation` |
+| 422: no commits between head and base, a branch that does not exist, any other value it does not accept (GitHub's reason follows the generic sentence); 403 for an archived repository | `github_validation` |
 | 429, or 403 with a rate-limit header, or 403 without one whose message names a rate limit (GitHub's secondary limit answers like that) | `github_rate_limited` |
 | 403 for any other reason (no permission, no rate limit, no archived repository) | `action_failed` (the message names the call and the status; it does not send the owner to the App's settings) |
 | 5xx, no connection, no answer in time | `github_unavailable` |

@@ -44,6 +44,11 @@ export const ACTION_LABEL_MAX_CHARS = 50;
 export const ACTION_LABELS_MAX = 20;
 /** A branch name an action is given (a Git ref component is at most 255 bytes). */
 export const ACTION_BRANCH_MAX_CHARS = 255;
+/**
+ * GitHub's reason for a refused action as the step reports it (#913). The generic sentence in front of it and this bound keep the whole
+ * message under `FAILURE_MESSAGE_MAX_CHARS`, which the steps of `onFailure` read.
+ */
+export const GITHUB_REASON_MAX_CHARS = 150;
 
 /** The issue a label hands to a run (#845) is stored bounded: whoever opened the issue chose its words. */
 export const ISSUE_TITLE_MAX_CHARS = 256;
