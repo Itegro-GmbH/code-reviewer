@@ -240,6 +240,44 @@ describe("the tip a follow-up is accepted at", () => {
 
     expect(branchesRead(f)).toEqual(["main"]);
   });
+
+  // #909-T12
+  it("falls back to the tip of the base branch when the start branch was deleted", async () => {
+    const f = fakes(
+      session({ headCommit: null, startBranch: "feature/start" }),
+    );
+    f.provider.getBranch.mockImplementation((_i, _r, name: string) =>
+      Promise.resolve(name === "feature/start" ? null : { sha: TIP }),
+    );
+    f.queue.enqueueFollowUpTurn.mockResolvedValue({
+      status: "created",
+      job: { id: "job-2" },
+      session: session({ status: "running" }),
+      turn: { ...lastTurn(), number: 2 },
+    });
+
+    await createFollowUps(f.deps).continueSession(USER, "session-1", body());
+
+    expect(branchesRead(f)).toEqual(["feature/start", "main"]);
+    expect(f.queue.enqueueFollowUpTurn).toHaveBeenCalled();
+  });
+
+  // #909-T12
+  it("is an error only when the base branch is gone as well", async () => {
+    const f = fakes(
+      session({ headCommit: null, startBranch: "feature/start" }),
+    );
+    f.provider.getBranch.mockResolvedValue(null);
+
+    const failure = await failureOf(
+      createFollowUps(f.deps).continueSession(USER, "session-1", body()),
+    );
+
+    expect((failure as ImplementerError).code).toBe(
+      "IMPLEMENTER_BASE_BRANCH_NOT_FOUND",
+    );
+    expect(branchesRead(f)).toEqual(["feature/start", "main"]);
+  });
 });
 
 describe("a repeat of a request id that is queued", () => {
