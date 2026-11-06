@@ -866,7 +866,7 @@ taken out (and lone surrogates), the cut is on a character boundary, every instr
 that instruction and is disabled. The hint "history: about N tokens; the first call reads all of it again" comes from the tokens of the last model call of the last turn, with the warning of the spike that a very long history can reach the cost limit with the first call. The run page also shows the continuation mode of a follow-up turn (`imported` or `summary_only` with the reason).
 
 **Known limits and the release window.**
-- **App before runner (release window).** Until the runner with `implementer_resume` is live, a follow-up turn ends for free with `implementer_engine_unavailable`, before any credential exists (the claim checks the feature, see above). The app and the runner of release 2 are shipped together, so the window does not exist there; it is only the time between the two deployments if they are ever shipped apart.
+- **App before runner (release window).** Until the runner with `implementer_resume` is live, a follow-up turn ends for free with `implementer_engine_unavailable`, before any credential exists (the claim checks the feature, see above). Likewise a task with a start branch ends free with `implementer_engine_unavailable` until the Worker carrying `implementer_start_branch` is live. The app and the runner of release 2 are shipped together, so the window does not exist there; it is only the time between the two deployments if they are ever shipped apart.
 - **A follow-up on a workflow's session.** A session that a workflow run started can be continued from the Runs page like any other. That **changes the branch behind the run** (the run's result is no longer what the branch holds), and the **cost of the follow-up turn is not counted in the run's budget**: it is a turn of its own, with its own cost limit.
 - **N3, one 404 discards at once.** The start discards the instruction when GitHub answers 404 for the branch or the repository once; there is no second look, so a wrong 404 from the platform loses the instruction (its text stays on the Runs page).
 - **N6, the summary and the depth.** `previousSummary` is the last summary that is not empty (a turn that reported none does not erase it), and the history that is read is at most 100 turns (`TURN_HISTORY_LIMIT`); the digest holds less (above).
@@ -923,7 +923,7 @@ the checks below add to it and do not replace it.
 the Dispatcher last (`docs/deployment-vercel.md`, the deployment pipeline). The test starts only after `persist` and the canary of that run are green and
 the Dispatcher serves the snapshot of the run. The App and the runner are **one release**: the App accepts the new keys of a result (`checkedOut`)
 and sends `resume` only to a runner that names `implementer_resume`, so between the two promotions a follow-up ends
-`implementer_engine_unavailable`, free, and a first turn is unharmed. Do not start a follow-up in that window and do not promote one half alone.
+`implementer_engine_unavailable`, free, and a first turn is unharmed. A task with a start branch ends the same way, free, until the Worker carrying `implementer_start_branch` is live. Do not start a follow-up in that window and do not promote one half alone.
 
 | # | Check | A pass is | A failure is |
 |---|---|---|---|

@@ -198,7 +198,7 @@ describe("the claim of a turn of the Implementer on the workspace's own Anthropi
 
 // #909: a turn with a start branch goes only to a Worker that reads it; one that did not would start from the base branch.
 describe("the claim of a turn of the Implementer with a start branch", () => {
-  // #909-T09
+  // #909-T13
   it("hands a Worker with the feature the start branch", async () => {
     const h = await start();
     await h.enqueueTurn({
@@ -217,7 +217,7 @@ describe("the claim of a turn of the Implementer with a start branch", () => {
     });
   });
 
-  // #909-T09
+  // #909-T13
   it("ends the turn implementer_engine_unavailable, free, for a Worker without the feature, before a token exists", async () => {
     const h = await start();
     const turn = await h.enqueueTurn({
@@ -235,7 +235,7 @@ describe("the claim of a turn of the Implementer with a start branch", () => {
     expect(h.issuedJobTokens()).toEqual([]);
   });
 
-  // #909-T09
+  // #909-T13
   it("hands a Worker without the feature a turn that has no start branch, with no startBranch field", async () => {
     const h = await start();
     await h.enqueueTurn({

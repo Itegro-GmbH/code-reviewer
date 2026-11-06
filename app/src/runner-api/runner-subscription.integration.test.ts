@@ -205,7 +205,7 @@ describe("the claim of a turn on the harness claude-code", () => {
     });
   });
 
-  // #909-T09
+  // #909-T13
   it("ends the turn, free, when the runner does not read the start branch, instead of starting from the base branch", async () => {
     const h = await start();
     const runner = await h.registerRunner({ labels: ["box"], manifest: BOTH });
@@ -230,7 +230,7 @@ describe("the claim of a turn on the harness claude-code", () => {
     });
   });
 
-  // #909-T09
+  // #909-T13
   it("hands a runner that reads the start branch the turn with it", async () => {
     const h = await start();
     const runner = await h.registerRunner({ labels: ["box"], manifest: BOTH });
