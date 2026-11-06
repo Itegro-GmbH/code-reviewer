@@ -7,18 +7,18 @@ taken, the other is written as skipped) and `loop` (rounds, `until`, `maxRounds`
 The routes exist only in a deployment with the capability `implementer` (`src/capabilities/routes.ts`), like the workflows and the Implementer; every
 member may use them (`start_implementer_task`: a run starts tasks).
 
-| File                                 | Role                                                                                                                                                                     |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `machine.ts`                         | The state machine as a pure function: the state of a run (its steps, the budget, the clock) in, the one next move out. A function of the state, so a repeat finds `idle` |
-| `engine.ts`                          | `createWorkflowEngine`: reads the state under the lock of the run, asks for the move, makes it; `advance(runId)` and `jobEnded(jobId)` (never throws)                    |
-| `turn-facts.ts`, `turn-reader.ts`    | What an agent step yields once its turn is over: the result held to the stored schema again (`checkResultValue`), the facts, the cost; and the read of a turn            |
-| `templates.ts`                       | `{{ref}}` at run time: one pass, values are data, bounded, a missing value fails the step                                                                                |
-| `connectors.ts`                      | The interface of an action, the registry, `ConnectorError` (a step ends with its code), and the inputs of an action node resolved and held to the connector's spec       |
-| `github-connectors.ts`               | The three GitHub actions through the GitHub App of the workspace: cleaned and bounded inputs, GitHub's refusals as stable codes (`docs/workflows.md`, "GitHub actions")  |
-| `label-trigger.ts`                   | The label trigger (#845): which workflows a label on an issue starts, one run each under `gh-<delivery id>-<workflow id>`, and the bounded issue as the run's input      |
-| `document.ts`                        | The workflow document as the engine reads it (defensively)                                                                                                               |
-| `service.ts`, `http.ts`, `shared.ts` | The run service (start, get, list), the handlers behind the routes, the wiring of the running server (the hook of the runner API, the reconciler of the sweep)           |
-| `errors.ts`, `limits.ts`             | The stable codes (`WORKFLOW_RUN_*` for the routes, the lower case codes of a failed run or step) and the bounds                                                          |
+| File                                 | Role                                                                                                                                                                                                                   |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `machine.ts`                         | The state machine as a pure function: the state of a run (its steps, the budget, the clock) in, the one next move out. A function of the state, so a repeat finds `idle`. Also the failure phase of `onFailure` (#902) |
+| `engine.ts`                          | `createWorkflowEngine`: reads the state under the lock of the run, asks for the move, makes it; `advance(runId)` and `jobEnded(jobId)` (never throws)                                                                  |
+| `turn-facts.ts`, `turn-reader.ts`    | What an agent step yields once its turn is over: the result held to the stored schema again (`checkResultValue`), the facts, the cost; and the read of a turn                                                          |
+| `templates.ts`                       | `{{ref}}` at run time: one pass, values are data, bounded, a missing value fails the step                                                                                                                              |
+| `connectors.ts`                      | The interface of an action, the registry, `ConnectorError` (a step ends with its code), and the inputs of an action node resolved and held to the connector's spec                                                     |
+| `github-connectors.ts`               | The three GitHub actions through the GitHub App of the workspace: cleaned and bounded inputs, GitHub's refusals as stable codes (`docs/workflows.md`, "GitHub actions")                                                |
+| `label-trigger.ts`                   | The label trigger (#845): which workflows a label on an issue starts, one run each under `gh-<delivery id>-<workflow id>`, and the bounded issue as the run's input                                                    |
+| `document.ts`                        | The workflow document as the engine reads it (defensively)                                                                                                                                                             |
+| `service.ts`, `http.ts`, `shared.ts` | The run service (start, get, list), the handlers behind the routes, the wiring of the running server (the hook of the runner API, the reconciler of the sweep)                                                         |
+| `errors.ts`, `limits.ts`             | The stable codes (`WORKFLOW_RUN_*` for the routes, the lower case codes of a failed run or step) and the bounds                                                                                                        |
 
 The tables are `workflow_runs` and `workflow_step_runs` (migration `20261105130000_create_workflow_runs`; `20261105170000_add_workflow_step_cost_basis` adds where a step's cost comes from), written by
 `src/db/repositories/workflow-runs-repository.ts`, scoped to a workspace. `workflow-runs-sweep.ts` is the one instance-level read (the runs that run and were
@@ -47,6 +47,13 @@ the filter: [`docs/workflows.md`](../../../docs/workflows.md#the-label-trigger).
 3. The end of a turn reaches the engine through `ReportDeps.turnEnded` (`runner-api/report.ts`, called where the write tokens are switched off), after the
    completion is stored. A hook that throws or rejects is caught and logged by its code; the completion is not affected. A job that ends without a report is
    found by `reconcileWorkflowRuns` (the sweep and the opportunistic maintenance), which calls `advance` for every run that waited a minute.
+
+## `onFailure` (#902)
+
+A run that would end `failed` or `cancelled` in a workflow with `onFailure` steps first answers `begin_failure` (`machine.ts`): the engine stores `FailureRecord` (the status and error code the run ends
+with, and the facts `{{failure.*}}`) in `workflow_runs.failure` and keeps the run `running`. From then on `nextMove` is in the failure phase: the rows after the workflow's own are replayed against the
+`onFailure` nodes (`contextOf` tells a row its place), a failed step counts as over, a cancel is ignored, an agent step or a loop is never started, and the run ends with the stored status. Not run for
+`document_unusable` and `workflow_owner_gone`. `code` and `message` of the failure are defused where they go into a comment (`templates.ts`). `docs/workflows.md`, "After a failure".
 
 ## Decisions where the plan left room
 

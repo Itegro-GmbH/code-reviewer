@@ -8,7 +8,7 @@ workspace with versions.
 **Status (milestones 1 to 5 of epic #833).** The format, the validator, the storage, the [profiles](profiles.md) they refer to, the
 **engine**, the three GitHub actions, the **label trigger** and the **control steps** `if` and `loop` exist: a workflow with the manual trigger can be started through the API, and a
 workflow with the trigger `github.issueLabeled` starts when somebody puts its label on an issue (see [Engine](#engine), [Control at run time](#control-at-run-time) and [The label trigger](#the-label-trigger));
-either runs its steps in the order the document says, in rounds where there is a loop. A member can [cancel a run](#cancelling-a-run). Not yet: an editor.
+either runs its steps in the order the document says, in rounds where there is a loop. A member can [cancel a run](#cancelling-a-run), and a workflow can clean up after a failed or cancelled run with [`onFailure`](#after-a-failure-onfailure). Not yet: an editor.
 The finish tool exists (see [Result schemas](#result-schemas)). The workflows exist only in
 a deployment with the capability `implementer` (the factory); there is no editor, but the routes below and, for the runs, [pages](#the-run-page). Every member of a workspace may
 use them (the permission `start_implementer_task`).
@@ -67,7 +67,8 @@ An answer you will see while fixing:
 | `description` | no | Up to 1000 characters. |
 | `trigger` | yes | What starts the workflow. |
 | `budgetUsd` | no | What the workflow may spend over all its steps, in USD. 20 when left out. Not above the operator's maximum (100 today). |
-| `steps` | yes | A list of steps, 1 to 50 in all (counted through branches and loop bodies). |
+| `steps` | yes | A list of steps, 1 to 50 in all (counted through branches and loop bodies, `onFailure` included). |
+| `onFailure` | no | Steps that run once after the run ended `failed` or `cancelled` ([After a failure](#after-a-failure-onfailure)). Left out: the run ends at once, as it always did. |
 
 Every object is **closed**: a field the format does not name is an error (`unknown_field`, with the names that exist). Lengths are counted in
 characters (an emoji is one), as the JSON Schema counts them.
@@ -174,6 +175,32 @@ loop); `if` and `loop` together nest 4 levels deep at most.
 
 The format names `forEach`, `approval` and `workflow` (a workflow used as a step of another) so that documents can use them later. Version 1
 refuses them with `kind_not_supported`; their other fields are not defined yet and are not checked.
+
+### After a failure: `onFailure`
+
+`onFailure` is a list of steps beside `steps`. They run **once, after the run ended `failed` or `cancelled`**, and never after `succeeded`. The run keeps the final status it was going to have
+(`failed` with its error code, or `cancelled`); the steps only clean up. A document without `onFailure` is valid and behaves as before.
+
+- **What they may be.** An `action` of `github.issue.comment` or `github.issue.labels`, and an `if` over such actions (to tell a cancel from a failure, for example). No agent step, no `loop`, no
+  `github.pullRequest.open` (`on_failure_step_not_allowed`): after a failure nothing starts an agent or opens a pull request.
+- **What they can read.** `{{trigger.…}}` as in any step, the facts of the failure, and the `onFailure` steps before them. **Not the steps of the workflow**: after a failure any of them may not have run
+  (`reference_not_in_scope`). The id `failure` is taken in `onFailure`; ids are unique in the document as a whole.
+- **The facts of the failure** (`{{failure.<fact>}}`, all texts):
+
+  | Fact | Holds |
+  | --- | --- |
+  | `status` | `failed` or `cancelled`: how the run ends. |
+  | `stepId` | The step the failure belongs to: the step that failed, the agent step the budget could not pay, the `if` or `loop` whose condition could not be told, the step a cancel stopped. Empty when no step does (a run cancelled before its first step). |
+  | `code` | The code of that step (`no_result`, `timeout`, `github_not_found`, …), or the code of the run (`budget_exhausted`, `condition_failed`); `cancelled` for a cancel. |
+  | `message` | A short sentence (300 characters at most) about why. |
+
+  They are **data, not commands**: none of them is a [target](#one-repository-per-run-and-targets) (`target_from_untrusted_value`), and `code` and `message`, which may quote a connector, GitHub or a runner,
+  go into a comment **defused** like the text an agent wrote or the title of an issue (no mention of a person or team, no `Closes #n`, no comment marker, see [Results and facts](#results-and-facts)).
+- **When they run.** After a step failed, the budget ended the run (`budget_exhausted`; they cost nothing, so they run), a condition could not be told (`condition_failed`), or a member cancelled the run
+  (after its agent has stopped, [Cancelling a run](#cancelling-a-run)). They do **not** run when the run could not even start (`workflow_owner_gone`) or its steps do not fit its document (`document_unusable`):
+  nothing of such a run can be trusted to act on an issue.
+- **A step of `onFailure` that fails** is recorded (the run page shows it, with its code) and the next one runs; it is never repeated and starts nothing else. The run ends with the status it was going to have.
+  A cancel asked for while they run changes nothing: the run ends `failed` and they finish.
 
 ## References and data flow
 
@@ -445,8 +472,9 @@ the open findings on the issue. `{{review.findings}}` after the loop is the last
 `review` is a session of its own (`"session": "new"`) and starts **from the branch of `implement`** (`"branch": "{{implement.branch}}"`), so it reads the code the implementer wrote, in every round
 ([Branches](#branches-and-what-a-step-starts-from)). It declares its `result` although the profile `reviewer` brings the same default: the example then validates and reads without the profile at hand.
 
-**When a step fails inside the loop** the run ends as `failed` at once: nothing is commented on the issue, no pull request is opened, and the issue keeps `agent working`
-([Failures inside a loop](#control-at-run-time)). A run a member cancels ([Cancelling a run](#cancelling-a-run)) leaves it on the issue too. Read the run page; format v1 has no failure branch yet.
+**When a step fails inside the loop** (or the budget ends the run, or a member cancels it) the run ends as `failed` (or `cancelled`), no pull request is opened, and `onFailure` runs: `report` comments on the issue what stopped
+the run (the step, its code and a short message, defused), and `release` takes `agent working` off and puts `agent failed` on. It cannot put `ready for agent` back: that label starts the workflow, so adding it is refused
+(`label_retriggers_workflow`); a person puts it on again when the issue should be tried again. The run keeps its status; the page shows the two steps after the one that failed ([After a failure](#after-a-failure-onfailure)).
 
 ## The API
 
@@ -534,11 +562,11 @@ the run and its steps; the first steps start right after the answer.
 3. The job ends `cancelled` (code `cancelled`, a stable code) with that report; billing charges what the turn used and nothing else. A holder that never reports (it died, it heard nothing) is not waited for for ever: the job is
    ended by the app after a grace of 4 minutes, or when its lease lapses, or when its claim is given back; none of these queues the turn again.
 4. The engine reads the end of the turn like any other: the step ends `failed` with the code `cancelled` (its cost is what the runner reported; a turn that never ran, because no runner took it or its Worker could not be started, is booked at no cost; one that ran and reported nothing is booked as the limit, as for any step), and the run ends
-   `cancelled`, without `errorCode`. A turn that finished by itself in the same moment keeps its result; the run still ends `cancelled`.
+   `cancelled`, without `errorCode` (after its [`onFailure`](#after-a-failure-onfailure) steps, when the workflow has them: the agent has stopped by then). A turn that finished by itself in the same moment keeps its result; the run still ends `cancelled`.
 5. A step whose turn was queued behind another instruction of its session (`session.continue`) discards that instruction first, so no turn starts later that no run reads. A turn that starts after the stop (the claimant was
    in the middle of starting it) is asked to stop by the one that started it, so no turn runs on that nobody wants.
 
-An action that runs is not interrupted (it is a call of at most 60 seconds and may have happened); the run ends after it. A cancel changes no label: an issue that carries `agent working` keeps it, as after a failed run, and the label is taken off by hand. Stopping the task of an agent step on its own (the [Implementer route](implementer.md#cancelling-a-run-891)) ends
+An action that runs is not interrupted (it is a call of at most 60 seconds and may have happened); the run ends after it. A cancel changes no label by itself: a workflow with [`onFailure`](#after-a-failure-onfailure) cleans up after the agent has stopped (the facts have `status` `cancelled`); without it the issue keeps `agent working` and the label is taken off by hand. Stopping the task of an agent step on its own (the [Implementer route](implementer.md#cancelling-a-run-891)) ends
 the run `cancelled` the same way, not `failed`.
 
 A run looks like this (a step is `pending` when written, `running` once claimed, then `succeeded` or `failed`; a step of the branch an `if` did not take is written `skipped`):
@@ -649,10 +677,22 @@ node it is (`stepId`), how often that step has run (`round`, from 1) and, for a 
   step must declare the same `result` as that step, else it ends with `agent_start_failed` before anything is started. The cost limit of the turn is the smaller of what is left of
   the budget and the limit of the session's last turn.
 - **Failures inside a loop.** A step that fails, a budget that cannot pay the next agent step and a condition that cannot be told end the **whole run** at once as `failed`
-  (`step_failed`, `budget_exhausted`, `condition_failed`): the steps after the loop do not run, so in "Issue to PR" **nothing is commented on the issue and no pull request is
-  opened**, and the issue keeps the label `agent working`. The only signals are the run page and the status of the run (`GET .../runs/<runId>`); watch them, or take the label off by hand. A run a member cancels ([Cancelling a run](#cancelling-a-run)) leaves the label on the issue the same way.
-  The format has no branch for a failure yet (an `onFailure` that runs steps when a step or a loop fails); it is a follow-up. The loop's own `maxRounds` and `budget` exits are
-  **not** failures: they end the loop, and the `if` after it (`{{fix.exit}}`) decides, which is what the example's comment on the issue is for.
+  (`step_failed`, `budget_exhausted`, `condition_failed`): the steps after the loop do not run, so in "Issue to PR" **no pull request is opened**. What the run does then is
+  [`onFailure`](#onfailure-at-run-time): the example comments on the issue and swaps the label; a workflow without `onFailure` leaves the issue as it is and the only signals are the run page and the
+  status of the run (`GET .../runs/<runId>`). The loop's own `maxRounds` and `budget` exits are **not** failures: they end the loop, and the `if` after it (`{{fix.exit}}`) decides, which is what the example's comment on the issue is for.
+
+### `onFailure` at run time
+
+*#902.* When the walk would end the run `failed` or `cancelled` and the workflow has `onFailure` steps, the engine first **stores how the run ends** with the run (`workflow_runs.failure`: the status, the error code and the
+facts above) and keeps it `running`. The rows after that are the rows of `onFailure`, replayed against its steps the same way as the workflow's own; a step that failed or was skipped counts as over, so the next one runs.
+When the last one is over, the run ends with the stored status and error code (`failed` with `step_failed`, `budget_exhausted` or `condition_failed`; `cancelled` with none), and `finishedAt` is the end of the cleanup.
+
+- **Idempotent.** Like every move it is made under the lock of the run from the rows, so a doubled event or a sweep finds what the first one did. A step that was claimed and has no outcome after two minutes is ended
+  `action_interrupted`, not repeated; the steps after it still run.
+- **The run is still `running` meanwhile**, which also keeps the issue busy for the label trigger (one running run per workflow and issue). The sweep finds it if the engine dies.
+- **Cancel.** The run is cancelled when its agent has stopped; `onFailure` starts then, and ignores a cancel that is (or becomes) asked for while it runs. The route answers `requested` or `already_requested` as ever.
+- **Budget.** The steps cost nothing (comments and labels), so a budget that is used up does not stop them. They never start an agent: whatever the document says, an agent step or a loop in `onFailure` ends the cleanup.
+- **A document of an older version** has no `onFailure` and runs as before; the column is null for every run that exists.
 
 ### Branches and what a step starts from
 
@@ -674,6 +714,8 @@ node it is (`stepId`), how often that step has run (`round`, from 1) and, for a 
 - **A cancelled run ends when its agent has stopped** (#891), at the next heartbeat of its runner (30 seconds on the Worker, 60 at most on a customer's runner) plus the time the agent needs to stop and push (the stop of a turn has 120 seconds, and the heart keeps beating meanwhile), and at the latest after the
   grace of 4 minutes, when the app ends the job itself. A runner of an earlier release ignores `cancelRequested`: it goes on until that grace ends the job and its claim is lost, so it stops without a push. The steps that had not
   started are not written as skipped rows (only a step that was written and not claimed is); the page shows what ran. The run page has a plain button, no confirmation.
+- **`onFailure` reads no step of the workflow.** After a failure any step may not have run, so the facts of the failure (`status`, `stepId`, `code`, `message`) and the trigger are all it has: it cannot name the branch the agent pushed or quote an earlier result. (A later extension could offer them with a `| default`.)
+- **`onFailure` is not shown apart on the run page and not in the run's JSON**: its steps are rows after the failed one, like any step; `workflow_runs.failure` is not returned by the routes yet.
 - **Profiles are resolved per step**, at the moment the step starts; a profile without a version can mean version 2 for step two of a run whose step one ran
   with version 1.
 - **The sweep has a time budget** (40 seconds, 10 for the maintenance after a request), checked between two runs; a run is looked at as a whole.
