@@ -1053,10 +1053,11 @@ export function readStoredUsage(result: JsonValue | null): RunUsageView | null {
   const costKnown =
     typeof costUsd === "number" && Number.isFinite(costUsd) && costUsd >= 0;
   if (costUsd !== null && !costKnown) return null;
-  // #856: only the basis this version knows is taken, with an estimate that is a cost (else none).
+  // #856: only the basis this version knows is taken, with an estimate that is a cost (else none), and only beside no cost: a billed
+  // number is a cost, whatever else the report says.
   const estimate = usage.estimatedCostUsd;
   const subscription =
-    usage.costBasis === "subscription"
+    usage.costBasis === "subscription" && costUsd === null
       ? {
           costBasis: "subscription" as const,
           estimatedCostUsd:

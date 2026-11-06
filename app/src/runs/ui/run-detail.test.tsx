@@ -229,6 +229,32 @@ describe("the usage of a run", () => {
   });
 
   // #856-T74
+  it("never reads a billed cost as 'not billed': a cost beside the basis shows the cost", () => {
+    const { container } = render(
+      <RunDetail
+        workspaceSlug="acme"
+        initial={snap(
+          detail({
+            usage: {
+              ...usage,
+              costUsd: 0.04,
+              costBasis: "subscription",
+              estimatedCostUsd: 0.4231,
+            },
+          }),
+        )}
+        api={apiAnswering([])}
+      />,
+    );
+
+    expect(
+      container.querySelector('[data-slot="run-cost-subscription"]'),
+    ).toBeNull();
+    expect(text(container)).not.toContain("not billed");
+    expect(text(container)).toContain("$0.04");
+  });
+
+  // #856-T74
   it("says a subscription turn has no estimate when Claude Code gave none", () => {
     const { container } = render(
       <RunDetail

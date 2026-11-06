@@ -280,6 +280,22 @@ describe("the usage of a run", () => {
   );
 
   // #856-T73
+  it("does not read a billed cost as a subscription: a cost beside the basis is a cost, and the basis and estimate are left out", () => {
+    expect(
+      readStoredUsage({
+        ok: true,
+        usage: { ...usage, costBasis: "subscription", estimatedCostUsd: 0.42 },
+      }),
+    ).toEqual({
+      model: "vendor/dynamic-model",
+      totalTokens: 12900,
+      aiCalls: 7,
+      costUsd: 0.04,
+      stoppedEarly: null,
+    });
+  });
+
+  // #856-T73
   it("does not take a basis it does not know, nor the estimate that goes with it", () => {
     expect(
       readStoredUsage({

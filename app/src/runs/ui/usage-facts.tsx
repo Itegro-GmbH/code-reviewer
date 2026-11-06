@@ -42,7 +42,8 @@ export const STOPPED_EARLY_TEXT: Record<StoppedEarly, string> = {
  * estimate at API prices, with a line that says so), or "No estimate, through a subscription"; any other run shows what it cost.
  */
 function costDescription(usage: RunUsageView): ReactNode {
-  if (usage.costBasis === "subscription") {
+  // Beside a cost the basis is not read: a billed number must never read "not billed".
+  if (usage.costBasis === "subscription" && usage.costUsd === null) {
     const estimate = usage.estimatedCostUsd ?? null;
     return (
       <span className="flex flex-col">
