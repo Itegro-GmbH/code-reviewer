@@ -26,8 +26,16 @@ OPEN = NetworkRule("open")
 def test_a_subscription_turn_reaches_the_anthropic_api_and_nothing_else() -> None:
     rule = subscription_rule(OFF)
 
-    assert rule == NetworkRule(MODE_LIST, ("api.anthropic.com",))
+    assert rule == NetworkRule(MODE_LIST, ("api.anthropic.com",), ports=(443,))
     assert ANTHROPIC_HOST == "api.anthropic.com" and not ANTHROPIC_HOST.startswith("*")
+
+
+# #856-P04
+def test_the_door_entry_of_a_subscription_turn_allows_443_only() -> None:
+    """Claude Code speaks TLS: port 80 of the API host is not needed and not opened."""
+    assert subscription_rule(OFF).ports == (443,)
+    assert subscription_rule(NetworkRule(MODE_LIST, ("api.anthropic.com",))).ports == (443,)
+    assert subscription_rule(OFF).to_json()["ports"] == [443]
 
 
 # #856-N01

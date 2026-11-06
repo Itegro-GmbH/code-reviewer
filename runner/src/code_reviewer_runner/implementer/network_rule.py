@@ -16,6 +16,10 @@ and the runner checks it), a name that arrives in a request is brought to it fir
   `a.b.pythonhosted.org`) and not `pythonhosted.org` itself: whoever wants both writes both. A
   suffix has at least two labels after the `*.`, so `*.com` is not a rule (that is `open` with
   another name).
+* A rule may narrow the ports of the door (`ports`, a subset of the two the door dials, 80 and
+  443; empty means both). It is the runner's own, never the contract's: the door's start document
+  carries it and the rule of a job or of an environment cannot (`parse_rule`). The Claude Code
+  subscription turn uses it to reach its API host on 443 only (#856).
 * An IP address is never an entry and never a name: a request to one is refused in every mode
   (`is_ip_literal`, which also takes the old forms a resolver would read as one: `2130706433`,
   `0x7f.1`, `127.1`).
@@ -31,6 +35,8 @@ MODE_LIST: Final = "list"
 MODE_OPEN: Final = "open"
 MODES: Final = (MODE_OFF, MODE_LIST, MODE_OPEN)
 MAX_HOSTS: Final = 100
+# The ports the door can dial at all; a rule may allow fewer (`NetworkRule.ports`).
+DOOR_PORTS: Final = (80, 443)
 MAX_NAME_CHARS: Final = 253
 MAX_LABEL_CHARS: Final = 63
 
@@ -113,13 +119,21 @@ def normalize_entry(raw: str) -> str | None:
 @dataclass(frozen=True)
 class NetworkRule:
     """The rule of one environment. `hosts` is empty unless the mode is `list`, and not empty
-    then."""
+    then. `ports` is empty (the door's two ports) or the ports of `DOOR_PORTS` the rule allows;
+    only a list may narrow them."""
 
     mode: str = MODE_OFF
     hosts: tuple[str, ...] = ()
+    ports: tuple[int, ...] = ()
+
+    def allows_port(self, port: int) -> bool:
+        return port in (self.ports or DOOR_PORTS)
 
     def to_json(self) -> dict[str, Any]:
-        return {"mode": self.mode, "hosts": list(self.hosts)}
+        document: dict[str, Any] = {"mode": self.mode, "hosts": list(self.hosts)}
+        if self.ports:
+            document["ports"] = list(self.ports)
+        return document
 
 
 OFF: Final = NetworkRule()
@@ -154,6 +168,28 @@ def parse_rule(document: object, where: str = "network") -> NetworkRule:
             raise RuleError(f"{where}.hosts has an entry that is not a host name or a *.suffix")
         checked.append(entry)
     return NetworkRule(MODE_LIST, tuple(dict.fromkeys(checked)))
+
+
+def parse_door_rule(document: object, where: str = "rule") -> NetworkRule:
+    """The rule in the door's start document: the contract's rule, plus an optional `ports` (a
+    non-empty list of ports of `DOOR_PORTS`, for a list only). Raises `RuleError`."""
+    if not isinstance(document, dict):
+        return parse_rule(document, where)
+    given: dict[str, Any] = {str(key): value for key, value in document.items()}  # type: ignore[reportUnknownVariableType]
+    if "ports" not in given:
+        return parse_rule(given, where)
+    ports: object = given.pop("ports")
+    rule = parse_rule(given, where)
+    if rule.mode != MODE_LIST:
+        raise RuleError(f"{where}.ports must be absent unless the mode is list")
+    if not isinstance(ports, list) or not ports:
+        raise RuleError(f"{where}.ports must be a non-empty list")
+    numbers: list[int] = []
+    for port in ports:  # type: ignore[reportUnknownVariableType]
+        if isinstance(port, bool) or not isinstance(port, int) or port not in DOOR_PORTS:
+            raise RuleError(f"{where}.ports has a port the door does not serve")
+        numbers.append(port)
+    return NetworkRule(MODE_LIST, rule.hosts, tuple(sorted(set(numbers))))
 
 
 class RuleMatcher:

@@ -284,7 +284,7 @@ def test_the_network_door_is_forced_to_the_anthropic_api_and_nothing_else(
 ) -> None:
     played = play(says("Done."))
 
-    assert played.rules == [NetworkRule(MODE_LIST, ("api.anthropic.com",))]
+    assert played.rules == [NetworkRule(MODE_LIST, ("api.anthropic.com",), ports=(443,))]
     assert played.result["implementer"]["network"]["mode"] == "list"
 
 
@@ -299,7 +299,7 @@ def test_an_environment_that_lists_exactly_that_host_is_fine(play: Callable[...,
     )
 
     assert played.result["ok"] is True
-    assert played.rules == [NetworkRule(MODE_LIST, ("api.anthropic.com",))]
+    assert played.rules == [NetworkRule(MODE_LIST, ("api.anthropic.com",), ports=(443,))]
 
 
 # #856-N04
