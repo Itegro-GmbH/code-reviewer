@@ -119,9 +119,9 @@ the credentials of a job). With `lookForEarlierSince` it first looks for the app
 same provider neutral access codes as the reads above, and never holds a token or the body.
 
 `openPullRequest`, `commentOnIssue` and `changeIssueLabels` (#844, the workflow actions, `src/workflow-runs/github-connectors.ts`) write as the app with
-a token of its own limited to the repository and to one permission (pull requests, or issues) and switched off afterwards. A pull request that is open for
+a token of its own limited to the repository and to what the action needs and switched off afterwards: pull requests write plus contents read (and metadata read) for the pull request, issues write for a comment or labels (contents is needed to resolve the head and base refs, #913). A pull request that is open for
 the same head and base is the result (`existing`), labels are idempotent. A failure is an `IntegrationError` with the codes of a write: `..._SCOPE_REFUSED` is an
-App that lacks the permission, `..._NO_CHANGES_TO_COMPARE` a head with nothing the base lacks, `..._REQUEST_REFUSED` any other refusal of the content.
+App that lacks the permission, `..._NO_CHANGES_TO_COMPARE` a head with nothing the base lacks, `..._REQUEST_REFUSED` any other refusal of the content. Only `..._REQUEST_REFUSED` carries `IntegrationError.detail`: what the platform said about the refusal (GitHub: the `message` or the names of `errors`), bounded and cleaned of control characters, links and tokens, but still the platform's text, so untrusted data: whoever shows it defuses it.
 
 ### Rules for implementations
 

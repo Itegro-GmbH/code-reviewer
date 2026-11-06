@@ -155,6 +155,8 @@ export function describeRunFailure(code: string | null): string | null {
 
 /** The permissions the actions need, as the settings page of the GitHub App words them. Only these are ever named. */
 const GITHUB_PERMISSIONS = [
+  "Pull requests: Read and write and Contents: Read-only",
+  // What a step of an earlier run says (#913 added the contents to the pull request action).
   "Pull requests: Read and write",
   "Issues: Read and write",
 ] as const;

@@ -93,11 +93,20 @@ export class IntegrationError extends Error implements SafeMessageError {
   readonly retryable: boolean;
   /** For a rate limit: how long the platform asked to wait; otherwise null. */
   readonly retryAfterSeconds: number | null;
+  /**
+   * For `INTEGRATION_REQUEST_REFUSED` (#913): what the platform said about the refusal, as far as it said anything. Bounded, but
+   * the platform's own text, so untrusted data: whoever shows it defuses it. Null otherwise.
+   */
+  readonly detail: string | null;
 
   constructor(
     code: IntegrationErrorCode,
     message: string,
-    options?: { cause?: unknown; retryAfterSeconds?: number | null },
+    options?: {
+      cause?: unknown;
+      retryAfterSeconds?: number | null;
+      detail?: string;
+    },
   ) {
     super(
       message,
@@ -107,5 +116,6 @@ export class IntegrationError extends Error implements SafeMessageError {
     this.code = code;
     this.retryable = RETRYABLE_ACCESS_CODES.includes(code);
     this.retryAfterSeconds = options?.retryAfterSeconds ?? null;
+    this.detail = options?.detail ?? null;
   }
 }

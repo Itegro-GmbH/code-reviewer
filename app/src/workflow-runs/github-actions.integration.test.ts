@@ -198,7 +198,7 @@ describe("start by hand, implementer, open the pull request, comment on the issu
       errorCode: "github_permission_missing",
     });
     expect(state.steps[1]?.errorMessage).toContain(
-      "Pull requests: Read and write",
+      "Pull requests: Read and write and Contents: Read-only",
     );
     expect(state.steps[1]?.errorMessage).toContain("open pull requests");
     expect(app.h.fake.pullRequests("acme/widgets")).toHaveLength(0);

@@ -22,8 +22,9 @@ import {
   ACTION_LABELS_MAX,
   ACTION_LABEL_MAX_CHARS,
   ACTION_TITLE_MAX_CHARS,
+  GITHUB_REASON_MAX_CHARS,
 } from "./limits.ts";
-import { BIDI_CONTROLS } from "./templates.ts";
+import { BIDI_CONTROLS, defuseMentions } from "./templates.ts";
 
 /** The connection and the repository an action acts on, resolved for the repository of the run. */
 export type GithubActionTarget = {
@@ -39,7 +40,8 @@ export type GithubConnectorDeps = {
 
 /** What each action needs of the App, as the settings page of the GitHub App words it. */
 export const GITHUB_PERMISSION_NEEDED = {
-  "github.pullRequest.open": "Pull requests: Read and write",
+  "github.pullRequest.open":
+    "Pull requests: Read and write and Contents: Read-only",
   "github.issue.comment": "Issues: Read and write",
   "github.issue.labels": "Issues: Read and write",
 } as const;
@@ -167,9 +169,43 @@ function permissionText(name: GithubConnectorName): string {
   return `The GitHub App of this workspace may not ${ACTION_VERB[name]}: it needs the permission "${GITHUB_PERMISSION_NEEDED[name]}". The owner of the GitHub installation has to grant it in the App's settings and accept the change on the installation; then run the workflow again.`;
 }
 
+/** The marks that make a link, an image or markup in Markdown and HTML. */
+const MARKUP_MARKS = /[[\]()<>`]/g;
+/** A link in any form (`scheme:…`, `//…`, `www.…`), or a word that looks like a GitHub token. GitHub's reason may quote what was sent; neither goes into a step. */
+const LINK = /\b[a-z][a-z0-9+.-]*:\S+|\/\/\S+|\bwww\.\S*/gi;
+const TOKEN = /\b(?:gh[pousr]_|github_pat_)\w+/g;
+/** Characters of no width or no meaning a reader cannot see: the C1 controls, the word joiner, the byte order mark, the soft hyphen. */
+const INVISIBLE = /[\u0080-\u009f\u2060\ufeff\u00ad]/g;
+
 /**
- * What GitHub's refusal means for the step. The message never carries the answer of GitHub or an input of the action; the permission
- * the action needs is named so that the run page can say what to change.
+ * GitHub's reason for a refusal, as a short line the step may carry, or undefined for none. It is GitHub's text and quotes what
+ * the action sent, so it is untrusted data like an agent's: one line without control or invisible characters, the marks of a link or
+ * of markup, links or token-looking words, defused so that it cannot mention, close or mark anything where a comment repeats it, and
+ * only then cut at `GITHUB_REASON_MAX_CHARS` (never inside a surrogate pair), so that the bound holds for the text as it is kept.
+ */
+export function cleanReason(value: string | null): string | undefined {
+  if (value === null) return undefined;
+  const line = value
+    .replace(BIDI_CONTROLS, "")
+    .replace(INVISIBLE, "")
+    .replace(LONE_SURROGATE, "")
+    .replace(LINE_BREAKS, " ")
+    .replace(MARKUP_MARKS, "")
+    .replace(TOKEN, "[token]")
+    .replace(LINK, "[link]")
+    .replace(/ {2,}/g, " ")
+    .trim();
+  if (line === "") return undefined;
+  const defused = defuseMentions(line);
+  return defused.length <= GITHUB_REASON_MAX_CHARS
+    ? defused
+    : `${leading(defused, GITHUB_REASON_MAX_CHARS - 1).trimEnd()}…`;
+}
+
+/**
+ * What GitHub's refusal means for the step. The message never carries an input of the action or a credential; the permission the
+ * action needs is named so that the run page can say what to change, and for a refused value (422) GitHub's own short reason follows
+ * the generic sentence (`cleanReason`, #913).
  */
 export function toConnectorError(
   name: GithubConnectorName,
@@ -209,11 +245,13 @@ export function toConnectorError(
         "github_validation",
         "There are no commits between the head and the base branch, so there is nothing to open a pull request for.",
       );
-    case "INTEGRATION_REQUEST_REFUSED":
+    case "INTEGRATION_REQUEST_REFUSED": {
+      const reason = cleanReason(error.detail);
       return new ConnectorError(
         "github_validation",
-        "GitHub refused the request: one of the values is not accepted (for example a branch that does not exist).",
+        `GitHub refused the request: one of the values is not accepted (for example a branch that does not exist).${reason === undefined ? "" : ` GitHub said: ${reason}${/[.!?…]$/.test(reason) ? "" : "."}`}`,
       );
+    }
     case "INTEGRATION_ACCESS_RATE_LIMITED":
       return new ConnectorError(
         "github_rate_limited",
