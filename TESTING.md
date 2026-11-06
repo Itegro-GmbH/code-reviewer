@@ -263,6 +263,14 @@ Engine suite (`runner/tests/engine/`, `uv run pytest -m engine`, `make test-engi
   and in the app the migration, the validator, the claim routing by harness and the claim of a turn without a model
   (`runner-subscription.integration.test.ts`). What needs a Docker daemon (the layer, a turn as the user `agent` behind the real network
   door with `no-new-privileges`) is `tests/lane/test_implementer_subscription.py` in CI.
+- Hardening of Claude Code on a runner (#856, fourth slice): the pin of both npm packages is proven by running the layer's real install
+  script against a fake `npm` (`test_claude_code_layer.py`: a changed digest of the stub or of the platform program fails the build) and by
+  `test_fetch_claude_code_script.py`; the 443-only entry of the subscription rule by `test_network_rule.py`, `test_netdoor_proxy.py` (a real
+  loopback proxy), `test_netdoor_launcher.py` and `test_claude_code_gates.py`; `factory-runner selftest` for Claude Code by
+  `test_claude_code_selftest.py` and `test_factory_runner_cli.py` with doubles for the daemon, the door and the container and a scripted
+  `stream-json`: **no automated test calls a model**, and the real tiny turn runs only when a person passes `--with-claude-code`. The model
+  network that a turn without a model door needs is proven against the fake daemon (`test_netdoor_launcher.py`) and, on a real one, by
+  `tests/lane/test_network_door_alone.py` (CI lane).
 - The OpenCode half (#197, `test_engine_opencode.py` and `opencode_support.py`) needs the pinned
   executable and a trusted `rg`. `runner/scripts/fetch_opencode.py` downloads the release named by
   `runner/opencode-pin.json` over https, accepts it only with the pinned size and SHA-256, unpacks
