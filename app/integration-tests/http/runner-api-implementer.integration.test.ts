@@ -369,7 +369,10 @@ describe("the Worker's fetch of a turn", () => {
       startBranch: "workflow/run-1/implement",
     });
 
-    const { input } = await fetched(h);
+    const { input } = await fetched(
+      h,
+      [...FEATURES, "implementer_start_branch"].join(","),
+    );
 
     expect(contract.check("RunnerJobInput", input)).toStrictEqual({
       valid: true,

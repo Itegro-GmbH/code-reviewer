@@ -140,6 +140,7 @@ def _ready(tmp_path: Path) -> GitWorkspace:
         spec.base_branch: START,
         spec.branch: START,
     }
+    workspace._start_tips = frozenset({START})  # pyright: ignore[reportPrivateUsage]
     return workspace
 
 
