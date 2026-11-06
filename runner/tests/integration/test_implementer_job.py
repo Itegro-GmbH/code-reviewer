@@ -152,6 +152,7 @@ class FakeGit(GitWorkspace):
             before_push=before_push,
         )
         self._start: str | None = START
+        self._start_source: str | None = "main"
         self.tip: str | None = None
         self.commits: list[CommitInfo] = []
         self.files: list[FileChange] = []
@@ -2291,13 +2292,37 @@ def test_the_prompt_file_of_a_follow_up_turn_is_the_one_of_a_first_turn(play: An
 
 
 # #840-T132
-def test_a_first_turn_sends_the_instruction_as_text_and_reports_no_resume(play: Any) -> None:
+# #909-T09
+def test_a_first_turn_sends_the_note_about_the_repository_then_the_instruction_and_no_resume(
+    play: Any,
+) -> None:
     turn = play(commits_then_ends())
 
     assert turn.agent is not None
-    assert turn.agent.texts[0] == example_instruction()
+    first = cast("list[dict[str, Any]]", turn.agent.texts[0])
+    assert [part.get("synthetic") for part in first] == [True, None]
+    assert "full clone" in first[0]["text"]
+    assert "The base branch of this task is `main`" in first[0]["text"]
+    assert "`implementer/a1b2c3` was made from the base branch" in first[0]["text"]
+    assert "NEW sandbox" not in first[0]["text"]
+    assert first[1] == {"type": "text", "text": example_instruction()}
     assert turn.agent.resume_input is None
     assert "resume" not in turn.result["implementer"]
+
+
+# #909-T09
+def test_a_first_turn_with_a_start_branch_is_told_which_branch_it_was_made_from(
+    play: Any,
+) -> None:
+    def started_at_a_feature_branch(git: FakeGit) -> None:
+        git._start_source = "feature/x"  # pyright: ignore[reportPrivateUsage]
+
+    turn = play(commits_then_ends(), configure=started_at_a_feature_branch)
+
+    assert turn.agent is not None
+    text = turn.agent.texts[0][0]["text"]
+    assert "The base branch of this task is `main`" in text
+    assert "`implementer/a1b2c3` was made from `feature/x`" in text
 
 
 # #840-T133

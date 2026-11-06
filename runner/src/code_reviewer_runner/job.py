@@ -92,6 +92,7 @@ _IMPLEMENTER_TOP_LEVEL_FIELDS = {"reviewKind", "implementer", "git", "llm", "env
 _IMPLEMENTER_FIELDS = {
     "repo",
     "baseBranch",
+    "startBranch",
     "branch",
     "instruction",
     "limits",
@@ -437,6 +438,8 @@ class ImplementerSpec:
     result_schema: dict[str, Any] | None = None
     # #838: set on a follow-up turn, the branches of the session; None on the first turn.
     resume: ImplementerResume | None = None
+    # #909: the branch the session branch is made from on a first turn; None: the base branch.
+    start_branch: str | None = None
 
 
 class JobError(Exception):
@@ -1096,6 +1099,13 @@ def _implementer_spec(data: dict[str, Any], git: GitAccess) -> ImplementerSpec:
     branch = _pushable_branch_name(spec.get("branch"), "implementer.branch")
     if branch == base_branch:
         raise _invalid("implementer.branch must differ from implementer.baseBranch")
+    start_branch = (
+        _branch_name(spec["startBranch"], "implementer.startBranch")
+        if "startBranch" in spec
+        else None
+    )
+    if start_branch == branch:
+        raise _invalid("implementer.branch must differ from implementer.startBranch")
     return ImplementerSpec(
         repo=_implementer_repo(spec, git),
         base_branch=base_branch,
@@ -1110,6 +1120,7 @@ def _implementer_spec(data: dict[str, Any], git: GitAccess) -> ImplementerSpec:
         profile=profile,
         result_schema=_implementer_result_schema(spec),
         resume=_implementer_resume(spec, branch),
+        start_branch=start_branch,
     )
 
 

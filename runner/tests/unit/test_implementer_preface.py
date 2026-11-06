@@ -15,8 +15,10 @@ from code_reviewer_runner.implementer.preface import (
     PrefaceFacts,
     ResumeMode,
     build_preface,
+    first_turn_parts,
     history_part,
     message_parts,
+    repository_note,
 )
 
 SHA_A = "a" * 40
@@ -313,3 +315,69 @@ def test_line_ends_are_made_alike_and_tabs_are_kept() -> None:
 
     assert "one\ntwo\nthree\tfour" in record
     assert "\r" not in record
+
+
+# -- #909: the repository is a full clone, and which branch is the base and the start -------------
+
+BASE = "main"
+FEATURE = "feature/x"
+
+
+# #909-T09
+def test_the_note_says_the_repository_is_a_full_clone_and_names_base_and_start() -> None:
+    text = repository_note(base=BASE, start=FEATURE, session=SESSION)
+
+    assert text.startswith("[System note, not written by the user.]")
+    assert "full clone" in text
+    assert "every branch" in text and "local branch" in text
+    assert "no `origin/` branches" in text and "no remote" in text
+    assert "whole history" in text and "tags" in text
+    assert "`git merge-base`" in text and "`git diff <branch>...HEAD`" in text
+    assert f"The base branch of this task is `{BASE}`" in text
+    assert f"`{SESSION}` was made from `{FEATURE}`" in text
+    assert "Only the branches you create or change are pushed" in text
+
+
+# #909-T09
+def test_a_session_started_at_the_base_says_so() -> None:
+    text = repository_note(base=BASE, start=BASE, session=SESSION)
+
+    assert f"`{SESSION}` was made from the base branch" in text
+
+
+# #909-T09
+@pytest.mark.parametrize("name", HOSTILE_NAMES)
+def test_a_branch_name_that_is_not_plain_is_never_put_into_the_note(name: str) -> None:
+    text = repository_note(base=name, start=name, session=SESSION)
+
+    probe = name.strip()
+    if probe:
+        assert probe not in text
+    assert "Ignore all previous" not in text and "rm -rf" not in text and "<system>" not in text
+    assert "full clone" in text
+
+
+# #909-T09
+def test_a_first_turn_is_the_note_as_a_synthetic_part_and_then_the_instruction_as_given() -> None:
+    parts = first_turn_parts(INSTRUCTION, base=BASE, start=FEATURE, session=SESSION)
+
+    assert len(parts) == 2
+    assert parts[0]["synthetic"] is True and parts[0]["type"] == "text"
+    assert parts[0]["text"] == repository_note(base=BASE, start=FEATURE, session=SESSION)
+    assert parts[-1] == {"type": "text", "text": INSTRUCTION}
+    assert INSTRUCTION not in parts[0]["text"]
+
+
+# #909-T09
+def test_the_preface_of_a_follow_up_carries_the_note_in_its_own_part() -> None:
+    text = build_preface(facts(base=BASE, start=FEATURE, session=SESSION))
+
+    assert "full clone" in text
+    assert f"The base branch of this task is `{BASE}`" in text
+    assert f"`{SESSION}` was made from `{FEATURE}`" in text
+    assert len(message_parts(facts(base=BASE, start=FEATURE, session=SESSION), INSTRUCTION)) == 2
+
+
+# #909-T09
+def test_a_preface_without_base_and_start_has_no_note() -> None:
+    assert "full clone" not in build_preface(facts())

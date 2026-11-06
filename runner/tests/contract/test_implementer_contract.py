@@ -125,6 +125,12 @@ JOB_REFUSALS: dict[str, Callable[[Document], None]] = {
     "branch starts with a dash": _set(("implementer", "branch"), "-force"),
     "branch with a space": _set(("implementer", "branch"), "has space"),
     "base branch with a space": _set(("implementer", "baseBranch"), "has space"),
+    # #909-T07: the start branch is bounded as the base branch is
+    "start branch with a space": _set(("implementer", "startBranch"), "has space"),
+    "start branch starts with a dash": _set(("implementer", "startBranch"), "-force"),
+    "empty start branch": _set(("implementer", "startBranch"), ""),
+    "start branch that is not a string": _set(("implementer", "startBranch"), 7),
+    "start branch that is null": _set(("implementer", "startBranch"), None),
     "full name without owner": _set(("implementer", "repo", "fullName"), "no-owner"),
     "clone url that is not https": _set(("implementer", "repo", "cloneUrl"), "file:///etc/passwd"),
     # #843: the profile version a turn started with
@@ -172,6 +178,43 @@ def test_the_example_of_the_job_is_valid_and_the_runner_reads_it() -> None:
     assert parsed.implementer.cost.key_mode == "managed"
     assert parsed.implementer.model_entry.model_id == "deepseek/deepseek-v4.1-flash"
     assert parsed.git.token == "example-git-write-token"
+
+
+# #909-T07
+def test_a_job_may_name_a_start_branch_and_a_job_without_one_is_still_valid() -> None:
+    assert "startBranch" not in _job()["implementer"]
+    assert _accepts("RunnerJobInput", _job())
+    assert runner_job.parse_implementer_input(json.dumps(_job())).implementer.start_branch is None
+    job = _job()
+    job["implementer"]["startBranch"] = "feature/x"
+
+    assert _accepts("RunnerJobInput", job)
+    parsed = runner_job.parse_implementer_input(json.dumps(job)).implementer
+    assert (parsed.base_branch, parsed.start_branch) == ("main", "feature/x")
+
+
+# #909-T07
+def test_the_runner_refuses_a_start_branch_that_is_the_new_branch() -> None:
+    job = _job()
+    job["implementer"]["startBranch"] = job["implementer"]["branch"]
+
+    with pytest.raises(runner_job.JobError) as refused:
+        runner_job.parse_implementer_input(json.dumps(job))
+
+    assert refused.value.code is ErrorCode.INVALID_JOB
+    assert "implementer.startBranch" in refused.value.detail
+
+
+# #909-T07
+def test_a_lone_surrogate_in_the_start_branch_is_refused_by_the_runner() -> None:
+    job = _job()
+    job["implementer"]["startBranch"] = "a\ud800b"
+
+    with pytest.raises(runner_job.JobError) as refused:
+        runner_job.parse_implementer_input(json.dumps(job))
+
+    assert refused.value.code is ErrorCode.INVALID_JOB
+    assert "implementer.startBranch" in refused.value.detail
 
 
 @pytest.mark.parametrize("name", sorted(JOB_REFUSALS))

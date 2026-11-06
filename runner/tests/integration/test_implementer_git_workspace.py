@@ -42,8 +42,9 @@ def test_the_base_branch_is_cloned_into_a_root_owned_mirror(rig: Rig) -> None:
     assert workspace.start_commit == rig.origin.tip("main")
     assert workspace.mirror.is_dir()
     assert stat.S_IMODE(workspace.mirror.stat().st_mode) == 0o700
-    shallow = raw("rev-list", "--count", "HEAD", cwd=workspace.mirror, git=rig.git)
-    assert shallow == "1"  # --depth 1
+    # #909-T01: the whole history, not one commit.
+    assert raw("rev-list", "--count", "HEAD", cwd=workspace.mirror, git=rig.git) == "2"
+    assert not (workspace.mirror / "shallow").exists()
 
 
 # #762-T01

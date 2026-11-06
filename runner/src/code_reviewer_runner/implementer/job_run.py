@@ -270,6 +270,7 @@ def production_setup(
             base_branch=spec.base_branch,
             branch=spec.branch,
             resume=spec.resume,
+            start_branch=spec.start_branch,
         ),
         WorkspaceLayout(work_dir=work_dir),
         identity,

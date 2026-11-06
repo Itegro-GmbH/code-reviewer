@@ -1073,7 +1073,7 @@ def test_a_stale_lock_in_the_mirror_does_not_stop_the_push(rig: Rig) -> None:
     assert rig.origin.tip(BRANCH) == tip
 
 
-def test_binary_and_large_commits_are_pushed_and_the_shallow_mirror_takes_them(rig: Rig) -> None:
+def test_binary_and_large_commits_are_pushed_from_the_full_mirror(rig: Rig) -> None:
     workspace = rig.prepared()
     blob = secrets.token_bytes(6 * 1024 * 1024)
     (workspace.repo / "data.bin").write_bytes(blob)
@@ -1090,7 +1090,7 @@ def test_binary_and_large_commits_are_pushed_and_the_shallow_mirror_takes_them(r
         cwd=rig.origin.seed, git=rig.git, GIT_DIR=str(rig.origin.path),
     )  # fmt: skip
     assert int(size) == len(blob)
-    assert (Path(workspace.mirror) / "shallow").exists(), "the mirror is a depth 1 clone"
+    assert not (Path(workspace.mirror) / "shallow").exists(), "the mirror is a full clone"
 
 
 def test_no_background_gc_or_maintenance_is_started_in_the_mirror(rig: Rig) -> None:
