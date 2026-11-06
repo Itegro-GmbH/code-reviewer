@@ -8,6 +8,8 @@ import {
 } from "../workflow-runs/errors.ts";
 import {
   COST_BASIS_COPY,
+  COST_BASIS_UNKNOWN_COPY,
+  costBasisCopy,
   describeRunFailure,
   describeRunPollFailure,
   describeStartFailure,
@@ -120,6 +122,21 @@ describe("the copy of the workflow pages", () => {
     }
     expect(COST_BASIS_COPY.estimated.label).toBe("estimated");
     expect(COST_BASIS_COPY.limit.label).toContain("limit");
+  });
+
+  // #856-T71
+  it("explains a subscription cost as an estimate that is not billed", () => {
+    expect(COST_BASIS_COPY.subscription.label).toBe("through a subscription");
+    expect(COST_BASIS_COPY.subscription.explanation).toContain("not billed");
+    expect(costBasisCopy("subscription")).toBe(COST_BASIS_COPY.subscription);
+  });
+
+  // #856-T72
+  it("has a neutral sentence for a basis it does not know", () => {
+    expect(costBasisCopy("something-new")).toBe(COST_BASIS_UNKNOWN_COPY);
+    expect(COST_BASIS_UNKNOWN_COPY.explanation.length).toBeGreaterThan(20);
+    // A name on the prototype is no basis.
+    expect(costBasisCopy("constructor")).toBe(COST_BASIS_UNKNOWN_COPY);
   });
 
   // #873-T23

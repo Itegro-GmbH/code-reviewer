@@ -11,7 +11,7 @@ from urllib.parse import quote
 
 import pytest
 
-from code_reviewer_runner.redaction import REDACTED, RedactingStream, Redactor
+from code_reviewer_runner.redaction import REDACTED, RedactingStream, Redactor, secret_forms
 
 TOKEN = "dummy-installation-token-0123456789"
 API_KEY = "dummy-openrouter-key-0123456789"
@@ -159,3 +159,27 @@ def test_text_that_only_looks_like_base64_is_left_alone() -> None:
     other = base64.b64encode(("tok_" + "Aq9Lm3XvTn8Rk5Wc2Yb7").encode()).decode()
 
     assert redactor.redact(other) == other
+
+
+# #856-T43: the minimum applies to the whole encoding of a very short secret as well
+@pytest.mark.unit
+@pytest.mark.parametrize("secret", ["a", "ab", "abc", "abcde"])
+def test_base64_of_a_very_short_secret_is_not_a_form_that_would_match_everywhere(
+    secret: str,
+) -> None:
+    # Letters only: the quoted spellings are the secret itself, so the rest of the set is base64.
+    encoded = secret_forms(secret) - {secret}
+
+    assert all(len(form) >= 8 for form in encoded)
+    # What the secret is as written stays: the exact value is always redacted.
+    assert Redactor([secret]).redact(f"token {secret}") == f"token {REDACTED}"
+
+
+# #856-T43
+@pytest.mark.unit
+def test_base64_of_a_secret_of_six_bytes_is_still_a_form() -> None:
+    secret = "abcdef"
+
+    forms = secret_forms(secret)
+
+    assert base64.b64encode(secret.encode()).decode() in forms

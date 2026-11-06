@@ -200,6 +200,87 @@ describe("the usage of a run", () => {
     expect(text(container)).not.toContain("$0");
   });
 
+  // #856-T74
+  it("shows a subscription turn as an estimate through a subscription, not as its cost", () => {
+    const { container } = render(
+      <RunDetail
+        workspaceSlug="acme"
+        initial={snap(
+          detail({
+            usage: {
+              ...usage,
+              costUsd: null,
+              costBasis: "subscription",
+              estimatedCostUsd: 0.4231,
+            },
+          }),
+        )}
+        api={apiAnswering([])}
+      />,
+    );
+
+    expect(screen.getByText("Cost")).toBeTruthy();
+    const shown = container.querySelector(
+      '[data-slot="run-cost-subscription"]',
+    );
+    expect(shown?.textContent).toBe("≈ $0.4231 through a subscription");
+    expect(text(container)).toContain("Estimate at API prices, not billed");
+    expect(text(container)).not.toContain("Not available");
+  });
+
+  // #856-T74
+  it("never reads a billed cost as 'not billed': a cost beside the basis shows the cost", () => {
+    const { container } = render(
+      <RunDetail
+        workspaceSlug="acme"
+        initial={snap(
+          detail({
+            usage: {
+              ...usage,
+              costUsd: 0.04,
+              costBasis: "subscription",
+              estimatedCostUsd: 0.4231,
+            },
+          }),
+        )}
+        api={apiAnswering([])}
+      />,
+    );
+
+    expect(
+      container.querySelector('[data-slot="run-cost-subscription"]'),
+    ).toBeNull();
+    expect(text(container)).not.toContain("not billed");
+    expect(text(container)).toContain("$0.04");
+  });
+
+  // #856-T74
+  it("says a subscription turn has no estimate when Claude Code gave none", () => {
+    const { container } = render(
+      <RunDetail
+        workspaceSlug="acme"
+        initial={snap(
+          detail({
+            usage: {
+              ...usage,
+              costUsd: null,
+              costBasis: "subscription",
+              estimatedCostUsd: null,
+            },
+          }),
+        )}
+        api={apiAnswering([])}
+      />,
+    );
+
+    const shown = container.querySelector(
+      '[data-slot="run-cost-subscription"]',
+    );
+    expect(shown?.textContent).toBe("No estimate, through a subscription");
+    expect(text(container)).not.toContain("Not available");
+    expect(text(container)).not.toContain("≈");
+  });
+
   // #267-T08
   it("shows the cost of a run to four decimals and never rounds a real cost to zero", () => {
     function shown(costUsd: number): string | null {

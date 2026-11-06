@@ -12,6 +12,7 @@ import type { RunView } from "../workflow-runs/service.ts";
 import { WORKFLOW_RUN_POLL_MS, type WorkflowRunsApi } from "./api.ts";
 import {
   COST_BASIS_COPY,
+  COST_BASIS_UNKNOWN_COPY,
   COST_NOT_RUN_COPY,
   RUN_POLL_FAILED_TEXT,
 } from "./messages.ts";
@@ -210,6 +211,57 @@ describe("the budget and the cost", () => {
       expect(explained?.textContent).toContain(copy.explanation);
     },
   );
+
+  // #856-T71
+  it("says a subscription step is worth about its estimate, through a subscription, and not billed", () => {
+    const { container } = renderRun(
+      run({ steps: [step({ costBasis: "subscription", costUsd: 0.42 })] }),
+    );
+
+    const line = container.querySelector(
+      "[data-slot=step-cost]",
+    )?.parentElement;
+    expect(line?.textContent).toContain("≈ $0.42 through a subscription");
+    expect(line?.textContent).not.toContain("(");
+    const explained = container.querySelector("[data-slot=run-cost-bases]");
+    expect(explained?.textContent).toContain("not billed");
+  });
+
+  // #856-T71
+  it("says a subscription step has no estimate when Claude Code gave none", () => {
+    const { container } = renderRun(
+      run({ steps: [step({ costBasis: "subscription", costUsd: 0 })] }),
+    );
+
+    const line = container.querySelector(
+      "[data-slot=step-cost]",
+    )?.parentElement;
+    expect(line?.textContent).toContain("no estimate, through a subscription");
+    expect(line?.textContent).not.toContain("≈");
+  });
+
+  // #856-T72
+  it("falls back to a neutral label for a cost basis this page does not know", () => {
+    const { container } = renderRun(
+      run({
+        steps: [
+          step({
+            // A value a newer version wrote and this one reads after a rollback.
+            costBasis: "metered" as unknown as "reported",
+            costUsd: 1,
+          }),
+        ],
+      }),
+    );
+
+    expect(container.querySelector("[data-slot=cost-basis]")?.textContent).toBe(
+      COST_BASIS_UNKNOWN_COPY.label,
+    );
+    expect(
+      container.querySelector("[data-slot=run-cost-bases]")?.textContent,
+    ).toContain(COST_BASIS_UNKNOWN_COPY.explanation);
+    expect(container.textContent).toContain("$1.00");
+  });
 
   // #873-T42
   it("shows no basis for a step that cost nothing", () => {

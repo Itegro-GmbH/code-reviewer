@@ -143,6 +143,7 @@ describe("the migrations of both epics", () => {
       "20261105230000_add_profile_harness",
       "20261105231000_widen_step_cost_basis_for_subscription",
       "20261106004000_add_workflow_run_failure",
+      "20261106012000_add_usage_record_cost_basis",
     ]);
   });
 

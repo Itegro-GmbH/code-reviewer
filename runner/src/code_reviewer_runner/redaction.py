@@ -35,9 +35,9 @@ _PATTERNS = tuple(
 # part in, say nothing about the secret and are cut off: what is left is the same wherever the
 # secret sits.
 _LEADING_CHARS_BY_ALIGNMENT = (0, 2, 3)
-# A cut form shorter than this would match everywhere (the whole encoding of a short secret is
-# kept).
-_MIN_CUT_FORM_CHARS = 8
+# A form shorter than this would match everywhere: the base64 of a very short secret is left out,
+# whole or cut (the secret as it is written is always redacted).
+_MIN_FORM_CHARS = 8
 
 
 def _base64_forms(secret: str) -> set[str]:
@@ -46,14 +46,16 @@ def _base64_forms(secret: str) -> set[str]:
     raw = secret.encode()
     forms: set[str] = set()
     for encode in (base64.b64encode, base64.urlsafe_b64encode):
-        forms.add(encode(raw).decode())
+        whole = encode(raw).decode()
+        if len(whole) >= _MIN_FORM_CHARS:
+            forms.add(whole)
         for alignment, leading in enumerate(_LEADING_CHARS_BY_ALIGNMENT):
             padded = encode(bytes(alignment) + raw).decode()
             unpadded = padded.rstrip("=")
             # The last character of a group that is not full takes bits of the next byte.
             trailing = 1 if (alignment + len(raw)) % 3 else 0
             for form in (padded[leading:], unpadded[leading : len(unpadded) - trailing]):
-                if alignment == 0 or len(form) >= _MIN_CUT_FORM_CHARS:
+                if len(form) >= _MIN_FORM_CHARS:
                     forms.add(form)
     return forms
 

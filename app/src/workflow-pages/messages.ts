@@ -212,11 +212,29 @@ export const COST_BASIS_COPY = {
       "The cost could not be determined, so the step is charged the whole limit it ran under. The real cost is probably lower, but the run never spends more than its budget.",
   },
   subscription: {
-    label: "estimated, not billed",
+    label: "through a subscription",
     explanation:
-      "This turn ran on the Claude subscription of a runner's device, so nothing is billed for the model. The figure is Claude Code's estimate of what it would cost at API prices (nothing when it gave none); it counts against the budget of the run.",
+      "This turn ran on the Claude subscription of a runner's device, so it is not billed. The figure is Claude Code's estimate of what the turn would cost at API prices (nothing when it gave none); it counts against the budget of the run, never towards a bill or a usage total.",
   },
 } as const;
+
+/** What a page says of a cost basis it does not know (a value a newer version wrote, read after a rollback): the figure stays, the reason is not guessed. */
+export const COST_BASIS_UNKNOWN_COPY = {
+  label: "basis not known",
+  explanation:
+    "This page does not know how this cost was determined, so it shows the figure as stored.",
+} as const;
+
+/** The copy of a cost basis, or the neutral one for a basis this version does not have. */
+export function costBasisCopy(
+  basis: string,
+):
+  | (typeof COST_BASIS_COPY)[keyof typeof COST_BASIS_COPY]
+  | typeof COST_BASIS_UNKNOWN_COPY {
+  return Object.hasOwn(COST_BASIS_COPY, basis)
+    ? COST_BASIS_COPY[basis as keyof typeof COST_BASIS_COPY]
+    : COST_BASIS_UNKNOWN_COPY;
+}
 
 /** A step that no runner took: not a cost basis, the step never ran. */
 export const COST_NOT_RUN_COPY = {
@@ -225,6 +243,8 @@ export const COST_NOT_RUN_COPY = {
 } as const;
 
 export const COST_COPY = {
+  approximately: "≈",
+  noEstimate: "no estimate,",
   budget: "Budget",
   of: "of",
   spentOfBudget: "spent of the budget",

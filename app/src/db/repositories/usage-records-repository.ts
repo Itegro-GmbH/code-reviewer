@@ -19,6 +19,7 @@ import {
 } from "../../job-kind/job-kind.ts";
 import type {
   SettledReason,
+  UsageCostBasis,
   UsageKeyMode,
   UsageSettlement,
   UsageState,
@@ -49,6 +50,8 @@ export type UsageRecord = {
   settledAt: string | null;
   /** Why it was settled without a report of its run (`no_result`); null when the run reported, and while not settled. */
   settledReason: SettledReason | null;
+  /** `subscription` for a turn that ran on a customer's login (#856): no cost, and not an unknown one. Null otherwise. */
+  costBasis: UsageCostBasis | null;
 };
 
 /** Where a reader stopped in the settled records: the next page starts after this `(settledAt, id)`. */
@@ -192,6 +195,7 @@ export function toUsageRecord(row: Selectable<UsageRecordsTable>): UsageRecord {
     reservedAt: row.reserved_at,
     settledAt: row.settled_at,
     settledReason: row.settled_reason as SettledReason | null,
+    costBasis: row.cost_basis as UsageCostBasis | null,
   };
 }
 
@@ -322,6 +326,7 @@ export function createUsageRecordsRepository(
               completion_tokens: settlement.completionTokens,
               settled_at: timestamp,
               settled_reason: settlement.reason ?? null,
+              cost_basis: settlement.costBasis ?? null,
             }
           : {
               state: "void",
@@ -330,6 +335,7 @@ export function createUsageRecordsRepository(
               completion_tokens: null,
               settled_at: null,
               settled_reason: null,
+              cost_basis: null,
             };
       // One statement: a reserved record is ended, a final one is left alone, a missing one is created.
       const changed = await db
@@ -472,7 +478,8 @@ export function createUsageRecordsRepository(
             "superseded",
           ),
           (eb) => eb.fn.sum("cost_micro_usd").as("cost"),
-          sql`sum(case when state = 'settled' and cost_micro_usd is null then 1 else 0 end)`.as(
+          // A turn on a subscription has no cost to know (#856).
+          sql`sum(case when state = 'settled' and cost_micro_usd is null and cost_basis is null then 1 else 0 end)`.as(
             "unknown",
           ),
         ])

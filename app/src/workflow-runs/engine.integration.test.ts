@@ -735,6 +735,45 @@ describe("the budget over all steps", () => {
     expect(app.engineLines.join("\n")).toContain("charged=estimated");
   });
 
+  // #856-T70
+  it("books a subscription turn at its estimate and logs no missing cost for it", async () => {
+    const app = await startEngineHarness({ operatorCostLimitCents: 10_000 });
+    const { runId } = await started(app, withBudget(1));
+
+    await endTurn(app, {
+      agentResult: { summary: "Plan." },
+      subscription: { estimatedCostUsd: 0.25 },
+    });
+
+    const state = await app.stateOf(runId);
+    expect(state.steps[0]).toMatchObject({
+      status: "succeeded",
+      costMicroUsd: 250_000,
+      costBasis: "subscription",
+    });
+    // The estimate of a login is no cost that went unreported: there is nothing to watch.
+    expect(app.engineLines.join("\n")).not.toContain("cost not reported");
+  });
+
+  // #856-T75
+  it("books a step whose report only says it ran on a subscription at the cap, as one whose cost is not known", async () => {
+    const app = await startEngineHarness({ operatorCostLimitCents: 10_000 });
+    const { runId } = await started(app, withBudget(1));
+
+    await endTurn(app, {
+      agentResult: { summary: "Plan." },
+      subscription: { estimatedCostUsd: 0.25, onlyClaimed: true },
+    });
+
+    const state = await app.stateOf(runId);
+    expect(state.steps[0]).toMatchObject({
+      status: "succeeded",
+      costMicroUsd: 1_000_000,
+      costBasis: "limit",
+    });
+    expect(app.engineLines.join("\n")).toContain("charged=limit");
+  });
+
   // #844-T74
   it("holds the budget of the document to the operator's maximum", async () => {
     const app = await startEngineHarness({ maxBudgetUsd: 5 });

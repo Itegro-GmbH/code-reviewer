@@ -77,6 +77,8 @@ describe("the usage record catalog entry migration", () => {
           llm_provider: null,
           // Added by a later migration (#605).
           billing_state: null,
+          // Added by a later migration (#856).
+          cost_basis: null,
         },
       ]);
       const table = (await db.introspection.getTables()).find(

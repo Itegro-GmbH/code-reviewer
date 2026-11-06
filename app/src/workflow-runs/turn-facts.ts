@@ -15,6 +15,7 @@ import type {
   StoredImplementerSession,
   StoredImplementerTurn,
 } from "../db/repositories/implementer-repository.ts";
+import { CLAUDE_CODE_HARNESS } from "../runner-identity/harness.ts";
 import { FACT_NAMES } from "../workflows/facts.ts";
 import { isRecord } from "../workflows/json.ts";
 import {
@@ -112,11 +113,8 @@ export function subscriptionCost(ended: EndedTurn): number | null {
     isRecord(ended.jobResult) && isRecord(ended.jobResult.usage)
       ? ended.jobResult.usage
       : null;
-  if (
-    usage?.costBasis !== "subscription" &&
-    ended.turn.profile?.harness !== "claude-code"
-  )
-    return null;
+  // The harness of the step's profile decides, never the basis the report names: any runner could write it into a report.
+  if (ended.turn.profile?.harness !== CLAUDE_CODE_HARNESS) return null;
   const estimate = usage?.estimatedCostUsd;
   return typeof estimate === "number" &&
     Number.isFinite(estimate) &&

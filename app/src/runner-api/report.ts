@@ -23,6 +23,7 @@ import { withoutUnaccountedManagedSuccess } from "./managed-cost-guard.ts";
 import { implementerBlockProblems } from "./implementer-report.ts";
 import { withAgentResultOrNoResult } from "./implementer-result-guard.ts";
 import { redactResult } from "./redact.ts";
+import { CLAUDE_CODE_HARNESS } from "../runner-identity/harness.ts";
 import type { JobEndedEvent } from "../dispatch/job-ended.ts";
 import type { RunnerApiLogger } from "./logger.ts";
 import {
@@ -59,9 +60,16 @@ export type ReportDeps = {
    * #843: the turn a job of the Implementer runs, asked when a turn reports success without the result its schema asks for (the
    * schema is the turn's; the report is then recorded as `no_result`). `undefined` for a job that is not a turn.
    */
-  implementerTurn: (
-    job: Job,
-  ) => Promise<{ turn: { resultSchema: unknown } } | undefined>;
+  implementerTurn: (job: Job) => Promise<
+    | {
+        turn: {
+          resultSchema: unknown;
+          /** #856: the profile version the turn ran with; its harness says whether the turn may report a subscription. */
+          profile: { harness?: string | undefined } | null;
+        };
+      }
+    | undefined
+  >;
   /**
    * #395: a job ended or went back to the queue through this call. The running server uses it to send the jobs that
    * were waiting for the slot, after the response; it never throws and never delays the answer.
@@ -101,6 +109,26 @@ export const RUNNER_SHUTDOWN_CODE = "runner_shutdown";
 /** The code a failed job is stored with: a code the runner is known to use, or `unknown`. */
 export function mapRunnerErrorCode(code: string): string {
   return RUNNER_ERROR_CODES.some((known) => known === code) ? code : "unknown";
+}
+
+/**
+ * #856: the basis `subscription` (and the estimate that goes with it) is kept in a stored usage only for a turn whose profile has the
+ * harness `claude-code`, which we know from the turn and not from the report: any runner or Worker could name it for any job, and the
+ * run page and the budget of a workflow read the stored usage. Anything else loses both fields; the cost, tokens and verdict stay.
+ */
+export async function withoutUntrustedCostBasis(
+  result: RunnerResult,
+  harnessOfJob: () => Promise<string | null>,
+): Promise<RunnerResult> {
+  const usage = result.usage;
+  if (usage === null || usage === undefined) return result;
+  if (usage.costBasis === undefined && usage.estimatedCostUsd === undefined)
+    return result;
+  if ((await harnessOfJob()) === CLAUDE_CODE_HARNESS) return result;
+  const kept = { ...usage };
+  delete kept.costBasis;
+  delete kept.estimatedCostUsd;
+  return { ...result, usage: kept };
 }
 
 /**
@@ -324,7 +352,11 @@ export async function finishJob(
   // #843: the result of the agent is held to its bounds once more (the redaction can make it longer), and a turn with a schema that
   // reports success without one is a `no_result`. The report stays whole in both cases.
   const stored = await withAgentResultOrNoResult(
-    cleaned,
+    await withoutUntrustedCostBasis(cleaned, async () =>
+      job.reviewKind === "implementer"
+        ? ((await deps.implementerTurn(job))?.turn.profile?.harness ?? null)
+        : null,
+    ),
     async () =>
       job.reviewKind === "implementer" &&
       (await deps.implementerTurn(job))?.turn.resultSchema != null,

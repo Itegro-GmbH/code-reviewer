@@ -90,6 +90,8 @@ export function createUsageFeedRepository(
         eb.and([
           eb("state", "=", "settled"),
           eb("cost_micro_usd", "is", null),
+          // A turn on a subscription has no cost to know (#856).
+          eb("cost_basis", "is", null),
           eb("reserved_at", ">=", from),
           eb("reserved_at", "<", to),
         ]);

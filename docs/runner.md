@@ -824,7 +824,7 @@ and to guard the exits):
 | Gate | Where | What |
 | ---- | ----- | ---- |
 | Push guard | `implementer/push_guard.py`, `GitWorkspace._login_secret_in` | Before a branch is pushed the runner reads what it adds beyond where the turn started (`git rev-list --objects` and `git cat-file --batch` in the mirror: commits, trees with their names, blobs, and the name of the branch) for the token and its spellings (`redaction.secret_forms`: as it is, URL-quoted, and base64 and base64url, with and without padding, at each of the three alignments the token can have inside a larger base64 text). Found: the branch gets the reason `login_secret` and is not pushed; the task's branch ends the turn `push_rejected`. Not read to the end (too large, a failed git, a timeout): `unchecked`, not pushed (it fails closed). Bounds: 300 s per read, a 64 MiB object list, 4 GiB of content. **It is a net, not a wall**: it finds the token and the spellings above, in plain text. It does not find the token hex-encoded, compressed (gzip, tar, a packed or zipped file), rot13 or otherwise shifted, reversed, or split over several lines or files. An agent that is told to hide the login can; the guard stops the accident and the lazy case, and the decision to accept the login in the agent's environment (follow-up 5) stands on the network gate, the owner's own device and the owner's own subscription. **Time**: the final push keeps 40 % of its seconds for the guard (`GUARD_SHARE`: 10 of the 25 s of a stop, 40 of the 100 s of a normal end); the fetch of a branch, the question to the lease and the push stop before that slice, and what the guard does not use goes back to the push of the last branch. So a stop (a cancelled run, a stopped Worker) or a slow fetch cannot leave the guard a second and turn committed work into `unchecked`. |
-| Redaction | `claude_code/agent.py`, `job_run.result_of` | The agent's `Redactor` knows the login: the step records, the turn's text and note are redacted in the agent; the job's secrets (the login included) are taken out of every text of the report (branch names, commit subjects, paths, the summary) and of the log line. Exact forms only for the facts of the report: a commit subject "fix authorization header" is not a secret. No snapshot export and no transcript volume exist for this harness yet (follow-up: resume across containers), so there is nothing else to scrub. |
+| Redaction | `claude_code/agent.py`, `job_run.result_of` | The agent's `Redactor` knows the login: the step records, the turn's text and note are redacted in the agent; the job's secrets (the login included) are taken out of every text of the report (branch names, commit subjects, paths, the summary) and of the log line. Exact forms only for the facts of the report: a commit subject "fix authorization header" is not a secret. No snapshot export and no transcript volume exist for this harness yet (design: "Resume across containers"), so there is nothing else to scrub; the design redacts the transcript with the login too and scans it again before it is stored. |
 | Network | `claude_code/gates.py`, `session._start_network`, `job_run.production_setup` | A subscription turn is forced onto the network door with the rule `list` and exactly `api.anthropic.com` (an exact name, no suffix). An environment that is `open`, or lists any other host, refuses the turn (`implementer_config_invalid`, detail starting `subscription_network_open` or `subscription_network_hosts`), free, before the container exists. The door dials ports 80 and 443 only (`netdoor/proxy.py`), as for every rule; Claude Code uses 443. Narrowing a rule to a port is not in the rule format yet (follow-up). |
 | Readiness per job | `claude_code/readiness.ready_harness`, `job_run.run_implementer_job` | The manifest said ready at the start; the job looks again (the login file, the layer on the daemon; nothing is built). A device that cannot refuses the job (`implementer_engine_unavailable`, detail starting `harness_not_ready`) and never falls back to OpenCode. |
 | No new privileges | `agent_container.agent_document(no_new_privileges=True)` | The container of the Claude Code agent is made with `no-new-privileges`; the hosted OpenCode agent is root and free and keeps its container as it was. |
@@ -835,12 +835,11 @@ copies its labels only); the combination can only come from a hand-made job.
 
 ### What is left of R3 (follow-ups of #856)
 
-1. **Resume across thrown-away containers**: a session volume under `CLAUDE_CONFIG_DIR` (the R0 spike measured about 254 KB after a
-   turn, +5 KB per turn, no key on it), and the runner's snapshot channel for it. Until then a follow-up turn on this harness continues
-   from the summary of the earlier turns (`summary_only`, reason `no_snapshot`). The adapter already resumes within a container and
-   falls back to a fresh session when the volume is empty. The session volume and the snapshot must be redacted with the login too.
-2. **Cost in the app** (done for the budget of a workflow run, see "Cost"): "≈ <amount> through a subscription" on the Runs page, never in
-   the totals; a per-workflow switch that lets a budget ignore it. **Owner question**: should a subscription turn on a customer runner be
+1. **Resume across thrown-away containers** (designed, not built; see "Resume across containers: design" below). Until then a follow-up
+   turn on this harness continues from the summary of the earlier turns (`summary_only`, reason `no_snapshot`). The adapter already
+   resumes within a container and falls back to a fresh session when the volume is empty.
+2. **Cost in the app** (done: the Runs page and the workflow run page say "≈ <amount> through a subscription", a subscription record is
+   no unknown cost and no total; see "Cost in the app" below). Left: a per-workflow switch that lets a budget ignore the estimate. **Owner question**: should a subscription turn on a customer runner be
    free of infra minutes and of the balance check at claim? Today it is not (the minutes are billed as for every job and the claim checks
    the balance).
 3. **The self-test's canned turn for Claude Code** (a canned Anthropic provider inside the container, as for OpenCode), so that
@@ -863,6 +862,73 @@ copies its labels only); the combination can only come from a hand-made job.
 8. **A port in the network rule** (so that a subscription turn reaches `api.anthropic.com:443` and not `:80`), and a dedicated error code for
    the refusals above instead of `implementer_config_invalid` with a reason word.
 9. **An environment with a setup script on this harness** (the layer on top of the image the script leaves).
+
+### Cost in the app (#856, third slice)
+
+A subscription turn reports `costUsd: null`, `costBasis: "subscription"` and `estimatedCostUsd` (null = Claude Code gave none).
+
+- **Runs page** (Implementer run detail, also the admin portal's job view): the Cost row reads "≈ $0.42 through a subscription" with the line
+  "Estimate at API prices, not billed", or "No estimate, through a subscription"; never "Not available". The figure is the job result's
+  `usage.estimatedCostUsd` (`readStoredUsage`), kept only for the one basis the app knows.
+- **Workflow run page**: a subscription step reads "Cost ≈ $0.42 through a subscription" ("no estimate, through a subscription" for a
+  booked 0). A cost basis a version does not know (a value a newer release wrote, read after a rollback) shows the neutral label
+  "basis not known" with the figure as stored; it never throws.
+- **Usage and billing**: the usage record of such a turn is settled with its tokens, no cost and `usage_records.cost_basis =
+  'subscription'` (migration `20261106012000_add_usage_record_cost_basis`, expand only, null for every older record). It adds
+  nothing to a cost sum, is not an unknown cost (no #361 log line, not in `unknownCostCount`, not in the operator feed of unknown
+  costs) and is not charged as AI cost. The minutes of the device and the balance check at claim are unchanged (owner question below).
+  The workflow budget still counts the estimate (decision 12 of the plan); the engine no longer logs "cost not reported" for it.
+- **Who may say it**: the basis in a report is the runner's word and is never taken on its own. The app keeps it in the stored result
+  (`withoutUntrustedCostBasis`) and in the usage record (`trustOfJob`) only for a turn of the Implementer whose profile has the harness
+  `claude-code` and that a runner of the workspace held (`jobs.runner_id` is `runner:<id>` of a row in `runners`); the workflow budget
+  reads the harness of the step's profile (`subscriptionCost`). For any other job (OpenCode, managed key, Diff, Dynamic, a hosted
+  Worker) the word is dropped and the usage is booked as before, so an unknown cost stays visible. The Runs page reads the copy only
+  beside no cost, and the database refuses a record with a cost and the basis (`usage_records_cost_basis_check`).
+
+### Resume across containers: design
+
+**What exists.** The adapter runs `claude -p --resume <id>` and falls back to a fresh session when Claude Code says "No conversation found".
+The conversation is one file, `$CLAUDE_CONFIG_DIR/projects/-work-repo/<session-id>.jsonl` (`/home/agent/.claude/...`; 254 KB after a
+turn, +5 KB per turn, R0). The transcripts are filed by the working directory, so the agent's path stays `/work/repo`. OpenCode resumes
+through the snapshot channel: the job process exports the session over the engine's HTTP API, redacts it, gzips it (cap 8 MiB), hands it
+to the job host over `RUNNER_SNAPSHOT_FD`, the host uploads it in parts (`PUT .../session`), the app keeps ONE row per session
+(`implementer_session_snapshots`, replaced by each turn; offered only when written by the directly preceding turn), and the next turn's
+host downloads it (`GET .../resume-session`) and puts `resume-session.gz` in the process's directory.
+
+**Why it was not built in this slice.** Every layer of that channel names the OpenCode export: the header carries the engine version
+(`opencode_version` column, `VERSION_CHANGED` reason), `resume_session.py` checks the shape of the engine's JSON and its session id, the
+export is an HTTP walk of the engine, and the import is the engine's `import` call. It cannot be tested here (no Docker daemon; the lane
+test needs one), and a wrong redaction would store the login. So it is one slice of its own.
+
+**The design.**
+1. **Kind of snapshot.** A header word `harness` (`opencode` | `claude-code`) in the snapshot header line and a nullable column
+   `implementer_session_snapshots.harness` (expand only, null = `opencode`; the existing `opencode_version` column carries the Claude Code
+   version for the other kind). The app offers a snapshot only to a turn of the same harness; any other pairing is `no_snapshot` and the
+   turn continues from the summary. The new feature word `claude_session_snapshot` in the runner API version lets an older app and an
+   older runner agree.
+2. **Export (job process, before the container is stopped).** One `docker exec` as `agent` that writes a tar of exactly
+   `projects/-work-repo/<session-id>.jsonl` to its standard output (never the whole config directory: no `.credentials.json`,
+   `settings`, `plugins`, `backups`, `todos`, `shell-snapshots`). The runner reads at most `MAX_RAW_BYTES`, within the seconds an export has
+   (5, or 2 at a stop), in a daemon thread as the OpenCode export does.
+3. **Redaction, line by line.** Each JSONL line is parsed; every string value and key goes through the turn's `Redactor` (login, token
+   shapes, the job's secrets and their base64/URL forms), never the JSON text (the lesson of the OpenCode export); a line that is not JSON
+   is dropped, not copied. The result is compact JSON lines, gzip without a time, cap 8 MiB gzipped; over the cap there is no snapshot.
+   After redaction the whole file is scanned once more with `SecretScanner` on the login's forms; a hit discards the snapshot
+   (`login_secret`, fails closed).
+4. **Import (next turn, in the fresh container).** After the container is up and before the first message, the process writes the
+   verified gz through one `docker exec` (`tar -x` as `agent`, only that one path, owned by `agent`, mode 0600) and calls the adapter with
+   `resume_from=<session id>`. The id is the UUID in the header and is checked as a UUID. A "No conversation found" (a bad file) already
+   falls back to a fresh session with `import_failed`.
+5. **The login is never in a snapshot.** Test: a canned transcript whose lines hold the token raw, URL-quoted, in base64 at each
+   alignment and in a key name goes through the exporter; the result contains none of the forms, and a transcript the redactor cannot
+   clean is discarded. A second test lists the tar: only the one path. The lane test (CI) runs a turn, exports, throws the container away,
+   imports in a new one and checks that the second turn answers from the first one's content.
+6. **Customer runner and hosted.** Claude Code runs on customer runners only, so only the `runner_session_snapshot` endpoints
+   (`/api/runners/v1/jobs/{id}/session`, `/resume-session`) carry this kind; the hosted Worker API never sees it.
+7. **Not stored by us unredacted, and still the customer's data.** The transcript holds the agent's tool output, i.e. repository content.
+   It is kept like the OpenCode snapshot (the stored conversation is kept for good, erased with the workspace). The owner should confirm
+   that a Claude Code transcript may be stored in our database at all, since Anthropic's terms are about the login, not the transcript;
+   the transcript is the customer's session content, redacted, never the login.
 
 ## Spikes R0 (#853)
 

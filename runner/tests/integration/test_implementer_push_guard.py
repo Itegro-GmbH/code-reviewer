@@ -242,13 +242,21 @@ class Seen:
     def __init__(self) -> None:
         self.fetch: list[float] = []
         self.guard: list[float] = []
+        self.listing: list[float] = []
         self.push: list[float] = []
 
 
-def timed(workspace: GitWorkspace, clock: Clock, monkeypatch: pytest.MonkeyPatch) -> Seen:
+def timed(
+    workspace: GitWorkspace,
+    clock: Clock,
+    monkeypatch: pytest.MonkeyPatch,
+    guard_costs: tuple[float, ...] = (),
+) -> Seen:
     """Run the phases with the clock under the test's hand: the fetch of a branch uses all the time
-    it was given, the guard's reads and the push use none. Records what each was given."""
+    it was given, the push uses none, the listing of the guard uses what `guard_costs` says for
+    each branch in turn (none by default). Records what each was given."""
     seen = Seen()
+    costs = list(guard_costs)
     workspace._clock = clock  # pyright: ignore[reportPrivateUsage]
     take_over = GitWorkspace._take_over  # pyright: ignore[reportPrivateUsage]
     real_stream = GitWorkspace._mirror_stream  # pyright: ignore[reportPrivateUsage]
@@ -263,6 +271,9 @@ def timed(workspace: GitWorkspace, clock: Clock, monkeypatch: pytest.MonkeyPatch
     def stream(self: GitWorkspace, args: list[str], consume: Any, **options: Any) -> Outcome:
         if "rev-list" in args or "cat-file" in args:
             seen.guard.append(options["timeout"])
+        if "rev-list" in args:
+            seen.listing.append(options["timeout"])
+            clock.now += costs.pop(0) if costs else 0.0
         return real_stream(self, args, consume, **options)
 
     def push(self: GitWorkspace, scratch: str, name: str, deadline: float) -> Any:
@@ -333,12 +344,72 @@ def test_the_guard_of_a_stop_has_a_slice_that_fits_the_pushing_time_of_a_stop(
     commit(workspace, "a.txt")
     clock = Clock()
     seen = timed(workspace, clock, monkeypatch)
+    start = clock.now
 
     workspace.push_all(seconds=STOP_PUSH_SECONDS)
 
     # A branch with one commit is read in well under a second; the slice is there for a large one.
     assert seen.guard[0] >= STOP_PUSH_SECONDS * git_workspace.GUARD_SHARE - 0.6
-    assert STOP_PUSH_SECONDS * (1 - git_workspace.GUARD_SHARE) >= 10.0
+    # What the slice leaves is still the time a fetch needs: the fetch was given at least 10 s.
+    assert seen.fetch[0] - start >= 10.0
+
+
+def two_branches(workspace: GitWorkspace) -> tuple[str, str]:
+    """The tips of two branches with a commit of their own: the form's branch and `other`."""
+    first = commit(workspace, "a.txt")
+    assert (
+        agent_git(workspace, "checkout", "-q", "-b", "other", workspace.start_commit).returncode
+        == 0
+    )
+    return first, commit(workspace, "b.txt")
+
+
+# #856-G09
+def test_the_slice_is_shared_by_the_branches_what_one_reads_the_next_does_not_get_again(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = guarded(rig)
+    first, second = two_branches(workspace)
+    clock = Clock()
+    # The guard needs 3 s to list the objects of the first branch.
+    seen = timed(workspace, clock, monkeypatch, guard_costs=(3.0,))
+    start = clock.now
+
+    report = workspace.push_all(seconds=20.0)
+
+    slice_ = 20.0 * git_workspace.GUARD_SHARE
+    assert len(seen.listing) == 2
+    assert seen.listing[0] == pytest.approx(slice_)  # pyright: ignore[reportUnknownMemberType]
+    # The second branch reads with what the first left of the slice, not with a slice of its own.
+    assert seen.listing[1] == pytest.approx(slice_ - 3.0)  # pyright: ignore[reportUnknownMemberType]
+    # The first branch fetches and pushes before what is still kept; the last has it all.
+    assert seen.fetch[1] == pytest.approx(start + 20.0 - (slice_ - 3.0))  # pyright: ignore[reportUnknownMemberType]
+    assert seen.push[0] == pytest.approx(start + 20.0 - (slice_ - 3.0))  # pyright: ignore[reportUnknownMemberType]
+    assert seen.push[1] == pytest.approx(start + 20.0)  # pyright: ignore[reportUnknownMemberType]
+    assert rig.origin.tip(BRANCH) == first and rig.origin.tip("other") == second
+    assert reason_of(report) is None and reason_of(report, "other") is None
+
+
+# #856-G09
+def test_a_slice_the_first_branch_used_up_leaves_the_next_one_the_time_of_the_push(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = guarded(rig)
+    first, second = two_branches(workspace)
+    clock = Clock()
+    # The first branch needs the whole slice of 8 s.
+    seen = timed(workspace, clock, monkeypatch, guard_costs=(8.0,))
+    start = clock.now
+
+    report = workspace.push_all(seconds=20.0)
+
+    # Nothing is kept any more: the second branch is read within what the push has left (a read
+    # has one second at the least), is still guarded, and the last push keeps its deadline.
+    assert seen.listing[0] == pytest.approx(20.0 * git_workspace.GUARD_SHARE)  # pyright: ignore[reportUnknownMemberType]
+    assert len(seen.listing) == 2 and seen.listing[1] <= 1.0
+    assert seen.push[1] == pytest.approx(start + 20.0)  # pyright: ignore[reportUnknownMemberType]
+    assert reason_of(report) is None and reason_of(report, "other") is None
+    assert rig.origin.tip(BRANCH) == first and rig.origin.tip("other") == second
 
 
 # #856-G06

@@ -508,6 +508,8 @@ function parseUsage(
     check.dropped.push(`${prefix}callTrace`);
   // #856: a turn on a device's login says so, and what Claude Code thinks it is worth at API prices. A basis this contract does not
   // name is left out with its estimate; an estimate that is no cost is read as none. The usage, the cost and the verdict are kept.
+  // This is only what the runner says: the report path keeps it for a claude-code turn and the settlement takes it for a claude-code
+  // turn on a customer's runner, both from our own records of the job (`withoutUntrustedCostBasis`, `trustOfJob`).
   const onSubscription = value.costBasis === "subscription";
   if (value.costBasis !== undefined && !onSubscription)
     check.dropped.push(`${prefix}costBasis`);

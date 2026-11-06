@@ -51,6 +51,8 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
   workflow_runs: ["trigger_kind", "cancel_requested_at"],
   // #891: when a member asked for the running turn to stop; null for every job that exists.
   jobs: ["cancel_requested_at"],
+  // #856: how to read a settled record without a cost (a subscription turn); null for every record that exists.
+  usage_records: ["cost_basis"],
 };
 
 /** What a column added later holds on an existing row when it is not null: a constant default. */
