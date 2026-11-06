@@ -62,6 +62,7 @@ const SESSION: StoredImplementerSession = {
   repositoryId: "r-1",
   slot: 1,
   baseBranch: "main",
+  startBranch: null,
   branch: "workflow/run-1/work",
   headCommit: null,
   status: "idle",

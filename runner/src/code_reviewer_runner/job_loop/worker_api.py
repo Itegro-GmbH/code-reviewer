@@ -97,6 +97,8 @@ WORKER_FEATURES: tuple[str, ...] = (
     # #838: the Worker reads `implementer.resume` and starts a follow-up turn from the branches of
     # the session.
     "implementer_resume",
+    # #909: the Worker reads `implementer.startBranch` and starts the work from that branch.
+    "implementer_start_branch",
 )
 # The feature of `GET /api/runners/v1/version` that says the Worker API exists.
 FEATURE_WORKER_API = "worker_api"

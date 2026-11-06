@@ -361,6 +361,44 @@ describe("the Worker's fetch of a turn", () => {
     expect(input).not.toHaveProperty("dynamic");
   });
 
+  // #909-T07
+  it("carries the start branch of the session next to its base, and none for a session without one", async () => {
+    const h = await start();
+    await h.turn({
+      baseBranch: "main",
+      startBranch: "workflow/run-1/implement",
+    });
+
+    const { input } = await fetched(
+      h,
+      [...FEATURES, "implementer_start_branch"].join(","),
+    );
+
+    expect(contract.check("RunnerJobInput", input)).toStrictEqual({
+      valid: true,
+      errors: "",
+    });
+    expect(input).toMatchObject({
+      implementer: {
+        baseBranch: "main",
+        startBranch: "workflow/run-1/implement",
+      },
+    });
+  });
+
+  // #909-T07
+  it("leaves the start branch out of the job of a session that has none", async () => {
+    const h = await start();
+    await h.turn({ baseBranch: "develop" });
+
+    const { input } = await fetched(h);
+
+    expect(input).toMatchObject({ implementer: { baseBranch: "develop" } });
+    expect(
+      (input as { implementer: Record<string, unknown> }).implementer,
+    ).not.toHaveProperty("startBranch");
+  });
+
   // #753-T03
   it("mints a token for the one repository that can write its contents, and a review job's token stays read-only", async () => {
     const h = await start();

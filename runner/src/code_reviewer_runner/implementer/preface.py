@@ -17,6 +17,12 @@ digits and `._/-`), commit ids of 40 lower-case hex digits shown as seven, and t
 turn. A name that does not match is not shown, only counted. Nothing the agent, a member or the
 repository wrote can reach the preface through them.
 
+**The repository note** (#909) is the same kind of text for every turn, the first one included: the
+repository is a full clone (every branch of the provider is a local branch, with its whole history
+and its tags), which branch is the base of the task and which the session branch was made from. A
+first turn has it as a synthetic part in front of the instruction (`first_turn_parts`), a follow-up
+in its preface. The names pass the same check as the others and are left out when they do not.
+
 **The summary and the digest** are text the earlier agent and members wrote. In the fallback they
 are given to the new agent as *data*, in a part of their own (`history_part`): behind a fixed
 sentence that says what they are, inside a fence the text itself cannot close. They are never part
@@ -66,6 +72,11 @@ class PrefaceFacts:
     moved: Sequence[MovedBranch] = ()
     missing: Sequence[str] = ()
     setup_ran: bool = False
+    # #909: the base branch, the branch the session branch was made from and the session branch;
+    # none of them: no note about the repository.
+    base: str | None = None
+    start: str | None = None
+    session: str | None = None
 
 
 def _name(value: str) -> str | None:
@@ -78,6 +89,51 @@ def _short(value: str) -> str | None:
 
 def _quoted(names: Sequence[str]) -> str:
     return ", ".join(f"`{name}`" for name in names)
+
+
+def _repository_sentences(base: str, start: str, session: str) -> str:
+    """The fixed sentences about the clone, with the three names put in where they are plain."""
+    shown_base, shown_start, shown_session = _name(base), _name(start), _name(session)
+    text = (
+        "Your repository is a full clone of the GitHub repository, as a developer has it: every "
+        "branch of it is a local branch here (no `origin/` branches, no remote), with its whole "
+        "history and its tags, so `git log`, `git blame`, `git merge-base` and "
+        "`git diff <branch>...HEAD` work against any of them."
+    )
+    text += (
+        f" The base branch of this task is `{shown_base}`: the work is compared with it."
+        if shown_base is not None
+        else " The base branch of this task has a name that is not shown here."
+    )
+    if shown_session is None:
+        text += " Your session branch has a name that is not shown here."
+    elif start == base:
+        text += f" `{shown_session}` was made from the base branch."
+    elif shown_start is not None:
+        text += f" `{shown_session}` was made from `{shown_start}`."
+    else:
+        text += f" `{shown_session}` was made from a branch whose name is not shown here."
+    return text + " Only the branches you create or change are pushed when your turn ends."
+
+
+def repository_note(*, base: str, start: str, session: str) -> str:
+    """The text of the synthetic part that tells a turn about its repository."""
+    return f"{_MARK} {_repository_sentences(base, start, session)}"
+
+
+def first_turn_parts(
+    instruction: str, *, base: str, start: str, session: str
+) -> list[dict[str, Any]]:
+    """The parts of the first message of a first turn: the note about the repository
+    (synthetic), then the person's instruction exactly as given."""
+    return [
+        {
+            "type": "text",
+            "text": repository_note(base=base, start=start, session=session),
+            "synthetic": True,
+        },
+        {"type": "text", "text": instruction},
+    ]
 
 
 def _branch_line(facts: PrefaceFacts) -> str:
@@ -146,6 +202,8 @@ def build_preface(facts: PrefaceFacts) -> str:
     ]
     if facts.setup_ran:
         lines.append("The environment's setup script ran again on the branch that is checked out.")
+    if facts.base is not None and facts.start is not None and facts.session is not None:
+        lines.append(_repository_sentences(facts.base, facts.start, facts.session))
     lines.append(_branch_line(facts))
     if checkout is None:
         lines.append("The branch that is checked out has a name that is not shown here.")

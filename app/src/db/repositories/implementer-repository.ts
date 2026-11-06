@@ -46,7 +46,10 @@ export type StoredImplementerSession = {
   repositoryId: string;
   /** The number of the session in its repository, from 1; its jobs hold `-slot` as the pull request number. */
   slot: number;
+  /** The branch the work is compared with and merged into. */
   baseBranch: string;
+  /** #909: the branch the session branch was made from when that is not the base; null: the tip of the base. */
+  startBranch: string | null;
   branch: string;
   /** The last commit pushed to the branch; null until a turn has pushed one. */
   headCommit: string | null;
@@ -186,6 +189,8 @@ export type StoredImplementerTurn = {
 export type NewImplementerTask = {
   repositoryId: string;
   baseBranch: string;
+  /** #909: the branch the new branch is made from, when that is not the base; left out or null: the tip of the base. */
+  startBranch?: string | null;
   /** The new branch; one session per branch and repository. */
   branch: string;
   instruction: string;
@@ -381,6 +386,7 @@ function sessionFrom(
     repositoryId: row.repository_id,
     slot: row.slot,
     baseBranch: row.base_branch,
+    startBranch: row.start_branch,
     branch: row.branch,
     headCommit: row.head_commit,
     status: row.status,
@@ -681,6 +687,7 @@ export function createImplementerRepository(
             repository_id: task.repositoryId,
             slot,
             base_branch: task.baseBranch,
+            start_branch: task.startBranch ?? null,
             branch: task.branch,
             status: "running",
             created_by: task.createdBy,

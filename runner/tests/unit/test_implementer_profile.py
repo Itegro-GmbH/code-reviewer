@@ -102,3 +102,8 @@ def test_a_refusal_does_not_repeat_the_text_of_the_instructions() -> None:
 # #843-R05
 def test_the_worker_names_the_feature_that_reads_the_profile() -> None:
     assert "implementer_profile" in WORKER_FEATURES
+
+
+# #909-T13
+def test_the_worker_names_the_feature_that_reads_the_start_branch() -> None:
+    assert "implementer_start_branch" in WORKER_FEATURES

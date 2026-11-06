@@ -887,13 +887,14 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       values,
       INSTRUCTION_MAX_LENGTH,
     );
-    // The branch the session starts from: the step's own (`branch`, a target the validator held to a literal, a trigger value or the
-    // branch of an earlier agent step), else the base branch of the run.
-    const base =
+    // The base of the session is always the run's: the branch the work is compared with and merged into. The branch the session starts
+    // from is the step's own (`branch`, a target the validator held to a literal, a trigger value or the branch of an earlier agent
+    // step), else the tip of the base (#909).
+    const start =
       node.branch === undefined
-        ? run.baseBranch
+        ? undefined
         : startBranchOf(node.branch, values);
-    if (typeof base === "object") return { outcome: base };
+    if (typeof start === "object") return { outcome: start };
     const owner = await sessionOwner(run);
     if ("missing" in owner)
       return { outcome: failed("agent_start_failed", ownerMissingText(owner)) };
@@ -902,7 +903,8 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         owner,
         {
           repositoryId: run.repositoryId,
-          baseBranch: base,
+          baseBranch: run.baseBranch,
+          ...(start === undefined ? {} : { startBranch: start }),
           branch: sessionBranchOf(run, step),
           instruction,
           environmentId: environment.id,

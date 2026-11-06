@@ -700,14 +700,15 @@ When the last one is over, the run ends with the stored status and error code (`
   `workflow/<run id>/<step id>.r<round>`. A step id never holds a `.` (a letter, then letters, digits, `_` or `-`), so no step can be named like the later round of another
   (`review` in round two is `review.r2`; a step called `review-r2` is `review-r2`). A continued session keeps its branch.
 - **A reviewer needs the code: `branch`.** A session of its own starts from the base branch of the run, so a reviewer would not see what the implementer did. The agent step takes
-  `"branch": "{{implement.branch}}"`: the new session starts from that branch (the Implementer's `baseBranch`; the branch must exist on GitHub, which it does once the turn that
+  `"branch": "{{implement.branch}}"`: the new session starts from that branch (the Implementer's `startBranch`, #909; the `baseBranch` of the session stays the base branch of the run; the branch must exist on GitHub, which it does once the turn that
   made it started, and the step ends with `agent_start_failed` if it was deleted). In a loop the value is the one of the latest round of `implement`, which in round two holds
   the commits of the session that went on. The value is a [target](#one-repository-per-run-and-targets): a literal, a trigger value or the branch **fact** of an agent step, never text an agent wrote.
 - **Push rights and the branch of the reviewer.** `branch` only chooses where the session **starts**. The session always works on a branch of its own, `workflow/<run id>/<step id>`
   (with `.r<round>` from the second session of the step on), created from that start; it never pushes to the branch it started from. A profile that **may not push** (the reviewer) reads the
   branch and changes nothing that leaves its container. A profile that **may push** pushes to its own branch, which is then built on top of the other (a second branch, not a commit on
   the implementer's), and its own `{{<step>.branch}}` is that second branch. The name of the session's branch is unique whatever it starts from: it holds the run and the step.
-  The Worker fetches the branch it starts from one commit deep, so a reviewer sees the code of that branch as it stands, not its history (and not the difference to the base branch).
+  The agent's repository is a full clone (#909: every branch of the repository as a local branch, the whole history and the tags), so a reviewer sees the history of the branch it starts from and can run
+  `git diff <base>...HEAD` against the base branch of the run. Only the branches an agent created or moved are pushed; the others are left as they were.
 
 ### Known limits
 

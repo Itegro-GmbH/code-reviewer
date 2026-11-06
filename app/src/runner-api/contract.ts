@@ -67,6 +67,9 @@ export const CLAIM_FEATURES = [
   // named it; a follow-up turn is refused (`implementer_engine_unavailable`, free) for a caller that did not. The app sends no `resume`
   // yet: the follow-up API (the next step of #745) is what produces one.
   "implementer_resume",
+  // #909: the runner reads `implementer.startBranch` and starts the work from that branch instead of the base branch. Sent only to a
+  // caller that named it; a turn with a start branch is refused (`implementer_engine_unavailable`, free) for a caller that did not.
+  "implementer_start_branch",
 ] as const;
 export type ClaimFeature = (typeof CLAIM_FEATURES)[number];
 
@@ -479,6 +482,8 @@ export type RunnerJobInput = {
 export type ImplementerJobOptions = {
   repo: { fullName: string; cloneUrl: string };
   baseBranch: string;
+  /** #909: the branch the new branch is made from when that is not the base; absent: the tip of the base. */
+  startBranch?: string;
   branch: string;
   /** The task as the user wrote it, at most 20 000 characters; literal data. */
   instruction: string;

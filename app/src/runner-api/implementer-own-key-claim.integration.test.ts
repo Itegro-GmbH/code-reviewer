@@ -196,6 +196,61 @@ describe("the claim of a turn of the Implementer on the workspace's own Anthropi
   });
 });
 
+// #909: a turn with a start branch goes only to a Worker that reads it; one that did not would start from the base branch.
+describe("the claim of a turn of the Implementer with a start branch", () => {
+  // #909-T13
+  it("hands a Worker with the feature the start branch", async () => {
+    const h = await start();
+    await h.enqueueTurn({
+      modelChoice: { provider: "anthropic", model: SONNET },
+      costLimitCents: 500,
+      startBranch: "feature/start",
+    });
+
+    const { job } = await h.claimed({
+      ...claimOptions(),
+      features: [...FEATURES, "implementer_start_branch"],
+    });
+
+    expect(job.input).toMatchObject({
+      implementer: { baseBranch: "main", startBranch: "feature/start" },
+    });
+  });
+
+  // #909-T13
+  it("ends the turn implementer_engine_unavailable, free, for a Worker without the feature, before a token exists", async () => {
+    const h = await start();
+    const turn = await h.enqueueTurn({
+      modelChoice: { provider: "anthropic", model: SONNET },
+      costLimitCents: 500,
+      startBranch: "feature/start",
+    });
+
+    expect((await h.claim(claimOptions())).status).toBe(204);
+
+    expect(await h.queue.get(turn.job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "implementer_engine_unavailable",
+    });
+    expect(h.issuedJobTokens()).toEqual([]);
+  });
+
+  // #909-T13
+  it("hands a Worker without the feature a turn that has no start branch, with no startBranch field", async () => {
+    const h = await start();
+    await h.enqueueTurn({
+      modelChoice: { provider: "anthropic", model: SONNET },
+      costLimitCents: 500,
+    });
+
+    const { job } = await h.claimed(claimOptions());
+
+    expect(
+      (job.input as { implementer: Record<string, unknown> }).implementer,
+    ).not.toHaveProperty("startBranch");
+  });
+});
+
 describe("a turn of the Implementer on the operator's key", () => {
   // Managed mode is not part of this change: a stored entry on a provider of the registry still ends the turn before any key or token
   // exists, as it did, and is never built as a native job on the operator's key.

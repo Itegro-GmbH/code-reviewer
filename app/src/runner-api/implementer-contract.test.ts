@@ -125,6 +125,24 @@ describe("the implementer job input", () => {
     }
   });
 
+  // #909-T07
+  it("takes a start branch bounded as the base branch is, and a job without one is still valid", () => {
+    const without = example("RunnerJobInput");
+    expect(without.implementer.startBranch).toBeUndefined();
+    expect(accepts("RunnerJobInput", without)).toBe(true);
+
+    for (const name of ["feature/x", "workflow/7f0c/implement"]) {
+      const input = example("RunnerJobInput");
+      input.implementer.startBranch = name;
+      expect(accepts("RunnerJobInput", input), name).toBe(true);
+    }
+    for (const bad of ["has space", "-force", "", 7, null, "a".repeat(256)]) {
+      const input = example("RunnerJobInput");
+      input.implementer.startBranch = bad;
+      expect(accepts("RunnerJobInput", input), String(bad)).toBe(false);
+    }
+  });
+
   // #746-T01
   it("bounds the instruction at 20 000 characters and the time limit", () => {
     const longest = example("RunnerJobInput");

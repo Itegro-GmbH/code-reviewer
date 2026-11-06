@@ -373,6 +373,8 @@ export type Checked = {
     instruction: string;
     branch: string;
     baseBranch: string;
+    /** #909: the branch the session branch is made from when that is not the base; null: the tip of the base. */
+    startBranch: string | null;
     /** The https address the runner clones from and pushes to, with no credential in it (`cloneUrlOf`). */
     cloneUrl: string;
     /** #818: the environment the turn copied when it started; null for a task without one. */
@@ -1096,6 +1098,7 @@ export async function checkJob(
         instruction: turn.turn.instruction,
         branch: turn.session.branch,
         baseBranch: turn.session.baseBranch,
+        startBranch: turn.session.startBranch,
         cloneUrl,
         environment:
           turn.turn.environment === null
@@ -1246,6 +1249,13 @@ export async function buildJobInput(
   // feature reads (the three fields are part of `resume`, a closed object): the turn ends here, free, before any credential exists.
   if (implementer?.resume != null && !features.includes("implementer_resume"))
     return refuse("implementer_engine_unavailable", "reason=resume");
+  // #909: the same for the start branch. A Worker that does not read it would start from the base branch, and the work would grow on a
+  // branch the person did not choose.
+  if (
+    implementer?.startBranch != null &&
+    !features.includes("implementer_start_branch")
+  )
+    return refuse("implementer_engine_unavailable", "reason=start_branch");
   if (costLimit.enforced === "none")
     deps.logger.info(
       `[runner-api] job=${job.id} carries no cost limit: the runner names neither claim feature cost_limit nor operator_cost_limit, so a Dynamic Review is held only to the runner's own RUNNER_DYNAMIC_MAX_COST_USD and a Diff Review to none`,
@@ -1358,6 +1368,9 @@ export async function buildJobInput(
           implementer: {
             repo: { fullName: repo.fullName, cloneUrl: implementer.cloneUrl },
             baseBranch: implementer.baseBranch,
+            ...(implementer.startBranch === null
+              ? {}
+              : { startBranch: implementer.startBranch }),
             branch: implementer.branch,
             instruction: implementer.instruction,
             limits: { timeLimitSeconds: IMPLEMENTER_TIME_LIMIT_SECONDS },
@@ -1543,6 +1556,11 @@ async function prepareSubscription(
     return refuse("implementer_engine_unavailable", "reason=result");
   if (turn.turn.number >= 2 && !features.includes("implementer_resume"))
     return refuse("implementer_engine_unavailable", "reason=resume");
+  if (
+    turn.session.startBranch !== null &&
+    !features.includes("implementer_start_branch")
+  )
+    return refuse("implementer_engine_unavailable", "reason=start_branch");
   if (job.leaseExpiresAt === null)
     throw new Error(`Claimed job ${job.id} has no lease expiry.`);
 
@@ -1630,6 +1648,9 @@ async function prepareSubscription(
     implementer: {
       repo: { fullName: repo.fullName, cloneUrl },
       baseBranch: turn.session.baseBranch,
+      ...(turn.session.startBranch === null
+        ? {}
+        : { startBranch: turn.session.startBranch }),
       branch: turn.session.branch,
       instruction: turn.turn.instruction,
       limits: { timeLimitSeconds: IMPLEMENTER_TIME_LIMIT_SECONDS },

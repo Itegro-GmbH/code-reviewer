@@ -106,7 +106,7 @@ from .network_report import (
 )
 from .network_rule import MODE_OFF, MODE_OPEN, OFF, NetworkRule
 from .network_switch import Post, model_host_of, narrow_policy, parse_switch, urllib_post
-from .preface import MovedBranch, PrefaceFacts, ResumeMode, message_parts
+from .preface import MovedBranch, PrefaceFacts, ResumeMode, first_turn_parts, message_parts
 from .prompts import LEFTOVER_PROMPT, RESULT_REMINDER_PROMPT, instructions_text
 from .reader import RESET_SECONDS as READER_RESET_SECONDS
 from .report import agent_result_ok
@@ -618,18 +618,21 @@ class ImplementerSession:
     def _first_message(
         self, agent: ImplementerAgent | ClaudeCodeAgent
     ) -> str | list[dict[str, Any]]:
-        """The first message of the turn: the instruction, and on a follow-up turn the preface
-        (what happened to the sandbox) in front of it, as a part of its own."""
+        """The first message of the turn: the instruction behind the note about the repository
+        (#909), and on a follow-up turn the preface (what happened to the sandbox, the same note
+        in it) in front of it, as a part of its own."""
         instruction = self.job.implementer.instruction
         resume = self.job.implementer.resume
-        if resume is None:
-            return instruction
-        outcome = agent.resume or ResumeOutcome(ResumeMode.SUMMARY_ONLY, ResumeReason.IMPORT_FAILED)
         workspace = self.workspace
+        base, session = self.job.implementer.base_branch, self.job.implementer.branch
+        if resume is None:
+            return first_turn_parts(
+                instruction, base=base, start=workspace.start_source, session=session
+            )
+        outcome = agent.resume or ResumeOutcome(ResumeMode.SUMMARY_ONLY, ResumeReason.IMPORT_FAILED)
         tips = workspace.start_tips
-        # The session branch first, then the others in alphabetical order.
-        session = self.job.implementer.branch
-        names = sorted(tips, key=lambda name: (name != session, name))
+        # The session branch first, then the base, then the others in alphabetical order.
+        names = sorted(tips, key=lambda name: (name != session, name != base, name))
         checkout = workspace.start_checkout or session
         facts = PrefaceFacts(
             turn=resume.turn,
@@ -639,6 +642,9 @@ class ImplementerSession:
             moved=[MovedBranch(m.name, m.was, m.now) for m in workspace.resume_moved],
             missing=workspace.resume_missing,
             setup_ran=self._has_script(),
+            base=base,
+            start=workspace.start_source,
+            session=session,
         )
         return message_parts(
             facts, instruction, previous_summary=resume.previous_summary, digest=resume.digest

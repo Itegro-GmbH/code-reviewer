@@ -679,6 +679,7 @@ export function createJobsRepository(
       const task: NewImplementerTask = {
         repositoryId: input.repositoryId,
         baseBranch: input.baseBranch,
+        startBranch: input.startBranch ?? null,
         branch: input.branch,
         instruction: input.instruction,
         modelChoice: input.modelChoice,
