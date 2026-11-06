@@ -146,7 +146,12 @@ describe("the migration that widens the review kind checks", () => {
       journal: await constraintsOf(db, "billing_journal_entries"),
     };
     const others = (constraints: typeof before.usage) =>
-      constraints.filter((check) => !check.name.endsWith("review_kind_check"));
+      constraints.filter(
+        (check) =>
+          !check.name.endsWith("review_kind_check") &&
+          // Added by a later migration (#856).
+          check.name !== "usage_records_cost_basis_check",
+      );
     expect(others(after.usage)).toEqual(others(before.usage));
     expect(others(after.journal)).toEqual(others(before.journal));
     for (const check of [
