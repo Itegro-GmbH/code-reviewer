@@ -394,6 +394,8 @@ ledger and ends with the turn like the write token.
 last turn pushed with their tips, the branch to check out). The App builds `resume` for every turn from number 2 on (#841, `resume.ts`: the union of the branches the earlier turns pushed, the checkout, whether the conversation of the directly preceding turn is stored (#885), the last summary and the digest, all from the stored reports) and sends it, with `snapshot`,
 `previousSummary` and `digest` inside it, only to a caller that named the feature; any other caller gets the turn refused (`implementer_engine_unavailable`, free, before any credential exists, as for the environment).
 
+**The start branch (#909).** The claim feature `implementer_start_branch` is the Worker's way to say it reads `implementer.startBranch`, the branch a new session branch is made from. The app sends the field only to a caller that named it and ends a turn that has one for a caller that did not with `implementer_engine_unavailable` (reason `start_branch`, free, before any credential exists), on the own-key path and on the subscription path alike.
+
 A failure that may pass (GitHub down while the installation is read or the token is made) gives the job back with `Retry-After`.
 A turn is never run twice (`maxAttempts` 1), so it is put back in the queue only while **no input was ever handed to a Worker**: the
 write tokens are remembered before an input leaves, so a turn whose ledger is empty has handed out none (`noInputHandedOut`, asked

@@ -1249,6 +1249,13 @@ export async function buildJobInput(
   // feature reads (the three fields are part of `resume`, a closed object): the turn ends here, free, before any credential exists.
   if (implementer?.resume != null && !features.includes("implementer_resume"))
     return refuse("implementer_engine_unavailable", "reason=resume");
+  // #909: the same for the start branch. A Worker that does not read it would start from the base branch, and the work would grow on a
+  // branch the person did not choose.
+  if (
+    implementer?.startBranch != null &&
+    !features.includes("implementer_start_branch")
+  )
+    return refuse("implementer_engine_unavailable", "reason=start_branch");
   if (costLimit.enforced === "none")
     deps.logger.info(
       `[runner-api] job=${job.id} carries no cost limit: the runner names neither claim feature cost_limit nor operator_cost_limit, so a Dynamic Review is held only to the runner's own RUNNER_DYNAMIC_MAX_COST_USD and a Diff Review to none`,
@@ -1549,6 +1556,11 @@ async function prepareSubscription(
     return refuse("implementer_engine_unavailable", "reason=result");
   if (turn.turn.number >= 2 && !features.includes("implementer_resume"))
     return refuse("implementer_engine_unavailable", "reason=resume");
+  if (
+    turn.session.startBranch !== null &&
+    !features.includes("implementer_start_branch")
+  )
+    return refuse("implementer_engine_unavailable", "reason=start_branch");
   if (job.leaseExpiresAt === null)
     throw new Error(`Claimed job ${job.id} has no lease expiry.`);
 

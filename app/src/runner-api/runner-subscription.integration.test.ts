@@ -16,6 +16,7 @@ const NOW_FEATURES = [
   "implementer_environment",
   "implementer_result",
   "implementer_resume",
+  "implementer_start_branch",
 ];
 const CLAUDE_MODEL = { provider: "claude-code", model: "claude-sonnet-5-5" };
 const RUNNER_ENV = { id: "env-runner", name: "My box", labels: ["box"] };
@@ -201,6 +202,51 @@ describe("the claim of a turn on the harness claude-code", () => {
     expect(await h.queue.get(turn.job.id)).toMatchObject({
       status: "failed",
       errorCode: "implementer_engine_unavailable",
+    });
+  });
+
+  // #909-T09
+  it("ends the turn, free, when the runner does not read the start branch, instead of starting from the base branch", async () => {
+    const h = await start();
+    const runner = await h.registerRunner({ labels: ["box"], manifest: BOTH });
+    const turn = await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+      profile: PROFILE,
+      startBranch: "feature/start",
+    });
+
+    const response = await h.claim(
+      claimOf(
+        runner.credential,
+        NOW_FEATURES.filter((name) => name !== "implementer_start_branch"),
+      ),
+    );
+
+    expect(response.status).toBe(204);
+    expect(await h.queue.get(turn.job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "implementer_engine_unavailable",
+    });
+  });
+
+  // #909-T09
+  it("hands a runner that reads the start branch the turn with it", async () => {
+    const h = await start();
+    const runner = await h.registerRunner({ labels: ["box"], manifest: BOTH });
+    await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+      profile: PROFILE,
+      startBranch: "feature/start",
+    });
+
+    const response = await h.claim(claimOf(runner.credential));
+
+    expect(response.status).toBe(200);
+    const { job } = (await response.json()) as ClaimResponse;
+    expect(job.input).toMatchObject({
+      implementer: { startBranch: "feature/start" },
     });
   });
 
