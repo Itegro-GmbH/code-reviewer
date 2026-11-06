@@ -58,6 +58,7 @@ from code_reviewer_runner.factory_runner.base import (
     EXIT_OK,
     EXIT_USAGE,
 )
+from code_reviewer_runner.factory_runner.claude_code_selftest import device_checks
 from code_reviewer_runner.factory_runner.config import (
     ConfigError,
     Limits,
@@ -75,7 +76,7 @@ from code_reviewer_runner.factory_runner.config import (
 )
 from code_reviewer_runner.factory_runner.job_api import RunnerJobApi
 from code_reviewer_runner.factory_runner.prepare import Prepared, prepare
-from code_reviewer_runner.factory_runner.selftest import SelfTestResult, summary
+from code_reviewer_runner.factory_runner.selftest import Check, SelfTestResult, summary
 from code_reviewer_runner.factory_runner.service import (
     DEFAULT_ONCE_WAIT_SECONDS,
     LOGGER_NAME,
@@ -109,6 +110,13 @@ class CliSeams:
         config, env
     )
     run_selftest: Callable[[RunnerConfig, Mapping[str, str]], SelfTestResult] | None = None
+    # What `selftest` adds about Claude Code after the base (#856): readiness, and with the flag
+    # one tiny turn on the device's login. `with_turn` is the user's explicit flag.
+    claude_code: Callable[
+        [RunnerConfig, Mapping[str, str], SelfTestResult, bool], tuple[Check, ...]
+    ] = lambda config, env, result, with_turn: device_checks(
+        config, env, result, with_turn=with_turn
+    )
     now: Callable[[], float] = time.time
     hostname: Callable[[], str] = socket.gethostname
     # The daemon the loop tidies (`housekeeping.py`).
@@ -170,6 +178,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     selftest = commands.add_parser("selftest", help="prove the base on this machine")
     selftest.add_argument("--json", action="store_true", help="print the result as JSON")
+    selftest.add_argument(
+        "--with-claude-code",
+        action="store_true",
+        help="also run one tiny turn of Claude Code with this device's login: a real call that "
+        "costs a few cents of your subscription (without it no model is called)",
+    )
 
     cli_manage.add_parsers(commands)
     return parser
@@ -350,6 +364,10 @@ def _selftest(
         result = seams.run_selftest(config, env)
     else:
         result = seams.check(config, env).selftest
+    asked = bool(arguments.with_claude_code)
+    extra = seams.claude_code(config, env, result, asked) if result.base_ok else ()
+    result = replace(result, checks=(*result.checks, *extra))
+    claude_ready = all(check.ok for check in extra)
     if arguments.json:
         json.dump(
             {
@@ -359,6 +377,7 @@ def _selftest(
                 "capabilities": list(result.capabilities),
                 "seconds": round(result.seconds, 1),
                 "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in result.checks],
+                "claudeCode": ({"ready": claude_ready, "turnAsked": asked} if extra else None),
             },
             out,
             indent=2,
@@ -367,11 +386,30 @@ def _selftest(
     else:
         for line in summary(result):
             out.write(line + "\n")
+        if extra:
+            out.write(_claude_code_line(claude_ready, asked) + "\n")
+        elif asked:
+            out.write("claude-code: not checked (the base is not ready)\n")
         out.write(
             f"base: {'ready' if result.base_ok else 'NOT ready'}; "
             f"capabilities: {', '.join(result.capabilities) or 'none'}\n"
         )
+    # Asked for by hand, a Claude Code check that fails is a failed self-test; by default it is
+    # only said (the base is what the exit code is about).
+    if asked and not claude_ready:
+        return EXIT_NOT_READY
     return EXIT_OK if result.base_ok else EXIT_NOT_READY
+
+
+def _claude_code_line(ready: bool, asked: bool) -> str:
+    if not ready:
+        return "claude-code: NOT ready (the lines above say why)"
+    if asked:
+        return "claude-code: ready; one real turn ran on your subscription"
+    return (
+        "claude-code: ready; no model was called "
+        "(--with-claude-code runs one tiny turn that costs a few cents of your subscription)"
+    )
 
 
 # -- run -----------------------------------------------------------------------------------

@@ -33,7 +33,7 @@ from code_reviewer_runner.dynamic_review.model_door_route import (
 from code_reviewer_runner.implementer.docker_api import DockerApi
 from code_reviewer_runner.implementer.door_launcher import PRIVATE_RANGES, network_document
 from code_reviewer_runner.implementer.netdoor.addresses import TEST_PUBLIC_VARIABLE
-from code_reviewer_runner.implementer.netdoor.service import run_netdoor
+from code_reviewer_runner.implementer.netdoor.service import StartRefused, parse_start, run_netdoor
 from code_reviewer_runner.implementer.netdoor_launcher import (
     NETDOOR_CONTAINER_NAME,
     NETDOOR_MEMORY_BYTES,
@@ -60,7 +60,7 @@ class Rig:
     """The fake daemon with the real network door behind it, and the seams that point Control at
     it. The door's lookup and connector are the test's (`netdoor_support`)."""
 
-    def __init__(self, directory: Path, origin: Origin) -> None:
+    def __init__(self, directory: Path, origin: Origin, *, model_network: bool = True) -> None:
         self.port = free_port()
         self.lookups = Lookups(
             table={"registry.npmjs.org": [PUBLIC], "example.com": [PUBLIC]},
@@ -68,7 +68,8 @@ class Rig:
         )
         self.engine = FakeDockerEngine(directory / "docker.sock", self.behave).start()
         self.api = DockerApi(str(directory / "docker.sock"), timeout=5.0)
-        self.api.create_network(network_document())
+        if model_network:
+            self.api.create_network(network_document())
         self.seams = NetDoorSeams(
             api=lambda: DockerApi(str(directory / "docker.sock"), timeout=5.0),
             hostname=lambda: HOSTNAME,
@@ -107,6 +108,15 @@ def origin() -> Iterator[Origin]:
 def rig(origin: Origin) -> Iterator[Rig]:
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="netdoor-") as directory:
         made = Rig(Path(directory), origin)
+        yield made
+        made.stop()
+
+
+@pytest.fixture
+def bare_rig(origin: Origin) -> Iterator[Rig]:
+    """A daemon on which no model door made the model network (a subscription turn has none)."""
+    with tempfile.TemporaryDirectory(dir="/tmp", prefix="netdoor-") as directory:
+        made = Rig(Path(directory), origin, model_network=False)
         yield made
         made.stop()
 
@@ -208,6 +218,18 @@ def test_nothing_of_the_rule_is_in_a_request_to_the_daemon_it_goes_to_the_door_o
         "deadlineSeconds": 600.0,
     }
     assert json.loads(start_document(RULE, 600.0)) == first
+
+
+# #856-P03
+def test_the_start_document_carries_the_ports_of_a_narrowed_rule_only() -> None:
+    narrow = NetworkRule(MODE_LIST, ("api.anthropic.com",), ports=(443,))
+
+    assert json.loads(start_document(narrow, 600.0))["rule"] == {
+        "mode": "list",
+        "hosts": ["api.anthropic.com"],
+        "ports": [443],
+    }
+    assert "ports" not in json.loads(start_document(RULE, 600.0))["rule"]
 
 
 # -- the door's own egress rules ---
@@ -369,3 +391,47 @@ def test_a_door_that_is_killed_is_seen_as_an_end_that_nobody_asked_for(rig: Rig)
         time.sleep(0.05)
     assert door.end is not None and door.end.unexpected
     door.stop()
+
+
+# #856-P03
+def test_the_door_starts_with_the_ports_of_the_rule_and_refuses_ports_it_does_not_serve() -> None:
+    narrow = NetworkRule(MODE_LIST, ("api.anthropic.com",), ports=(443,))
+
+    started = parse_start(start_document(narrow, 600.0).decode())
+    assert started.rule == narrow
+
+    document = json.loads(start_document(narrow, 600.0))
+    document["rule"]["ports"] = [22]
+    with pytest.raises(StartRefused) as refused:
+        parse_start(json.dumps(document))
+    assert refused.value.reason == "rule_invalid"
+
+
+# #856-P05
+def test_a_door_without_a_model_door_makes_the_model_network_it_sits_on_and_takes_it_away(
+    bare_rig: Rig,
+) -> None:
+    """A turn on a subscription has no model door, which is what makes the network otherwise: the
+    network door makes it (the same document, so the sweep of the runner's housekeeping finds
+    it), puts itself on it and removes it with itself."""
+    assert bare_rig.engine.networks == {}
+
+    door = bare_rig.start()
+    ((_, network),) = bare_rig.engine.networks.items()
+    door_id = bare_rig.engine.container(NETDOOR_CONTAINER_NAME).identifier
+
+    assert network["document"] == network_document()
+    assert door_id in network["members"]
+    door.stop()
+    assert bare_rig.engine.networks == {}
+
+
+# #856-P05
+def test_a_door_beside_a_model_door_uses_its_network_and_leaves_it_to_it(rig: Rig) -> None:
+    door = rig.start()
+    door.stop()
+
+    assert len(rig.engine.networks) == 1, "the model door's network stays for the model door"
+    assert not [call for call in rig.engine.calls if call[0] == "DELETE" and "/networks" in call[1]]
+    created = [call for call in rig.engine.calls if call[1].endswith("/networks/create")]
+    assert len(created) == 1, "only the one the test's model door made"

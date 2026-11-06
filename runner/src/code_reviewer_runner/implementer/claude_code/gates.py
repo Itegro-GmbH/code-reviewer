@@ -7,11 +7,13 @@ read it. The decision (the lead's, owner may revise) is to accept that and to gu
 
 * **The network.** Claude Code has to reach Anthropic; nothing else is needed for a turn. So a
   subscription turn is forced onto the network door with the rule `list` and exactly
-  `api.anthropic.com` (an exact name, no suffix; the door dials ports 80 and 443 only, and Claude
-  Code uses 443). The environment's own rule cannot widen that: an `open` environment, or one that
-  lists any other host (any other host could be a place to send the token to), refuses the turn,
-  free, with a reason word in the detail. An environment that is `off` or lists exactly that host is
-  fine: the turn gets the same rule either way.
+  `api.anthropic.com` (an exact name, no suffix) on **port 443 only**: Claude Code speaks TLS, so
+  the entry does not get the port 80 that a listed host has in every other rule (`ports` of the
+  rule; the door refuses 80 for it with `port_not_allowed`). The environment's own rule cannot
+  widen that: an `open` environment, or one that lists any other host (any other host could be a
+  place to send the token to), refuses the turn, free, with a reason word in the detail. An
+  environment that is `off` or lists exactly that host is fine: the turn gets the same rule either
+  way.
 * **The push** (`push_guard.py`) and **the redaction** (the agent's `Redactor` knows the login)
   keep the token out of the repository and out of every output.
 
@@ -26,6 +28,7 @@ from code_reviewer_runner.job import JobError
 from code_reviewer_runner.result import ErrorCode
 
 ANTHROPIC_HOST: Final = "api.anthropic.com"
+ANTHROPIC_PORTS: Final = (443,)
 NETWORK_OPEN_REASON: Final = "subscription_network_open"
 NETWORK_HOSTS_REASON: Final = "subscription_network_hosts"
 
@@ -45,4 +48,4 @@ def subscription_rule(environment: NetworkRule) -> NetworkRule:
             f"{NETWORK_HOSTS_REASON}: a turn on a subscription login reaches only "
             f"{ANTHROPIC_HOST}, so an environment that lists other hosts cannot run it",
         )
-    return NetworkRule(MODE_LIST, (ANTHROPIC_HOST,))
+    return NetworkRule(MODE_LIST, (ANTHROPIC_HOST,), ports=ANTHROPIC_PORTS)

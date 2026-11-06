@@ -21,7 +21,7 @@ from code_reviewer_runner.dynamic_review.model_door_route import (
 )
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 
-from ..network_rule import MODE_OFF, NetworkRule, RuleError, parse_rule
+from ..network_rule import MODE_OFF, NetworkRule, RuleError, parse_door_rule
 from .addresses import Resolver, ci_public_network, system_resolver
 from .connections import ConnectionLog
 from .protocol import (
@@ -91,7 +91,7 @@ def parse_start(text: str) -> NetStart:
     ):
         raise StartRefused(REFUSED_START_INVALID)
     try:
-        rule = parse_rule(given["rule"], "rule")
+        rule = parse_door_rule(given["rule"], "rule")
     except RuleError:
         raise StartRefused(REFUSED_RULE_INVALID) from None
     if rule.mode == MODE_OFF:

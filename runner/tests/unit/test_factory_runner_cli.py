@@ -393,3 +393,102 @@ def test_a_file_with_a_credential_and_no_runner_id_is_exit_six_that_names_the_wa
 
     assert code == EXIT_CONFIG
     assert "register --force" in err and "runnerId" in err
+
+
+# #856-S07
+def _selftest_with_claude(
+    tmp_path: Path, *argv: str, checks: tuple[Check, ...], base_ok: bool = True
+) -> tuple[int, str, list[bool]]:
+    asked: list[bool] = []
+
+    def claude(
+        _config: RunnerConfig, _env: Any, _result: SelfTestResult, with_turn: bool
+    ) -> tuple[Check, ...]:
+        asked.append(with_turn)
+        return checks
+
+    out = io.StringIO()
+    got = main(
+        ["selftest", *argv],
+        environment={"FACTORY_RUNNER_HOME": str(tmp_path / "home")},
+        seams=CliSeams(run_selftest=lambda _c, _e: _result(base_ok), claude_code=claude),
+        out=out,
+        err=io.StringIO(),
+    )
+    return got, out.getvalue(), asked
+
+
+READY_CLAUDE = (
+    Check("claude-code-login", True, "a usable login (not shown)"),
+    Check("claude-code-layer", True, "image"),
+    Check("claude-code-version", True, "2.1.311; no model was called"),
+)
+
+
+# #856-S07
+def test_selftest_by_default_looks_at_claude_code_without_a_model_call(tmp_path: Path) -> None:
+    got, out, asked = _selftest_with_claude(tmp_path, checks=READY_CLAUDE)
+
+    assert (got, asked) == (EXIT_OK, [False])
+    assert "ok   claude-code-version: 2.1.311; no model was called" in out
+    assert "--with-claude-code" in out and "subscription" in out
+
+
+# #856-S07
+def test_a_claude_code_check_that_fails_is_said_but_does_not_change_the_exit_code_by_default(
+    tmp_path: Path,
+) -> None:
+    failing = (*READY_CLAUDE[:1], Check("claude-code-layer", False, "not built"))
+
+    got, out, _ = _selftest_with_claude(tmp_path, checks=failing)
+
+    assert got == EXIT_OK
+    assert "FAIL claude-code-layer: not built" in out and "base: ready" in out
+
+
+# #856-S07
+def test_a_device_without_a_login_prints_no_claude_code_line_by_default(tmp_path: Path) -> None:
+    got, out, asked = _selftest_with_claude(tmp_path, checks=())
+
+    assert (got, asked) == (EXIT_OK, [False])
+    assert "claude-code" not in out and "--with-claude-code" not in out
+
+
+# #856-S07
+@pytest.mark.parametrize(("turn_ok", "code"), [(True, EXIT_OK), (False, EXIT_NOT_READY)])
+def test_with_claude_code_asks_for_the_tiny_turn_and_its_failure_is_the_exit_code(
+    tmp_path: Path, turn_ok: bool, code: int
+) -> None:
+    turn = Check("claude-code-turn", turn_ok, "answered; \u2248 $0.0150" if turn_ok else "llm_auth")
+
+    got, out, asked = _selftest_with_claude(
+        tmp_path, "--with-claude-code", checks=(*READY_CLAUDE, turn)
+    )
+
+    assert (got, asked) == (code, [True])
+    assert ("ok   claude-code-turn" if turn_ok else "FAIL claude-code-turn: llm_auth") in out
+
+
+# #856-S07
+def test_with_claude_code_on_a_machine_whose_base_fails_does_not_start_a_turn(
+    tmp_path: Path,
+) -> None:
+    got, _, asked = _selftest_with_claude(
+        tmp_path, "--with-claude-code", checks=READY_CLAUDE, base_ok=False
+    )
+
+    assert got == EXIT_NOT_READY and asked == []
+
+
+# #856-S07
+def test_selftest_as_json_carries_the_claude_code_checks_and_whether_the_turn_was_asked(
+    tmp_path: Path,
+) -> None:
+    got, out, _ = _selftest_with_claude(
+        tmp_path, "--json", "--with-claude-code", checks=READY_CLAUDE
+    )
+
+    report = json.loads(out)
+    assert got == EXIT_OK
+    assert report["claudeCode"] == {"ready": True, "turnAsked": True}
+    assert [c["name"] for c in report["checks"]][-3:] == [c.name for c in READY_CLAUDE]

@@ -78,6 +78,9 @@ CHECK_CONTAINER: Final = "agent-container"
 CHECK_OPENCODE: Final = "opencode"
 CHECK_TURN: Final = "canned-turn"
 CHECK_AGENT_DOCKER: Final = "agent-docker"
+# The checks of the Claude Code harness (`claude_code_selftest.py`) start with this word. Like
+# `agent-docker` they are a capability of the machine: one that fails never costs the base.
+CHECK_CLAUDE_CODE_PREFIX: Final = "claude-code"
 # The capability the manifest names when `agent-docker` passed.
 CAPABILITY_AGENT_DOCKER: Final = "agent-docker"
 
@@ -153,6 +156,10 @@ class Check:
     detail: str = ""
 
 
+def _is_base(check: Check) -> bool:
+    return check.name != CHECK_AGENT_DOCKER and not check.name.startswith(CHECK_CLAUDE_CODE_PREFIX)
+
+
 @dataclass(frozen=True)
 class SelfTestResult:
     checks: tuple[Check, ...]
@@ -163,8 +170,12 @@ class SelfTestResult:
 
     @property
     def base_ok(self) -> bool:
-        """The base holds: every check but the capability passed."""
-        return all(check.ok for check in self.checks if check.name != CHECK_AGENT_DOCKER)
+        """The base holds: every check but the capabilities passed."""
+        return all(check.ok for check in self.checks if _is_base(check))
+
+    @property
+    def claude_code_checks(self) -> tuple[Check, ...]:
+        return tuple(c for c in self.checks if c.name.startswith(CHECK_CLAUDE_CODE_PREFIX))
 
     @property
     def agent_docker(self) -> bool:
@@ -176,7 +187,7 @@ class SelfTestResult:
 
     def failed(self) -> Check | None:
         """The first check of the base that failed."""
-        return next((c for c in self.checks if not c.ok and c.name != CHECK_AGENT_DOCKER), None)
+        return next((c for c in self.checks if not c.ok and _is_base(c)), None)
 
 
 @dataclass(frozen=True)
@@ -265,7 +276,7 @@ def _agent(run: _Run, runtime: str, memory: int, cpus: int | None) -> str | None
         if version is not None and _turn(run, container) and runtime == AGENT_RUNTIME:
             _nested(run, container)
     finally:
-        _remove(run.api, container)
+        remove_container(run.api, container)
     return version
 
 
@@ -384,7 +395,7 @@ def _digest_warning(reference: str | None) -> str:
     )
 
 
-def _throwaway(
+def throwaway_document(
     image: str, runtime: str, memory_mb: int, cpus: int | None, runner_id: str
 ) -> dict[str, object]:
     """The agent's container as a real turn makes it, without the network and the volumes."""
@@ -407,11 +418,12 @@ def _throwaway(
 
 def _start(run: _Run, runtime: str, memory_mb: int, cpus: int | None) -> str | None:
     api = run.api
-    _clear_own(api, SELFTEST_CONTAINER, run.runner_id)
+    clear_own_container(api, SELFTEST_CONTAINER, run.runner_id)
     container: str | None = None
     try:
         container = api.create_container(
-            _throwaway(run.seams.image, runtime, memory_mb, cpus, run.runner_id), SELFTEST_CONTAINER
+            throwaway_document(run.seams.image, runtime, memory_mb, cpus, run.runner_id),
+            SELFTEST_CONTAINER,
         )
         api.start_container(container)
         end = run.seams.clock() + READY_SECONDS
@@ -430,7 +442,7 @@ def _start(run: _Run, runtime: str, memory_mb: int, cpus: int | None) -> str | N
             detail += f": a container named {SELFTEST_CONTAINER} of another runner is in the way"
         run.record(CHECK_CONTAINER, False, detail)
     if container is not None:
-        _remove(api, container)
+        remove_container(api, container)
     return None
 
 
@@ -537,7 +549,7 @@ def _nested(run: _Run, container: str) -> None:
     )
 
 
-def _clear_own(api: DockerApi, container: str, runner_id: str) -> None:
+def clear_own_container(api: DockerApi, container: str, runner_id: str) -> None:
     """Remove `container` if it is this runner's (a self-test that was killed leaves one): the name
     is fixed, so another runner's must not be removed by it."""
     try:
@@ -548,10 +560,10 @@ def _clear_own(api: DockerApi, container: str, runner_id: str) -> None:
     labels = config.get("Labels") if isinstance(config, dict) else None  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
     owner = labels.get(RUNNER_LABEL) if isinstance(labels, dict) else None  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
     if (owner if isinstance(owner, str) else "") == runner_id:
-        _remove(api, container)
+        remove_container(api, container)
 
 
-def _remove(api: DockerApi, container: str) -> None:
+def remove_container(api: DockerApi, container: str) -> None:
     with contextlib.suppress(DockerError):
         api.stop_container(container, grace=1, timeout=30.0)
     with contextlib.suppress(DockerError):

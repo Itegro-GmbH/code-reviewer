@@ -487,3 +487,37 @@ def test_a_tunnel_in_use_ends_when_the_proxy_stops(origin: Origin) -> None:
     finally:
         client.close()
         running.stop()
+
+
+# #856-P02
+def test_a_rule_that_allows_443_only_tunnels_to_443_and_refuses_80_in_both_forms(
+    origin: Origin,
+) -> None:
+    rule = NetworkRule(MODE_LIST, ("registry.npmjs.org",), ports=(443,))
+    lookups = lookups_for(origin, "registry.npmjs.org")
+    running = start_proxy(rule, lookups)
+    try:
+        allowed = talk(running.port, connect_request("registry.npmjs.org:443"))
+        tunnel = talk(running.port, connect_request("registry.npmjs.org:80"))
+        plain = talk(running.port, get("http://registry.npmjs.org/x"))
+    finally:
+        running.stop()
+
+    assert status_of(allowed) == 200
+    assert status_of(tunnel) == 403 and refusal_reason(tunnel) == "port_not_allowed"
+    assert status_of(plain) == 403 and refusal_reason(plain) == "port_not_allowed"
+    assert lookups.connected == [(PUBLIC, 443)], "port 80 was never dialled"
+
+
+# #856-P02
+def test_a_rule_without_ports_still_allows_80_and_443(origin: Origin) -> None:
+    lookups = lookups_for(origin, "registry.npmjs.org")
+    running = start_proxy(LIST, lookups)
+    try:
+        answers = [
+            talk(running.port, connect_request(f"registry.npmjs.org:{port}")) for port in (80, 443)
+        ]
+    finally:
+        running.stop()
+
+    assert [status_of(answer) for answer in answers] == [200, 200]
