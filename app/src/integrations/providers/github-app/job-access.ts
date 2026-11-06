@@ -236,7 +236,9 @@ export function toWriteError(error: unknown): IntegrationError {
   if (error.code === "GITHUB_APP_REQUEST_FAILED" && error.status === 422)
     return new IntegrationError("INTEGRATION_REQUEST_REFUSED", error.message, {
       cause: error,
-      ...(error.reason === undefined ? {} : { detail: error.reason }),
+      ...(error.reason === undefined || error.duringTokenRequest
+        ? {}
+        : { detail: error.reason }),
     });
   return toReadError(error);
 }

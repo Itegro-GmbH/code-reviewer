@@ -102,7 +102,7 @@ describe("what the workflow pages take from a run", () => {
     // Names a person can read stay.
     expect(
       readableMessageOf(
-        'Needs the permission "Pull requests: Read and write".',
+        'Needs the permission "Pull requests: Read and write and Contents: Read-only".',
       ),
     ).not.toBeNull();
     expect(

@@ -563,14 +563,17 @@ function repoPath(repoFullName: string): string {
 }
 
 /**
- * GitHub's words for a refusal as one short line: control characters become spaces, a link and a token-looking word are replaced
- * (the text is GitHub's, but it can quote what was sent), and the rest is cut at `REASON_MAX_CHARS`. Undefined for nothing.
+ * GitHub's words for a refusal as one short line: control characters become spaces, the marks that make a link or an image in
+ * Markdown and HTML are dropped, a link (`scheme:…`, `//…`, `www.…`) and a token-looking word are replaced (the text is GitHub's,
+ * but it can quote what was sent), and only then is the rest cut at `REASON_MAX_CHARS`, so that the bound holds for the text as it is
+ * kept. Undefined for nothing.
  */
 function cleanReason(text: string): string | undefined {
   const line = text
     .replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ")
-    .replace(/https?:\/\/\S*/gi, "[link]")
+    .replace(/[[\]()<>`]/g, "")
     .replace(/\b(?:gh[pousr]_|github_pat_)\w+/g, "[token]")
+    .replace(/\b[a-z][a-z0-9+.-]*:\S+|\/\/\S+|\bwww\.\S*/gi, "[link]")
     .replace(/ {2,}/g, " ")
     .trim();
   if (line === "") return undefined;
@@ -726,31 +729,42 @@ export function createGithubAppClient(
   async function refusalOf(
     response: Response,
   ): Promise<{ refusal: GithubRefusalReason; reason?: string }> {
-    let message = "";
+    // `messages` is what GitHub wrote as text and the only thing that is classified; `entries` adds the names of an entry that has
+    // no text (`Repository archived invalid` must not read as GitHub saying the repository is archived) and is for the reason only.
+    let messages = "";
     let entries = "";
     try {
       const json: unknown = JSON.parse((await response.text()).slice(0, 4000));
       if (isRecord(json) && typeof json.message === "string")
-        message = json.message;
+        messages = json.message;
       // A 422 says what is wrong in `errors` (opening a pull request: the pull request exists, there is nothing to compare).
-      if (isRecord(json) && Array.isArray(json.errors))
-        entries = json.errors
-          .map((entry: unknown) => {
-            if (!isRecord(entry)) return "";
-            if (typeof entry.message === "string" && entry.message !== "")
-              return entry.message;
-            return [entry.resource, entry.field, entry.code]
-              .filter((part): part is string => typeof part === "string")
-              .join(" ");
-          })
-          .filter((text) => text !== "")
-          .join("; ");
+      if (isRecord(json) && Array.isArray(json.errors)) {
+        const texts: string[] = [];
+        const described: string[] = [];
+        for (const entry of json.errors as unknown[]) {
+          if (!isRecord(entry)) continue;
+          if (
+            typeof entry.message === "string" &&
+            entry.message.trim() !== ""
+          ) {
+            texts.push(entry.message);
+            described.push(entry.message);
+            continue;
+          }
+          const names = [entry.resource, entry.field, entry.code]
+            .filter((part): part is string => typeof part === "string")
+            .join(" ");
+          if (names !== "") described.push(names);
+        }
+        messages = `${messages} ${texts.join(" ")}`;
+        entries = described.join("; ");
+      }
     } catch {
       // An answer that is not JSON says nothing.
     }
-    const reason = cleanReason(entries === "" ? message : entries);
+    const reason = cleanReason(entries.trim() === "" ? messages : entries);
     return {
-      refusal: classify(response.status, `${message} ${entries}`),
+      refusal: classify(response.status, messages),
       ...(reason === undefined ? {} : { reason }),
     };
   }

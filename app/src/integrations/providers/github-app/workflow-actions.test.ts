@@ -222,7 +222,9 @@ describe("github.pullRequest.open", () => {
       );
       expect(error).toBeInstanceOf(ConnectorError);
       expect((error as ConnectorError).code).toBe("github_permission_missing");
-      expect(error.message).toContain("Pull requests: Read and write");
+      expect(error.message).toContain(
+        '"Pull requests: Read and write and Contents: Read-only"',
+      );
       expect(error.message).toContain("open pull requests");
     }
   });
@@ -326,7 +328,7 @@ describe("github.pullRequest.open", () => {
       "11ABCDEFG0abcdefghijklmnop",
     ].join("_");
     const hostile = [
-      "Ask @org/team to close #12.\n<!-- marker -->",
+      "Ask @org/team to close #12.\n<!-- marker -->\u202e",
       `see https://evil.example/x?t=${installationToken}`,
       `token ${installationToken} and ${fineGrainedToken}`,
       "x".repeat(2_000),
@@ -347,8 +349,82 @@ describe("github.pullRequest.open", () => {
     expect(error.message).not.toMatch(/ghs_|github_pat_/);
     expect(error.message).not.toContain("@org");
     expect(error.message).not.toContain("<!--");
-    expect(error.message).not.toMatch(/[\u0000-\u001f]/);
+    expect(error.message).not.toMatch(/[\u0000-\u001f\u202e]/);
     expect(error.message).toContain("GitHub said: ");
+    // Defused, not removed: the number is still there with a space of no width in it.
+    expect(error.message).toContain("#\u200b12");
+    // Cut at the bound and the cut shows.
+    expect(error.message).toMatch(/…\.?$/);
+  });
+
+  // #913-T03
+  it("defuses every kind of link and bounds the reason after defusing, which makes the text longer", async () => {
+    const messageFor = async (reason: string) => {
+      const { connector } = setup({
+        openPullRequestFailure: refusedFor(reason),
+      });
+      const error = await failure(
+        connector("github.pullRequest.open").run(
+          call({ head: "workflow/r1/work", title: "T" }),
+        ),
+      );
+      return error.message;
+    };
+    const sayingOf = (message: string) =>
+      message.slice(message.indexOf("GitHub said: ") + "GitHub said: ".length);
+
+    for (const hostile of [
+      "see www.evil.example/x now",
+      "see //evil.example/x now",
+      "see ftp://evil.example/x now",
+      "see javascript:alert(1) now",
+      "see mailto:a@evil.example now",
+      "see HTTPS://EVIL.EXAMPLE/x now",
+    ])
+      expect(sayingOf(await messageFor(hostile)), hostile).toBe(
+        "see [link] now.",
+      );
+    expect(sayingOf(await messageFor("a [click](x) <b>b</b> `c` d"))).toBe(
+      "a clickx bb/b c d.",
+    );
+    expect(sayingOf(await messageFor("title: is missing"))).toBe(
+      "title: is missing.",
+    );
+
+    // Every "@a" grows by a character of no width when it is defused; the cut comes after.
+    const grown = await messageFor("@a ".repeat(400));
+    expect(grown.length).toBeLessThanOrEqual(300);
+    expect(sayingOf(grown).length).toBeLessThanOrEqual(151);
+    expect(grown).toMatch(/…\.?$/);
+    expect(grown).not.toContain("@a");
+  });
+
+  // #913-T03
+  it("strips the invisible characters, takes a whole stop for the end, and treats white space as no reason", async () => {
+    const messageFor = async (reason: string) => {
+      const { connector } = setup({
+        openPullRequestFailure: refusedFor(reason),
+      });
+      const error = await failure(
+        connector("github.pullRequest.open").run(
+          call({ head: "workflow/r1/work", title: "T" }),
+        ),
+      );
+      return error.message;
+    };
+    const generic =
+      "GitHub refused the request: one of the values is not accepted (for example a branch that does not exist).";
+
+    expect(
+      await messageFor("a\u0085b\u009fc\u2060d\ufeffe\u00adf\u0080g"),
+    ).toBe(`${generic} GitHub said: abcdefg.`);
+    expect(await messageFor("Head is invalid.")).toBe(
+      `${generic} GitHub said: Head is invalid.`,
+    );
+    expect(await messageFor("Is it valid?")).toBe(
+      `${generic} GitHub said: Is it valid?`,
+    );
+    expect(await messageFor("  \n\u0085 ")).toBe(generic);
   });
 
   // #913-T03

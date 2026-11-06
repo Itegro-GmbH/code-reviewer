@@ -8,6 +8,7 @@ import {
   JOB_TOKEN_PERMISSIONS,
   PULL_REQUEST_ACTION_TOKEN_PERMISSIONS,
   toImplementerAccessError,
+  toWriteError,
 } from "./job-access.ts";
 import { GithubAppError } from "./errors.ts";
 
@@ -19,6 +20,24 @@ describe("the token permissions of the action that opens a pull request", () => 
       contents: "read",
       metadata: "read",
     });
+  });
+});
+
+describe("the reason GitHub gave for a refusal", () => {
+  const refused = (duringTokenRequest: boolean) =>
+    new GithubAppError("GITHUB_APP_REQUEST_FAILED", "GitHub answered 422.", {
+      status: 422,
+      reason: "PullRequest head invalid",
+      duringTokenRequest,
+    });
+
+  // #913-T02
+  it("is the detail of a refused call, and of no refused token request", () => {
+    expect(toWriteError(refused(false))).toMatchObject({
+      code: "INTEGRATION_REQUEST_REFUSED",
+      detail: "PullRequest head invalid",
+    });
+    expect(toWriteError(refused(true)).detail).toBeNull();
   });
 });
 

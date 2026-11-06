@@ -743,13 +743,13 @@ references are resolved.
 
 | Connector | App permission it needs (as the App's settings page words it) | Idempotent? |
 | --- | --- | --- |
-| `github.pullRequest.open` | Pull requests: Read and write | Yes: an open pull request for the same head and base is the result (`number` and `url` of it, `existing: true`), not an error. It is looked for first, and again when GitHub answers that one exists. Only a pull request whose head is a branch of this repository (not of a fork of the same owner) and whose head and base are the ones asked for counts. |
+| `github.pullRequest.open` | Pull requests: Read and write and Contents: Read-only | Yes: an open pull request for the same head and base is the result (`number` and `url` of it, `existing: true`), not an error. It is looked for first, and again when GitHub answers that one exists. Only a pull request whose head is a branch of this repository (not of a fork of the same owner) and whose head and base are the ones asked for counts. |
 | `github.issue.comment` | Issues: Read and write | Not by GitHub (it has no way to say "this comment once"). The engine never repeats an action (`action_timeout`, `action_interrupted`), which keeps a comment from being written twice. As a second guard the comment ends with an invisible marker `<!-- wf-<runId>-<position> -->`, and the comments of the issue that changed since the step began (five minutes earlier, for the clocks) are looked at for the App's own comment with it before one is written (`existing: true`, the url of that comment). That holds **within one run** only; see "After a timeout or an error of GitHub's own". |
 | `github.issue.labels` | Issues: Read and write | Yes: an added label that is on the issue stays, a removed one that is not on it is skipped. A label the repository lacks is created by the add. `labels` is what the issue has afterwards. |
 
 GitHub files the comments and labels of a pull request under issues, so `Issues` covers a pull request too.
 
-`github.pullRequest.open` needs **Pull requests: Read and write** and, besides, **Contents: Read** (the App's installation holds it for the agent's branch already): its token asks for
+`github.pullRequest.open` needs **Pull requests: Read and write** and, besides, **Contents: Read-only** (the App's installation holds it for the agent's branch already): its token asks for
 `pull_requests: write`, `contents: read` and `metadata: read`. Without the contents GitHub cannot resolve the head and base refs and answers 422 "head invalid" for a branch that exists (#913).
 
 | Input | Bound |
@@ -761,7 +761,7 @@ GitHub files the comments and labels of a pull request under issues, so `Issues`
 | `add`, `remove` | At most 20 names each, 50 characters at most, no control characters, no empty name, **no name of dots only** (`.`, `..`): the address that removes a label ends with its name, `DELETE …/labels/.` is read as `…/labels/` and would remove every label of the issue. The connector and the client both refuse such a name before any request. Duplicates are dropped. |
 
 **Failures.** What GitHub refuses ends the step with a code of its own and a message for the run page that names no token and no text of the action. The one text of GitHub's that it carries is the short reason of a refused value (`github_validation`,
-for example "GitHub said: PullRequest head invalid."): it is GitHub's own, so it is cleaned (one line, no links or token-looking words), cut at 150 characters and defused like an agent's text, and the message as a whole stays within the 300 characters that `{{failure.message}}` keeps:
+for example "GitHub said: PullRequest head invalid."): it is GitHub's own, so it is cleaned (one line, no invisible characters, no links in any form (`https://…`, `www.…`, `//…`, `javascript:…`, `mailto:…`) or token-looking words, no `[ ] ( ) < >` or backticks), defused like an agent's text and only then cut at 150 characters (so the bound holds for the text as it is kept), and the message as a whole is at most 300 characters in `{{failure.message}}` (the engine clips it there):
 
 | What GitHub answered | Code |
 | --- | --- |
@@ -825,9 +825,9 @@ number or a list that is a whole reference (an issue number, labels). What a ste
 - **A `#000`-like number is left alone** (a CSS colour, a "number" that starts with zeros only). `#123456` is defused: it cannot be told from an issue.
 
 **Permissions the owner grants.** The App of a deployment has no Issues and Pull requests write at first. Until the owner of the App adds **Issues: Read and write**
-and **Pull requests: Read and write** to it and the owner of each installation accepts the change, every one of these steps ends with
+and **Pull requests: Read and write** to it (the pull request action needs **Contents: Read-only** besides) and the owner of each installation accepts the change, every one of these steps ends with
 `github_permission_missing` and a sentence that names the permission ("The GitHub App of this workspace may not open pull requests: it needs the permission
-"Pull requests: Read and write". …"). Nothing in the app changes the App's configuration at GitHub.
+"Pull requests: Read and write and Contents: Read-only". …"). Nothing in the app changes the App's configuration at GitHub.
 
 ### The label trigger
 
@@ -1011,7 +1011,7 @@ not exist.
     `url` (a link only if it passes the check below, else the text), `number` and `existing` (whether the action found what it would have made, so nothing new was created).
     Everything in them is text from outside, rendered as text and never as markup.
   - **Failed actions.** The codes of the GitHub connectors are told in a sentence, not as the code: `github_permission_missing` names the permission the App lacks
-    ("Pull requests: Read and write" or "Issues: Read and write", taken from the step's message only if it is one of these two) and says that the owner of the installation has
+    ("Pull requests: Read and write and Contents: Read-only" or "Issues: Read and write", taken from the step's message only if it is one of the known ones, an earlier "Pull requests: Read and write" included) and says that the owner of the installation has
     to grant it; `github_rate_limited` says the limit was reached and the action was not repeated; `github_not_found`, `github_validation` and `github_unavailable` have a
     sentence of their own; an action that creates something and ended without an answer (`github_unavailable` with that note, `action_timeout`, `action_interrupted`) says
     **"The action may have happened: check GitHub before starting again."** The message the step stored is shown under the sentence as text.

@@ -45,8 +45,9 @@ export const ACTION_LABELS_MAX = 20;
 /** A branch name an action is given (a Git ref component is at most 255 bytes). */
 export const ACTION_BRANCH_MAX_CHARS = 255;
 /**
- * GitHub's reason for a refused action as the step reports it (#913). The generic sentence in front of it and this bound keep the whole
- * message under `FAILURE_MESSAGE_MAX_CHARS`, which the steps of `onFailure` read.
+ * GitHub's reason for a refused action as the step reports it (#913), counted after the text is defused (defusing makes it longer, so
+ * the cut comes last). The generic sentence in front of it and this bound keep the whole message under `FAILURE_MESSAGE_MAX_CHARS`,
+ * which the steps of `onFailure` read.
  */
 export const GITHUB_REASON_MAX_CHARS = 150;
 

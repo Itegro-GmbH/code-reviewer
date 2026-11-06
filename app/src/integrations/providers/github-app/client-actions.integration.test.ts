@@ -221,6 +221,152 @@ describe("opening a pull request", () => {
     expect(error.reason).toBeDefined();
     expect(error.reason).not.toMatch(/https?:|ghs_|[\u0000-\u001f]/);
     expect(error.reason?.length).toBeLessThanOrEqual(300);
+    // Cut at the bound, and the cut shows.
+    expect(error.reason).toHaveLength(300);
+    expect(error.reason?.endsWith("…")).toBe(true);
+  });
+
+  // #913-T02
+  it("classifies only what GitHub wrote as a message, never the resource, field and code it names", async () => {
+    const open = async (body: unknown) => {
+      const { client } = await setup({
+        fetch: (async (input, init) => {
+          if (init?.method === "POST" && String(input).endsWith("/pulls"))
+            return new Response(JSON.stringify(body), { status: 422 });
+          return fetch(input, init);
+        }) satisfies typeof fetch,
+      });
+      return failureOf(
+        client.openPullRequest("4242", PULLS, "acme/widgets", {
+          head: "workflow/r1/work",
+          base: "main",
+          title: "T",
+        }),
+      );
+    };
+
+    // The names of an entry are for the reason only: `archived` here is a field, not GitHub saying the repository is archived.
+    expect(
+      await open({
+        message: "Validation Failed",
+        errors: [
+          { resource: "Repository", field: "archived", code: "invalid" },
+        ],
+      }),
+    ).toMatchObject({
+      refusal: "other",
+      reason: "Repository archived invalid",
+    });
+    // A real message still classifies.
+    expect(
+      await open({
+        message: "Validation Failed",
+        errors: [
+          { resource: "Repository", message: "Repository was archived" },
+        ],
+      }),
+    ).toMatchObject({ refusal: "repository_archived" });
+    // A message of white space says nothing: the names stand in for it.
+    expect(
+      await open({
+        message: "Validation Failed",
+        errors: [
+          {
+            message: "   ",
+            resource: "PullRequest",
+            field: "head",
+            code: "invalid",
+          },
+        ],
+      }),
+    ).toMatchObject({ reason: "PullRequest head invalid" });
+    // Without errors the top-level message is the reason.
+    expect(await open({ message: "Validation Failed" })).toMatchObject({
+      refusal: "other",
+      reason: "Validation Failed",
+    });
+  });
+
+  // #913-T02
+  it("defuses every kind of link and the marks that make one in a reason, and cuts after that so that the bound holds", async () => {
+    const reasonFor = async (text: string) => {
+      const { client } = await setup({
+        fetch: (async (input, init) => {
+          if (init?.method === "POST" && String(input).endsWith("/pulls"))
+            return new Response(
+              JSON.stringify({
+                message: "Validation Failed",
+                errors: [{ resource: "PullRequest", message: text }],
+              }),
+              { status: 422 },
+            );
+          return fetch(input, init);
+        }) satisfies typeof fetch,
+      });
+      const error = await failureOf(
+        client.openPullRequest("4242", PULLS, "acme/widgets", {
+          head: "workflow/r1/work",
+          base: "main",
+          title: "T",
+        }),
+      );
+      return error.reason ?? "";
+    };
+
+    for (const hostile of [
+      "see www.evil.example/x now",
+      "see //evil.example/x now",
+      "see ftp://evil.example/x now",
+      "see javascript:alert(1) now",
+      "see mailto:a@evil.example now",
+      "see HTTPS://EVIL.EXAMPLE/x now",
+    ]) {
+      const reason = await reasonFor(hostile);
+      expect(reason, hostile).toBe("see [link] now");
+    }
+    const marked = await reasonFor("a [click](x) <b>b</b> `c` d");
+    expect(marked).not.toMatch(/[\[\]()<>`]/);
+    // A colon that starts nothing stays.
+    expect(await reasonFor("title: is missing")).toBe("title: is missing");
+
+    // A short word that becomes "[link]" grows: the cut comes after, so the bound still holds.
+    const grown = await reasonFor("a:b ".repeat(400));
+    expect(grown.length).toBeLessThanOrEqual(300);
+    expect(grown.endsWith("…")).toBe(true);
+  });
+
+  // #913-T02
+  it("keeps GitHub's reason out of a refused token request", async () => {
+    const { client } = await setup({
+      fetch: (async (input, init) => {
+        if (String(input).endsWith("/access_tokens"))
+          return new Response(
+            JSON.stringify({
+              message: "Validation Failed",
+              errors: [
+                { message: "The permissions requested are not granted" },
+              ],
+            }),
+            { status: 422 },
+          );
+        return fetch(input, init);
+      }) satisfies typeof fetch,
+    });
+
+    const error = await failureOf(
+      client.openPullRequest("4242", PULLS, "acme/widgets", {
+        head: "workflow/r1/work",
+        base: "main",
+        title: "T",
+      }),
+    );
+
+    expect(error).toMatchObject({
+      status: 422,
+      duringTokenRequest: true,
+      refusal: "permission_missing",
+    });
+    expect(error.reason).toBeUndefined();
   });
 
   // #844-T345

@@ -40,7 +40,8 @@ export type GithubConnectorDeps = {
 
 /** What each action needs of the App, as the settings page of the GitHub App words it. */
 export const GITHUB_PERMISSION_NEEDED = {
-  "github.pullRequest.open": "Pull requests: Read and write",
+  "github.pullRequest.open":
+    "Pull requests: Read and write and Contents: Read-only",
   "github.issue.comment": "Issues: Read and write",
   "github.issue.labels": "Issues: Read and write",
 } as const;
@@ -168,32 +169,37 @@ function permissionText(name: GithubConnectorName): string {
   return `The GitHub App of this workspace may not ${ACTION_VERB[name]}: it needs the permission "${GITHUB_PERMISSION_NEEDED[name]}". The owner of the GitHub installation has to grant it in the App's settings and accept the change on the installation; then run the workflow again.`;
 }
 
-/** A link, or a word that looks like a GitHub token. GitHub's reason may quote what was sent; neither goes into a step. */
-const LINK = /https?:\/\/\S*/gi;
+/** The marks that make a link, an image or markup in Markdown and HTML. */
+const MARKUP_MARKS = /[[\]()<>`]/g;
+/** A link in any form (`scheme:…`, `//…`, `www.…`), or a word that looks like a GitHub token. GitHub's reason may quote what was sent; neither goes into a step. */
+const LINK = /\b[a-z][a-z0-9+.-]*:\S+|\/\/\S+|\bwww\.\S*/gi;
 const TOKEN = /\b(?:gh[pousr]_|github_pat_)\w+/g;
+/** Characters of no width or no meaning a reader cannot see: the C1 controls, the word joiner, the byte order mark, the soft hyphen. */
+const INVISIBLE = /[\u0080-\u009f\u2060\ufeff\u00ad]/g;
 
 /**
  * GitHub's reason for a refusal, as a short line the step may carry, or undefined for none. It is GitHub's text and quotes what
- * the action sent, so it is untrusted data like an agent's: one line without control characters, links or token-looking words, cut at
- * `GITHUB_REASON_MAX_CHARS` (never inside a surrogate pair) and defused so that it cannot mention, close or mark anything where a
- * comment repeats it.
+ * the action sent, so it is untrusted data like an agent's: one line without control or invisible characters, the marks of a link or
+ * of markup, links or token-looking words, defused so that it cannot mention, close or mark anything where a comment repeats it, and
+ * only then cut at `GITHUB_REASON_MAX_CHARS` (never inside a surrogate pair), so that the bound holds for the text as it is kept.
  */
 export function cleanReason(value: string | null): string | undefined {
   if (value === null) return undefined;
   const line = value
     .replace(BIDI_CONTROLS, "")
+    .replace(INVISIBLE, "")
     .replace(LONE_SURROGATE, "")
     .replace(LINE_BREAKS, " ")
-    .replace(LINK, "[link]")
+    .replace(MARKUP_MARKS, "")
     .replace(TOKEN, "[token]")
+    .replace(LINK, "[link]")
     .replace(/ {2,}/g, " ")
     .trim();
   if (line === "") return undefined;
-  const cut =
-    line.length <= GITHUB_REASON_MAX_CHARS
-      ? line
-      : `${leading(line, GITHUB_REASON_MAX_CHARS - 1).trimEnd()}…`;
-  return defuseMentions(cut);
+  const defused = defuseMentions(line);
+  return defused.length <= GITHUB_REASON_MAX_CHARS
+    ? defused
+    : `${leading(defused, GITHUB_REASON_MAX_CHARS - 1).trimEnd()}…`;
 }
 
 /**
@@ -243,7 +249,7 @@ export function toConnectorError(
       const reason = cleanReason(error.detail);
       return new ConnectorError(
         "github_validation",
-        `GitHub refused the request: one of the values is not accepted (for example a branch that does not exist).${reason === undefined ? "" : ` GitHub said: ${reason}.`}`,
+        `GitHub refused the request: one of the values is not accepted (for example a branch that does not exist).${reason === undefined ? "" : ` GitHub said: ${reason}${/[.!?…]$/.test(reason) ? "" : "."}`}`,
       );
     }
     case "INTEGRATION_ACCESS_RATE_LIMITED":
