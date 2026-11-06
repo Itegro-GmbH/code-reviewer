@@ -205,6 +205,43 @@ describe("the submit when the turn ends between the two writes", () => {
   });
 });
 
+describe("the tip a follow-up is accepted at", () => {
+  const branchesRead = (f: Fakes) =>
+    f.provider.getBranch.mock.calls.map((call) => call[2] as string);
+
+  // #909-T11
+  it("reads the start branch, not the base branch, for a session that never pushed", async () => {
+    const f = fakes(
+      session({ headCommit: null, startBranch: "feature/start" }),
+    );
+    f.queue.enqueueFollowUpTurn.mockResolvedValue({
+      status: "created",
+      job: { id: "job-2" },
+      session: session({ status: "running" }),
+      turn: { ...lastTurn(), number: 2 },
+    });
+
+    await createFollowUps(f.deps).continueSession(USER, "session-1", body());
+
+    expect(branchesRead(f)).toEqual(["feature/start"]);
+  });
+
+  // #909-T11
+  it("reads the base branch for a session that never pushed and has no start branch", async () => {
+    const f = fakes(session({ headCommit: null, startBranch: null }));
+    f.queue.enqueueFollowUpTurn.mockResolvedValue({
+      status: "created",
+      job: { id: "job-2" },
+      session: session({ status: "running" }),
+      turn: { ...lastTurn(), number: 2 },
+    });
+
+    await createFollowUps(f.deps).continueSession(USER, "session-1", body());
+
+    expect(branchesRead(f)).toEqual(["main"]);
+  });
+});
+
 describe("a repeat of a request id that is queued", () => {
   const held = (extra: Partial<QueuedInstruction> = {}) =>
     session({ status: "running", queued: queued(extra) });

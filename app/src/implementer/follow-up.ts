@@ -192,7 +192,8 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
   const now = deps.now ?? (() => new Date());
 
   /**
-   * The tip a turn is accepted at: the session's branch when it has pushed one (it must still be there), else the base branch. A
+   * The tip a turn is accepted at: the session's branch when it has pushed one (it must still be there), else the branch the session started from (#909: the start
+   * branch, or the base branch when it has none). A
    * platform failure other than "not there" is the platform's, as for the first turn.
    */
   async function tipOf(
@@ -221,7 +222,7 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
       const base = await provider.getBranch(
         integration,
         repo,
-        session.baseBranch,
+        session.startBranch ?? session.baseBranch,
       );
       if (base === null)
         throw new ImplementerError(
