@@ -12,6 +12,11 @@
 // result schema is kept as the JSON text that was validated, so this layer imports nothing from the workflow format.
 import "server-only";
 import { type Kysely, type Selectable } from "kysely";
+import {
+  OPENCODE_HARNESS,
+  isProfileHarness,
+  type ProfileHarness,
+} from "../../runner-identity/harness.ts";
 import { formatTimestamp } from "../codecs.ts";
 import {
   decodeModelChoice,
@@ -49,6 +54,8 @@ export type ProfileContent = {
   canPush: boolean;
   /** The JSON text of the default result schema, or null for none. */
   defaultResult: string | null;
+  /** #856: the harness the version runs with; left out when it is written, OpenCode is meant. Always set when it is read. */
+  harness?: ProfileHarness;
 };
 
 export type StoredProfileVersion = {
@@ -102,6 +109,8 @@ export type ProfileVersionFactsRow = {
   defaultResult: string | null;
   /** Whether the version's model is a managed one: a catalog entry on the platform's key (#854). */
   managedModel: boolean;
+  /** #856: the harness the version runs with. */
+  harness: ProfileHarness;
 };
 
 export type ProfilesRepository = {
@@ -172,7 +181,15 @@ function contentFrom(row: Selectable<ProfileVersionsTable>): ProfileContent {
     costLimitCents: row.cost_limit_cents,
     canPush: row.can_push === 1,
     defaultResult: row.default_result,
+    harness: harnessOf(row.harness),
   };
+}
+
+/** The harness a stored version names; a version saved before harnesses were stored (null) is OpenCode. */
+function harnessOf(stored: string | null): ProfileHarness {
+  return stored !== null && isProfileHarness(stored)
+    ? stored
+    : OPENCODE_HARNESS;
 }
 
 function versionFrom(
@@ -215,6 +232,7 @@ export function createProfilesRepository(
     cost_limit_cents: content.costLimitCents,
     can_push: content.canPush ? 1 : 0,
     default_result: content.defaultResult,
+    harness: content.harness ?? OPENCODE_HARNESS,
     created_by: createdBy,
     created_at: timestamp,
   });
@@ -319,6 +337,7 @@ export function createProfilesRepository(
           "can_push",
           "default_result",
           "model_choice",
+          "harness",
         ])
         .where("workspace_id", "=", workspaceId)
         .where((eb) =>
@@ -340,6 +359,7 @@ export function createProfilesRepository(
         canPush: row.can_push === 1,
         defaultResult: row.default_result,
         managedModel: "entryId" in decodeModelChoice(row.model_choice),
+        harness: harnessOf(row.harness),
       }));
     },
 

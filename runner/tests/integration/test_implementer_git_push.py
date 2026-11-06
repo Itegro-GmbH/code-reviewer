@@ -109,8 +109,10 @@ def test_a_mirror_without_room_takes_nothing_over_and_every_branch_says_so(rig: 
 
 
 def test_inodes_count_as_room_too(rig: Rig) -> None:
-    workspace = rig.prepared(space=lambda path: DiskSpace(free_bytes=10 * 1024**3, free_inodes=5))
+    space: list[DiskSpace] = [DiskSpace(free_bytes=10 * 1024**3, free_inodes=10**6)]
+    workspace = rig.prepared(space=lambda path: space[0])
     commit(workspace, "a.txt")
+    space[0] = DiskSpace(free_bytes=10 * 1024**3, free_inodes=5)  # the inodes ran out meanwhile
 
     report = push(workspace)
 
@@ -1073,7 +1075,7 @@ def test_a_stale_lock_in_the_mirror_does_not_stop_the_push(rig: Rig) -> None:
     assert rig.origin.tip(BRANCH) == tip
 
 
-def test_binary_and_large_commits_are_pushed_and_the_shallow_mirror_takes_them(rig: Rig) -> None:
+def test_binary_and_large_commits_are_pushed_from_the_full_mirror(rig: Rig) -> None:
     workspace = rig.prepared()
     blob = secrets.token_bytes(6 * 1024 * 1024)
     (workspace.repo / "data.bin").write_bytes(blob)
@@ -1090,7 +1092,7 @@ def test_binary_and_large_commits_are_pushed_and_the_shallow_mirror_takes_them(r
         cwd=rig.origin.seed, git=rig.git, GIT_DIR=str(rig.origin.path),
     )  # fmt: skip
     assert int(size) == len(blob)
-    assert (Path(workspace.mirror) / "shallow").exists(), "the mirror is a depth 1 clone"
+    assert not (Path(workspace.mirror) / "shallow").exists(), "the mirror is a full clone"
 
 
 def test_no_background_gc_or_maintenance_is_started_in_the_mirror(rig: Rig) -> None:

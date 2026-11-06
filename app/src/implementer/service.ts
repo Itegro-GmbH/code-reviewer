@@ -22,12 +22,15 @@ import { JobQueueError } from "../jobs/errors.ts";
 import type { EnqueueImplementerTurnResult } from "../jobs/job-types.ts";
 import type { JobQueue } from "../jobs/job-queue.ts";
 import { branchConflict } from "./branch-name.ts";
+import { createRunCanceller, type RunCanceller } from "./cancel.ts";
 import { ImplementerError, type UnwritableReason } from "./errors.ts";
 import {
   BRANCH_CONFLICT,
   BRANCH_EXISTS,
   copyEnvironment,
   copyProfile,
+  modelNeedsCatalog,
+  requireRunnerForHarness,
   noAccessReason,
   NOT_FOUND,
   platformFailure,
@@ -68,21 +71,22 @@ export type StartedTask = {
   created: boolean;
 };
 
-export type ImplementerService = FollowUps & {
-  /** The active repositories of the workspace whose integration is active (a project is not needed), by name. */
-  listRepositories(): Promise<{ repositories: RepositoryChoice[] }>;
-  listBranches(repositoryId: string): Promise<BranchChoices>;
-  listModels(): Promise<ModelOptions>;
-  /**
-   * Starts a task. `user` is the signed-in person: `id` is recorded as the creator of the session, `githubLogin` as the actor
-   * of the job. `input` is the body as received and is checked here. Throws an `ImplementerError`.
-   */
-  startTask(
-    user: { id: string; githubLogin: string },
-    input: unknown,
-    options?: StartTaskOptions,
-  ): Promise<StartedTask>;
-};
+export type ImplementerService = FollowUps &
+  RunCanceller & {
+    /** The active repositories of the workspace whose integration is active (a project is not needed), by name. */
+    listRepositories(): Promise<{ repositories: RepositoryChoice[] }>;
+    listBranches(repositoryId: string): Promise<BranchChoices>;
+    listModels(): Promise<ModelOptions>;
+    /**
+     * Starts a task. `user` is the signed-in person: `id` is recorded as the creator of the session, `githubLogin` as the actor
+     * of the job. `input` is the body as received and is checked here. Throws an `ImplementerError`.
+     */
+    startTask(
+      user: { id: string; githubLogin: string },
+      input: unknown,
+      options?: StartTaskOptions,
+    ): Promise<StartedTask>;
+  };
 
 /**
  * What only code inside the app can ask for, never a request body (#844): the workflow engine starts a step with the rest of the
@@ -105,7 +109,10 @@ export type ImplementerServiceDependencies = FollowUpDependencies & {
   environments: Pick<ImplementerEnvironmentsRepository, "get">;
   /** The workspace's profiles (#843): a task may run with one, whose version is copied into the turn. */
   profiles: Pick<ProfilesRepository, "findByName">;
-  queue: Pick<JobQueue, "enqueueImplementerTurn" | "findImplementerTurn">;
+  queue: Pick<
+    JobQueue,
+    "enqueueImplementerTurn" | "findImplementerTurn" | "get" | "requestCancel"
+  >;
   /** The operator's maximum cost per turn in whole US cents, read for each call. */
   operatorCostLimitCents(): Promise<number>;
   /** One line per started task; never carries the instruction, a model or a token. */
@@ -144,6 +151,7 @@ function repeatOf(
   const same =
     session.repositoryId === task.repositoryId &&
     session.baseBranch === task.baseBranch &&
+    (session.startBranch ?? null) === (task.startBranch ?? null) &&
     session.branch === task.branch &&
     turn.instruction === task.instruction &&
     (turn.environment?.id ?? turn.runnerEnvironment?.id ?? null) ===
@@ -165,9 +173,14 @@ export function createImplementerService(
 ): ImplementerService {
   const log = deps.log ?? ((line) => console.info(line));
   const followUps = createFollowUps(deps);
+  const canceller = createRunCanceller({
+    queue: deps.queue,
+    ...(deps.log === undefined ? {} : { log: deps.log }),
+  });
 
   return {
     ...followUps,
+    ...canceller,
 
     async listRepositories() {
       const integrations = new Map(
@@ -286,6 +299,20 @@ export function createImplementerService(
             "The repository has no branch with the name of the base branch.",
           );
         baseSha = base.sha;
+        // #909: the session starts at the start branch when the task names one; its tip is where the work begins.
+        if (task.startBranch !== undefined) {
+          const start = await provider.getBranch(
+            integration,
+            repo,
+            task.startBranch,
+          );
+          if (start === null)
+            throw new ImplementerError(
+              "IMPLEMENTER_BASE_BRANCH_NOT_FOUND",
+              "The repository has no branch with the name of the start branch.",
+            );
+          baseSha = start.sha;
+        }
         if ((await provider.getBranch(integration, repo, task.branch)) !== null)
           throw BRANCH_EXISTS();
         // Git holds `foo` or `foo/bar`, not both. What the read can tell: the first 100 branches the platform lists.
@@ -318,7 +345,10 @@ export function createImplementerService(
       // with neither runs without a finish tool, as it did before result schemas.
       const resultSchema = task.result ?? resultOfProfile(profileResult);
 
-      const reason = await deps.models.check(model);
+      // The model of the harness claude-code is a name Claude Code reads on the device's login: no catalog, no key of the workspace.
+      const reason = modelNeedsCatalog(profile)
+        ? await deps.models.check(model)
+        : null;
       if (reason !== null)
         throw new ImplementerError(
           "IMPLEMENTER_MODEL_NOT_ALLOWED",
@@ -332,6 +362,7 @@ export function createImplementerService(
         task.environmentId === null
           ? { environment: null, runnerEnvironment: null }
           : await copyEnvironment(deps.environments, task.environmentId, model);
+      requireRunnerForHarness(profile, runnerEnvironment);
 
       if (costLimitCents !== null) {
         const maximumCents = await deps.operatorCostLimitCents();
@@ -357,6 +388,9 @@ export function createImplementerService(
         result = await deps.queue.enqueueImplementerTurn({
           repositoryId: task.repositoryId,
           baseBranch: task.baseBranch,
+          ...(task.startBranch === undefined
+            ? {}
+            : { startBranch: task.startBranch }),
           baseSha,
           branch: task.branch,
           instruction: task.instruction,

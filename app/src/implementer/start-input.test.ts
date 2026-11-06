@@ -213,6 +213,37 @@ describe("the body that starts a task", () => {
     ).toMatchObject({ ok: true });
   });
 
+  // #909-T07
+  it("takes an optional start branch with the rules of a base branch and keeps it out of the value when absent", () => {
+    expect(validateStartInput(VALID)).toEqual({ ok: true, value: parsed });
+    expect(
+      validateStartInput({ ...VALID, startBranch: "workflow/run-1/implement" }),
+    ).toEqual({
+      ok: true,
+      value: { ...parsed, startBranch: "workflow/run-1/implement" },
+    });
+    expect(validateStartInput({ ...VALID, startBranch: null })).toEqual({
+      ok: true,
+      value: parsed,
+    });
+    expect(issuesOf({ ...VALID, startBranch: "bad name" })).toEqual([
+      { field: "startBranch", code: "invalid" },
+    ]);
+    expect(issuesOf({ ...VALID, startBranch: 7 })).toEqual([
+      { field: "startBranch", code: "invalid" },
+    ]);
+    expect(issuesOf({ ...VALID, startBranch: "" })).toEqual([
+      { field: "startBranch", code: "invalid" },
+    ]);
+  });
+
+  // #909-T07
+  it("refuses a start branch that is the new branch", () => {
+    expect(issuesOf({ ...VALID, startBranch: VALID.branch })).toEqual([
+      { field: "branch", code: "invalid" },
+    ]);
+  });
+
   it("reports every field that is wrong, in the order of the body", () => {
     expect(
       issuesOf({

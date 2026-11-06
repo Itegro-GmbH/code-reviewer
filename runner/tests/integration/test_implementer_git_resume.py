@@ -123,9 +123,13 @@ def test_no_checkout_means_the_session_branch(rig: Rig, three: dict[str, str]) -
 
 # #838-T13
 def test_the_session_branch_that_never_arrived_is_made_at_the_base_tip_and_another_is_checked_out(
-    rig: Rig, three: dict[str, str]
+    rig: Rig,
 ) -> None:
-    others = {name: tip for name, tip in three.items() if name != BRANCH}
+    # The provider has no session branch (#909: one it has is always taken, listed or not).
+    others = {
+        "feature/x": rig.origin.commit_on("feature/x", "x.txt"),
+        "feature/y": rig.origin.commit_on("feature/y", "y.txt"),
+    }
     workspace = rig.prepared(resume=resume_of(*others.items(), checkout="feature/y"))
 
     tips = tips_of_the_repo(workspace)
@@ -135,10 +139,9 @@ def test_the_session_branch_that_never_arrived_is_made_at_the_base_tip_and_anoth
 
 
 # #838-T14
-def test_the_session_branch_checked_out_though_it_never_arrived(
-    rig: Rig, three: dict[str, str]
-) -> None:
-    workspace = rig.prepared(resume=resume_of(("feature/y", three["feature/y"]), checkout=BRANCH))
+def test_the_session_branch_checked_out_though_it_never_arrived(rig: Rig) -> None:
+    tip = rig.origin.commit_on("feature/y", "y.txt")
+    workspace = rig.prepared(resume=resume_of(("feature/y", tip), checkout=BRANCH))
 
     assert checked_out(workspace) == BRANCH
     assert head_of(workspace) == rig.origin.tip("main")
@@ -183,7 +186,8 @@ def test_the_commits_and_files_of_the_turn_are_counted_from_the_session_branchs_
 
 
 # #838-T20
-def test_every_branch_of_the_session_and_the_base_are_fetched_fifty_deep(rig: Rig) -> None:
+# #909-T02
+def test_every_branch_of_the_session_and_the_base_come_with_their_whole_history(rig: Rig) -> None:
     tips = {
         BRANCH: rig.origin.many_commits_on(BRANCH, 60),
         "feature/x": rig.origin.many_commits_on("feature/x", 70),
@@ -192,17 +196,20 @@ def test_every_branch_of_the_session_and_the_base_are_fetched_fifty_deep(rig: Ri
 
     workspace = rig.prepared(resume=resume_of(*tips.items(), checkout=BRANCH))
 
-    def depth(ref: str, where: Path = workspace.mirror) -> int:
-        return int(raw("rev-list", "--count", ref, cwd=where, git=rig.git))
-
-    # At least 50: git counts the depth from every tip, so a commit another tip reaches within 50
-    # commits is there as well (these branches share the history of the base).
-    assert depth(f"refs/heads/{BRANCH}") >= 50
-    assert depth("refs/heads/feature/x") >= 50
-    assert depth("refs/heads/main") >= 50
-    # The agent has the same history.
-    assert depth(BRANCH, workspace.repo) >= 50
-    assert depth("main", workspace.repo) >= 50
+    for place, prefix in ((workspace.mirror, "refs/heads/"), (workspace.repo, "")):
+        for name in ("main", BRANCH, "feature/x"):
+            have = int(raw("rev-list", "--count", prefix + name, cwd=place, git=rig.git))
+            want = int(
+                raw(
+                    "--git-dir",
+                    str(rig.origin.path),
+                    "rev-list",
+                    "--count",
+                    f"refs/heads/{name}",
+                    git=rig.git,
+                )
+            )
+            assert have == want, (place, name)
 
 
 # #838-T20c
@@ -219,29 +226,10 @@ def test_the_agent_can_merge_base_with_a_base_branch_that_moved_after_the_earlie
     assert done.stdout.strip() == raw("rev-parse", "main~3", cwd=workspace.repo, git=rig.git)
 
 
-# #838-T20b
-@pytest.mark.parametrize("session_first", [True, False])
-def test_a_branch_that_is_an_ancestor_of_the_session_branch_does_not_cut_its_history(
-    rig: Rig, session_first: bool
-) -> None:
-    ancestor = rig.origin.many_commits_on("feature/x", 60)
-    raw("push", "-q", "origin", f"{ancestor}:refs/heads/{BRANCH}", cwd=rig.origin.seed, git=rig.git)
-    session = rig.origin.many_commits_on(BRANCH, 10)
-    listed = [(BRANCH, session), ("feature/x", ancestor)]
-    if not session_first:
-        listed.reverse()
-
-    workspace = rig.prepared(resume=resume_of(*listed, checkout=BRANCH))
-
-    # The session branch keeps the depth it is promised, whatever the order of `resume.branches`
-    # (the ancestor's 50 commits are all within reach of the session branch's tip: 10 + 50).
-    assert int(raw("rev-list", "--count", BRANCH, cwd=workspace.mirror, git=rig.git)) >= 50
-    assert int(raw("rev-list", "--count", BRANCH, cwd=workspace.repo, git=rig.git)) >= 50
-
-
 # #838-T20d
+# #909-T02
 @pytest.mark.parametrize("order", ["base_first", "base_last", "session_between"])
-def test_a_branch_far_ahead_of_the_base_does_not_cut_the_history_of_the_base(
+def test_a_branch_far_ahead_of_the_base_or_forked_before_its_tip_still_merge_bases_with_it(
     rig: Rig, order: str
 ) -> None:
     base = rig.origin.many_commits_on("main", 60)
@@ -255,17 +243,6 @@ def test_a_branch_far_ahead_of_the_base_does_not_cut_the_history_of_the_base(
 
     workspace = rig.prepared(resume=resume_of(*listed, checkout=BRANCH))
 
-    for place in (workspace.mirror, workspace.repo):
-        ref = "refs/heads/" if place == workspace.mirror else ""
-
-        def depth(name: str, where: Path = place, prefix: str = ref) -> int:
-            return int(raw("rev-list", "--count", prefix + name, cwd=where, git=rig.git))
-
-        # Git counts the depth as the least over all tips: no tip has less than 50 commits of
-        # history, however the branches lie to each other.
-        assert depth("main") >= 50
-        assert depth(BRANCH) >= 50
-        assert depth("feature/x") >= 50
     for other in ("main", "feature/x"):
         done = agent_git(workspace, "merge-base", other, BRANCH)
         assert done.returncode == 0 and done.stdout.strip(), other
@@ -276,7 +253,8 @@ def test_a_branch_far_ahead_of_the_base_does_not_cut_the_history_of_the_base(
 
 
 # #838-T20e
-def test_the_branches_of_a_follow_up_are_fetched_in_one_command(
+# #909-T02
+def test_the_whole_repository_of_a_follow_up_is_fetched_in_one_command(
     rig: Rig, three: dict[str, str], tmp_path: Path
 ) -> None:
     log = tmp_path / "git.log"
@@ -285,8 +263,9 @@ def test_the_branches_of_a_follow_up_are_fetched_in_one_command(
     rig.workspace(git=wrapper, resume=resume_of_three(three, checkout=BRANCH)).prepare()
 
     calls = log.read_text().splitlines()
-    assert sum(1 for line in calls if " fetch " in f" {line} ") == 1
-    assert sum(1 for line in calls if " ls-remote " in f" {line} ") == 1
+    assert sum(1 for line in calls if " fetch " in f" {line} " and "--depth" not in line) == 1
+    assert not any("--depth" in line for line in calls)
+    assert not any(" ls-remote " in f" {line} " for line in calls)
 
 
 # -- what moved, what is gone --------------------------------------------------------------------
@@ -641,28 +620,13 @@ def slow_git(tmp_path: Path, real: str, command: str, seconds: str) -> str:
 
 
 # #838-T33
-def test_the_look_at_the_provider_is_bounded_by_the_fetch_timeout_not_by_the_default(
-    rig: Rig, three: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+# #909-T02
+def test_the_fetch_of_a_first_turn_is_bounded_by_the_clone_time_not_by_the_default(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(git_workspace, "FETCH_TIMEOUT", 1.0)
-    wrapper = slow_git(tmp_path, rig.git, "ls-remote", "20")
-    workspace = rig.workspace(git=wrapper, resume=resume_of_three(three, checkout=BRANCH))
-    started = time.monotonic()
-
-    with pytest.raises(JobError) as refused:
-        workspace.prepare()
-
-    assert refused.value.code is ErrorCode.CLONE_FAILED
-    assert time.monotonic() - started < 10
-
-
-# #838-T34
-def test_the_fetch_of_a_follow_up_is_bounded_by_the_deadline_of_the_follow_up_not_by_the_default(
-    rig: Rig, three: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(git_workspace, "RESUME_FETCH_SECONDS", 2.0)
+    monkeypatch.setattr(git_workspace, "CLONE_FETCH_SECONDS", 1.0)
     wrapper = slow_git(tmp_path, rig.git, "fetch", "20")
-    workspace = rig.workspace(git=wrapper, resume=resume_of_three(three, checkout=BRANCH))
+    workspace = rig.workspace(git=wrapper)
     started = time.monotonic()
 
     with pytest.raises(JobError) as refused:
@@ -673,26 +637,19 @@ def test_the_fetch_of_a_follow_up_is_bounded_by_the_deadline_of_the_follow_up_no
     assert not workspace.repo.exists()
 
 
-# #838-T34b
-def test_the_look_and_the_fetch_of_a_follow_up_are_bounded_together(
+# #838-T34
+# #909-T02
+def test_the_fetch_of_a_follow_up_is_bounded_by_the_clone_time_not_by_the_default(
     rig: Rig, three: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(git_workspace, "RESUME_FETCH_SECONDS", 2.0)
-    directory = tmp_path / "wrapper"
-    directory.mkdir()
-    script = directory / "git"
-    script.write_text(
-        "#!/bin/sh\n"
-        'case " $* " in *" ls-remote "*|*" fetch "*) sleep 1.5 ;; esac\n'
-        f'exec "{rig.git}" "$@"\n'
-    )
-    script.chmod(0o755)
-    workspace = rig.workspace(git=str(script), resume=resume_of_three(three, checkout=BRANCH))
+    monkeypatch.setattr(git_workspace, "CLONE_FETCH_SECONDS", 2.0)
+    wrapper = slow_git(tmp_path, rig.git, "fetch", "20")
+    workspace = rig.workspace(git=wrapper, resume=resume_of_three(three, checkout=BRANCH))
     started = time.monotonic()
 
     with pytest.raises(JobError) as refused:
         workspace.prepare()
 
     assert refused.value.code is ErrorCode.CLONE_FAILED
-    assert time.monotonic() - started < 4.5
+    assert time.monotonic() - started < 10
     assert not workspace.repo.exists()

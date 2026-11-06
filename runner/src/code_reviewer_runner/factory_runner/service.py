@@ -88,6 +88,7 @@ from code_reviewer_runner.factory_runner.update import (
     load_channel,
 )
 from code_reviewer_runner.implementer.agent_container import AGENT_IMAGE_REFERENCE
+from code_reviewer_runner.implementer.claude_code.login import OAUTH_VARIABLE
 from code_reviewer_runner.implementer.docker_api import DockerApi
 from code_reviewer_runner.job import IMPLEMENTER_WORK_DIR, IMPLEMENTER_WORK_DIR_VARIABLE
 from code_reviewer_runner.job_loop.api import ApiUnavailable, ClaimedJob
@@ -153,6 +154,10 @@ class RunnerService:
         self._seams = seams
         self._clock = seams.clock
         credentials = [config.credential] if config.credential else []
+        # #856: a login that only the environment holds is handed to the job processes; no line of
+        # the runner's log may carry it.
+        if login := prepared.environment.get(OAUTH_VARIABLE):
+            credentials.append(login)
         self._masker = SecretMasker(credentials)
         self._logger = logger or logging.getLogger(LOGGER_NAME)
         self._log = SafeLog(self._logger, self._masker)
@@ -186,6 +191,8 @@ class RunnerService:
         """Announce, then claim and run until the mode ends it. Returns the exit code."""
         for line in summary(self._prepared.selftest):
             self._log.info("self-test %s", line)
+        for note in self._prepared.harness_notes:
+            self._log.info("harness %s", note)
         loop = asyncio.get_running_loop()
         for number in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(number, self.stop)
@@ -284,7 +291,7 @@ class RunnerService:
             if once:
                 return (
                     EXIT_OK
-                    if end in (JobEnd.OK, JobEnd.GIVEN_BACK, JobEnd.SUPERSEDED)
+                    if end in (JobEnd.OK, JobEnd.GIVEN_BACK, JobEnd.SUPERSEDED, JobEnd.CANCELLED)
                     else EXIT_FAILED
                 )
         self._log.info("stopped")

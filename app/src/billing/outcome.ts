@@ -194,6 +194,8 @@ export const ERROR_CODE_CLASSES = {
   checkout_incomplete: "charged",
   // Replaced by a newer push; it reported what it used. In full.
   superseded: "charged",
+  // A member stopped it (#891): what it used, in full; a turn that never ran prices to nothing. Not ours, so never free.
+  cancelled: "charged",
   // The Implementer (#746, classes settled in #754): what ended before the agent ran is free (no model call was made); what ended
   // after it ran is charged like any run that used the model (`AI_COST_FAILURE_CODES`), none of it is clearly our fault: the
   // agent gave up, the repository refused its branch, the work left the branch (or the repository could not be committed or

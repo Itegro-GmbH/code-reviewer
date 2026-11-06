@@ -15,6 +15,7 @@ import type {
   StoredImplementerSession,
   StoredImplementerTurn,
 } from "../db/repositories/implementer-repository.ts";
+import { CLAUDE_CODE_HARNESS } from "../runner-identity/harness.ts";
 import { FACT_NAMES } from "../workflows/facts.ts";
 import { isRecord } from "../workflows/json.ts";
 import {
@@ -30,6 +31,8 @@ export type EndedTurn = {
   /** The final status of the job. */
   jobStatus: "succeeded" | "failed" | "superseded" | "cancelled";
   jobErrorCode: string | null;
+  /** The job was claimed by a runner (it has a claim time). A job that ended before that never ran. */
+  jobClaimed: boolean;
   /** What the runner reported, as stored. */
   jobResult: unknown;
   turn: StoredImplementerTurn;
@@ -38,8 +41,11 @@ export type EndedTurn = {
   price?: TokenPrice | undefined;
 };
 
-/** Where the cost of a step comes from: the runner's figure, the token counts at the catalog price, or the cap the turn ran under. */
-export type CostBasis = "reported" | "estimated" | "limit";
+/**
+ * Where the cost of a step comes from: the runner's figure, the token counts at the catalog price, the cap the turn ran under, or (#856)
+ * Claude Code's own estimate at API prices for a turn on a customer device's login, which is never billed.
+ */
+export type CostBasis = "reported" | "estimated" | "limit" | "subscription";
 
 export type TurnOutcome =
   | {
@@ -96,6 +102,27 @@ export function estimateCost(
   return Number.isFinite(micro) && micro >= 0 ? Math.ceil(micro) : null;
 }
 
+/**
+ * #856: the estimate, in micro dollars, of a turn that ran on the login of a customer's device, or null for any other turn. Claude
+ * Code's figure at API prices (0 when it gave none) counts against the budget of the run, so a run cannot be driven past it by turns
+ * that cost nothing; it is not a charge and never enters a total of billing. A turn of that harness that left no usage (stopped,
+ * killed) is booked at 0 as well: there is no figure, and the cap is not what it cost.
+ */
+export function subscriptionCost(ended: EndedTurn): number | null {
+  const usage =
+    isRecord(ended.jobResult) && isRecord(ended.jobResult.usage)
+      ? ended.jobResult.usage
+      : null;
+  // The harness of the step's profile decides, never the basis the report names: any runner could write it into a report.
+  if (ended.turn.profile?.harness !== CLAUDE_CODE_HARNESS) return null;
+  const estimate = usage?.estimatedCostUsd;
+  return typeof estimate === "number" &&
+    Number.isFinite(estimate) &&
+    estimate >= 0
+    ? Math.ceil(estimate * MICRO_USD_PER_USD)
+    : 0;
+}
+
 const COMMIT_SHA = /^[0-9a-f]{40}$/;
 
 function implementerBlock(jobResult: unknown): Record<string, unknown> {
@@ -132,6 +159,20 @@ function pushFacts(ended: EndedTurn): Record<string, unknown> {
 }
 
 /**
+ * #891: the codes with which a claimed job a member stopped ends when its Worker never got going: it could not be started, or it was
+ * given back before it had the input of the job (the release reasons of the claim, `CLAIM_RELEASE_REASONS`, but `worker_exited`, after
+ * which the turn may have run). Billing frees these; the run's budget does too.
+ */
+const NEVER_RAN_CODES: ReadonlySet<string> = new Set([
+  "launch_failed",
+  "claim_failed",
+  "git_access_unavailable",
+  "pull_request_unavailable",
+  "price_check_failed",
+  "provider_pin_check_failed",
+]);
+
+/**
  * `unknownCostMicroUsd` is the cap the turn ran under. A turn whose cost the runner did not report is charged by its token counts at
  * the catalog price (never above the cap) when both are there, and at the whole cap when not, so that a run whose cost cannot be seen
  * never spends more than its budget.
@@ -150,7 +191,25 @@ export function outcomeOfTurn(
       costMicroUsd: 0,
       costBasis: "reported",
     };
-  const reported = costOfResult(ended.jobResult);
+  // #891: a turn a member stopped that never ran (no runner took it, or its Worker could not be started) used no model: it is booked
+  // at no cost, not at the cap. One that ran and reported nothing may have used it, and falls through to the cap below.
+  if (
+    ended.jobStatus === "cancelled" &&
+    (!ended.jobClaimed ||
+      (ended.jobErrorCode !== null &&
+        NEVER_RAN_CODES.has(ended.jobErrorCode))) &&
+    costOfResult(ended.jobResult) === null
+  )
+    return {
+      ok: false,
+      code: ended.jobErrorCode ?? "cancelled",
+      message: "The agent's task was stopped because the run was cancelled.",
+      detail: `status=${ended.jobStatus} error=${ended.jobErrorCode ?? "none"}`,
+      costMicroUsd: 0,
+      costBasis: "reported",
+    };
+  const onSubscription = subscriptionCost(ended);
+  const reported = onSubscription ?? costOfResult(ended.jobResult);
   // Only a turn that succeeded has every call answered and counted; a failed or stopped one may have lost an open call (the
   // runner then reports no cost), so it is charged at the cap.
   const estimated =
@@ -163,12 +222,22 @@ export function outcomeOfTurn(
       ? unknownCostMicroUsd
       : Math.min(estimated, unknownCostMicroUsd));
   const costBasis: CostBasis =
-    reported !== null ? "reported" : estimated !== null ? "estimated" : "limit";
+    onSubscription !== null
+      ? "subscription"
+      : reported !== null
+        ? "reported"
+        : estimated !== null
+          ? "estimated"
+          : "limit";
   if (ended.jobStatus !== "succeeded")
     return {
       ok: false,
       code: ended.jobErrorCode ?? "job_failed",
-      message: "The agent's task ended without success.",
+      message:
+        // #891: stopped by a member; what it had pushed stays on its branch.
+        ended.jobErrorCode === "cancelled"
+          ? "The agent's task was stopped because the run was cancelled."
+          : "The agent's task ended without success.",
       detail: `status=${ended.jobStatus} error=${ended.jobErrorCode ?? "none"}`,
       costMicroUsd,
       costBasis,

@@ -6,7 +6,8 @@
 // Values are data. A text is built in one pass from the parts of the template; what a reference yields is inserted as it is and never
 // read again, so a result that holds `{{` or an instruction does nothing here. The default of a reference is a JSON value taken as it
 // is. A value of an agent step that goes into the text of an action (a title, a comment) is defused, and so are the title, body and
-// labels of the issue of a label trigger (#845: anyone who can open an issue wrote them): it cannot mention a person or a
+// labels of the issue of a label trigger (#845: anyone who can open an issue wrote them), and the code and the message of a failure (#902: they may quote a
+// connector, GitHub or a runner): it cannot mention a person or a
 // team, nor name an issue a pull request would close, nor rebuild the marker of a comment (`defuseSegments`). The text is defused
 // once it is put together, so what a boundary between two parts would form (`@` and `octocat`) is caught too. A value that goes into a text is cleaned of control characters (the Implementer refuses them) and cut at
 // `TEMPLATE_VALUE_MAX_CHARS` with a note that says so; the text as a whole must fit the bound of the place it goes to, or the step
@@ -29,6 +30,8 @@ export type RunValues = {
   steps: Readonly<Record<string, unknown>>;
   /** `previous.<step>`: the output a direct step of the innermost loop body had in the round before; empty in round one and outside loops. */
   previous?: Readonly<Record<string, unknown>>;
+  /** #902: the facts of the failure the steps of `onFailure` read (`{{failure.status}}`, `.stepId`, `.code`, `.message`); not set in the steps of the workflow. */
+  failure?: Readonly<Record<string, unknown>>;
   /** The ids of the steps in `steps` that an agent produced: what they report is text an agent wrote, not a literal of the workflow. */
   agentSteps?: ReadonlySet<string>;
 };
@@ -54,7 +57,12 @@ const OUTSIDER_TRIGGER_FIELDS: ReadonlySet<string> = new Set([
   "labels",
 ]);
 
+/** What the failure of a run says besides its status and the id of a step of the workflow: a code a runner or a connector chose, and a message that may quote one. */
+const FAILURE_TEXT_FIELDS: ReadonlySet<string> = new Set(["code", "message"]);
+
 function isOutsiderText(path: readonly string[]): boolean {
+  if (path[0] === "failure")
+    return path[1] !== undefined && FAILURE_TEXT_FIELDS.has(path[1]);
   return (
     path[0] === "trigger" &&
     path[1] === "issue" &&
@@ -323,6 +331,8 @@ function lookup(path: readonly string[], values: RunValues): unknown {
   let at: unknown;
   let names = rest;
   if (root === "trigger") at = values.trigger;
+  else if (root === "failure" && values.failure !== undefined)
+    at = values.failure;
   else if (root === "previous") {
     // `previous.<step>.…` starts at the output of that step in the round before.
     const [step, ...inner] = rest;

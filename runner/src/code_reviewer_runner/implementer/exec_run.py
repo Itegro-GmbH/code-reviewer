@@ -69,6 +69,7 @@ def run_exec(
     *,
     env: Mapping[str, str] | None = None,
     workdir: str | None = None,
+    user: str | None = None,
     stdin: bytes | Iterable[bytes] | None = None,
     timeout: float,
     consume: Callable[[bytes], None] | None = None,
@@ -83,7 +84,9 @@ def run_exec(
     exception goes to the caller). Without, up to `KEEP_BYTES` of it are returned. The command's
     standard error is dropped. `stdin` is bytes or an iterable of them."""
     try:
-        exec_id = api.create_exec(container, exec_document(argv, env=env, workdir=workdir))
+        exec_id = api.create_exec(
+            container, exec_document(argv, env=env, workdir=workdir, user=user)
+        )
         streams = api.attach_exec(exec_id)
     except DockerError:
         return Outcome(255, "", f"{name} cannot run", unanswered=True)

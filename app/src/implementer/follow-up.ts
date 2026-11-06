@@ -42,6 +42,8 @@ import type { ImplementerModels } from "./models.ts";
 import {
   copyEnvironment,
   copyProfile,
+  modelNeedsCatalog,
+  requireRunnerForHarness,
   MAX_ID_LENGTH,
   noAccessReason,
   platformFailure,
@@ -190,7 +192,8 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
   const now = deps.now ?? (() => new Date());
 
   /**
-   * The tip a turn is accepted at: the session's branch when it has pushed one (it must still be there), else the base branch. A
+   * The tip a turn is accepted at: the session's branch when it has pushed one (it must still be there), else the branch the session started from (#909: the start
+   * branch, or the base branch when it has none or the provider no longer has it). A
    * platform failure other than "not there" is the platform's, as for the first turn.
    */
   async function tipOf(
@@ -216,6 +219,13 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
         if (branch === null) throw BRANCH_GONE();
         return branch.sha;
       }
+      // A start branch that is gone (merged and deleted) is no reason to end the follow-up: the
+      // runner carries on from the base branch, so the tip is the base's.
+      const start =
+        session.startBranch === null
+          ? null
+          : await provider.getBranch(integration, repo, session.startBranch);
+      if (start !== null) return start.sha;
       const base = await provider.getBranch(
         integration,
         repo,
@@ -285,7 +295,11 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
         model,
       ));
 
-    const reason = await deps.models.check(model);
+    requireRunnerForHarness(profile, runnerEnvironment);
+    // The model of the harness claude-code is a name on a device's login: no catalog, no key of the workspace (#856).
+    const reason = modelNeedsCatalog(profile)
+      ? await deps.models.check(model)
+      : null;
     if (reason !== null)
       throw new ImplementerError(
         "IMPLEMENTER_MODEL_NOT_ALLOWED",

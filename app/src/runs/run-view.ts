@@ -262,6 +262,12 @@ export type RunUsageView = {
   costUsd: number | null;
   /** Why a Dynamic Review was wrapped up early and may be incomplete (#293); null otherwise. */
   stoppedEarly: StoppedEarly | null;
+  /**
+   * #856: `subscription` for a turn that ran on the Claude login of a customer's device. It has no cost (`costUsd` is null, nothing is
+   * billed); `estimatedCostUsd` is what Claude Code says it is worth at API prices, null when it gave none. Absent for every other run.
+   */
+  costBasis?: "subscription";
+  estimatedCostUsd?: number | null;
 };
 
 export type RunDetailView = RunRowView & {
@@ -472,6 +478,10 @@ const BRANCH_REASONS: Readonly<Record<string, string>> = {
   out_of_space:
     "The disk of the workspace had no room left to take this branch over, so it was not pushed.",
   excluded: "This branch is not pushed.",
+  login_secret:
+    "The branch holds the login of the runner's device (the token of the harness), so it was not pushed. Remove it from the branch and run the task again.",
+  unchecked:
+    "The branch could not be checked for the login of the runner's device, so it was not pushed.",
 };
 
 export function describeBranchReason(reason: string | null): string {
@@ -1043,6 +1053,21 @@ export function readStoredUsage(result: JsonValue | null): RunUsageView | null {
   const costKnown =
     typeof costUsd === "number" && Number.isFinite(costUsd) && costUsd >= 0;
   if (costUsd !== null && !costKnown) return null;
+  // #856: only the basis this version knows is taken, with an estimate that is a cost (else none), and only beside no cost: a billed
+  // number is a cost, whatever else the report says.
+  const estimate = usage.estimatedCostUsd;
+  const subscription =
+    usage.costBasis === "subscription" && costUsd === null
+      ? {
+          costBasis: "subscription" as const,
+          estimatedCostUsd:
+            typeof estimate === "number" &&
+            Number.isFinite(estimate) &&
+            estimate >= 0
+              ? estimate
+              : null,
+        }
+      : {};
   return {
     model:
       typeof model === "string"
@@ -1056,6 +1081,7 @@ export function readStoredUsage(result: JsonValue | null): RunUsageView | null {
       (STOPPED_EARLY_REASONS as readonly string[]).includes(usage.stoppedEarly)
         ? (usage.stoppedEarly as StoppedEarly)
         : null,
+    ...subscription,
   };
 }
 

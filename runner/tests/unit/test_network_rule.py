@@ -19,6 +19,7 @@ from code_reviewer_runner.implementer.network_rule import (
     ascii_name,
     is_ip_literal,
     normalize_entry,
+    parse_door_rule,
     parse_rule,
 )
 
@@ -257,3 +258,47 @@ def test_a_private_special_or_metadata_address_is_not_public(address: str) -> No
 )
 def test_an_ordinary_address_is_public(address: str) -> None:
     assert is_public(address)
+
+
+# -- the port restriction of a rule (#856) ----------------------------------------------------
+
+
+# #856-P01
+def test_a_rule_without_ports_serializes_as_before_and_one_with_ports_says_them() -> None:
+    plain = NetworkRule(MODE_LIST, ("pypi.org",))
+    narrow = NetworkRule(MODE_LIST, ("api.anthropic.com",), ports=(443,))
+
+    assert plain.ports == () and plain.to_json() == {"mode": "list", "hosts": ["pypi.org"]}
+    assert narrow.to_json() == {"mode": "list", "hosts": ["api.anthropic.com"], "ports": [443]}
+    assert narrow != NetworkRule(MODE_LIST, ("api.anthropic.com",))
+
+
+# #856-P01
+def test_the_door_reads_a_rule_with_ports_and_a_job_cannot_carry_them() -> None:
+    document = {"mode": "list", "hosts": ["api.anthropic.com"], "ports": [443]}
+
+    assert parse_door_rule(document) == NetworkRule(MODE_LIST, ("api.anthropic.com",), ports=(443,))
+    assert parse_door_rule({"mode": "list", "hosts": ["pypi.org"]}) == NetworkRule(
+        MODE_LIST, ("pypi.org",)
+    )
+    assert parse_door_rule({**document, "ports": [443, 80, 443]}).ports == (80, 443)
+    # The contract's rule (a job, the app's environment) is exactly mode and hosts.
+    with pytest.raises(RuleError):
+        parse_rule(document)
+
+
+# #856-P01
+@pytest.mark.parametrize(
+    "ports",
+    [[], [22], [8443], [443, 22], ["443"], [True], [443.0], [0], [-1], 443, None, [80, 443, 8080]],
+)
+def test_a_port_list_the_door_does_not_serve_is_refused(ports: Any) -> None:
+    with pytest.raises(RuleError):
+        parse_door_rule({"mode": "list", "hosts": ["api.anthropic.com"], "ports": ports})
+
+
+# #856-P01
+@pytest.mark.parametrize("mode", ["open", "off"])
+def test_ports_belong_to_a_list_only(mode: str) -> None:
+    with pytest.raises(RuleError):
+        parse_door_rule({"mode": mode, "hosts": [], "ports": [443]})

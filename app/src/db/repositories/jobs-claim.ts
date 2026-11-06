@@ -28,10 +28,15 @@ export type JobClaim = {
 /**
  * #854: whose turns a claim may take. A claim without a scope (the Dispatcher's, the poll mode's) never takes a turn of a runner
  * environment: those wait for a runner of their workspace. A customer's runner takes only the turns of runner environments of its own
- * workspace whose labels it has all of.
+ * workspace whose labels it has all of, and whose profile's harness (#856) it announces as ready (OpenCode alone when it names none).
+ * Nobody else takes a turn that runs on the harness `claude-code`: it needs the login of a customer's device.
  */
 export type ClaimScope = {
-  customerRunner: { workspaceId: string; labels: readonly string[] };
+  customerRunner: {
+    workspaceId: string;
+    labels: readonly string[];
+    harnesses?: readonly string[];
+  };
 };
 
 /** Enough for every pull request in the queue to be tried; a bug fails instead of looping. */
@@ -105,11 +110,18 @@ function claimQuery(
           scope.customerRunner.labels.map((label) => sql`${label}`),
           sql`, `,
         )}]::text[]`;
+  const harnesses = sql`array[${sql.join(
+    (scope?.customerRunner.harnesses ?? ["opencode"]).map(
+      (harness) => sql`${harness}`,
+    ),
+    sql`, `,
+  )}]::text[]`;
   const routing =
     scope === undefined
       ? sql`and not exists (
           select 1 from implementer_turns as routed
-          where routed.job_id = due.id and routed.environment_kind = 'runner'
+          where routed.job_id = due.id
+            and (routed.environment_kind = 'runner' or routed.profile_harness = 'claude-code')
         )`
       : sql`and due.workspace_id = ${scope.customerRunner.workspaceId}
         and exists (
@@ -117,6 +129,7 @@ function claimQuery(
           where routed.job_id = due.id
             and routed.environment_kind = 'runner'
             and string_to_array(routed.environment_labels, E'\n') <@ ${labels}
+            and coalesce(routed.profile_harness, 'opencode') = any(${harnesses})
         )`;
   return sql<Selectable<JobsTable>>`
     update jobs

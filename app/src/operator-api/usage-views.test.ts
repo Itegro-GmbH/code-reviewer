@@ -22,6 +22,7 @@ function record(modelTier: string | null): UsageRecord {
     reservedAt: "2026-10-14T11:00:00.000Z",
     settledAt: "2026-10-14T11:00:01.000Z",
     settledReason: null,
+    costBasis: null,
   };
 }
 

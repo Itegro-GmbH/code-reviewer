@@ -43,6 +43,7 @@ const CONTENT: ProfileContent = {
   costLimitCents: 300,
   canPush: true,
   defaultResult: null,
+  harness: "opencode",
 };
 const NEW: NewProfile = {
   name: "implementer",
@@ -91,6 +92,7 @@ describe("the profiles repository", () => {
           costLimitCents: null,
           canPush: true,
           defaultResult: SCHEMA,
+          harness: "opencode",
         },
         createdBy: "u-1",
         createdAt: "2026-11-04T08:00:00.000Z",
@@ -100,6 +102,36 @@ describe("the profiles repository", () => {
       profile: created.ok ? created.profile : undefined,
       current: created.ok ? created.saved : undefined,
     });
+  });
+
+  // #856-T62
+  it("keeps the harness of a version, and reads a version saved without one as OpenCode", async () => {
+    const { a, db } = await setup();
+
+    await a.create({ ...NEW, name: "plain" }, 100);
+    await a.create(
+      {
+        ...NEW,
+        name: "claude",
+        content: {
+          ...CONTENT,
+          model: { provider: "claude-code", model: "sonnet" },
+          harness: "claude-code",
+        },
+      },
+      100,
+    );
+    // A version a release wrote before the column existed has none (null), and runs OpenCode.
+    await sql`insert into profile_versions (profile_id, version, workspace_id, description, model_choice, instructions, can_push, created_by, created_at)
+      select profile_id, 2, workspace_id, description, model_choice, instructions, can_push, created_by, created_at
+      from profile_versions where profile_id = 'pr-1'`.execute(db);
+
+    expect((await a.get("pr-2"))?.current.content.harness).toBe("claude-code");
+    expect((await a.get("pr-1"))?.current.content.harness).toBe("opencode");
+    expect((await a.getVersion("pr-1", 2))?.content.harness).toBe("opencode");
+    expect(
+      (await a.versionFacts([{ profileId: "pr-2", version: 1 }]))[0]?.harness,
+    ).toBe("claude-code");
   });
 
   // #843-T51
@@ -340,6 +372,7 @@ describe("the profiles repository", () => {
         canPush: false,
         defaultResult: SCHEMA,
         managedModel: true,
+        harness: "opencode",
       },
       {
         profileId: "pr-1",
@@ -347,6 +380,7 @@ describe("the profiles repository", () => {
         canPush: true,
         defaultResult: null,
         managedModel: true,
+        harness: "opencode",
       },
     ]);
     expect(await a.versionFacts([])).toEqual([]);

@@ -278,6 +278,7 @@
         "git_access_unavailable": "GitHub could not be reached to prepare this run, even after several tries.",
         "pull_request_unavailable": "The pull request could not be read from GitHub, even after several tries.",
         "claim_failed": "The server could not prepare this run, even after several tries.",
+        "cancelled": "A member of the workspace stopped this run.",
         "price_check_failed": "The server could not check the model for this run, even after several tries.",
         "provider_pin_check_failed": "The server could not check the address of the model provider for this run, even after several tries.",
         "launch_failed": "The worker for this run could not be started, even after several tries.",

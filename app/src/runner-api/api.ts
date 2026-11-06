@@ -271,6 +271,8 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
               customerRunner: {
                 workspaceId: customer.runner.workspaceId,
                 labels: customer.runner.labels,
+                // #856: the harnesses it announced as ready; a turn that asks for another is not its to take.
+                harnesses: readyHarnesses(customer.runner.manifest),
               },
             },
           );

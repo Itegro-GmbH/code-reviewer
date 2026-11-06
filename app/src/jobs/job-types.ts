@@ -67,6 +67,8 @@ export type Job = {
   errorCode: string | null;
   /** The newer job that replaced this one, when its status is `superseded`. */
   supersededBy: string | null;
+  /** #891: when a member asked for the running turn to stop; the heartbeat tells its holder. Null when nobody did. */
+  cancelRequestedAt: string | null;
   createdAt: string;
   updatedAt: string;
   /** When the job reached a final status. */
@@ -110,7 +112,9 @@ export type EnqueueJobInput = {
 export type EnqueueImplementerTurnInput = {
   repositoryId: string;
   baseBranch: string;
-  /** The tip of the base branch read when the task was accepted: 40 hexadecimal characters. */
+  /** #909: the branch the new branch is made from, when that is not the base; left out or null: the tip of the base. */
+  startBranch?: string | null;
+  /** The tip the task starts at, read when it was accepted (the start branch, else the base branch): 40 hexadecimal characters. */
   baseSha: string;
   /** The new branch; one session per branch and repository. */
   branch: string;
@@ -189,6 +193,18 @@ export const ENQUEUE_EXISTING_REASONS = [
 ] as const;
 export type EnqueueExistingReason = (typeof ENQUEUE_EXISTING_REASONS)[number];
 
+/**
+ * What asking for a job to stop came to (#891). `cancelled`: it was waiting, so it ended at once and nothing ran. `requested`: it runs; its
+ * holder is told by its next heartbeat, stops the turn and reports. `already_requested`: it runs and was asked before. `already_ended`: it is
+ * over (or was never claimed again after a lost attempt it ended with); `job` is as it ended. `not_found`: no such job in this workspace.
+ */
+export type CancelJobResult =
+  | { status: "cancelled"; job: Job }
+  | { status: "requested"; job: Job }
+  | { status: "already_requested"; job: Job }
+  | { status: "already_ended"; job: Job }
+  | { status: "not_found" };
+
 export type EnqueueResult =
   | {
       status: "created";
@@ -245,6 +261,11 @@ export const JOB_ERROR_CODES = [
   "dynamic_review_disabled",
   /** Cancelled because the job's command was removed from the product (#203). */
   "command_removed",
+  /**
+   * Cancelled because a member asked for it (#891): while it waited, or while it ran (its runner reports it after it stopped the turn and pushed what
+   * was committed; a lease that lapsed or a stop that took longer than the grace ends the job with it too).
+   */
+  "cancelled",
   /** Failed because no Dispatcher took the job within the give-up time of a hosted deployment (#328). */
   "dispatch_unavailable",
   /** Failed at claim because an operator suspended the workspace's reviews (#277). */

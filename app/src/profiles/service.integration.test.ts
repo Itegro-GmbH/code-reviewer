@@ -28,6 +28,7 @@ const REVIEWER = {
     required: ["findings"],
     properties: { findings: { type: "array", items: { type: "string" } } },
   },
+  harness: "opencode",
 };
 
 async function setup() {
@@ -168,6 +169,7 @@ describe("the profile service", () => {
       costLimitCents: null,
       canPush: true,
       defaultResult: null,
+      harness: "opencode",
     });
   });
 

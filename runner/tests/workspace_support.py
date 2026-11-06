@@ -126,6 +126,8 @@ class Rig:
         timeout: float = 600.0,
         space: Callable[[Path], DiskSpace] | None = None,
         resume: ImplementerResume | None = None,
+        guard_secrets: Sequence[str] = (),
+        start_branch: str | None = None,
     ) -> GitWorkspace:
         spec = WorkspaceSpec(
             clone_url=url or self.origin.url,
@@ -133,6 +135,7 @@ class Rig:
             base_branch=base_branch,
             branch=branch,
             resume=resume,
+            start_branch=start_branch,
         )
         return GitWorkspace(
             spec,
@@ -143,6 +146,7 @@ class Rig:
             schemes=schemes,
             timeout=timeout,
             space=space or disk_space,
+            guard_secrets=guard_secrets,
         )
 
     def prepared(
@@ -151,9 +155,14 @@ class Rig:
         branch: str = BRANCH,
         space: Callable[[Path], DiskSpace] | None = None,
         resume: ImplementerResume | None = None,
+        start_branch: str | None = None,
     ) -> GitWorkspace:
         workspace = self.workspace(
-            base_branch=base_branch, branch=branch, space=space, resume=resume
+            base_branch=base_branch,
+            branch=branch,
+            space=space,
+            resume=resume,
+            start_branch=start_branch,
         )
         workspace.prepare()
         return workspace

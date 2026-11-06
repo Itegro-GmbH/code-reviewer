@@ -7,49 +7,19 @@
 // method, in any spelling, and also from the data route itself when the proxy is not in front; the admin
 // gets in, with an unverified email address too. The routes are read from the file system, so a page or
 // route added to the portal without a decision here fails the test.
+// The cases that run on every route and method are in guard-visitor-routes.integration.test.ts and the
+// guard-member-*.integration.test.ts files (#905: one file of 484 tests made its shard the slowest of the job); the
+// routes and the harness they share are in src/test-support/admin-guard-cases.ts.
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { type AdminHarness } from "../test-support/admin-harness.ts";
+import { concretePath } from "../test-support/routes.ts";
 import {
-  MISSING_ANSWER_MARKER,
-  createAdminHarness,
-  type AdminHarness,
-} from "../test-support/admin-harness.ts";
-import { concretePath, discoverRoutes } from "../test-support/routes.ts";
-import { isInternalPortalPath } from "./paths.ts";
-
-const MEMBER = { email: "member@example.com", password: "k4Pq-v8Zm2Xw" };
-const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
-
-// The files of the portal live below /instance-portal; the address of a person is /admin
-// (src/admin/paths.ts). `route` is the address a person uses.
-const portalFiles = discoverRoutes().filter(({ route }) =>
-  isInternalPortalPath(concretePath(route)),
-);
-const adminRoutes = portalFiles.map(({ route, file }) => ({
-  route: route.replace(/^(\/api)?\/instance-portal/, "$1/admin"),
-  file,
-}));
-const pageRoutes = adminRoutes.filter(({ file }) => /page\.[a-z]+$/.test(file));
-const dataRoutes = adminRoutes.filter(({ file }) =>
-  /route\.[a-z]+$/.test(file),
-);
-
-async function startPortal() {
-  const portal = await createAdminHarness();
-  await portal.createUser({ id: "member-1", ...MEMBER });
-  const memberCookies = await portal.signIn(MEMBER.email, MEMBER.password);
-  return { portal, memberCookies };
-}
-
-// The answer of a path that is no route of the app (the harness's stand-in for Next.js's 404): nothing
-// of the portal reached, no redirect, no rewrite header.
-function isHidden(response: Response): boolean {
-  return (
-    response.status === 404 &&
-    response.headers.get(MISSING_ANSWER_MARKER) === "1" &&
-    response.headers.get("x-middleware-rewrite") === null &&
-    response.headers.get("location") === null
-  );
-}
+  adminRoutes,
+  isHidden,
+  portalFiles,
+  startPortal,
+  pageRoutes,
+} from "../test-support/admin-guard-cases.ts";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -144,23 +114,6 @@ describe("a visitor without a session", () => {
   );
 
   // #98-AD-01
-  it.each(
-    dataRoutes.flatMap(({ route }) =>
-      METHODS.map((method) => ({ route, method })),
-    ),
-  )(
-    "gets 401 from the data route $route with $method",
-    async ({ route, method }) => {
-      const { portal } = await startPortal();
-
-      const response = await portal.visit(concretePath(route), { method });
-
-      expect(response.status).toBe(401);
-      expect(await response.json()).toEqual({ error: "UNAUTHENTICATED" });
-    },
-  );
-
-  // #98-AD-01
   it("gets 401 from the data route itself when the proxy is not in front, and nothing is changed", async () => {
     const { portal } = await startPortal();
 
@@ -176,30 +129,6 @@ describe("a visitor without a session", () => {
 });
 
 describe("a signed in person who is not an instance admin", () => {
-  // #98-AD-02
-  it.each(
-    adminRoutes.flatMap(({ route }) =>
-      METHODS.map((method) => ({ route, method })),
-    ),
-  )(
-    "gets the 404 of a missing path from $route with $method",
-    async ({ route, method }) => {
-      const { portal, memberCookies } = await startPortal();
-
-      const response = await portal.visit(concretePath(route), {
-        method,
-        cookies: memberCookies,
-        ...(method === "GET" ? {} : { body: { tenancy: "multi" } }),
-      });
-
-      expect(isHidden(response)).toBe(true);
-      expect(await response.text()).not.toContain("reached");
-      expect((await portal.service.readSettings()).tenancy.value).toBe(
-        "single",
-      );
-    },
-  );
-
   // #98-AD-02
   it("is handled by the proxy exactly like a person asking for a path that does not exist", async () => {
     const { portal, memberCookies } = await startPortal();

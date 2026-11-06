@@ -16,6 +16,10 @@ NO_RESULT_REASON = "no_result_from_process"
 DISK_BUDGET_REASON = "disk_budget_exceeded"
 
 
+# #856: the basis of the cost of a turn that ran on a login of the customer's device.
+COST_BASIS_SUBSCRIPTION = "subscription"
+
+
 class ErrorCode(StrEnum):
     """Stable codes a caller may branch on. Never put free text where a code is expected."""
 
@@ -79,6 +83,9 @@ class ErrorCode(StrEnum):
     # A newer push replaced this run while it was running (#396). It stopped sending model requests,
     # published nothing and reports what it used. Not a failure of the job.
     SUPERSEDED = "superseded"
+    # A member asked for this run to stop (#891). The turn was ended, what was committed was pushed
+    # and the usage is reported. Not a failure of the job.
+    CANCELLED = "cancelled"
     # The Implementer (#746). Stable codes a caller branches on; a turn that fails is never run
     # again silently. `COST_LIMIT_REACHED` above is the cost limit of a turn as well.
     # `BRANCH_EXISTS` and `BRANCH_VIOLATION` are no longer produced since git is free in the
@@ -132,6 +139,11 @@ class Usage:
     # The per-call trace of a Dynamic Review without content (#541): `usage.callTrace` of the runner
     # API, built by `dynamic_review/call_trace.py`. None for any other run.
     call_trace: dict[str, Any] | None = None
+    # #856: a turn on the harness claude-code (a login of the customer's device) is not billed
+    # through us: `cost_usd` stays None and `cost_basis` says `subscription`; what Claude Code says
+    # the turn is worth at API prices is `estimated_cost_usd` (None: it did not say).
+    cost_basis: str | None = None
+    estimated_cost_usd: float | None = None
 
     @property
     def used_the_model(self) -> bool:
@@ -154,6 +166,9 @@ class Usage:
             document["limitExceededBy"] = self.limit_exceeded_by
         if self.call_trace is not None:
             document["callTrace"] = self.call_trace
+        if self.cost_basis is not None:
+            document["costBasis"] = self.cost_basis
+            document["estimatedCostUsd"] = self.estimated_cost_usd
         return document
 
 

@@ -61,9 +61,11 @@ comes from (`Sec-Fetch-Site` / `Origin`), the body of the POST for `application/
 - `GET /api/w/:workspace/implementer/repositories/:repositoryId/branches`: `{ defaultBranch, branches, truncated }`, the default
   branch first, at most 100 names (`getRepositoryFacts` and `listBranches`).
 - `GET /api/w/:workspace/implementer/models`: the options of the picker (below).
-- `POST /api/w/:workspace/implementer/tasks` with `{ repositoryId, baseBranch, branch, instruction, model, costLimitCents?, environmentId?, profile?, result?,
+- `POST /api/w/:workspace/implementer/tasks` with `{ repositoryId, baseBranch, startBranch?, branch, instruction, model, costLimitCents?, environmentId?, profile?, result?,
 clientRequestId }`: `201 { runId, sessionId }`, `200` with the same ids for a client request id that was accepted before (nothing
-  is written then). `model` is `{ entryId }` (operator's key) or `{ provider, model }` (own key).
+  is written then). `model` is `{ entryId }` (operator's key) or `{ provider, model }` (own key). `startBranch` (#909) is the branch the new
+  branch is made from when that is not the base (the workflow engine sends it for a step with `branch`); it must exist on the provider
+  (`IMPLEMENTER_BASE_BRANCH_NOT_FOUND` otherwise) and defaults to the tip of the base. The base stays the branch the work is compared with.
 
 | Status    | Code                                                                  | When                                                                                                                                                                                                 |
 | --------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

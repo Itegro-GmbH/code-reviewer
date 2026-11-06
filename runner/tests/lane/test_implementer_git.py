@@ -154,7 +154,9 @@ def test_a_rewrite_of_a_branch_on_the_remote_and_a_workflow_file_are_each_reject
             write_file(repo, "a.txt", "a\n"),
             commit("Good"),
             bash(
-                f"git switch -q --orphan {existing} && git rm -rfq . ; echo fresh > fresh.txt "
+                # The clone has every provider branch (#909): `existing` is a local one to replace.
+                f"git branch -q -D {existing}; git switch -q --orphan {existing} "
+                "&& git rm -rfq . ; echo fresh > fresh.txt "
                 "&& git add -A && git commit -q -m Rewritten; echo '[rewrite]' $?"
             ),
             bash(f"git switch -q {BRANCH}; echo '[back]' $?"),

@@ -28,6 +28,8 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
     "profile_version",
     "profile_instructions",
     "profile_can_push",
+    // #856: the harness of the profile version; null for every turn that exists (it reads OpenCode).
+    "profile_harness",
     // #843: the result schema a task ran with and the result the agent handed in; null for every turn that exists.
     "result_schema",
     "result_value",
@@ -38,6 +40,8 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
     "queued_discarded",
     "queued_attempted_at",
     "queued_first_failed_at",
+    // #909: the branch a session branch is made from apart from its base; null for every session that exists.
+    "start_branch",
   ],
   // #745, step 7: the environment's network rule; every environment that exists reads `off` and no hosts (`DEFAULTS_OF_COLUMNS`).
   // #854: the kind (`hosted`) and the labels (none) of every environment that exists.
@@ -45,7 +49,12 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
   // #818: the size of the VM where the Dispatcher reported it; null for every VM that exists.
   job_vm_runs: ["vcpus"],
   // #845: what started a run; every run that exists was started by hand (`DEFAULTS_OF_COLUMNS`).
-  workflow_runs: ["trigger_kind"],
+  // #891: when a member asked for the run to stop; null for every run that exists.
+  workflow_runs: ["trigger_kind", "cancel_requested_at"],
+  // #891: when a member asked for the running turn to stop; null for every job that exists.
+  jobs: ["cancel_requested_at"],
+  // #856: how to read a settled record without a cost (a subscription turn); null for every record that exists.
+  usage_records: ["cost_basis"],
 };
 
 /** What a column added later holds on an existing row when it is not null: a constant default. */

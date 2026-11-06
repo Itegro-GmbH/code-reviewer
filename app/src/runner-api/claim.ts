@@ -93,6 +93,7 @@ import {
   type DynamicModelCapabilities,
   type DynamicReviewOptions,
   type SplitClaimResponse,
+  type SubscriptionJobInput,
 } from "./contract.ts";
 import type { RunnerEngine } from "../jobs/runner-capabilities.ts";
 import type { JobOptions, JobOptionsSource } from "./job-options.ts";
@@ -102,6 +103,11 @@ import { DEFAULT_TOKEN_LIFETIME_MS } from "./write-token.ts";
 import type { UndeliveredTokenRevoker } from "./write-token.ts";
 import type { GitTokenEntry } from "./claimed-keys.ts";
 import { keyModeForJob } from "../llm/resolve.ts";
+import {
+  CLAUDE_CODE_HARNESS,
+  CLAUDE_CODE_MODEL_PATTERN,
+  CLAUDE_CODE_PROVIDER,
+} from "../runner-identity/harness.ts";
 import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import { callerLlmProviders } from "./requests.ts";
 import { errorResponse, jsonResponse, noContent } from "./responses.ts";
@@ -322,10 +328,17 @@ export type Refusal =
   | { kind: "cancelled"; errorCode: JobErrorCode }
   | { kind: "retry"; reason: string; retryAfterSeconds: number };
 
+/** The answer of a claim as it leaves, which for a turn on the harness `claude-code` (#856) is a job without `llm`. */
+type ClaimAnswer = Omit<ClaimResponse, "job"> & {
+  job: Omit<ClaimResponse["job"], "input"> & {
+    input: AnyJobInput | SubscriptionJobInput;
+  };
+};
+
 type Prepared =
   | {
       kind: "ready";
-      response: ClaimResponse;
+      response: ClaimAnswer;
       entryModel: string | null;
       native: boolean;
       /** #753: the write token of a turn, which the claim remembers before the input leaves and switches off if it cannot. */
@@ -360,6 +373,8 @@ export type Checked = {
     instruction: string;
     branch: string;
     baseBranch: string;
+    /** #909: the branch the session branch is made from when that is not the base; null: the tip of the base. */
+    startBranch: string | null;
     /** The https address the runner clones from and pushes to, with no credential in it (`cloneUrlOf`). */
     cloneUrl: string;
     /** #818: the environment the turn copied when it started; null for a task without one. */
@@ -1083,6 +1098,7 @@ export async function checkJob(
         instruction: turn.turn.instruction,
         branch: turn.session.branch,
         baseBranch: turn.session.baseBranch,
+        startBranch: turn.session.startBranch,
         cloneUrl,
         environment:
           turn.turn.environment === null
@@ -1233,6 +1249,13 @@ export async function buildJobInput(
   // feature reads (the three fields are part of `resume`, a closed object): the turn ends here, free, before any credential exists.
   if (implementer?.resume != null && !features.includes("implementer_resume"))
     return refuse("implementer_engine_unavailable", "reason=resume");
+  // #909: the same for the start branch. A Worker that does not read it would start from the base branch, and the work would grow on a
+  // branch the person did not choose.
+  if (
+    implementer?.startBranch != null &&
+    !features.includes("implementer_start_branch")
+  )
+    return refuse("implementer_engine_unavailable", "reason=start_branch");
   if (costLimit.enforced === "none")
     deps.logger.info(
       `[runner-api] job=${job.id} carries no cost limit: the runner names neither claim feature cost_limit nor operator_cost_limit, so a Dynamic Review is held only to the runner's own RUNNER_DYNAMIC_MAX_COST_USD and a Diff Review to none`,
@@ -1345,6 +1368,9 @@ export async function buildJobInput(
           implementer: {
             repo: { fullName: repo.fullName, cloneUrl: implementer.cloneUrl },
             baseBranch: implementer.baseBranch,
+            ...(implementer.startBranch === null
+              ? {}
+              : { startBranch: implementer.startBranch }),
             branch: implementer.branch,
             instruction: implementer.instruction,
             limits: { timeLimitSeconds: IMPLEMENTER_TIME_LIMIT_SECONDS },
@@ -1483,6 +1509,212 @@ function modelHostOf(
   return host === null ? {} : { modelHost: host };
 }
 
+/**
+ * #856: the claim of a turn on the harness `claude-code`, or `undefined` for every other job. The turn runs on the login of the
+ * customer's device, so none of what makes a model run is done here: no selection, no key, no price, no catalog entry, no usage
+ * selection, and nothing of the login is known to the app. What stays is what makes any turn run: the guard of the project, the
+ * installation's right to write, the git token of exactly this repository, and the facts of the turn. The turn's cost limit becomes
+ * `--max-budget-usd` (the smaller of the profile's and the operator's), the only brake besides the clock.
+ */
+async function prepareSubscription(
+  deps: ClaimDeps,
+  claimed: NonNullable<ClaimResult>,
+  engines: readonly RunnerEngine[],
+  features: readonly ClaimFeature[],
+  split: boolean,
+): Promise<Prepared | undefined> {
+  const { job, leaseToken } = claimed;
+  if (job.reviewKind !== "implementer") return undefined;
+  const turn = await deps.implementerTurn(job);
+  if (turn === undefined || turn.turn.profile?.harness !== CLAUDE_CODE_HARNESS)
+    return undefined;
+  const unbuilt = refusalForKind(job.reviewKind, engines);
+  if (unbuilt !== null) return refuse(unbuilt);
+  // Only a runner of the customer takes it: a Dispatcher's claim (split) and a hosted Worker have no login of a device.
+  if (split || turn.turn.runnerEnvironment == null)
+    return refuse("implementer_config_invalid", "reason=harness_needs_runner");
+  const decision = await deps.guard.check(job);
+  if (!decision.allow)
+    return decision.outcome === "cancel"
+      ? { kind: "cancelled", errorCode: decision.errorCode }
+      : refuse(decision.errorCode);
+  const choice = turn.turn.modelChoice;
+  if (
+    "entryId" in choice ||
+    choice.provider !== CLAUDE_CODE_PROVIDER ||
+    !CLAUDE_CODE_MODEL_PATTERN.test(choice.model)
+  )
+    return refuse("implementer_config_invalid", "reason=subscription_model");
+  // The caller must read what the turn carries, as for any turn: a runner that does not would run it without the profile, or without
+  // the finish tool, or from the base branch.
+  if (!features.includes("implementer_profile"))
+    return refuse("implementer_engine_unavailable", "reason=profile");
+  if (
+    turn.turn.resultSchema != null &&
+    !features.includes("implementer_result")
+  )
+    return refuse("implementer_engine_unavailable", "reason=result");
+  if (turn.turn.number >= 2 && !features.includes("implementer_resume"))
+    return refuse("implementer_engine_unavailable", "reason=resume");
+  if (
+    turn.session.startBranch !== null &&
+    !features.includes("implementer_start_branch")
+  )
+    return refuse("implementer_engine_unavailable", "reason=start_branch");
+  if (job.leaseExpiresAt === null)
+    throw new Error(`Claimed job ${job.id} has no lease expiry.`);
+
+  const repository = await deps
+    .repositories(job.workspaceId)
+    .get(job.repositoryId);
+  const integration =
+    repository === undefined
+      ? undefined
+      : await deps.integrations(job.workspaceId).get(repository.integrationId);
+  if (
+    repository === undefined ||
+    integration === undefined ||
+    integration.status !== "active"
+  )
+    return refuse("git_connection_disabled");
+  if (PLATFORM_OF[integration.type] !== "github")
+    return refuse("git_access_failed");
+  const provider = deps.registry.resolve(integration.type);
+  const repo: RepoRef = {
+    integrationId: repository.integrationId,
+    externalId: repository.externalId,
+    fullName: repository.fullName,
+    url: repository.url,
+  };
+  const cloneUrl = cloneUrlOf(repo.url);
+  if (cloneUrl === null)
+    return refuse("implementer_config_invalid", "reason=clone_url");
+  try {
+    const held = await provider.installationPermissions(integration);
+    if (!held.contentsWrite) return refuse("git_write_not_granted");
+  } catch (error) {
+    return unreadable(
+      deps,
+      job,
+      error,
+      false,
+      "the installation could not be read",
+    );
+  }
+
+  // The budget of the turn in dollars: the profile's limit, the operator's maximum when the profile names none or a higher one.
+  const operatorCents = await deps.operatorCostLimitCents();
+  const cents = Math.min(
+    turn.turn.costLimitCents ?? operatorCents,
+    operatorCents,
+  );
+  if (!Number.isSafeInteger(cents) || cents < 1)
+    return refuse("implementer_config_invalid", "reason=cost_limit");
+
+  let git: GitAccess;
+  try {
+    git = revealGitAccess(
+      await provider.implementerAccess(integration, repo, {
+        readOnly: turn.turn.profile.canPush === false,
+      }),
+    );
+  } catch (error) {
+    if (!(error instanceof IntegrationError)) throw error;
+    deps.logger.error(
+      `[runner-api] job=${job.id} credentials could not be created: ${describeError(error)}`,
+    );
+    if (error.retryable)
+      return {
+        kind: "retry",
+        reason: "git_access_unavailable",
+        retryAfterSeconds: retryAfterOf(error),
+      };
+    return refuse(accessFailureCode(error));
+  }
+  if (git.provider !== "github" || git.botLogin === null)
+    return refuse("git_access_failed");
+
+  let resume: ResumeBlock | null;
+  try {
+    resume =
+      turn.turn.number >= 2 ? await deps.implementerResume(job, turn) : null;
+  } catch (error) {
+    await deps.revokeUndelivered(job, writeTokenOf(git));
+    throw error;
+  }
+  const profile = turn.turn.profile;
+  const input: SubscriptionJobInput = {
+    reviewKind: "implementer",
+    implementer: {
+      repo: { fullName: repo.fullName, cloneUrl },
+      baseBranch: turn.session.baseBranch,
+      ...(turn.session.startBranch === null
+        ? {}
+        : { startBranch: turn.session.startBranch }),
+      branch: turn.session.branch,
+      instruction: turn.turn.instruction,
+      limits: { timeLimitSeconds: IMPLEMENTER_TIME_LIMIT_SECONDS },
+      subscription: {
+        model: choice.model,
+        maxBudgetUsd: (cents / 100).toFixed(2),
+      },
+      profile: {
+        name: profile.name,
+        version: profile.version,
+        ...(profile.instructions === ""
+          ? {}
+          : { instructions: profile.instructions }),
+        canPush: profile.canPush,
+        harness: CLAUDE_CODE_HARNESS,
+      },
+      ...(turn.turn.resultSchema === null
+        ? {}
+        : { resultSchema: turn.turn.resultSchema }),
+      ...(resume === null
+        ? {}
+        : {
+            resume: {
+              turn: resume.turn,
+              branches: resume.branches,
+              checkout: resume.checkout,
+              snapshot: resume.snapshot,
+              ...(resume.previousSummary === undefined
+                ? {}
+                : { previousSummary: resume.previousSummary }),
+              ...(resume.digest === undefined ? {} : { digest: resume.digest }),
+            },
+          }),
+    },
+    git: {
+      provider: "github",
+      baseUrl: git.baseUrl,
+      token: git.token,
+      botLogin: git.botLogin,
+    },
+    env: {},
+  };
+  deps.logger.info(
+    `[runner-api] job=${job.id} selection harness=claude-code key=device`,
+  );
+  return {
+    kind: "ready",
+    entryModel: null,
+    native: false,
+    writeToken: writeTokenOf(git),
+    response: {
+      version: RUNNER_API_VERSION,
+      job: {
+        id: job.id,
+        leaseToken,
+        leaseExpiresAt: job.leaseExpiresAt,
+        heartbeatIntervalSeconds: deps.heartbeatIntervalSeconds,
+        tokenExpiresAt: git.expiresAt,
+        input,
+      },
+    },
+  };
+}
+
 async function prepare(
   deps: ClaimDeps,
   claimed: NonNullable<ClaimResult>,
@@ -1492,6 +1724,15 @@ async function prepare(
   llmProviders: readonly string[] | undefined,
 ): Promise<Prepared> {
   const { job, leaseToken } = claimed;
+  // #856: a turn on the harness claude-code takes its own road: no model, no key and no price are chosen, the login is the device's.
+  const subscription = await prepareSubscription(
+    deps,
+    claimed,
+    engines,
+    features,
+    split,
+  );
+  if (subscription !== undefined) return subscription;
   const checked = await checkJob(deps, job, {
     engines,
     classifyReadFailures: false,
@@ -1699,8 +1940,15 @@ export async function handleClaim(
     maxRunning?: number;
     /** #424: the providers the caller advertised in its claim; absent means the default provider only. */
     llmProviders?: readonly string[];
-    /** #854: the claim is a customer's runner's: only the turns of its workspace's runner environments whose labels it has. */
-    customerRunner?: { workspaceId: string; labels: readonly string[] };
+    /**
+     * #854: the claim is a customer's runner's: only the turns of its workspace's runner environments whose labels it has. #856: and
+     * whose profile's harness it announced as ready.
+     */
+    customerRunner?: {
+      workspaceId: string;
+      labels: readonly string[];
+      harnesses?: readonly string[];
+    };
   } = {},
 ): Promise<Response> {
   // #320: a Dispatcher names `worker_credential` and gets a per-job credential instead of the input.
@@ -1786,10 +2034,10 @@ export async function handleClaim(
 
       // Before the key leaves with the response: if it cannot be remembered, the job is given back (below)
       // and no runner has the key.
-      await deps.claimedKeys.remember(
-        claimed.job.id,
-        prepared.response.job.input.llm.apiKey,
-      );
+      // A turn on a login of the device has no key of ours to remember (#856).
+      const key = prepared.response.job.input.llm?.apiKey;
+      if (key !== undefined)
+        await deps.claimedKeys.remember(claimed.job.id, key);
       if (prepared.entryModel !== null)
         await deps.claimedKeys.rememberModel(
           claimed.job.id,

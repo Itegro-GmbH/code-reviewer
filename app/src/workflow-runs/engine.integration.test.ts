@@ -431,6 +431,7 @@ describe("a turn that was started and not recorded", () => {
       members: app.members,
       profiles: app.profiles,
       environments: app.environments,
+      jobs: app.queue,
       implementer: {
         startTask: async () => {
           throw new ImplementerError(
@@ -732,6 +733,45 @@ describe("the budget over all steps", () => {
     ]);
     expect(state.run.spentMicroUsd).toBe(450_000);
     expect(app.engineLines.join("\n")).toContain("charged=estimated");
+  });
+
+  // #856-T70
+  it("books a subscription turn at its estimate and logs no missing cost for it", async () => {
+    const app = await startEngineHarness({ operatorCostLimitCents: 10_000 });
+    const { runId } = await started(app, withBudget(1));
+
+    await endTurn(app, {
+      agentResult: { summary: "Plan." },
+      subscription: { estimatedCostUsd: 0.25 },
+    });
+
+    const state = await app.stateOf(runId);
+    expect(state.steps[0]).toMatchObject({
+      status: "succeeded",
+      costMicroUsd: 250_000,
+      costBasis: "subscription",
+    });
+    // The estimate of a login is no cost that went unreported: there is nothing to watch.
+    expect(app.engineLines.join("\n")).not.toContain("cost not reported");
+  });
+
+  // #856-T75
+  it("books a step whose report only says it ran on a subscription at the cap, as one whose cost is not known", async () => {
+    const app = await startEngineHarness({ operatorCostLimitCents: 10_000 });
+    const { runId } = await started(app, withBudget(1));
+
+    await endTurn(app, {
+      agentResult: { summary: "Plan." },
+      subscription: { estimatedCostUsd: 0.25, onlyClaimed: true },
+    });
+
+    const state = await app.stateOf(runId);
+    expect(state.steps[0]).toMatchObject({
+      status: "succeeded",
+      costMicroUsd: 1_000_000,
+      costBasis: "limit",
+    });
+    expect(app.engineLines.join("\n")).toContain("charged=limit");
   });
 
   // #844-T74
@@ -1354,6 +1394,7 @@ describe("a failure of the engine", () => {
       members: app.members,
       profiles: app.profiles,
       environments: { listSummaries: async () => [] },
+      jobs: app.queue,
       implementer: app.implementerService,
       turns: {
         read: async () => undefined,
@@ -1409,6 +1450,7 @@ describe("a failure of the engine", () => {
         ),
       },
       environments: app.environments,
+      jobs: app.queue,
       implementer: app.implementerService,
       turns: {
         read: watched("turn", (jobId) => app.turnReader.read(jobId)),
@@ -1458,6 +1500,7 @@ describe("a failure of the engine", () => {
       },
       profiles: app.profiles,
       environments: { listSummaries: async () => [] },
+      jobs: app.queue,
       implementer: app.implementerService,
       turns: {
         read: async () => undefined,

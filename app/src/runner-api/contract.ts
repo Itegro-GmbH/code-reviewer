@@ -67,6 +67,9 @@ export const CLAIM_FEATURES = [
   // named it; a follow-up turn is refused (`implementer_engine_unavailable`, free) for a caller that did not. The app sends no `resume`
   // yet: the follow-up API (the next step of #745) is what produces one.
   "implementer_resume",
+  // #909: the runner reads `implementer.startBranch` and starts the work from that branch instead of the base branch. Sent only to a
+  // caller that named it; a turn with a start branch is refused (`implementer_engine_unavailable`, free) for a caller that did not.
+  "implementer_start_branch",
 ] as const;
 export type ClaimFeature = (typeof CLAIM_FEATURES)[number];
 
@@ -261,6 +264,8 @@ export const RUNNER_ERROR_CODES = [
   "lease_lost",
   // #396: the run was replaced by a newer push; it stopped gracefully and reports what it used.
   "superseded",
+  // #891: a member asked for the turn to stop; it stopped, pushed what was committed and reports what it used.
+  "cancelled",
   // #746: the Implementer (the factory deployment only). Stable codes a caller branches on; a turn that fails is never
   // run again silently. `cost_limit_reached` above is the cost limit of a turn as well.
   "branch_exists",
@@ -477,6 +482,8 @@ export type RunnerJobInput = {
 export type ImplementerJobOptions = {
   repo: { fullName: string; cloneUrl: string };
   baseBranch: string;
+  /** #909: the branch the new branch is made from when that is not the base; absent: the tip of the base. */
+  startBranch?: string;
   branch: string;
   /** The task as the user wrote it, at most 20 000 characters; literal data. */
   instruction: string;
@@ -520,6 +527,33 @@ export type ImplementerJobInput = Omit<
   command?: undefined;
   dynamic?: undefined;
   base?: undefined;
+};
+
+/**
+ * #856: the job of a turn on the harness `claude-code` (`ImplementerJob.subscription`): the login is the device's, so there is no `llm`
+ * and the turn carries neither `cost` nor `modelEntry`. Only a customer's runner that announced the harness as ready is handed one.
+ */
+export type SubscriptionJobInput = Omit<
+  ImplementerJobInput,
+  "llm" | "implementer"
+> & {
+  llm?: undefined;
+  implementer: Omit<ImplementerJobOptions, "cost" | "modelEntry"> & {
+    subscription: {
+      /** A model name as Claude Code reads it; left out, its default. */
+      model?: string;
+      /** The most the turn may be worth at API prices, in US dollars as a decimal string (`--max-budget-usd`). */
+      maxBudgetUsd: string;
+    };
+    /** The profile version names the harness (`ImplementerProfile` in the contract). */
+    profile: {
+      name: string;
+      version: number;
+      instructions?: string;
+      canPush: boolean;
+      harness: "claude-code";
+    };
+  };
 };
 
 /** #753: the input of a job as a claim or a Worker's fetch hands it out: a review's, or a turn's. */
@@ -587,6 +621,8 @@ export type HeartbeatResponse = {
     leaseExpiresAt: string;
     /** #396: a newer push replaced this run (only for a claim that named the feature `supersede`). */
     superseded?: boolean;
+    /** #891: a member asked for this run to stop; the runner ends the turn, pushes what is committed and reports `cancelled`. */
+    cancelRequested?: boolean;
   };
 };
 
@@ -604,6 +640,12 @@ export type RunnerUsage = {
   limitExceededBy?: number;
   /** What each call was, without content (#541). Absent for a runner that sends none and for a Diff Review. */
   callTrace?: RunnerCallTrace;
+  /**
+   * #856: `subscription` for a turn that ran on the login of a customer's device. Such a turn is not billed through us (`costUsd` is
+   * null); `estimatedCostUsd` is what Claude Code says it is worth at API prices, shown as an estimate and never added to a total.
+   */
+  costBasis?: "subscription";
+  estimatedCostUsd?: number | null;
 };
 
 /** The engine's tools as the trace names them; every other tool a model called is `other` (#541). */
@@ -873,7 +915,7 @@ export type CompleteResponse = {
    */
   job: {
     id: string;
-    status: "succeeded" | "failed" | "queued" | "superseded";
+    status: "succeeded" | "failed" | "queued" | "superseded" | "cancelled";
   };
   alreadyCompleted: boolean;
 };

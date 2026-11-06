@@ -18,7 +18,7 @@ export type ProfileVersionFacts = {
   defaultResult?: ResultSchema;
   /** Whether the version's model is a managed one (an entry of the catalog, on the platform's key), as opposed to one of the workspace's own key (#854). */
   managedModel?: boolean;
-  /** The harness the version runs with (#854); left out: OpenCode, the only one profiles know today. */
+  /** The harness the version runs with (#854, #856); left out: OpenCode. */
   harness?: string;
 };
 

@@ -8,6 +8,7 @@ the runner is built and used, and what was **measured** before it was built; it 
 - [Registration and routing](#registration-and-routing-r1a-854): how a machine becomes a runner of a workspace (R1a).
 - [The Factory-Runner](#the-factory-runner-r1b-854): the service, the `factory-runner` command, the image, installation for a
   developer and operation in a VM (R1b).
+- [Claude Code, R3](#claude-code-r3-856): the first slice of the Claude Code harness (adapter core) and what is left.
 - [Spikes R0](#spikes-r0-853): what was measured on a real VM before the build.
 
 ## Registration and routing (R1a, #854)
@@ -257,6 +258,19 @@ itself between two jobs, and reads a changed configuration when it next starts: 
 run also finds the newer release and stages it, as `factory-runner update` does, and **never installs an older or a rolled-back one**.
 `--purge` is only valid with `--uninstall`.
 
+**The memory of a rollback is read with the installed image, and fails open.** The installer reads `rejected-release` (see "Updates") with
+`factory-runner:current`, the only thing on the machine that can read the volume. A file that exists but cannot be read, or holds no whole
+number, does not stop the install: it is ignored with a warning on the standard error, and a release that was rolled back may then be
+installed again. No file is the normal case and says nothing. **After `--uninstall` without `--purge` and a new install** there is no image
+yet when the installer decides, so it cannot read the file even though the volume still has it: it may install the release that was rolled
+back (the uninstall says so). To keep the block, write the number into the file again after the install (see "Updates", "the way back by
+hand") or `--purge` and start over; the running service reads the file and takes no release up to that number from then on.
+
+**A fresh pull can lose its digest reference.** The service removes the digest references of old releases when it starts (see "Updates"),
+and so a pull by digest that is not named yet (`tag`) is one of them. Both the installer and `factory-runner update` pull a second time
+when the reference is gone before the tag (the pull is by digest: the same image) and fail with "could not be named" after the second
+one; the next run succeeds.
+
 `--dry-run` says what it would do and changes nothing. `--uninstall` removes the service, the command and the images and keeps the
 configuration and `/work`; `--uninstall --purge` removes those too (revoke the runner in the app: its credential keeps working
 until then). Afterwards the firewall tables Control left in the machine's network namespace (the security notes below) are deleted
@@ -266,7 +280,8 @@ by `nft delete table ...` or at the next restart of the machine.
 terminal (`--yes` accepts the warnings when there is none). **The question comes before the first change** (the image, the unit, the
 registration), with the checks it needs and the download of the package and its SHA-256 check; with no terminal and no `--yes` the
 installer stops there with "nothing was changed". Any answer but `yes` is not a failure: the base installation goes on without Sysbox.
-Only then does the package go in, after `/etc/docker/daemon.json` was copied to `daemon.json.factory-runner-backup`:
+Only then does the package go in, after `/etc/docker/daemon.json` was copied to `daemon.json.factory-runner-backup` (a backup that exists
+already, from an earlier `--sysbox` run, is **kept**: a second copy would be the file the package rewrote, not the original):
 
 - it installs the package `sysbox-ce 0.7.1` (the version of the golden snapshot, checked against its SHA-256);
 - the package **rewrites `/etc/docker/daemon.json`** (a copy is kept next to it first): the `sysbox-runc` runtime, `bip` 172.20.0.1/16 and
@@ -336,7 +351,7 @@ docker run -d --name factory-runner --restart unless-stopped --stop-timeout 150 
 | `register [--token-file F \| --token T] [--name N] [--labels a,b] [--url U] [--cpus] [--memory-mb] [--disk-gb] [--runtime] [--agent-image] [--force]` | Exchanges the token for the runner's credential (read from `--token-file`, `-`, `FACTORY_RUNNER_TOKEN` or `--token`, see above) and writes the configuration (file mode 0600, directory 0700). If the app accepted the token but the file cannot be written, it says `runner registered, but its credential could not be saved: revoke it in the app and register again` and ends with exit code 8: the credential is shown once and is lost. Refuses to replace a registration without `--force`. Without `--url` it goes to `https://code-review.com`. The manifest of the registration is empty: `run` announces what the self-test proved. |
 | `run`                          | The service loop (below).                                                                                                                  |
 | `run --once [--wait SECONDS]`  | Takes **one** job and ends with its exit code. With no job within `--wait` (default 600) it ends with **exit code 0** and the line `no job for the labels of this runner within Ns: nothing to do`. |
-| `selftest [--json]`            | Proves the base (below). Exit code 0 when it holds, 5 when it does not. Needs no registration. It only looks: it pulls and names no image, so a missing or not pinned agent image is reported as not ready (a starting `run` pulls it). It may run beside a service; its throwaway container is one more on the daemon for the seconds it takes. |
+| `selftest [--json] [--with-claude-code]` | Proves the base (below). On a device with a Claude Code login it also looks at Claude Code (no model call); with `--with-claude-code`, by hand, it runs one tiny real turn on that login (a few cents of your subscription, see "Claude Code with your subscription"). Exit code 0 when it holds, 5 when it does not. Needs no registration. It only looks: it pulls and names no image, so a missing or not pinned agent image is reported as not ready (a starting `run` pulls it). It may run beside a service; its throwaway container is one more on the daemon for the seconds it takes. |
 | `config show`                  | The configuration as the runner sees it (file and environment), the credential only as `set` / `not set`.                                  |
 | `config set [--name N] [--labels a,b] [--cpus N\|none] [--memory-mb N\|none] [--disk-gb N\|none] [--parallel N] [--runtime R] [--agent-image I\|none] [--auto-update on\|off]` | Changes the file **on the device** (labels, limits, parallelism, name, runtime, image, automatic updates). Every value goes through the check of `register`; one wrong value changes nothing. `none` removes a limit. The credential and everything not named stay as they are, and the environment is never written into the file; when a variable overrides a setting that was changed, it says so. A running service reads the file when it starts: restart it after its job. `--parallel` accepts 1: this runner takes one job at a time. |
 | `credential show`              | `credential: set (from the file)` or `not set`, and how old it is. Never the value.                                                         |
@@ -462,6 +477,22 @@ streams the words, ends with the usage the model gave. No network, no key, no mo
 only under `sysbox-runc`: a container is made from a file of the image and run in the agent's own Docker.
 What it does **not** prove is covered elsewhere: the door and the git rules by the unit and lane tests of the Implementer, the
 Sysbox wall by a VM with Sysbox.
+
+**Claude Code in the self-test** (#856, `factory_runner/claude_code_selftest.py`). A device that has a Claude Code login gets more lines after
+the base; a device with none gets none. They are a capability like `agent-docker`: a failing one is said and never costs the base (the names
+start with `claude-code`, and `base_ok` and the exit code leave them out).
+
+- **By default, readiness only, no model call, no cost:** `claude-code-login` (the token file or variable is usable; the value is never
+  printed), `claude-code-layer` (the layer with the pinned version is on the daemon; it says whether it was checked against the pinned
+  digests or is a version the device chose), `claude-code-version` (`claude --version` as the unprivileged user in a throwaway container made
+  from the layer: no network, no volume, no login in it, removed afterwards; it must report the version the layer was built for).
+- **`selftest --with-claude-code`, by hand only:** after readiness, one **real turn** with the device's real login, in the container and behind
+  the network door of a job (the forced rule: `api.anthropic.com`, port 443), with the prompt "Reply with the single word: ok", the model
+  alias `haiku` and a budget of $0.25. It is a real call to Anthropic: it costs a few cents of the user's subscription (the line prints the
+  estimate at API prices, "through your subscription") and bills nothing. A failure is the exit code 5 then (by default a Claude Code line
+  that fails is only said). Nothing automated runs it: the service loop and the tests never do (the tests use doubles for the door and the
+  container and a scripted `stream-json`).
+- The line `claude-code: ready; no model was called (...)` says which depth ran.
 
 ### Limits
 
@@ -701,11 +732,274 @@ What the tests cannot know and the first install must check (nothing of this run
 - **SIGTERM during the self-test** (N4) comes before the signal handlers are installed and ends the process at once; nothing is claimed.
 - **No warning for a `config.json` that is too open** (N5): the file is written 0600 in a 0700 folder, but a mode changed later is not noticed.
 - **`proven` under `runc`** (N6): the name of the sandbox proof says only that the self-test passed; under `runc` there is no Sysbox wall (see the security notes).
-- **No proxy for the app client** (N7): the runner talks to the app directly (`HTTPS_PROXY` is not read).
+- **No proxy for the app client** (N7): the runner talks to the app directly (`HTTPS_PROXY` is not read). The release documents of an update
+  (manifest, signature) are fetched through the proxy of the environment (`https_proxy`, `no_proxy`) as the installer's `curl` does; the pull of
+  the image is the daemon's, with the daemon's own proxy settings.
 - **`register --force`** (N8) replaces the local file and leaves the old runner in the app's list: revoke it there.
 - **The credential file** is as safe as the machine: whoever reads it is the runner. Revoke the runner in the app if the machine is lost.
 - **The page's command** shows `factory-runner register --token ...` without an address; the command goes to `https://code-review.com`.
   `--url` is for another app.
+
+## Claude Code with your subscription
+
+This is for the person who runs a runner and wants jobs of the harness **Claude Code** to use **their own Claude subscription**. The technical
+parts are in "Claude Code, R3" below.
+
+### What runs where
+
+- **On your device:** the runner, Docker, and for each job a container with Claude Code in it. Claude Code is **Anthropic's program, unmodified**.
+  We do not ship it: the first start of the runner builds a layer on your agent image that installs the pinned version (2.1.311) from the npm
+  registry and accepts it only with the SHA-512 digests pinned in the runner, for both the npm package and the platform program (linux x64 and
+  arm64). The model traffic goes **from your device straight to `api.anthropic.com`**, on your subscription. It does not pass through our servers.
+- **At code-review.com:** the job (which repository and branch, the instruction, the profile), the live view of the steps, the result, the usage
+  numbers and the cost estimate. The app learns that your runner has Claude Code ready (a word in the runner's manifest); it never learns the
+  login.
+- **Your login** is a token you make with `claude setup-token` and keep on the device: in a file `claude-code-token` in the runner's home
+  (`$FACTORY_RUNNER_HOME`), or the file named by `FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE`, or in `CLAUDE_CODE_OAUTH_TOKEN` of the runner's
+  environment. A file must be a plain file (no link) that only its owner can read (mode 0600). The token **is never stored in our app or
+  database, never sent to the app and never written to a log** (the runner's log masks it). It is handed to Claude Code's process in the job's
+  container for the length of the job, and to nothing else.
+- Set it up, then look: `factory-runner selftest` shows the login, the layer and the version without calling a model;
+  `factory-runner selftest --with-claude-code` runs one tiny real turn on your subscription (a few cents) so that you know the login works.
+
+### What the guards do, and what they do not
+
+The agent is **free inside its container** (no list of allowed tools): it can read files, run commands and edit the repository. Claude Code
+needs the token in its environment, so **the agent's own commands can read the token**. We do not pretend otherwise. The guards are at the exits:
+
+| Guard | What it does | What it does not do |
+| ----- | ------------ | ------------------- |
+| Network rule | The container's only way out is a door that lets through `api.anthropic.com` on port 443 and nothing else (no other host, no IP address, not port 80). An environment that allows more refuses the job. | It cannot tell what is said to Anthropic. |
+| Push guard | Before a branch is pushed, the runner reads what it adds (files, names, commit messages, the branch name) for the token and its plain, URL-quoted and base64 forms. A branch with a hit is not pushed; one it could not read to the end is not pushed either. | **It is a net, not a wall.** It does not find a token that was hex-encoded, compressed (gzip, tar, zip), rot13, reversed or split over several lines or files. An agent that is told to hide the token can. |
+| Redaction | The token and the job's other secrets are taken out of the step records, the answer text and the report before they leave the runner. | The same limit: exact forms only. |
+| Container | No new privileges, an unprivileged user, memory and CPU limits, a budget per message (`--max-budget-usd`) and the job's clock. | A budget is checked when a message ends: it is a brake, not an exact limit. |
+
+Treat the token like any key on that machine: the runner's host should be one you trust, repositories you let it work on are repositories you
+let an agent act on, and a revoked or rotated token (`claude setup-token` again) ends the exposure. If you suspect a leak, revoke the token at Anthropic.
+
+### What it costs
+
+Claude Code reports a price at API list prices for each turn. The app shows it as **"≈ $0.42 through a subscription"** (or "no estimate,
+through a subscription" when Claude Code could not price every model): an estimate, **never billed by us, never added to a total** of
+the usage. A workflow's budget counts the estimate (so a run can still stop at its limit). What the subscription itself costs, and its usage
+limits, are between you and Anthropic: when the subscription's limit is reached the job ends with `llm_quota`. The minutes of a run on your
+runner are counted as for any other run today; whether runs on your own subscription and device should be free of them is not decided,
+and this page will say when it is.
+
+### Anthropic's terms
+
+Using Claude Code with your subscription is subject to **Anthropic's terms**, and they are yours to read and keep: the **Consumer Terms of
+Service** (for Free, Pro and Max accounts, https://www.anthropic.com/legal/consumer-terms), the **Commercial Terms of Service** (for Team,
+Enterprise and API use, https://www.anthropic.com/legal/commercial-terms), the **Usage Policy** (https://www.anthropic.com/legal/aup) and
+Claude Code's own "Legal and compliance" page in Anthropic's documentation. They decide, among other things, what you may do with a
+subscription token and how automated use is counted. **We do not claim that Anthropic has approved unattended or automated runs on a
+subscription**; that question is open with Anthropic, and until it is answered you use your subscription this way on your own responsibility.
+Use of your own credentials on your own device is the design (we never hold or resell a login), but it does not replace reading the terms.
+
+## Claude Code, R3 (#856)
+
+R3 adds Claude Code as a harness that a runner announces when its device has a login for it. **The first slice was the adapter core**:
+the pieces that start Claude Code headless in the agent's container, read what it prints and announce it. **The second slice wires it
+into a job** (section "Wiring into a job"): a profile names the harness, the claim routes by it, the runner runs it on the device's
+login behind the gates; "What is left" says what remains.
+The code is [`runner/src/code_reviewer_runner/implementer/claude_code/`](../runner/src/code_reviewer_runner/implementer/claude_code).
+
+### Rules it keeps (owner, 2026-11-05)
+
+- Claude Code is used **unmodified, with each user's own credentials, on the customer's device** (our runner). No resale. The login is
+  a token the customer makes with `claude setup-token`; it is **never stored in our app or its database, never sent to the app, never
+  logged**, and there is no Claude login in our app. The operator key never goes to a runner.
+- **The agent is free inside the sandbox**: `--permission-mode bypassPermissions`, no `--allowedTools` (a closed list of tools). Only
+  money, key and exits are guarded.
+- **Not as root, and not on `IS_SANDBOX=1`.** Bypass mode refuses to run as root unless `IS_SANDBOX=1`, which Anthropic does not
+  document; it is not relied on. Claude Code runs as the unprivileged user `agent` (uid 10201) of the install layer; root stays for the
+  set-up (the runner hands `/work/repo` and `/work/result` to that user before the first turn). What the agent loses against the hosted
+  OpenCode agent (root, `apt`) is the price of this rule; the reader that takes the repository after the turn already copes with files
+  of another uid (`reader.py`).
+- **Cost** of a subscription turn is an estimate: Claude Code's `total_cost_usd` is the list price of the usage, and the adapter takes
+  it only when Claude Code priced **every** model of the turn from its list (`costBasis: list`); otherwise it is unknown, never a number.
+  The display is "≈ <amount> through a subscription", never billed, never added to our totals. The app books it for the budget of a
+  workflow run (below, "Cost").
+
+### The parts
+
+| Part | File | What it does |
+| ---- | ---- | ------------ |
+| Events | `events.py` | `LineSplitter` (whole JSON lines out of chunks, bounded), `ClaudeEvents` (each `stream-json` event becomes the engine-shaped event the unchanged `StepConverter` reads, so the bounds, the redaction and "a tool's output is never recorded" stay where they are: a failing tool is recorded as the word `failed`, only the finish tool's refusal keeps its text; a finished tool, message and block is forgotten), `parse_result` (the `result` event: how the turn ended, the text, the session, the estimate: only a finite, non-negative, list-priced figure, otherwise unknown). Failures are told from structured fields only (`errors`, `subtype`, the `error` of the assistant message, `api_error_status`), never from the text of a result. |
+| Command | `command.py` | `claude -p --output-format stream-json --verbose --include-partial-messages --permission-mode bypassPermissions --setting-sources user --strict-mcp-config [--model m] (--session-id id \| --resume id) [--max-budget-usd n] [--append-system-prompt text] [--mcp-config json]`. The prompt is the standard input, the login is in the environment, never in the argument list. `--setting-sources user` and `--strict-mcp-config` keep the repository's settings (hooks, permissions) and `.mcp.json` out: what the repository holds is data. `ENABLE_TOOL_SEARCH=false` puts the finish tool's schema in the first request; telemetry, updates and error reports are off. `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` is **not** set: it exists in 2.1.311 but forces the permission mode to `default` and wants bubblewrap (see "What is left", 7). |
+| Login | `login.py` | The token from `FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE`, else `claude-code-token` in the runner's home, else `CLAUDE_CODE_OAUTH_TOKEN` in the runner's environment. A file must be a plain file, not a link, readable only by its owner (0600), one token on one line. A problem is described in words, never with the value. |
+| Layer | `layer.py` | The install layer, **built on the device** on top of the agent image through the Engine API (`DockerApi.build_image`) and cached under `code-reviewer-agent-claude-code:<version>-sha512-<digest prefix>-<base id>` (verified) or `...:<version>-unverified-<base id>`; the tag **and** the labels (`com.code-reviewer.claude-code`, `.integrity`) say which, and `find_layer` compares both, so an unverified layer is never taken for the pinned one. The pinned version (2.1.311, the npm `stable` of the R0 spike): its **npm package, which is only a stub**, and the **platform package that holds the program** (`@anthropic-ai/claude-code-linux-x64` or `-arm64`, the glibc builds; the agent image is Debian) are each fetched as a tarball by `npm pack` and **accepted only with their own pinned SHA-512** (`CLAUDE_CODE_INTEGRITY`, `PLATFORM_INTEGRITY`), checked with `sha512sum -c` under `set -e` so a changed digest fails the build; then both are installed from the two files with `npm install --offline`, so npm resolves nothing from the registry on its own. The architecture is the one of the daemon's machine (`uname -m`); a machine of another architecture or libc has no pinned program and cannot build the pinned layer. The layer's labels carry a fingerprint of the platform digests (`com.code-reviewer.claude-code.platform`) and the tag a short form of it, so a layer built when only the stub was pinned is not taken for the pinned one and is built again. The program must report the version, and the user `agent` is made. The device may choose another exact version (`FACTORY_RUNNER_CLAUDE_CODE_VERSION`; no digest to compare then, for neither package; the pinned version named there keeps its digest checks). We never publish or ship Claude Code. |
+| Agent | `agent.py` | `ClaudeCodeAgent`: the surface of `ImplementerAgent` (`start`, `turn`, `stop`, `steps`, `session_id`, `resume`, `step_notes`) for a process-per-message engine. A turn is `claude -p` as an exec in the agent's container (`AgentContainer.run_streaming`), the lines go to the step feeder as they come, the end is the `result` event. A second message is `--resume <id>` in the same container. An empty session volume ("No conversation found", said in `errors`, with no model call) starts a fresh session under the same id and reports `summary_only`. Failures: budget exhausted = `cost_limit_reached`, no login or an expired or revoked token (the `authentication_failed` error, status 401) = `llm_auth`, the subscription's usage limit (`rate_limit`, `billing_error`, status 429 or 402) = `llm_quota`, no result = `implementer_engine_unavailable` with the exit code. |
+| Finish tool | `agent.py`, `result_channel.py` | The same stdio shim as OpenCode's (`factory-submit mcp`), written into the container with the schema, named to Claude Code as the MCP server `finish` (tool `mcp__finish__submit_result`). The server validates; Claude Code does not. |
+| Manifest | `readiness.py`, `factory_runner/prepare.py` | `claude-code` is announced when the device has a login for it: `ready: true` when the token is usable and the layer is on the daemon (a start builds a missing one, the `selftest` command only looks), `ready: false` with a note in the log when not. A device with no login says nothing. It is added beside OpenCode, never instead, and only on a machine whose base holds. |
+
+### Verified
+
+- **Unit** (`tests/unit/test_claude_code_*.py`, `test_docker_api_build.py`, the streamed-command cases of `test_agent_container.py`):
+  every rule above, with doubles for the container and the daemon.
+- **Engine** (`tests/engine/test_engine_claude_code.py`, in the engine suite, no network): the **real, pinned Claude Code** started
+  with the adapter's own command line and environment against the strict fake provider of `fakes/wire` behind a made-up key. A turn
+  with a thought, a read, a command and a closing text, whose events make the records of the live view and whose result is priced; the
+  finish tool through Claude Code's real MCP client (a wrong result refused with its reason, a right one accepted, the first request
+  carries the schema); a second message that resumes the session and sends the whole history; a session that does not exist; no
+  login; a budget that ends the turn; the finding that `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` forces the default permission mode (so it is not set); and a repository whose `.claude/settings.json` hook and `.mcp.json` server **do not run** (with
+  a control that shows they do under the other setting sources). `scripts/fetch_claude_code.py` installs the pinned version with npm
+  and accepts the npm stub and the platform program tarball of the host (linux x64 or arm64, glibc) only with their pinned digests, installs them from the files with `--offline`, and reuses a cached install only with both verified tarballs kept beside it (another host is refused); CI caches it. The engine tests were run locally against Claude Code 2.1.304 and
+  against the pinned 2.1.311; the first run against the real program found that "No conversation found" is in `errors`, not in
+  `result`, and that a device that is not logged in answers `subtype: success` with `is_error: true`.
+- **Not run here** (this host has no Docker daemon): building the layer, a turn inside the container as the user `agent`, the ownership
+  of what that user writes into the repository volume, and a run under Sysbox. They need the Docker lane.
+
+### Wiring into a job (second slice of #856)
+
+A profile version can name the harness `claude-code`; a turn started with it is run by a runner that announces the harness as **ready**,
+on the login of that runner's device. Everything below is tested at the lowest level that can prove it; what only a Docker daemon can
+show is the lane (CI).
+
+**The harness on the profile.** `profile_versions.harness` and `implementer_turns.profile_harness` (migration `20261105210000`, expand
+only, null reads as `opencode`). The model of such a profile is `{"provider": "claude-code", "model": "<name Claude Code reads>"}` (for
+example `sonnet`, `claude-sonnet-5-5`): no catalog entry, no key of the workspace and no price stand behind it, so the model check of
+the catalog is skipped and the provider name `claude-code` is refused on any other harness. Starting a task with such a profile in an
+environment that is not a runner's is refused before anything is written (`IMPLEMENTER_HARNESS_NEEDS_RUNNER`, 422); the workflow check
+`harness_needs_runner` says the same for a workflow.
+
+**Routing.** The claim of a customer's runner takes a turn only when the harness of its profile is one of the harnesses the runner
+announced as ready (`jobs-claim.ts`: `coalesce(profile_harness, 'opencode') = any(harnesses)`); the Dispatcher's and the shared token's
+claim never take a turn on `claude-code`. A runner whose `claude-code` is not ready, or that does not announce it, leaves the turn
+queued for one that does.
+
+**The job.** A turn on `claude-code` is handed to the runner as a job without `llm`, without `implementer.cost` and without
+`implementer.modelEntry`; it carries `implementer.subscription` (`{model?, maxBudgetUsd}`) and `implementer.profile.harness`
+(`contracts/runner-api.v1.json`; the schema and the runner's parser refuse a job that mixes the two shapes). The app chooses no model,
+reads no key and records no selection for it; `maxBudgetUsd` is the smaller of the profile's cost limit and the operator's maximum, in
+dollars, and becomes `--max-budget-usd`: with no model door there is no ledger, so the budget and the job's clock are the only brakes.
+Claude Code counts the flag per process and every message of a turn is another process (the instruction, the extra message for a dirty
+tree, the reminder for a result), so the agent passes each message **what the earlier messages left** of the budget (the cap less their
+estimate, `ClaudeCodeAgent._budget_left`); a spent budget sends no further message (the extra messages are skipped, the first one
+cannot be). If an earlier message was not priced, the leftover is unknown and the turn sends one extra message at most (two messages
+in all, each with the whole cap).
+The login is never in a job: the job process reads it from the file the runner hands it by **path** (`FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE`,
+resolved from the runner's own configuration; a login that only the runner's environment holds is handed on in
+`CLAUDE_CODE_OAUTH_TOKEN`, and the runner's log masks it).
+
+**Cost.** The usage of such a turn has `costUsd: null`, `costBasis: "subscription"` and `estimatedCostUsd` (null when Claude Code did
+not price every model): an estimate, never billed. A turn a member cancels reports the same (the job host keeps the usage the process
+printed). The app keeps both fields (`parseUsage`); the AI price of the run is nothing (`costUsd` is null, so the run is settled as
+"AI cost unknown": only the minutes, never the AI price). The budget of a workflow run counts the estimate at API prices (0 when there
+is none) with the step cost basis `subscription` ("estimated, not billed" on the run page), not the cap with the basis `limit`; the
+`costUsd` fact of the step is that estimate. A turn of the harness that left no usage at all (killed) is booked at 0 as well. The
+estimate is never a charge and enters no total of billing.
+
+**Gates** (the token is visible inside the agent's container; the decision of the lead, which the owner may revise, is to accept that
+and to guard the exits):
+
+| Gate | Where | What |
+| ---- | ----- | ---- |
+| Push guard | `implementer/push_guard.py`, `GitWorkspace._login_secret_in` | Before a branch is pushed the runner reads what it adds beyond where the turn started (`git rev-list --objects` and `git cat-file --batch` in the mirror: commits, trees with their names, blobs, and the name of the branch) for the token and its spellings (`redaction.secret_forms`: as it is, URL-quoted, and base64 and base64url, with and without padding, at each of the three alignments the token can have inside a larger base64 text). Found: the branch gets the reason `login_secret` and is not pushed; the task's branch ends the turn `push_rejected`. Not read to the end (too large, a failed git, a timeout): `unchecked`, not pushed (it fails closed). Bounds: 300 s per read, a 64 MiB object list, 4 GiB of content. **It is a net, not a wall**: it finds the token and the spellings above, in plain text. It does not find the token hex-encoded, compressed (gzip, tar, a packed or zipped file), rot13 or otherwise shifted, reversed, or split over several lines or files. An agent that is told to hide the login can; the guard stops the accident and the lazy case, and the decision to accept the login in the agent's environment (follow-up 5) stands on the network gate, the owner's own device and the owner's own subscription. **Time**: the final push keeps 40 % of its seconds for the guard (`GUARD_SHARE`: 10 of the 25 s of a stop, 40 of the 100 s of a normal end); the fetch of a branch, the question to the lease and the push stop before that slice, and what the guard does not use goes back to the push of the last branch. So a stop (a cancelled run, a stopped Worker) or a slow fetch cannot leave the guard a second and turn committed work into `unchecked`. |
+| Redaction | `claude_code/agent.py`, `job_run.result_of` | The agent's `Redactor` knows the login: the step records, the turn's text and note are redacted in the agent; the job's secrets (the login included) are taken out of every text of the report (branch names, commit subjects, paths, the summary) and of the log line. Exact forms only for the facts of the report: a commit subject "fix authorization header" is not a secret. No snapshot export and no transcript volume exist for this harness yet (design: "Resume across containers"), so there is nothing else to scrub; the design redacts the transcript with the login too and scans it again before it is stored. |
+| Network | `claude_code/gates.py`, `session._start_network`, `job_run.production_setup` | A subscription turn is forced onto the network door with the rule `list` and exactly `api.anthropic.com` (an exact name, no suffix). An environment that is `open`, or lists any other host, refuses the turn (`implementer_config_invalid`, detail starting `subscription_network_open` or `subscription_network_hosts`), free, before the container exists. The door dials ports 80 and 443 only (`netdoor/proxy.py`), and a listed host has both in every rule; **the entry of a subscription turn has 443 only**: the runner's `NetworkRule` has an optional `ports` (a subset of the door's two, a list only; empty = both), it travels in the door's start document (`parse_door_rule`) and not in the contract (a job's or an environment's rule is still exactly `mode` and `hosts`, so no app change), and the door refuses port 80 for it with `port_not_allowed` (CONNECT and plain HTTP alike). The door container's own firewall table still lets 80 and 443 out; the proxy is what narrows it, so the narrowing is the proxy's word, not the kernel's. The rule applies to all hosts of its list (the subscription rule has one). **The model network.** A turn on this harness has no model door, and the model door is what otherwise makes the model network that the network door and the agent's container join; the unit tests had always made the network by hand, so this path never ran against a daemon that did not have it. The network door now makes it when it is missing (`netdoor_launcher._ensure_network`, the same document and labels as the model door's, so the runner's sweep finds a leftover) and removes it with itself only when it made it; beside a model door nothing changes. Proven against the fake daemon (`test_netdoor_launcher.py`) and, on a real one, by the lane test `test_network_door_alone.py` (CI). |
+| Readiness per job | `claude_code/readiness.ready_harness`, `job_run.run_implementer_job` | The manifest said ready at the start; the job looks again (the login file, the layer on the daemon; nothing is built). A device that cannot refuses the job (`implementer_engine_unavailable`, detail starting `harness_not_ready`) and never falls back to OpenCode. |
+| No new privileges | `agent_container.agent_document(no_new_privileges=True)` | The container of the Claude Code agent is made with `no-new-privileges`; the hosted OpenCode agent is root and free and keeps its container as it was. |
+
+**A limit.** A turn on `claude-code` cannot run in an environment with a setup script yet (`subscription_setup_script`): the layer is built on
+the golden image, and the image a script leaves is not that. A runner environment has no script of the app's anyway (`copyEnvironment`
+copies its labels only); the combination can only come from a hand-made job.
+
+### What is left of R3 (follow-ups of #856)
+
+1. **Resume across thrown-away containers** (designed, not built; see "Resume across containers: design" below). Until then a follow-up
+   turn on this harness continues from the summary of the earlier turns (`summary_only`, reason `no_snapshot`). The adapter already
+   resumes within a container and falls back to a fresh session when the volume is empty.
+2. **Cost in the app** (done: the Runs page and the workflow run page say "≈ <amount> through a subscription", a subscription record is
+   no unknown cost and no total; see "Cost in the app" below). Left: a per-workflow switch that lets a budget ignore the estimate. **Owner question**: should a subscription turn on a customer runner be
+   free of infra minutes and of the balance check at claim? Today it is not (the minutes are billed as for every job and the claim checks
+   the balance).
+3. **The self-test for Claude Code** (done in the fourth slice, "Claude Code in the self-test" above: readiness by default, one real tiny
+   turn only with `--with-claude-code`). Left: a canned Anthropic provider inside the container, so that "ready" could mean "ran a turn" without
+   the user's login and without a cent, and a lane test that builds the layer and runs a turn as the user `agent` behind the door.
+4. **Docs for customers, including Anthropic's terms** (done: "Claude Code with your subscription" above). **Open with the owner**: plan S3, the
+   written question to Anthropic whether unattended runs with a subscription token are allowed; the docs say plainly that we do not claim they are.
+5. **The login is in the environment of the agent's tools** (decided for now: accept it and guard the exits, above). Claude Code needs it
+   there, and a command the agent runs (`env`) can print it; the output is not recorded in the step records, but it is in the agent's own
+   session and in anything the agent writes. The switch that would scrub it, `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` (measured on 2.1.311 with
+   the real program), **forces the permission mode to `default`** ("Declare allowedTools explicitly") and requires bubblewrap, so every
+   tool waits for an approval in a headless run; it contradicts "the agent is free inside the sandbox" unless the owner accepts an
+   explicit tool list (`--allowedTools`). Options for the owner: (a) an explicit, complete list of Claude Code's tools and the switch,
+   with bubblewrap and a user namespace in the container (not available under default seccomp), (b) hand the token in through a file
+   descriptor (`CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` exists in 2.1.311; not measured: whether the tools inherit the descriptor, and
+   `docker exec` can only pass the standard streams), (c) what this PR does.
+6. **Pin the platform tarball with its own digest** (done in the fourth slice: layer and `fetch_claude_code.py`; the musl builds and other systems are not pinned).
+7. **Layer cleanup and a non-blocking build at start** (a start builds a missing layer synchronously; old layers stay on the daemon).
+8. **A port in the network rule** (done in the fourth slice: `NetworkRule.ports`, 443 for the subscription rule; the app's environment rule has no ports). Left: a dedicated error code for
+   the refusals above instead of `implementer_config_invalid` with a reason word.
+9. **An environment with a setup script on this harness** (the layer on top of the image the script leaves).
+
+### Cost in the app (#856, third slice)
+
+A subscription turn reports `costUsd: null`, `costBasis: "subscription"` and `estimatedCostUsd` (null = Claude Code gave none).
+
+- **Runs page** (Implementer run detail, also the admin portal's job view): the Cost row reads "≈ $0.42 through a subscription" with the line
+  "Estimate at API prices, not billed", or "No estimate, through a subscription"; never "Not available". The figure is the job result's
+  `usage.estimatedCostUsd` (`readStoredUsage`), kept only for the one basis the app knows.
+- **Workflow run page**: a subscription step reads "Cost ≈ $0.42 through a subscription" ("no estimate, through a subscription" for a
+  booked 0). A cost basis a version does not know (a value a newer release wrote, read after a rollback) shows the neutral label
+  "basis not known" with the figure as stored; it never throws.
+- **Usage and billing**: the usage record of such a turn is settled with its tokens, no cost and `usage_records.cost_basis =
+  'subscription'` (migration `20261106012000_add_usage_record_cost_basis`, expand only, null for every older record). It adds
+  nothing to a cost sum, is not an unknown cost (no #361 log line, not in `unknownCostCount`, not in the operator feed of unknown
+  costs) and is not charged as AI cost. The minutes of the device and the balance check at claim are unchanged (owner question below).
+  The workflow budget still counts the estimate (decision 12 of the plan); the engine no longer logs "cost not reported" for it.
+- **Who may say it**: the basis in a report is the runner's word and is never taken on its own. The app keeps it in the stored result
+  (`withoutUntrustedCostBasis`) and in the usage record (`trustOfJob`) only for a turn of the Implementer whose profile has the harness
+  `claude-code` and that a runner of the workspace held (`jobs.runner_id` is `runner:<id>` of a row in `runners`); the workflow budget
+  reads the harness of the step's profile (`subscriptionCost`). For any other job (OpenCode, managed key, Diff, Dynamic, a hosted
+  Worker) the word is dropped and the usage is booked as before, so an unknown cost stays visible. The Runs page reads the copy only
+  beside no cost, and the database refuses a record with a cost and the basis (`usage_records_cost_basis_check`).
+
+### Resume across containers: design
+
+**What exists.** The adapter runs `claude -p --resume <id>` and falls back to a fresh session when Claude Code says "No conversation found".
+The conversation is one file, `$CLAUDE_CONFIG_DIR/projects/-work-repo/<session-id>.jsonl` (`/home/agent/.claude/...`; 254 KB after a
+turn, +5 KB per turn, R0). The transcripts are filed by the working directory, so the agent's path stays `/work/repo`. OpenCode resumes
+through the snapshot channel: the job process exports the session over the engine's HTTP API, redacts it, gzips it (cap 8 MiB), hands it
+to the job host over `RUNNER_SNAPSHOT_FD`, the host uploads it in parts (`PUT .../session`), the app keeps ONE row per session
+(`implementer_session_snapshots`, replaced by each turn; offered only when written by the directly preceding turn), and the next turn's
+host downloads it (`GET .../resume-session`) and puts `resume-session.gz` in the process's directory.
+
+**Why it was not built in this slice.** Every layer of that channel names the OpenCode export: the header carries the engine version
+(`opencode_version` column, `VERSION_CHANGED` reason), `resume_session.py` checks the shape of the engine's JSON and its session id, the
+export is an HTTP walk of the engine, and the import is the engine's `import` call. It cannot be tested here (no Docker daemon; the lane
+test needs one), and a wrong redaction would store the login. So it is one slice of its own.
+
+**The design.**
+1. **Kind of snapshot.** A header word `harness` (`opencode` | `claude-code`) in the snapshot header line and a nullable column
+   `implementer_session_snapshots.harness` (expand only, null = `opencode`; the existing `opencode_version` column carries the Claude Code
+   version for the other kind). The app offers a snapshot only to a turn of the same harness; any other pairing is `no_snapshot` and the
+   turn continues from the summary. The new feature word `claude_session_snapshot` in the runner API version lets an older app and an
+   older runner agree.
+2. **Export (job process, before the container is stopped).** One `docker exec` as `agent` that writes a tar of exactly
+   `projects/-work-repo/<session-id>.jsonl` to its standard output (never the whole config directory: no `.credentials.json`,
+   `settings`, `plugins`, `backups`, `todos`, `shell-snapshots`). The runner reads at most `MAX_RAW_BYTES`, within the seconds an export has
+   (5, or 2 at a stop), in a daemon thread as the OpenCode export does.
+3. **Redaction, line by line.** Each JSONL line is parsed; every string value and key goes through the turn's `Redactor` (login, token
+   shapes, the job's secrets and their base64/URL forms), never the JSON text (the lesson of the OpenCode export); a line that is not JSON
+   is dropped, not copied. The result is compact JSON lines, gzip without a time, cap 8 MiB gzipped; over the cap there is no snapshot.
+   After redaction the whole file is scanned once more with `SecretScanner` on the login's forms; a hit discards the snapshot
+   (`login_secret`, fails closed).
+4. **Import (next turn, in the fresh container).** After the container is up and before the first message, the process writes the
+   verified gz through one `docker exec` (`tar -x` as `agent`, only that one path, owned by `agent`, mode 0600) and calls the adapter with
+   `resume_from=<session id>`. The id is the UUID in the header and is checked as a UUID. A "No conversation found" (a bad file) already
+   falls back to a fresh session with `import_failed`.
+5. **The login is never in a snapshot.** Test: a canned transcript whose lines hold the token raw, URL-quoted, in base64 at each
+   alignment and in a key name goes through the exporter; the result contains none of the forms, and a transcript the redactor cannot
+   clean is discarded. A second test lists the tar: only the one path. The lane test (CI) runs a turn, exports, throws the container away,
+   imports in a new one and checks that the second turn answers from the first one's content.
+6. **Customer runner and hosted.** Claude Code runs on customer runners only, so only the `runner_session_snapshot` endpoints
+   (`/api/runners/v1/jobs/{id}/session`, `/resume-session`) carry this kind; the hosted Worker API never sees it.
+7. **Not stored by us unredacted, and still the customer's data.** The transcript holds the agent's tool output, i.e. repository content.
+   It is kept like the OpenCode snapshot (the stored conversation is kept for good, erased with the workspace). The owner should confirm
+   that a Claude Code transcript may be stored in our database at all, since Anthropic's terms are about the login, not the transcript;
+   the transcript is the customer's session content, redacted, never the login.
 
 ## Spikes R0 (#853)
 

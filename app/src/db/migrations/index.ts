@@ -91,6 +91,12 @@ import { migration as createWorkflowRuns } from "./20261105130000_create_workflo
 import { migration as addImplementerSessionQueue } from "./20261105160000_add_implementer_session_queue.ts";
 import { migration as addWorkflowRunTrigger } from "./20261105190000_add_workflow_run_trigger.ts";
 import { migration as addWorkflowStepRounds } from "./20261105200000_add_workflow_step_rounds.ts";
+import { migration as addRunCancellation } from "./20261105210000_add_run_cancellation.ts";
+import { migration as addProfileHarness } from "./20261105230000_add_profile_harness.ts";
+import { migration as widenStepCostBasisForSubscription } from "./20261105231000_widen_step_cost_basis_for_subscription.ts";
+import { migration as addWorkflowRunFailure } from "./20261106004000_add_workflow_run_failure.ts";
+import { migration as addUsageRecordCostBasis } from "./20261106012000_add_usage_record_cost_basis.ts";
+import { migration as addImplementerSessionStartBranch } from "./20261106130000_add_implementer_session_start_branch.ts";
 import { migration as addImplementerTurnEnvironment } from "./20261102150000_add_implementer_turn_environment.ts";
 import { migration as createImplementerEnvironments } from "./20261102140000_create_implementer_environments.ts";
 import { migration as createImplementerSessionsAndTurns } from "./20261030140000_create_implementer_sessions_and_turns.ts";
@@ -207,6 +213,14 @@ const migrations: Record<string, Migration> = {
   "20261105170000_add_workflow_step_cost_basis": addWorkflowStepCostBasis,
   "20261105190000_add_workflow_run_trigger": addWorkflowRunTrigger,
   "20261105200000_add_workflow_step_rounds": addWorkflowStepRounds,
+  "20261105210000_add_run_cancellation": addRunCancellation,
+  "20261105230000_add_profile_harness": addProfileHarness,
+  "20261105231000_widen_step_cost_basis_for_subscription":
+    widenStepCostBasisForSubscription,
+  "20261106004000_add_workflow_run_failure": addWorkflowRunFailure,
+  "20261106012000_add_usage_record_cost_basis": addUsageRecordCostBasis,
+  "20261106130000_add_implementer_session_start_branch":
+    addImplementerSessionStartBranch,
 };
 
 export const migrationProvider: MigrationProvider = {

@@ -33,6 +33,7 @@ const VIEW: ProfileView = {
     costLimitCents: null,
     canPush: false,
     defaultResult: null,
+    harness: "opencode",
   },
   versions: [
     { version: 2, savedAt: "2026-11-04T09:00:00.000Z" },

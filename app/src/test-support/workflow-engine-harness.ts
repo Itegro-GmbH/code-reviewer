@@ -86,6 +86,12 @@ export type TurnReport = {
   ok?: boolean;
   errorCode?: string;
   costUsd?: number | null;
+  /** A turn on a customer device's login (#856): no cost, the basis `subscription` and the estimate at API prices (null: none). */
+  subscription?: {
+    estimatedCostUsd: number | null;
+    /** Only the report says so; the profile of the step is not on the harness claude-code (what any runner could write). */
+    onlyClaimed?: true;
+  };
   /** The token counts of the usage; default 1 and 1. */
   tokens?: { prompt: number; completion: number };
   /** What the finish tool stored; none when the turn has no schema or the agent never called it. */
@@ -93,6 +99,8 @@ export type TurnReport = {
   pushed?: boolean;
   commits?: string[];
   headCommit?: string | null;
+  /** The claim of a turn a test took before (`claimTurn`): the report is made for that job, not for the oldest that waits. */
+  claimed?: { job: { id: string }; leaseToken: string };
 };
 
 export async function startEngineHarness(
@@ -167,6 +175,7 @@ export async function startEngineHarness(
     profiles: app.profiles,
     environments,
     implementer: app.service,
+    jobs,
     turns: turnReader,
     connectors: createConnectorRegistry(options.connectors ?? []),
     repositoryName: async (id) => (await h.repositories.get(id))?.fullName,
@@ -243,7 +252,9 @@ export async function startEngineHarness(
    */
   async function finishTurn(report: TurnReport = {}): Promise<string> {
     claimed += 1;
-    const lease = await app.queue.claimNext("runner-a", ["implementer"]);
+    const lease =
+      report.claimed ??
+      (await app.queue.claimNext("runner-a", ["implementer"]));
     if (lease === null) throw new Error("no turn waits for a runner");
     const head = report.headCommit === undefined ? sha("c") : report.headCommit;
     const result = {
@@ -265,8 +276,17 @@ export async function startEngineHarness(
                 (report.tokens?.prompt ?? 1) + (report.tokens?.completion ?? 1),
               aiCalls: 1,
               fallbackUsed: false,
-              costUsd: report.costUsd === null ? null : (report.costUsd ?? 0.5),
+              costUsd:
+                report.subscription !== undefined || report.costUsd === null
+                  ? null
+                  : (report.costUsd ?? 0.5),
               stoppedEarly: null,
+              ...(report.subscription === undefined
+                ? {}
+                : {
+                    costBasis: "subscription",
+                    estimatedCostUsd: report.subscription.estimatedCostUsd,
+                  }),
             },
       implementer: {
         baseCommit: sha("a"),
@@ -291,6 +311,16 @@ export async function startEngineHarness(
             result,
           }
         : { ok: true as const, result };
+    // The app takes a subscription from the harness of the step's profile, never from the report: the step of such a report has it.
+    if (
+      report.subscription !== undefined &&
+      report.subscription.onlyClaimed === undefined
+    )
+      await h.db
+        .updateTable("implementer_turns")
+        .set({ profile_harness: "claude-code" })
+        .where("job_id", "=", lease.job.id)
+        .execute();
     const done = await app.queue.complete(
       lease.job.id,
       lease.leaseToken,
@@ -301,9 +331,17 @@ export async function startEngineHarness(
     return lease.job.id;
   }
 
+  /** Claims the oldest turn that waits, the way a runner does: it runs, and a test reports it later (`finishTurn({ claimed })`). */
+  async function claimTurn() {
+    const lease = await app.queue.claimNext("runner-a", ["implementer"]);
+    if (lease === null) throw new Error("no turn waits for a runner");
+    return lease;
+  }
+
   return {
     ...app,
     workspaceId,
+    claimTurn,
     workflows,
     members,
     runs,

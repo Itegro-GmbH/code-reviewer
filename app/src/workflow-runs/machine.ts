@@ -19,8 +19,16 @@
 //    last round (`maxRounds`), or the budget cannot pay another agent step (`budget`: checked only between two rounds), else the
 //    body starts again. The decision is written as the loop's row, with `exit` and `rounds` as its output.
 //
-// A run is `running` until the walk is over (`succeeded`) or a step failed or the budget ran out (`failed`).
-import { MICRO_USD_PER_CENT } from "./limits.ts";
+// `onFailure` (#902): when the walk would end the run `failed` or `cancelled`, the machine first answers `begin_failure` with how the run
+// ends and why (`FailureRecord`, stored with the run). From then on the run is in its failure phase: the rows after the ones of the
+// workflow are the rows of `onFailure`, replayed against its nodes the same way, and only they matter. A step of it that fails is
+// recorded and the next one runs; a cancel asked for meanwhile changes nothing; the run ends with the status the record holds. An agent
+// step or a loop is never started there (the validator refuses them; the machine does not trust the document).
+//
+// A run is `running` until the walk is over (`succeeded`), a step failed or the budget ran out (`failed`), or a member stopped it (`cancelled`, #891:
+// once a stop is asked for, no step is written or started any more; a turn that runs is asked to stop, a step that did not start is
+// skipped, and the run ends when nothing runs).
+import { FAILURE_MESSAGE_MAX_CHARS, MICRO_USD_PER_CENT } from "./limits.ts";
 import type { RunFailureCode } from "./errors.ts";
 
 /** A node of the document as the machine walks it. `unsupported`: a kind the engine does not run, or a node that is not well formed. */
@@ -50,6 +58,10 @@ export type MachineStep = {
   createdAt: string;
   /** When the step was claimed; null for a step nobody has taken yet. */
   startedAt: string | null;
+  /** Why a failed step failed (`cancelled` for a turn a member stopped, #891). */
+  errorCode?: string | null;
+  /** What the failed step said, for the failure of the run (#902). */
+  errorMessage?: string | null;
   /** For an `if`: the branch it took. */
   taken?: "then" | "else";
 };
@@ -66,14 +78,33 @@ export type RoundContext = {
   previous: Readonly<Record<string, number>>;
 };
 
+/**
+ * How a run ended, recorded when its `onFailure` steps begin (#902) and read by them as `{{failure.*}}`. `status` and `errorCode` are what the
+ * run ends with afterwards; `stepId` is the step the failure belongs to (empty when no step does: a run cancelled before its first step),
+ * `code` the code of that step or of the run, and `message` a short sentence, at most `FAILURE_MESSAGE_MAX_CHARS` long.
+ */
+export type FailureRecord = {
+  status: "failed" | "cancelled";
+  errorCode: RunFailureCode | null;
+  stepId: string;
+  code: string;
+  message: string;
+};
+
 export type MachineState = {
-  runStatus: "running" | "succeeded" | "failed";
+  runStatus: "running" | "succeeded" | "failed" | "cancelled";
+  /** A member asked for the run to stop (#891). */
+  cancelRequested: boolean;
   budgetMicroUsd: number;
   spentMicroUsd: number;
   /** The steps written so far, by position. */
   steps: readonly MachineStep[];
   /** The nodes of the pinned document, in order. */
   nodes: readonly MachineNode[];
+  /** The nodes of `onFailure`, in order; none when the workflow has none (#902). */
+  onFailure: readonly MachineNode[];
+  /** How the run ended, once its `onFailure` steps have begun; null before (#902). */
+  failure: FailureRecord | null;
   /**
    * Whether the condition of the `if` (`when`) or the `loop` (`until`) with this id holds, with the steps of the round before in reach.
    * It may throw (a value the condition needs is missing): the run then ends with `condition_failed`.
@@ -94,6 +125,8 @@ export type SkippedStep = {
 };
 
 export type Move =
+  /** #902: the run would end failed or cancelled and the workflow has `onFailure` steps: store how it ends, and run them. */
+  | { move: "begin_failure"; failure: FailureRecord }
   /** Nothing to do now: the run is over, or it waits for a job that has not ended or a worker that holds a step. */
   | { move: "idle" }
   /** Write the next step; `capMicroUsd` is what an agent step may spend (the rest of the budget). */
@@ -128,16 +161,25 @@ export type Move =
   | { move: "execute"; position: number; takeOver: boolean }
   /** The step's job may have ended: read it and end the step. */
   | { move: "read_job"; position: number }
-  /** An action was started and the engine was interrupted (it is not repeated), or an agent step could not be started for too long. */
+  /** #891: a stop was asked for and the step's turn runs: ask its job to stop (asked again at every look, which is harmless). */
+  | { move: "cancel_job"; position: number }
+  /** #891: a stop was asked for and the step was written and not claimed: it ends skipped. */
+  | { move: "skip_step"; position: number }
+  /**
+   * An action was started and the engine was interrupted (it is not repeated), an agent step could not be started for too long, or (#891) a
+   * stop was asked for while an agent step had no turn yet.
+   */
   | {
       move: "fail_step";
       position: number;
-      code: "action_interrupted" | "agent_start_failed";
+      code: "action_interrupted" | "agent_start_failed" | "cancelled";
     }
   | {
       move: "finish_run";
-      status: "succeeded" | "failed";
+      status: "succeeded" | "failed" | "cancelled";
       errorCode: RunFailureCode | null;
+      /** The step a run-level failure belongs to (the agent step the budget could not pay, the control step whose condition failed). */
+      stepId?: string;
     };
 
 /** What is left of the budget, in micro dollars; zero when it is used up. */
@@ -199,10 +241,14 @@ function flatten(nodes: readonly MachineNode[]): MachineNode[] {
   ]);
 }
 
-/** Walks the rows over the nodes: see the top of this file. Pure. */
+/**
+ * Walks the rows over the nodes: see the top of this file. Pure. `tolerant` (the steps of `onFailure`, #902): a step that failed or was
+ * skipped is over like a succeeded one, because the steps after it still run.
+ */
 export function replay(
   nodes: readonly MachineNode[],
   steps: readonly MachineStep[],
+  options: { tolerant?: boolean } = {},
 ): Replayed {
   let at = 0;
   const contexts: (RoundContext | undefined)[] = [];
@@ -314,6 +360,11 @@ export function replay(
         const row = consume(node, context, direct);
         if (row === undefined) return mismatch;
         if (row.status === "succeeded") return undefined;
+        if (
+          options.tolerant === true &&
+          (row.status === "failed" || row.status === "skipped")
+        )
+          return undefined;
         // Only the last row can be a step that is not over.
         return at === steps.length && row.status !== "skipped"
           ? { kind: "open", index: at - 1 }
@@ -332,14 +383,46 @@ function roundOf(steps: readonly MachineStep[], stepId: string): number {
   return steps.filter((step) => step.stepId === stepId).length + 1;
 }
 
-export function nextMove(state: MachineState): Move {
-  if (state.runStatus !== "running") return { move: "idle" };
+/** What a run does once a member asked it to stop: nothing new starts, what runs is asked to stop, and the run ends when nothing runs. */
+function cancelMove(state: MachineState): Move {
+  const last = state.steps[state.steps.length - 1];
+  if (last === undefined)
+    return { move: "finish_run", status: "cancelled", errorCode: null };
+  const position = state.steps.length - 1;
+  switch (last.status) {
+    case "pending":
+      return { move: "skip_step", position };
+    case "running":
+      if (last.kind === "agent" && last.hasJob)
+        return { move: "cancel_job", position };
+      // An agent step whose turn is not recorded yet: the one that claimed it may be starting the turn this moment. The step ends now, the
+      // turn that may exist under its request id is found and asked to stop (`fail_step`), and one that starts later is stopped by the one
+      // that started it (`attachTurn` fails for an ended step).
+      if (last.kind === "agent")
+        return { move: "fail_step", position, code: "cancelled" };
+      // An action that runs is not interrupted (it may have happened); one that was interrupted is told so, as in any run.
+      return isStale(last, state.now, state.staleMs)
+        ? { move: "fail_step", position, code: "action_interrupted" }
+        : { move: "idle" };
+    case "failed":
+    case "succeeded":
+    case "skipped":
+      return { move: "finish_run", status: "cancelled", errorCode: null };
+  }
+}
+
+/** The move of the workflow itself: the walk over `nodes`, or the stop a member asked for. Not the failure phase. */
+function workflowMove(state: MachineState): Move {
+  if (state.cancelRequested) return cancelMove(state);
 
   const last = state.steps[state.steps.length - 1];
   if (last !== undefined) {
     const position = state.steps.length - 1;
     switch (last.status) {
       case "failed":
+        // #891: the turn of this step was stopped by a member (through the run, or through the task itself): the run is cancelled, not failed.
+        if (last.errorCode === "cancelled")
+          return { move: "finish_run", status: "cancelled", errorCode: null };
         return {
           move: "finish_run",
           status: "failed",
@@ -368,23 +451,177 @@ export function nextMove(state: MachineState): Move {
   return moveFor(state, stop);
 }
 
-function moveFor(state: MachineState, stop: Stop | undefined): Move {
+const FAILURE_MESSAGES = {
+  budget_exhausted:
+    "The budget of the workflow cannot pay for another agent step.",
+  condition_failed:
+    "A condition could not be told: a value it needs does not exist.",
+  step_kind_not_supported:
+    "The workflow holds a step this engine does not run.",
+  cancelled: "The run was cancelled.",
+  step_failed: "The step failed.",
+} as const;
+
+const clipMessage = (text: string): string =>
+  text.length <= FAILURE_MESSAGE_MAX_CHARS
+    ? text
+    : `${text.slice(0, FAILURE_MESSAGE_MAX_CHARS - 1)}…`;
+
+/** How a run that is about to end `failed` or `cancelled` ended, for the steps of `onFailure`: see `FailureRecord`. */
+function failureOf(
+  state: MachineState,
+  end: Extract<Move, { move: "finish_run" }> & {
+    status: "failed" | "cancelled";
+  },
+): FailureRecord {
+  const last = state.steps[state.steps.length - 1];
+  const row = last?.status === "failed" ? last : undefined;
+  const rowMessage =
+    row?.errorMessage == null || row.errorMessage.trim() === ""
+      ? undefined
+      : clipMessage(row.errorMessage);
+  if (end.status === "cancelled")
+    return {
+      status: "cancelled",
+      errorCode: null,
+      stepId: row?.stepId ?? "",
+      code: "cancelled",
+      message: rowMessage ?? FAILURE_MESSAGES.cancelled,
+    };
+  if (end.errorCode === "step_failed")
+    return {
+      status: "failed",
+      errorCode: "step_failed",
+      stepId: row?.stepId ?? "",
+      code: row?.errorCode ?? "step_failed",
+      message: rowMessage ?? FAILURE_MESSAGES.step_failed,
+    };
+  const code = end.errorCode ?? "step_failed";
+  return {
+    status: "failed",
+    errorCode: end.errorCode,
+    stepId: end.stepId ?? "",
+    code,
+    message:
+      code === "budget_exhausted" ||
+      code === "condition_failed" ||
+      code === "step_kind_not_supported"
+        ? FAILURE_MESSAGES[code]
+        : FAILURE_MESSAGES.step_failed,
+  };
+}
+
+/** The index of the first row of the failure phase: the rows of `onFailure` come after the rows of the workflow, ids being unique in a document. */
+function failureStart(
+  onFailure: readonly MachineNode[],
+  steps: readonly MachineStep[],
+): number {
+  const ids = new Set(flatten(onFailure).map((node) => node.id));
+  const first = steps.findIndex((row) => ids.has(row.stepId));
+  return first === -1 ? steps.length : first;
+}
+
+/** The nodes of `onFailure` as the failure phase walks them: an agent step and a loop are never started there, whatever the document says. */
+function safeNodes(nodes: readonly MachineNode[]): MachineNode[] {
+  return nodes.map((node): MachineNode => {
+    if (node.kind === "agent" || node.kind === "loop")
+      return { kind: "unsupported", id: node.id };
+    if (node.kind === "if")
+      return {
+        ...node,
+        then: safeNodes(node.then),
+        else: safeNodes(node.else),
+      };
+    return node;
+  });
+}
+
+/**
+ * The context of the row at `position` (all rows, the failure phase included), or undefined when the rows do not fit the document: for
+ * the rows of the workflow the walk over `nodes`, for the rows of `onFailure` the walk over its nodes.
+ */
+export function contextOf(
+  nodes: readonly MachineNode[],
+  onFailure: readonly MachineNode[],
+  steps: readonly MachineStep[],
+  position: number,
+): RoundContext | undefined {
+  const start = failureStart(onFailure, steps);
+  return position < start
+    ? replay(nodes, steps.slice(0, start)).contexts[position]
+    : replay(safeNodes(onFailure), steps.slice(start), { tolerant: true })
+        .contexts[position - start];
+}
+
+/** The failure phase (#902): the steps of `onFailure` one after the other, then the end the run was going to have. */
+function failureMove(state: MachineState, failure: FailureRecord): Move {
+  const start = failureStart(state.onFailure, state.steps);
+  const rows = state.steps.slice(start);
+  const last = rows[rows.length - 1];
+  const position = state.steps.length - 1;
+  if (last !== undefined) {
+    // Only an action runs here; a step that is not claimed yet is done, one that is claimed is waited for or, when its claimant is gone,
+    // told so: it is not repeated, and the steps after it go on.
+    if (last.status === "pending")
+      return { move: "execute", position, takeOver: false };
+    if (last.status === "running")
+      return isStale(last, state.now, state.staleMs)
+        ? { move: "fail_step", position, code: "action_interrupted" }
+        : { move: "idle" };
+  }
+  const { stop } = replay(safeNodes(state.onFailure), rows, { tolerant: true });
+  return moveFor(state, stop, failure);
+}
+
+export function nextMove(state: MachineState): Move {
+  if (state.runStatus !== "running") return { move: "idle" };
+  if (state.failure !== null) return failureMove(state, state.failure);
+  const move = workflowMove(state);
+  if (
+    move.move !== "finish_run" ||
+    move.status === "succeeded" ||
+    state.onFailure.length === 0 ||
+    // Rows that are not what the document says: nothing of this run can be trusted, not even to comment on an issue.
+    move.errorCode === "document_unusable"
+  )
+    return move;
+  return {
+    move: "begin_failure",
+    failure: failureOf(state, { ...move, status: move.status }),
+  };
+}
+
+function moveFor(
+  state: MachineState,
+  stop: Stop | undefined,
+  failure?: FailureRecord,
+): Move {
+  // In the failure phase every way the walk can stop short ends the run the way it was going to end; it never fails again.
+  const end = (otherwise: Move): Move =>
+    failure === undefined
+      ? otherwise
+      : {
+          move: "finish_run",
+          status: failure.status,
+          errorCode: failure.errorCode,
+        };
   if (stop === undefined)
-    return { move: "finish_run", status: "succeeded", errorCode: null };
+    return end({ move: "finish_run", status: "succeeded", errorCode: null });
   const position = state.steps.length;
   switch (stop.kind) {
     case "mismatch":
-      return {
+      return end({
         move: "finish_run",
         status: "failed",
         errorCode: "document_unusable",
-      };
+      });
     case "unsupported":
-      return {
+      return end({
         move: "finish_run",
         status: "failed",
         errorCode: "step_kind_not_supported",
-      };
+        stepId: stop.node.id,
+      });
     case "open":
       // The last row is over only when the machine looked at its status above; a replay that ends here is not a state it can be in.
       return { move: "idle" };
@@ -395,7 +632,7 @@ function moveFor(state: MachineState, stop: Stop | undefined): Move {
         try {
           holds = state.holds(node.id, stop.context);
         } catch {
-          return conditionFailed();
+          return end(conditionFailed(node.id));
         }
         return {
           move: "add_if",
@@ -417,11 +654,12 @@ function moveFor(state: MachineState, stop: Stop | undefined): Move {
         };
       }
       if (node.kind !== "agent" && node.kind !== "action")
-        return {
+        return end({
           move: "finish_run",
           status: "failed",
           errorCode: "step_kind_not_supported",
-        };
+          stepId: node.id,
+        });
       const round = roundOf(state.steps, node.id);
       if (node.kind === "action")
         return {
@@ -435,11 +673,12 @@ function moveFor(state: MachineState, stop: Stop | undefined): Move {
       const remaining = remainingMicroUsd(state);
       // A task's cost limit is in whole cents: less than one cent cannot be handed out.
       if (remaining < MICRO_USD_PER_CENT)
-        return {
+        return end({
           move: "finish_run",
           status: "failed",
           errorCode: "budget_exhausted",
-        };
+          stepId: node.id,
+        });
       return {
         move: "add_step",
         position,
@@ -454,7 +693,7 @@ function moveFor(state: MachineState, stop: Stop | undefined): Move {
       try {
         until = state.holds(stop.loop.id, stop.finished);
       } catch {
-        return conditionFailed();
+        return end(conditionFailed(stop.loop.id));
       }
       const exit = until
         ? "until"
@@ -472,15 +711,16 @@ function moveFor(state: MachineState, stop: Stop | undefined): Move {
           exit,
           rounds: stop.rounds,
         };
-      return moveFor(state, stop.again());
+      return moveFor(state, stop.again(), failure);
     }
   }
 }
 
-function conditionFailed(): Move {
+function conditionFailed(stepId: string): Move {
   return {
     move: "finish_run",
     status: "failed",
     errorCode: "condition_failed",
+    stepId,
   };
 }

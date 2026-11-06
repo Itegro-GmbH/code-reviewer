@@ -50,7 +50,6 @@ from .connections import (
 
 _log = logging.getLogger(__name__)
 
-ALLOWED_PORTS: Final = (80, 443)
 MAX_HEAD_BYTES: Final = 16 * 1024
 HEAD_SECONDS: Final = 15.0
 CONNECT_SECONDS: Final = 10.0
@@ -146,6 +145,7 @@ class Decider:
         test_network: IPv4Network | None = None,
     ) -> None:
         self.matcher = RuleMatcher(rule)
+        self._rule = rule
         self.log = log
         self._resolver = resolver
         self._test_network = test_network
@@ -156,7 +156,7 @@ class Decider:
         name = ascii_name(host)
         if name is None:
             return Decision(reason=REASON_BAD_REQUEST)
-        if port not in ALLOWED_PORTS:
+        if not self._rule.allows_port(port):
             return Decision(reason=REASON_PORT)
         if not self.matcher.allows(name):
             return Decision(reason=REASON_NOT_LISTED)
@@ -169,7 +169,7 @@ class Decider:
 _REASON_TEXT: Final = {
     REASON_NOT_LISTED: "the host is not in the environment's network list",
     REASON_IP_LITERAL: "an IP address is never allowed, use a host name",
-    REASON_PORT: "only ports 80 and 443 are allowed",
+    REASON_PORT: "this port is not allowed (the door dials 80 and 443, a rule may allow fewer)",
     REASON_BAD_REQUEST: "the request is not one this proxy serves",
     REASON_TOO_MANY: "too many connections at once",
     REASON_UPSTREAM: "the host could not be reached",

@@ -253,6 +253,15 @@ export interface JobsTable {
   worker_fetches: ColumnType<number, number | undefined, number>;
   /** #397: 1 when the holder of the claim understands that its run can be superseded (the feature `supersede`). */
   accepts_supersede: ColumnType<number, number | undefined, number>;
+  /**
+   * #891: when a member asked for the running turn of the job to stop (ISO 8601 text in UTC), or null. The heartbeat answers `cancelRequested`
+   * while it is set; the job ends `cancelled` when its holder reports it, when its lease lapses or when the grace for the stop is over.
+   */
+  cancel_requested_at: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
   claimed_at: string | null;
   heartbeat_at: string | null;
   lease_expires_at: string | null;
@@ -419,6 +428,11 @@ export interface UsageRecordsTable {
    * claimed with billing off, which is never charged.
    */
   billing_state: string | null;
+  /**
+   * `subscription` (USAGE_COST_BASES, #856) for a turn that ran on the login of a customer's device: it has no cost, but not because
+   * the runner could not measure it, so it is not an unknown cost; null for every other record.
+   */
+  cost_basis: string | null;
 }
 
 /** The LLM key handed to a runner with the claim of a job, encrypted (src/runner-api/claimed-keys.ts). */
@@ -1024,8 +1038,14 @@ export interface ImplementerSessionsTable {
   workspace_id: string;
   repository_id: string;
   slot: number;
-  /** The branch the new branch starts from. */
+  /** The branch the new branch is compared with and merged into. */
   base_branch: string;
+  /** #909: the branch the new branch is made from when that is not the base; null: the tip of the base. */
+  start_branch: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
   /** The new branch, unique within the repository. */
   branch: string;
   /** The last commit pushed to `branch`; null until a turn pushed one. */
@@ -1171,6 +1191,12 @@ export interface ImplementerTurnsTable {
     number | null,
     number | null | undefined,
     number | null
+  >;
+  /** #856: the harness of the profile version, copied when the turn was written; null reads as OpenCode, and a task without a profile has none. */
+  profile_harness: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
   >;
   /**
    * The result schema the task ran with (#843), JSON text of a schema the validator of the format accepted: the task's own, or the
@@ -1338,6 +1364,17 @@ export interface WorkflowRunsTable {
   trigger_key: ColumnType<string | null, string | null | undefined, never>;
   /** The login the agent steps are started as: the person who started the run, or who put the label on. Display only. */
   actor_login: string;
+  /** #891: when a member asked for the run to stop; the run stays `running` until its turn has ended, then ends `cancelled`. */
+  cancel_requested_at: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  /**
+   * #902: JSON text, set once when a run that would end `failed` or `cancelled` begins the steps of `onFailure`: how it ends afterwards and
+   * the facts those steps read. The run stays `running` until they are over. Null otherwise.
+   */
+  failure: ColumnType<string | null, string | null | undefined, string | null>;
   created_at: string;
   updated_at: string;
   /** Set when the run ends. */
@@ -1364,7 +1401,7 @@ export interface WorkflowStepRunsTable {
   turn_id: string | null;
   cap_micro_usd: number | null;
   cost_micro_usd: number | null;
-  /** Where `cost_micro_usd` comes from: `reported`, `estimated` or `limit` (#873); null for a step that was charged nothing. */
+  /** Where `cost_micro_usd` comes from: `reported`, `estimated`, `limit` (#873) or `subscription` (#856: an estimate of a turn that is not billed); null for a step that was charged nothing. */
   cost_basis: string | null;
   /** JSON text: the values later steps refer to. */
   output: string | null;
@@ -1449,6 +1486,8 @@ export interface ProfileVersionsTable {
   can_push: number;
   /** JSON text of the default result schema, or null for none. */
   default_result: string | null;
+  /** #856: `opencode` or `claude-code`; null reads as OpenCode (a version saved before harnesses were stored). */
+  harness: string | null;
   created_by: string;
   created_at: string;
 }

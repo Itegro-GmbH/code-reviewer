@@ -3,6 +3,11 @@
 // What the first turn (`service.ts`) and the follow-up turns (`follow-up.ts`) share: the refusals that mean the same thing for both,
 // what an access failure of the platform becomes, and the checks of a repository, an environment and a profile that are copied into
 // a turn. Nothing here is asked of the platform unless a function says so.
+import {
+  CLAUDE_CODE_HARNESS,
+  OPENCODE_HARNESS,
+  harnessNeedsRunner,
+} from "../runner-identity/harness.ts";
 import type { ImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import type {
   TurnEnvironment,
@@ -166,6 +171,30 @@ export async function copyEnvironment(
   };
 }
 
+/**
+ * #856: a profile on a harness that exists only on a runner (`claude-code`) runs in a runner environment and nowhere else. A task without
+ * an environment, or in a hosted one, is refused before a turn, a job or a VM exists.
+ */
+export function requireRunnerForHarness(
+  profile: TurnProfile | null,
+  runnerEnvironment: TurnRunnerEnvironment | null,
+): void {
+  if (
+    profile !== null &&
+    harnessNeedsRunner(profile.harness ?? OPENCODE_HARNESS) &&
+    runnerEnvironment === null
+  )
+    throw new ImplementerError(
+      "IMPLEMENTER_HARNESS_NEEDS_RUNNER",
+      "A profile on the harness claude-code runs only in a runner environment.",
+    );
+}
+
+/** Whether a model is run through the workspace's keys and the catalog; the model of the harness `claude-code` is a name on a device's login. */
+export function modelNeedsCatalog(profile: TurnProfile | null): boolean {
+  return profile?.harness !== CLAUDE_CODE_HARNESS;
+}
+
 /** A runner works with its owner's own key. A managed model is the platform's and runs on platform VMs only. */
 export function requireOwnKey(model: ModelChoice): void {
   if ("entryId" in model)
@@ -199,6 +228,7 @@ export async function copyProfile(
       version: found.version.version,
       instructions: content.instructions,
       canPush: content.canPush,
+      harness: content.harness ?? OPENCODE_HARNESS,
     },
     model: content.model,
     costLimitCents: content.costLimitCents,

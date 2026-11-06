@@ -202,6 +202,18 @@ def _usage(value: object) -> dict[str, Any] | None:
         and excess > 0
     ):
         document["limitExceededBy"] = excess
+    # The cost of a turn on a login of the customer's device (#856): the basis and the estimate. A
+    # malformed one is left out and the rest of the usage is still reported.
+    if usage.get("costBasis") == "subscription":
+        estimate = usage.get("estimatedCostUsd")
+        if estimate is None or (
+            isinstance(estimate, (int, float))
+            and not isinstance(estimate, bool)
+            and math.isfinite(estimate)
+            and estimate >= 0
+        ):
+            document["costBasis"] = "subscription"
+            document["estimatedCostUsd"] = estimate
     # The per-call trace (#541) is observability: one that is not the contract's is left out, and
     # the usage, the cost and the verdict stay.
     raw_trace = usage.get("callTrace")
@@ -408,8 +420,12 @@ def stopped_result(
     measured_ms: int,
     *,
     implementer: bool,
+    code: str = RUNNER_SHUTDOWN,
+    detail: str = "the runner was shut down before the job finished",
+    reason_without_usage: str | None = None,
 ) -> Result:
-    """The result of a job the host ended because the runner was stopped: always `runner_shutdown`.
+    """The result of a job the host ended because the runner was stopped: always `runner_shutdown`
+    (`code` says otherwise for a run a member stopped: `cancelled`, #891).
 
     A turn of the Implementer that was stopped has pushed what was committed and printed its result
     before it went (`runner_shutdown`, the block with the head and the summary, and what the model
@@ -417,24 +433,30 @@ def stopped_result(
     the job back and the person finds the branch there. Whatever else the process printed (a
     different code, a success) is not: the host stopped it. Without a usable line, or for any other
     kind, the result is the bare one.
+
+    A run the app settles by its usage (a member's stop, #891, ends it for good) names
+    `reason_without_usage` when the process left no usage behind (killed after the grace, not ended
+    cleanly, nothing printed): the model may have been used, so the app counts the run with an
+    unknown cost instead of voiding it (`NO_RESULT_REASON`).
     """
     stderr = "" if outcome is None else outcome.stderr.decode("utf-8", errors="replace")
     result = failure_result(
-        RUNNER_SHUTDOWN,
-        "the runner was shut down before the job finished",
+        code,
+        detail,
         duration_ms=measured_ms,
         log_tail=stderr,
         redactor=redactor,
     )
     line = _parse_line(outcome.stdout) if outcome is not None and implementer else None
-    if line is None:
-        return result
-    kept = _sanitize(
-        {**line, "ok": False, "errorCode": RUNNER_SHUTDOWN}, redactor, measured_ms, implementer=True
-    )
-    for name in ("usage", "implementer"):
-        if kept.get(name) is not None:
-            result[name] = kept[name]
+    if line is not None:
+        kept = _sanitize(
+            {**line, "ok": False, "errorCode": code}, redactor, measured_ms, implementer=True
+        )
+        for name in ("usage", "implementer"):
+            if kept.get(name) is not None:
+                result[name] = kept[name]
+    if result["usage"] is None and reason_without_usage is not None:
+        result["errorReason"] = reason_without_usage
     return result
 
 

@@ -97,6 +97,8 @@ function harness(options: {
     triggerKind: "github.issueLabeled",
     createdBy: null,
     actorLogin: "octocat",
+    cancelRequestedAt: null,
+    failure: null,
     createdAt: NOW.toISOString(),
     updatedAt: NOW.toISOString(),
     finishedAt: null,
@@ -182,6 +184,7 @@ function harness(options: {
         }),
       discardRequested,
     },
+    jobs: { requestCancel: vi.fn() },
     turns: {
       // The first step's turn is over; the turn the instruction started in the meantime still runs.
       read: async (jobId) =>

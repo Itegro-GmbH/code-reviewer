@@ -63,6 +63,7 @@ describe("enqueueing a job", () => {
       result: null,
       errorCode: null,
       supersededBy: null,
+      cancelRequestedAt: null,
       createdAt: T0.toISOString(),
       updatedAt: T0.toISOString(),
       finishedAt: null,

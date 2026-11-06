@@ -25,8 +25,9 @@ const ENDED_JOB_STATUSES = ["succeeded", "failed", "cancelled", "superseded"];
  * which this leaves alone.
  *
  * - A job a runner held that then ended with no result (its lease ran out on the last attempt, it ran past the hard
- *   limit, its runner was shut down on the last attempt) may have used the model: its record is `settled` with an
- *   unknown cost and unknown tokens, and the reason `no_result`. Counting it is the conservative reading (#273).
+ *   limit, its runner was shut down on the last attempt, or a member asked to stop it and the runner never reported, #891) may have
+ *   used the model: its record is `settled` with an unknown cost and unknown tokens, and the reason `no_result`. Counting it is the
+ *   conservative reading (#273).
  * - A run that was superseded while it ran (#397) has its record marked `superseded` and keeps it reserved while its
  *   Worker drains. When the claim ran out, and the grace for a late report after it, without a report, the record is `settled` with an
  *   unknown cost and unknown tokens: the model may have been in use for the request in flight, and nothing is
@@ -65,8 +66,21 @@ export async function closeRecordsOfEndedJobs(
           .selectFrom("jobs")
           .select("jobs.id")
           .whereRef("jobs.id", "=", "usage_records.job_id")
-          .where("jobs.status", "=", "failed")
-          .where("jobs.error_code", "in", [...NO_RESULT_JOB_ERROR_CODES]),
+          .where((job) =>
+            job.or([
+              job.and([
+                job("jobs.status", "=", "failed"),
+                job("jobs.error_code", "in", [...NO_RESULT_JOB_ERROR_CODES]),
+              ]),
+              // #891: a job a member asked to stop while a runner held it, that ended without the runner's report (the lease lapsed, the
+              // claim was given back, the grace for the stop ran out): the model may have been used for the turn it ran.
+              job.and([
+                job("jobs.status", "=", "cancelled"),
+                job("jobs.error_code", "=", "cancelled"),
+                job("jobs.claimed_at", "is not", null),
+              ]),
+            ]),
+          ),
       ),
     )
     .returning(["workspace_id", "job_id"])

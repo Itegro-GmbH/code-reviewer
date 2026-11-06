@@ -271,6 +271,7 @@ def status(
 
 def ledger() -> tuple[DoorLedger, DoorState]:
     job = parse_implementer_input(implementer_job_text())
+    assert job.implementer.model_entry is not None and job.implementer.cost is not None
     made = build_door_ledger(
         job.implementer.model_entry,
         job.implementer.cost,

@@ -37,6 +37,12 @@ export type ImplementerRouteHandlers = {
   continueSession(request: Request, sessionId: string): Promise<Response>;
   /** #841: what the "Continue" form of a run needs; 404 for a run that is not the newest turn of a session. */
   continuation(request: Request, runId: string): Promise<Response>;
+  /**
+   * #891: a member stops a run. 202 `{ runId, outcome: "requested", status }` for a turn that runs and is told to stop, 200 with the same
+   * body for a turn that ended at once (`cancelled`), a repeat (`already_requested`) and a run that is over (`already_ended`); 404
+   * `IMPLEMENTER_RUN_NOT_FOUND` for a job that is no run of the Implementer of this workspace.
+   */
+  cancelRun(request: Request, runId: string): Promise<Response>;
 };
 
 const NO_STORE = { "cache-control": "no-store" };
@@ -167,6 +173,14 @@ export function createImplementerRouteHandlers({
             "This run is not the newest turn of a session of this workspace.",
           );
         return Response.json(continuation, { headers: NO_STORE });
+      }),
+    cancelRun: (request, runId) =>
+      answer(request, async () => {
+        const cancelled = await service.cancelRun(runId);
+        return Response.json(cancelled, {
+          status: cancelled.outcome === "requested" ? 202 : 200,
+          headers: NO_STORE,
+        });
       }),
   };
 }

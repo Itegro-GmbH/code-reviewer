@@ -208,6 +208,11 @@ const FIELD_COPY: Record<
     invalid: "This base branch cannot be used. Choose another.",
     too_long: "This base branch cannot be used. Choose another.",
   },
+  startBranch: {
+    required: "Choose a start branch.",
+    invalid: "This start branch cannot be used. Choose another.",
+    too_long: "This start branch cannot be used. Choose another.",
+  },
   instruction: {
     required: "Describe the task for the agent.",
     invalid:
@@ -325,6 +330,8 @@ const failureCopy = (
     "The size of this environment is no longer offered (1 vCPU leaves the agent no memory), so the task was not started and nothing was charged. Change the size under Environments to 2 vCPU or more, or choose another environment.",
   IMPLEMENTER_RUNNER_NEEDS_OWN_KEY:
     "A runner works with your own API key, and the model of this task is a managed one that runs on platform VMs only. Choose a model of your own key, or an environment that runs on a platform VM. Nothing was started and nothing was charged.",
+  IMPLEMENTER_HARNESS_NEEDS_RUNNER:
+    "This profile runs Claude Code on the login of a runner's device, which only a runner environment can do. Choose an environment that runs on a runner. Nothing was started and nothing was charged.",
   IMPLEMENTER_PROFILE_NOT_FOUND:
     "This profile does not exist any more, is archived, or has no such version. Choose another, or none.",
   IMPLEMENTER_MODEL_NOT_ALLOWED: hasReason(failure.reason)
@@ -332,6 +339,8 @@ const failureCopy = (
     : MODEL_REFUSED_GENERIC,
   IMPLEMENTER_SESSION_NOT_FOUND:
     "This session is not available in this workspace any more. Reload the page.",
+  IMPLEMENTER_RUN_NOT_FOUND:
+    "This run is not available in this workspace any more. Reload the page.",
   IMPLEMENTER_SESSION_BUSY:
     "A turn is running and the next instruction is already queued. It starts when the running turn ends; you can send another one after that.",
   IMPLEMENTER_BRANCH_GONE:

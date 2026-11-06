@@ -62,6 +62,7 @@ const SESSION: StoredImplementerSession = {
   repositoryId: "r-1",
   slot: 1,
   baseBranch: "main",
+  startBranch: null,
   branch: "workflow/run-1/work",
   headCommit: null,
   status: "idle",
@@ -79,6 +80,7 @@ function ended(patch: Partial<EndedTurn> = {}): EndedTurn {
   return {
     jobStatus: "succeeded",
     jobErrorCode: null,
+    jobClaimed: true,
     jobResult: {
       usage: { costUsd: 0.25 },
       implementer: {
@@ -307,6 +309,55 @@ describe("the outcome of a turn", () => {
     ).toMatchObject({ ok: false, code: "job_failed" });
   });
 
+  // #891-T41
+  it("books a cancelled turn that never ran at no cost, on the reported basis, not at the cap", () => {
+    for (const patch of [
+      { jobClaimed: false, jobErrorCode: "cancelled", jobResult: null },
+      // The Worker could not be started: the job ends cancelled with the reason, free.
+      { jobClaimed: true, jobErrorCode: "launch_failed", jobResult: null },
+      // It never got the input of the job: given back before the start, free like the launch.
+      { jobClaimed: true, jobErrorCode: "claim_failed", jobResult: null },
+      {
+        jobClaimed: true,
+        jobErrorCode: "git_access_unavailable",
+        jobResult: null,
+      },
+    ])
+      expect(
+        outcomeOfTurn(ended({ jobStatus: "cancelled", ...patch }), 777_000),
+      ).toMatchObject({
+        ok: false,
+        costMicroUsd: 0,
+        costBasis: "reported",
+      });
+    expect(
+      outcomeOfTurn(
+        ended({
+          jobStatus: "cancelled",
+          jobClaimed: false,
+          jobErrorCode: "cancelled",
+          jobResult: null,
+        }),
+        777_000,
+      ),
+    ).toMatchObject({ code: "cancelled" });
+  });
+
+  // #891-T41
+  it("still books a cancelled turn that ran but reported nothing at the cap", () => {
+    expect(
+      outcomeOfTurn(
+        ended({
+          jobStatus: "cancelled",
+          jobClaimed: true,
+          jobErrorCode: "cancelled",
+          jobResult: null,
+        }),
+        777_000,
+      ),
+    ).toMatchObject({ costMicroUsd: 777_000, costBasis: "limit" });
+  });
+
   // #844-T38
   it("charges the cap of the step when the cost is not known", () => {
     for (const jobResult of [
@@ -480,5 +531,125 @@ describe("the outcome of a turn", () => {
     ).toMatchObject({ costMicroUsd: 100_000, costBasis: "reported" });
     expect(estimateCost({ usage: tokens }, price)).toBe(180);
     expect(estimateCost({ usage: tokens }, undefined)).toBeNull();
+  });
+  // #856-T41
+  describe("a turn that ran on the login of a customer's device", () => {
+    const subscription = (usage: Record<string, unknown>) => ({
+      usage: { costUsd: null, costBasis: "subscription", ...usage },
+    });
+    const claudeTurn = turn({
+      profile: {
+        id: "p-1",
+        name: "worker",
+        version: 1,
+        instructions: "",
+        canPush: true,
+        harness: "claude-code",
+      },
+    });
+
+    it("books the estimate at API prices with the basis subscription, not the cap", () => {
+      const outcome = outcomeOfTurn(
+        ended({
+          turn: claudeTurn,
+          jobResult: subscription({ estimatedCostUsd: 0.42 }),
+        }),
+        5_000_000,
+      );
+      expect(outcome).toMatchObject({
+        ok: true,
+        costMicroUsd: 420_000,
+        costBasis: "subscription",
+        output: { costUsd: 0.42 },
+      });
+    });
+
+    it("books nothing when Claude Code gave no estimate", () => {
+      for (const usage of [
+        { estimatedCostUsd: null },
+        {},
+        { estimatedCostUsd: "x" },
+      ])
+        expect(
+          outcomeOfTurn(
+            ended({ turn: claudeTurn, jobResult: subscription(usage) }),
+            5_000_000,
+          ),
+        ).toMatchObject({
+          costMicroUsd: 0,
+          costBasis: "subscription",
+          output: { costUsd: 0 },
+        });
+    });
+
+    it("books a failed or cancelled turn the same way", () => {
+      for (const jobStatus of ["failed", "cancelled"] as const)
+        expect(
+          outcomeOfTurn(
+            ended({
+              turn: claudeTurn,
+              jobStatus,
+              jobErrorCode: jobStatus === "cancelled" ? "cancelled" : "x",
+              jobResult: subscription({ estimatedCostUsd: 0.1 }),
+            }),
+            5_000_000,
+          ),
+        ).toMatchObject({
+          ok: false,
+          costMicroUsd: 100_000,
+          costBasis: "subscription",
+        });
+    });
+
+    // The word of the report is not ours to believe: the harness of the step's profile says whether it ran on a subscription.
+    it("books a step on another harness at its reported cost or the cap, whatever its report says", () => {
+      const opencodeTurn = turn({
+        profile: {
+          id: "p-1",
+          name: "worker",
+          version: 1,
+          instructions: "",
+          canPush: true,
+          harness: "opencode",
+        },
+      });
+      for (const withProfile of [turn(), opencodeTurn]) {
+        // No cost reported: the cap, not the estimate the report names and not 0.
+        expect(
+          outcomeOfTurn(
+            ended({
+              turn: withProfile,
+              jobResult: subscription({ estimatedCostUsd: 0.01 }),
+            }),
+            5_000_000,
+          ),
+        ).toMatchObject({ costMicroUsd: 5_000_000, costBasis: "limit" });
+        // A cost reported: that cost.
+        expect(
+          outcomeOfTurn(
+            ended({
+              turn: withProfile,
+              jobResult: subscription({ costUsd: 0.3, estimatedCostUsd: 0.01 }),
+            }),
+            5_000_000,
+          ),
+        ).toMatchObject({ costMicroUsd: 300_000, costBasis: "reported" });
+      }
+    });
+
+    it("books a turn of the harness claude-code that left no usage at no cost, not at the cap", () => {
+      expect(
+        outcomeOfTurn(
+          ended({
+            turn: claudeTurn,
+            jobStatus: "cancelled",
+            jobClaimed: true,
+            jobErrorCode: "cancelled",
+            jobResult: null,
+          }),
+          5_000_000,
+        ),
+      ).toMatchObject({ costMicroUsd: 0, costBasis: "subscription" });
+    });
   });
 });

@@ -47,6 +47,7 @@ export function createTurnReader(deps: {
       ended: {
         jobStatus: job.status,
         jobErrorCode: job.errorCode,
+        jobClaimed: job.claimedAt !== null,
         jobResult: job.result,
         turn,
         session,

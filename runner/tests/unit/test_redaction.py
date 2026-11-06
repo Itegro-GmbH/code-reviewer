@@ -6,9 +6,12 @@ and the streams PR-Agent writes to cannot leak a secret that is split across wri
 
 import base64
 import io
+from collections.abc import Callable
 from urllib.parse import quote
 
-from code_reviewer_runner.redaction import REDACTED, RedactingStream, Redactor
+import pytest
+
+from code_reviewer_runner.redaction import REDACTED, RedactingStream, Redactor, secret_forms
 
 TOKEN = "dummy-installation-token-0123456789"
 API_KEY = "dummy-openrouter-key-0123456789"
@@ -111,3 +114,72 @@ def test_a_secret_that_straddles_the_release_of_a_very_long_line_is_still_redact
     assert output.count("x") == 990
     assert output.count("y") == 600
     assert output.count("z") == 600
+
+
+ALIGNMENT_SECRET = "tok_" + "Zq9Lm3XvTn8Rk5Wc2Yb7"
+ENCODERS: dict[str, Callable[[bytes], bytes]] = {
+    "std": base64.b64encode,
+    "urlsafe": base64.urlsafe_b64encode,
+}
+
+
+def shifted(prefix: str, suffix: str, encoder: str, *, padded: bool) -> str:
+    """The secret between a prefix and a suffix, base64 encoded as a whole: the text a tool prints
+    when it encodes a larger value that holds the secret."""
+    text = ENCODERS[encoder]((prefix + ALIGNMENT_SECRET + suffix).encode()).decode()
+    return text if padded else text.rstrip("=")
+
+
+# #856-T43: base64 is found where the secret starts at any of the three positions of a group
+@pytest.mark.unit
+@pytest.mark.parametrize("encoder", sorted(ENCODERS))
+@pytest.mark.parametrize("padded", [True, False], ids=["padded", "unpadded"])
+@pytest.mark.parametrize(
+    "prefix", ["", "a", "ab", "abc", "abcd"], ids=lambda v: f"offset{len(v) % 3}+{len(v)}"
+)
+@pytest.mark.parametrize("suffix", ["", "x", "xy", "xyz"], ids=lambda v: f"tail{len(v)}")
+def test_base64_of_a_larger_value_that_holds_the_secret_is_replaced_at_any_alignment(
+    encoder: str, padded: bool, prefix: str, suffix: str
+) -> None:
+    redactor = Redactor([ALIGNMENT_SECRET])
+    encoded = shifted(prefix, suffix, encoder, padded=padded)
+
+    text = redactor.redact(f"value={encoded};")
+
+    assert REDACTED in text
+    # What is left of the encoded value is the prefix, the suffix and the edges.
+    left = len(text.replace(REDACTED, "")) - len("value=;")
+    assert left <= (len(prefix) + 2) // 3 * 4 + (len(suffix) + 2) // 3 * 4 + 4
+
+
+# #856-T43
+@pytest.mark.unit
+def test_text_that_only_looks_like_base64_is_left_alone() -> None:
+    redactor = Redactor([ALIGNMENT_SECRET])
+    other = base64.b64encode(("tok_" + "Aq9Lm3XvTn8Rk5Wc2Yb7").encode()).decode()
+
+    assert redactor.redact(other) == other
+
+
+# #856-T43: the minimum applies to the whole encoding of a very short secret as well
+@pytest.mark.unit
+@pytest.mark.parametrize("secret", ["a", "ab", "abc", "abcde"])
+def test_base64_of_a_very_short_secret_is_not_a_form_that_would_match_everywhere(
+    secret: str,
+) -> None:
+    # Letters only: the quoted spellings are the secret itself, so the rest of the set is base64.
+    encoded = secret_forms(secret) - {secret}
+
+    assert all(len(form) >= 8 for form in encoded)
+    # What the secret is as written stays: the exact value is always redacted.
+    assert Redactor([secret]).redact(f"token {secret}") == f"token {REDACTED}"
+
+
+# #856-T43
+@pytest.mark.unit
+def test_base64_of_a_secret_of_six_bytes_is_still_a_form() -> None:
+    secret = "abcdef"
+
+    forms = secret_forms(secret)
+
+    assert base64.b64encode(secret.encode()).decode() in forms

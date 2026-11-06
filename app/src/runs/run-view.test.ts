@@ -46,6 +46,7 @@ function job(overrides: Partial<Job> = {}): Job {
     result: null,
     errorCode: null,
     supersededBy: null,
+    cancelRequestedAt: null,
     createdAt: "2026-10-10T12:00:00.000Z",
     updatedAt: "2026-10-10T12:01:00.000Z",
     finishedAt: "2026-10-10T12:01:00.000Z",
@@ -232,6 +233,76 @@ describe("the usage of a run", () => {
   // #201-T22
   it("reads the model, the summed tokens, the model calls and the cost of a stored result, and nothing else of it", () => {
     expect(readStoredUsage({ ok: true, usage })).toEqual({
+      model: "vendor/dynamic-model",
+      totalTokens: 12900,
+      aiCalls: 7,
+      costUsd: 0.04,
+      stoppedEarly: null,
+    });
+  });
+
+  // #856-T73
+  it("reads that a turn ran through a subscription with its estimate at API prices, and no cost", () => {
+    const subscription = {
+      ...usage,
+      costUsd: null,
+      costBasis: "subscription",
+      estimatedCostUsd: 0.42,
+    };
+
+    expect(readStoredUsage({ ok: true, usage: subscription })).toEqual({
+      model: "vendor/dynamic-model",
+      totalTokens: 12900,
+      aiCalls: 7,
+      costUsd: null,
+      stoppedEarly: null,
+      costBasis: "subscription",
+      estimatedCostUsd: 0.42,
+    });
+  });
+
+  // #856-T73
+  it.each([null, -1, "0.4"])(
+    "reads a subscription turn without a usable estimate as one without an estimate (%s)",
+    (estimatedCostUsd) => {
+      expect(
+        readStoredUsage({
+          ok: true,
+          usage: {
+            ...usage,
+            costUsd: null,
+            costBasis: "subscription",
+            estimatedCostUsd,
+          },
+        }),
+      ).toMatchObject({ costBasis: "subscription", estimatedCostUsd: null });
+    },
+  );
+
+  // #856-T73
+  it("does not read a billed cost as a subscription: a cost beside the basis is a cost, and the basis and estimate are left out", () => {
+    expect(
+      readStoredUsage({
+        ok: true,
+        usage: { ...usage, costBasis: "subscription", estimatedCostUsd: 0.42 },
+      }),
+    ).toEqual({
+      model: "vendor/dynamic-model",
+      totalTokens: 12900,
+      aiCalls: 7,
+      costUsd: 0.04,
+      stoppedEarly: null,
+    });
+  });
+
+  // #856-T73
+  it("does not take a basis it does not know, nor the estimate that goes with it", () => {
+    expect(
+      readStoredUsage({
+        ok: true,
+        usage: { ...usage, costBasis: "metered", estimatedCostUsd: 3 },
+      }),
+    ).toEqual({
       model: "vendor/dynamic-model",
       totalTokens: 12900,
       aiCalls: 7,

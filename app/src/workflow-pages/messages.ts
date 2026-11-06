@@ -37,6 +37,11 @@ export const RUN_STATUS_COPY = {
     label: "Failed",
     description: "A step failed or the budget ran out. The steps say why.",
   },
+  cancelled: {
+    label: "Cancelled",
+    description:
+      "A member of the workspace stopped the run. What the agent had committed was pushed to its branch when possible; the steps that had not started did not run.",
+  },
 } as const;
 
 export const STEP_STATUS_COPY = {
@@ -129,6 +134,8 @@ const STEP_FAILURE_TEXT: Record<
   cost_limit_reached: "The agent reached its cost limit.",
   no_runner_available:
     "No runner of this workspace with the labels of the environment took the task in time.",
+  cancelled:
+    "A member of the workspace stopped the run, so the agent of this step was ended.",
 };
 type JobFailureCode = "timeout" | "cost_limit_reached" | "no_runner_available";
 
@@ -204,7 +211,30 @@ export const COST_BASIS_COPY = {
     explanation:
       "The cost could not be determined, so the step is charged the whole limit it ran under. The real cost is probably lower, but the run never spends more than its budget.",
   },
+  subscription: {
+    label: "through a subscription",
+    explanation:
+      "This turn ran on the Claude subscription of a runner's device, so it is not billed. The figure is Claude Code's estimate of what the turn would cost at API prices (nothing when it gave none); it counts against the budget of the run, never towards a bill or a usage total.",
+  },
 } as const;
+
+/** What a page says of a cost basis it does not know (a value a newer version wrote, read after a rollback): the figure stays, the reason is not guessed. */
+export const COST_BASIS_UNKNOWN_COPY = {
+  label: "basis not known",
+  explanation:
+    "This page does not know how this cost was determined, so it shows the figure as stored.",
+} as const;
+
+/** The copy of a cost basis, or the neutral one for a basis this version does not have. */
+export function costBasisCopy(
+  basis: string,
+):
+  | (typeof COST_BASIS_COPY)[keyof typeof COST_BASIS_COPY]
+  | typeof COST_BASIS_UNKNOWN_COPY {
+  return Object.hasOwn(COST_BASIS_COPY, basis)
+    ? COST_BASIS_COPY[basis as keyof typeof COST_BASIS_COPY]
+    : COST_BASIS_UNKNOWN_COPY;
+}
 
 /** A step that no runner took: not a cost basis, the step never ran. */
 export const COST_NOT_RUN_COPY = {
@@ -213,6 +243,8 @@ export const COST_NOT_RUN_COPY = {
 } as const;
 
 export const COST_COPY = {
+  approximately: "≈",
+  noEstimate: "no estimate,",
   budget: "Budget",
   of: "of",
   spentOfBudget: "spent of the budget",
@@ -261,6 +293,12 @@ export const PAGE_COPY = {
   stepCreated: "This was created by the step.",
   profile: "Profile",
   openRun: "Open the run",
+  cancelRun: "Cancel run",
+  cancelling: "Stopping the run",
+  cancelHint:
+    "Stops the agent that is working and starts no further step. What it has committed is pushed to its branch; only what it used until it stopped is charged.",
+  cancelRequested:
+    "The run is stopping: the agent is told to stop, which takes up to a minute or two, and the run ends when it has. This page updates by itself.",
 } as const;
 
 export const START_COPY = {

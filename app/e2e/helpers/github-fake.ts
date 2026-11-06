@@ -159,13 +159,19 @@ export function userMenuButton(page: Page, account: { name: string }) {
   return page.getByRole("button", { name: account.name });
 }
 
-/** Opens the user menu and presses "Sign out". */
+/**
+ * Opens the user menu, presses "Sign out" and waits until the sign-out is done. The menu item submits a server
+ * action that ends the session and then redirects to the login page, so the login page is the proof that the
+ * session is gone. Returning earlier lets the next step (a `goto`, the next account signing in) cancel the
+ * action in flight and land on the still signed in app (#907).
+ */
 export async function signOutThroughTheMenu(
   page: Page,
   account: { name: string },
 ): Promise<void> {
   await userMenuButton(page, account).click();
   await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await expect(page).toHaveURL(/\/login$/);
 }
 
 export type GithubInstallation = {

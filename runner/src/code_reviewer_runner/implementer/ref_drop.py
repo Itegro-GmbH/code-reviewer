@@ -61,20 +61,23 @@ class TooManyRefBytes(RefListingFailed):
 @dataclass
 class RefDeletions:
     """Iterable of the `delete <ref>` commands of `update-ref --stdin -z` for every branch (but
-    `keep`) and tag the listing names. `count` is how many it made once the iteration has ended.
-    Iterating starts the listing in a thread of its own and raises `RefListingFailed` at the end
-    of the listing when it failed, `TooManyRefs` as soon as more than `limit` refs would be deleted
-    and `TooManyRefBytes` as soon as their commands would be more than `max_bytes` (nothing past
-    either limit is sent on)."""
+    `keep`) and tag (but `keep_tags`) the listing names. `count` is how many it made once the
+    iteration has ended. Iterating starts the listing in a thread of its own and raises
+    `RefListingFailed` at the end of the listing when it failed, `TooManyRefs` as soon as more than
+    `limit` refs would be deleted and `TooManyRefBytes` as soon as their commands would be more than
+    `max_bytes` (nothing past either limit is sent on)."""
 
     listing: Callable[[Callable[[bytes], None]], Outcome]
     keep: Collection[str]
+    keep_tags: Collection[str] = ()
     limit: int = MAX_REFS
     max_bytes: int = MAX_REF_BYTES
     count: int = field(default=0, init=False)
 
     def __iter__(self) -> Generator[bytes]:
-        kept = {HEADS + name.encode() for name in self.keep}
+        kept = {HEADS + name.encode() for name in self.keep} | {
+            TAGS + name.encode() for name in self.keep_tags
+        }
         chunks: queue.Queue[bytes | None] = queue.Queue(QUEUE_CHUNKS)
         stopped = threading.Event()
         failure: list[Outcome] = []

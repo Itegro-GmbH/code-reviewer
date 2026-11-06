@@ -60,6 +60,8 @@ export type ProfileFactsRow = {
   defaultResult: string | null;
   /** Whether the version's model is a managed one (a catalog entry; #854). */
   managedModel: boolean;
+  /** The harness the version runs with (#856). */
+  harness: string;
 };
 
 /**
@@ -103,6 +105,7 @@ export function profileInfosOf(
               {
                 canPush: row.canPush,
                 managedModel: row.managedModel,
+                harness: row.harness,
                 ...(row.defaultResult === null
                   ? {}
                   : {

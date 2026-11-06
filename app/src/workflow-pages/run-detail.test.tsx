@@ -12,6 +12,7 @@ import type { RunView } from "../workflow-runs/service.ts";
 import { WORKFLOW_RUN_POLL_MS, type WorkflowRunsApi } from "./api.ts";
 import {
   COST_BASIS_COPY,
+  COST_BASIS_UNKNOWN_COPY,
   COST_NOT_RUN_COPY,
   RUN_POLL_FAILED_TEXT,
 } from "./messages.ts";
@@ -44,7 +45,10 @@ function apiAnswering(answers: RequestResult<{ run: RunView }>[]) {
   return fake as unknown as WorkflowRunsApi & { run: typeof fake.run };
 }
 
-function renderRun(value: RunView, api = apiAnswering([])) {
+function renderRun<T extends WorkflowRunsApi>(
+  value: RunView,
+  api: T = apiAnswering([]) as unknown as T,
+) {
   const view = render(
     <WorkflowRunDetail
       workspaceSlug="acme"
@@ -192,6 +196,7 @@ describe("the budget and the cost", () => {
     ["reported", COST_BASIS_COPY.reported],
     ["estimated", COST_BASIS_COPY.estimated],
     ["limit", COST_BASIS_COPY.limit],
+    ["subscription", COST_BASIS_COPY.subscription],
   ] as const)(
     "names the basis %s of a step's cost and explains it for the run",
     (basis, copy) => {
@@ -206,6 +211,57 @@ describe("the budget and the cost", () => {
       expect(explained?.textContent).toContain(copy.explanation);
     },
   );
+
+  // #856-T71
+  it("says a subscription step is worth about its estimate, through a subscription, and not billed", () => {
+    const { container } = renderRun(
+      run({ steps: [step({ costBasis: "subscription", costUsd: 0.42 })] }),
+    );
+
+    const line = container.querySelector(
+      "[data-slot=step-cost]",
+    )?.parentElement;
+    expect(line?.textContent).toContain("≈ $0.42 through a subscription");
+    expect(line?.textContent).not.toContain("(");
+    const explained = container.querySelector("[data-slot=run-cost-bases]");
+    expect(explained?.textContent).toContain("not billed");
+  });
+
+  // #856-T71
+  it("says a subscription step has no estimate when Claude Code gave none", () => {
+    const { container } = renderRun(
+      run({ steps: [step({ costBasis: "subscription", costUsd: 0 })] }),
+    );
+
+    const line = container.querySelector(
+      "[data-slot=step-cost]",
+    )?.parentElement;
+    expect(line?.textContent).toContain("no estimate, through a subscription");
+    expect(line?.textContent).not.toContain("≈");
+  });
+
+  // #856-T72
+  it("falls back to a neutral label for a cost basis this page does not know", () => {
+    const { container } = renderRun(
+      run({
+        steps: [
+          step({
+            // A value a newer version wrote and this one reads after a rollback.
+            costBasis: "metered" as unknown as "reported",
+            costUsd: 1,
+          }),
+        ],
+      }),
+    );
+
+    expect(container.querySelector("[data-slot=cost-basis]")?.textContent).toBe(
+      COST_BASIS_UNKNOWN_COPY.label,
+    );
+    expect(
+      container.querySelector("[data-slot=run-cost-bases]")?.textContent,
+    ).toContain(COST_BASIS_UNKNOWN_COPY.explanation);
+    expect(container.textContent).toContain("$1.00");
+  });
 
   // #873-T42
   it("shows no basis for a step that cost nothing", () => {
@@ -678,5 +734,107 @@ describe("while the run runs", () => {
       await vi.advanceTimersByTimeAsync(WORKFLOW_RUN_POLL_MS * 10);
     });
     expect(api.run).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("stopping a run", () => {
+  const cancelling = (
+    answers: RequestResult<{ run: RunView; outcome: string }>[],
+  ) => {
+    const cancel = vi.fn(
+      async () =>
+        answers.shift() ??
+        ({
+          ok: false,
+          status: 500,
+          code: "UNEXPECTED_RESPONSE",
+          issues: [],
+        } as RequestResult<{ run: RunView; outcome: string }>),
+    );
+    return {
+      run: vi.fn(async () => failure("UNEXPECTED_RESPONSE")),
+      cancel,
+    } as unknown as WorkflowRunsApi & { cancel: typeof cancel };
+  };
+
+  // #891-T60
+  it("offers to cancel a run that runs, asks the route and says the run is stopping", async () => {
+    const api = cancelling([
+      {
+        ok: true,
+        data: {
+          run: run({ cancelRequestedAt: "2026-11-05T10:03:00.000Z" }),
+          outcome: "requested",
+        },
+      },
+    ]);
+    const { container } = renderRun(run(), api);
+
+    const button = screen.getByRole("button", { name: "Cancel run" });
+    await act(async () => {
+      button.click();
+    });
+
+    expect(api.cancel).toHaveBeenCalledWith("wf-1", "run-1");
+    expect(screen.queryByRole("button", { name: "Cancel run" })).toBeNull();
+    expect(
+      container.querySelector("[data-slot=run-cancel-requested]")?.textContent,
+    ).toContain("stopping");
+  });
+
+  // #891-T60
+  it("shows a run that is already stopping as stopping, without the button", () => {
+    const { container } = renderRun(
+      run({ cancelRequestedAt: "2026-11-05T10:03:00.000Z" }),
+    );
+
+    expect(screen.queryByRole("button", { name: "Cancel run" })).toBeNull();
+    expect(
+      container.querySelector("[data-slot=run-cancel-requested]"),
+    ).not.toBeNull();
+  });
+
+  // #891-T61
+  it("has no button for a run that has ended, and shows a cancelled run in words", () => {
+    const { container } = renderRun(
+      run({
+        status: "cancelled",
+        cancelRequestedAt: "2026-11-05T10:03:00.000Z",
+        finishedAt: "2026-11-05T10:04:00.000Z",
+        steps: [
+          step({
+            status: "failed",
+            errorCode: "cancelled",
+            output: null,
+            finishedAt: "2026-11-05T10:04:00.000Z",
+          }),
+        ],
+      }),
+    );
+
+    expect(screen.queryByRole("button", { name: "Cancel run" })).toBeNull();
+    expect(screen.getAllByText("Cancelled").length).toBeGreaterThan(0);
+    expect(container.querySelector("[data-slot=run-failure]")).toBeNull();
+    expect(
+      container.querySelector("[data-slot=step-failure]")?.textContent,
+    ).toContain("stopped the run");
+    expect(container.textContent).not.toContain("cancelled");
+  });
+
+  // #891-T62
+  it("says why when the stop could not be asked for, and keeps the button", async () => {
+    const api = cancelling([
+      { ok: false, status: 404, code: "WORKFLOW_RUN_NOT_FOUND", issues: [] },
+    ]);
+    const { container } = renderRun(run(), api);
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Cancel run" }).click();
+    });
+
+    expect(
+      container.querySelector("[data-slot=run-cancel-failure]")?.textContent,
+    ).toContain("no longer exists");
+    expect(screen.getByRole("button", { name: "Cancel run" })).toBeTruthy();
   });
 });

@@ -180,6 +180,7 @@ export const errorCopy = (
     "When the review was ready, the job was no longer held by its runner or this could not be confirmed, so nothing was written. The next push reviews again.",
   superseded:
     "A newer push replaced this run while it was running, so it was stopped and published nothing.",
+  cancelled: "A member of the workspace stopped this run.",
   // The Implementer (#746). One plain sentence each; none promises a pull request (the work is on a branch).
   branch_exists:
     "The branch for this task already exists on the repository, so nothing was changed. Choose another branch name.",
@@ -342,6 +343,9 @@ export const turnErrorCopy = (
     "No runner of this workspace with the labels of the task's environment picked the task up within the time limit, so it was cancelled and nothing was charged. Start a runner that has the labels (see Runners), or choose another environment, and start the task again.",
   dispatch_unavailable:
     "No worker picked up this task within the time limit, so it was stopped. The service that starts workers may be down or fully busy. Start the task again later.",
+  // #891: stopped by a member. A turn that was running pushed what it had committed when it could, so the branch holds that work.
+  cancelled:
+    "A member of the workspace stopped this task. The agent was ended; work it had committed was pushed to the branch when possible, so check the branch for what reached it. Only what the task used until it stopped is charged.",
   lease_lost:
     "The worker no longer held this task when it was ready, or this could not be confirmed, so the result was not saved. Work pushed before that stays on the branch.",
   billing_hold_released:

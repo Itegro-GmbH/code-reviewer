@@ -23,7 +23,10 @@ const MODEL_FIELD_MAX_LENGTH = 200;
 
 export type StartInput = {
   repositoryId: string;
+  /** The branch the work is compared with and merged into. */
   baseBranch: string;
+  /** #909: the branch the new branch is made from when that is not the base (a step of a workflow that continues another's branch); left out: the tip of the base. */
+  startBranch?: string;
   branch: string;
   instruction: string;
   /** The model; null when a profile is named (#843): the profile's version brings the model and the cost limit. */
@@ -125,6 +128,14 @@ export function validateStartInput(body: unknown): StartInputCheck {
   else if (typeof baseBranch !== "string" || !BRANCH_NAME.test(baseBranch))
     refuse("baseBranch", "invalid");
 
+  // The start branch exists on the platform or the submit is refused; here it only has to be a name the queue can hold.
+  const startBranch = fields.startBranch ?? undefined;
+  if (
+    startBranch !== undefined &&
+    (typeof startBranch !== "string" || !BRANCH_NAME.test(startBranch))
+  )
+    refuse("startBranch", "invalid");
+
   const branch = fields.branch;
   if (branch === undefined || branch === "") refuse("branch", "required");
   else if (typeof branch !== "string") refuse("branch", "invalid");
@@ -135,6 +146,8 @@ export function validateStartInput(body: unknown): StartInputCheck {
     );
     if (!checked.ok)
       refuse("branch", checked.issue === "empty" ? "required" : checked.issue);
+    else if (startBranch !== undefined && startBranch === branch)
+      refuse("branch", "invalid");
   }
 
   const instruction = fields.instruction;
@@ -220,6 +233,9 @@ export function validateStartInput(body: unknown): StartInputCheck {
     value: {
       repositoryId: repositoryId as string,
       baseBranch: baseBranch as string,
+      ...(startBranch === undefined
+        ? {}
+        : { startBranch: startBranch as string }),
       branch: branch as string,
       instruction: instruction as string,
       model: profileRef === null ? (model as ModelChoice) : null,

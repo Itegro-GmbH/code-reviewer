@@ -96,6 +96,38 @@ describe("the count of unknown-cost settlements", () => {
     expect(await countsOf(feed)).toEqual([]);
   });
 
+  // #856-T75: a real claude-code turn on a customer's runner is in `runner-api/runner-subscription-cost.integration.test.ts`.
+  it("counts a job that only says it ran through a subscription: the basis is not the runner's to name", async () => {
+    const { fixture, feed } = await start();
+    const job = await enqueue(fixture);
+    const claimed = await fixture.queue.claimNext("runner-a", ENGINES);
+    await fixture.queue.complete(job.id, claimed?.leaseToken ?? "", {
+      ok: true,
+      result: {
+        ok: true,
+        usage: {
+          promptTokens: 100,
+          completionTokens: 10,
+          costUsd: null,
+          costBasis: "subscription",
+          estimatedCostUsd: 0.42,
+        },
+      },
+    });
+
+    expect(await countsOf(feed)).toEqual([
+      { workspaceId: fixture.workspaceId, keyMode: "own", unknownCostCount: 1 },
+    ]);
+    expect(await recordsOf(fixture).get(job.id)).toMatchObject({
+      state: "settled",
+      costMicroUsd: null,
+      costBasis: null,
+      promptTokens: 100,
+    });
+    const [group] = await recordsOf(fixture).summarize(WHOLE);
+    expect(group).toMatchObject({ settledCount: 1, unknownCostCount: 1 });
+  });
+
   // #385-T03
   it("counts a run of unknown cost under the key mode it ran on, own and operator's apart", async () => {
     const { fixture, feed } = await start();

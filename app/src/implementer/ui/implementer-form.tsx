@@ -75,6 +75,7 @@ type Problem = { sentence: string; runId?: string };
 const FIELD_OF_ISSUE: Record<ImplementerIssue["field"], FieldKey | null> = {
   repositoryId: "repository",
   baseBranch: "baseBranch",
+  startBranch: null,
   branch: "branch",
   instruction: "instruction",
   model: "model",
@@ -94,6 +95,7 @@ const FIELD_OF_FAILURE: Record<string, FieldKey> = {
   IMPLEMENTER_ENVIRONMENT_NOT_FOUND: "environment",
   IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED: "environment",
   IMPLEMENTER_RUNNER_NEEDS_OWN_KEY: "environment",
+  IMPLEMENTER_HARNESS_NEEDS_RUNNER: "environment",
   IMPLEMENTER_PROFILE_NOT_FOUND: "profile",
   EXCEEDS_OPERATOR_MAXIMUM: "cost",
 };

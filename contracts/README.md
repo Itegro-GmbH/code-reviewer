@@ -231,7 +231,8 @@ one instruction, and one turn is one `jobs` row of the kind `implementer`. It ex
 - `RunnerJobInput` depends on its kind. A Diff or Dynamic job requires `prUrl` and `command` (as before) and may not carry
   `implementer`; an implementer job requires the closed object `implementer` and may not carry `prUrl`, `command`, `args`,
   `base` or `dynamic`. `git`, `llm` and `env` are required for every kind. `implementer` holds `repo {fullName, cloneUrl}`,
-  `baseBranch`, `branch`, `instruction` (at most 20 000 characters, literal data), `limits {timeLimitSeconds}`, and `cost`,
+  `baseBranch`, the optional `startBranch` (#909: the branch the new branch is made from, bounded as `baseBranch` is; absent: the tip
+  of the base), `branch`, `instruction` (at most 20 000 characters, literal data), `limits {timeLimitSeconds}`, and `cost`,
   `modelEntry` and the optional `capabilities` of the native Dynamic job, unchanged (`DynamicCostPolicy`,
   `DynamicModelEntry`). `git.token` is a token that may write the contents of exactly `repo`. The Diff and Dynamic documents
   (`examples/ClaimResponse.json`, `fakes/fixtures/*.json`) are untouched and stay valid.

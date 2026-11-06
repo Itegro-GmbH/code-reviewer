@@ -14,7 +14,7 @@ code-review.com has none of it: no page, no route, no job kind, and its Dispatch
 
 A member of the workspace opens `/w/<slug>/implementer`, picks a repository, a base branch, a **new** branch name, writes
 the task, picks a model and, if they want, a lower cost limit. The task becomes one job. A fresh Sandbox VM starts, an
-OpenCode agent works in a clone, in a container of its own with its own Docker, and starts on the new branch. Git is free for
+OpenCode agent works in a full clone (every branch of the repository, its whole history and its tags, #909), in a container of its own with its own Docker, and starts on the new branch. Git is free for
 the agent inside that clone, and it has no way to push: when the turn ends, **the runner pushes every local branch of the
 clone** to GitHub, the new branch among them (section "The git rules"). It does not open a pull request and does not merge.
 The person finds the branches on GitHub and the run on the Runs page, and can **continue the session** there with a next instruction on a new VM
@@ -64,11 +64,11 @@ A follow-up is a job like the first turn's: a new VM from the golden snapshot, t
   commits of the earlier turns are already on GitHub, so that rewriting them makes the push reject the branch (the agent is warned,
   not stopped).
 - **Branches.** A turn may push several branches (section "The git rules"), so a follow-up starts from **all** the branches the earlier turns
-  left on GitHub, not only the session's: one fetch, 50 commits deep from every tip, a local branch for each, and the branch the agent
+  left on GitHub, not only the session's: one fetch of every branch and tag of the provider with the whole history (#909), a local branch for each, and the branch the agent
   ended on checked out (section "A follow-up turn: the workspace with several branches"). Each branch is judged against its own start
   tip at the push, so a branch the turn did not touch is not pushed again. If someone pushed to a branch meanwhile, the turn continues on
   the GitHub tip and the preface says so. A session whose branch was deleted on GitHub cannot be continued (`IMPLEMENTER_BRANCH_GONE`,
-  "start a new task"); one that never pushed anything starts again from the base branch under the same name.
+  "start a new task"); one that never pushed anything starts again from where the first turn started, under the same name: the start branch (`startBranch`) when the task named one, else the base branch.
 
 ### The conversation
 
@@ -155,11 +155,15 @@ the two deployments costs nothing but the follow-ups that fall into it. The live
 3. **Fetch.** The Worker asks the App for the job. Here, and only here, the App makes a git token for exactly this repository
    that holds `contents: write` and `metadata: read` and nothing else (no pull requests, no issues, no checks), and the model
    access of the chosen entry or key. The token lives with the turn and is switched off when the turn ends, however it ended.
-4. **Prepare.** The runner (root in the container) clones the base branch with depth 1 into a bare mirror that only it can
-   enter. It makes the agent's repository in `/work/repo` as a local clone of that mirror, and the reader (a container of its
-   own, section "How Control reads the agent's repository") gives it no remote, no credential, the system identity and a new
-   branch at the base tip. Nothing else is put into that repository: no hook, no guard, no spool. A follow-up turn (the job
-   carries `resume`) starts from the branches the earlier turns left on GitHub instead, taken in one fetch 50 commits deep from every tip (section "A follow-up turn: the workspace with several branches").
+4. **Prepare.** The runner (root in the container) clones the **whole repository** (#909: every branch, the tags, the full
+   history, no `--depth`) into a bare mirror that only it can enter. It makes the agent's repository in `/work/repo` as a full local
+   clone of that mirror, and the reader (a container of its own, section "How Control reads the agent's repository") gives it no
+   remote, no credential, the system identity, a **local branch for every branch of the provider** (no `origin/` branches) and a new
+   branch at the tip of the **start branch** (the `startBranch` of the job; the base branch when the job names none). The agent has
+   the repository as a developer has it locally, so `git log`, `git blame`, `git merge-base` and `git diff <base>...HEAD` work against
+   any branch. Nothing else is put into that repository: no hook, no guard, no spool. A follow-up turn (the job carries `resume`)
+   gets the same clone and checks out the branch the earlier turn ended on (section "A follow-up turn: the workspace with several
+   branches"). A repository too large for the clone's time limit (`CLONE_FETCH_SECONDS`, 600 s) ends the turn `clone_failed`, free; there is no size cap yet. The job carries `startBranch` only for a Worker that names the claim feature `implementer_start_branch`; for any other a task with a start branch ends `implementer_engine_unavailable`, free, before a credential exists (a Worker that did not read it would start from the base branch).
 5. **Set up** (only when the task's environment has a script). The runner starts the **Setup container** from the agent's image, runs the
    script in it with full internet access, and commits the container as the agent's image; a script that fails ends the turn here, free,
    before the model door exists (section "The environment's setup script"). Without a script nothing happens and nothing changes.
@@ -229,6 +233,8 @@ gave up, a stop with the lease still held), and never after a lost lease, the ru
 | `unreadable` | The branch could not be taken over from the agent's repository (a broken repository, objects git refuses) |
 | `not_a_commit` | The branch points at a tree or a tag, not a commit |
 | `out_of_time` | The time for the final push ran out before this branch |
+| `login_secret` | (#856) The branch holds the login of the device of a runner that ran the agent on its own Claude login (the token, or one of its spellings: URL-quoted, base64) in a commit, a file, a file name, a commit message or its own name, so it was not pushed; the turn ends `push_rejected` when it is the task's branch |
+| `unchecked` | (#856) The push guard could not read the branch to its end (too large, or git failed), so it was not pushed: the guard never lets a branch through that it did not read |
 | `out_of_space` | The disk the runner takes branches over to (the reserve disk, section "The disk") had too little room left, or ran out while this one was taken over; nothing was fetched when the room was short beforehand |
 | `excluded` | The branch is in `PUSH_EXCLUDED_BRANCHES` (below) |
 
@@ -286,7 +292,9 @@ full disk; making one does).
   there, with no network, no token and no way out.
 - The list of local branches is made by `git for-each-ref` in the reader. Its output is read as a stream and **capped at
   4 MiB** (about 40,000 branches); over the cap the read is ended and the turn ends `push_rejected` with a sentence that says
-  the list is too long, and nothing is pushed. The runner never holds more of an agent-controlled list than the cap.
+  the list is too long, and nothing is pushed. The runner never holds more of an agent-controlled list than the cap. Every branch of the
+  provider is a local branch (#909), so a branch still at its start tip is dropped as the stream is read and does not count against the cap
+  (the session branch always stays): the cap bounds the branches the turn changed or made.
 - The mirror reads the agent's branches through `git upload-pack`, named on the command line (`--upload-pack`) and run in the
   reader through the Docker daemon (`exec_pipe`, a command that takes no path and no option from its caller), over protocol
   version 2 (so that the advertisement the runner reads is for the one ref it asks for, and does not grow with the refs the
@@ -342,26 +350,21 @@ The workspace (`GitWorkspace`) prepares such a turn like this:
   `baseBranch`, `branch` or a name of `resume` is refused the same way. Before anything is fetched the workspace checks every name once more as a first turn's names are checked (`git check-ref-format`, not `HEAD`,
   no leading dash, no control character); a name git does not accept ends the turn `implementer_config_invalid`, free. The same code ends the turn when one name is the directory of another (the session branch
   `a` and a branch `a/b`, or the base `main` and `main/x`): both cannot be refs, and the session branch is made at the base tip when the provider never had it.
-- **Fetch.** The runner asks the provider which of the branches it has (`git ls-remote --heads`, the same authenticated path as the clone, one call with a ref pattern per branch), then takes the base branch and **all**
-  of those that exist **in one** `git fetch --depth=50` (`RESUME_DEPTH`) into the mirror as `refs/heads/<name>`. Git counts the depth from every tip and keeps a commit when any tip reaches it within 50 commits, so
-  **what is guaranteed is: every tip (base, session branch, other branches) has at least 50 commits of history where it has that many, whatever the order of `resume.branches` and however the branches lie to each
-  other** (a branch 49 commits ahead of the base, or a session branch that forked before the base tip, does not make the base a shallow root). It is not guaranteed that nothing is deeper: a commit that another tip
-  reaches within 50 commits is there as well. The agent has no remote to deepen from, and with less history a base branch that moved since the earlier turn could not be merged, rebased or diffed against (`merge-base`
-  finds nothing, "refusing to merge unrelated histories"). **The limit that remains:** a merge base further back than 50 commits from the tips is not found. Separate fetches could not give this (a later `--depth`
-  fetch moves the shallow boundary, whatever the order), which is why there is one. The branches the provider does not list are left out and recorded (`resume_missing`) from the answer of `ls-remote`, without a fetch
-  that fails; a base branch it does not list ends the turn `base_branch_not_found`, a session branch of `resume` it does not list `clone_failed` (free). A first turn keeps the base branch one deep. The `ls-remote` is
-  bounded by `FETCH_TIMEOUT` (60 s) and the fetch by what is left of `RESUME_FETCH_SECONDS` (300 s, started before the `ls-remote`: both together); a turn that is not set up by then ends `clone_failed` (free). The token is
-  in the environment of those git processes and nowhere else, as for the base. The tip is read from the mirror after the fetch, never from the job or from the `ls-remote` (a branch that moves between the two is taken as
-  the fetch has it).
+- **Fetch.** One `git fetch` of every branch and every tag of the provider, without `--depth` (#909), into the mirror as `refs/heads/<name>` and `refs/tags/<name>`, the same call as on a first turn. The branches
+  of `resume` no longer decide what is fetched: they only decide what is told (`resume_moved`, `resume_missing`) and what is checked out. Everything the provider has is in the agent's repository with its whole history, so
+  `merge-base` against a base that moved since the earlier turn always finds the fork. A base branch the provider does not have ends the turn `base_branch_not_found` and a session branch of `resume` it no longer
+  has `clone_failed` (both free); a start branch it does not have ends a **first** turn `clone_failed`, and a follow-up carries on (its branches are its own). The fetch is bound by `CLONE_FETCH_SECONDS` (600 s); a turn
+  that is not set up by then ends `clone_failed` (free). So does a set-up that leaves the reserve disk with less room than the push needs (`MIN_FREE_BYTES`, `MIN_FREE_INODES`, the same check as before the push), asked after the mirror and again after the agent's repository (a second full copy) is cloned: the
+  turn ends before the agent starts, with a detail that names the room it needs, instead of running the agent into a full disk. The token is in the environment of that git process and nowhere else. The tip of each branch is read from the mirror after the fetch, never from the job.
 - **What moved.** The tip the provider has now is the start of the turn, whatever the job said: a branch that is not at the tip the earlier turn pushed is taken as it is and recorded
   (`resume_moved`: name, the tip that was, the tip that is) so that the agent can be told. A branch the provider no longer has is left out and recorded (`resume_missing`); the checkout falls back to the session
   branch when that is the one that is gone. A session branch that is in `resume` and gone ends the turn `clone_failed` (free): the app checks it before it starts a turn, so this is a race.
-- **The agent's repository.** Made as always from the mirror (a clone that is not `--single-branch`: the mirror holds the base branch and the branches of the session and nothing else under `refs/heads/`), then a
-  local branch for every fetched branch at the tip the mirror has (one `update-ref --stdin -z` in the reader), the session branch at the base tip when no earlier turn pushed it, no remote, and the
-  branch the agent was on checked out. `resume` with no branches starts from the base like a first turn.
+- **The agent's repository.** Made as always from the mirror (a clone that is not `--single-branch`, tags included), then a
+  local branch for every branch of the mirror at the tip the mirror has (one `update-ref --stdin -z` in the reader), the session branch at the start tip when no earlier turn pushed it, no remote (so no `origin/` branches), and the
+  branch the agent was on checked out. `resume` with no branches starts from the start branch like a first turn.
 - **One start tip per branch** (`start_tips`). `start_commit` is the start tip of the session branch (the base tip on a first turn), so `baseCommit`, `commits` and `filesChanged` of the report cover what this turn did to the
-  session branch. The final push judges every branch against its own start tip: a branch of the session that the agent did not touch is not fetched, not pushed and not reported; a branch the agent made is left alone while it is still at
-  some start tip (it holds no commit of its own). The push is as before: every local branch, no force. In the result of a follow-up turn `pushed` and `headCommit` describe the session branch only; the other
+  session branch. The final push judges every branch against its own start tip: a branch of the repository that the agent did not touch (every other branch of the provider, #909) is not fetched, not pushed, not reported and does not count toward the 50 branches of `MAX_PUSHED_BRANCHES`; a branch the agent made is left alone while it is still at
+  some start tip (it holds no commit of its own). The push is as before: every local branch, no force. The 4 MiB cap of the list of local branches (`LIST_MAX_BYTES`) counts only the branches the turn changed or made, not the ones still at their start tip (section "The git rules"). In the result of a follow-up turn `pushed` and `headCommit` describe the session branch only; the other
   branches the turn pushed are in `branches`, which the claim of the next follow-up turn reads (`resume.branches`).
 - **After the setup script** the history of the script is undone branch by branch: HEAD back on the branch the agent starts on, every branch of the turn at its start tip, every other branch and tag deleted.
 
@@ -863,7 +866,7 @@ taken out (and lone surrogates), the cut is on a character boundary, every instr
 that instruction and is disabled. The hint "history: about N tokens; the first call reads all of it again" comes from the tokens of the last model call of the last turn, with the warning of the spike that a very long history can reach the cost limit with the first call. The run page also shows the continuation mode of a follow-up turn (`imported` or `summary_only` with the reason).
 
 **Known limits and the release window.**
-- **App before runner (release window).** Until the runner with `implementer_resume` is live, a follow-up turn ends for free with `implementer_engine_unavailable`, before any credential exists (the claim checks the feature, see above). The app and the runner of release 2 are shipped together, so the window does not exist there; it is only the time between the two deployments if they are ever shipped apart.
+- **App before runner (release window).** Until the runner with `implementer_resume` is live, a follow-up turn ends for free with `implementer_engine_unavailable`, before any credential exists (the claim checks the feature, see above). Likewise a task with a start branch ends free with `implementer_engine_unavailable` until the Worker carrying `implementer_start_branch` is live. The app and the runner of release 2 are shipped together, so the window does not exist there; it is only the time between the two deployments if they are ever shipped apart.
 - **A follow-up on a workflow's session.** A session that a workflow run started can be continued from the Runs page like any other. That **changes the branch behind the run** (the run's result is no longer what the branch holds), and the **cost of the follow-up turn is not counted in the run's budget**: it is a turn of its own, with its own cost limit.
 - **N3, one 404 discards at once.** The start discards the instruction when GitHub answers 404 for the branch or the repository once; there is no second look, so a wrong 404 from the platform loses the instruction (its text stays on the Runs page).
 - **N6, the summary and the depth.** `previousSummary` is the last summary that is not empty (a turn that reported none does not erase it), and the history that is read is at most 100 turns (`TURN_HISTORY_LIMIT`); the digest holds less (above).
@@ -872,6 +875,34 @@ that instruction and is disabled. The hint "history: about N tokens; the first c
 
 **Tests.** `follow-up.test.ts` (fakes: the turn that ends between the two writes, the repeat of a queued request id, the discard of one instruction only, the attempt, the day), `follow-up.integration.test.ts` and `follow-up-http.integration.test.ts` (Postgres: busy and queued, the second queued is `409`, branch gone, model not allowed, the environment copy, two parallel submits make one turn or one queued instruction, idempotency, another workspace is `404`, the start at the end of a turn also for a double event, the discard), `implementer-queue.integration.test.ts` (also the stale discard and the order and backoff of the sweep), `turn-ended-hook.test.ts`,
 `implementer-own-key-claim.integration.test.ts` (the claim with and without `implementer_resume`), `add-implementer-session-queue.integration.test.ts` (the migration), `resume.test.ts`, `continue-input.test.ts`, `follow-up-starter.test.ts`, `sweep.test.ts` and `continue-form.test.tsx`.
+
+## Cancelling a run (#891)
+
+A member stops a run with `POST /api/w/:workspace/implementer/runs/:runId/cancel` (no body; `:runId` is the id of the job, `runId` of the start answer), for every member (`start_implementer_task`: whoever may start a task may stop one). A job that is no
+turn of the Implementer of this workspace is `404 IMPLEMENTER_RUN_NOT_FOUND`, whatever the reason. The answer is `{runId, outcome, status}`:
+
+| `outcome` | HTTP | What happened |
+|---|---|---|
+| `cancelled` | 200 | The turn was waiting (for a Dispatcher, or for a runner of its labels). It ended at once with the code `cancelled`: nothing ran, its usage record is void, its hold is given back, the session is idle again, and no instruction of it is left to start. |
+| `requested` | 202 | The turn runs. The job is marked (`jobs.cancel_requested_at`). |
+| `already_requested` | 200 | It runs and was asked before. Nothing changed; the first moment stays. |
+| `already_ended` | 200 | The run is over (`status` says how). Nothing changed. |
+
+**How a running turn stops.** Every heartbeat answer of the job says `cancelRequested: true` while the mark is set (the lease is extended as usual; contract `HeartbeatResponse` and `WorkerHeartbeatResponse`). The job host of the Worker, and of a customer's runner (the same `JobHost`),
+learns it at its next heartbeat (30 seconds on the Worker, 60 at most on a customer's runner) or at the lease check before a push, and ends the turn the way it ends it when the Worker is stopped (SIGTERM, "Limits", row Stop): the engine is ended at once, **what is committed is pushed** (the lease check still says `held`),
+the snapshot is taken when it takes 2 seconds or less, and the process prints its result. The stop has up to 120 seconds (`IMPLEMENTER_TERMINATE_GRACE_SECONDS`), as long as the lease: the host keeps beating the heart while the process ends, so the lease cannot lapse before the report is delivered or the grace is over. The host reports it under the code `cancelled` (not `runner_shutdown`: the job is not given back) with what the process printed: the usage the model was used for and the report of the turn (the pushed branches, the summary).
+A turn that finished by itself in the same moment keeps its own result. The job then ends **`cancelled`** with `error_code = cancelled` (`complete` takes the code `cancelled` as the status `cancelled`; a repeated report is recognised, another outcome is a conflict), the session is idle, and the report is recorded on the session like any turn's.
+
+**What is charged.** The class of the code is `charged` (`app/src/billing/outcome.ts`): the usage the runner reported, at the price of the key mode, and the minutes. A turn that never ran prices to nothing. A holder that never reports (it died, it heard nothing) leaves the usage record `settled`
+with an unknown cost (`no_result`), which bills the minutes only, like a lost lease. A process that was ended without printing a result (killed after the grace, not ended cleanly) is reported `cancelled` with the reason `no_result_from_process`, which settles the record the same way instead of voiding it. A holder that gives the job back because the platform failed (`launch_failed`, `worker_exited`, or the input never arrived) ends it `cancelled` with that code: free, a void record, nothing charged. In a workflow, a turn that never ran (nobody claimed it, or its Worker could not be started) is booked at no cost on the reported basis; one that ran and reported nothing is booked at the limit.
+
+**When the holder does not stop.** The job is ended by the app, with `cancelled`, in these cases, and never queued again however many attempts it has left (a turn is run once anyway): its lease lapsed; its claim was given back (`release`); the grace of 4 minutes (`cancelGraceMs`,
+`DEFAULT_CANCEL_GRACE_MS`) after the request is over, at the heartbeat of the holder (which then loses its claim, like at the hard limit) or at the sweep. A runner of an earlier release ignores the field and stops that way, without a push.
+
+**In a workflow.** The [run route](workflows.md#cancelling-a-run) asks the job of the step. Stopping the task of an agent step on its own ends the run `cancelled` too, at the next look of the engine (the end of the turn, or the sweep).
+
+**Tests.** `jobs/cancel-queue.integration.test.ts` (the queue: waiting, running, repeats, ended jobs, other workspaces, the report, billing, the lapsed lease, the release, the grace), `implementer/cancel.test.ts` (the service and the route), `job_loop` host tests
+`test_job_loop_cancelled.py` (heartbeat answer, the stop, the report, the lease check), `workflow-runs/engine-cancel.integration.test.ts` and `machine.test.ts` (the run).
 
 ## Release 2: live test
 
@@ -892,7 +923,7 @@ the checks below add to it and do not replace it.
 the Dispatcher last (`docs/deployment-vercel.md`, the deployment pipeline). The test starts only after `persist` and the canary of that run are green and
 the Dispatcher serves the snapshot of the run. The App and the runner are **one release**: the App accepts the new keys of a result (`checkedOut`)
 and sends `resume` only to a runner that names `implementer_resume`, so between the two promotions a follow-up ends
-`implementer_engine_unavailable`, free, and a first turn is unharmed. Do not start a follow-up in that window and do not promote one half alone.
+`implementer_engine_unavailable`, free, and a first turn is unharmed. A task with a start branch ends the same way, free, until the Worker carrying `implementer_start_branch` is live. Do not start a follow-up in that window and do not promote one half alone.
 
 | # | Check | A pass is | A failure is |
 |---|---|---|---|
@@ -1204,7 +1235,7 @@ one-shot `NET_ADMIN` container, and only then writes the rule to its stdin. The 
 **What it decides, per request, by the host name of the request:**
 
 * `CONNECT host:port` is an **HTTPS tunnel**; the door never looks inside (no certificate of ours, no interception). Plain HTTP (`METHOD http://host[:port]/path`) is forwarded to the port the URL names, 80 when it names none, if that port is one of the two the door allows (any other port is `port_not_allowed`), with the request line rewritten to its origin form, `Host` set from the same authority the decision was made on, `Connection: close` forced, and the rest of the traffic relayed unread, so one connection is one destination. Anything else (a request in origin form, `https://` as a URL, a user name in the authority, a malformed line, a method that is not an HTTP token) is a 400.
-* The order, the same in every mode: an **IP literal** is refused (`ip_literal`: IPv4 in any spelling a resolver reads, `127.1`, `0x7f.1`, `2130706433`, IPv6 in brackets); a name that is no DNS name is refused (`bad_request`); a **port other than 443 and 80** is refused (`port_not_allowed`); the rule must list the name (`list`; `open` lists everything; `not_listed`); only now is the name looked up, so **a name the rule does not list is never sent to a resolver**; **every IPv4 address it has must be public** (`private_address`: private, loopback, link-local, the metadata address, shared (CGNAT), special-purpose, documentation, multicast and reserved ranges, `netdoor/addresses.py`), and a name with one public and one private address is refused as a whole; the door then **connects to an address it checked**, never to the name again, so a resolver that answers differently the second time (DNS rebinding) changes nothing. IPv6 is not looked up: the door has none.
+* The order, the same in every mode: an **IP literal** is refused (`ip_literal`: IPv4 in any spelling a resolver reads, `127.1`, `0x7f.1`, `2130706433`, IPv6 in brackets); a name that is no DNS name is refused (`bad_request`); a **port other than 443 and 80** is refused (`port_not_allowed`; a rule of the runner's own can allow fewer: the Claude Code subscription turn's rule has 443 only, `NetworkRule.ports`, `docs/runner.md`); the rule must list the name (`list`; `open` lists everything; `not_listed`); only now is the name looked up, so **a name the rule does not list is never sent to a resolver**; **every IPv4 address it has must be public** (`private_address`: private, loopback, link-local, the metadata address, shared (CGNAT), special-purpose, documentation, multicast and reserved ranges, `netdoor/addresses.py`), and a name with one public and one private address is refused as a whole; the door then **connects to an address it checked**, never to the name again, so a resolver that answers differently the second time (DNS rebinding) changes nothing. IPv6 is not looked up: the door has none.
 * A refusal is a `403` with `X-Network-Door: <word>` and one plain sentence in the body, so that a failed `npm install` says why. A connection that cannot be made is a `502` (`upstream_failed`); more than 128 connections at once get a `503`.
 * Case, a trailing dot and Unicode do not get round the list: the name is brought to lower case ASCII (punycode) before it is compared, the entries are in the same form.
 
@@ -1335,8 +1366,8 @@ it. What it did to the repository is the **base** the agent starts from, not a c
    repository ignores already (`node_modules`, a virtual environment, build output) needs nothing. A name with a line end cannot be written as a
    pattern and is left as it is; more than 10,000 entries (or 1 MiB of names) ends the turn rather than half of them being kept.
 
-Before both, the script's **history** is undone (`_return_to_start`): HEAD goes back to the branch the agent starts on, every branch of the turn (the base branch, the task's branch and, on a follow-up, each branch of the session) to its own start tip, and every other
-branch and every tag is deleted, whatever worktree has it checked out (`git update-ref --stdin -z`, fed by a streamed listing of the refs, so no length of one name is a limit, and the number of refs and the bytes of their names are (#827): a script that leaves more than 100,000 branches and tags (`ref_drop.MAX_REFS`), or branches and tags whose delete commands are more than 32 MiB together (`ref_drop.MAX_REF_BYTES`, so that a few refs with names of kilobytes do not get round the count), ends the turn `setup_failed`, free, with "the script made more than 100000 branches and tags" or "the names of the branches and tags the script made are more than 33554432 bytes" (both bounds are well above any repository and well below what the 256 MiB reader holds in one `update-ref`, not measured on a VM); before, such a script ended it by the reader's memory limit with no reason; `branch -D` would refuse a branch a linked worktree of the script has checked out and end the turn). The commits stay in the object store and their files in the tree.
+Before both, the script's **history** is undone (`_return_to_start`): HEAD goes back to the branch the agent starts on, every branch of the repository (all the provider's branches and the task's branch) to its own start tip in one `update-ref --stdin -z`, every tag of the provider to what it was, and every other
+branch and tag (the script's own) is deleted, whatever worktree has it checked out (`git update-ref --stdin -z`, fed by a streamed listing of the refs, so no length of one name is a limit, and the number of refs and the bytes of their names are (#827): a script that leaves more than 100,000 branches and tags (`ref_drop.MAX_REFS`), or branches and tags whose delete commands are more than 32 MiB together (`ref_drop.MAX_REF_BYTES`, so that a few refs with names of kilobytes do not get round the count), ends the turn `setup_failed`, free, with "the script made more than 100000 branches and tags" or "the names of the branches and tags the script made are more than 33554432 bytes" (both bounds are well above any repository and well below what the 256 MiB reader holds in one `update-ref`, not measured on a VM); before, such a script ended it by the reader's memory limit with no reason; `branch -D` would refuse a branch a linked worktree of the script has checked out and end the turn). The commits stay in the object store and their files in the tree.
 
 This is a rule about where the agent starts, not about what the script may do. If it turns out to be wrong, it is one function. A script that left the
 repository unreadable (it removed `.git`) ends the turn with `setup_failed` (free: the runner could not read what the script left, and the script's output is not shown).
@@ -1612,6 +1643,7 @@ used):
 | `dispatch_unavailable` | Nothing claimed the turn within `RUNNER_DISPATCH_GIVE_UP_SECONDS` (60 minutes by default); the Dispatcher is down, protected or full ([`deployment-vercel.md`](deployment-vercel.md), 5.3) | free | Look at the App's sweep log and the Dispatcher's |
 | `timeout` | The turn was still running 70 minutes after it started, so the app failed it. The Worker normally ends it before at its 3600 seconds | free | Check the branch for what was pushed |
 | `lease_lost`, `lease_expired` | The Worker no longer held the turn when it was ready, or stopped reporting, or the lease could not be confirmed before the final push; the result was not saved and nothing is pushed after the loss. Nothing is pushed during the turn, so a lost lease means no work reached GitHub | free | Start again |
+| `cancelled` | A member stopped the run (#891, [Cancelling a run](#cancelling-a-run-891)): while it waited (nothing ran), or while it ran, when the engine was ended at the next heartbeat and what was committed was pushed. Also when the stop was not carried out within 4 minutes and the app ended the job | charged (what it used; nothing for a turn that never ran) | Check the branch for what was pushed |
 | `runner_shutdown` | The Worker was told to stop (SIGTERM) while it worked: the engine was ended, all committed branches were pushed if the lease was still held. A turn of the Implementer is never run twice, so the app gives it back and it ends here, as its last attempt. The usage of a stopped turn is not recorded yet (#799) | free | Check the branch for what was pushed; start again with a new branch name |
 | `runner_error` | The runner failed unexpectedly before any model call, or the model door or the agent's container went away during the turn before any call was billed or open ("the model door ended during the turn" or "the agent's container ended during the turn", with the exit code, and "killed for its memory" when the kernel did it) | free | Read the Worker log; start again |
 | `dynamic_accounting_failed` | The model usage could not be accounted for, so the turn ended and its cost is not known. The work may be done: check the branch | free | Check the branch |

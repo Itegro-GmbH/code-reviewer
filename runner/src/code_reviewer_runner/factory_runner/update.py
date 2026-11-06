@@ -181,9 +181,12 @@ class HttpsRedirects(urllib.request.HTTPRedirectHandler):
 
 
 def https_opener() -> urllib.request.OpenerDirector:
-    """An opener that knows `https` and nothing else: no `file:`, `ftp:`, `data:`, plain `http:`."""
+    """An opener that knows `https` and nothing else: no `file:`, `ftp:`, `data:`, plain `http:`.
+    A proxy named in the environment (`https_proxy`, `no_proxy`) is used, as the installer's
+    `curl` does; without those variables the opener goes direct."""
     opener = urllib.request.OpenerDirector()
     for handler in (
+        urllib.request.ProxyHandler(),
         urllib.request.HTTPSHandler(),
         HttpsRedirects(),
         urllib.request.UnknownHandler(),  # any other scheme is a `URLError`, not a silent None
@@ -309,33 +312,50 @@ def stage(
         return Staged(Outcome.REJECTED, manifest.release, manifest.digest)
     by_digest = f"{manifest.repository}@{manifest.digest}"
     try:
-        api.request(
-            "POST",
-            f"/images/create?fromImage={manifest.repository}&tag={manifest.digest}",
-            ok=(200,),
-            timeout=pull_seconds,
-        )
-        image = dict(api.inspect_image(by_digest))
+        image = _pull(api, by_digest, manifest, pull_seconds)
     except DockerError as error:
         raise UpdateError(f"the release image cannot be pulled ({error})") from None
     if release_of(image) != manifest.release:
         _forget(api, by_digest)
         raise UpdateError("the image is not the release its manifest names")
     try:
-        if _exists(api, CURRENT_REFERENCE):
-            api.request(
-                "POST",
-                f"/images/{CURRENT_REFERENCE}/tag?repo={CURRENT_REPOSITORY}&tag={PREVIOUS_TAG}",
-                ok=(201,),
-            )
+        _name_current(api, by_digest)
+    except DockerError:
+        # A service that starts at this moment removes the digest references of the images that
+        # are neither `current` nor `previous` (`prune_references`), and a pull that is not named
+        # yet is one of them. The pull is by digest, so a second one brings the very same image.
+        try:
+            _pull(api, by_digest, manifest, pull_seconds)
+            _name_current(api, by_digest)
+        except DockerError as error:
+            raise UpdateError(f"the new image could not be named ({error})") from None
+    return Staged(Outcome.STAGED, manifest.release, manifest.digest)
+
+
+def _pull(
+    api: DockerApi, by_digest: str, manifest: Manifest, pull_seconds: float
+) -> dict[str, object]:
+    api.request(
+        "POST",
+        f"/images/create?fromImage={manifest.repository}&tag={manifest.digest}",
+        ok=(200,),
+        timeout=pull_seconds,
+    )
+    return dict(api.inspect_image(by_digest))
+
+
+def _name_current(api: DockerApi, by_digest: str) -> None:
+    if _exists(api, CURRENT_REFERENCE):
         api.request(
             "POST",
-            f"/images/{by_digest}/tag?repo={CURRENT_REPOSITORY}&tag={CURRENT_TAG}",
+            f"/images/{CURRENT_REFERENCE}/tag?repo={CURRENT_REPOSITORY}&tag={PREVIOUS_TAG}",
             ok=(201,),
         )
-    except DockerError as error:
-        raise UpdateError(f"the new image could not be named ({error})") from None
-    return Staged(Outcome.STAGED, manifest.release, manifest.digest)
+    api.request(
+        "POST",
+        f"/images/{by_digest}/tag?repo={CURRENT_REPOSITORY}&tag={CURRENT_TAG}",
+        ok=(201,),
+    )
 
 
 def rollback(api: DockerApi, home: Path) -> int:

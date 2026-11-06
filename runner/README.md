@@ -627,6 +627,7 @@ and the enum agree. Callers branch on the code, never on the text.
 | `dynamic_model_features_unsupported` | The configured model does not support the tool calling or structured output Dynamic Review requires (a forced tool choice, #511), or OpenRouter found no provider that supports every parameter of a request (404, #270); there is no fallback model or provider |
 | `lease_lost` | A Dynamic job was no longer held by this runner (lease lost, job cancelled) or could not be confirmed as held right before it would have written its summary; nothing was written (#260). A turn of the Implementer ends with it when the lease is not confirmed `held` before a push; nothing is pushed after that (#765) |
 | `superseded` | A newer push replaced this run while it was running (#396): it finished the model requests in flight, sent no more, published nothing and reports what it used. Not a failure of the job ("A superseded run", below) |
+| `cancelled` | A member asked for this run to stop (#891): the heartbeat answer said `cancelRequested`, the job host ended the turn like a stop of the Worker (a turn of the Implementer pushes what is committed first) and reports this code, not `runner_shutdown`, with the usage and the report the process printed. The job is not given back |
 | `branch_exists` | An implementer job (#746). **No longer produced**: a branch the remote refuses is a rejected entry of the report and the turn ends `push_rejected`; the word stays for old runs |
 | `base_branch_not_found` | An implementer job (#746): the base branch the turn should start from does not exist on the remote |
 | `clone_failed` | An implementer job (#746): the repository could not be cloned |
@@ -1205,8 +1206,8 @@ local branches**, without force. There is no check of who committed, what descen
 
 | Piece | What it is |
 |---|---|
-| Mirror `/work/reserve/mirror.git` | A bare, `--depth 1` clone of the base branch, root-owned, mode 0700, made without a template, on the **reserve disk** (a pre-allocated 8 GiB file system below the work volume that the agent's container does not mount and cannot fill). The provider token is in the environment (`GIT_CONFIG_COUNT`, `http.extraHeader`) of the one git process that clones or pushes: never in argv, a config file, a URL or anything the agent can read. Redirects are not followed. |
-| Agent repository `/work/repo` | The Subpath `repo` of the work volume, which the agent's container mounts: a local clone of the mirror (no hard links) made in the **reader** with the repository read-write, before the agent exists: no remote, system identity, the new branch at the base tip, no sparse checkout. The agent is root in its own container and owns it. Nothing else is installed in it: no hook, no guard, no spool. Control never runs git with it as working directory or git directory; `dirty()` runs in the read-only reader, `rescue_detached_head()` and `commit_all()` in the one that can write, after the agent's container is killed, with the agent's hooks off. |
+| Mirror `/work/reserve/mirror.git` | A bare **full** clone (#909: every branch and tag of the provider, the whole history, no `--depth`), root-owned, mode 0700, made without a template, on the **reserve disk** (a pre-allocated 8 GiB file system below the work volume that the agent's container does not mount and cannot fill). The provider token is in the environment (`GIT_CONFIG_COUNT`, `http.extraHeader`) of the one git process that clones or pushes: never in argv, a config file, a URL or anything the agent can read. Redirects are not followed. |
+| Agent repository `/work/repo` | The Subpath `repo` of the work volume, which the agent's container mounts: a full local clone of the mirror (no hard links, tags included) made in the **reader** with the repository read-write, before the agent exists: no remote (so no `origin/` branches), system identity, a local branch for every branch of the provider, the new branch at the tip of the start branch (`startBranch` of the job, the base branch when it names none), no sparse checkout. The agent is root in its own container and owns it. Nothing else is installed in it: no hook, no guard, no spool. Control never runs git with it as working directory or git directory; `dirty()` runs in the read-only reader, `rescue_detached_head()` and `commit_all()` in the one that can write, after the agent's container is killed, with the agent's hooks off. |
 | The directories | `/work` and `/run/code-reviewer` must belong to the runner, be no link and be writable by no one else, or the turn is `setup_failed`. |
 | The final push (`GitWorkspace.push_all`) | See below. Nothing is pushed during the turn. |
 | `push_policy.py` | `select_branches` is **the one place for a rule about which branches are pushed**; `PUSH_EXCLUDED_BRANCHES` (empty) is applied there and reported as `excluded`. `branch_name_problem` judges every name before it is put in a refspec. |
@@ -1216,7 +1217,7 @@ the lease held), never after a lost lease, `push_all(seconds=...)`:
 
 1. asks the lease (`before_push`; `LeaseNotConfirmed` is asked again every `confirm_pause` up to `confirm_seconds`, then `lease_lost`);
 2. lists the agent's local branches with `git for-each-ref` run in the read-only reader, streamed and capped at
-   `LIST_MAX_BYTES` (4 MiB; over it nothing is pushed and the turn ends `push_rejected`, `list_problem` says why); the names are
+   `LIST_MAX_BYTES` (4 MiB of the branches the turn changed or made: one still at its start tip is dropped as it is read; over it nothing is pushed and the turn ends `push_rejected`, `list_problem` says why); the names are
    checked (`push_policy`), a branch the listing puts at the start commit is skipped without a fetch, the task's branch comes
    first, at most 50 are taken (excluded names count toward them); the rest is counted in `branchesDropped`;
 3. per branch, `fetch --no-tags` over protocol 2 with `fetch.fsckObjects` and `transfer.fsckObjects` into `refs/runner/in/<n>` of the mirror
@@ -1226,7 +1227,7 @@ the lease held), never after a lost lease, `push_all(seconds=...)`:
    before the commit and before this push (`quiet_readers`), so nothing a filter left behind is alive;
 4. classifies each failure into a reason word from the exit status and the `!` lines of the porcelain (`non_fast_forward`,
    `remote_rejected`, `workflows_not_allowed`, `provider_refused`, `provider_error`, `provider_unavailable`, `timed_out`,
-   `unreadable`, `not_a_commit`, `out_of_time`, `out_of_space`, `excluded`); `workflows_not_allowed` is found only in the reason in the
+   `unreadable`, `not_a_commit`, `out_of_time`, `out_of_space`, `excluded`, and, for a turn on a device's login, `login_secret` and `unchecked` from the push guard, which reads what a branch adds before it is pushed); `workflows_not_allowed` is found only in the reason in the
    parentheses of the status line (or at the start of a `remote:` line), never in the branch name; a git command killed at its
    time limit is `timed_out`; a hiccup of the provider (a 5xx, a reset, `internal error`) is tried once more; a client error is
    not (a 401, 403 or 404 is `provider_refused`, any other one `provider_error`).

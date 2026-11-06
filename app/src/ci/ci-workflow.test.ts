@@ -294,16 +294,17 @@ describe("CI workflow triggers and jobs", () => {
 describe("CI time limits", () => {
   const browserJobs = ["e2e", "e2e-hosted", "e2e-dynamic"];
 
-  // #641-T01
-  it("runs the integration tests outside app-fast, in two shards of their own job", () => {
+  // #641-T01, three shards by #905
+  it("runs the integration tests outside app-fast, in three shards of their own job", () => {
     const job = jobNamed("app-int");
     const matrix = (job.strategy as { matrix?: { shard?: number[] } }).matrix;
 
     expect(commandLines(jobNamed("app-fast")).join("\n")).not.toContain(
       "pnpm test:int",
     );
-    expect(matrix?.shard).toEqual([1, 2]);
-    expect(commandLines(job)).toContain('pnpm test:int --shard="$SHARD/2"');
+    expect(matrix?.shard).toEqual([1, 2, 3]);
+    expect(commandLines(job)).toContain('pnpm test:int --shard="$SHARD/3"');
+    expect(job.name).toBe("App: integration tests (${{ matrix.shard }}/3)");
     expect(
       steps(job).find((step) => step.run?.startsWith("pnpm test:int"))?.env,
     ).toMatchObject({ SHARD: "${{ matrix.shard }}" });

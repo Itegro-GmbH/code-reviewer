@@ -49,6 +49,7 @@ import {
 } from "../job-status.ts";
 import {
   JOB_TRIGGER_KINDS,
+  type CancelJobResult,
   type EnqueueFollowUpTurnInput,
   type EnqueueFollowUpTurnResult,
   type EnqueueImplementerTurnInput,
@@ -57,6 +58,7 @@ import {
   type Job,
   type JobErrorCode,
 } from "../../jobs/job-types.ts";
+import { idleSessionsOfEndedTurns } from "./implementer-sessions-sweep.ts";
 import { SUPERSEDED_DRAIN_MS } from "../supersede-timing.ts";
 import { databaseDriver } from "../driver.ts";
 import { decodeJson, formatTimestamp } from "../codecs.ts";
@@ -147,6 +149,13 @@ export type JobsRepository = {
   enqueueFollowUpTurn(
     input: EnqueueFollowUpTurnInput,
   ): Promise<EnqueueFollowUpTurnResult>;
+  /**
+   * #891: a member asks for a job of this workspace to stop. A waiting job ends `cancelled` now (code `cancelled`, its reserved usage record
+   * voided, its hold given back, the session of its turn idle). A running job is only marked: its holder learns it from the heartbeat, ends
+   * the turn and reports, and the queue ends the job `cancelled` when the report comes, the lease lapses or the grace is over. A repeat, and a
+   * job that is over, change nothing.
+   */
+  requestCancel(jobId: string): Promise<CancelJobResult>;
   /** Cancels every waiting job of a repository (its project was deactivated); returns how many. */
   cancelWaitingForRepository(repositoryId: string): Promise<number>;
   /**
@@ -249,6 +258,7 @@ export function toJob(row: Selectable<JobsTable>): Job {
     result: row.result === null ? null : decodeJson<JsonValue>(row.result),
     errorCode: row.error_code,
     supersededBy: row.superseded_by,
+    cancelRequestedAt: row.cancel_requested_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     finishedAt: row.finished_at,
@@ -669,6 +679,7 @@ export function createJobsRepository(
       const task: NewImplementerTask = {
         repositoryId: input.repositoryId,
         baseBranch: input.baseBranch,
+        startBranch: input.startBranch ?? null,
         branch: input.branch,
         instruction: input.instruction,
         modelChoice: input.modelChoice,
@@ -890,6 +901,61 @@ export function createJobsRepository(
         }
         throw error;
       }
+    },
+
+    requestCancel(jobId) {
+      return inTransaction<CancelJobResult>(async (trx) => {
+        const timestamp = formatTimestamp(now());
+        const mine = () =>
+          trx
+            .selectFrom("jobs")
+            .selectAll()
+            .where("workspace_id", "=", workspaceId)
+            .where("id", "=", jobId);
+        // Not a transition of the shared table (`canTransition`), like `cancelWaiting`: this ends one job a person named.
+        const waiting = await trx
+          .updateTable("jobs")
+          .set({
+            status: "cancelled",
+            error_code: "cancelled" satisfies JobErrorCode,
+            finished_at: timestamp,
+            updated_at: timestamp,
+          })
+          .where("workspace_id", "=", workspaceId)
+          .where("id", "=", jobId)
+          .where("status", "=", "queued")
+          .returningAll()
+          .executeTakeFirst();
+        if (waiting !== undefined) {
+          // A job that waited again after a lost lease keeps a reserved usage record; it no longer counts.
+          const voided = await createUsageRecordsRepository(
+            trx,
+            workspaceId,
+            now,
+          ).voidEndedJobsWithIds();
+          // #498: a job that took a hold before it waited again gives it back.
+          await settleEndedJobs(trx, voided, now);
+          await idleSessionsOfEndedTurns(trx, timestamp);
+          return { status: "cancelled", job: toJob(waiting) };
+        }
+        const marked = await trx
+          .updateTable("jobs")
+          .set({ cancel_requested_at: timestamp, updated_at: timestamp })
+          .where("workspace_id", "=", workspaceId)
+          .where("id", "=", jobId)
+          .where("status", "=", "running")
+          .where("cancel_requested_at", "is", null)
+          .returningAll()
+          .executeTakeFirst();
+        if (marked !== undefined)
+          return { status: "requested", job: toJob(marked) };
+        const row = await mine().executeTakeFirst();
+        if (row === undefined) return { status: "not_found" };
+        const job = toJob(row);
+        return job.status === "running"
+          ? { status: "already_requested", job }
+          : { status: "already_ended", job };
+      });
     },
 
     cancelWaitingForRepository(repositoryId) {

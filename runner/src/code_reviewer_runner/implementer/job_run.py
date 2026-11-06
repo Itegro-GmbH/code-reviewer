@@ -38,12 +38,14 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import Protocol
 
 from code_reviewer_runner.capabilities import ENGINE_IMPLEMENTER, engines_from_environment
 from code_reviewer_runner.dynamic_review.budget import BudgetLedger
 from code_reviewer_runner.job import (
+    HARNESS_CLAUDE_CODE,
     IMPLEMENTER_AGENT_MEMORY_VARIABLE,
     IMPLEMENTER_SANDBOX_PROOF_VARIABLE,
     IMPLEMENTER_WORK_DIR,
@@ -57,6 +59,10 @@ from code_reviewer_runner.result import ErrorCode, JobResult, Usage
 from code_reviewer_runner.usage_probe import UsageProbe
 
 from .agent_container import OPENCODE, AgentContainer, AgentSeams
+from .claude_code.gates import subscription_rule
+from .claude_code.login import ClaudeLogin
+from .claude_code.readiness import HarnessNotReady, ReadyHarness, ready_harness
+from .docker_api import DockerApi
 from .environment_setup import EnvironmentSetup, log_output, run_environment_setup
 from .git_workspace import (
     GitIdentity,
@@ -68,7 +74,7 @@ from .git_workspace import (
 from .network_rule import OFF
 from .reader import ReaderAccess
 from .report import clip_texts, escaped_size, fit_block, valid_block
-from .result_channel import ResultReader, make_result_directory
+from .result_channel import ResultReader, make_result_directory, redacted_value
 from .resume_session import ResumeInput
 from .runner_profile import agent_seams, reader_seams, setup_seams
 from .session import AgentPlace, ImplementerSession, SessionSeams
@@ -146,6 +152,23 @@ class JobSeams:
     # Makes the session; the default builds the real `ImplementerSession`.
     session: Callable[..., TurnLike] | None = None
     clock: Callable[[], float] = time.monotonic
+    # #856: looks at the device again for a job that asks for Claude Code (the login, the layer);
+    # nothing is built. The default asks the real daemon.
+    harness: Callable[[Mapping[str, str]], ReadyHarness | HarnessNotReady] | None = None
+
+
+# Where a job process finds the runner's home when its token is the default file there; the runner
+# hands the path of the file itself (`FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE`) when it has one.
+RUNNER_HOME_VARIABLE = "FACTORY_RUNNER_HOME"
+
+
+def device_harness(environment: Mapping[str, str]) -> ReadyHarness | HarnessNotReady:
+    """The default look at the device for a job that asks for Claude Code (#856)."""
+    home = Path(environment.get(RUNNER_HOME_VARIABLE) or "/nonexistent")
+    try:
+        return ready_harness(DockerApi(), environment, home)
+    except Exception:
+        return HarnessNotReady("the daemon could not be asked")
 
 
 def lease_gate(check: LeaseCheck) -> Callable[[], None]:
@@ -197,16 +220,36 @@ def check_sandbox(environment: Mapping[str, str]) -> JobError | None:
 
 
 def production_setup(
-    job: ImplementerInput, environment: Mapping[str, str], gate: Callable[[], None]
+    job: ImplementerInput,
+    environment: Mapping[str, str],
+    gate: Callable[[], None],
+    harness: ReadyHarness | None = None,
 ) -> TurnSetup:
     """The setup of a real container: the reader, the work volume, the git workspace. Raises
-    `JobError` with a stable code; nothing of the job's credentials is read from the environment."""
+    `JobError` with a stable code; nothing of the job's credentials is read from the environment.
+    `harness` is the device's Claude Code for a job that asks for it (#856): its login is guarded
+    in the push, its layer is the agent's image, and the agent's network is the forced rule."""
     work_dir = Path(environment.get(IMPLEMENTER_WORK_DIR_VARIABLE) or IMPLEMENTER_WORK_DIR)
     memory = int(environment.get(AGENT_MEMORY_VARIABLE, "0").strip())
     spec = job.implementer
     identity = identity_for(job)
     # #843: a turn with a result schema has the result directory in its containers and its readers.
     with_result = spec.result_schema is not None
+    subscription = spec.subscription is not None
+    if subscription and (harness is None or (spec.environment and spec.environment.has_script)):
+        # The layer is built on the golden image; a script's image is not that (a follow-up).
+        raise JobError(
+            ErrorCode.IMPLEMENTER_CONFIG_INVALID,
+            "subscription_setup_script: a turn on the harness claude-code cannot run in an "
+            "environment with a setup script yet"
+            if harness is not None
+            else "harness_not_ready: the device was not looked at for this job",
+        )
+    if subscription:
+        environment_rule = OFF if spec.environment is None else spec.environment.network
+        rule_of_turn = subscription_rule(environment_rule)
+    else:
+        rule_of_turn = OFF if spec.environment is None else spec.environment.network
     reader = ReaderAccess(
         {
             "GIT_AUTHOR_NAME": identity.name,
@@ -227,11 +270,13 @@ def production_setup(
             base_branch=spec.base_branch,
             branch=spec.branch,
             resume=spec.resume,
+            start_branch=spec.start_branch,
         ),
         WorkspaceLayout(work_dir=work_dir),
         identity,
         reader,
         before_push=gate,
+        guard_secrets=() if harness is None else (harness.login.secret,),
     )
 
     def run_environment(
@@ -252,7 +297,8 @@ def production_setup(
             seams=setup_seams(environment),
         )
 
-    rule = OFF if spec.environment is None else spec.environment.network
+    rule = rule_of_turn
+    claude = None if harness is None else AgentSeams(image=harness.image, no_new_privileges=True)
 
     def place_from(image: str) -> Callable[[], AgentPlace]:
         return lambda: AgentContainer(
@@ -261,7 +307,12 @@ def production_setup(
 
     return TurnSetup(
         workspace,
-        lambda: AgentContainer(memory, agent_seams(environment), rule, result=with_result),
+        lambda: AgentContainer(
+            memory,
+            agent_seams(environment, AgentSeams() if claude is None else claude),
+            rule,
+            result=with_result,
+        ),
         (OPENCODE,),
         close=reader.close,
         environment=EnvironmentHost(run_environment, place_from),
@@ -313,6 +364,7 @@ def _fitted(block: Mapping[str, object] | None, rest: JobResult | None) -> dict[
 def result_of(turn: TurnResult, *, duration_ms: int, secrets: tuple[str, ...]) -> JobResult:
     """The result line of a finished turn."""
     redactor = Redactor(secrets)
+    exact = redactor.redact_known
     lines = list(turn.notes)
     if turn.error_code is not None:
         lines.append(f"{turn.error_code.value}: {turn.error_detail or ''}".rstrip(": "))
@@ -324,9 +376,13 @@ def result_of(turn: TurnResult, *, duration_ms: int, secrets: tuple[str, ...]) -
         comment_url=None,
         error_code=turn.error_code,
         log_tail=tail,
-        usage=turn.usage if used or turn.ok else None,
+        # A turn on a login of the device (#856) was not billed through us, but what it was worth,
+        # when it is known, is shown whatever its end.
+        usage=turn.usage if used or turn.ok or turn.usage.estimated_cost_usd is not None else None,
     )
-    block = _fitted(turn.implementer_block(), bare)
+    # Every fact of the report is data the agent can shape (a branch name, a commit subject, a
+    # path): the job's secrets are taken out of each text, exactly and in their spellings.
+    block = _fitted(redacted_value(turn.implementer_block(), exact), bare)
     if block is None:
         # Our own report is not one the app can read: a bug, and not a success. It cost what it
         # cost, so it is a charged end.
@@ -412,7 +468,11 @@ def run_implementer_job(
             "this runner did not advertise the implementer engine",
             duration_ms=_elapsed_ms(clock, started),
         )
-    if job.llm.max_cost_usd is None and job.llm.operator_max_cost_usd is None:
+    if (
+        job.implementer.subscription is None
+        and job.llm.max_cost_usd is None
+        and job.llm.operator_max_cost_usd is None
+    ):
         # No limit in the job is no limit at all: the ledger would fall back to a default of the
         # operator's environment that an Implementer container does not have (1.00 USD, silently).
         return failure(
@@ -423,13 +483,30 @@ def run_implementer_job(
     refused = check_sandbox(environment)
     if refused is not None:
         return failure(refused.code, refused.detail, duration_ms=_elapsed_ms(clock, started))
+    # #856: the manifest said the device can run Claude Code; it is looked at again for this job,
+    # and a device that cannot refuses it. The job is never run with another harness.
+    ready: ReadyHarness | None = None
+    if (
+        job.implementer.profile is not None
+        and job.implementer.profile.harness == HARNESS_CLAUDE_CODE
+    ):
+        looked = (seams.harness or device_harness)(environment)
+        if isinstance(looked, HarnessNotReady):
+            return failure(
+                ErrorCode.IMPLEMENTER_ENGINE_UNAVAILABLE,
+                f"harness_not_ready: {looked.text}",
+                duration_ms=_elapsed_ms(clock, started),
+            )
+        ready = looked
+        if secrets_sink is not None:
+            secrets_sink.append(ready.login.secret)
     # No answer is no lease: a process started without the channel never pushes.
     gate = lease_gate(lease_check or (lambda: LeaseState.UNCONFIRMED))
     setup: TurnSetup | None = None
     session: TurnLike | None = None
     prepared: EnvironmentSetup | None = None
     try:
-        factory = seams.setup or production_setup
+        factory = seams.setup or partial(production_setup, harness=ready)
         setup = factory(job, environment, gate)
         setup.workspace.prepare()
         if job.implementer.environment is not None and job.implementer.environment.has_script:
@@ -449,6 +526,7 @@ def run_implementer_job(
             steps,
             snapshot,
             resume,
+            None if ready is None else ready.login,
         )
         if usage_probe is not None:
             usage_probe.watch(lambda: _usage_of(session, job))
@@ -535,6 +613,7 @@ def _session(
     steps: StepPump | None = None,
     snapshot: SnapshotPump | None = None,
     resume: ResumeInput | None = None,
+    login: ClaudeLogin | None = None,
 ) -> TurnLike:
     options: dict[str, object] = {
         "workspace": setup.workspace,
@@ -550,6 +629,8 @@ def _session(
     }
     if resume is not None:
         options["resume"] = resume
+    if login is not None:
+        options["login"] = login
     if setup.results is not None:
         options["results"] = setup.results
     if seams.session is not None:

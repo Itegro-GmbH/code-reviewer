@@ -409,6 +409,17 @@ const ENTRIES: Entry[] = [
     implementer: true,
   },
   {
+    // #891: a member stops a run of the Implementer; another workspace's run is not found, and nothing is marked or ended there.
+    name: "POST implementer/runs/[runId]/cancel",
+    route: "/api/w/[workspace]/implementer/runs/[runId]/cancel",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) => `/implementer/runs/${ids.turnRunId}/cancel`,
+    params: (ids) => ({ runId: ids.turnRunId }),
+    file: "implementer/runs/[runId]/cancel/route.ts",
+    implementer: true,
+  },
+  {
     name: "POST implementer/tasks",
     route: "/api/w/[workspace]/implementer/tasks",
     method: "POST",
@@ -620,6 +631,21 @@ const ENTRIES: Entry[] = [
       runId: ids.workflowRunId,
     }),
     file: "workflows/[workflowId]/runs/[runId]/route.ts",
+    implementer: true,
+  },
+  {
+    // #891: a member stops a run of a workflow; another workspace's run is not found, and nothing is marked there.
+    name: "POST workflows/[workflowId]/runs/[runId]/cancel",
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/cancel",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) =>
+      `/workflows/${ids.workflowId}/runs/${ids.workflowRunId}/cancel`,
+    params: (ids) => ({
+      workflowId: ids.workflowId,
+      runId: ids.workflowRunId,
+    }),
+    file: "workflows/[workflowId]/runs/[runId]/cancel/route.ts",
     implementer: true,
   },
   {

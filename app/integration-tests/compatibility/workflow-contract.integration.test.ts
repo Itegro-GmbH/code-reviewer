@@ -181,6 +181,23 @@ const WORKFLOW_CASES: Case[] = [
   ["no steps", (d) => delete d.steps],
   ["an empty list of steps", (d) => (d.steps = [])],
   ["steps that are no list", (d) => (d.steps = {})],
+  // #902
+  ["an empty list of onFailure steps", (d) => (d.onFailure = [])],
+  ["onFailure steps that are no list", (d) => (d.onFailure = "comment")],
+  [
+    "an onFailure step with a key it does not know",
+    (d) =>
+      (d.onFailure = [
+        {
+          id: "report",
+          kind: "action",
+          connector: "github.issue.comment",
+          issue: 7,
+          body: "b",
+          repo: "a/b",
+        },
+      ]),
+  ],
   ["a budget of zero", (d) => (d.budgetUsd = 0)],
   ["a budget that is a text", (d) => (d.budgetUsd = "20")],
   ["a description that is a number", (d) => (d.description = 5)],

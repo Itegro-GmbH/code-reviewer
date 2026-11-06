@@ -23,6 +23,11 @@ export type WorkflowRunsApi = {
     workflowId: string,
     body: { input: Record<string, unknown>; clientRequestId: string },
   ): Promise<RequestResult<{ run: RunView }>>;
+  /** Stops a run (#891). `requested`: it is told to stop; a repeat and a run that is over answer with their own outcome. */
+  cancel(
+    workflowId: string,
+    runId: string,
+  ): Promise<RequestResult<{ run: RunView; outcome: string }>>;
 };
 
 export function createWorkflowRunsApi(
@@ -53,6 +58,12 @@ export function createWorkflowRunsApi(
         "POST",
         runsPath(workflowId),
         body,
+      ),
+    cancel: (workflowId, runId) =>
+      requestJson<{ run: RunView; outcome: string }>(
+        fetchImpl,
+        "POST",
+        `${runsPath(workflowId)}/${encodeURIComponent(runId)}/cancel`,
       ),
   };
 }

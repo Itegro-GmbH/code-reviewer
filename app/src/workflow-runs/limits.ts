@@ -32,6 +32,8 @@ export const SWEEP_RUNS_MAX = 25;
 export const MOVES_PER_CALL_MAX = 200;
 /** Words of an error message kept with a step. */
 export const ERROR_MESSAGE_MAX_CHARS = 1000;
+/** The message of a failure that the steps of `onFailure` read (`{{failure.message}}`, #902): short, because it goes into a comment. */
+export const FAILURE_MESSAGE_MAX_CHARS = 300;
 /** A pull request title of an action: GitHub accepts 256 characters; a longer one is cut. */
 export const ACTION_TITLE_MAX_CHARS = 256;
 /** The text of a comment or a pull request description of an action: GitHub accepts 65 536; a longer text is cut and says so. */

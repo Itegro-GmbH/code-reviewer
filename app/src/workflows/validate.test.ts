@@ -241,6 +241,7 @@ describe("the document", () => {
           "trigger",
           "budgetUsd",
           "steps",
+          "onFailure",
         ],
       }),
     ]);

@@ -193,6 +193,13 @@ entitlements still stop it, and its record is then voided.
   that is already a transaction reports nothing, as it cannot see its caller's commit. The operator API counts the same runs per workspace and key mode (below), for a
   reader that polls instead of reading logs. Alerting on the line (or the count) is the operator's way of watching
   what the limit cannot bound.
+- **Subscription turns (#856).** A turn that ran on the Claude login of a customer's device reports `costUsd: null` with the
+  basis `subscription`. Its record is settled with the tokens, no cost and `cost_basis = 'subscription'`: it is not an unknown cost
+  (no alert, not in `unknownCostCount` or the operator feed of unknown costs), adds nothing to a sum and is never billed as AI
+  cost. The estimate at API prices lives in the job's result and is shown on the Runs page as "≈ $X through a subscription".
+  The minutes of the device are billed as for any job (owner question open). The basis is taken from our own records, never from
+  the report: only a turn of the Implementer on the harness `claude-code` that ran on a customer's runner is a subscription
+  (`trustOfJob`); the basis any other job reports is dropped, and a record with a cost cannot carry it (database check).
 - **Locking.** The claim already runs under the instance gate lock of the queue, which serializes claims. The workspace row is also locked `for no key update` (an
   insert that only references it does not wait), so the count stays exact if the gate is ever narrowed. The lock and
   the count are taken only when a limit applies to the job (`readsUsage`: the limit of its kind, or the cost limit of
