@@ -201,9 +201,12 @@ command line that makes a link any more (#700).
 
 ## Tests
 
-- `guard.integration.test.ts`: the proxy and the data route with real requests, a real database and Better
-  Auth: anonymous, not an admin (every route, every method, odd spellings, a Server Function, the route
-  without the proxy), the admin, an unverified admin. `portal-guards.test.ts` finds a file without a guard.
+- `guard.integration.test.ts`, `guard-visitor-routes.integration.test.ts`, `guard-member-*.integration.test.ts`: the
+  proxy and the data route with real requests, a real database and Better Auth: anonymous, not an admin (every
+  route, every method, odd spellings, a Server Function, the route without the proxy), the admin, an unverified
+  admin. The cases on every route and method are their own files (#905: one test file runs in one worker, and one
+  file of 484 tests made its CI shard the slowest); the routes and the harness are in
+  `src/test-support/admin-guard-cases.ts`. `portal-guards.test.ts` finds a file without a guard.
 - `http.integration.test.ts`, `service.integration.test.ts`, `tenancy.integration.test.ts`,
   `tenancy-race.integration.test.ts`: the settings, their rules, the concurrency and what is never in an
   answer or a log line. `src/secrets/store.integration.test.ts` and `secret-value.test.ts`: the store.
