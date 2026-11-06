@@ -66,6 +66,7 @@ WITH_SYSBOX=0
 UNINSTALL=0
 PURGE=0
 TOKEN_FILE=""
+TOKEN_TYPED=""
 CHANNEL_FILE=""
 RUNNER_NAME=""
 RUNNER_LABELS=""
@@ -82,6 +83,8 @@ SYSBOX_PACKAGE=""
 TMPDIRS=""
 
 cleanup() {
+  # bash keeps the `IFS=` of an interrupted `IFS= read` while the trap runs; the paths are split on blanks.
+  unset IFS
   # shellcheck disable=SC2086 # the paths of mktemp hold no space
   for dir in $TMPDIRS; do
     rm -rf -- "$dir"
@@ -101,8 +104,8 @@ make_tmpdir() { # sets TMPDIR_MADE
 usage() {
   cat <<'EOF'
 Usage: sh install.sh [options]
-  --token-file FILE   registration token from a file (- = standard input); else asked on the terminal
-                      (hidden), else FACTORY_RUNNER_TOKEN (visible in history, sudo log, process list).
+  --token-file FILE   registration token from a file (- = standard input); else FACTORY_RUNNER_TOKEN
+                      (visible in history, sudo log, process list); else asked on the terminal (hidden).
                       Never an argument.
   --name NAME         the name in the list of runners (default: the host name)
   --labels a,b        labels the runner announces (e.g. linux,gpu)
@@ -210,8 +213,47 @@ installed_release() {
 
 # The highest release a rollback left on this machine (update.py, "rejected-release"), 0 without
 # one. It is read with the installed image, the only thing on a machine that can read the volume.
+# Fail-open: a file that cannot be read or holds no number does not stop the install, but it is
+# said, because a rolled-back release may be installed again for it.
 rejected_release() {
-  number_or_zero "$(docker run --rm --entrypoint cat -v "$HOME_VOLUME:/var/lib/factory-runner:ro" "$CURRENT" "$REJECTED_PATH" 2>/dev/null </dev/null || true)"
+  if raw="$(docker run --rm --entrypoint sh -v "$HOME_VOLUME:/var/lib/factory-runner:ro" "$CURRENT" -c '[ -e "$1" ] || exit 3; cat -- "$1"' sh "$REJECTED_PATH" 2>/dev/null </dev/null)"; then
+    case "$raw" in
+      ''|*[!0-9]*|??????????*) # empty, not digits, or longer than a release number can be
+        warn "warning: the file rejected-release of the configuration is not a release number: it is ignored, a release that was rolled back may be installed again"
+        printf '0'
+        ;;
+      *) printf '%s' "$raw" ;;
+    esac
+  else
+    status=$?
+    # 3: there is no file, the normal case.
+    if [ "$status" != 3 ]; then
+      warn "warning: the file rejected-release of the configuration cannot be read: it is ignored, a release that was rolled back may be installed again"
+    fi
+    printf '0'
+  fi
+}
+
+# Pull the image by its digest and name it `current` (the one before it `previous`). Returns 1 when a
+# call after the pull finds the digest reference gone (see the caller); every other failure ends the
+# script. In a list (`if !`) `set -e` does not apply: each call that may fail says `|| return 1`.
+pull_and_name() { # pull_and_name IMAGE RELEASE
+  say "pulling $1 (release $2)"
+  docker pull -q "$1" >/dev/null </dev/null || fail "the image could not be pulled"
+  label="$(docker image inspect --format '{{index .Config.Labels "code-reviewer.runner.release"}}' "$1" 2>/dev/null </dev/null)" || return 1
+  if [ "$label" != "$2" ]; then
+    docker rmi "$1" >/dev/null 2>&1 </dev/null || true
+    fail "the image is not the release its manifest names: nothing was installed"
+  fi
+  new_id="$(docker image inspect --format '{{.Id}}' "$1" 2>/dev/null </dev/null)" || return 1
+  old_id="$(docker image inspect --format '{{.Id}}' "$CURRENT" 2>/dev/null </dev/null || true)"
+  # `previous` is the image before this one: it changes only when `current` does.
+  if [ -n "$old_id" ] && [ "$old_id" != "$new_id" ]; then
+    docker tag "$CURRENT" "$PREVIOUS" </dev/null || return 1
+  fi
+  if [ "$old_id" != "$new_id" ]; then
+    docker tag "$1" "$CURRENT" </dev/null || return 1
+  fi
 }
 
 # Download the channel and the signed manifest, prove the manifest, and name the image it announces
@@ -271,21 +313,12 @@ stage_image() {
       return
     fi
   fi
-  say "pulling $repository@$digest (release $release)"
-  docker pull -q "$repository@$digest" >/dev/null </dev/null || fail "the image could not be pulled"
-  label="$(docker image inspect --format '{{index .Config.Labels "code-reviewer.runner.release"}}' "$repository@$digest")"
-  if [ "$label" != "$release" ]; then
-    docker rmi "$repository@$digest" >/dev/null 2>&1 </dev/null || true
-    fail "the image is not the release its manifest names: nothing was installed"
-  fi
-  new_id="$(docker image inspect --format '{{.Id}}' "$repository@$digest")"
-  old_id="$(docker image inspect --format '{{.Id}}' "$CURRENT" 2>/dev/null </dev/null || true)"
-  # `previous` is the image before this one: it changes only when `current` does.
-  if [ -n "$old_id" ] && [ "$old_id" != "$new_id" ]; then
-    docker tag "$CURRENT" "$PREVIOUS"
-  fi
-  if [ "$old_id" != "$new_id" ]; then
-    docker tag "$repository@$digest" "$CURRENT"
+  if ! pull_and_name "$repository@$digest" "$release"; then
+    # A runner that starts at this moment removes the digest references of the images that are
+    # neither `current` nor `previous` (update.py, `prune_references`): the image just pulled too.
+    # The pull is by digest, so a second one brings the very same image.
+    warn "the pulled image was removed before it was named: pulling it again"
+    pull_and_name "$repository@$digest" "$release" || fail "the image could not be named (is a runner starting? run the installer again): nothing was installed"
   fi
   say "verified release $release ($digest)"
 }
@@ -388,14 +421,23 @@ read_token() { # prints the token, or nothing
   elif [ -n "${FACTORY_RUNNER_TOKEN:-}" ]; then
     warn "warning: the token came from FACTORY_RUNNER_TOKEN: it is in your shell history, in the log of sudo and was in the process list. Prefer the prompt or --token-file."
     printf '%s' "$FACTORY_RUNNER_TOKEN"
-  elif [ "$DRY_RUN" != 1 ] && have_tty; then
-    printf 'Registration token (from the app: Runners, "Add a runner"; input is hidden): ' >/dev/tty
-    stty -echo </dev/tty 2>/dev/null || true
-    IFS= read -r line </dev/tty || line=""
-    stty echo </dev/tty 2>/dev/null || true
-    printf '\n' >/dev/tty
-    printf '%s' "$line"
   fi
+}
+
+# Asked on the terminal, without echo; sets TOKEN_TYPED. Not in a command substitution: the signal
+# traps must belong to the shell that gets the signal. dash runs no EXIT trap on a signal, so Ctrl-C
+# at the prompt would leave the terminal without echo; `exit` in the trap does run the EXIT trap
+# (the temporary files go).
+ask_for_token() {
+  printf 'Registration token (from the app: Runners, "Add a runner"; input is hidden): ' >/dev/tty
+  trap 'stty echo </dev/tty 2>/dev/null || true; printf "\n" >/dev/tty 2>/dev/null || true; exit 130' INT
+  trap 'stty echo </dev/tty 2>/dev/null || true; printf "\n" >/dev/tty 2>/dev/null || true; exit 143' TERM
+  trap 'stty echo </dev/tty 2>/dev/null || true; printf "\n" >/dev/tty 2>/dev/null || true; exit 131' QUIT
+  stty -echo </dev/tty 2>/dev/null || true
+  IFS= read -r TOKEN_TYPED </dev/tty || TOKEN_TYPED=""
+  stty echo </dev/tty 2>/dev/null || true
+  trap - INT TERM QUIT
+  printf '\n' >/dev/tty
 }
 
 register_or_configure() {
@@ -414,7 +456,12 @@ register_or_configure() {
     fi
     return 0
   fi
+  # The file and the variable are read in a subshell; the prompt is not (see `ask_for_token`).
   token="$(read_token || true)"
+  if [ -z "$token" ] && [ -z "$TOKEN_FILE" ] && [ -z "${FACTORY_RUNNER_TOKEN:-}" ] && [ "$DRY_RUN" != 1 ] && have_tty; then
+    ask_for_token
+    token="$TOKEN_TYPED"
+  fi
   if [ -z "$token" ]; then
     say "no registration token: the service is installed but not started."
     say "register it with a file that holds the token, then start it:"
@@ -493,7 +540,10 @@ prepare_sysbox() {
 
 install_sysbox() {
   [ -n "$SYSBOX_PACKAGE" ] || return 0
-  if [ -f "$DOCKER_DAEMON_JSON" ]; then
+  if [ -f "$DOCKER_DAEMON_JSON.factory-runner-backup" ]; then
+    # A second run would copy the file the first package install already rewrote over the original.
+    say "$DOCKER_DAEMON_JSON.factory-runner-backup exists: the first backup is kept"
+  elif [ -f "$DOCKER_DAEMON_JSON" ]; then
     cp -p "$DOCKER_DAEMON_JSON" "$DOCKER_DAEMON_JSON.factory-runner-backup"
     say "copied $DOCKER_DAEMON_JSON to $DOCKER_DAEMON_JSON.factory-runner-backup"
   fi
@@ -525,6 +575,7 @@ uninstall() {
     say "the configuration (with the credential) and /work are removed"
   else
     say "the configuration (volume $HOME_VOLUME) and /work (factory-runner-work) are kept; --purge removes them"
+    say "a release that was rolled back stays in the file rejected-release of that volume, but a new install has no image to read it with and may install that release again (--purge forgets it)"
   fi
   say "revoke this runner in the app (Runners) so that its credential stops working"
 }

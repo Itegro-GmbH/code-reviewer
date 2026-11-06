@@ -1364,6 +1364,11 @@ export interface WorkflowRunsTable {
     string | null | undefined,
     string | null
   >;
+  /**
+   * #902: JSON text, set once when a run that would end `failed` or `cancelled` begins the steps of `onFailure`: how it ends afterwards and
+   * the facts those steps read. The run stays `running` until they are over. Null otherwise.
+   */
+  failure: ColumnType<string | null, string | null | undefined, string | null>;
   created_at: string;
   updated_at: string;
   /** Set when the run ends. */

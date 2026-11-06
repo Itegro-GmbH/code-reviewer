@@ -258,6 +258,19 @@ itself between two jobs, and reads a changed configuration when it next starts: 
 run also finds the newer release and stages it, as `factory-runner update` does, and **never installs an older or a rolled-back one**.
 `--purge` is only valid with `--uninstall`.
 
+**The memory of a rollback is read with the installed image, and fails open.** The installer reads `rejected-release` (see "Updates") with
+`factory-runner:current`, the only thing on the machine that can read the volume. A file that exists but cannot be read, or holds no whole
+number, does not stop the install: it is ignored with a warning on the standard error, and a release that was rolled back may then be
+installed again. No file is the normal case and says nothing. **After `--uninstall` without `--purge` and a new install** there is no image
+yet when the installer decides, so it cannot read the file even though the volume still has it: it may install the release that was rolled
+back (the uninstall says so). To keep the block, write the number into the file again after the install (see "Updates", "the way back by
+hand") or `--purge` and start over; the running service reads the file and takes no release up to that number from then on.
+
+**A fresh pull can lose its digest reference.** The service removes the digest references of old releases when it starts (see "Updates"),
+and so a pull by digest that is not named yet (`tag`) is one of them. Both the installer and `factory-runner update` pull a second time
+when the reference is gone before the tag (the pull is by digest: the same image) and fail with "could not be named" after the second
+one; the next run succeeds.
+
 `--dry-run` says what it would do and changes nothing. `--uninstall` removes the service, the command and the images and keeps the
 configuration and `/work`; `--uninstall --purge` removes those too (revoke the runner in the app: its credential keeps working
 until then). Afterwards the firewall tables Control left in the machine's network namespace (the security notes below) are deleted
@@ -267,7 +280,8 @@ by `nft delete table ...` or at the next restart of the machine.
 terminal (`--yes` accepts the warnings when there is none). **The question comes before the first change** (the image, the unit, the
 registration), with the checks it needs and the download of the package and its SHA-256 check; with no terminal and no `--yes` the
 installer stops there with "nothing was changed". Any answer but `yes` is not a failure: the base installation goes on without Sysbox.
-Only then does the package go in, after `/etc/docker/daemon.json` was copied to `daemon.json.factory-runner-backup`:
+Only then does the package go in, after `/etc/docker/daemon.json` was copied to `daemon.json.factory-runner-backup` (a backup that exists
+already, from an earlier `--sysbox` run, is **kept**: a second copy would be the file the package rewrote, not the original):
 
 - it installs the package `sysbox-ce 0.7.1` (the version of the golden snapshot, checked against its SHA-256);
 - the package **rewrites `/etc/docker/daemon.json`** (a copy is kept next to it first): the `sysbox-runc` runtime, `bip` 172.20.0.1/16 and
@@ -702,7 +716,9 @@ What the tests cannot know and the first install must check (nothing of this run
 - **SIGTERM during the self-test** (N4) comes before the signal handlers are installed and ends the process at once; nothing is claimed.
 - **No warning for a `config.json` that is too open** (N5): the file is written 0600 in a 0700 folder, but a mode changed later is not noticed.
 - **`proven` under `runc`** (N6): the name of the sandbox proof says only that the self-test passed; under `runc` there is no Sysbox wall (see the security notes).
-- **No proxy for the app client** (N7): the runner talks to the app directly (`HTTPS_PROXY` is not read).
+- **No proxy for the app client** (N7): the runner talks to the app directly (`HTTPS_PROXY` is not read). The release documents of an update
+  (manifest, signature) are fetched through the proxy of the environment (`https_proxy`, `no_proxy`) as the installer's `curl` does; the pull of
+  the image is the daemon's, with the daemon's own proxy settings.
 - **`register --force`** (N8) replaces the local file and leaves the old runner in the app's list: revoke it there.
 - **The credential file** is as safe as the machine: whoever reads it is the runner. Revoke the runner in the app if the machine is lost.
 - **The page's command** shows `factory-runner register --token ...` without an address; the command goes to `https://code-review.com`.
@@ -858,7 +874,7 @@ A subscription turn reports `costUsd: null`, `costBasis: "subscription"` and `es
   booked 0). A cost basis a version does not know (a value a newer release wrote, read after a rollback) shows the neutral label
   "basis not known" with the figure as stored; it never throws.
 - **Usage and billing**: the usage record of such a turn is settled with its tokens, no cost and `usage_records.cost_basis =
-  'subscription'` (migration `20261105233000_add_usage_record_cost_basis`, expand only, null for every older record). It adds
+  'subscription'` (migration `20261106012000_add_usage_record_cost_basis`, expand only, null for every older record). It adds
   nothing to a cost sum, is not an unknown cost (no #361 log line, not in `unknownCostCount`, not in the operator feed of unknown
   costs) and is not charged as AI cost. The minutes of the device and the balance check at claim are unchanged (owner question below).
   The workflow budget still counts the estimate (decision 12 of the plan); the engine no longer logs "cost not reported" for it.

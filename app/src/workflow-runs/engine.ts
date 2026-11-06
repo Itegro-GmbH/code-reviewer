@@ -59,8 +59,9 @@ import {
   STEP_STALE_MS,
 } from "./limits.ts";
 import {
+  contextOf,
   nextMove,
-  replay,
+  type FailureRecord,
   type MachineState,
   type MachineStep,
   type RoundContext,
@@ -198,8 +199,20 @@ function valuesOf(
 ): RunValues {
   const input = parseOutput(run.triggerInput);
   const record = isRecord(input) ? input : {};
+  const failure = failureOf(run);
   return {
     trigger: run.triggerKind === "manual" ? { input: record } : record,
+    // The facts of the failure exist for the steps of `onFailure` only: once the run has begun them.
+    ...(failure === undefined
+      ? {}
+      : {
+          failure: {
+            status: failure.status,
+            stepId: failure.stepId,
+            code: failure.code,
+            message: failure.message,
+          },
+        }),
     steps: Object.fromEntries(
       steps.flatMap((step) =>
         step.status === "succeeded"
@@ -218,6 +231,30 @@ function valuesOf(
     agentSteps: new Set(
       steps.filter((step) => step.kind === "agent").map((step) => step.stepId),
     ),
+  };
+}
+
+/** How a run ended while its `onFailure` steps run, as the engine stored it; undefined before, or for text that is not a record of it. */
+function failureOf(
+  run: Pick<StoredWorkflowRun, "failure">,
+): FailureRecord | undefined {
+  const parsed = parseOutput(run.failure);
+  if (!isRecord(parsed)) return undefined;
+  const { status, errorCode, stepId, code, message } = parsed;
+  if (
+    (status !== "failed" && status !== "cancelled") ||
+    (errorCode !== null && typeof errorCode !== "string") ||
+    typeof stepId !== "string" ||
+    typeof code !== "string" ||
+    typeof message !== "string"
+  )
+    return undefined;
+  return {
+    status,
+    errorCode: errorCode as FailureRecord["errorCode"],
+    stepId,
+    code,
+    message,
   };
 }
 
@@ -248,6 +285,7 @@ function machineStepsOf(steps: readonly StoredStepRun[]): MachineStep[] {
       createdAt: step.createdAt,
       startedAt: step.startedAt,
       errorCode: step.errorCode,
+      errorMessage: step.errorMessage,
       ...(taken === undefined ? {} : { taken }),
     };
   });
@@ -373,6 +411,8 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       spentMicroUsd: run.spentMicroUsd,
       steps: machineStepsOf(steps),
       nodes: machineNodes(document.steps),
+      onFailure: machineNodes(document.onFailure),
+      failure: failureOf(run) ?? null,
       holds(nodeId, context) {
         const node = byId.get(nodeId);
         const condition =
@@ -560,6 +600,14 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     switch (move.move) {
       case "idle":
         return { kind: "done" };
+      case "begin_failure": {
+        // The run stays `running` while the steps of `onFailure` run; it ends with the status stored here.
+        await lock.beginFailure(JSON.stringify(move.failure));
+        log(
+          `[workflow-runs] run failing run=${run.id} status=${move.failure.status} code=${move.failure.code}`,
+        );
+        return { kind: "again" };
+      }
       case "finish_run":
         await lock.finishRun({
           status: move.status,
@@ -1119,8 +1167,10 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         : undefined,
     );
     if (claimed === undefined) return;
-    // #891: a stop that was asked for between the decision and the claim: the step does not start.
-    if ((await deps.runs.getRun(run.id))?.cancelRequestedAt != null) {
+    // #891: a stop that was asked for between the decision and the claim: the step does not start. Not a step of `onFailure` (#902): it
+    // runs after the stop, or after a failure, and a stop asked for meanwhile changes neither.
+    const current = await deps.runs.getRun(run.id);
+    if (current?.cancelRequestedAt != null && current.failure === null) {
       await deps.runs.settleOwnStep(claimed.id, { status: "skipped" });
       return;
     }
@@ -1136,38 +1186,57 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       } else {
         const steps = await deps.runs.listSteps(run.id);
         // Where in its loop the step is, from the rows: its round, and the rows of the round before that `previous.*` reads.
-        const context = replay(
+        const context = contextOf(
           machineNodes(document.steps),
+          machineNodes(document.onFailure),
           machineStepsOf(steps),
-        ).contexts[claimed.position];
+          claimed.position,
+        );
         // The rows do not match the document (the machine found the same before it wrote this row): a guess at round one would run the
-        // step with the wrong `previous` and the wrong instruction, so the run ends instead.
+        // step with the wrong `previous` and the wrong instruction, so the run ends instead. A step of `onFailure` ends alone: the run
+        // is over its failure already, and ends the way it was going to.
         if (context === undefined) {
-          await deps.runs.lockRun(run.id, async (lock) => {
-            await lock.finishStep(
-              claimed.id,
-              failed(
-                "turn_unreadable",
-                "The step does not fit the document of the run.",
-              ),
+          if (run.failure !== null) {
+            outcome = failed(
+              "turn_unreadable",
+              "The step does not fit the document of the run.",
             );
-            await lock.finishRun({
-              status: "failed",
-              errorCode: "document_unusable",
+          } else {
+            await deps.runs.lockRun(run.id, async (lock) => {
+              await lock.finishStep(
+                claimed.id,
+                failed(
+                  "turn_unreadable",
+                  "The step does not fit the document of the run.",
+                ),
+              );
+              await lock.finishRun({
+                status: "failed",
+                errorCode: "document_unusable",
+              });
             });
-          });
-          log(
-            `[workflow-runs] run failed run=${run.id} code=document_unusable`,
-          );
-          return;
+            log(
+              `[workflow-runs] run failed run=${run.id} code=document_unusable`,
+            );
+            return;
+          }
+        } else {
+          const values = valuesOf(run, steps, context);
+          if (claimed.kind === "agent")
+            target = continuedStep(node, steps, claimed.position);
+          outcome =
+            claimed.kind === "agent"
+              ? await startAgent(
+                  run,
+                  claimed,
+                  node,
+                  values,
+                  context,
+                  steps,
+                  byId,
+                )
+              : await runAction(run, claimed, node, values);
         }
-        const values = valuesOf(run, steps, context);
-        if (claimed.kind === "agent")
-          target = continuedStep(node, steps, claimed.position);
-        outcome =
-          claimed.kind === "agent"
-            ? await startAgent(run, claimed, node, values, context, steps, byId)
-            : await runAction(run, claimed, node, values);
       }
     } catch (error) {
       if (error instanceof TemplateError)

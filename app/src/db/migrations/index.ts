@@ -94,7 +94,8 @@ import { migration as addWorkflowStepRounds } from "./20261105200000_add_workflo
 import { migration as addRunCancellation } from "./20261105210000_add_run_cancellation.ts";
 import { migration as addProfileHarness } from "./20261105230000_add_profile_harness.ts";
 import { migration as widenStepCostBasisForSubscription } from "./20261105231000_widen_step_cost_basis_for_subscription.ts";
-import { migration as addUsageRecordCostBasis } from "./20261105233000_add_usage_record_cost_basis.ts";
+import { migration as addWorkflowRunFailure } from "./20261106004000_add_workflow_run_failure.ts";
+import { migration as addUsageRecordCostBasis } from "./20261106012000_add_usage_record_cost_basis.ts";
 import { migration as addImplementerTurnEnvironment } from "./20261102150000_add_implementer_turn_environment.ts";
 import { migration as createImplementerEnvironments } from "./20261102140000_create_implementer_environments.ts";
 import { migration as createImplementerSessionsAndTurns } from "./20261030140000_create_implementer_sessions_and_turns.ts";
@@ -215,7 +216,8 @@ const migrations: Record<string, Migration> = {
   "20261105230000_add_profile_harness": addProfileHarness,
   "20261105231000_widen_step_cost_basis_for_subscription":
     widenStepCostBasisForSubscription,
-  "20261105233000_add_usage_record_cost_basis": addUsageRecordCostBasis,
+  "20261106004000_add_workflow_run_failure": addWorkflowRunFailure,
+  "20261106012000_add_usage_record_cost_basis": addUsageRecordCostBasis,
 };
 
 export const migrationProvider: MigrationProvider = {

@@ -10,7 +10,7 @@ import type { Database } from "../schema.ts";
 import { migrationProvider } from "./index.ts";
 import { createEmptyTestDatabase } from "../../test-support/test-database.ts";
 
-const THIS = "20261105233000_add_usage_record_cost_basis";
+const THIS = "20261106012000_add_usage_record_cost_basis";
 const T = "2026-11-05T08:00:00.000Z";
 
 function upTo(include: (name: string) => boolean): MigrationProvider {
@@ -121,7 +121,7 @@ describe("the usage record cost basis migration", () => {
     expect((await columns.execute(db)).rows).toHaveLength(1);
 
     const { migration } =
-      await import("./20261105233000_add_usage_record_cost_basis.ts");
+      await import("./20261106012000_add_usage_record_cost_basis.ts");
     await migration.down?.(db);
 
     expect((await columns.execute(db)).rows).toHaveLength(0);
