@@ -177,20 +177,24 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: node tools/vercel/check-build-output.mjs app
 
-  # The integration tests in a job of their own, split into two shards: in app-fast they took 6 to
-  # 10 minutes and pushed it over its limit (#641). They run against this Postgres service container: every test
+  # The integration tests in a job of their own, split into three shards: in app-fast they took 6 to
+  # 10 minutes and pushed it over its limit (#641). With two shards the slower one took 9 to 14 minutes on a
+  # good day (one file alone, the admin portal guard, was 7 of them) and the 15 minutes ran out twice when the
+  # runner was slow (#905). Vitest splits the files of a shard by name, not by duration, so the shards stay
+  # balanced only while no file is a large part of one. They run against this Postgres service container: every test
   # gets a database of its own, cloned from a migrated template (TEST_DATABASE_URL names the server). The
-  # credentials are throwaway: CI uses no repository secret.
+  # credentials are throwaway: CI uses no repository secret. The time limit leaves room for a runner that is
+  # twice as slow as usual.
   app-int:
-    name: "App: integration tests (${{ matrix.shard }}/2)"
+    name: "App: integration tests (${{ matrix.shard }}/3)"
     needs: changes
     if: ${{ github.event_name == 'push' || github.base_ref == 'main' || needs.changes.outputs.app == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3]
     services:
       postgres:
         image: postgres:18
@@ -222,7 +226,7 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
           SHARD: ${{ matrix.shard }}
-        run: pnpm test:int --shard="$SHARD/2"
+        run: pnpm test:int --shard="$SHARD/3"
 
   # The Dispatcher (#327): TypeScript on Hono, its own pnpm project. No database and no network service:
   # its tests run against the fake App of fakes/dispatcher-app on loopback.
