@@ -151,7 +151,7 @@ function repeatOf(
   const same =
     session.repositoryId === task.repositoryId &&
     session.baseBranch === task.baseBranch &&
-    session.startBranch === (task.startBranch ?? null) &&
+    (session.startBranch ?? null) === (task.startBranch ?? null) &&
     session.branch === task.branch &&
     turn.instruction === task.instruction &&
     (turn.environment?.id ?? turn.runnerEnvironment?.id ?? null) ===
