@@ -96,8 +96,8 @@ describe("the count of unknown-cost settlements", () => {
     expect(await countsOf(feed)).toEqual([]);
   });
 
-  // #856-T75
-  it("does not count a turn that ran through a subscription, which has no cost to know", async () => {
+  // #856-T75: a real claude-code turn on a customer's runner is in `runner-api/runner-subscription-cost.integration.test.ts`.
+  it("counts a job that only says it ran through a subscription: the basis is not the runner's to name", async () => {
     const { fixture, feed } = await start();
     const job = await enqueue(fixture);
     const claimed = await fixture.queue.claimNext("runner-a", ENGINES);
@@ -115,25 +115,17 @@ describe("the count of unknown-cost settlements", () => {
       },
     });
 
-    expect(await countsOf(feed)).toEqual([]);
-    expect(await recordsOf(fixture).get(job.id)).toMatchObject({
-      state: "settled",
-      costMicroUsd: null,
-      costBasis: "subscription",
-      promptTokens: 100,
-    });
-    // The workspace's own summary does not count it as unknown either, and it adds nothing to a cost.
-    const [group] = await recordsOf(fixture).summarize(WHOLE);
-    expect(group).toMatchObject({
-      settledCount: 1,
-      knownCostMicroUsd: 0,
-      unknownCostCount: 0,
-    });
-    // A run of unknown cost beside it is still counted.
-    await runToCompletion(fixture, { costUsd: null });
     expect(await countsOf(feed)).toEqual([
       { workspaceId: fixture.workspaceId, keyMode: "own", unknownCostCount: 1 },
     ]);
+    expect(await recordsOf(fixture).get(job.id)).toMatchObject({
+      state: "settled",
+      costMicroUsd: null,
+      costBasis: null,
+      promptTokens: 100,
+    });
+    const [group] = await recordsOf(fixture).summarize(WHOLE);
+    expect(group).toMatchObject({ settledCount: 1, unknownCostCount: 1 });
   });
 
   // #385-T03

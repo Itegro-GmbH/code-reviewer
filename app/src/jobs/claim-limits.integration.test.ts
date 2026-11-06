@@ -893,8 +893,8 @@ describe("the limits at claim", () => {
     ]);
   });
 
-  // #856-T75
-  it("raises no alert for a turn that ran through a subscription: it has no cost to be unknown", async () => {
+  // #856-T75: the real claude-code turn on a customer's runner is in `runner-api/runner-subscription-cost.integration.test.ts`.
+  it("still raises the alert for a job that only says it ran through a subscription: the word is not ours to believe", async () => {
     const fixture = await start();
     const alerts: unknown[] = [];
     const queue = createRunnerQueue(fixture.db, {
@@ -918,7 +918,9 @@ describe("the limits at claim", () => {
       },
     });
 
-    expect(alerts).toEqual([]);
+    expect(alerts).toEqual([
+      { workspaceId: fixture.workspaceId, jobId: job.id },
+    ]);
   });
 
   // #361-T10
@@ -1462,6 +1464,35 @@ describe("the limits at claim", () => {
         status: "failed",
         errorCode: "quota_exhausted",
       });
+    });
+
+    // #856-T75
+    it("raises the alert for a superseded run that only says it ran through a subscription", async () => {
+      const fixture = await start();
+      const alerts: unknown[] = [];
+      const queue = createRunnerQueue(fixture.db, {
+        now: fixture.clock.now,
+        onUnknownCostSettled: (event) => alerts.push(event),
+      });
+      const { old, claimed } = await supersededRun(fixture);
+
+      await queue.complete(old.id, claimed?.leaseToken ?? "", {
+        ...REPORT,
+        result: {
+          ...REPORT.result,
+          usage: {
+            promptTokens: 100,
+            completionTokens: 10,
+            costUsd: null,
+            costBasis: "subscription",
+            estimatedCostUsd: 0.1,
+          },
+        },
+      });
+
+      expect(alerts).toEqual([
+        { workspaceId: fixture.workspaceId, jobId: old.id },
+      ]);
     });
 
     // #397-T09

@@ -61,6 +61,13 @@ export const NO_RESULT_JOB_ERROR_CODES = [
 export const USAGE_COST_BASES = ["subscription"] as const;
 export type UsageCostBasis = (typeof USAGE_COST_BASES)[number];
 
+/**
+ * What the caller knows about the job from its own records (#856), never from the report: the basis a report names is the runner's
+ * word, and any runner or Worker could mark any job as one that has no cost to know. `subscription` is true only for a turn of the
+ * Implementer on the harness `claude-code` that ran on a customer's runner (`isSubscriptionTurn`); without it the basis is not taken.
+ */
+export type SettlementTrust = { subscription?: boolean };
+
 /** Whose key a run was made with. The same two values as the key mode of the entitlements. */
 export type UsageKeyMode = KeyMode;
 
@@ -190,8 +197,9 @@ function errorReasonOf(result: unknown): string | null {
  */
 export function settlementOfSupersededOutcome(
   outcome: JobOutcome,
+  trust: SettlementTrust = {},
 ): UsageSettlement {
-  const settlement = settlementOfOutcome(outcome);
+  const settlement = settlementOfOutcome(outcome, trust);
   return settlement.state === "settled"
     ? { ...settlement, reason: "superseded" }
     : settlement;
@@ -237,7 +245,10 @@ function showsNoModelCall(usage: ReportedUsage): boolean {
  * itself for a process it had to end or that left no result (`NO_RESULT_ERROR_REASONS`). A runner of an earlier
  * release never sends the reason, and an app of an earlier release ignores it: both stay void, as before.
  */
-export function settlementOfOutcome(outcome: JobOutcome): UsageSettlement {
+export function settlementOfOutcome(
+  outcome: JobOutcome,
+  trust: SettlementTrust = {},
+): UsageSettlement {
   const usage = reportedUsage(outcome.result);
   if (usage === null && !outcome.ok) {
     const reason = errorReasonOf(outcome.result);
@@ -263,6 +274,8 @@ export function settlementOfOutcome(outcome: JobOutcome): UsageSettlement {
       usage.costUsd === null ? null : costUsdToMicroUsd(usage.costUsd),
     promptTokens: usage.promptTokens,
     completionTokens: usage.completionTokens,
-    ...(usage.costBasis === null ? {} : { costBasis: usage.costBasis }),
+    ...(usage.costBasis === null || trust.subscription !== true
+      ? {}
+      : { costBasis: usage.costBasis }),
   };
 }

@@ -83,8 +83,38 @@ import { settleEndedJobs } from "../../billing/settle-jobs.ts";
 import {
   settlementOfOutcome,
   settlementOfSupersededOutcome,
+  type SettlementTrust,
   type UnknownCostSettlement,
 } from "../../usage/usage-records.ts";
+import { CLAUDE_CODE_HARNESS } from "../../runner-identity/harness.ts";
+import { customerRunnerId } from "../../runner-identity/tokens.ts";
+
+/**
+ * What the usage record of an ended job may take from its report (#856): `subscription` only for a turn of the Implementer whose
+ * profile has the harness `claude-code` and that a runner of the workspace held, read from the turn and the runner in our own tables
+ * and never from the report (any runner or Worker could name the basis for any job to hide its cost from the alert and the counts).
+ */
+async function trustOfJob(
+  trx: Kysely<Database>,
+  job: { id: string; workspace_id: string; runner_id: string | null },
+): Promise<SettlementTrust> {
+  const prefix = customerRunnerId("");
+  if (job.runner_id === null || !job.runner_id.startsWith(prefix)) return {};
+  const turn = await trx
+    .selectFrom("implementer_turns")
+    .innerJoin("runners", (join) =>
+      join
+        .onRef("runners.workspace_id", "=", "implementer_turns.workspace_id")
+        .on("runners.id", "=", job.runner_id?.slice(prefix.length) ?? ""),
+    )
+    .select("implementer_turns.id")
+    .where("implementer_turns.job_id", "=", job.id)
+    .where("implementer_turns.workspace_id", "=", job.workspace_id)
+    .where("implementer_turns.environment_kind", "=", "runner")
+    .where("implementer_turns.profile_harness", "=", CLAUDE_CODE_HARNESS)
+    .executeTakeFirst();
+  return { subscription: turn !== undefined };
+}
 
 /**
  * Gives the session of a turn what its report says (#754) and sets it idle: the pushed head, the summary and the saved agent
@@ -1483,7 +1513,10 @@ export function createRunnerJobsRepository(
             // sure of it.
             await idleSessionsOfEndedTurns(trx, timestamp);
             // Settled from what the runner reported, in the same transaction as the job's end.
-            const settlement = settlementOfOutcome(outcome);
+            const settlement = settlementOfOutcome(
+              outcome,
+              await trustOfJob(trx, finished),
+            );
             const settled = await createUsageRecordsRepository(
               trx,
               finished.workspace_id,
@@ -1550,7 +1583,10 @@ export function createRunnerJobsRepository(
               .returningAll()
               .executeTakeFirst();
             if (stored === undefined) return { status: "not_holder" };
-            const settlement = settlementOfSupersededOutcome(outcome);
+            const settlement = settlementOfSupersededOutcome(
+              outcome,
+              await trustOfJob(trx, stored),
+            );
             const settled = await createUsageRecordsRepository(
               trx,
               stored.workspace_id,
@@ -1565,7 +1601,9 @@ export function createRunnerJobsRepository(
             if (
               settled &&
               settlement.state === "settled" &&
-              settlement.costMicroUsd === null
+              settlement.costMicroUsd === null &&
+              // #856: a turn on a subscription has no cost to be unknown.
+              settlement.costBasis === undefined
             )
               unknownCost.push({
                 workspaceId: stored.workspace_id,
