@@ -549,6 +549,9 @@ class GitWorkspace:
         self._check_names()
         self.clone_mirror()
         self.create_agent_repository()
+        # The agent's repository is a second full copy of the mirror: the room the push needs has
+        # to be left after both.
+        self._require_room()
         if not self._access.warm():
             raise fail(ErrorCode.SETUP_FAILED, "reader_unavailable: the reader cannot be made")
 
@@ -580,9 +583,10 @@ class GitWorkspace:
         in it.
 
         The base branch not on the provider is `base_branch_not_found` and a start branch it does
-        not have is `clone_failed`, both free; so is a clone that leaves less room than the push
-        needs (`_has_room`). A first turn makes its session branch new: one the provider has
-        already (a race with the app's own check) is dropped from the mirror. A follow-up records
+        not have is `clone_failed`, both free; so is a mirror that already leaves less room than the
+        push needs (`_require_room`; `prepare` asks again after the agent's repository is cloned).
+        A first turn makes its session branch new: one the provider has already (a race with the
+        app's own check) is dropped from the mirror. A follow-up records
         what moved (`resume_moved`) and what is gone (`resume_missing`) among the branches the
         earlier turns pushed; the session branch gone is the end of the turn (the app checks it
         before it starts one, so this is a race)."""
@@ -604,16 +608,9 @@ class GitWorkspace:
             raise fail(
                 ErrorCode.CLONE_FAILED, "the repository cannot be cloned: " + self._detail(fetched)
             )
-        # The agent's repository is a second copy of what was just fetched, and the push needs room
-        # in the reserve afterwards: a clone that leaves less than the push needs ends the turn
-        # here, free, instead of running the agent into a full disk.
-        if not self._has_room():
-            raise fail(
-                ErrorCode.CLONE_FAILED,
-                "the repository leaves too little room on the disk for the turn "
-                f"(it needs {MIN_FREE_BYTES // (1024 * 1024)} MiB and {MIN_FREE_INODES} "
-                "inodes free after the clone)",
-            )
+        # Fail fast: a mirror that alone leaves less than the push needs ends the turn here, free,
+        # before the agent's repository is cloned. `prepare` asks again once that clone exists.
+        self._require_room()
         tips = self._ref_tips("refs/heads/")
         self._tags = self._ref_tips("refs/tags/")
         if base not in tips:
@@ -698,6 +695,7 @@ class GitWorkspace:
             protocols="file",
         )
         if cloned.returncode != 0:
+            self._require_room()  # a clone that ran the disk full is the clone's failure
             raise fail(
                 ErrorCode.SETUP_FAILED,
                 "the agent repository cannot be cloned: " + self._detail(cloned),
@@ -1515,6 +1513,17 @@ class GitWorkspace:
         if _is_client_error(detail):
             return REASON_PROVIDER_ERROR
         return REASON_PROVIDER_UNAVAILABLE
+
+    def _require_room(self) -> None:
+        """`clone_failed` (free) when the mirror's file system has less room than the push needs."""
+        if self._has_room():
+            return
+        raise fail(
+            ErrorCode.CLONE_FAILED,
+            "the repository leaves too little room on the disk for the turn "
+            f"(it needs {MIN_FREE_BYTES // (1024 * 1024)} MiB and {MIN_FREE_INODES} "
+            "inodes free after the clone)",
+        )
 
     def _has_room(self) -> bool:
         """Whether the mirror's file system has the room the final push needs. A file system that

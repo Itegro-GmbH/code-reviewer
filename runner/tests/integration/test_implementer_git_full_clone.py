@@ -386,6 +386,27 @@ def test_a_clone_that_leaves_too_few_inodes_ends_the_turn_clone_failed(
 
 
 # #909-T10
+def test_an_agent_clone_that_fills_the_disk_ends_the_turn_clone_failed(
+    rig: Rig, busy: dict[str, str]
+) -> None:
+    holder: list[GitWorkspace] = []
+
+    def space(path: Path) -> DiskSpace:
+        # Room while only the mirror exists; gone once the agent's repository has been cloned.
+        room = 10 * 1024**3 if not holder[0].repo.exists() else 1024
+        return DiskSpace(free_bytes=room, free_inodes=10**6)
+
+    workspace = rig.workspace(space=space)
+    holder.append(workspace)
+
+    with pytest.raises(JobError) as refused:
+        workspace.prepare()
+
+    assert refused.value.code is ErrorCode.CLONE_FAILED
+    assert "room" in refused.value.detail
+
+
+# #909-T10
 def test_a_clone_with_room_left_is_not_refused(rig: Rig, busy: dict[str, str]) -> None:
     workspace = rig.workspace(
         space=lambda path: DiskSpace(free_bytes=10 * 1024**3, free_inodes=10**6)
