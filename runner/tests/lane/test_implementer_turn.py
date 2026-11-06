@@ -269,9 +269,10 @@ def test_a_container_killed_mid_turn_ends_the_turn_named_and_what_was_committed_
         while not stop.is_set():
             counted = docker(
                 "exec", AGENT_CONTAINER_NAME, "git", "-C", "/work/repo", "rev-list", "--count",
-                "HEAD", check=False,
+                "main..HEAD", check=False,
             )  # fmt: skip
-            if counted.returncode == 0 and int(counted.stdout.strip() or 0) >= 3:
+            # The clone has the whole history (#909): the agent's commits are the ones after `main`.
+            if counted.returncode == 0 and int(counted.stdout.strip() or 0) >= 2:
                 docker("kill", AGENT_CONTAINER_NAME, check=False)
                 return
             stop.wait(0.3)

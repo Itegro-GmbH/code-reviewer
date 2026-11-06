@@ -134,6 +134,7 @@ async function turnOf(app: EngineHarness, jobId: string) {
       "implementer_turns.profile_name",
       "implementer_sessions.branch",
       "implementer_sessions.base_branch",
+      "implementer_sessions.start_branch",
     ])
     .where("implementer_turns.job_id", "=", jobId)
     .executeTakeFirstOrThrow();
@@ -225,12 +226,15 @@ describe("Issue to PR: a label, implement and review in rounds, then a pull requ
       [1, `workflow/${runId}/review`],
       [1, `workflow/${runId}/review.r2`],
     ]);
-    // The reviewer starts from the branch of `implement` in every round, the implementer from the base branch of the run.
-    expect(reviews.map((turn) => turn.base_branch)).toEqual([
+    // The reviewer starts from the branch of `implement` in every round, the implementer from the base branch of the run; the base of
+    // every session stays the run's (#909).
+    expect(reviews.map((turn) => turn.start_branch)).toEqual([
       `workflow/${runId}/implement`,
       `workflow/${runId}/implement`,
     ]);
+    expect(reviews.map((turn) => turn.base_branch)).toEqual(["main", "main"]);
     expect(first.base_branch).toBe("main");
+    expect(first.start_branch).toBeNull();
     expect(reviews[0]?.session_id).not.toBe(reviews[1]?.session_id);
     expect(reviews[0]?.instruction).toBe(
       `Review branch workflow/${runId}/implement against the issue.`,

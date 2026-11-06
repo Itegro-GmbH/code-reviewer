@@ -40,6 +40,8 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
     "queued_discarded",
     "queued_attempted_at",
     "queued_first_failed_at",
+    // #909: the branch a session branch is made from apart from its base; null for every session that exists.
+    "start_branch",
   ],
   // #745, step 7: the environment's network rule; every environment that exists reads `off` and no hosts (`DEFAULTS_OF_COLUMNS`).
   // #854: the kind (`hosted`) and the labels (none) of every environment that exists.
