@@ -283,7 +283,8 @@ def _turn_check(
         return Check(CHECK_TURN, False, f"{error.code.value}: {error}")
     finally:
         log = _end(agent, place, door)
-    if "ok" not in answer.text.lower():
+    # The word itself, not two letters inside another one ("token", "look").
+    if answer.text.strip().rstrip(".!").strip().lower() != "ok":
         return Check(
             CHECK_TURN, False, "the turn ended without the answer that was asked for" + log
         )

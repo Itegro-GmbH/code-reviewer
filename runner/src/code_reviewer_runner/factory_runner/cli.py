@@ -388,6 +388,8 @@ def _selftest(
             out.write(line + "\n")
         if extra:
             out.write(_claude_code_line(claude_ready, asked) + "\n")
+        elif asked:
+            out.write("claude-code: not checked (the base is not ready)\n")
         out.write(
             f"base: {'ready' if result.base_ok else 'NOT ready'}; "
             f"capabilities: {', '.join(result.capabilities) or 'none'}\n"

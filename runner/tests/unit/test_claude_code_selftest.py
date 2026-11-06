@@ -408,6 +408,26 @@ def test_a_turn_that_does_not_answer_with_the_word_fails(rig: Rig) -> None:
     assert rig.doors[0].stopped and rig.place.removed
 
 
+# #856-S04
+@pytest.mark.parametrize("text", ["Take a look at the token.", "book", "not okay"])
+def test_a_word_that_only_holds_the_letters_is_not_the_answer(rig: Rig, text: str) -> None:
+    rig.place.output = scripted(text)
+
+    turn = rig.run(with_turn=True)[-1]
+
+    assert (turn.name, turn.ok) == (CHECK_TURN, False)
+
+
+# #856-S04
+@pytest.mark.parametrize("text", ["ok", "OK.", "Ok!", " ok \n"])
+def test_the_answer_ok_passes_whatever_its_case_and_full_stop(rig: Rig, text: str) -> None:
+    rig.place.output = scripted(text)
+
+    turn = rig.run(with_turn=True)[-1]
+
+    assert (turn.name, turn.ok) == (CHECK_TURN, True)
+
+
 # #856-S05
 def test_a_login_the_api_refuses_fails_the_turn_with_the_code_and_cleans_up(rig: Rig) -> None:
     rig.place.output = scripted(
