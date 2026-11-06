@@ -54,6 +54,11 @@ export type StoredWorkflowRun = {
   actorLogin: string;
   /** #891: when a member asked for the run to stop; null when nobody did. The run stays `running` until its turn has ended. */
   cancelRequestedAt: string | null;
+  /**
+   * #902: how the run ends and why, as JSON text, once the steps of `onFailure` have begun; null before, and for a workflow without them.
+   * The run stays `running` until they are over.
+   */
+  failure: string | null;
   createdAt: string;
   updatedAt: string;
   finishedAt: string | null;
@@ -177,6 +182,11 @@ export type RunLock = {
    * not marked.
    */
   requestCancel(): Promise<boolean>;
+  /**
+   * #902: stores how the run ends (`failure`, JSON text) and keeps it `running`, unless that was done before. Returns whether this call stored
+   * it. A run that is over takes none.
+   */
+  beginFailure(failure: string): Promise<boolean>;
   /** Marks the run as looked at without changing anything else: the sweep takes the runs that waited longest first. */
   touch(): Promise<void>;
 };
@@ -241,6 +251,7 @@ function runFrom(row: Selectable<WorkflowRunsTable>): StoredWorkflowRun {
     createdBy: row.created_by,
     actorLogin: row.actor_login,
     cancelRequestedAt: row.cancel_requested_at,
+    failure: row.failure,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     finishedAt: row.finished_at,
@@ -355,6 +366,7 @@ export function createWorkflowRunsRepository(
         created_by: input.createdBy,
         actor_login: input.actorLogin,
         cancel_requested_at: null,
+        failure: null,
         created_at: at,
         updated_at: at,
         finished_at: null,
@@ -595,6 +607,21 @@ export function createWorkflowRunsRepository(
               .executeTakeFirst();
             if (marked === undefined) return false;
             lock.run = { ...lock.run, cancelRequestedAt: at, updatedAt: at };
+            return true;
+          },
+          async beginFailure(failure) {
+            const at = formatTimestamp(now());
+            const stored = await trx
+              .updateTable("workflow_runs")
+              .set({ failure, updated_at: at })
+              .where("workspace_id", "=", workspaceId)
+              .where("id", "=", runId)
+              .where("status", "=", "running")
+              .where("failure", "is", null)
+              .returning("id")
+              .executeTakeFirst();
+            if (stored === undefined) return false;
+            lock.run = { ...lock.run, failure, updatedAt: at };
             return true;
           },
           async touch() {
