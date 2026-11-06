@@ -98,6 +98,7 @@ function harness(options: {
     createdBy: null,
     actorLogin: "octocat",
     cancelRequestedAt: null,
+    failure: null,
     createdAt: NOW.toISOString(),
     updatedAt: NOW.toISOString(),
     finishedAt: null,

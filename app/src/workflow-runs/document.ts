@@ -13,6 +13,8 @@ export type RunDocument = {
   budgetUsd: number;
   /** The nodes of the workflow, in the order they run. */
   steps: (Record<string, unknown> & { id: string; kind: string })[];
+  /** The steps that run once after the run ended `failed` or `cancelled` (#902); empty when the workflow has none. */
+  onFailure: (Record<string, unknown> & { id: string; kind: string })[];
 };
 
 export function readRunDocument(text: string): RunDocument | undefined {
@@ -26,16 +28,12 @@ export function readRunDocument(text: string): RunDocument | undefined {
   const { trigger, steps } = parsed;
   if (typeof trigger.kind !== "string" || !Array.isArray(steps))
     return undefined;
-  const nodes: RunDocument["steps"] = [];
-  for (const node of steps) {
-    if (
-      !isRecord(node) ||
-      typeof node.id !== "string" ||
-      typeof node.kind !== "string"
-    )
-      return undefined;
-    nodes.push(node as RunDocument["steps"][number]);
-  }
+  const nodes = readNodes(steps);
+  if (nodes === undefined) return undefined;
+  // A document without `onFailure` has none; one whose `onFailure` is not a list of nodes is not usable (the validator never saved one).
+  const failureNodes =
+    parsed.onFailure === undefined ? [] : readNodes(parsed.onFailure);
+  if (failureNodes === undefined) return undefined;
   const budget = parsed.budgetUsd;
   if (
     budget !== undefined &&
@@ -46,7 +44,24 @@ export function readRunDocument(text: string): RunDocument | undefined {
     trigger: trigger as RunDocument["trigger"],
     budgetUsd: budget ?? BUDGET_DEFAULT_USD,
     steps: nodes,
+    onFailure: failureNodes,
   };
+}
+
+/** A list of nodes as the engine walks them, or undefined when it is not a list of objects with an id and a kind. */
+function readNodes(list: unknown): RunDocument["steps"] | undefined {
+  if (!Array.isArray(list)) return undefined;
+  const nodes: RunDocument["steps"] = [];
+  for (const node of list as unknown[]) {
+    if (
+      !isRecord(node) ||
+      typeof node.id !== "string" ||
+      typeof node.kind !== "string"
+    )
+      return undefined;
+    nodes.push(node as RunDocument["steps"][number]);
+  }
+  return nodes;
 }
 
 /** The kinds of node the engine runs. The format's reserved kinds are refused by the validator, so a saved document holds only these. */
@@ -124,6 +139,7 @@ export function nodesById(
     }
   };
   walk(document.steps);
+  walk(document.onFailure);
   return found;
 }
 

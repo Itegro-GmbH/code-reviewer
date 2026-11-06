@@ -61,6 +61,8 @@ function state(patch: Partial<MachineState> = {}): MachineState {
     spentMicroUsd: 0,
     steps: [],
     nodes: [agent("plan"), agent("build"), action("open")],
+    onFailure: [],
+    failure: null,
     holds: () => {
       throw new Error("no condition is asked in this test");
     },
@@ -106,6 +108,7 @@ describe("the state machine of a workflow run", () => {
       move: "finish_run",
       status: "failed",
       errorCode: "budget_exhausted",
+      stepId: "build",
     });
     expect(
       nextMove(state({ steps: [done("plan")], spentMicroUsd: 25_000_000 })),
@@ -113,6 +116,7 @@ describe("the state machine of a workflow run", () => {
       move: "finish_run",
       status: "failed",
       errorCode: "budget_exhausted",
+      stepId: "build",
     });
   });
 
@@ -245,6 +249,7 @@ describe("the state machine of a workflow run", () => {
       move: "finish_run",
       status: "failed",
       errorCode: "step_kind_not_supported",
+      stepId: "later",
     });
   });
 
@@ -368,6 +373,7 @@ describe("an if", () => {
       move: "finish_run",
       status: "failed",
       errorCode: "condition_failed",
+      stepId: "done",
     });
   });
 

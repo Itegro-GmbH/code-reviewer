@@ -411,6 +411,27 @@ clean; this block is checked against [`contracts/examples/workflow/Workflow.json
         }
       ]
     }
+  ],
+  "onFailure": [
+    {
+      "id": "report",
+      "kind": "action",
+      "connector": "github.issue.comment",
+      "issue": "{{trigger.issue}}",
+      "body": "The agent stopped before a pull request was ready ({{failure.status}} at step {{failure.stepId}}, {{failure.code}}): {{failure.message}}"
+    },
+    {
+      "id": "release",
+      "kind": "action",
+      "connector": "github.issue.labels",
+      "issue": "{{trigger.issue}}",
+      "remove": [
+        "agent working"
+      ],
+      "add": [
+        "agent failed"
+      ]
+    }
   ]
 }
 ```
