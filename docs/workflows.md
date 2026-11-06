@@ -1001,6 +1001,7 @@ Beyond the form:
 | `repo_required` | A manual trigger without `input` that declares `repo` as a required text: the run has no repository. | Declare `repo` in `properties` and `required` of the trigger's `input`. |
 | `target_from_untrusted_value` | An input that decides a target (`issue`, `head`, `base`, `add`, `remove`, `environment`) holds more than a literal or one reference of the kind the input takes (see the table under "targets": a field of the trigger such as the title or the body of the issue is not one). | Use a literal, or exactly one reference the message names. |
 | `label_retriggers_workflow` | An action adds the label that starts the workflow. | Remove the label instead, or add another one. |
+| `on_failure_step_not_allowed` | A step of `onFailure` that is not a comment (`github.issue.comment`), a label change (`github.issue.labels`) or an `if` over them. | Only comment and change labels after a failure. |
 | `too_many_steps` | More than 50 steps. | Split the workflow. |
 | `nesting_too_deep` | `if`/`loop` too deep, a loop in a loop in a loop, conditions or a result schema nested too deep. | Flatten it. |
 | `result_schema_too_large` | A result schema with more than 100 fields in all. | Make it smaller. |

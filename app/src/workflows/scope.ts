@@ -29,7 +29,7 @@ import {
 import type { Reference } from "./template.ts";
 
 export type StepKind =
-  "trigger" | "agent" | "action" | "if" | "loop" | "reserved";
+  "trigger" | "failure" | "agent" | "action" | "if" | "loop" | "reserved";
 
 export type Binding = {
   id: string;
@@ -137,6 +137,11 @@ export type ScopeContext = {
   /** The check has all the problems an answer can hold: nothing more needs to be looked at. */
   halted: () => boolean;
 };
+
+/** Whether a pointer is inside the `onFailure` list of the document. */
+function inOnFailure(path: string): boolean {
+  return isPrefix("/onFailure", path);
+}
 
 function isPrefix(shorter: string, longer: string): boolean {
   return longer === shorter || longer.startsWith(`${shorter}/`);
@@ -340,6 +345,19 @@ export function resolveReference(
   const binding = use.env.scope.get(root);
   if (binding !== undefined) return descend(binding, rest, ref, context, use);
   const info = context.index.get(root);
+  if (
+    info !== undefined &&
+    inOnFailure(info.path) !== inOnFailure(use.nodePath)
+  )
+    return fail(
+      context,
+      use,
+      "reference_not_in_scope",
+      inOnFailure(use.nodePath)
+        ? `${shown(info.id)} is a step of the workflow. The steps of onFailure run after a failure, when any step may not have run: they read the trigger, 'failure' and the onFailure steps before them.`
+        : `${shown(info.id)} is a step of onFailure, which runs after the workflow has ended and is not part of its flow. Only onFailure steps read it.`,
+      namesInReach(use.env, true).names,
+    );
   if (info !== undefined) {
     const why = whyNotReachable(info, use);
     return fail(

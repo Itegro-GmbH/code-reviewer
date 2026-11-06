@@ -14,6 +14,11 @@ import {
   type TargetCheck,
 } from "./check-values.ts";
 import { COST_FACT, FACT_NAMES, FACT_TYPES, PUSH_FACTS } from "./facts.ts";
+import {
+  FAILURE_ID,
+  ON_FAILURE_CONNECTORS,
+  ON_FAILURE_KINDS,
+} from "./failure.ts";
 import { isRecord, jsonTypeName, textLength } from "./json.ts";
 import {
   DESCRIPTION_MAX_LENGTH,
@@ -62,9 +67,12 @@ export const ID_PATTERN = new RegExp(
 );
 const RESERVED_IDS = ["trigger", "previous"] as const;
 
-function isStepId(id: string): boolean {
+/** `failure` is taken in `onFailure` only: a step of the workflow called so keeps working, nothing there reads the failure. */
+function isStepId(id: string, onFailure: boolean): boolean {
   return (
-    ID_PATTERN.test(id) && !(RESERVED_IDS as readonly string[]).includes(id)
+    ID_PATTERN.test(id) &&
+    !(RESERVED_IDS as readonly string[]).includes(id) &&
+    !(onFailure && id === FAILURE_ID)
   );
 }
 const COMMON_KEYS = ["id", "kind", "description"] as const;
@@ -81,6 +89,8 @@ export type StepState = {
   branches: StepInfo["branches"];
   /** The list being checked is the body of a loop, not a branch of an `if` inside one. */
   inLoopBody: boolean;
+  /** The list is `onFailure` or inside it (#902): actions and `if` only, and no step of the workflow in reach. */
+  onFailure: boolean;
 };
 
 function keysOf(
@@ -594,7 +604,7 @@ function checkSession(
     );
     return;
   }
-  if (!isStepId(target)) {
+  if (!isStepId(target, false)) {
     c.report(
       issue(
         at,
@@ -766,6 +776,15 @@ function checkAction(
     );
     return;
   }
+  if (state.onFailure && !ON_FAILURE_CONNECTORS.includes(name))
+    c.report(
+      issue(
+        pointer(path, "connector"),
+        "on_failure_step_not_allowed",
+        `${shown(name)} cannot run after a failure. A step of onFailure may use ${listNames(ON_FAILURE_CONNECTORS)}.`,
+        ON_FAILURE_CONNECTORS,
+      ),
+    );
   keysOf(
     node,
     [...COMMON_KEYS, "connector", ...Object.keys(spec.inputs)],
@@ -888,6 +907,7 @@ function checkBranch(
     loopDepth: state.loopDepth,
     branches: [...state.branches, { ifId: node.id as string, branch: key }],
     inLoopBody: false,
+    onFailure: state.onFailure,
   });
 }
 
@@ -976,6 +996,7 @@ function checkLoop(
       loopDepth: state.loopDepth + 1,
       branches: state.branches,
       inLoopBody: true,
+      onFailure: state.onFailure,
     });
   }
   const untilAt = pointer(path, "until");
@@ -1037,7 +1058,7 @@ export function checkSteps(
       continue;
     }
     const id = node.id;
-    const validId = typeof id === "string" && isStepId(id);
+    const validId = typeof id === "string" && isStepId(id, state.onFailure);
     if (id === undefined)
       missing(at, "id", 'a name for the step, like "implement".', c);
     else if (typeof id !== "string")
@@ -1047,7 +1068,7 @@ export function checkSteps(
         issue(
           pointer(at, "id"),
           "invalid_value",
-          `${shown(id)} is not a usable id: start with a letter, then letters, digits, '_' or '-' (${ID_MAX_LENGTH} at most); 'trigger' and 'previous' are taken.`,
+          `${shown(id)} is not a usable id: start with a letter, then letters, digits, '_' or '-' (${ID_MAX_LENGTH} at most); 'trigger' and 'previous' are taken${state.onFailure ? `, and '${FAILURE_ID}' in onFailure` : ""}.`,
         ),
       );
     const kind = node.kind;
@@ -1086,6 +1107,24 @@ export function checkSteps(
           "unknown_kind",
           `${typeof kind === "string" ? `${shown(kind)} is not a node kind` : "'kind' must be a text"}. Available: ${listNames([...SUPPORTED_KINDS])} (reserved: ${listNames([...RESERVED_KINDS])}).`,
           SUPPORTED_KINDS,
+        ),
+      );
+      if (validId)
+        bind({
+          id,
+          kind: "reserved",
+          type: { kind: "unknown" },
+          unavailable: {},
+        });
+      continue;
+    }
+    if (state.onFailure && !ON_FAILURE_KINDS.includes(kind)) {
+      c.report(
+        issue(
+          pointer(at, "kind"),
+          "on_failure_step_not_allowed",
+          `A step of onFailure is an action or an if, not ${shown(kind)}: after a failure nothing starts an agent or a loop. Available: ${listNames(ON_FAILURE_KINDS)}.`,
+          ON_FAILURE_KINDS,
         ),
       );
       if (validId)

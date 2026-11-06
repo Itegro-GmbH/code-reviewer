@@ -90,6 +90,8 @@ export const SEMANTIC_ISSUE_CODES = [
   "label_retriggers_workflow",
   /** A `required` entry of a result schema that names no property (the schema language cannot say it). */
   "required_field_unknown",
+  /** A step of `onFailure` that is not a comment, a label change or an `if` over them: no agent, no loop, no pull request runs after a failure. */
+  "on_failure_step_not_allowed",
   /** More steps than a document may hold. */
   "too_many_steps",
   /** `if` and `loop` nested deeper than allowed, or a result schema with more levels than allowed. */

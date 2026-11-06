@@ -5,6 +5,7 @@
 // it on every path, the types of the values that flow, the limits, and the profile, environment and connector names against a
 // resolver. It never throws on a document and never stops at the first problem; the list is sorted by path.
 import { checkSteps, type Checker, type StepState } from "./check-steps.ts";
+import { FAILURE_ID, FAILURE_TYPE } from "./failure.ts";
 import { isRecord, jsonTypeName, textLength } from "./json.ts";
 import {
   BUDGET_DEFAULT_USD,
@@ -61,6 +62,7 @@ const DOCUMENT_KEYS = [
   "trigger",
   "budgetUsd",
   "steps",
+  "onFailure",
 ];
 
 /**
@@ -404,7 +406,15 @@ export function validateWorkflow(
   );
 
   const index = new Map<string, StepInfo>();
-  const stepCount = indexSteps(document.steps, "/steps", [], index, report);
+  let stepCount = indexSteps(document.steps, "/steps", [], index, report);
+  if (document.onFailure !== undefined)
+    stepCount += indexSteps(
+      document.onFailure,
+      "/onFailure",
+      [],
+      index,
+      report,
+    );
   if (stepCount > STEPS_MAX)
     report(
       issue(
@@ -444,8 +454,27 @@ export function validateWorkflow(
       loopDepth: 0,
       branches: [],
       inLoopBody: false,
+      onFailure: false,
     };
     checkSteps(document.steps, "/steps", checker, env, state);
+    // #902: the steps that run after a failure see the trigger, the facts of the failure and each other, none of the steps above.
+    if (document.onFailure !== undefined) {
+      const failureScope = new Scope();
+      failureScope.set("trigger", triggerBinding);
+      failureScope.set(FAILURE_ID, {
+        id: FAILURE_ID,
+        kind: "failure",
+        type: FAILURE_TYPE,
+        unavailable: {},
+      });
+      checkSteps(
+        document.onFailure,
+        "/onFailure",
+        checker,
+        { scope: failureScope, loops: [] },
+        { ...state, onFailure: true },
+      );
+    }
   }
 
   const found = sortIssues(sink.issues);
