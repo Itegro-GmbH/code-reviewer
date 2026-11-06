@@ -405,11 +405,14 @@ class HttpWorkerApi:
             # The thread of the call before this one hands its answer to the loop and ends a moment
             # later: a caller that goes on at once (the next part of a snapshot) finds it alive.
             # A call that is really still running is not waited for beyond this moment. The wait
-            # gives the loop back (a `join` here would stop the heartbeat for the moment).
+            # gives the loop back (a `join` here would stop the heartbeat for the moment). The slot
+            # is read again after every pause: a second caller that waited for the same thread may
+            # have started its own by then, and that one is the call before this one now.
             loop = asyncio.get_running_loop()
             deadline = loop.time() + ENDING_THREAD_SECONDS
-            while running.is_alive() and loop.time() < deadline:
+            while running is not None and running.is_alive() and loop.time() < deadline:
                 await asyncio.sleep(ENDING_THREAD_POLL_SECONDS)
+                running = getattr(self, slot)
         if running is not None and running.is_alive():
             raise ApiUnavailable(f"an earlier {name} has not ended")
         return await self._run_on_thread(name, call, slot=slot)
