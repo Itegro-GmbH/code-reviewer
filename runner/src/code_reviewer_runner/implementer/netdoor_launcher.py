@@ -66,6 +66,7 @@ from .door_launcher import (
     RULES_ENTRYPOINT,
     RULES_SECONDS,
     STOP_SECONDS,
+    network_document,
 )
 from .door_state import DoorEnd
 from .netdoor.addresses import TEST_PUBLIC_VARIABLE
@@ -263,10 +264,14 @@ class RunningNetDoor:
         *,
         container: str,
         seams: NetDoorSeams,
+        network: str | None = None,
     ) -> None:
         self._api = api
         self._streams = streams
         self._container = container
+        # The model network when this door made it (a turn with no model door), else None: the
+        # model door that made it takes it away.
+        self._network = network
         self._seams = seams
         self._lock = threading.Lock()
         self._state = NetDoorState()
@@ -362,18 +367,38 @@ class RunningNetDoor:
                 self._streams.write(json.dumps({"op": OP_STOP}).encode() + b"\n")
             self._streams.close_write()
             self._reader.join(timeout=self._seams.stop_seconds)
-            _remove_quietly(self._api, self._container)
+            _remove_quietly(self._api, self._container, self._network)
             self._streams.close()
         return self.snapshot()
 
 
-def _remove_quietly(api: DockerApi, container: str | None) -> None:
-    if container is None:
-        return
+def _remove_quietly(api: DockerApi, container: str | None, network: str | None = None) -> None:
+    """The door's container and, when the door made it, the model network (each on its own; a
+    network with a member is not removed, and the sweep of the runner's housekeeping finds what is
+    left by its label)."""
+    steps: list[Callable[[], None]] = []
+    if container is not None:
+        steps.append(lambda: api.remove_container(container))
+    if network is not None:
+        steps.append(lambda: api.remove_network(network))
+    for step in steps:
+        try:
+            step()
+        except DockerError as error:
+            _log.warning("the network door could not be cleaned up (%s)", error.status)
+
+
+def _ensure_network(api: DockerApi) -> str | None:
+    """Make the model network when it is not there: a turn with no model door (Claude Code on a
+    subscription) has nothing else to make it. The id of the network when this call made it, None
+    when it was there (the model door's, which takes it away)."""
     try:
-        api.remove_container(container)
+        api.inspect_network(MODEL_NETWORK_NAME)
     except DockerError as error:
-        _log.warning("the network door could not be cleaned up (%s)", error.status)
+        if error.status != 404:
+            raise
+        return api.create_network(network_document())
+    return None
 
 
 def start_network_door(
@@ -387,6 +412,7 @@ def start_network_door(
     door that cannot be started; whatever was made is removed first."""
     api = seams.api()
     container: str | None = None
+    network: str | None = None
     streams: AttachedStreams | None = None
     test = seams.ci_network
     try:
@@ -394,6 +420,7 @@ def start_network_door(
         image = str(me.get("Image", ""))
         if not image or not me.get("Id"):
             raise _unavailable("the daemon does not know this container")
+        network = _ensure_network(api)
         container = api.create_container(door_document(image, test), NETDOOR_CONTAINER_NAME)
         api.connect_network(
             MODEL_NETWORK_NAME,
@@ -405,7 +432,7 @@ def start_network_door(
         if test is not None:
             api.connect_network(test.network, {"Container": container})
         streams = api.attach(container)
-        running = RunningNetDoor(api, streams, container=container, seams=seams)
+        running = RunningNetDoor(api, streams, container=container, seams=seams, network=network)
         running.begin()
         api.start_container(container)
         _close_the_doors_network(api, image, container, None if test is None else test.cidr)
@@ -413,18 +440,18 @@ def start_network_door(
         with contextlib.suppress(OSError):
             streams.write(start_document(rule, deadline_seconds))
     except DockerError as error:
-        _cleanup(api, container, streams)
+        _cleanup(api, container, streams, network)
         raise _unavailable(f"the daemon refused a step ({error.status})") from None
     except JobError:
-        _cleanup(api, container, streams)
+        _cleanup(api, container, streams, network)
         raise
     except Exception:
-        _cleanup(api, container, streams)
+        _cleanup(api, container, streams, network)
         raise _unavailable(
             "a step of the start failed in a way the daemon did not explain"
         ) from None
     except BaseException:
-        _cleanup(api, container, streams)
+        _cleanup(api, container, streams, network)
         raise
     running.wait_ready(seams.ready_seconds)
     refusal = running.refusal
@@ -460,7 +487,12 @@ def _close_the_doors_network(api: DockerApi, image: str, door: str, test_cidr: s
         raise _unavailable(f"the door's network rules could not be installed (exit code {code})")
 
 
-def _cleanup(api: DockerApi, container: str | None, streams: AttachedStreams | None) -> None:
+def _cleanup(
+    api: DockerApi,
+    container: str | None,
+    streams: AttachedStreams | None,
+    network: str | None = None,
+) -> None:
     if streams is not None:
         streams.close()
-    _remove_quietly(api, container)
+    _remove_quietly(api, container, network)
