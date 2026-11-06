@@ -19,6 +19,8 @@ from code_reviewer_runner.implementer.claude_code.layer import (
     CLAUDE_CODE_INTEGRITY,
     CLAUDE_CODE_VERSION,
     LAYER_REPOSITORY,
+    PLATFORM_INTEGRITY,
+    PLATFORM_LABEL,
     LayerError,
     LayerSpec,
     build_context,
@@ -105,8 +107,9 @@ def test_the_tag_names_the_version_and_the_base_it_was_built_on() -> None:
     other = "sha256:" + "cd" * 32
 
     digest = base64.b64decode(CLAUDE_CODE_INTEGRITY.removeprefix("sha512-")).hex()[:12]
+    platform_word = layer_labels(SPEC)[PLATFORM_LABEL][:8]
     assert layer_tag(BASE, SPEC) == (
-        f"{LAYER_REPOSITORY}:{CLAUDE_CODE_VERSION}-sha512-{digest}-{'ab' * 6}"
+        f"{LAYER_REPOSITORY}:{CLAUDE_CODE_VERSION}-sha512-{digest}-p{platform_word}-{'ab' * 6}"
     )
     assert layer_tag(BASE, SPEC) != layer_tag(other, SPEC)
     assert layer_tag(BASE, SPEC) != layer_tag(BASE, LayerSpec(version="2.1.318", integrity=None))
@@ -214,30 +217,151 @@ def test_a_layer_with_another_digest_label_is_not_taken_as_the_pin() -> None:
     assert find_layer(daemon, "agent:golden", SPEC) is None
 
 
-def _check_lines(text: str) -> str:
-    return "\n".join(
-        line.strip().rstrip("\\").strip().removesuffix(";").strip()
-        for line in text.splitlines()
-        if "sha512sum -c" in line
+def _hex(integrity: str) -> str:
+    return base64.b64decode(integrity.removeprefix("sha512-")).hex()
+
+
+def _integrity_of(data: bytes) -> str:
+    return "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode()
+
+
+# #856-T13
+def test_the_platform_program_is_pinned_for_linux_x64_and_arm64_with_its_own_digest() -> None:
+    pinned = dict(PLATFORM_INTEGRITY)
+    text = dockerfile(BASE, SPEC)
+
+    assert set(pinned) == {"x64", "arm64"}
+    assert pinned["x64"] != pinned["arm64"] and CLAUDE_CODE_INTEGRITY not in pinned.values()
+    for arch, integrity in pinned.items():
+        assert _hex(integrity) in text, arch
+        assert f"@anthropic-ai/claude-code-linux-${{platform}}@{CLAUDE_CODE_VERSION}" in text
+    # Both tarballs are checked, then installed from the files, with no further registry fetch.
+    assert text.count("sha512sum -c") == 2
+    install = next(line for line in text.splitlines() if "npm install --global" in line)
+    assert "--offline" in install and "${tarball}" in install and "${platform_tarball}" in install
+    assert text.index("sha512sum -c") < text.index("npm install --global")
+    assert text.rindex("sha512sum -c") < text.index("npm install --global")
+
+
+# #856-T13
+def test_a_version_chosen_on_the_device_pins_no_platform_program_either() -> None:
+    chosen = LayerSpec(version="2.1.318", integrity=None)
+    text = dockerfile(BASE, chosen)
+
+    assert chosen.platform_integrity is None
+    assert "sha512sum" not in text and "claude-code-linux" not in text and "--offline" not in text
+    # A pinned stub with no pinned program (or the other way round) is not a spec.
+    with pytest.raises(ValueError):
+        LayerSpec(platform_integrity=None)
+    with pytest.raises(ValueError):
+        LayerSpec(integrity=None, platform_integrity=(("x64", PLATFORM_INTEGRITY[1][1]),))
+    with pytest.raises(ValueError):
+        LayerSpec(platform_integrity=(("x64", "sha512-nope"),))
+    with pytest.raises(ValueError):
+        LayerSpec(
+            platform_integrity=(("x64", CLAUDE_CODE_INTEGRITY), ("riscv", CLAUDE_CODE_INTEGRITY))
+        )
+
+
+# #856-T13
+def test_a_layer_built_before_the_platform_pin_is_not_taken_as_the_pin() -> None:
+    """The earlier verified layer pinned the stub only: same version, same stub digest label."""
+    old_labels = {k: v for k, v in layer_labels(SPEC).items() if k != PLATFORM_LABEL}
+    daemon = Daemon(
+        have={
+            "agent:golden": {"Id": BASE},
+            layer_tag(BASE, SPEC): {"Config": {"Labels": old_labels}},
+        }
+    )
+
+    assert find_layer(daemon, "agent:golden", SPEC) is None
+    other = LayerSpec(
+        platform_integrity=(("x64", PLATFORM_INTEGRITY[0][1]), ("arm64", CLAUDE_CODE_INTEGRITY))
+    )
+    assert layer_labels(other)[PLATFORM_LABEL] != layer_labels(SPEC)[PLATFORM_LABEL]
+    assert layer_tag(BASE, other) != layer_tag(BASE, SPEC)
+    assert layer_labels(UNVERIFIED)[PLATFORM_LABEL] == "unverified"
+
+
+FAKE_NPM = r"""#!/bin/sh
+# `npm pack <spec> --silent` writes <name>.tgz into the working directory from $FAKE_NPM_DIR/<name>
+# and prints the file name; `npm install ...` records its arguments.
+case "$1" in
+  pack)
+    name="$(printf %s "$2" | sed 's/^@//; s/@[0-9.]*$//; s#/#-#g').tgz"
+    cp "$FAKE_NPM_DIR/$name" "./$name"
+    echo "$name"
+    ;;
+  install)
+    shift
+    echo "$@" > "$FAKE_NPM_DIR/install-arguments"
+    ;;
+esac
+"""
+
+
+def _build_script(spec: LayerSpec, work: Path) -> str:
+    """The first RUN of the layer (the install), up to the `npm install` itself, with /tmp moved
+    into `work`: what the daemon would run to fetch and check the two tarballs."""
+    text = dockerfile(BASE, spec)
+    run = text.split("RUN set -eu; \\\n", 1)[1].split("RUN groupadd", 1)[0]
+    lines = [line.strip().removesuffix("\\").strip() for line in run.splitlines()]
+    start = next(i for i, line in enumerate(lines) if "npm install --global" in line)
+    return ("set -eu; " + " ".join(lines[:start])).replace("/tmp", str(work))
+
+
+def _run_build(tmp_path: Path, *, stub: bytes, platform: bytes, pinned_platform: bytes):
+    """Run the check part of the script with a fake `npm` that serves `stub` and `platform`."""
+    import platform as host
+
+    arch = "arm64" if host.machine() in ("aarch64", "arm64") else "x64"
+    fake = tmp_path / "fake"
+    fake.mkdir()
+    (fake / "npm").write_text(FAKE_NPM)
+    (fake / "npm").chmod(0o755)
+    registry = tmp_path / "registry"
+    registry.mkdir()
+    (registry / "anthropic-ai-claude-code.tgz").write_bytes(stub)
+    (registry / f"anthropic-ai-claude-code-linux-{arch}.tgz").write_bytes(platform)
+    work = tmp_path / "work"
+    work.mkdir()
+    pins = tuple((a, _integrity_of(pinned_platform)) for a in ("x64", "arm64"))
+    spec = LayerSpec(integrity=_integrity_of(b"the stub"), platform_integrity=pins)
+    script = _build_script(spec, work)
+    return subprocess.run(
+        ["/bin/sh", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=work,
+        env={"PATH": f"{fake}:/usr/bin:/bin", "FAKE_NPM_DIR": str(registry)},
     )
 
 
 # #856-T13
-def test_the_build_script_fails_when_the_tarball_does_not_have_the_digest(tmp_path: Path) -> None:
-    """The check line of the build script, run on a file: the digest of the file passes, any
-    other digest fails the build (`set -e`)."""
-    tarball = tmp_path / "claude-code.tgz"
-    tarball.write_bytes(b"not the pinned tarball")
-    good = "sha512-" + base64.b64encode(hashlib.sha512(tarball.read_bytes()).digest()).decode()
-    bad = "sha512-" + base64.b64encode(hashlib.sha512(b"another").digest()).decode()
+def test_the_build_script_passes_when_both_tarballs_have_their_digests(tmp_path: Path) -> None:
+    done = _run_build(
+        tmp_path, stub=b"the stub", platform=b"the program", pinned_platform=b"the program"
+    )
 
-    def run(integrity: str) -> int:
-        script = _check_lines(dockerfile(BASE, LayerSpec(integrity=integrity)))
-        script = script.replace("/tmp/${tarball}", str(tarball))
-        assert "sha512sum -c" in script
-        return subprocess.run(
-            ["/bin/sh", "-c", script], check=False, capture_output=True
-        ).returncode
+    assert done.returncode == 0, done.stderr
 
-    assert run(good) == 0
-    assert run(bad) != 0
+
+# #856-T13
+def test_the_build_script_fails_when_the_stub_does_not_have_its_digest(tmp_path: Path) -> None:
+    done = _run_build(
+        tmp_path, stub=b"a changed stub", platform=b"the program", pinned_platform=b"the program"
+    )
+
+    assert done.returncode != 0 and "claude-code.tgz: FAILED" in done.stdout
+
+
+# #856-T13
+def test_the_build_script_fails_when_the_platform_program_does_not_have_its_digest(
+    tmp_path: Path,
+) -> None:
+    done = _run_build(
+        tmp_path, stub=b"the stub", platform=b"a changed program", pinned_platform=b"the program"
+    )
+
+    assert done.returncode != 0 and "claude-code-linux-" in done.stdout and "FAILED" in done.stdout
