@@ -351,7 +351,7 @@ docker run -d --name factory-runner --restart unless-stopped --stop-timeout 150 
 | `register [--token-file F \| --token T] [--name N] [--labels a,b] [--url U] [--cpus] [--memory-mb] [--disk-gb] [--runtime] [--agent-image] [--force]` | Exchanges the token for the runner's credential (read from `--token-file`, `-`, `FACTORY_RUNNER_TOKEN` or `--token`, see above) and writes the configuration (file mode 0600, directory 0700). If the app accepted the token but the file cannot be written, it says `runner registered, but its credential could not be saved: revoke it in the app and register again` and ends with exit code 8: the credential is shown once and is lost. Refuses to replace a registration without `--force`. Without `--url` it goes to `https://code-review.com`. The manifest of the registration is empty: `run` announces what the self-test proved. |
 | `run`                          | The service loop (below).                                                                                                                  |
 | `run --once [--wait SECONDS]`  | Takes **one** job and ends with its exit code. With no job within `--wait` (default 600) it ends with **exit code 0** and the line `no job for the labels of this runner within Ns: nothing to do`. |
-| `selftest [--json]`            | Proves the base (below). Exit code 0 when it holds, 5 when it does not. Needs no registration. It only looks: it pulls and names no image, so a missing or not pinned agent image is reported as not ready (a starting `run` pulls it). It may run beside a service; its throwaway container is one more on the daemon for the seconds it takes. |
+| `selftest [--json] [--with-claude-code]` | Proves the base (below). On a device with a Claude Code login it also looks at Claude Code (no model call); with `--with-claude-code`, by hand, it runs one tiny real turn on that login (a few cents of your subscription, see "Claude Code with your subscription"). Exit code 0 when it holds, 5 when it does not. Needs no registration. It only looks: it pulls and names no image, so a missing or not pinned agent image is reported as not ready (a starting `run` pulls it). It may run beside a service; its throwaway container is one more on the daemon for the seconds it takes. |
 | `config show`                  | The configuration as the runner sees it (file and environment), the credential only as `set` / `not set`.                                  |
 | `config set [--name N] [--labels a,b] [--cpus N\|none] [--memory-mb N\|none] [--disk-gb N\|none] [--parallel N] [--runtime R] [--agent-image I\|none] [--auto-update on\|off]` | Changes the file **on the device** (labels, limits, parallelism, name, runtime, image, automatic updates). Every value goes through the check of `register`; one wrong value changes nothing. `none` removes a limit. The credential and everything not named stay as they are, and the environment is never written into the file; when a variable overrides a setting that was changed, it says so. A running service reads the file when it starts: restart it after its job. `--parallel` accepts 1: this runner takes one job at a time. |
 | `credential show`              | `credential: set (from the file)` or `not set`, and how old it is. Never the value.                                                         |
@@ -477,6 +477,22 @@ streams the words, ends with the usage the model gave. No network, no key, no mo
 only under `sysbox-runc`: a container is made from a file of the image and run in the agent's own Docker.
 What it does **not** prove is covered elsewhere: the door and the git rules by the unit and lane tests of the Implementer, the
 Sysbox wall by a VM with Sysbox.
+
+**Claude Code in the self-test** (#856, `factory_runner/claude_code_selftest.py`). A device that has a Claude Code login gets more lines after
+the base; a device with none gets none. They are a capability like `agent-docker`: a failing one is said and never costs the base (the names
+start with `claude-code`, and `base_ok` and the exit code leave them out).
+
+- **By default, readiness only, no model call, no cost:** `claude-code-login` (the token file or variable is usable; the value is never
+  printed), `claude-code-layer` (the layer with the pinned version is on the daemon; it says whether it was checked against the pinned
+  digests or is a version the device chose), `claude-code-version` (`claude --version` as the unprivileged user in a throwaway container made
+  from the layer: no network, no volume, no login in it, removed afterwards; it must report the version the layer was built for).
+- **`selftest --with-claude-code`, by hand only:** after readiness, one **real turn** with the device's real login, in the container and behind
+  the network door of a job (the forced rule: `api.anthropic.com`, port 443), with the prompt "Reply with the single word: ok", the model
+  alias `haiku` and a budget of $0.25. It is a real call to Anthropic: it costs a few cents of the user's subscription (the line prints the
+  estimate at API prices, "through your subscription") and bills nothing. A failure is the exit code 5 then (by default a Claude Code line
+  that fails is only said). Nothing automated runs it: the service loop and the tests never do (the tests use doubles for the door and the
+  container and a scripted `stream-json`).
+- The line `claude-code: ready; no model was called (...)` says which depth ran.
 
 ### Limits
 
@@ -724,6 +740,62 @@ What the tests cannot know and the first install must check (nothing of this run
 - **The page's command** shows `factory-runner register --token ...` without an address; the command goes to `https://code-review.com`.
   `--url` is for another app.
 
+## Claude Code with your subscription
+
+This is for the person who runs a runner and wants jobs of the harness **Claude Code** to use **their own Claude subscription**. The technical
+parts are in "Claude Code, R3" below.
+
+### What runs where
+
+- **On your device:** the runner, Docker, and for each job a container with Claude Code in it. Claude Code is **Anthropic's program, unmodified**.
+  We do not ship it: the first start of the runner builds a layer on your agent image that installs the pinned version (2.1.311) from the npm
+  registry and accepts it only with the SHA-512 digests pinned in the runner, for both the npm package and the platform program (linux x64 and
+  arm64). The model traffic goes **from your device straight to `api.anthropic.com`**, on your subscription. It does not pass through our servers.
+- **At code-review.com:** the job (which repository and branch, the instruction, the profile), the live view of the steps, the result, the usage
+  numbers and the cost estimate. The app learns that your runner has Claude Code ready (a word in the runner's manifest); it never learns the
+  login.
+- **Your login** is a token you make with `claude setup-token` and keep on the device: in a file `claude-code-token` in the runner's home
+  (`$FACTORY_RUNNER_HOME`), or the file named by `FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE`, or in `CLAUDE_CODE_OAUTH_TOKEN` of the runner's
+  environment. A file must be a plain file (no link) that only its owner can read (mode 0600). The token **is never stored in our app or
+  database, never sent to the app and never written to a log** (the runner's log masks it). It is handed to Claude Code's process in the job's
+  container for the length of the job, and to nothing else.
+- Set it up, then look: `factory-runner selftest` shows the login, the layer and the version without calling a model;
+  `factory-runner selftest --with-claude-code` runs one tiny real turn on your subscription (a few cents) so that you know the login works.
+
+### What the guards do, and what they do not
+
+The agent is **free inside its container** (no list of allowed tools): it can read files, run commands and edit the repository. Claude Code
+needs the token in its environment, so **the agent's own commands can read the token**. We do not pretend otherwise. The guards are at the exits:
+
+| Guard | What it does | What it does not do |
+| ----- | ------------ | ------------------- |
+| Network rule | The container's only way out is a door that lets through `api.anthropic.com` on port 443 and nothing else (no other host, no IP address, not port 80). An environment that allows more refuses the job. | It cannot tell what is said to Anthropic. |
+| Push guard | Before a branch is pushed, the runner reads what it adds (files, names, commit messages, the branch name) for the token and its plain, URL-quoted and base64 forms. A branch with a hit is not pushed; one it could not read to the end is not pushed either. | **It is a net, not a wall.** It does not find a token that was hex-encoded, compressed (gzip, tar, zip), rot13, reversed or split over several lines or files. An agent that is told to hide the token can. |
+| Redaction | The token and the job's other secrets are taken out of the step records, the answer text and the report before they leave the runner. | The same limit: exact forms only. |
+| Container | No new privileges, an unprivileged user, memory and CPU limits, a budget per message (`--max-budget-usd`) and the job's clock. | A budget is checked when a message ends: it is a brake, not an exact limit. |
+
+Treat the token like any key on that machine: the runner's host should be one you trust, repositories you let it work on are repositories you
+let an agent act on, and a revoked or rotated token (`claude setup-token` again) ends the exposure. If you suspect a leak, revoke the token at Anthropic.
+
+### What it costs
+
+Claude Code reports a price at API list prices for each turn. The app shows it as **"≈ $0.42 through a subscription"** (or "no estimate,
+through a subscription" when Claude Code could not price every model): an estimate, **never billed by us, never added to a total** of
+the usage. A workflow's budget counts the estimate (so a run can still stop at its limit). What the subscription itself costs, and its usage
+limits, are between you and Anthropic: when the subscription's limit is reached the job ends with `llm_quota`. The minutes of a run on your
+runner are counted as for any other run today; whether runs on your own subscription and device should be free of them is not decided,
+and this page will say when it is.
+
+### Anthropic's terms
+
+Using Claude Code with your subscription is subject to **Anthropic's terms**, and they are yours to read and keep: the **Consumer Terms of
+Service** (for Free, Pro and Max accounts, https://www.anthropic.com/legal/consumer-terms), the **Commercial Terms of Service** (for Team,
+Enterprise and API use, https://www.anthropic.com/legal/commercial-terms), the **Usage Policy** (https://www.anthropic.com/legal/aup) and
+Claude Code's own "Legal and compliance" page in Anthropic's documentation. They decide, among other things, what you may do with a
+subscription token and how automated use is counted. **We do not claim that Anthropic has approved unattended or automated runs on a
+subscription**; that question is open with Anthropic, and until it is answered you use your subscription this way on your own responsibility.
+Use of your own credentials on your own device is the design (we never hold or resell a login), but it does not replace reading the terms.
+
 ## Claude Code, R3 (#856)
 
 R3 adds Claude Code as a harness that a runner announces when its device has a login for it. **The first slice was the adapter core**:
@@ -825,7 +897,7 @@ and to guard the exits):
 | ---- | ----- | ---- |
 | Push guard | `implementer/push_guard.py`, `GitWorkspace._login_secret_in` | Before a branch is pushed the runner reads what it adds beyond where the turn started (`git rev-list --objects` and `git cat-file --batch` in the mirror: commits, trees with their names, blobs, and the name of the branch) for the token and its spellings (`redaction.secret_forms`: as it is, URL-quoted, and base64 and base64url, with and without padding, at each of the three alignments the token can have inside a larger base64 text). Found: the branch gets the reason `login_secret` and is not pushed; the task's branch ends the turn `push_rejected`. Not read to the end (too large, a failed git, a timeout): `unchecked`, not pushed (it fails closed). Bounds: 300 s per read, a 64 MiB object list, 4 GiB of content. **It is a net, not a wall**: it finds the token and the spellings above, in plain text. It does not find the token hex-encoded, compressed (gzip, tar, a packed or zipped file), rot13 or otherwise shifted, reversed, or split over several lines or files. An agent that is told to hide the login can; the guard stops the accident and the lazy case, and the decision to accept the login in the agent's environment (follow-up 5) stands on the network gate, the owner's own device and the owner's own subscription. **Time**: the final push keeps 40 % of its seconds for the guard (`GUARD_SHARE`: 10 of the 25 s of a stop, 40 of the 100 s of a normal end); the fetch of a branch, the question to the lease and the push stop before that slice, and what the guard does not use goes back to the push of the last branch. So a stop (a cancelled run, a stopped Worker) or a slow fetch cannot leave the guard a second and turn committed work into `unchecked`. |
 | Redaction | `claude_code/agent.py`, `job_run.result_of` | The agent's `Redactor` knows the login: the step records, the turn's text and note are redacted in the agent; the job's secrets (the login included) are taken out of every text of the report (branch names, commit subjects, paths, the summary) and of the log line. Exact forms only for the facts of the report: a commit subject "fix authorization header" is not a secret. No snapshot export and no transcript volume exist for this harness yet (design: "Resume across containers"), so there is nothing else to scrub; the design redacts the transcript with the login too and scans it again before it is stored. |
-| Network | `claude_code/gates.py`, `session._start_network`, `job_run.production_setup` | A subscription turn is forced onto the network door with the rule `list` and exactly `api.anthropic.com` (an exact name, no suffix). An environment that is `open`, or lists any other host, refuses the turn (`implementer_config_invalid`, detail starting `subscription_network_open` or `subscription_network_hosts`), free, before the container exists. The door dials ports 80 and 443 only (`netdoor/proxy.py`), and a listed host has both in every rule; **the entry of a subscription turn has 443 only**: the runner's `NetworkRule` has an optional `ports` (a subset of the door's two, a list only; empty = both), it travels in the door's start document (`parse_door_rule`) and not in the contract (a job's or an environment's rule is still exactly `mode` and `hosts`, so no app change), and the door refuses port 80 for it with `port_not_allowed` (CONNECT and plain HTTP alike). The door container's own firewall table still lets 80 and 443 out; the proxy is what narrows it, so the narrowing is the proxy's word, not the kernel's. The rule applies to all hosts of its list (the subscription rule has one). |
+| Network | `claude_code/gates.py`, `session._start_network`, `job_run.production_setup` | A subscription turn is forced onto the network door with the rule `list` and exactly `api.anthropic.com` (an exact name, no suffix). An environment that is `open`, or lists any other host, refuses the turn (`implementer_config_invalid`, detail starting `subscription_network_open` or `subscription_network_hosts`), free, before the container exists. The door dials ports 80 and 443 only (`netdoor/proxy.py`), and a listed host has both in every rule; **the entry of a subscription turn has 443 only**: the runner's `NetworkRule` has an optional `ports` (a subset of the door's two, a list only; empty = both), it travels in the door's start document (`parse_door_rule`) and not in the contract (a job's or an environment's rule is still exactly `mode` and `hosts`, so no app change), and the door refuses port 80 for it with `port_not_allowed` (CONNECT and plain HTTP alike). The door container's own firewall table still lets 80 and 443 out; the proxy is what narrows it, so the narrowing is the proxy's word, not the kernel's. The rule applies to all hosts of its list (the subscription rule has one). **The model network.** A turn on this harness has no model door, and the model door is what otherwise makes the model network that the network door and the agent's container join; the unit tests had always made the network by hand, so this path never ran against a daemon that did not have it. The network door now makes it when it is missing (`netdoor_launcher._ensure_network`, the same document and labels as the model door's, so the runner's sweep finds a leftover) and removes it with itself only when it made it; beside a model door nothing changes. Proven against the fake daemon (`test_netdoor_launcher.py`) and, on a real one, by the lane test `test_network_door_alone.py` (CI). |
 | Readiness per job | `claude_code/readiness.ready_harness`, `job_run.run_implementer_job` | The manifest said ready at the start; the job looks again (the login file, the layer on the daemon; nothing is built). A device that cannot refuses the job (`implementer_engine_unavailable`, detail starting `harness_not_ready`) and never falls back to OpenCode. |
 | No new privileges | `agent_container.agent_document(no_new_privileges=True)` | The container of the Claude Code agent is made with `no-new-privileges`; the hosted OpenCode agent is root and free and keeps its container as it was. |
 
@@ -842,11 +914,11 @@ copies its labels only); the combination can only come from a hand-made job.
    no unknown cost and no total; see "Cost in the app" below). Left: a per-workflow switch that lets a budget ignore the estimate. **Owner question**: should a subscription turn on a customer runner be
    free of infra minutes and of the balance check at claim? Today it is not (the minutes are billed as for every job and the claim checks
    the balance).
-3. **The self-test's canned turn for Claude Code** (a canned Anthropic provider inside the container, as for OpenCode), so that
-   "ready" means "ran a turn" and not only "installed and logged in"; a lane test that builds the layer and runs a turn as the user
-   `agent` behind the door.
-4. **Docs for customers, including Anthropic's terms** (plan S3, the owner's written question about unattended runs with a
-   subscription token) before external customers.
+3. **The self-test for Claude Code** (done in the fourth slice, "Claude Code in the self-test" above: readiness by default, one real tiny
+   turn only with `--with-claude-code`). Left: a canned Anthropic provider inside the container, so that "ready" could mean "ran a turn" without
+   the user's login and without a cent, and a lane test that builds the layer and runs a turn as the user `agent` behind the door.
+4. **Docs for customers, including Anthropic's terms** (done: "Claude Code with your subscription" above). **Open with the owner**: plan S3, the
+   written question to Anthropic whether unattended runs with a subscription token are allowed; the docs say plainly that we do not claim they are.
 5. **The login is in the environment of the agent's tools** (decided for now: accept it and guard the exits, above). Claude Code needs it
    there, and a command the agent runs (`env`) can print it; the output is not recorded in the step records, but it is in the agent's own
    session and in anything the agent writes. The switch that would scrub it, `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` (measured on 2.1.311 with
