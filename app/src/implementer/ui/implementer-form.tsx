@@ -75,6 +75,7 @@ type Problem = { sentence: string; runId?: string };
 const FIELD_OF_ISSUE: Record<ImplementerIssue["field"], FieldKey | null> = {
   repositoryId: "repository",
   baseBranch: "baseBranch",
+  startBranch: null,
   branch: "branch",
   instruction: "instruction",
   model: "model",

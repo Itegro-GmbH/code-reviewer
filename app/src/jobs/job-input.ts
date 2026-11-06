@@ -176,6 +176,13 @@ export function validateImplementerTurnInput(
     if (!isNonEmptyString(value)) refuse(field, "required");
     else if (!BRANCH_NAME.test(value)) refuse(field, "invalid");
   }
+  const startBranch = fields.startBranch;
+  if (
+    startBranch !== undefined &&
+    startBranch !== null &&
+    (typeof startBranch !== "string" || !BRANCH_NAME.test(startBranch))
+  )
+    refuse("startBranch", "invalid");
   const baseSha = fields.baseSha;
   if (typeof baseSha !== "string" || !HEAD_SHA.test(baseSha))
     refuse("baseSha", "invalid");

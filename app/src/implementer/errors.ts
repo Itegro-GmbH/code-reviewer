@@ -110,6 +110,7 @@ export type ImplementerIssue = {
   field:
     | "repositoryId"
     | "baseBranch"
+    | "startBranch"
     | "branch"
     | "instruction"
     | "model"

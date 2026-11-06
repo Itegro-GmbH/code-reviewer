@@ -1038,8 +1038,14 @@ export interface ImplementerSessionsTable {
   workspace_id: string;
   repository_id: string;
   slot: number;
-  /** The branch the new branch starts from. */
+  /** The branch the new branch is compared with and merged into. */
   base_branch: string;
+  /** #909: the branch the new branch is made from when that is not the base; null: the tip of the base. */
+  start_branch: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
   /** The new branch, unique within the repository. */
   branch: string;
   /** The last commit pushed to `branch`; null until a turn pushed one. */

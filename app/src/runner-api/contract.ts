@@ -479,6 +479,8 @@ export type RunnerJobInput = {
 export type ImplementerJobOptions = {
   repo: { fullName: string; cloneUrl: string };
   baseBranch: string;
+  /** #909: the branch the new branch is made from when that is not the base; absent: the tip of the base. */
+  startBranch?: string;
   branch: string;
   /** The task as the user wrote it, at most 20 000 characters; literal data. */
   instruction: string;

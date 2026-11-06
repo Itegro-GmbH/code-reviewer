@@ -44,6 +44,7 @@ function session(
     repositoryId: "repo-1",
     slot: 1,
     baseBranch: "main",
+    startBranch: null,
     branch: "implementer/abc123",
     headCommit: TIP,
     status: "idle",

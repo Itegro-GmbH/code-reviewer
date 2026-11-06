@@ -373,6 +373,8 @@ export type Checked = {
     instruction: string;
     branch: string;
     baseBranch: string;
+    /** #909: the branch the session branch is made from when that is not the base; null: the tip of the base. */
+    startBranch: string | null;
     /** The https address the runner clones from and pushes to, with no credential in it (`cloneUrlOf`). */
     cloneUrl: string;
     /** #818: the environment the turn copied when it started; null for a task without one. */
@@ -1096,6 +1098,7 @@ export async function checkJob(
         instruction: turn.turn.instruction,
         branch: turn.session.branch,
         baseBranch: turn.session.baseBranch,
+        startBranch: turn.session.startBranch,
         cloneUrl,
         environment:
           turn.turn.environment === null
@@ -1358,6 +1361,9 @@ export async function buildJobInput(
           implementer: {
             repo: { fullName: repo.fullName, cloneUrl: implementer.cloneUrl },
             baseBranch: implementer.baseBranch,
+            ...(implementer.startBranch === null
+              ? {}
+              : { startBranch: implementer.startBranch }),
             branch: implementer.branch,
             instruction: implementer.instruction,
             limits: { timeLimitSeconds: IMPLEMENTER_TIME_LIMIT_SECONDS },
@@ -1630,6 +1636,9 @@ async function prepareSubscription(
     implementer: {
       repo: { fullName: repo.fullName, cloneUrl },
       baseBranch: turn.session.baseBranch,
+      ...(turn.session.startBranch === null
+        ? {}
+        : { startBranch: turn.session.startBranch }),
       branch: turn.session.branch,
       instruction: turn.turn.instruction,
       limits: { timeLimitSeconds: IMPLEMENTER_TIME_LIMIT_SECONDS },

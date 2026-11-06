@@ -80,6 +80,31 @@ async function rejection(promise: Promise<unknown>): Promise<unknown> {
 }
 
 describe("starting a task", () => {
+  // #909-T07
+  it("keeps the start branch of a task beside its base, and null for a task without one", async () => {
+    const { db, idA, a } = await setup();
+
+    const plain = await startTask(db, idA, taskOf(a), a.repoUrl);
+    const started = await startTask(
+      db,
+      idA,
+      taskOf(a, {
+        branch: "implementer/second",
+        startBranch: "workflow/run-1/implement",
+      }),
+      a.repoUrl,
+    );
+
+    expect(plain.session).toMatchObject({
+      baseBranch: "main",
+      startBranch: null,
+    });
+    expect(started.session).toMatchObject({
+      baseBranch: "main",
+      startBranch: "workflow/run-1/implement",
+    });
+  });
+
   // #751-T02
   it("creates the session and its first turn with the next slot, the job in between", async () => {
     const { db, idA, a } = await setup();

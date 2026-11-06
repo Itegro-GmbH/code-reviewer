@@ -208,6 +208,11 @@ const FIELD_COPY: Record<
     invalid: "This base branch cannot be used. Choose another.",
     too_long: "This base branch cannot be used. Choose another.",
   },
+  startBranch: {
+    required: "Choose a start branch.",
+    invalid: "This start branch cannot be used. Choose another.",
+    too_long: "This start branch cannot be used. Choose another.",
+  },
   instruction: {
     required: "Describe the task for the agent.",
     invalid:

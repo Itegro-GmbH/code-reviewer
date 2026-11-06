@@ -112,7 +112,9 @@ export type EnqueueJobInput = {
 export type EnqueueImplementerTurnInput = {
   repositoryId: string;
   baseBranch: string;
-  /** The tip of the base branch read when the task was accepted: 40 hexadecimal characters. */
+  /** #909: the branch the new branch is made from, when that is not the base; left out or null: the tip of the base. */
+  startBranch?: string | null;
+  /** The tip the task starts at, read when it was accepted (the start branch, else the base branch): 40 hexadecimal characters. */
   baseSha: string;
   /** The new branch; one session per branch and repository. */
   branch: string;

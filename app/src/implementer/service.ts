@@ -151,6 +151,7 @@ function repeatOf(
   const same =
     session.repositoryId === task.repositoryId &&
     session.baseBranch === task.baseBranch &&
+    session.startBranch === (task.startBranch ?? null) &&
     session.branch === task.branch &&
     turn.instruction === task.instruction &&
     (turn.environment?.id ?? turn.runnerEnvironment?.id ?? null) ===
@@ -298,6 +299,20 @@ export function createImplementerService(
             "The repository has no branch with the name of the base branch.",
           );
         baseSha = base.sha;
+        // #909: the session starts at the start branch when the task names one; its tip is where the work begins.
+        if (task.startBranch !== undefined) {
+          const start = await provider.getBranch(
+            integration,
+            repo,
+            task.startBranch,
+          );
+          if (start === null)
+            throw new ImplementerError(
+              "IMPLEMENTER_BASE_BRANCH_NOT_FOUND",
+              "The repository has no branch with the name of the start branch.",
+            );
+          baseSha = start.sha;
+        }
         if ((await provider.getBranch(integration, repo, task.branch)) !== null)
           throw BRANCH_EXISTS();
         // Git holds `foo` or `foo/bar`, not both. What the read can tell: the first 100 branches the platform lists.
@@ -373,6 +388,9 @@ export function createImplementerService(
         result = await deps.queue.enqueueImplementerTurn({
           repositoryId: task.repositoryId,
           baseBranch: task.baseBranch,
+          ...(task.startBranch === undefined
+            ? {}
+            : { startBranch: task.startBranch }),
           baseSha,
           branch: task.branch,
           instruction: task.instruction,
