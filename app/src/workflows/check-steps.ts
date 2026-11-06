@@ -1118,7 +1118,8 @@ export function checkSteps(
         });
       continue;
     }
-    if (state.onFailure && !ON_FAILURE_KINDS.includes(kind)) {
+    // The node is checked like any other below: the form of a node that is not allowed is still the form the JSON Schema states.
+    if (state.onFailure && !ON_FAILURE_KINDS.includes(kind))
       c.report(
         issue(
           pointer(at, "kind"),
@@ -1127,15 +1128,6 @@ export function checkSteps(
           ON_FAILURE_KINDS,
         ),
       );
-      if (validId)
-        bind({
-          id,
-          kind: "reserved",
-          type: { kind: "unknown" },
-          unavailable: {},
-        });
-      continue;
-    }
     const nodeId = validId ? id : undefined;
     const withId = nodeId === undefined ? undefined : { ...node, id: nodeId };
     switch (kind) {
