@@ -43,7 +43,8 @@ What the system does, and what the agent can and cannot:
   detached HEAD and the leftover commit after the agent's container is gone) run in the second
   reader that has it read-write. The list of branches is made by `git for-each-ref` in the reader,
   read as a stream and
-  capped (`LIST_MAX_BYTES`); the mirror reads the branches through `git upload-pack` in the reader,
+  capped (`LIST_MAX_BYTES`; a branch still at its start tip is dropped as it is read and does not
+  count, #909); the mirror reads the branches through `git upload-pack` in the reader,
   piped to Control's `git fetch` (`exec_pipe.py`). What comes back is an object stream that the
   mirror's git checks (`fsckObjects`) and stores; the mirror is bare (nothing is checked out, no
   filter or hook runs) and its config is the runner's. The names of the branches are the only thing
@@ -111,8 +112,10 @@ DIRTY_TIMEOUT = 10.0
 REPORT_READ_TIMEOUT = 5.0
 # Each of the three git commands of the rescue of a detached HEAD (`rescue_detached_head`).
 RESCUE_STEP_TIMEOUT = 3.0
-# The most bytes of the agent's list of local branches the runner reads. A repository can hold any
-# number of refs; this holds about 40,000 branches and the rest is not read.
+# The most bytes of the list of local branches the runner keeps. Every branch of the provider is a
+# local branch (#909), but one still at its start tip is dropped as the list is read and does not
+# count: this holds about 40,000 branches the turn changed or made (the session branch always
+# stays), and a list with more is not read.
 LIST_MAX_BYTES = 4 * 1024 * 1024
 FETCH_TIMEOUT = 60.0
 # The most time the one fetch of the whole repository (every branch, every tag, the full history,
@@ -474,6 +477,7 @@ class GitWorkspace:
         # when the earlier turn never pushed it) and every branch of a follow-up that arrived. The
         # one of the form's branch is `_start`.
         self._starts: dict[str, str] = {}
+        self._start_tips: frozenset[str] = frozenset()
         # The tags of the provider (name to the object the tag is), kept as they were fetched.
         self._tags: dict[str, str] = {}
         self._start: str | None = None
@@ -568,6 +572,7 @@ class GitWorkspace:
             )
         self._moved, self._missing = [], []
         self._starts = self._fetch_everything()
+        self._start_tips = frozenset(self._starts.values())
 
     def _fetch_everything(self) -> dict[str, str]:
         """One `git fetch` of every branch and tag of the provider, without `--depth`; then the tip
@@ -575,11 +580,12 @@ class GitWorkspace:
         in it.
 
         The base branch not on the provider is `base_branch_not_found` and a start branch it does
-        not have is `clone_failed`, both free. A first turn makes its session branch new: one the
-        provider has already (a race with the app's own check) is dropped from the mirror. A
-        follow-up records what moved (`resume_moved`) and what is gone (`resume_missing`) among the
-        branches the earlier turns pushed; the session branch gone is the end of the turn (the app
-        checks it before it starts one, so this is a race)."""
+        not have is `clone_failed`, both free; so is a clone that leaves less room than the push
+        needs (`_has_room`). A first turn makes its session branch new: one the provider has
+        already (a race with the app's own check) is dropped from the mirror. A follow-up records
+        what moved (`resume_moved`) and what is gone (`resume_missing`) among the branches the
+        earlier turns pushed; the session branch gone is the end of the turn (the app checks it
+        before it starts one, so this is a race)."""
         base, branch = self.spec.base_branch, self.spec.branch
         start = self.spec.start_branch
         fetched = self._mirror(
@@ -597,6 +603,16 @@ class GitWorkspace:
         if fetched.returncode != 0:
             raise fail(
                 ErrorCode.CLONE_FAILED, "the repository cannot be cloned: " + self._detail(fetched)
+            )
+        # The agent's repository is a second copy of what was just fetched, and the push needs room
+        # in the reserve afterwards: a clone that leaves less than the push needs ends the turn
+        # here, free, instead of running the agent into a full disk.
+        if not self._has_room():
+            raise fail(
+                ErrorCode.CLONE_FAILED,
+                "the repository leaves too little room on the disk for the turn "
+                f"(it needs {MIN_FREE_BYTES // (1024 * 1024)} MiB and {MIN_FREE_INODES} "
+                "inodes free after the clone)",
             )
         tips = self._ref_tips("refs/heads/")
         self._tags = self._ref_tips("refs/tags/")
@@ -1183,14 +1199,34 @@ class GitWorkspace:
         cannot be read (`list_problem` says why). `git for-each-ref` run **in the reader**, so that
         the repository's config is read there and nowhere else, and **streamed and capped** at
         `LIST_MAX_BYTES`: the runner holds no more than that of a list the agent controls, and the
-        read is ended when the cap is passed. The names are judged by
+        read is ended when the cap is passed. A branch still at its start tip (every branch of the
+        provider, #909, unless the agent moved it) is dropped line by line as it arrives and does
+        not count against the cap; the session branch is always kept. The names are judged by
         `push_policy`. The listed tip is only a hint that saves a fetch (a branch still at the
         start commit has nothing to push); what is pushed is read from the mirror."""
-        data = bytearray()
+        kept = bytearray()
+        pending = bytearray()
+
+        def take(line: bytes) -> None:
+            tip, _, ref = line.decode("utf-8", errors="surrogateescape").partition(" ")
+            name = ref.removeprefix("refs/heads/")
+            if (
+                ref.startswith("refs/heads/")
+                and name != self.spec.branch
+                and self._unchanged(name, tip)
+            ):
+                return
+            kept.extend(line + b"\n")
 
         def consume(chunk: bytes) -> None:
-            data.extend(chunk)
-            if len(data) > LIST_MAX_BYTES:
+            pending.extend(chunk)
+            # Split on the line feed only: a name that holds another separator stays one name,
+            # which `push_policy` then refuses.
+            *lines, rest = bytes(pending).split(b"\n")
+            pending[:] = rest
+            for line in lines:
+                take(line)
+            if len(kept) + len(pending) > LIST_MAX_BYTES:
                 raise _ListingTooLarge
 
         try:
@@ -1205,10 +1241,10 @@ class GitWorkspace:
         if done.returncode != 0:
             self._progress.list_problem = LIST_UNREADABLE
             return None
+        if pending:
+            take(bytes(pending))
         branches: list[tuple[str, str]] = []
-        # Split on the line feed only: a name that holds another separator stays one name, which
-        # `push_policy` then refuses.
-        for line in data.decode("utf-8", errors="surrogateescape").split("\n"):
+        for line in kept.decode("utf-8", errors="surrogateescape").split("\n"):
             tip, _, ref = line.partition(" ")
             if ref.startswith("refs/heads/"):
                 branches.append((ref.removeprefix("refs/heads/"), tip))
@@ -1389,7 +1425,7 @@ class GitWorkspace:
         start = self._starts.get(name)
         if start is not None:
             return tip == start
-        return tip in self._starts.values()
+        return tip in self._start_tips
 
     def _record(self, name: str, tip: str | None, reason: str | None) -> None:
         self._progress.branches.append(BranchPush(name, tip, reason is None, reason))

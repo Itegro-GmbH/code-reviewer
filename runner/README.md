@@ -1217,7 +1217,7 @@ the lease held), never after a lost lease, `push_all(seconds=...)`:
 
 1. asks the lease (`before_push`; `LeaseNotConfirmed` is asked again every `confirm_pause` up to `confirm_seconds`, then `lease_lost`);
 2. lists the agent's local branches with `git for-each-ref` run in the read-only reader, streamed and capped at
-   `LIST_MAX_BYTES` (4 MiB; over it nothing is pushed and the turn ends `push_rejected`, `list_problem` says why); the names are
+   `LIST_MAX_BYTES` (4 MiB of the branches the turn changed or made: one still at its start tip is dropped as it is read; over it nothing is pushed and the turn ends `push_rejected`, `list_problem` says why); the names are
    checked (`push_policy`), a branch the listing puts at the start commit is skipped without a fetch, the task's branch comes
    first, at most 50 are taken (excluded names count toward them); the rest is counted in `branchesDropped`;
 3. per branch, `fetch --no-tags` over protocol 2 with `fetch.fsckObjects` and `transfer.fsckObjects` into `refs/runner/in/<n>` of the mirror

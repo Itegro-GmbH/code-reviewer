@@ -12,8 +12,9 @@ from pathlib import Path
 
 import pytest
 
+from code_reviewer_runner.implementer import git_workspace as workspace_module
 from code_reviewer_runner.implementer import push_policy
-from code_reviewer_runner.implementer.git_workspace import GitWorkspace
+from code_reviewer_runner.implementer.git_workspace import DiskSpace, GitWorkspace
 from code_reviewer_runner.job import ImplementerResume, JobError, ResumeBranch
 from code_reviewer_runner.result import ErrorCode
 from git_support import TOKEN, HttpOrigin, files_mentioning, raw
@@ -356,3 +357,56 @@ def test_a_follow_up_does_not_end_because_its_start_branch_is_gone(
     workspace.prepare()
 
     assert head_of(workspace) == rig.origin.tip(BRANCH)
+
+
+# #909-T10
+def test_a_clone_that_leaves_too_little_room_ends_the_turn_clone_failed(
+    rig: Rig, busy: dict[str, str]
+) -> None:
+    workspace = rig.workspace(space=lambda path: DiskSpace(free_bytes=1024, free_inodes=10**6))
+
+    with pytest.raises(JobError) as refused:
+        workspace.prepare()
+
+    assert refused.value.code is ErrorCode.CLONE_FAILED
+    assert "room" in refused.value.detail
+    assert not workspace.repo.exists()
+
+
+# #909-T10
+def test_a_clone_that_leaves_too_few_inodes_ends_the_turn_clone_failed(
+    rig: Rig, busy: dict[str, str]
+) -> None:
+    workspace = rig.workspace(space=lambda path: DiskSpace(free_bytes=10 * 1024**3, free_inodes=5))
+
+    with pytest.raises(JobError) as refused:
+        workspace.prepare()
+
+    assert refused.value.code is ErrorCode.CLONE_FAILED
+
+
+# #909-T10
+def test_a_clone_with_room_left_is_not_refused(rig: Rig, busy: dict[str, str]) -> None:
+    workspace = rig.workspace(
+        space=lambda path: DiskSpace(free_bytes=10 * 1024**3, free_inodes=10**6)
+    )
+
+    workspace.prepare()
+
+    assert head_of(workspace) == busy["main"]
+
+
+# #909-T05
+def test_branches_the_agent_did_not_touch_do_not_count_against_the_cap_of_the_list(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for number in range(300):
+        rig.origin.commit_on(f"topic/{number:03d}", f"t{number}.txt")
+    monkeypatch.setattr(workspace_module, "LIST_MAX_BYTES", 4_000)
+    workspace = rig.prepared()
+    commit(workspace, "a.txt")
+
+    report = workspace.push_all(seconds=120.0)
+
+    assert report.listed and report.list_problem is None
+    assert [entry.name for entry in report.branches if entry.pushed] == [BRANCH]

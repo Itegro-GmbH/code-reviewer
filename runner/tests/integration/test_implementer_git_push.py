@@ -109,8 +109,10 @@ def test_a_mirror_without_room_takes_nothing_over_and_every_branch_says_so(rig: 
 
 
 def test_inodes_count_as_room_too(rig: Rig) -> None:
-    workspace = rig.prepared(space=lambda path: DiskSpace(free_bytes=10 * 1024**3, free_inodes=5))
+    space: list[DiskSpace] = [DiskSpace(free_bytes=10 * 1024**3, free_inodes=10**6)]
+    workspace = rig.prepared(space=lambda path: space[0])
     commit(workspace, "a.txt")
+    space[0] = DiskSpace(free_bytes=10 * 1024**3, free_inodes=5)  # the inodes ran out meanwhile
 
     report = push(workspace)
 
