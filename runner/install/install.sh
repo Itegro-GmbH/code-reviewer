@@ -83,6 +83,8 @@ SYSBOX_PACKAGE=""
 TMPDIRS=""
 
 cleanup() {
+  # bash keeps the `IFS=` of an interrupted `IFS= read` while the trap runs; the paths are split on blanks.
+  unset IFS
   # shellcheck disable=SC2086 # the paths of mktemp hold no space
   for dir in $TMPDIRS; do
     rm -rf -- "$dir"
@@ -430,10 +432,11 @@ ask_for_token() {
   printf 'Registration token (from the app: Runners, "Add a runner"; input is hidden): ' >/dev/tty
   trap 'stty echo </dev/tty 2>/dev/null || true; printf "\n" >/dev/tty 2>/dev/null || true; exit 130' INT
   trap 'stty echo </dev/tty 2>/dev/null || true; printf "\n" >/dev/tty 2>/dev/null || true; exit 143' TERM
+  trap 'stty echo </dev/tty 2>/dev/null || true; printf "\n" >/dev/tty 2>/dev/null || true; exit 131' QUIT
   stty -echo </dev/tty 2>/dev/null || true
   IFS= read -r TOKEN_TYPED </dev/tty || TOKEN_TYPED=""
   stty echo </dev/tty 2>/dev/null || true
-  trap - INT TERM
+  trap - INT TERM QUIT
   printf '\n' >/dev/tty
 }
 
