@@ -862,6 +862,12 @@ A subscription turn reports `costUsd: null`, `costBasis: "subscription"` and `es
   nothing to a cost sum, is not an unknown cost (no #361 log line, not in `unknownCostCount`, not in the operator feed of unknown
   costs) and is not charged as AI cost. The minutes of the device and the balance check at claim are unchanged (owner question below).
   The workflow budget still counts the estimate (decision 12 of the plan); the engine no longer logs "cost not reported" for it.
+- **Who may say it**: the basis in a report is the runner's word and is never taken on its own. The app keeps it in the stored result
+  (`withoutUntrustedCostBasis`) and in the usage record (`trustOfJob`) only for a turn of the Implementer whose profile has the harness
+  `claude-code` and that a runner of the workspace held (`jobs.runner_id` is `runner:<id>` of a row in `runners`); the workflow budget
+  reads the harness of the step's profile (`subscriptionCost`). For any other job (OpenCode, managed key, Diff, Dynamic, a hosted
+  Worker) the word is dropped and the usage is booked as before, so an unknown cost stays visible. The Runs page reads the copy only
+  beside no cost, and the database refuses a record with a cost and the basis (`usage_records_cost_basis_check`).
 
 ### Resume across containers: design
 

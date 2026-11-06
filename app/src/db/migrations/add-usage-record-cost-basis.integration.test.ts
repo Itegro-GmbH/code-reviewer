@@ -47,9 +47,14 @@ async function seedJob(db: Kysely<Database>, id: string) {
   );
 }
 
-const record = (id: string, jobId: string, basis: string | null) =>
-  sql`insert into usage_records (id, workspace_id, job_id, review_kind, key_mode, state, reserved_at, cost_basis)
-    values (${id}, 'w-1', ${jobId}, 'diff', 'own', 'reserved', ${T}, ${basis})`;
+const record = (
+  id: string,
+  jobId: string,
+  basis: string | null,
+  costMicroUsd: number | null = null,
+) =>
+  sql`insert into usage_records (id, workspace_id, job_id, review_kind, key_mode, state, reserved_at, settled_at, cost_basis, cost_micro_usd)
+    values (${id}, 'w-1', ${jobId}, 'diff', 'own', ${costMicroUsd === null ? "reserved" : "settled"}, ${T}, ${costMicroUsd === null ? null : T}, ${basis}, ${costMicroUsd})`;
 
 describe("the usage record cost basis migration", () => {
   // #856-M03
@@ -88,6 +93,20 @@ describe("the usage record cost basis migration", () => {
       record("ur-3", "j-3", "reported").execute(db),
     ).rejects.toThrow();
     await expect(record("ur-4", "j-4", "").execute(db)).rejects.toThrow();
+    await db.destroy();
+  });
+
+  // #856-M03
+  it("takes the basis only beside no cost: a billed number is never a subscription", async () => {
+    const { db } = await createEmptyTestDatabase();
+    await migrateToLatest(db, migrationProvider);
+    for (const id of ["j-1", "j-2", "j-3"]) await seedJob(db, id);
+
+    await record("ur-1", "j-1", null, 12346).execute(db);
+    await record("ur-2", "j-2", "subscription", null).execute(db);
+    await expect(
+      record("ur-3", "j-3", "subscription", 0).execute(db),
+    ).rejects.toThrow(/usage_records_cost_basis_check/);
     await db.destroy();
   });
 

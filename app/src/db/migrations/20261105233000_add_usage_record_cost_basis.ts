@@ -2,7 +2,8 @@
 
 // How the cost of a settled usage record is to be read (#856): a turn that ran on the login of a customer's device has no cost, but not
 // because the runner could not measure it. `usage_records.cost_basis` is `subscription` for such a record and null for every other, so
-// the counts of unknown costs and their alert (#361, #385) leave it out. Nothing is written by this migration; every record written
+// the counts of unknown costs and their alert (#361, #385) leave it out. A record with a cost is never one: the check allows the basis
+// only beside no cost, so a billed number cannot be marked as not billed. Nothing is written by this migration; every record written
 // before it, and every one a release that does not know the column writes, reads null, as it did.
 //
 // Expand only, safe for the version that is still running (it never reads or writes the column) and for the live database:
@@ -28,7 +29,7 @@ export const migration: Migration = {
 
     await sql`alter table usage_records add column cost_basis text`.execute(db);
     await sql`alter table usage_records add constraint usage_records_cost_basis_check check (
-        cost_basis is null or cost_basis = 'subscription'
+        cost_basis is null or (cost_basis = 'subscription' and cost_micro_usd is null)
       )`.execute(db);
 
     await sql`select set_config('lock_timeout', ${before}, true)`.execute(db);
