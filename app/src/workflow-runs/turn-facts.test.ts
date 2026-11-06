@@ -536,10 +536,23 @@ describe("the outcome of a turn", () => {
     const subscription = (usage: Record<string, unknown>) => ({
       usage: { costUsd: null, costBasis: "subscription", ...usage },
     });
+    const claudeTurn = turn({
+      profile: {
+        id: "p-1",
+        name: "worker",
+        version: 1,
+        instructions: "",
+        canPush: true,
+        harness: "claude-code",
+      },
+    });
 
     it("books the estimate at API prices with the basis subscription, not the cap", () => {
       const outcome = outcomeOfTurn(
-        ended({ jobResult: subscription({ estimatedCostUsd: 0.42 }) }),
+        ended({
+          turn: claudeTurn,
+          jobResult: subscription({ estimatedCostUsd: 0.42 }),
+        }),
         5_000_000,
       );
       expect(outcome).toMatchObject({
@@ -557,7 +570,10 @@ describe("the outcome of a turn", () => {
         { estimatedCostUsd: "x" },
       ])
         expect(
-          outcomeOfTurn(ended({ jobResult: subscription(usage) }), 5_000_000),
+          outcomeOfTurn(
+            ended({ turn: claudeTurn, jobResult: subscription(usage) }),
+            5_000_000,
+          ),
         ).toMatchObject({
           costMicroUsd: 0,
           costBasis: "subscription",
@@ -570,6 +586,7 @@ describe("the outcome of a turn", () => {
         expect(
           outcomeOfTurn(
             ended({
+              turn: claudeTurn,
               jobStatus,
               jobErrorCode: jobStatus === "cancelled" ? "cancelled" : "x",
               jobResult: subscription({ estimatedCostUsd: 0.1 }),
@@ -583,17 +600,43 @@ describe("the outcome of a turn", () => {
         });
     });
 
-    it("books a turn of the harness claude-code that left no usage at no cost, not at the cap", () => {
-      const claudeTurn = turn({
+    // The word of the report is not ours to believe: the harness of the step's profile says whether it ran on a subscription.
+    it("books a step on another harness at its reported cost or the cap, whatever its report says", () => {
+      const opencodeTurn = turn({
         profile: {
           id: "p-1",
           name: "worker",
           version: 1,
           instructions: "",
           canPush: true,
-          harness: "claude-code",
+          harness: "opencode",
         },
       });
+      for (const withProfile of [turn(), opencodeTurn]) {
+        // No cost reported: the cap, not the estimate the report names and not 0.
+        expect(
+          outcomeOfTurn(
+            ended({
+              turn: withProfile,
+              jobResult: subscription({ estimatedCostUsd: 0.01 }),
+            }),
+            5_000_000,
+          ),
+        ).toMatchObject({ costMicroUsd: 5_000_000, costBasis: "limit" });
+        // A cost reported: that cost.
+        expect(
+          outcomeOfTurn(
+            ended({
+              turn: withProfile,
+              jobResult: subscription({ costUsd: 0.3, estimatedCostUsd: 0.01 }),
+            }),
+            5_000_000,
+          ),
+        ).toMatchObject({ costMicroUsd: 300_000, costBasis: "reported" });
+      }
+    });
+
+    it("books a turn of the harness claude-code that left no usage at no cost, not at the cap", () => {
       expect(
         outcomeOfTurn(
           ended({
