@@ -4,6 +4,7 @@
 // the same answer as `GET .../repositories/:repositoryId/issues` (src/app/api/w/[workspace]/repositories/[repositoryId]/issues/route.ts)
 // for the repository of the project. A project id the workspace does not have is `TRACKER_PROJECT_NOT_FOUND`. Every member may read them.
 import { connection } from "next/server";
+import { requireImplementerCapability } from "@/implementer/shared";
 import { projectServiceFor } from "@/projects/shared";
 import { createTrackerRouteHandlers } from "@/tracker/http";
 import { trackerServiceFor } from "@/tracker/shared";
@@ -15,6 +16,8 @@ export async function GET(
 ): Promise<Response> {
   // Needs the request and the database, so it never runs at build time.
   await connection();
+  // The proxy answers first; this is the second wall for a request that reaches the route file anyway.
+  requireImplementerCapability();
   const { workspace, projectId } = await context.params;
   return withWorkspace(workspace, "view", async (access) => {
     const project = await projectServiceFor(access.workspace.id).getProject(

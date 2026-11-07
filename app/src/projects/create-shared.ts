@@ -36,7 +36,16 @@ export function boardsFor(
         url: repository.url,
       });
       return { kind: "boards", ...answer };
-    } catch {
+    } catch (error) {
+      // The code of the error, never its text: it may carry what GitHub answered.
+      console.error(
+        "[projects] reading the boards of a repository failed:",
+        error instanceof Error &&
+          "code" in error &&
+          typeof error.code === "string"
+          ? error.code
+          : "unknown",
+      );
       return { kind: "failed" };
     }
   };

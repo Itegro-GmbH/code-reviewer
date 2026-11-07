@@ -169,6 +169,35 @@ describe("creating a project", () => {
     ]);
   });
 
+  // #922-T80
+  it("answers 201 with every lane failed when copying the lanes throws, and keeps the project", async () => {
+    const { handlers, createProject, copyLanes, post } = setup();
+    copyLanes.mockRejectedValueOnce(new Error("the database went away"));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await handlers.create(
+      post({
+        repositoryId: "repo-1",
+        lanes: ["issue-to-pr", "review-a-pull-request"],
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    expect(createProject).toHaveBeenCalledTimes(1);
+    const body = (await response.json()) as {
+      project: { id: string };
+      lanes: unknown;
+    };
+    expect(body.project.id).toBe("project-1");
+    expect(body.lanes).toEqual([
+      { key: "issue-to-pr", ok: false, code: "LANE_COPY_FAILED" },
+      { key: "review-a-pull-request", ok: false, code: "LANE_COPY_FAILED" },
+    ]);
+    // The text of the error is never logged.
+    expect(JSON.stringify(logged.mock.calls)).not.toContain("database");
+    logged.mockRestore();
+  });
+
   // #922-T73
   it("refuses a board the repository does not have, naming the boards it has, and writes nothing", async () => {
     const { handlers, createProject, post } = setup();

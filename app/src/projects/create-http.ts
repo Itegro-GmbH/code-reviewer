@@ -34,6 +34,9 @@ export type BoardsAnswer =
   | { kind: "integration_unavailable" }
   | { kind: "failed" };
 
+/** The code a lane is reported with when copying them failed in a way no lane has a code for (the project stays). */
+export const LANE_COPY_FAILED = "LANE_COPY_FAILED";
+
 /** What copying one built-in lane into the new project came to (`WorkflowService.copyBuiltIn`). */
 export type LaneCopy =
   | { key: string; ok: true; workflow: { id: string; name: string } }
@@ -182,8 +185,22 @@ export function createNewProjectHandlers({
         }
 
         const project = await service.createProject(repositoryId, ticketBoard);
-        const copied =
-          lanes.length === 0 ? [] : await copyLanes(user, project.id, lanes);
+        // The project is written: whatever goes wrong while the lanes are copied is reported per lane, never as a failure of the creation.
+        let copied: LaneCopy[] = [];
+        if (lanes.length > 0)
+          try {
+            copied = await copyLanes(user, project.id, lanes);
+          } catch (error) {
+            console.error(
+              "[projects] copying the built-in lanes failed:",
+              error instanceof Error ? error.name : "unknown",
+            );
+            copied = lanes.map((key) => ({
+              key,
+              ok: false,
+              code: LANE_COPY_FAILED,
+            }));
+          }
         return Response.json(
           {
             project: projectView(project),

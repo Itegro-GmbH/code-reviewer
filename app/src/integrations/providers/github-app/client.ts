@@ -564,8 +564,9 @@ const BOARD_UNAVAILABLE_ERRORS: ReadonlySet<string> = new Set([
 
 const BOARDS_QUERY =
   "query($owner:String!,$name:String!,$first:Int!){repository(owner:$owner,name:$name){projectsV2(first:$first){nodes{id}}}}";
+// `query: "is:open"` leaves the closed boards out at GitHub, so they cannot fill the page and hide the open ones.
 const REPOSITORY_BOARDS_QUERY =
-  'query($owner:String!,$name:String!,$first:Int!){repository(owner:$owner,name:$name){projectsV2(first:$first){nodes{id number title closed field(name:"Status"){... on ProjectV2SingleSelectField{id options{name}}}}}}}';
+  'query($owner:String!,$name:String!,$first:Int!){repository(owner:$owner,name:$name){projectsV2(first:$first,query:"is:open"){nodes{id number title closed field(name:"Status"){... on ProjectV2SingleSelectField{id options{name}}}}}}}';
 const BOARD_ITEMS_QUERY =
   'query($project:ID!,$after:String,$first:Int!){node(id:$project){... on ProjectV2{items(first:$first,after:$after){pageInfo{hasNextPage endCursor}nodes{content{... on Issue{id} ... on PullRequest{id}} fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}';
 

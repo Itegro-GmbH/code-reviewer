@@ -187,6 +187,65 @@ describe("the project as one ticket source migration", () => {
     await db.destroy();
   });
 
+  // #922-T06
+  it("prefers an active project to an inactive one for a lane that ran in both, and logs a lane that can only go to an inactive project", async () => {
+    const { db } = await createEmptyTestDatabase();
+    await migrateToLatest(
+      db,
+      upTo((name) => name < THIS),
+    );
+    await sql`insert into users (id, name, email, email_verified, created_at, updated_at)
+      values ('u-1', 'A', 'a@example.com', 1, ${T}, ${T})`.execute(db);
+    await workspace(db, "w-mixed", [
+      { id: "r-live", name: "acme/live", project: "on" },
+      { id: "r-dead", name: "acme/dead", project: "off" },
+    ]);
+    // Its newest run worked in the inactive project, an older one in the active one: the active one takes it.
+    await workflow(db, "wf-both", "w-mixed");
+    await run(
+      db,
+      "run-1",
+      "wf-both",
+      "w-mixed",
+      "r-live",
+      "2026-11-05T08:00:00.000Z",
+    );
+    await run(
+      db,
+      "run-2",
+      "wf-both",
+      "w-mixed",
+      "r-dead",
+      "2026-11-06T08:00:00.000Z",
+    );
+    // It only ever ran in the inactive project: placed there, and said so in the log.
+    await workflow(db, "wf-only-dead", "w-mixed");
+    await run(
+      db,
+      "run-3",
+      "wf-only-dead",
+      "w-mixed",
+      "r-dead",
+      "2026-11-06T09:00:00.000Z",
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await migrateToLatest(
+      db,
+      upTo((name) => name <= THIS),
+    );
+
+    expect(await projectsOfWorkflows(db)).toEqual({
+      "wf-both": { project: "p-r-live", archived: false },
+      "wf-only-dead": { project: "p-r-dead", archived: false },
+    });
+    const lines = warn.mock.calls.map((call) => String(call[0]));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("wf-only-dead");
+    expect(lines[0]).toContain("inactive project");
+    await db.destroy();
+  });
+
   // #922-T02
   it("points the rows of the mirror at the project of their repository and leaves the projects without a stored source", async () => {
     const { db } = await createEmptyTestDatabase();

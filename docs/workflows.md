@@ -621,7 +621,11 @@ that was written before has no stored source and reads as the issues of its repo
   its tickets from. A lane without a project (archived, or written by an older version) is not held to it.
 - **`ticket.setStatus`** takes the board from the project ([The action](#the-action-kind-action)); `board` on the step stays an accepted override.
 - **The name of a lane** is held once per project (case ignored), not once per workspace, so every project can have its own "Issue to PR". A lane without a project keeps the old rule among such lanes.
-- **Migration.** Each workflow that existed was given to the project of the repository its newest run used, else to the only active project of its workspace; one that no project could take was archived and is
+- **A lane without a project** is what an older version writes while this one is being deployed (the database allows it; the service never creates one, and the migration has placed or archived every lane that existed when it ran).
+  It is still read, saved, archived and started by its id (a manual or api start is held to no repository), and it keeps its name rule among such lanes. It starts **no run from a label**, is listed in **no project** (the list
+  needs a `projectId`) and shows on no Lanes tab; a lane like that is written again in a project (`POST /workflows?projectId=…`) and the old one archived. There is no separate list of them: they are rare and last for one release.
+- **Migration.** Each workflow that existed was given to the project of the repository its newest run used (an active project before an inactive one), else to the only active project of its workspace; a lane that
+  can only go to an inactive project is placed there and listed in the log, and one that no project could take was archived and is
   listed in the log of the migration (`20261107190000_project_ticket_source`) so that its owner can write it again in the right project. The mirror of the tickets (`tracker_items`) points at the project of
   its repository.
 
@@ -629,7 +633,7 @@ that was written before has no stored source and reads as the issues of its repo
 `{ "repositoryId", "board": { "projectV2Id" } | null, "lanes": ["issue-to-pr", "review-a-pull-request"] }`, `board` and `lanes` optional. The board must be one of the boards of the repository (`GET
 /api/w/<slug>/repositories/<id>/boards` lists them with the options of their Status field, read from GitHub with a token that may read boards and nothing else); the server takes the Status field from that list, never from
 the body. `lanes` copies the built-in lanes into the new project as lanes of its own (validated like any save, with the profiles `implementer` and `reviewer` and the first environment of the workspace by name): a lane that
-cannot be copied is reported in `lanes: [{ key, ok, workflowId | code }]` and does not undo the project. The answer is `201 { project: { id, repositoryId, active, ticketSource }, lanes }`; a body that cannot be used is
+cannot be copied is reported in `lanes: [{ key, ok, workflowId | code }]` and does not undo the project (when the copying fails altogether, every lane is `ok: false` with `code: "LANE_COPY_FAILED"`). The answer is `201 { project: { id, repositoryId, active, ticketSource }, lanes }`; a body that cannot be used is
 `400 PROJECT_REQUEST_INVALID` with `issues: [{ path, code, message, available }]` (`unknown_field`, `missing_field`, `wrong_type`, `invalid_value`, `unknown_lane`, `duplicate_lane`, `unknown_board`, `board_without_status`,
 `board_unavailable`; `available` lists what would have been accepted); a repository that is a project already is `409 PROJECT_ALREADY_EXISTS`. The tickets of a project are `GET /api/w/<slug>/projects/<id>/issues`, the same
 answer as the issues of its repository. Switching a repository on or off for review (`PUT .../repositories/<id>/project`) and the review settings are unchanged: a deployment without the factory behaves as before.

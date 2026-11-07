@@ -61,8 +61,8 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
     "trigger_id",
     "ticket_ref",
   ],
-  // #922: the ticket source of a project (the migration writes one for every project that exists, so no test of an older migration holds a
-  // project that has none) and the project a lane belongs to; null for every workflow that exists.
+  // #922: the ticket source of a project (null reads as the issues of its repository without a board) and the project a lane belongs to
+  // (the migration places the lanes that exist, but not at the time an older migration's test seeds them); null for every row that exists.
   projects: ["ticket_source"],
   workflows: ["project_id"],
   // #920: the question a step ended with and the comment that carries it; null for every step that exists.

@@ -5,7 +5,7 @@
 //    the GitHub issues of one repository and the optional GitHub Project that is their board. A project row is one per repository
 //    (`repository_id` is unique), so `repositoryId` is that repository; the column holds what the repository cannot: the board. It is
 //    null for every project that exists and code reads null as "the issues of the repository, no board" (no backfill: the column is
-//    written when a project is created in the factory, or its board is set).
+//    written when a project is created in the factory; no route sets the board of a project that exists, that is #937).
 //  - `workflows.project_id`: the project a lane belongs to. Nullable at the database (an archived lane that no project could take stays
 //    without one, and so does a lane an older version writes while this one is being deployed); the service requires it for every lane it
 //    creates, and a lane without a project starts no run from a label.
@@ -16,9 +16,11 @@
 //    version that is still running writes.
 //
 // Backfills of the lanes and of the mirror's `project_id`. Lanes: a workflow that is not archived goes to the project of the repository
-// its newest run used; one that never ran goes to the only active project of its workspace; one that cannot be placed is archived and
-// listed in the log of the migration (name, id and workspace, one line each), so that an owner can write it again in the project it
-// belongs to.
+// its newest run used, an active project before an inactive one (the label trigger serves only active projects), the newest run first
+// among equals; a lane that can only go to an inactive project is placed there and listed in the log; one that never ran goes to the
+// only active project of its workspace; one that cannot be placed is archived and listed in the log of the migration (name, id and
+// workspace, one line each), so that an owner can write it again in the project it belongs to. A lane an older version writes after
+// the migration has run stays without a project (docs/workflows.md, "Lanes belong to a project").
 //
 // Expand only, safe for the version that is still running (it never reads the new columns, and the lanes it writes stay without a project):
 //  - two nullable columns without a default are added, which Postgres does without rewriting the tables; the foreign key of `project_id`
@@ -79,20 +81,32 @@ export const migration: Migration = {
       db,
     );
 
-    // The lanes: the project of the repository the newest run used, else the only active project of the workspace.
-    await sql`update workflows w
+    // The lanes: the project of the repository the newest run used (an active project before an inactive one), else the only active
+    // project of the workspace.
+    const placedByRuns = await sql<{
+      id: string;
+      name: string;
+      workspace_id: string;
+      active: number;
+    }>`update workflows w
       set project_id = placed.project_id
       from (
-        select distinct on (r.workflow_id) r.workflow_id, p.id as project_id
+        select distinct on (r.workflow_id) r.workflow_id, p.id as project_id, p.active
         from workflow_runs r
         join projects p on p.repository_id = r.repository_id
         join repositories repo on repo.id = p.repository_id
         join workflows own on own.id = r.workflow_id and own.workspace_id = repo.workspace_id
-        order by r.workflow_id, r.created_at desc, r.id desc
+        order by r.workflow_id, p.active desc, r.created_at desc, r.id desc
       ) placed
       where w.id = placed.workflow_id
         and w.project_id is null
-        and w.archived_at is null`.execute(db);
+        and w.archived_at is null
+      returning w.id, w.name, w.workspace_id, placed.active`.execute(db);
+    for (const row of placedByRuns.rows)
+      if (row.active !== 1)
+        console.warn(
+          `[migration] 20261107190000_project_ticket_source placed the workflow ${row.id} "${row.name.slice(0, 100)}" of workspace ${row.workspace_id} in an inactive project: no label starts it until the project is switched on (#922).`,
+        );
     await sql`update workflows w
       set project_id = only_project.project_id
       from (

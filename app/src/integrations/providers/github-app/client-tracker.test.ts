@@ -601,9 +601,12 @@ describe("the boards of a repository (#922)", () => {
       permissions: BOARD.permissions,
     });
     const query = calls.find((call) => call.path === "/graphql")?.body as {
+      query: string;
       variables: Record<string, unknown>;
     };
     expect(query.variables).toMatchObject({ owner: "acme", name: "widgets" });
+    // Closed boards are left out at GitHub, so they cannot fill the page and hide the open ones.
+    expect(query.query).toContain('query:"is:open"');
   });
 
   // #922-T41
