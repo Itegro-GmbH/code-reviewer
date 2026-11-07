@@ -262,7 +262,7 @@ async function seed(
       email: `user-${tag}@example.test`,
       email_verified: 1,
       image: null,
-      github_login: null,
+      github_login: `gh-user-${tag}`,
       imported_at: null,
       is_instance_admin: 0,
       org_checked_at: null,
@@ -1217,6 +1217,15 @@ const CASES: Case[] = [
     run: (a) => a.members.list(),
     expectAnswer: (answer, a) =>
       expect(answer).toEqual([expect.objectContaining({ userId: a.userId })]),
+  },
+  {
+    // #917: the logins that `ticket.requestReview` asks are the ones of A's members; B's member has a login too and is not in the answer
+    name: "members.githubLogins",
+    run: (a) => a.members.githubLogins(),
+    expectAnswer: (answer, a, b) => {
+      expect(answer).toEqual([`gh-${a.userId}`]);
+      expect(answer).not.toContain(`gh-${b.userId}`);
+    },
   },
   {
     name: "members.get",

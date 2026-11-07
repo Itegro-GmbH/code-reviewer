@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// The three GitHub actions of the engine (#844, milestone 3b): `github.pullRequest.open`, `github.issue.comment` and `github.issue.labels`.
+// The GitHub actions of the engine (#844, milestone 3b): `github.pullRequest.open`, `github.issue.comment` and `github.issue.labels`, and
+// the provider-neutral names and the two actions of #917 (`ticket.setStatus`, `ticket.requestReview`).
 // They act through the GitHub App of the workspace, on the repository of the run and on nothing else: the repository is never an input,
 // so no value can name another one. The inputs are data: the title is one line, texts and lists are bounded, a branch is a plain branch
 // name of this repository (no `owner:` prefix that would reach into a fork). Every call passes `call.signal` on and keeps to
@@ -24,6 +25,7 @@ import {
   ACTION_TITLE_MAX_CHARS,
   GITHUB_REASON_MAX_CHARS,
 } from "./limits.ts";
+import { PROJECT_MEMBERS } from "../workflows/connectors.ts";
 import { BIDI_CONTROLS, defuseMentions } from "./templates.ts";
 
 /** The connection and the repository an action acts on, resolved for the repository of the run. */
@@ -36,6 +38,11 @@ export type GithubActionTarget = {
 export type GithubConnectorDeps = {
   /** The target of a run's repository; undefined when the repository or its connection is gone. */
   targetOf(call: ActionCall): Promise<GithubActionTarget | undefined>;
+  /**
+   * The GitHub logins of the members of the project the run belongs to (`reviewers: "project members"` of `ticket.requestReview`, #917);
+   * left out where nothing says who they are, which makes that value an `action_input_invalid` of the step.
+   */
+  projectMembers?(call: ActionCall): Promise<string[]>;
 };
 
 /** What each action needs of the App, as the settings page of the GitHub App words it. */
@@ -44,21 +51,27 @@ export const GITHUB_PERMISSION_NEEDED = {
     "Pull requests: Read and write and Contents: Read-only",
   "github.issue.comment": "Issues: Read and write",
   "github.issue.labels": "Issues: Read and write",
+  "ticket.setStatus":
+    "Projects: Read and write (an organization permission the owner of the GitHub installation has to opt in to) and Issues: Read-only",
+  "ticket.requestReview": "Pull requests: Read and write",
 } as const;
 
 const ACTION_VERB = {
   "github.pullRequest.open": "open pull requests",
   "github.issue.comment": "write comments",
   "github.issue.labels": "change labels",
+  "ticket.setStatus": "move tickets on a board",
+  "ticket.requestReview": "request reviews",
 } as const;
 
 type GithubConnectorName = keyof typeof GITHUB_PERMISSION_NEEDED;
 
 /** The actions that create something when they are done twice: after a timeout or an answer of GitHub's own error the step cannot know that nothing was created. */
-const NOT_REPEATABLE: ReadonlySet<GithubConnectorName> = new Set([
-  "github.pullRequest.open",
-  "github.issue.comment",
-]);
+const NOT_REPEATABLE: ReadonlySet<GithubConnectorName> =
+  new Set<GithubConnectorName>([
+    "github.pullRequest.open",
+    "github.issue.comment",
+  ]);
 
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
 const CONTROL_EXCEPT_LINE_BREAKS =
@@ -159,10 +172,66 @@ function labelNames(value: unknown, name: string): string[] {
   return [...names];
 }
 
-function issueNumber(value: unknown): number {
+function wholeNumber(value: unknown, name: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1)
-    throw new ActionInputError("issue must be a whole number from 1.");
+    throw new ActionInputError(`${name} must be a whole number from 1.`);
   return value;
+}
+
+function issueNumber(value: unknown): number {
+  return wholeNumber(value, "issue");
+}
+
+/** What GitHub allows in a user name: letters, digits and single hyphens, up to 39 characters. */
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+/** A board is the number of a Project or its node id. */
+const BOARD_REFERENCE = /^(?:[1-9]\d{0,9}|PVT_[A-Za-z0-9_-]{1,200})$/;
+/** How many people one action asks for a review; GitHub itself allows 15 users per request. */
+const REVIEWERS_MAX = 15;
+/** How many option names of a board a failure names. */
+const BOARD_OPTIONS_SHOWN = 20;
+
+function boardReference(value: unknown): string {
+  if (typeof value !== "string" || !BOARD_REFERENCE.test(value))
+    throw new ActionInputError(
+      "board must be the number of a GitHub Project or its node id.",
+    );
+  return value;
+}
+
+function statusName(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.trim() === "" ||
+    value.length > ACTION_LABEL_MAX_CHARS ||
+    CONTROL_CHARACTERS.test(value)
+  )
+    throw new ActionInputError(
+      `status must be the name of a status of the board, up to ${String(ACTION_LABEL_MAX_CHARS)} characters, on one line.`,
+    );
+  return value;
+}
+
+/** The logins `reviewers` names, bounded and without doubles; "project members" is not one of them (the caller resolves it). */
+function reviewerLogins(value: unknown): string[] {
+  if (!Array.isArray(value))
+    throw new ActionInputError(
+      `reviewers must be "${PROJECT_MEMBERS}" or a list of GitHub logins.`,
+    );
+  const logins = new Map<string, string>();
+  for (const entry of value) {
+    if (typeof entry !== "string" || !GITHUB_LOGIN.test(entry))
+      throw new ActionInputError(
+        "reviewers holds a text that is not a GitHub login.",
+      );
+    logins.set(entry.toLowerCase(), entry);
+  }
+  if (logins.size === 0) throw new ActionInputError("reviewers names nobody.");
+  if (logins.size > REVIEWERS_MAX)
+    throw new ActionInputError(
+      `reviewers names more than ${String(REVIEWERS_MAX)} people.`,
+    );
+  return [...logins.values()];
 }
 
 function permissionText(name: GithubConnectorName): string {
@@ -334,6 +403,21 @@ function unavailable(name: GithubConnectorName): ConnectorError {
   );
 }
 
+/** The failure of a status the board does not have: the options it has, as the board spells them (one line each, bounded). */
+function boardStatusText(available: readonly string[]): string {
+  const shown = available
+    .slice(0, BOARD_OPTIONS_SHOWN)
+    .map((option) => cleanReason(option))
+    .filter((option): option is string => option !== undefined);
+  const more =
+    available.length > BOARD_OPTIONS_SHOWN
+      ? ` and ${String(available.length - BOARD_OPTIONS_SHOWN)} more`
+      : "";
+  return shown.length === 0
+    ? "The board has no Status field with options, so no status can be set."
+    : `The board has no such status. Its statuses are: ${shown.join(", ")}${more}.`;
+}
+
 export function createGithubConnectors(
   deps: GithubConnectorDeps,
 ): ActionConnector[] {
@@ -442,26 +526,133 @@ export function createGithubConnectors(
     },
   };
 
-  // #916: the provider-neutral names of the two actions on a ticket. The ticket is the issue of the repository of the run, so each is the
-  // GitHub action with the same inputs and `ticket` where it has `issue`.
-  const onTicket = (
+  const setStatus: ActionConnector = {
+    name: "ticket.setStatus",
+    idempotent: true,
+    async run(call) {
+      const name = "ticket.setStatus";
+      const issue = issueNumber(call.inputs.ticket);
+      const board = boardReference(call.inputs.board);
+      const status = statusName(call.inputs.status);
+      const { provider, integration, repo } = await targetOrFail(deps, call);
+      if (provider.setTicketStatus === undefined) throw unavailable(name);
+      try {
+        const moved = await provider.setTicketStatus(
+          integration,
+          repo,
+          issue,
+          { board, status },
+          call.signal,
+        );
+        switch (moved.kind) {
+          case "moved":
+            return { status: moved.status };
+          case "issue_not_found":
+            throw new ConnectorError(
+              "github_not_found",
+              "GitHub has no issue with that number in the repository of the run.",
+            );
+          case "board_not_found":
+            throw new ConnectorError(
+              "github_not_found",
+              "The GitHub App of this workspace cannot find that GitHub Project among the projects of the repository's owner. Check the number of the board and that the App may read the owner's projects.",
+            );
+          case "status_unknown":
+            throw new ConnectorError(
+              "board_status_unknown",
+              boardStatusText(moved.available),
+            );
+        }
+      } catch (error) {
+        throw toConnectorError(name, error);
+      }
+    },
+  };
+
+  const requestReview: ActionConnector = {
+    name: "ticket.requestReview",
+    idempotent: true,
+    async run(call) {
+      const name = "ticket.requestReview";
+      const pullRequest = wholeNumber(call.inputs.pullRequest, "pullRequest");
+      const { reviewers } = call.inputs;
+      const members = reviewers === PROJECT_MEMBERS;
+      if (typeof reviewers === "string" && !members)
+        throw new ActionInputError(
+          `reviewers must be "${PROJECT_MEMBERS}" or a list of GitHub logins.`,
+        );
+      let logins: string[];
+      if (members) {
+        if (deps.projectMembers === undefined)
+          throw new ActionInputError(
+            `"${PROJECT_MEMBERS}" cannot be resolved on this server; name the logins.`,
+          );
+        // All of them, in the order they joined: GitHub decides who can review, and the first REVIEWERS_MAX it accepts are asked.
+        const known = new Map<string, string>();
+        for (const login of await deps.projectMembers(call))
+          if (GITHUB_LOGIN.test(login) && !known.has(login.toLowerCase()))
+            known.set(login.toLowerCase(), login);
+        if (known.size === 0)
+          throw new ActionInputError(
+            "None of the members of the project has a GitHub login to ask for a review.",
+          );
+        logins = [...known.values()];
+      } else logins = reviewerLogins(reviewers);
+      const { provider, integration, repo } = await targetOrFail(deps, call);
+      if (provider.requestReviewers === undefined) throw unavailable(name);
+      try {
+        // The members of a project need not all be able to review this pull request (a collaborator of the repository, not its author),
+        // so they are asked one by one, in order, until REVIEWERS_MAX are accepted; the ones GitHub refuses for that reason are left
+        // out. People the lane names are asked for as they are.
+        const { requested } = await provider.requestReviewers(
+          integration,
+          repo,
+          pullRequest,
+          logins,
+          {
+            skipRefused: members,
+            ...(members ? { max: REVIEWERS_MAX } : {}),
+            signal: call.signal,
+          },
+        );
+        if (members && requested.length === 0)
+          throw new ConnectorError(
+            "github_validation",
+            "GitHub accepted none of the members of the project as reviewers: they are not collaborators of the repository, or the author of the pull request. Add them to the repository or name other reviewers.",
+          );
+        return { requested };
+      } catch (error) {
+        throw toConnectorError(name, error);
+      }
+    },
+  };
+
+  // The provider-neutral names of the actions (#916, #917): the same action under another name, with the input that names the target
+  // renamed to the one the GitHub action calls it. The target is the issue or pull request of the repository of the run.
+  const alias = (
     neutral: string,
     connector: ActionConnector,
+    input?: string,
   ): ActionConnector => ({
     name: neutral,
     ...(connector.idempotent === true ? { idempotent: true } : {}),
     run: (call) =>
-      connector.run({
-        ...call,
-        inputs: { ...call.inputs, issue: call.inputs.ticket },
-      }),
+      connector.run(
+        input === undefined
+          ? call
+          : { ...call, inputs: { ...call.inputs, issue: call.inputs[input] } },
+      ),
   });
 
   return [
     pullRequestOpen,
     issueComment,
     issueLabels,
-    onTicket("ticket.comment", issueComment),
-    onTicket("ticket.labels", issueLabels),
+    alias("pullRequest.open", pullRequestOpen),
+    alias("pullRequest.comment", issueComment, "pullRequest"),
+    alias("ticket.comment", issueComment, "ticket"),
+    alias("ticket.labels", issueLabels, "ticket"),
+    setStatus,
+    requestReview,
   ];
 }

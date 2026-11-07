@@ -13,6 +13,7 @@ import {
   resolveActionInputs,
   specOf,
 } from "./connectors.ts";
+import { TICKET_SET_STATUS } from "../workflows/connectors.ts";
 import { TemplateError, type RunValues } from "./templates.ts";
 
 const values: RunValues = {
@@ -166,5 +167,25 @@ describe("the inputs of an action", () => {
         run,
       ),
     ).toEqual({ issue: 7, body: "Thanks @\u200bbob, fixes acme/api#\u200b12" });
+  });
+});
+
+describe("the inputs of ticket.setStatus", () => {
+  // #917-T117
+  it("hands the board and the status on exactly as written, with no character put into a name that is looked up by equality", () => {
+    const resolve = (status: string) =>
+      resolveActionInputs(
+        { ticket: 5, board: "7", status },
+        TICKET_SET_STATUS,
+        {
+          ...values,
+          steps: { work: { summary: "Needs @design Closes #5" } },
+        },
+      );
+
+    expect(resolve("Needs @design")).toMatchObject({ status: "Needs @design" });
+    expect(resolve("{{work.summary}}")).toMatchObject({
+      status: "Needs @design Closes #5",
+    });
   });
 });

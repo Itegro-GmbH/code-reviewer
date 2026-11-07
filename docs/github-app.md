@@ -201,6 +201,26 @@ is removed on GitHub. A missing permission is told from these by what GitHub ans
 only for "Resource not accessible by integration"). The **Re-run** button of a check run does nothing: the App does
 not subscribe to `check_run` events; a new push, or `/review`, runs the review again.
 
+
+### Optional: Projects (for `ticket.setStatus`)
+
+The workflow action `ticket.setStatus` ([workflows](workflows.md#the-action-kind-action), #917) moves a ticket to a column of a GitHub Project (projects_v2) board. GitHub
+has this only as an **organization permission**, and the App does not ask for it in its manifest: it is **opt-in**, so an installation that never uses boards never grants it.
+To use `ticket.setStatus`:
+
+1. In the App's settings on GitHub (*Permissions & events > Organization permissions*), set **Projects** (`organization_projects`) to **Read and write** and save.
+2. Every installation has to accept the changed permissions (GitHub asks an owner of the organization). Until it does, GitHub refuses the token of the action
+   (HTTP 422) and the step ends with `github_permission_missing`, naming "Projects: Read and write" and "Issues: Read-only".
+3. The action's own token holds exactly `organization_projects: write`, `issues: read` and `metadata: read`
+   (`BOARD_STATUS_TOKEN_PERMISSIONS` in `app/src/integrations/providers/github-app/job-access.ts`). It only reads the project's `Status` field and the issue, adds the issue
+   to the project when it is not on it, and sets that one field.
+
+The token is limited to the one repository of the run **for issues and pull requests**. The Projects permission is an organization permission and has no repository to limit it to: it applies to
+**the owner's projects** (every project of the organization the installation can see), so the action itself keeps to the project of the owner of the run's repository (a project node id of another owner is not found).
+
+The project must belong to the **owner of the repository** (an organization; GitHub does not let an App write the projects of a user with an installation token). The board is
+named by its number (the number in the project's address, `…/projects/7`) or its node id. `ticket.requestReview` needs nothing new: it uses Pull requests: Read and write.
+
 ## The Implementer
 
 This section applies only to a deployment whose capability set has `implementer` (the Software Factory, `PRODUCT_CAPABILITIES`).
@@ -330,7 +350,7 @@ instance admin.
 Anybody can install a public App, so an installation is **not** reviewed until a workspace has linked it
 (`docs/decisions/0001-editions-setup-and-accounts.md`, section 2.9). An Owner or Admin of the workspace does that:
 
-1. Open the workspace's **Connections** page and press **Connect GitHub**. GitHub shows the App's installation page.
+1. Open the workspace's **Connections** page (in the factory: **Settings**, tab **Integrations**) and press **Connect GitHub**. GitHub shows the App's installation page.
 2. Pick the account or organization, and choose **Only select repositories**. Select the repositories the team
    wants reviewed. Granting "All repositories" is possible but not recommended. Confirm the permission list GitHub
    shows and press Install.
@@ -401,7 +421,8 @@ it reads the workspace's own connections) if the repository is missing, and swit
       verification enabled
 - [ ] Permissions: Pull requests Read and write, Issues Read and write, Contents Read-only (Contents Read and write for a
       deployment with the Implementer, see "The Implementer"), Metadata Read-only, Checks Read and write, Email addresses
-      Read-only, Members Read-only, and nothing else
+      Read-only, Members Read-only, and nothing else (Projects Read and write only for lanes that use `ticket.setStatus`,
+      see "Optional: Projects")
 - [ ] Events: Pull request, Issue comment, Issues, Sub issues and Check suite ticked (and Projects v2 item if the project board is used)
 - [ ] The tile on Integrations shows **Configured**, and **Sign in with GitHub** is enabled
 - [ ] Only for the way by hand: the `.pem` file is in the password manager and deleted from the laptop

@@ -76,10 +76,18 @@ describe("the workflow contract", () => {
       "IssueLabelsAction",
       "TicketCommentAction",
       "TicketLabelsAction",
+      "TicketSetStatusAction",
+      "TicketRequestReviewAction",
+      "PullRequestCommentAction",
     ]) {
       const def = defs[name] as Json;
       const properties = def.properties as Record<string, Json>;
-      byConnector.set((properties.connector as Json).const as string, def);
+      const connector = properties.connector as Json;
+      // A definition names its connector as a constant, or as a list when it is also known by another name (#917).
+      for (const connectorName of (connector.enum ?? [
+        connector.const,
+      ]) as string[])
+        byConnector.set(connectorName, def);
     }
 
     expect([...byConnector.keys()].sort()).toEqual(

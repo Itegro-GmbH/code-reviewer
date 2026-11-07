@@ -23,6 +23,6 @@ the life of the profile).
 - **The name never changes.** A workflow refers to a profile by name and version; a rename would make `reviewer@2` mean something else. Another name is another profile.
 - **The model and the cost limit are checked twice**: when a version is saved (so a typo is refused with an answer an AI can act on) and when a task starts (the
   catalog and the operator's maximum can change; a saved version is history and is not re-checked on read).
-- **API only for the Implementer form.** `POST .../implementer/tasks` takes `profile`; the page has no picker yet (a UI for profiles is a later change). With a
+- **API only for the Implementer form.** `POST .../implementer/tasks` takes `profile`; the Implementer form has no picker yet. The Profiles page (#925, `ui/`) lists the profiles and opens one in a drawer: harness, instructions and the push right are saved as the next version (the model is carried over unchanged); the key, the runner, the question right and the model's picker are shown disabled with a hint until the format has a place for them. With a
   profile the body names neither `model` nor `costLimitCents`.
 - **The resolver of the workflow validator reads the versions the document names**, not every version of every profile (`src/workflows/profile-refs.ts`).

@@ -717,6 +717,18 @@ const ENTRIES: Entry[] = [
     implementer: true,
   },
   {
+    // #925: every member reads how many ToDos of their own workspace are open (the count on the sidebar link); nothing of another.
+    name: "GET todos/count",
+    route: "/api/w/[workspace]/todos/count",
+    method: "GET",
+    minRole: MINIMUM_ROLE.view,
+    path: () => "/todos/count",
+    params: () => ({}),
+    file: "todos/count/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
     // #854-T140: every member lists the runners of their own workspace; the other workspace's are not reachable.
     name: "GET runners",
     route: "/api/w/[workspace]/runners",

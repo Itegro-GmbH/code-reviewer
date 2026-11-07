@@ -6,6 +6,7 @@
 import {
   GITHUB_ISSUE_COMMENT,
   GITHUB_ISSUE_LABELS,
+  PULL_REQUEST_COMMENT,
   TICKET_COMMENT,
   TICKET_LABELS,
 } from "./connectors.ts";
@@ -27,6 +28,7 @@ export const ON_FAILURE_CONNECTORS: readonly string[] = [
   GITHUB_ISSUE_LABELS.name,
   TICKET_COMMENT.name,
   TICKET_LABELS.name,
+  PULL_REQUEST_COMMENT.name,
 ];
 
 /** The node kinds an `onFailure` list may hold: actions, and `if` over the facts of the failure. */

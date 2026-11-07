@@ -231,6 +231,35 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     class: "implementer",
   },
   { route: "/w/[workspace]/runners", class: "implementer" },
+  // The shell of the factory (#925): the ToDos page and the count on its sidebar link, the profiles page, the tabs of a project's
+  // cockpit (the issues tab is the project's own address, which opens the review settings where there is no factory), the tabs of the
+  // settings that moved there from `/connections` and `/members` (those stay as they were without the factory), and the review
+  // settings at their own address below the project.
+  { route: "/w/[workspace]/settings/integrations", class: "implementer" },
+  { route: "/w/[workspace]/settings/members", class: "implementer" },
+  {
+    route: "/w/[workspace]/projects/[repositoryId]/review",
+    class: "implementer",
+  },
+  { route: "/api/w/[workspace]/todos/count", class: "implementer" },
+  { route: "/w/[workspace]/todos", class: "implementer" },
+  { route: "/w/[workspace]/profiles", class: "implementer" },
+  {
+    route: "/w/[workspace]/projects/[repositoryId]/lanes",
+    class: "implementer",
+  },
+  {
+    route: "/w/[workspace]/projects/[repositoryId]/runs",
+    class: "implementer",
+  },
+  {
+    route: "/w/[workspace]/projects/[repositoryId]/setup",
+    class: "implementer",
+  },
+  {
+    route: "/w/[workspace]/projects/[repositoryId]/todos",
+    class: "implementer",
+  },
   { route: "/api/workers/v1/jobs/[id]/steps", class: "implementer" },
   // One part of the session snapshot of a turn, put by its Worker for the follow-up turns (#839).
   { route: "/api/workers/v1/jobs/[id]/session", class: "implementer" },
